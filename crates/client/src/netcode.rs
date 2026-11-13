@@ -1,9 +1,13 @@
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
+use crate::connections::{ConnEvent, ConnHandle, ConnOpener};
 use crossbeam::channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use game::{ClientPacket, ServerPacket};
 use log::{error, info, warn};
@@ -60,8 +64,123 @@ enum Raced<T> {
     Cancelled,
 }
 
+/// Every connection of one session, on one tokio runtime (its own thread): the
+/// login connection ([`NetThread::connect`]) and one per other host the home
+/// sends the client to ([`ConnOpener`]). Each delivers its packets keyed by its
+/// connection (`connections::tag_key`) on the session's one event channel, and
+/// a [`ConnEvent::Closed`] when it ends. The runtime runs until the session is
+/// left (`cancel` disconnects) and every connection has flushed and closed.
+pub struct NetThread {
+    runtime: tokio::runtime::Handle,
+    events: Sender<(u32, ConnEvent)>,
+    cancel: Receiver<()>,
+    policy: ConnectPolicy,
+    /// Connections not ended yet.
+    live: Arc<AtomicUsize>,
+}
+
+/// Where a connection dials.
+pub enum ConnTarget {
+    Addr(SocketAddr),
+    /// `host:port` as a host's endpoint names it; resolved on the runtime.
+    Name(String),
+}
+
+impl NetThread {
+    /// Start the session's netcode runtime. Connections retry their connect by
+    /// `policy` and give it up once `cancel` disconnects.
+    pub fn start(
+        events: Sender<(u32, ConnEvent)>,
+        cancel: Receiver<()>,
+        policy: ConnectPolicy,
+    ) -> std::io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("netcode").build()?;
+        let handle = runtime.handle().clone();
+        let live = Arc::new(AtomicUsize::new(0));
+        let (left, open) = (cancel.clone(), live.clone());
+        std::thread::Builder::new().name("netcode".into()).spawn(move || {
+            runtime.block_on(async move {
+                // Each connection flushes its last packets (the `Leave`) as it
+                // ends: the runtime outlives the session until they all have.
+                while !(matches!(left.try_recv(), Err(TryRecvError::Disconnected)) && open.load(Ordering::SeqCst) == 0) {
+                    tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+                }
+            });
+        })?;
+        Ok(Self { runtime: handle, events, cancel, policy, live })
+    }
+
+    /// Open a connection keyed `key` to `target`, presenting `credential` (`None`
+    /// = the local player name) and sending what arrives on `outgoing` until its
+    /// sender drops (then it closes gracefully).
+    pub fn connect(
+        &self,
+        key: u32,
+        target: ConnTarget,
+        credential: Option<game::Credential>,
+        outgoing: Receiver<ClientPacket>,
+    ) {
+        self.live.fetch_add(1, Ordering::SeqCst);
+        let key = Arc::new(AtomicU32::new(key));
+        let (events, policy, cancel) = (self.events.clone(), self.policy, self.cancel.clone());
+        let conn_key = key.clone();
+        let work = self.runtime.spawn(async move {
+            let server = match target {
+                ConnTarget::Addr(addr) => addr,
+                ConnTarget::Name(name) => resolve(name).await?,
+            };
+            let mut connection = ServerConnection::keyed(events, conn_key, outgoing, server)
+                .with_connect_policy(policy)
+                .with_credential(credential)
+                .with_cancel(cancel);
+            connection.connect_and_handle().await
+        });
+        let (events, live) = (self.events.clone(), self.live.clone());
+        self.runtime.spawn(async move {
+            let reason = match work.await {
+                Ok(Ok(())) => "server connection closed".to_string(),
+                Ok(Err(e)) => e.to_string(),
+                Err(e) => format!("netcode task failed: {e}"),
+            };
+            let _ = events.send((key.load(Ordering::SeqCst), ConnEvent::Closed(reason)));
+            live.fetch_sub(1, Ordering::SeqCst);
+        });
+    }
+}
+
+impl ConnOpener for NetThread {
+    fn open(&mut self, ordinal: u32, endpoint: &game::HostEndpoint, credential: game::Credential) -> ConnHandle {
+        let (send, outgoing) = crossbeam::channel::unbounded();
+        match &endpoint.quic {
+            Some(quic) => self.connect(ordinal, ConnTarget::Name(quic.clone()), Some(credential), outgoing),
+            None => {
+                let _ = self.events.send((ordinal, ConnEvent::Closed(format!("host {ordinal} offers no QUIC address"))));
+            }
+        }
+        ConnHandle { send }
+    }
+}
+
+/// `name` (`host:port`) as an address: parsed, else looked up off the runtime's
+/// workers.
+async fn resolve(name: String) -> std::io::Result<SocketAddr> {
+    if let Ok(addr) = name.parse() {
+        return Ok(addr);
+    }
+    let shown = name.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        std::net::ToSocketAddrs::to_socket_addrs(&name).map(|mut addrs| addrs.next())
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+    found.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{shown} resolves to no address")))
+}
+
 pub struct ServerConnection {
-    send: Sender<ServerPacket>,
+    events: Sender<(u32, ConnEvent)>,
+    /// This connection's key on `events`; a provisional one becomes the host's
+    /// ordinal once its `Host` packet passed (`connections::tag_key`).
+    key: Arc<AtomicU32>,
     recv: Receiver<ClientPacket>,
     server: SocketAddr,
     connect_policy: ConnectPolicy,
@@ -75,12 +194,25 @@ pub struct ServerConnection {
 
 impl ServerConnection {
     pub fn new(
-        send: Sender<ServerPacket>,
+        events: Sender<(u32, ConnEvent)>,
+        key: u32,
+        recv: Receiver<ClientPacket>,
+        server: SocketAddr,
+    ) -> Self {
+        Self::keyed(events, Arc::new(AtomicU32::new(key)), recv, server)
+    }
+
+    /// [`Self::new`] with its key shared (the netcode reads it when the
+    /// connection ends, to key its `Closed`).
+    fn keyed(
+        events: Sender<(u32, ConnEvent)>,
+        key: Arc<AtomicU32>,
         recv: Receiver<ClientPacket>,
         server: SocketAddr,
     ) -> Self {
         Self {
-            send,
+            events,
+            key,
             recv,
             server,
             connect_policy: ConnectPolicy::default(),
@@ -240,7 +372,7 @@ impl ServerConnection {
         let mut stream = connection.open_uni().await.map_err(connection_lost)?;
         stream.write_all(&hello).await.map_err(connection_lost)?;
         stream.finish().map_err(connection_lost)?;
-        let sender = self.send.clone();
+        let (events, key) = (self.events.clone(), self.key.clone());
         let recv_conn = connection.clone();
 
         tokio::spawn(async move {
@@ -291,7 +423,10 @@ impl ServerConnection {
                     p => p,
                 };
 
-                if sender.send(packet).is_err() {
+                let mut now = key.load(Ordering::SeqCst);
+                let tag = crate::connections::tag_key(&mut now, &packet);
+                key.store(now, Ordering::SeqCst);
+                if events.send((tag, ConnEvent::Packet(packet))).is_err() {
                     // The game thread ended the session.
                     break;
                 }
@@ -299,20 +434,37 @@ impl ServerConnection {
             }
         });
 
-        // Forward the game thread's packets until it ends the session (its
-        // sender drops: `Ok`) or the connection goes away (`Err`, whose
-        // message is the session's end reason). Polled, so a lost server is
-        // noticed even while the game sends nothing.
+        // The game thread's packets, moved off its channel by a blocking
+        // bridge (a worker blocked on it would starve the session's other
+        // connections). It ends with the game's sender, or with this loop.
+        let (bridge, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<ClientPacket>();
+        let from_game = self.recv.clone();
+        tokio::task::spawn_blocking(move || loop {
+            match from_game.recv_timeout(CLOSE_POLL_INTERVAL) {
+                Ok(packet) => {
+                    if bridge.send(packet).is_err() {
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) if bridge.is_closed() => return,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        });
+        // Forward the game thread's packets until it closes this connection
+        // (its sender drops: `Ok`) or the connection goes away (`Err`, whose
+        // message is the reason). Polled, so a lost server is noticed even
+        // while the game sends nothing.
         let mut last_sent: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             if let Some(close_reason) = connection.close_reason() {
                 error!("Server connection closed: {:?}", close_reason);
                 return Err(connection_lost(close_reason));
             }
-            let packet = match self.recv.recv_timeout(CLOSE_POLL_INTERVAL) {
-                Ok(packet) => packet,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => {
+            let packet = match tokio::time::timeout(CLOSE_POLL_INTERVAL, outgoing.recv()).await {
+                Ok(Some(packet)) => packet,
+                Err(_) => continue,
+                Ok(None) => {
                     close_gracefully(&endpoint, &connection, last_sent.take()).await;
                     return Ok(());
                 }
@@ -435,7 +587,7 @@ pub(crate) mod tests {
         let (send, _server_packets) = crossbeam::channel::unbounded();
         let (_client_packets, recv) = crossbeam::channel::unbounded();
         let mut connection =
-            ServerConnection::new(send, recv, dead).with_connect_policy(ConnectPolicy {
+            ServerConnection::new(send, 0, recv, dead).with_connect_policy(ConnectPolicy {
                 attempt_timeout: Duration::from_millis(15),
                 retry_interval: Duration::from_millis(5),
                 deadline: Duration::from_millis(40),
@@ -480,7 +632,7 @@ pub(crate) mod tests {
         let (send, _server_packets) = crossbeam::channel::unbounded();
         let (_client_packets, recv) = crossbeam::channel::unbounded();
         let (cancel, cancel_recv) = crossbeam::channel::bounded::<()>(0);
-        let mut connection = ServerConnection::new(send, recv, addr)
+        let mut connection = ServerConnection::new(send, 0, recv, addr)
             .with_connect_policy(ConnectPolicy {
                 attempt_timeout: Duration::from_millis(50),
                 retry_interval: Duration::from_millis(10),

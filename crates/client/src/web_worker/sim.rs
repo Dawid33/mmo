@@ -128,9 +128,11 @@ fn tagged(tag: u8, body: &[u8]) -> Uint8Array {
 /// The worker's session.
 struct WorkerSession {
     manager: GameInstanceManager,
-    /// Decoded server packets, into the manager.
-    server_send: Sender<ServerPacket>,
-    server_recv: Receiver<ServerPacket>,
+    /// Decoded server packets, into the manager, keyed by the one (home)
+    /// connection's key so far (`connections::tag_key`).
+    server_send: Sender<(u32, crate::connections::ConnEvent)>,
+    server_recv: Receiver<(u32, crate::connections::ConnEvent)>,
+    server_key: u32,
     /// The manager's outgoing packets, encoded into [`SimOut::Packets`].
     packets: Receiver<ClientPacket>,
     /// The app ends of the session channels (the page forwards into them).
@@ -166,8 +168,9 @@ pub fn worker_start() {
             },
             Some((&TAG_SERVER_FRAME, frame)) => match game::decode_packet::<ServerPacket>(frame) {
                 Ok(packet) => SESSION.with(|s| {
-                    if let Some(session) = s.borrow().as_ref() {
-                        let _ = session.server_send.send(packet);
+                    if let Some(session) = s.borrow_mut().as_mut() {
+                        let key = crate::connections::tag_key(&mut session.server_key, &packet);
+                        let _ = session.server_send.send((key, crate::connections::ConnEvent::Packet(packet)));
                     }
                 }),
                 Err(e) => log::warn!("failed deserializing packet {e:?}"),
@@ -208,6 +211,7 @@ fn handle(message: ToSim) {
                     manager,
                     server_send,
                     server_recv,
+                    server_key: crate::connections::PROVISIONAL_CONN,
                     packets,
                     game_send,
                     request_send,

@@ -10,7 +10,7 @@
 use bevy::platform::cell::SyncCell;
 use bevy::prelude::*;
 use crossbeam::channel::Receiver;
-use game::ServerPacket;
+use crate::connections::ConnEvent;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use crate::session::{SessionChannels, SessionEnded};
@@ -20,7 +20,7 @@ use crate::GameInstanceManager;
 /// The inline (main-thread) backend.
 pub struct SimDriver {
     manager: GameInstanceManager,
-    server_recv: Receiver<ServerPacket>,
+    server_recv: Receiver<(u32, ConnEvent)>,
     /// One line when the connect gave up or the connection died (`netcode_web`).
     lost: Receiver<String>,
     client_tick_ms: f64,

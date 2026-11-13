@@ -82,10 +82,10 @@ impl Session {
     fn step(&mut self, app: &mut App) {
         app.update();
         self.client.send_tick();
-        self.client.pump(&self.server_to_client).expect("client pump");
+        self.client.pump_packets(&self.server_to_client).expect("client pump");
         self.server.pump().expect("server pump");
         self.server.tick();
-        self.client.pump(&self.server_to_client).expect("client reconcile pump");
+        self.client.pump_packets(&self.server_to_client).expect("client reconcile pump");
         app.update();
     }
 

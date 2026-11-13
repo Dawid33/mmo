@@ -48,6 +48,22 @@ impl LocalServer {
         send: Sender<ServerPacket>,
         genesis: InlineStudGenesis,
     ) -> Result<Self, GameError> {
+        let mut server = Self::new_unconnected(recv, send, genesis)?;
+        server.connect_local_client();
+        Ok(server)
+    }
+
+    /// [`Self::new_with_genesis`] with no session yet: one host of several
+    /// (`harness::SimHarness::with_hosts`) is configured first (its ownership,
+    /// endpoint, peers), then the local client connects to its home host
+    /// ([`Self::connect_local_client`]) or observes another
+    /// ([`Self::observer_connected`]).
+    #[doc(hidden)]
+    pub fn new_unconnected(
+        recv: Receiver<ClientPacket>,
+        send: Sender<ServerPacket>,
+        genesis: InlineStudGenesis,
+    ) -> Result<Self, GameError> {
         // The sim reads the block properties (items, drops); the stud world
         // itself comes from `genesis`.
         crate::blocks::load_registry();
@@ -56,24 +72,42 @@ impl LocalServer {
         let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineStudLodBuilder::new(Box::new(|key| {
             worldgen::stud_gen::stud_lod_tile(key, worldgen::WORLD_SEED)
         })));
-        let mut manager =
+        let manager =
             WorldManager::new(InlineSpawner::default().with_stud_genesis(genesis), out_send, region_out_send, lod_builder);
-        // Server-authoritative player creation, as on ClientConnected. The
-        // handshake is bypassed: the session starts as the local player.
-        manager.handle_server_event(
-            ServerEvent::ClientConnected { client: LOCAL_CLIENT_ID, player: LOCAL_PLAYER_ID, record: None },
-            0,
-        );
-        let mut server = Self {
+        Ok(Self {
             manager,
             recv,
             send,
             out_recv,
             region_out_recv,
             now_ms: 0,
-        };
-        server.drain();
-        Ok(server)
+        })
+    }
+
+    /// Server-authoritative player creation, as on ClientConnected. The
+    /// handshake is bypassed: the session starts as the local player.
+    #[doc(hidden)]
+    pub fn connect_local_client(&mut self) {
+        self.manager.handle_server_event(
+            ServerEvent::ClientConnected { client: LOCAL_CLIENT_ID, player: LOCAL_PLAYER_ID, record: None },
+            self.now_ms,
+        );
+        self.drain();
+    }
+
+    /// The local client's observer session here (another host is its home): what a
+    /// server's edge announces once an observer ticket was admitted. Harness hook.
+    #[doc(hidden)]
+    pub fn observer_connected(&mut self, client: ClientId, player: game::PlayerId) {
+        self.manager.handle_server_event(ServerEvent::ObserverConnected { client, player }, self.now_ms);
+        self.drain();
+    }
+
+    /// The world manager itself (multi-host harness wiring: ownership, peers,
+    /// observer orders). Harness hook.
+    #[doc(hidden)]
+    pub fn manager_mut(&mut self) -> &mut WorldManager<InlineSpawner> {
+        &mut self.manager
     }
 
     /// Jitter the inline regions' scheduling from a seed (see
@@ -120,6 +154,8 @@ impl LocalServer {
         while let Ok((_target, packet)) = self.out_recv.try_recv() {
             let _ = self.send.send(packet);
         }
+        // No edge here holds observer orders to revoke: the list would only grow.
+        let _ = self.manager.take_observer_revocations();
     }
 
     /// Current sim tick of a running region, or 0 if it isn't running
@@ -242,7 +278,7 @@ mod tests {
         // A few frames of the wasm drive loop: server pump -> client pump.
         for _ in 0..6 {
             server.pump().unwrap();
-            assert!(manager.pump(&server_recv).unwrap());
+            assert!(manager.pump_packets(&server_recv).unwrap());
         }
 
         // Client received region + player identity. NewRegion carries the
@@ -269,11 +305,11 @@ mod tests {
 
         // Server ticks advance the authoritative world and reach the client.
         server.tick();
-        manager.pump(&server_recv).unwrap();
+        manager.pump_packets(&server_recv).unwrap();
 
         // Client ticks advance the local prediction.
         manager.send_tick();
-        assert!(manager.pump(&server_recv).unwrap());
+        assert!(manager.pump_packets(&server_recv).unwrap());
         drop(bridge_recv);
     }
 
@@ -303,7 +339,7 @@ mod tests {
         // RequestPlayerRegion -> PlayerRegion -> 9x RequestRegionConnection -> 9x Region.
         for _ in 0..6 {
             server.pump().unwrap();
-            assert!(manager.pump(&server_recv).unwrap());
+            assert!(manager.pump_packets(&server_recv).unwrap());
         }
 
         let mut loaded = std::collections::BTreeSet::new();

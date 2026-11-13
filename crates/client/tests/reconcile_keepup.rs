@@ -136,12 +136,12 @@ impl Diag {
         for _ in 0..8 {
             self.forward_packets();
             self.server.pump().unwrap();
-            assert!(self.manager.pump(&self.server_recv).unwrap());
+            assert!(self.manager.pump_packets(&self.server_recv).unwrap());
             self.stash_bridge_receivers();
         }
         // One authoritative tick so a GameEvent arrives and flips is_caught_up.
         self.server.tick();
-        assert!(self.manager.pump(&self.server_recv).unwrap());
+        assert!(self.manager.pump_packets(&self.server_recv).unwrap());
         self.stash_bridge_receivers();
     }
 
@@ -154,11 +154,11 @@ impl Diag {
                 .unwrap();
         }
         self.manager.send_tick();
-        assert!(self.manager.pump(&self.server_recv).unwrap());
+        assert!(self.manager.pump_packets(&self.server_recv).unwrap());
         self.forward_packets();
         self.server.pump().unwrap();
         self.server.tick();
-        assert!(self.manager.pump(&self.server_recv).unwrap());
+        assert!(self.manager.pump_packets(&self.server_recv).unwrap());
         self.stash_bridge_receivers();
     }
 
@@ -166,7 +166,7 @@ impl Diag {
     /// of the server by induced latency).
     fn client_only_tick(&mut self) {
         self.manager.send_tick();
-        assert!(self.manager.pump(&self.server_recv).unwrap());
+        assert!(self.manager.pump_packets(&self.server_recv).unwrap());
         self.stash_bridge_receivers();
     }
 
@@ -188,7 +188,7 @@ impl Diag {
                 .unwrap();
         }
         self.manager.send_tick();
-        assert!(self.manager.pump(&slow_lane.1).unwrap());
+        assert!(self.manager.pump_packets(&slow_lane.1).unwrap());
         self.forward_packets();
         self.server.pump().unwrap();
         self.server.tick();
@@ -208,7 +208,7 @@ impl Diag {
             }
             slow_lane.0.send(p).unwrap();
         }
-        assert!(self.manager.pump(&slow_lane.1).unwrap());
+        assert!(self.manager.pump_packets(&slow_lane.1).unwrap());
         self.stash_bridge_receivers();
     }
 
@@ -427,11 +427,11 @@ fn diag_h_latency_chase_cost() {
             ))
             .unwrap();
         d.manager.send_tick();
-        assert!(d.manager.pump(&d.server_recv).unwrap());
+        assert!(d.manager.pump_packets(&d.server_recv).unwrap());
         d.forward_packets_delayed(&mut queue, f, 5);
         d.server.pump().unwrap();
         d.server.tick();
-        assert!(d.manager.pump(&d.server_recv).unwrap());
+        assert!(d.manager.pump_packets(&d.server_recv).unwrap());
         d.stash_bridge_receivers();
         d.report("H", f);
         if f >= 15 {
@@ -686,7 +686,7 @@ fn soak_realtime_keepup() {
                 .unwrap();
             next_input += Duration::from_millis(16);
         }
-        assert!(d.manager.pump(&d.server_recv).unwrap());
+        assert!(d.manager.pump_packets(&d.server_recv).unwrap());
         d.stash_bridge_receivers();
         if now >= next_sample {
             samples.push(d.home_log_len());

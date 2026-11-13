@@ -29,8 +29,10 @@ pub(crate) const HOME_STALL_MIN_MS: isize = (game::MAX_INPUT_LEAD_TICKS * game::
 /// Most ticks one alignment step adds or sits out (two seconds).
 pub(crate) const MAX_ALIGN_TICKS: usize = 2000 / game::TICK_RATE as usize;
 
-/// One `ServerPacket::SyncClock` sample, from any region: every region
-/// reports the one world tick numbering.
+/// One `ServerPacket::SyncClock` sample, from any region the HOME connection
+/// serves: every region reports the one world tick numbering, but only the
+/// home's samples carry the round trip input pays (another host's connection
+/// has its own; `GameInstanceManager::handle_packet` drops its samples).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClockInput {
     pub server_tick: game::Tick,

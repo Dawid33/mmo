@@ -20,6 +20,7 @@ pub mod web_worker; // Web Workers: the sim worker + the compute pool (browser m
 pub mod renderer;
 pub mod blocks; // block registry loader (assets/blocks/blocks.ron)
 pub mod instance; // GameInstanceManager (moved out of main.rs)
+pub mod connections; // one connection per server host, routed by region (R3)
 pub mod regions; // predicted regions behind a message pair: inline or one thread each
 pub mod frontend; // FrontendUi layer: main menu + placeholder screens
 #[cfg(not(target_arch = "wasm32"))]

@@ -7,15 +7,61 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    state_hash, ClientPacket, ClientUpdateEvent, GameEventKind, InputEvent, Key, RegionCoords, ServerPacket,
+    state_hash, ClientId, ClientPacket, ClientUpdateEvent, Credential, GameEventKind, InputEvent, Key, PlayerId,
+    RegionCoords, ServerPacket,
 };
 
+use crate::connections::{ConnEvent, ConnHandle, ConnOpener, PROVISIONAL_CONN};
 use crate::{GameInstanceManager, LocalServer, LOCAL_CLIENT_ID};
 
+/// Regions per super-region side in [`SimHarness::with_hosts`]: one, so host seams lie
+/// between neighbouring regions and a 3x3 window spans several hosts.
+pub const HARNESS_SUPER_REGION_REGIONS: u32 = 1;
+/// Most server rounds [`SimHarness::with_hosts`] waits for every peer session to be up.
+const PEER_CONNECT_ROUNDS: usize = 40;
+
+/// The client's connection to one host (each host gets at most one).
+struct FakeConn {
+    /// The host (index into `servers`).
+    host: usize,
+    /// Its key on the client's event channel (`connections::tag_key`).
+    key: u32,
+    /// What the client sends on it.
+    out: Receiver<ClientPacket>,
+    /// Its session started at the host (the home's at once; an observer's once the
+    /// host holds a matching observer order, as a server's edge admits it).
+    admitted: bool,
+    /// The observer ticket it presented: `(client, nonce)`.
+    ticket: Option<(ClientId, u64)>,
+}
+
+/// A connection the client asked for ([`HarnessOpener`]).
+struct Opened {
+    ordinal: u32,
+    credential: Credential,
+    out: Receiver<ClientPacket>,
+}
+
+/// The harness's transport for connections to other hosts: each `open` is
+/// picked up by the next step.
+struct HarnessOpener(Sender<Opened>);
+
+impl ConnOpener for HarnessOpener {
+    fn open(&mut self, ordinal: u32, _endpoint: &game::HostEndpoint, credential: Credential) -> ConnHandle {
+        let (send, out) = unbounded();
+        let _ = self.0.send(Opened { ordinal, credential, out });
+        ConnHandle { send }
+    }
+}
+
 pub struct SimHarness {
-    server: LocalServer,
+    /// One per host of the world (one, unless [`Self::with_hosts`]).
+    servers: Vec<LocalServer>,
+    /// The host the client logs in to.
+    home_host: usize,
     client: GameInstanceManager,
-    server_to_client: Receiver<ServerPacket>,
+    /// Each host's packets to the client.
+    server_out: Vec<Receiver<ServerPacket>>,
     bridge_recv: Receiver<ClientUpdateEvent>,
     /// Debug toggles shared with the manager — tests flip these the way the
     /// render thread's F3 dev panel would.
@@ -40,21 +86,31 @@ pub struct SimHarness {
     /// server's live (already-advanced) hash. (That describes a client that
     /// trails; one that leads is aligned by `catch_up`.)
     server_hashes: HashMap<(RegionCoords, game::Tick), u32>,
-    /// What the client actually reads: `server_to_client` forwarded through
-    /// `forward()`, which can withhold `SyncClock` (see `catch_up`).
-    client_in_send: Sender<ServerPacket>,
-    client_in: Receiver<ServerPacket>,
+    /// What the client actually reads: each host's packets keyed by the client's
+    /// connection to it, forwarded by `pump_client`, which can withhold
+    /// `SyncClock` (see `catch_up`).
+    client_in_send: Sender<(u32, ConnEvent)>,
+    client_in: Receiver<(u32, ConnEvent)>,
     /// The client's regions run on their own threads (`threaded`); every
     /// pump then waits for them (`settle_regions`), so a step stays lockstep.
     threaded: bool,
-    /// What the client sent, on its way to `server_in` (see `set_latency`).
-    client_out: Receiver<ClientPacket>,
-    server_in: Sender<ClientPacket>,
-    /// One-way delay in steps (`set_latency`); 0 = the lockstep default.
+    /// The client's connections, one per host at most (the home's first).
+    conns: Vec<FakeConn>,
+    /// Connections the client opened since the last step.
+    opened: Receiver<Opened>,
+    /// Each host's inbound client packets.
+    server_in: Vec<Sender<ClientPacket>>,
+    /// Observer orders each host received from its peers: `(client, player, nonce)`.
+    orders: Vec<Vec<(ClientId, PlayerId, u64)>>,
+    /// Ticks added to each host's `SyncClock` samples (`skew_clock`).
+    clock_skew: Vec<i64>,
+    /// One-way delay in steps (`set_latency`), every connection alike; 0 = the
+    /// lockstep default.
     latency: usize,
-    /// Packets in flight, each with the step it is delivered at.
-    to_server: VecDeque<(usize, ClientPacket)>,
-    to_client: VecDeque<(usize, ServerPacket)>,
+    /// Packets in flight, each with the step it is delivered at (and the host /
+    /// connection key it goes to).
+    to_server: VecDeque<(usize, usize, ClientPacket)>,
+    to_client: VecDeque<(usize, u32, ServerPacket)>,
     /// Steps taken (the clock `latency` counts in).
     steps: usize,
     /// Extra steps for the next step's client packets only (`delay_next_send`).
@@ -130,18 +186,21 @@ impl SimHarness {
         client.set_lod_table(lod_table);
         client.set_near_radius(near_radius);
 
-        let client_out = client.client_packet_recv(); // Receiver<ClientPacket>
+        let (opener, opened) = unbounded();
+        client.set_conn_opener(Box::new(HarnessOpener(opener)));
+        let home = FakeConn { host: 0, key: PROVISIONAL_CONN, out: client.client_packet_recv(), admitted: true, ticket: None };
         let (server_in, client_to_server) = unbounded::<ClientPacket>();
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
-        let (client_in_send, client_in) = unbounded::<ServerPacket>();
+        let (client_in_send, client_in) = unbounded();
         let server = LocalServer::new_with_genesis(client_to_server, server_to_client_send, genesis).expect("local server");
         let mut server = server;
         server.record_slot_start_hashes();
 
         Self {
-            server,
+            servers: vec![server],
+            home_host: 0,
             client,
-            server_to_client,
+            server_out: vec![server_to_client],
             bridge_recv,
             debug,
             held: BTreeSet::new(),
@@ -150,13 +209,153 @@ impl SimHarness {
             client_in_send,
             client_in,
             threaded: false,
-            client_out,
-            server_in,
+            conns: vec![home],
+            opened,
+            server_in: vec![server_in],
+            orders: vec![Vec::new()],
+            clock_skew: vec![0],
             latency: 0,
             to_server: VecDeque::new(),
             to_client: VecDeque::new(),
             steps: 0,
             extra_delay: 0,
+        }
+    }
+
+    /// `hosts` hosts of one world (`Ownership::Static`,
+    /// [`HARNESS_SUPER_REGION_REGIONS`] regions per super-region side), each an
+    /// in-process manager on the lightweight flat world, every pair joined by an
+    /// `InlinePeerLink` (no delay). The client logs in to the host that owns the spawn
+    /// region and holds one fake connection per host it is sent to — its home's from
+    /// the start, another's once its home's `RegionElsewhere` sends it there; the
+    /// same `set_latency` delays every connection. Near radius 1 (the window spans
+    /// host seams), LOD off.
+    pub fn with_hosts(hosts: u32) -> Self {
+        assert!(hosts >= 1);
+        let s = HARNESS_SUPER_REGION_REGIONS;
+        let mut h = Self::with_config(&[], 1);
+        let home = game::Ownership::Static { ordinal: 0, hosts }.owner_of(game::SPAWN_REGION, s) as usize;
+        // Rebuild the servers as `hosts` unconnected hosts: the one-host server
+        // `build` made has the local client's session and no peers.
+        let mut servers = Vec::new();
+        let mut server_out = Vec::new();
+        let mut server_in = Vec::new();
+        for ordinal in 0..hosts {
+            let (to_server, from_client) = unbounded::<ClientPacket>();
+            let (to_client, from_server) = unbounded::<ServerPacket>();
+            let mut server =
+                LocalServer::new_unconnected(from_client, to_client, crate::local_server::lightweight_test_genesis())
+                    .expect("local server");
+            let manager = server.manager_mut();
+            manager.set_ownership(game::Ownership::Static { ordinal, hosts }, s);
+            manager.set_endpoints(harness_endpoint(ordinal), game::seeded_nonces(0x5eed + u64::from(ordinal)));
+            server.record_slot_start_hashes();
+            servers.push(server);
+            server_out.push(from_server);
+            server_in.push(to_server);
+        }
+        for a in 0..hosts {
+            for b in a + 1..hosts {
+                let (ea, eb) = game::InlinePeerLink::pair(0xabcd + u64::from(a * hosts + b), 0);
+                servers[a as usize].manager_mut().set_peer(b, game::PeerSession::new(harness_hello(a), b), Box::new(ea));
+                servers[b as usize].manager_mut().set_peer(a, game::PeerSession::new(harness_hello(b), a), Box::new(eb));
+            }
+        }
+        h.servers = servers;
+        h.server_out = server_out;
+        h.server_in = server_in;
+        h.orders = vec![Vec::new(); hosts as usize];
+        h.clock_skew = vec![0; hosts as usize];
+        h.home_host = home;
+        h.conns[0].host = home;
+        // Every peer session up before the client logs in: its window's
+        // regions on other hosts are then reachable from the home.
+        let window = game::SPAWN_REGION.window_3x3();
+        for _ in 0..PEER_CONNECT_ROUNDS {
+            if h.servers.iter_mut().all(|server| window.iter().all(|rc| server.manager_mut().reaches(*rc))) {
+                break;
+            }
+            h.tick_server();
+        }
+        assert!(
+            h.servers.iter_mut().all(|server| window.iter().all(|rc| server.manager_mut().reaches(*rc))),
+            "the harness hosts' peer sessions never came up"
+        );
+        // What the hosts said before the client logged in is no one's.
+        for out in &h.server_out {
+            for _ in out.try_iter() {}
+        }
+        h.servers[home].connect_local_client();
+        h
+    }
+
+    /// The host that owns `rc` (index into the harness's hosts).
+    pub fn owner(&mut self, rc: RegionCoords) -> u32 {
+        self.servers[0].manager_mut().owner_of(rc)
+    }
+
+    /// The host the client logged in to.
+    pub fn home_host(&self) -> u32 {
+        self.home_host as u32
+    }
+
+    /// The client connection `rc`'s traffic counts from: a host's ordinal (or
+    /// `connections::PROVISIONAL_CONN` before the home named itself).
+    pub fn client_region_connection(&self, rc: RegionCoords) -> u32 {
+        self.client.region_connection(rc)
+    }
+
+    /// The hosts the client holds a connection to.
+    pub fn client_connections(&self) -> Vec<u32> {
+        self.conns.iter().map(|c| c.host as u32).collect()
+    }
+
+    /// Every `SyncClock` host `host` sends from now on reads `ticks` later than
+    /// its world tick (a host whose samples must not steer the client's clock).
+    pub fn skew_clock(&mut self, host: u32, ticks: i64) {
+        self.clock_skew[host as usize] = ticks;
+    }
+
+    /// Host `host`'s tick of its running region `rc` (0 if it does not run it).
+    pub fn server_region_tick(&mut self, host: u32, rc: RegionCoords) -> game::Tick {
+        self.servers[host as usize].region_tick(rc)
+    }
+
+    /// The server that runs `rc` (its owner's; the home's when none does).
+    fn server_for(&mut self, rc: RegionCoords) -> &mut LocalServer {
+        let owner = self.servers.iter_mut().position(|server| server.running_regions().contains(&rc));
+        let i = owner.unwrap_or(self.home_host);
+        &mut self.servers[i]
+    }
+
+    /// The client's connections opened since the last step join the harness;
+    /// each waiting one is admitted once its host holds the observer order its
+    /// ticket matches (a server's edge refuses it until then; here it waits).
+    fn admit_connections(&mut self) {
+        while let Ok(Opened { ordinal, credential, out }) = self.opened.try_recv() {
+            let ticket = match credential {
+                Credential::Observer { client, nonce } => Some((client, nonce)),
+                _ => None,
+            };
+            assert!(
+                self.conns.iter().all(|c| c.host != ordinal as usize),
+                "the client opened a second connection to host {ordinal}"
+            );
+            self.conns.push(FakeConn { host: ordinal as usize, key: ordinal, out, admitted: false, ticket });
+        }
+        for (host, server) in self.servers.iter_mut().enumerate() {
+            for (client, player, nonce, _ttl) in server.manager_mut().take_observer_orders() {
+                self.orders[host].push((client, player, nonce));
+            }
+        }
+        for conn in self.conns.iter_mut().filter(|c| !c.admitted) {
+            assert_ne!(conn.host, self.home_host, "an observer ticket presented to the home host");
+            let Some((client, nonce)) = conn.ticket else { continue };
+            let found = self.orders[conn.host].iter().find(|(c, _, n)| *c == client && *n == nonce).copied();
+            if let Some((client, player, _)) = found {
+                self.servers[conn.host].observer_connected(client, player);
+                conn.admitted = true;
+            }
         }
     }
 
@@ -168,11 +367,11 @@ impl SimHarness {
         self.latency = steps;
         if steps == 0 {
             // Deliver everything still in flight.
-            for (_, p) in self.to_server.drain(..) {
-                let _ = self.server_in.send(p);
+            for (_, host, p) in self.to_server.drain(..) {
+                let _ = self.server_in[host].send(p);
             }
-            for (_, p) in self.to_client.drain(..) {
-                let _ = self.client_in_send.send(p);
+            for (_, key, p) in self.to_client.drain(..) {
+                let _ = self.client_in_send.send((key, ConnEvent::Packet(p)));
             }
         }
     }
@@ -187,13 +386,17 @@ impl SimHarness {
     }
 
     fn deliver_to_server(&mut self) {
+        self.admit_connections();
         let extra = std::mem::take(&mut self.extra_delay);
-        for p in self.client_out.try_iter() {
-            self.to_server.push_back((self.steps + self.latency + extra, p));
+        let due = self.steps + self.latency + extra;
+        for conn in self.conns.iter().filter(|c| c.admitted) {
+            for p in conn.out.try_iter() {
+                self.to_server.push_back((due, conn.host, p));
+            }
         }
-        while self.to_server.front().is_some_and(|(due, _)| *due <= self.steps) {
-            let (_, p) = self.to_server.pop_front().expect("checked");
-            let _ = self.server_in.send(p);
+        while self.to_server.front().is_some_and(|(due, ..)| *due <= self.steps) {
+            let (_, host, p) = self.to_server.pop_front().expect("checked");
+            let _ = self.server_in[host].send(p);
         }
     }
 
@@ -219,7 +422,9 @@ impl SimHarness {
     /// tick-aligned `assert_converged` needs. `jittery` makes regions miss
     /// ticks, and this harness's client cannot pace itself against that.
     pub fn set_schedule(&mut self, schedule: game::InlineSchedule) {
-        self.server.set_schedule(Some(schedule));
+        for server in &mut self.servers {
+            server.set_schedule(Some(schedule.clone()));
+        }
     }
 
     /// Send an `Order` as the local client (predicted at the next `step`).
@@ -276,10 +481,14 @@ impl SimHarness {
     /// tick-aligned (see `server_hashes` / `assert_converged`).
     fn tick_server(&mut self) {
         self.deliver_to_server();
-        self.server.pump().expect("server pump");
-        self.server.tick();
-        for (rc, t, hash) in self.server.take_slot_start_hashes() {
-            self.server_hashes.insert((rc, t), hash);
+        // Every host ticks every step: their world ticks stay equal.
+        for server in &mut self.servers {
+            server.pump().expect("server pump");
+            server.tick();
+            // Regions never run on two hosts: one map holds them all.
+            for (rc, t, hash) in server.take_slot_start_hashes() {
+                self.server_hashes.insert((rc, t), hash);
+            }
         }
     }
 
@@ -288,18 +497,30 @@ impl SimHarness {
     /// client reconciles without re-pacing itself against the server.
     fn pump_client(&mut self, with_clock: bool) {
         let rtt = std::time::Duration::from_millis(2 * self.latency as u64 * game::TICK_RATE);
-        for packet in self.server_to_client.try_iter() {
-            let packet = match packet {
-                ServerPacket::SyncClock(rc, rate, tick, _) => ServerPacket::SyncClock(rc, rate, tick, rtt),
-                p => p,
+        for (host, out) in self.server_out.iter().enumerate() {
+            let conn = self.conns.iter_mut().find(|c| c.host == host && c.admitted);
+            let Some(conn) = conn else {
+                // No session of the client there yet: nothing is for it.
+                for _ in out.try_iter() {}
+                continue;
             };
-            if with_clock || !matches!(packet, ServerPacket::SyncClock(..)) {
-                self.to_client.push_back((self.steps + self.latency, packet));
+            let skew = self.clock_skew[host];
+            for packet in out.try_iter() {
+                let packet = match packet {
+                    ServerPacket::SyncClock(rc, rate, tick, _) => {
+                        ServerPacket::SyncClock(rc, rate, tick.saturating_add_signed(skew), rtt)
+                    }
+                    p => p,
+                };
+                let key = crate::connections::tag_key(&mut conn.key, &packet);
+                if with_clock || !matches!(packet, ServerPacket::SyncClock(..)) {
+                    self.to_client.push_back((self.steps + self.latency, key, packet));
+                }
             }
         }
-        while self.to_client.front().is_some_and(|(due, _)| *due <= self.steps) {
-            let (_, p) = self.to_client.pop_front().expect("checked");
-            let _ = self.client_in_send.send(p);
+        while self.to_client.front().is_some_and(|(due, ..)| *due <= self.steps) {
+            let (_, key, p) = self.to_client.pop_front().expect("checked");
+            let _ = self.client_in_send.send((key, ConnEvent::Packet(p)));
         }
         self.client.pump(&self.client_in).expect("client pump");
         if self.threaded {
@@ -477,7 +698,8 @@ impl SimHarness {
     /// Server-side state surgery on a running region, e.g. before
     /// `connect()` so the client's snapshot already holds the change.
     pub fn with_server_region(&mut self, rc: RegionCoords, f: impl FnOnce(&mut game::Region)) {
-        self.server.with_region(rc, f);
+        let owner = self.servers[0].manager_mut().owner_of(rc) as usize;
+        self.servers[owner].with_region(rc, f);
     }
 
     /// A client region's rollback state, if loaded (inline host only).
@@ -496,7 +718,7 @@ impl SimHarness {
 
     /// Authoritative teleport for scenario setup (server-side, undo-safe).
     pub fn teleport_player(&mut self, pos: [f32; 3]) {
-        self.server.teleport_local_player(pos);
+        self.servers[self.home_host].teleport_local_player(pos);
         self.settle();
     }
 
@@ -608,7 +830,7 @@ impl SimHarness {
         let mut client = self.client_regions();
         while steps < CATCH_UP_MAX_TICKS
             && client.iter().any(|(rc, (t, _))| {
-                !self.server_hashes.contains_key(&(*rc, *t)) && self.server.region_tick(*rc) < *t
+                !self.server_hashes.contains_key(&(*rc, *t)) && self.server_for(*rc).region_tick(*rc) < *t
             })
         {
             self.tick_server();
@@ -645,5 +867,23 @@ pub enum Dir {
 impl Default for SimHarness {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Host `ordinal`'s endpoint in [`SimHarness::with_hosts`] (no addresses: the harness
+/// connects in process).
+fn harness_endpoint(ordinal: u32) -> game::HostEndpoint {
+    game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None }
+}
+
+/// The hello host `ordinal` of [`SimHarness::with_hosts`] starts its peer sessions with.
+fn harness_hello(ordinal: u32) -> game::PeerHello {
+    game::PeerHello {
+        ordinal,
+        boot: 1000 + u64::from(ordinal),
+        generation: 1,
+        endpoint: harness_endpoint(ordinal),
+        received_through: 0,
+        received_from_boot: None,
     }
 }

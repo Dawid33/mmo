@@ -131,7 +131,8 @@ pub struct HomeView {
 pub struct RunnerCtx {
     pub id: RegionId,
     pub client_id: ClientId,
-    pub server_send: Sender<ClientPacket>,
+    /// Where its predictions go: the session's home connection (`Outgoing::Home`).
+    pub server_send: Sender<crate::connections::Outgoing>,
     pub client_event_send: Sender<ClientUpdateEvent>,
     pub debug_flags: game::DebugFlags,
 }
@@ -343,7 +344,8 @@ fn predict(region: &mut Region, ctx: &RunnerCtx, kind: GameEventKind, out: &mut 
             if is_input {
                 info!("[client] predicted PlayerInput id={} in home {:?}; sending to server", event.id, ctx.id);
             }
-            let _ = ctx.server_send.send(ClientPacket::GameEventAfterTick(event, after_tick));
+            let packet = ClientPacket::GameEventAfterTick(event, after_tick);
+            let _ = ctx.server_send.send(crate::connections::Outgoing::Home(packet));
         }
         Err(e) => out.push(RegionReport::Failed(e)),
     }
@@ -435,7 +437,7 @@ mod tests {
     const CLIENT: ClientId = 0;
 
     /// A client-side region (holding `CLIENT`) and a runner context for it.
-    fn setup() -> (Region, RunnerState, RunnerCtx, Receiver<ClientPacket>) {
+    fn setup() -> (Region, RunnerState, RunnerCtx, Receiver<crate::connections::Outgoing>) {
         let rc = RegionCoords::new(0, 0);
         let mut server = Region::empty(rc);
         server.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
@@ -514,7 +516,7 @@ mod tests {
         run(&mut r, &mut st, &ctx, RegionCmd::Predict(kind.clone()));
         let predicted_id = *r.pending_event_ids().last().unwrap();
         match server_recv.try_recv().unwrap() {
-            ClientPacket::GameEventAfterTick(ev, after) => {
+            crate::connections::Outgoing::Home(ClientPacket::GameEventAfterTick(ev, after)) => {
                 assert_eq!(after, 5);
                 assert_eq!(ev.id, predicted_id);
                 assert_eq!(ev.kind, kind);
@@ -570,7 +572,7 @@ mod tests {
         let ids = r.pending_event_ids();
         assert_eq!(ids.len(), n + 3, "arrival, input, tick");
         match server_recv.try_recv().unwrap() {
-            ClientPacket::GameEventAfterTick(ev, after) => {
+            crate::connections::Outgoing::Home(ClientPacket::GameEventAfterTick(ev, after)) => {
                 assert_eq!(ev.kind, input);
                 assert_eq!(after, t as u64, "stamped with the arrival's slot");
                 assert_eq!(ev.id, ids[n] + 1, "right after the arrival");
@@ -645,7 +647,7 @@ mod tests {
         let input = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
         run(&mut r, &mut st, &ctx, RegionCmd::Predict(input));
         let input_id = match server_recv.try_recv().unwrap() {
-            ClientPacket::GameEventAfterTick(ev, _) => ev.id,
+            crate::connections::Outgoing::Home(ClientPacket::GameEventAfterTick(ev, _)) => ev.id,
             other => panic!("expected GameEventAfterTick, got {other:?}"),
         };
         assert_eq!(logged(&r).len(), n + 2, "slot t+1 still open: still held");

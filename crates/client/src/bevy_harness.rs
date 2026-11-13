@@ -165,12 +165,12 @@ impl BevyInputHarness {
         // runs the sim toggle in the same drain.
         self.client.send_tick();
         self.client
-            .pump(&self.server_to_client)
+            .pump_packets(&self.server_to_client)
             .expect("client pump");
         self.server.pump().expect("server pump");
         self.server.tick();
         self.client
-            .pump(&self.server_to_client)
+            .pump_packets(&self.server_to_client)
             .expect("client reconcile pump");
 
         // Back: drain this tick's region updates -> apply the cursor grab.

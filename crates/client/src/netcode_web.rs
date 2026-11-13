@@ -14,6 +14,7 @@
 //! transport stays where the main-thread build has always had it. It only
 //! uses what both globals have (`web_worker::fetch` / `sleep_ms`), so moving
 //! it into the worker is a call-site change once that is understood.
+use crate::connections::ConnEvent;
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use game::{ClientPacket, ServerPacket};
 use js_sys::{Reflect, Uint8Array};
@@ -43,12 +44,14 @@ fn connection_lost(lost: &Sender<String>, reason: &str) {
 /// (the session's game manager) closes the transport.
 pub fn connect(
     server: WebServer,
-    server_send: Sender<ServerPacket>,
+    server_send: Sender<(u32, ConnEvent)>,
     client_recv: Receiver<ClientPacket>,
     lost: Sender<String>,
     credential: Option<game::Credential>,
 ) {
-    let incoming = Incoming::Packets(server_send);
+    // The one (home) connection: keyed as `connections::tag_key` keys it. The
+    // browser's connections to other hosts are R3 Task 23's.
+    let incoming = Incoming::Packets(server_send, crate::connections::PROVISIONAL_CONN);
     let outgoing = Outgoing::Packets(client_recv);
     spawn_local(async move {
         if let Err(e) = run(server, incoming, outgoing, lost.clone(), credential).await {
@@ -78,16 +81,18 @@ pub fn connect_frames(
 
 /// Where received packets go.
 enum Incoming {
-    Packets(Sender<ServerPacket>),
+    /// Decoded, keyed by the connection (its key so far).
+    Packets(Sender<(u32, ConnEvent)>, u32),
     Frames(Box<dyn FnMut(Vec<u8>)>),
 }
 
 impl Incoming {
     fn deliver(&mut self, bytes: Vec<u8>) {
         match self {
-            Incoming::Packets(send) => match game::decode_packet::<ServerPacket>(&bytes) {
+            Incoming::Packets(send, key) => match game::decode_packet::<ServerPacket>(&bytes) {
                 Ok(packet) => {
-                    let _ = send.send(packet);
+                    let tag = crate::connections::tag_key(key, &packet);
+                    let _ = send.send((tag, ConnEvent::Packet(packet)));
                 }
                 Err(e) => warn!("failed deserializing packet {e:?}"),
             },

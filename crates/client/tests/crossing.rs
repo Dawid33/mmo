@@ -359,3 +359,69 @@ fn predicted_intent_across_regions_does_not_mispredict() {
     h.assert_regions_in_step();
     h.assert_converged();
 }
+
+/// R3: one world on several hosts. The client logs in to the host that owns
+/// its spawn region; the regions of its window another host owns come over a
+/// connection to that host of their own (`client::connections`).
+mod two_hosts {
+    use client::harness::SimHarness;
+    use std::collections::BTreeSet;
+
+    /// Most steps `load_window` waits for the spawn window.
+    const LOAD_STEPS: usize = 60;
+
+    /// Step until every region of the spawn window is loaded (bounded); the window.
+    fn load_window(h: &mut SimHarness) -> Vec<game::RegionCoords> {
+        let window = game::SPAWN_REGION.window_3x3();
+        for _ in 0..LOAD_STEPS {
+            if window.iter().all(|rc| h.client_region_loaded(*rc)) {
+                break;
+            }
+            h.step();
+        }
+        window
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn window_spanning_a_host_seam_loads_regions_from_both() {
+        let mut h = SimHarness::with_hosts(2);
+        h.connect();
+        let window = load_window(&mut h);
+        let owners: BTreeSet<u32> = window.iter().map(|rc| h.owner(*rc)).collect();
+        assert_eq!(owners.len(), 2, "the spawn window spans a host seam");
+        for rc in &window {
+            let owner = h.owner(*rc);
+            assert!(h.client_region_loaded(*rc), "{rc:?} (host {owner}'s) never loaded");
+            assert_eq!(h.client_region_connection(*rc), owner, "{rc:?}'s traffic counts from its owner's connection");
+        }
+        let mut hosts = h.client_connections();
+        hosts.sort();
+        assert_eq!(hosts, vec![0, 1], "one connection per host");
+        h.assert_regions_in_step();
+        h.assert_converged();
+    }
+
+    /// Only the home connection's `SyncClock` samples steer the predicted clock:
+    /// another host's, read 40 ticks ahead here, never move it.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn clock_follows_the_home_connection_only() {
+        const SKEW_TICKS: i64 = 40;
+        let mut h = SimHarness::with_hosts(2);
+        h.connect();
+        let window = load_window(&mut h);
+        let home = h.home_host();
+        let other = 1 - home;
+        assert!(window.iter().any(|rc| h.owner(*rc) == other), "the window reaches the other host");
+        h.skew_clock(other, SKEW_TICKS);
+        for step in 0..SKEW_TICKS as usize {
+            h.step();
+            let lead = h.client_tick() as i64 - h.server_region_tick(home, game::SPAWN_REGION) as i64;
+            assert!(
+                (-3..=6).contains(&lead),
+                "step {step}: the client's clock leads the home host by {lead} ticks (another host's samples steered it)"
+            );
+        }
+    }
+}
