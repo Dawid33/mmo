@@ -279,9 +279,26 @@
 ## Phase 3: Transfers land at T+1
 
 **Slot order (both sides implement it; deviations only cost a misprediction).** The *slot* T+1 is the gap after a region's tick T and before its tick T+1. Within a slot:
-1. client inputs that were held for it, in arrival order;
-2. then transfers (arrivals, halo/ghost deltas, intents), in the order they reach the region;
-3. a crossing player's own inputs always come **after** that player's arrival.
+1. client inputs that were held for it, in arrival order (the rest on receipt);
+2. ~~then transfers (arrivals, halo/ghost deltas, intents), in the order they reach the region;~~
+   **Amended 2026-11-13 (plan `2026-11-13-seam-slot-order.md`, "Design"):** every region-to-region
+   message (`RegionInput::Transfer`; the client's `Arrival` / `HaloEntity` / `Halo` / `Intent` commands)
+   goes into the region's `SlotInbox` (`game::slot_order`), never straight into the sim — on the server
+   and in the client's predicted regions alike. Immediately before a `Tick` the region applies every
+   buffered message with `stamp <= current_tick()`, sorted by `(stamp, class, key, arrival)`: class 0
+   `EntityArrived` (entity id), 1 `HaloEntityGone` (source, entity id), 2 `HaloEntity` (source, entity
+   id), 3 `HaloUpdate` (source), 4 `HaloSourceGone` (region), 5 `Intent` (intents before replies; an
+   intent by its sender, a reply by the entity it is for, then the answering owner, then — replies only —
+   its content), 6 anything else (a held creation and what queues behind it), arrival only. So a slot is:
+   `Tick`, inputs, the slot's neighbour messages sorted, the next `Tick` — thread timing no longer picks
+   the order, and the same events in another arrival order are no longer a misprediction. A message
+   whose slot already closed (`stamp < current_tick()`) is applied at the end of the open slot, by its
+   stamp first; whether it is late can still differ between server and client (not fixed);
+3. a crossing player's own inputs always come **after** that player's arrival. *(As built 2026-11-13:
+   whatever follows a buffered arrival — a late input, a park or leave for that body — is pushed with
+   `SlotInbox::push_after_arrival` and applied directly after it: after the inputs the arriving bundle
+   carries, before the slot's other messages, followers in arrival order. What follows a held creation
+   is pushed `Other` behind it, `push_behind`.)*
 
 ### Task 3.1: Server — `RegionInput::Transfer`, held until the stamped slot
 
@@ -298,7 +315,7 @@
   RegionOutput::Departures(Vec<(EntityBundle, RegionCoords)>, Tick)   // stamp = source current_tick() after the tick = T+1
   RegionOutput::GhostUpdates(Vec<(GhostData, RegionCoords)>, Tick)
   ```
-- The held queue releases, after each tick, every entry whose stamp is ≤ the new `current_tick()`: held client inputs first, then transfers, each in queue order. A `Transfer` whose stamp is already ≤ `current_tick()` on receipt is applied at once.
+- The held queue releases, after each tick, every entry whose stamp is ≤ the new `current_tick()`: held client inputs first, then transfers, each in queue order. A `Transfer` whose stamp is already ≤ `current_tick()` on receipt is applied at once. *(Superseded 2026-11-13 by the amended slot rule above: no `Transfer` is applied on receipt any more; the slot's transfers are applied, sorted, immediately before the next `Tick`.)*
 
 - [ ] **Step 1: Write the failing tests.**
   - `handoff_manager.rs::arrival_lands_in_slot_after_departure_tick`: lockstep. A player walks across the seam. The authoritative event stream of the target shows `EntityArrived` after the target's tick numbered (departure stamp − 1) and before the next `Tick`.

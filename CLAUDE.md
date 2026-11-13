@@ -127,6 +127,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   regions talk only via `RegionInput`/`RegionOutput` messages (the future network seam) — never shared memory.
 - Goal: a seam changes nothing observable. One world-numbered tick in every region (`WorldClock`); entities
   are `EntityId { birth_region, serial }`; crossings are stamped transfers applied at T+1.
+- A slot's neighbour messages go through `SlotInbox` (`game::slot_order`) and are applied right before the
+  next `Tick` in canonical order, on server and client alike — never apply a `Transfer` on receipt.
 - `carry_components` / `Client::arrive` destructure with no `..` on purpose: a new `Ecs`/`Client` field must
   be classified as travelling or not.
 - Sim code reads neighbours through `WorldView` (own ∪ halo) and writes anything it does not own as an

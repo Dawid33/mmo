@@ -41,7 +41,9 @@ pub enum SlotClass {
     HaloUpdate = 3,
     HaloSourceGone = 4,
     Intent = 5,
-    /// Anything else, and anything queued behind another entry.
+    /// Anything else, and anything queued behind a held creation
+    /// ([`SlotInbox::push_behind`]); followers of an arrival sort with the
+    /// arrival ([`SlotInbox::push_after_arrival`]).
     Other = 6,
 }
 
