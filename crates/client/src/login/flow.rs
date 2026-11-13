@@ -508,7 +508,14 @@ impl LoginSession {
             },
             _ if busy => Step::none(),
             LoginIntent::SignIn => {
-                if self.waiting_for_sign_in() || self.logged_in() {
+                // Signed in already (a Cancel or Back pressed while the token
+                // trade was in flight: its reply still signed the player in
+                // and left the screen on Login): on to the world list, which
+                // fetches itself on entry (`refresh_worlds`).
+                if self.logged_in() {
+                    return Step::goto(AppState::Worlds);
+                }
+                if self.waiting_for_sign_in() {
                     return Step::none();
                 }
                 self.error.clear();
@@ -1314,6 +1321,16 @@ mod tests {
         assert!(matches!(step.calls.as_slice(), [LoginCall::Worlds]));
         assert_eq!(login.account_name, "Ada");
         assert!(login.logged_in() && !login.busy());
+    }
+
+    #[test]
+    fn sign_in_while_logged_in_goes_to_the_world_list() {
+        let mut login = session();
+        let _ = login.apply(logged_in("a@b.c", "r1"), AppState::Login);
+        assert!(login.logged_in());
+        let step = login.intent(LoginIntent::SignIn, AppState::Login);
+        assert_eq!(step.goto, Some(AppState::Worlds));
+        assert!(step.calls.is_empty(), "no new sign-in starts");
     }
 
     #[test]

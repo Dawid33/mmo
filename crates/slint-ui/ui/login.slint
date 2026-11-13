@@ -1,106 +1,164 @@
-// The login screen (Play online): email, password, Log in / Register /
-// Forgot password, and a line saying what happened. The client
-// (crates/client/src/login/flow.rs) talks to the login service; this screen
-// only reports what the player did. `busy` (a request in flight) disables
-// every button but Back (which abandons the request).
+// The login screen (Play online): Sign in hands the player to the identity
+// provider's page in the browser (the OAuth device flow); while the game waits
+// for them it shows the code to type, Open browser and Cancel. The client
+// (crates/client/src/login/flow.rs) does the talking; this screen only reports
+// what the player did. `busy` (a request in flight) disables Sign in; Cancel
+// and Back stay usable (they abandon the request).
 
-import { Button, FrameFace, GraphicalSets, LabelFace, Styles, TextField, VerticalFlow } from "@widgets";
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
 
 export component LoginScreen {
-    in-out property <string> email;
-    in-out property <string> password;
-    // Draw the password in the clear (headless tests compare the two).
-    in property <bool> show-password;
+    // The code to type at the provider's page, and the page itself with the
+    // code filled in (the browser build opens it from the click).
+    in property <string> user-code;
+    in property <string> verify-url;
+    // The game waits for the player to finish at the provider.
+    in property <bool> waiting;
     in property <string> error;
-    // Not an error: "Check your email to verify your account", …
+    // Not an error: a line of progress.
     in property <string> notice;
     in property <bool> busy;
-    callback submit();
-    callback register();
-    callback forgot();
+    callback sign-in();
+    callback open-browser();
+    callback cancel();
     callback back();
 
-    property <bool> filled: root.email != "" && root.password != "";
+    property <length> line-height: 28px;
+    property <length> code-height: 44px;
+    property <length> button-height: 32px;
+    property <length> gap: 12px;
+    // Rows of the body, from its top (the frame's content-y).
+    property <length> status-y: root.waiting
+        ? 2 * root.line-height + root.code-height + 2 * root.gap + root.button-height + root.gap
+        : root.button-height + root.gap;
+    property <length> foot-y: root.status-y + 2 * root.line-height;
+    property <length> back-top: root.waiting ? root.foot-y + root.gap : root.foot-y + root.line-height + root.gap;
 
     // Where things are, for the headless tests (absolute, logical px).
-    out property <length> email-x: email-field.absolute-position.x + email-field.width / 2;
-    out property <length> email-y: email-field.absolute-position.y + email-field.height / 2;
-    out property <length> password-x: password-field.absolute-position.x + password-field.width / 2;
-    out property <length> password-y: password-field.absolute-position.y + password-field.height / 2;
-    out property <length> submit-x: submit-btn.absolute-position.x + submit-btn.width / 2;
-    out property <length> submit-y: submit-btn.absolute-position.y + submit-btn.height / 2;
-    out property <length> register-x: register-btn.absolute-position.x + register-btn.width / 2;
-    out property <length> register-y: register-btn.absolute-position.y + register-btn.height / 2;
-    out property <length> forgot-x: forgot-btn.absolute-position.x + forgot-btn.width / 2;
-    out property <length> forgot-y: forgot-btn.absolute-position.y + forgot-btn.height / 2;
+    out property <length> sign-in-x: sign-in-btn.absolute-position.x + sign-in-btn.width / 2;
+    out property <length> sign-in-y: sign-in-btn.absolute-position.y + sign-in-btn.height / 2;
+    out property <length> open-browser-x: open-btn.absolute-position.x + open-btn.width / 2;
+    out property <length> open-browser-y: open-btn.absolute-position.y + open-btn.height / 2;
+    out property <length> cancel-x: cancel-btn.absolute-position.x + cancel-btn.width / 2;
+    out property <length> cancel-y: cancel-btn.absolute-position.y + cancel-btn.height / 2;
     out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
     out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
 
     frame := FrameFace {
         title: "Play online";
-        width: max(420px, self.content-x + body.preferred-width
-            + Styles.frame.box.padding.right + GraphicalSets.inset(Styles.frame.graphics).right);
-        height: self.content-y + body.preferred-height
+        width: min(root.width - 48px, 480px);
+        height: self.content-y + root.back-top + root.button-height
             + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
 
-        body := VerticalFlow {
+        property <length> inner-width: self.content-right - self.content-x;
+        property <length> half-width: (self.inner-width - root.gap) / 2;
+
+        // Idle: one button.
+        sign-in-btn := Button {
+            visible: !root.waiting;
             x: frame.content-x;
             y: frame.content-y;
-            width: frame.content-right - frame.content-x;
+            width: frame.inner-width;
+            height: root.button-height;
+            text: "Sign in";
+            style: Styles.confirm-button;
+            enabled: !root.busy;
+            clicked => { root.sign-in(); }
+        }
 
-            LabelFace {
-                text: "Email";
-            }
-            email-field := TextField {
-                text <=> root.email;
-                enabled: !root.busy;
-            }
-            LabelFace {
-                text: "Password";
-            }
-            password-field := TextField {
-                text <=> root.password;
-                password: !root.show-password;
-                enabled: !root.busy;
-                accepted => {
-                    if !root.busy && root.filled { root.submit(); }
-                }
-            }
-            submit-btn := Button {
-                text: "Log in";
-                style: Styles.confirm-button;
-                enabled: !root.busy && root.filled;
-                clicked => { root.submit(); }
-            }
-            register-btn := Button {
-                text: "Register";
-                enabled: !root.busy && root.filled;
-                clicked => { root.register(); }
-            }
-            forgot-btn := Button {
-                text: "Forgot password";
-                enabled: !root.busy && root.email != "";
-                clicked => { root.forgot(); }
-            }
-            if root.busy: LabelFace {
-                style: Styles.caption-label;
-                text: "Talking to the login server\u{2026}";
-            }
-            if root.error != "": LabelFace {
-                style: Styles.bold-red-label;
-                text: root.error;
-            }
-            if root.notice != "": LabelFace {
-                text: root.notice;
-            }
-            // Back works while busy: it abandons the call in flight.
-            back-btn := Button {
-                style: Styles.back-button;
-                text: "Back";
-                clicked => { root.back(); }
-            }
+        // Waiting: the code, and the two ways on.
+        LabelFace {
+            visible: root.waiting;
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.inner-width;
+            height: root.line-height;
+            text: "Finish signing in in your browser";
+        }
+        LabelFace {
+            visible: root.waiting;
+            x: frame.content-x;
+            y: frame.content-y + root.line-height;
+            width: frame.inner-width;
+            height: root.line-height;
+            style: Styles.caption-label;
+            text: "If asked, enter this code:";
+        }
+        // Read-only but selectable: the player can copy the code.
+        TextInput {
+            visible: root.waiting;
+            x: frame.content-x;
+            y: frame.content-y + 2 * root.line-height + root.gap / 2;
+            width: frame.inner-width;
+            height: root.code-height;
+            text: root.user-code;
+            read-only: true;
+            single-line: true;
+            color: #ffffff;
+            font-family: Styles.frame.title.font.family;
+            font-weight: Styles.frame.title.font.weight;
+            font-size: 28px;
+            vertical-alignment: center;
+        }
+        open-btn := Button {
+            visible: root.waiting;
+            x: frame.content-x;
+            y: frame.content-y + 2 * root.line-height + root.code-height + 2 * root.gap;
+            width: frame.half-width;
+            height: root.button-height;
+            text: "Open browser";
+            style: Styles.confirm-button;
+            clicked => { root.open-browser(); }
+        }
+        cancel-btn := Button {
+            visible: root.waiting;
+            x: frame.content-x + frame.half-width + root.gap;
+            y: open-btn.y;
+            width: frame.half-width;
+            height: root.button-height;
+            text: "Cancel";
+            clicked => { root.cancel(); }
+        }
+
+        // Status lines: the error, then a notice or "talking to the server".
+        LabelFace {
+            visible: root.error != "";
+            x: frame.content-x;
+            y: frame.content-y + root.status-y;
+            width: frame.inner-width;
+            height: root.line-height;
+            style: Styles.bold-red-label;
+            text: root.error;
+        }
+        LabelFace {
+            visible: root.notice != "" || root.busy;
+            x: frame.content-x;
+            y: frame.content-y + root.status-y + root.line-height;
+            width: frame.inner-width;
+            height: root.line-height;
+            style: root.notice != "" ? Styles.label : Styles.caption-label;
+            text: root.notice != "" ? root.notice : "Talking to the login server\u{2026}";
+        }
+        LabelFace {
+            visible: !root.waiting;
+            x: frame.content-x;
+            y: frame.content-y + root.foot-y;
+            width: frame.inner-width;
+            height: root.line-height;
+            style: Styles.caption-label;
+            text: "New here? You can create an account on the sign-in page.";
+        }
+        // Back works while busy: it abandons the call in flight.
+        back-btn := Button {
+            x: frame.content-x;
+            y: frame.content-y + root.back-top;
+            width: frame.inner-width;
+            height: root.button-height;
+            style: Styles.back-button;
+            text: "Back";
+            clicked => { root.back(); }
         }
     }
 }

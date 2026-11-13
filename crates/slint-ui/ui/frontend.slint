@@ -59,30 +59,28 @@ export component FrontendUi inherits Window {
     // The login screen (screen 5, login.slint) and the online world list
     // (screen 6, worlds.slint); their Back is `back` above. `login-error`,
     // `login-notice` and `login-busy` are shared by both.
-    in-out property <string> login-email <=> login.email;
-    in-out property <string> login-password <=> login.password;
-    in property <bool> login-show-password <=> login.show-password;
+    // The device sign-in: the code to type, the page with it filled in, and
+    // whether the game waits for the player to finish at the provider.
+    in property <string> login-user-code <=> login.user-code;
+    in property <string> login-verify-url <=> login.verify-url;
+    in property <bool> login-waiting <=> login.waiting;
     in property <string> login-error;
     in property <string> login-notice;
     in property <bool> login-busy;
-    // The signed-in account's email.
+    // The signed-in account's display name (its email when the name is unknown).
     in property <string> login-account;
     in property <[OnlineWorldRow]> worlds;
-    callback login-submit();
-    callback login-register();
-    callback login-forgot();
+    callback login-sign-in();
+    callback login-open-browser();
+    callback login-cancel();
     callback world-join(string);
     callback logout();
-    out property <length> login-email-x: login.email-x;
-    out property <length> login-email-y: login.email-y;
-    out property <length> login-password-x: login.password-x;
-    out property <length> login-password-y: login.password-y;
-    out property <length> login-submit-x: login.submit-x;
-    out property <length> login-submit-y: login.submit-y;
-    out property <length> login-register-x: login.register-x;
-    out property <length> login-register-y: login.register-y;
-    out property <length> login-forgot-x: login.forgot-x;
-    out property <length> login-forgot-y: login.forgot-y;
+    out property <length> login-sign-in-x: login.sign-in-x;
+    out property <length> login-sign-in-y: login.sign-in-y;
+    out property <length> login-open-browser-x: login.open-browser-x;
+    out property <length> login-open-browser-y: login.open-browser-y;
+    out property <length> login-cancel-x: login.cancel-x;
+    out property <length> login-cancel-y: login.cancel-y;
     out property <length> worlds-row-x: online-worlds.row-x;
     out property <length> worlds-row0-y: online-worlds.row0-y;
     out property <length> worlds-row-pitch: online-worlds.row-pitch;
@@ -239,9 +237,9 @@ export component FrontendUi inherits Window {
         error: root.login-error;
         notice: root.login-notice;
         busy: root.login-busy;
-        submit => { root.login-submit(); }
-        register => { root.login-register(); }
-        forgot => { root.login-forgot(); }
+        sign-in => { root.login-sign-in(); }
+        open-browser => { root.login-open-browser(); }
+        cancel => { root.login-cancel(); }
         back => { root.back(); }
     }
     online-worlds := WorldsScreen {

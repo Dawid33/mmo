@@ -15,7 +15,7 @@ export struct OnlineWorldRow {
 
 export component WorldsScreen {
     in property <[OnlineWorldRow]> worlds;
-    // The signed-in account's email.
+    // The signed-in account's display name (its email when the name is unknown).
     in property <string> account;
     in property <string> error;
     in property <string> notice;

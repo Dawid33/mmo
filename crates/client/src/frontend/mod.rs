@@ -222,10 +222,33 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
         let queue = actions.clone();
         ui.on_world_join(move |id| queue.borrow_mut().push(FrontendAction::JoinWorld(id.to_string())));
     }
-    // Until the login screen is rewritten for the device sign-in, its Log in
-    // button signs in (the typed fields are not read) and Register / Forgot
-    // password do nothing.
-    ui.on_login_submit(push(FrontendAction::SignIn));
+    ui.on_login_sign_in(push(FrontendAction::SignIn));
+    ui.on_login_cancel(push(FrontendAction::CancelSignIn));
+    // Native: the flow opens the system browser. Browser build: the flow opens
+    // nothing, the page does, from this callback itself: it runs while the
+    // click's pointer event is dispatched into Slint (renderer/slint_overlay.rs,
+    // the frame right after the DOM event), not a further queued action later,
+    // so the browser still counts it as the player's click (transient user
+    // activation) and lets the tab open.
+    #[cfg(not(target_arch = "wasm32"))]
+    ui.on_login_open_browser(push(FrontendAction::OpenBrowser));
+    #[cfg(target_arch = "wasm32")]
+    {
+        use slint_ui::slint::ComponentHandle;
+        let weak = ui.as_weak();
+        ui.on_login_open_browser(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let url = ui.get_login_verify_url();
+            if url.is_empty() {
+                return;
+            }
+            if let Some(window) = web_sys::window() {
+                if window.open_with_url_and_target(url.as_str(), "_blank").is_err() {
+                    bevy::log::warn!("[login] the browser refused to open the sign-in tab");
+                }
+            }
+        });
+    }
     ui.set_join_only(JOIN_ONLY);
     #[cfg(target_arch = "wasm32")]
     ui.set_server_address(initial_server_address().into());
@@ -404,21 +427,24 @@ fn push_login_state(ui: &FrontendUi, login: Option<Res<LoginSession>>, shown_wor
     if ui.get_login_error() != login.error.as_str() {
         ui.set_login_error(login.error.as_str().into());
     }
-    // Until the login screen is rewritten: the pending sign-in's code as its
-    // notice line, and the screen busy while it waits (Back cancels it).
-    let notice = if login.waiting_for_sign_in() {
-        format!("Sign in in your browser \u{2014} code {}", login.user_code())
+    if ui.get_login_waiting() != login.waiting_for_sign_in() {
+        ui.set_login_waiting(login.waiting_for_sign_in());
+    }
+    if ui.get_login_user_code() != login.user_code() {
+        ui.set_login_user_code(login.user_code().into());
+    }
+    if ui.get_login_verify_url() != login.verification_uri_complete() {
+        ui.set_login_verify_url(login.verification_uri_complete().into());
+    }
+    if ui.get_login_busy() != login.busy() {
+        ui.set_login_busy(login.busy());
+    }
+    // The worlds screen's "Signed in as": the display name, else the email.
+    let account = if login.account_name.is_empty() {
+        login.account.as_deref().unwrap_or("")
     } else {
-        String::new()
+        login.account_name.as_str()
     };
-    if ui.get_login_notice() != notice.as_str() {
-        ui.set_login_notice(notice.into());
-    }
-    let busy = login.busy() || login.waiting_for_sign_in();
-    if ui.get_login_busy() != busy {
-        ui.set_login_busy(busy);
-    }
-    let account = login.account.as_deref().unwrap_or("");
     if ui.get_login_account() != account {
         ui.set_login_account(account.into());
     }
