@@ -1,0 +1,673 @@
+/* Orion: one stylesheet for the website and the Keycloak login theme (website/site/css/site.css
+   is a symlink to this file). Every value comes from the tokens on :root. Pages are a column:
+   .site-header with the .brand, a main area, .site-footer. The memorable thing is the brick:
+   a .card wears a row of studs on its top edge and a solid brick side under it, and the
+   primary button is a small brick that presses down. Everything else stays quiet. */
+
+/* ---- Tokens ---------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light dark;
+
+  /* Ground and surfaces */
+  --bg: #dfe5ec;          /* mortar grey: the page */
+  --bg-stud: rgb(255 255 255 / 0.3); /* baseplate dots on the page */
+  --surface: #ffffff;     /* a brick: cards */
+  --surface-edge: #b4bfcc; /* the brick's side under a card */
+  --surface-sunk: #f1f4f7; /* inputs, quiet panels */
+  --line: #c3ccd6;
+  --line-strong: #8d9aa8;
+
+  /* Ink */
+  --text: #17212c;
+  --muted: #4f5d6c;
+
+  /* Toy-brick yellow: the one accent */
+  --accent: #f4b400;
+  --accent-hover: #ffc21a;
+  --accent-edge: #b98500;
+  --accent-ink: #1d1a10;
+  --link: #1b5cb8;
+
+  /* Messages */
+  --danger: #b4321c;
+  --danger-bg: #fbe5e0;
+  --success: #276f39;
+  --success-bg: #e0f1e4;
+  --warning: #8a5d00;
+  --warning-bg: #fff2cc;
+  --info: #1b5cb8;
+  --info-bg: #e2ecf9;
+
+  --focus: #1f6fe0;
+
+  /* Type: one rounded system stack, nothing downloaded */
+  --font: ui-rounded, "SF Pro Rounded", "Nunito", "Varela Round", system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --text-s: 0.875rem;
+  --text-m: 1rem;
+  --text-l: 1.25rem;
+  --text-xl: 1.75rem;
+  --text-xxl: clamp(2.25rem, 6vw, 3.5rem);
+  --leading: 1.5;
+
+  /* Shape and space */
+  --radius-s: 4px;
+  --radius: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --gutter: var(--space-4);
+  --measure: 34rem;
+  --card-width: 28rem;
+  --brick-edge: 6px;      /* depth of the brick side under a card */
+  --stud-h: 10px;      /* a stud is 28 px wide in each 48 px pitch */
+  --stud-pitch: 48px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111923;
+    --bg-stud: rgb(255 255 255 / 0.035);
+    --surface: #1d2834;
+    --surface-edge: #070b10;
+    --surface-sunk: #151e28;
+    --line: #34424f;
+    --line-strong: #5d6d7d;
+    --text: #e8edf2;
+    --muted: #a3b0bd;
+    --accent: #f4b400;
+    --accent-hover: #ffc21a;
+    --accent-edge: #8f6600;
+    --accent-ink: #1d1a10;
+    --link: #7fb2ff;
+    --danger: #ff9a86;
+    --danger-bg: #3a1a15;
+    --success: #8fd6a0;
+    --success-bg: #15301d;
+    --warning: #ffd36b;
+    --warning-bg: #352a0c;
+    --info: #9cc3ff;
+    --info-bg: #142540;
+    --focus: #7fb2ff;
+  }
+}
+
+/* ---- Base ------------------------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: var(--text-m);
+  line-height: var(--leading);
+  color: var(--text);
+  background-color: var(--bg);
+  /* A baseplate, barely there. */
+  background-image: radial-gradient(circle at center, var(--bg-stud) 0 5px, transparent 5.5px);
+  background-size: 24px 24px;
+}
+
+a {
+  color: var(--link);
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+img,
+svg {
+  max-width: 100%;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 var(--space-3);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0 0 var(--space-4);
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: var(--space-5) 0;
+}
+
+/* ---- Page frame ------------------------------------------------------------------------ */
+
+.page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.page-main {
+  flex: 1;
+  width: 100%;
+  max-width: calc(var(--card-width) + 2 * var(--gutter));
+  margin: 0 auto;
+  padding: var(--space-6) var(--gutter) var(--space-7);
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: var(--space-4) var(--gutter);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text);
+  font-size: var(--text-l);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  text-decoration: none;
+}
+
+.brand img {
+  width: 40px;
+  height: auto;
+  display: block;
+}
+
+.brand:hover {
+  text-decoration: none;
+}
+
+.site-footer {
+  padding: var(--space-5) var(--gutter) var(--space-6);
+  color: var(--muted);
+  font-size: var(--text-s);
+  text-align: center;
+}
+
+.site-footer p {
+  margin: 0;
+}
+
+/* ---- The brick card -------------------------------------------------------------------- */
+
+.card {
+  position: relative;
+  margin-top: var(--stud-h);
+  padding: var(--space-6);
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 var(--brick-edge) 0 var(--surface-edge);
+}
+
+/* The studs: one row across the top edge, in the card's own colour. */
+.card::before {
+  content: "";
+  position: absolute;
+  left: var(--space-5);
+  right: var(--space-5);
+  top: calc(-1 * var(--stud-h) + 1px);
+  height: var(--stud-h);
+  background: var(--surface);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='10'%3E%3Crect x='10' width='28' height='14' rx='3'/%3E%3C/svg%3E")
+    left top / var(--stud-pitch) var(--stud-h) space no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='10'%3E%3Crect x='10' width='28' height='14' rx='3'/%3E%3C/svg%3E")
+    left top / var(--stud-pitch) var(--stud-h) space no-repeat;
+  pointer-events: none;
+}
+
+.card-header h1,
+.card h1 {
+  font-size: var(--text-xl);
+}
+
+.card-header {
+  margin-bottom: var(--space-5);
+}
+
+.card-header .subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-s);
+}
+
+.required {
+  color: var(--danger);
+}
+
+/* "Signed in as …" with a restart link, on second-step pages */
+#kc-username {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-sunk);
+  border-radius: var(--radius-s);
+  font-weight: 700;
+}
+
+#kc-username a {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-s);
+  font-weight: 400;
+}
+
+.card-info {
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.card-info p:last-child {
+  margin-bottom: 0;
+}
+
+.card .instruction {
+  color: var(--text);
+}
+
+#traceId {
+  color: var(--muted);
+  font-size: var(--text-s);
+}
+
+/* ---- Fields ---------------------------------------------------------------------------- */
+
+.field {
+  margin-bottom: var(--space-4);
+}
+
+.field-label-row {
+  display: flex;
+  gap: var(--space-1);
+  align-items: baseline;
+}
+
+.card label,
+.field-label {
+  display: inline-block;
+  margin-bottom: var(--space-1);
+  font-weight: 700;
+}
+
+.card input:not([type="checkbox"], [type="radio"], [type="submit"], [type="button"], [type="hidden"]),
+.card select,
+.card textarea,
+.field-input {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-sunk);
+  border: 2px solid var(--line);
+  border-radius: var(--radius-s);
+}
+
+.card input:hover:not(:focus, [disabled]),
+.card select:hover,
+.card textarea:hover {
+  border-color: var(--line-strong);
+}
+
+.card input:focus-visible,
+.card select:focus-visible,
+.card textarea:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+  border-color: var(--focus);
+}
+
+.card [aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.card input[disabled] {
+  opacity: 0.7;
+}
+
+.field-input-group {
+  display: flex;
+}
+
+.field-input-group > input {
+  flex: 1;
+  min-width: 0;
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+}
+
+.field-message,
+.field-help {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--text-s);
+  color: var(--muted);
+}
+
+.field-message-error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.field-group-title {
+  font-size: var(--text-l);
+  font-weight: 800;
+}
+
+.card input[type="checkbox"],
+.card input[type="radio"] {
+  width: 18px;
+  height: 18px;
+  margin: 0 var(--space-2) 0 0;
+  vertical-align: -3px;
+  accent-color: var(--accent-edge);
+}
+
+.checkbox label,
+.choice-label {
+  font-weight: 400;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-2);
+}
+
+.choice-disabled {
+  color: var(--muted);
+}
+
+/* Form options row: "Remember me", "Forgot password?", "Back to login" */
+.form-settings {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-s);
+}
+
+.form-options-row {
+  font-size: var(--text-s);
+  margin-bottom: var(--space-4);
+}
+
+.form-settings .form-options-row {
+  margin-bottom: 0;
+}
+
+.form-buttons,
+#kc-form-buttons {
+  margin-top: var(--space-5);
+}
+
+.form-buttons-row,
+.form-buttons:has(> .btn + .btn) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+#kc-form-buttons:has(> .btn + .btn) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+/* ---- Buttons --------------------------------------------------------------------------- */
+
+.btn,
+.card button:not(.btn-reveal),
+.card input[type="submit"],
+.card input[type="button"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-5);
+  font: inherit;
+  font-weight: 800;
+  line-height: 1.2;
+  text-decoration: none;
+  color: var(--text);
+  background: var(--surface-sunk);
+  border: 2px solid var(--line);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.btn-primary,
+.card input[type="submit"].btn-primary,
+.card button.btn-primary {
+  margin-bottom: 4px;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 4px 0 var(--accent-edge);
+  transition: transform 60ms ease-out, box-shadow 60ms ease-out;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* The brick presses into the plate. */
+.btn-primary:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 var(--accent-edge);
+}
+
+.btn-quiet,
+.card .btn-quiet {
+  color: var(--text);
+  background: transparent;
+  border-color: var(--line-strong);
+}
+
+.btn-quiet:hover {
+  background: var(--surface-sunk);
+}
+
+.btn-block {
+  display: flex;
+  width: 100%;
+}
+
+.btn-large {
+  font-size: var(--text-m);
+}
+
+.btn[disabled],
+.btn.is-disabled,
+.card input[type="submit"][disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Show / hide password: a square cap on the input's right */
+.btn-reveal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  flex: 0 0 44px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface-sunk);
+  border: 2px solid var(--line);
+  border-left: 0;
+  border-radius: 0 var(--radius-s) var(--radius-s) 0;
+  cursor: pointer;
+}
+
+.btn-reveal:hover {
+  color: var(--text);
+}
+
+/* ---- Messages -------------------------------------------------------------------------- */
+
+.alert {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  margin-bottom: var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border-left: 6px solid currentColor;
+  border-radius: var(--radius-s);
+  color: var(--info);
+  background: var(--info-bg);
+}
+
+.alert-text {
+  color: var(--text);
+}
+
+.alert-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.alert-success {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.alert-warning {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+/* ---- Icons (masks in the text colour) -------------------------------------------------- */
+
+.icon {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  background: currentColor;
+  -webkit-mask: var(--icon) center / contain no-repeat;
+  mask: var(--icon) center / contain no-repeat;
+}
+
+.icon-eye {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E");
+}
+
+.icon-eye-off {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.6 5.1A10 10 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-2.6 3.4M6.6 6.6C3.7 8.5 2 12 2 12s3.6 7 10 7a9.6 9.6 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18'/%3E%3C/svg%3E");
+}
+
+.icon-restart {
+  width: 16px;
+  height: 16px;
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5'/%3E%3C/svg%3E");
+}
+
+.icon-alert,
+.icon-info,
+.icon-check {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E");
+}
+
+.kc-tooltip-text {
+  font-size: var(--text-s);
+}
+
+/* ---- Identity providers ---------------------------------------------------------------- */
+
+.social h2 {
+  font-size: var(--text-m);
+}
+
+.social-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.social-grid {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* ---- Utility --------------------------------------------------------------------------- */
+
+.space-top {
+  margin-top: var(--space-4);
+}
+
+.visually-hidden,
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Phone width ----------------------------------------------------------------------- */
+
+@media (max-width: 30rem) {
+  .page-main {
+    padding-top: var(--space-4);
+  }
+
+  .card {
+    padding: var(--space-5) var(--space-4);
+  }
+
+  .card::before {
+    left: var(--space-4);
+    right: var(--space-4);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-primary {
+    transition: none;
+  }
+}

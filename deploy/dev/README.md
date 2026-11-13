@@ -13,3 +13,27 @@ the maintenance database: `MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55
 (`just test-pg`).
 
 This is for development only. The game box and the orion cluster do not use it.
+
+# Dev Keycloak
+
+The player identity provider, run by the same `deploy/dev/compose.yml` (service `keycloak`,
+`quay.io/keycloak/keycloak:26.8.2` in `start-dev`).
+
+- `just kc-up` starts it (waits until healthy) on `http://127.0.0.1:8180`; the admin
+  console is at `/admin` with `admin` / `admin`.
+- `just kc-down` stops and removes the container. There is no data volume: every
+  `kc-up` imports `keycloak/players-realm.json` afresh, so edit that file (not the admin
+  console) to change the realm.
+- `just site-theme-check` fetches every login page a player can reach and checks it is in
+  the `orion` theme (`scripts/site_theme_check.sh`).
+
+Realm `players` (issuer `http://127.0.0.1:8180/realms/players`): login theme `orion`,
+registration on (username, email and password only), user `dev` / `dev-password`
+(email `dev@localhost`, verified), and client `site`, the website: public, standard flow
+with PKCE S256, redirect `http://127.0.0.1:8182/callback.html`, post-logout redirect
+`http://127.0.0.1:8182/`.
+
+The theme is mounted read-only from `website/theme/orion`. `start-dev` caches no themes,
+so template, message and stylesheet edits show on reload; a `theme.properties` change
+needs `just kc-down && just kc-up`. `ORION_SITE_URL` (`http://127.0.0.1:8182`) is the
+brand link's target.

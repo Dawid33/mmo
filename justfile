@@ -801,7 +801,7 @@ tunnel:
 
 # Start the dev Postgres on 127.0.0.1:55432 and wait until it is healthy.
 pg-up:
-    docker compose -f deploy/dev/compose.yml up -d --wait
+    docker compose -f deploy/dev/compose.yml up -d --wait postgres
     @echo "dev database: {{dev_database_url}}"
 
 # Stop the dev Postgres; its data stays in the mmo-dev-pg volume.
@@ -811,12 +811,29 @@ pg-down:
 # Delete the dev Postgres data and start again empty.
 pg-reset:
     docker compose -f deploy/dev/compose.yml down -v
-    docker compose -f deploy/dev/compose.yml up -d --wait
+    docker compose -f deploy/dev/compose.yml up -d --wait postgres
 
 # Run psql inside the dev Postgres: `just pg-psql -c 'select version()'`.
 [positional-arguments]
 pg-psql *args:
     docker compose -f deploy/dev/compose.yml exec -T postgres psql -U mmo -d mmo "$@"
+
+# ---- Dev Keycloak (deploy/dev) ---------------------------------------------
+
+# Start the dev Keycloak on 127.0.0.1:8180 (admin / admin) and wait until it is healthy.
+# Realm `players` from deploy/dev/keycloak/players-realm.json, login theme website/theme/orion.
+kc-up:
+    docker compose -f deploy/dev/compose.yml up -d --wait keycloak
+    @echo "dev issuer: http://127.0.0.1:8180/realms/players"
+
+# Stop and remove the dev Keycloak, so the next `kc-up` imports the realm file again.
+kc-down:
+    docker compose -f deploy/dev/compose.yml rm -sf keycloak
+
+# Check every login page the dev Keycloak serves is in the orion theme (`just kc-up` first).
+# Env KC, SITE, SKIP_LOGIN=1: see scripts/site_theme_check.sh.
+site-theme-check:
+    scripts/site_theme_check.sh
 
 # ---- Test -----------------------------------------------------------------
 
