@@ -11,7 +11,8 @@ use game::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::thread::{self, Reply, Request};
+use crate::counters::{Counters, StoreCounters};
+use crate::thread::{self, Reply, Request, Stamped};
 use crate::{CoordinatorFence, Dials, Fence, OpenMode, StoreError, StoreUrl, SuperRegion};
 
 /// The world row and whether a forged artifact is stored.
@@ -61,7 +62,7 @@ pub struct HostBoot {
 /// A handle on the open store (see the crate docs and `thread.rs`).
 #[derive(Clone)]
 pub struct StoreHandle {
-    tx: mpsc::UnboundedSender<Request>,
+    tx: mpsc::UnboundedSender<Stamped>,
     join: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     /// `world.super_region_regions`, read at open.
     super_region_regions: u32,
@@ -78,6 +79,8 @@ pub struct StoreHandle {
     /// [`StoreHandle::listen_cuts`]' poll period in ms (test setter:
     /// [`StoreHandle::set_terrain_poll_period`]).
     poll_ms: Arc<AtomicU64>,
+    /// Wait and codec-CPU counters of the store thread, shared with it.
+    counters: Arc<Counters>,
 }
 
 fn stopped() -> StoreError {
@@ -89,7 +92,8 @@ impl StoreHandle {
     /// is open (a [`OpenMode::Writer`] creates a missing store and migrates it).
     pub fn open(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<StoreHandle, StoreError> {
         let cuts = Arc::new(thread::CutState::new());
-        let (tx, join, super_region_regions) = thread::spawn(url, dials, mode, cuts.clone())?;
+        let counters = Arc::new(Counters::default());
+        let (tx, join, super_region_regions) = thread::spawn(url, dials, mode, cuts.clone(), counters.clone())?;
         Ok(StoreHandle {
             tx,
             join: Arc::new(Mutex::new(Some(join))),
@@ -100,6 +104,7 @@ impl StoreHandle {
             cuts,
             url: url.clone(),
             poll_ms: crate::listen::default_poll_ms(),
+            counters,
         })
     }
 
@@ -168,6 +173,18 @@ impl StoreHandle {
         self.super_region_regions
     }
 
+    /// Counters of the store thread since the last call, reset by it: requests picked
+    /// up, their wait from being sent to being picked up, and the CPU the thread spent
+    /// in encode / decode ([`StoreCounters`]). Shared by every clone of the handle.
+    pub fn take_counters(&self) -> StoreCounters {
+        self.counters.take()
+    }
+
+    /// Sends a request stamped with now; a stopped thread gives it back.
+    fn send(&self, req: Request) -> Result<(), Request> {
+        self.tx.send(Stamped { sent: std::time::Instant::now(), req }).map_err(|e| e.0.req)
+    }
+
     fn ask<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> Result<T, StoreError> {
         if thread::on_store_thread() {
             // Its answer would come from this very thread: refuse rather than hang.
@@ -176,7 +193,7 @@ impl StoreHandle {
             ));
         }
         let (tx, rx) = crossbeam::channel::bounded(1);
-        self.tx.send(make(Reply::Sync(tx))).map_err(|_| stopped())?;
+        self.send(make(Reply::Sync(tx))).map_err(|_| stopped())?;
         rx.recv().map_err(|_| stopped())?
     }
 
@@ -184,7 +201,7 @@ impl StoreHandle {
     /// thread: the receiver disconnects).
     fn ask_later<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
-        let _ = self.tx.send(make(Reply::Sync(tx)));
+        let _ = self.send(make(Reply::Sync(tx)));
         rx
     }
 
@@ -329,7 +346,7 @@ impl StoreHandle {
             let _ = tx.send(Err(e));
             return rx;
         }
-        if let Err(mpsc::error::SendError(req)) = self.tx.send(Request::CommitCut(Box::new(cut), fence, Reply::Sync(tx))) {
+        if let Err(req) = self.send(Request::CommitCut(Box::new(cut), fence, Reply::Sync(tx))) {
             if let Request::CommitCut(_, _, reply) = req {
                 reply.send(Err(stopped()));
             }
@@ -393,7 +410,7 @@ impl StoreHandle {
             *pending = Some(cut.id);
         }
         let req = Request::PrepareCut(Box::new(cut), fence, generation, Reply::Sync(tx));
-        if let Err(mpsc::error::SendError(Request::PrepareCut(c, _, _, reply))) = self.tx.send(req) {
+        if let Err(Request::PrepareCut(c, _, _, reply)) = self.send(req) {
             self.cuts.settle(c.id);
             reply.send(Err(stopped()));
         }
@@ -515,7 +532,7 @@ impl StoreHandle {
         key: &str,
     ) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Request::ResolvePlayer(key.to_string(), Reply::Async(tx))).map_err(|_| stopped())?;
+        self.send(Request::ResolvePlayer(key.to_string(), Reply::Async(tx))).map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
     }
 
@@ -543,7 +560,7 @@ impl StoreHandle {
             let _ = tx.send(Err(e));
             return rx;
         }
-        if let Err(mpsc::error::SendError(req)) = self.tx.send(Request::SaveCoordinator(state, fence, Reply::Sync(tx))) {
+        if let Err(req) = self.send(Request::SaveCoordinator(state, fence, Reply::Sync(tx))) {
             if let Request::SaveCoordinator(_, _, reply) = req {
                 reply.send(Err(stopped()));
             }
@@ -625,7 +642,7 @@ impl StoreHandle {
     /// joins it (closing the pool and releasing SQLite's world lock). Other clones'
     /// later calls fail with a `Backend` error.
     pub fn shutdown(self) {
-        let _ = self.tx.send(Request::Shutdown);
+        let _ = self.send(Request::Shutdown);
         let join = self.join.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(join) = join {
             if join.join().is_err() {

@@ -7,11 +7,13 @@
 //! answers every write with `StoreError::ReadOnly`.
 
 use std::sync::Arc;
+use std::time::Instant;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use game::{CutId, PlayerId, PlayerRecord, RegionCoords, Tick, WorldCut};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+use crate::counters::Counters;
 use crate::rows::{self, CutEnd};
 use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 use crate::{
@@ -48,6 +50,12 @@ impl<T> Reply<T> {
             }
         }
     }
+}
+
+/// A request with the instant it was sent, for the store thread's wait counter.
+pub(crate) struct Stamped {
+    pub sent: Instant,
+    pub req: Request,
 }
 
 pub(crate) enum Request {
@@ -149,11 +157,17 @@ macro_rules! on_pool {
 
 /// What [`spawn`] returns: the request sender, the thread, and the store's
 /// `world.super_region_regions`.
-pub(crate) type Spawned = (mpsc::UnboundedSender<Request>, std::thread::JoinHandle<()>, u32);
+pub(crate) type Spawned = (mpsc::UnboundedSender<Stamped>, std::thread::JoinHandle<()>, u32);
 
 /// Opens the store on a new `world-store` thread and returns it once the
 /// store is open (or the open's error).
-pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode, cuts: Arc<CutState>) -> Result<Spawned, StoreError> {
+pub(crate) fn spawn(
+    url: &StoreUrl,
+    dials: Dials,
+    mode: OpenMode,
+    cuts: Arc<CutState>,
+    counters: Arc<Counters>,
+) -> Result<Spawned, StoreError> {
     let (tx, rx) = mpsc::unbounded_channel();
     let (opened_tx, opened_rx) = crossbeam::channel::bounded(1);
     let url = url.clone();
@@ -161,6 +175,7 @@ pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode, cuts: Arc<CutS
         .name("world-store".into())
         .spawn(move || {
             ON_STORE_THREAD.with(|f| f.set(true));
+            crate::counters::install(counters.clone());
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
@@ -190,7 +205,7 @@ pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode, cuts: Arc<CutS
                     }
                 };
                 let _ = opened_tx.send(Ok(s));
-                serve(pool, guard, s, world_tag, cuts, mode == OpenMode::ReadOnly, rx).await;
+                serve(pool, guard, s, world_tag, cuts, counters, mode == OpenMode::ReadOnly, rx).await;
             });
         })
         .map_err(|e| StoreError::Backend(format!("spawn the world-store thread: {e}")))?;
@@ -215,8 +230,9 @@ async fn serve(
     s: u32,
     world_tag: Option<u32>,
     cuts: Arc<CutState>,
+    counters: Arc<Counters>,
     read_only: bool,
-    mut rx: mpsc::UnboundedReceiver<Request>,
+    mut rx: mpsc::UnboundedReceiver<Stamped>,
 ) {
     let writer = Arc::new(Mutex::new(()));
     // Commits and prepares in order on one task.
@@ -245,7 +261,11 @@ async fn serve(
         })
     };
     let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    while let Some(req) = rx.recv().await {
+    while let Some(Stamped { sent, req }) = rx.recv().await {
+        // Every request kind is counted here, as the thread picks it up (a stop is no request).
+        if !matches!(req, Request::Shutdown) {
+            counters.record_request(sent.elapsed());
+        }
         tasks.retain(|t| !t.is_finished());
         let (pool, writer) = (pool.clone(), writer.clone());
         let req = match refuse_if_read_only(req, read_only, &cuts) {

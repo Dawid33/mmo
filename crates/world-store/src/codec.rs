@@ -52,6 +52,7 @@ pub const ZSTD_LEVEL: i32 = 3;
 
 /// `format` byte + zstd(bincode(`v`)).
 pub fn encode<T: Serialize>(format: u8, v: &T) -> Vec<u8> {
+    let _cpu = crate::counters::CpuSpan::start();
     let raw = bincode::serialize(v).expect("bincode serializes a stored type");
     let body = zstd::bulk::compress(&raw, ZSTD_LEVEL).expect("zstd compresses in memory");
     let mut out = Vec::with_capacity(body.len() + 1);
@@ -62,6 +63,7 @@ pub fn encode<T: Serialize>(format: u8, v: &T) -> Vec<u8> {
 
 /// The inverse of [`encode`]; a wrong format byte or a bad body is `Corrupt`.
 pub fn decode<T: DeserializeOwned>(expected: u8, bytes: &[u8]) -> Result<T, StoreError> {
+    let _cpu = crate::counters::CpuSpan::start();
     let name = std::any::type_name::<T>();
     let (&format, body) = bytes.split_first().ok_or_else(|| StoreError::Corrupt(format!("{name}: empty blob")))?;
     if format != expected {
@@ -78,6 +80,7 @@ pub fn decode<T: DeserializeOwned>(expected: u8, bytes: &[u8]) -> Result<T, Stor
 /// them. An old row that holds a voxel body does not decode (`Corrupt`): voxel
 /// worlds are refused at open.
 pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreError> {
+    let _cpu = crate::counters::CpuSpan::start();
     match bytes.first() {
         Some(&FORMAT_ENTITY_BUNDLE_V1) => {
             decode::<game::EntityBundleV1>(FORMAT_ENTITY_BUNDLE_V1, bytes).map(game::EntityBundle::from)
@@ -95,6 +98,7 @@ pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreErr
 /// A stored player record of any format: the current one, or format 1
 /// (`game::PlayerRecordV1`, a `Client` without registered prefabs) converted.
 pub fn decode_player_record(bytes: &[u8]) -> Result<game::PlayerRecord, StoreError> {
+    let _cpu = crate::counters::CpuSpan::start();
     match bytes.first() {
         Some(&FORMAT_PLAYER_RECORD_V1) => {
             decode::<game::PlayerRecordV1>(FORMAT_PLAYER_RECORD_V1, bytes).map(game::PlayerRecord::from)
@@ -109,6 +113,7 @@ pub fn decode_player_record(bytes: &[u8]) -> Result<game::PlayerRecord, StoreErr
 /// closed along the region's edge (no cliff bricks, no wall layers derived there). The
 /// row is written once per region, so a format 1 row is read this way every time.
 pub fn decode_stud_ground(bytes: &[u8]) -> Result<Vec<(game::ColumnCoords, game::StudColumnGround)>, StoreError> {
+    let _cpu = crate::counters::CpuSpan::start();
     match bytes.first() {
         Some(&FORMAT_STUD_GROUND_V1) => {
             let old: Vec<(game::ColumnCoords, game::StudColumnGroundV1)> = decode(FORMAT_STUD_GROUND_V1, bytes)?;
@@ -124,6 +129,7 @@ pub fn decode_stud_ground(bytes: &[u8]) -> Result<Vec<(game::ColumnCoords, game:
 /// (`game::RegionMetaV2`: each tile designation becomes its cell box) or format 1
 /// (`game::RegionMetaV1`, whose voxel water bodies must be empty) converted.
 pub fn decode_region_meta(bytes: &[u8]) -> Result<game::RegionMeta, StoreError> {
+    let _cpu = crate::counters::CpuSpan::start();
     match bytes.first() {
         Some(&FORMAT_REGION_META_V1) => {
             decode::<game::RegionMetaV1>(FORMAT_REGION_META_V1, bytes).map(game::RegionMeta::from)
@@ -144,6 +150,7 @@ const WORLD_MAP_HEADER: usize = 9;
 /// damaged row a load error, never a silently wrong map (the tiles' framing);
 /// the version says which `build_world_map` made it.
 pub fn encode_world_map(map: &game::WorldMap) -> Vec<u8> {
+    let _cpu = crate::counters::CpuSpan::start();
     let raw = bincode::serialize(map).expect("bincode serializes a WorldMap");
     let body = zstd::bulk::compress(&raw, ZSTD_LEVEL).expect("zstd compresses in memory");
     let mut out = Vec::with_capacity(WORLD_MAP_HEADER + body.len());
@@ -183,6 +190,7 @@ impl std::fmt::Display for WorldMapRowError {
 
 /// The inverse of [`encode_world_map`].
 pub fn decode_world_map(bytes: &[u8]) -> Result<game::WorldMap, WorldMapRowError> {
+    let _cpu = crate::counters::CpuSpan::start();
     let Some(&format) = bytes.first() else { return Err(WorldMapRowError::Damaged("empty row".into())) };
     if format != FORMAT_WORLD_MAP {
         return Err(WorldMapRowError::Layout { format });

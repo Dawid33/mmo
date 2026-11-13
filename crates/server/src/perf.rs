@@ -19,6 +19,8 @@
 //!   packet a client will never get, i.e. a silently incomplete join.
 //! * `backlog` — queued-but-unhandled messages: client→manager, region→manager,
 //!   manager→writer. Anything that keeps growing is the stage that cannot keep up.
+//! * `store_req` / `store_wait_max_ms` / `store_cpu_max_ms` — the world-store thread: requests
+//!   picked up, the longest wait of one from being sent, and the longest single encode / decode.
 //! * `tiles` — the served forged world's tile cache (only for a tiled world):
 //!   decoded MB resident (pinned ones included), MB pinned by running jobs, the
 //!   budget (`VOXEL_TILE_CACHE_MB`), and tiles loaded / failed loads in the
@@ -126,12 +128,15 @@ impl ServerReport {
         &mut self,
         manager: &mut game::WorldManager<S>,
         backlog: Backlog,
+        store: Option<&world_store::StoreHandle>,
     ) {
         let window = self.window_start.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
             return;
         }
         self.window_start = Instant::now();
+        // Taken once per window, whether or not the line is said (an idle window is dropped).
+        let st = store.map(|s| s.take_counters()).unwrap_or_default();
         let m = manager.take_perf_counters();
         let d = manager.depths();
         let take = |a: &AtomicU64| a.swap(0, Relaxed);
@@ -153,7 +158,8 @@ impl ServerReport {
              | lod hit={} sub={} built={} inflight={} cache={} \
              latency avg={:.1}ms max={:.1}ms build avg={:.1}ms max={:.1}ms \
              | tx pkts={} bytes={} send sum={:.1}ms max={:.1}ms timeouts={} total_timeouts={} \
-             | backlog in={} region={} tx={}{}",
+             | backlog in={} region={} tx={} \
+             | store_req={} store_wait_max_ms={} store_cpu_max_ms={}{}",
             window.as_secs_f32(),
             d.sessions,
             d.running,
@@ -182,6 +188,9 @@ impl ServerReport {
             backlog.client_events,
             backlog.region_outputs,
             backlog.writer,
+            st.requests,
+            st.wait_ms_max,
+            st.cpu_ms_max,
             tiles,
         );
     }

@@ -1218,6 +1218,7 @@ pub fn run() -> claims::ServerExit {
                 region_outputs: region_out_recv.len(),
                 writer: writer_backlog.len(),
             },
+            store.as_ref(),
         );
     }
 

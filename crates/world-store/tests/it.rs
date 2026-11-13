@@ -2,6 +2,7 @@
 //! Postgres tests run only with `MMO_TEST_DATABASE_URL` set (`just pg-up`, `just test-pg`).
 
 mod clock;
+mod counters;
 mod codec;
 mod cut;
 mod fence;

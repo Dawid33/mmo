@@ -6,6 +6,7 @@
 
 pub mod ctl;
 mod codec;
+mod counters;
 mod fence;
 mod forged;
 mod handle;
@@ -20,6 +21,7 @@ mod url;
 use std::fmt;
 
 pub use codec::*;
+pub use counters::StoreCounters;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{CutCommitted, HostBoot, HostRow, StoreHandle, WorldInfo};

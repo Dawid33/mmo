@@ -104,7 +104,7 @@ fn other_chunk() -> StudChunkRecord {
     StudChunkRecord::Edited(StudChunk::new([StudBrick::filler([1, 2, 3], [2, 3, 2], game::MAT_DIRT)]).unwrap())
 }
 
-fn first_cut(h: &StoreHandle) -> WorldCut {
+pub(crate) fn first_cut(h: &StoreHandle) -> WorldCut {
     let (pid, rec) = h.resolve_player(&token(1)).unwrap();
     assert_eq!(rec, None);
     WorldCut {
