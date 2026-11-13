@@ -9,9 +9,12 @@
 #     restart too many, ends its loop — and never a restart once the stack is stopping;
 #   - when any member ends on its own (login, the coordinator, a host loop) the stack goes
 #     down and this script exits 1;
-#   - Ctrl-C stops the stack in order: the hosts (their leave cut needs the coordinator),
-#     then the coordinator, then login. Each stage has a deadline, after which what is left
-#     is KILLed; a second Ctrl-C kills at once. Exit 0 if everything stopped in time, else 1.
+#   - Ctrl-C (or TERM, or HUP: a closed terminal) stops the stack in order: every host
+#     server (their leave cut needs the coordinator), then the coordinator, then login. Each
+#     stage has a deadline, after which what is left is KILLed; a second signal kills at
+#     once. Exit 0 only if everything stopped in time and is confirmed gone, else 1. Only
+#     this script decides: the host loops ignore HUP / TERM / INT, and a pid is signalled
+#     only while it is still the process started (its command line names the binary).
 #
 #   scripts/dev_r3.sh <dir> <coordinator env words> <host 0 env words> [<host 1 env words> ...]
 #
@@ -23,6 +26,12 @@
 #   DEV_R3_HOST_STOP_SECS (45: the leave cut's 30 s timeout + margin), DEV_R3_STOP_SECS (60),
 #   DEV_R3_RESTART_MAX (3), DEV_R3_RESTART_WINDOW_SECS (60), DEV_R3_RESTART_BACKOFF_SECS (1).
 set -uo pipefail
+
+# `wait -n -p` (the watch) needs bash 5.1.
+if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1))); then
+    echo "dev-r3: needs bash >= 5.1 (this is $BASH_VERSION)" >&2
+    exit 2
+fi
 
 if [ $# -lt 3 ]; then
     echo "usage: $0 <dir> <coordinator env words> <host 0 env words> [<host n env words> ...]" >&2
@@ -42,7 +51,9 @@ restart_max=${DEV_R3_RESTART_MAX:-3}
 restart_window=${DEV_R3_RESTART_WINDOW_SECS:-60}
 restart_backoff=${DEV_R3_RESTART_BACKOFF_SECS:-1}
 
-say() { echo "dev-r3: $*"; }
+# Never fails (a closed terminal must not end a stop part-way).
+say() { echo "dev-r3: $*" 2>/dev/null || true; }
+self=$0
 
 mkdir -p "$dir" "$(dirname "$login_log")"
 pin=$dir/coordinator.cert-sha256
@@ -57,64 +68,101 @@ interrupted=0
 escalate=0
 failed=0
 
-# wait_gone <deadline secs> <what> [pid...]: waits until every pid is gone; what is left at
-# the deadline — or at once after a second Ctrl-C — is KILLed (and the stop counts as failed).
+# ours <pid> <binary>: whether <pid> is alive and still the process we started from
+# <binary> (its command line names it) — never a recycled pid, never a zombie.
+ours() {
+    local cmd
+    cmd=$( { tr '\0' ' ' <"/proc/$1/cmdline"; } 2>/dev/null) || return 1
+    [[ -n "$cmd" && "$cmd" == *"$2"* ]]
+}
+
+# wait_gone <deadline secs> <what> <binary> [pid...]: waits until no pid is ours any more;
+# what is left at the deadline — or at once after a second signal — is KILLed (the stop
+# then counts as failed), and one that outlives the KILL is reported.
 wait_gone() {
-    local secs=$1 what=$2 p
-    shift 2
+    local secs=$1 what=$2 bin=$3 p
+    shift 3
     local pids=()
     for p in "$@"; do
-        if kill -0 "$p" 2>/dev/null; then pids+=("$p"); fi
+        if ours "$p" "$bin"; then pids+=("$p"); fi
     done
     if [ "${#pids[@]}" -eq 0 ]; then return 0; fi
     say "waiting up to ${secs}s for $what (pids ${pids[*]}); Ctrl-C again kills at once"
-    local end=$((SECONDS + secs))
+    local end=$((SECONDS + secs)) killed=0
     while :; do
         local left=()
         for p in "${pids[@]}"; do
-            if kill -0 "$p" 2>/dev/null; then left+=("$p"); fi
+            if ours "$p" "$bin"; then left+=("$p"); fi
         done
         if [ "${#left[@]}" -eq 0 ]; then return 0; fi
         pids=("${left[@]}")
-        if [ "$escalate" = 1 ] || ((SECONDS >= end)); then
+        if [ "$killed" = 1 ] && ((SECONDS >= end)); then
+            say "could not confirm $what gone (pids ${pids[*]})"
+            failed=1
+            return 0
+        fi
+        if [ "$killed" = 0 ] && { [ "$escalate" = 1 ] || ((SECONDS >= end)); }; then
             say "killing $what (pids ${pids[*]})"
             kill -KILL "${pids[@]}" 2>/dev/null || true
             failed=1
-            return 0
+            killed=1
+            end=$((SECONDS + 2))
         fi
         sleep 0.2
     done
 }
 
+# The host servers named by the remaining pid files that are still ours.
+host_servers() {
+    local f p
+    for f in "$dir"/host-*.pid; do
+        [ -s "$f" ] || continue
+        p=$(cat "$f" 2>/dev/null) || continue
+        if ours "$p" "$server"; then echo "$p"; fi
+    done
+}
+
+# stop_hosts <what>: TERMs every host server still running and waits for them.
+stop_hosts() {
+    local spids=()
+    mapfile -t spids < <(host_servers)
+    if [ "${#spids[@]}" -gt 0 ]; then
+        say "stopping $1 (each saves a leave cut with the coordinator)"
+        kill -TERM "${spids[@]}" 2>/dev/null || true
+        wait_gone "$host_stop_secs" "$1" "$server" "${spids[@]}"
+    fi
+}
+
 # The EXIT trap: stops whatever runs, in order. Exits 1 if the stack failed or a stage
-# needed a KILL.
+# needed a KILL or could not be confirmed.
 stop() {
     local code=$?
     trap - EXIT
-    trap 'escalate=1' INT TERM
+    trap 'escalate=1' INT TERM HUP
+    trap '' PIPE
     touch "$dir/stopping"
     if [ -n "$rpid" ]; then kill "$rpid" 2>/dev/null || true; fi
-    # Only servers whose loop still runs: a loop removes its pid file when it ends.
-    local spids=() n f
-    for n in "${!hpids[@]}"; do
-        f=$dir/host-$n.pid
-        if kill -0 "${hpids[$n]}" 2>/dev/null && [ -s "$f" ]; then spids+=("$(cat "$f")"); fi
-    done
-    if [ "${#spids[@]}" -gt 0 ]; then
-        say "stopping the hosts (each saves a leave cut with the coordinator)"
-        kill -TERM "${spids[@]}" 2>/dev/null || true
-        wait_gone "$host_stop_secs" "the hosts" "${spids[@]}"
-    fi
-    if [ "${#hpids[@]}" -gt 0 ]; then wait_gone 5 "the host loops" "${hpids[@]}"; fi
-    if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; then
+    # Every host server, whether or not its loop still runs (a pid file outlives a loop
+    # that was killed); the loops ignore signals and end once their server has.
+    stop_hosts "the hosts"
+    if [ "${#hpids[@]}" -gt 0 ]; then wait_gone 5 "the host loops" "$self" "${hpids[@]}"; fi
+    # A loop may have started a server after the first look (a restart racing the stop).
+    stop_hosts "the hosts started late"
+    if [ -n "$cpid" ] && ours "$cpid" "$server"; then
         say "stopping the coordinator"
         kill -TERM "$cpid" 2>/dev/null || true
-        wait_gone "$stop_secs" "the coordinator" "$cpid"
+        wait_gone "$stop_secs" "the coordinator" "$server" "$cpid"
     fi
-    if [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null; then
+    if [ -n "$lpid" ] && ours "$lpid" "$login"; then
         say "stopping the login service"
         kill -TERM "$lpid" 2>/dev/null || true
-        wait_gone "$stop_secs" "the login service" "$lpid"
+        wait_gone "$stop_secs" "the login service" "$login" "$lpid"
+    fi
+    if [ -n "$(host_servers)" ]; then
+        say "host servers still running: $(host_servers | tr '\n' ' ')"
+        failed=1
+    else
+        rm -f "$dir"/host-*.pid
     fi
     wait 2>/dev/null
     if [ "$code" -ne 0 ] || [ "$failed" = 1 ]; then
@@ -125,15 +173,20 @@ stop() {
     exit 0
 }
 trap stop EXIT
-trap 'interrupted=1' INT TERM
+trap 'interrupted=1' INT TERM HUP
 
 # Host <n> with <env words...>: started again on exit 5 or 137, bounded; never once stopping.
 host_loop() {
     local n=$1
     shift
     local log=$dir/host-$n.log restarts=() rc spid now t
+    # Only the supervisor decides when a host stops; the server gets default dispositions.
+    trap '' HUP TERM INT
     while :; do
-        env "$@" RUST_BACKTRACE=1 setsid "$server" >>"$log" 2>&1 </dev/null &
+        (
+            trap - HUP TERM INT
+            exec env "$@" RUST_BACKTRACE=1 setsid "$server" >>"$log" 2>&1 </dev/null
+        ) &
         spid=$!
         echo "$spid" >"$dir/host-$n.pid"
         if [ -e "$dir/stopping" ]; then kill -TERM "$spid" 2>/dev/null || true; fi
@@ -208,6 +261,7 @@ for n in "${!host_envs[@]}"; do
 done
 # Watch: the first member to end on its own takes the stack down.
 while :; do
+    if [ "$interrupted" = 1 ]; then exit 0; fi
     ended=""
     rc=0
     wait -n -p ended "${hpids[@]}" "$cpid" "$lpid" || rc=$?
