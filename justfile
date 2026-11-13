@@ -1274,7 +1274,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
         echo "  are dirty, so a host restarts once on this start and this run is likely INVALID - simply run it again."
     fi
     # The dev Postgres (as `pg-up`, without printing its URL).
-    docker compose -f deploy/dev/compose.yml up -d --wait
+    docker compose -f deploy/dev/compose.yml up -d --wait postgres
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --release --bin server --bin worldctl --bin login

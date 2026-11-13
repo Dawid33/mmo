@@ -317,16 +317,15 @@ hr {
   align-items: baseline;
 }
 
-.card label,
+:where(.card label),
 .field-label {
   display: inline-block;
   margin-bottom: var(--space-1);
   font-weight: 700;
 }
 
-.card input:not([type="checkbox"], [type="radio"], [type="submit"], [type="button"], [type="hidden"]),
-.card select,
-.card textarea,
+/* By element inside a card (zero specificity, so any class rule wins), and by class. */
+:where(.card input:not([type="checkbox"], [type="radio"], [type="submit"], [type="button"], [type="hidden"]), .card select, .card textarea),
 .field-input {
   display: block;
   width: 100%;
@@ -368,8 +367,8 @@ hr {
 .field-input-group > input {
   flex: 1;
   min-width: 0;
-  border-top-right-radius: 0 !important;
-  border-bottom-right-radius: 0 !important;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 .field-message,
@@ -452,10 +451,10 @@ hr {
 
 /* ---- Buttons --------------------------------------------------------------------------- */
 
+/* By class, and by element inside a card (zero specificity: .btn-primary, .btn-quiet and their
+   :hover / :active states always win). */
 .btn,
-.card button:not(.btn-reveal),
-.card input[type="submit"],
-.card input[type="button"] {
+:where(.card button:not(.btn-reveal), .card input[type="submit"], .card input[type="button"]) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -473,9 +472,7 @@ hr {
   cursor: pointer;
 }
 
-.btn-primary,
-.card input[type="submit"].btn-primary,
-.card button.btn-primary {
+.btn-primary {
   margin-bottom: 4px;
   color: var(--accent-ink);
   background: var(--accent);
@@ -495,8 +492,7 @@ hr {
   box-shadow: 0 1px 0 var(--accent-edge);
 }
 
-.btn-quiet,
-.card .btn-quiet {
+.btn-quiet {
   color: var(--text);
   background: transparent;
   border-color: var(--line-strong);
