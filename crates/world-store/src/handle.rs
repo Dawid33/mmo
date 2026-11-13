@@ -437,7 +437,9 @@ impl StoreHandle {
     /// A commit is refused with `StaleGeneration` (nothing recorded) unless the world is
     /// at `generation`. If this call records a commit it also writes the world tick
     /// (`tick`, never backwards) and marks `leaving` clean. A commit is recorded only if
-    /// exactly the parts of `hosts` are staged; otherwise an ABORT is recorded (logged)
+    /// exactly the parts of `hosts` are staged and every host whose `hosts` row is not
+    /// clean is among `hosts` (one that registered while the cut was pending runs beside
+    /// it unsaved); otherwise an ABORT is recorded (logged)
     /// and the call returns `false`. Then every staged part of the cut — listed or not —
     /// is committed or rolled back as the STORED decision says (a part already finished
     /// counts as done). Returns the stored decision. Postgres only.

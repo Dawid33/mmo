@@ -3,7 +3,8 @@
 //! ([`crate::rows::CutEnd::Prepare`]); the coordinator then records ONE decision
 //! row (`cut_decisions`, first writer wins on the cut id) and finishes
 //! (`COMMIT PREPARED` / `ROLLBACK PREPARED`) every part of the cut that is staged.
-//! A commit is recorded only if exactly the listed hosts' parts are staged; otherwise
+//! A commit is recorded only if exactly the listed hosts' parts are staged and every
+//! host whose `hosts` row is not clean is listed; otherwise
 //! the decision becomes an abort. A host that gives up records an abort the same way
 //! ([`abort_cut`]); a part that prepares after its cut was decided finishes itself
 //! ([`finish_if_decided`]); a process starting up finishes or aborts whatever a crash
@@ -219,7 +220,24 @@ pub(crate) async fn decide_cut(
                     .into_keys()
                     .collect();
                 let listed: BTreeSet<u32> = hosts.iter().copied().collect();
-                if staged != listed {
+                // Every host whose row is not clean must be listed: one that registered
+                // while the cut was pending (back from a clean leave, or new) runs beside
+                // the cut, and an entity it acked from a listed host — or sent to one —
+                // would be saved by no part, or by two. `register_host` takes the world
+                // row's lock first, so it either registered before this read (→ abort; the
+                // next cut lists it) or registers after the decision (and loads this cut).
+                let dirty: Vec<i64> = sqlx::query_scalar("SELECT ordinal FROM hosts WHERE clean = 0 ORDER BY ordinal")
+                    .fetch_all(&mut *tx)
+                    .await?;
+                let unlisted: Vec<i64> = dirty.into_iter().filter(|h| u32::try_from(*h).map_or(true, |h| !listed.contains(&h))).collect();
+                if !unlisted.is_empty() {
+                    log::warn!(
+                        "[world-store] cut {} cannot commit: a host registered while the cut was pending (hosts \
+                         {unlisted:?} have a dirty row and no part in it); recording an abort, the next cut lists them",
+                        cut.0
+                    );
+                    commit = false;
+                } else if staged != listed {
                     let missing: Vec<u32> = listed.difference(&staged).copied().collect();
                     let unexpected: Vec<u32> = staged.difference(&listed).copied().collect();
                     log::warn!(

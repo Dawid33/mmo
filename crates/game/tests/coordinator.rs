@@ -1770,3 +1770,41 @@ fn leave_requests_begin_one_cut_and_a_leaver_is_not_expected_until_its_next_boot
     c.maintain(1900 + CUT_EVERY_MS);
     assert_eq!(begun(&commit_routed(&mut c)).len(), 2, "both take part again");
 }
+
+/// Final review I1: a host attaching while a cut it is not in runs (back from a clean
+/// leave, or new) aborts that cut — it may exchange entities with the participants before
+/// the cut's tick, which no part would save — and the next cut takes it in.
+#[test]
+fn attach_of_a_host_outside_the_running_cut_aborts_it() {
+    let mut c = cutting();
+    // Host 1 leaves in a committed cut.
+    c.handle(1, HostMsg::LeaveRequest, 100);
+    c.maintain(100 + game::LEAVE_BATCH_MS);
+    let cut = begun(&commit_routed(&mut c))[0].1;
+    c.handle(0, HostMsg::CutPrepared { cut }, 700);
+    c.handle(1, HostMsg::CutPrepared { cut }, 700);
+    assert!(c.take_decision().expect("decided").commit);
+    c.decided(cut, true);
+    commit_routed(&mut c);
+    // A cut of host 0 alone begins; host 1 comes back (another boot) before it is decided.
+    c.maintain(700 + CUT_EVERY_MS);
+    let alone = begun(&commit_routed(&mut c));
+    assert_eq!(alone.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0]);
+    let cut = alone[0].1;
+    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None };
+    c.handle(1, back, 1800);
+    assert!(c.left_hosts().is_empty(), "another boot: back");
+    commit_routed(&mut c);
+    c.handle(0, HostMsg::CutPrepared { cut }, 1800);
+    let d = c.take_decision().expect("the attach decides");
+    assert_eq!((d.cut, d.commit), (cut, false), "the cut that excludes host 1 is aborted");
+    c.decided(cut, false);
+    commit_routed(&mut c);
+    // The next cut takes both.
+    c.maintain(1800 + CUT_EVERY_MS);
+    assert_eq!(begun(&commit_routed(&mut c)).len(), 2, "both take part");
+    // A host never seen before attaching mid-cut aborts it too.
+    let cut = c.world_cut_running().expect("running").0;
+    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), 1900);
+    assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)));
+}

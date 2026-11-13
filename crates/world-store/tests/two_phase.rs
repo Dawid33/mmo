@@ -442,6 +442,70 @@ fn leaving_host_is_clean_only_if_committed() {
     h.shutdown();
 }
 
+/// A commit decision must list every host whose `hosts` row is not clean: host 2
+/// registered (row dirty) while a cut of hosts {0, 1} was pending, so it may hold state
+/// that cut does not save (an entity it acked from a peer, one it sent away) → abort.
+#[test]
+fn commit_beside_a_dirty_unlisted_host_becomes_an_abort() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let h1 = open(&w.url);
+    let (f0, f1) = fences(&h);
+    let f2 = h.claim_super_regions(2, vec![(7, 7)]).unwrap();
+    h.register_host(host_row(0), &f0).unwrap();
+    h.register_host(host_row(1), &f1).unwrap();
+    h.register_host(host_row(2), &f2).unwrap();
+    let c = h.claim_coordinator().unwrap();
+    prepare_both(&h, &h1, 40, &f0, &f1);
+    assert!(!h.decide_cut(CutId(40), 4000, true, vec![0, 1], vec![], c, 0).unwrap());
+    assert_eq!(h.cut_decision(CutId(40)).unwrap(), Some(false), "an abort is recorded");
+    assert!(h.stored_regions().unwrap().is_empty(), "nothing visible");
+    assert_eq!(h.world_info().unwrap().world_tick, 0);
+    assert_eq!(prepared(&w), 0, "both parts are rolled back");
+    h1.shutdown();
+    h.shutdown();
+}
+
+/// A host returning from a clean leave (its row dirty again) aborts a commit that does
+/// not list it; listing every dirty host commits, and a leave cut (the leaver listed,
+/// dirty until this very decision) commits.
+#[test]
+fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let h1 = open(&w.url);
+    let (f0, f1) = fences(&h);
+    h.register_host(host_row(0), &f0).unwrap();
+    h.register_host(host_row(1), &f1).unwrap();
+    let c = h.claim_coordinator().unwrap();
+    let settle = |cut: u64| {
+        h.cut_decided(CutId(cut)).unwrap();
+        h1.cut_decided(CutId(cut)).unwrap();
+    };
+    // Host 1 leaves: listed, dirty until this decision marks it clean.
+    prepare_both(&h, &h1, 50, &f0, &f1);
+    assert!(h.decide_cut(CutId(50), 5000, true, vec![0, 1], vec![1], c, 0).unwrap(), "the leave cut commits");
+    settle(50);
+    // Host 0 alone: host 1's row is clean, unlisted is fine.
+    h.prepare_cut(part(51, 0), f0.clone(), 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(51), 5100, true, vec![0], vec![], c, 0).unwrap(), "a clean row need not be listed");
+    settle(51);
+    // Host 1 returns (clean row: no generation bump) while cut 52 of host 0 is pending.
+    h.prepare_cut(part(52, 0), f0.clone(), 0).recv().unwrap().unwrap();
+    let boot = h1.register_host(host_row(1), &f1).unwrap();
+    assert!(!boot.bumped);
+    assert!(!h.decide_cut(CutId(52), 5200, true, vec![0], vec![], c, 0).unwrap(), "host 1 is dirty and unlisted");
+    settle(52);
+    assert_eq!(h.world_info().unwrap().world_tick, 5100, "cut 52 is not visible");
+    // The next cut lists it: commits.
+    prepare_both(&h, &h1, 53, &f0, &f1);
+    assert!(h.decide_cut(CutId(53), 5300, true, vec![0, 1], vec![], c, 0).unwrap());
+    settle(53);
+    assert_eq!(prepared(&w), 0);
+    h1.shutdown();
+    h.shutdown();
+}
+
 #[test]
 fn sqlite_is_not_two_phase_ready() {
     let h = open(&StoreUrl::Memory);

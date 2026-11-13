@@ -299,8 +299,10 @@ impl Coordinator {
         self.cuts.lead
     }
 
-    /// An `Attach` of `host`: it is attached; a cut it takes part in and not decided yet
-    /// is aborted (its link dropped: messages of the cut may be lost); the cut it says is
+    /// An `Attach` of `host`: it is attached; a cut not decided yet is aborted — one it
+    /// takes part in (its link dropped: messages of the cut may be lost), and one it does
+    /// not (a host arriving makes the cut's participants stale: it may exchange entities
+    /// with them before the cut's tick, which no part would save); the cut it says is
     /// pending is answered.
     pub(super) fn cut_attach(&mut self, host: u32, pending: Option<CutId>, boot: u64) {
         self.cuts.attached.insert(host);
@@ -309,7 +311,8 @@ impl Coordinator {
             log::info!("coordinator: host {host} is back (boot {boot}): expected again");
             self.cuts.left.remove(&host);
         }
-        self.abort_for(host, "re-attached");
+        let why = if self.cuts.run.as_ref().is_some_and(|r| r.has(host)) { "re-attached" } else { "attached, not in the cut" };
+        self.abort_running(host, why);
         if let Some(cut) = pending {
             if self.cuts.run.as_ref().is_none_or(|r| r.cut != cut) {
                 self.answer_cut(host, cut);
@@ -419,7 +422,14 @@ impl Coordinator {
 
     /// A running cut `host` takes part in, not decided yet, is aborted (`why`, for the log).
     fn abort_for(&mut self, host: u32, why: &str) {
-        if let Some(run) = self.cuts.run.as_mut().filter(|r| r.verdict.is_none() && r.has(host)) {
+        if self.cuts.run.as_ref().is_some_and(|r| r.has(host)) {
+            self.abort_running(host, why);
+        }
+    }
+
+    /// The running cut, not decided yet, is aborted because of `host` (`why`, for the log).
+    fn abort_running(&mut self, host: u32, why: &str) {
+        if let Some(run) = self.cuts.run.as_mut().filter(|r| r.verdict.is_none()) {
             log::warn!("coordinator: world cut {}: host {host} {why}; aborted", run.cut.0);
             run.verdict = Some(false);
         }

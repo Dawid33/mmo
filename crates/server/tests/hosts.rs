@@ -1581,6 +1581,45 @@ fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() 
     w.stop(&dir);
 }
 
+/// Final review I1: host 1 returns from a clean leave while a cut of host 0 alone is
+/// pending (begun, host 0's part not staged yet): that cut is aborted — by the coordinator
+/// on host 1's attach, or by the store's decision (host 1's row is dirty and unlisted) —
+/// the next cut takes both and commits, and a slime of host 0's is held and stored once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
+    install_props();
+    let Some(db) = PgDb::create("lback") else { return };
+    let dir = scratch("lback");
+    let mut w = world(&db, &dir);
+    let generation = w.claims[0].store().world_generation().unwrap();
+    w.until_committed_after(&db, 0);
+    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Clean, "host 1 left");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [1]);
+    let a0 = seam_of(&w, 0);
+    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    // A cut of host 0 alone begins; nothing of host 0 runs from here until host 1 is back.
+    let cut = until_part(&mut w, 0, &["pending", "marked"]);
+    assert_eq!(decision_of(&db, cut), None);
+    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    assert_eq!((again.generation, again.bumped), (generation, false), "a clean return");
+    w.pair.until("the cut that excludes host 1 is decided", |_| decision_of(&db, cut).is_some());
+    assert_eq!(decision_of(&db, cut), Some(false), "the cut of host 0 alone is aborted");
+    w.until_committed_after(&db, cut.0 as i64);
+    assert_eq!(holders_all(&mut w, id).len(), 1, "held once: {:?}", holders_all(&mut w, id));
+    let (birth, serial) = (id.birth_region, id.serial);
+    let stored = query_i64s(
+        &db,
+        &format!("SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {serial}", birth.x, birth.z),
+    );
+    assert_eq!(stored, [1], "stored once");
+    for h in 0..HOSTS {
+        assert!(!w.generations[h as usize].is_set(), "no rollback");
+    }
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
 /// A host of several exiting with no coordinator to cut for it waits its leave timeout
 /// and exits 0 without a cut: its row stays dirty, so its return raises the generation.
 #[test]
