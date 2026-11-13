@@ -317,6 +317,54 @@ fn lost_region_mirrors_dropped_on_unload() {
     assert_eq!(mirror_in(&mut rig, SPAWN_REGION, id), None, "the lost owner's mirror is gone");
 }
 
+/// The pile and chest mirrors the spawn region holds of `of`, in `of`'s frame.
+fn mirrors_from_spawn(rig: &mut Rig, of: RegionCoords) -> (Vec<game::BlockPos>, Vec<game::BlockPos>) {
+    let mut out = (Vec::new(), Vec::new());
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        let d = r.data();
+        out.0 = d.halo_piles().keys().filter(|p| p.to_local().0 == of).map(|p| p.to_local().1).collect();
+        out.1 = d.halo_containers().keys().filter(|p| p.to_local().0 == of).map(|p| p.to_local().1).collect();
+    });
+    out
+}
+
+/// A region lost and respawned at once (the next message for it found its
+/// thread dead) re-seeds its running neighbours: the new incarnation's seed
+/// lands after the end of the lost one's mirrors (`HaloSourceGone`, stamped
+/// with the world tick), so the neighbour mirrors the pile and chest the new
+/// incarnation holds.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn respawned_region_reseeds_after_its_loss() {
+    let mut rig = joined();
+    rig.kill(north());
+    // The client's repeated subscribe: its snapshot request finds north dead.
+    let ev = game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(north()), CLIENT);
+    assert!(rig.manager.handle_server_event(ev, rig.now_ms));
+    assert!(rig.manager.running_regions().contains(&north()), "north respawned");
+    // Before the new incarnation reads its first input: a pile and a chest on
+    // its edge facing the spawn region, as a host's respawn restores them from
+    // its store (this rig's respawn regenerates) — no delta of them pending.
+    let world = game::RegionSpawner::world_tick(rig.manager.spawner_mut());
+    let n = REGION_BLOCKS as i32;
+    rig.manager.spawner_mut().with_region(north(), |r| {
+        let stack = game::ItemStack { item: game::ItemId(1), count: 3 };
+        r.with_data(|d| {
+            assert_eq!(d.deposit_items_safe([5, STAND, n - 1], stack, world, game::PICKUP_DELAY_TICKS), 0);
+            let chest = WorldBlockPos::from_local(north(), game::BlockPos::new(9, STAND, n - 1));
+            d.write_container_safe(chest, Some(stocked_chest()));
+        });
+        r.take_halo_updates();
+    });
+    rig.settle();
+    for _ in 0..3 {
+        rig.round();
+    }
+    let (piles, chests) = mirrors_from_spawn(&mut rig, north());
+    assert_eq!(piles, vec![game::BlockPos::new(5, STAND, n - 1)], "the respawned north's pile is mirrored");
+    assert_eq!(chests, vec![game::BlockPos::new(9, STAND, n - 1)], "and its chest");
+}
+
 
 
 /// The chest cell [`halo_updates_roll_back_bit_exact`] mirrors: east's edge

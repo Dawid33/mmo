@@ -5,6 +5,8 @@
 //! region's runner buffers every region-to-region message here and, right
 //! before each `Tick`, applies the ones whose stamp has come, sorted by
 //! `(stamp, class, key, arrival)` — so thread timing never decides the order.
+//! A halo seed (`HaloUpdate { replace: true }`) has its own class, after
+//! `HaloSourceGone` ([`SlotClass::HaloSeed`]; amended in execution).
 
 use std::collections::VecDeque;
 
@@ -14,7 +16,7 @@ use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentRefusal, IntentRep
 /// key, then arrival (one FIFO per source, so equal keys keep their source's order):
 /// - `Arrival`: the entity's id;
 /// - `HaloEntityGone` / `HaloEntity`: the source region, then the entity's id;
-/// - `HaloUpdate`, `HaloSourceGone`: the source region;
+/// - `HaloUpdate` (a delta), `HaloSourceGone`, `HaloSeed`: the source region;
 /// - `Intent`: intents before replies; an intent by its sending entity (`by`), a
 ///   reply by the entity it is for, then the region that answered it (the owner
 ///   of its intent's position), then — replies only — its content (`reply`,
@@ -38,13 +40,25 @@ pub enum SlotClass {
     Arrival = 0,
     HaloEntityGone = 1,
     HaloEntity = 2,
+    /// A `HaloUpdate` delta (`replace: false`).
     HaloUpdate = 3,
     HaloSourceGone = 4,
-    Intent = 5,
+    /// A `HaloUpdate` seed (`replace: true`), after the stamp's
+    /// `HaloSourceGone` (amended in execution): at one stamp a lost
+    /// incarnation's last deltas precede the end of its mirrors, and a
+    /// respawned incarnation's seed (answered before its first tick, stamped
+    /// with its start tick, as the manager's `HaloSourceGone`) follows it.
+    /// The stamp's entity updates still sort before a seed, which drops the
+    /// source's entity mirrors (its next tick re-sends them). Accepted cost:
+    /// an old incarnation's seed answered in the very slot it died also lands
+    /// after its Gone (its piles and chests mirrored, nobody answering them,
+    /// until the respawn's seed replaces them).
+    HaloSeed = 5,
+    Intent = 6,
     /// Anything else, and anything queued behind a held creation
     /// ([`SlotInbox::push_behind`]); followers of an arrival sort with the
     /// arrival ([`SlotInbox::push_after_arrival`]).
-    Other = 6,
+    Other = 7,
 }
 
 /// The class of a message kind.
@@ -57,6 +71,7 @@ pub fn slot_class(kind: &GameEventKind) -> SlotClass {
         GameEventKind::EntityArrived(_) => SlotClass::Arrival,
         GameEventKind::HaloEntityGone(_) => SlotClass::HaloEntityGone,
         GameEventKind::HaloEntity(_) => SlotClass::HaloEntity,
+        GameEventKind::HaloUpdate(u) if u.replace => SlotClass::HaloSeed,
         GameEventKind::HaloUpdate(_) => SlotClass::HaloUpdate,
         GameEventKind::HaloSourceGone(_) => SlotClass::HaloSourceGone,
         GameEventKind::Intent(_) => SlotClass::Intent,
@@ -145,7 +160,7 @@ fn key_of(kind: &GameEventKind) -> Key {
     }
 }
 
-/// Class 5's first key: intents before replies.
+/// Class `Intent`'s first key: intents before replies.
 const INTENT_KEY: i64 = 0;
 const REPLY_KEY: i64 = 1;
 
@@ -415,8 +430,9 @@ mod tests {
             arrival(eid(0, 0, 1)),
             gone(src, eid(0, 0, 1)),
             update(src, eid(0, 0, 1), 0.0),
-            halo(src, true),
+            halo(src, false),
             GameEventKind::HaloSourceGone(src),
+            halo(src, true),
             intent(),
             input(1),
         ];
@@ -425,6 +441,29 @@ mod tests {
             inbox.push(e.clone(), 3);
         }
         assert_eq!(inbox.drain_all(), in_order);
+    }
+
+    /// One source's delta, the end of its mirrors, its seed and an entity
+    /// update at one stamp sort entity update, delta, Gone, seed whatever the
+    /// push order: a lost incarnation's deltas before its Gone, a respawned
+    /// one's seed after it.
+    #[test]
+    fn a_seed_sorts_after_its_sources_gone() {
+        let src = rc(0, -1);
+        let want = vec![
+            update(src, eid(0, -1, 4), 1.0),
+            halo(src, false),
+            GameEventKind::HaloSourceGone(src),
+            halo(src, true),
+        ];
+        let orders: [[usize; 4]; 4] = [[0, 1, 2, 3], [3, 2, 1, 0], [2, 3, 0, 1], [1, 3, 2, 0]];
+        for order in orders {
+            let mut inbox = SlotInbox::new();
+            for i in order {
+                inbox.push(want[i].clone(), 6);
+            }
+            assert_eq!(inbox.drain_due(6), want, "push order {order:?}");
+        }
     }
 
     #[test]
