@@ -15,8 +15,6 @@ export component LoginScreen {
     // The game waits for the player to finish at the provider.
     in property <bool> waiting;
     in property <string> error;
-    // Not an error: a line of progress.
-    in property <string> notice;
     in property <bool> busy;
     callback sign-in();
     callback open-browser();
@@ -31,7 +29,7 @@ export component LoginScreen {
     property <length> status-y: root.waiting
         ? 2 * root.line-height + root.code-height + 2 * root.gap + root.button-height + root.gap
         : root.button-height + root.gap;
-    property <length> foot-y: root.status-y + 2 * root.line-height;
+    property <length> foot-y: root.status-y + root.line-height;
     property <length> back-top: root.waiting ? root.foot-y + root.gap : root.foot-y + root.line-height + root.gap;
 
     // Where things are, for the headless tests (absolute, logical px).
@@ -122,24 +120,15 @@ export component LoginScreen {
             clicked => { root.cancel(); }
         }
 
-        // Status lines: the error, then a notice or "talking to the server".
+        // Status line: the error, else "talking to the server".
         LabelFace {
-            visible: root.error != "";
+            visible: root.error != "" || root.busy;
             x: frame.content-x;
             y: frame.content-y + root.status-y;
             width: frame.inner-width;
             height: root.line-height;
-            style: Styles.bold-red-label;
-            text: root.error;
-        }
-        LabelFace {
-            visible: root.notice != "" || root.busy;
-            x: frame.content-x;
-            y: frame.content-y + root.status-y + root.line-height;
-            width: frame.inner-width;
-            height: root.line-height;
-            style: root.notice != "" ? Styles.label : Styles.caption-label;
-            text: root.notice != "" ? root.notice : "Talking to the login server\u{2026}";
+            style: root.error != "" ? Styles.bold-red-label : Styles.caption-label;
+            text: root.error != "" ? root.error : "Talking to the login server\u{2026}";
         }
         LabelFace {
             visible: !root.waiting;

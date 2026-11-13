@@ -18,7 +18,6 @@ export component WorldsScreen {
     // The signed-in account's display name (its email when the name is unknown).
     in property <string> account;
     in property <string> error;
-    in property <string> notice;
     in property <bool> busy;
     callback join(string);
     callback logout();
@@ -45,7 +44,7 @@ export component WorldsScreen {
         title: "Worlds";
         width: min(root.width - 48px, 520px);
         height: self.list-top + root.shown-rows * (root.row-height + root.row-gap) + root.gap
-            + 2 * root.line-height + root.gap + root.bar-height
+            + root.line-height + root.gap + root.bar-height
             + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
@@ -86,12 +85,12 @@ export component WorldsScreen {
             style: root.error != "" ? Styles.bold-red-label : Styles.caption-label;
             text: root.error != "" ? root.error
                 : root.busy && root.worlds.length > 0 ? "Talking to the login server\u{2026}"
-                : root.notice;
+                : "";
         }
 
         back-btn := Button {
             x: frame.content-x;
-            y: frame.list-bottom + root.gap + 2 * root.line-height + root.gap;
+            y: frame.list-bottom + root.gap + root.line-height + root.gap;
             width: 140px;
             height: root.bar-height;
             style: Styles.back-button;

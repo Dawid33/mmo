@@ -798,6 +798,7 @@ fn perform_step(step: Step, login: &mut LoginSession, commands: &mut Commands, n
         commands.insert_resource(join);
     }
     if let Some(url) = step.open {
+        // The URL was checked (http / https) when the answer was parsed.
         open_browser(&url);
     }
     if let Some(state) = step.goto {

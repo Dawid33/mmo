@@ -88,6 +88,12 @@ impl fmt::Debug for DevicePoll {
     }
 }
 
+/// `http://` or `https://` (the scheme in any case).
+fn is_web_url(url: &str) -> bool {
+    let starts = |scheme: &str| url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme));
+    starts("https://") || starts("http://")
+}
+
 /// The device authorization endpoint's success body.
 pub fn parse_device_start(body: &str) -> Result<DeviceStart, String> {
     let mut start: DeviceStart =
@@ -97,6 +103,15 @@ pub fn parse_device_start(body: &str) -> Result<DeviceStart, String> {
     }
     if start.verification_uri_complete.is_empty() {
         start.verification_uri_complete = start.verification_uri.clone();
+    }
+    // The pages are opened in the player's browser: only web pages.
+    for (field, url) in [
+        ("verification_uri", &start.verification_uri),
+        ("verification_uri_complete", &start.verification_uri_complete),
+    ] {
+        if !is_web_url(url) {
+            return Err(format!("device authorization answer with a non-http(s) {field}"));
+        }
     }
     Ok(start)
 }
@@ -179,6 +194,22 @@ mod tests {
         assert_eq!(start.interval, 5);
         assert!(parse_device_start("<html>").is_err());
         assert!(parse_device_start(r#"{"device_code":"","user_code":"","verification_uri":"","expires_in":1}"#).is_err());
+    }
+
+    #[test]
+    fn device_start_refuses_a_non_http_verification_url() {
+        let body = |plain: &str, complete: &str| {
+            format!(
+                r#"{{"device_code":"d","user_code":"U","verification_uri":"{plain}","verification_uri_complete":"{complete}","expires_in":600}}"#
+            )
+        };
+        for bad in ["javascript:alert(1)", "file:///etc/passwd", "/relative", "ftp://x"] {
+            let err = parse_device_start(&body(bad, "")).err().unwrap();
+            assert!(err.contains("verification_uri") && !err.contains(bad), "{err}");
+            assert!(parse_device_start(&body("https://a/device", bad)).is_err(), "{bad}");
+        }
+        assert!(parse_device_start(&body("https://a/device", "javascript:alert(1)")).err().unwrap().contains("_complete"));
+        assert!(parse_device_start(&body("HTTP://127.0.0.1:8180/device", "http://127.0.0.1:8180/device?user_code=U")).is_ok());
     }
 
     #[test]

@@ -57,15 +57,14 @@ export component FrontendUi inherits Window {
     out property <length> play-online-button-y: menu.play-online-button-y;
 
     // The login screen (screen 5, login.slint) and the online world list
-    // (screen 6, worlds.slint); their Back is `back` above. `login-error`,
-    // `login-notice` and `login-busy` are shared by both.
+    // (screen 6, worlds.slint); their Back is `back` above. `login-error`
+    // and `login-busy` are shared by both.
     // The device sign-in: the code to type, the page with it filled in, and
     // whether the game waits for the player to finish at the provider.
     in property <string> login-user-code <=> login.user-code;
     in property <string> login-verify-url <=> login.verify-url;
     in property <bool> login-waiting <=> login.waiting;
     in property <string> login-error;
-    in property <string> login-notice;
     in property <bool> login-busy;
     // The signed-in account's display name (its email when the name is unknown).
     in property <string> login-account;
@@ -235,7 +234,6 @@ export component FrontendUi inherits Window {
         width: root.width;
         height: root.height;
         error: root.login-error;
-        notice: root.login-notice;
         busy: root.login-busy;
         sign-in => { root.login-sign-in(); }
         open-browser => { root.login-open-browser(); }
@@ -249,7 +247,6 @@ export component FrontendUi inherits Window {
         worlds: root.worlds;
         account: root.login-account;
         error: root.login-error;
-        notice: root.login-notice;
         busy: root.login-busy;
         join(id) => { root.world-join(id); }
         logout => { root.logout(); }

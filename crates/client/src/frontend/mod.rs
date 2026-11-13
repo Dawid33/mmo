@@ -238,6 +238,7 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
         let weak = ui.as_weak();
         ui.on_login_open_browser(move || {
             let Some(ui) = weak.upgrade() else { return };
+            // The URL was checked (http / https) when the answer was parsed.
             let url = ui.get_login_verify_url();
             if url.is_empty() {
                 return;
