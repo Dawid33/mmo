@@ -131,8 +131,6 @@ pub struct ApiError {
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
     BadRequest,
-    BadCredentials,
-    NotVerified,
     Revoked,
     UnknownWorld,
     WorldClosed,
@@ -198,15 +196,15 @@ mod tests {
             "\"open\""
         );
         assert_eq!(
-            serde_json::to_string(&ApiErrorCode::BadCredentials).unwrap(),
-            "\"bad_credentials\""
+            serde_json::to_string(&ApiErrorCode::UnknownWorld).unwrap(),
+            "\"unknown_world\""
         );
         assert_eq!(
             serde_json::to_string(&ApiErrorCode::WorldClosed).unwrap(),
             "\"world_closed\""
         );
-        let e: ApiErrorCode = serde_json::from_str("\"not_verified\"").unwrap();
-        assert_eq!(e, ApiErrorCode::NotVerified);
+        let e: ApiErrorCode = serde_json::from_str("\"world_unavailable\"").unwrap();
+        assert_eq!(e, ApiErrorCode::WorldUnavailable);
     }
 
     #[test]

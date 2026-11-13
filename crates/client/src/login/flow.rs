@@ -1,4 +1,4 @@
-//! Play online: logging in, listing the login service's worlds and joining one
+//! Play online: signing in, listing the login service's worlds and joining one
 //! with a login-issued JWT (R2a). The screens are `ui/login.slint` and
 //! `ui/worlds.slint` ([`AppState::Login`], [`AppState::Worlds`]); the
 //! frontend turns their buttons into [`LoginIntent`]s, [`start_login`] sends
@@ -20,6 +20,20 @@
 //! startup: the kept token is used only when the player presses Play online.
 //! The browser opens on its login screen, so it still refreshes at startup.
 //!
+//! Signing in is the identity provider's device flow (RFC 8628, with PKCE;
+//! parsing in [`super::oidc`]): Sign in fetches where the service's players
+//! sign in (`GET /v1/config`) and starts a device sign-in there
+//! ([`LoginCall::DeviceStart`]); its answer becomes the
+//! [`LoginSession::pending_device`] (the code the screen shows; native opens
+//! the browser at it). [`LoginSession::tick`] then sends one
+//! [`LoginCall::DevicePoll`] at a time, each at least the provider's interval
+//! after the previous one, until the provider hands out an access token,
+//! which [`LoginCall::LoginOidc`] trades for the service's refresh token (the
+//! same path a refresh takes from there). The polling stops for good on the
+//! token, on an expired or refused sign-in, at the deadline, on Cancel or
+//! Back, and as soon as the login screen is left; a poll's answer for a
+//! sign-in that is no longer the pending one is dropped.
+//!
 //! Back leaves the login screens even while a call is in flight: the calls
 //! are tagged with a generation, Back starts a new one (the screens are idle
 //! again), and a reply of an older generation still records its token and
@@ -32,37 +46,45 @@
 //! both with `Credential::Jwt`. When an online session ends the player is
 //! back on the world list ([`LoginSession::home`]).
 //!
-//! Never log a password, a refresh token, a ticket or a JWT: nothing here
-//! derives `Debug` over them.
+//! Never log a refresh token, an access token, a device code, the PKCE
+//! verifier, a ticket or a JWT: nothing here derives `Debug` over them.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
 
 use bevy::prelude::*;
 use crossbeam::channel::{unbounded, Receiver, Sender};
-use login_api::{ApiErrorCode, JoinTicket, LoginResponse, WorldEntry};
+use login_api::{ApiErrorCode, JoinTicket, LoginConfigResponse, LoginResponse, WorldEntry};
 
+use super::oidc::{self, DevicePoll, DeviceStart};
 use super::{store, LoginApi, LoginFailure};
 use crate::session::{AppState, PendingJoin};
 
-/// The notice after Register (the service mails a verification link;
-/// unverified accounts may still log in).
-pub const REGISTERED_NOTICE: &str = "Check your email to verify your account";
-/// The notice after Forgot password (the same whether or not the email has an
-/// account: no enumeration).
-pub const RESET_NOTICE: &str = "If that email has an account, a reset link is on its way";
+/// The login screen's line when the device sign-in ran out (the provider said
+/// so, or its deadline passed) before the player confirmed it.
+pub const SIGN_IN_EXPIRED: &str = "Sign-in expired";
+/// The line when the player refused the sign-in at the provider.
+pub const SIGN_IN_REFUSED: &str = "Sign-in was refused";
+/// The line when the provider ended the sign-in for another reason.
+pub const SIGN_IN_FAILED: &str = "Sign-in failed \u{2014} try again";
+/// Whether this platform opens the provider's page itself. The browser does
+/// not: the page opens the tab from the button's click (a popup needs the
+/// player's gesture).
+pub const OPENS_BROWSER: bool = cfg!(not(target_arch = "wasm32"));
 /// The world list's line when a ticket has no address this client can use.
 pub const NO_ADDRESS_ERROR: &str = "That world cannot be reached from this client";
 
-/// What a frontend button asked of the login service. Holds a password:
-/// deliberately no `Debug`.
+/// What a frontend button asked of the login service.
 #[derive(Message, Clone)]
 pub enum LoginIntent {
     /// The main menu's Play online.
     PlayOnline,
-    Submit { email: String, password: String },
-    Register { email: String, password: String },
-    Forgot { email: String },
+    /// The login screen's Sign in: start a device sign-in.
+    SignIn,
+    /// Open the pending sign-in's page (again).
+    OpenBrowser,
+    /// Stop waiting for the pending sign-in.
+    CancelSignIn,
     JoinWorld(String),
     Logout,
     /// Back on the login or world screen: abandon the calls in flight.
@@ -77,15 +99,19 @@ pub const REFRESH_AT_STARTUP: bool = cfg!(target_arch = "wasm32");
 
 /// One call to the login service. Holds secrets: no `Debug`.
 pub enum LoginCall {
-    Login { email: String, password: String },
-    Register { email: String, password: String },
+    /// Where the service's players sign in, then a device sign-in there with
+    /// the PKCE challenge of `verifier`.
+    DeviceStart { verifier: String },
+    /// One poll of the pending device sign-in.
+    DevicePoll { provider: LoginConfigResponse, device_code: String, verifier: String },
+    /// The provider's access token traded for the service's refresh token.
+    LoginOidc { access_token: String },
     /// `silent`: the refresh of a kept token (the browser's startup, or Play
-    /// online with a kept token) rather than a typed login.
+    /// online with a kept token) rather than a sign-in.
     Refresh { token: String, silent: bool },
     Worlds,
     Join { token: String, world: String },
     Logout { token: String },
-    Reset { email: String },
 }
 
 /// A join's answer: the ticket, the rotated refresh token and (native) the
@@ -99,35 +125,75 @@ pub struct Joined {
 
 /// One answer of the login service. Holds secrets: no `Debug`.
 pub enum LoginReply {
-    /// A login or a refresh (`silent`: of a kept token).
+    /// A sign-in or a refresh (`silent`: of a kept token).
     Session { silent: bool, result: Result<LoginResponse, LoginFailure> },
-    Registered(Result<(), LoginFailure>),
+    /// A device sign-in started (`verifier`: the one its call sent the
+    /// challenge of), with the provider it runs at.
+    DeviceStarted { verifier: String, result: Result<(LoginConfigResponse, DeviceStart), LoginFailure> },
+    /// One poll's answer, for the sign-in of `device_code`. `Err`: the poll
+    /// did not get through (the sign-in goes on).
+    DevicePolled { device_code: String, result: Result<DevicePoll, LoginFailure> },
     Worlds(Result<Vec<WorldEntry>, LoginFailure>),
     Joined(Result<Joined, LoginFailure>),
     /// Logout is fire-and-forget: the local login is gone already.
     LoggedOut,
-    ResetRequested(Result<(), LoginFailure>),
 }
 
 /// Whether `failure` says the refresh token itself is no good (revoked,
 /// expired, unknown), as opposed to the service being down or failing.
 fn refused_token(failure: &LoginFailure) -> bool {
-    matches!(failure, LoginFailure::Api(e) if matches!(e.code, ApiErrorCode::Revoked | ApiErrorCode::BadCredentials))
+    matches!(failure, LoginFailure::Api(e) if e.code == ApiErrorCode::Revoked)
 }
 
 /// Whether a call's reply counts toward [`LoginSession::busy`] (logout does
-/// not: nothing waits for it).
+/// not: nothing waits for it; nor does a device poll: the sign-in's waiting
+/// is [`LoginSession::waiting_for_sign_in`], and its polls come and go).
 fn awaited(call: &LoginCall) -> bool {
-    !matches!(call, LoginCall::Logout { .. })
+    !matches!(call, LoginCall::Logout { .. } | LoginCall::DevicePoll { .. })
+}
+
+/// A device sign-in started and not finished: the code the player confirms
+/// at the provider, and when to poll next. Holds the device code and the
+/// PKCE verifier: no `Debug`.
+pub struct PendingDevice {
+    /// The provider the sign-in runs at.
+    pub provider: LoginConfigResponse,
+    /// What the screen shows: `start.user_code`, `start.verification_uri`
+    /// and `start.verification_uri_complete`.
+    pub start: DeviceStart,
+    /// The PKCE verifier every poll presents (a secret).
+    verifier: String,
+    /// When the sign-in runs out ([`LoginSession::tick`]'s clock, seconds).
+    pub deadline: f64,
+    /// The earliest time of the next poll.
+    pub next_poll: f64,
+    /// Seconds between two polls (the provider's, longer after `slow_down`).
+    pub interval: u64,
+    /// A poll is on its way: no second one until it answers.
+    polling: bool,
 }
 
 /// Runs one call against the service.
 pub async fn perform(api: &LoginApi, call: LoginCall) -> LoginReply {
     match call {
-        LoginCall::Login { email, password } => {
-            LoginReply::Session { silent: false, result: api.login(&email, &password).await }
+        LoginCall::DeviceStart { verifier } => {
+            let result = async {
+                let provider = api.config().await?;
+                let challenge = oidc::pkce_challenge(&verifier);
+                let start = api.device_start(&provider.oidc_issuer, &provider.oidc_client_id, &challenge).await?;
+                Ok((provider, start))
+            }
+            .await;
+            LoginReply::DeviceStarted { verifier, result }
         }
-        LoginCall::Register { email, password } => LoginReply::Registered(api.register(&email, &password).await),
+        LoginCall::DevicePoll { provider, device_code, verifier } => {
+            let result =
+                api.device_poll(&provider.oidc_issuer, &provider.oidc_client_id, &device_code, &verifier).await;
+            LoginReply::DevicePolled { device_code, result }
+        }
+        LoginCall::LoginOidc { access_token } => {
+            LoginReply::Session { silent: false, result: api.login_oidc(&access_token).await }
+        }
         LoginCall::Refresh { token, silent } => LoginReply::Session { silent, result: api.refresh(&token).await },
         LoginCall::Worlds => LoginReply::Worlds(api.worlds().await),
         LoginCall::Join { token, world } => LoginReply::Joined(api.join(&token, &world).await.map(|response| {
@@ -144,7 +210,6 @@ pub async fn perform(api: &LoginApi, call: LoginCall) -> LoginReply {
             let _ = api.logout(&token).await; // errors ignored: the login is gone locally
             LoginReply::LoggedOut
         }
-        LoginCall::Reset { email } => LoginReply::ResetRequested(api.request_reset(&email).await),
     }
 }
 
@@ -251,17 +316,23 @@ pub struct Step {
     pub store: StoreOp,
     pub calls: Vec<LoginCall>,
     pub join: Option<PendingJoin>,
+    /// Open this page in the system browser (native only, [`OPENS_BROWSER`]).
+    pub open: Option<String>,
 }
 
 impl Step {
     fn none() -> Self {
-        Self { goto: None, store: StoreOp::Keep, calls: Vec::new(), join: None }
+        Self { goto: None, store: StoreOp::Keep, calls: Vec::new(), join: None, open: None }
     }
     fn goto(state: AppState) -> Self {
         Self { goto: Some(state), ..Self::none() }
     }
     fn call(call: LoginCall) -> Self {
         Self { calls: vec![call], ..Self::none() }
+    }
+    /// Opens `url` where this platform opens pages itself, else nothing.
+    fn open(url: &str) -> Self {
+        Self { open: OPENS_BROWSER.then(|| url.to_string()), ..Self::none() }
     }
 }
 
@@ -277,17 +348,21 @@ pub struct LoginSession {
     pub api: LoginApi,
     /// The refresh token (a secret: never logged).
     pub refresh: Option<String>,
-    /// The signed-in account's email, once a login or refresh succeeded.
+    /// The signed-in account's email, once a sign-in or refresh succeeded.
     pub account: Option<String>,
+    /// The signed-in account's display name ("" = unknown or signed out).
+    pub account_name: String,
     pub worlds: Vec<WorldEntry>,
-    /// The screens' error line ("" = none) and notice line.
+    /// The screens' error line ("" = none).
     pub error: String,
-    pub notice: String,
     /// The running world session was joined with a ticket: ending it returns
     /// to the world list.
     pub playing_online: bool,
-    /// The password field is to be emptied (after a login).
-    pub clear_password: bool,
+    /// The device sign-in the player is confirming at the provider, if any.
+    pub pending_device: Option<PendingDevice>,
+    /// The frame clock (seconds) as of the last [`Self::tick`]: device
+    /// sign-in deadlines and poll times count on it.
+    clock: f64,
     /// Calls of the current [`Generation`] whose reply has not come back
     /// (the replies come over [`LoginWorker`]'s channel).
     in_flight: u32,
@@ -310,11 +385,12 @@ impl LoginSession {
             api,
             refresh: None,
             account: None,
+            account_name: String::new(),
             worlds: Vec::new(),
             error: String::new(),
-            notice: String::new(),
             playing_online: false,
-            clear_password: false,
+            pending_device: None,
+            clock: 0.0,
             in_flight: 0,
             generation: 0,
             worker: None,
@@ -328,16 +404,36 @@ impl LoginSession {
     }
 
     /// Back on the login screens: the calls in flight are abandoned (their
-    /// replies still record a token or an account, see [`Self::receive`]) and
-    /// the screens are usable again.
+    /// replies still record a token or an account, see [`Self::receive`]),
+    /// the device sign-in is dropped (no more polls) and the screens are
+    /// usable again.
     pub fn back(&mut self) {
         self.generation += 1;
         self.in_flight = 0;
+        self.pending_device = None;
     }
 
-    /// A request is in flight: the screens' buttons are disabled.
+    /// A request is in flight: the screens' buttons are disabled. A device
+    /// sign-in's waiting is not "busy" ([`Self::waiting_for_sign_in`]); its
+    /// start and the final token trade are.
     pub fn busy(&self) -> bool {
         self.in_flight > 0
+    }
+
+    /// A device sign-in is waiting for the player to confirm it at the
+    /// provider ([`Self::pending_device`] holds its code).
+    pub fn waiting_for_sign_in(&self) -> bool {
+        self.pending_device.is_some()
+    }
+
+    /// The pending sign-in's code for the player to type ("" = none).
+    pub fn user_code(&self) -> &str {
+        self.pending_device.as_ref().map_or("", |p| p.start.user_code.as_str())
+    }
+
+    /// The pending sign-in's page with the code filled in ("" = none).
+    pub fn verification_uri_complete(&self) -> &str {
+        self.pending_device.as_ref().map_or("", |p| p.start.verification_uri_complete.as_str())
     }
 
     pub fn logged_in(&self) -> bool {
@@ -362,8 +458,10 @@ impl LoginSession {
     fn sign_out(&mut self) {
         self.refresh = None;
         self.account = None;
+        self.account_name.clear();
         self.worlds.clear();
         self.playing_online = false;
+        self.pending_device = None;
     }
 
     /// The browser's startup step ([`REFRESH_AT_STARTUP`]): a kept refresh
@@ -380,7 +478,6 @@ impl LoginSession {
         match intent {
             LoginIntent::PlayOnline => {
                 self.error.clear();
-                self.notice.clear();
                 if self.logged_in() {
                     return Step::goto(AppState::Worlds);
                 }
@@ -396,21 +493,26 @@ impl LoginSession {
                 self.back();
                 Step::none()
             }
+            // Cancel works while the sign-in starts too: like Back, it
+            // abandons the call in flight (its answer is then dropped).
+            LoginIntent::CancelSignIn => {
+                if busy || self.waiting_for_sign_in() {
+                    self.back();
+                    self.error.clear();
+                }
+                Step::none()
+            }
+            LoginIntent::OpenBrowser => match &self.pending_device {
+                Some(pending) => Step::open(&pending.start.verification_uri_complete),
+                None => Step::none(),
+            },
             _ if busy => Step::none(),
-            LoginIntent::Submit { email, password } => {
+            LoginIntent::SignIn => {
+                if self.waiting_for_sign_in() || self.logged_in() {
+                    return Step::none();
+                }
                 self.error.clear();
-                self.notice.clear();
-                Step::call(LoginCall::Login { email: email.trim().into(), password })
-            }
-            LoginIntent::Register { email, password } => {
-                self.error.clear();
-                self.notice.clear();
-                Step::call(LoginCall::Register { email: email.trim().into(), password })
-            }
-            LoginIntent::Forgot { email } => {
-                self.error.clear();
-                self.notice.clear();
-                Step::call(LoginCall::Reset { email: email.trim().into() })
+                Step::call(LoginCall::DeviceStart { verifier: oidc::new_pkce_verifier() })
             }
             LoginIntent::JoinWorld(world) => {
                 self.error.clear();
@@ -423,7 +525,6 @@ impl LoginSession {
                 let token = self.refresh.clone();
                 self.sign_out();
                 self.error.clear();
-                self.notice.clear();
                 let mut step = Step::goto(Self::logged_out_state());
                 step.store = StoreOp::Clear;
                 if state == AppState::Login {
@@ -442,12 +543,12 @@ impl LoginSession {
     /// leaves the screens' lines alone.
     pub fn receive(&mut self, generation: Generation, reply: LoginReply, state: AppState) -> Step {
         if generation != self.generation {
-            let lines = (std::mem::take(&mut self.error), std::mem::take(&mut self.notice));
+            let line = std::mem::take(&mut self.error);
             let step = self.apply(reply, AppState::MainMenu);
-            (self.error, self.notice) = lines;
+            self.error = line;
             return step;
         }
-        if !matches!(reply, LoginReply::LoggedOut) {
+        if !matches!(reply, LoginReply::LoggedOut | LoginReply::DevicePolled { .. }) {
             self.in_flight = self.in_flight.saturating_sub(1);
         }
         self.apply(reply, state)
@@ -478,8 +579,8 @@ impl LoginSession {
             LoginReply::Session { silent, result: Ok(response) } => {
                 self.refresh = Some(response.refresh_token.clone());
                 self.account = Some(response.account_email);
+                self.account_name = response.account_name;
                 self.error.clear();
-                self.clear_password = true;
                 let mut step = Step::call(LoginCall::Worlds);
                 step.store = StoreOp::Save(response.refresh_token);
                 // A silent refresh moves on only from the login screen (the
@@ -491,6 +592,7 @@ impl LoginSession {
             }
             LoginReply::Session { silent, result: Err(failure) } => {
                 self.account = None;
+                self.account_name.clear();
                 self.error = failure.to_string();
                 let mut step = Step::none();
                 // The service refused the kept token: forget it. Unreachable,
@@ -501,18 +603,8 @@ impl LoginSession {
                 }
                 step
             }
-            LoginReply::Registered(result) | LoginReply::ResetRequested(result) if result.is_err() => {
-                self.error = result.err().map(|f| f.to_string()).unwrap_or_default();
-                Step::none()
-            }
-            LoginReply::Registered(_) => {
-                self.notice = REGISTERED_NOTICE.into();
-                Step::none()
-            }
-            LoginReply::ResetRequested(_) => {
-                self.notice = RESET_NOTICE.into();
-                Step::none()
-            }
+            LoginReply::DeviceStarted { verifier, result } => self.device_started(verifier, result, state),
+            LoginReply::DevicePolled { device_code, result } => self.device_polled(&device_code, result, state),
             LoginReply::Worlds(Ok(worlds)) => {
                 self.worlds = worlds;
                 Step::none()
@@ -532,6 +624,114 @@ impl LoginSession {
             }
             LoginReply::LoggedOut => Step::none(),
         }
+    }
+
+    /// A device sign-in's start: it becomes the pending one (from the login
+    /// screen only — an answer that lands after the player left, or of an
+    /// abandoned generation, starts nothing).
+    fn device_started(
+        &mut self,
+        verifier: String,
+        result: Result<(LoginConfigResponse, DeviceStart), LoginFailure>,
+        state: AppState,
+    ) -> Step {
+        let (provider, start) = match result {
+            Ok(started) => started,
+            Err(failure) => {
+                warn!("[login] cannot start a sign-in: {failure:?}");
+                self.error = failure.to_string();
+                return Step::none();
+            }
+        };
+        if state != AppState::Login {
+            return Step::none();
+        }
+        let interval = start.interval.max(1);
+        let step = Step::open(&start.verification_uri_complete);
+        self.pending_device = Some(PendingDevice {
+            deadline: self.clock + start.expires_in as f64,
+            next_poll: self.clock + interval as f64,
+            interval,
+            provider,
+            start,
+            verifier,
+            polling: false,
+        });
+        self.error.clear();
+        step
+    }
+
+    /// One poll's answer. Dropped unless it is for the pending sign-in (one
+    /// cancelled, expired or replaced since is gone) and the player is on the
+    /// login screen.
+    fn device_polled(&mut self, device_code: &str, result: Result<DevicePoll, LoginFailure>, state: AppState) -> Step {
+        if state != AppState::Login {
+            return Step::none();
+        }
+        let Some(pending) = self.pending_device.as_mut().filter(|p| p.start.device_code == device_code) else {
+            return Step::none();
+        };
+        pending.polling = false;
+        let poll = match result {
+            Ok(poll) => poll,
+            // Did not get through: poll again at the next interval, until the
+            // deadline.
+            Err(failure) => {
+                warn!("[login] a sign-in poll failed, polling again: {failure:?}");
+                return Step::none();
+            }
+        };
+        let interval = oidc::next_interval(pending.interval, &poll);
+        // The next poll was due one interval after this one was sent; a
+        // slow_down lengthens that wait as well as every later one.
+        pending.next_poll += interval.saturating_sub(pending.interval) as f64;
+        pending.interval = interval;
+        match poll {
+            DevicePoll::Pending | DevicePoll::SlowDown => Step::none(),
+            DevicePoll::Token(access_token) => {
+                self.pending_device = None;
+                Step::call(LoginCall::LoginOidc { access_token })
+            }
+            DevicePoll::Expired => self.end_sign_in(SIGN_IN_EXPIRED),
+            DevicePoll::Denied => self.end_sign_in(SIGN_IN_REFUSED),
+            DevicePoll::Failed(why) => {
+                warn!("[login] the identity provider ended the sign-in: {why}");
+                self.end_sign_in(SIGN_IN_FAILED)
+            }
+        }
+    }
+
+    /// The pending sign-in is over without a login: `line` on the screen.
+    fn end_sign_in(&mut self, line: &str) -> Step {
+        self.pending_device = None;
+        self.error = line.into();
+        Step::none()
+    }
+
+    /// Every frame, with the frame clock `now` (seconds) on screen `state`:
+    /// the pending device sign-in's next poll when it is due and none is on
+    /// its way. Off the login screen the sign-in is dropped; past its
+    /// deadline it ends as [`SIGN_IN_EXPIRED`].
+    pub fn tick(&mut self, now: f64, state: AppState) -> Step {
+        self.clock = now;
+        let Some(pending) = self.pending_device.as_mut() else { return Step::none() };
+        if state != AppState::Login {
+            self.pending_device = None;
+            return Step::none();
+        }
+        if now >= pending.deadline {
+            return self.end_sign_in(SIGN_IN_EXPIRED);
+        }
+        if pending.polling || now < pending.next_poll {
+            return Step::none();
+        }
+        pending.polling = true;
+        pending.next_poll = now + pending.interval as f64;
+        Step::call(LoginCall::DevicePoll {
+            provider: pending.provider.clone(),
+            device_code: pending.start.device_code.clone(),
+            verifier: pending.verifier.clone(),
+        })
     }
 
     /// A ticket: keep the rotated refresh token first, then start the session
@@ -570,6 +770,9 @@ impl LoginSession {
                 self.in_flight += u32::from(counted);
             } else {
                 self.error = LoginFailure::Network("the login client stopped".into()).to_string();
+                // A poll that was never sent never answers: drop the sign-in
+                // rather than wait for it.
+                self.pending_device = None;
             }
         }
     }
@@ -587,10 +790,26 @@ fn perform_step(step: Step, login: &mut LoginSession, commands: &mut Commands, n
     if let Some(join) = step.join {
         commands.insert_resource(join);
     }
+    if let Some(url) = step.open {
+        open_browser(&url);
+    }
     if let Some(state) = step.goto {
         next.set(state);
     }
 }
+
+/// Opens the provider's sign-in page in the system browser (the URL carries
+/// the user code: not logged).
+#[cfg(not(target_arch = "wasm32"))]
+fn open_browser(url: &str) {
+    if let Err(e) = open::that_detached(url) {
+        warn!("[login] cannot open the browser for the sign-in ({:?})", e.kind());
+    }
+}
+
+/// The browser never asks ([`OPENS_BROWSER`]): its page opens the tab.
+#[cfg(target_arch = "wasm32")]
+fn open_browser(_url: &str) {}
 
 /// `Startup`: with a login service configured, the [`LoginSession`]; in the
 /// browser ([`REFRESH_AT_STARTUP`]) a kept refresh token is refreshed
@@ -633,21 +852,26 @@ pub fn start_login(
     }
 }
 
-/// The service's answers, applied.
+/// The service's answers, applied; then the device sign-in's next poll
+/// ([`LoginSession::tick`], on the real-time clock: it runs on native and in
+/// the browser alike, and never pauses).
 pub fn poll_login(
     login: Option<ResMut<LoginSession>>,
     state: Res<State<AppState>>,
+    time: Res<Time<Real>>,
     mut commands: Commands,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(mut login) = login else { return };
+    let now = time.elapsed_secs_f64();
+    login.clock = now;
     let (replies, lost): (Vec<(Generation, LoginReply)>, bool) = match &login.worker {
         Some(worker) => {
             let replies = worker.replies.try_iter().collect();
             let lost = matches!(worker.replies.try_recv(), Err(crossbeam::channel::TryRecvError::Disconnected));
             (replies, lost)
         }
-        None => return,
+        None => (Vec::new(), false),
     };
     for (generation, reply) in replies {
         let step = login.receive(generation, reply, *state.get());
@@ -657,6 +881,8 @@ pub fn poll_login(
         error!("[login] the login-http worker stopped");
         login.worker_lost();
     }
+    let step = login.tick(now, *state.get());
+    perform_step(step, &mut login, &mut commands, &mut next);
 }
 
 /// `OnEnter(Worlds)`: back on the list (an online session over, or from the
@@ -724,7 +950,6 @@ mod tests {
         assert_eq!(step.store, StoreOp::Save("r1".into()));
         assert!(matches!(step.calls.as_slice(), [LoginCall::Worlds]));
         assert_eq!(login.account.as_deref(), Some("a@b.c"));
-        assert!(login.clear_password);
     }
 
     #[test]
@@ -766,9 +991,8 @@ mod tests {
     fn only_a_refused_kept_token_is_forgotten() {
         for (failure, cleared) in [
             (api(ApiErrorCode::Revoked), true),
-            (api(ApiErrorCode::BadCredentials), true),
             (api(ApiErrorCode::Internal), false),
-            (api(ApiErrorCode::NotVerified), false),
+            (api(ApiErrorCode::IdentityRefused), false),
             (LoginFailure::Protocol("502".into()), false),
             (LoginFailure::Network("down".into()), false),
         ] {
@@ -796,23 +1020,6 @@ mod tests {
         assert_eq!(step.goto, None, "a late revoke does not leave the world");
         assert_eq!(step.store, StoreOp::Clear, "but the token is cleared");
         assert!(!login.logged_in() && login.refresh.is_none());
-    }
-
-    #[test]
-    fn register_and_reset_show_their_notices() {
-        let mut login = session();
-        let _ = login.apply(LoginReply::Registered(Ok(())), AppState::Login);
-        assert_eq!(login.notice, REGISTERED_NOTICE);
-        let _ = login.apply(LoginReply::ResetRequested(Ok(())), AppState::Login);
-        assert_eq!(login.notice, RESET_NOTICE);
-        let short = LoginFailure::Api(ApiError { code: ApiErrorCode::BadRequest, message: "Password is too short".into() });
-        let _ = login.apply(LoginReply::Registered(Err(short)), AppState::Login);
-        assert_eq!(login.error, "Password is too short");
-        let _ = login.apply(
-            LoginReply::Session { silent: false, result: Err(api(ApiErrorCode::BadCredentials)) },
-            AppState::Login,
-        );
-        assert_eq!(login.error, "Wrong email or password");
     }
 
     #[test]
@@ -907,8 +1114,227 @@ mod tests {
     fn nothing_is_sent_while_busy() {
         let mut login = session();
         login.in_flight = 1;
-        let step = login.intent(LoginIntent::Submit { email: "a@b.c".into(), password: "p".into() }, AppState::Login);
+        let step = login.intent(LoginIntent::SignIn, AppState::Login);
         assert!(step.calls.is_empty());
+    }
+
+    const COMPLETE_URI: &str = "https://auth.test/realms/mmo/device?user_code=WDJB-MJHT";
+
+    fn provider() -> LoginConfigResponse {
+        LoginConfigResponse { oidc_issuer: "https://auth.test/realms/mmo".into(), oidc_client_id: "game".into() }
+    }
+
+    fn device_start(code: &str) -> DeviceStart {
+        DeviceStart {
+            device_code: code.into(),
+            user_code: "WDJB-MJHT".into(),
+            verification_uri: "https://auth.test/realms/mmo/device".into(),
+            verification_uri_complete: COMPLETE_URI.into(),
+            expires_in: 600,
+            interval: 5,
+        }
+    }
+
+    /// Sign in on the login screen at `now`, and the start's answer (device
+    /// code `code`, 600 s, every 5 s) as the worker would hand it back.
+    fn sign_in(login: &mut LoginSession, code: &str, now: f64) -> Step {
+        let step = login.intent(LoginIntent::SignIn, AppState::Login);
+        assert!(matches!(step.calls.as_slice(), [LoginCall::DeviceStart { .. }]), "Sign in starts a device sign-in");
+        login.in_flight += 1; // what `send` counts for it
+        assert!(login.busy());
+        let _ = login.tick(now, AppState::Login);
+        let started = LoginReply::DeviceStarted { verifier: "verifier".into(), result: Ok((provider(), device_start(code))) };
+        login.receive(login.generation, started, AppState::Login)
+    }
+
+    fn polled(code: &str, poll: DevicePoll) -> LoginReply {
+        LoginReply::DevicePolled { device_code: code.into(), result: Ok(poll) }
+    }
+
+    /// How many polls `tick` sends (and that they are for `code`).
+    fn polls(step: &Step, code: &str) -> usize {
+        step.calls
+            .iter()
+            .map(|call| match call {
+                LoginCall::DevicePoll { device_code, verifier, provider } => {
+                    assert_eq!(device_code, code);
+                    assert_eq!(verifier, "verifier", "every poll presents the start's verifier");
+                    assert_eq!(provider.oidc_client_id, "game");
+                }
+                _ => panic!("tick sends only polls"),
+            })
+            .count()
+    }
+
+    /// Review Focus 4: the player never confirms. The provider's
+    /// `expired_token` and the deadline both end the sign-in with
+    /// "Sign-in expired", leave an idle login screen and stop the polling;
+    /// a new sign-in can start.
+    #[test]
+    fn expired_device_clears_pending_and_reports() {
+        let mut login = session();
+        let step = sign_in(&mut login, "dev-1", 100.0);
+        assert_eq!(step.open.as_deref(), OPENS_BROWSER.then_some(COMPLETE_URI), "native opens the browser");
+        assert!(login.waiting_for_sign_in() && !login.busy());
+        assert_eq!(login.user_code(), "WDJB-MJHT");
+        assert_eq!(login.verification_uri_complete(), COMPLETE_URI);
+
+        assert_eq!(polls(&login.tick(104.0, AppState::Login), "dev-1"), 0, "not before the interval");
+        assert_eq!(polls(&login.tick(105.0, AppState::Login), "dev-1"), 1);
+        assert_eq!(polls(&login.tick(111.0, AppState::Login), "dev-1"), 0, "at most one poll on its way");
+        let _ = login.receive(login.generation, polled("dev-1", DevicePoll::Pending), AppState::Login);
+        assert!(login.waiting_for_sign_in() && login.error.is_empty());
+        assert_eq!(polls(&login.tick(111.0, AppState::Login), "dev-1"), 1, "due an interval after the last poll");
+
+        let step = login.receive(login.generation, polled("dev-1", DevicePoll::Expired), AppState::Login);
+        assert!(step.calls.is_empty() && step.goto.is_none());
+        assert!(!login.waiting_for_sign_in() && !login.busy(), "an idle login screen");
+        assert_eq!(login.error, SIGN_IN_EXPIRED);
+        assert_eq!(polls(&login.tick(500.0, AppState::Login), "dev-1"), 0, "nothing polls any more");
+
+        // The deadline, while polls keep failing to get through.
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-2", 0.0);
+        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-2"), 1);
+        let offline = LoginReply::DevicePolled { device_code: "dev-2".into(), result: Err(LoginFailure::Network("down".into())) };
+        let _ = login.receive(login.generation, offline, AppState::Login);
+        assert!(login.waiting_for_sign_in(), "a poll that did not get through does not end the sign-in");
+        assert_eq!(polls(&login.tick(9.0, AppState::Login), "dev-2"), 0);
+        assert_eq!(polls(&login.tick(10.0, AppState::Login), "dev-2"), 1, "it polls again at the next interval");
+        let step = login.tick(600.0, AppState::Login);
+        assert!(step.calls.is_empty());
+        assert!(!login.waiting_for_sign_in());
+        assert_eq!(login.error, SIGN_IN_EXPIRED);
+        // The last poll's late answer changes nothing.
+        let step = login.receive(login.generation, polled("dev-2", DevicePoll::Pending), AppState::Login);
+        assert!(step.calls.is_empty() && !login.waiting_for_sign_in());
+        assert_eq!(polls(&login.tick(700.0, AppState::Login), "dev-2"), 0);
+        // A new sign-in can start.
+        let step = login.intent(LoginIntent::SignIn, AppState::Login);
+        assert!(matches!(step.calls.as_slice(), [LoginCall::DeviceStart { .. }]));
+
+        // Refused at the provider.
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-3", 0.0);
+        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-3"), 1);
+        let _ = login.receive(login.generation, polled("dev-3", DevicePoll::Denied), AppState::Login);
+        assert!(!login.waiting_for_sign_in());
+        assert_eq!(login.error, SIGN_IN_REFUSED);
+    }
+
+    /// Review Focus 4: Cancel, Back, leaving the login screen and an answer
+    /// for a sign-in that is no longer the pending one all stop the polling.
+    #[test]
+    fn cancel_stops_polling() {
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-1", 0.0);
+        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-1"), 1);
+        let _ = login.intent(LoginIntent::CancelSignIn, AppState::Login);
+        assert!(!login.waiting_for_sign_in() && !login.busy() && login.error.is_empty());
+        assert_eq!(polls(&login.tick(100.0, AppState::Login), "dev-1"), 0, "no poll after Cancel");
+        // The poll on its way answers with a token after all: dropped (an
+        // older generation, and no pending sign-in of its device code).
+        let step = login.receive(0, polled("dev-1", DevicePoll::Token("access".into())), AppState::Login);
+        assert!(step.calls.is_empty() && step.goto.is_none());
+        assert!(!login.logged_in() && !login.waiting_for_sign_in());
+
+        // Cancel while the start is on its way: its answer starts nothing.
+        let mut login = session();
+        let _ = login.intent(LoginIntent::SignIn, AppState::Login);
+        login.in_flight += 1;
+        let _ = login.intent(LoginIntent::CancelSignIn, AppState::Login);
+        assert!(!login.busy());
+        let late = LoginReply::DeviceStarted { verifier: "verifier".into(), result: Ok((provider(), device_start("dev-1"))) };
+        let step = login.receive(0, late, AppState::Login);
+        assert!(step.open.is_none() && !login.waiting_for_sign_in());
+        assert_eq!(polls(&login.tick(100.0, AppState::Login), "dev-1"), 0);
+
+        // Back.
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-1", 0.0);
+        let _ = login.intent(LoginIntent::Back, AppState::Login);
+        assert!(!login.waiting_for_sign_in());
+        assert_eq!(polls(&login.tick(100.0, AppState::MainMenu), "dev-1"), 0);
+
+        // Leaving the login screen any other way: the next tick drops it.
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-1", 0.0);
+        assert_eq!(polls(&login.tick(5.0, AppState::Worlds), "dev-1"), 0);
+        assert!(!login.waiting_for_sign_in());
+
+        // An answer for a replaced sign-in (another device code) is dropped.
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-1", 0.0);
+        let _ = login.intent(LoginIntent::CancelSignIn, AppState::Login);
+        let _ = sign_in(&mut login, "dev-2", 10.0);
+        let step = login.receive(login.generation, polled("dev-1", DevicePoll::Denied), AppState::Login);
+        assert!(step.calls.is_empty());
+        assert!(login.waiting_for_sign_in() && login.error.is_empty(), "dev-2 is still pending");
+        assert_eq!(polls(&login.tick(15.0, AppState::Login), "dev-2"), 1);
+    }
+
+    #[test]
+    fn slow_down_lengthens_the_interval() {
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-1", 0.0);
+        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-1"), 1);
+        let _ = login.receive(login.generation, polled("dev-1", DevicePoll::SlowDown), AppState::Login);
+        assert_eq!(login.pending_device.as_ref().map(|p| p.interval), Some(10));
+        assert_eq!(polls(&login.tick(14.0, AppState::Login), "dev-1"), 0);
+        assert_eq!(polls(&login.tick(15.0, AppState::Login), "dev-1"), 1);
+        let _ = login.receive(login.generation, polled("dev-1", DevicePoll::Pending), AppState::Login);
+        assert_eq!(polls(&login.tick(24.0, AppState::Login), "dev-1"), 0);
+        assert_eq!(polls(&login.tick(25.0, AppState::Login), "dev-1"), 1);
+    }
+
+    /// The token is traded for the service's refresh token, and from there
+    /// it is the usual login: kept, the world list fetched and shown.
+    #[test]
+    fn a_device_token_signs_in() {
+        let mut login = session();
+        let _ = sign_in(&mut login, "dev-1", 0.0);
+        let _ = login.intent(LoginIntent::SignIn, AppState::Login);
+        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-1"), 1, "a second Sign in starts nothing");
+        let step = login.receive(login.generation, polled("dev-1", DevicePoll::Token("access".into())), AppState::Login);
+        assert!(matches!(step.calls.as_slice(), [LoginCall::LoginOidc { access_token }] if access_token == "access"));
+        assert!(!login.waiting_for_sign_in());
+        login.in_flight += 1;
+        let ok = LoginReply::Session {
+            silent: false,
+            result: Ok(LoginResponse {
+                refresh_token: "r1".into(),
+                account_email: "a@b.c".into(),
+                email_verified: true,
+                account_name: "Ada".into(),
+            }),
+        };
+        let step = login.receive(login.generation, ok, AppState::Login);
+        assert_eq!(step.goto, Some(AppState::Worlds));
+        assert_eq!(step.store, StoreOp::Save("r1".into()));
+        assert!(matches!(step.calls.as_slice(), [LoginCall::Worlds]));
+        assert_eq!(login.account_name, "Ada");
+        assert!(login.logged_in() && !login.busy());
+    }
+
+    #[test]
+    fn open_browser_reopens_the_pending_page() {
+        let mut login = session();
+        assert!(login.intent(LoginIntent::OpenBrowser, AppState::Login).open.is_none(), "nothing pending");
+        let _ = sign_in(&mut login, "dev-1", 0.0);
+        let step = login.intent(LoginIntent::OpenBrowser, AppState::Login);
+        assert_eq!(step.open.as_deref(), OPENS_BROWSER.then_some(COMPLETE_URI));
+        assert!(step.calls.is_empty());
+    }
+
+    #[test]
+    fn a_failed_start_is_an_error_line() {
+        let mut login = session();
+        let _ = login.intent(LoginIntent::SignIn, AppState::Login);
+        login.in_flight += 1;
+        let none = LoginReply::DeviceStarted { verifier: "verifier".into(), result: Err(LoginFailure::NoSignIn) };
+        let step = login.receive(login.generation, none, AppState::Login);
+        assert!(step.open.is_none() && !login.waiting_for_sign_in() && !login.busy());
+        assert_eq!(login.error, super::super::api::NO_SIGN_IN);
     }
 
     #[test]

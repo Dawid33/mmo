@@ -20,6 +20,11 @@ game = { workspace = true }
 # The login service's HTTP DTOs (serde only) and its client: native rustls (ring), browser fetch.
 login-api = { workspace = true }
 reqwest = { workspace = true }
+# The device sign-in's PKCE (`login/oidc.rs`): SHA-256 + base64url of a random verifier.
+# Pure Rust; `getrandom`'s `js` feature (Web Crypto) only acts on wasm32, as rapier's does.
+sha2 = { workspace = true }
+base64 = { workspace = true }
+getrandom = { version = "0.2", features = ["js"] }
 # Player-facing game UI (Factorio-style Slint widgets, software-rendered):
 # composited by `renderer/slint_overlay.rs`.
 slint-ui = { workspace = true }
@@ -45,6 +50,8 @@ bincode = { workspace = true }
 # The prefab library's Import from / Export to clipboard (`prefab_editor/library_ui.rs`).
 # Already in the tree (Bevy's and Slint's clipboard), so it adds no build.
 arboard = { version = "3.6", default-features = false }
+# The device sign-in opens the identity provider's page in the system browser (`login/flow.rs`).
+open = "5"
 quinn = { workspace = true }
 tokio = { workspace = true, features = ["time", "rt", "sync"] } # connect retry: timeout + sleep; `rt`: the login-http thread's current-thread runtime; `sync`: netcode's outgoing bridge
 pyroscope = { workspace = true, optional = true }

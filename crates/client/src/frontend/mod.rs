@@ -26,7 +26,6 @@ use std::rc::Rc;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use slint_ui::slint::ComponentHandle;
 use slint_ui::FrontendUi;
 
 use crate::renderer::slint_overlay::{render_slint_layer, SlintLayer, SlintLayerPlugin, FRONTEND_LAYER_ORDER};
@@ -46,11 +45,11 @@ pub enum FrontendAction {
     JoinServer,
     /// The main menu's Play online.
     PlayOnline,
-    /// The login screen's Log in / Register / Forgot password, with the typed
-    /// fields in [`LoginForm`].
-    LoginSubmit,
-    Register,
-    ForgotPassword,
+    /// The login screen's Sign in (the identity provider's device sign-in),
+    /// Open browser (its page again) and Cancel.
+    SignIn,
+    OpenBrowser,
+    CancelSignIn,
     /// The online world list's pick, by world id.
     JoinWorld(String),
     Logout,
@@ -73,22 +72,6 @@ struct FrontendActions(Rc<RefCell<Vec<FrontendAction>>>);
 
 /// The address the last Join server named (the Slint callback's argument).
 struct JoinAddress(Rc<RefCell<String>>);
-
-/// The login form's email and password at the last Log in / Register /
-/// Forgot password (read from the UI in the callback). Never logged; the
-/// password is taken out when the intent is built ([`take_login_form`]).
-struct LoginForm(Rc<RefCell<(String, String)>>);
-
-/// The form's email and password, leaving only the email behind (it is kept
-/// for convenience; the password must not outlive the request).
-fn take_login_form(form: &NonSend<LoginForm>) -> (String, String) {
-    take_form(&form.0)
-}
-
-fn take_form(form: &RefCell<(String, String)>) -> (String, String) {
-    let mut form = form.borrow_mut();
-    (form.0.clone(), std::mem::take(&mut form.1))
-}
 
 /// Whether the menu is the browser's: only Join server (the browser cannot
 /// make or keep worlds, it only joins a server).
@@ -160,22 +143,21 @@ pub fn action_target(action: &FrontendAction) -> ActionEffect {
         FrontendAction::PrefabLibrary => ActionEffect::Goto(AppState::PrefabLibrary),
         FrontendAction::Exit => ActionEffect::Exit,
         FrontendAction::PlayOnline
-        | FrontendAction::LoginSubmit
-        | FrontendAction::Register
-        | FrontendAction::ForgotPassword
+        | FrontendAction::SignIn
+        | FrontendAction::OpenBrowser
+        | FrontendAction::CancelSignIn
         | FrontendAction::JoinWorld(_)
         | FrontendAction::Logout => ActionEffect::Login,
     }
 }
 
-/// The login call an action makes (`form`: the typed email and password).
-pub fn login_intent(action: &FrontendAction, form: &(String, String)) -> Option<LoginIntent> {
-    let (email, password) = form.clone();
+/// The login call an action makes.
+pub fn login_intent(action: &FrontendAction) -> Option<LoginIntent> {
     Some(match action {
         FrontendAction::PlayOnline => LoginIntent::PlayOnline,
-        FrontendAction::LoginSubmit => LoginIntent::Submit { email, password },
-        FrontendAction::Register => LoginIntent::Register { email, password },
-        FrontendAction::ForgotPassword => LoginIntent::Forgot { email },
+        FrontendAction::SignIn => LoginIntent::SignIn,
+        FrontendAction::OpenBrowser => LoginIntent::OpenBrowser,
+        FrontendAction::CancelSignIn => LoginIntent::CancelSignIn,
         FrontendAction::JoinWorld(id) => LoginIntent::JoinWorld(id.clone()),
         FrontendAction::Logout => LoginIntent::Logout,
         _ => return None,
@@ -240,22 +222,10 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
         let queue = actions.clone();
         ui.on_world_join(move |id| queue.borrow_mut().push(FrontendAction::JoinWorld(id.to_string())));
     }
-    // The form is read when its button is pressed, so the flow gets exactly
-    // what was on screen.
-    let form = Rc::new(RefCell::new((String::new(), String::new())));
-    let push_form = |action: FrontendAction| {
-        let (queue, form, weak) = (actions.clone(), form.clone(), ui.as_weak());
-        move || {
-            if let Some(ui) = weak.upgrade() {
-                *form.borrow_mut() = (ui.get_login_email().to_string(), ui.get_login_password().to_string());
-            }
-            queue.borrow_mut().push(action.clone());
-        }
-    };
-    ui.on_login_submit(push_form(FrontendAction::LoginSubmit));
-    ui.on_login_register(push_form(FrontendAction::Register));
-    ui.on_login_forgot(push_form(FrontendAction::ForgotPassword));
-    world.insert_non_send(LoginForm(form));
+    // Until the login screen is rewritten for the device sign-in, its Log in
+    // button signs in (the typed fields are not read) and Register / Forgot
+    // password do nothing.
+    ui.on_login_submit(push(FrontendAction::SignIn));
     ui.set_join_only(JOIN_ONLY);
     #[cfg(target_arch = "wasm32")]
     ui.set_server_address(initial_server_address().into());
@@ -292,11 +262,7 @@ fn initial_server_address() -> String {
 fn apply_frontend_actions(
     actions: Option<NonSend<FrontendActions>>,
     join_address: Option<NonSend<JoinAddress>>,
-    (login_form, login, mut login_intents): (
-        Option<NonSend<LoginForm>>,
-        Option<Res<LoginSession>>,
-        MessageWriter<LoginIntent>,
-    ),
+    (login, mut login_intents): (Option<Res<LoginSession>>, MessageWriter<LoginIntent>),
     mut commands: Commands,
     state: Res<State<AppState>>,
     embarked: Res<Embarked>,
@@ -344,8 +310,7 @@ fn apply_frontend_actions(
                 exit.write(AppExit::Success);
             }
             ActionEffect::Login => {
-                let form = login_form.as_ref().map(take_login_form).unwrap_or_default();
-                if let Some(intent) = login_intent(&action, &form) {
+                if let Some(intent) = login_intent(&action) {
                     login_intents.write(intent);
                 }
             }
@@ -366,7 +331,7 @@ fn push_frontend_state(
     #[cfg(not(target_arch = "wasm32"))] host: Option<Res<crate::local_host::LocalHost>>,
     (cover, time): (Res<loading::LoadingCover>, Res<Time<Real>>),
     mut shown_lines: Local<Vec<String>>,
-    (login, mut shown_worlds): (Option<ResMut<LoginSession>>, Local<Vec<(String, String, bool)>>),
+    (login, mut shown_worlds): (Option<Res<LoginSession>>, Local<Vec<(String, String, bool)>>),
 ) {
     let Some(layer) = layer else { return };
     let ui = layer.overlay.ui();
@@ -430,24 +395,28 @@ fn push_frontend_state(
 
 /// The login screens' properties from the [`LoginSession`] (none: no login
 /// service, so no Play online).
-fn push_login_state(ui: &FrontendUi, login: Option<ResMut<LoginSession>>, shown_worlds: &mut Vec<(String, String, bool)>) {
+fn push_login_state(ui: &FrontendUi, login: Option<Res<LoginSession>>, shown_worlds: &mut Vec<(String, String, bool)>) {
     use slint_ui::slint::{ModelRc, VecModel};
     if ui.get_online_available() != login.is_some() {
         ui.set_online_available(login.is_some());
     }
-    let Some(mut login) = login else { return };
-    if login.clear_password {
-        login.clear_password = false;
-        ui.set_login_password("".into());
-    }
+    let Some(login) = login else { return };
     if ui.get_login_error() != login.error.as_str() {
         ui.set_login_error(login.error.as_str().into());
     }
-    if ui.get_login_notice() != login.notice.as_str() {
-        ui.set_login_notice(login.notice.as_str().into());
+    // Until the login screen is rewritten: the pending sign-in's code as its
+    // notice line, and the screen busy while it waits (Back cancels it).
+    let notice = if login.waiting_for_sign_in() {
+        format!("Sign in in your browser \u{2014} code {}", login.user_code())
+    } else {
+        String::new()
+    };
+    if ui.get_login_notice() != notice.as_str() {
+        ui.set_login_notice(notice.into());
     }
-    if ui.get_login_busy() != login.busy() {
-        ui.set_login_busy(login.busy());
+    let busy = login.busy() || login.waiting_for_sign_in();
+    if ui.get_login_busy() != busy {
+        ui.set_login_busy(busy);
     }
     let account = login.account.as_deref().unwrap_or("");
     if ui.get_login_account() != account {
@@ -482,13 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn the_form_keeps_the_email_but_not_the_password() {
-        let form = RefCell::new(("a@b.c".to_string(), "hunter2hunter2".to_string()));
-        assert_eq!(take_form(&form), ("a@b.c".to_string(), "hunter2hunter2".to_string()));
-        assert_eq!(*form.borrow(), ("a@b.c".to_string(), String::new()));
-    }
-
-    #[test]
     fn screen_index_login_and_worlds() {
         assert_eq!(screen_index(AppState::Login), 5);
         assert_eq!(screen_index(AppState::Worlds), 6);
@@ -496,27 +458,25 @@ mod tests {
 
     #[test]
     fn login_actions_go_to_the_login_flow() {
-        let form = ("a@b.c".to_string(), "hunter2hunter2".to_string());
         for action in [
             FrontendAction::PlayOnline,
-            FrontendAction::LoginSubmit,
-            FrontendAction::Register,
-            FrontendAction::ForgotPassword,
+            FrontendAction::SignIn,
+            FrontendAction::OpenBrowser,
+            FrontendAction::CancelSignIn,
             FrontendAction::JoinWorld("alpha".into()),
             FrontendAction::Logout,
         ] {
             assert_eq!(action_target(&action), ActionEffect::Login, "{action:?}");
-            assert!(login_intent(&action, &form).is_some(), "{action:?}");
+            assert!(login_intent(&action).is_some(), "{action:?}");
         }
+        assert!(matches!(login_intent(&FrontendAction::SignIn), Some(LoginIntent::SignIn)));
+        assert!(matches!(login_intent(&FrontendAction::OpenBrowser), Some(LoginIntent::OpenBrowser)));
+        assert!(matches!(login_intent(&FrontendAction::CancelSignIn), Some(LoginIntent::CancelSignIn)));
         assert!(matches!(
-            login_intent(&FrontendAction::LoginSubmit, &form),
-            Some(LoginIntent::Submit { email, password }) if email == "a@b.c" && password == "hunter2hunter2"
-        ));
-        assert!(matches!(
-            login_intent(&FrontendAction::JoinWorld("alpha".into()), &form),
+            login_intent(&FrontendAction::JoinWorld("alpha".into())),
             Some(LoginIntent::JoinWorld(id)) if id == "alpha"
         ));
-        assert!(login_intent(&FrontendAction::Back, &form).is_none());
+        assert!(login_intent(&FrontendAction::Back).is_none());
     }
 
     #[test]

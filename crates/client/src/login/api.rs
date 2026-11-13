@@ -4,41 +4,22 @@
 //! runtime on native, `spawn_local` in the browser, where reqwest uses
 //! `fetch`).
 //!
-//! The DTOs print passwords, refresh tokens and JWTs with `{:?}`: never log
-//! them; [`LoginFailure`] holds none of them.
+//! It also calls the identity provider's device flow endpoints
+//! ([`LoginApi::device_start`], [`LoginApi::device_poll`]; parsing in
+//! [`super::oidc`]).
+//!
+//! The DTOs print refresh tokens, access tokens and JWTs with `{:?}`: never
+//! log them; [`LoginFailure`] holds none of them.
 
 use std::fmt;
 
 use login_api::{
-    ApiError, ApiErrorCode, JoinRequest, JoinResponse, LoginResponse, RefreshRequest, WorldEntry, PATH_JOIN,
-    PATH_LOGOUT, PATH_REFRESH, PATH_WORLDS,
+    ApiError, ApiErrorCode, JoinRequest, JoinResponse, LoginConfigResponse, LoginResponse, OidcLoginRequest,
+    RefreshRequest, WorldEntry, PATH_CONFIG, PATH_JOIN, PATH_LOGIN_OIDC, PATH_LOGOUT, PATH_REFRESH, PATH_WORLDS,
 };
-use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
 
-// The password routes the login service no longer has (Keycloak owns passwords). The screens that
-// call them go with the Keycloak login screen; until then these keep them building.
-const PATH_REGISTER: &str = "/v1/register";
-const PATH_LOGIN: &str = "/v1/login";
-const PATH_RESET_REQUEST: &str = "/v1/reset/request";
-
-#[derive(Serialize)]
-struct RegisterRequest {
-    email: String,
-    password: String,
-}
-
-#[derive(Serialize)]
-struct LoginRequest {
-    email: String,
-    password: String,
-}
-
-#[derive(Serialize)]
-struct ResetRequest {
-    email: String,
-}
+use super::oidc::{self, DevicePoll, DeviceStart};
 
 /// Overrides the login service's address on native (empty = unset); the
 /// build-time `VOXEL_LOGIN_URL` is the fallback.
@@ -64,29 +45,35 @@ pub enum LoginFailure {
     Api(ApiError),
     /// The answer was neither a success nor an `ApiError` (the HTTP status).
     Protocol(String),
+    /// The login service has no identity provider (`GET /v1/config` is 404).
+    NoSignIn,
+    /// The identity provider would not start a sign-in (its OAuth error code,
+    /// or the HTTP status).
+    Provider(String),
 }
+
+/// The line when the login service has no identity provider.
+pub const NO_SIGN_IN: &str = "This server has no sign-in configured.";
 
 impl fmt::Display for LoginFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoginFailure::Network(_) => f.write_str("Can't reach the login server"),
             LoginFailure::Api(e) => match e.code {
-                ApiErrorCode::BadCredentials => f.write_str("Wrong email or password"),
-                ApiErrorCode::NotVerified => f.write_str("Please verify your email address first"),
                 ApiErrorCode::Revoked => f.write_str("Your login expired \u{2014} please log in again"),
                 ApiErrorCode::UnknownWorld => f.write_str("That world does not exist"),
                 ApiErrorCode::WorldClosed => f.write_str("That world is closed"),
                 ApiErrorCode::WorldUnavailable => {
                     f.write_str("That world's server is not reachable right now \u{2014} try again shortly")
                 }
-                ApiErrorCode::IdentityRefused => f.write_str("The identity provider's login was refused"),
-                ApiErrorCode::IdentityConflict => {
-                    f.write_str("That identity clashes with an existing account")
-                }
+                ApiErrorCode::IdentityRefused => f.write_str("Sign-in was not accepted. Try again."),
+                ApiErrorCode::IdentityConflict => f.write_str("That email already belongs to another game account."),
                 ApiErrorCode::BadRequest => f.write_str(&e.message),
                 ApiErrorCode::Internal => f.write_str("The login server had a problem \u{2014} try again later"),
             },
             LoginFailure::Protocol(_) => f.write_str("The login server sent an answer we do not understand"),
+            LoginFailure::NoSignIn => f.write_str(NO_SIGN_IN),
+            LoginFailure::Provider(_) => f.write_str("Can't start the sign-in \u{2014} try again later"),
         }
     }
 }
@@ -99,6 +86,8 @@ impl fmt::Debug for LoginFailure {
             LoginFailure::Network(why) => write!(f, "Network({why})"),
             LoginFailure::Api(e) => write!(f, "Api({:?})", e.code),
             LoginFailure::Protocol(status) => write!(f, "Protocol({status})"),
+            LoginFailure::NoSignIn => f.write_str("NoSignIn"),
+            LoginFailure::Provider(why) => write!(f, "Provider({why})"),
         }
     }
 }
@@ -139,12 +128,63 @@ impl LoginApi {
         Self { base, http }
     }
 
-    pub async fn register(&self, email: &str, password: &str) -> Result<(), LoginFailure> {
-        self.post(PATH_REGISTER, &RegisterRequest { email: email.into(), password: password.into() }).await
+    /// Where this service's players sign in; [`LoginFailure::NoSignIn`] when
+    /// it has no identity provider.
+    pub async fn config(&self) -> Result<LoginConfigResponse, LoginFailure> {
+        let (status, body) = self.exchange(self.http.get(format!("{}{PATH_CONFIG}", self.base))).await?;
+        if status == 404 {
+            return Err(LoginFailure::NoSignIn);
+        }
+        parse_response(status, &body)
     }
 
-    pub async fn login(&self, email: &str, password: &str) -> Result<LoginResponse, LoginFailure> {
-        self.post(PATH_LOGIN, &LoginRequest { email: email.into(), password: password.into() }).await
+    /// Starts a device sign-in at the identity provider `issuer` for
+    /// `client_id`, with the PKCE S256 `challenge` of the verifier the polls
+    /// will present.
+    pub async fn device_start(&self, issuer: &str, client_id: &str, challenge: &str) -> Result<DeviceStart, LoginFailure> {
+        let form = [
+            ("client_id", client_id),
+            ("scope", oidc::SCOPE),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+        ];
+        let (status, body) = self.exchange(self.http.post(oidc::device_endpoint(issuer)).form(&form)).await?;
+        let body = String::from_utf8_lossy(&body);
+        if status != 200 {
+            return Err(LoginFailure::Provider(match oidc::parse_device_poll(status, &body) {
+                DevicePoll::Failed(why) => why,
+                _ => format!("HTTP {status}"),
+            }));
+        }
+        oidc::parse_device_start(&body).map_err(LoginFailure::Provider)
+    }
+
+    /// One poll of a device sign-in (`verifier`: the PKCE verifier its start
+    /// sent the challenge of). A transport error or a provider-side failure
+    /// (5xx) is an `Err`: the sign-in goes on and polls again.
+    pub async fn device_poll(
+        &self,
+        issuer: &str,
+        client_id: &str,
+        device_code: &str,
+        verifier: &str,
+    ) -> Result<DevicePoll, LoginFailure> {
+        let form = [
+            ("grant_type", oidc::DEVICE_GRANT_TYPE),
+            ("client_id", client_id),
+            ("device_code", device_code),
+            ("code_verifier", verifier),
+        ];
+        let (status, body) = self.exchange(self.http.post(oidc::token_endpoint(issuer)).form(&form)).await?;
+        if status >= 500 {
+            return Err(LoginFailure::Protocol(status.to_string()));
+        }
+        Ok(oidc::parse_device_poll(status, &String::from_utf8_lossy(&body)))
+    }
+
+    /// Logs in with the identity provider's access token.
+    pub async fn login_oidc(&self, access_token: &str) -> Result<LoginResponse, LoginFailure> {
+        self.post(PATH_LOGIN_OIDC, &OidcLoginRequest { access_token: access_token.into() }).await
     }
 
     pub async fn refresh(&self, token: &str) -> Result<LoginResponse, LoginFailure> {
@@ -165,20 +205,22 @@ impl LoginApi {
         self.post(PATH_JOIN, &JoinRequest { refresh_token: token.into(), world: world.into() }).await
     }
 
-    pub async fn request_reset(&self, email: &str) -> Result<(), LoginFailure> {
-        self.post(PATH_RESET_REQUEST, &ResetRequest { email: email.into() }).await
-    }
-
     async fn post<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, LoginFailure> {
         self.answer(self.http.post(format!("{}{path}", self.base)).json(body)).await
     }
 
     async fn answer<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T, LoginFailure> {
+        let (status, body) = self.exchange(request).await?;
+        parse_response(status, &body)
+    }
+
+    /// Sends `request`: the answer's status and body.
+    async fn exchange(&self, request: reqwest::RequestBuilder) -> Result<(u16, Vec<u8>), LoginFailure> {
         let call = async {
             let response = request.send().await.map_err(network)?;
-            let status: StatusCode = response.status();
+            let status = response.status().as_u16();
             let body = response.bytes().await.map_err(network)?;
-            parse_response(status.as_u16(), &body)
+            Ok((status, body.to_vec()))
         };
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -262,13 +304,17 @@ mod tests {
 
     #[test]
     fn error_body_maps_to_failure() {
-        let failure = parse_response::<LoginResponse>(401, &api_error("bad_credentials", "no")).unwrap_err();
-        assert_eq!(failure, LoginFailure::Api(ApiError { code: ApiErrorCode::BadCredentials, message: "no".into() }));
-        assert_eq!(failure.to_string(), "Wrong email or password");
+        let failure = parse_response::<LoginResponse>(401, &api_error("identity_refused", "no")).unwrap_err();
+        assert_eq!(failure, LoginFailure::Api(ApiError { code: ApiErrorCode::IdentityRefused, message: "no".into() }));
+        assert_eq!(failure.to_string(), "Sign-in was not accepted. Try again.");
+        let conflict = parse_response::<LoginResponse>(409, &api_error("identity_conflict", "x")).unwrap_err();
+        assert_eq!(conflict.to_string(), "That email already belongs to another game account.");
+        assert_eq!(LoginFailure::NoSignIn.to_string(), NO_SIGN_IN);
+        assert!(!format!("{:?}", LoginFailure::Provider("invalid_client".into())).is_empty());
         let revoked = parse_response::<LoginResponse>(401, &api_error("revoked", "x")).unwrap_err();
         assert_eq!(revoked.to_string(), "Your login expired \u{2014} please log in again");
-        let bad = parse_response::<()>(400, &api_error("bad_request", "Password is too short")).unwrap_err();
-        assert_eq!(bad.to_string(), "Password is too short", "bad_request shows the server's message");
+        let bad = parse_response::<()>(400, &api_error("bad_request", "World name is too long")).unwrap_err();
+        assert_eq!(bad.to_string(), "World name is too long", "bad_request shows the server's message");
         let internal = parse_response::<()>(500, &api_error("internal", "db exploded at 10.0.0.3")).unwrap_err();
         assert!(!internal.to_string().contains("10.0.0.3"), "internal errors stay generic");
         // Not an ApiError: the status only.
