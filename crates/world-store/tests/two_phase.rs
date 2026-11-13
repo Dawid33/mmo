@@ -867,12 +867,29 @@ fn stale_row_across_hosts_commits_and_is_reported() {
     h.shutdown();
 }
 
-/// Restores the migration lock timeout when dropped (a panicking test too).
-struct MigrateTimeout;
+/// Serialises the tests that lower the (process-wide) migration lock timeout.
+static MIGRATE_TIMEOUT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The migration lock timeout lowered until dropped (a panicking test too), one test at
+/// a time (the guard field holds the lock).
+struct MigrateTimeout(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl MigrateTimeout {
+    fn set(ms: u64) -> MigrateTimeout {
+        let guard = MIGRATE_TIMEOUT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        world_store::set_migrate_lock_timeout_ms(ms);
+        MigrateTimeout(guard)
+    }
+
+    /// Back to the default while still held.
+    fn reset(&self) {
+        world_store::set_migrate_lock_timeout_ms(world_store::MIGRATE_LOCK_TIMEOUT_MS);
+    }
+}
 
 impl Drop for MigrateTimeout {
     fn drop(&mut self) {
-        world_store::set_migrate_lock_timeout_ms(world_store::MIGRATE_LOCK_TIMEOUT_MS);
+        self.reset();
     }
 }
 
@@ -907,16 +924,38 @@ fn migration_behind_an_orphan_prepared_part_fails_with_the_remedy() {
         .unwrap();
     }
     assert_eq!(prepared(&w), 1);
-    let _restore = MigrateTimeout;
-    world_store::set_migrate_lock_timeout_ms(300);
+    let timeout = MigrateTimeout::set(300);
     let at = std::time::Instant::now();
     let err = StoreHandle::open(&w.url, Dials::BUILT, OpenMode::Writer).err().expect("the open fails");
     assert!(at.elapsed() < Duration::from_secs(10), "within the bound: {:?}", at.elapsed());
     let text = err.to_string();
     assert!(text.contains("pg_prepared_xacts") && text.contains(gid) && text.contains("ROLLBACK PREPARED"), "{text}");
     exec(&w, &format!("ROLLBACK PREPARED '{gid}'"));
-    world_store::set_migrate_lock_timeout_ms(world_store::MIGRATE_LOCK_TIMEOUT_MS);
+    timeout.reset();
     let h = StoreHandle::open(&w.url, Dials::BUILT, OpenMode::Writer).expect("migrates once the part is gone");
     h.shutdown();
     assert_eq!(prepared(&w), 0);
+}
+
+/// Fix round 2: a migration that times out behind an ordinary lock (no prepared
+/// transaction of the world exists) blames no prepared transaction: it says another
+/// process holds the lock and to retry.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn migration_behind_an_ordinary_lock_says_retry() {
+    let Some(w) = pg_world() else { return };
+    crate::voxel_refusal::old_store(&w.url, 9, "1", &[]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut conn = rt.block_on(sqlx::PgConnection::connect(&w.db.url)).unwrap();
+    let mut tx = rt.block_on(conn.begin()).unwrap();
+    rt.block_on(sqlx::query("LOCK TABLE entities IN ROW EXCLUSIVE MODE").execute(&mut *tx)).unwrap();
+    let timeout = MigrateTimeout::set(300);
+    let err = StoreHandle::open(&w.url, Dials::BUILT, OpenMode::Writer).err().expect("the open fails");
+    let text = err.to_string();
+    assert!(text.contains("another process") && text.contains("retry"), "{text}");
+    assert!(!text.contains("ROLLBACK PREPARED"), "no prepared transaction is blamed: {text}");
+    rt.block_on(tx.rollback()).unwrap();
+    rt.block_on(conn.close()).unwrap();
+    timeout.reset();
+    StoreHandle::open(&w.url, Dials::BUILT, OpenMode::Writer).expect("migrates once the lock is gone").shutdown();
 }

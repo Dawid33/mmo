@@ -671,6 +671,11 @@ macro_rules! engine_rows {
             /// ([`claim_super_regions`]). SQLite: the process's file lock already excludes
             /// every other writer. Callers hold the writer lock.
             pub(crate) async fn set_super_region_regions(pool: &Pool, s: u32) -> Result<bool, StoreError> {
+                // The side divides region coordinates (`super_region_of`, the stale-row
+                // guard's SQL); [`super_region_regions`] refuses a stored 0 at open too.
+                if s == 0 {
+                    return Err(StoreError::Unsupported("a super-region side of 0 regions (it must be >= 1)".into()));
+                }
                 let mut tx = pool.begin().await?;
                 let sql = format!("SELECT super_region_regions FROM world WHERE id = 1{}", $update_lock);
                 sqlx::query(&sql)

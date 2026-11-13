@@ -160,6 +160,9 @@ pub fn set_migrate_lock_timeout_ms(ms: u64) {
 async fn migrate_pg(pool: &sqlx::PgPool) -> Result<(), StoreError> {
     let ms = MIGRATE_LOCK_TIMEOUT.load(std::sync::atomic::Ordering::SeqCst);
     let mut conn = pool.acquire().await?;
+    // Never handed back to the pool with the setting: closed when dropped, on every
+    // path (an error anywhere below included).
+    conn.close_on_drop();
     sqlx::Executor::execute(&mut *conn, format!("SET lock_timeout = '{ms}ms'").as_str()).await?;
     let ran = sqlx::migrate!("migrations/pg").run(&mut *conn).await;
     let lock_timeout = |e: &sqlx::Error| matches!(e, sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03"));
@@ -173,18 +176,30 @@ async fn migrate_pg(pool: &sqlx::PgPool) -> Result<(), StoreError> {
                 .fetch_all(&mut *conn)
                 .await
                 .unwrap_or_default();
-        // Never handed back with the setting (the connection is dropped, not reused).
-        conn.close_on_drop();
-        return Err(StoreError::Backend(format!(
+        return Err(StoreError::Backend(migrate_timeout_message(ms, &gids)));
+    }
+    ran?;
+    // Closed on drop even now (one connection; the pool opens another when needed).
+    Ok(())
+}
+
+/// What a migration that timed out on a lock says: the prepared transactions of this
+/// world if there are any (`gids`), else the other lock holders it can only be.
+fn migrate_timeout_message(ms: u64, gids: &[String]) -> String {
+    if gids.is_empty() {
+        format!(
+            "migrating the world schema waited longer than {ms} ms for a lock: another process is migrating \
+             this world or holds a lock on its tables (no prepared transaction of it is in pg_prepared_xacts); \
+             retry once it is done"
+        )
+    } else {
+        format!(
             "migrating the world schema waited longer than {ms} ms for a table lock; prepared transactions \
              of this world (pg_prepared_xacts: {gids:?}) hold it — a save cut part a crashed host left \
              staged. Start the previous build once (it resolves them), or run ROLLBACK PREPARED '<gid>' for \
              each listed gid, then open the world again"
-        )));
+        )
     }
-    ran?;
-    sqlx::Executor::execute(&mut *conn, "RESET lock_timeout").await?;
-    Ok(())
 }
 
 /// The migration that drops the voxel table and column (`0005_drop_voxel_terrain`).

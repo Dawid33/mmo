@@ -352,10 +352,15 @@ const ENTITIES_TWICE_LISTED: i64 = 20;
 /// warned and ignored.
 pub(crate) async fn report_entities_twice(pool: &PgPool, cut: CutId, tick: Tick) -> bool {
     let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
-        "SELECT n.birth_rx, n.birth_rz, n.serial, n.rx, n.rz, o.rx, o.rz FROM entities n \
+        // The cut's rows through its regions (every region a cut writes gets
+        // `regions.saved_tick` = the cut's tick in the same upsert), then the entities'
+        // key prefix `(rx, rz)` and one `entities_id` probe per row: never a scan of
+        // `entities`. (`regions` has no `saved_tick` index: one row per stored region.)
+        "SELECT n.birth_rx, n.birth_rz, n.serial, n.rx, n.rz, o.rx, o.rz FROM regions r \
+         JOIN entities n ON n.rx = r.rx AND n.rz = r.rz \
          JOIN entities o ON o.birth_rx = n.birth_rx AND o.birth_rz = n.birth_rz AND o.serial = n.serial \
            AND NOT (o.rx = n.rx AND o.rz = n.rz) \
-         WHERE n.saved_tick = $1 ORDER BY n.birth_rx, n.birth_rz, n.serial, o.rx, o.rz LIMIT $2",
+         WHERE r.saved_tick = $1 ORDER BY n.birth_rx, n.birth_rz, n.serial, o.rx, o.rz LIMIT $2",
     )
     .bind(tick as i64)
     .bind(ENTITIES_TWICE_LISTED)

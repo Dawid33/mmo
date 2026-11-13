@@ -127,6 +127,42 @@ async fn schemas_match() {
     drop(db);
 }
 
+/// Whether `pool` has an index named `name` (any table).
+async fn has_index(pool: &Pool, name: &str) -> bool {
+    match pool {
+        Pool::Sqlite(p) => sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = $1")
+            .bind(name)
+            .fetch_optional(p)
+            .await
+            .unwrap()
+            .is_some(),
+        Pool::Pg(p) => sqlx::query("SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1")
+            .bind(name)
+            .fetch_optional(p)
+            .await
+            .unwrap()
+            .is_some(),
+    }
+}
+
+/// `entities_id` (migration 0010): the stale-row guard and the post-commit check find an
+/// entity's other rows through it, on both engines.
+#[tokio::test]
+async fn entities_have_an_index_by_id() {
+    let (sqlite, _g) = open_pool(&StoreUrl::Memory, Dials::BUILT, OpenMode::Writer).await.unwrap();
+    assert!(has_index(&sqlite, "entities_id").await, "SQLite");
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
+    let db = common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
+    {
+        let (pg, _g) = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT, OpenMode::Writer).await.unwrap();
+        assert!(has_index(&pg, "entities_id").await, "Postgres");
+        if let Pool::Pg(p) = &pg {
+            p.close().await;
+        }
+    }
+    drop(db);
+}
+
 /// Both engines carry the same migration versions, so `newest_migration()`
 /// (read from the Postgres set) is what a read-only SQLite open expects too.
 #[test]
