@@ -145,16 +145,18 @@ pub fn register(
     store.register_host(row, fence)
 }
 
-/// Whether a [`PeerLinks::start`] error is the store's fence (this boot was replaced
-/// between its claim and its registration): exit fenced, not a start-up error.
 /// The other hosts that left the world cleanly in a committed leave cut, each with the boot
-/// that left: their `hosts` row is clean (every boot clears its own row when it registers,
-/// before it dials or listens). A crashed host's row is dirty: it is not one of them. Read
-/// at boot for [`game::WorldManager::note_left_peers`].
+/// that left: only a committed leave decision marks a `hosts` row clean, and every boot makes
+/// its own row dirty when it registers (a registration racing the leave commit loses or wins
+/// on the world generation, so a clean row always names the boot that left). A crashed host's
+/// row is dirty: it is not one of them. Read at boot for
+/// [`game::WorldManager::note_left_peers`]; a later boot is expected again from its hello.
 pub fn left_cleanly(store: &world_store::StoreHandle, me: u32) -> Result<Vec<(u32, u64)>, world_store::StoreError> {
     Ok(store.hosts()?.into_iter().filter(|r| r.clean && r.ordinal != me).map(|r| (r.ordinal, r.boot)).collect())
 }
 
+/// Whether a [`PeerLinks::start`] error is the store's fence (this boot was replaced
+/// between its claim and its registration): exit fenced, not a start-up error.
 pub fn is_fenced(e: &io::Error) -> bool {
     e.get_ref().and_then(|e| e.downcast_ref::<StoreError>()).is_some_and(|e| matches!(e, StoreError::Fenced { .. }))
 }

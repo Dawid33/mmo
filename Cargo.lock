@@ -8250,6 +8250,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "auth",
+ "axum",
  "base64 0.22.1",
  "bincode 1.3.3",
  "crossbeam",
@@ -8270,6 +8271,7 @@ dependencies = [
  "sqlx",
  "svc-link",
  "tokio",
+ "tower",
  "world-store",
  "worldgen",
  "wtransport",
