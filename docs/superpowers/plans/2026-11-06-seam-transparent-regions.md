@@ -299,6 +299,8 @@
    `SlotInbox::push_after_arrival` and applied directly after it: after the inputs the arriving bundle
    carries, before the slot's other messages, followers in arrival order. What follows a held creation
    is pushed `Other` behind it, `push_behind`.)*
+   *(amended in execution: a halo seed (`HaloUpdate { replace: true }`) sorts in its own class directly after
+   `HaloSourceGone`, so a respawned region's seed follows the end of its lost incarnation's mirrors at one stamp.)*
 
 ### Task 3.1: Server — `RegionInput::Transfer`, held until the stamped slot
 
