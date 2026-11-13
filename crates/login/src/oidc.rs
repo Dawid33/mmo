@@ -99,8 +99,9 @@ struct Discovery {
 
 struct Keys {
     by_kid: HashMap<String, DecodingKey>,
-    /// When the keys were last fetched (or a fetch last started): the refetch rate limit.
-    last_fetch: Instant,
+    /// When a refetch last started: the refetch rate limit. `None` until the first one, so the
+    /// first unknown `kid` always refetches.
+    last_fetch: Option<Instant>,
 }
 
 pub struct OidcVerifier {
@@ -155,7 +156,7 @@ impl OidcVerifier {
             issuer: issuer.to_string(),
             audience: audience.to_string(),
             jwks_uri,
-            keys: RwLock::new(Keys { by_kid, last_fetch: Instant::now() }),
+            keys: RwLock::new(Keys { by_kid, last_fetch: None }),
         }
     }
 
@@ -236,10 +237,10 @@ impl OidcVerifier {
         {
             // Claim the refetch before the request, so a failing provider is not hammered either.
             let mut keys = self.keys.write().unwrap_or_else(|e| e.into_inner());
-            if keys.last_fetch.elapsed() < Duration::from_secs(JWKS_REFETCH_MIN_SECS) {
+            if keys.last_fetch.is_some_and(|at| at.elapsed() < Duration::from_secs(JWKS_REFETCH_MIN_SECS)) {
                 return Err(OidcError::UnknownKid);
             }
-            keys.last_fetch = Instant::now();
+            keys.last_fetch = Some(Instant::now());
         }
         let by_kid = parse_jwks(&get_text(&http()?, uri).await?)?;
         self.keys.write().unwrap_or_else(|e| e.into_inner()).by_kid = by_kid;

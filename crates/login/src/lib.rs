@@ -15,7 +15,7 @@ use std::io;
 use std::sync::Arc;
 
 pub use api::{AppState, router, system_clock};
-pub use config::{LoginConfig, MailerKind};
+pub use config::{LoginConfig, MailerKind, OidcConfig};
 pub use password::{Hasher, check_password};
 pub use store::{
     AccountId, AccountRow, DISPLAY_NAME_MAX_CHARS, LoginError, LoginStore, OidcUpsert, OpenSession, PendingKick, RefreshOutcome,
@@ -64,7 +64,18 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
             None
         }
     };
-    let state = AppState::new(
+    // A provider that cannot be reached at start is fatal: better than a login that never works.
+    let verifier = match &config.oidc {
+        Some(oidc) => {
+            let verifier = oidc::OidcVerifier::discover(&oidc.issuer, &oidc.audience)
+                .await
+                .map_err(|e| io::Error::other(format!("identity provider {}: {e}", oidc.issuer)))?;
+            log::info!("[login] identity-provider login on: issuer {}, audience {}", oidc.issuer, oidc.audience);
+            Some(verifier)
+        }
+        None => None,
+    };
+    let mut state = AppState::new(
         store,
         Arc::new(signer),
         Hasher::default(),
@@ -73,6 +84,9 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
         system_clock(),
     )
     .with_service_token(service_token);
+    if let Some(verifier) = verifier {
+        state = state.with_oidc(Arc::new(verifier));
+    }
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await

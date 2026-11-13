@@ -33,13 +33,15 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::LoginConfig;
 use crate::host_link::HostLinks;
+use crate::oidc::OidcVerifier;
 use crate::mail::{
     Mail, Mailer, RESET_TOKEN_TTL_SECS, VERIFY_TOKEN_TTL_SECS, already_registered_mail, reset_mail,
     verify_mail,
 };
 use crate::password::{Hasher, check_password};
 use crate::store::normalize_email;
-use crate::store::{AccountRow, LoginError, LoginStore, RefreshOutcome};
+use crate::config::OidcConfig;
+use crate::store::{AccountRow, LoginError, LoginStore, OidcUpsert, RefreshOutcome};
 use crate::{EMAIL_TOKEN_RESET, EMAIL_TOKEN_VERIFY};
 
 /// Random bytes in a refresh or email token.
@@ -57,6 +59,8 @@ const BAD_CREDENTIALS_MSG: &str = "wrong email or password";
 const REVOKED_MSG: &str = "signed out: please log in again";
 const NOT_VERIFIED_MSG: &str = "confirm your email address first (see the mail we sent)";
 const BAD_LINK_MSG: &str = "this link is invalid, used or expired";
+const IDENTITY_REFUSED_MSG: &str = "the identity provider's token was refused: sign in again";
+const IDENTITY_CONFLICT_MSG: &str = "this email address belongs to another account";
 const WORLD_UNAVAILABLE_MSG: &str = "the world server is not reachable right now; try again shortly";
 /// The `Refused` text a kicked session gets after a logout everywhere.
 pub const KICK_LOGOUT_ALL: &str = "signed out everywhere";
@@ -77,6 +81,8 @@ pub struct AppState {
     pub clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// The world hosts' service links (`SpawnPlayer` / `Kick`).
     pub host_links: Arc<HostLinks>,
+    /// Verifies the identity provider's tokens; `None` = identity-provider login is off.
+    pub oidc: Option<Arc<OidcVerifier>>,
     /// A PHC string of [`DUMMY_PASSWORD`] under `hasher`, so an unknown email costs one verify.
     dummy_phc: Arc<str>,
 }
@@ -92,7 +98,14 @@ impl AppState {
     ) -> AppState {
         let dummy_phc = hasher.hash(DUMMY_PASSWORD).into();
         let host_links = Arc::new(HostLinks::new(None, store.clone(), clock.clone()));
-        AppState { store, signer, hasher: Arc::new(hasher), mailer, config, clock, host_links, dummy_phc }
+        AppState { store, signer, hasher: Arc::new(hasher), mailer, config, clock, host_links, oidc: None, dummy_phc }
+    }
+
+    /// Log players in with the identity provider's tokens, checked by `verifier` (the settings
+    /// are `config.oidc`).
+    pub fn with_oidc(mut self, verifier: Arc<OidcVerifier>) -> AppState {
+        self.oidc = Some(verifier);
+        self
     }
 
     /// Dial world hosts with the service `token` (without one, a world with a `host_link` is
@@ -168,6 +181,16 @@ impl Fail {
     }
     fn world_unavailable() -> Fail {
         Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable, WORLD_UNAVAILABLE_MSG)
+    }
+    fn identity_refused() -> Fail {
+        Fail::new(StatusCode::UNAUTHORIZED, ApiErrorCode::IdentityRefused, IDENTITY_REFUSED_MSG)
+    }
+    fn identity_conflict() -> Fail {
+        Fail::new(StatusCode::CONFLICT, ApiErrorCode::IdentityConflict, IDENTITY_CONFLICT_MSG)
+    }
+    /// A route of a feature this deployment does not run.
+    fn not_configured() -> Fail {
+        Fail::new(StatusCode::NOT_FOUND, ApiErrorCode::BadRequest, "not available")
     }
     fn internal() -> Fail {
         Fail::new(StatusCode::INTERNAL_SERVER_ERROR, ApiErrorCode::Internal, "internal error")
@@ -264,7 +287,7 @@ fn login_response(account: &AccountRow, refresh_token: String) -> LoginResponse 
         refresh_token,
         account_email: account.email.clone(),
         email_verified: account.email_verified_at.is_some(),
-        account_name: String::new(),
+        account_name: account.display_name.clone(),
     }
 }
 
@@ -333,6 +356,41 @@ async fn login(State(s): State<AppState>, ApiJson(req): ApiJson<LoginRequest>) -
     let token = issue_refresh(&s, account.account_id, random::<FAMILY_BYTES>()).await?;
     log::info!("[login] account {} logged in", account.account_id);
     Ok(Json(login_response(&account, token)))
+}
+
+/// The verifier and settings, or 404 when identity-provider login is off (both routes alike).
+fn oidc_parts(s: &AppState) -> Result<(&Arc<OidcVerifier>, &OidcConfig), Fail> {
+    match (&s.oidc, &s.config.oidc) {
+        (Some(verifier), Some(config)) => Ok((verifier, config)),
+        _ => Err(Fail::not_configured()),
+    }
+}
+
+async fn login_oidc(State(s): State<AppState>, ApiJson(req): ApiJson<OidcLoginRequest>) -> Result<Json<LoginResponse>, Fail> {
+    let (verifier, _) = oidc_parts(&s)?;
+    let identity = verifier.verify_refreshing(&req.access_token, s.now()).await.map_err(|e| {
+        // The variant only: never the token or the claims.
+        log::warn!("[login] identity-provider token refused: {e}");
+        Fail::identity_refused()
+    })?;
+    let account = match s.store.upsert_oidc_account(&identity.subject, &identity.email, &identity.name, s.now_db()).await? {
+        OidcUpsert::Created(id) | OidcUpsert::Existing(id) | OidcUpsert::Adopted(id) => id,
+        OidcUpsert::EmailTaken => {
+            log::warn!("[login] identity-provider login refused: its email belongs to another account");
+            return Err(Fail::identity_conflict());
+        }
+    };
+    let Some(row) = s.store.account(account).await? else {
+        return Err(Fail::internal());
+    };
+    let token = issue_refresh(&s, account, random::<FAMILY_BYTES>()).await?;
+    log::info!("[login] account {account} logged in with the identity provider");
+    Ok(Json(login_response(&row, token)))
+}
+
+async fn config(State(s): State<AppState>) -> Result<Json<LoginConfigResponse>, Fail> {
+    let (_, oidc) = oidc_parts(&s)?;
+    Ok(Json(LoginConfigResponse { oidc_issuer: oidc.issuer.clone(), oidc_client_id: oidc.client_id.clone() }))
 }
 
 async fn refresh(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest>) -> Result<Json<LoginResponse>, Fail> {
@@ -543,6 +601,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route(PATH_REGISTER, post(register))
         .route(PATH_LOGIN, post(login))
+        .route(PATH_LOGIN_OIDC, post(login_oidc))
+        .route(PATH_CONFIG, get(config))
         .route(PATH_REFRESH, post(refresh))
         .route(PATH_LOGOUT, post(logout))
         .route(PATH_WORLDS, get(worlds))

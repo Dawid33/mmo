@@ -15,6 +15,11 @@ pub const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8790";
 /// `localhost` (browsers treat the two as different origins).
 pub const DEFAULT_CORS_ORIGINS: &str = "http://127.0.0.1:1334,http://localhost:1334";
 
+/// `VOXEL_OIDC_AUDIENCE` unset.
+pub const DEFAULT_OIDC_AUDIENCE: &str = "mmo-login";
+/// `VOXEL_OIDC_CLIENT_ID` unset.
+pub const DEFAULT_OIDC_CLIENT_ID: &str = "game";
+
 /// How mail goes out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MailerKind {
@@ -22,6 +27,17 @@ pub enum MailerKind {
     Log,
     /// Amazon SES v2, sending as `from` (`VOXEL_MAIL_FROM`).
     Ses { from: String },
+}
+
+/// The external identity provider (OpenID Connect) the service logs players in with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OidcConfig {
+    /// The provider's issuer URL (`VOXEL_OIDC_ISSUER`); its discovery document is fetched at start.
+    pub issuer: String,
+    /// The `aud` an access token must carry (`VOXEL_OIDC_AUDIENCE`).
+    pub audience: String,
+    /// The public client id the game logs in as (`VOXEL_OIDC_CLIENT_ID`), told to clients by `/v1/config`.
+    pub client_id: String,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -38,6 +54,8 @@ pub struct LoginConfig {
     /// Refuse login / refresh / join until the email is verified.
     pub require_verified: bool,
     pub mailer: MailerKind,
+    /// `None` (`VOXEL_OIDC_ISSUER` unset): no identity-provider login.
+    pub oidc: Option<OidcConfig>,
 }
 
 impl LoginConfig {
@@ -49,7 +67,8 @@ impl LoginConfig {
     /// From `lookup(name)`; an unset or empty variable takes its default.
     /// `VOXEL_LOGIN_BIND`, `VOXEL_LOGIN_DB`, `VOXEL_LOGIN_KEYS_DIR`, `VOXEL_LOGIN_PUBLIC_URL`,
     /// `VOXEL_LOGIN_CORS_ORIGINS` (comma list), `VOXEL_LOGIN_REQUIRE_VERIFIED` (`1` = on),
-    /// `VOXEL_MAILER` (`log` | `ses`) and `VOXEL_MAIL_FROM` (required with `ses`).
+    /// `VOXEL_MAILER` (`log` | `ses`), `VOXEL_MAIL_FROM` (required with `ses`), and
+    /// `VOXEL_OIDC_ISSUER` (unset = off), `VOXEL_OIDC_AUDIENCE` (`mmo-login`), `VOXEL_OIDC_CLIENT_ID` (`game`).
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<LoginConfig, String> {
         let get = |k: &str, default: &str| {
             lookup(k)
@@ -78,6 +97,11 @@ impl LoginConfig {
             }
             other => return Err(format!("VOXEL_MAILER={other:?}: want `log` or `ses`")),
         };
+        let oidc = Some(get("VOXEL_OIDC_ISSUER", "")).filter(|i| !i.is_empty()).map(|issuer| OidcConfig {
+            issuer,
+            audience: get("VOXEL_OIDC_AUDIENCE", DEFAULT_OIDC_AUDIENCE),
+            client_id: get("VOXEL_OIDC_CLIENT_ID", DEFAULT_OIDC_CLIENT_ID),
+        });
         Ok(LoginConfig {
             bind,
             db_url: get("VOXEL_LOGIN_DB", DEFAULT_DB),
@@ -86,6 +110,7 @@ impl LoginConfig {
             cors_origins,
             require_verified,
             mailer,
+            oidc,
         })
     }
 }
@@ -120,6 +145,7 @@ impl std::fmt::Debug for LoginConfig {
             .field("cors_origins", &self.cors_origins)
             .field("require_verified", &self.require_verified)
             .field("mailer", &self.mailer)
+            .field("oidc", &self.oidc)
             .finish()
     }
 }

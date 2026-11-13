@@ -8,6 +8,8 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use login::mail::LogMailer;
+use login::config::OidcConfig;
+use login::oidc::OidcVerifier;
 use login::{AppState, Hasher, LoginConfig, LoginStore, WorldRow, router};
 use login_api::*;
 use serde::Serialize;
@@ -454,6 +456,9 @@ fn config_defaults_and_overrides() {
     assert_eq!(d.cors_origins, vec![ORIGIN_OK.to_string(), "http://localhost:1334".to_string()]);
     assert!(!d.require_verified);
     assert_eq!(d.mailer, MailerKind::Log);
+    assert_eq!(d.oidc, None);
+    let oidc = LoginConfig::from_lookup(|k| (k == "VOXEL_OIDC_ISSUER").then(|| "https://auth.example/realms/mmo".into())).unwrap();
+    assert_eq!(oidc.oidc, Some(oidc_config("https://auth.example/realms/mmo")));
     let env = |k: &str| {
         match k {
             "VOXEL_LOGIN_BIND" => Some("0.0.0.0:9000"),
@@ -858,4 +863,131 @@ mod host_link {
         assert!(host.wait_seen(|s| s.contains(&kick)).await.contains(&kick));
         assert!(wait_no_pending_kicks(&a).await);
     }
+}
+
+// ---- OIDC login ----
+
+const OIDC_ISSUER: &str = "https://auth.example/realms/mmo";
+
+fn oidc_config(issuer: &str) -> OidcConfig {
+    OidcConfig { issuer: issuer.into(), audience: "mmo-login".into(), client_id: "game".into() }
+}
+
+/// `state` with OIDC on, verifying against `verifier`.
+fn with_oidc(mut state: AppState, issuer: &str, verifier: OidcVerifier) -> AppState {
+    let mut config = (*state.config).clone();
+    config.oidc = Some(oidc_config(issuer));
+    state.config = Arc::new(config);
+    state.with_oidc(Arc::new(verifier))
+}
+
+async fn oidc_app() -> App {
+    app_from(false, |state| {
+        let verifier = OidcVerifier::from_jwks(OIDC_ISSUER, "mmo-login", crate::common::OIDC_JWKS).unwrap();
+        with_oidc(state, OIDC_ISSUER, verifier)
+    })
+    .await
+}
+
+fn oidc_claims(issuer: &str, sub: &str) -> serde_json::Value {
+    serde_json::json!({
+        "iss": issuer, "aud": "mmo-login", "exp": T0 + 300, "sub": sub,
+        "email": "Ann@X.io", "email_verified": true, "preferred_username": "ann",
+    })
+}
+
+impl App {
+    async fn login_oidc(&self, token: String) -> Resp {
+        self.post(PATH_LOGIN_OIDC, &OidcLoginRequest { access_token: token }).await
+    }
+}
+
+#[tokio::test]
+async fn oidc_login_creates_account_and_returns_refresh() {
+    let a = oidc_app().await;
+    let r = a.login_oidc(crate::common::oidc_token(oidc_claims(OIDC_ISSUER, "u-1"), "test-1")).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let login: LoginResponse = r.json();
+    assert!(!login.refresh_token.is_empty());
+    assert_eq!(login.account_name, "ann");
+    assert_eq!(login.account_email, "ann@x.io");
+    assert!(login.email_verified);
+
+    // The refresh token joins like a password login's does, and rotation keeps the name.
+    let j = a.join(&login.refresh_token, "w1").await;
+    assert_eq!(j.status, StatusCode::OK, "{}", j.text());
+    let j: JoinResponse = j.json();
+    assert_ne!(j.refresh_token, login.refresh_token);
+    let again = a.post(PATH_REFRESH, &RefreshRequest { refresh_token: j.refresh_token }).await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(again.json::<LoginResponse>().account_name, "ann");
+}
+
+#[tokio::test]
+async fn oidc_login_with_foreign_audience_is_401() {
+    let a = oidc_app().await;
+    let mut claims = oidc_claims(OIDC_ISSUER, "u-1");
+    claims["aud"] = serde_json::json!("account");
+    let r = a.login_oidc(crate::common::oidc_token(claims, "test-1")).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(r.error(), ApiErrorCode::IdentityRefused);
+}
+
+#[tokio::test]
+async fn oidc_login_email_conflict_is_409() {
+    let a = oidc_app().await;
+    let first = a.login_oidc(crate::common::oidc_token(oidc_claims(OIDC_ISSUER, "u-1"), "test-1")).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let r = a.login_oidc(crate::common::oidc_token(oidc_claims(OIDC_ISSUER, "u-2"), "test-1")).await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.error(), ApiErrorCode::IdentityConflict);
+}
+
+#[tokio::test]
+async fn oidc_routes_are_404_when_not_configured() {
+    let a = app().await;
+    let r = a.login_oidc("x".into()).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(a.get(PATH_CONFIG).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn config_reports_issuer_and_client() {
+    let a = oidc_app().await;
+    let r = a.get(PATH_CONFIG).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let v: serde_json::Value = r.json();
+    assert_eq!(v, serde_json::json!({ "oidc_issuer": OIDC_ISSUER, "oidc_client_id": "game" }));
+}
+
+/// Serves discovery and a JWKS that gains kid `test-2` (the same key) after its first request.
+async fn serve_provider() -> String {
+    use std::sync::atomic::AtomicUsize;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let discovery = serde_json::json!({ "issuer": base, "jwks_uri": format!("{base}/jwks") });
+    let jwks = move || {
+        let mut doc: serde_json::Value = serde_json::from_str(crate::common::OIDC_JWKS).unwrap();
+        if hits.fetch_add(1, Ordering::SeqCst) >= 1 {
+            let mut second = doc["keys"][0].clone();
+            second["kid"] = "test-2".into();
+            doc["keys"].as_array_mut().unwrap().push(second);
+        }
+        axum::Json(doc)
+    };
+    let provider = Router::new()
+        .route("/.well-known/openid-configuration", axum::routing::get(move || async move { axum::Json(discovery) }))
+        .route("/jwks", axum::routing::get(move || async move { jwks() }));
+    tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+    base
+}
+
+#[tokio::test]
+async fn oidc_login_refetches_keys_on_unknown_kid() {
+    let issuer = serve_provider().await;
+    let verifier = OidcVerifier::discover(&issuer, "mmo-login").await.unwrap();
+    let a = app_from(false, |state| with_oidc(state, &issuer, verifier)).await;
+    let r = a.login_oidc(crate::common::oidc_token(oidc_claims(&issuer, "u-1"), "test-2")).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
 }

@@ -6,8 +6,7 @@ const ISSUER: &str = "https://auth.example/realms/mmo";
 const AUDIENCE: &str = "mmo-login";
 const NOW: u64 = 1_800_000_000;
 
-const KEY_PEM: &str = include_str!("fixtures/oidc_rsa.pem");
-const JWKS: &str = include_str!("fixtures/oidc_jwks.json");
+use crate::common::{OIDC_JWKS as JWKS, OIDC_KEY_PEM as KEY_PEM, oidc_token as token};
 
 fn verifier() -> OidcVerifier {
     OidcVerifier::from_jwks(ISSUER, AUDIENCE, JWKS).unwrap()
@@ -24,13 +23,6 @@ fn with(key: &str, value: Value) -> Value {
     let mut c = claims();
     c[key] = value;
     c
-}
-
-/// Signs `claims` with the fixture key (RS256) under key id `kid`.
-fn token(claims: Value, kid: &str) -> String {
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(kid.to_string());
-    jsonwebtoken::encode(&header, &claims, &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).unwrap()).unwrap()
 }
 
 fn check(claims: Value) -> Result<Identity, OidcError> {
