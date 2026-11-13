@@ -267,6 +267,22 @@ pub type StudHaloGenerator = std::sync::Arc<
     dyn Fn(RegionCoords, std::ops::Range<usize>, std::ops::Range<usize>) -> crate::StudRegionSeed + Send + Sync,
 >;
 
+/// A client's body buffered in a runner's inbox: its arrival (stamp, entity),
+/// or its creation (a create or restore held past a save cut).
+#[derive(Debug, Clone, Copy)]
+enum HeldBody {
+    Arrival(Tick, crate::EntityId),
+    Creation(Tick),
+}
+
+impl HeldBody {
+    fn stamp(self) -> Tick {
+        match self {
+            HeldBody::Arrival(t, _) | HeldBody::Creation(t) => t,
+        }
+    }
+}
+
 pub struct RegionRunner {
     id: RegionCoords,
     /// See [`RegionRunner::set_stud_halo_generator`].
@@ -424,18 +440,18 @@ impl RegionRunner {
         match input {
             RegionInput::Event(kind) if kind.input_client().is_some() => self.route_input(kind, None),
             RegionInput::Event(kind) => match self.behind_held_body(&kind) {
-                Some(stamp) => self.inbox.push_behind(kind, stamp),
+                Some(body) => self.queue_behind(kind, body, body.stamp()),
                 None => self.apply_input(kind),
             },
             RegionInput::Transfer(kind, stamp) => match self.behind_held_body(&kind) {
-                Some(held) => self.inbox.push_behind(kind, held.max(stamp)),
+                Some(body) => self.queue_behind(kind, body, stamp),
                 None => self.inbox.push(kind, stamp),
             },
             RegionInput::EventAfterTick(kind, after_tick) if kind.input_client().is_some() => {
                 self.route_input(kind, Some(after_tick))
             }
             RegionInput::EventAfterTick(kind, after_tick) => match self.behind_held_body(&kind) {
-                Some(stamp) => self.inbox.push_behind(kind, stamp.max(after_tick)),
+                Some(body) => self.queue_behind(kind, body, after_tick),
                 None => self.hold_or_apply(kind, after_tick),
             },
             RegionInput::RequestSnapshot(client_id) => {
@@ -516,21 +532,37 @@ impl RegionRunner {
     /// The stamp of `client`'s body buffered in the inbox — its arrival (a
     /// crossing waiting for the end of its slot), or its creation (a create or
     /// restore the manager held past a save cut's tick) — if any.
-    fn held_body(&self, client: ClientId) -> Option<Tick> {
-        self.inbox.holds(|k| match k {
+    fn held_body(&self, client: ClientId) -> Option<HeldBody> {
+        let (stamp, kind) = self.inbox.holds_entry(|k| match k {
             GameEventKind::EntityArrived(b) => b.client.as_ref().is_some_and(|(c, _)| *c == client),
             GameEventKind::CreateClient(c) | GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _) => {
                 *c == client
             }
             _ => false,
+        })?;
+        Some(match kind {
+            GameEventKind::EntityArrived(b) => HeldBody::Arrival(stamp, b.id),
+            _ => HeldBody::Creation(stamp),
         })
     }
 
-    /// No event for a client is applied before its buffered body: the stamp
+    /// Queue `kind` (stamped `stamp`) behind `body`: directly after a buffered
+    /// arrival — after the inputs it carries, before the slot's other messages
+    /// (`SlotInbox::push_after_arrival`) — unless it is for a later slot than
+    /// the arrival's (then behind everything of its own stamp); behind a held
+    /// creation, among class `Other` (`push_behind`).
+    fn queue_behind(&mut self, kind: GameEventKind, body: HeldBody, stamp: Tick) {
+        match body {
+            HeldBody::Arrival(arrives, id) if stamp <= arrives => self.inbox.push_after_arrival(kind, arrives, id),
+            held => self.inbox.push_behind(kind, held.stamp().max(stamp)),
+        }
+    }
+
+    /// No event for a client is applied before its buffered body: the body
     /// to queue `kind` (a server event for a client — park, leave, …) behind
-    /// it, when there is one. Any other plain `Event` overtakes the inbox (see
+    /// ([`Self::queue_behind`]), when there is one. Any other plain `Event` overtakes the inbox (see
     /// [`RegionInput::Event`]).
-    fn behind_held_body(&self, kind: &GameEventKind) -> Option<Tick> {
+    fn behind_held_body(&self, kind: &GameEventKind) -> Option<HeldBody> {
         let client = match kind {
             GameEventKind::ParkPlayer(c) | GameEventKind::ClientLeft(c) => Some(*c),
             k => k.origin_client(),
@@ -641,7 +673,8 @@ impl RegionRunner {
         if !self.region.data().clients.contains_key(&client) {
             // Its arrival, or its creation held past a save cut
             // (`WorldManager::send_play_event`).
-            if let Some(arrives) = self.held_body(client) {
+            if let Some(body) = self.held_body(client) {
+                let arrives = body.stamp();
                 let now = self.region.current_tick() as u64;
                 match stamp {
                     // A later slot than the arrival's, not open yet: the
@@ -649,7 +682,7 @@ impl RegionRunner {
                     Some(s) if s > arrives && s > now && s - now <= MAX_INPUT_LEAD_TICKS => {
                         self.held.push_back((kind, s))
                     }
-                    _ => self.inbox.push_behind(kind, arrives),
+                    _ => self.queue_behind(kind, body, arrives),
                 }
                 return;
             }

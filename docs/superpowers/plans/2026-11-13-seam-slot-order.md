@@ -27,16 +27,16 @@
 
    | class | kind | key within the class |
    |---|---|---|
-   | 0 | `EntityArrived` | entity id (birth region `x`, `z`, serial) |
+   | 0 | `EntityArrived` | entity id (birth region `x`, `z`, serial); an arrival's followers directly after it, in arrival order *(amended in execution, Task 3 fix round 1: see point 5)* |
    | 1 | `HaloEntityGone` | `from` `(x, z)`, entity id |
    | 2 | `HaloEntity` | `source_region` `(x, z)`, entity id |
    | 3 | `HaloUpdate` | `from` `(x, z)` |
    | 4 | `HaloSourceGone` | region `(x, z)` |
    | 5 | `Intent` | intents before replies; an intent by its sending entity (`by`), a reply by the entity it is for, then the region that answered it (the owner of its intent's position; `BreakBlock` / `PlaceBlock` carry none); replies only, then their content (`reply`, `hops`, `hint`); then arrival *(amended in execution: "arrival only" left two sources' intents or replies tied, so the `seq` assigned on receipt — hashed state — still followed channel timing; the key makes messages of different sources never tie)* *(amended in execution, Task 3: replies to `BreakBlock` / `PlaceBlock` carry no position, and a reply relayed through the entity's old region could tie with a direct reply from the same owner — replies now tie-break on their content; intents do not, since one sender's emission order carries meaning: carve then place)* |
-   | 6 | anything else, and anything queued **behind** another entry | arrival only |
+   | 6 | anything else (a held creation among them), and anything queued **behind** a held creation | arrival only |
 
    Classes 0–3 are in a source's own emission order (`Departures`, then `HaloEntities` with every `Gone` before every `Update`, then `HaloDeltas`), so one source's messages keep their relative order.
-5. An entry that must follow another (a client's event behind its held creation; a crossing player's input behind that player's arrival) is pushed as class 6 with the stamp of the entry it follows: it sorts after every class 0–5 entry of that stamp and keeps arrival order among class 6.
+5. An entry that must follow another is queued behind it. Behind a buffered **arrival** (a crossing player's late input, a park or leave for that body) it is pushed as a follower of that arrival (`SlotInbox::push_after_arrival`): same stamp, class 0 and key as the arrival, sorted directly after it — after the inputs the arriving bundle carries (applied with the arrival), before the slot's other messages — followers in arrival order; one for a later slot than the arrival's goes behind everything of its own stamp. Behind a held **creation** (itself class 6) it is pushed as class 6 with the creation's stamp and keeps arrival order among class 6. *(amended in execution, Task 3 fix round 1: the plan first queued every follower as class 6, after all of the slot's class 0–5 messages; but on the server's common path a crossing player's inputs travel in the bundle and apply right after `EntityArrived`, so a late input sat elsewhere than a carried one, and a client predicting either position mispredicted whenever another neighbour message shared the arrival's slot. One position on both sides: directly after the arrival.)*
 
 **What does not change:** the tick a message takes effect in (the next `Tick` sees it either way); the wire; the stamps; the intent queue's `(due, source, seq)` order (its `seq`, assigned on receipt, becomes canonical because class 5's key separates sources — *amended in execution*: receipt order alone is not canonical across sources); where the state hash and a save cut's snapshot are taken (after the `Tick`, at the opening of a slot — they now see every message of the closed slot, on both sides alike).
 

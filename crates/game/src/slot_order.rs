@@ -25,6 +25,14 @@ use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentRefusal, IntentRep
 ///   which keep arrival order (a sender's emission order carries meaning: carve
 ///   then place);
 /// - `Other`: arrival only.
+///
+/// A follower of a buffered arrival ([`SlotInbox::push_after_arrival`]: a
+/// client's input or server event for the arriving body) takes its arrival's
+/// stamp, class and key and sorts directly after it, followers in arrival
+/// order — before the slot's other messages (amended in execution: one
+/// position on both sides, the one a crossing body's carried inputs have).
+/// A follower of a held creation (itself `Other`) is pushed `Other` behind it
+/// ([`SlotInbox::push_behind`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlotClass {
     Arrival = 0,
@@ -152,6 +160,9 @@ struct Entry {
     key: Key,
     /// Replies only (`None` for every other entry, and for `push_behind`).
     tie: Option<ReplyTie>,
+    /// 1 for a follower of an arrival (`push_after_arrival`): after the
+    /// arrival, which shares its stamp, class and key; 0 otherwise.
+    follower: u8,
     arrival: u64,
     kind: GameEventKind,
 }
@@ -169,9 +180,13 @@ impl SlotInbox {
     }
 
     fn add(&mut self, kind: GameEventKind, stamp: Tick, class: SlotClass, key: Key, tie: Option<ReplyTie>) {
+        self.add_entry(kind, stamp, class, key, tie, 0);
+    }
+
+    fn add_entry(&mut self, kind: GameEventKind, stamp: Tick, class: SlotClass, key: Key, tie: Option<ReplyTie>, follower: u8) {
         let arrival = self.next_arrival;
         self.next_arrival += 1;
-        self.entries.push_back(Entry { stamp, class, key, tie, arrival, kind });
+        self.entries.push_back(Entry { stamp, class, key, tie, follower, arrival, kind });
     }
 
     /// Buffer a message; its class and key come from the kind.
@@ -186,6 +201,14 @@ impl SlotInbox {
         self.add(kind, stamp, SlotClass::Other, [0; 6], None);
     }
 
+    /// Buffer an entry that must follow the arrival of `entity` stamped
+    /// `stamp`: directly after that arrival, before the slot's other
+    /// messages; followers of one arrival keep their arrival order.
+    pub fn push_after_arrival(&mut self, kind: GameEventKind, stamp: Tick, entity: EntityId) {
+        let [a, b, c] = id_key(entity);
+        self.add_entry(kind, stamp, SlotClass::Arrival, [a, b, c, 0, 0, 0], None, 1);
+    }
+
     fn drain_where(&mut self, take: impl Fn(Tick) -> bool) -> Vec<GameEventKind> {
         let mut out = Vec::new();
         let mut keep = VecDeque::with_capacity(self.entries.len());
@@ -198,7 +221,7 @@ impl SlotInbox {
         }
         self.entries = keep;
         // `arrival` is unique, so the order is total (and a stable sort is moot).
-        out.sort_by_key(|e| (e.stamp, e.class, e.key, e.tie, e.arrival));
+        out.sort_by_key(|e| (e.stamp, e.class, e.key, e.tie, e.follower, e.arrival));
         out.into_iter().map(|e| e.kind).collect()
     }
 
@@ -231,7 +254,13 @@ impl SlotInbox {
 
     /// The stamp of the first buffered entry (in arrival order) matching `pred`.
     pub fn holds(&self, pred: impl Fn(&GameEventKind) -> bool) -> Option<Tick> {
-        self.entries.iter().find(|e| pred(&e.kind)).map(|e| e.stamp)
+        self.holds_entry(pred).map(|(stamp, _)| stamp)
+    }
+
+    /// The stamp and kind of the first buffered entry (in arrival order)
+    /// matching `pred`: what a follower needs to address it.
+    pub fn holds_entry(&self, pred: impl Fn(&GameEventKind) -> bool) -> Option<(Tick, &GameEventKind)> {
+        self.entries.iter().find(|e| pred(&e.kind)).map(|e| (e.stamp, &e.kind))
     }
 }
 
@@ -545,6 +574,47 @@ mod tests {
         inbox.push(r.clone(), 2);
         assert_eq!(inbox.drain_all(), vec![r.clone(), r, input(1)]);
         assert!(reply_tie(&carve_by(eid(0, 0, 3), 0)).is_none(), "intents carry no content tie-break");
+    }
+
+    /// A follower of an arrival sorts directly after it, before the slot's
+    /// other messages, whatever the push order; two followers keep their
+    /// arrival order.
+    #[test]
+    fn a_follower_of_an_arrival_sorts_directly_after_it() {
+        let (e, smaller) = (eid(0, 0, 9), eid(-1, 0, 1));
+        let (f1, f2) = (input(1), input(2));
+        let other = update(rc(0, -1), eid(0, -1, 4), 1.0);
+        let want = vec![arrival(smaller), arrival(e), f1.clone(), f2.clone(), other.clone()];
+        let orders: [[usize; 5]; 4] = [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0], [2, 4, 0, 3, 1], [3, 0, 4, 2, 1]];
+        for order in orders {
+            let mut inbox = SlotInbox::new();
+            let mut pushed_f1 = false;
+            for i in order {
+                match i {
+                    0 => inbox.push(arrival(e), 5),
+                    1 => inbox.push(arrival(smaller), 5),
+                    // f1 is always pushed before f2: they keep that order.
+                    2 | 3 if !pushed_f1 => {
+                        inbox.push_after_arrival(f1.clone(), 5, e);
+                        pushed_f1 = true;
+                    }
+                    2 | 3 => inbox.push_after_arrival(f2.clone(), 5, e),
+                    _ => inbox.push(other.clone(), 5),
+                }
+            }
+            assert_eq!(inbox.drain_due(5), want, "push order {order:?}");
+        }
+    }
+
+    /// A follower of a held creation is pushed behind it (class `Other`), as before.
+    #[test]
+    fn a_follower_of_a_creation_stays_behind_it() {
+        let create = GameEventKind::CreateClient(7);
+        let mut inbox = SlotInbox::new();
+        inbox.push(create.clone(), 4);
+        inbox.push_behind(input(7), 4);
+        inbox.push(arrival(eid(0, 0, 1)), 4);
+        assert_eq!(inbox.drain_due(4), vec![arrival(eid(0, 0, 1)), create, input(7)]);
     }
 
     #[test]

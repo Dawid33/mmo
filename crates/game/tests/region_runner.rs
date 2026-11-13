@@ -495,6 +495,45 @@ fn carried_inputs_follow_the_arrival_before_queued_ones() {
     assert_eq!(kinds[1..], [look(1.0), look(2.0), GameEventKind::Tick, look(3.0)]);
 }
 
+/// A late input for a body whose arrival is buffered lands directly after that
+/// arrival — where a crossing body's carried inputs land — before the slot's
+/// other messages (here a halo message of another source).
+#[test]
+fn late_input_for_a_buffered_arrival_lands_right_after_it() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    let other = ghost(RegionCoords::new(1, 0), game::REGION_SIZE - 1.0);
+    r.handle_input(RegionInput::Transfer(arriving_body(7, 1), t));
+    r.handle_input(RegionInput::Transfer(other.clone(), t));
+    let input = key_input(7);
+    r.handle_input(RegionInput::Event(input.clone()));
+    r.tick();
+    let kinds: Vec<_> = processed(&out).into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds.len(), 4, "{kinds:?}");
+    assert!(is_arrival_of(&kinds[0], 7), "{kinds:?}");
+    assert_eq!(kinds[1..], [input, other, GameEventKind::Tick]);
+}
+
+/// With carried inputs and a late one: the arrival, the carried ones (older),
+/// the late one, then the slot's other messages.
+#[test]
+fn carried_then_late_inputs_land_right_after_the_arrival() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    let look = |dx| GameEventKind::PlayerInput(7, game::InputEvent::MouseMotion { dx, dy: 0.0 });
+    let other = ghost(RegionCoords::new(1, 0), game::REGION_SIZE - 1.0);
+    let GameEventKind::EntityArrived(mut bundle) = arriving_body(7, 1) else { unreachable!() };
+    bundle.pending_inputs = vec![(look(1.0), t as u64)];
+    r.handle_input(RegionInput::Transfer(other.clone(), t));
+    r.handle_input(RegionInput::Transfer(GameEventKind::EntityArrived(bundle), t));
+    r.handle_input(RegionInput::Event(look(2.0)));
+    r.tick();
+    let kinds: Vec<_> = processed(&out).into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds.len(), 5, "{kinds:?}");
+    assert!(is_arrival_of(&kinds[0], 7), "{kinds:?}");
+    assert_eq!(kinds[1..], [look(1.0), look(2.0), other, GameEventKind::Tick]);
+}
+
 /// `Shutdown` with a save cut pending at a tick the region will not reach: what is
 /// buffered for the slots before the cut tick is applied before the `CutSnapshot`,
 /// the rest after it, before `Stopped` — nothing lost.
