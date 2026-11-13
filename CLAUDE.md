@@ -71,6 +71,15 @@ print secrets.
 
 ## Testing
 
+**Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
+token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
+HTTP API at https://grafana.factoriosurvivalworld.com (`Authorization: Bearer $GRAFANA_SERVICE_TOKEN`;
+data sources: Prometheus (local), Thanos, Loki, Tempo, Pyroscope, CloudWatch, Alertmanager; `just orion-grafana`
+gives a local port-forward). Load it with `set -a; . ./.env; set +a` inside the one command that needs it; never echo it,
+pass it on a command line that gets logged, or write it anywhere else. Reading is fine without asking;
+**ask before changing anything in Grafana** (dashboards, alerts, data sources, users, tokens) — durable
+changes belong in `deploy/modules/monitoring/`, not in the UI.
+
 **Never run whole game/server/client suites as a routine check.** Verify with:
 
 - `just test-one <crate> "<cargo test args>"` for exactly the touched tests. Integration tests are ONE
