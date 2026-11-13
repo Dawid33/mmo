@@ -169,14 +169,31 @@ pub struct GameInstanceManager {
     /// Opens connections to other hosts (`None`: this transport has only the one).
     opener: Option<Box<dyn ConnOpener + Send>>,
     /// Regions whose observer connection closed, asked for again through the home
-    /// once `conn_clock_ms` reaches the value (`connections::OBSERVER_RETRY_MS`).
+    /// once `conn_clock_ms` reaches the value (`connections::observer_retry_delay_ms`).
     observer_retry: BTreeMap<RegionCoords, u64>,
+    /// How many times in a row each host's observer connection ended with regions to
+    /// ask for again (by host ordinal; reset by a snapshot from that host): the retry
+    /// backs off.
+    observer_failures: BTreeMap<u32, u32>,
     /// Session time in ms: `TICK_RATE` per client tick (no wall clock: harnesses and
     /// wasm run it too).
     conn_clock_ms: u64,
-    /// The key `pump_packets` tags its one connection's packets with
-    /// (`connections::tag_key`).
-    packets_tag: u32,
+    /// A region the home sent the client to on another host unasked
+    /// (`RegionElsewhere` for a region it did not subscribe): a move's target, held in
+    /// the window until the `PlayerRegion` of the move comes.
+    pending_move: Option<RegionCoords>,
+    /// Regions whose subscribe went out through the home and was not answered yet (by
+    /// a snapshot or a `RegionElsewhere`), with when (`conn_clock_ms`): a
+    /// `RegionElsewhere` for one released meanwhile is a late answer, not a move.
+    asked_home: BTreeMap<RegionCoords, u64>,
+    /// Since when (`conn_clock_ms`) the predicted body — or a move — is on another
+    /// host than the home's with no `PlayerRegion` from there, and whether that was
+    /// logged ([`HOME_UNCONFIRMED_WARN_MS`]).
+    home_unconfirmed_since: Option<u64>,
+    home_unconfirmed_warned: bool,
+    /// LOD keys still to be asked of the home again since it moved hosts (paced like
+    /// new keys).
+    lod_resend: std::collections::BTreeSet<game::lod::LodKey>,
     /// Where the predicted regions run (inline here; one thread each in
     /// native play, `use_region_threads`). The manager never touches a
     /// `Region` directly: `RegionCmd` in, `RegionReport` out.
@@ -319,6 +336,19 @@ const KEEPUP_WARN_HARD_DEPTH: usize = 64;
 /// table in ~2s at the 50ms tick and leaves any table up to 32 keys unpaced.
 pub const LOD_REQUESTS_PER_TICK: usize = 32;
 
+/// How long the predicted body (or a move the home announced) may stand on another
+/// host than the home's with no `PlayerRegion` from that host before the client logs
+/// it as stranded (once per episode; it keeps going: the hosts tell it if the body was
+/// parked, `PLAYER_PARKED_ELSEWHERE`). Above the hosts' hand-off session grace
+/// (`game::HANDOFF_SESSION_GRACE_MS`).
+pub const HOME_UNCONFIRMED_WARN_MS: u64 = 15_000;
+const _: () = assert!(HOME_UNCONFIRMED_WARN_MS > game::HANDOFF_SESSION_GRACE_MS);
+
+/// How long a subscribe sent through the home is remembered unanswered
+/// (`GameInstanceManager::asked_home`); a host that cannot reach a region's owner
+/// never answers.
+const ASKED_HOME_FORGET_MS: u64 = 10_000;
+
 /// Client-side rolling counters for reconciliation load and clock drift,
 /// flushed to one INFO line every `METRICS_REPORT_INTERVAL`. The window start
 /// is lazily set on the first native report so construction stays wasm-safe
@@ -345,6 +375,10 @@ struct ReconMetrics {
     corrections: u32,
     correction_sum: f32,
     correction_max: f32,
+    /// The same over the whole session (never reset by the metrics window): the
+    /// harness reads them (`corrections`).
+    total_corrections: u32,
+    total_correction_max: f32,
     /// World-clock steps (`regions::clock`): how many, and the ticks the
     /// predicted tick moved over them.
     align_steps: u32,
@@ -415,6 +449,9 @@ const CROSSING_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Default)]
 struct CrossingProbe {
     open: Option<(Instant, RegionCoords, RegionCoords)>,
+    /// The hosts serving the region left and the region entered (`None`: not known),
+    /// as the client's connections had them at the flip: a host flip when they differ.
+    hosts: (Option<u32>, Option<u32>),
     /// Ticks the new home still had to sit out (ahead of the clock) at the flip.
     stalled_at_flip: usize,
     last_home_tick: Option<Instant>,
@@ -437,11 +474,12 @@ struct CrossingProbe {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CrossingProbe {
-    fn flip(&mut self, from: RegionCoords, to: RegionCoords, stalled_at_flip: usize) {
+    fn flip(&mut self, from: RegionCoords, to: RegionCoords, stalled_at_flip: usize, hosts: (Option<u32>, Option<u32>)) {
         // Crossed again inside the window: close the old one early.
         self.report();
         *self = CrossingProbe {
             open: Some((Instant::now(), from, to)),
+            hosts,
             stalled_at_flip,
             last_home_tick: self.last_home_tick,
             before_tick_gap_max: self.before_tick_gap_max,
@@ -510,7 +548,8 @@ impl CrossingProbe {
             "region_crossing",
             "from={},{} to={},{} window_ms={} confirm_ms={} stalled_at_flip={} tick_gap_max_ms={} \
              before_tick_gap_max_ms={} home_stalled_ticks={} home_align={}({:+}t) corrections={} \
-             correction_max={:.2}u snapshots={} snapshot_ms={} snapshot_max_ms={}",
+             correction_max={:.2}u snapshots={} snapshot_ms={} snapshot_max_ms={} host_flip={} from_host={} \
+             to_host={}",
             from.x,
             from.z,
             to.x,
@@ -527,7 +566,10 @@ impl CrossingProbe {
             self.correction_max,
             self.snapshots,
             game::perf::ms(self.snapshot_time),
-            game::perf::ms(self.snapshot_max)
+            game::perf::ms(self.snapshot_max),
+            u8::from(self.hosts.0 != self.hosts.1),
+            self.hosts.0.map_or(-1, i64::from),
+            self.hosts.1.map_or(-1, i64::from)
         );
         // The next crossing's baseline starts now.
         self.before_tick_gap_max = Duration::ZERO;
@@ -701,8 +743,13 @@ impl GameInstanceManager {
             first_conn_recv,
             opener: None,
             observer_retry: BTreeMap::new(),
+            observer_failures: BTreeMap::new(),
             conn_clock_ms: 0,
-            packets_tag: crate::connections::PROVISIONAL_CONN,
+            pending_move: None,
+            asked_home: BTreeMap::new(),
+            home_unconfirmed_since: None,
+            home_unconfirmed_warned: false,
+            lod_resend: std::collections::BTreeSet::new(),
             client_id: None,
             home_region: None,
             window_center: None,
@@ -761,15 +808,21 @@ impl GameInstanceManager {
         }
     }
 
-    /// The connection that serves `rc` (harness hook: a host's ordinal, or
-    /// `connections::PROVISIONAL_CONN` for the home before it named itself).
-    pub fn region_connection(&self, rc: RegionCoords) -> u32 {
-        self.conns.connection_of(rc)
+    /// The host of the connection that serves `rc` (harness hook; `None` before the
+    /// home named itself).
+    pub fn region_host(&self, rc: RegionCoords) -> Option<u32> {
+        self.conns.ordinal_of(self.conns.connection_of(rc))
     }
 
-    /// The home connection's key (harness hook).
-    pub fn home_connection(&self) -> u32 {
-        self.conns.home()
+    /// The home connection's host (harness hook; `None` before it named itself).
+    pub fn home_host(&self) -> Option<u32> {
+        self.conns.home_ordinal()
+    }
+
+    /// The hosts this session holds a connection to, by connection key (harness
+    /// hook).
+    pub fn connection_hosts(&self) -> Vec<(u32, Option<u32>)> {
+        self.conns.keys().into_iter().map(|key| (key, self.conns.ordinal_of(key))).collect()
     }
 
     /// Override how the initial connect is retried (default in production).
@@ -904,6 +957,17 @@ impl GameInstanceManager {
         self.recon.total_mispredictions
     }
 
+    /// How many LOD keys this session holds subscribed (test/harness hook).
+    pub fn lod_subscriptions(&self) -> usize {
+        self.lod_subscribed.len()
+    }
+
+    /// Home-region corrections over the whole session: how many, and the largest
+    /// (world units) (test/harness hook).
+    pub fn corrections(&self) -> (u32, f32) {
+        (self.recon.total_corrections, self.recon.total_correction_max)
+    }
+
     /// The client's current home region (test/harness hook).
     pub fn home_region(&self) -> RegionCoords {
         self.home_region.expect("home region set")
@@ -938,6 +1002,7 @@ impl GameInstanceManager {
             GameEventKind::Tick => {
                 self.conn_clock_ms += game::TICK_RATE;
                 self.retry_observer_regions();
+                self.maintain_connections();
                 #[cfg(not(target_arch = "wasm32"))]
                 let tick_start = Instant::now();
                 let Some(target) = self.clock.advance() else {
@@ -1172,6 +1237,8 @@ impl GameInstanceManager {
                                 self.recon.corrections += 1;
                                 self.recon.correction_sum += moved;
                                 self.recon.correction_max = self.recon.correction_max.max(moved);
+                                self.recon.total_corrections += 1;
+                                self.recon.total_correction_max = self.recon.total_correction_max.max(moved);
                                 #[cfg(not(target_arch = "wasm32"))]
                                 self.crossing.correction(moved);
                             }
@@ -1239,7 +1306,8 @@ impl GameInstanceManager {
                 #[cfg(not(target_arch = "wasm32"))]
                 if self.home_region != Some(target) {
                     let stalled = self.clock.tick().map_or(0, |t| self.held_ticks(target, t));
-                    self.crossing.flip(source, target, stalled);
+                    let hosts = (self.region_host(source), self.region_host(target));
+                    self.crossing.flip(source, target, stalled, hosts);
                 }
                 self.home_region = Some(target);
             }
@@ -1285,13 +1353,11 @@ impl GameInstanceManager {
     }
 
     /// [`Self::pump`] for a transport with one connection (`LocalServer` harnesses):
-    /// every packet is that connection's, keyed as its transport would
-    /// (`connections::tag_key`).
+    /// every packet is the login connection's.
     pub fn pump_packets(&mut self, packets: &Receiver<ServerPacket>) -> Result<bool, GameError> {
         let (send, incoming) = crossbeam::channel::unbounded();
         for packet in packets.try_iter() {
-            let key = crate::connections::tag_key(&mut self.packets_tag, &packet);
-            let _ = send.send((key, ConnEvent::Packet(packet)));
+            let _ = send.send((crate::connections::LOGIN_CONN, ConnEvent::Packet(packet)));
         }
         self.pump(&incoming)
     }
@@ -1386,14 +1452,17 @@ impl GameInstanceManager {
             game::PlayMode::Adventure => self.fortress_radius,
             game::PlayMode::Fortress => 0,
         };
-        desired_window(
+        let mut window = desired_window(
             center,
             self.home_region,
             self.near_radius,
             home_radius,
             self.fortress_region,
             self.fortress_radius,
-        )
+        );
+        // A move's target, until its `PlayerRegion` makes it the home.
+        window.extend(self.pending_move);
+        window
     }
 
     /// Centre of the near window and the LOD rings: the viewer's region, but
@@ -1555,7 +1624,7 @@ impl GameInstanceManager {
         for rc in wanted {
             // The home, unless another host already serves it (it answers with
             // `RegionElsewhere` for a region another host owns).
-            self.send_out(Outgoing::Region(rc, ClientPacket::RequestRegionConnection(rc)));
+            self.request_region(rc);
         }
         let stale: Vec<RegionCoords> = self.subscribed.difference(&desired).copied().collect();
         for rc in stale {
@@ -1619,6 +1688,14 @@ impl GameInstanceManager {
             game::lod::LOD_STICKY_BAND,
         );
         self.lod_assigned = assigned;
+        // Keys held since before the home moved hosts: asked of the new home again,
+        // paced like new ones (and ahead of them).
+        self.lod_resend.retain(|key| desired.contains(key));
+        let resend: Vec<game::lod::LodKey> = self.lod_resend.iter().take(LOD_REQUESTS_PER_TICK).copied().collect();
+        for key in &resend {
+            self.lod_resend.remove(key);
+            self.send_out(Outgoing::Home(ClientPacket::RequestLod(*key)));
+        }
         if desired == self.lod_subscribed {
             if !self.join.lod_requests_done && !desired.is_empty() {
                 // The paced RequestLod diff has fully drained for the first time.
@@ -1646,7 +1723,7 @@ impl GameInstanceManager {
         // distance, so the set's own order is nearest-first.
         let wanted: Vec<game::lod::LodKey> = desired
             .difference(&self.lod_subscribed)
-            .take(LOD_REQUESTS_PER_TICK)
+            .take(LOD_REQUESTS_PER_TICK - resend.len())
             .copied()
             .collect();
         for key in wanted {
@@ -1707,8 +1784,7 @@ impl GameInstanceManager {
                 Err(GameError::Disconnected(reason))
             }
             ConnEvent::Closed(reason) => {
-                info!("[client] the connection to host {conn} closed: {reason}");
-                self.close_observer(conn);
+                self.close_observer(conn, &reason, false);
                 Ok(())
             }
         }
@@ -1739,57 +1815,111 @@ impl GameInstanceManager {
             }
             return self.apply_packet(conn, packet);
         }
-        if conn == self.conns.home() {
-            return self.apply_packet(conn, packet);
-        }
         match packet {
+            // The player's hop on that host: for the `PlayerRegion` behind it.
+            ServerPacket::HomeHop(hop) => {
+                self.conns.on_home_hop(conn, hop);
+                return Ok(());
+            }
+            // The home's counts; another host's makes it the home, unless it is older
+            // than a home already taken (`ConnectionSet::on_player_region`).
+            ServerPacket::PlayerRegion(..) => {
+                let old = self.conns.home();
+                if !self.conns.on_player_region(conn) {
+                    info!(
+                        "[client] a PlayerRegion from host {:?} older than the home's (host {:?}): ignored",
+                        self.conns.ordinal_of(conn),
+                        self.conns.home_ordinal()
+                    );
+                    return Ok(());
+                }
+                if self.conns.home() != old {
+                    self.home_moved(old);
+                }
+                return self.apply_packet(conn, packet);
+            }
+            packet if conn == self.conns.home() => return self.apply_packet(conn, packet),
             ServerPacket::Host(endpoint) => {
                 if !self.conns.on_host(conn, endpoint.ordinal) {
-                    self.close_observer(conn);
+                    self.close_observer(conn, "its Host packet names another host", false);
                 }
             }
             ServerPacket::Refused(why) => return self.observer_refused(conn, why),
             // Only the home's samples steer the clock (one host's world tick
             // numbering is every host's, but its round trip is not).
             ServerPacket::SyncClock(..) => {}
-            // `PlayerRegion` on another host's connection (a hand-off there) is
-            // R3 Task 18's; nothing else is an observer connection's business.
-            _ => log::debug!("[client] a non-region packet on host {conn}'s observer connection: ignored"),
+            _ => log::debug!("[client] a non-region packet on connection {conn} (not the home): ignored"),
         }
         Ok(())
     }
 
+    /// The home moved from connection `old` to another host's (its `PlayerRegion`
+    /// came): input, UI requests and the clock follow `conns.home()` from now on; the
+    /// old connection stays for the regions it serves. The LOD subscriptions move too —
+    /// released on the old host (a session holding only LOD subscriptions there would
+    /// be idle-closed) and asked of the new home again, paced (`update_lod_window`).
+    fn home_moved(&mut self, old: u32) {
+        info!(
+            "[client] the home moved from host {:?} to host {:?}",
+            self.conns.ordinal_of(old),
+            self.conns.home_ordinal()
+        );
+        for key in &self.lod_subscribed {
+            self.conns.route(Outgoing::Conn(old, ClientPacket::ReleaseLod(*key)));
+        }
+        self.lod_resend = self.lod_subscribed.clone();
+    }
+
     /// Another host refused (and closes) its connection: its regions are asked
-    /// for again through the home after `OBSERVER_RETRY_MS` (an idle close, a
+    /// for again through the home after the retry wait (an idle close, a
     /// ticket that reached that host after the client did). A player who is no
     /// longer this session's anywhere ends the session: log in again.
     fn observer_refused(&mut self, conn: u32, why: String) -> Result<(), GameError> {
         if why == game::PLAYER_PARKED_ELSEWHERE || why == game::PLAYER_ELSEWHERE_REFUSAL {
-            error!("[client] host {conn} refused the connection: {why}");
+            error!("[client] host {:?} refused the connection: {why}", self.conns.ordinal_of(conn));
             return Err(GameError::Disconnected(format!("The server refused the connection: {why}")));
         }
-        warn!(
-            "[client] host {conn} refused the connection: {why}; its regions are asked for again in {} ms",
-            crate::connections::OBSERVER_RETRY_MS
-        );
-        self.close_observer(conn);
+        // An observer session with no region subscription is closed by its host:
+        // routine (the window left that host's regions).
+        let routine = why == game::OBSERVER_IDLE_REFUSAL;
+        self.close_observer(conn, &format!("refused: {why}"), routine);
         Ok(())
     }
 
-    /// Close another host's connection (or forget one that closed): its regions
-    /// are dropped here and asked for again through the home after
-    /// `OBSERVER_RETRY_MS`.
-    fn close_observer(&mut self, conn: u32) {
+    /// Close another host's connection (or forget one that closed, `why`): its regions
+    /// are dropped here and asked for again through the home, after a wait that doubles
+    /// with each end of that host's connection in a row
+    /// (`connections::observer_retry_delay_ms`). A `routine` end, or one of a
+    /// connection that served no region, is logged at info, others as a warning.
+    fn close_observer(&mut self, conn: u32, why: &str, routine: bool) {
+        let ordinal = self.conns.ordinal_of(conn);
         let Closed::Observer { regions } = self.conns.on_closed(conn) else {
             error!("[client] close_observer on the home connection");
             return;
         };
-        let due = self.conn_clock_ms + crate::connections::OBSERVER_RETRY_MS;
-        for rc in regions {
-            if self.subscribed.contains(&rc) {
-                self.drop_region(rc);
-                self.observer_retry.insert(rc, due);
+        let lost: Vec<RegionCoords> = regions.into_iter().filter(|rc| self.subscribed.contains(rc)).collect();
+        if lost.is_empty() {
+            info!("[client] the connection to host {ordinal:?} closed ({why}); it served no region");
+            return;
+        }
+        let failures = match ordinal {
+            Some(o) => {
+                let n = self.observer_failures.entry(o).or_insert(0);
+                *n += 1;
+                *n
             }
+            None => 1,
+        };
+        let wait = crate::connections::observer_retry_delay_ms(failures);
+        if routine {
+            info!("[client] the connection to host {ordinal:?} closed ({why}); {lost:?} asked for again in {wait} ms");
+        } else {
+            warn!("[client] the connection to host {ordinal:?} closed ({why}); {lost:?} asked for again in {wait} ms");
+        }
+        let due = self.conn_clock_ms + wait;
+        for rc in lost {
+            self.drop_region(rc);
+            self.observer_retry.insert(rc, due);
         }
     }
 
@@ -1801,8 +1931,47 @@ impl GameInstanceManager {
         for rc in due {
             self.observer_retry.remove(&rc);
             if self.subscribed.contains(&rc) && !self.host.contains(&rc) {
-                self.send_out(Outgoing::Region(rc, ClientPacket::RequestRegionConnection(rc)));
+                self.request_region(rc);
             }
+        }
+    }
+
+    /// Subscribe `rc` where it is served (through the home unless another host's
+    /// connection serves it); one through the home is remembered until answered
+    /// (`asked_home`).
+    fn request_region(&mut self, rc: RegionCoords) {
+        if self.conns.connection_of(rc) == self.conns.home() {
+            self.asked_home.insert(rc, self.conn_clock_ms);
+        }
+        self.send_out(Outgoing::Region(rc, ClientPacket::RequestRegionConnection(rc)));
+    }
+
+    /// Once per client tick: close connections idle for `CONN_IDLE_CLOSE_MS`, forget
+    /// unanswered subscribes, and log once when the body (or a move) stays on another
+    /// host than the home's with no `PlayerRegion` from there.
+    fn maintain_connections(&mut self) {
+        let now = self.conn_clock_ms;
+        for key in self.conns.close_idle(now) {
+            info!("[client] connection {key} served no region for {} ms: closed", crate::connections::CONN_IDLE_CLOSE_MS);
+        }
+        self.asked_home.retain(|_, at| now.saturating_sub(*at) < ASKED_HOME_FORGET_MS);
+        let home_host = self.conns.home_ordinal();
+        let body_elsewhere = self.home_region.is_some_and(|rc| self.region_host(rc) != home_host);
+        if !(body_elsewhere || self.pending_move.is_some()) {
+            self.home_unconfirmed_since = None;
+            self.home_unconfirmed_warned = false;
+            return;
+        }
+        let since = *self.home_unconfirmed_since.get_or_insert(now);
+        if !self.home_unconfirmed_warned && now.saturating_sub(since) >= HOME_UNCONFIRMED_WARN_MS {
+            self.home_unconfirmed_warned = true;
+            warn!(
+                "[client] the body is in {:?} (host {:?}), a move to {:?} is pending, and no host has said it is \
+                 the home for {HOME_UNCONFIRMED_WARN_MS} ms (home: host {home_host:?}); waiting",
+                self.home_region,
+                self.home_region.and_then(|rc| self.region_host(rc)),
+                self.pending_move
+            );
         }
     }
 
@@ -1844,12 +2013,15 @@ impl GameInstanceManager {
 
                 let home = id.unwrap_or(RegionCoords::new(0, 0));
                 let first_home = self.home_region.is_none();
+                // A move's `PlayerRegion` (or any later one) ends the wait for it.
+                self.pending_move = None;
                 #[cfg(not(target_arch = "wasm32"))]
                 match self.home_region {
                     // The server flipped first (no predicted crossing yet).
                     Some(prev) if prev != home => {
                         let stalled = self.clock.tick().map_or(0, |t| self.held_ticks(home, t));
-                        self.crossing.flip(prev, home, stalled);
+                        let hosts = (self.region_host(prev), self.conns.ordinal_of(conn));
+                        self.crossing.flip(prev, home, stalled, hosts);
                         self.crossing.confirmed(home);
                     }
                     _ => self.crossing.confirmed(home),
@@ -1868,12 +2040,20 @@ impl GameInstanceManager {
                     // pushes (handoff confirmations) must NOT re-burst —
                     // that would resnapshot nine regions per crossing.
                     for rc in home.window_radius(self.near_radius) {
-                        self.send_out(Outgoing::Region(rc, ClientPacket::RequestRegionConnection(rc)));
+                        self.request_region(rc);
                         self.subscribed.insert(rc);
                     }
                 }
             }
             game::ServerPacket::Region(id, raw_game_data) => {
+                self.asked_home.remove(&id);
+                if conn != self.conns.home() {
+                    // That host serves again: its next connection end waits the
+                    // shortest retry.
+                    if let Some(o) = self.conns.ordinal_of(conn) {
+                        self.observer_failures.remove(&o);
+                    }
+                }
                 if !self.subscribed.contains(&id) {
                     // Window moved on while the snapshot was in flight: the
                     // connection it came on lets it go.
@@ -1971,6 +2151,8 @@ impl GameInstanceManager {
             game::ServerPacket::PersonInfo(p) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::PersonInfo(p));
             }
+            // Taken by `handle_packet` before it gets here.
+            game::ServerPacket::HomeHop(hop) => self.conns.on_home_hop(conn, hop),
             // The first packet of every session: which host the home is.
             game::ServerPacket::Host(endpoint) => {
                 info!("[client] the home connection is to host {}", endpoint.ordinal);
@@ -1981,11 +2163,19 @@ impl GameInstanceManager {
             // Only the home sends these (`handle_packet`): a client dials no
             // address from anywhere else.
             game::ServerPacket::RegionElsewhere { region, endpoint, ticket } => {
-                if !self.subscribed.contains(&region) {
-                    // Released while the answer was on its way (a move's unsolicited
-                    // one is R3 Task 18's).
+                let asked = self.asked_home.remove(&region).is_some();
+                if !self.subscribed.contains(&region) && asked {
+                    // Released while the answer was on its way.
                     log::debug!("[client] {region:?} is host {}'s, but no longer wanted", endpoint.ordinal);
                 } else if let Some(opener) = self.opener.as_mut() {
+                    if !self.subscribed.contains(&region) {
+                        // Unasked: the home moved the player to another host's region
+                        // (a Play, an embark there). Subscribe it there and hold it in
+                        // the window; that host's `PlayerRegion` makes it the home.
+                        info!("[client] moved to {region:?}, host {}'s", endpoint.ordinal);
+                        self.pending_move = Some(region);
+                        self.subscribed.insert(region);
+                    }
                     info!("[client] {region:?} is served by host {}", endpoint.ordinal);
                     self.conns.on_region_elsewhere(region, endpoint, ticket, opener.as_mut());
                 } else {
@@ -2042,7 +2232,7 @@ impl GameInstanceManager {
             .map_err(|e| GameError::Disconnected(format!("netcode runtime failed to start: {e}")))?;
         // The login connection: the home until told otherwise.
         net.connect(
-            crate::connections::PROVISIONAL_CONN,
+            crate::connections::LOGIN_CONN,
             crate::netcode::ConnTarget::Addr(self.server),
             self.credential.clone(),
             self.first_conn_recv.clone(),

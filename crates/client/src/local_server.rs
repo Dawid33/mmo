@@ -103,6 +103,21 @@ impl LocalServer {
         self.drain();
     }
 
+    /// The local client's session here ended (its connection closed). Harness hook.
+    #[doc(hidden)]
+    pub fn client_disconnected(&mut self) {
+        self.manager.handle_server_event(ServerEvent::ClientDisconnected(LOCAL_CLIENT_ID), self.now_ms);
+        self.drain();
+    }
+
+    /// Exchange what is queued with the peer hosts now (a step's departures over a host
+    /// seam reach the host they go to before its regions' next tick). Harness hook.
+    #[doc(hidden)]
+    pub fn pump_peers(&mut self) {
+        self.manager.pump_peers(self.now_ms);
+        self.drain();
+    }
+
     /// The world manager itself (multi-host harness wiring: ownership, peers,
     /// observer orders). Harness hook.
     #[doc(hidden)]

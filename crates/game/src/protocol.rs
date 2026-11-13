@@ -934,6 +934,14 @@ pub enum ServerPacket {
     /// The answer to `RequestRegionConnection` for a region another host owns: connect to
     /// `endpoint` with `ticket` (`Credential::Observer`) and subscribe there.
     RegionElsewhere { region: RegionId, endpoint: crate::HostEndpoint, ticket: ObserverTicket },
+    /// The player's hop on this host (its placement count across hosts,
+    /// `PlayerHandoff::hop`), sent right before the `PlayerRegion` that makes this
+    /// session the player's home after its body or record came from another host. A
+    /// client with connections to several hosts follows a `PlayerRegion` from a
+    /// connection that is not its home only when it is above every hop it saw: packets of
+    /// two connections have no order between them, and a ping-pong's late `PlayerRegion`
+    /// from the host the body left again must not take the home back there.
+    HomeHop(u64),
 }
 
 /// What a client presents to another host (`Credential::Observer`) to subscribe to its

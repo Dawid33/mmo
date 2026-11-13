@@ -1218,6 +1218,7 @@ fn ping_pong(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
+    rig.record_packets();
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     let (_, _, id) = until_body(rig);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
@@ -1244,6 +1245,26 @@ fn ping_pong(rig: &mut MultiRig) {
     assert_eq!(mb.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
     assert!(ma.departed().is_empty(), "the player is back on host {ha}: {:?}", ma.departed());
     assert_eq!(mb.departed().get(&P_PLAYER), Some(&ha), "host {hb} handed it back to host {ha}");
+    // Each promotion's `PlayerRegion` came right behind the player's hop there, and the
+    // later home's hop is the higher: a client reading the two hosts' packets in any
+    // order can tell which home is the newer.
+    let on_b = home_hops(&packets_to(rig, hb));
+    let on_a = home_hops(&packets_to(rig, ha));
+    assert_eq!(on_b.iter().map(|(_, r)| *r).collect::<Vec<_>>(), [b], "host {hb} became the home once");
+    assert_eq!(on_a.iter().map(|(_, r)| *r).collect::<Vec<_>>(), [a], "host {ha} became the home again once");
+    assert!(on_a[0].0 > on_b[0].0, "the newer home's hop is higher: {on_a:?} after {on_b:?}");
+}
+
+/// Every `HomeHop(n)` that is followed at once by a `PlayerRegion(Some(r))` in `packets`:
+/// `(n, r)`.
+fn home_hops(packets: &[&game::ServerPacket]) -> Vec<(u64, RegionCoords)> {
+    packets
+        .windows(2)
+        .filter_map(|w| match (w[0], w[1]) {
+            (game::ServerPacket::HomeHop(n), game::ServerPacket::PlayerRegion(Some(r), P_CLIENT)) => Some((*n, *r)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]

@@ -49,9 +49,9 @@ pub fn connect(
     lost: Sender<String>,
     credential: Option<game::Credential>,
 ) {
-    // The one (home) connection: keyed as `connections::tag_key` keys it. The
-    // browser's connections to other hosts are R3 Task 23's.
-    let incoming = Incoming::Packets(server_send, crate::connections::PROVISIONAL_CONN);
+    // The one (home) connection: the login one. The browser's connections to
+    // other hosts are R3 Task 23's.
+    let incoming = Incoming::Packets(server_send, crate::connections::LOGIN_CONN);
     let outgoing = Outgoing::Packets(client_recv);
     spawn_local(async move {
         if let Err(e) = run(server, incoming, outgoing, lost.clone(), credential).await {
@@ -81,7 +81,7 @@ pub fn connect_frames(
 
 /// Where received packets go.
 enum Incoming {
-    /// Decoded, keyed by the connection (its key so far).
+    /// Decoded, keyed by the connection.
     Packets(Sender<(u32, ConnEvent)>, u32),
     Frames(Box<dyn FnMut(Vec<u8>)>),
 }
@@ -91,8 +91,7 @@ impl Incoming {
         match self {
             Incoming::Packets(send, key) => match game::decode_packet::<ServerPacket>(&bytes) {
                 Ok(packet) => {
-                    let tag = crate::connections::tag_key(key, &packet);
-                    let _ = send.send((tag, ConnEvent::Packet(packet)));
+                    let _ = send.send((*key, ConnEvent::Packet(packet)));
                 }
                 Err(e) => warn!("failed deserializing packet {e:?}"),
             },

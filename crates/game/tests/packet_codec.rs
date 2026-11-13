@@ -190,6 +190,9 @@ fn new_variants_round_trip_and_old_indices_are_unchanged() {
         }
         other => panic!("wrong variant {other:?}"),
     }
+    let hop = ServerPacket::HomeHop(7);
+    assert_eq!(tag(&bincode::serialize(&hop).unwrap()), 21, "HomeHop after it");
+    assert!(matches!(decode_packet::<ServerPacket>(&encode_packet(&hop).unwrap()).unwrap(), ServerPacket::HomeHop(7)));
     let observer = Credential::Observer { client: 9, nonce: 42 };
     assert_eq!(tag(&bincode::serialize(&observer).unwrap()), 2, "Observer is appended last");
     let hello = ClientPacket::Hello { credential: observer.clone() };

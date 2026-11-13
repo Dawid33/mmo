@@ -393,7 +393,7 @@ mod two_hosts {
         for rc in &window {
             let owner = h.owner(*rc);
             assert!(h.client_region_loaded(*rc), "{rc:?} (host {owner}'s) never loaded");
-            assert_eq!(h.client_region_connection(*rc), owner, "{rc:?}'s traffic counts from its owner's connection");
+            assert_eq!(h.client_region_host(*rc), Some(owner), "{rc:?}'s traffic counts from its owner's connection");
         }
         let mut hosts = h.client_connections();
         hosts.sort();
@@ -402,26 +402,501 @@ mod two_hosts {
         h.assert_converged();
     }
 
-    /// Only the home connection's `SyncClock` samples steer the predicted clock:
-    /// another host's, read 40 ticks ahead here, never move it.
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn clock_follows_the_home_connection_only() {
-        const SKEW_TICKS: i64 = 40;
-        let mut h = SimHarness::with_hosts(2);
-        h.connect();
-        let window = load_window(&mut h);
-        let home = h.home_host();
-        let other = 1 - home;
-        assert!(window.iter().any(|rc| h.owner(*rc) == other), "the window reaches the other host");
-        h.skew_clock(other, SKEW_TICKS);
-        for step in 0..SKEW_TICKS as usize {
-            h.step();
-            let lead = h.client_tick() as i64 - h.server_region_tick(home, game::SPAWN_REGION) as i64;
+    /// A host's `SyncClock` samples read this many ticks ahead
+    /// (`clock_follows_the_home_connection_only`).
+    const SKEW_TICKS: i64 = 40;
+    /// The most the lead may stray from the unskewed run's, per step, in ticks.
+    const LEAD_SLACK_TICKS: i64 = 1;
+
+    /// The client's lead over host `host`'s region `rc` after each of `steps` steps,
+    /// with host `skewed`'s samples read [`SKEW_TICKS`] ahead from the start (`None`:
+    /// no skew).
+    fn leads(h: &mut SimHarness, skewed: Option<u32>, host: u32, rc: game::RegionCoords, steps: usize) -> Vec<i64> {
+        if let Some(skewed) = skewed {
+            h.skew_clock(skewed, SKEW_TICKS);
+        }
+        (0..steps)
+            .map(|_| {
+                h.step();
+                h.client_tick() as i64 - h.server_region_tick(host, rc) as i64
+            })
+            .collect()
+    }
+
+    /// Every lead of `skewed` within [`LEAD_SLACK_TICKS`] of the same step's lead in
+    /// `baseline` (the same run with no skew).
+    fn assert_leads_match(baseline: &[i64], skewed: &[i64], what: &str) {
+        for (step, (b, s)) in baseline.iter().zip(skewed).enumerate() {
             assert!(
-                (-3..=6).contains(&lead),
-                "step {step}: the client's clock leads the home host by {lead} ticks (another host's samples steered it)"
+                (s - b).abs() <= LEAD_SLACK_TICKS,
+                "step {step}: the client's clock leads by {s} ticks, {b} with no skew ({what}); \
+                 baseline {baseline:?}, skewed {skewed:?}"
             );
         }
     }
+
+    /// Only the home connection's `SyncClock` samples steer the predicted clock:
+    /// another host's, read 40 ticks ahead here, never move it — the lead over the
+    /// home host is the same, step for step, as in the same run with no skew.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn clock_follows_the_home_connection_only() {
+        let run = |skew: bool| {
+            let mut h = SimHarness::with_hosts(2);
+            h.connect();
+            let window = load_window(&mut h);
+            let home = h.home_host();
+            let other = 1 - home;
+            assert!(window.iter().any(|rc| h.owner(*rc) == other), "the window reaches the other host");
+            leads(&mut h, skew.then_some(other), home, game::SPAWN_REGION, SKEW_TICKS as usize)
+        };
+        let baseline = run(false);
+        assert_leads_match(&baseline, &run(true), "another host's samples steered it");
+    }
+
+    /// Once the body crossed into the other host's region and its connection became the
+    /// home, the clock follows that host: the old home's samples, read 40 ticks ahead,
+    /// no longer move it.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn clock_follows_the_new_home_after_a_host_flip() {
+        let run = |skew: bool| {
+            let mut h = SimHarness::with_hosts(2);
+            h.connect();
+            load_window(&mut h);
+            let old = h.home_host();
+            let dir = super::foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
+            h.cross_boundary(dir);
+            let new = h.client_home_host().expect("a home host");
+            assert_ne!(new, old, "the home moved hosts");
+            let rc = h.player_region();
+            leads(&mut h, skew.then_some(old), new, rc, SKEW_TICKS as usize)
+        };
+        let baseline = run(false);
+        assert_leads_match(&baseline, &run(true), "the old home's samples steered it");
+    }
+}
+
+/// The first cardinal neighbour of the spawn region the other host of `h` owns (the
+/// direction a walk crosses a host seam in).
+fn foreign_dir(h: &mut SimHarness) -> Option<Dir> {
+    let home = h.home_host();
+    [Dir::East, Dir::West, Dir::North, Dir::South].into_iter().find(|dir| h.owner(neighbour(game::SPAWN_REGION, *dir)) != home)
+}
+
+/// The region next to `rc` in `dir` (north is -z).
+fn neighbour(rc: game::RegionCoords, dir: Dir) -> game::RegionCoords {
+    match dir {
+        Dir::East => game::RegionCoords::new(rc.x + 1, rc.z),
+        Dir::West => game::RegionCoords::new(rc.x - 1, rc.z),
+        Dir::North => game::RegionCoords::new(rc.x, rc.z - 1),
+        Dir::South => game::RegionCoords::new(rc.x, rc.z + 1),
+    }
+}
+
+/// The key that walks the body in `dir`.
+fn walk_key(dir: Dir) -> game::Key {
+    match dir {
+        Dir::North => game::Key::KeyW,
+        Dir::South => game::Key::KeyS,
+        Dir::East => game::Key::KeyD,
+        Dir::West => game::Key::KeyA,
+    }
+}
+
+/// How far along `dir` a world position is (grows as the body walks that way).
+fn progress(pos: [f32; 3], dir: Dir) -> f32 {
+    match dir {
+        Dir::East => pos[0],
+        Dir::West => -pos[0],
+        Dir::North => -pos[2],
+        Dir::South => pos[2],
+    }
+}
+
+/// Most steps a walk waits for the window of `with_hosts` to load (both hosts'
+/// regions) before the walk starts; every compared run steps the same number.
+const HOSTS_LOAD_STEPS: usize = 60;
+
+/// Steps after the crossing over which its corrections are counted.
+const AFTER_CROSSING_STEPS: usize = 40;
+
+/// Steps until every region of the spawn window is loaded (bounded).
+fn load_spawn_window(h: &mut SimHarness) {
+    for _ in 0..HOSTS_LOAD_STEPS {
+        if game::SPAWN_REGION.window_3x3().iter().all(|rc| h.client_region_loaded(*rc)) {
+            return;
+        }
+        h.step();
+    }
+    panic!("the spawn window never loaded");
+}
+
+/// Toggle the first-person camera on and take off (double-tap Space, climb): a
+/// walk then never stops at a ledge.
+fn take_off(h: &mut SimHarness) {
+    use game::Key;
+    h.press(Key::KeyE);
+    h.step();
+    h.release(Key::KeyE);
+    h.step();
+    h.press(Key::Space);
+    h.step();
+    h.release(Key::Space);
+    h.step();
+    h.press(Key::Space);
+    h.step_n(20);
+    h.release(Key::Space);
+    h.step_n(4);
+}
+
+/// Hold `dir`'s key until the predicted body is in another region with a readable
+/// pose (bounded), then release it; the region it reached.
+fn walk_over_a_seam(h: &mut SimHarness, dir: Dir) -> game::RegionCoords {
+    let start = h.player_region();
+    h.press(walk_key(dir));
+    for _ in 0..400 {
+        h.step();
+        if h.player_region() != start && h.player_world_pos().is_some() {
+            break;
+        }
+    }
+    h.release(walk_key(dir));
+    assert_ne!(h.player_region(), start, "the walk never crossed a seam");
+    h.player_region()
+}
+
+/// The same walk from the spawn over its `dir` seam — a thread seam in a one-host
+/// world, a host seam with two hosts — and the home corrections it caused.
+fn walk_and_count(mut h: SimHarness, dir: Dir) -> (u32, f32, u32) {
+    h.connect();
+    let waited = (0..HOSTS_LOAD_STEPS)
+        .take_while(|_| {
+            let loaded = game::SPAWN_REGION.window_3x3().iter().all(|rc| h.client_region_loaded(*rc));
+            if !loaded {
+                h.step();
+            }
+            !loaded
+        })
+        .count();
+    // Both runs walk at the same world tick.
+    h.step_n(HOSTS_LOAD_STEPS - waited);
+    take_off(&mut h);
+    let before = h.corrections().0;
+    let reached = walk_over_a_seam(&mut h, dir);
+    assert_eq!(reached, neighbour(game::SPAWN_REGION, dir));
+    h.step_n(AFTER_CROSSING_STEPS);
+    let (n, max) = h.corrections();
+    (n - before, max, h.client_home_host().expect("a home host"))
+}
+
+/// A host seam is no seam to the player: the same walk over the spawn's seam
+/// toward the other host's region with no link delay corrects the predicted body
+/// exactly as often, and as far, as the walk over a thread seam of one host.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_flip_matches_thread_flip_without_delay() {
+    let mut probe = SimHarness::with_hosts(2);
+    let dir = foreign_dir(&mut probe).expect("a cardinal neighbour on the other host");
+    let other = 1 - probe.home_host();
+    drop(probe);
+    let (thread_n, thread_max, _) = walk_and_count(SimHarness::with_near_radius(1), dir);
+    let (host_n, host_max, home) = walk_and_count(SimHarness::with_hosts(2), dir);
+    assert_eq!(home, other, "the two-host walk crossed a host seam (its home moved)");
+    assert_eq!(
+        host_n, thread_n,
+        "corrections: {host_n} over the host seam, {thread_n} over the thread seam (max {host_max} vs {thread_max})"
+    );
+    assert!(
+        (host_max - thread_max).abs() <= 0.01,
+        "largest correction: {host_max} over the host seam, {thread_max} over the thread seam"
+    );
+}
+
+/// W (or the spawn's host-seam direction) held across a host seam under a 100 ms
+/// round trip, sprint toggling: the inputs around the crossing land where the client
+/// predicted them (the old host forwards those it still gets), so no reconcile pulls
+/// the body back along its walk; then everything converges.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn held_key_across_a_host_seam_no_rubber_band() {
+    for period in SPRINT_TOGGLE_PERIODS {
+        let mut h = SimHarness::with_hosts(2);
+        let dir = foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
+        let other = 1 - h.home_host();
+        h.connect();
+        load_spawn_window(&mut h);
+        h.set_latency(RUBBER_BAND_LATENCY_STEPS);
+        h.step_n(CLOCK_SETTLE_STEPS);
+        take_off(&mut h);
+        let start = h.player_region();
+        h.press(walk_key(dir));
+        let mut last = h.player_world_pos().expect("body before the walk");
+        let mut past = None;
+        for step in 0..400 + HELD_PAST_CROSSING_STEPS {
+            if step % period == 0 {
+                if (step / period) % 2 == 0 {
+                    h.press(game::Key::ControlLeft);
+                } else {
+                    h.release(game::Key::ControlLeft);
+                }
+            }
+            h.step();
+            let Some(now) = h.player_world_pos() else { continue };
+            assert!(
+                progress(now, dir) >= progress(last, dir) - MAX_STEP_BACK_UNITS,
+                "sprint every {period}, step {step}: the predicted body moved back along the walk, {} -> {} \
+                 (home {:?}, host {:?})",
+                progress(last, dir),
+                progress(now, dir),
+                h.player_region(),
+                h.client_home_host()
+            );
+            last = now;
+            if past.is_none() && h.player_region() != start {
+                past = Some(step);
+            }
+            if past.is_some_and(|p| step >= p + HELD_PAST_CROSSING_STEPS) {
+                break;
+            }
+        }
+        assert_eq!(h.player_region(), neighbour(start, dir), "crossed the seam");
+        assert_eq!(h.client_home_host(), Some(other), "the home moved to the other host");
+        h.release(game::Key::ControlLeft);
+        h.release(walk_key(dir));
+        h.set_latency(0);
+        h.assert_converged();
+    }
+}
+
+/// The body crosses into the other host's region: that host's `PlayerRegion` (on its
+/// observer connection) makes its connection the home — the hosts agree on which
+/// session is the home — and the old home's connection stays, serving its regions.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn home_follows_player_region_from_the_new_connection() {
+    let mut h = SimHarness::with_hosts(2);
+    let dir = foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
+    let (old, other) = (h.home_host(), 1 - h.home_host());
+    h.connect();
+    load_spawn_window(&mut h);
+    assert_eq!(h.client_home_host(), Some(old));
+    h.cross_boundary(dir);
+    assert_eq!(h.client_home_host(), Some(other), "the home followed the body to host {other}");
+    assert_eq!(h.server_session(other), Some(game::SessionKind::Home));
+    assert_eq!(h.server_session(old), Some(game::SessionKind::Observer));
+    assert_eq!(h.client_connections(), vec![0, 1], "the old home's connection stays");
+    assert_eq!(h.client_region_host(game::SPAWN_REGION), Some(old), "it serves the regions it served");
+    h.assert_progresses(game::Key::KeyW);
+    h.assert_converged();
+    h.assert_regions_in_step();
+}
+
+/// A -> B -> A, and B's packets reach the client only after A took the body back:
+/// B's `PlayerRegion`, older than A's, must not take the home there.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn late_player_region_after_a_ping_pong_keeps_the_home() {
+    let mut h = SimHarness::with_hosts(2);
+    let dir = foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
+    let back = match dir {
+        Dir::East => Dir::West,
+        Dir::West => Dir::East,
+        Dir::North => Dir::South,
+        Dir::South => Dir::North,
+    };
+    let (a, b) = (h.home_host(), 1 - h.home_host());
+    h.connect();
+    load_spawn_window(&mut h);
+    take_off(&mut h);
+    h.hold_host(b, true);
+    walk_over_a_seam(&mut h, dir);
+    // Over there on the server too (the hand-off acknowledged), before turning back.
+    for _ in 0..40 {
+        if h.server_session(b) == Some(game::SessionKind::Home) {
+            break;
+        }
+        h.step();
+    }
+    assert_eq!(h.server_session(b), Some(game::SessionKind::Home), "host {b} took the body");
+    assert_eq!(h.client_home_host(), Some(a), "B's PlayerRegion is held back");
+    assert_eq!(walk_over_a_seam(&mut h, back), game::SPAWN_REGION);
+    // On a little: the prediction ran without B's corrections, the body there may
+    // trail it.
+    h.press(walk_key(back));
+    h.step_n(8);
+    h.release(walk_key(back));
+    for _ in 0..40 {
+        if h.server_session(a) == Some(game::SessionKind::Home) {
+            break;
+        }
+        h.step();
+    }
+    assert_eq!(h.server_session(a), Some(game::SessionKind::Home), "host {a} took the body back");
+    h.step_n(4);
+    h.hold_host(b, false);
+    h.step_n(10);
+    assert_eq!(h.client_home_host(), Some(a), "B's late PlayerRegion did not take the home back");
+    assert_eq!(h.player_region(), game::SPAWN_REGION);
+    h.assert_converged();
+}
+
+/// Play into a region of the other host far outside the window: the home moves the
+/// player there (a move, Task 8) and sends the client on with an unasked
+/// `RegionElsewhere`; the client connects, subscribes, and that host's `PlayerRegion`
+/// makes it the home.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn teleport_to_a_foreign_host_switches_home() {
+    const MAP_RADIUS: i32 = 4;
+    let mut h = SimHarness::with_hosts(2);
+    let other = 1 - h.home_host();
+    let target = (2..=MAP_RADIUS)
+        .flat_map(|x| [game::RegionCoords::new(x, 0), game::RegionCoords::new(-x, 0)])
+        .find(|rc| h.owner(*rc) == other)
+        .expect("a region of the other host on the map, outside the window");
+    let side = 2 * MAP_RADIUS as u32 + 1;
+    for host in 0..2 {
+        h.host_manager(host).set_world_map(game::WorldMap {
+            origin: game::RegionCoords::new(-MAP_RADIUS, -MAP_RADIUS),
+            width: side,
+            height: side,
+            tiles: (0..side * side).map(|_| play_tile()).collect(),
+            rock_names: vec![],
+            region_types: vec![],
+        });
+    }
+    h.connect();
+    load_spawn_window(&mut h);
+    h.request(client::instance::ClientRequest::PlayRegion(target));
+    let mut moved = false;
+    for _ in 0..200 {
+        h.step();
+        if h.client_home_host() == Some(other) && h.player_region() == target && h.client_region_loaded(target) {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "never moved to {target:?} on host {other}: home {:?} on host {:?}", h.player_region(), h.client_home_host());
+    assert_eq!(h.server_session(other), Some(game::SessionKind::Home));
+    assert_eq!(h.client_region_host(target), Some(other));
+    h.settle();
+    h.assert_converged();
+}
+
+/// A tile anyone can play: dry, flat, landing at its corner.
+fn play_tile() -> game::TileSummary {
+    game::TileSummary {
+        ground_min_m: 0.0,
+        ground_mean_m: 0.0,
+        ground_max_m: 0.0,
+        relief_m: 0.0,
+        slope: [0.0, 0.0],
+        sea_fraction: 0.0,
+        lake_fraction: 0.0,
+        lake_level_m: None,
+        rivers: 0,
+        river_max_discharge_m2: 0.0,
+        river_max_width_m: 0.0,
+        surface_rock: None,
+        landing: Some([2, 2]),
+        biome: game::Biome::Grassland,
+        region: 0,
+        temperature_c: 10.0,
+        precip_mm: 700.0,
+        savagery: 50,
+        alignment: 0,
+        volcano: false,
+    }
+}
+
+/// The window leaves the other host's regions (the near radius drops to the home
+/// alone): its connection, serving nothing, closes after `CONN_IDLE_CLOSE_MS` and the
+/// session there ends. A later window over that host opens a new connection — the
+/// old one's late `Closed` does not touch it — and its regions load again.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn idle_observer_connection_is_closed() {
+    let idle_steps = (client::connections::CONN_IDLE_CLOSE_MS / game::TICK_RATE) as usize;
+    let mut h = SimHarness::with_hosts(2);
+    let (home, other) = (h.home_host(), 1 - h.home_host());
+    h.connect();
+    load_spawn_window(&mut h);
+    assert_eq!(h.client_connections(), vec![0, 1]);
+    h.set_client_near_radius(0);
+    h.step_n(idle_steps / 2);
+    assert_eq!(h.client_connections(), vec![0, 1], "not idle long enough yet");
+    h.step_n(idle_steps / 2 + 4);
+    assert_eq!(h.client_connections(), vec![home], "the idle connection to host {other} closed");
+    assert_eq!(h.server_session(other), None, "its session there ended");
+    assert_eq!(h.observer_closes(other), 1);
+    h.set_client_near_radius(1);
+    load_spawn_window(&mut h);
+    let mut hosts = h.client_connections();
+    hosts.sort();
+    assert_eq!(hosts, vec![0, 1], "a new connection to host {other}");
+    for rc in game::SPAWN_REGION.window_3x3() {
+        assert_eq!(h.client_region_host(rc), Some(h.owner(rc)));
+    }
+    assert_eq!(h.server_session(other), Some(game::SessionKind::Observer));
+    h.assert_converged();
+}
+
+/// Carry (Task 17): the manager's half of an observer connection's end. A ticket that
+/// reaches the far host before its order is refused there; the client asks for the
+/// regions again through the home after the retry wait and gets in. Later that host
+/// closes the connection: its regions are dropped, asked for again, and reload.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn refused_and_closed_observer_connections_reload_their_regions() {
+    let mut h = SimHarness::with_hosts(2);
+    let other = 1 - h.home_host();
+    let theirs: Vec<game::RegionCoords> =
+        game::SPAWN_REGION.window_3x3().into_iter().filter(|rc| h.owner(*rc) == other).collect();
+    h.orders_late(4);
+    h.connect();
+    load_spawn_window(&mut h);
+    assert!(h.observer_closes(other) >= 1, "the early ticket was refused");
+    h.orders_late(0);
+    let refused = h.observer_closes(other);
+    h.close_connection(other);
+    h.step();
+    assert!(theirs.iter().all(|rc| !h.client_region_loaded(*rc)), "its regions were dropped");
+    load_spawn_window(&mut h);
+    assert_eq!(h.observer_closes(other), refused + 1);
+    for rc in &theirs {
+        assert_eq!(h.client_region_host(*rc), Some(other), "{rc:?} served by host {other} again");
+    }
+    h.assert_converged();
+}
+
+/// LOD rings of `lod_subscriptions_follow_the_home` (the smallest: one ring).
+const LOD_TABLE: &[(i32, u32)] = &[(2, 2)];
+
+/// The home moves hosts: the LOD keys the client holds are released on the old home
+/// (a session there holding only LOD subscriptions would be idle-closed) and asked of
+/// the new one, which then serves every LOD request.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn lod_subscriptions_follow_the_home() {
+    let mut h = SimHarness::with_hosts(2);
+    let dir = foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
+    let (old, other) = (h.home_host(), 1 - h.home_host());
+    h.set_client_lod_table(LOD_TABLE);
+    h.connect();
+    load_spawn_window(&mut h);
+    h.step_n(4);
+    let held = h.client_lod_keys();
+    assert!(held > 0, "the client holds LOD keys");
+    assert_eq!(h.lod_traffic(other), (0, 0), "LOD goes to the home only");
+    h.cross_boundary(dir);
+    assert_eq!(h.client_home_host(), Some(other));
+    h.step_n(4);
+    let (asked, released) = h.lod_traffic(old);
+    assert_eq!(asked, released, "every key held on host {old} was released there");
+    let (asked_new, released_new) = h.lod_traffic(other);
+    assert_eq!(asked_new - released_new, h.client_lod_keys(), "the new home holds every key the client holds");
+    let before = h.lod_traffic(old);
+    h.step_n(20);
+    assert_eq!(h.lod_traffic(old), before, "nothing more about LOD goes to host {old}");
 }

@@ -5,10 +5,17 @@ to one table: per metric, the distribution over every crossing.
 Reads the `[perf] event=region_crossing` (game thread) and
 `region_crossing_render` (render; only its `after:` half) lines, `main_stall`,
 the autopilot's own events, and — when the client ran with PERF_LOG=1 — the
-`[client-motion]` chunk-crossing lines. Usage: crossing_summary.py <client.log>
+`[client-motion]` chunk-crossing lines.
+
+Usage: crossing_summary.py [--by KEY] [--p95] <client.log>
+
+  --by KEY  also split the game-thread crossings by the value of KEY on their line
+            (e.g. `--by host_flip`: crossings between two hosts' regions vs within one).
+  --p95     per group (or over all crossings): the p95 of correction_max, corrections
+            and confirm_ms only.
 """
+import argparse
 import re
-import sys
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 KV = re.compile(r"(\w+)=(-?[0-9.]+)")
@@ -44,7 +51,58 @@ def row(label, values):
     )
 
 
-def main(path):
+P95_KEYS = ["correction_max", "corrections", "confirm_ms"]
+
+
+def crossing_lines(lines):
+    """The key=value pairs of every game-thread `event=region_crossing` line."""
+    out = []
+    for raw in lines:
+        line = ANSI.sub("", raw)
+        if "event=region_crossing " in line:
+            out.append({k: float(v) for k, v in KV.findall(line.split("event=region_crossing", 1)[1])})
+    return out
+
+
+def group_by(crossings, key):
+    """Crossings by the value of `key` (as text; `-` when a line lacks it)."""
+    groups = {}
+    for c in crossings:
+        value = c.get(key)
+        label = "-" if value is None else (str(int(value)) if value == int(value) else str(value))
+        groups.setdefault(label, []).append(c)
+    return groups
+
+
+def p95_by(crossings, key=None):
+    """{group: {metric: p95}} for the P95_KEYS (one group "all" without `key`); a
+    metric no crossing of a group has (or only as -1, "never") is left out."""
+    groups = group_by(crossings, key) if key else {"all": crossings}
+    out = {}
+    for label, members in sorted(groups.items()):
+        out[label] = {}
+        for metric in P95_KEYS:
+            values = [m[metric] for m in members if metric in m and m[metric] >= 0]
+            if values:
+                out[label][metric] = pct(values, 0.95)
+    return out
+
+
+def print_groups(crossings, key, p95_only):
+    groups = group_by(crossings, key) if key else {"all": crossings}
+    head = f"  {'metric (per crossing)':<36} {'p50':>8} {'p95':>8} {'max':>8} {'sum':>9}"
+    for label, members in sorted(groups.items()):
+        print(f"\nregion crossings, {key}={label}: n={len(members)}" if key else f"\nregion crossings: n={len(members)}")
+        if p95_only:
+            for metric, value in p95_by(members)["all"].items():
+                print(f"  p95 {metric:<32} {value:>8.2f}")
+            continue
+        print(head)
+        for k, label_text in GAME_KEYS:
+            print(row(label_text, [g[k] for g in members if k in g and g[k] >= 0]))
+
+
+def main(path, by=None, p95_only=False):
     game, render, stalls, motion, auto, faults = [], [], [], [], {}, []
     for raw in open(path, errors="replace"):
         line = ANSI.sub("", raw)
@@ -82,7 +140,11 @@ def main(path):
         if ev in auto:
             print(f"  {ev}: {auto[ev]}")
     head = f"  {'metric (per crossing)':<36} {'p50':>8} {'p95':>8} {'max':>8} {'sum':>9}"
-    if game:
+    if game and (by or p95_only):
+        print_groups(game, by, p95_only)
+        if p95_only:
+            return
+    elif game:
         print(f"\nregion crossings (game thread): n={len(game)}")
         print(head)
         for key, label in GAME_KEYS:
@@ -115,6 +177,9 @@ def main(path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    main(sys.argv[1])
+    parser = argparse.ArgumentParser(usage=__doc__)
+    parser.add_argument("log")
+    parser.add_argument("--by", help="split game-thread crossings by this key's value")
+    parser.add_argument("--p95", action="store_true", help="only the p95 of correction_max, corrections, confirm_ms")
+    args = parser.parse_args()
+    main(args.log, args.by, args.p95)

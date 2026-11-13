@@ -287,6 +287,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::info!("client {client}: connected after its body was handed here; the session is its home");
             self.observer_revocations.push(client);
             let region = self.homes.get(&client).copied();
+            self.send_home_hop(client, player);
             let _ = self.out.send((Some(client), ServerPacket::PlayerRegion(region, client)));
             self.send_home_state(client, now_ms);
             if let Some(rc) = region {
@@ -429,6 +430,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.adventurer_of.insert(c, site);
         }
         let promoted = self.promote_session(c, from, now_ms);
+        if promoted {
+            self.send_home_hop(c, h.player);
+        }
         // Its home here, `PlayerRegion` to the client.
         self.accept_arrival(None, target, stamp, bundle, now_ms);
         if promoted {
@@ -532,6 +536,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.homes.insert(c, target);
         self.creating.insert(c, (target, h.player, record.clone()));
         self.send_play_event(target, GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))));
+        if promoted {
+            self.send_home_hop(c, h.player);
+        }
         let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
         if promoted {
             self.send_home_state(c, now_ms);
@@ -540,6 +547,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.claim_changed(h.player);
         self.world_player_online(c);
         self.login_arrived(c, h.login);
+    }
+
+    /// `client`'s session here is about to be told (`PlayerRegion`) it became the home of
+    /// `player`, handed here from another host: the player's hop here goes first
+    /// ([`ServerPacket::HomeHop`]), so a client with connections to several hosts can tell
+    /// this newer home from an older one whose `PlayerRegion` arrives after it.
+    fn send_home_hop(&self, client: ClientId, player: PlayerId) {
+        let _ = self.out.send((Some(client), ServerPacket::HomeHop(self.hop_here(player))));
     }
 
     /// `c`'s body was handed here by host `from`: its session here (an observer, if any)

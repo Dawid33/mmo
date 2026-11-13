@@ -128,8 +128,8 @@ fn tagged(tag: u8, body: &[u8]) -> Uint8Array {
 /// The worker's session.
 struct WorkerSession {
     manager: GameInstanceManager,
-    /// Decoded server packets, into the manager, keyed by the one (home)
-    /// connection's key so far (`connections::tag_key`).
+    /// Decoded server packets, into the manager, keyed by the one (home,
+    /// login) connection's key.
     server_send: Sender<(u32, crate::connections::ConnEvent)>,
     server_recv: Receiver<(u32, crate::connections::ConnEvent)>,
     server_key: u32,
@@ -169,7 +169,7 @@ pub fn worker_start() {
             Some((&TAG_SERVER_FRAME, frame)) => match game::decode_packet::<ServerPacket>(frame) {
                 Ok(packet) => SESSION.with(|s| {
                     if let Some(session) = s.borrow_mut().as_mut() {
-                        let key = crate::connections::tag_key(&mut session.server_key, &packet);
+                        let key = session.server_key;
                         let _ = session.server_send.send((key, crate::connections::ConnEvent::Packet(packet)));
                     }
                 }),
@@ -211,7 +211,7 @@ fn handle(message: ToSim) {
                     manager,
                     server_send,
                     server_recv,
-                    server_key: crate::connections::PROVISIONAL_CONN,
+                    server_key: crate::connections::LOGIN_CONN,
                     packets,
                     game_send,
                     request_send,

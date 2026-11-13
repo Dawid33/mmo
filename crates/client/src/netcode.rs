@@ -1,7 +1,7 @@
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -67,7 +67,7 @@ enum Raced<T> {
 /// Every connection of one session, on one tokio runtime (its own thread): the
 /// login connection ([`NetThread::connect`]) and one per other host the home
 /// sends the client to ([`ConnOpener`]). Each delivers its packets keyed by its
-/// connection (`connections::tag_key`) on the session's one event channel, and
+/// connection's key on the session's one event channel, and
 /// a [`ConnEvent::Closed`] when it ends. The runtime runs until the session is
 /// left (`cancel` disconnects) and every connection has flushed and closed.
 pub struct NetThread {
@@ -121,15 +121,13 @@ impl NetThread {
         outgoing: Receiver<ClientPacket>,
     ) {
         self.live.fetch_add(1, Ordering::SeqCst);
-        let key = Arc::new(AtomicU32::new(key));
         let (events, policy, cancel) = (self.events.clone(), self.policy, self.cancel.clone());
-        let conn_key = key.clone();
         let work = self.runtime.spawn(async move {
             let server = match target {
                 ConnTarget::Addr(addr) => addr,
                 ConnTarget::Name(name) => resolve(name).await?,
             };
-            let mut connection = ServerConnection::keyed(events, conn_key, outgoing, server)
+            let mut connection = ServerConnection::new(events, key, outgoing, server)
                 .with_connect_policy(policy)
                 .with_credential(credential)
                 .with_cancel(cancel);
@@ -142,19 +140,20 @@ impl NetThread {
                 Ok(Err(e)) => e.to_string(),
                 Err(e) => format!("netcode task failed: {e}"),
             };
-            let _ = events.send((key.load(Ordering::SeqCst), ConnEvent::Closed(reason)));
+            let _ = events.send((key, ConnEvent::Closed(reason)));
             live.fetch_sub(1, Ordering::SeqCst);
         });
     }
 }
 
 impl ConnOpener for NetThread {
-    fn open(&mut self, ordinal: u32, endpoint: &game::HostEndpoint, credential: game::Credential) -> ConnHandle {
+    fn open(&mut self, key: u32, endpoint: &game::HostEndpoint, credential: game::Credential) -> ConnHandle {
         let (send, outgoing) = crossbeam::channel::unbounded();
         match &endpoint.quic {
-            Some(quic) => self.connect(ordinal, ConnTarget::Name(quic.clone()), Some(credential), outgoing),
+            Some(quic) => self.connect(key, ConnTarget::Name(quic.clone()), Some(credential), outgoing),
             None => {
-                let _ = self.events.send((ordinal, ConnEvent::Closed(format!("host {ordinal} offers no QUIC address"))));
+                let ordinal = endpoint.ordinal;
+                let _ = self.events.send((key, ConnEvent::Closed(format!("host {ordinal} offers no QUIC address"))));
             }
         }
         ConnHandle { send }
@@ -178,9 +177,9 @@ async fn resolve(name: String) -> std::io::Result<SocketAddr> {
 
 pub struct ServerConnection {
     events: Sender<(u32, ConnEvent)>,
-    /// This connection's key on `events`; a provisional one becomes the host's
-    /// ordinal once its `Host` packet passed (`connections::tag_key`).
-    key: Arc<AtomicU32>,
+    /// This connection's key on `events` (`connections`: one per connection, for
+    /// its whole life).
+    key: u32,
     recv: Receiver<ClientPacket>,
     server: SocketAddr,
     connect_policy: ConnectPolicy,
@@ -196,17 +195,6 @@ impl ServerConnection {
     pub fn new(
         events: Sender<(u32, ConnEvent)>,
         key: u32,
-        recv: Receiver<ClientPacket>,
-        server: SocketAddr,
-    ) -> Self {
-        Self::keyed(events, Arc::new(AtomicU32::new(key)), recv, server)
-    }
-
-    /// [`Self::new`] with its key shared (the netcode reads it when the
-    /// connection ends, to key its `Closed`).
-    fn keyed(
-        events: Sender<(u32, ConnEvent)>,
-        key: Arc<AtomicU32>,
         recv: Receiver<ClientPacket>,
         server: SocketAddr,
     ) -> Self {
@@ -372,7 +360,7 @@ impl ServerConnection {
         let mut stream = connection.open_uni().await.map_err(connection_lost)?;
         stream.write_all(&hello).await.map_err(connection_lost)?;
         stream.finish().map_err(connection_lost)?;
-        let (events, key) = (self.events.clone(), self.key.clone());
+        let (events, key) = (self.events.clone(), self.key);
         let recv_conn = connection.clone();
 
         tokio::spawn(async move {
@@ -423,10 +411,7 @@ impl ServerConnection {
                     p => p,
                 };
 
-                let mut now = key.load(Ordering::SeqCst);
-                let tag = crate::connections::tag_key(&mut now, &packet);
-                key.store(now, Ordering::SeqCst);
-                if events.send((tag, ConnEvent::Packet(packet))).is_err() {
+                if events.send((key, ConnEvent::Packet(packet))).is_err() {
                     // The game thread ended the session.
                     break;
                 }
