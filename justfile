@@ -711,7 +711,9 @@ web_server := "orion.factoriosurvivalworld.com"
 
 # The login service the browser page should use (`just login=http://127.0.0.1:8790 web`):
 # `web` prints the page URL with `?login=<url>`, which makes the join-only menu offer
-# Play online. Empty = the plain Join-server menu.
+# Play online — on a localhost page only (127.0.0.1 / localhost / [::1]): on any other
+# host the page ignores `?login=` and uses its build-time VOXEL_LOGIN_URL. Empty = the
+# plain Join-server menu.
 login := ""
 
 # The browser has no worlds of its own: it opens on the main menu, whose Join
@@ -1138,8 +1140,9 @@ host ordinal="0" hosts="1" delay="0": (_dev-hosts-check ordinal hosts delay "1")
 # login service's push on 127.0.0.1:6490 (pin target/dev-r2/host-0.cert-sha256); once it has
 # written that pin, world `dev` is re-registered with the link, so joins push `SpawnPlayer`
 # and the host admits a ticket only against it. SIGTERMs the coordinator and the login
-# service on exit. Connect with `just run-online`-style login
-# (`client debug online`) or the login screens. The first start on an empty dev database
+# service on exit. Connect with the dev account's kept login and no screens:
+# `VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/target/dev-login/refresh ./target/debug/client debug online`,
+# or the login screens: `VOXEL_LOGIN_URL=http://127.0.0.1:8790 just play`. The first start on an empty dev database
 # forges the world in the coordinator, which can take longer than the `online_wait_secs`
 # (180 s) wait for its pin: then rerun (the world is kept), or raise it once with
 # `just online_wait_secs=900 dev-r2`.
@@ -1217,7 +1220,8 @@ done
 # frame that many ms; measurement only). A world whose super-region side was set
 # (`just worldctl super-region <url> <n>`) needs VOXEL_SUPER_REGION_REGIONS=<n> in the
 # environment. First start on an empty database: see `dev-r2` (`online_wait_secs`).
-# Connect with `just run-online`-style login.
+# Connect as for `dev-r2`: `VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/target/dev-login/refresh
+# ./target/debug/client debug online` (no screens), or `VOXEL_LOGIN_URL=http://127.0.0.1:8790 just play`.
 dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") kc-up pg-up _dev-login-setup (_dev-token dev_r3_dir)
     #!/usr/bin/env bash
     set -euo pipefail
