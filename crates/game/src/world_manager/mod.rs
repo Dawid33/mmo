@@ -1095,7 +1095,14 @@ pub struct WorldManager<S: RegionSpawner> {
     /// their `RegionDown`, a `Running` without them): what they sent last may have been
     /// lost, so the next [`Self::stored_terrain_changed`] that lists one re-seeds its
     /// running neighbours' halos from the store even if its version is one already seen.
-    /// Forgotten when it runs again (`RegionUp` / `Running`).
+    /// Forgotten when it runs again (`RegionUp` / `Running`), and when the region is this
+    /// host's (it runs here, or is listed while owned here).
+    ///
+    /// Trade-off: a re-seed by this mark at an UNCHANGED version may replace border edits
+    /// the halo received live (after the store's last save of the region) with the older
+    /// stored state, until the next cut that saves that region or the link's return
+    /// re-seeds it. Bounded and self-healing; chosen over a halo that never learns of a
+    /// park whose `RegionParked` and final halo were lost with the link.
     foreign_halo_stale: BTreeSet<RegionCoords>,
     /// A peer runs a newer world generation ([`Self::take_higher_generation`]).
     higher_generation: Option<u64>,
@@ -2265,10 +2272,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// built — the only stale cross-host read is halo seeding.
     pub fn stored_terrain_changed(&mut self, versions: BTreeMap<RegionCoords, u64>) {
         for (rc, version) in versions {
+            let foreign = self.is_foreign(rc);
+            if !foreign {
+                // This host's (it may have been another host's): no stale mark to keep.
+                self.foreign_halo_stale.remove(&rc);
+            }
             if self.regions.contains_key(&rc) {
                 continue;
             }
-            let foreign = self.is_foreign(rc);
             let live = self.foreign_running.contains_key(&rc);
             let changed = self.stored_regions.get(&rc) != Some(&version);
             let stale = foreign && !live && self.foreign_halo_stale.remove(&rc);

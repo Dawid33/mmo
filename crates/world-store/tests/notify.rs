@@ -130,9 +130,18 @@ fn listener_reconnect_emits_resync() {
     let killed = query_i64s(&db.url, &format!("SELECT pg_terminate_backend({})::int::bigint", pids[0]));
     assert_eq!(killed, vec![1], "the listener's backend was terminated");
     assert!(until_resync(&notices, NOTICE_WAIT), "a Resync within 5 s of the reconnect");
-    let again = query_i64s(&db.url, &pid_sql);
-    assert_eq!(again.len(), 1, "listening again: {again:?}");
-    assert_ne!(again, pids, "on a new backend");
+    // The terminated backend may linger in `pg_stat_activity` for a moment: wait for the
+    // listener's new backend alone.
+    let deadline = Instant::now() + NOTICE_WAIT;
+    let again = loop {
+        let again = query_i64s(&db.url, &pid_sql);
+        if (again.len() == 1 && again != pids) || Instant::now() >= deadline {
+            break again;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(again.len(), 1, "listening again, on one backend: {again:?}");
+    assert_ne!(again, pids, "a new backend");
     h.notify_cut(CutId(9), 4321).unwrap();
     assert_eq!(next_cut(&notices, NOTICE_WAIT), Some(CutNotice::Cut { tick: 4321 }), "later notices still arrive");
     drop(notices);

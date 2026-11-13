@@ -25,9 +25,16 @@ pub const TERRAIN_NOTIFY_ENV: &str = "VOXEL_TERRAIN_NOTIFY";
 /// A direct Postgres URL for the listener (a pooler in front of the store's URL — e.g.
 /// PgBouncer in transaction mode — does not carry `LISTEN`); unset: the store's URL.
 pub const WORLD_DB_DIRECT_ENV: &str = "VOXEL_WORLD_DB_DIRECT";
-/// The wait before a listener that could not connect (or lost its connection for good)
-/// tries again.
+/// The wait before a listener that could not connect, or whose connection lived less than
+/// [`LISTEN_MIN_LIFE`], tries again.
 const LISTEN_RETRY: Duration = Duration::from_secs(1);
+/// A listener connection lost sooner than this after it was made (a proxy or an
+/// `idle_session_timeout` ending sessions at once) waits [`LISTEN_RETRY`] before the next:
+/// no tight reconnect loop, no back-to-back `Resync`s on every host.
+const LISTEN_MIN_LIFE: Duration = Duration::from_secs(1);
+/// At most one warning per this long about malformed `world_cut` payloads (any database
+/// user can `NOTIFY` the channel).
+const MALFORMED_WARN: Duration = Duration::from_secs(30);
 
 /// What a host's listener says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,15 +78,20 @@ pub(crate) fn payload(cut: game::CutId, tick: Tick) -> String {
     format!("{},{tick}", cut.0)
 }
 
-/// What a notice's payload says (a malformed one: resync).
+/// What a notice's payload (`<cut>,<tick>`) says; a malformed one: resync.
 fn notice_of(payload: &str) -> CutNotice {
-    match payload.split_once(',').and_then(|(_, t)| t.trim().parse::<Tick>().ok()) {
+    let parsed = payload
+        .split_once(',')
+        .and_then(|(c, t)| c.trim().parse::<u64>().ok().and(t.trim().parse::<Tick>().ok()));
+    match parsed {
         Some(tick) => CutNotice::Cut { tick },
-        None => {
-            log::warn!("[world-store] a malformed world_cut notice ({payload:?}); resyncing");
-            CutNotice::Resync
-        }
+        None => CutNotice::Resync,
     }
+}
+
+/// How long to wait before the next connection, after one that lived `lived`.
+fn reconnect_wait(lived: Duration) -> Duration {
+    if lived < LISTEN_MIN_LIFE { LISTEN_RETRY } else { Duration::ZERO }
 }
 
 /// Where the listener connects, for logs: host and database, never the URL (it holds a
@@ -135,6 +147,7 @@ pub(crate) fn start(url: Option<String>, mode: NotifyMode, poll_ms: &AtomicU64) 
 async fn listen(url: String, tx: Sender<CutNotice>) {
     let at = describe(&url);
     let mut failing = false;
+    let mut malformed_warned: Option<std::time::Instant> = None;
     loop {
         let mut listener = match connect(&url).await {
             Ok(l) => l,
@@ -154,12 +167,23 @@ async fn listen(url: String, tx: Sender<CutNotice>) {
         if tx.send(CutNotice::Resync).is_err() {
             return;
         }
+        let connected = std::time::Instant::now();
         loop {
             let notice = match listener.try_recv().await {
-                Ok(Some(n)) => notice_of(n.payload()),
-                // The connection was lost and made again (and `LISTEN`s again): what was
-                // sent meanwhile is lost.
-                Ok(None) => CutNotice::Resync,
+                Ok(Some(n)) => {
+                    let notice = notice_of(n.payload());
+                    if notice == CutNotice::Resync && malformed_warned.is_none_or(|w| w.elapsed() >= MALFORMED_WARN) {
+                        malformed_warned = Some(std::time::Instant::now());
+                        log::warn!("[world-store] a malformed world_cut notice ({:?}); resyncing", n.payload());
+                    }
+                    notice
+                }
+                // The connection was lost (not made again: `eager_reconnect(false)`); what
+                // is sent until the next one listens is lost — its `Resync` covers it.
+                Ok(None) => {
+                    log::warn!("[world-store] the terrain listener lost {at}; reconnecting");
+                    break;
+                }
                 Err(e) => {
                     log::warn!("[world-store] the terrain listener lost {at} ({e}); reconnecting");
                     break;
@@ -169,6 +193,8 @@ async fn listen(url: String, tx: Sender<CutNotice>) {
                 return;
             }
         }
+        drop(listener);
+        tokio::time::sleep(reconnect_wait(connected.elapsed())).await;
     }
 }
 
@@ -184,6 +210,42 @@ async fn connect(url: &str) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
         .await?;
     let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
     listener.ignore_pool_close_event(true);
+    // A lost connection is made again by `listen` (with its backoff), not inside `try_recv`.
+    listener.eager_reconnect(false);
     listener.listen(WORLD_CUT_CHANNEL).await?;
     Ok(listener)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notice_of_reads_the_tick_and_resyncs_on_anything_malformed() {
+        assert_eq!(notice_of(&payload(game::CutId(7), 1234)), CutNotice::Cut { tick: 1234 });
+        assert_eq!(notice_of(" 7 , 99 "), CutNotice::Cut { tick: 99 });
+        for bad in ["", "7", "7,", ",5", "x,5", "7,x", "7,-1", "7,5,6", "hello"] {
+            assert_eq!(notice_of(bad), CutNotice::Resync, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn notify_mode_parses_listen_poll_and_refuses_the_rest() {
+        assert_eq!(NotifyMode::parse(None), Ok(NotifyMode::Listen));
+        assert_eq!(NotifyMode::parse(Some("")), Ok(NotifyMode::Listen));
+        assert_eq!(NotifyMode::parse(Some(" listen ")), Ok(NotifyMode::Listen));
+        assert_eq!(NotifyMode::parse(Some("poll")), Ok(NotifyMode::Poll));
+        for bad in ["Listen", "POLL", "notify", "1"] {
+            let e = NotifyMode::parse(Some(bad)).unwrap_err();
+            assert!(e.contains(TERRAIN_NOTIFY_ENV), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_short_lived_connection_waits_before_the_next() {
+        assert_eq!(reconnect_wait(Duration::ZERO), LISTEN_RETRY);
+        assert_eq!(reconnect_wait(LISTEN_MIN_LIFE - Duration::from_millis(1)), LISTEN_RETRY);
+        assert_eq!(reconnect_wait(LISTEN_MIN_LIFE), Duration::ZERO);
+        assert_eq!(reconnect_wait(Duration::from_secs(60)), Duration::ZERO);
+    }
 }

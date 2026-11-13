@@ -2253,7 +2253,9 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     }
     w.pair.until("the link is seen down", |p| !p.sims[hb].manager.foreign_running().contains(&a));
     // Host 0 digs at the border and parks the region.
+    let mut dug_at = 0;
     w.pair.sims[ha].manager.spawner_mut().with_region(a, |r| {
+        dug_at = r.current_tick() as i64;
         r.with_data(|d| assert!(!d.carve_stud_safe(lo, hi).is_empty(), "the dig"));
     });
     let now = w.pair.now();
@@ -2262,6 +2264,16 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     for _ in 0..10 {
         w.pair.round();
     }
+    // Not timing-dependent: no world cut holding the dig can commit while the link is down
+    // (each needs every participant's mark over it; one that is unreachable aborts the
+    // cut, `world_cut.rs`), and the dig came after the link was seen down — checked here.
+    assert!(
+        decisions(&db).iter().all(|(_, t, k)| !*k || *t <= dug_at),
+        "no cut after the dig committed while the link was down: {:?} (dug at {dug_at})",
+        decisions(&db)
+    );
+    let saved = query_i64s(&db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", a.x, a.z));
+    assert!(saved.iter().all(|t| *t <= dug_at), "the store does not hold the dig yet: {saved:?} (dug at {dug_at})");
     assert!(seen_from_b(&mut w.pair).is_some(), "the dig's halo traffic was lost with the link");
     let parked_after = decisions(&db).iter().map(|(c, _, _)| *c).max().unwrap_or(0);
 

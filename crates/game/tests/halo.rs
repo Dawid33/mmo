@@ -600,15 +600,13 @@ impl game::PeerLink for HeldLink {
     }
 }
 
-/// Task 6's carry: a FOREIGN neighbour that parks while the peer link is down (its final
-/// halo and its `RegionParked` are lost with the link). While it ran, its stored version
-/// rose (a cut while live: nothing to do then). Once the link is seen down its halo is no
-/// longer live: the next `Resync` re-seeds it from the store even though the version is
-/// one already seen, and the cut that saves its park re-seeds it again.
-#[test]
-fn stored_terrain_change_reseeds_a_foreign_halo_whose_link_dropped() {
+/// [`two_host_manager`] with a peer session to the other host on which `f` ran (its halo
+/// live, version 1 noted while live), then the link dropped: `f`'s halo is no longer live
+/// (as if it parked meanwhile, its final halo and `RegionParked` lost with the link).
+fn two_host_manager_with_a_dropped_link() -> TwoHostManager {
     use game::{HostEndpoint, PeerHello, PeerLink as _, PeerMsg, PeerSession, Volatile};
-    let TwoHostManager { mut m, mine, f, spawn_inputs, .. } = two_host_manager();
+    let mut t = two_host_manager();
+    let (mine, f) = (t.mine, t.f);
     let other = 1 - mine;
     let hello = |ordinal| PeerHello {
         ordinal,
@@ -620,7 +618,7 @@ fn stored_terrain_change_reseeds_a_foreign_halo_whose_link_dropped() {
     };
     let (here, mut there) = game::InlinePeerLink::pair(3, 0);
     let here = std::sync::Arc::new(std::sync::Mutex::new(here));
-    m.set_peer(other, PeerSession::new(hello(mine), other), Box::new(HeldLink(here.clone())));
+    t.m.set_peer(other, PeerSession::new(hello(mine), other), Box::new(HeldLink(here.clone())));
     let mut now = 0;
     let mut pump = |m: &mut game::WorldManager<RecordingSpawner>, there: &mut game::InlinePeerLink| {
         now += 1;
@@ -628,22 +626,32 @@ fn stored_terrain_change_reseeds_a_foreign_halo_whose_link_dropped() {
         there.pump(now);
         for _ in std::iter::from_fn(|| there.recv()) {}
     };
-    pump(&mut m, &mut there);
+    pump(&mut t.m, &mut there);
     there.send(PeerMsg::Hello(hello(other)));
-    pump(&mut m, &mut there);
+    pump(&mut t.m, &mut there);
     there.send(PeerMsg::Volatile(Volatile::RegionUp(f)));
-    pump(&mut m, &mut there);
-    assert!(m.foreign_running().contains(&f), "f runs on the other host: its halo is live");
-    for _ in spawn_inputs.try_iter() {}
+    pump(&mut t.m, &mut there);
+    assert!(t.m.foreign_running().contains(&f), "f runs on the other host: its halo is live");
+    for _ in t.spawn_inputs.try_iter() {}
 
-    m.stored_terrain_changed([(f, 1)].into());
-    assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "a live halo is not re-seeded");
-    assert_eq!(m.stored_regions().get(&f), Some(&1), "its version is noted");
+    t.m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&t.spawn_inputs), Vec::<RegionCoords>::new(), "a live halo is not re-seeded");
+    assert_eq!(t.m.stored_regions().get(&f), Some(&1), "its version is noted");
 
-    // The link drops; f parks meanwhile (its final halo and `RegionParked` are lost).
     here.lock().unwrap().set_up(false);
-    pump(&mut m, &mut there);
-    assert!(!m.foreign_running().contains(&f), "a lost link: f's halo is no longer live");
+    pump(&mut t.m, &mut there);
+    assert!(!t.m.foreign_running().contains(&f), "a lost link: f's halo is no longer live");
+    t
+}
+
+/// Task 6's carry: a FOREIGN neighbour that parks while the peer link is down (its final
+/// halo and its `RegionParked` are lost with the link). While it ran, its stored version
+/// rose (a cut while live: nothing to do then). Once the link is seen down its halo is no
+/// longer live: the next `Resync` re-seeds it from the store even though the version is
+/// one already seen, and the cut that saves its park re-seeds it again.
+#[test]
+fn stored_terrain_change_reseeds_a_foreign_halo_whose_link_dropped() {
+    let TwoHostManager { mut m, f, spawn_inputs, .. } = two_host_manager_with_a_dropped_link();
     m.stored_terrain_changed([(f, 1)].into());
     assert_eq!(store_seeds(&spawn_inputs), vec![f], "the Resync re-seeds it from the store");
     m.stored_terrain_changed([(f, 1)].into());
@@ -651,6 +659,20 @@ fn stored_terrain_change_reseeds_a_foreign_halo_whose_link_dropped() {
     // The cut that saves its park.
     m.stored_terrain_changed([(f, 2)].into());
     assert_eq!(store_seeds(&spawn_inputs), vec![f], "the notice of its saved park re-seeds it");
+}
+
+/// A stale mark is dropped when its region is listed while this host owns it (it became
+/// this host's): owned by the other host again later, an unchanged version re-seeds
+/// nothing.
+#[test]
+fn stored_terrain_change_drops_the_stale_mark_of_a_region_now_owned_here() {
+    let TwoHostManager { mut m, mine, f, spawn_inputs, .. } = two_host_manager_with_a_dropped_link();
+    m.set_ownership(game::Ownership::AllInOne, 1);
+    m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "this host's own region: nothing");
+    m.set_ownership(game::Ownership::Static { ordinal: mine, hosts: 2 }, 1);
+    m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "the stale mark went with the ownership");
 }
 
 /// A region that has ticked asked to re-seed a neighbour the store cannot serve keeps its
