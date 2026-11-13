@@ -298,7 +298,7 @@ impl MultiRig {
                 spawner.set_schedule(Some(f(mix(seed, u64::from(h)))));
             }
             let mut rig = Rig::with_ownership(spawner, floor.clone(), ownership, s);
-            rig.manager.set_endpoints(rig_endpoint(h), mix(seed, 2000 + u64::from(h)));
+            rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(seed, 2000 + u64::from(h))));
             rigs.push(rig);
             let home = nearest_first(64)
                 .into_iter()

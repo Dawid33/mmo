@@ -231,7 +231,7 @@ async fn accept_loop(
             let id = hello.client_id(&next_client_id);
             // Announced before reading any other packets, mirroring the quinn path (an
             // observer's newer connection replaces its older one).
-            let mine = ClientSink::Web(session.clone());
+            let mine = ClientSink::web(session.clone());
             if let Err(why) = crate::seat_session(&sinks, &send, id, &hello, &auth, mine.clone()) {
                 return refuse(&session, &why).await;
             }

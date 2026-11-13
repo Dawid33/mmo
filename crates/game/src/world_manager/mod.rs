@@ -53,6 +53,24 @@ pub const OBSERVER_ORDER_TTL_SECS: u64 = 120;
 pub const OBSERVER_IDLE_CLOSE_MS: u64 = 30_000;
 /// What an idle observer session is told when it is closed ([`OBSERVER_IDLE_CLOSE_MS`]).
 pub const OBSERVER_IDLE_REFUSAL: &str = "observer session idle: no subscription on this server";
+/// Where a host draws its observer nonces ([`WorldManager::set_endpoints`]): the server's
+/// is the OS's randomness — a nonce must be unpredictable from any number of earlier ones.
+pub type NonceSource = Box<dyn FnMut() -> u64 + Send>;
+
+/// A deterministic [`NonceSource`] for seeded tests: splitmix64 over a counter from `seed`.
+/// PREDICTABLE (the finalizer inverts): never a server's.
+pub fn seeded_nonces(seed: u64) -> NonceSource {
+    let mut state = seed;
+    Box::new(move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    })
+}
+/// How often a session's input naming another client is warned about, at most.
+const FOREIGN_INPUT_WARN_MS: u64 = 1_000;
 /// Most arrivals that wait in the manager's mailbox for one region that is
 /// not running ([`WorldManager::pending_arrival_count`]); past it the oldest
 /// is despawned — one carrying drops leaves them as item piles at the seam
@@ -1080,9 +1098,14 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Observer orders other hosts sent, for the server edge
     /// ([`Self::take_observer_orders`]): `(client, player, nonce, ttl_secs)`.
     observer_orders: Vec<(ClientId, PlayerId, u64, u64)>,
-    /// The splitmix state observer nonces are drawn from: `None` until
-    /// [`Self::set_endpoints`] seeds it (an unseeded host mints no ticket).
-    nonce_state: Option<u64>,
+    /// Where observer nonces come from: `None` until [`Self::set_endpoints`] gives a
+    /// source (a host without one mints no ticket).
+    nonces: Option<NonceSource>,
+    /// Clients whose session here became their home, for the server edge
+    /// ([`Self::take_observer_revocations`]).
+    observer_revocations: Vec<ClientId>,
+    /// When a session's input naming another client was last warned about.
+    foreign_input_warned_ms: Option<u64>,
     /// The unseeded-nonce error was logged (once).
     unseeded_warned: bool,
     /// The world cut this host takes part in (several hosts, `world_cut.rs`), from its
@@ -1254,7 +1277,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             awaiting_session: BTreeMap::new(),
             observer_tickets: BTreeMap::new(),
             observer_orders: Vec::new(),
-            nonce_state: None,
+            nonces: None,
+            observer_revocations: Vec::new(),
+            foreign_input_warned_ms: None,
             unseeded_warned: false,
             world_cut: None,
             world_cut_seen: None,
@@ -1507,7 +1532,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Returns false when the server should quit (a Quit game event).
+    /// Whether the server goes on: always, now (a client's `Quit` is dropped; the
+    /// server stops on its own signals).
     pub fn handle_server_event(&mut self, ev: ServerEvent, now_ms: u64) -> bool {
         self.clock_ms = self.clock_ms.max(now_ms);
         match ev {
@@ -1592,7 +1618,22 @@ impl<S: RegionSpawner> WorldManager<S> {
                     };
                     match event.kind {
                     GameEventKind::Tick => {}
-                    GameEventKind::Quit => return false,
+                    // No client stops the server: a client quits its own session, and a
+                    // single-player server exits when its last client leaves.
+                    GameEventKind::Quit => log::debug!("client {id}: a Quit from a client dropped"),
+                    // A session sends input for its own client only.
+                    kind @ (GameEventKind::PlayerInput(..)
+                    | GameEventKind::UiAction(..)
+                    | GameEventKind::Order(..)
+                    | GameEventKind::Prefab(..))
+                        if kind.origin_client() != Some(id) =>
+                    {
+                        let now = self.clock_ms;
+                        if self.foreign_input_warned_ms.is_none_or(|at| now.saturating_sub(at) >= FOREIGN_INPUT_WARN_MS) {
+                            self.foreign_input_warned_ms = Some(now);
+                            log::warn!("client {id}: input naming client {:?} dropped", kind.origin_client());
+                        }
+                    }
                     kind @ (GameEventKind::PlayerInput(..)
                     | GameEventKind::UiAction(..)
                     | GameEventKind::Order(..)
@@ -3016,7 +3057,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|(c, s)| {
                 s.kind == SessionKind::Observer
                     && s.subscribed.is_empty()
-                    && s.lod_subscribed.is_empty()
                     && !self.in_flight.values().any(|f| f.bundle.client.as_ref().is_some_and(|(b, _)| b == *c))
                     && now_ms.saturating_sub(s.idle_since_ms) >= OBSERVER_IDLE_CLOSE_MS
             })
@@ -3113,6 +3153,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.client_disconnected(old, now_ms);
         }
         self.sessions.entry(id).or_default().player = Some(player);
+        // A home session: no observer ticket of the id is admitted here any more.
+        self.observer_revocations.push(id);
         self.player_of.insert(id, player);
         self.placed_by_login(player);
         self.spawn_unpin(player);

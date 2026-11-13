@@ -138,7 +138,7 @@ impl Host {
             Box::new(game::NullLodBuilder::default()),
         );
         manager.set_ownership(Ownership::Static { ordinal, hosts: HOSTS }, S);
-        manager.set_endpoints(endpoint(ordinal, port), 0x5EED + u64::from(ordinal));
+        manager.set_endpoints(endpoint(ordinal, port), game::seeded_nonces(0x5EED + u64::from(ordinal)));
         manager.set_world_map(land_map());
         Host { manager, region_out, packets, log: Vec::new() }
     }
@@ -168,6 +168,7 @@ struct Edge {
     orders: Arc<ObserverOrders>,
     events: Receiver<ServerEvent>,
     to_writer: Sender<(Option<ClientId>, ServerPacket)>,
+    sinks: Arc<dashmap::DashMap<ClientId, server::ClientSink>>,
     /// Every event the edge sent B's manager, in order.
     log: Vec<ServerEvent>,
 }
@@ -181,6 +182,10 @@ struct World {
     started: Instant,
     /// Added to B's clock (an idle observer's 30 s pass at once).
     skew_b: u64,
+    /// While set, B's packets are kept from its edge's writer (in order), as a writer that
+    /// lags behind its manager.
+    hold_writer: bool,
+    held: Vec<(Option<ClientId>, ServerPacket)>,
     /// Last: dropped after the edge's writer input (its writer task blocks on it).
     rt: tokio::runtime::Runtime,
 }
@@ -214,10 +219,11 @@ impl World {
         let (to_writer, writer_recv) = unbounded();
         let players = player_store::shared(player_store::MemoryPlayerStore::default());
         let mut ingress = server::WorldIngress::new("127.0.0.1".parse().unwrap(), port, false, players, auth);
+        let sinks = ingress.sinks();
         rt.spawn(async move { ingress.listen(event_send, writer_recv).await });
-        let edge = Edge { port, orders, events, to_writer, log: Vec::new() };
+        let edge = Edge { port, orders, events, to_writer, sinks, log: Vec::new() };
         let mut world =
-            World { a, b, edge, seam: host_seam(), started: Instant::now(), skew_b: 0, rt };
+            World { a, b, edge, seam: host_seam(), started: Instant::now(), skew_b: 0, hold_writer: false, held: Vec::new(), rt };
         let (sa, sb) = world.seam;
         world.until("both hosts attached and reaching each other", |w| {
             w.a.manager.world_attached()
@@ -250,15 +256,20 @@ impl World {
         self.b.settle(now_b);
         self.a.manager.maintain(now);
         self.b.manager.maintain(now_b);
-        self.edge.orders.record_all(self.b.manager.take_observer_orders());
+        server::observer_pass(&mut self.b.manager, Some(&self.edge.orders), &self.edge.sinks);
         self.a.settle(now);
         self.b.settle(now_b);
         self.a.log.extend(self.a.packets.try_iter());
         for (to, packet) in self.b.packets.try_iter() {
             // The writer gets what the log keeps (`ServerPacket` is not `Clone`).
             let copy: ServerPacket = game::decode_packet(&game::encode_packet(&packet).unwrap()).unwrap();
-            self.edge.to_writer.send((to, copy)).unwrap();
+            self.held.push((to, copy));
             self.b.log.push((to, packet));
+        }
+        if !self.hold_writer {
+            for out in self.held.drain(..) {
+                self.edge.to_writer.send(out).unwrap();
+            }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -516,6 +527,45 @@ fn unknown_or_expired_nonce_is_refused() {
     }
     assert_eq!(book.len(), OBSERVER_ORDERS_MAX, "the book is capped");
     assert_eq!(book.admit(2, 2, 2_001), Err(REFUSE_OBSERVER), "the first to expire went first");
+
+    // A peer's ttl is clamped to the protocol's.
+    let book = ObserverOrders::new(Arc::new(|| 5_000));
+    book.record_all(vec![(CLIENT, PLAYER, 9, u64::MAX)]);
+    assert_eq!(book.admit(CLIENT, 9, 5_000 + game::OBSERVER_ORDER_TTL_SECS - 1), Ok(PLAYER));
+    assert_eq!(book.admit(CLIENT, 9, 5_000 + game::OBSERVER_ORDER_TTL_SECS), Err(REFUSE_OBSERVER), "clamped");
+    // A revoked client's orders go.
+    book.revoke(CLIENT);
+    assert_eq!(book.admit(CLIENT, 9, 5_000), Err(REFUSE_OBSERVER), "revoked");
+}
+
+/// The peer message that carries a nonce never prints it.
+#[test]
+fn observer_order_debug_hides_the_nonce() {
+    let nonce = 0x1234_5678_9ABC_DEF0_u64;
+    let order = game::Reliable::ObserverOrder { client: CLIENT, player: PLAYER, nonce: game::Nonce(nonce), ttl_secs: 120 };
+    let shown = format!("{order:?} {order:#?}");
+    for form in [format!("{nonce}"), format!("{nonce:x}"), format!("{nonce:X}")] {
+        assert!(!shown.contains(&form), "{shown}");
+    }
+}
+
+/// The edge never seats an observer over a Home session of its id (login-admitted or
+/// promoted): the observer is handed back, nothing is told the manager, the occupant stays.
+#[test]
+fn seat_observer_never_replaces_a_home_session() {
+    let sinks = dashmap::DashMap::new();
+    let (send, events) = unbounded();
+    sinks.insert(CLIENT, ("home", true));
+    let seated = player_store::seat_observer(&sinks, &send, CLIENT, PLAYER, ("newcomer", false), |s| s.1);
+    assert_eq!(seated, Err(("newcomer", false)), "refused");
+    assert_eq!(*sinks.get(&CLIENT).unwrap(), ("home", true), "the occupant stays");
+    assert!(events.try_recv().is_err(), "the manager hears nothing");
+    // An observer replaces an observer.
+    sinks.insert(CLIENT, ("older", false));
+    let seated = player_store::seat_observer(&sinks, &send, CLIENT, PLAYER, ("newer", false), |s| s.1);
+    assert_eq!(seated, Ok(Some(("older", false))));
+    assert!(matches!(events.try_recv(), Ok(ServerEvent::ClientDisconnected(CLIENT))));
+    assert!(matches!(events.try_recv(), Ok(ServerEvent::ObserverConnected { client: CLIENT, .. })));
 }
 
 /// Over the wire: a ticket with a wrong nonce is refused with the one refusal, and B hears
@@ -598,7 +648,17 @@ fn second_connection_with_the_same_ticket_replaces_the_first() {
     let ticket = w.ticket_from_a();
     let mut first = w.observe(&ticket);
     w.until_received(&mut first, "the first connection's Host", |p| matches!(p, ServerPacket::Host(_)));
+    // Traffic for the first session is on its way when the second connects.
+    let b = w.seam.1;
+    first.send(&w.rt, ClientPacket::RequestRegionConnection(b));
+    w.until_received(&mut first, "b's snapshot", |p| matches!(p, ServerPacket::Region(rc, _) if *rc == b));
+    // The writer lags: b's events for the first session are still queued when the second
+    // is seated (and its Host queued behind them).
+    w.hold_writer = true;
+    w.rounds(5);
     let mut second = w.observe(&ticket);
+    w.rounds(3);
+    w.hold_writer = false;
     w.until_received(&mut first, "the first connection's refusal", |p| matches!(p, ServerPacket::Refused(_)));
     assert!(
         first.seen.iter().any(|p| matches!(p, ServerPacket::Refused(why) if why == REFUSE_REPLACED)),
@@ -620,7 +680,6 @@ fn second_connection_with_the_same_ticket_replaces_the_first() {
     assert_eq!(sessions, ["connected", "disconnected", "connected"], "the old one ends first, once");
     assert_eq!(w.b.manager.session_kind(CLIENT), Some(game::SessionKind::Observer), "the new session lives");
     // The new connection is the live one.
-    let b = w.seam.1;
     second.send(&w.rt, ClientPacket::RequestRegionConnection(b));
     w.until_received(&mut second, "b's snapshot on the new connection", |p| matches!(p, ServerPacket::Region(rc, _) if *rc == b));
     assert!(matches!(second.seen[0], ServerPacket::Host(_)), "{:?}", names(&second.seen));
@@ -687,6 +746,60 @@ fn observer_becomes_home_when_the_body_arrives() {
     let received = names(&client.seen);
     let at = received.iter().position(|n| n == "PlayerRegion").expect("PlayerRegion received");
     assert_eq!(received[at..at + 4], ["PlayerRegion", "Fortress", "Calendar", "Sites"], "{received:?}");
+}
+
+/// The body arrives (B's observer session is promoted to Home); then the same ticket is
+/// presented again: B's edge refuses it (the order was revoked on promotion), the Home session
+/// is not disconnected, nothing parks, and the newcomer hears nothing of the player.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn ticket_cannot_replace_a_promoted_home_session() {
+    let mut w = World::new();
+    w.connect_home_on_a();
+    let ticket = w.ticket_from_a();
+    let mut client = w.observe(&ticket);
+    w.until_received(&mut client, "B's Host packet", |p| matches!(p, ServerPacket::Host(_)));
+    let b = w.seam.1;
+    let now = w.now();
+    w.a.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(b), CLIENT), now);
+    w.until("the session on B is the home", |w| w.b.manager.session_kind(CLIENT) == Some(game::SessionKind::Home));
+    w.rounds(5);
+    let disconnects = |w: &World| w.edge.log.iter().filter(|e| matches!(e, ServerEvent::ClientDisconnected(_))).count();
+    let before = disconnects(&w);
+    let mut thief = w.dial(Credential::Observer { client: ticket.client, nonce: ticket.nonce });
+    w.until_received(&mut thief, "a refusal", |p| matches!(p, ServerPacket::Refused(_)));
+    w.until_closed(&thief, "the edge closes the newcomer");
+    w.rounds(20);
+    thief.drain();
+    assert!(matches!(&thief.seen[..], [ServerPacket::Refused(_)]), "the newcomer got only its refusal: {:?}", names(&thief.seen));
+    assert_eq!(disconnects(&w), before, "the Home session was not disconnected");
+    assert_eq!(w.b.manager.session_kind(CLIENT), Some(game::SessionKind::Home));
+    assert_eq!(w.b.manager.home_of(CLIENT), Some(b), "nothing parked");
+    assert!(client.connection.close_reason().is_none(), "the home connection is open");
+}
+
+/// Once promoted, the session's own input is accepted (it is no observer any more).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn promoted_session_input_is_accepted() {
+    let mut w = World::new();
+    w.connect_home_on_a();
+    let ticket = w.ticket_from_a();
+    let mut client = w.observe(&ticket);
+    w.until_received(&mut client, "B's Host packet", |p| matches!(p, ServerPacket::Host(_)));
+    let b = w.seam.1;
+    let now = w.now();
+    w.a.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(b), CLIENT), now);
+    let body_on_b = |w: &mut World| {
+        let mut mode = None;
+        w.b.manager.spawner_mut().with_region(b, |r| mode = r.data().clients.get(&CLIENT).map(|c| c.mode));
+        mode
+    };
+    w.until("the body stands in b", |w| w.b.manager.session_kind(CLIENT) == Some(game::SessionKind::Home) && body_on_b(w).is_some());
+    let order = game::GameEventKind::Order(CLIENT, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None });
+    let tick = game::RegionSpawner::world_tick(w.b.manager.spawner_mut());
+    client.send(&w.rt, ClientPacket::GameEventAfterTick(game::GameEvent { kind: order, id: 0, region_id: b }, tick));
+    w.until("the order applied on B", |w| body_on_b(w) == Some(game::PlayMode::Adventure));
 }
 
 /// A test QUIC client that accepts any certificate (the server's is self-signed).

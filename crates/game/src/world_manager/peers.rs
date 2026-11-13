@@ -222,11 +222,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Where clients reach this host (the first packet of every session,
-    /// [`crate::ServerPacket::Host`]), and the seed observer nonces are drawn from (random
-    /// per host process start: a nonce must not be guessable).
-    pub fn set_endpoints(&mut self, mine: crate::HostEndpoint, nonce_seed: u64) {
+    /// [`crate::ServerPacket::Host`]), and where observer nonces come from: a server passes
+    /// the OS's randomness (a nonce must be unpredictable from any number of earlier ones),
+    /// a seeded test [`seeded_nonces`].
+    pub fn set_endpoints(&mut self, mine: crate::HostEndpoint, nonces: NonceSource) {
         self.endpoint = mine;
-        self.nonce_state = Some(nonce_seed);
+        self.nonces = Some(nonces);
+    }
+
+    /// The clients whose session here became (or started as) their home since the last
+    /// call: the server edge revokes their observer orders, and an observer connection of
+    /// theirs may no longer replace the home one.
+    pub fn take_observer_revocations(&mut self) -> Vec<ClientId> {
+        std::mem::take(&mut self.observer_revocations)
     }
 
     /// The observer orders other hosts sent since the last call:
@@ -277,6 +285,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.sessions.insert(client, Session { kind, player: Some(player), idle_since_ms: now_ms, ..Session::default() });
         if home {
             log::info!("client {client}: connected after its body was handed here; the session is its home");
+            self.observer_revocations.push(client);
             let region = self.homes.get(&client).copied();
             let _ = self.out.send((Some(client), ServerPacket::PlayerRegion(region, client)));
             self.send_home_state(client, now_ms);
@@ -540,6 +549,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         match self.sessions.get_mut(&c) {
             Some(session) => {
                 session.kind = SessionKind::Home;
+                self.observer_revocations.push(c);
                 true
             }
             None => {
@@ -663,11 +673,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("client {client}: no player for its session; subscribe to {rc:?} dropped");
             return;
         }
-        if self.nonce_state.is_none() {
-            // No seed (`set_endpoints` not called): a ticket would be guessable.
+        if self.nonces.is_none() {
+            // No source (`set_endpoints` not called): no ticket.
             if !self.unseeded_warned {
                 self.unseeded_warned = true;
-                log::error!("[server] no nonce seed (set_endpoints): subscribes to other hosts' regions are dropped");
+                log::error!("[server] no nonce source (set_endpoints): subscribes to other hosts' regions are dropped");
             }
             return;
         }
@@ -691,21 +701,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         match self.sessions.get(&client).and_then(|s| s.player) {
             Some(player) => {
                 let ttl_secs = OBSERVER_ORDER_TTL_SECS;
-                self.queue_to_peer(owner, Reliable::ObserverOrder { client, player, nonce, ttl_secs });
+                self.queue_to_peer(owner, Reliable::ObserverOrder { client, player, nonce: crate::Nonce(nonce), ttl_secs });
             }
             None => log::error!("client {client}: an observer ticket with no player; host {owner} is not told"),
         }
         crate::ObserverTicket { client, nonce }
     }
 
-    /// splitmix64 over the seed [`Self::set_endpoints`] gave (callers check it is seeded).
+    /// The next nonce of the source [`Self::set_endpoints`] gave (callers check there is one).
     fn next_nonce(&mut self) -> u64 {
-        let state = self.nonce_state.unwrap_or_default().wrapping_add(0x9E37_79B9_7F4A_7C15);
-        self.nonce_state = Some(state);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        self.nonces.as_mut().map_or(0, |next| next())
     }
 
     /// `msg` to host `ordinal` (a state message departing after its source answered goes by
@@ -1134,8 +1139,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.accept_handoff(from, target, stamp, *bundle, handoff);
             }
             // For the server edge, which admits the ticket (`take_observer_orders`).
+            // Never for a client whose session here is its home: its ticket must not open a
+            // second connection of it (`take_observer_revocations`).
             Reliable::ObserverOrder { client, player, nonce, ttl_secs } => {
-                self.observer_orders.push((client, player, nonce, ttl_secs));
+                if self.sessions.get(&client).is_some_and(|s| s.kind == SessionKind::Home) {
+                    log::info!("[server] host {from}'s observer order for client {client}, at home here: not recorded");
+                } else {
+                    self.observer_orders.push((client, player, nonce.0, ttl_secs));
+                }
             }
             // As if one of this host's regions had sent it: no cut has seen it here, unless
             // it came after its sender's mark (that sender's snapshot holds it).

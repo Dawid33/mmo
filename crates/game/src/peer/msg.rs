@@ -54,6 +54,18 @@ pub struct PlayerHandoff {
     pub hop: u64,
 }
 
+/// An observer ticket's secret ([`Reliable::ObserverOrder`]): serialized as the bare
+/// number, never printed (`Debug` shows `<secret>`).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct Nonce(pub u64);
+
+impl std::fmt::Debug for Nonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<secret>")
+    }
+}
+
 /// What must arrive exactly once, in order: numbered per directed link, kept by the
 /// sender until acknowledged ([`super::PeerSession::queue`]).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -65,7 +77,7 @@ pub enum Reliable {
     PlayerMove { handoff: PlayerHandoff, record: Box<PlayerRecord>, target: RegionCoords },
     /// Admit `client` (of `player`) presenting `nonce` for `ttl_secs` from receipt (the
     /// receiving edge dates it by its own clock).
-    ObserverOrder { client: ClientId, player: PlayerId, nonce: u64, ttl_secs: u64 },
+    ObserverOrder { client: ClientId, player: PlayerId, nonce: Nonce, ttl_secs: u64 },
     /// Spawn a login session's player; `origin` is the host the order entered at (the
     /// one the login service pushed it to), `hops` how often it was forwarded. `player` and
     /// `record_region` are what `origin` read from the store for the token.

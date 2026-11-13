@@ -116,25 +116,34 @@ pub const REFUSE_REPLACED: &str = "replaced by a newer connection";
 /// between), the manager is told the older session ended (`ClientDisconnected`) and then
 /// the new one started (`ObserverConnected`). The older connection's own close then reports
 /// nothing ([`release_sink`]).
+///
+/// An observer replaces only an observer: when the id's live connection is its home
+/// (`is_home`: admitted by a login or a name, or promoted), `Err` hands `sink` back —
+/// the caller refuses it — and nothing is sent or changed.
 pub fn seat_observer<V>(
     sinks: &dashmap::DashMap<game::ClientId, V>,
     send: &crossbeam::channel::Sender<game::ServerEvent>,
     id: game::ClientId,
     player: game::PlayerId,
     sink: V,
-) -> Option<V> {
+    is_home: impl FnOnce(&V) -> bool,
+) -> Result<Option<V>, V> {
     let connected = game::ServerEvent::ObserverConnected { client: id, player };
     match sinks.entry(id) {
         dashmap::mapref::entry::Entry::Occupied(mut slot) => {
+            if is_home(slot.get()) {
+                log::info!("[server] client {id}: an observer connection refused: its home session is live here");
+                return Err(sink);
+            }
             let older = slot.insert(sink);
             let _ = send.send(game::ServerEvent::ClientDisconnected(id));
             let _ = send.send(connected);
-            Some(older)
+            Ok(Some(older))
         }
         dashmap::mapref::entry::Entry::Vacant(slot) => {
             slot.insert(sink);
             let _ = send.send(connected);
-            None
+            Ok(None)
         }
     }
 }
@@ -267,11 +276,9 @@ pub fn announce_session(
     auth: &crate::auth_edge::Authenticator,
 ) -> Result<(), String> {
     let player = session.player;
-    if let Some(client) = session.observer {
-        // Never a body, a store write or a login event (the accept paths seat it with
-        // [`seat_observer`], which also replaces an older connection).
-        let _ = send.send(game::ServerEvent::ObserverConnected { client, player });
-        return Ok(());
+    if session.observer.is_some() {
+        // Seated by [`seat_observer`], never announced as a player (that would place a body).
+        return Err("an observer session is not announced".into());
     }
     let relay = auth.relays_logins();
     auth.announce(session.ticket.as_ref(), || {

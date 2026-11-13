@@ -294,12 +294,40 @@ fn disconnect_during_stopping_window_leaves_no_phantom_subscriber() {
     assert!(h.drain_packets().is_empty(), "packets sent to a dead client");
 }
 
+/// A client's `Quit` never stops the server (no client sends one: a client quits its own
+/// session; a single-player server exits when its last client leaves or its parent goes).
 #[test]
-fn quit_event_stops_the_manager() {
+fn quit_from_a_client_is_dropped() {
     let mut h = harness();
     h.event(ServerEvent::connected(0), 0);
     let ev = GameEvent::new(GameEventKind::Quit, 0, SPAWN_REGION);
-    assert!(!h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0));
+    assert!(h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev.clone()), 0), 0), "GameEvent(Quit)");
+    assert!(h.event(ServerEvent::ClientPacket(ClientPacket::GameEventAfterTick(ev, 0), 0), 0), "GameEventAfterTick(Quit)");
+    assert_eq!(h.manager.depths().sessions, 1, "the session goes on");
+}
+
+/// A session may only send input for its own client: an `Order` naming another client is
+/// dropped, its own is applied.
+#[test]
+fn input_naming_another_client_is_dropped() {
+    let mut h = harness();
+    h.event(session(0, 1, None), 0);
+    h.event(session(1, 2, None), 0);
+    let mode = |h: &mut Harness, c: ClientId| {
+        for _ in 0..3 {
+            h.manager.spawner_mut().tick_all();
+            h.settle(0);
+        }
+        let mut out = None;
+        h.manager.spawner_mut().with_region(SPAWN_REGION, |r| out = r.data().clients.get(&c).map(|c| c.mode));
+        out.expect("the client is in the spawn region")
+    };
+    assert_ne!(mode(&mut h, 0), game::PlayMode::Adventure);
+    let adventure = |c| GameEventKind::Order(c, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None });
+    client_event(&mut h, 1, adventure(0));
+    assert_ne!(mode(&mut h, 0), game::PlayMode::Adventure, "client 1 drove client 0");
+    client_event(&mut h, 0, adventure(0));
+    assert_eq!(mode(&mut h, 0), game::PlayMode::Adventure, "its own order applies");
 }
 
 /// Connect client 0 and drain the join packets, returning the harness ready

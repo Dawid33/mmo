@@ -147,20 +147,73 @@ pub mod webtransport;
 pub mod world_file;
 
 /// One connected client's outgoing half, transport-agnostic. The router
-/// writes bincode ServerPackets; each variant frames them as one
-/// uni-stream per packet.
+/// writes bincode ServerPackets; each transport frames them as one
+/// uni-stream per packet. Clones share the connection and its seat state.
 #[derive(Clone)]
-pub enum ClientSink {
+pub struct ClientSink {
+    conn: SinkConnection,
+    seat: Arc<SeatState>,
+}
+
+#[derive(Clone)]
+enum SinkConnection {
     Quinn(quinn::Connection),
     Web(wtransport::Connection),
 }
 
+/// How a connection holds its id ([`seat_session`]).
+#[derive(Default)]
+struct SeatState {
+    /// The id's session is its home here: admitted by a login or a player name, or an
+    /// observer session the manager promoted ([`game::WorldManager::take_observer_revocations`]).
+    /// An observer connection never replaces it.
+    home: std::sync::atomic::AtomicBool,
+    /// An observer connection that has not had its `Host` yet: packets still addressed to
+    /// its id before that were the replaced session's, and are not sent to it.
+    awaiting_host: std::sync::atomic::AtomicBool,
+}
+
 impl ClientSink {
+    pub fn quinn(conn: quinn::Connection) -> ClientSink {
+        ClientSink { conn: SinkConnection::Quinn(conn), seat: Arc::default() }
+    }
+
+    pub fn web(session: wtransport::Connection) -> ClientSink {
+        ClientSink { conn: SinkConnection::Web(session), seat: Arc::default() }
+    }
+
+    /// Whether the id's session on this connection is its home ([`SeatState::home`]).
+    pub fn is_home(&self) -> bool {
+        self.seat.home.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The manager made this connection's session the home (or it was admitted as one).
+    pub fn set_home(&self) {
+        self.seat.home.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether `packet` goes to this connection: an observer connection gets nothing
+    /// before its `Host` but a refusal ([`SeatState::awaiting_host`]).
+    pub fn admits(&self, packet: &ServerPacket) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !self.seat.awaiting_host.load(SeqCst) {
+            return true;
+        }
+        match packet {
+            ServerPacket::Host(_) => {
+                self.seat.awaiting_host.store(false, SeqCst);
+                true
+            }
+            ServerPacket::Refused(_) => true,
+            _ => false,
+        }
+    }
+
     /// Send one packet; a failed/vanished client is logged and skipped so a
     /// single dead connection can't kill the shared writer task.
     pub async fn send_packet(&self, packet: Vec<u8>) {
-        match self {
-            ClientSink::Quinn(conn) => {
+        match &self.conn {
+            SinkConnection::Quinn(conn) => {
                 let mut stream = match conn.open_uni().await {
                     Ok(s) => s,
                     Err(e) => {
@@ -177,7 +230,7 @@ impl ClientSink {
                     let _ = stream.stopped().await;
                 });
             }
-            ClientSink::Web(session) => {
+            SinkConnection::Web(session) => {
                 let mut stream = match session.open_uni().await {
                     Ok(opening) => match opening.await {
                         Ok(s) => s,
@@ -196,17 +249,17 @@ impl ClientSink {
     /// Close the connection with application code 1 (`refused`): the session
     /// was ended by the server (`ServerPacket::Refused` already sent).
     pub fn close_refused(&self) {
-        match self {
-            ClientSink::Quinn(conn) => conn.close(1u32.into(), b"refused"),
-            ClientSink::Web(session) => session.close(wtransport::VarInt::from_u32(1), b"refused"),
+        match &self.conn {
+            SinkConnection::Quinn(conn) => conn.close(1u32.into(), b"refused"),
+            SinkConnection::Web(session) => session.close(wtransport::VarInt::from_u32(1), b"refused"),
         }
     }
 
     /// Whether `other` is this very connection.
     pub fn same_connection(&self, other: &ClientSink) -> bool {
-        match (self, other) {
-            (ClientSink::Quinn(a), ClientSink::Quinn(b)) => a.stable_id() == b.stable_id(),
-            (ClientSink::Web(a), ClientSink::Web(b)) => a.stable_id() == b.stable_id(),
+        match (&self.conn, &other.conn) {
+            (SinkConnection::Quinn(a), SinkConnection::Quinn(b)) => a.stable_id() == b.stable_id(),
+            (SinkConnection::Web(a), SinkConnection::Web(b)) => a.stable_id() == b.stable_id(),
             _ => false,
         }
     }
@@ -238,12 +291,21 @@ pub(crate) fn seat_session(
     sink: ClientSink,
 ) -> Result<(), String> {
     if hello.observer.is_some() {
-        if let Some(older) = player_store::seat_observer(sinks, send, id, hello.player, sink) {
-            log::info!("[server] client {id}: a newer observer connection replaces the older");
-            older.refuse_later(player_store::REFUSE_REPLACED);
-        }
-        return Ok(());
+        // Nothing reaches it before its `Host` (what is still addressed to the id is an
+        // older session's).
+        sink.seat.awaiting_host.store(true, std::sync::atomic::Ordering::SeqCst);
+        return match player_store::seat_observer(sinks, send, id, hello.player, sink, ClientSink::is_home) {
+            Ok(None) => Ok(()),
+            Ok(Some(older)) => {
+                log::info!("[server] client {id}: a newer observer connection replaces the older");
+                older.refuse_later(player_store::REFUSE_REPLACED);
+                Ok(())
+            }
+            // Its session here is the home: an observer ticket never takes its place.
+            Err(_) => Err(auth_edge::REFUSE_OBSERVER.into()),
+        };
     }
+    sink.set_home();
     if player_store::claim_sink(sinks, id, sink).is_err() {
         return Err(player_store::REFUSE_ALREADY_CONNECTED.into());
     }
@@ -288,6 +350,8 @@ pub struct WorldIngress {
     /// The WebTransport ingress's self-signed certificate, minted before the ingress starts
     /// (its hash is in this host's endpoint); `None`: the ingress reads its source itself.
     wt_cert: Option<webtransport::SelfSignedCert>,
+    /// Each live session's connection, by id (shared with the main loop: [`Self::sinks`]).
+    sinks: Arc<DashMap<ClientId, ClientSink>>,
 }
 
 impl WorldIngress {
@@ -298,7 +362,13 @@ impl WorldIngress {
         players: player_store::SharedPlayerStore,
         auth: Arc<auth_edge::Authenticator>,
     ) -> Self {
-        Self { ip, port, webtransport, players, auth, wt_cert: None }
+        Self { ip, port, webtransport, players, auth, wt_cert: None, sinks: Arc::new(DashMap::new()) }
+    }
+
+    /// The live connections by session id: the main loop marks the ones whose observer
+    /// session the manager promoted to the home ([`ClientSink::set_home`]).
+    pub fn sinks(&self) -> Arc<DashMap<ClientId, ClientSink>> {
+        self.sinks.clone()
     }
 
     /// Serve WebTransport with `cert` (minted ahead, so its hash could be advertised).
@@ -341,7 +411,7 @@ impl WorldIngress {
             .unwrap_or_else(|e| panic!("could not bind QUIC on {quic_addr}: {e}"));
         info!("listening on {quic_addr} (QUIC)");
 
-        let sinks: Arc<DashMap<ClientId, ClientSink>> = Arc::new(DashMap::new());
+        let sinks = self.sinks.clone();
         let writer_sinks = sinks.clone();
         tokio::spawn(async move {
             // A stalled or vanished peer must never wedge this shared task:
@@ -381,7 +451,7 @@ impl WorldIngress {
                 match target {
                     // Directed packet: if the client is gone, drop it.
                     Some(id) => {
-                        let sink = writer_sinks.get(&id).map(|e| e.value().clone());
+                        let sink = writer_sinks.get(&id).map(|e| e.value().clone()).filter(|s| s.admits(&event));
                         if let Some(sink) = sink {
                             if matches!(event, ServerPacket::Refused(_)) {
                                 // The manager ended this session (its player
@@ -416,7 +486,7 @@ impl WorldIngress {
                     }
                     None => {
                         let targets: Vec<ClientSink> =
-                            writer_sinks.iter().map(|e| e.value().clone()).collect();
+                            writer_sinks.iter().map(|e| e.value().clone()).filter(|s| s.admits(&event)).collect();
                         for sink in targets {
                             send_bounded(sink, packet.clone()).await;
                         }
@@ -479,7 +549,7 @@ impl WorldIngress {
                 // claimed in the same step, so a replayed ticket never replaces a live one
                 // (an observer's newer connection does replace its older one).
                 let id = hello.client_id(&next_client_id);
-                let mine = ClientSink::Quinn(connection.clone());
+                let mine = ClientSink::quinn(connection.clone());
                 if let Err(why) = seat_session(&sinks, &send, id, &hello, &auth, mine.clone()) {
                     return refuse_quic(&connection, &why).await;
                 }
@@ -732,6 +802,7 @@ pub fn run() -> claims::ServerExit {
     let auth = Arc::new(authenticator);
     let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone())
         .with_webtransport_cert(wt_cert);
+    let sinks = rgi.sinks();
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
@@ -924,7 +995,7 @@ pub fn run() -> claims::ServerExit {
     }
     let mut manager = game::WorldManager::new(spawner, server_send, region_out_send, lod_builder);
     manager.set_ownership(ownership, super_region_regions);
-    manager.set_endpoints(endpoint.clone(), random_u64());
+    manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {
         manager.set_entry_host(entry);
     }
@@ -1071,9 +1142,7 @@ pub fn run() -> claims::ServerExit {
         }
         manager.maintain(now_ms);
         // Several hosts: the observer tickets other hosts vouched for since the last pass.
-        if let Some(orders) = &observer_orders {
-            orders.record_all(manager.take_observer_orders());
-        }
+        observer_pass(&mut manager, observer_orders.as_deref(), &sinks);
         // The login relay (several hosts): spawn orders taken, kicks relayed, answers out.
         if let Some(relay) = &login_relay {
             relay.pump(&mut manager);
@@ -1153,6 +1222,29 @@ fn host_endpoint(
         quic: Some(peer_link::advertise_quic_from(lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(), port)),
         webtransport: peer_link::advertise_wt_from(lookup(peer_link::ADVERTISE_WT_ENV).as_deref()),
         cert_hash: wt_cert.map(|c| c.sha256_hex().to_string()),
+    }
+}
+
+/// The main loop's pass over the manager's observer bookkeeping (after `maintain`): the
+/// orders other hosts sent go to the edge's book (several hosts: `orders`), and the
+/// sessions that became (or started as) their home are revoked there — their tickets admit
+/// nothing more — and marked on their connection, which no observer connection replaces.
+pub fn observer_pass<S: game::RegionSpawner>(
+    manager: &mut game::WorldManager<S>,
+    orders: Option<&auth_edge::ObserverOrders>,
+    sinks: &DashMap<ClientId, ClientSink>,
+) {
+    let taken = manager.take_observer_orders();
+    if let Some(orders) = orders {
+        orders.record_all(taken);
+    }
+    for client in manager.take_observer_revocations() {
+        if let Some(orders) = orders {
+            orders.revoke(client);
+        }
+        if let Some(sink) = sinks.get(&client) {
+            sink.set_home();
+        }
     }
 }
 
@@ -1344,6 +1436,15 @@ mod tests {
     }
 
     #[test]
+    fn observer_nonces_come_from_the_os() {
+        let (mut a, mut b) = (os_nonces(), os_nonces());
+        let drawn: std::collections::BTreeSet<u64> = (0..1000).map(|_| a()).collect();
+        assert_eq!(drawn.len(), 1000, "no repeats");
+        // Not a seeded sequence: two sources (as two hosts, or two boots) do not agree.
+        assert_ne!((a(), a()), (b(), b()));
+    }
+
+    #[test]
     fn single_player_has_no_webtransport_ingress() {
         assert!(webtransport_enabled(false));
         assert!(!webtransport_enabled(true));
@@ -1395,13 +1496,16 @@ fn host_world_link(ordinal: u32, boot: u64, epoch: u64) -> Result<roles::QuicWor
     ))
 }
 
-/// A random number: SipHash under keys the OS seeds (`RandomState`) over the boot number.
-/// The seed of this boot's observer nonces, which must not be guessable.
-fn random_u64() -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u64(host_boot());
-    h.finish()
+/// This host's observer nonces: each one fresh from the OS's randomness (ring's
+/// `SystemRandom`, through rustls's provider), so no number of earlier nonces predicts the
+/// next. A failed read stops the process: a guessable nonce would let anyone observe.
+fn os_nonces() -> game::NonceSource {
+    let random = rustls::crypto::ring::default_provider().secure_random;
+    Box::new(move || {
+        let mut bytes = [0u8; 8];
+        random.fill(&mut bytes).unwrap_or_else(|e| fatal(&format!("the OS's randomness failed: {e:?}")));
+        u64::from_le_bytes(bytes)
+    })
 }
 
 /// A number distinct per host process start (its world requests' `RequestId::boot`): the

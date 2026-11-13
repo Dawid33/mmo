@@ -323,8 +323,15 @@ impl ObserverOrders {
     pub fn record_all(&self, orders: Vec<(ClientId, PlayerId, u64, u64)>) {
         let now = (self.now)();
         for (client, player, nonce, ttl_secs) in orders {
+            // A peer's ttl is never trusted past the protocol's.
+            let ttl_secs = ttl_secs.min(game::OBSERVER_ORDER_TTL_SECS);
             self.record(client, player, nonce, now.saturating_add(ttl_secs));
         }
+    }
+
+    /// `client`'s session here is its home: its orders go (its tickets admit nothing more).
+    pub fn revoke(&self, client: ClientId) {
+        self.lock().remove(&client);
     }
 
     /// The player of `client`'s order for `nonce`, if one is valid at `now_secs`. The nonce

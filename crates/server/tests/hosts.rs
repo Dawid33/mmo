@@ -184,7 +184,7 @@ impl Sim {
             Box::new(game::NullLodBuilder::default()),
         );
         manager.set_ownership(Ownership::Static { ordinal, hosts: HOSTS }, s);
-        manager.set_endpoints(endpoint(ordinal), 0x5EED + u64::from(ordinal));
+        manager.set_endpoints(endpoint(ordinal), game::seeded_nonces(0x5EED + u64::from(ordinal)));
         for (other, link) in links.take() {
             let hello = PeerHello {
                 ordinal,
