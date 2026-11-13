@@ -1883,9 +1883,23 @@ impl GameInstanceManager {
             self.conns.home_ordinal()
         );
         // The subscribes left unanswered at the old home get no answer the client reads
-        // any more (it reads only region traffic there): forgotten, so an unasked
+        // any more (it reads only region traffic there; a `RegionElsewhere` from it is
+        // dropped): each region still wanted and not held is released there (the old home
+        // drops it; a late snapshot from it is not the mapped connection's any more) and
+        // asked of the new home. The old entries are forgotten first, so an unasked
         // `RegionElsewhere` from the new home is never taken for their answer.
+        let pending: Vec<RegionCoords> = self
+            .asked_home
+            .keys()
+            .copied()
+            .filter(|rc| self.subscribed.contains(rc) && !self.host.contains(rc) && self.conns.connection_of(*rc) == old)
+            .collect();
         self.asked_home.clear();
+        for rc in pending {
+            self.send_out(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(rc)));
+            self.conns.release(rc);
+            self.request_region(rc);
+        }
         // A release still queued for the new home (it was a former home itself) would
         // land after the requests below and drop them: purged, as are those for a
         // connection that closed. No release is ever queued for the home, so every
@@ -2747,7 +2761,8 @@ mod manager_tests {
     /// LOD releases of the earlier flips are still queued (more keys than one tick
     /// sends): no release reaches a host after its keys were asked of it again — at the
     /// end B holds every key the client holds and A none. The subscribes left
-    /// unanswered at the old home are forgotten at each flip.
+    /// unanswered at the old home are forgotten at each flip (one still wanted is asked
+    /// of the new home).
     #[test]
     fn lod_keys_end_on_the_home_after_quick_flips() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
@@ -2783,7 +2798,8 @@ mod manager_tests {
         };
         manager.request_region(RegionCoords::new(-1, 0));
         flip(&mut manager, b, 1);
-        let asked_forgotten = manager.asked_home.is_empty();
+        // Forgotten there: what is left was asked of the new home (a region still wanted).
+        let asked_forgotten = manager.asked_home.keys().all(|rc| manager.conns.connection_of(*rc) == b);
         manager.update_lod_window();
         flip(&mut manager, a, 2);
         manager.update_lod_window();
@@ -2798,7 +2814,73 @@ mod manager_tests {
         lod_held(opener.0.lock().unwrap()[0].try_iter(), &mut on_b);
         assert_eq!(on_b, keys, "host B holds every key the client holds ({} missing)", keys.difference(&on_b).count());
         assert!(on_a.is_empty(), "host A holds none: {} left", on_a.len());
-        assert!(asked_forgotten, "the old home's unanswered subscribes are forgotten at the flip");
+        assert!(asked_forgotten, "the old home's unanswered subscribes are forgotten (or asked of the new home) at the flip");
+    }
+
+    /// Final review I4: region R is asked of home A; the home flips to B before A's answer
+    /// (which the client would no longer read): R is released on A and asked of B, a late
+    /// snapshot from A is dropped, B's loads it, and nothing of R is left subscribed on A.
+    #[test]
+    fn a_region_pending_on_the_old_home_is_asked_of_the_new_one() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let opener = RecordingOpener::default();
+        manager.set_conn_opener(Box::new(opener.clone()));
+        let home = RegionCoords::new(0, 0);
+        let b_region = RegionCoords::new(1, 0);
+        let r = RegionCoords::new(-1, 0);
+        let endpoint = |ordinal| game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None };
+        server_send.send(ServerPacket::Host(endpoint(0))).unwrap();
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::RegionElsewhere {
+                region: b_region,
+                endpoint: endpoint(1),
+                ticket: game::ObserverTicket { client: 0, nonce: 1 },
+            })
+            .unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let a = crate::connections::LOGIN_CONN;
+        let b = manager.conns.conn_to(1).expect("a connection to host 1");
+        // R is wanted and asked of home A; no answer yet.
+        manager.subscribed.insert(r);
+        manager.request_region(r);
+        manager.flush_outgoing();
+        let _ = manager_packets(&manager);
+        let on_b = opener.0.lock().unwrap()[0].clone();
+        let _ = on_b.try_iter().count();
+        // B's HomeHop + PlayerRegion arrive before A's answer.
+        let (events, incoming) = crossbeam::channel::unbounded();
+        events.send((b, ConnEvent::Packet(ServerPacket::HomeHop(1)))).unwrap();
+        events.send((b, ConnEvent::Packet(ServerPacket::PlayerRegion(Some(home), 0)))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        assert_eq!(manager.conns.home(), b);
+        let sent_a = manager_packets(&manager);
+        assert!(
+            sent_a.iter().any(|p| matches!(p, ClientPacket::ReleaseRegionConnection(rc) if *rc == r)),
+            "released on the old home: {sent_a:?}"
+        );
+        let sent_b: Vec<ClientPacket> = on_b.try_iter().collect();
+        assert!(
+            sent_b.iter().any(|p| matches!(p, ClientPacket::RequestRegionConnection(rc) if *rc == r)),
+            "asked of the new home: {sent_b:?}"
+        );
+        assert_eq!(manager.conns.connection_of(r), b);
+        // A's late snapshot is dropped; B's loads R.
+        let mut world = game::World::new();
+        world.load(&r, Region::empty(r));
+        events.send((a, ConnEvent::Packet(world.build_region_server_packet(&r)))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        assert!(!manager.loaded_regions().contains(&r), "not from the old home");
+        events.send((b, ConnEvent::Packet(world.build_region_server_packet(&r)))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        assert!(manager.loaded_regions().contains(&r), "loaded from the new home");
+        // The client's own packets to A from here on hold no subscribe of R.
+        assert!(!manager_packets(&manager).iter().any(|p| matches!(p, ClientPacket::RequestRegionConnection(rc) if *rc == r)));
+    }
+
+    /// The packets the client sent on its login connection since the last call.
+    fn manager_packets(manager: &GameInstanceManager) -> Vec<ClientPacket> {
+        manager.client_packet_recv().try_iter().collect()
     }
 
     /// Fix round 2 (Task 18 m5): a region's retry was set to a long wait while it was far
