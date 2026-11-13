@@ -913,16 +913,18 @@ login-world-list:
 
 with_web := ""
 
-# The dev account `dev-login` / `run-online` ensure (verified). Local dev database
-# (target/dev-login/login.sqlite) only — not a secret.
+# The dev account `dev-login` / `run-online` set up (verified, no password: the client starts
+# from a refresh token `login account issue-refresh` prints). Local dev database
+# (target/dev-login/login.sqlite) only.
 dev_email := "dev@localhost"
-dev_password := "dev-password"
 
 # How long `run-online` waits for the login service and the server to come up.
 online_wait_secs := "180"
 
 # What `dev-login` and `run-online` need in the dev login database: a signing key,
-# the world `dev` (127.0.0.1:6466 / :6467) and the verified account `dev_email`. The world
+# the world `dev` (127.0.0.1:6466 / :6467) and the verified account `dev_email` with a fresh refresh token in
+# target/dev-login/refresh (the file `run-online`'s client keeps its login in; rewritten at every
+# start, the client rotates the token in it while it runs). The world
 # is (re)registered WITHOUT a host link (R2a: the jwt server checks tickets by epoch), undoing
 # the link a `dev-r2` run registers.
 _dev-login-setup:
@@ -934,10 +936,10 @@ _dev-login-setup:
         $login keygen
     fi
     $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/
-    printf '%s\n' "{{dev_password}}" | $login account ensure {{dev_email}} --verified
+    $login account issue-refresh {{dev_email}} >target/dev-login/refresh.tmp && chmod 600 target/dev-login/refresh.tmp && mv target/dev-login/refresh.tmp target/dev-login/refresh
 
 # A dev server that requires login, with the login service beside it: ensures a signing
-# key, the world `dev` and the dev account (`dev_email` / `dev_password`), runs `login serve`
+# key, the world `dev` and the dev account (`dev_email`, with a kept token), runs `login serve`
 # in the background and the dev server (VOXEL_AUTH=jwt, play region size) in the
 # foreground; SIGTERMs the login service on exit.
 # `just with_web=1 dev-login` also serves the browser page (wasm-server-runner, :1334)
@@ -966,8 +968,8 @@ dev-login: _dev-login-setup
 
 # The `dev-login` setup, then the login service and the jwt dev server in the
 # background (logs target/dev-login/{login,server}.log), and once both answer (at most
-# `online_wait_secs`) the client in the foreground as `client debug online`: it logs in
-# as `dev_email`, joins world `dev` with the ticket's JWT and embarks (returning to the
+# `online_wait_secs`) the client in the foreground as `client debug online`: it starts from the
+# kept login of `dev_email` (no screens, no password), joins world `dev` with the ticket's JWT and embarks (returning to the
 # account's fortress if it has one). Closing the client SIGTERMs the server (it saves
 # the world) and the login service. Honours `adapter` / `world` like `run`; play
 # region size. Refuses to start if UDP 6466 or TCP 8790 is already taken.
@@ -1005,7 +1007,7 @@ run-online: _dev-login-setup
         fi
         sleep 0.5
     done
-    VOXEL_LOGIN_URL=$login_url VOXEL_LOGIN_EMAIL={{dev_email}} VOXEL_LOGIN_PASSWORD={{dev_password}} \
+    VOXEL_LOGIN_URL=$login_url VOXEL_LOGIN_REFRESH_FILE=$PWD/target/dev-login/refresh \
         RUST_BACKTRACE=1 ./target/debug/client debug online
 
 # ---- Split roles: world coordinator + region host (R2b) ---------------------------------
@@ -1306,7 +1308,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     login=./target/release/login
     if ! ls "$VOXEL_LOGIN_KEYS_DIR"/*.pem >/dev/null 2>&1; then $login keygen >/dev/null; fi
     $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ >/dev/null
-    printf '%s\n' "{{dev_password}}" | $login account ensure {{dev_email}} --verified >/dev/null
+    $login account issue-refresh {{dev_email}} >"$out/login/refresh.tmp" && chmod 600 "$out/login/refresh.tmp" && mv "$out/login/refresh.tmp" "$out/login/refresh"
     # Every host and the coordinator (the world row says 1; a host refuses a mismatch).
     export VOXEL_SUPER_REGION_REGIONS=1
     stack_pid=""
@@ -1358,7 +1360,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
         echo "go-nogo-r3: client, autopilot boundary=$1, {{seconds}} s ($out/client-$1.log)"
         VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY=$1 VOXEL_AUTOPILOT_SECONDS={{seconds}} \
             VOXEL_HOSTS=2 VOXEL_SUPER_REGION_REGIONS=1 PERF_LOG=1 RUST_BACKTRACE=1 \
-            VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_EMAIL={{dev_email}} VOXEL_LOGIN_PASSWORD={{dev_password}} \
+            VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/$out/login/refresh \
             timeout --foreground -k 10 $(( {{seconds}} + {{online_wait_secs}} )) \
             ./{{probe_dir}}/release/client debug online >"$out/client-$1.log" 2>&1 </dev/null \
             || echo "go-nogo-r3: the $1 client exited $?"

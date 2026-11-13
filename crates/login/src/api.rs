@@ -42,7 +42,7 @@ use crate::password::{Hasher, check_password};
 use crate::store::normalize_email;
 use crate::config::OidcConfig;
 use crate::store::{AccountRow, LoginError, LoginStore, OidcUpsert, RefreshOutcome};
-use crate::{EMAIL_TOKEN_RESET, EMAIL_TOKEN_VERIFY};
+use crate::{AccountId, EMAIL_TOKEN_RESET, EMAIL_TOKEN_VERIFY};
 
 /// Random bytes in a refresh or email token.
 pub const TOKEN_BYTES: usize = 32;
@@ -269,17 +269,24 @@ async fn verify_password(state: &AppState, password: String, phc: String) -> Res
     })
 }
 
-/// Store a new refresh token in `family` for `account`; the token.
-async fn issue_refresh(state: &AppState, account: i64, family: [u8; FAMILY_BYTES]) -> Result<String, Fail> {
+/// A new refresh token of a new family for `account`, stored with the normal expiry
+/// ([`REFRESH_TTL_DAYS`] from `now`). The handlers and `login account issue-refresh` both make
+/// their tokens here.
+pub async fn mint_refresh(store: &LoginStore, account: AccountId, now: i64) -> Result<String, LoginError> {
     let token = new_token();
-    state.store.insert_refresh(token_hash(&token), account, family, refresh_expiry(state)).await?;
+    store.insert_refresh(token_hash(&token), account, random::<FAMILY_BYTES>(), refresh_expiry_from(now)).await?;
     Ok(token)
+}
+
+/// When a refresh token issued at `now` expires.
+fn refresh_expiry_from(now: i64) -> i64 {
+    let ttl = i64::try_from(REFRESH_TTL_DAYS * SECS_PER_DAY).unwrap_or(i64::MAX);
+    now.saturating_add(ttl)
 }
 
 /// When a refresh token issued now expires.
 fn refresh_expiry(state: &AppState) -> i64 {
-    let ttl = REFRESH_TTL_DAYS * SECS_PER_DAY;
-    i64::try_from(state.now().saturating_add(ttl)).unwrap_or(i64::MAX)
+    refresh_expiry_from(state.now_db())
 }
 
 fn login_response(account: &AccountRow, refresh_token: String) -> LoginResponse {
@@ -353,7 +360,7 @@ async fn login(State(s): State<AppState>, ApiJson(req): ApiJson<LoginRequest>) -
     if s.config.require_verified && account.email_verified_at.is_none() {
         return Err(Fail::not_verified());
     }
-    let token = issue_refresh(&s, account.account_id, random::<FAMILY_BYTES>()).await?;
+    let token = mint_refresh(&s.store, account.account_id, s.now_db()).await?;
     log::info!("[login] account {} logged in", account.account_id);
     Ok(Json(login_response(&account, token)))
 }
@@ -383,7 +390,7 @@ async fn login_oidc(State(s): State<AppState>, ApiJson(req): ApiJson<OidcLoginRe
     let Some(row) = s.store.account(account).await? else {
         return Err(Fail::internal());
     };
-    let token = issue_refresh(&s, account, random::<FAMILY_BYTES>()).await?;
+    let token = mint_refresh(&s.store, account, s.now_db()).await?;
     log::info!("[login] account {account} logged in with the identity provider");
     Ok(Json(login_response(&row, token)))
 }

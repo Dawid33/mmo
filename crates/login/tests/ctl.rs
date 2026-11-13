@@ -157,3 +157,80 @@ async fn account_ensure_creates_then_updates() {
     assert!(store.account_by_email("other@localhost").await.unwrap().unwrap().email_verified_at.is_none());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `POST /v1/refresh` with `token` through the real router over the store at `db`.
+async fn refresh_status(db: &str, token: &str) -> axum::http::StatusCode {
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use tower::ServiceExt;
+
+    let store = LoginStore::open(db).await.unwrap();
+    let (key, _pem) = auth::SigningKey::generate();
+    let state = login::AppState::new(
+        store,
+        std::sync::Arc::new(auth::Signer::new(vec![key]).ok().unwrap()),
+        Hasher::for_tests(),
+        std::sync::Arc::new(login::mail::LogMailer::default()),
+        std::sync::Arc::new(login::LoginConfig::from_lookup(|_| None).unwrap()),
+        login::system_clock(),
+    );
+    let body = serde_json::to_vec(&login_api::RefreshRequest { refresh_token: token.into() }).unwrap();
+    let req = Request::post(login_api::PATH_REFRESH)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    login::router(state).oneshot(req).await.unwrap().status()
+}
+
+/// Runs `issue-refresh` for `email` off the async runtime; the one printed line, unquoted.
+async fn issue(db: &str, email: &str) -> String {
+    let (d, line) = (db.to_string(), format!("account issue-refresh {email}"));
+    let out = tokio::task::spawn_blocking(move || run(&d, &line, "")).await.unwrap().unwrap();
+    assert!(out.ends_with('\n') && out.matches('\n').count() == 1, "one line: {out:?}");
+    out.trim_end().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_refresh_creates_a_verified_account_and_a_working_token() {
+    let root = temp_dir("issue");
+    let db = root.join("l.sqlite");
+    let db = db.to_str().unwrap().to_string();
+    let token = issue(&db, "dev@localhost").await;
+    let store = LoginStore::open(&db).await.unwrap();
+    let row = store.account_by_email("dev@localhost").await.unwrap().unwrap();
+    assert!(row.email_verified_at.is_some());
+    assert_eq!(row.subject, None);
+    drop(store);
+    assert_eq!(refresh_status(&db, &token).await, axum::http::StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_refresh_twice_keeps_one_account_and_both_tokens_work() {
+    let root = temp_dir("issue2");
+    let db = root.join("l.sqlite");
+    let db = db.to_str().unwrap().to_string();
+    let first = issue(&db, "Dev@Localhost").await;
+    let second = issue(&db, "dev@localhost").await;
+    assert_ne!(first, second);
+    // The first token is still good: a second family, not a rotation of the first.
+    assert_eq!(refresh_status(&db, &first).await, axum::http::StatusCode::OK);
+    assert_eq!(refresh_status(&db, &second).await, axum::http::StatusCode::OK);
+    let store = LoginStore::open(&db).await.unwrap();
+    let a = store.account_by_email("dev@localhost").await.unwrap().unwrap();
+    assert!(a.email_verified_at.is_some());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_refresh_prints_only_the_token() {
+    let root = temp_dir("issue3");
+    let db = root.join("l.sqlite");
+    let db = db.to_str().unwrap().to_string();
+    let token = issue(&db, "dev@localhost").await;
+    assert!(!token.contains(char::is_whitespace), "{token:?}");
+    // The same length as a refresh token a login hands out.
+    let minted = login::api::mint_refresh(&LoginStore::open(&db).await.unwrap(), 1, 0).await.unwrap();
+    assert_eq!(token.len(), minted.len());
+    let _ = std::fs::remove_dir_all(&root);
+}

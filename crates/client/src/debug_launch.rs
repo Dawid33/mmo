@@ -22,15 +22,16 @@
 //!   `--adventure-at SITE` starts an adventure at that site instead of
 //!   embarking (`just run-two`: client 2 adventures in client 1's fortress,
 //!   whose id client 1 logs as `[debug] embarked: fortress site=N`).
-//! - `online` — log in to the login service (`VOXEL_LOGIN_URL`) as
-//!   `VOXEL_LOGIN_EMAIL` / `VOXEL_LOGIN_PASSWORD`, join its world `--world <id>`
+//! - `online` — start from the login kept in `VOXEL_LOGIN_REFRESH_FILE` (a
+//!   refresh token an operator issued: `login account issue-refresh <email>`)
+//!   at the login service (`VOXEL_LOGIN_URL`), join its world `--world <id>`
 //!   (default [`DEFAULT_ONLINE_WORLD`]) with the ticket's JWT, then embark as
 //!   `embarked` does. `just run-online` starts the login service and a jwt
 //!   server and runs this. The login goes through the Play online flow
 //!   (`login::flow`: its `login-http` worker, the kept refresh token, the
 //!   ticket's [`crate::session::PendingJoin`]): the scenario only presses its
-//!   buttons ([`LoginIntent`]s). A failed login or join prints the screen's
-//!   error line and exits non-zero.
+//!   buttons ([`LoginIntent`]s), no password involved. A refused kept login, a
+//!   failed login or a failed join prints the screen's error line and exits non-zero.
 //!
 //! The scenario drives the ordinary flow, nothing is faked: the world goes
 //! through the generator's forge job and `PendingWorld` → `AppState::Starting`
@@ -91,7 +92,7 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
                  --port N hosts its server on UDP port N, --join HOST:PORT joins a\n             \
                  running server instead (several clients on one world); --adventure-at SITE\n             \
                  starts an adventure at site SITE (a number) instead of embarking\n  \
-      online     log in (VOXEL_LOGIN_URL, VOXEL_LOGIN_EMAIL, VOXEL_LOGIN_PASSWORD), join the\n             \
+      online     start from the kept login (VOXEL_LOGIN_URL, VOXEL_LOGIN_REFRESH_FILE), join the\n             \
                  login service's world ID (default `dev`) and embark as `embarked` does\n             \
                  (`just run-online` starts the login service and a server for it)\n  \
       studs      the toy-brick TEST world: 3x3 regions of stud chunks, no store, no menu\n             \
@@ -105,9 +106,6 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
 
 /// The `online` preset's world when `--world` is not given (`just dev-login`'s).
 pub const DEFAULT_ONLINE_WORLD: &str = "dev";
-/// The `online` preset's account (with [`LOGIN_PASSWORD_ENV`]).
-pub const LOGIN_EMAIL_ENV: &str = "VOXEL_LOGIN_EMAIL";
-pub const LOGIN_PASSWORD_ENV: &str = "VOXEL_LOGIN_PASSWORD";
 
 /// A debug launch picked on the command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,30 +138,20 @@ impl DebugScenario {
     }
 }
 
-/// The `online` preset's credentials. Holds a password: deliberately no
-/// `Debug`; removed once the login is sent.
-#[derive(Resource, Clone)]
-pub struct OnlineLogin {
-    pub email: String,
-    pub password: String,
-}
-
-/// The `online` preset's credentials from `env` (`VOXEL_LOGIN_EMAIL`,
-/// `VOXEL_LOGIN_PASSWORD`); `login_url`: the configured login service. A
-/// missing one is an error naming it (the variable, never its value).
-pub fn online_login_from(
-    env: impl Fn(&str) -> Option<String>,
-    login_url: Option<&str>,
-) -> Result<OnlineLogin, String> {
-    let need = |key: &str| {
-        env(key)
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| format!("`debug online` needs {key} set\n\n{USAGE}"))
-    };
+/// Whether the `online` preset can start: `login_url` is the configured login
+/// service, `kept` the refresh token the store keeps ([`crate::login::store::load_refresh`]).
+/// A missing one is an error naming it (the variable, never a token).
+pub fn online_login_from(login_url: Option<&str>, kept: Option<&str>) -> Result<(), String> {
     if login_url.is_none() {
         return Err(format!("`debug online` needs {} set (the login service)\n\n{USAGE}", crate::login::api::LOGIN_URL_ENV));
     }
-    Ok(OnlineLogin { email: need(LOGIN_EMAIL_ENV)?, password: need(LOGIN_PASSWORD_ENV)? })
+    if kept.is_none() {
+        return Err(format!(
+            "`debug online` needs a kept login: set {} to a file made by `login account issue-refresh`\n\n{USAGE}",
+            crate::login::store::REFRESH_FILE_ENV
+        ));
+    }
+    Ok(())
 }
 
 /// The command line after the program name. `Ok(None)` = no debug launch.
@@ -352,9 +340,12 @@ enum Phase {
 /// How far the `online` preset's login is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OnlineStep {
-    /// Waiting for the login screen, then the login is sent.
+    /// Waiting for the login screen, then the kept login is presented.
     Login,
-    /// The login is sent; once on the world list (and its fetch answered) the join is.
+    /// The intent is written; one frame for the login flow to read it (before that a
+    /// not-yet-busy session looks like a refused one).
+    Presented,
+    /// The kept login is on its way; once on the world list (and its fetch answered) the join is.
     LoggingIn,
     /// The join is sent; its ticket starts the session.
     Joining,
@@ -387,23 +378,17 @@ struct DebugForge(ForgeJob);
 /// otherwise (leaving the world returns to the main menu as usual).
 pub struct DebugLaunchPlugin {
     pub scenario: DebugScenario,
-    /// `online`'s credentials ([`Self::from_env`]).
-    pub online: Option<OnlineLogin>,
 }
 
 impl DebugLaunchPlugin {
-    /// The plugin for `scenario`, with what it needs from the environment
-    /// (`online`: the credentials and login service). An error explains what
+    /// The plugin for `scenario`, once the environment has what it needs
+    /// (`online`: the login service and a kept login). An error explains what
     /// is missing (like a bad command line, before any window opens).
     pub fn from_env(scenario: DebugScenario) -> Result<Self, String> {
-        let online = match scenario {
-            DebugScenario::Online { .. } => Some(online_login_from(
-                |key| std::env::var(key).ok(),
-                crate::login::login_url().as_deref(),
-            )?),
-            DebugScenario::Embarked { .. } | DebugScenario::Studs { .. } | DebugScenario::Prefab { .. } => None,
-        };
-        Ok(Self { scenario, online })
+        if matches!(scenario, DebugScenario::Online { .. }) {
+            online_login_from(crate::login::login_url().as_deref(), crate::login::store::load_refresh().as_deref())?;
+        }
+        Ok(Self { scenario })
     }
 }
 
@@ -411,9 +396,6 @@ impl Plugin for DebugLaunchPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DebugLaunch { scenario: self.scenario.clone(), phase: Phase::Boot, tried: Vec::new() })
             .add_systems(Update, (boot, drive_online_login, poll_forge, auto_embark).chain());
-        if let Some(online) = &self.online {
-            app.insert_resource(online.clone());
-        }
         // An online session ends on the world list instead of the menu.
         for home in [AppState::MainMenu, AppState::Worlds] {
             app.add_systems(OnTransition { exited: AppState::Starting, entered: home }, abandon)
@@ -558,6 +540,25 @@ fn boot(
     next.set(AppState::Starting);
 }
 
+/// What `online`'s login step does next: `None` = wait, `Some(Ok)` = logged in (on the world
+/// list), `Some(Err)` = give up. A kept token the service refuses is dropped silently by the
+/// flow, so "back on the login screen, idle, not logged in" with no error line is a refusal.
+fn online_login_verdict(state: AppState, busy: bool, logged_in: bool, error: &str) -> Option<Result<(), String>> {
+    if busy {
+        return None;
+    }
+    if state == AppState::Worlds && logged_in {
+        return Some(Ok(()));
+    }
+    if !error.is_empty() {
+        return Some(Err(format!("login failed: {error}")));
+    }
+    if state == AppState::Login && !logged_in {
+        return Some(Err("login failed: the kept login was refused".into()));
+    }
+    None
+}
+
 /// `online`: logs in and joins through the login screens' own flow
 /// (`login::flow`). A failure (the screens' error line, with nothing in
 /// flight) ends the launch: printed, and the app exits non-zero.
@@ -566,8 +567,6 @@ fn drive_online_login(
     mut launch: ResMut<DebugLaunch>,
     state: Res<State<AppState>>,
     login: Option<Res<LoginSession>>,
-    credentials: Option<Res<OnlineLogin>>,
-    mut commands: Commands,
     mut intents: MessageWriter<LoginIntent>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -584,8 +583,8 @@ fn drive_online_login(
         return fail("no login service configured", &mut launch);
     };
     let state = *state.get();
-    if step != OnlineStep::Login && !login.busy() && !login.error.is_empty() {
-        let why = format!("{} failed: {}", if step == OnlineStep::Joining { "join" } else { "login" }, login.error);
+    if step == OnlineStep::Joining && !login.busy() && !login.error.is_empty() {
+        let why = format!("join failed: {}", login.error);
         return fail(&why, &mut launch);
     }
     match step {
@@ -593,20 +592,23 @@ fn drive_online_login(
             if state != AppState::Login {
                 return; // the login screen first: its answer moves on only from there
             }
-            let Some(credentials) = credentials else {
-                return fail("no credentials", &mut launch);
-            };
-            info!("[debug] logging in as {}", credentials.email);
-            intents.write(LoginIntent::Submit { email: credentials.email.clone(), password: credentials.password.clone() });
-            commands.remove_resource::<OnlineLogin>();
-            launch.phase = Phase::Online(OnlineStep::LoggingIn);
+            // Entering the login screens by a state change sends nothing on native: the
+            // menu's Play online is what refreshes the kept login, so press it.
+            info!("[debug] starting from the kept login");
+            intents.write(LoginIntent::PlayOnline);
+            launch.phase = Phase::Online(OnlineStep::Presented);
         }
+        OnlineStep::Presented => launch.phase = Phase::Online(OnlineStep::LoggingIn),
         OnlineStep::LoggingIn => {
-            // On the list, the list fetched: a join sent now is not refused as busy.
-            if state == AppState::Worlds && login.logged_in() && !login.busy() {
-                info!("[debug] logged in; joining world {world}");
-                intents.write(LoginIntent::JoinWorld(world.clone()));
-                launch.phase = Phase::Online(OnlineStep::Joining);
+            match online_login_verdict(state, login.busy(), login.logged_in(), &login.error) {
+                None => {}
+                Some(Err(why)) => return fail(&why, &mut launch),
+                // On the list, the list fetched: a join sent now is not refused as busy.
+                Some(Ok(())) => {
+                    info!("[debug] logged in; joining world {world}");
+                    intents.write(LoginIntent::JoinWorld(world.clone()));
+                    launch.phase = Phase::Online(OnlineStep::Joining);
+                }
             }
         }
         OnlineStep::Joining => {
@@ -889,19 +891,32 @@ mod tests {
     }
 
     #[test]
-    fn debug_online_needs_its_credentials_and_service() {
-        let env = |vars: &'static [(&'static str, &'static str)]| {
-            move |key: &str| vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
-        };
-        let full: &[(&str, &str)] = &[(LOGIN_EMAIL_ENV, "dev@localhost"), (LOGIN_PASSWORD_ENV, "dev-password")];
+    fn online_needs_a_login_url_and_a_kept_token() {
         let url = Some("http://127.0.0.1:8790");
-        let ok = online_login_from(env(full), url).unwrap();
-        assert_eq!((ok.email.as_str(), ok.password.as_str()), ("dev@localhost", "dev-password"));
-        let err = |e: Result<OnlineLogin, String>| e.err().expect("an error");
-        assert!(err(online_login_from(env(full), None)).contains("VOXEL_LOGIN_URL"));
-        assert!(err(online_login_from(env(&full[1..]), url)).contains(LOGIN_EMAIL_ENV));
-        let no_password = err(online_login_from(env(&[(LOGIN_EMAIL_ENV, "dev@localhost"), (LOGIN_PASSWORD_ENV, "")]), url));
-        assert!(no_password.contains(LOGIN_PASSWORD_ENV) && no_password.contains("usage: client"));
+        assert_eq!(online_login_from(url, Some("kept")), Ok(()));
+        let no_url = online_login_from(None, Some("kept")).unwrap_err();
+        assert!(no_url.contains("VOXEL_LOGIN_URL") && no_url.contains("usage: client"), "{no_url}");
+        let no_kept = online_login_from(url, None).unwrap_err();
+        assert!(
+            no_kept.contains(
+                "`debug online` needs a kept login: set VOXEL_LOGIN_REFRESH_FILE to a file made by `login account issue-refresh`"
+            ),
+            "{no_kept}"
+        );
+    }
+
+    #[test]
+    fn online_verdict_table() {
+        use AppState::{Login, Worlds};
+        assert_eq!(online_login_verdict(Login, true, false, ""), None, "busy: wait");
+        assert_eq!(online_login_verdict(Worlds, false, true, ""), Some(Ok(())));
+        assert_eq!(
+            online_login_verdict(Login, false, false, ""),
+            Some(Err("login failed: the kept login was refused".into()))
+        );
+        let net = online_login_verdict(Login, false, false, "network: connection refused").unwrap().unwrap_err();
+        assert!(net.contains("network: connection refused"), "{net}");
+        assert_eq!(online_login_verdict(Worlds, false, false, ""), None, "on the list, fetch pending: wait");
     }
 
     #[test]

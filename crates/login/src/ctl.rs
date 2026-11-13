@@ -33,7 +33,8 @@ const USAGE: &str = "usage: login [--db <url>] <command>
   world list | remove <id> | open <id> | close <id>
   account set-password <email>   (password on stdin)
   account ensure <email> [--verified]   (password on stdin; creates or updates)
-  account verify <email>";
+  account verify <email>
+  account issue-refresh <email>   (prints a new refresh token; creates the account if missing)";
 
 /// Run one admin command with the real hasher and stdin.
 pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
@@ -266,6 +267,27 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                 store.mark_verified(acc.account_id, now_secs()).await.map_err(|e| e.to_string())
             })?;
             writeln!(out, "{email} verified").map_err(io)
+        }
+        ["account", "issue-refresh", email] => {
+            // For launches with no screens: the token is the only thing printed (the recipe
+            // redirects it into the client's token file). An account made here has no password
+            // (an empty hash matches nothing) and is verified.
+            let email = normalize_email(email).map_err(|e| e.to_string())?;
+            let token = block_on(async {
+                let store = open(&db_url()?).await?;
+                let err = |e: crate::LoginError| e.to_string();
+                let now = now_secs();
+                let id = match store.account_by_email(&email).await.map_err(err)? {
+                    Some(acc) => acc.account_id,
+                    None => match store.create_account(&email, "", now).await.map_err(err)? {
+                        Some(id) => id,
+                        None => return Err(format!("account {email:?} appeared concurrently; run again")),
+                    },
+                };
+                store.mark_verified(id, now).await.map_err(err)?;
+                crate::api::mint_refresh(&store, id, now).await.map_err(err)
+            })?;
+            writeln!(out, "{token}").map_err(io)
         }
         ["serve"] => Err("`serve` is run by the binary itself".into()),
         _ => Err(USAGE.into()),
