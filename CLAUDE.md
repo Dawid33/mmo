@@ -77,8 +77,12 @@ print secrets.
   `it` binary per crate (`--test it <file>::`); files that touch process-global state (`HASH_MODE`, the
   forged world, a logger, wasm32, perf gates) keep their own `[[test]]` target — a new such file needs one.
   Server test targets `roles`, `coordinator_rt` and `hosts` need `--features test-hooks` (`just test-r2` /
-  `test-r3` / `test-server` pass it); Postgres-backed tests take their throwaway database from `crates/pg-test-support`
-  (`MMO_TEST_DATABASE_URL`).
+  `test-r3` / `test-server` pass it; `observer` does not); Postgres-backed tests take their throwaway
+  database from `crates/pg-test-support` (`MMO_TEST_DATABASE_URL`). Multi-host: `just test-r3` (real hosts
+  over real links, serial) plus the seeded layer `game` `peer_schedule::` (part of `just test-threads`); the
+  browser's frame codec on wasm32: `just client-wasm`.
+- After a wide change run each touched crate's whole non-client suite once — filtered runs let two broken
+  world-store tests sit unnoticed.
 - `just smoke` — the default sanity check, hard-limited to 60 s. It only type-checks the client; running
   client tests (`just test-one client "--lib <filter>"`) is a slow opt-in — **ask first**.
 - `just test-threads` after touching handoff, `WorldManager`, `region_threads` or anything crossing a seam
@@ -124,6 +128,12 @@ print secrets.
 - World store (`crates/world-store`, SQLite or Postgres via `VOXEL_WORLD_DB`) holds the forged world as
   tiles, regions, players, history; saved by periodic save cuts at one world tick. A store read ERROR never
   regenerates a region (`LoadFailed`, retried later); only a missing row generates.
+- A cut part writes only rows of its own regions — **never add a table two hosts' parts can both write**.
+  Entity rows are keyed per region (migrations 0009/0010), so the database no longer refuses a duplicate
+  entity: the store does (a duplicate inside a part, or a stale row in another region the cut cannot be
+  deleting, is refused; a cross-host one is reported after the commit, `cuts_with_entities_twice`).
+  Postgres migrations run under a lock timeout (`MIGRATE_LOCK_TIMEOUT_MS`) that names any
+  `pg_prepared_xacts` they wait behind.
 - Bump `worldgen::tile_map::WORLD_MAP_VERSION` on ANY change to what `build_world_map` returns.
 - Join snapshots go out slim (`game/src/region_wire.rs`): stud chunks as diffs against their pristine chunk,
   derivable voxel collider grids rebuilt by the receiver — only shapes the sender has checked byte-equal to a
@@ -141,26 +151,64 @@ print secrets.
   push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static`, `VOXEL_HOST_ORDINAL`,
   `VOXEL_HOSTS`, `VOXEL_SUPER_REGION_REGIONS` (16; checked against the world row). `just dev-r2` runs
   login + coordinator + host 0 (state in git-ignored `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
-  R3 (several hosts): `just dev-r3 [hosts] [delay]` (all hosts, supervised by `scripts/dev_r3.sh`;
-  `target/dev-r3/`), `just test-r3`, `worldctl super-region`; env `VOXEL_ENTRY_HOST`, `VOXEL_PEER_BIND`,
-  `VOXEL_PEER_LINK_DELAY_MS`, `VOXEL_WT_PORT`, `VOXEL_ADVERTISE_QUIC`/`_WT`, `VOXEL_TERRAIN_NOTIFY`,
-  `VOXEL_WORLD_DB_DIRECT`.
+- **Many hosts (R3, `VOXEL_HOSTS` > 1; plan `docs/superpowers/plans/2026-11-12-r3-multi-host.md` — built,
+  go/no-go pending, see `TODO.md`)**: needs role `host`, Postgres and the login link (`jwt`), else refused.
+  - Hosts talk directly over peer links (`game::peer`: one `PeerSession` per other ordinal, `Reliable` /
+    `Volatile` messages; `server/src/peer_link.rs`, QUIC over `svc-link`): crossings, halo, intents,
+    forwarded input, player hand-offs. Each host registers once per boot in the `hosts` table
+    (`register_host`: addresses, pins, `clean`); peers find each other there.
+  - One tick numbering for all hosts from the world clock anchor (`world_clock.rs`; `worldctl clock-reset`).
+    A host that restarts after a crash raises the world generation and EVERY host exits
+    `EXIT_WORLD_ROLLBACK` (5): the whole world restarts from its last cut (no per-host failover yet).
+  - Saves are coordinated world cuts in two phases (each host `prepare_cut`s its part, the coordinator
+    decides; Postgres needs `max_prepared_transactions > 0`, the dev compose sets it); parts a crash left
+    staged are resolved at start before anything else (`resolve_staged_cuts`). An exiting host asks for a
+    leave cut and exits 0 either way — not committed → its `hosts` row stays dirty → its return rolls back.
+  - Login links to the entry host (`VOXEL_ENTRY_HOST`, default 0), which places each player on the host
+    that holds them (`world_manager/placement.rs`, relayed `SpawnOrder`s). Regions of another host reach a
+    client through an observer session: `RegionElsewhere { endpoint, ticket }` → a second connection with
+    `Credential::Observer` — no body, input only as its own `origin_client`.
+  - Saved terrain of other hosts arrives by LISTEN/NOTIFY per cut with a polling backstop
+    (`VOXEL_TERRAIN_NOTIFY=listen|poll`; `VOXEL_WORLD_DB_DIRECT` = a direct, unpooled URL for the listener).
+  - Env: `VOXEL_ENTRY_HOST`, `VOXEL_PEER_BIND` (127.0.0.1:{6500+ordinal}), `VOXEL_PEER_CERT_HASH_FILE`,
+    `VOXEL_ADVERTISE_QUIC`/`_WT` (what clients are told), `VOXEL_WT_PORT`, `VOXEL_PEER_LINK_DELAY_MS`
+    (measurement only); `worldctl super-region <url> <n>` (only before the first claim) + hosts run with
+    `VOXEL_SUPER_REGION_REGIONS=n`.
+  - `just dev-r3 <hosts> [delay]` (positional, 2..6): login + coordinator + every host under
+    `scripts/dev_r3.sh` (restarts a host on exit 5 or 137, at most 3 per 60 s; `DEV_R3_*` knobs in its
+    header; state `target/dev-r3/`); `just host <ordinal> <hosts> <delay>`; `just go-nogo-r3 <delay>
+    [seconds]` (own database and `target/go-nogo-r3/`; exit 0 GO, 1 NO-GO, 2 INVALID, 3 no verdict).
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
   with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
-  process stops writing and exits `EXIT_FENCED` (3); a dead coordinator thread exits `EXIT_COORDINATOR_FAILED`
-  (4). No advisory lock any more (SQLite keeps its flock). `OpenMode::ReadOnly` handles (export, tools) write
-  nothing and need the newest schema. Never add a store write that skips the fence.
+  process stops writing and exits `EXIT_FENCED` (3, also when fenced at `register_host`); a dead coordinator
+  thread exits `EXIT_COORDINATOR_FAILED` (4); a world rollback exits `EXIT_WORLD_ROLLBACK` (5). No advisory
+  lock any more (SQLite keeps its flock). `OpenMode::ReadOnly` handles (export, tools) write nothing and need
+  the newest schema. Never add a store write that skips the fence.
 - **Link rules**: a re-`Attach` after any reconnect rebuilds the coordinator's view; requests are memoised by
   `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
   beats latency). Login pushes `SpawnPlayer`/`Kick` to the host's link; kicks are durable until acked
   (login migration 0003). With several hosts the coordinator serves every ordinal of `VOXEL_HOSTS`; login
   links to the entry host only.
+- **Peer link rules** (`game::peer`, `world_manager/peers.rs`, `world_cut.rs`): a `PeerSession` is never
+  replaced — `set_peer` on a known ordinal swaps the link and resets the connection. Resume is boot-scoped
+  (`PeerHello.received_from_boot`: a count made against another boot renumbers). `Reliable` is numbered,
+  kept until acked and re-sent after a drop; `Volatile` is sent only while the peer is reachable, never
+  replayed. A state message the sender already accounts for in cut K travels as `Reliable::InCut { cut,
+  body }`; a host marks `CutMark { K }` only once all its regions answered and its tick reached T. From a
+  leave cut's `BeginCut` until `CutDone` each side holds back what it would send the other. A peer link
+  down, or the coordinator down, means no cuts until it is back.
 
 **Client** (`crates/client`)
 - `renderer/` bridges sim state to Bevy; predicted regions run like the server's (`regions/`, threaded on
   native). The render unit is the sim chunk on every backend (`renderer/stud/`); the terrain shader
   `assets/shaders/stud_terrain.wgsl` is compiled in (rebuild, no hot reload) and its params struct is
   mirrored by `StudFortressParams` in `renderer/stud/material.rs`.
+- **Connections** (`connections.rs`): a session's `ConnectionSet` holds one connection per host, each open
+  under its own key; `RegionElsewhere` opens an observer connection, and region traffic counts only from
+  the connection its region maps to. Input, predictions, UI and LOD requests go to the home only; the home
+  follows `PlayerRegion` from another connection only after a higher `ServerPacket::HomeHop`. In the
+  browser the page opens one WebTransport session per host, pinned by `HostEndpoint.cert_hash`
+  (`web_endpoint::web_server_for_host`; page → worker framing in `web_frame.rs`).
 - **Session lifecycle** (`session.rs`): any new per-world resource, system `Local` or entity root must be
   registered (`add_session_reset`, `SessionLocal`) or tagged `SessionScoped`, or it leaks into the next world.
 - UI is **Slint only** (no `bevy_ui`, no egui). `CursorPolicy` is the only cursor-grab writer. `dev_ui`

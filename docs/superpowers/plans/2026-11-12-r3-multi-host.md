@@ -84,7 +84,7 @@ Each one gives the trade-off first. The ones that are the user's to overrule are
 
 ## Amendments made during execution (2026-11-12/13)
 
-Rulings and as-built changes from the execution ledger (`.superpowers/sdd/2026-11-12-r3-multi-host/progress.md`, `task-13-ruling.md`). Each is marked "(amended in execution: …)" where the text below changed. Status: Tasks 1–16 and 19 done; 20 steps 1, 2, 4 and 21 steps 1–3 done; 20 step 3, 21 step 4 and Tasks 17, 18, 22, 23, 24 not run.
+Rulings and as-built changes from the execution ledger (`.superpowers/sdd/2026-11-12-r3-multi-host/progress.md`, `task-13-ruling.md`). Each is marked "(amended in execution: …)" where the text below changed. Status (2026-11-13): BUILT, go/no-go pending. Tasks 1–19 and 24 done (plus the extra store work 14b / 12b below); 20 steps 1, 2, 4; 21 steps 1–3; 22 steps 1–2; 23 steps 1, 2, 4. Not run — the user's: 20.3 and 23.3 (live checks), 21.4 and 22.3 (measurements), hence 22.4 (the verdict). R3 is not accepted until they are.
 
 1. Global — `LINK_PROTOCOL_VERSION` bumped only in T9 (2→3) and T15 (3→4); T10–T14 changed service-link enums under T15's bump (one tree builds every process).
 2. Global — test-command forms: `just test-one <crate> "--test <target> -- <filters>"`; `hosts` / `roles` / `coordinator_rt` need `--features test-hooks`, `observer` does not; seeded `peer_schedule::` tests need `--include-ignored`.
@@ -123,6 +123,17 @@ Rulings and as-built changes from the execution ledger (`.superpowers/sdd/2026-1
 35. T21 — `latency_ms_max/sum`; `[server]` line `store_req= store_wait_max_ms= store_lat_max_ms= store_cpu_max_ms= store_cpu_sum_ms=`; Step 4's decision rule reads `store_lat_max_ms` with `store_cpu_sum_ms` (dequeue wait cannot see queueing behind decodes).
 36. T17 / T18 / T22 / T23 / T24 (not yet run) — "Consumes, as built" and "Carried from execution" lists added; `just dev-r3 2` / `just go-nogo-r3 1` forms; T22's conservation check names the real `[server]` counters (`items_destroyed=`, `intent_replies_lost=`).
 37. Review Focus 2 — the T15 test's real name `rejoin_within_a_cut_follows_the_departed_pointer`.
+38. T17 — as built: `ConnectionSet` also has `on_host` / `home_known` / `is_live` / `connection_of`; a connection before its `Host` packet is `PROVISIONAL_CONN` (`tag_key`); `NetThread` runs every connection on one tokio runtime thread with a `spawn_blocking` bridge for outgoing packets; the harness is `SimHarness::with_hosts(n)`; the test command is `just test-one client "--test it -- crossing::two_hosts:: --include-ignored"`; the wasm check is `just web-check`.
+39. T18 — per-open connection keys (`ConnOpener::open` takes a key): a stale `Closed` of an old connection can no longer close a reopened one to the same host.
+40. T18 — `ServerPacket::HomeHop(u64)` (appended, tag 21), sent right before `PlayerRegion` at `accept_handoff` / `accept_move` / an awaited `observer_connected`; the client follows a `PlayerRegion` from a non-home connection only with a higher hop (the ordering rule two hosts' packets lacked).
+41. T18 — `CONN_IDLE_CLOSE_MS = 10_000`; observer retry `OBSERVER_RETRY_NEAR_MAX_MS = 2_000` (below the hand-off grace) backing off to 30 s; LOD release / resend queues paced 32 per tick and purged when the home moves; a stranded body is logged after 15 s; the harness exchanges peer messages after every host ticks (production writes a hand-off in the same loop iteration; a late one costs one tick, no catch-up).
+42. T22 — the peer-link delay knob gets a due-time timer thread (only when the delay is > 0; frames were flushed only when the main loop woke, rounding 1–5 ms up to a tick); own commit before the probe.
+43. T22 — `go-nogo-r3` does not depend on `dev-r3`: it runs `scripts/dev_r3.sh` itself with release binaries on its own database `mmo_go_nogo_r3` and `target/go-nogo-r3/`, and refuses while dev ports are in use. Exit 0 GO, 1 NO-GO, 2 INVALID, 3 no verdict. INVALID: fewer than 20 crossings in a group, a host restart, a server panic, a supervisor failure / dead member / non-zero exit / KILL after stop, a host silent > 15 s before its run's `autopilot_done`, a client that ended early. NO-GO also on a state-hash mismatch, `items_destroyed` / `intent_replies_lost` > 0, or `peer_unreceived` > 0 on the last two `[server]` lines. The autopilot picks its seam with `pick_seam` via `rendezvous_owner(super_region_of)`.
+44. T23 — `SimOut::Close { conn }` added; per-open keys in the browser too; the frame codec lives in `crates/client/src/web_frame.rs` with its own `[[test]] web_frame_wasm`, run by the new `just client-wasm`; `web_server_for_host` pins by `endpoint.cert_hash` (else trusted PKI; https only); every host writes `assets/webtransport-cert-hash-<ordinal>.json` (host 0 also the old single name); losing the home ends the session. Step 2 built `just web-release`, not `just web`.
+45. Extra 14b (found by the T22 re-review: nothing tested two hosts leaving in one cut, which every `dev-r3` Ctrl-C does) — seeded `both_hosts_leave_in_one_cut`, `three_hosts_leave_in_one_cut`, `hosts_leave_in_consecutive_cuts`. They exposed a store defect: the world-wide `entities` primary key made two hosts' parts touch one row whenever an entity crossed hosts between cuts → every later cut aborted.
+46. Extra 12b — migration `0009_entities_per_region` (primary key `(rx, rz, birth_rx, birth_rz, serial)`: a part writes only rows of its own regions) and `0010_entities_by_id` (non-unique index); uniqueness moved to code: `check_entities_once` within a part, `check_stale_rows` refuses an inserted id that has a row in another region the cut cannot be deleting, and a detect-only check after a committed decision (`StoreHandle::cuts_with_entities_twice`). Real-process tests `entity_crossing_hosts_between_cuts_does_not_stall_saving`, `both_hosts_stopped_together_leave_cleanly`.
+47. Extra 12b — `decide_cut` and `register_host` lock the world row `FOR NO KEY UPDATE` (with `FOR UPDATE` they deadlocked against a claim's `FOR KEY SHARE` waiting on a prepared part — a T20 regression); Postgres migrations run under a 30 s `lock_timeout` (`MIGRATE_LOCK_TIMEOUT_MS`) whose error names the `pg_prepared_xacts` gids; open refuses a super-region side ≤ 0; the stale `voxel_refusal` migration-number assertion was fixed.
+48. T24 — the closing verification ran whole non-client suites of every touched crate once (a wide change), not only the plan's listed commands; `just test-one game "--test peer_schedule"` is not a target — `peer_schedule::` lives in the game `it` binary (`seam_tests` of `just test-threads`).
 
 ---
 
@@ -586,11 +597,11 @@ This and Task 18 are the largest client change since the region threads. `instan
   - A stranded client — body parked on a host it has no session on, or a hand-off stuck in a queue — is told only through `PLAYER_PARKED_ELSEWHERE` when the far host parks it; anything else is never told (Task 7; Tasks 17/18).
   - Never reconnect to the HOME host with an observer ticket (now refused at the edge; formerly it parked the body).
 
-- [ ] **Step 1: Failing tests** (`connections::tests`, pure): `region_elsewhere_opens_one_connection_per_host` (two regions of one host → one `open`); `subscribe_and_release_go_to_the_owning_connection`; `predictions_and_ui_requests_go_home_only`; `traffic_from_the_wrong_connection_is_not_accepted`; `observer_close_returns_its_regions_home_close_ends_the_session`; harness: `two_hosts::window_spanning_a_host_seam_loads_regions_from_both`; `two_hosts::clock_follows_the_home_connection_only`.
-- [ ] **Step 2: Ask the user**, then run `just test-one client "--lib connections::"` — FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 command and `just test-one client "--test crossing -- two_hosts::"` (opt-in), `just smoke` — PASS.
-- [ ] **Step 5: Commit** `feat(client): one connection per host with a region → connection table; input only to the home`.
+- [x] **Step 1: Failing tests** (`connections::tests`, pure): `region_elsewhere_opens_one_connection_per_host` (two regions of one host → one `open`); `subscribe_and_release_go_to_the_owning_connection`; `predictions_and_ui_requests_go_home_only`; `traffic_from_the_wrong_connection_is_not_accepted`; `observer_close_returns_its_regions_home_close_ends_the_session`; harness: `two_hosts::window_spanning_a_host_seam_loads_regions_from_both`; `two_hosts::clock_follows_the_home_connection_only`.
+- [x] **Step 2: Ask the user**, then run `just test-one client "--lib connections::"` — FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** the Step 2 command and `just test-one client "--test crossing -- two_hosts::"` (opt-in), `just smoke` — PASS.
+- [x] **Step 5: Commit** `feat(client): one connection per host with a region → connection table; input only to the home`.
 
 ### Task 18: Client — flips and moves across connections
 
@@ -606,11 +617,11 @@ This and Task 18 are the largest client change since the region threads. `instan
 - `CrossingProbe`'s `[perf] event=region_crossing` line gains `host_flip=0|1 from_host=<o> to_host=<o>`; `crossing_summary.py` gains `--by host_flip` and `--p95` (p95 of `correction_max`, `corrections`, `confirm_ms` per group).
 - **Carried from execution:** the `PlayerRegion` ordering rule and the stranded-client case of Task 17's carries are shared with this task (the home switch is decided here); a demoted session that holds only LOD subscriptions is idle-closed after 30 s on the old host, so LOD requests must follow the home. A move's `RegionElsewhere` arrives from the host the player LEFT, and the old host's session becomes an observer (Task 8).
 
-- [ ] **Step 1: Failing tests** (`crossing.rs`, harness `with_hosts(2)`): `host_flip_matches_thread_flip_without_delay` (the same walk across a thread seam and across a host seam with link delay 0: the same number of corrections and `correction_max` within 0.01); `held_key_across_a_host_seam_no_rubber_band` (`MAX_STEP_BACK_UNITS`); `home_follows_player_region_from_the_new_connection`; `teleport_to_a_foreign_host_switches_home`; `idle_observer_connection_is_closed`; and a script test in a new `scripts/tests/test_crossing_summary.py` (`unittest`), `test_groups_by_host_flip` (three sample lines → two groups with the right p95).
-- [ ] **Step 2: Ask the user**, then run `just test-one client "--test crossing -- host_flip held_key_across_a_host home_follows teleport idle_observer"` and `python3 -m unittest discover -s scripts/tests -p "test_crossing_summary.py"` — FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 commands, `just smoke` — PASS.
-- [ ] **Step 5: Commit** `feat(client): home follows the body across connections; crossing probe reports host flips`.
+- [x] **Step 1: Failing tests** (`crossing.rs`, harness `with_hosts(2)`): `host_flip_matches_thread_flip_without_delay` (the same walk across a thread seam and across a host seam with link delay 0: the same number of corrections and `correction_max` within 0.01); `held_key_across_a_host_seam_no_rubber_band` (`MAX_STEP_BACK_UNITS`); `home_follows_player_region_from_the_new_connection`; `teleport_to_a_foreign_host_switches_home`; `idle_observer_connection_is_closed`; and a script test in a new `scripts/tests/test_crossing_summary.py` (`unittest`), `test_groups_by_host_flip` (three sample lines → two groups with the right p95).
+- [x] **Step 2: Ask the user**, then run `just test-one client "--test crossing -- host_flip held_key_across_a_host home_follows teleport idle_observer"` and `python3 -m unittest discover -s scripts/tests -p "test_crossing_summary.py"` — FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** the Step 2 commands, `just smoke` — PASS.
+- [x] **Step 5: Commit** `feat(client): home follows the body across connections; crossing probe reports host flips`.
 
 ## Phase E — notification, launch, measurement, browser
 
@@ -681,10 +692,10 @@ This and Task 18 are the largest client change since the region threads. `instan
 - Conservation half of the verdict: `just test-threads` and `just test-r3` green on the same commit; in the run's logs no `[client-state-hash]` mismatch, `items_destroyed=0` and `intent_replies_lost=0` on every `[server]` line (amended in execution: the line has no `items_lost=` field), and `peer_unreceived=0` at the end.
 - **Carried from execution:** `dev-r3` must run every host (a never-registered ordinal is awaited by store placement → login 503); the dev stack writes one shared `assets/webtransport-cert-hash.json` (last host wins, Task 23), irrelevant to the native probe; `dev-r3`'s supervisor restarts a host on exit 5 / 137 at most 3 times per 60 s, so a restart during a measurement shows in `target/dev-r3/host-<n>.log`.
 
-- [ ] **Step 1: Failing test** `autopilot::tests::pick_seam_finds_a_host_seam_and_a_thread_seam` (hosts 2, s 1: the two sides of the first differ in owner, of the second agree; both within 4 regions of the home) — `just test-one client "--lib autopilot::"` is a client test: **ask first**. Implement; PASS.
-- [ ] **Step 2: Commit** `feat: go / no-go probe for host seams (autopilot boundary=host|thread, just go-nogo-r3)`.
-- [ ] **Step 3: Ask the user before running the measurement** — it is a benchmark on their box. With their go-ahead run `just go-nogo-r3 1`, `just go-nogo-r3 2`, `just go-nogo-r3 5` (and `just go-nogo-r3 0` as the reference) (amended in execution: just arguments are positional), confirm the adapter from the `AdapterInfo` line and that `scaling_cur_freq` is not clamped, and record the three tables and verdicts in `TODO.md`.
-- [ ] **Step 4: Act on the verdict.** `GO` at all three delays → continue to Task 23. Any `NO-GO` → stop this plan here, write what the tables show (which metric, at which delay, with the tick gap and `confirm_ms` beside it) into `TODO.md`, and plan the seam fix — there is no fallback (§0.9).
+- [x] **Step 1: Failing test** `autopilot::tests::pick_seam_finds_a_host_seam_and_a_thread_seam` (hosts 2, s 1: the two sides of the first differ in owner, of the second agree; both within 4 regions of the home) — `just test-one client "--lib autopilot::"` is a client test: **ask first**. Implement; PASS.
+- [x] **Step 2: Commit** `feat: go / no-go probe for host seams (autopilot boundary=host|thread, just go-nogo-r3)`.
+- [ ] **Step 3: Ask the user before running the measurement** — it is a benchmark on their box. With their go-ahead run `just go-nogo-r3 1`, `just go-nogo-r3 2`, `just go-nogo-r3 5` (and `just go-nogo-r3 0` as the reference) (amended in execution: just arguments are positional), confirm the adapter from the `AdapterInfo` line and that `scaling_cur_freq` is not clamped, and record the three tables and verdicts in `TODO.md`. **Not run — the user's.**
+- [ ] **Step 4: Act on the verdict.** `GO` at all three delays → continue to Task 23. Any `NO-GO` → stop this plan here, write what the tables show (which metric, at which delay, with the tick gap and `confirm_ms` beside it) into `TODO.md`, and plan the seam fix — there is no fallback (§0.9). **Not run — the user's.**
 
 ### Task 23: Browser multi-connection
 
@@ -699,10 +710,10 @@ This and Task 18 are the largest client change since the region threads. `instan
 - **Consumes, as built** (amended in execution): `HostEndpoint.webtransport` comes from `VOXEL_ADVERTISE_WT` (`just dev-r3` sets `https://127.0.0.1:{6467 + 10·ordinal}/`; each host's WebTransport port is `VOXEL_WT_PORT`), and `HostEndpoint.cert_hash` is the hash of the certificate the host minted at start (Task 16), carried in `ServerPacket::Host`, `RegionElsewhere` and the login ticket's `SpawnAck`.
 - **Carried from execution:** every host overwrites the single dev file `assets/webtransport-cert-hash.json` (last writer wins) — the page must pin each host by `endpoint.cert_hash`, or the dev stack needs a per-host file (Task 20).
 
-- [ ] **Step 1: Failing tests** (`wasm-bindgen-test`, in the target `just determinism-wasm`'s runner already serves, or a new `[[test]]` if it needs its own): `server_frame_round_trips_with_its_connection`; `short_frame_is_rejected`.
-- [ ] **Step 2: Run** them — FAIL; implement; PASS; `just web` builds; `just smoke`.
-- [ ] **Step 3: Ask the user, then live check** in a browser against `just dev-r3 2`: log in, walk across a host seam, watch two WebTransport sessions in the network panel and no reconnect.
-- [ ] **Step 4: Commit** `feat(client,web): one WebTransport session per host in the browser`.
+- [x] **Step 1: Failing tests** (`wasm-bindgen-test`, in the target `just determinism-wasm`'s runner already serves, or a new `[[test]]` if it needs its own): `server_frame_round_trips_with_its_connection`; `short_frame_is_rejected`.
+- [x] **Step 2: Run** them — FAIL; implement; PASS; `just web` builds; `just smoke`.
+- [ ] **Step 3: Ask the user, then live check** in a browser against `just dev-r3 2`: log in, walk across a host seam, watch two WebTransport sessions in the network panel and no reconnect. **Not run — the user's.**
+- [x] **Step 4: Commit** `feat(client,web): one WebTransport session per host in the browser`.
 
 ### Task 24: Documentation
 
@@ -714,9 +725,9 @@ This and Task 18 are the largest client change since the region threads. `instan
   - TODO.md, R4: `HostMsg::Request` carries no hop (a stale grant from an older placement); region incarnations are per region, not per host; the leaver's claims are not released (static ownership reclaims). R5: `peer_addr` is the bound address — an advertised peer address (e.g. `VOXEL_ADVERTISE_PEER`) is needed off one machine.
   - Report to the user: Task 16's scope addition (input only for its own `origin_client`, client `Quit` dropped — a pre-existing hole), and, for the final review, local (name-credential) session ids from a per-process counter that can collide across hosts with observer ids.
 
-- [ ] **Step 1:** Write the docs.
-- [ ] **Step 2: Run** `just smoke`, `just test-threads`, `just test-r2`, `just test-r3`, `just test-pg "--test it"`, `just determinism-wasm` — PASS.
-- [ ] **Step 3: Commit** `docs: R3 — many hosts, one world`.
+- [x] **Step 1:** Write the docs.
+- [x] **Step 2: Run** `just smoke`, `just test-threads`, `just test-r2`, `just test-r3`, `just test-pg "--test it"`, `just determinism-wasm` — PASS.
+- [x] **Step 3: Commit** `docs: R3 — many hosts, one world`.
 
 ---
 
