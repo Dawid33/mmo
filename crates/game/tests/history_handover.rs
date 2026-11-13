@@ -926,6 +926,7 @@ fn neighbour_wake_catches_up() {
     let z = (LANDING[1] as f32 + 0.5) * common::TILE_W;
     w.teleport_player(rc(1, 0), -(FLIP_HYSTERESIS + 2.0), z);
     w.tick();
+    w.tick(); // the woken region's slot closes: the arrival is applied before its next Tick
     assert!(w.running(rc(0, 0)), "the player's arrival woke the site region");
     let census = bodies(&mut w.manager);
     for p in &a {
@@ -1104,6 +1105,9 @@ fn arrival_into_stopping_region_waits_for_its_park() {
     }
     w.settle();
     assert!(w.running(rc(0, 0)), "the arrival woke (0, 0) once it parked");
+    // The replayed arrival is applied at the end of the woken region's open slot.
+    w.manager.spawner_mut().tick_all();
+    w.settle();
     let mut player_here = false;
     w.manager.spawner_mut().with_region(rc(0, 0), |r| player_here = r.data().player_entites.contains_key(&CLIENT));
     assert!(player_here, "the player arrived in (0, 0)");

@@ -843,6 +843,10 @@ fn disconnect_mid_crossing_parks_the_body_where_it_went() {
     h.manager.handle_server_event(ServerEvent::ClientDisconnected(0), 10);
     h.settle(10);
     h.settle(10);
+    // The arrival, and the park queued behind it, are applied at the end of
+    // the east region's open slot, before its next Tick.
+    h.manager.spawner_mut().tick_all();
+    h.settle(11);
     let east = RegionCoords::new(1, 0);
     assert_eq!(bodies_in(&mut h, SPAWN_REGION), 0);
     assert_eq!(bodies_in(&mut h, east), 0, "no orphan body where it crossed to");

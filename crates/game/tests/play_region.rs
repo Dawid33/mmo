@@ -343,6 +343,9 @@ mod manager {
         });
         h.manager.spawner_mut().tick_all();
         h.settle(2);
+        // The returned body is applied at the end of the target's open slot, before its next Tick.
+        h.manager.spawner_mut().tick_all();
+        h.settle(3);
         assert!(!h.manager.running_regions().contains(&RegionCoords::new(2, 0)), "no region off the map wakes");
         assert_eq!(players_in(&mut h, target), 1, "the player is handed back");
         assert!(!h.drain().iter().any(|(_, p)| matches!(p, ServerPacket::PlayerRegion(Some(rc), 0) if *rc != target)));
