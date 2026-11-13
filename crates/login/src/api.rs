@@ -30,7 +30,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::LoginConfig;
 use crate::host_link::HostLinks;
-use crate::oidc::OidcVerifier;
+use crate::oidc::{OidcError, OidcVerifier};
 use crate::config::OidcConfig;
 use crate::store::{AccountRow, LoginError, LoginStore, OidcUpsert, RefreshOutcome};
 use crate::AccountId;
@@ -143,6 +143,10 @@ impl Fail {
     }
     fn identity_refused() -> Fail {
         Fail::new(StatusCode::UNAUTHORIZED, ApiErrorCode::IdentityRefused, IDENTITY_REFUSED_MSG)
+    }
+    /// The identity provider could not be reached to check a token: try again later.
+    fn provider_unavailable() -> Fail {
+        Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::Internal, "the identity provider is unavailable")
     }
     fn identity_conflict() -> Fail {
         Fail::new(StatusCode::CONFLICT, ApiErrorCode::IdentityConflict, IDENTITY_CONFLICT_MSG)
@@ -275,10 +279,17 @@ fn oidc_parts(s: &AppState) -> Result<(&Arc<OidcVerifier>, &OidcConfig), Fail> {
 
 async fn login_oidc(State(s): State<AppState>, ApiJson(req): ApiJson<OidcLoginRequest>) -> Result<Json<LoginResponse>, Fail> {
     let (verifier, _) = oidc_parts(&s)?;
-    let identity = verifier.verify_refreshing(&req.access_token, s.now()).await.map_err(|e| {
+    let identity = verifier.verify_refreshing(&req.access_token, s.now()).await.map_err(|e| match e {
+        // The provider's keys could not be fetched: our problem, not the player's.
+        OidcError::Fetch(_) => {
+            log::warn!("[login] identity-provider login unavailable: {e}");
+            Fail::provider_unavailable()
+        }
         // The variant only: never the token or the claims.
-        log::warn!("[login] identity-provider token refused: {e}");
-        Fail::identity_refused()
+        _ => {
+            log::warn!("[login] identity-provider token refused: {e}");
+            Fail::identity_refused()
+        }
     })?;
     let account = match s.store.upsert_oidc_account(&identity.subject, &identity.email, &identity.name, s.now_db()).await? {
         OidcUpsert::Created(id) | OidcUpsert::Existing(id) | OidcUpsert::Adopted(id) => id,

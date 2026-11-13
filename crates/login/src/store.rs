@@ -122,6 +122,9 @@ const QUEUE_KICKS: &str = "INSERT INTO pending_kicks (world_id, player_token, se
      ON CONFLICT (world_id, player_token) DO UPDATE SET \
      session_epoch = excluded.session_epoch, reason = excluded.reason, created_at = excluded.created_at";
 
+/// The kick reason when an unverified account is adopted by the identity provider's sign-in.
+const ADOPTION_KICK_REASON: &str = "signed in again through the identity provider";
+
 /// Inside transaction `$tx`: revoke every refresh token of `$account` and queue a kick for
 /// each of its open sessions in a world with a host link; evaluates to how many were queued.
 macro_rules! revoke_with_kicks {
@@ -271,7 +274,8 @@ impl LoginStore {
 
     /// Sign-in through the identity provider, in one transaction: the account of `subject`
     /// (email and name refreshed); else the subject-less account with this email (adopted: its
-    /// password is cleared and its email marked verified); else [`OidcUpsert::EmailTaken`] if another subject holds the
+    /// password is cleared and its email marked verified; if it was not verified yet, its
+    /// refresh tokens are revoked and its open sessions kicked in the same transaction); else [`OidcUpsert::EmailTaken`] if another subject holds the
     /// email; else a new password-less account. `email` is already normalised (as for
     /// [`Self::create_account`]); `display_name` is cut to [`DISPLAY_NAME_MAX_CHARS`].
     pub async fn upsert_oidc_account(
@@ -307,15 +311,21 @@ impl LoginStore {
                             .await?;
                         OidcUpsert::Existing(id)
                     }
-                } else if let Some(row) = sqlx::query("SELECT account_id, subject FROM accounts WHERE email = $1")
-                    .bind(email)
-                    .fetch_optional(&mut *tx)
-                    .await?
+                } else if let Some(row) =
+                    sqlx::query("SELECT account_id, subject, email_verified_at FROM accounts WHERE email = $1")
+                        .bind(email)
+                        .fetch_optional(&mut *tx)
+                        .await?
                 {
                     if row.get::<Option<String>, _>(1).is_some() {
                         OidcUpsert::EmailTaken
                     } else {
                         let id: i64 = row.get(0);
+                        // Never verified: whoever registered it may not own the email. Their
+                        // refresh tokens die and their sessions are kicked with the adoption.
+                        if row.get::<Option<i64>, _>(2).is_none() {
+                            revoke_with_kicks!(tx, id, now, ADOPTION_KICK_REASON);
+                        }
                         sqlx::query(
                             "UPDATE accounts SET subject = $1, display_name = $2, password_hash = '', \
                              email_verified_at = COALESCE(email_verified_at, $3) WHERE account_id = $4",
@@ -358,24 +368,26 @@ impl LoginStore {
     }
 
     /// The account of `email`, made (no password, verified) when there is none: what an operator
-    /// needs to hand out a refresh token (`login account issue-refresh`).
+    /// needs to hand out a refresh token (`login account issue-refresh`). An account that
+    /// already exists is left exactly as it is — its verification included: an operator must
+    /// not vouch for an email someone else registered.
     pub async fn ensure_verified_account(&self, email: &str, now: i64) -> Result<AccountId, LoginError> {
-        const VERIFY: &str =
-            "UPDATE accounts SET email_verified_at = $1 WHERE account_id = $2 AND email_verified_at IS NULL";
-        let id = match self.account_by_email(email).await? {
-            Some(account) => account.account_id,
-            // Lost a race with another creator: the account is there now.
-            None => match self.create_account(email, "", now).await? {
-                Some(id) => id,
-                None => self
-                    .account_by_email(email)
-                    .await?
-                    .map(|a| a.account_id)
-                    .ok_or_else(|| LoginError::Backend(format!("account {email:?} vanished while being made")))?,
-            },
-        };
-        exec!(self, p => sqlx::query(VERIFY).bind(now).bind(id).execute(p).await?);
-        Ok(id)
+        const CREATE: &str = "INSERT INTO accounts (email, password_hash, email_verified_at, created_at) \
+             VALUES ($1, '', $2, $2) ON CONFLICT (email) DO NOTHING RETURNING account_id";
+        if let Some(account) = self.account_by_email(email).await? {
+            return Ok(account.account_id);
+        }
+        let made = on!(self, p => sqlx::query(CREATE).bind(email).bind(now).fetch_optional(p).await?
+            .map(|r| r.get::<i64, _>(0)));
+        match made {
+            Some(id) => Ok(id),
+            // Lost a race with another creator: the account is there now, left as it is.
+            None => self
+                .account_by_email(email)
+                .await?
+                .map(|a| a.account_id)
+                .ok_or_else(|| LoginError::Backend(format!("account {email:?} vanished while being made"))),
+        }
     }
 
     pub async fn insert_refresh(

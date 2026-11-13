@@ -35,10 +35,11 @@ async fn ensure_verified_account_makes_or_finds_one() {
     // Again: the same account, its verified time kept.
     assert_eq!(s.ensure_verified_account("a@b.c", 20).await.unwrap(), id);
     assert_eq!(s.account(id).await.unwrap().unwrap().email_verified_at, Some(10));
-    // An unverified account (made another way) becomes verified.
+    // An unverified account (made another way) is found but stays unverified: an operator
+    // must not vouch for an email the command did not set up.
     let other = s.create_account("o@b.c", "h", 1).await.unwrap().unwrap();
     assert_eq!(s.ensure_verified_account("o@b.c", 30).await.unwrap(), other);
-    assert_eq!(s.account(other).await.unwrap().unwrap().email_verified_at, Some(30));
+    assert_eq!(s.account(other).await.unwrap().unwrap().email_verified_at, None);
 }
 
 #[tokio::test]
@@ -381,6 +382,88 @@ async fn oidc_adopts_password_account_by_email() {
     assert_eq!(s.player_token_for(id, "w1", 11, || panic!("must not mint again")).await.unwrap(), token);
     let row = s.account_by_subject("s1").await.unwrap().unwrap();
     assert_eq!((row.account_id, row.email_verified_at, row.password_hash.as_str()), (id, Some(10), ""));
+}
+
+/// A world with a host link, where a revocation queues kicks.
+fn linked_world() -> WorldRow {
+    WorldRow {
+        world_id: "linked".into(),
+        name: "L".into(),
+        status: WorldStatus::Open,
+        quic: None,
+        webtransport: None,
+        cert_hash: None,
+        created_at: 1,
+        host_link: Some("127.0.0.1:6490".into()),
+        host_link_cert: Some("ab".repeat(32)),
+    }
+}
+
+/// Someone registered this email before the identity provider and never verified it: when the
+/// real owner signs in, the squatter's refresh token dies and its live session is kicked, in the
+/// same transaction as the adoption. The account's world players stay.
+async fn adopt_unverified(s: LoginStore) {
+    s.put_world(&linked_world()).await.unwrap();
+    let id = s.create_account("a@x.io", "hash", 5).await.unwrap().unwrap();
+    let token = s.player_token_for(id, "linked", 6, || "tok".into()).await.unwrap();
+    assert_eq!(s.bump_session(id, "linked", 6).await.unwrap(), 1);
+    s.insert_refresh([1; 32], id, [9; 16], 1000).await.unwrap();
+    assert_eq!(s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap(), OidcUpsert::Adopted(id));
+    assert!(
+        matches!(s.rotate_refresh([1; 32], [2; 32], 1000, 11).await.unwrap(), RefreshOutcome::Reused { .. }),
+        "the squatter's token no longer rotates"
+    );
+    let kick = login::PendingKick {
+        world_id: "linked".into(),
+        player_token: token.clone(),
+        session_epoch: 1,
+        reason: "signed in again through the identity provider".into(),
+    };
+    assert_eq!(s.pending_kicks().await.unwrap(), vec![kick]);
+    assert_eq!(s.player_token_for(id, "linked", 12, || panic!("must not mint again")).await.unwrap(), token);
+}
+
+#[tokio::test]
+async fn oidc_adopting_an_unverified_account_revokes_its_tokens() {
+    adopt_unverified(store().await).await;
+}
+
+#[tokio::test]
+async fn oidc_adopting_an_unverified_account_revokes_its_tokens_postgres() {
+    if crate::common::pg_admin_url().is_none() { return crate::common::skip_msg() }
+    let db = crate::common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
+    adopt_unverified(LoginStore::open(&db.url).await.unwrap()).await;
+    drop(db);
+}
+
+/// An account whose email was already verified belongs to that email's owner: adopting it
+/// keeps its refresh tokens and its sessions.
+async fn adopt_verified(s: LoginStore) {
+    s.put_world(&linked_world()).await.unwrap();
+    let id = s.ensure_verified_account("a@x.io", 5).await.unwrap();
+    s.player_token_for(id, "linked", 6, || "tok".into()).await.unwrap();
+    s.bump_session(id, "linked", 6).await.unwrap();
+    s.insert_refresh([1; 32], id, [9; 16], 1000).await.unwrap();
+    assert_eq!(s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap(), OidcUpsert::Adopted(id));
+    assert_eq!(
+        s.rotate_refresh([1; 32], [2; 32], 1000, 11).await.unwrap(),
+        RefreshOutcome::Valid { account: id, family: [9; 16] }
+    );
+    assert!(s.pending_kicks().await.unwrap().is_empty());
+    assert_eq!(s.account(id).await.unwrap().unwrap().email_verified_at, Some(5), "verified time kept");
+}
+
+#[tokio::test]
+async fn oidc_adopting_a_verified_account_keeps_its_tokens() {
+    adopt_verified(store().await).await;
+}
+
+#[tokio::test]
+async fn oidc_adopting_a_verified_account_keeps_its_tokens_postgres() {
+    if crate::common::pg_admin_url().is_none() { return crate::common::skip_msg() }
+    let db = crate::common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
+    adopt_verified(LoginStore::open(&db.url).await.unwrap()).await;
+    drop(db);
 }
 
 #[tokio::test]

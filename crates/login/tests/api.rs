@@ -806,3 +806,36 @@ async fn oidc_login_refetches_keys_on_unknown_kid() {
     let r = a.login_oidc(crate::common::oidc_token(oidc_claims(&issuer, "u-1"), "test-2")).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
 }
+
+/// A provider whose JWKS answers once (discovery), then only 500s.
+async fn serve_failing_provider() -> String {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::AtomicUsize;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let discovery = serde_json::json!({ "issuer": base, "jwks_uri": format!("{base}/jwks") });
+    let jwks = move || {
+        if hits.fetch_add(1, Ordering::SeqCst) >= 1 {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "down").into_response();
+        }
+        axum::Json(serde_json::from_str::<serde_json::Value>(crate::common::OIDC_JWKS).unwrap()).into_response()
+    };
+    let provider = Router::new()
+        .route("/.well-known/openid-configuration", axum::routing::get(move || async move { axum::Json(discovery) }))
+        .route("/jwks", axum::routing::get(move || async move { jwks() }));
+    tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+    base
+}
+
+/// The provider's keys cannot be fetched: the service has a problem, not the player — 503
+/// with the internal code, never a refused identity.
+#[tokio::test]
+async fn oidc_login_when_keys_cannot_be_fetched_is_503() {
+    let issuer = serve_failing_provider().await;
+    let verifier = OidcVerifier::discover(&issuer, "mmo-login").await.unwrap();
+    let a = app_from(|state| with_oidc(state, &issuer, verifier)).await;
+    let r = a.login_oidc(crate::common::oidc_token(oidc_claims(&issuer, "u-1"), "test-2")).await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
+    assert_eq!(r.error(), ApiErrorCode::Internal);
+}

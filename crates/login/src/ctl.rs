@@ -24,7 +24,8 @@ const USAGE: &str = "usage: login [--db <url>] <command>
   world add <id> --name <n> [--quic host:port] [--wt url] [--cert-hash h] [--closed]
             [--link host:port --link-cert <sha256>]   (the host's service link: join pushes SpawnPlayer)
   world list | remove <id> | open <id> | close <id>
-  account issue-refresh <email>   (prints a new refresh token; creates the account if missing)
+  account issue-refresh <email>   (prints a new refresh token; creates the account, verified,
+                                   if missing; an existing account is left as it is)
   account revoke <email>   (revokes its refresh tokens and kicks its open sessions)";
 
 fn now_secs() -> i64 {
@@ -177,7 +178,8 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
         ["account", "issue-refresh", email] => {
             // For launches with no screens: the token is the only thing printed (the recipe
             // redirects it into the client's token file). An account made here has no password
-            // (Keycloak owns those) and is verified.
+            // (Keycloak owns those) and is verified; an existing one is left as it is (never
+            // marked verified: that would launder an unverified squatter's account).
             let email = normalize_email(email).map_err(|e| e.to_string())?;
             let token = block_on(async {
                 let store = open(&db_url()?).await?;
