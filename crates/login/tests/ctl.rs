@@ -1,23 +1,14 @@
-use login::ctl::{CtlDeps, run_ctl_with};
-use login::{Hasher, LoginStore};
+use login::ctl::run_ctl;
+use login::LoginStore;
 use login_api::WorldStatus;
 
 fn args(s: &str) -> Vec<String> {
     s.split_whitespace().map(String::from).collect()
 }
 
-fn run(db: &str, line: &str, stdin: &str) -> Result<String, String> {
+fn run(db: &str, line: &str) -> Result<String, String> {
     let mut out = Vec::new();
-    let mut input = stdin.as_bytes();
-    let full = format!("--db {db} {line}");
-    run_ctl_with(
-        &args(&full),
-        &mut out,
-        CtlDeps {
-            hasher: Hasher::for_tests(),
-            stdin: &mut input,
-        },
-    )?;
+    run_ctl(&args(&format!("--db {db} {line}")), &mut out)?;
     Ok(String::from_utf8(out).unwrap())
 }
 
@@ -34,8 +25,8 @@ fn keygen_numbers_files_and_signs_with_newest() {
     let keys = root.join("keys"); // does not exist yet
     let db = root.join("l.sqlite");
     let line = format!("keygen --dir {}", keys.display());
-    let kid1 = run(db.to_str().unwrap(), &line, "").unwrap();
-    let kid2 = run(db.to_str().unwrap(), &line, "").unwrap();
+    let kid1 = run(db.to_str().unwrap(), &line).unwrap();
+    let kid2 = run(db.to_str().unwrap(), &line).unwrap();
     assert_ne!(kid1.trim(), kid2.trim());
     let mut names: Vec<_> = std::fs::read_dir(&keys)
         .unwrap()
@@ -63,98 +54,37 @@ async fn world_add_list_remove() {
     let db = db.to_str().unwrap().to_string();
     let d = db.clone();
     tokio::task::spawn_blocking(move || {
-        run(&d, "world add dev --name Dev --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/", "").unwrap();
-        let list = run(&d, "world list", "").unwrap();
+        run(&d, "world add dev --name Dev --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/").unwrap();
+        let list = run(&d, "world list").unwrap();
         assert!(list.contains("dev") && list.contains("open") && list.contains("127.0.0.1:6466"), "{list}");
-        run(&d, "world close dev", "").unwrap();
-        assert!(run(&d, "world list", "").unwrap().contains("closed"));
-        run(&d, "world open dev", "").unwrap();
-        assert!(run(&d, "world list", "").unwrap().contains("open"));
-        assert!(run(&d, "world close nope", "").is_err());
+        run(&d, "world close dev").unwrap();
+        assert!(run(&d, "world list").unwrap().contains("closed"));
+        run(&d, "world open dev").unwrap();
+        assert!(run(&d, "world list").unwrap().contains("open"));
+        assert!(run(&d, "world close nope").is_err());
         // The host's service link: both flags or neither; a pin is 64 hex digits.
         let pin = "AB".repeat(32);
         let linked = format!("world add dev --name Dev --link 127.0.0.1:6490 --link-cert {pin}");
-        run(&d, &linked, "").unwrap();
-        assert!(run(&d, "world list", "").unwrap().contains("link=127.0.0.1:6490"));
-        assert!(run(&d, "world add dev --name Dev --link 127.0.0.1:6490", "").is_err());
-        assert!(run(&d, "world add dev --name Dev --link nope --link-cert 00", "").is_err());
-        assert!(run(&d, &format!("world add dev --name Dev --link 127.0.0.1:6490 --link-cert {}", "zz".repeat(32)), "").is_err());
-        run(&d, "world close dev", "").unwrap();
-        assert!(run(&d, "world list", "").unwrap().contains("link=127.0.0.1:6490"), "close keeps the link");
-        let readded = run(&d, "world add dev --name Dev", "").unwrap();
+        run(&d, &linked).unwrap();
+        assert!(run(&d, "world list").unwrap().contains("link=127.0.0.1:6490"));
+        assert!(run(&d, "world add dev --name Dev --link 127.0.0.1:6490").is_err());
+        assert!(run(&d, "world add dev --name Dev --link nope --link-cert 00").is_err());
+        assert!(run(&d, &format!("world add dev --name Dev --link 127.0.0.1:6490 --link-cert {}", "zz".repeat(32))).is_err());
+        run(&d, "world close dev").unwrap();
+        assert!(run(&d, "world list").unwrap().contains("link=127.0.0.1:6490"), "close keeps the link");
+        let readded = run(&d, "world add dev --name Dev").unwrap();
         assert!(readded.contains("warning") && readded.contains("127.0.0.1:6490"), "the cleared link is said: {readded}");
-        assert!(run(&d, "world list", "").unwrap().contains("link=-"), "re-adding without a link clears it");
-        assert!(!run(&d, "world add dev --name Dev", "").unwrap().contains("warning"), "nothing to clear now");
-        run(&d, "world remove dev", "").unwrap();
-        assert!(run(&d, "world remove dev", "").is_err());
-        assert!(!run(&d, "world list", "").unwrap().contains("dev"));
+        assert!(run(&d, "world list").unwrap().contains("link=-"), "re-adding without a link clears it");
+        assert!(!run(&d, "world add dev --name Dev").unwrap().contains("warning"), "nothing to clear now");
+        run(&d, "world remove dev").unwrap();
+        assert!(run(&d, "world remove dev").is_err());
+        assert!(!run(&d, "world list").unwrap().contains("dev"));
     })
     .await
     .unwrap();
     let store = LoginStore::open(&db).await.unwrap();
     assert!(store.worlds().await.unwrap().is_empty());
     let _ = WorldStatus::Open;
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn set_password_then_login() {
-    let root = temp_dir("pw");
-    let db = root.join("l.sqlite");
-    let db = db.to_str().unwrap().to_string();
-    let store = LoginStore::open(&db).await.unwrap();
-    store.create_account("a@b.c", "old", 0).await.unwrap().unwrap();
-    drop(store);
-    let d = db.clone();
-    tokio::task::spawn_blocking(move || {
-        assert!(run(&d, "account set-password nobody@x.y", "correct horse battery\n").is_err());
-        assert!(run(&d, "account set-password A@B.c", "short\n").is_err());
-        let out = run(&d, "account set-password A@B.c", "correct horse battery\n").unwrap();
-        assert!(!out.contains("correct horse"));
-        run(&d, "account verify a@b.c", "").unwrap();
-    })
-    .await
-    .unwrap();
-    let store = LoginStore::open(&db).await.unwrap();
-    let row = store.account_by_email("a@b.c").await.unwrap().unwrap();
-    assert!(Hasher::for_tests().verify("correct horse battery", &row.password_hash));
-    assert!(row.email_verified_at.is_some());
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn account_ensure_creates_then_updates() {
-    let root = temp_dir("ensure");
-    let db = root.join("l.sqlite");
-    let db = db.to_str().unwrap().to_string();
-    let d = db.clone();
-    tokio::task::spawn_blocking(move || {
-        assert!(run(&d, "account ensure dev@localhost", "short\n").is_err());
-        let out = run(&d, "account ensure Dev@Localhost --verified", "dev-password\n").unwrap();
-        assert!(out.contains("created") && out.contains("verified"), "{out}");
-        assert!(!out.contains("dev-password"));
-        // Same password again: nothing to change.
-        let out = run(&d, "account ensure dev@localhost --verified", "dev-password\n").unwrap();
-        assert!(out.contains("unchanged"), "{out}");
-        // A new password replaces the old one.
-        let out = run(&d, "account ensure dev@localhost", "another-password\n").unwrap();
-        assert!(out.contains("password set") && !out.contains("another-password"), "{out}");
-    })
-    .await
-    .unwrap();
-    let store = LoginStore::open(&db).await.unwrap();
-    let row = store.account_by_email("dev@localhost").await.unwrap().unwrap();
-    assert!(Hasher::for_tests().verify("another-password", &row.password_hash));
-    assert!(!Hasher::for_tests().verify("dev-password", &row.password_hash));
-    assert!(row.email_verified_at.is_some());
-    // Without --verified a new account stays unverified.
-    drop(store);
-    let d = db.clone();
-    tokio::task::spawn_blocking(move || run(&d, "account ensure other@localhost", "other-password\n").unwrap())
-        .await
-        .unwrap();
-    let store = LoginStore::open(&db).await.unwrap();
-    assert!(store.account_by_email("other@localhost").await.unwrap().unwrap().email_verified_at.is_none());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -169,8 +99,6 @@ async fn refresh_status(db: &str, token: &str) -> axum::http::StatusCode {
     let state = login::AppState::new(
         store,
         std::sync::Arc::new(auth::Signer::new(vec![key]).ok().unwrap()),
-        Hasher::for_tests(),
-        std::sync::Arc::new(login::mail::LogMailer::default()),
         std::sync::Arc::new(login::LoginConfig::from_lookup(|_| None).unwrap()),
         login::system_clock(),
     );
@@ -185,7 +113,7 @@ async fn refresh_status(db: &str, token: &str) -> axum::http::StatusCode {
 /// Runs `issue-refresh` for `email` off the async runtime; the one printed line, unquoted.
 async fn issue(db: &str, email: &str) -> String {
     let (d, line) = (db.to_string(), format!("account issue-refresh {email}"));
-    let out = tokio::task::spawn_blocking(move || run(&d, &line, "")).await.unwrap().unwrap();
+    let out = tokio::task::spawn_blocking(move || run(&d, &line)).await.unwrap().unwrap();
     assert!(out.ends_with('\n') && out.matches('\n').count() == 1, "one line: {out:?}");
     out.trim_end().to_string()
 }
@@ -232,5 +160,52 @@ async fn issue_refresh_prints_only_the_token() {
     // The same length as a refresh token a login hands out.
     let minted = login::api::mint_refresh(&LoginStore::open(&db).await.unwrap(), 1, 0).await.unwrap();
     assert_eq!(token.len(), minted.len());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_revoke_ends_sessions() {
+    let root = temp_dir("revoke");
+    let db = root.join("l.sqlite");
+    let db = db.to_str().unwrap().to_string();
+    let token = issue(&db, "dev@localhost").await;
+    // A session in a host-linked world: `revoke` queues a kick for it.
+    let store = LoginStore::open(&db).await.unwrap();
+    let id = store.account_by_email("dev@localhost").await.unwrap().unwrap().account_id;
+    store
+        .put_world(&login::WorldRow {
+            world_id: "linked".into(),
+            name: "L".into(),
+            status: WorldStatus::Open,
+            quic: None,
+            webtransport: None,
+            cert_hash: None,
+            created_at: 1,
+            host_link: Some("127.0.0.1:6490".into()),
+            host_link_cert: Some("ab".repeat(32)),
+        })
+        .await
+        .unwrap();
+    store.player_token_for(id, "linked", 0, || "tok".into()).await.unwrap();
+    assert_eq!(store.bump_session(id, "linked", 0).await.unwrap(), 1);
+    drop(store);
+    assert_eq!(refresh_status(&db, &token).await, axum::http::StatusCode::OK);
+    // The refresh above rotated the token; a second one is a new family: both die with the account's tokens.
+    let second = issue(&db, "dev@localhost").await;
+
+    let d = db.clone();
+    let out = tokio::task::spawn_blocking(move || run(&d, "account revoke Dev@Localhost")).await.unwrap().unwrap();
+    assert!(out.contains("1 session(s) kicked"), "{out}");
+    assert!(!out.contains(&second), "no token is printed: {out}");
+    assert_eq!(refresh_status(&db, &second).await, axum::http::StatusCode::UNAUTHORIZED);
+    let store = LoginStore::open(&db).await.unwrap();
+    let kicks = store.pending_kicks().await.unwrap();
+    assert_eq!(kicks.len(), 1);
+    assert_eq!((kicks[0].world_id.as_str(), kicks[0].player_token.as_str(), kicks[0].session_epoch), ("linked", "tok", 1));
+    assert_eq!(kicks[0].reason, login::api::KICK_ACCOUNT_REVOKED);
+    drop(store);
+    let d = db.clone();
+    let missing = tokio::task::spawn_blocking(move || run(&d, "account revoke nobody@localhost")).await.unwrap();
+    assert!(missing.is_err());
     let _ = std::fs::remove_dir_all(&root);
 }

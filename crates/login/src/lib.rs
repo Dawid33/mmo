@@ -1,36 +1,28 @@
-//! The login service: its database ([`LoginStore`]), password handling, mail and the HTTP API
+//! The login service: its database ([`LoginStore`]) and the HTTP API
 //! ([`router`] over an [`AppState`]; [`serve`] runs it from a [`LoginConfig`]).
 
 pub mod api;
 pub mod config;
 pub mod ctl;
 pub mod host_link;
-pub mod mail;
 pub mod oidc;
-pub mod pages;
-pub mod password;
 pub mod store;
 
 use std::io;
 use std::sync::Arc;
 
 pub use api::{AppState, router, system_clock};
-pub use config::{LoginConfig, MailerKind, OidcConfig};
-pub use password::{Hasher, check_password};
+pub use config::{LoginConfig, OidcConfig};
 pub use store::{
     AccountId, AccountRow, DISPLAY_NAME_MAX_CHARS, LoginError, LoginStore, OidcUpsert, OpenSession, PendingKick, RefreshOutcome,
     WorldRow, normalize_email,
 };
 
-/// Kind of an email token: verify the address.
-pub const EMAIL_TOKEN_VERIFY: i64 = 0;
-/// Kind of an email token: reset the password.
-pub const EMAIL_TOKEN_RESET: i64 = 1;
 /// Connections per pool (Postgres / file SQLite).
 pub const LOGIN_POOL_MAX: u32 = 8;
 
 /// Run the login service until the process ends: open (and migrate) the database, load the
-/// signing keys, pick the mailer, bind `config.bind` and serve [`router`].
+/// signing keys, bind `config.bind` and serve [`router`].
 pub async fn serve(config: LoginConfig) -> io::Result<()> {
     let store = LoginStore::open(&config.db_url)
         .await
@@ -41,20 +33,12 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
             format!("signing keys in {}: {e} (run `login keygen` to make one)", config.keys_dir.display()),
         )
     })?;
-    let mailer: Arc<dyn mail::Mailer> = match &config.mailer {
-        MailerKind::Log => {
-            log::warn!("[login] VOXEL_MAILER=log: mail links (with their tokens) go to the log — dev only");
-            Arc::new(mail::LogMailer::default())
-        }
-        MailerKind::Ses { from } => Arc::new(mail::SesMailer::from_env(from.clone()).await),
-    };
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     log::info!(
-        "[login] listening on http://{} (signing kid {}, {} key(s) published, require_verified={})",
+        "[login] listening on http://{} (signing kid {}, {} key(s) published)",
         listener.local_addr()?,
         signer.signing_key().kid(),
-        signer.jwks().keys.len(),
-        config.require_verified
+        signer.jwks().keys.len()
     );
     // The service token world hosts' links are dialed with (worlds with a `host_link`).
     let service_token = match svc_link::service_token_from_env() {
@@ -78,8 +62,6 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
     let mut state = AppState::new(
         store,
         Arc::new(signer),
-        Hasher::default(),
-        mailer,
         Arc::new(config),
         system_clock(),
     )

@@ -9,8 +9,6 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:8790";
 pub const DEFAULT_DB: &str = "target/dev-login/login.sqlite";
 /// `VOXEL_LOGIN_KEYS_DIR` unset.
 pub const DEFAULT_KEYS_DIR: &str = "target/dev-login/keys";
-/// `VOXEL_LOGIN_PUBLIC_URL` unset: where mailed links point.
-pub const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8790";
 /// `VOXEL_LOGIN_CORS_ORIGINS` unset: the dev browser build's page (`just web`), by IP or as
 /// `localhost` (browsers treat the two as different origins).
 pub const DEFAULT_CORS_ORIGINS: &str = "http://127.0.0.1:1334,http://localhost:1334";
@@ -19,15 +17,6 @@ pub const DEFAULT_CORS_ORIGINS: &str = "http://127.0.0.1:1334,http://localhost:1
 pub const DEFAULT_OIDC_AUDIENCE: &str = "mmo-login";
 /// `VOXEL_OIDC_CLIENT_ID` unset.
 pub const DEFAULT_OIDC_CLIENT_ID: &str = "game";
-
-/// How mail goes out.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MailerKind {
-    /// `LogMailer`: logs the link. Dev only — the link carries a single-use token.
-    Log,
-    /// Amazon SES v2, sending as `from` (`VOXEL_MAIL_FROM`).
-    Ses { from: String },
-}
 
 /// The external identity provider (OpenID Connect) the service logs players in with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,13 +36,8 @@ pub struct LoginConfig {
     pub db_url: String,
     /// The PKCS#8 PEM signing keys (`login keygen` writes them).
     pub keys_dir: PathBuf,
-    /// The service's public base URL, for links in mail.
-    pub public_url: String,
     /// Exact origins a browser may call the API from.
     pub cors_origins: Vec<String>,
-    /// Refuse login / refresh / join until the email is verified.
-    pub require_verified: bool,
-    pub mailer: MailerKind,
     /// `None` (`VOXEL_OIDC_ISSUER` unset): no identity-provider login.
     pub oidc: Option<OidcConfig>,
 }
@@ -65,9 +49,8 @@ impl LoginConfig {
     }
 
     /// From `lookup(name)`; an unset or empty variable takes its default.
-    /// `VOXEL_LOGIN_BIND`, `VOXEL_LOGIN_DB`, `VOXEL_LOGIN_KEYS_DIR`, `VOXEL_LOGIN_PUBLIC_URL`,
-    /// `VOXEL_LOGIN_CORS_ORIGINS` (comma list), `VOXEL_LOGIN_REQUIRE_VERIFIED` (`1` = on),
-    /// `VOXEL_MAILER` (`log` | `ses`), `VOXEL_MAIL_FROM` (required with `ses`), and
+    /// `VOXEL_LOGIN_BIND`, `VOXEL_LOGIN_DB`, `VOXEL_LOGIN_KEYS_DIR`,
+    /// `VOXEL_LOGIN_CORS_ORIGINS` (comma list), and
     /// `VOXEL_OIDC_ISSUER` (unset = off), `VOXEL_OIDC_AUDIENCE` (`mmo-login`), `VOXEL_OIDC_CLIENT_ID` (`game`).
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<LoginConfig, String> {
         let get = |k: &str, default: &str| {
@@ -85,18 +68,6 @@ impl LoginConfig {
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let require_verified = get("VOXEL_LOGIN_REQUIRE_VERIFIED", "0") == "1";
-        let mailer = match get("VOXEL_MAILER", "log").as_str() {
-            "log" => MailerKind::Log,
-            "ses" => {
-                let from = get("VOXEL_MAIL_FROM", "");
-                if from.is_empty() {
-                    return Err("VOXEL_MAILER=ses needs VOXEL_MAIL_FROM (the sender address)".into());
-                }
-                MailerKind::Ses { from }
-            }
-            other => return Err(format!("VOXEL_MAILER={other:?}: want `log` or `ses`")),
-        };
         let oidc = Some(get("VOXEL_OIDC_ISSUER", "")).filter(|i| !i.is_empty()).map(|issuer| OidcConfig {
             issuer,
             audience: get("VOXEL_OIDC_AUDIENCE", DEFAULT_OIDC_AUDIENCE),
@@ -106,10 +77,7 @@ impl LoginConfig {
             bind,
             db_url: get("VOXEL_LOGIN_DB", DEFAULT_DB),
             keys_dir: PathBuf::from(get("VOXEL_LOGIN_KEYS_DIR", DEFAULT_KEYS_DIR)),
-            public_url: get("VOXEL_LOGIN_PUBLIC_URL", DEFAULT_PUBLIC_URL),
             cors_origins,
-            require_verified,
-            mailer,
             oidc,
         })
     }
@@ -141,10 +109,7 @@ impl std::fmt::Debug for LoginConfig {
             .field("bind", &self.bind)
             .field("db_url", &redact_url(&self.db_url))
             .field("keys_dir", &self.keys_dir)
-            .field("public_url", &self.public_url)
             .field("cors_origins", &self.cors_origins)
-            .field("require_verified", &self.require_verified)
-            .field("mailer", &self.mailer)
             .field("oidc", &self.oidc)
             .finish()
     }

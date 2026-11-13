@@ -1,18 +1,15 @@
 //! The login service's HTTP API: one axum [`Router`] over [`AppState`].
 //!
 //! Security rules this file keeps (constraints decisions 5–12):
-//! - **No account enumeration.** Login answers one `BadCredentials` body for an unknown email and
-//!   a wrong password, and runs one Argon2 verification either way (against [`AppState`]'s dummy
-//!   hash when the email is unknown). Register and reset-request always answer 202; an existing
-//!   email gets an "already registered" mail instead of a verify mail. Mail goes out on a spawned
-//!   task, so the answer never waits on (or times) the mail transport.
+//! - **No passwords here.** Keycloak owns them: a player logs in there, and `/v1/login/oidc`
+//!   trades the access token it issued for a refresh token of ours.
 //! - **Refresh tokens** are [`TOKEN_BYTES`] random bytes, base64url without padding; the database
 //!   holds SHA-256 over the token's base64url STRING bytes ([`token_hash`]) — so any presented
-//!   string hashes, and a malformed one is simply unknown. Email tokens use the same scheme.
+//!   string hashes, and a malformed one is simply unknown.
 //!   Every refresh / join rotates the token within its family (take + successor in one
 //!   transaction, `LoginStore::rotate_refresh`); presenting a spent token revokes
 //!   the whole family.
-//! - **Nothing secret is logged**: no password, refresh / email token or whole JWT, and no request
+//! - **Nothing secret is logged**: no refresh token or whole JWT, and no request
 //!   or response body (the `login-api` DTOs' `Debug` prints them). Joins log account id + `kid`.
 
 use std::future::Future;
@@ -34,17 +31,11 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::config::LoginConfig;
 use crate::host_link::HostLinks;
 use crate::oidc::OidcVerifier;
-use crate::mail::{
-    Mail, Mailer, RESET_TOKEN_TTL_SECS, VERIFY_TOKEN_TTL_SECS, already_registered_mail, reset_mail,
-    verify_mail,
-};
-use crate::password::{Hasher, check_password};
-use crate::store::normalize_email;
 use crate::config::OidcConfig;
 use crate::store::{AccountRow, LoginError, LoginStore, OidcUpsert, RefreshOutcome};
-use crate::{AccountId, EMAIL_TOKEN_RESET, EMAIL_TOKEN_VERIFY};
+use crate::AccountId;
 
-/// Random bytes in a refresh or email token.
+/// Random bytes in a refresh token.
 pub const TOKEN_BYTES: usize = 32;
 /// Random bytes in a refresh-token family id.
 pub const FAMILY_BYTES: usize = 16;
@@ -52,30 +43,20 @@ pub const FAMILY_BYTES: usize = 16;
 pub const PLAYER_TOKEN_BYTES: usize = 16;
 /// Seconds per day, for [`REFRESH_TTL_DAYS`].
 const SECS_PER_DAY: u64 = 86_400;
-/// The dummy password [`AppState`] hashes once, verified against when a login's email is unknown.
-const DUMMY_PASSWORD: &str = "dummy password for unknown accounts";
-/// The single answer to an unknown email or a wrong password.
-const BAD_CREDENTIALS_MSG: &str = "wrong email or password";
 const REVOKED_MSG: &str = "signed out: please log in again";
-const NOT_VERIFIED_MSG: &str = "confirm your email address first (see the mail we sent)";
-const BAD_LINK_MSG: &str = "this link is invalid, used or expired";
 const IDENTITY_REFUSED_MSG: &str = "the identity provider's token was refused: sign in again";
 const IDENTITY_CONFLICT_MSG: &str = "this email address belongs to another account";
 const WORLD_UNAVAILABLE_MSG: &str = "the world server is not reachable right now; try again shortly";
 /// The `Refused` text a kicked session gets after a logout everywhere.
 pub const KICK_LOGOUT_ALL: &str = "signed out everywhere";
-/// The `Refused` text a kicked session gets after a password reset.
-pub const KICK_PASSWORD_RESET: &str = "the account's password was reset; log in again";
-/// The `Refused` text a kicked session gets after an admin set the password (`login account`).
-pub const KICK_PASSWORD_SET: &str = "the account's password was changed; log in again";
+/// The `Refused` text a kicked session gets after an operator revoked the account (`login account revoke`).
+pub const KICK_ACCOUNT_REVOKED: &str = "the account was signed out by an operator; log in again";
 
 /// What every handler shares. Cheap to clone.
 #[derive(Clone)]
 pub struct AppState {
     pub store: LoginStore,
     pub signer: Arc<auth::Signer>,
-    pub hasher: Arc<Hasher>,
-    pub mailer: Arc<dyn Mailer>,
     pub config: Arc<LoginConfig>,
     /// Seconds since the Unix epoch.
     pub clock: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -83,22 +64,17 @@ pub struct AppState {
     pub host_links: Arc<HostLinks>,
     /// Verifies the identity provider's tokens; `None` = identity-provider login is off.
     pub oidc: Option<Arc<OidcVerifier>>,
-    /// A PHC string of [`DUMMY_PASSWORD`] under `hasher`, so an unknown email costs one verify.
-    dummy_phc: Arc<str>,
 }
 
 impl AppState {
     pub fn new(
         store: LoginStore,
         signer: Arc<auth::Signer>,
-        hasher: Hasher,
-        mailer: Arc<dyn Mailer>,
         config: Arc<LoginConfig>,
         clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> AppState {
-        let dummy_phc = hasher.hash(DUMMY_PASSWORD).into();
         let host_links = Arc::new(HostLinks::new(None, store.clone(), clock.clone()));
-        AppState { store, signer, hasher: Arc::new(hasher), mailer, config, clock, host_links, oidc: None, dummy_phc }
+        AppState { store, signer, config, clock, host_links, oidc: None }
     }
 
     /// Log players in with the identity provider's tokens, checked by `verifier` (the settings
@@ -132,17 +108,6 @@ impl AppState {
         i64::try_from(self.now()).unwrap_or(i64::MAX)
     }
 
-    /// Send on a spawned task; a failure is logged (recipient's absence of a token: the error
-    /// carries the transport message only).
-    fn send_mail(&self, mail: Mail) {
-        let subject = mail.subject.clone();
-        let fut = self.mailer.send(mail);
-        tokio::spawn(async move {
-            if let Err(e) = fut.await {
-                log::error!("[login] mail {subject:?} failed: {e}");
-            }
-        });
-    }
 }
 
 /// The real clock.
@@ -170,14 +135,8 @@ impl Fail {
     pub(crate) fn bad_request(message: impl Into<String>) -> Fail {
         Fail::new(StatusCode::BAD_REQUEST, ApiErrorCode::BadRequest, message)
     }
-    fn bad_credentials() -> Fail {
-        Fail::new(StatusCode::UNAUTHORIZED, ApiErrorCode::BadCredentials, BAD_CREDENTIALS_MSG)
-    }
     fn revoked() -> Fail {
         Fail::new(StatusCode::UNAUTHORIZED, ApiErrorCode::Revoked, REVOKED_MSG)
-    }
-    fn not_verified() -> Fail {
-        Fail::new(StatusCode::FORBIDDEN, ApiErrorCode::NotVerified, NOT_VERIFIED_MSG)
     }
     fn world_unavailable() -> Fail {
         Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable, WORLD_UNAVAILABLE_MSG)
@@ -211,7 +170,7 @@ impl IntoResponse for Fail {
 }
 
 /// `axum::Json` whose rejection is an [`ApiError`] 400 too. The message is generic: serde's
-/// would echo parts of the body (a password, a token).
+/// would echo parts of the body (a token).
 pub struct ApiJson<T>(pub T);
 
 impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
@@ -238,7 +197,7 @@ fn random<const N: usize>() -> [u8; N] {
     b
 }
 
-/// A new refresh or email token (base64url, no padding).
+/// A new refresh token (base64url, no padding).
 fn new_token() -> String {
     URL_SAFE_NO_PAD.encode(random::<TOKEN_BYTES>())
 }
@@ -251,22 +210,6 @@ pub fn token_hash(token: &str) -> [u8; 32] {
 /// A new player token: [`PLAYER_TOKEN_BYTES`] random bytes as lowercase hex.
 fn new_player_token() -> String {
     random::<PLAYER_TOKEN_BYTES>().iter().map(|b| format!("{b:02x}")).collect()
-}
-
-async fn hash_password(state: &AppState, password: String) -> Result<String, Fail> {
-    let hasher = state.hasher.clone();
-    tokio::task::spawn_blocking(move || hasher.hash(&password)).await.map_err(|e| {
-        log::error!("[login] hashing task: {e}");
-        Fail::internal()
-    })
-}
-
-async fn verify_password(state: &AppState, password: String, phc: String) -> Result<bool, Fail> {
-    let hasher = state.hasher.clone();
-    tokio::task::spawn_blocking(move || hasher.verify(&password, &phc)).await.map_err(|e| {
-        log::error!("[login] verify task: {e}");
-        Fail::internal()
-    })
 }
 
 /// A new refresh token of a new family for `account`, stored with the normal expiry
@@ -300,9 +243,8 @@ fn login_response(account: &AccountRow, refresh_token: String) -> LoginResponse 
 
 /// Rotate `presented`: spend it and store its successor in the same family, atomically
 /// ([`LoginStore::rotate_refresh`]); the live account and the successor token. A spent token
-/// revokes its family; an unknown / expired one, a deleted account or (with `require_verified`)
-/// an unverified one is refused (the successor is then never handed out; it dies with the family
-/// at the next reuse or expiry).
+/// revokes its family; an unknown / expired one or a deleted account is refused (the successor is
+/// then never handed out; it dies with the family at the next reuse or expiry).
 async fn rotate_refresh(state: &AppState, presented: &str) -> Result<(AccountRow, String), Fail> {
     let now = state.now_db();
     let successor = new_token();
@@ -312,9 +254,6 @@ async fn rotate_refresh(state: &AppState, presented: &str) -> Result<(AccountRow
             let Some(row) = state.store.account(account).await? else {
                 return Err(Fail::revoked());
             };
-            if state.config.require_verified && row.email_verified_at.is_none() {
-                return Err(Fail::not_verified());
-            }
             Ok((row, successor))
         }
         RefreshOutcome::Reused { account, family } => {
@@ -324,45 +263,6 @@ async fn rotate_refresh(state: &AppState, presented: &str) -> Result<(AccountRow
         }
         RefreshOutcome::Unknown => Err(Fail::revoked()),
     }
-}
-
-async fn register(State(s): State<AppState>, ApiJson(req): ApiJson<RegisterRequest>) -> Result<StatusCode, Fail> {
-    let email = normalize_email(&req.email).map_err(Fail::bad_request)?;
-    check_password(&req.password).map_err(Fail::bad_request)?;
-    // Hash before knowing whether the email exists: both answers cost the same.
-    let phc = hash_password(&s, req.password).await?;
-    let now = s.now_db();
-    match s.store.create_account(&email, &phc, now).await? {
-        Some(account) => {
-            let token = new_token();
-            s.store
-                .insert_email_token(token_hash(&token), account, EMAIL_TOKEN_VERIFY, now + VERIFY_TOKEN_TTL_SECS)
-                .await?;
-            log::info!("[login] account {account} registered");
-            s.send_mail(verify_mail(&email, &s.config.public_url, &token));
-        }
-        None => s.send_mail(already_registered_mail(&email, &s.config.public_url)),
-    }
-    Ok(StatusCode::ACCEPTED)
-}
-
-async fn login(State(s): State<AppState>, ApiJson(req): ApiJson<LoginRequest>) -> Result<Json<LoginResponse>, Fail> {
-    let email = normalize_email(&req.email).map_err(Fail::bad_request)?;
-    // An over-long password can never match (the policy refuses it at register / reset).
-    let password = if req.password.chars().count() > PASSWORD_MAX_CHARS { String::new() } else { req.password };
-    let account = s.store.account_by_email(&email).await?;
-    let phc = account.as_ref().map_or_else(|| s.dummy_phc.to_string(), |a| a.password_hash.clone());
-    let matches = verify_password(&s, password.clone(), phc).await?;
-    let account = match account {
-        Some(a) if matches && !password.is_empty() => a,
-        _ => return Err(Fail::bad_credentials()),
-    };
-    if s.config.require_verified && account.email_verified_at.is_none() {
-        return Err(Fail::not_verified());
-    }
-    let token = mint_refresh(&s.store, account.account_id, s.now_db()).await?;
-    log::info!("[login] account {} logged in", account.account_id);
-    Ok(Json(login_response(&account, token)))
 }
 
 /// The verifier and settings, or 404 when identity-provider login is off (both routes alike).
@@ -452,9 +352,6 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     let Some(account) = s.store.account(account_id).await? else {
         return Err(Fail::revoked());
     };
-    if s.config.require_verified && account.email_verified_at.is_none() {
-        return Err(Fail::not_verified());
-    }
     let now = s.now();
     let player_token =
         s.store.player_token_for(account.account_id, &world.world_id, s.now_db(), new_player_token).await?;
@@ -516,65 +413,6 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     }))
 }
 
-/// Confirm an email address with a mailed token (API and page).
-pub(crate) async fn confirm_email(s: &AppState, token: &str) -> Result<(), Fail> {
-    let now = s.now_db();
-    let Some(account) = s.store.use_email_token(token_hash(token), EMAIL_TOKEN_VERIFY, now).await? else {
-        return Err(Fail::bad_request(BAD_LINK_MSG));
-    };
-    s.store.mark_verified(account, now).await?;
-    log::info!("[login] account {account} verified its email");
-    Ok(())
-}
-
-/// Mail a reset link if `email` has an account; the same outcome either way (API and page).
-pub(crate) async fn request_reset(s: &AppState, email: &str) -> Result<(), Fail> {
-    let Ok(email) = normalize_email(email) else { return Ok(()) };
-    if let Some(account) = s.store.account_by_email(&email).await? {
-        let token = new_token();
-        let expires = s.now_db() + RESET_TOKEN_TTL_SECS;
-        s.store.insert_email_token(token_hash(&token), account.account_id, EMAIL_TOKEN_RESET, expires).await?;
-        s.send_mail(reset_mail(&email, &s.config.public_url, &token));
-    }
-    Ok(())
-}
-
-/// Set a new password with a mailed reset token and sign every session out (API and page). The
-/// policy is checked first, so a refused password does not spend the token. Following the link
-/// also proves the address, so the account counts as verified.
-pub(crate) async fn confirm_reset(s: &AppState, token: &str, password: String) -> Result<(), Fail> {
-    check_password(&password).map_err(Fail::bad_request)?;
-    let now = s.now_db();
-    // The link is checked before the slow hash, and spent only with the reset itself: one
-    // transaction sets the password, revokes every session and queues their kicks.
-    if s.store.peek_email_token(token_hash(token), EMAIL_TOKEN_RESET, now).await?.is_none() {
-        return Err(Fail::bad_request(BAD_LINK_MSG));
-    }
-    let phc = hash_password(s, password).await?;
-    let reset = s.store.reset_password(token_hash(token), EMAIL_TOKEN_RESET, &phc, now, KICK_PASSWORD_RESET).await?;
-    let Some((account, kicks)) = reset else {
-        return Err(Fail::bad_request(BAD_LINK_MSG)); // spent meanwhile (a second click)
-    };
-    log::info!("[login] account {account} reset its password ({kicks} kick(s) queued)");
-    s.host_links.wake_kicks();
-    Ok(())
-}
-
-async fn verify(State(s): State<AppState>, ApiJson(req): ApiJson<VerifyRequest>) -> Result<StatusCode, Fail> {
-    confirm_email(&s, &req.token).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn reset_request(State(s): State<AppState>, ApiJson(req): ApiJson<ResetRequest>) -> Result<StatusCode, Fail> {
-    request_reset(&s, &req.email).await?;
-    Ok(StatusCode::ACCEPTED)
-}
-
-async fn reset_confirm(State(s): State<AppState>, ApiJson(req): ApiJson<ResetConfirm>) -> Result<StatusCode, Fail> {
-    confirm_reset(&s, &req.token, req.password).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 async fn jwks(State(s): State<AppState>) -> Json<auth::Jwks> {
     Json(s.signer.jwks())
 }
@@ -606,20 +444,14 @@ fn cors(config: &LoginConfig) -> CorsLayer {
 pub fn router(state: AppState) -> Router {
     let cors = cors(&state.config);
     Router::new()
-        .route(PATH_REGISTER, post(register))
-        .route(PATH_LOGIN, post(login))
         .route(PATH_LOGIN_OIDC, post(login_oidc))
         .route(PATH_CONFIG, get(config))
         .route(PATH_REFRESH, post(refresh))
         .route(PATH_LOGOUT, post(logout))
         .route(PATH_WORLDS, get(worlds))
         .route(PATH_JOIN, post(join))
-        .route(PATH_VERIFY, post(verify))
-        .route(PATH_RESET_REQUEST, post(reset_request))
-        .route(PATH_RESET_CONFIRM, post(reset_confirm))
         .route(PATH_JWKS, get(jwks))
         .route("/healthz", get(healthz))
-        .merge(crate::pages::routes())
         .layer(cors)
         .with_state(state)
 }

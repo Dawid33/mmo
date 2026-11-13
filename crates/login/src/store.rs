@@ -112,7 +112,6 @@ enum Pool {
 }
 
 /// Run the same expression against whichever pool is open.
-const SET_PASSWORD: &str = "UPDATE accounts SET password_hash = $1 WHERE account_id = $2";
 const REVOKE_ACCOUNT: &str = "UPDATE refresh_tokens SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL";
 const QUEUE_KICKS: &str = "INSERT INTO pending_kicks (world_id, player_token, session_epoch, reason, created_at) \
      SELECT s.world_id, p.player_token, s.session_epoch, CAST($2 AS TEXT), CAST($3 AS BIGINT) \
@@ -358,88 +357,25 @@ impl LoginStore {
         Ok(on!(self, p => sqlx::query(&sql).bind(id).fetch_optional(p).await?.map(|r| account_row!(r))))
     }
 
-    /// The account a live email token of `kind` belongs to, WITHOUT spending it (a reset
-    /// checks the link before the slow password hash; [`Self::reset_password`] spends it).
-    pub async fn peek_email_token(&self, hash: [u8; 32], kind: i64, now: i64) -> Result<Option<AccountId>, LoginError> {
-        const SQL: &str =
-            "SELECT account_id FROM email_tokens WHERE token_hash = $1 AND kind = $2 AND used_at IS NULL AND expires_at > $3";
-        Ok(on!(self, p => sqlx::query(SQL).bind(&hash[..]).bind(kind).bind(now).fetch_optional(p).await?
-            .map(|r| r.get::<i64, _>(0))))
-    }
-
-    /// A mailed password reset, all in ONE transaction: the email token of `kind` is spent,
-    /// the password set, the account marked verified (the link proved the address), every
-    /// refresh token revoked and a kick (with `reason`) queued for each open session — so a
-    /// password is never changed with the old sessions surviving, nor a token spent for a
-    /// reset that did not happen. `None`: the token is not live (nothing changed). Else the
-    /// account and how many kicks were queued.
-    pub async fn reset_password(
-        &self,
-        token: [u8; 32],
-        kind: i64,
-        password_hash: &str,
-        now: i64,
-        reason: &str,
-    ) -> Result<Option<(AccountId, u64)>, LoginError> {
-        const USE: &str = "UPDATE email_tokens SET used_at = $1 \
-             WHERE token_hash = $2 AND kind = $3 AND used_at IS NULL AND expires_at > $1 RETURNING account_id";
-        const VERIFIED: &str =
+    /// The account of `email`, made (no password, verified) when there is none: what an operator
+    /// needs to hand out a refresh token (`login account issue-refresh`).
+    pub async fn ensure_verified_account(&self, email: &str, now: i64) -> Result<AccountId, LoginError> {
+        const VERIFY: &str =
             "UPDATE accounts SET email_verified_at = $1 WHERE account_id = $2 AND email_verified_at IS NULL";
-        macro_rules! tx {
-            ($p:expr) => {{
-                let mut tx = $p.begin().await?;
-                let used = sqlx::query(USE).bind(now).bind(&token[..]).bind(kind).fetch_optional(&mut *tx).await?;
-                match used.map(|r| r.get::<i64, _>(0)) {
-                    None => None,
-                    Some(account) => {
-                        sqlx::query(SET_PASSWORD).bind(password_hash).bind(account).execute(&mut *tx).await?;
-                        sqlx::query(VERIFIED).bind(now).bind(account).execute(&mut *tx).await?;
-                        let kicks = revoke_with_kicks!(tx, account, now, reason);
-                        tx.commit().await?;
-                        Some((account, kicks))
-                    }
-                }
-            }};
-        }
-        Ok(match &self.pool {
-            Pool::Sqlite(p) => tx!(p),
-            Pool::Pg(p) => tx!(p),
-        })
-    }
-
-    /// Set `id`'s password and, in the SAME transaction, revoke its refresh tokens and queue a
-    /// kick (with `reason`) for each open session (an admin reset): how many kicks were queued.
-    pub async fn set_password_with_kicks(
-        &self,
-        id: AccountId,
-        hash: &str,
-        now: i64,
-        reason: &str,
-    ) -> Result<u64, LoginError> {
-        macro_rules! tx {
-            ($p:expr) => {{
-                let mut tx = $p.begin().await?;
-                sqlx::query(SET_PASSWORD).bind(hash).bind(id).execute(&mut *tx).await?;
-                let kicks = revoke_with_kicks!(tx, id, now, reason);
-                tx.commit().await?;
-                kicks
-            }};
-        }
-        Ok(match &self.pool {
-            Pool::Sqlite(p) => tx!(p),
-            Pool::Pg(p) => tx!(p),
-        })
-    }
-
-    pub async fn set_password(&self, id: AccountId, hash: &str) -> Result<(), LoginError> {
-        exec!(self, p => sqlx::query(SET_PASSWORD).bind(hash).bind(id).execute(p).await?);
-        Ok(())
-    }
-
-    pub async fn mark_verified(&self, id: AccountId, now: i64) -> Result<(), LoginError> {
-        const SQL: &str = "UPDATE accounts SET email_verified_at = $1 WHERE account_id = $2 AND email_verified_at IS NULL";
-        exec!(self, p => sqlx::query(SQL).bind(now).bind(id).execute(p).await?);
-        Ok(())
+        let id = match self.account_by_email(email).await? {
+            Some(account) => account.account_id,
+            // Lost a race with another creator: the account is there now.
+            None => match self.create_account(email, "", now).await? {
+                Some(id) => id,
+                None => self
+                    .account_by_email(email)
+                    .await?
+                    .map(|a| a.account_id)
+                    .ok_or_else(|| LoginError::Backend(format!("account {email:?} vanished while being made")))?,
+            },
+        };
+        exec!(self, p => sqlx::query(VERIFY).bind(now).bind(id).execute(p).await?);
+        Ok(id)
     }
 
     pub async fn insert_refresh(
@@ -545,28 +481,6 @@ impl LoginStore {
         const SQL: &str = "UPDATE refresh_tokens SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL";
         exec!(self, p => sqlx::query(SQL).bind(now).bind(account).execute(p).await?);
         Ok(())
-    }
-
-    pub async fn insert_email_token(
-        &self,
-        hash: [u8; 32],
-        account: AccountId,
-        kind: i64,
-        expires_at: i64,
-    ) -> Result<(), LoginError> {
-        const SQL: &str = "INSERT INTO email_tokens (token_hash, account_id, kind, expires_at) VALUES ($1, $2, $3, $4)";
-        exec!(self, p => sqlx::query(SQL)
-            .bind(&hash[..]).bind(account).bind(kind).bind(expires_at)
-            .execute(p).await?);
-        Ok(())
-    }
-
-    /// Single use, atomic: the account the token belongs to, once, if unexpired and of `kind`.
-    pub async fn use_email_token(&self, hash: [u8; 32], kind: i64, now: i64) -> Result<Option<AccountId>, LoginError> {
-        const SQL: &str = "UPDATE email_tokens SET used_at = $1 \
-             WHERE token_hash = $2 AND kind = $3 AND used_at IS NULL AND expires_at > $1 RETURNING account_id";
-        Ok(on!(self, p => sqlx::query(SQL).bind(now).bind(&hash[..]).bind(kind).fetch_optional(p).await?
-            .map(|r| r.get::<i64, _>(0))))
     }
 
     /// Insert or replace a world of the registry (`created_at` of an existing one is kept).

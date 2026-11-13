@@ -10,12 +10,35 @@
 use std::fmt;
 
 use login_api::{
-    ApiError, ApiErrorCode, JoinRequest, JoinResponse, LoginRequest, LoginResponse, RefreshRequest, RegisterRequest,
-    ResetRequest, WorldEntry, PATH_JOIN, PATH_LOGIN, PATH_LOGOUT, PATH_REFRESH, PATH_REGISTER, PATH_RESET_REQUEST,
-    PATH_WORLDS,
+    ApiError, ApiErrorCode, JoinRequest, JoinResponse, LoginResponse, RefreshRequest, WorldEntry, PATH_JOIN,
+    PATH_LOGOUT, PATH_REFRESH, PATH_WORLDS,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
+
+// The password routes the login service no longer has (Keycloak owns passwords). The screens that
+// call them go with the Keycloak login screen; until then these keep them building.
+const PATH_REGISTER: &str = "/v1/register";
+const PATH_LOGIN: &str = "/v1/login";
+const PATH_RESET_REQUEST: &str = "/v1/reset/request";
+
+#[derive(Serialize)]
+struct RegisterRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct ResetRequest {
+    email: String,
+}
 
 /// Overrides the login service's address on native (empty = unset); the
 /// build-time `VOXEL_LOGIN_URL` is the fallback.

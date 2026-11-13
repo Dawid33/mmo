@@ -2357,8 +2357,7 @@ fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode)
             })
             .await
             .unwrap();
-        let account = store.create_account("dwarf@example.org", "x", 1).await.unwrap().unwrap();
-        store.mark_verified(account, 1).await.unwrap();
+        let account = store.ensure_verified_account("dwarf@example.org", 1).await.unwrap();
         assert_eq!(store.player_token_for(account, WORLD, 1, move || token.clone()).await.unwrap().len(), 32);
         let refresh = "hosts-test-refresh-token";
         let expires = (NOW + 3600) as i64;
@@ -2368,8 +2367,6 @@ fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode)
         let state = login::AppState::new(
             store.clone(),
             Arc::new(auth::Signer::new(vec![key]).ok().unwrap()),
-            login::Hasher::for_tests(),
-            Arc::new(login::mail::LogMailer::default()),
             Arc::new(login::LoginConfig::from_lookup(|_| None).unwrap()),
             clock.clone(),
         )

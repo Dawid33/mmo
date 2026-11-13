@@ -36,6 +36,14 @@ registration on (username, email and password only), email verification required
 with PKCE S256, redirect `http://127.0.0.1:8182/callback.html`, post-logout redirect
 `http://127.0.0.1:8182/`.
 
+Client `game`, the game: public, signs in by the device flow (the game shows a code, the player
+enters it on Keycloak's page), PKCE S256 required (the device request carries a `code_challenge`,
+the token request its `code_verifier`), redirects only to the browser build on
+`http://127.0.0.1:1334` / `http://localhost:1334`; its access tokens carry the audience
+`mmo-login` (mapper `login-service-audience`). It mirrors `deploy/modules/keycloak-realm/clients.tf`.
+`just dev-login`, `dev-r2` and `dev-r3` start Keycloak and run the login service with
+`VOXEL_OIDC_ISSUER=http://127.0.0.1:8180/realms/players`, so a player signs in as `dev` / `dev-password`.
+
 The theme is mounted read-only from `website/theme/orion`. `start-dev` caches no themes,
 so template, message and stylesheet edits show on reload; a `theme.properties` change
 needs `just kc-down && just kc-up`. `ORION_SITE_URL` (`http://127.0.0.1:8182`) is the

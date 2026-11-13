@@ -196,15 +196,6 @@ dashmap = { version = "6.1.0", default-features = false }
 serde_json = "1.0.93"
 login-api = { path = "crates/login-api" }
 login = { path = "crates/login" }
-# Password hashing — crates/login.
-argon2 = "0.5"
-# Amazon SES v2 mail — crates/login only. `default-https-client` is OFF on purpose: it enables
-# rustls' `aws-lc-rs`, and with workspace feature unification every rustls user (quinn, reqwest)
-# then has two crypto providers and `ClientConfig::builder()` panics. SesMailer passes its own
-# rustls+ring HTTP client (aws-smithy-http-client `rustls-ring`).
-aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
-aws-sdk-sesv2 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
-aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 auth = { path = "crates/auth" }
 # The game server's JWKS fetch (crates/server, VOXEL_AUTH=jwt).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

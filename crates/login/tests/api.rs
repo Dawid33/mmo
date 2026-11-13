@@ -7,34 +7,27 @@ use auth::{Jwks, Signer, SigningKey, Verifier};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
-use login::mail::LogMailer;
 use login::config::OidcConfig;
 use login::oidc::OidcVerifier;
-use login::{AppState, Hasher, LoginConfig, LoginStore, WorldRow, router};
+use login::{AppState, LoginConfig, LoginStore, WorldRow, router};
 use login_api::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tower::ServiceExt;
 
 const T0: u64 = 1_800_000_000;
-const PASSWORD: &str = "correct horse battery";
 const EMAIL: &str = "Dwarf@Example.org";
 const ORIGIN_OK: &str = "http://127.0.0.1:1334";
 const BODY_LIMIT: usize = 1 << 20;
 
 struct App {
     router: Router,
-    mailer: LogMailer,
     clock: Arc<AtomicU64>,
     store: LoginStore,
 }
 
-async fn app_with(require_verified: bool) -> App {
-    app_from(require_verified, |state| state).await
-}
-
-/// [`app_with`] whose state `adjust` changes (host links).
-async fn app_from(require_verified: bool, adjust: impl FnOnce(AppState) -> AppState) -> App {
+/// An app whose state `adjust` changes (host links, identity provider).
+async fn app_from(adjust: impl FnOnce(AppState) -> AppState) -> App {
     let store = LoginStore::open("sqlite::memory:").await.unwrap();
     for (id, status) in [("w1", WorldStatus::Open), ("w2", WorldStatus::Open), ("shut", WorldStatus::Closed)] {
         store
@@ -52,25 +45,21 @@ async fn app_from(require_verified: bool, adjust: impl FnOnce(AppState) -> AppSt
             .await
             .unwrap();
     }
-    let mut config = LoginConfig::from_lookup(|_| None).unwrap();
-    config.require_verified = require_verified;
-    let mailer = LogMailer::default();
+    let config = LoginConfig::from_lookup(|_| None).unwrap();
     let clock = Arc::new(AtomicU64::new(T0));
     let c = clock.clone();
     let (key, _pem) = SigningKey::generate();
     let state = AppState::new(
         store.clone(),
         Arc::new(Signer::new(vec![key]).ok().unwrap()),
-        Hasher::for_tests(),
-        Arc::new(mailer.clone()),
         Arc::new(config),
         Arc::new(move || c.load(Ordering::SeqCst)),
     );
-    App { router: router(adjust(state)), mailer, clock, store }
+    App { router: router(adjust(state)), clock, store }
 }
 
 async fn app() -> App {
-    app_with(false).await
+    app_from(|state| state).await
 }
 
 struct Resp {
@@ -113,31 +102,12 @@ impl App {
         self.send(Request::get(path).body(Body::empty()).unwrap()).await
     }
 
-    /// The token of the last mail's link with `path` (`/verify` or `/reset`).
-    fn mailed_token(&self, path: &str) -> String {
-        let needle = format!("{path}?token=");
-        let mails = self.mailer.sent();
-        let text = &mails.last().expect("a mail was sent").text;
-        let at = text.find(&needle).unwrap_or_else(|| panic!("no {needle} link in {text}"));
-        text[at + needle.len()..].split_whitespace().next().unwrap().to_string()
-    }
-
-    async fn register(&self, email: &str, password: &str) -> Resp {
-        self.post(PATH_REGISTER, &RegisterRequest { email: email.into(), password: password.into() }).await
-    }
-
-    async fn login(&self, email: &str, password: &str) -> Resp {
-        self.post(PATH_LOGIN, &LoginRequest { email: email.into(), password: password.into() }).await
-    }
-
-    /// Register + verify + login; the refresh token.
+    /// A new refresh token (a new family) of the account `EMAIL`, made verified when missing:
+    /// what a login with the identity provider hands out.
     async fn account(&self) -> String {
-        assert_eq!(self.register(EMAIL, PASSWORD).await.status, StatusCode::ACCEPTED);
-        let token = self.mailed_token("/verify");
-        assert_eq!(self.post(PATH_VERIFY, &VerifyRequest { token }).await.status, StatusCode::NO_CONTENT);
-        let r = self.login(EMAIL, PASSWORD).await;
-        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
-        r.json::<LoginResponse>().refresh_token
+        let email = login::normalize_email(EMAIL).unwrap();
+        let id = self.store.ensure_verified_account(&email, self.now() as i64).await.unwrap();
+        login::api::mint_refresh(&self.store, id, self.now() as i64).await.unwrap()
     }
 
     async fn join(&self, refresh: &str, world: &str) -> Resp {
@@ -156,7 +126,7 @@ impl App {
 }
 
 #[tokio::test]
-async fn register_login_join_happy_path() {
+async fn join_happy_path() {
     let a = app().await;
     let refresh = a.account().await;
     let me = a.store.account_by_email("dwarf@example.org").await.unwrap().unwrap();
@@ -221,39 +191,6 @@ async fn two_worlds_independent() {
 }
 
 #[tokio::test]
-async fn login_unknown_email_and_bad_password_look_the_same() {
-    let a = app().await;
-    a.account().await;
-    let unknown = a.login("nobody@example.org", PASSWORD).await;
-    let wrong = a.login(EMAIL, "wrong password!!").await;
-    assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(unknown.status, wrong.status);
-    assert_eq!(unknown.body, wrong.body);
-    assert_eq!(unknown.error(), ApiErrorCode::BadCredentials);
-}
-
-#[tokio::test]
-async fn register_existing_email_sends_already_registered_and_202() {
-    let a = app().await;
-    a.account().await;
-    let before = a.mailer.sent().len();
-    let r = a.register(" DWARF@example.org ", "another password").await;
-    assert_eq!(r.status, StatusCode::ACCEPTED);
-    let mails = a.mailer.sent();
-    assert_eq!(mails.len(), before + 1);
-    let m = mails.last().unwrap();
-    assert_eq!(m.to, "dwarf@example.org");
-    assert_eq!(m.subject, "You already have an account");
-    assert!(!m.text.contains("token="));
-    // The password did not change.
-    assert_eq!(a.login(EMAIL, PASSWORD).await.status, StatusCode::OK);
-    assert_eq!(a.login(EMAIL, "another password").await.status, StatusCode::UNAUTHORIZED);
-    // A bad password is refused before anything else.
-    let short = a.register("new@example.org", "short").await;
-    assert_eq!((short.status, short.error()), (StatusCode::BAD_REQUEST, ApiErrorCode::BadRequest));
-}
-
-#[tokio::test]
 async fn refresh_reuse_revokes_family() {
     let a = app().await;
     let t0 = a.account().await;
@@ -277,70 +214,27 @@ async fn refresh_reuse_revokes_family() {
         .await;
     assert_eq!((bad.status, bad.error()), (StatusCode::BAD_REQUEST, ApiErrorCode::BadRequest));
     // Logout of a fresh family: its token stops working.
-    let t = a.login(EMAIL, PASSWORD).await.json::<LoginResponse>().refresh_token;
+    let t = a.account().await;
     let out = a.post(PATH_LOGOUT, &RefreshRequest { refresh_token: t.clone() }).await;
     assert_eq!(out.status, StatusCode::NO_CONTENT);
     assert_eq!(a.post(PATH_REFRESH, &RefreshRequest { refresh_token: t }).await.status, StatusCode::UNAUTHORIZED);
     // Refresh tokens expire.
-    let t = a.login(EMAIL, PASSWORD).await.json::<LoginResponse>().refresh_token;
+    let t = a.account().await;
     a.clock.fetch_add(REFRESH_TTL_DAYS * 86_400 + 1, Ordering::SeqCst);
     assert_eq!(a.post(PATH_REFRESH, &RefreshRequest { refresh_token: t }).await.status, StatusCode::UNAUTHORIZED);
 }
 
+/// Keycloak owns passwords: the service has no register / password-login / verify / reset route.
 #[tokio::test]
-async fn require_verified_refuses_unverified() {
-    let a = app_with(true).await;
-    assert_eq!(a.register(EMAIL, PASSWORD).await.status, StatusCode::ACCEPTED);
-    let r = a.login(EMAIL, PASSWORD).await;
-    assert_eq!((r.status, r.error()), (StatusCode::FORBIDDEN, ApiErrorCode::NotVerified));
-    // A wrong password still answers bad credentials (no hint that the account exists).
-    assert_eq!(a.login(EMAIL, "wrong password!!").await.error(), ApiErrorCode::BadCredentials);
-    let token = a.mailed_token("/verify");
-    assert_eq!(a.post(PATH_VERIFY, &VerifyRequest { token: token.clone() }).await.status, StatusCode::NO_CONTENT);
-    // Single use.
-    assert_eq!(a.post(PATH_VERIFY, &VerifyRequest { token }).await.status, StatusCode::BAD_REQUEST);
-    let r = a.login(EMAIL, PASSWORD).await;
-    assert_eq!(r.status, StatusCode::OK);
-    assert!(r.json::<LoginResponse>().email_verified);
-
-    // Without require_verified an unverified account may log in.
-    let b = app().await;
-    b.register(EMAIL, PASSWORD).await;
-    let r = b.login(EMAIL, PASSWORD).await;
-    assert_eq!(r.status, StatusCode::OK);
-    let r: LoginResponse = r.json();
-    assert!(!r.email_verified);
-    assert_eq!(r.account_email, "dwarf@example.org");
-}
-
-#[tokio::test]
-async fn reset_sets_password_and_revokes_refresh() {
+async fn password_routes_are_gone() {
     let a = app().await;
-    let refresh = a.account().await;
-    let mails = a.mailer.sent().len();
-    // Unknown address: 202 and no mail.
-    let r = a.post(PATH_RESET_REQUEST, &ResetRequest { email: "nobody@example.org".into() }).await;
-    assert_eq!(r.status, StatusCode::ACCEPTED);
-    assert_eq!(a.mailer.sent().len(), mails);
-    let r = a.post(PATH_RESET_REQUEST, &ResetRequest { email: EMAIL.into() }).await;
-    assert_eq!(r.status, StatusCode::ACCEPTED);
-    let token = a.mailed_token("/reset");
-    // Policy first: the token is not spent by a too-short password.
-    let short = a.post(PATH_RESET_CONFIRM, &ResetConfirm { token: token.clone(), password: "short".into() }).await;
-    assert_eq!(short.status, StatusCode::BAD_REQUEST);
-    let ok = a.post(PATH_RESET_CONFIRM, &ResetConfirm { token: token.clone(), password: "a brand new password".into() }).await;
-    assert_eq!(ok.status, StatusCode::NO_CONTENT, "{}", ok.text());
-    let again = a.post(PATH_RESET_CONFIRM, &ResetConfirm { token, password: "yet another password".into() }).await;
-    assert_eq!((again.status, again.error()), (StatusCode::BAD_REQUEST, ApiErrorCode::BadRequest));
-    assert_eq!(a.login(EMAIL, PASSWORD).await.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(a.login(EMAIL, "a brand new password").await.status, StatusCode::OK);
-    assert_eq!(a.post(PATH_REFRESH, &RefreshRequest { refresh_token: refresh }).await.status, StatusCode::UNAUTHORIZED);
-    // Reset tokens expire.
-    a.post(PATH_RESET_REQUEST, &ResetRequest { email: EMAIL.into() }).await;
-    let token = a.mailed_token("/reset");
-    a.clock.fetch_add(login::mail::RESET_TOKEN_TTL_SECS as u64 + 1, Ordering::SeqCst);
-    let late = a.post(PATH_RESET_CONFIRM, &ResetConfirm { token, password: "too late password".into() }).await;
-    assert_eq!(late.status, StatusCode::BAD_REQUEST);
+    for path in ["/v1/login", "/v1/register", "/v1/reset/request", "/v1/reset/confirm", "/v1/verify"] {
+        let r = a.post(path, &serde_json::json!({ "email": EMAIL, "password": "correct horse battery" })).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "POST {path}");
+    }
+    for path in ["/verify?token=x", "/reset?token=x"] {
+        assert_eq!(a.get(path).await.status, StatusCode::NOT_FOUND, "GET {path}");
+    }
 }
 
 #[tokio::test]
@@ -369,7 +263,7 @@ async fn preflight(a: &App, origin: &str) -> Resp {
     a.send(
         Request::builder()
             .method(Method::OPTIONS)
-            .uri(PATH_LOGIN)
+            .uri(PATH_REFRESH)
             .header(header::ORIGIN, origin)
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
             .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
@@ -393,69 +287,13 @@ async fn cors_allows_configured_origin_only() {
     assert!(evil.headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
 }
 
-fn form_post(path: &str, body: String) -> Request<Body> {
-    Request::post(path)
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(Body::from(body))
-        .unwrap()
-}
-
-#[tokio::test]
-async fn reset_page_form_round_trip() {
-    let a = app().await;
-    a.account().await;
-    a.post(PATH_RESET_REQUEST, &ResetRequest { email: EMAIL.into() }).await;
-    let token = a.mailed_token("/reset");
-    let page = a.get(&format!("/reset?token={token}")).await;
-    assert_eq!(page.status, StatusCode::OK);
-    let html = page.text();
-    assert!(page.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
-    // Relative, so it works behind a path prefix (`/login/reset` posts to `/login/reset`).
-    assert!(html.contains("<form") && html.contains("method=\"post\"") && html.contains("action=\"reset\""), "{html}");
-    // The URL carries the token: never cached, never sent on as a Referer.
-    assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
-    assert_eq!(page.headers[header::REFERRER_POLICY], "no-referrer");
-    assert!(html.contains(&format!("value=\"{token}\"")));
-    assert!(!html.contains("<script"));
-    let done = a.send(form_post("/reset", format!("token={token}&password=a+brand+new+password"))).await;
-    assert_eq!(done.status, StatusCode::OK);
-    assert!(done.text().to_lowercase().contains("password changed"), "{}", done.text());
-    assert_eq!(a.login(EMAIL, "a brand new password").await.status, StatusCode::OK);
-    // Used twice: an error page, not a success.
-    let again = a.send(form_post("/reset", format!("token={token}&password=a+brand+new+password"))).await;
-    assert_eq!(again.status, StatusCode::BAD_REQUEST);
-    assert!(!again.text().to_lowercase().contains("password changed"));
-    // Echoed values are escaped.
-    let page = a.get("/reset?token=%3Cscript%3E").await;
-    assert!(!page.text().contains("<script>") && page.text().contains("&lt;script&gt;"));
-}
-
-#[tokio::test]
-async fn verify_page_confirms() {
-    let a = app_with(true).await;
-    a.register(EMAIL, PASSWORD).await;
-    let token = a.mailed_token("/verify");
-    let page = a.get(&format!("/verify?token={token}")).await;
-    assert_eq!(page.status, StatusCode::OK);
-    assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
-    assert_eq!(page.headers[header::REFERRER_POLICY], "no-referrer");
-    assert!(page.text().to_lowercase().contains("verified"), "{}", page.text());
-    assert_eq!(a.login(EMAIL, PASSWORD).await.status, StatusCode::OK);
-    let again = a.get(&format!("/verify?token={token}")).await;
-    assert_eq!(again.status, StatusCode::BAD_REQUEST);
-}
-
 #[test]
 fn config_defaults_and_overrides() {
-    use login::MailerKind;
     let d = LoginConfig::from_lookup(|_| None).unwrap();
     assert_eq!(d.bind.to_string(), "127.0.0.1:8790");
     assert_eq!(d.db_url, "target/dev-login/login.sqlite");
     assert_eq!(d.keys_dir, std::path::PathBuf::from("target/dev-login/keys"));
-    assert_eq!(d.public_url, "http://127.0.0.1:8790");
     assert_eq!(d.cors_origins, vec![ORIGIN_OK.to_string(), "http://localhost:1334".to_string()]);
-    assert!(!d.require_verified);
-    assert_eq!(d.mailer, MailerKind::Log);
     assert_eq!(d.oidc, None);
     let oidc = LoginConfig::from_lookup(|k| (k == "VOXEL_OIDC_ISSUER").then(|| "https://auth.example/realms/mmo".into())).unwrap();
     assert_eq!(oidc.oidc, Some(oidc_config("https://auth.example/realms/mmo")));
@@ -463,9 +301,6 @@ fn config_defaults_and_overrides() {
         match k {
             "VOXEL_LOGIN_BIND" => Some("0.0.0.0:9000"),
             "VOXEL_LOGIN_CORS_ORIGINS" => Some("https://a.example, https://b.example"),
-            "VOXEL_LOGIN_REQUIRE_VERIFIED" => Some("1"),
-            "VOXEL_MAILER" => Some("ses"),
-            "VOXEL_MAIL_FROM" => Some("noreply@example.org"),
             _ => None,
         }
         .map(String::from)
@@ -473,11 +308,7 @@ fn config_defaults_and_overrides() {
     let c = LoginConfig::from_lookup(env).unwrap();
     assert_eq!(c.bind.to_string(), "0.0.0.0:9000");
     assert_eq!(c.cors_origins, vec!["https://a.example".to_string(), "https://b.example".to_string()]);
-    assert!(c.require_verified);
-    assert_eq!(c.mailer, MailerKind::Ses { from: "noreply@example.org".into() });
-    // SES needs a sender; a bad bind address or mailer is refused.
-    assert!(LoginConfig::from_lookup(|k| (k == "VOXEL_MAILER").then(|| "ses".to_string())).is_err());
-    assert!(LoginConfig::from_lookup(|k| (k == "VOXEL_MAILER").then(|| "smtp".to_string())).is_err());
+    // A bad bind address is refused.
     assert!(LoginConfig::from_lookup(|k| (k == "VOXEL_LOGIN_BIND").then(|| "nope".to_string())).is_err());
 }
 
@@ -613,7 +444,7 @@ mod host_link {
 
     /// An app whose host links dial with the service token; `ack_timeout` bounds each join.
     async fn linked_app(worlds: &[WorldRow], ack_timeout: Duration) -> App {
-        let a = app_from(false, |state| {
+        let a = app_from(|state| {
             let links = HostLinks::new(Some(SERVICE_TOKEN.into()), state.store.clone(), state.clock.clone())
                 .with_ack_timeout(ack_timeout);
             state.with_host_links(links)
@@ -765,7 +596,7 @@ mod host_link {
         let jw: JoinResponse = a.join(&jb.refresh_token, "w1").await.json();
         let (ta, tb) = (epoch_of(&a, &v, &ja).0, epoch_of(&a, &v, &jb).0);
         // A plain logout kicks nobody.
-        let other = a.login(EMAIL, PASSWORD).await.json::<LoginResponse>().refresh_token;
+        let other = a.account().await;
         let out = a.post(PATH_LOGOUT, &LogoutRequest { refresh_token: other, all: false }).await;
         assert_eq!(out.status, StatusCode::NO_CONTENT);
         let out = a.post(PATH_LOGOUT, &LogoutRequest { refresh_token: jw.refresh_token.clone(), all: true }).await;
@@ -847,22 +678,6 @@ mod host_link {
         drop(host);
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    #[tokio::test]
-    async fn password_reset_kicks_the_accounts_sessions() {
-        let host = FakeHost::acking();
-        let a = linked_app(&[host.world("a")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
-        let refresh = a.account().await;
-        let j: JoinResponse = a.join(&refresh, "a").await.json();
-        let token = epoch_of(&a, &a.verifier().await, &j).0;
-        a.post(PATH_RESET_REQUEST, &ResetRequest { email: EMAIL.into() }).await;
-        let reset = a.mailed_token("/reset");
-        let ok = a.post(PATH_RESET_CONFIRM, &ResetConfirm { token: reset, password: "a brand new password".into() }).await;
-        assert_eq!(ok.status, StatusCode::NO_CONTENT, "{}", ok.text());
-        let kick = LoginToHost::Kick { player_token: token, session_epoch: 1, reason: login::api::KICK_PASSWORD_RESET.into() };
-        assert!(host.wait_seen(|s| s.contains(&kick)).await.contains(&kick));
-        assert!(wait_no_pending_kicks(&a).await);
-    }
 }
 
 // ---- OIDC login ----
@@ -882,7 +697,7 @@ fn with_oidc(mut state: AppState, issuer: &str, verifier: OidcVerifier) -> AppSt
 }
 
 async fn oidc_app() -> App {
-    app_from(false, |state| {
+    app_from(|state| {
         let verifier = OidcVerifier::from_jwks(OIDC_ISSUER, "mmo-login", crate::common::OIDC_JWKS).unwrap();
         with_oidc(state, OIDC_ISSUER, verifier)
     })
@@ -913,7 +728,7 @@ async fn oidc_login_creates_account_and_returns_refresh() {
     assert_eq!(login.account_email, "ann@x.io");
     assert!(login.email_verified);
 
-    // The refresh token joins like a password login's does, and rotation keeps the name.
+    // The refresh token joins like any other, and rotation keeps the name.
     let j = a.join(&login.refresh_token, "w1").await;
     assert_eq!(j.status, StatusCode::OK, "{}", j.text());
     let j: JoinResponse = j.json();
@@ -987,7 +802,7 @@ async fn serve_provider() -> String {
 async fn oidc_login_refetches_keys_on_unknown_kid() {
     let issuer = serve_provider().await;
     let verifier = OidcVerifier::discover(&issuer, "mmo-login").await.unwrap();
-    let a = app_from(false, |state| with_oidc(state, &issuer, verifier)).await;
+    let a = app_from(|state| with_oidc(state, &issuer, verifier)).await;
     let r = a.login_oidc(crate::common::oidc_token(oidc_claims(&issuer, "u-1"), "test-2")).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
 }

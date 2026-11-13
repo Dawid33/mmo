@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # `just dev-r3`'s supervisor: the recipe builds, resets the world clock and runs this.
-# It starts the login service, the coordinator and every region host, each in a session of
+# It starts the login service (players log in with the dev Keycloak, `just kc-up`, which the
+# recipe starts first: it reads VOXEL_OIDC_ISSUER from the recipe's environment), the
+# coordinator and every region host, each in a session of
 # its own (setsid: a terminal Ctrl-C reaches only this script), then watches them:
 #
 #   - a host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137

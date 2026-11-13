@@ -24,10 +24,21 @@ async fn create_account_refuses_duplicate_email() {
     assert_eq!((row.account_id, row.password_hash.as_str(), row.created_at), (id, "h", 10));
     assert_eq!(s.account(id).await.unwrap().unwrap(), row);
     assert!(s.account_by_email("x@y.z").await.unwrap().is_none());
-    s.set_password(id, "new").await.unwrap();
-    s.mark_verified(id, 20).await.unwrap();
+}
+
+#[tokio::test]
+async fn ensure_verified_account_makes_or_finds_one() {
+    let s = store().await;
+    let id = s.ensure_verified_account("a@b.c", 10).await.unwrap();
     let row = s.account(id).await.unwrap().unwrap();
-    assert_eq!((row.password_hash.as_str(), row.email_verified_at), ("new", Some(20)));
+    assert_eq!((row.password_hash.as_str(), row.email_verified_at), ("", Some(10)));
+    // Again: the same account, its verified time kept.
+    assert_eq!(s.ensure_verified_account("a@b.c", 20).await.unwrap(), id);
+    assert_eq!(s.account(id).await.unwrap().unwrap().email_verified_at, Some(10));
+    // An unverified account (made another way) becomes verified.
+    let other = s.create_account("o@b.c", "h", 1).await.unwrap().unwrap();
+    assert_eq!(s.ensure_verified_account("o@b.c", 30).await.unwrap(), other);
+    assert_eq!(s.account(other).await.unwrap().unwrap().email_verified_at, Some(30));
 }
 
 #[tokio::test]
@@ -57,18 +68,6 @@ async fn revoke_family_revokes_all_of_it() {
     s.insert_refresh([4; 32], a, [8; 16], 1000).await.unwrap();
     s.revoke_account_refresh(a, 7).await.unwrap();
     assert!(matches!(s.take_refresh([4; 32], 8).await.unwrap(), RefreshOutcome::Reused { .. }));
-}
-
-#[tokio::test]
-async fn email_token_single_use_and_expiry() {
-    let s = store().await;
-    let a = s.create_account("a@b.c", "h", 0).await.unwrap().unwrap();
-    s.insert_email_token([1; 32], a, 0, 100).await.unwrap();
-    assert_eq!(s.use_email_token([1; 32], 1, 50).await.unwrap(), None, "wrong kind");
-    assert_eq!(s.use_email_token([1; 32], 0, 50).await.unwrap(), Some(a));
-    assert_eq!(s.use_email_token([1; 32], 0, 51).await.unwrap(), None);
-    s.insert_email_token([2; 32], a, 1, 100).await.unwrap();
-    assert_eq!(s.use_email_token([2; 32], 1, 100).await.unwrap(), None, "expired");
 }
 
 #[tokio::test]
@@ -129,17 +128,14 @@ async fn file_database_persists() {
 
 const RACERS: usize = 8;
 
-/// `RACERS` concurrent takes of one token / email token: exactly one wins.
+/// `RACERS` concurrent takes of one token: exactly one wins.
 async fn race_takes(store: LoginStore) {
     let a = store.create_account("a@b.c", "h", 0).await.unwrap().unwrap();
     store.insert_refresh([1; 32], a, [9; 16], 1000).await.unwrap();
-    store.insert_email_token([2; 32], a, 0, 1000).await.unwrap();
     let mut refresh = Vec::new();
-    let mut email = Vec::new();
     for _ in 0..RACERS {
-        let (s1, s2) = (store.clone(), store.clone());
+        let s1 = store.clone();
         refresh.push(tokio::spawn(async move { s1.take_refresh([1; 32], 10).await.unwrap() }));
-        email.push(tokio::spawn(async move { s2.use_email_token([2; 32], 0, 10).await.unwrap() }));
     }
     let mut valid = 0;
     for h in refresh {
@@ -150,11 +146,6 @@ async fn race_takes(store: LoginStore) {
         }
     }
     assert_eq!(valid, 1, "exactly one concurrent refresh take is Valid");
-    let mut used = 0;
-    for h in email {
-        used += usize::from(h.await.unwrap().is_some());
-    }
-    assert_eq!(used, 1, "exactly one concurrent email-token use succeeds");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -338,47 +329,24 @@ async fn kick_queue_postgres() {
     drop(db);
 }
 
-/// A password reset is one transaction: when a later step fails (here the kick queue is
-/// gone), the password is unchanged, the reset token is not spent and the account's refresh
-/// tokens stay — never a changed password with the old sessions alive.
+/// Revoking an account is one transaction: when a later step fails (here the kick queue is
+/// gone), the account's refresh tokens stay — never revoked tokens without their kicks.
 #[tokio::test]
-async fn reset_password_is_all_or_nothing() {
-    let dir = std::env::temp_dir().join(format!("login-reset-tx-{}", std::process::id()));
+async fn revoke_account_with_kicks_is_all_or_nothing() {
+    let dir = std::env::temp_dir().join(format!("login-revoke-tx-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("login.sqlite");
     let _ = std::fs::remove_file(&db);
     let s = LoginStore::open(db.to_str().unwrap()).await.unwrap();
-    let a = s.create_account("a@b.c", "old", 0).await.unwrap().unwrap();
-    s.insert_email_token([7; 32], a, 1, 1000).await.unwrap();
+    let a = s.create_account("a@b.c", "", 0).await.unwrap().unwrap();
     s.insert_refresh([1; 32], a, [9; 16], 1000).await.unwrap();
     // Break the transaction's last step from outside.
     let raw = sqlx::SqlitePool::connect(&format!("sqlite:{}", db.display())).await.unwrap();
     sqlx::query("DROP TABLE pending_kicks").execute(&raw).await.unwrap();
     raw.close().await;
-    assert!(s.reset_password([7; 32], 1, "new", 10, "reset").await.is_err());
-    assert_eq!(s.account(a).await.unwrap().unwrap().password_hash, "old", "the password is unchanged");
-    assert_eq!(s.peek_email_token([7; 32], 1, 10).await.unwrap(), Some(a), "the reset token is not spent");
+    assert!(s.revoke_account_with_kicks(a, 10, "revoked").await.is_err());
     assert_eq!(s.take_refresh([1; 32], 10).await.unwrap(), RefreshOutcome::Valid { account: a, family: [9; 16] });
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The happy path: token spent, password set, verified, refresh tokens revoked; a dead
-/// token changes nothing.
-#[tokio::test]
-async fn reset_password_spends_sets_and_revokes() {
-    let s = store().await;
-    let a = s.create_account("a@b.c", "old", 0).await.unwrap().unwrap();
-    s.insert_email_token([7; 32], a, 1, 1000).await.unwrap();
-    s.insert_refresh([1; 32], a, [9; 16], 1000).await.unwrap();
-    assert_eq!(s.reset_password([8; 32], 1, "new", 10, "reset").await.unwrap(), None, "unknown token");
-    assert_eq!(s.account(a).await.unwrap().unwrap().password_hash, "old");
-    assert_eq!(s.reset_password([7; 32], 1, "new", 10, "reset").await.unwrap(), Some((a, 0)));
-    let row = s.account(a).await.unwrap().unwrap();
-    assert_eq!((row.password_hash.as_str(), row.email_verified_at), ("new", Some(10)));
-    assert_eq!(s.peek_email_token([7; 32], 1, 11).await.unwrap(), None, "spent");
-    assert_ne!(s.take_refresh([1; 32], 11).await.unwrap(), RefreshOutcome::Valid { account: a, family: [9; 16] });
-    assert_eq!(s.set_password_with_kicks(a, "newer", 12, "set").await.unwrap(), 0);
-    assert_eq!(s.account(a).await.unwrap().unwrap().password_hash, "newer");
 }
 
 #[tokio::test]

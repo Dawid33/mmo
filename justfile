@@ -894,8 +894,10 @@ smoke:
 # ---- Login service (crates/login) -------------------------------------------
 
 # The login service / its admin commands: `just login` serves on 127.0.0.1:8790
-# (VOXEL_LOGIN_* env, database target/dev-login/login.sqlite); `just login world list`,
-# `just login account verify a@b.c`, ... Built capped, then run.
+# (VOXEL_LOGIN_* env, database target/dev-login/login.sqlite; `VOXEL_OIDC_ISSUER` turns the
+# Keycloak login on, see `dev_oidc_issuer`); `just login world list`,
+# `just login account issue-refresh a@b.c`, `just login account revoke a@b.c`, ... Built
+# capped, then run.
 login *args='serve':
     {{cap}} {{cargo}} build -p login --bin login
     ./target/debug/login {{args}}
@@ -920,6 +922,11 @@ with_web := ""
 # (target/dev-login/login.sqlite) only.
 dev_email := "dev@localhost"
 
+# The dev Keycloak's realm (`just kc-up`): what the login service started by `dev-login`, `dev-r2`
+# and `dev-r3` trusts for player logins (`VOXEL_OIDC_ISSUER`). The audience (`mmo-login`) and the
+# client (`game`) are the login service's defaults and the realm file's `game` client.
+dev_oidc_issuer := "http://127.0.0.1:8180/realms/players"
+
 # How long `run-online` waits for the login service and the server to come up.
 online_wait_secs := "180"
 
@@ -943,16 +950,18 @@ _dev-login-setup:
     chmod 600 target/dev-login/refresh.tmp
     mv target/dev-login/refresh.tmp target/dev-login/refresh
 
-# A dev server that requires login, with the login service beside it: ensures a signing
-# key, the world `dev` and the dev account (`dev_email`, with a kept token), runs `login serve`
-# in the background and the dev server (VOXEL_AUTH=jwt, play region size) in the
+# A dev server that requires login, with the login service beside it: starts the dev
+# Keycloak (`kc-up`), ensures a signing key, the world `dev` and the dev account (`dev_email`,
+# with a kept token), runs `login serve` (players log in with Keycloak: user `dev`, password
+# `dev-password`) in the background and the dev server (VOXEL_AUTH=jwt, play region size) in the
 # foreground; SIGTERMs the login service on exit.
 # `just with_web=1 dev-login` also serves the browser page (wasm-server-runner, :1334)
 # and prints its `?login=` URL (log target/dev-login/web.log).
-dev-login: _dev-login-setup
+dev-login: kc-up _dev-login-setup
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_OIDC_ISSUER={{dev_oidc_issuer}}
     {{cap}} {{cargo}} build --bin server
     login=./target/debug/login
     mkdir -p target/dev-login
@@ -1123,8 +1132,8 @@ host ordinal="0" hosts="1" delay="0": (_dev-hosts-check ordinal hosts delay "1")
     env {{ shell(host_env_sh, ordinal, hosts, delay, if hosts == "1" { dev_r2_dir } else { dev_r3_dir }, dev_database_url) }} \
         RUST_BACKTRACE=1 ./target/debug/server
 
-# The split world with login: the dev Postgres (`pg-up`), the `dev-login` setup and login
-# service, the coordinator (log target/dev-r2/coordinator.log) and, once it has written
+# The split world with login: the dev Keycloak (`kc-up`) and Postgres (`pg-up`), the `dev-login`
+# setup and login service (players log in with Keycloak), the coordinator (log target/dev-r2/coordinator.log) and, once it has written
 # its pin, host 0 in the foreground (VOXEL_AUTH=jwt, world `dev`). The host listens for the
 # login service's push on 127.0.0.1:6490 (pin target/dev-r2/host-0.cert-sha256); once it has
 # written that pin, world `dev` is re-registered with the link, so joins push `SpawnPlayer`
@@ -1134,10 +1143,11 @@ host ordinal="0" hosts="1" delay="0": (_dev-hosts-check ordinal hosts delay "1")
 # forges the world in the coordinator, which can take longer than the `online_wait_secs`
 # (180 s) wait for its pin: then rerun (the world is kept), or raise it once with
 # `just online_wait_secs=900 dev-r2`.
-dev-r2: pg-up _dev-login-setup _dev-r2-token
+dev-r2: kc-up pg-up _dev-login-setup _dev-r2-token
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_OIDC_ISSUER={{dev_oidc_issuer}}
     {{cap}} {{cargo}} build --bin server
     pin={{dev_r2_dir}}/coordinator.cert-sha256
     host_pin={{dev_r2_dir}}/host-0.cert-sha256
@@ -1190,8 +1200,8 @@ done
 
 # One world on 2..6 region hosts (R3) with login: the dev Postgres (`pg-up`, started with
 # max_prepared_transactions > 0 — several hosts stage their cuts in two phases and refuse
-# to start without it), the `dev-login` setup, `worldctl clock-reset`, then
-# scripts/dev_r3.sh: the login service, the coordinator (log target/dev-r3/coordinator.log)
+# to start without it), the dev Keycloak (`kc-up`), the `dev-login` setup, `worldctl clock-reset`, then
+# scripts/dev_r3.sh: the login service (players log in with Keycloak), the coordinator (log target/dev-r3/coordinator.log)
 # and, once it has written its pin, EVERY host 0..`hosts` (`host` above: host n on UDP
 # 6466 + 10n, peers on 127.0.0.1:6500 + n; logs target/dev-r3/host-<n>.log). All of them
 # on purpose: a host ordinal that has never started is still awaited by placement, so
@@ -1208,10 +1218,12 @@ done
 # (`just worldctl super-region <url> <n>`) needs VOXEL_SUPER_REGION_REGIONS=<n> in the
 # environment. First start on an empty database: see `dev-r2` (`online_wait_secs`).
 # Connect with `just run-online`-style login.
-dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") pg-up _dev-login-setup (_dev-token dev_r3_dir)
+dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") kc-up pg-up _dev-login-setup (_dev-token dev_r3_dir)
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    # scripts/dev_r3.sh starts the login service from this environment.
+    export VOXEL_OIDC_ISSUER={{dev_oidc_issuer}}
     {{cap}} {{cargo}} build --bin server --bin worldctl
     ./target/debug/worldctl clock-reset {{dev_database_url}}
     DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} exec scripts/dev_r3.sh {{dev_r3_dir}} \

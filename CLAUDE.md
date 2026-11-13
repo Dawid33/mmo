@@ -153,8 +153,13 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
 - Join snapshots go out slim (`game/src/region_wire.rs`): stud chunks as diffs against their pristine chunk,
   derivable voxel collider grids rebuilt by the receiver — only shapes the sender has checked byte-equal to a
   fresh build are omitted. `VOXEL_SNAPSHOT_COLLIDERS=send|rebuild` (default: `send` for a single-player server).
-- Auth: `VOXEL_AUTH=token` (default, offline) or `jwt` (login service, `crates/login`; a `jwt` host without a
-  service token refuses to start unless `VOXEL_JWT_ADMISSION=newest`, dev only). The workspace's
+- Auth: `VOXEL_AUTH=token` (default, offline) or `jwt` (login service, `crates/login`, with Keycloak: it owns
+  the passwords and the login pages, the login service trades a Keycloak access token for its own refresh
+  token at `/v1/login/oidc`; `VOXEL_OIDC_ISSUER` (unset = no Keycloak login), `VOXEL_OIDC_AUDIENCE` (`mmo-login`),
+  `VOXEL_OIDC_CLIENT_ID` (`game`); `just dev-login|dev-r2|dev-r3` start the dev Keycloak (`kc-up`) and set the
+  issuer; a launch with no screens starts from `login account issue-refresh <email>`, `login account revoke
+  <email>` ends an account's sessions; no register / password / reset routes). A `jwt` host without a
+  service token refuses to start unless `VOXEL_JWT_ADMISSION=newest`, dev only. The workspace's
   only rustls crypto provider is **ring** — keep `aws-lc-rs` out of the tree.
 - **Role split (R2, `VOXEL_ROLE=all|host|coordinator`, default `all` = one process as before; plan
   `docs/superpowers/plans/2026-11-07-r2b-role-split.md`)**: the coordinator (`game::coordinator`, claims,

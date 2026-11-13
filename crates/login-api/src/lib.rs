@@ -11,22 +11,13 @@ pub const JOIN_JWT_TTL_SECS: u64 = 300;
 pub const HOST_AUDIENCE: &str = "mmo-host";
 /// How long a refresh token lives.
 pub const REFRESH_TTL_DAYS: u64 = 30;
-/// Shortest accepted password, in characters.
-pub const PASSWORD_MIN_CHARS: usize = 10;
-/// Longest accepted password, in characters.
-pub const PASSWORD_MAX_CHARS: usize = 128;
 /// Longest accepted email address, in characters (after trimming).
 pub const EMAIL_MAX_CHARS: usize = 254;
 
-pub const PATH_REGISTER: &str = "/v1/register";
-pub const PATH_LOGIN: &str = "/v1/login";
 pub const PATH_REFRESH: &str = "/v1/refresh";
 pub const PATH_LOGOUT: &str = "/v1/logout";
 pub const PATH_WORLDS: &str = "/v1/worlds";
 pub const PATH_JOIN: &str = "/v1/join";
-pub const PATH_VERIFY: &str = "/v1/verify";
-pub const PATH_RESET_REQUEST: &str = "/v1/reset/request";
-pub const PATH_RESET_CONFIRM: &str = "/v1/reset/confirm";
 pub const PATH_LOGIN_OIDC: &str = "/v1/login/oidc";
 pub const PATH_CONFIG: &str = "/v1/config";
 pub const PATH_JWKS: &str = "/.well-known/jwks.json";
@@ -62,18 +53,6 @@ pub struct JoinTicket {
     /// A dev host's self-signed WebTransport certificate hash.
     pub cert_hash: Option<String>,
     pub expires_in_secs: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RegisterRequest {
-    pub email: String,
-    pub password: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoginRequest {
-    pub email: String,
-    pub password: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,22 +103,6 @@ pub struct JoinRequest {
 pub struct JoinResponse {
     pub ticket: JoinTicket,
     pub refresh_token: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResetRequest {
-    pub email: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResetConfirm {
-    pub token: String,
-    pub password: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerifyRequest {
-    pub token: String,
 }
 
 /// One world of the registry, as the world list shows it.

@@ -4,12 +4,12 @@
 //! Global flag `--db <url>` overrides `VOXEL_LOGIN_DB`; `keygen --dir <d>` overrides
 //! `VOXEL_LOGIN_KEYS_DIR`.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use login_api::WorldStatus;
 
-use crate::{Hasher, LoginConfig, LoginStore, WorldRow, check_password, normalize_email};
+use crate::{LoginConfig, LoginStore, WorldRow, normalize_email};
 
 /// Digits in a key file name (`0001.pem`); [`auth::Signer::load_dir`] sorts byte-wise.
 pub const KEY_FILE_DIGITS: usize = 4;
@@ -18,37 +18,14 @@ pub const KEY_FILE_MODE: u32 = 0o600;
 /// Mode of a created keys directory.
 pub const KEY_DIR_MODE: u32 = 0o700;
 
-/// What [`run_ctl_with`] needs from outside, so tests can inject cheap hashing and a password.
-pub struct CtlDeps<'a> {
-    pub hasher: Hasher,
-    /// Where `account set-password` / `account ensure` read the password (one line).
-    pub stdin: &'a mut dyn BufRead,
-}
-
 const USAGE: &str = "usage: login [--db <url>] <command>
   serve
   keygen [--dir <d>]
   world add <id> --name <n> [--quic host:port] [--wt url] [--cert-hash h] [--closed]
             [--link host:port --link-cert <sha256>]   (the host's service link: join pushes SpawnPlayer)
   world list | remove <id> | open <id> | close <id>
-  account set-password <email>   (password on stdin)
-  account ensure <email> [--verified]   (password on stdin; creates or updates)
-  account verify <email>
-  account issue-refresh <email>   (prints a new refresh token; creates the account if missing)";
-
-/// Run one admin command with the real hasher and stdin.
-pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
-    let stdin = std::io::stdin();
-    let mut lock = stdin.lock();
-    run_ctl_with(
-        args,
-        out,
-        CtlDeps {
-            hasher: Hasher::default(),
-            stdin: &mut lock,
-        },
-    )
-}
+  account issue-refresh <email>   (prints a new refresh token; creates the account if missing)
+  account revoke <email>   (revokes its refresh tokens and kicks its open sessions)";
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -96,8 +73,8 @@ pub fn route(args: &[String]) -> Result<Route, String> {
     Ok(Route { db, serve })
 }
 
-/// [`run_ctl`] with injected dependencies.
-pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> Result<(), String> {
+/// Run one admin command, writing its output to `out`.
+pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     let mut args = args.to_vec();
     let db = take_opt(&mut args, "--db")?;
     let dir = take_opt(&mut args, "--dir")?;
@@ -108,7 +85,6 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
     let link = take_opt(&mut args, "--link")?;
     let link_cert = take_opt(&mut args, "--link-cert")?;
     let closed = take_flag(&mut args, "--closed");
-    let verified = take_flag(&mut args, "--verified");
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let config = || LoginConfig::from_env();
@@ -198,96 +174,37 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
             })?;
             writeln!(out, "world {id} {cmd}ed").map_err(io)
         }
-        ["account", "set-password", email] => {
-            let email = normalize_email(email).map_err(|e| e.to_string())?;
-            let password = read_password(deps.stdin)?;
-            let hash = deps.hasher.hash(&password);
-            block_on(async {
-                let store = open(&db_url()?).await?;
-                let acc = store
-                    .account_by_email(&email)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("no account {email:?}"))?;
-                // An admin reset logs old sessions out: refresh tokens revoked, and kicks queued
-                // for the running login service to send (its sweeper picks them up) — in the
-                // password's own transaction.
-                store
-                    .set_password_with_kicks(acc.account_id, &hash, now_secs(), crate::api::KICK_PASSWORD_SET)
-                    .await
-                    .map_err(|e| e.to_string())
-            })?;
-            writeln!(out, "password set for {email}; refresh tokens revoked, sessions kicked").map_err(io)
-        }
-        ["account", "ensure", email] => {
-            // Idempotent: create the account if missing, else make its password this one
-            // (an unchanged password keeps its refresh tokens); `--verified` marks it verified.
-            let email = normalize_email(email).map_err(|e| e.to_string())?;
-            let password = read_password(deps.stdin)?;
-            let hasher = &deps.hasher;
-            let what = block_on(async {
-                let store = open(&db_url()?).await?;
-                let err = |e: crate::LoginError| e.to_string();
-                let (id, what) = match store.account_by_email(&email).await.map_err(err)? {
-                    Some(acc) if hasher.verify(&password, &acc.password_hash) => (acc.account_id, "unchanged"),
-                    Some(acc) => {
-                        let hash = hasher.hash(&password);
-                        store
-                            .set_password_with_kicks(acc.account_id, &hash, now_secs(), crate::api::KICK_PASSWORD_SET)
-                            .await
-                            .map_err(err)?;
-                        (acc.account_id, "password set")
-                    }
-                    None => {
-                        let id = store
-                            .create_account(&email, &hasher.hash(&password), now_secs())
-                            .await
-                            .map_err(err)?
-                            .ok_or_else(|| format!("account {email:?} appeared concurrently; run again"))?;
-                        (id, "created")
-                    }
-                };
-                if verified {
-                    store.mark_verified(id, now_secs()).await.map_err(err)?;
-                }
-                Ok(what)
-            })?;
-            let v = if verified { ", verified" } else { "" };
-            writeln!(out, "account {email}: {what}{v}").map_err(io)
-        }
-        ["account", "verify", email] => {
-            let email = normalize_email(email).map_err(|e| e.to_string())?;
-            block_on(async {
-                let store = open(&db_url()?).await?;
-                let acc = store
-                    .account_by_email(&email)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("no account {email:?}"))?;
-                store.mark_verified(acc.account_id, now_secs()).await.map_err(|e| e.to_string())
-            })?;
-            writeln!(out, "{email} verified").map_err(io)
-        }
         ["account", "issue-refresh", email] => {
             // For launches with no screens: the token is the only thing printed (the recipe
             // redirects it into the client's token file). An account made here has no password
-            // (an empty hash matches nothing) and is verified.
+            // (Keycloak owns those) and is verified.
             let email = normalize_email(email).map_err(|e| e.to_string())?;
             let token = block_on(async {
                 let store = open(&db_url()?).await?;
                 let err = |e: crate::LoginError| e.to_string();
                 let now = now_secs();
-                let id = match store.account_by_email(&email).await.map_err(err)? {
-                    Some(acc) => acc.account_id,
-                    None => match store.create_account(&email, "", now).await.map_err(err)? {
-                        Some(id) => id,
-                        None => return Err(format!("account {email:?} appeared concurrently; run again")),
-                    },
-                };
-                store.mark_verified(id, now).await.map_err(err)?;
+                let id = store.ensure_verified_account(&email, now).await.map_err(err)?;
                 crate::api::mint_refresh(&store, id, now).await.map_err(err)
             })?;
             writeln!(out, "{token}").map_err(io)
+        }
+        ["account", "revoke", email] => {
+            // Ends every session of the account: its refresh tokens are revoked and a kick is
+            // queued for each open session (the running login service's sweeper sends them).
+            let email = normalize_email(email).map_err(|e| e.to_string())?;
+            let kicks = block_on(async {
+                let store = open(&db_url()?).await?;
+                let acc = store
+                    .account_by_email(&email)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("no account {email:?}"))?;
+                store
+                    .revoke_account_with_kicks(acc.account_id, now_secs(), crate::api::KICK_ACCOUNT_REVOKED)
+                    .await
+                    .map_err(|e| e.to_string())
+            })?;
+            writeln!(out, "{email}: refresh tokens revoked, {kicks} session(s) kicked").map_err(io)
         }
         ["serve"] => Err("`serve` is run by the binary itself".into()),
         _ => Err(USAGE.into()),
@@ -309,15 +226,6 @@ fn host_link_args(link: Option<String>, cert: Option<String>) -> Result<(Option<
         }
         _ => Err("--link and --link-cert go together".into()),
     }
-}
-
-/// One line of `stdin`, checked against the password policy. Never echoed.
-fn read_password(stdin: &mut dyn BufRead) -> Result<String, String> {
-    let mut line = String::new();
-    stdin.read_line(&mut line).map_err(|e| e.to_string())?;
-    let password = line.trim_end_matches(['\n', '\r']).to_string();
-    check_password(&password).map_err(|e| e.to_string())?;
-    Ok(password)
 }
 
 async fn open(url: &str) -> Result<LoginStore, String> {
