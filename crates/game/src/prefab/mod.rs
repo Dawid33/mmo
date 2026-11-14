@@ -1,5 +1,7 @@
-//! Prefabs: pre-built structures stamped into the voxel world. This module
-//! holds the shape catalogue and the one rotation convention.
+//! Prefabs: pre-built structures stamped into the voxel world. `shapes` is the catalogue of named block
+//! shapes and `turn` the one rotation convention; `file` and `codec` are the on-disk form (RON text, lz4
+//! binary); `resolve` turns a file into block ids with a spatial index; `layout` lays a resolved prefab
+//! out one chunk at a time; `builtin` is the game's own set, embedded at build time or read from disk.
 
 pub mod builtin;
 pub mod codec;
@@ -29,5 +31,4 @@ pub use layout::{
 };
 pub use builtin::{
     embedded_prefab_sources, install_prefabs, load_builtin_prefabs, prefabs, PrefabSet, BUILTIN_PREFAB_DIR,
-    BUILTIN_SKIPPED_DIRS,
 };

@@ -9,8 +9,6 @@ use super::resolve::{prefab_name_key, resolve, ResolvedPrefab, Trust};
 use crate::registry::BlockId;
 
 pub const BUILTIN_PREFAB_DIR: &str = "assets/prefabs";
-/// Sub-directories never read or embedded: local import output and cut lists.
-pub const BUILTIN_SKIPPED_DIRS: &[&str] = &["imported", "sources"];
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PrefabSet {
@@ -80,6 +78,13 @@ pub fn embedded_prefab_sources() -> &'static [(&'static str, &'static [u8])] {
     include!(concat!(env!("OUT_DIR"), "/builtin_prefabs.rs"))
 }
 
+/// The same few lines as `takes_file` / `walk` in `crates/game/build.rs`: keep the two filters identical
+/// (a file named `*.prefab.ron` or `*.prefab.bin`, not starting with `.`; directories starting with `.`
+/// and symlinked directories are not entered; a name that is not UTF-8 is skipped).
+fn takes_file(name: &str) -> bool {
+    !name.starts_with('.') && (name.ends_with(RON_SUFFIX) || name.ends_with(BIN_SUFFIX))
+}
+
 fn read_dir_sorted(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
@@ -87,13 +92,14 @@ fn read_dir_sorted(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), S
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
+        let Ok(name) = e.file_name().into_string() else { continue };
+        let kind = e.file_type().map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = e.path();
-        let name = e.file_name().to_string_lossy().into_owned();
-        if path.is_dir() {
-            if !BUILTIN_SKIPPED_DIRS.contains(&name.as_str()) {
+        if kind.is_dir() {
+            if !name.starts_with('.') {
                 read_dir_sorted(&path, out)?;
             }
-        } else {
+        } else if takes_file(&name) && (kind.is_file() || path.is_file()) {
             let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             out.push((name, bytes));
         }
@@ -101,7 +107,7 @@ fn read_dir_sorted(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), S
     Ok(())
 }
 
-/// From `disk_dir` when it exists (recursive, skipping [`BUILTIN_SKIPPED_DIRS`]), else the embedded copy.
+/// From `disk_dir` when it exists (recursive, the same file filter as the build script), else the embedded copy.
 pub fn load_builtin_prefabs(
     disk_dir: Option<&Path>,
     block_named: &dyn Fn(&str) -> Option<BlockId>,

@@ -79,21 +79,47 @@ fn an_unknown_block_names_the_file() {
     assert!(err.contains("dev-hut.prefab.ron"), "{err}");
 }
 
-#[test]
-fn skipped_directories_are_not_read() {
-    let dir = std::env::temp_dir().join(format!("mmo-prefab-skip-{}", std::process::id()));
+fn temp_tree(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mmo-prefab-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    for d in ["imported", "sources"] {
-        std::fs::create_dir_all(dir.join(d)).unwrap();
-        std::fs::write(dir.join(d).join("b.prefab.ron"), b"garbage {").unwrap();
-    }
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn named_hut(name: &str) -> String {
     let mut f = dev_hut();
-    f.name = "a".into();
-    std::fs::write(dir.join("a.prefab.ron"), prefab_to_ron(&f)).unwrap();
+    f.name = name.into();
+    prefab_to_ron(&f)
+}
+
+#[test]
+fn sub_directories_are_read() {
+    let dir = temp_tree("subdirs");
+    std::fs::create_dir_all(dir.join("more")).unwrap();
+    std::fs::write(dir.join("a.prefab.ron"), named_hut("a")).unwrap();
+    std::fs::write(dir.join("more").join("b.prefab.ron"), named_hut("b")).unwrap();
     let reg = registry();
     let set = load_builtin_prefabs(Some(&dir), &|n| reg.id_of(n));
     std::fs::remove_dir_all(&dir).unwrap();
-    assert_eq!(set.unwrap().len(), 1);
+    let set = set.unwrap();
+    assert_eq!(set.len(), 2);
+    assert!(set.named("a").is_some() && set.named("b").is_some());
+}
+
+#[test]
+fn build_script_and_loader_take_the_same_files() {
+    let dir = temp_tree("filter");
+    std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+    std::fs::write(dir.join("a.prefab.ron"), named_hut("a")).unwrap();
+    std::fs::write(dir.join(".#x.prefab.ron"), b"garbage {").unwrap();
+    std::fs::write(dir.join("notes.txt"), b"garbage {").unwrap();
+    std::fs::write(dir.join(".hidden").join("h.prefab.ron"), named_hut("h")).unwrap();
+    let reg = registry();
+    let set = load_builtin_prefabs(Some(&dir), &|n| reg.id_of(n));
+    std::fs::remove_dir_all(&dir).unwrap();
+    let set = set.unwrap();
+    assert_eq!(set.len(), 1);
+    assert!(set.named("a").is_some());
 }
 
 #[test]
