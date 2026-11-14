@@ -374,6 +374,10 @@ const MIN_CONTENDED_STEPS: usize = TWO_SOURCES_WATCH_STEPS / 4;
 /// Server schedules `two_hosts_shuffled_server_order_does_not_mispredict` runs.
 const SHUFFLED_SERVER_SEEDS: u64 = 6;
 
+/// Top of the floor of `client::local_server::lightweight_test_generator` (its
+/// `Chunk::flat_floor(8)`), in voxels = world units.
+const LIGHTWEIGHT_GROUND_TOP: f32 = 8.0;
+
 /// `ReconcileStats::kind_slot` of everything relayed between regions.
 const TRANSFER_KIND: usize = 2;
 
@@ -386,8 +390,8 @@ const TRANSFER_KIND: usize = 2;
 /// mispredictions over the watch, all mispredictions, and the steps the server's
 /// west or north region mirrored both bodies. Converged before and after.
 fn two_sources_in_one_slot(mut h: SimHarness) -> (u64, u64, usize) {
-    let bv = game::BLOCK_UNITS as f32;
-    let ground = game::plate_units(client::local_server::TEST_GROUND_TOP_PLATES);
+    let bv = game::BLOCK_VOXELS as f32;
+    let ground = LIGHTWEIGHT_GROUND_TOP;
     let spawn = game::SPAWN_REGION;
     let north_west = game::RegionCoords::new(spawn.x - 1, spawn.z - 1);
     let targets = [game::RegionCoords::new(spawn.x - 1, spawn.z), game::RegionCoords::new(spawn.x, spawn.z - 1)];
@@ -492,8 +496,8 @@ const THIRD_PARTY_PAST_STEPS: usize = 20;
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn crossing_with_a_third_party_halo_in_the_slot_does_not_mispredict() {
-    let bv = game::BLOCK_UNITS as f32;
-    let ground = game::plate_units(client::local_server::TEST_GROUND_TOP_PLATES);
+    let bv = game::BLOCK_VOXELS as f32;
+    let ground = LIGHTWEIGHT_GROUND_TOP;
     let spawn = game::SPAWN_REGION;
     let north = neighbour(spawn, Dir::North);
     let mut h = SimHarness::with_near_radius(1);

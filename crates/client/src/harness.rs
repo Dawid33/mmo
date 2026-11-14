@@ -272,7 +272,7 @@ impl SimHarness {
             let (to_server, from_client) = unbounded::<ClientPacket>();
             let (to_client, from_server) = unbounded::<ServerPacket>();
             let mut server =
-                LocalServer::new_unconnected(from_client, to_client, crate::local_server::lightweight_test_genesis())
+                LocalServer::new_unconnected(from_client, to_client, crate::local_server::lightweight_test_generator())
                     .expect("local server");
             let manager = server.manager_mut();
             manager.set_ownership(game::Ownership::Static { ordinal, hosts }, s);

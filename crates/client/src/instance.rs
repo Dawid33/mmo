@@ -2852,7 +2852,7 @@ mod manager_tests {
         assert_eq!(manager.conns.connection_of(r), b);
         // A's late snapshot is dropped; B's loads R.
         let mut world = game::World::new();
-        world.load(&r, Region::empty(r));
+        world.load(&r, Region::from_chunks(r, Vec::new()));
         events.send((a, ConnEvent::Packet(world.build_region_server_packet(&r)))).unwrap();
         assert!(manager.pump(&incoming).unwrap());
         assert!(!manager.loaded_regions().contains(&r), "not from the old home");
