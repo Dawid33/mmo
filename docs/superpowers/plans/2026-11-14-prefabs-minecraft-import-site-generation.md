@@ -415,3 +415,44 @@ non-air blocks, 549 block names, 3,696 states, all vanilla. What it says for the
   takes it from there.
 - Variety matters more than size: several small houses beat one cathedral, and pieces that repeat (wall
   runs, corridor sections) are what the generators live on.
+
+## 11. Carried over from plan 1 (blocks and core — done 2026-11-14)
+
+Plan `2026-11-14-prefabs-1-blocks-and-core.md` is built: 121 building blocks, the shape catalogue, the
+prefab file (RON and binary), resolve, `layout_chunk`, the built-in set with `dev-hut`, `prefab view` /
+`prefab check`. Open items, in the order they start to matter:
+
+**First step of the next plan**
+- `PrefabSet::from_sources` (`crates/game/src/prefab/builtin.rs`) keys its sources by file name: two files
+  of one name in different sub-directories silently lose one. Refuse a repeated name; test
+  `a.prefab.ron` + `more/a.prefab.ron`.
+
+**Left uncommitted for the owner of those files** (they held another session's work in progress)
+- `crates/client/src/renderer/mod.rs`: 124 `EMBEDDED_BLOCK_TEXTURES` entries. Until committed, the client
+  tests `embedded_block_textures_*` fail on a clean checkout and the wasm client draws the building set as
+  missing textures. The list was checked by script against `assets/blocks/*.png` (182 = 182); the client
+  tests themselves were not run.
+- `justfile`: recipes `prefab-view` and `prefab-check`.
+
+**Before the importer (stage D)**
+- `deny_unknown_fields` does not reach the struct variants of `FileShape` and `Shape`; a typo there still
+  passes.
+- `Cuboids` chisels are rebuilt per cell in `layout_chunk`; intern identical shapes at resolve.
+- `layout_chunk` allocates a `BTreeMap` per call; `cell()` scans a bucket's boxes linearly. Measure on the
+  first real import before changing either.
+- `prefab view`: elevations look through door gaps (add depth shading), are slow on 100 M-cell prefabs
+  (per-slab `Vec` + `BTreeMap`), `--scale` is unbounded above, no test pins panel orientation, and a name
+  is only looked up at the top level of `assets/prefabs`.
+
+**Before any `Trust::Untrusted` caller (stage H)**
+- `occupied_cells` is outside both untrusted work budgets (65 536 thin tall boxes pass and cost ~10⁹ cell
+  writes); `max_bytes` is ignored for RON input.
+
+**Whenever**
+- `install_prefabs` is process-global: the first test that installs a set needs its own `[[test]]` target
+  or must install exactly the built-in set.
+- Plain `i32` arithmetic on anchor + offset in `layout.rs` panics in debug at coordinates near 2³¹.
+- Shape extents in `shapes.rs` are literals rather than named consts; an open trapdoor ignores `half`.
+- `build.rs` and the disk loader differ on a `read_dir` error (skip vs fail); Cargo's directory watch
+  re-runs the script for dotfiles it then ignores.
+- `tools/textures/gen.py`: `mix` aliases `lerp`.
