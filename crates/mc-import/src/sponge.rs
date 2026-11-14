@@ -54,7 +54,7 @@ pub fn read_schem(bytes: &[u8]) -> Result<BlockVolume, ImportError> {
     let palette = read_palette(palette_tag.ok_or_else(|| bad("no Palette"))?)?;
     let data = data_tag.and_then(Tag::as_bytes).ok_or_else(|| bad("no block data"))?;
     let blocks = decode_cells(data, cells as usize, palette.len())?;
-    let block_entities = read_entities(entities_tag)?;
+    let block_entities = read_entities(entities_tag, version)?;
 
     let meta = s.get("Metadata");
     let text = |k: &str| meta.and_then(|m| m.get(k)).and_then(Tag::as_str).unwrap_or("").to_string();
@@ -125,14 +125,19 @@ fn decode_cells(data: &[u8], cells: usize, palette_len: usize) -> Result<Vec<u16
     Ok(out)
 }
 
-fn read_entities(t: Option<&Tag>) -> Result<Vec<BlockEntity>, ImportError> {
+/// Sponge v3 wraps a block entity's own NBT in `Data` next to `Id` and `Pos`; v2 is flat.
+fn read_entities(t: Option<&Tag>, version: i32) -> Result<Vec<BlockEntity>, ImportError> {
     let Some(t) = t else { return Ok(Vec::new()) };
     let list = t.as_list().ok_or_else(|| bad("BlockEntities is not a list"))?;
     list.iter()
         .map(|e| {
             let pos = e.get("Pos").and_then(Tag::as_ints).filter(|p| p.len() == 3).ok_or_else(|| bad("block entity without Pos"))?;
             let id = e.get("Id").and_then(Tag::as_str).ok_or_else(|| bad("block entity without Id"))?;
-            Ok(BlockEntity { pos: [pos[0], pos[1], pos[2]], id: id.to_string(), nbt: e.clone() })
+            let nbt = match e.get("Data") {
+                Some(d @ Tag::Compound(_)) if version == 3 => d.clone(),
+                _ => e.clone(),
+            };
+            Ok(BlockEntity { pos: [pos[0], pos[1], pos[2]], id: id.to_string(), nbt })
         })
         .collect()
 }
