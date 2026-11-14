@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use game::lod::{LodCell, LodKey};
+use game::prefab::column_top_world;
 use game::{BlockId, RegionCoords, Voxel};
 use worldgen::structures::*;
 
@@ -292,4 +293,109 @@ fn trees_are_suppressed_the_same_way() {
         }
     }
     assert!(near_with < near_bare, "the structure removed no canopy ({near_with} vs {near_bare})");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_tower_across_two_keys_shows_half_in_each() {
+    if !default_dials() {
+        return;
+    }
+    install_real_block_props();
+    let rc = forest();
+    let east = RegionCoords::new(rc.x + 1, rc.z);
+    let bare = world::generate(&[rc, east], &NoStructures);
+    // A 9 × 40 × 9 tower whose box straddles the seam between the two regions' factor-16 keys.
+    let (w, skirt) = (9, 4);
+    let seam = east.x * RB;
+    let (ax, az) = world::dry_site(&bare, [seam - w + 2, rc.z * RB + skirt, seam + w - 2, rc.z * RB + RB - skirt], w, w, skirt)
+        .expect("a dry site across the seam");
+    let level = world::ground(&bare, ax + w / 2, az + w / 2);
+    let tower = prefabs::solid("tower", [w as u32, 40, w as u32], [0, 0, 0], prefabs::BRICK);
+    let sp = placed(&tower, [ax, level + 1, az], Some(Pad { level, skirt: skirt as u32 }));
+    let (min, max) = sp.bounds();
+    assert!(min[0] < seam && max[0] > seam, "the box crosses the seam");
+    let list = StructureList::new(vec![sp.clone()], 1);
+    let tiles = [rc, east].map(|r| tile(&LodKey::for_region(16, r), &list));
+    let mut drawn = [0, 0];
+    for x in min[0] - skirt..max[0] + skirt {
+        for z in min[2] - skirt..max[2] + skirt {
+            for (i, t) in tiles.iter().enumerate() {
+                if !t.contains(x, z) {
+                    continue;
+                }
+                let (cx, cz) = t.cell_of(x, z);
+                let col = t.column(cx, cz);
+                if box_distance(&sp, x, z) > 0 {
+                    assert!(!col.values().any(|&b| b == brick()), "a tower cell outside the box at ({x}, {z})");
+                    continue;
+                }
+                // The whole box's profile at this column: the prefab column's cells above the pad, in its
+                // top block's material.
+                let (top, mat) = column_top_world(&sp.prefab, &sp.at, x, z).expect("a solid tower column");
+                assert_eq!((top, mat), (max[1] - 1, brick()));
+                assert!(col.get(&level).is_some_and(|&b| b != brick()), "terrain at the pad level ({x}, {z})");
+                let shown: Vec<(i32, BlockId)> = col.range(level + 1..).map(|(y, b)| (*y, *b)).collect();
+                let want: Vec<(i32, BlockId)> = (level + 1..=top).map(|y| (y, mat)).collect();
+                assert_eq!(shown, want, "tile {i}, column ({x}, {z})");
+                drawn[i] += 1;
+            }
+        }
+    }
+    let [a, b] = drawn;
+    assert!(a > 0 && b > 0, "each tile draws its half ({a}, {b})");
+    assert_eq!(a + b, w * w, "the halves make the whole box");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_pad_over_shallow_water_dries_the_coarse_water() {
+    if !default_dials() {
+        return;
+    }
+    install_real_block_props();
+    // A 3 × 3 box whose middle column is shallow sea (1 or 2 blocks deep), inside its region by the
+    // skirt: the first such column on the coast north-east of spawn (that region, else a neighbour).
+    let water_top = worldgen::pipeline::SEA_TOP_BLOCK;
+    let coast = RegionCoords::from_world(5632.0, -2560.0);
+    let neighbours = [(0, 0), (1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)];
+    let site = neighbours.into_iter().find_map(|(dx, dz)| {
+        let rc = RegionCoords::new(coast.x + dx, coast.z + dz);
+        let bare = world::generate(&[rc], &NoStructures);
+        let shallow = |x: i32, z: i32| {
+            let (col, lx, lz) = world::column(&bare, x, z);
+            col.ground().unwrap().recipe_water(lx, lz).is_some()
+                && (1..=2).contains(&(water_top - world::ground(&bare, x, z)))
+        };
+        let (r0x, r0z) = (rc.x * RB, rc.z * RB);
+        (r0x + 4..r0x + RB - 4)
+            .flat_map(|x| (r0z + 4..r0z + RB - 4).map(move |z| (x, z)))
+            .find(|&(x, z)| shallow(x, z))
+            .map(|(x, z)| (rc, x, z))
+    });
+    let (rc, x, z) = site.expect("shallow sea on the coast");
+    let (r0x, r0z) = (rc.x * RB, rc.z * RB);
+    let level = water_top + 1;
+    let slab = prefabs::solid("slab", [3, 1, 3], [0, 0, 0], prefabs::PLANK);
+    let sp = placed(&slab, [x - 1, level + 1, z - 1], Some(Pad { level, skirt: 2 }));
+    let list = StructureList::new(vec![sp.clone()], 1);
+    let full = world::generate(&[rc], &list);
+    for factor in [16, 4] {
+        let key = LodKey::for_region(factor, rc);
+        let per = (game::BLOCK_VOXELS as u32 / factor).max(1) as usize; // LOD columns per block edge
+        let side = (RB as usize) * per;
+        let at = |tops: &[(i16, u8)], bx: i32, bz: i32| tops[(bz - r0z) as usize * per * side + (bx - r0x) as usize * per];
+        let before = worldgen::coarse_water_with(&key, SEED, mats(), &NoStructures).decode().unwrap();
+        let after = worldgen::coarse_water_with(&key, SEED, mats(), &list).decode().unwrap();
+        assert_ne!(at(&before, x, z).0, game::NO_WATER, "factor {factor}: water at ({x}, {z}) before");
+        for bx in x - 1..=x + 1 {
+            for bz in z - 1..=z + 1 {
+                assert_eq!(at(&after, bx, bz), (game::NO_WATER, 0), "factor {factor}: water over the pad at ({bx}, {bz})");
+                // Full generation agrees: no recipe water over the padded column.
+                let (col, lx, lz) = world::column(&full, bx, bz);
+                assert_eq!(col.ground().unwrap().recipe_water(lx, lz), None, "full generation at ({bx}, {bz})");
+                assert_eq!(world::ground(&full, bx, bz), level);
+            }
+        }
+    }
 }
