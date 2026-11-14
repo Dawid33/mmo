@@ -1,0 +1,14 @@
+# The login service serves /metrics on its HTTP port (the Ingress routes only /v1/ and the JWKS).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: login
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml .Values.selectorLabels | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
