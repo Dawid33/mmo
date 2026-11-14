@@ -369,3 +369,49 @@ fn nothing_below_bedrock() {
         }
     }
 }
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn no_slope_under_a_box_on_a_hillside() {
+    if !default_dials() {
+        return;
+    }
+    install_real_block_props();
+    let rc = forest();
+    let bare = world::generate(&[rc], &NoStructures);
+    let (w, d, skirt) = (7, 7, 4);
+    let (r0x, r0z) = (rc.x * RB, rc.z * RB);
+    // The steepest dry site: where the first skirt ring lies furthest under the level (the ground at the
+    // box's middle) — a skirt column at least `skirt + 1` under it is lower than the box's edge.
+    let mut best: Option<(i32, i32, (i32, i32))> = None;
+    for ax in r0x + skirt..r0x + RB - skirt - w {
+        for az in r0z + skirt..r0z + RB - skirt - d {
+            let reach = (ax - skirt..ax + w + skirt).flat_map(|x| (az - skirt..az + d + skirt).map(move |z| (x, z)));
+            if !reach.into_iter().all(|(x, z)| world::dry(&bare, x, z)) {
+                continue;
+            }
+            let level = world::ground(&bare, ax + w / 2, az + d / 2);
+            let ring = (ax - 1..=ax + w).flat_map(|x| (az - 1..=az + d).map(move |z| (x, z)));
+            let drop = ring.map(|(x, z)| level - world::ground(&bare, x, z)).max().unwrap();
+            let heights = (ax..ax + w).flat_map(|x| (az..az + d).map(move |z| (x, z))).map(|(x, z)| world::ground(&bare, x, z));
+            let (lo, hi) = heights.fold((i32::MAX, i32::MIN), |(lo, hi), g| (lo.min(g), hi.max(g)));
+            if best.is_none_or(|b| drop > b.0) {
+                best = Some((drop, hi - lo, (ax, az)));
+            }
+        }
+    }
+    let (drop, fall, (ax, az)) = best.expect("a dry site");
+    assert!(fall >= 3, "the steepest dry site falls only {fall} blocks across the box");
+    assert!(drop > skirt, "no skirt column lies lower than the box's edge (drop {drop})");
+    let level = world::ground(&bare, ax + w / 2, az + d / 2);
+    let sp = placed(&prefabs::hut(w as u32, 5, d as u32), [ax, level + 1, az], Some(Pad { level, skirt: skirt as u32 }));
+    let r = world::generate(&[rc], &StructureList::new(vec![sp.clone()], 1));
+    assert_cells(&r, &sp);
+    for x in ax..ax + w {
+        for z in az..az + d {
+            let (block, chisel) = world::read(&r, [x, level, z]);
+            assert_ne!(block.id, BlockId::AIR, "the pad's top block at ({x}, {z})");
+            assert_eq!(chisel, None, "a chisel on the pad's top block at ({x}, {level}, {z})");
+        }
+    }
+}

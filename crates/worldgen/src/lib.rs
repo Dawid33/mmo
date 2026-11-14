@@ -606,24 +606,33 @@ fn tree_blocks(
 
 /// Levels the samples (`samples[i * nz + j]` is world column `(x0 + i, z0 + j)`) under the structures'
 /// pads, from each column's natural surface, and keeps trees off their keep-out. A padded column loses its
-/// glacier ice; its water and cover stay.
-fn pad_samples(samples: &mut [ColSample], near: &[&structures::StructurePlacement], (x0, z0): (i32, i32), nz: usize) {
-    for (k, c) in samples.iter_mut().enumerate() {
-        pad_sample(c, near, x0 + (k / nz) as i32, z0 + (k % nz) as i32);
-    }
+/// glacier ice; its water and cover stay. Returns, indexed like `samples`, whether each column lies in a
+/// pad's box (see [`pad_sample`]).
+fn pad_samples(
+    samples: &mut [ColSample],
+    near: &[&structures::StructurePlacement],
+    (x0, z0): (i32, i32),
+    nz: usize,
+) -> Vec<bool> {
+    samples.iter_mut().enumerate().map(|(k, c)| pad_sample(c, near, x0 + (k / nz) as i32, z0 + (k % nz) as i32)).collect()
 }
 
 /// Levels one sample, of world block column `(x, z)`, under the structures' pads and keeps trees off
 /// their keep-out (see [`pad_samples`]). Every place generation samples a ground column pads it with this.
-fn pad_sample(c: &mut ColSample, near: &[&structures::StructurePlacement], x: i32, z: i32) {
-    if let structures::PadEffect::Level { surface, .. } = structures::pad_at(near, x, z, c.s) {
+/// Returns whether the column lies in a pad's box: such a column never carries a slope (its top block is
+/// the ground a structure stands on), wherever generation decides slopes.
+fn pad_sample(c: &mut ColSample, near: &[&structures::StructurePlacement], x: i32, z: i32) -> bool {
+    let mut boxed = false;
+    if let structures::PadEffect::Level { surface, in_box } = structures::pad_at(near, x, z, c.s) {
         c.s = surface;
         c.top = surface;
         c.ice_from = c.water_top + 1;
+        boxed = in_box;
     }
     if structures::blocks_trees(near, x, z, TREE_REACH_BLOCKS) {
         c.trees = false;
     }
+    boxed
 }
 
 /// The band `(lo, hi)` of the chunk column at world block `(x, z)` grown to the structures whose box
@@ -736,18 +745,23 @@ fn columns_from_patch(
     // is exactly what it is without a structure source.
     let near_owned = structures.placements_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
     let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
+    // Whether each sampled column lies in a pad's box, indexed like `samples` (empty: none does).
+    let mut in_box = Vec::new();
     if !near.is_empty() {
         // The whole ring, before slopes: slopes, the cliff rule and tree surfaces read it.
-        pad_samples(&mut samples, &near, (wx - ring, wz - ring), nz);
+        in_box = pad_samples(&mut samples, &near, (wx - ring, wz - ring), nz);
     }
     let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
     // Each column's slope, over the ring minus its outer block (`None`
-    // there), indexed like `samples`.
+    // there, and in a pad's box), indexed like `samples`.
     let mut slope_cells = vec![None; nx * nz];
     for bx in 1 - ring..ww + ring - 1 {
         for bz in 1 - ring..wd + ring - 1 {
-            slope_cells[(bx + ring) as usize * nz + (bz + ring) as usize] =
-                slopes::slope_for(&at(bx, bz), |dx, dz| at(bx + dx, bz + dz));
+            let i = (bx + ring) as usize * nz + (bz + ring) as usize;
+            if in_box.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            slope_cells[i] = slopes::slope_for(&at(bx, bz), |dx, dz| at(bx + dx, bz + dz));
         }
     }
     let slope_at = |bx: i32, bz: i32| {
@@ -1199,12 +1213,10 @@ fn coarse_from_patch(
     // None: the tile is exactly what it is without a structure source.
     let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, (tree_m + TREE_REACH_BLOCKS).max(cb));
     let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
-    // Pads `c`, the sample of world block column (x, z).
+    // Pads `c`, the sample of world block column (x, z); with whether the column lies in a pad's box.
     let padded = |mut c: ColSample, x: i32, z: i32| {
-        if !near.is_empty() {
-            pad_sample(&mut c, &near, x, z);
-        }
-        c
+        let in_box = !near.is_empty() && pad_sample(&mut c, &near, x, z);
+        (c, in_box)
     };
 
     // Centre (world metres) of cell column (cx, cz).
@@ -1219,7 +1231,7 @@ fn coarse_from_patch(
     let cell_sample = |cx: i32, cz: i32| {
         let (mx, mz) = centre(cx, cz);
         let (x, z) = centre_block(cx, cz);
-        padded(point_sample(patch, &mats, mx, mz), x, z)
+        padded(point_sample(patch, &mats, mx, mz), x, z).0
     };
     let samples: Vec<ColSample> =
         (0..cells).flat_map(|cz| (0..cells).map(move |cx| (cx, cz))).map(|(cx, cz)| cell_sample(cx, cz)).collect();
@@ -1340,8 +1352,9 @@ fn coarse_from_patch(
             );
             let cached = memo.borrow().get(&(x, z)).copied();
             cached.unwrap_or_else(|| {
-                let c = sample(x, z);
-                let slope = slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz)).is_some();
+                // A column in a pad's box is never a slope, as in full generation.
+                let (c, in_box) = sample(x, z);
+                let slope = !in_box && slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz).0).is_some();
                 let g = tree_ground(c, slope);
                 memo.borrow_mut().insert((x, z), g);
                 g
