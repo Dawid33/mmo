@@ -15,6 +15,9 @@ use game::prefab::{placement_bounds, Placement, ResolvedPrefab};
 /// below the column's water top, that column is flooded — its recipe water fills the prefab's air — so
 /// a placer must not choose such a level. Every padded column, box and skirt alike, loses its glacier
 /// ice (and any ice on its water).
+///
+/// A `skirt` over `MAX_PAD_SKIRT` acts as `MAX_PAD_SKIRT` everywhere: read it through
+/// [`Pad::effective_skirt`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pad {
     pub level: i32,
@@ -22,6 +25,13 @@ pub struct Pad {
 }
 
 pub const MAX_PAD_SKIRT: u32 = 16;
+
+impl Pad {
+    /// The skirt as generation uses it: `skirt` clamped to `MAX_PAD_SKIRT`.
+    pub fn effective_skirt(&self) -> u32 {
+        self.skirt.min(MAX_PAD_SKIRT)
+    }
+}
 /// Side of one spatial-index bucket, in world blocks.
 pub const STRUCTURE_BUCKET_BLOCKS: i32 = 64;
 
@@ -38,10 +48,10 @@ impl StructurePlacement {
         placement_bounds(&self.prefab, &self.at)
     }
 
-    /// The x/z box grown by the pad's skirt (0 without a pad): [x0, z0, x1, z1], max exclusive.
+    /// The x/z box grown by the pad's effective skirt (0 without a pad): [x0, z0, x1, z1], max exclusive.
     pub fn reach_xz(&self) -> [i32; 4] {
         let (min, max) = self.bounds();
-        let s = self.pad.map_or(0, |p| p.skirt as i32);
+        let s = self.pad.map_or(0, |p| p.effective_skirt() as i32);
         [min[0] - s, min[2] - s, max[0] + s, max[2] + s]
     }
 }
@@ -83,12 +93,7 @@ pub struct StructureList {
 
 impl StructureList {
     /// `set_hash` = the prefab set's `content_hash()` the placements were drawn from.
-    pub fn new(mut placements: Vec<StructurePlacement>, set_hash: u32) -> Self {
-        for p in &mut placements {
-            if let Some(pad) = &mut p.pad {
-                pad.skirt = pad.skirt.min(MAX_PAD_SKIRT);
-            }
-        }
+    pub fn new(placements: Vec<StructurePlacement>, set_hash: u32) -> Self {
         let b = STRUCTURE_BUCKET_BLOCKS;
         let mut buckets: BTreeMap<[i32; 2], Vec<u32>> = BTreeMap::new();
         let mut h = crc32fast::Hasher::new();
@@ -109,7 +114,7 @@ impl StructureList {
                 Some(pad) => {
                     h.update(&[1]);
                     h.update(&pad.level.to_le_bytes());
-                    h.update(&pad.skirt.to_le_bytes());
+                    h.update(&pad.effective_skirt().to_le_bytes());
                 }
                 None => h.update(&[0]),
             }
@@ -177,7 +182,7 @@ fn box_distance(min: [i32; 3], max: [i32; 3], x: i32, z: i32) -> i64 {
 /// The surface of ground column (x, z) under these placements. A box beats any skirt: the FIRST
 /// placement (in list order) with a pad whose x/z box holds the column decides, `Level { surface:
 /// level, in_box: true }`; only when no box holds it, the FIRST placement whose pad's skirt reaches it
-/// decides: at Chebyshev distance d in 1..=skirt from its box, `surface = level + (natural - level) * d
+/// decides: at Chebyshev distance d in 1..=skirt (its effective skirt) from its box, `surface = level + (natural - level) * d
 /// / (skirt + 1)` (i64 arithmetic, truncating division), `in_box: false`. Otherwise `PadEffect::None`.
 /// A placement without a pad affects nothing.
 pub fn pad_at(placements: &[&StructurePlacement], x: i32, z: i32, natural: i32) -> PadEffect {
@@ -190,7 +195,7 @@ pub fn pad_at(placements: &[&StructurePlacement], x: i32, z: i32, natural: i32) 
     }
     for p in placements {
         let Some(pad) = p.pad else { continue };
-        let skirt = pad.skirt.min(MAX_PAD_SKIRT) as i64;
+        let skirt = pad.effective_skirt() as i64;
         let (min, max) = p.bounds();
         let d = box_distance(min, max, x, z);
         if d <= skirt {

@@ -68,6 +68,7 @@ fn the_index_finds_what_brute_force_finds() {
     }
     let source = StructureList::new(list.clone(), 1);
     assert_eq!(source.len(), 200);
+    let mut found = 0;
     for _ in 0..100 {
         let (x0, z0) = (r.range(-2100, 2100), r.range(-2100, 2100));
         let (x1, z1) = (x0 + r.range(1, 200), z0 + r.range(1, 200));
@@ -76,16 +77,17 @@ fn the_index_finds_what_brute_force_finds() {
             let want: Vec<Placement> = list
                 .iter()
                 .filter(|p| {
-                    let pad = p.pad.map(|q| Pad { skirt: q.skirt.min(MAX_PAD_SKIRT), ..q });
-                    let p = &StructurePlacement { pad, ..(*p).clone() };
                     let [a, b, c, d] = p.reach_xz();
                     a - margin < x1 && c + margin > x0 && b - margin < z1 && d + margin > z0
                 })
                 .map(|p| p.at)
                 .collect();
             assert_eq!(got, want);
+            found += usize::from(!got.is_empty());
         }
     }
+    // 100 rectangles × 3 margins: a quarter of the queries must have found something.
+    assert!(found * 4 >= 300, "only {found} of 300 queries returned a placement");
 }
 
 #[test]
@@ -175,11 +177,15 @@ fn a_box_beats_an_earlier_skirt() {
 fn skirt_is_clamped() {
     let big = boxed(0, 0, 4, 4, Some(Pad { level: 50, skirt: 1000 }));
     let max = boxed(0, 0, 4, 4, Some(Pad { level: 50, skirt: MAX_PAD_SKIRT }));
+    assert_eq!(big.pad.unwrap().effective_skirt(), MAX_PAD_SKIRT);
+    assert_eq!(big.reach_xz(), max.reach_xz());
     let (a, b) = (StructureList::new(vec![big], 0), StructureList::new(vec![max], 0));
     assert_eq!(a.content_hash(), b.content_hash());
     let pa = a.placements_in(-100, -100, 100, 100, 0);
     let pb = b.placements_in(-100, -100, 100, 100, 0);
-    assert_eq!(pa[0].pad, Some(Pad { level: 50, skirt: MAX_PAD_SKIRT }));
+    assert_eq!(pa[0].pad.unwrap().effective_skirt(), MAX_PAD_SKIRT);
+    assert_eq!(b.placements_in(3 + MAX_PAD_SKIRT as i32 + 1, 0, 100, 4, 0).len(), 0);
+    assert_eq!(a.placements_in(3 + MAX_PAD_SKIRT as i32 + 1, 0, 100, 4, 0).len(), 0, "the index uses the clamp");
     let (pa, pb): (Vec<&StructurePlacement>, Vec<&StructurePlacement>) =
         (pa.iter().map(|p| p.as_ref()).collect(), pb.iter().map(|p| p.as_ref()).collect());
     for x in -30..40 {
