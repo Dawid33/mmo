@@ -981,7 +981,7 @@ pub fn run() -> claims::ServerExit {
                     endpoint.clone(),
                     token,
                     claimed.store().clone(),
-                    claimed.fence(),
+                    &claimed.fence(),
                     config,
                 )
                 .unwrap_or_else(|e| {
@@ -994,7 +994,7 @@ pub fn run() -> claims::ServerExit {
                 peer_links = Some(links);
                 registered
             } else {
-                match peer_link::register(claimed.store(), claimed.fence(), ownership.ordinal(), boot, &endpoint, None) {
+                match peer_link::register(claimed.store(), &claimed.fence(), ownership.ordinal(), boot, &endpoint, None) {
                     Ok(registered) => registered,
                     Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
                     Err(e) => fatal(&e.to_string()),

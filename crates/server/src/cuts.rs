@@ -332,7 +332,7 @@ impl CutWriter {
         }
         let generation = self.world.as_ref().expect("world cuts").mine();
         let tick = cut.tick;
-        let reply = self.claims.store().prepare_cut(cut, self.claims.fence().clone(), generation);
+        let reply = self.claims.store().prepare_cut(cut, (*self.claims.fence()).clone(), generation);
         self.part = Some(WorldPart::new(id, tick, Some(reply)));
     }
 

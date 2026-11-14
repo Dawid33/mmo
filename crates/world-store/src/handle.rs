@@ -572,6 +572,45 @@ impl StoreHandle {
         self.ask(|r| Request::ClaimSuperRegions(owner, srs, r))
     }
 
+    /// Claims for `owner` only the super-regions of `srs` that no host holds: absent rows
+    /// (epoch 1) and free ones (owner [`NO_OWNER`], epoch + 1); a row another owner holds is
+    /// left alone, so of two claimers of one free row exactly one wins. One transaction,
+    /// like [`Self::claim_super_regions`]. The fence holds the rows won (possibly none).
+    pub fn claim_free(&self, owner: u32, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+        self.ask(|r| Request::ClaimFree(owner, srs, r))
+    }
+
+    /// [`Self::claim_free`], answered on the receiver.
+    pub fn claim_free_later(
+        &self,
+        owner: u32,
+        srs: Vec<SuperRegion>,
+    ) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
+        self.ask_later(|r| Request::ClaimFree(owner, srs, r))
+    }
+
+    /// Frees the super-regions `owner` holds under `fence` (owner [`NO_OWNER`], epoch + 1:
+    /// `fence` is fenced from then on). One transaction, fenced: `Fenced` (nothing freed)
+    /// unless every row of `fence` is still stored with its owner and epoch; only those rows
+    /// are freed. Refused with `Unsupported` for a fence of another owner, and while this
+    /// handle has an undecided staged cut part (its rows would be freed under it: release
+    /// after [`Self::cut_decided`]). No host calls it on exit; tools and tests do.
+    pub fn release(&self, owner: u32, fence: &Fence) -> Result<(), StoreError> {
+        if fence.owner != owner {
+            return Err(StoreError::Unsupported(format!(
+                "releasing host {owner}'s super-regions with host {}'s fence",
+                fence.owner
+            )));
+        }
+        if let Some(pending) = *self.cuts.pending() {
+            return Err(StoreError::Unsupported(format!(
+                "releasing super-regions while this handle's part of cut {} is staged and undecided",
+                pending.0
+            )));
+        }
+        self.ask(|r| Request::Release(fence.clone(), r))
+    }
+
     /// Claims the coordinator row (its epoch up by one), fencing the coordinator that held it.
     pub fn claim_coordinator(&self) -> Result<CoordinatorFence, StoreError> {
         self.ask(Request::ClaimCoordinator)

@@ -94,7 +94,8 @@ impl ThreadRegionSpawner {
     }
 
     /// Restore never-run regions from the world store.
-    /// Loads are fenced through `store` (shared with the cut writer).
+    /// Loads are fenced through `store` (shared with the cut writer), each under the
+    /// fence current at the load (a host's fence may grow while it runs).
     pub fn with_store(mut self, store: crate::claims::HostClaims) -> Self {
         self.store = Some(store);
         self
@@ -129,7 +130,8 @@ impl RegionSpawner for ThreadRegionSpawner {
                 // region never stalls the manager.
                 let genesis_started = Instant::now();
                 let parked = matches!(seed, RegionSeed::Parked(..) | RegionSeed::Deferred(Some(_)));
-                // Never run in this process: the world store may have it.
+                // Never run in this process: the world store may have it. Read under the
+                // claims' current fence (`HostClaims::load_region`), not one captured at spawn.
                 let loaded = match (&seed, &store) {
                     (RegionSeed::Deferred(None), Some(store)) => store.load_region(id),
                     _ => Ok(None),

@@ -93,6 +93,10 @@ pub(crate) enum Request {
     CommitCut(Box<WorldCut>, Fence, Reply<CutCommitted>),
     ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
     ClaimSuperRegions(u32, Vec<SuperRegion>, Reply<Fence>),
+    /// Claim only the absent or free super-regions of the list.
+    ClaimFree(u32, Vec<SuperRegion>, Reply<Fence>),
+    /// Free the fence's super-regions.
+    Release(Fence, Reply<()>),
     ClaimCoordinator(Reply<CoordinatorFence>),
     SaveCoordinator(Vec<u8>, CoordinatorFence, Reply<()>),
     LoadCoordinator(Reply<Option<Vec<u8>>>),
@@ -428,6 +432,14 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, claim_super_regions(owner, srs, s)))
             }),
+            Request::ClaimFree(owner, srs, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, claim_free(owner, srs, s)))
+            }),
+            Request::Release(fence, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, release(fence)))
+            }),
             Request::ClaimCoordinator(r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, claim_coordinator()))
@@ -539,6 +551,8 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::CommitCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PutTiled(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimSuperRegions(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::ClaimFree(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::Release(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimCoordinator(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SaveCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),

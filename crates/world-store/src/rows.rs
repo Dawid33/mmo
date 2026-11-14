@@ -226,31 +226,25 @@ macro_rules! engine_rows {
                     .ok_or_else(|| StoreError::Corrupt(format!("world.super_region_regions {s}")))
             }
 
-            /// Claims every super-region of `srs` for `owner` in one transaction:
-            /// a new row gets epoch 1, a known one epoch + 1 (whoever held it is
-            /// fenced). Rows are upserted in key order. Callers hold the writer lock.
-            ///
-            /// `opened` is the super-region side this handle read at open (`srs` are of that
-            /// side): the transaction first re-reads it from the world row (Postgres: `FOR
-            /// KEY SHARE`, the row [`set_super_region_regions`] locks first) and refuses with
-            /// [`StoreError::OtherSuperRegionSide`] if `worldctl super-region` changed it since.
-            pub(crate) async fn claim_super_regions(
-                pool: &Pool,
-                owner: u32,
-                srs: Vec<SuperRegion>,
-                opened: u32,
-            ) -> Result<Fence, StoreError> {
-                let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
+            /// Begins a claim's transaction (also [`release`]'s): bounded (Postgres) by
+            /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] — a prepared cut part holds its host's rows `FOR
+            /// SHARE` until its cut is decided; one nobody decides would hold the claim for ever.
+            async fn begin_claim(pool: &Pool) -> Result<Tx, StoreError> {
                 let mut tx = pool.begin().await?;
-                // Bounded (Postgres): a prepared cut part holds its host's rows `FOR SHARE`
-                // until its cut is decided; one nobody decides would hold the claim for ever.
                 cut_lock_timeout(&mut *tx, crate::CLAIM_LOCK_TIMEOUT_MS).await?;
-                // Postgres `FOR KEY SHARE`: waits only for `set_super_region_regions`'s `FOR
-                // UPDATE`, not for a cut's ordinary update of the world row.
+                Ok(tx)
+            }
+
+            /// Re-reads the super-region side in a claim's transaction (Postgres: `FOR KEY
+            /// SHARE`, the row [`set_super_region_regions`] locks first — it waits only for that
+            /// `FOR UPDATE`, not for a cut's ordinary update of the world row) and refuses with
+            /// [`StoreError::OtherSuperRegionSide`] if it is not `opened`, the side the handle read
+            /// at open (`worldctl super-region` changed it since).
+            async fn check_side(tx: &mut Tx, opened: u32) -> Result<(), StoreError> {
                 let key_share = if $share_lock.is_empty() { "" } else { " FOR KEY SHARE" };
                 let sql = format!("SELECT super_region_regions FROM world WHERE id = 1{key_share}");
                 let stored: i64 = sqlx::query(&sql)
-                    .fetch_optional(&mut *tx)
+                    .fetch_optional(&mut **tx)
                     .await?
                     .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
                     .try_get(0)?;
@@ -258,6 +252,43 @@ macro_rules! engine_rows {
                     let stored = u32::try_from(stored).unwrap_or(0);
                     return Err(StoreError::OtherSuperRegionSide { stored, opened });
                 }
+                Ok(())
+            }
+
+            /// A claim's (or release's) statement error: a `lock_timeout` (Postgres `55P03`)
+            /// ends the transaction and names the prepared transactions of this world that may
+            /// hold the rows ([`crate::open::claim_timeout_message`]).
+            async fn claim_error(pool: &Pool, tx: Tx, e: sqlx::Error) -> StoreError {
+                match &e {
+                    sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => {
+                        drop(tx);
+                        let gids: Vec<String> = sqlx::query_scalar(
+                            "SELECT gid FROM pg_prepared_xacts WHERE database = current_database() ORDER BY gid",
+                        )
+                        .fetch_all(pool)
+                        .await
+                        .unwrap_or_default();
+                        StoreError::Backend(crate::open::claim_timeout_message(crate::CLAIM_LOCK_TIMEOUT_MS, &gids))
+                    }
+                    _ => e.into(),
+                }
+            }
+
+            /// Claims every super-region of `srs` for `owner` in one transaction:
+            /// a new row gets epoch 1, a known one epoch + 1 (whoever held it is
+            /// fenced). Rows are upserted in key order. Callers hold the writer lock.
+            ///
+            /// `opened` is the super-region side this handle read at open (`srs` are of that
+            /// side): see [`check_side`].
+            pub(crate) async fn claim_super_regions(
+                pool: &Pool,
+                owner: u32,
+                srs: Vec<SuperRegion>,
+                opened: u32,
+            ) -> Result<Fence, StoreError> {
+                let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
+                let mut tx = begin_claim(pool).await?;
+                check_side(&mut tx, opened).await?;
                 let mut epochs = BTreeMap::new();
                 for (sx, sz) in srs {
                     let row = sqlx::query(
@@ -271,23 +302,92 @@ macro_rules! engine_rows {
                     .fetch_one(&mut *tx)
                     .await;
                     let row = match row {
-                        Err(sqlx::Error::Database(d)) if d.code().as_deref() == Some("55P03") => {
-                            drop(tx);
-                            let gids: Vec<String> = sqlx::query_scalar(
-                                "SELECT gid FROM pg_prepared_xacts WHERE database = current_database() ORDER BY gid",
-                            )
-                            .fetch_all(pool)
-                            .await
-                            .unwrap_or_default();
-                            return Err(StoreError::Backend(crate::open::claim_timeout_message(crate::CLAIM_LOCK_TIMEOUT_MS, &gids)));
-                        }
-                        r => r?,
+                        Ok(row) => row,
+                        Err(e) => return Err(claim_error(pool, tx, e).await),
                     };
                     let epoch: i64 = row.try_get(0)?;
                     epochs.insert((sx, sz), u(epoch));
                 }
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
+            }
+
+            /// Claims for `owner` the super-regions of `srs` that are absent or free (owner
+            /// [`crate::NO_OWNER`]), in one transaction like [`claim_super_regions`] (same
+            /// `lock_timeout`, same side check, rows in key order): a new row gets epoch 1, a free
+            /// one epoch + 1; a row another owner holds is left alone. Fenced first-writer-wins: the
+            /// upsert's `WHERE owner = -1` is evaluated on the row's newest version (Postgres
+            /// re-checks it after waiting for another claimer's row lock), so of two claimers
+            /// exactly one takes a row. The fence holds the rows won (possibly none). Callers
+            /// hold the writer lock.
+            pub(crate) async fn claim_free(
+                pool: &Pool,
+                owner: u32,
+                srs: Vec<SuperRegion>,
+                opened: u32,
+            ) -> Result<Fence, StoreError> {
+                let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
+                let mut tx = begin_claim(pool).await?;
+                check_side(&mut tx, opened).await?;
+                let sql = format!(
+                    "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
+                     ON CONFLICT (sx, sz) DO UPDATE SET owner = excluded.owner, epoch = super_regions.epoch + 1 \
+                     WHERE super_regions.owner = {} \
+                     RETURNING epoch",
+                    crate::NO_OWNER
+                );
+                let mut epochs = BTreeMap::new();
+                for (sx, sz) in srs {
+                    let row = sqlx::query(&sql)
+                        .bind(i64::from(sx))
+                        .bind(i64::from(sz))
+                        .bind(i64::from(owner))
+                        .fetch_optional(&mut *tx)
+                        .await;
+                    let row = match row {
+                        Ok(row) => row,
+                        Err(e) => return Err(claim_error(pool, tx, e).await),
+                    };
+                    if let Some(row) = row {
+                        let epoch: i64 = row.try_get(0)?;
+                        epochs.insert((sx, sz), u(epoch));
+                    }
+                }
+                tx.commit().await?;
+                Ok(Fence { owner, epochs, all_hosts: false })
+            }
+
+            /// Frees every super-region of `fence` (owner [`crate::NO_OWNER`], epoch + 1, so
+            /// `fence` and anything claimed before it is fenced) in one transaction: first
+            /// [`check_fence`] over the fence's own rows (refused with `Fenced` unless they are
+            /// all still `fence`'s), then one update per row in key order. Only the fence's rows
+            /// are freed: a release never skips the fence. `lock_timeout`
+            /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] like a claim. Callers hold the writer lock.
+            pub(crate) async fn release(pool: &Pool, fence: Fence) -> Result<(), StoreError> {
+                let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
+                let mut tx = begin_claim(pool).await?;
+                // `FOR SHARE` never waits for a staged part (it holds its rows `FOR SHARE` too);
+                // the updates below do.
+                check_fence(&mut *tx, &fence, &srs).await?;
+                for (sx, sz) in srs {
+                    let done = sqlx::query(&format!(
+                        "UPDATE super_regions SET owner = {}, epoch = epoch + 1 WHERE sx = $1 AND sz = $2 AND owner = $3",
+                        crate::NO_OWNER
+                    ))
+                    .bind(i64::from(sx))
+                    .bind(i64::from(sz))
+                    .bind(i64::from(fence.owner))
+                    .execute(&mut *tx)
+                    .await;
+                    match done {
+                        // Held `FOR SHARE` since the check (Postgres), under the writer lock (SQLite).
+                        Ok(d) if d.rows_affected() == 1 => {}
+                        Ok(_) => return Err(StoreError::Fenced { sr: Some((sx, sz)) }),
+                        Err(e) => return Err(claim_error(pool, tx, e).await),
+                    }
+                }
+                tx.commit().await?;
+                Ok(())
             }
 
             /// Locks (Postgres: `FOR SHARE`) and checks every super-region of

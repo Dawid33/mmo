@@ -1,13 +1,14 @@
 //! The server's owner-epoch claims: at start a process claims the
 //! super-regions it owns ([`HostClaims::claim`]) and keeps that
-//! [`Fence`] for its life. The world store checks it on every region load and
-//! cut commit; once another process claims one of those super-regions the
+//! [`Fence`]; a host may later grow it ([`HostClaims::add`], rows won with
+//! `claim_free`) or swap it for what it holds now ([`HostClaims::replace`]). The
+//! world store checks the current fence on every region load and cut commit; once another process claims one of those super-regions the
 //! store answers [`StoreError::Fenced`], and the process is fenced for good
 //! ([`Fenced`]): it stops ticking, refuses its clients and exits with
 //! [`EXIT_FENCED`] without a last save.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use game::{Ownership, RegionCoords, StoredRegion, WorldCut};
 use world_store::{Fence, StoreError, StoreHandle, SuperRegion};
@@ -117,11 +118,13 @@ impl WorldGeneration {
 }
 
 /// The world store with the process's claimed fence. Cheap to clone; every
-/// clone shares the fence and the [`Fenced`] flag.
+/// clone shares the fence (and its changes) and the [`Fenced`] flag.
 #[derive(Clone)]
 pub struct HostClaims {
     store: StoreHandle,
-    fence: Arc<Fence>,
+    /// The current fence: read whole by every load and commit, swapped whole by
+    /// [`HostClaims::add`] / [`HostClaims::replace`].
+    fence: Arc<RwLock<Arc<Fence>>>,
     fenced: Fenced,
 }
 
@@ -145,18 +148,23 @@ impl HostClaims {
             ));
         }
         let srs: Vec<SuperRegion> = ownership.claim_set(extent, stored).into_iter().collect();
-        let mut claims = HostClaims::claim_srs(store, ownership.ordinal(), srs)
+        let mut fence = store
+            .claim_super_regions(ownership.ordinal(), srs)
             .map_err(|e| format!("claiming the super-regions: {e}"))?;
         // All-in-one runs every host's regions: it adopts (and its cuts replace) every
         // host's in-flight rows.
-        Arc::make_mut(&mut claims.fence).all_hosts = matches!(ownership, Ownership::AllInOne);
-        Ok(claims)
+        fence.all_hosts = matches!(ownership, Ownership::AllInOne);
+        Ok(HostClaims::with_fence(store, fence))
     }
 
     /// Claims exactly `srs` as `owner`.
     pub fn claim_srs(store: StoreHandle, owner: u32, srs: Vec<SuperRegion>) -> Result<HostClaims, StoreError> {
         let fence = store.claim_super_regions(owner, srs)?;
-        Ok(HostClaims { store, fence: Arc::new(fence), fenced: Fenced::default() })
+        Ok(HostClaims::with_fence(store, fence))
+    }
+
+    fn with_fence(store: StoreHandle, fence: Fence) -> HostClaims {
+        HostClaims { store, fence: Arc::new(RwLock::new(Arc::new(fence))), fenced: Fenced::default() }
     }
 
     /// Claims, as owner 0, the super-regions of every region within `radius`
@@ -176,8 +184,30 @@ impl HostClaims {
         &self.store
     }
 
-    pub fn fence(&self) -> &Fence {
-        &self.fence
+    /// The current fence (a snapshot: a later [`Self::add`] / [`Self::replace`] does not
+    /// change it).
+    pub fn fence(&self) -> Arc<Fence> {
+        self.fence.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Grows the fence by `more` (rows this host won since, e.g. with `claim_free`): its
+    /// epochs are merged in, a super-region in both taking `more`'s. The next load or
+    /// commit is checked against them too (fenced anywhere = fenced).
+    pub fn add(&self, more: Fence) {
+        let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
+        debug_assert_eq!(more.owner, current.owner, "a fence grows only by its own owner's rows");
+        let mut grown = (**current).clone();
+        grown.epochs.extend(more.epochs);
+        *current = Arc::new(grown);
+    }
+
+    /// Swaps the fence for `fence` (what this host holds now, e.g. `owned_by`). The
+    /// process's `all_hosts` is kept: it is how the process runs, not a stored row.
+    pub fn replace(&self, mut fence: Fence) {
+        let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
+        debug_assert_eq!(fence.owner, current.owner, "a fence is replaced only by its own owner's");
+        fence.all_hosts = current.all_hosts;
+        *current = Arc::new(fence);
     }
 
     pub fn fenced(&self) -> &Fenced {
@@ -191,7 +221,7 @@ impl HostClaims {
     /// the process is now fenced by `error`.
     pub fn note_refusal(&self, error: &StoreError) -> bool {
         match error {
-            StoreError::Fenced { sr: Some(sr) } if !self.fence.epochs.contains_key(sr) => {
+            StoreError::Fenced { sr: Some(sr) } if !self.fence().epochs.contains_key(sr) => {
                 log::error!("[server] a write touched super-region {sr:?}, which this host never claimed; refused (not a takeover)");
                 false
             }
@@ -199,22 +229,22 @@ impl HostClaims {
         }
     }
 
-    /// Loads `rc` from the store under the fence; a fence refusal also sets
+    /// Loads `rc` from the store under the current fence; a fence refusal also sets
     /// the [`Fenced`] flag.
     pub fn load_region(&self, rc: RegionCoords) -> Result<Option<StoredRegion>, StoreError> {
-        let loaded = self.store.load_region(rc, &self.fence);
+        let loaded = self.store.load_region(rc, &self.fence());
         if let Err(e) = &loaded {
             self.note_refusal(e);
         }
         loaded
     }
 
-    /// Queues `cut` for commit under the fence; the answer arrives on the receiver.
+    /// Queues `cut` for commit under the current fence; the answer arrives on the receiver.
     pub fn commit_cut(
         &self,
         cut: WorldCut,
     ) -> crossbeam::channel::Receiver<Result<world_store::CutCommitted, StoreError>> {
-        self.store.commit_cut(cut, (*self.fence).clone())
+        self.store.commit_cut(cut, (*self.fence()).clone())
     }
 }
 
@@ -257,6 +287,41 @@ mod tests {
         let share = HostClaims::claim(store.clone(), mine, Some(extent), s).unwrap();
         assert_eq!(share.fence().owner, 2);
         assert!(share.fence().epochs.keys().all(|sr| game::rendezvous_owner(*sr, hosts) == 2));
+        store.shutdown();
+    }
+
+    /// A cut that writes nothing but the world tick: fenced by every super-region of its fence.
+    fn empty_cut(id: u64) -> WorldCut {
+        WorldCut {
+            id: game::CutId(id),
+            host: 0,
+            tick: 100 * id,
+            regions: vec![],
+            in_flight: vec![],
+            players: vec![],
+            history: None,
+        }
+    }
+
+    #[test]
+    fn added_super_regions_are_checked_by_the_next_commit() {
+        let store = memory_store();
+        let (x, y) = ((0, 0), (0, -1));
+        let claims = HostClaims::claim_srs(store.clone(), 0, vec![x]).unwrap();
+        claims.add(store.claim_free(0, vec![y]).unwrap());
+        assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![y, x]);
+        claims.commit_cut(empty_cut(1)).recv().unwrap().expect("both rows are held");
+        // Another process takes the added row: the next commit is fenced on it, and that
+        // refusal concerns this host (the row is in its current fence).
+        store.claim_super_regions(1, vec![y]).unwrap();
+        let err = claims.commit_cut(empty_cut(2)).recv().unwrap().unwrap_err();
+        assert_eq!(err, StoreError::Fenced { sr: Some(y) });
+        assert!(claims.clone().note_refusal(&err), "a takeover of an added row fences the host");
+        assert!(claims.fenced().is_set());
+        // Replaced by what it holds now, the fence commits again.
+        claims.replace(store.owned_by(0).unwrap());
+        assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![x]);
+        claims.commit_cut(empty_cut(3)).recv().unwrap().expect("x alone is still held");
         store.shutdown();
     }
 
