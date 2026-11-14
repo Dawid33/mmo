@@ -121,8 +121,7 @@ fn greedy_boxes() {
                     assert!(got.is_none());
                 } else {
                     solid += 1;
-                    let want = s.name.strip_prefix("minecraft:").unwrap();
-                    assert_eq!(got.map(|g| g.as_str()), Some(want).map(|w| if w == "stone_bricks" { "stone_bricks" } else { w }));
+                    assert_eq!(got.map(|g| g.as_str()), Some(s.name.strip_prefix("minecraft:").unwrap()));
                 }
             }
         }
@@ -253,4 +252,107 @@ fn deterministic() {
     let a = game::prefab::prefab_to_bin(&convert(&v, t, &opts(AirMode::Auto)).unwrap().0);
     let b = game::prefab::prefab_to_bin(&convert(&v, t, &opts(AirMode::Auto)).unwrap().0);
     assert_eq!(a, b);
+}
+
+/// Every cell of the trimmed box is in at most one of {box, shaped, carve box}; solids and shaped cells in
+/// exactly one; no carve box holds a solid, shaped or keep cell.
+#[test]
+fn boxes_shaped_and_carve_partition_the_cells() {
+    use mc_import::{classify, Class};
+    let t = Table::builtin();
+    let names = [
+        AIR, AIR, AIR, AIR, BRICK, "minecraft:oak_planks", "minecraft:glass", "minecraft:barrier",
+        "minecraft:oak_stairs[facing=north,half=bottom,shape=straight]", "minecraft:oak_door[facing=east,half=lower]",
+    ];
+    let mut seed = 777u32;
+    let v = vol([12, 12, 12], |_, _, _| {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        names[(seed >> 16) as usize % names.len()].into()
+    });
+    for mode in [AirMode::Auto, AirMode::Carve] {
+        let (f, _) = convert(&v, t, &opts(mode)).unwrap();
+        let src = f.meta.import.as_ref().unwrap().source_box.unwrap().0;
+        let sz = f.size.map(|n| n as usize);
+        let idx = |c: [i32; 3]| c[0] as usize + c[2] as usize * sz[0] + c[1] as usize * sz[0] * sz[2];
+        let mut boxed = vec![0u8; sz[0] * sz[1] * sz[2]];
+        let mut shaped = boxed.clone();
+        let mut carved = boxed.clone();
+        let each = |min: [i32; 3], size: [u32; 3], f: &mut dyn FnMut([i32; 3])| {
+            for z in 0..size[2] as i32 {
+                for y in 0..size[1] as i32 {
+                    for x in 0..size[0] as i32 {
+                        f([min[0] + x, min[1] + y, min[2] + z]);
+                    }
+                }
+            }
+        };
+        for b in &f.boxes {
+            each(b.min, b.size, &mut |c| boxed[idx(c)] += 1);
+        }
+        for c in &f.carve {
+            each(c.min, c.size, &mut |p| carved[idx(p)] += 1);
+        }
+        for s in &f.shaped {
+            shaped[idx(s.at)] += 1;
+        }
+        for z in 0..sz[2] as i32 {
+            for y in 0..sz[1] as i32 {
+                for x in 0..sz[0] as i32 {
+                    let i = idx([x, y, z]);
+                    let state = v.at((src[0] + x) as u32, (src[1] + y) as u32, (src[2] + z) as u32);
+                    let class = classify(state, t).class;
+                    assert!(boxed[i] + shaped[i] + carved[i] <= 1, "{mode:?}: cell {x},{y},{z} claimed twice");
+                    match class {
+                        Class::Block { .. } => assert_eq!((boxed[i], shaped[i], carved[i]), (1, 0, 0)),
+                        Class::Shaped { .. } => assert_eq!((boxed[i], shaped[i], carved[i]), (0, 1, 0)),
+                        Class::Keep => assert_eq!((boxed[i], shaped[i], carved[i]), (0, 0, 0)),
+                        Class::Air | Class::Marker { solid: None, .. } | Class::Dropped { .. } => {
+                            assert_eq!((boxed[i], shaped[i]), (0, 0));
+                            if mode == AirMode::Carve {
+                                assert_eq!(carved[i], 1, "Carve mode carves all air");
+                            }
+                        }
+                        Class::Marker { .. } => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn sign_entity(pos: [i32; 3], lines: [&str; 4]) -> BlockEntity {
+    let msgs = Tag::List(lines.iter().map(|l| Tag::String(l.to_string())).collect());
+    let front = Tag::Compound([("messages".to_string(), msgs)].into_iter().collect());
+    BlockEntity {
+        pos,
+        id: "minecraft:sign".into(),
+        nbt: Tag::Compound([("front_text".to_string(), front)].into_iter().collect()),
+    }
+}
+
+#[test]
+fn wall_and_hanging_signs_carry_text() {
+    let t = Table::builtin();
+    let states = ["minecraft:oak_wall_sign[facing=north]", "minecraft:oak_hanging_sign[rotation=0]", BRICK];
+    let mut v = vol([3, 1, 1], |x, _, _| states[x as usize].into());
+    v.block_entities = vec![
+        sign_entity([0, 0, 0], [r#"{"text":"Wall"}"#, r#""""#, r#""""#, r#""""#]),
+        sign_entity([1, 0, 0], [r#"{"text":"","extra":["Hang"]}"#, r#"["ing"]"#, r#""""#, r#""""#]),
+    ];
+    let (f, r) = convert(&v, t, &opts(AirMode::Auto)).unwrap();
+    let texts: Vec<_> = f.markers.iter().map(|m| (m.kind.as_str(), m.props.get("text").cloned())).collect();
+    assert_eq!(texts, vec![("sign", Some("Wall".to_string())), ("sign", Some("Hang ing".to_string()))]);
+    assert_eq!(r.signs_unparsed, 0);
+}
+
+#[test]
+fn unparsed_sign_lines_are_counted() {
+    let t = Table::builtin();
+    let mut v = vol([2, 1, 1], |x, _, _| if x == 0 { BRICK.into() } else { "minecraft:oak_sign[rotation=0]".into() });
+    // Empty forms are fine; `{{` and a number are not.
+    v.block_entities = vec![sign_entity([1, 0, 0], [r#"{"text":""}"#, "{}", "{{", "7"])];
+    let (f, r) = convert(&v, t, &opts(AirMode::Auto)).unwrap();
+    assert!(!f.markers[0].props.contains_key("text"));
+    assert_eq!(r.signs_unparsed, 2);
+    assert!(r.to_text("x").contains("unparsed"));
 }

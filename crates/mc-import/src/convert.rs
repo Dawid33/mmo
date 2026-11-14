@@ -223,6 +223,7 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
     }
     let t = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let tcells = t[0] * t[1] * t[2];
+    debug_assert!(tcells <= u32::MAX as usize, "cell indices are narrowed to u32 for the flood fill queue");
 
     // Our palette, in order of first use; the merge code per palette entry.
     let mut palette: Vec<String> = Vec::new();
@@ -345,8 +346,12 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
                         let mut props = info.props.clone();
                         if info.kind == "sign" {
                             let pos = [(lo[0] + x) as i32, (lo[1] + y) as i32, (lo[2] + z) as i32];
-                            if let Some(text) = entities.get(&pos).and_then(|e| sign_text(&e.nbt)) {
-                                props.insert("text".into(), text);
+                            if let Some(e) = entities.get(&pos) {
+                                let (text, unparsed) = sign_lines(&e.nbt);
+                                report.signs_unparsed += unparsed;
+                                if let Some(text) = text {
+                                    props.insert("text".into(), text);
+                                }
                             }
                         }
                         *report.markers.entry(info.kind.clone()).or_insert(0) += 1;
@@ -436,28 +441,32 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
 
 /// A sign's plain text: `front_text.messages` (1.20+) or `Text1..Text4`; non-empty lines joined by a space.
 pub(crate) fn sign_text(nbt: &Tag) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
-    if let Some(msgs) = nbt.get("front_text").and_then(|f| f.get("messages")).and_then(Tag::as_list) {
-        lines.extend(msgs.iter().take(4).filter_map(Tag::as_str).filter_map(json_text));
-    } else {
-        for k in ["Text1", "Text2", "Text3", "Text4"] {
-            lines.extend(nbt.get(k).and_then(Tag::as_str).and_then(json_text));
-        }
-    }
-    lines.retain(|l| !l.is_empty());
-    (!lines.is_empty()).then(|| lines.join(" "))
+    sign_lines(nbt).0
 }
 
-/// The plain text of a JSON text component: a bare string, or an object's top-level `"text"` string.
-/// Anything else (garbage included) yields `None`.
+/// The sign's text, and how many of its lines were non-empty yet unreadable.
+fn sign_lines(nbt: &Tag) -> (Option<String>, u64) {
+    let raw: Vec<&str> = match nbt.get("front_text").and_then(|f| f.get("messages")).and_then(Tag::as_list) {
+        Some(msgs) => msgs.iter().take(4).filter_map(Tag::as_str).collect(),
+        None => ["Text1", "Text2", "Text3", "Text4"].iter().filter_map(|k| nbt.get(k).and_then(Tag::as_str)).collect(),
+    };
+    let (mut lines, mut unparsed) = (Vec::new(), 0);
+    for r in raw {
+        match json_text(r) {
+            Some(t) if !t.is_empty() => lines.push(t),
+            Some(_) => {}
+            None if !r.trim().is_empty() => unparsed += 1,
+            None => {}
+        }
+    }
+    ((!lines.is_empty()).then(|| lines.join(" ")), unparsed)
+}
+
+/// The plain text of a JSON text component: a string; an object's `text` followed by the text of each
+/// `extra` element; an array's elements concatenated. Anything else (garbage included) yields `None`.
 pub fn json_text(src: &str) -> Option<String> {
     let mut p = Json { b: src.as_bytes(), i: 0 };
-    p.ws();
-    let out = match p.peek()? {
-        b'"' => p.string()?,
-        b'{' => p.object_text()?,
-        _ => return None,
-    };
+    let out = p.component(0)?;
     p.ws();
     (p.i == p.b.len()).then_some(out)
 }
@@ -483,6 +492,9 @@ impl Json<'_> {
     }
     fn hex4(&mut self) -> Option<u32> {
         let s = self.b.get(self.i..self.i + 4)?;
+        if !s.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
         let v = u32::from_str_radix(std::str::from_utf8(s).ok()?, 16).ok()?;
         self.i += 4;
         Some(v)
@@ -510,14 +522,20 @@ impl Json<'_> {
                         b't' => '\t',
                         b'u' => {
                             let hi = self.hex4()?;
+                            let mut ch = char::from_u32(hi).unwrap_or('\u{fffd}');
                             if (0xD800..0xDC00).contains(&hi) && self.b.get(self.i..self.i + 2) == Some(b"\\u") {
+                                // Combine only with a following low surrogate; else the high one stays lone.
+                                let save = self.i;
                                 self.i += 2;
-                                let lo = self.hex4()?;
-                                char::from_u32(0x10000 + ((hi - 0xD800) << 10) + lo.wrapping_sub(0xDC00))
-                                    .unwrap_or('\u{fffd}')
-                            } else {
-                                char::from_u32(hi).unwrap_or('\u{fffd}')
+                                match self.hex4() {
+                                    Some(lo) if (0xDC00..0xE000).contains(&lo) => {
+                                        ch = char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))
+                                            .unwrap_or('\u{fffd}');
+                                    }
+                                    _ => self.i = save,
+                                }
                             }
+                            ch
                         }
                         _ => return None,
                     };
@@ -529,31 +547,79 @@ impl Json<'_> {
             }
         }
     }
-    /// An object; the value of its top-level `"text"` when that is a string, else an empty string.
-    fn object_text(&mut self) -> Option<String> {
-        self.eat(b'{')?;
-        let mut text = String::new();
+    /// The plain text of a text component (see [`json_text`]).
+    fn component(&mut self, depth: usize) -> Option<String> {
+        if depth > JSON_MAX_DEPTH {
+            return None;
+        }
         self.ws();
-        if self.eat(b'}').is_some() {
-            return Some(text);
+        match self.peek()? {
+            b'"' => self.string(),
+            b'[' => {
+                let mut out = String::new();
+                self.array(depth, |p| {
+                    out.push_str(&p.component(depth + 1)?);
+                    Some(())
+                })?;
+                Some(out)
+            }
+            b'{' => {
+                self.i += 1;
+                let (mut text, mut extra) = (String::new(), String::new());
+                self.ws();
+                if self.eat(b'}').is_some() {
+                    return Some(text);
+                }
+                loop {
+                    self.ws();
+                    let key = self.string()?;
+                    self.ws();
+                    self.eat(b':')?;
+                    self.ws();
+                    match (key.as_str(), self.peek()?) {
+                        ("text", b'"') => text = self.string()?,
+                        ("extra", b'[') => {
+                            extra.clear();
+                            self.array(depth, |p| {
+                                extra.push_str(&p.component(depth + 1)?);
+                                Some(())
+                            })?;
+                        }
+                        _ => self.skip(depth + 1)?,
+                    }
+                    self.ws();
+                    match self.peek()? {
+                        b',' => self.i += 1,
+                        b'}' => {
+                            self.i += 1;
+                            text.push_str(&extra);
+                            return Some(text);
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+    /// Walks a JSON array (at its `[`), calling `item` with the parser at each element.
+    fn array(&mut self, depth: usize, mut item: impl FnMut(&mut Self) -> Option<()>) -> Option<()> {
+        if depth > JSON_MAX_DEPTH {
+            return None;
+        }
+        self.eat(b'[')?;
+        self.ws();
+        if self.eat(b']').is_some() {
+            return Some(());
         }
         loop {
-            self.ws();
-            let key = self.string()?;
-            self.ws();
-            self.eat(b':')?;
-            self.ws();
-            if key == "text" && self.peek() == Some(b'"') {
-                text = self.string()?;
-            } else {
-                self.skip(0)?;
-            }
+            item(self)?;
             self.ws();
             match self.peek()? {
                 b',' => self.i += 1,
-                b'}' => {
+                b']' => {
                     self.i += 1;
-                    return Some(text);
+                    return Some(());
                 }
                 _ => return None,
             }
@@ -615,9 +681,32 @@ mod tests {
         assert_eq!(json_text(r#"{"text":""}"#).as_deref(), Some(""));
         assert_eq!(json_text(r#""""#).as_deref(), Some(""));
         assert_eq!(json_text(r#"{"text":"a \"b\""}"#).as_deref(), Some("a \"b\""));
-        assert_eq!(json_text(r#"{"extra":[{"text":"x"}],"bold":true,"text":"Hié"}"#).as_deref(), Some("Hié"));
+        assert_eq!(json_text(r#"{"extra":[{"text":"x"}],"bold":true,"text":"Hié"}"#).as_deref(), Some("Hiéx"));
         for bad in ["", "{", "}{", "\"abc", "{\"text\":", "[1]", "nul", "{\"a\":[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]}", "\u{0}"] {
             assert_eq!(json_text(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn surrogates_and_escapes() {
+        assert_eq!(json_text(r#""\ud800\u0000""#).as_deref(), Some("\u{fffd}\0"));
+        assert_eq!(json_text(r#""😀""#).as_deref(), Some("😀"));
+        assert_eq!(json_text(r#""\ude00""#).as_deref(), Some("\u{fffd}"));
+        assert_eq!(json_text(r#""\ud800""#).as_deref(), Some("\u{fffd}"));
+        assert_eq!(json_text(r#""\u+123""#), None);
+        assert_eq!(json_text(r#""\u-123""#), None);
+    }
+
+    #[test]
+    fn components_with_extra_and_arrays() {
+        assert_eq!(json_text(r#"{"text":"","extra":["Zeus"]}"#).as_deref(), Some("Zeus"));
+        assert_eq!(json_text(r#"{"extra":[{"text":"Ze"},{"text":"us"}],"text":""}"#).as_deref(), Some("Zeus"));
+        assert_eq!(json_text(r#"["Zeus"]"#).as_deref(), Some("Zeus"));
+        assert_eq!(json_text(r#"["Ze",{"text":"u","extra":["s"]}]"#).as_deref(), Some("Zeus"));
+        assert_eq!(json_text(r#"{"text":"A ","extra":[{"text":"B","extra":[" C"]},"!"]}"#).as_deref(), Some("A B C!"));
+        assert_eq!(json_text(r#"{"color":"red"}"#).as_deref(), Some(""));
+        assert_eq!(json_text("{}").as_deref(), Some(""));
+        assert_eq!(json_text("[]").as_deref(), Some(""));
+        assert_eq!(json_text("42"), None);
     }
 }

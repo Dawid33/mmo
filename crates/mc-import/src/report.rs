@@ -20,6 +20,8 @@ pub struct Report {
     pub dropped: BTreeMap<String, u64>,
     /// Marker kind -> count.
     pub markers: BTreeMap<String, u64>,
+    /// Sign lines that held text this importer could not read (not counting empty lines).
+    pub signs_unparsed: u64,
 }
 
 impl Report {
@@ -36,6 +38,9 @@ impl Report {
                 let _ = writeln!(out, "  {k}: {n}");
             }
         };
+        if self.signs_unparsed > 0 {
+            let _ = writeln!(out, "sign lines unparsed (text lost): {}", self.signs_unparsed);
+        }
         section(&mut out, "markers", &self.markers);
         section(&mut out, "unmapped (placed as the fallback block)", &self.unmapped);
         section(&mut out, "dropped (became air)", &self.dropped);
