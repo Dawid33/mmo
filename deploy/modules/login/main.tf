@@ -6,14 +6,15 @@
 #
 # The binary is NOT in the image: the pod runs stock debian over the release
 # `login` binary found on the node at var.bin_host_path (a read-only hostPath),
-# put there by `just orion-login-push`. The first apply before the first push
-# crash-loops by design (a missing directory keeps the pod Pending with an event;
-# a missing binary is a StartError naming the path); it starts once pushed.
+# put there by `just orion-login-push`. Push the binary BEFORE the first apply:
+# the Deployment waits for its rollout, so without the binary (a missing directory
+# keeps the pod Pending, a missing binary is a StartError naming the path) the
+# apply blocks about 10 minutes, fails and taints the Deployment.
 #
 # Two replicas (var.replicas) protect against a deploy or a crashed pod: with
 # max_unavailable = 0 a new pod must be Ready (its health check answering, which
-# needs the database and Keycloak's discovery) before an old one stops, and a
-# PodDisruptionBudget keeps one up during drains. They do NOT protect against the
+# needs the database and Keycloak's discovery at start; afterwards /healthz is
+# static) before an old one stops, and a PodDisruptionBudget keeps one up during drains. They do NOT protect against the
 # node going down or the single PostgreSQL going down: both stay single points.
 #
 # Public: only /v1/ and /.well-known/jwks.json. NOT public: the health check and
@@ -21,6 +22,9 @@
 #
 # The signing key is generated here (ED25519, PKCS#8 PEM) and lives in the state:
 # every *.pem in the mounted directory is published, the last by file name signs.
+# Rotation: add a second key as 0002.pem in a later change; never replace
+# tls_private_key.signing, which invalidates the join tickets signed with the old
+# key (they live for seconds; refresh tokens are database rows, not affected).
 
 locals {
   ns     = kubernetes_namespace_v1.login.metadata[0].name

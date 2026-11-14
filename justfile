@@ -1798,6 +1798,32 @@ orion-keycloak-admin:
 orion-keycloak-admin-password:
     @{{tofu}} -chdir=deploy/envs/orion/keycloak output -raw admin_password; echo
 
+# The login service on orion (deploy/modules/login, root deploy/envs/orion/login): the pod runs
+# stock debian over the release `login` binary shipped to /srv/mmo/bin on the box.
+# Release build of the login binary (what orion-login-push ships).
+orion-login-build:
+    {{cap}} {{cargo}} build --release -p login --bin login
+
+# Ship the binary to the box and rolling-restart the login Deployment
+# (scripts/orion_login_push.sh; before the login root exists it only ships).
+orion-login-push: orion-login-build
+    DEPLOY_HOST={{deploy_host}} KUBE_CONTEXT={{orion_context}} scripts/orion_login_push.sh
+
+# The login operator commands inside a login pod, where the database is,
+# e.g. `just orion-login world list`, `just orion-login account issue-refresh <email>`.
+[positional-arguments]
+orion-login *args:
+    kubectl --context {{orion_context}} -n login exec deploy/login -- /srv/mmo/bin/login "$@"
+
+# Follow the login service's log.
+orion-login-logs:
+    kubectl --context {{orion_context}} -n login logs -f deploy/login --tail 200
+
+# Put the login root's service token on the box (/srv/mmo/secrets/service-token, mode 600) for the
+# game host. The token travels through the pipe only.
+orion-login-token-push:
+    {{tofu}} -chdir=deploy/envs/orion/login output -raw service_token | ssh -o BatchMode=yes {{deploy_host}} 'umask 077; mkdir -p /srv/mmo/secrets; cat > /srv/mmo/secrets/service-token.new; mv -f /srv/mmo/secrets/service-token.new /srv/mmo/secrets/service-token'
+
 # Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
 # `smoke` / `test-one` while iterating and keep this for a broader sweep.
 test: test-game test-client test-server test-worldgen

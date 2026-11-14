@@ -72,6 +72,7 @@ object store on the box itself (one copy, no off-box backup; telemetry and Zulip
 Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
 bump re-diff `website/theme/orion/login/template.ftl` against the new `base` theme and run `just site-theme-check`); monitoring stack
 handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
+the login service on orion runs the release `login` binary from `/srv/mmo/bin` on the box (`just orion-login-push` ships it and rolling-restarts; `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log);
 the public web build `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
 `target/tools`, never the distro's). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
 print secrets.
