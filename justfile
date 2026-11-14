@@ -834,6 +834,14 @@ web:
     WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
 
+# Type-check the client for the browser (wasm32-unknown-unknown) without
+# building, bundling or serving it: the cheap answer to "does this still compile
+# for the web" after touching the renderer, compute jobs or anything cfg'd on
+# wasm (no wasm-bindgen, no binaryen, no server; a few minutes cold, seconds
+# warm). At the default (test) region size, like `smoke`.
+web-check:
+    {{cap}} {{cargo}} check -p client --lib --bins --target wasm32-unknown-unknown
+
 # The browser release bundle in target/web/ (scripts/web_release.sh): the
 # `wasm-release` profile, wasm-bindgen (the Cargo.lock-matched CLI, installed under
 # target/tools on first use), wasm-opt -O3 from a pinned binaryen release (also
@@ -868,6 +876,10 @@ deploy-push:
 # Follow the deployed server's log.
 deploy-logs:
     ssh {{deploy_host}} docker compose -f /srv/mmo/compose.yml logs -f --tail 200 server
+
+# Forward the deploy box's k3s API to localhost:6443 (kubeconfig context `orion`).
+tunnel:
+    scripts/tunnel.sh {{deploy_host}}
 
 # ---- Dev Postgres (deploy/dev) ---------------------------------------------
 

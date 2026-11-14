@@ -1,3 +1,5 @@
+> **Superseded on 2026-11-14** by `docs/superpowers/plans/2026-11-13-voxel-terrain-return.md` (the stud world was reverted).
+
 # Stud World: replacing voxel chunks with toy bricks — master plan (2026-11-09)
 
 > **For agentic workers:** this is a **roadmap**, not a task-level plan. It fixes the target design,

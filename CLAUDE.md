@@ -10,9 +10,10 @@ bisection and subagent dispatches (shared build caches + the user's concurrent e
 
 ## Project
 
-A toy-brick (stud terrain) game in Rust: client/server over QUIC (WebTransport in the browser), deterministic simulation,
+A voxel game in Rust: client/server over QUIC (WebTransport in the browser), deterministic simulation,
 rollback netcode, a multi-region world. The client is a Bevy app; `game`, `server` and `worldgen` stay
-engine-agnostic — **no Bevy, no windowing library** there.
+engine-agnostic — **no Bevy, no windowing library** there. The terrain is voxel again since 2026-11-14 (the
+stud terrain was reverted): `docs/superpowers/plans/2026-11-13-voxel-terrain-return.md`.
 
 **Direction (2026-10-20):** a **Dwarf Fortress–style** game on the multi-region engine — a huge world
 forged up front (geology, climate, biomes, history), players play regions from a top-down commander
@@ -52,12 +53,14 @@ changed build/run/test command updates its recipe in the same change.
   recipes default to 256, tests/check/clippy/raw cargo to 64. Server and client must match (no handshake).
   Never write a region edge as a literal — derive from `REGION_BLOCKS` / `REGION_SIZE`. Costs scale with
   area; compare numbers within one size.
-- **Chunk size**: a constant, not a dial. The **sim chunk** (`CHUNK_BLOCKS` = 16 m = `CHUNK_UNITS` wide,
-  32 x 32 studs of 90-plate layers: `STUD_CHUNK_STUDS` / `STUD_CHUNK_PLATES`) owns one entity/body/
-  collider set and is the render unit. A sim **tile** is 2 x 2 studs x 6 plates (1 m x 1.2 m x 1 m);
-  every tile ↔ unit conversion goes through `game::tiles`. "Block" in a name (`BLOCK_UNITS`,
-  `WorldBlockPos`, `BlockId`, `Intent::BreakBlock`) means a 1 m tile column / an item id, kept from the
-  voxel world on purpose.
+- **Chunk size** (BUILD time, blocks): `chunk_blocks=2|16` (`VOXEL_CHUNK_BLOCKS`, default 16 in
+  `.cargo/config.toml` `[env]` and the justfile; anything else fails the build — `game::CHUNK_BLOCKS`,
+  `game/src/block.rs`). A block is 1 m = 16³ voxels (`BLOCK_VOXELS`). The **sim chunk** is `CHUNK_BLOCKS`³
+  blocks (16 m = 256 voxels, `CHUNK_UNITS`) and owns one entity/body/collider set; the 32³-voxel **brick**
+  (`BRICK_VOXELS`, 2³ blocks) is the meshing/LOD unit — the client fans each chunk out to
+  `BRICKS_PER_CHUNK_EDGE`³ bricks (`renderer/bricks.rs`). A literal 32 must say which it is (`BRICK_VOXELS`
+  or `CHUNK_UNITS`). `wasm_determinism` / `scene_hash_golden` pin hashes per size, kept current at 16
+  only — re-record (`just chunk_blocks=2 …`) before relying on 2. Server and client must match.
 
 ### Deployment
 
@@ -152,9 +155,11 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   Postgres migrations run under a lock timeout (`MIGRATE_LOCK_TIMEOUT_MS`) that names any
   `pg_prepared_xacts` they wait behind.
 - Bump `worldgen::tile_map::WORLD_MAP_VERSION` on ANY change to what `build_world_map` returns.
-- Join snapshots go out slim (`game/src/region_wire.rs`): stud chunks as diffs against their pristine chunk,
-  derivable voxel collider grids rebuilt by the receiver — only shapes the sender has checked byte-equal to a
-  fresh build are omitted. `VOXEL_SNAPSHOT_COLLIDERS=send|rebuild` (default: `send` for a single-player server).
+- Terrain refusal (`world-store/src/open.rs` `refuse_unreturned_world`): a store with saved regions that has
+  not applied migration `0011_voxel_terrain_returns` is refused before any migration runs and left untouched
+  (a stud world, or a voxel world saved before the stud switch — `0005` would drop its chunks): re-forge it.
+  From `0011` on a world whose `terrain` is `Studs` is refused. Migrations `0004`/`0005` stay in the tree and
+  are never edited (sqlx checksums them).
 - Auth: `VOXEL_AUTH=token` (default, offline) or `jwt` (login service, `crates/login`, with Keycloak: it owns
   the passwords and the login pages, the login service trades a Keycloak access token for its own refresh
   token at `/v1/login/oidc`; `VOXEL_OIDC_ISSUER` (unset = no Keycloak login), `VOXEL_OIDC_AUDIENCE` (`mmo-login`),
@@ -191,7 +196,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     client through an observer session: `RegionElsewhere { endpoint, ticket }` → a second connection with
     `Credential::Observer` — no body, input only as its own `origin_client`.
   - Saved terrain of other hosts arrives by LISTEN/NOTIFY per cut with a polling backstop
-    (`VOXEL_TERRAIN_NOTIFY=listen|poll`; `VOXEL_WORLD_DB_DIRECT` = a direct, unpooled URL for the listener).
+    (`VOXEL_TERRAIN_NOTIFY=listen|poll`; `VOXEL_WORLD_DB_DIRECT` = a direct, unpooled URL for the listener);
+    a changed version drops that region's cached LOD (`stored_terrain_changed` → `invalidate_region_lod`).
   - Env: `VOXEL_ENTRY_HOST`, `VOXEL_PEER_BIND` (127.0.0.1:{6500+ordinal}), `VOXEL_PEER_CERT_HASH_FILE`,
     `VOXEL_ADVERTISE_QUIC`/`_WT` (what clients are told), `VOXEL_WT_PORT`, `VOXEL_PEER_LINK_DELAY_MS`
     (measurement only); `worldctl super-region <url> <n>` (only before the first claim) + hosts run with
@@ -222,10 +228,14 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   down, or the coordinator down, means no cuts until it is back.
 
 **Client** (`crates/client`)
-- `renderer/` bridges sim state to Bevy; predicted regions run like the server's (`regions/`, threaded on
-  native). The render unit is the sim chunk on every backend (`renderer/stud/`); the terrain shader
-  `assets/shaders/stud_terrain.wgsl` is compiled in (rebuild, no hot reload) and its params struct is
-  mirrored by `StudFortressParams` in `renderer/stud/material.rs`.
+- `renderer/` bridges sim state to Bevy (`bridge.rs`); predicted regions run like the server's (`regions/`,
+  threaded on native). Near terrain: bricks (`bricks.rs`) are meshed in `meshing/` into 8-byte quad records
+  (`meshing/records.rs`, layout locked to `assets/shaders/voxel_pull.wgsl`) and drawn by `voxel_pull/`
+  (`TerrainRenderConfig` in `config.rs`, `VOXEL_NEAR_RENDER=per-chunk|direct|gpu`); the render unit is the
+  sim chunk on every backend (`meshing/chunk_mesh.rs` merges its bricks' records). Far terrain: the
+  server-streamed LOD rings (`lod_rings.rs`, raster); `far_voxel/` (`far_voxel.wgsl`,
+  `VOXEL_FAR_RENDER=brick`) is the brick raymarch — never suggest it, ask before removing it.
+  `voxel_pull.wgsl`, `voxel_pull_depth.wgsl` and `voxel_texture.wgsl` are compiled in (rebuild, no hot reload).
 - **Connections** (`connections.rs`): a session's `ConnectionSet` holds one connection per host, each open
   under its own key; `RegionElsewhere` opens an observer connection, and region traffic counts only from
   the connection its region maps to. Input, predictions, UI and LOD requests go to the home only; the home
@@ -238,9 +248,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   (F3 Debug tab) is dev tooling only, never player-facing.
 - wasm: no shared-memory threads; work runs in Web Workers by bincode messages. New compute work goes in
   `renderer::compute::JobKind` and must carry everything it reads (workers have no ECS).
-- Bevy pinned at `0.19.1`; upgrades are deliberate migrations. After a bump look at stud terrain on a real
-  adapter (`just run`): shader tests compose against stubs and miss upstream WGSL signature changes, and
-  no automated real-adapter run of stud terrain exists.
+- Bevy pinned at `0.19.1`; upgrades are deliberate migrations. Shader tests compose against stubs and miss
+  upstream WGSL signature changes, so after a bump run `just pull-smoke` on a real adapter (a self-screenshot
+  of the pulled near path only; it passed on Iris Xe 2026-11-14) and look at the terrain with `just run`
+  (nothing automated covers the LOD rings, water or `far_voxel` on a real adapter).
 
 **Slint UI** (`crates/slint-ui`) — built on the sibling checkout `../ui` (`~/Projects/ui`, needs a local
 Factorio install or `FACTORIO_DATA`; Wube's sprites are not shippable). Sources in `crates/slint-ui/ui/`,
@@ -249,30 +260,13 @@ only (`build_common.rs` `single_theme_overlay`). In widgets never bind `visible`
 component's ROOT (forces inlining, bloats codegen). Every root component calls `GameTheme.apply()` in `init`.
 After a Slint bump run `just slint-wasm`.
 
-**Worldgen** (`crates/worldgen`) — `stud_gen` is the only generator: `generate_stud_region` is a pure
-function of coordinates (+ the installed forged world) and yields ground recipes (`StudColumnGround`) plus
-feature bricks (trees). The fused `column()` must mirror the `#[cfg(test)]` `DensityFn` graph bit-for-bit.
+**Worldgen** (`crates/worldgen`) — `generate_region(RegionCoords, …)` (`generate_columns` for a window,
+`generate_region_forged` for an explicit forged world) is a pure function of coordinates (+ the installed
+forged world) yielding the region's chunk columns; that is what makes "park, or regenerate" safe. The fused
+`pipeline` `column()` must mirror the `#[cfg(test)]` `DensityFn` graph bit-for-bit.
 Forge tunables all live in `forge/knobs.rs` (`just forge-ui` to tune; check at 16 m cells before keeping a
-value; the `forge_quality` gate must pass). Water is recipe data (`StudColumnGround::water_top`), never
-bricks. Look at the world with `just world-map` after tuning changes.
-
-**Prefabs** (`game::prefab`; spec `docs/superpowers/specs/2026-11-11-prefab-system-design.md`) — a saved,
-named group of bricks. Files are `<name>.prefab.ron` (parts by LDraw number, materials by name): the game's own
-in `assets/prefabs/` (embedded by `game/build.rs`, installed like the block props: `install_prefabs`), the
-player's in `<data dir>/prefabs/` (`PrefabDir`); shared as `MMOPF1:` export strings. Only **Build** prefabs
-resolve so far (Prop files are stored and listed; plan `2026-11-11-prefabs-2-props.md`).
-- `resolve(file, Trust)` / `ResolvedPrefab::validate` guard every cap; a prefab from a player is untrusted
-  input (`Trust::Player`: brick `data` forced to 0). A new field or list needs its cap there.
-- ONE layout (`layout_build`) and ONE applier (`ChunkStamp::apply`: carve, re-brick the shell a carve
-  exposes, lay bricks) behind both `stamp_build_into_seed` (worldgen; nothing calls it yet) and the runtime
-  stamp — never give one path its own brick logic.
-- Runtime: `GameEventKind::Prefab(client, PrefabCommand)` — register / deregister (per player, in
-  `Client::prefabs`, travels across seams, cleared when parked) and stamp. The stamp is **developer-grade**
-  (as `Order::CarveStud`): no cost, no gate, anchor must lie in the handling region; a neighbour's part goes as
-  `CarveStud` / `PlaceStud` intents.
-- Editor: `just prefab-editor [--game] [name]` or main menu → Prefab editor (`client/src/prefab_editor/`,
-  native only) on the server's `prefab-editor` keyword world; a save is `capture_build` (everything that is
-  not the baseplate, read back at the anchor).
+value; the `forge_quality` gate must pass). Water is recipe data (`ColumnGround::water_top`), never
+blocks. Look at the world with `just world-map` after tuning changes.
 
 **Assets**
 - Blockbench `.bbmodel` loads natively (`crates/bbmodel`, `renderer/model.rs`); `just model-view`,
