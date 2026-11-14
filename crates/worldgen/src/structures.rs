@@ -57,7 +57,7 @@ pub trait StructureSource: Send + Sync {
     /// Placements whose `reach_xz` grown by `margin` intersects the half-open x/z rectangle
     /// `[x0, x1) x [z0, z1)`, in the source's own fixed order, each once. Must not depend on anything
     /// but its arguments.
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<&StructurePlacement>;
+    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>>;
     /// Identity of the whole source, for the worldgen cache key.
     fn content_hash(&self) -> u32;
 }
@@ -66,7 +66,7 @@ pub trait StructureSource: Send + Sync {
 pub struct NoStructures;
 
 impl StructureSource for NoStructures {
-    fn placements_in(&self, _: i32, _: i32, _: i32, _: i32, _: i32) -> Vec<&StructurePlacement> {
+    fn placements_in(&self, _: i32, _: i32, _: i32, _: i32, _: i32) -> Vec<Arc<StructurePlacement>> {
         Vec::new()
     }
     fn content_hash(&self) -> u32 {
@@ -76,7 +76,7 @@ impl StructureSource for NoStructures {
 
 /// An explicit list with a spatial index (x/z buckets of `STRUCTURE_BUCKET_BLOCKS`).
 pub struct StructureList {
-    placements: Vec<StructurePlacement>,
+    placements: Vec<Arc<StructurePlacement>>,
     buckets: BTreeMap<[i32; 2], Vec<u32>>,
     hash: u32,
 }
@@ -114,7 +114,7 @@ impl StructureList {
                 None => h.update(&[0]),
             }
         }
-        Self { placements, buckets, hash: h.finalize() }
+        Self { placements: placements.into_iter().map(Arc::new).collect(), buckets, hash: h.finalize() }
     }
 
     pub fn len(&self) -> usize {
@@ -127,7 +127,7 @@ impl StructureList {
 }
 
 impl StructureSource for StructureList {
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<&StructurePlacement> {
+    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
         if x0 >= x1 || z0 >= z1 {
             return Vec::new();
         }
@@ -151,6 +151,7 @@ impl StructureSource for StructureList {
                 let [a, c, d, e] = p.reach_xz();
                 a < gx1 && d > gx0 && c < gz1 && e > gz0
             })
+            .cloned()
             .collect()
     }
 
@@ -312,4 +313,122 @@ pub fn dev_placements(
         });
     }
     Ok(out)
+}
+
+type OriginOf = Box<dyn Fn(game::RegionCoords) -> [i32; 2] + Send + Sync>;
+type GroundOf = Box<dyn Fn(i32, i32) -> i32 + Send + Sync>;
+
+/// Dev placements beside EVERY region's origin column (`origin_of`), computed on first use per region
+/// and cached. A region's placements are `dev_placements(entries, origin_of(rc), prefabs, ground)`: a
+/// pure function of the region, so answers never depend on what was cached before.
+///
+/// `origin_of(rc)` must lie inside region `rc`: then every placement of `rc` lies within the region's
+/// block box grown by `reach`.
+pub struct DevRegionSource {
+    entries: Vec<DevEntry>,
+    prefabs: game::prefab::PrefabSet,
+    origin_of: OriginOf,
+    ground: GroundOf,
+    /// How far (Chebyshev, x/z) a region's placements, pads included, reach from its origin.
+    reach: i32,
+    hash: u32,
+    cache: std::sync::Mutex<BTreeMap<[i32; 2], Arc<Vec<Arc<StructurePlacement>>>>>,
+}
+
+impl DevRegionSource {
+    /// Lays the row out once at a dummy origin over flat ground: an unknown prefab is an error here,
+    /// and the layout gives `reach`.
+    pub fn new(
+        entries: Vec<DevEntry>,
+        prefabs: &game::prefab::PrefabSet,
+        origin_of: OriginOf,
+        ground: GroundOf,
+    ) -> Result<Self, String> {
+        let dummy = dev_placements(&entries, [0, 0], prefabs, &|_, _| 0)?;
+        let mut reach = 0i32;
+        for p in &dummy {
+            let [x0, z0, x1, z1] = p.reach_xz();
+            reach = reach.max(x0.abs()).max(z0.abs()).max(x1.abs()).max(z1.abs());
+        }
+        let max_offset = entries
+            .iter()
+            .filter_map(|e| e.offset)
+            .map(|[dx, dz]| dx.abs().max(dz.abs()))
+            .max()
+            .unwrap_or(0);
+        let mut h = crc32fast::Hasher::new();
+        h.update(&prefabs.content_hash().to_le_bytes());
+        h.update(&[2]); // not a StructureList
+        for e in &entries {
+            h.update(&(e.prefab.len() as u32).to_le_bytes());
+            h.update(e.prefab.as_bytes());
+            match e.offset {
+                Some([dx, dz]) => {
+                    h.update(&[1]);
+                    h.update(&dx.to_le_bytes());
+                    h.update(&dz.to_le_bytes());
+                }
+                None => h.update(&[0]),
+            }
+            h.update(&[e.turn]);
+        }
+        Ok(Self {
+            entries,
+            prefabs: prefabs.clone(),
+            origin_of,
+            ground,
+            reach: reach + max_offset,
+            hash: h.finalize(),
+            cache: std::sync::Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    fn region(&self, rx: i32, rz: i32) -> Arc<Vec<Arc<StructurePlacement>>> {
+        let cached = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&[rx, rz]).cloned();
+        if let Some(c) = cached {
+            return c;
+        }
+        // Outside the lock: pure, so a race computes the same value twice.
+        let origin = (self.origin_of)(game::RegionCoords { x: rx, z: rz });
+        let placements = dev_placements(&self.entries, origin, &self.prefabs, &*self.ground)
+            .expect("checked in DevRegionSource::new");
+        let value = Arc::new(placements.into_iter().map(Arc::new).collect::<Vec<_>>());
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).entry([rx, rz]).or_insert(value).clone()
+    }
+}
+
+impl StructureSource for DevRegionSource {
+    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
+        if x0 >= x1 || z0 >= z1 {
+            return Vec::new();
+        }
+        let rb = game::REGION_BLOCKS as i32;
+        let (gx0, gz0, gx1, gz1) = (x0 - margin, z0 - margin, x1 + margin, z1 + margin);
+        // Regions whose block box grown by `reach` meets the grown rectangle.
+        let r = self.reach;
+        let lo = |g: i32| (g - r).div_euclid(rb) - 1;
+        let hi = |g: i32| (g + r).div_euclid(rb) + 1;
+        let mut out = Vec::new();
+        for rx in lo(gx0)..=hi(gx1) {
+            if rx * rb - r >= gx1 || (rx + 1) * rb + r <= gx0 {
+                continue;
+            }
+            for rz in lo(gz0)..=hi(gz1) {
+                if rz * rb - r >= gz1 || (rz + 1) * rb + r <= gz0 {
+                    continue;
+                }
+                for p in self.region(rx, rz).iter() {
+                    let [a, c, d, e] = p.reach_xz();
+                    if a < gx1 && d > gx0 && c < gz1 && e > gz0 {
+                        out.push(p.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn content_hash(&self) -> u32 {
+        self.hash
+    }
 }

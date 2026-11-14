@@ -31,6 +31,7 @@ mod slopes;
 mod structure_coarse;
 mod structure_dev;
 mod structure_pass;
+mod structure_regions;
 mod structure_support;
 mod structures;
 mod tile_map;

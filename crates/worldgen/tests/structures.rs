@@ -129,6 +129,8 @@ fn skirt_is_clamped() {
     let pa = a.placements_in(-100, -100, 100, 100, 0);
     let pb = b.placements_in(-100, -100, 100, 100, 0);
     assert_eq!(pa[0].pad, Some(Pad { level: 50, skirt: MAX_PAD_SKIRT }));
+    let (pa, pb): (Vec<&StructurePlacement>, Vec<&StructurePlacement>) =
+        (pa.iter().map(|p| p.as_ref()).collect(), pb.iter().map(|p| p.as_ref()).collect());
     for x in -30..40 {
         assert_eq!(pad_at(&pa, x, 1, 60), pad_at(&pb, x, 1, 60));
     }

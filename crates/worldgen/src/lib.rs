@@ -734,7 +734,8 @@ fn columns_from_patch(
     }
     // Structures reaching the sampled ring (their pads) or its trees (their keep-out). None: the terrain
     // is exactly what it is without a structure source.
-    let near = structures.placements_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
+    let near_owned = structures.placements_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
+    let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
     if !near.is_empty() {
         // The whole ring, before slopes: slopes, the cliff rule and tree surfaces read it.
         pad_samples(&mut samples, &near, (wx - ring, wz - ring), nz);
@@ -1084,7 +1085,8 @@ fn water_from_patch(
     let (ox, oz, span_blocks) = coarse_window(key);
     // Structures whose pads reach the key: every sample is inside it. None: the water is exactly what it
     // is without a structure source.
-    let near = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, 0);
+    let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, 0);
+    let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
     let padded = |mut c: ColSample, x: i32, z: i32| {
         if !near.is_empty() {
             pad_sample(&mut c, &near, x, z);
@@ -1195,7 +1197,8 @@ fn coarse_from_patch(
     // Structures reaching any column the tile samples (their pads: cell columns
     // one out, tree surfaces and their slopes) or a tree surface's keep-out.
     // None: the tile is exactly what it is without a structure source.
-    let near = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, (tree_m + TREE_REACH_BLOCKS).max(cb));
+    let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, (tree_m + TREE_REACH_BLOCKS).max(cb));
+    let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
     // Pads `c`, the sample of world block column (x, z).
     let padded = |mut c: ColSample, x: i32, z: i32| {
         if !near.is_empty() {
