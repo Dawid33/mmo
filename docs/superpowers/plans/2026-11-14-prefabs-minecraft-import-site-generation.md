@@ -370,11 +370,15 @@ VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;s
 ```
 
 - `--prefab NAME[:DX,DZ[:TURN]]` (repeatable; the client joins the flags with `;`) makes the client start
-  its server with `VOXEL_DEV_STRUCTURES=all=<spec>`: the prefabs stand beside the landing column of EVERY
-  region (else its centre), laid out lazily per region as a row along +x without offsets, each on a pad
-  levelled to the ground at its anchor. The embark is chosen as without the flag.
-- `VOXEL_DEV_STRUCTURES` by hand has two forms: `all=<spec>` (above) and `<rx>,<rz>=<spec>` (one region
-  only, an explicit list; the server logs the placement count).
+  its server with `VOXEL_DEV_STRUCTURES=home=<spec>`: the prefabs stand beside the landing column (else the
+  centre) of the HOME region only, the first region this server generates in full, which in the debug
+  launch is the embark region; laid out as a row along +x without offsets, each on a pad levelled to the
+  ground at its anchor. Other regions are untouched. The embark is chosen as without the flag.
+- `VOXEL_DEV_STRUCTURES` by hand has three forms: `home=<spec>` (above), `all=<spec>` (the same beside
+  EVERY region's landing, laid out lazily per region) and `<rx>,<rz>=<spec>` (one named region, an
+  explicit list; the server logs the placement count). `home` is order-dependent by design: a region or far
+  tile generated before the home is fixed shows no prefab. With any of the three the server turns the
+  worldgen disk cache off (a cached region would carry or lack the prefab independently of the run).
 - `VOXEL_PREFAB_DIRS` (`:`-separated, relative to the current directory) adds prefab directories to
   `assets/prefabs`; the built-in set is always installed. A missing directory is a startup error.
 - It needs a region never saved before: use `--reset` (a saved region is never regenerated, so an

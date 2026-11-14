@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use game::RegionCoords;
-use worldgen::structures::{dev_placements, install, parse_dev_spec, DevRegionSource, StructureList, StructureSource};
+use worldgen::structures::{dev_placements, install, parse_dev_spec, DevHomeSource, DevRegionSource, StructureList, StructureSource};
 
 /// Extra prefab directories, `:`-separated, loaded together with `assets/prefabs`.
 pub const PREFAB_DIRS_ENV: &str = "VOXEL_PREFAB_DIRS";
@@ -25,6 +25,9 @@ pub enum DevStructures {
     Region { x: i32, z: i32, placements: usize },
     /// `all=<spec>`: the spec's prefabs beside every region's landing, laid out lazily.
     EveryRegion { spec: String },
+    /// `home=<spec>`: the spec's prefabs beside the landing of the first region generated in full (the
+    /// embark region in a debug launch), and nowhere else.
+    Home { spec: String },
 }
 
 /// Whether `VOXEL_DEV_STRUCTURES` asks for anything (the caller then builds a `LandingOf`).
@@ -42,7 +45,7 @@ pub struct DevSetup {
 }
 
 /// Installs the prefab set (always) and, when `VOXEL_DEV_STRUCTURES` is set and non-empty, a structure
-/// source with the dev placements: `<rx>,<rz>=<spec>` (one region) or `all=<spec>` (every region). See
+/// source with the dev placements: `<rx>,<rz>=<spec>` (one region), `all=<spec>` (every region) or `home=<spec>` (the first region generated). See
 /// [`from_env`]; on an error nothing is installed.
 pub fn install_from_env(
     registry: &game::BlockRegistry,
@@ -84,7 +87,7 @@ pub fn from_env(
         return Ok(DevSetup { prefabs: set, source: None, what: DevStructures::Off });
     }
     let bad = |why: &str| format!("{DEV_STRUCTURES_ENV}=\"{var}\": {why}");
-    let (region, spec) = var.split_once('=').ok_or_else(|| bad("expected <rx>,<rz>=<spec> or all=<spec>"))?;
+    let (region, spec) = var.split_once('=').ok_or_else(|| bad("expected <rx>,<rz>=<spec>, all=<spec> or home=<spec>"))?;
     let entries = parse_dev_spec(spec).map_err(|e| bad(&e))?;
     let edge = game::REGION_BLOCKS as i32;
     // The column the row is laid out beside: the region's landing, else its centre.
@@ -98,7 +101,12 @@ pub fn from_env(
         let what = DevStructures::EveryRegion { spec: spec.to_string() };
         return Ok(DevSetup { prefabs: set, source: Some(Arc::new(source)), what });
     }
-    let (rx, rz) = region.split_once(',').ok_or_else(|| bad("the region must be <rx>,<rz> or all"))?;
+    if region.trim() == "home" {
+        let source = DevHomeSource::new(entries, &set, Box::new(origin_of), Box::new(ground)).map_err(|e| bad(&e))?;
+        let what = DevStructures::Home { spec: spec.to_string() };
+        return Ok(DevSetup { prefabs: set, source: Some(Arc::new(source)), what });
+    }
+    let (rx, rz) = region.split_once(',').ok_or_else(|| bad("the region must be <rx>,<rz>, all or home"))?;
     let num = |s: &str| s.trim().parse::<i32>().map_err(|_| bad(&format!("\"{}\" is not a number", s.trim())));
     let rc = RegionCoords { x: num(rx)?, z: num(rz)? };
     let placements = dev_placements(&entries, origin_of(rc), &set, &ground).map_err(|e| bad(&e))?;

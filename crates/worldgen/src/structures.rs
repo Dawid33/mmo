@@ -70,6 +70,9 @@ pub trait StructureSource: Send + Sync {
     fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>>;
     /// Identity of the whole source, for the worldgen cache key.
     fn content_hash(&self) -> u32;
+    /// A full region `rc` is about to be generated (the public `generate_region` entries call this once,
+    /// before generating). Sources that depend on which region is asked for first use it; default: nothing.
+    fn region_requested(&self, _rc: game::RegionCoords) {}
 }
 
 /// No placements. `content_hash()` is 0.
@@ -441,5 +444,85 @@ impl StructureSource for DevRegionSource {
 
     fn content_hash(&self) -> u32 {
         self.hash
+    }
+}
+
+/// Dev placements beside the landing column of ONE region: the FIRST region whose full generation is
+/// requested through [`StructureSource::region_requested`] (in the debug launch, the embark region);
+/// nowhere else. The placements are `dev_placements(entries, origin_of(home), prefabs, ground)`, computed
+/// once, when the first request arrives; later requests are ignored. Until then `placements_in` is empty.
+///
+/// Order-dependent BY DESIGN (a dev tool): a region or far tile generated BEFORE the home is fixed sees no
+/// placements, and stays without. The worldgen disk cache must therefore be off while this is installed.
+pub struct DevHomeSource {
+    entries: Vec<DevEntry>,
+    prefabs: game::prefab::PrefabSet,
+    origin_of: OriginOf,
+    ground: GroundOf,
+    hash: u32,
+    home: OnceLock<(game::RegionCoords, Vec<Arc<StructurePlacement>>)>,
+}
+
+impl DevHomeSource {
+    /// Same arguments and validation as [`DevRegionSource::new`].
+    pub fn new(
+        entries: Vec<DevEntry>,
+        prefabs: &game::prefab::PrefabSet,
+        origin_of: OriginOf,
+        ground: GroundOf,
+    ) -> Result<Self, String> {
+        dev_placements(&entries, [0, 0], prefabs, &|_, _| 0)?;
+        let mut h = crc32fast::Hasher::new();
+        h.update(&prefabs.content_hash().to_le_bytes());
+        h.update(&[3]); // not a StructureList (none) nor a DevRegionSource (2)
+        for e in &entries {
+            h.update(&(e.prefab.len() as u32).to_le_bytes());
+            h.update(e.prefab.as_bytes());
+            match e.offset {
+                Some([dx, dz]) => {
+                    h.update(&[1]);
+                    h.update(&dx.to_le_bytes());
+                    h.update(&dz.to_le_bytes());
+                }
+                None => h.update(&[0]),
+            }
+            h.update(&[e.turn]);
+        }
+        Ok(Self { entries, prefabs: prefabs.clone(), origin_of, ground, hash: h.finalize(), home: OnceLock::new() })
+    }
+
+    /// The home region, once one was requested.
+    pub fn home(&self) -> Option<game::RegionCoords> {
+        self.home.get().map(|(rc, _)| *rc)
+    }
+}
+
+impl StructureSource for DevHomeSource {
+    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
+        let Some((_, placements)) = self.home.get() else { return Vec::new() };
+        if x0 >= x1 || z0 >= z1 {
+            return Vec::new();
+        }
+        let (gx0, gz0, gx1, gz1) = (x0 - margin, z0 - margin, x1 + margin, z1 + margin);
+        placements
+            .iter()
+            .filter(|p| {
+                let [a, c, d, e] = p.reach_xz();
+                a < gx1 && d > gx0 && c < gz1 && e > gz0
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn content_hash(&self) -> u32 {
+        self.hash
+    }
+
+    fn region_requested(&self, rc: game::RegionCoords) {
+        self.home.get_or_init(|| {
+            let placements = dev_placements(&self.entries, (self.origin_of)(rc), &self.prefabs, &*self.ground)
+                .expect("checked in DevHomeSource::new");
+            (rc, placements.into_iter().map(Arc::new).collect())
+        });
     }
 }

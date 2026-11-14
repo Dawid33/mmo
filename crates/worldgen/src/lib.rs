@@ -382,6 +382,7 @@ impl Patch for ProceduralPatch {
 /// deterministic. With `VOXEL_WORLD_FILE` set the region comes from that
 /// forged world and `seed` is ignored (see `forged.rs`).
 pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<(ColumnCoords, Column)> {
+    notify_region_requested(structures::active(), coords);
     generate_columns(coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, mats)
 }
 
@@ -524,7 +525,13 @@ pub fn generate_region_forged(
     coords: RegionCoords,
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
+    notify_region_requested(structures::active(), coords);
     generate_region_forged_with(world, coords, mats, structures::active())
+}
+
+/// Tells `source` that a full region is about to be generated (the two public full-region entries only).
+fn notify_region_requested(source: &dyn structures::StructureSource, coords: RegionCoords) {
+    source.region_requested(coords);
 }
 
 /// `generate_region_forged` with an explicit structure source.
@@ -1398,6 +1405,29 @@ fn coarse_from_patch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn region_request_reaches_the_source_once_per_notification() {
+        use std::sync::Mutex;
+        struct Counting(Mutex<Vec<game::RegionCoords>>);
+        impl crate::structures::StructureSource for Counting {
+            fn placements_in(&self, _: i32, _: i32, _: i32, _: i32, _: i32) -> Vec<std::sync::Arc<crate::structures::StructurePlacement>> {
+                Vec::new()
+            }
+            fn content_hash(&self) -> u32 {
+                0
+            }
+            fn region_requested(&self, rc: game::RegionCoords) {
+                self.0.lock().unwrap().push(rc);
+            }
+        }
+        let s = Counting(Mutex::new(Vec::new()));
+        super::notify_region_requested(&s, game::RegionCoords::new(2, -3));
+        super::notify_region_requested(&s, game::RegionCoords::new(0, 0));
+        assert_eq!(*s.0.lock().unwrap(), vec![game::RegionCoords::new(2, -3), game::RegionCoords::new(0, 0)]);
+        // No-op on NoStructures.
+        super::notify_region_requested(&crate::structures::NoStructures, game::RegionCoords::new(1, 1));
+    }
+
     /// R8.2: a column's LOD water — dry ground, open water, a column whose
     /// top water block is ice (dry: the ice is LOD terrain), a glacier.
     #[test]

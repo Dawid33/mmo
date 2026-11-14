@@ -51,7 +51,7 @@ pub const SERVER_PORT_ENV: &str = "VOXEL_SERVER_PORT";
 /// The server's dev structure variable (`server::dev_structures::DEV_STRUCTURES_ENV`).
 pub const DEV_STRUCTURES_ENV: &str = "VOXEL_DEV_STRUCTURES";
 
-/// `all=<spec>` for the next server this client starts ([`DEV_STRUCTURES_ENV`]); taken by the start.
+/// `home=<spec>` (or any other form) for the next server this client starts ([`DEV_STRUCTURES_ENV`]); taken by the start.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct DevStructures(pub String);
 

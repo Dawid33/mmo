@@ -82,6 +82,17 @@ fn dev_structures_install_and_stamp() {
         assert_eq!(beside.len(), 1, "one dev-hut beside region ({rc_x}, 0)'s landing: {row:?}");
         assert_eq!(beside[0].prefab.name, "dev-hut");
     }
+    // The home form: no placement anywhere until a region is generated in full, then the row is beside
+    // that region's landing only.
+    std::env::set_var(DEV_STRUCTURES_ENV, "home=dev-hut");
+    let setup = from_env(&registry, pure_landing.clone(), seed, mats).expect("home=dev-hut");
+    assert_eq!(setup.what, DevStructures::Home { spec: "dev-hut".into() });
+    let source = setup.source.expect("a source for home=");
+    assert!(source.placements_in(-10 * RB, -10 * RB, 10 * RB, 10 * RB, 0).is_empty());
+    source.region_requested(RegionCoords { x: 1, z: 0 });
+    let row = source.placements_in(-10 * RB, -10 * RB, 10 * RB, 10 * RB, 0);
+    assert_eq!(row.len(), 1);
+    assert_eq!(row[0].bounds().0[0], RB + 20 + DEV_GAP_BLOCKS);
     // Errors, each naming the offending text.
     for (value, names) in [
         ("garbage", "garbage"),
@@ -89,6 +100,8 @@ fn dev_structures_install_and_stamp() {
         ("x,y=dev-hut", "\"x\""),
         ("all=no-such-prefab", "no-such-prefab"),
         ("0,0=", "0,0="),
+        ("home=", "home="),
+        ("home=no-such-prefab", "no-such-prefab"),
     ] {
         std::env::set_var(DEV_STRUCTURES_ENV, value);
         let e = from_env(&registry, pure_landing.clone(), seed, mats).err().unwrap_or_else(|| panic!("{value} accepted"));

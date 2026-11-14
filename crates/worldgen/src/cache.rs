@@ -58,6 +58,11 @@ impl WorldgenCache {
         Self::at_dir(dir)
     }
 
+    /// A cache that never reads or writes a file (a dev structure source is installed, or tests).
+    pub fn disabled() -> Self {
+        Self { dir: None }
+    }
+
     /// Cache rooted at an explicit, existing directory (tests).
     pub fn at_dir(dir: PathBuf) -> Self {
         Self { dir: Some(dir) }
@@ -218,6 +223,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         (dir.clone(), WorldgenCache::at_dir(dir))
+    }
+
+    #[test]
+    fn disabled_cache_never_touches_a_file() {
+        let cache = WorldgenCache::disabled();
+        let rc = RegionCoords::new(9, 9);
+        let columns = vec![(ColumnCoords::new(0, 0), Column::new(2, Block::default(), Block::default(), vec![]))];
+        cache.store(rc, &columns);
+        assert!(cache.load(rc).is_none());
+        assert!(cache.dir.is_none());
     }
 
     #[test]

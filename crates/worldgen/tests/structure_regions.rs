@@ -122,3 +122,70 @@ fn every_region_gets_its_row_and_a_row_across_the_seam_is_whole() {
         }
     }
 }
+
+fn home_source(entries: Vec<DevEntry>, set: &PrefabSet) -> DevHomeSource {
+    DevHomeSource::new(entries, set, Box::new(centre_of), Box::new(|_, _| 70)).unwrap()
+}
+
+#[test]
+fn home_source_is_empty_until_a_home_is_set() {
+    let set = set_of(&[7]);
+    let src = home_source(vec![entry("box7", None)], &set);
+    assert_eq!(src.home(), None);
+    for rc in [RegionCoords::new(0, 0), RegionCoords::new(3, -2)] {
+        assert!(src.placements_in(rc.x * RB, rc.z * RB, (rc.x + 1) * RB, (rc.z + 1) * RB, 50).is_empty());
+    }
+    if default_dials() {
+        install_real_block_props();
+        let rc = RegionCoords::new(0, 0);
+        let with = worldgen::generate_region_with(rc, SEED, mats(), &src);
+        let without = worldgen::generate_region_with(rc, SEED, mats(), &NoStructures);
+        assert_eq!(bincode::serialize(&with).unwrap(), bincode::serialize(&without).unwrap());
+    }
+}
+
+#[test]
+fn home_source_stands_beside_the_first_requested_region_only() {
+    let set = set_of(&[7, 12]);
+    let entries = vec![entry("box7", None), entry("box12", None)];
+    let src = home_source(entries.clone(), &set);
+    let (a, b) = (RegionCoords::new(2, 1), RegionCoords::new(-4, 5));
+    src.region_requested(a);
+    src.region_requested(b);
+    assert_eq!(src.home(), Some(a));
+    let region_of = |rc: RegionCoords| src.placements_in(rc.x * RB, rc.z * RB, (rc.x + 1) * RB, (rc.z + 1) * RB, 0);
+    let expected = dev_placements(&entries, centre(a), &set, &|_, _| 70).unwrap();
+    let got = region_of(a);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got.iter().map(key).collect::<Vec<_>>(), expected.iter().map(|p| (p.at.anchor, p.prefab.name_key)).collect::<Vec<_>>());
+    assert!(region_of(b).is_empty());
+    assert!(region_of(RegionCoords::new(20, 20)).is_empty());
+    // Not the hash of a DevRegionSource for the same spec.
+    assert_ne!(src.content_hash(), source(entries, &set).content_hash());
+    assert_ne!(src.content_hash(), 0);
+}
+
+#[test]
+fn home_row_across_a_seam_is_whole() {
+    if !default_dials() {
+        return;
+    }
+    install_real_block_props();
+    let w = (RB / 2 + 8) as u32;
+    let set = set_of(&[w]);
+    let src = home_source(vec![entry(&format!("box{w}"), None)], &set);
+    let home = RegionCoords::new(0, 0);
+    src.region_requested(home);
+    let rcs = [home, RegionCoords::new(1, 0)];
+    let regions = world::generate(&rcs, &src);
+    let all = src.placements_in(0, 0, 2 * RB, RB, 0);
+    assert!(all.iter().any(|p| p.bounds().0[0] < RB && p.bounds().1[0] > RB), "the row crosses the seam");
+    for sp in &all {
+        for (p, w) in prefabs::expected(&sp.prefab, &sp.at) {
+            if p[0] < 0 || p[0] >= 2 * RB || p[2] < 0 || p[2] >= RB {
+                continue;
+            }
+            assert_eq!(world::read(&regions, p), w.unwrap_or((air(), None)), "prefab cell {p:?}");
+        }
+    }
+}
