@@ -185,3 +185,42 @@ fn bad_flags() {
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", text(&o));
     }
 }
+
+/// `--arms` and `--len` take the server's ranges (1..=4 streets, 16..=256 blocks), each refusal naming
+/// its flag; a picture over 8192 px a side is refused before it is drawn.
+#[test]
+fn town_refuses_out_of_range_values_and_huge_pictures() {
+    let dir = temp_dir("town-range");
+    write_test_houses(&dir);
+    let d = dir.to_str().unwrap();
+    let out = dir.join("t.png");
+    let o = out.to_str().unwrap();
+    for (args, flag) in [
+        (vec!["--arms", "0"], "--arms"),
+        (vec!["--arms", "5"], "--arms"),
+        (vec!["--len", "15"], "--len"),
+        (vec!["--len", "257"], "--len"),
+    ] {
+        let mut all = vec!["town", "test-style", "--dirs", d, "-o", o];
+        all.extend(args.iter());
+        let r = run(&all);
+        let t = text(&r);
+        assert_eq!(r.status.code(), Some(2), "{args:?}: {t}");
+        assert!(t.contains(flag), "{args:?}: {t}");
+    }
+    // The edges are accepted.
+    for args in [["--len", "16"], ["--len", "256"]] {
+        let mut all = vec!["town", "test-style", "--dirs", d, "-o", o, "--scale", "1"];
+        all.extend(args.iter());
+        let r = run(&all);
+        assert!(r.status.success(), "{args:?}: {}", text(&r));
+    }
+    let r = run(&["town", "test-style", "--dirs", d, "-o", o, "--scale", "200"]);
+    let t = text(&r);
+    assert_eq!(r.status.code(), Some(2), "{t}");
+    assert!(t.contains("8192") && t.contains("--scale"), "{t}");
+    let _ = std::fs::remove_file(&out);
+    let r = run(&["town", "test-style", "--dirs", d, "-o", o, "--scale", "200"]);
+    assert!(!out.exists(), "no picture written: {}", text(&r));
+    let _ = std::fs::remove_dir_all(&dir);
+}

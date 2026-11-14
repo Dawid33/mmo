@@ -16,7 +16,7 @@ use game::prefab::{
 use game::registry::BlockRegistry;
 
 pub(crate) const BLOCKS_DIR: &str = "assets/blocks";
-pub(crate) const USAGE: &str = "usage:\n  prefab-tool view <name-or-path> [-o <png>] [--scale <px per block>]\n  prefab-tool check [<dir>]\n  prefab-tool town <style> [--dirs <a:b:..>] [--seed N] [--arms 1-4] [--len N] [--terrain flat|seed] [-o <png>] [--scale N]";
+pub(crate) const USAGE: &str = "usage:\n  prefab-tool view <name-or-path> [-o <png>] [--scale <px per block>]\n  prefab-tool check [<dir>]\n  prefab-tool town <style> [--dirs <a:b:..>] [--seed N] [--arms 1-4] [--len 16-256] [--terrain flat|seed] [-o <png>] [--scale N]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

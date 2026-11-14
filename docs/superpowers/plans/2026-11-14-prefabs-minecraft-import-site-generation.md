@@ -372,13 +372,15 @@ VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;s
 - `--prefab NAME[:DX,DZ[:TURN]]` (repeatable; the client joins the flags with `;`) makes the client start
   its server with `VOXEL_DEV_STRUCTURES=home=<spec>`: the prefabs stand beside the landing column (else the
   centre) of the HOME region only, the first region to start running on this server and be generated fresh (the server's
-  region-thread generator announces it; a region restored from the store does not), which in the debug
-  launch is the embark region; laid out as a row along +x without offsets, each on a pad levelled to the
+  region-thread generator announces it; a region restored from the store does not). In a forged world the
+  spawn region, where a fresh session waits before it embarks, is never announced
+  (`server::dev_structures::announces_region`), so in the debug launch the home is the embark region
+  (embarking on the spawn tile itself gets no home; a procedural world announces every region); laid out as a row along +x without offsets, each on a pad levelled to the
   ground at its anchor. Other regions are untouched. The embark is chosen as without the flag.
-- `VOXEL_DEV_STRUCTURES` by hand has these forms (besides `town=` above): `home=<spec>` (above), `all=<spec>` (the same beside
+- `VOXEL_DEV_STRUCTURES` by hand has these forms (besides `town=`, below): `home=<spec>` (above), `all=<spec>` (the same beside
   EVERY region's landing, laid out lazily per region) and `<rx>,<rz>=<spec>` (one named region, an
   explicit list; the server logs the placement count). `home` is order-dependent by design: a region or far
-  tile generated before the home is fixed shows no prefab. With any of the three the server turns the
+  tile generated before the home is fixed shows no prefab. With any of the four (`town=` too) the server turns the
   worldgen disk cache off (a cached region would carry or lack the prefab independently of the run).
 - A town: `just town medieval` (or `just town medieval:2:64`; `client debug embarked --reset --town
   STYLE[:ARMS[:LEN]]`, refused with `--prefab` and `--join`) starts the server with

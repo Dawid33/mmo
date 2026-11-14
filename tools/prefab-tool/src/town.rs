@@ -26,8 +26,16 @@ const FRONT_MARK: [u8; 3] = [255, 0, 255];
 const LOW_SHADE: f32 = 0.6;
 /// The background samples the ground once per cell of this many blocks per side.
 const GROUND_CELL: i32 = 4;
-/// How far (in steps of 16 blocks) to look for a dry origin under `--terrain seed`.
-const ORIGIN_SCAN_STEPS: i32 = 4096;
+/// How many square rings (of `ORIGIN_SCAN_STEP` blocks) around (0, 0) to look for a dry origin under
+/// `--terrain seed`.
+const ORIGIN_SCAN_RINGS: i32 = 64;
+const ORIGIN_SCAN_STEP: i32 = 16;
+/// Streets and street length as the server takes them (`server::dev_structures::TOWN_ARMS` /
+/// `TOWN_ARM_LEN`).
+const ARMS: std::ops::RangeInclusive<u8> = 1..=4;
+const ARM_LEN: std::ops::RangeInclusive<i32> = 16..=256;
+/// The longest picture side, in pixels.
+const MAX_PICTURE_SIDE: u64 = 8192;
 
 struct TownArgs {
     style: String,
@@ -68,15 +76,15 @@ fn parse(args: &[String]) -> Result<TownArgs, Failure> {
             "--arms" => {
                 let v = value("--arms")?;
                 match v.parse::<u8>() {
-                    Ok(n) if (1..=4).contains(&n) => a.arms = Some(n),
+                    Ok(n) if ARMS.contains(&n) => a.arms = Some(n),
                     _ => return Err(bad(format!("--arms: \"{v}\" is not 1 to 4"))),
                 }
             }
             "--len" => {
                 let v = value("--len")?;
                 match v.parse::<i32>() {
-                    Ok(n) if n >= 1 => a.len = Some(n),
-                    _ => return Err(bad(format!("--len: \"{v}\" is not a whole number of at least 1"))),
+                    Ok(n) if ARM_LEN.contains(&n) => a.len = Some(n),
+                    _ => return Err(bad(format!("--len: \"{v}\" is not 16 to 256 blocks"))),
                 }
             }
             "--terrain" => match value("--terrain")?.as_str() {
@@ -160,12 +168,14 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
         }),
         seed: a.seed,
     };
-    // Under procedural terrain the origin is the first dry column scanning east in steps of 16.
     let origin = if a.seed_terrain {
-        (0..ORIGIN_SCAN_STEPS)
-            .map(|i| [i * 16, 0])
-            .find(|&[x, z]| !terrain.wet(x, z))
-            .ok_or((1, "no dry column found near the origin".to_string()))?
+        dry_origin(&terrain, &params).ok_or((
+            1,
+            format!(
+                "no dry site within {} blocks of (0, 0): the origin and every street's middle must be dry",
+                ORIGIN_SCAN_RINGS * ORIGIN_SCAN_STEP
+            ),
+        ))?
     } else {
         [0, 0]
     };
@@ -174,6 +184,13 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
     let extent = extent_of(&layout, origin, &params);
     let (w, d) = ((extent[2] - extent[0]) as u32, (extent[3] - extent[1]) as u32);
     let scale = a.scale.unwrap_or_else(|| (MAX_WIDTH / w.max(1)).max(1));
+    let (pw, ph) = (u64::from(w) * u64::from(scale), u64::from(d) * u64::from(scale));
+    if pw > MAX_PICTURE_SIDE || ph > MAX_PICTURE_SIDE {
+        return Err((
+            2,
+            format!("the picture would be {pw}x{ph} px, over {MAX_PICTURE_SIDE} px a side: lower --scale (now {scale})"),
+        ));
+    }
 
     let colours = BlockColours::load(&registry, Path::new(BLOCKS_DIR));
     let image = draw(&layout, &colours, &terrain, extent, scale);
@@ -206,6 +223,23 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
         );
     }
     Ok(())
+}
+
+/// Under `--terrain seed`: the first column, scanning square rings outward from (0, 0) in steps of
+/// `ORIGIN_SCAN_STEP` (each ring from its north-west corner, row by row), where the origin and the middle of
+/// every street the town has are dry. The cheap origin test first.
+fn dry_origin(terrain: &Terrain, p: &TownParams) -> Option<[i32; 2]> {
+    let mid = p.plaza / 2 + 1 + p.arm_len / 2;
+    let dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    let dry_site = |[x, z]: [i32; 2]| {
+        !terrain.wet(x, z) && dirs[..usize::from(p.arms.min(4))].iter().all(|[dx, dz]| !terrain.wet(x + dx * mid, z + dz * mid))
+    };
+    (0..=ORIGIN_SCAN_RINGS)
+        .flat_map(|r| {
+            (-r..=r).flat_map(move |j| (-r..=r).map(move |i| (i, j))).filter(move |&(i, j)| i.abs().max(j.abs()) == r)
+        })
+        .map(|(i, j)| [i * ORIGIN_SCAN_STEP, j * ORIGIN_SCAN_STEP])
+        .find(|&c| dry_site(c))
 }
 
 /// The bounding box [x0, z0, x1, z1] (max exclusive) of the plaza, every arm's full street strip and
