@@ -23,6 +23,7 @@ mod anim;
 mod block_edit;
 mod body;
 mod block_props;
+mod building_set;
 mod camera_controller;
 mod camera_look;
 mod chests;
