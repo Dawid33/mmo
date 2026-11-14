@@ -30,6 +30,7 @@ mod scene_hash_golden;
 mod slopes;
 mod structure_coarse;
 mod structure_dev;
+mod structure_forged;
 mod structure_pass;
 mod structure_regions;
 mod structure_support;
