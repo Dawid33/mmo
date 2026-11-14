@@ -456,3 +456,47 @@ prefab file (RON and binary), resolve, `layout_chunk`, the built-in set with `de
 - `build.rs` and the disk loader differ on a `read_dir` error (skip vs fail); Cargo's directory watch
   re-runs the script for dotfiles it then ignores.
 - `tools/textures/gen.py`: `mix` aliases `lerp`.
+
+## 12. Carried over from plan 2 (Minecraft schematic import — done 2026-11-14)
+
+Plan `2026-11-14-prefabs-2-minecraft-import.md` is built: `crates/mc-import` (NBT + Sponge v2/v3 reader,
+classification of block states through `data/materials.ron`, volume → prefab with trim, air flood fill and
+box merge, a splitter for showroom files) and the `mc-import` tool (`report`, `import`, `split`). On the
+sample library: **482 of 482 schematics import and resolve, zero unmapped blocks**, the whole run in about
+20 s. Output goes to the git-ignored `prefab-imports/`. The step-1 item of §11 (repeated file names) is
+fixed.
+
+What changed against §5 as first written: only Sponge `.schem` is read (worlds, litematic, structure NBT,
+cut lists and the map picture are not built); sign labels are opt-in (`--labels`) because real signs are
+decoration; closed fence gates are fence shapes, barrels are planks; a door cell stops the air flood and is
+carved; `split` with default ground falls back to a whole-file import when it finds fewer than two builds.
+
+**Left uncommitted for the owner of that file:** `justfile` — recipe `mc-import`.
+
+**For the kit stage (E), in the order they will bite**
+- **Interiors.** A house whose windows or doorless openings are open still lets outside air in, so many
+  real houses carve 0–30 cells; stamped on uneven ground, terrain would stay inside. Import those with
+  `--air carve` on a tight box, or have the stamper clear under roofs — decide per pack.
+- **`split` is for showrooms only.** It cut `stadium`, `castle` and `haven` into 15–17 pieces; those are
+  single compositions and should be `import`ed. `report`'s build count is the cue. Overlapping build boxes
+  are warned about, not masked (2 real cases each in `statuen` and `Pyramide2`).
+- **Anchor and ground fit** are fixed (box centre, y = 0, `Flat`) with no flag; a build imported with its
+  plate has its anchor under the plate. The tool needs `--anchor` and `--ground-fit` (or the cut list).
+- **Names.** File stems repeat across packs (`a2`, `c2`, …): give `--name` / `--prefix` per pack. A prefab
+  is promoted into `assets/prefabs/` only by re-importing with `--licence`.
+- **Mapping calls worth a look** (one table line each, `MAPPING_VERSION` 2): magma → basalt, moss →
+  green_terracotta, dead coral → andesite, obsidian → basalt, blackstone → the deepslate family, crimson →
+  stripped_mangrove, dark_oak log → stripped_dark_oak, nether bricks → deepslate_bricks, lapis →
+  blue_concrete, purpur → magenta_terracotta, oxidized copper → prismarine, weathered copper →
+  cyan_terracotta; furnaces and the like are plain blocks; water (3.9 M cells) and plants are dropped.
+- Two markers for one bed or double chest; split boxes are tight to solids, so a torch or sign on an outer
+  face is cut off; lit state of lamps and campfires ignored; `dirt_path` / `farmland` are whole blocks.
+
+**Smaller, whenever**
+- One air cell above a door with no upper half is carved even outdoors; a sign inside a build dropped for
+  size can still label a neighbour (labels are opt-in).
+- A `.prefab.bin` whose report file fails to write is left without its report.
+- A number or boolean inside a sign's `extra`, and `translate` / `keybind` components, lose that line.
+- `*_copper_bulb`, `*_copper_chest` fall back to `smooth_stone` (none in the library).
+- No fixture test pins "resolve before write"; several tests could not be seen failing before the code
+  existed (noted in the task reports).
