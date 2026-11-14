@@ -234,39 +234,31 @@ pub const DEV_PAD_SKIRT: u32 = 4;
 /// Gap between dev structures in a row, and between the origin and the first, in blocks.
 pub const DEV_GAP_BLOCKS: i32 = 6;
 
-/// Parses `"dev-hut,statuen-06:40,0:1"`. Errors name the bad entry.
+/// Parses `"dev-hut;statuen-06:40,0:1"`: entries separated by `;`, each `name[:dx,dz[:turn]]`. Name,
+/// dx, dz and turn are trimmed of whitespace. A name is non-empty and has no `:`, `;` or whitespace
+/// inside; an empty entry (a trailing `;` too) is an error. Errors name the entry.
 pub fn parse_dev_spec(spec: &str) -> Result<Vec<DevEntry>, String> {
-    // `,` separates both entries and the dx,dz pair: a part that starts with a number continues the
-    // previous entry when that one has an offset (`:`) still missing its dz.
-    let mut raw: Vec<String> = Vec::new();
-    for part in spec.split(',') {
-        let starts_with_number = part.split(':').next().is_some_and(|h| h.parse::<i32>().is_ok());
-        match raw.last_mut() {
-            Some(last) if starts_with_number && last.contains(':') && !last.contains(',') => {
-                last.push(',');
-                last.push_str(part);
-            }
-            _ => raw.push(part.to_string()),
-        }
-    }
-    raw.iter().map(|e| parse_dev_entry(e)).collect()
+    spec.split(';').enumerate().map(|(i, e)| parse_dev_entry(i + 1, e)).collect()
 }
 
-fn parse_dev_entry(entry: &str) -> Result<DevEntry, String> {
-    let bad = |why: &str| format!("structure entry \"{entry}\": {why}");
+fn parse_dev_entry(position: usize, entry: &str) -> Result<DevEntry, String> {
+    let bad = |why: &str| format!("structure entry {position} \"{entry}\": {why}");
+    if entry.trim().is_empty() {
+        return Err(bad("empty entry"));
+    }
     let mut parts = entry.split(':');
-    let name = parts.next().unwrap_or("");
+    let name = parts.next().unwrap_or("").trim();
     if name.is_empty() {
         return Err(bad("missing prefab name"));
     }
-    if name.parse::<i32>().is_ok() {
-        return Err(bad("a prefab name cannot be a bare number (a stray dz?)"));
+    if name.contains(char::is_whitespace) {
+        return Err(bad("a prefab name has no whitespace"));
     }
     let offset = match parts.next() {
         None => None,
         Some(o) => {
             let (dx, dz) = o.split_once(',').ok_or_else(|| bad("offset must be dx,dz"))?;
-            let num = |s: &str| s.trim().parse::<i32>().map_err(|_| bad(&format!("\"{s}\" is not a number")));
+            let num = |s: &str| s.trim().parse::<i32>().map_err(|_| bad(&format!("\"{}\" is not a number", s.trim())));
             Some([num(dx)?, num(dz)?])
         }
     };

@@ -270,6 +270,7 @@ mod tests {
         }
         let old = h.finalize();
         let none = crate::structures::NoStructures.content_hash();
+        assert_eq!(none, 0);
         assert_eq!(cache_key_with(7, "manifest", 32, 16, none).unwrap(), old);
         assert_ne!(cache_key_with(7, "manifest", 32, 16, 0xdead_beef).unwrap(), old);
     }

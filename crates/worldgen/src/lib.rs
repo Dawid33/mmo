@@ -436,6 +436,30 @@ pub fn generate_columns_with(
     columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats, trees_from, structures)
 }
 
+/// The y of the top ground block of world column (x, z) — the same value generation uses as the
+/// column's surface before any structure pad. Uses the installed forged world, else `seed`. The patch
+/// is the chunk-aligned one-chunk window holding the column, as `generate_columns` builds it.
+pub fn ground_y(x: i32, z: i32, seed: u64, mats: Materials) -> i32 {
+    if let Some(world) = forged::active() {
+        return ground_y_forged(world, x, z, mats);
+    }
+    let (ox, oz, span) = chunk_window(x, z, &mats);
+    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
+    column_sample(&ProceduralPatch(grid), &mats, x, z).s
+}
+
+/// `ground_y` for an explicit forged world.
+pub fn ground_y_forged(world: &forged::ForgedWorld, x: i32, z: i32, mats: Materials) -> i32 {
+    let (ox, oz, span) = chunk_window(x, z, &mats);
+    column_sample(&world.patch(ox, oz, span), &mats, x, z).s
+}
+
+/// `patch_window` of the one-chunk window holding world block column `(x, z)`.
+fn chunk_window(x: i32, z: i32, mats: &Materials) -> (f64, f64, f64) {
+    let cb = CHUNK_BLOCKS as i32;
+    patch_window(x.div_euclid(cb) * cb, z.div_euclid(cb) * cb, cb, mats)
+}
+
 /// Patch margin (blocks) past a window: wider when trees are on, which read
 /// surfaces further out (`TREE_RING_BLOCKS`).
 fn patch_margin(mats: &Materials) -> i32 {
@@ -1736,21 +1760,4 @@ mod tests {
             "coarse surface within ±1 cell for >=90% of columns ({hits}/{total})"
         );
     }
-}
-
-/// The y of the top ground block of world column (x, z) — the same value generation uses as the
-/// column's surface before any structure pad. Uses the installed forged world, else `seed`.
-pub fn ground_y(x: i32, z: i32, seed: u64, mats: Materials) -> i32 {
-    if let Some(world) = forged::active() {
-        return ground_y_forged(world, x, z, mats);
-    }
-    let (ox, oz, span) = patch_window(x, z, 1, &mats);
-    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
-    column_sample(&ProceduralPatch(grid), &mats, x, z).s
-}
-
-/// `ground_y` for an explicit forged world.
-pub fn ground_y_forged(world: &forged::ForgedWorld, x: i32, z: i32, mats: Materials) -> i32 {
-    let (ox, oz, span) = patch_window(x, z, 1, &mats);
-    column_sample(&world.patch(ox, oz, span), &mats, x, z).s
 }
