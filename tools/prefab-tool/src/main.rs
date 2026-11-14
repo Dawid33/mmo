@@ -1,7 +1,9 @@
-//! `prefab-tool view <name-or-path> [-o <png>] [--scale <px per block>]` and `prefab-tool check [<dir>]`.
+//! `prefab-tool view <name-or-path> [-o <png>] [--scale <px per block>]`, `prefab-tool check [<dir>]` and
+//! `prefab-tool town <style> [flags]` (a top-down picture of a town layout).
 //! Run from the repo root (the recipes in the justfile do).
 
 mod render;
+mod town;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,14 +15,15 @@ use game::prefab::{
 };
 use game::registry::BlockRegistry;
 
-const BLOCKS_DIR: &str = "assets/blocks";
-const USAGE: &str = "usage:\n  prefab-tool view <name-or-path> [-o <png>] [--scale <px per block>]\n  prefab-tool check [<dir>]";
+pub(crate) const BLOCKS_DIR: &str = "assets/blocks";
+pub(crate) const USAGE: &str = "usage:\n  prefab-tool view <name-or-path> [-o <png>] [--scale <px per block>]\n  prefab-tool check [<dir>]\n  prefab-tool town <style> [--dirs <a:b:..>] [--seed N] [--arms 1-4] [--len N] [--terrain flat|seed] [-o <png>] [--scale N]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("view") => view(&args[1..]),
         Some("check") => check(&args[1..]),
+        Some("town") => town::run(&args[1..]),
         _ => Err((2, USAGE.to_string())),
     };
     match result {
@@ -32,9 +35,9 @@ fn main() -> ExitCode {
     }
 }
 
-type Failure = (u8, String);
+pub(crate) type Failure = (u8, String);
 
-fn load_registry() -> Result<BlockRegistry, Failure> {
+pub(crate) fn load_registry() -> Result<BlockRegistry, Failure> {
     let path = Path::new(BLOCKS_DIR).join("blocks.ron");
     let src = std::fs::read_to_string(&path).map_err(|e| {
         (2, format!("cannot read {}: {e} (run prefab-tool from the repository root)", path.display()))

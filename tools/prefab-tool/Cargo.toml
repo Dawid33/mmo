@@ -2,11 +2,12 @@
 name = "prefab-tool"
 version = "0.1.0"
 edition = "2021"
-description = "Command-line prefab tool: `view` renders a prefab as a PNG, `check` validates the built-in set."
+description = "Command-line prefab tool: `view` renders a prefab as a PNG, `check` validates the built-in set, `town` draws a town layout."
 autotests = false
 
 [dependencies]
 game = { path = "../../crates/game" }
+worldgen = { path = "../../crates/worldgen" }
 png = "0.18"
 
 [[test]]

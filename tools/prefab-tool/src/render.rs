@@ -23,7 +23,7 @@ pub struct Image {
 }
 
 impl Image {
-    fn fill(&mut self, x: u32, y: u32, w: u32, h: u32, c: [u8; 3]) {
+    pub fn fill(&mut self, x: u32, y: u32, w: u32, h: u32, c: [u8; 3]) {
         for yy in y..(y + h).min(self.height) {
             for xx in x..(x + w).min(self.width) {
                 let i = ((yy * self.width + xx) * 3) as usize;
@@ -54,7 +54,7 @@ impl BlockColours {
         Self { by_id }
     }
 
-    fn of(&self, id: BlockId) -> [u8; 3] {
+    pub fn of(&self, id: BlockId) -> [u8; 3] {
         self.by_id.get(&id).copied().unwrap_or(GREY)
     }
 }
