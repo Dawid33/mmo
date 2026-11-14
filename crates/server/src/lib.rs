@@ -949,7 +949,12 @@ pub fn run() -> claims::ServerExit {
     // generator is only reached by paths that stay synchronous by design.
     let region_gen_cache = gen_cache.clone();
     let region_generator: region_threads::SharedRegionGenerator =
-        std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
+        std::sync::Arc::new(move |rc| {
+            // The first region to start running is the home region of a `home=` dev source; far-terrain
+            // and halo generation must not decide it, so only this generator announces.
+            worldgen::structures::active().region_requested(rc);
+            region_gen_cache.generate_cached(rc, world_seed, materials)
+        });
     // The world clock: ms since `start` (the manager's `now_ms` base) -> world
     // tick, continuing from the last committed cut's tick (procedural worlds:
     // from 0, never saved).

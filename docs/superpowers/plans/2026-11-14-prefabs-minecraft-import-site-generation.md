@@ -371,7 +371,8 @@ VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;s
 
 - `--prefab NAME[:DX,DZ[:TURN]]` (repeatable; the client joins the flags with `;`) makes the client start
   its server with `VOXEL_DEV_STRUCTURES=home=<spec>`: the prefabs stand beside the landing column (else the
-  centre) of the HOME region only, the first region this server generates in full, which in the debug
+  centre) of the HOME region only, the first region to start running on this server and be generated fresh (the server's
+  region-thread generator announces it; a region restored from the store does not), which in the debug
   launch is the embark region; laid out as a row along +x without offsets, each on a pad levelled to the
   ground at its anchor. Other regions are untouched. The embark is chosen as without the flag.
 - `VOXEL_DEV_STRUCTURES` by hand has three forms: `home=<spec>` (above), `all=<spec>` (the same beside

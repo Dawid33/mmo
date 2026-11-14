@@ -70,8 +70,10 @@ pub trait StructureSource: Send + Sync {
     fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>>;
     /// Identity of the whole source, for the worldgen cache key.
     fn content_hash(&self) -> u32;
-    /// A full region `rc` is about to be generated (the public `generate_region` entries call this once,
-    /// before generating). Sources that depend on which region is asked for first use it; default: nothing.
+    /// A region `rc` is starting to run on this server: the server's region-thread generator calls it once
+    /// per region start, right before generating (never from worldgen itself, the LOD workers, the halo
+    /// generator or the manager's synchronous generator; a region restored from the store does not
+    /// generate and so does not call it). Default: nothing.
     fn region_requested(&self, _rc: game::RegionCoords) {}
 }
 
@@ -448,7 +450,9 @@ impl StructureSource for DevRegionSource {
 }
 
 /// Dev placements beside the landing column of ONE region: the FIRST region whose full generation is
-/// requested through [`StructureSource::region_requested`] (in the debug launch, the embark region);
+/// to start running, as announced by the server's region-thread generator through
+/// [`StructureSource::region_requested`] (in the debug launch, the embark region, when it is generated
+/// fresh rather than restored from the store);
 /// nowhere else. The placements are `dev_placements(entries, origin_of(home), prefabs, ground)`, computed
 /// once, when the first request arrives; later requests are ignored. Until then `placements_in` is empty.
 ///
