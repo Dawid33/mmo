@@ -375,11 +375,18 @@ VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;s
   region-thread generator announces it; a region restored from the store does not), which in the debug
   launch is the embark region; laid out as a row along +x without offsets, each on a pad levelled to the
   ground at its anchor. Other regions are untouched. The embark is chosen as without the flag.
-- `VOXEL_DEV_STRUCTURES` by hand has three forms: `home=<spec>` (above), `all=<spec>` (the same beside
+- `VOXEL_DEV_STRUCTURES` by hand has these forms (besides `town=` above): `home=<spec>` (above), `all=<spec>` (the same beside
   EVERY region's landing, laid out lazily per region) and `<rx>,<rz>=<spec>` (one named region, an
   explicit list; the server logs the placement count). `home` is order-dependent by design: a region or far
   tile generated before the home is fixed shows no prefab. With any of the three the server turns the
   worldgen disk cache off (a cached region would carry or lack the prefab independently of the run).
+- A town: `just town medieval` (or `just town medieval:2:64`; `client debug embarked --reset --town
+  STYLE[:ARMS[:LEN]]`, refused with `--prefab` and `--join`) starts the server with
+  `VOXEL_DEV_STRUCTURES=town=<style>[:<arms>[:<arm_len>]]`: one town (`sites::town::layout_town`: a plaza,
+  1..=4 streets of 16..=256 blocks, houses of the style's kit on lots facing them) beside the landing of the
+  HOME region, as `home=` does. The kit comes from the installed prefab set, so the recipe adds every
+  sub-directory of `prefab-imports/` to `VOXEL_PREFAB_DIRS`; a style with fewer than three tagged houses is
+  a startup error naming it. The road and plaza blocks are `cobbled_road` and `smooth_stone`.
 - `VOXEL_PREFAB_DIRS` (`:`-separated, relative to the current directory) adds prefab directories to
   `assets/prefabs`; the built-in set is always installed. A missing directory is a startup error.
 - It needs a region never saved before: use `--reset` (a saved region is never regenerated, so an

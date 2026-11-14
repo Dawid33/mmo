@@ -6,7 +6,7 @@ use worldgen::sites::kit::*;
 use worldgen::sites::town::*;
 use worldgen::structures::StructurePlacement;
 
-use crate::structure_support::prefabs::{house_box, set_of};
+use crate::structure_support::prefabs::{house_box, set_of, town_houses};
 
 const ROAD: BlockId = BlockId(3);
 const PLAZA: BlockId = BlockId(4);
@@ -20,27 +20,8 @@ fn dry(_: i32, _: i32) -> bool {
     false
 }
 
-/// A house box with its door in the middle of the `front` side.
-fn house(name: &str, [x, y, z]: [u32; 3], front: Facing) -> PrefabFile {
-    let (xi, zi) = (x as i32, z as i32);
-    let door = match front {
-        Facing::North => [xi / 2, 1, 0],
-        Facing::South => [xi / 2, 1, zi - 1],
-        Facing::East => [xi - 1, 1, zi / 2],
-        Facing::West => [0, 1, zi / 2],
-    };
-    house_box(name, [x, y, z], &[STYLE, "house"], &[door])
-}
-
 fn houses() -> Vec<PrefabFile> {
-    vec![
-        house("a", [7, 5, 7], Facing::South),
-        house("b", [9, 6, 7], Facing::East),
-        house("c", [11, 8, 9], Facing::North),
-        house("d", [7, 7, 13], Facing::West),
-        house("e", [15, 9, 11], Facing::South),
-        house("f", [9, 4, 9], Facing::East),
-    ]
+    town_houses(STYLE, false)
 }
 
 fn kit() -> TownKit {

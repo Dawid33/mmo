@@ -455,6 +455,18 @@ pub fn ground_y_forged(world: &forged::ForgedWorld, x: i32, z: i32, mats: Materi
     column_sample(&world.patch(ox, oz, span), &mats, x, z).s
 }
 
+/// Whether world column (x, z) is under water in natural terrain (the same sample generation uses: its
+/// water top lies above its ground). Uses the installed forged world, else `seed`; the patch is the one
+/// [`ground_y`] reads.
+pub fn is_wet(x: i32, z: i32, seed: u64, mats: Materials) -> bool {
+    let (ox, oz, span) = chunk_window(x, z, &mats);
+    let c = match forged::active() {
+        Some(world) => column_sample(&world.patch(ox, oz, span), &mats, x, z),
+        None => column_sample(&ProceduralPatch(TerrainPipeline::new(seed).profile_grid(ox, oz, span)), &mats, x, z),
+    };
+    c.water_top > c.top
+}
+
 /// `patch_window` of the one-chunk window holding world block column `(x, z)`.
 fn chunk_window(x: i32, z: i32, mats: &Materials) -> (f64, f64, f64) {
     let cb = CHUNK_BLOCKS as i32;

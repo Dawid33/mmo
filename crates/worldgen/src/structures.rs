@@ -617,3 +617,111 @@ impl StructureSource for DevHomeSource {
         });
     }
 }
+
+type WetOf = Box<dyn Fn(i32, i32) -> bool + Send + Sync>;
+
+/// A town laid out once, beside the origin of the first region requested (`origin_of`), and nowhere else:
+/// [`DevHomeSource`]'s shape with `sites::town::layout_town` in place of a row of prefabs. Nothing until
+/// [`StructureSource::region_requested`] is first called; then one fixed layout, computed inside the
+/// `OnceLock`, filtered per query. Order-dependent BY DESIGN (a dev tool), so the worldgen disk cache must
+/// be off while this is installed.
+pub struct DevTownSource {
+    kit: crate::sites::kit::TownKit,
+    params: crate::sites::town::TownParams,
+    origin_of: OriginOf,
+    ground: GroundOf,
+    wet: WetOf,
+    hash: u32,
+    home: OnceLock<(game::RegionCoords, crate::sites::town::TownLayout, Vec<Arc<StructurePlacement>>)>,
+}
+
+impl DevTownSource {
+    /// `set_hash` = the prefab set's `content_hash()` the kit was drawn from.
+    pub fn new(
+        kit: crate::sites::kit::TownKit,
+        params: crate::sites::town::TownParams,
+        set_hash: u32,
+        origin_of: OriginOf,
+        ground: GroundOf,
+        wet: WetOf,
+    ) -> Self {
+        let mut h = crc32fast::Hasher::new();
+        h.update(&set_hash.to_le_bytes());
+        h.update(&[4]); // not a StructureList (none), a DevRegionSource (2) nor a DevHomeSource (3)
+        h.update(&(kit.style.len() as u32).to_le_bytes());
+        h.update(kit.style.as_bytes());
+        let p = &params;
+        h.update(&p.seed.to_le_bytes());
+        h.update(&[p.arms]);
+        for v in [p.arm_len, p.street_w, p.plaza, p.setback, p.gap_min, p.gap_max, p.max_relief] {
+            h.update(&v.to_le_bytes());
+        }
+        h.update(&p.pad_skirt.to_le_bytes());
+        h.update(&p.road.0.to_le_bytes());
+        h.update(&p.plaza_block.0.to_le_bytes());
+        Self { kit, params, origin_of, ground, wet, hash: h.finalize(), home: OnceLock::new() }
+    }
+
+    /// The home region, once one was requested.
+    pub fn home(&self) -> Option<game::RegionCoords> {
+        self.home.get().map(|(rc, ..)| *rc)
+    }
+
+    /// The whole layout, once a home is set.
+    pub fn layout(&self) -> Option<&crate::sites::town::TownLayout> {
+        self.home.get().map(|(_, l, _)| l)
+    }
+}
+
+impl StructureSource for DevTownSource {
+    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
+        let Some((_, _, placements)) = self.home.get() else { return Vec::new() };
+        if x0 >= x1 || z0 >= z1 {
+            return Vec::new();
+        }
+        let (gx0, gz0, gx1, gz1) = (x0 - margin, z0 - margin, x1 + margin, z1 + margin);
+        placements
+            .iter()
+            .filter(|p| {
+                let [a, c, d, e] = p.reach_xz();
+                a < gx1 && d > gx0 && c < gz1 && e > gz0
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn paints_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Paint> {
+        let Some((_, layout, _)) = self.home.get() else { return Vec::new() };
+        if x0 >= x1 || z0 >= z1 {
+            return Vec::new();
+        }
+        let (gx0, gz0, gx1, gz1) = (x0 - margin, z0 - margin, x1 + margin, z1 + margin);
+        layout
+            .paints
+            .iter()
+            .copied()
+            .filter(|p| {
+                let [a, c, d, e] = p.rect;
+                a < gx1 && d > gx0 && c < gz1 && e > gz0
+            })
+            .collect()
+    }
+
+    fn content_hash(&self) -> u32 {
+        self.hash
+    }
+
+    fn region_requested(&self, rc: game::RegionCoords) {
+        self.home.get_or_init(|| {
+            let layout = crate::sites::town::layout_town(
+                &self.kit,
+                (self.origin_of)(rc),
+                &self.params,
+                &*self.ground,
+                &*self.wet,
+            );
+            let placements = layout.placements.iter().cloned().map(Arc::new).collect();
+            (rc, layout, placements)
+        });
+    }
+}

@@ -188,6 +188,35 @@ pub mod prefabs {
         f
     }
 
+    /// A house box tagged `style` and `house`, its door in the middle of the `front` side; with `floor`, a
+    /// stone-brick floor (cell layer y 0) so the stamped house has blocks to find.
+    pub fn town_house(name: &str, style: &str, [x, y, z]: [u32; 3], front: Facing, floor: bool) -> PrefabFile {
+        let (xi, zi) = (x as i32, z as i32);
+        let door = match front {
+            Facing::North => [xi / 2, 1, 0],
+            Facing::South => [xi / 2, 1, zi - 1],
+            Facing::East => [xi - 1, 1, zi / 2],
+            Facing::West => [0, 1, zi / 2],
+        };
+        let mut f = house_box(name, [x, y, z], &[style, "house"], &[door]);
+        if floor {
+            f.boxes = vec![FileBox { min: [0, 0, 0], size: [x, 1, z], mat: BRICK }];
+        }
+        f
+    }
+
+    /// Six houses of different sizes and fronts in one style.
+    pub fn town_houses(style: &str, floor: bool) -> Vec<PrefabFile> {
+        vec![
+            town_house("a", style, [7, 5, 7], Facing::South, floor),
+            town_house("b", style, [9, 6, 7], Facing::East, floor),
+            town_house("c", style, [11, 8, 9], Facing::North, floor),
+            town_house("d", style, [7, 7, 13], Facing::West, floor),
+            town_house("e", style, [15, 9, 11], Facing::South, floor),
+            town_house("f", style, [9, 4, 9], Facing::East, floor),
+        ]
+    }
+
     /// A set built in memory from prefab files.
     pub fn set_of(files: &[PrefabFile]) -> PrefabSet {
         let reg = registry();
