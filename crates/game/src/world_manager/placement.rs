@@ -203,6 +203,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("[server] spawn order for player {}: this host is leaving; refused", req.player.0);
             return self.spawn_refused(req);
         }
+        if self.heir_not_adopted() {
+            // R4: until every report is in and resolved, this host cannot know which players
+            // a survivor's journal holds a newer record of — placing any from the store could
+            // pick the stale copy ("wait, never guess"). Retried at the adoption.
+            return self.hold_spawn(req, since_ms, "this host inherits land it has not adopted yet");
+        }
         match self.place_spawn(req.player, req.record_region) {
             Placement::Here if !live && !self.peers_synced() => self.hold_spawn(req, since_ms, "a peer has not synced"),
             Placement::Wait => {

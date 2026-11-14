@@ -94,6 +94,17 @@
 //! A report that comes after the resolution is dropped: the drop set and the resolution are
 //! made from the same reports.
 //!
+//! **Spawn orders wait on the heir.** From the moment the heir applies a succession (its
+//! mask goes up) until it has adopted it — every one, for an heir of several — EVERY spawn
+//! order is held (`placement.rs`, the held-spawn queue), not only those aimed at the
+//! inherited land: until the reports are resolved the heir cannot know which players a
+//! survivor's journal holds a newer record of, and placing one from the store's base-cut
+//! record could pick the stale copy. The held orders are retried right after the adoption
+//! (a player parked from a journal is then found here) or when the succession settles; an
+//! abandoned succession comes with a rollback, and the held orders die with the process
+//! (the login service times the join out). Other survivors are unchanged: their `departed`
+//! pointers send a moved player's order on to the heir, which holds it.
+//!
 //! **Who accounts for what the heir delivers — the three sender cases** (`world_cut.rs`,
 //! re-derived for a succession; no world cut runs from the declaration until the heir's
 //! `SuccessionAdopted`, and every cut pending with the predecessor was aborted before it):
@@ -516,6 +527,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         // ends with this process).
         self.inheriting.retain(|_, s| *s != id);
         self.successions_done.insert(id);
+        // Spawn orders held while this host had it to adopt go on. An abandoned succession
+        // comes with a rollback (`Generation` follows): this host exits, its held orders are
+        // never answered, and the login service times the join out (the client retries).
+        if settled {
+            self.retry_held_spawns();
+        }
     }
 
     /// The successions this host answered (`(id, adopted)`), for its `Attach`: `adopted`
@@ -677,6 +694,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // 5. Answered: the coordinator's next cut settles it (its part here adopts `pred`).
         self.world_send(HostMsg::SuccessionAdopted { id });
+        // The spawn orders held since the heir applied go on now (unless another succession
+        // of this host is still to adopt): a player parked above is found here.
+        self.retry_held_spawns();
     }
 
     /// Step 3 for people: a person's bundle is never delivered. The receiving host reports
@@ -767,6 +787,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_send(HostMsg::PlayerOffline { player: h.player, hop });
         self.parked_players.insert(h.player, record);
         true
+    }
+
+    /// Whether this host is the heir of a succession it applied and has not adopted yet:
+    /// every spawn order waits meanwhile (`placement.rs`), from the moment the mask goes up
+    /// until the LAST such succession is adopted (or is over).
+    pub(super) fn heir_not_adopted(&self) -> bool {
+        let me = self.ordinal();
+        self.successions.iter().any(|(id, r)| {
+            r.applied && r.order.heir == me && self.adoptions.get(id).is_none_or(|a| a.state != AdoptionState::Adopted)
+        })
     }
 
     /// Whether `rc` is land this host inherits and has not adopted yet (the mask).

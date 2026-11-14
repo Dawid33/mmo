@@ -7162,3 +7162,142 @@ fn heir_of_two(rig: &mut MultiRig) {
 fn an_heir_of_two_predecessors_settles_both_in_one_cut() {
     sweep("an_heir_of_two_predecessors_settles_both_in_one_cut", 3, 1, HEIR_SWEEP_SEEDS, heir_of_two);
 }
+
+// --- Fix round 2: the heir holds every spawn order until it has adopted ---------------
+
+/// The spawn orders `rig`'s hosts took (recorded and answered ok, as the server does),
+/// with the host that took each, and what the login service is told, gathered over `rounds`
+/// rounds (stopping at the first answer when `until_answer`).
+fn logins_over(rig: &mut MultiRig, rounds: usize, until_answer: bool) -> (Vec<(u32, game::SpawnRequest)>, Vec<(u32, game::LoginOut)>) {
+    let (mut taken, mut out) = (Vec::new(), Vec::new());
+    for _ in 0..rounds {
+        rig.round();
+        taken.extend(rig.serve_logins());
+        collect_login_out(rig, &mut out);
+        if until_answer && !out.is_empty() {
+            break;
+        }
+    }
+    (taken, out)
+}
+
+/// A spawn order for `player` (session epoch `epoch`, its stored record in `rc`) as the
+/// login service gives it to host `entry`, its entry host.
+fn spawn_order_at(rig: &mut MultiRig, entry: u32, player: game::PlayerId, rc: RegionCoords, epoch: u64) {
+    rig.hosts[entry as usize].manager.set_entry_host(entry);
+    let order = game::ServerEvent::SpawnOrder {
+        origin: entry,
+        hops: 0,
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: epoch,
+        player,
+        record_region: Some(rc),
+    };
+    rig.hosts[entry as usize].event(order);
+}
+
+/// The test player's record at a committed cut K lies in a survivor's land (`on_heir`: the
+/// heir's own; else a survivor S1 that is not the heir). After K the player walks from
+/// there into the dead host's region (a `Sent` entry on that survivor); the host dies. The
+/// login's spawn order reaches the heir — given to it directly, or relayed from S1 by its
+/// `departed` pointer — after the heir applied the succession and before it adopted: it
+/// waits, no body is made from the K record; once the heir adopts, the order is placed and
+/// the login stands where the journal's bundle put the player, once.
+fn login_before_adoption(rig: &mut MultiRig, on_heir: bool) -> bool {
+    let chain = succession_world(rig);
+    rig.parked_hold = true;
+    let rd = chain[1];
+    let dead = rig.owner(rd);
+    let (heir, other) = heir_and_survivor(rig, dead);
+    let s = if on_heir { heir } else { other.expect("three hosts") };
+    let rs = chain.iter().copied().find(|rc| rig.owner(*rc) == s).expect("the survivor's region");
+    rig.connect_home(s, P_CLIENT, P_PLAYER, centre_of(rs));
+    let (_, _, body) = until_body(rig);
+    until_committed(rig, 1);
+    let base = rig.committed_players[&P_PLAYER].clone();
+    assert_eq!(base.region, rs);
+    assert!(rig.teleport(rs, body, past_seam(rs, rd, REGION_SIZE / 2.0)));
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(P_CLIENT) == [(dead, rd)]), "the player never reached {rd:?}");
+    let hit = journalled(rig, s, dead, game::Subject::Player(P_PLAYER), true) && rig.committed_players[&P_PLAYER] == base;
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    until_applied(rig, &succession);
+    spawn_order_at(rig, s, P_PLAYER, rs, 6);
+    let (taken, out) = logins_over(rig, WAIT_ROUNDS, false);
+    assert!(taken.is_empty() && out.is_empty(), "nothing placed before the heir adopted: {taken:?} {out:?}");
+    assert!(rig.player_owners(P_CLIENT).is_empty(), "no body from the K record");
+    rig.with_adoption();
+    let (taken, out) = logins_over(rig, SUCCESSION_ROUNDS, true);
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "the heir took the order once adopted");
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 6, ok: true, endpoint: Some(rig_endpoint(heir)) };
+    assert_eq!(out, [(s, ack)], "the login service is told by its entry host");
+    let parked = rig.hosts[heir as usize].manager.parked_record(P_PLAYER).cloned().expect("parked from the journal");
+    assert_eq!(parked.region, rd, "the journal's record");
+    // The login connects with the store's K record: the journal's parked one wins.
+    rig.connect_login(heir, NEW_LOGIN_CLIENT, P_PLAYER, Some(base), LOGIN_TOKEN, 6);
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT).len() == 1), "one body");
+    assert_eq!(rig.player_owners(NEW_LOGIN_CLIENT)[0].1, rd, "where the journal's bundle put the player");
+    assert_settled_whole(rig, &succession, &[]);
+    until_committed(rig, 1);
+    assert_eq!(rig.committed_players[&P_PLAYER].region, rd, "the store holds the journal's state");
+    assert_player_once(rig, P_PLAYER);
+    hit
+}
+
+fn login_on_the_heir(rig: &mut MultiRig) -> bool {
+    login_before_adoption(rig, true)
+}
+
+fn login_relayed_to_the_heir(rig: &mut MultiRig) -> bool {
+    login_before_adoption(rig, false)
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_login_on_the_heir_before_adoption_waits_and_gets_the_journals_record() {
+    sweep_hits("a_login_on_the_heir_before_adoption_waits_and_gets_the_journals_record (2 hosts)", 2, 1, HEIR_SEEDS, login_on_the_heir);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_login_relayed_to_the_heir_before_adoption_waits_and_gets_the_journals_record() {
+    sweep_hits(
+        "a_login_relayed_to_the_heir_before_adoption_waits_and_gets_the_journals_record (3 hosts)",
+        3,
+        1,
+        HEIR_SEEDS,
+        login_relayed_to_the_heir,
+    );
+}
+
+/// A login of a player the succession does not touch (its record in the heir's own land),
+/// ordered on the heir after it applied and before it adopted: held, then placed at the
+/// adoption — neither lost nor refused — and its body is made once.
+fn unrelated_login(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let rd = chain[1];
+    let dead = rig.owner(rd);
+    let (heir, _) = heir_and_survivor(rig, dead);
+    let rh = chain.iter().copied().find(|rc| rig.owner(*rc) == heir).expect("the heir's region");
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    until_applied(rig, &succession);
+    spawn_order_at(rig, heir, FRESH_PLAYER, rh, 2);
+    let (taken, out) = logins_over(rig, WAIT_ROUNDS, false);
+    assert!(taken.is_empty() && out.is_empty(), "held until the adoption: {taken:?} {out:?}");
+    assert_eq!(rig.hosts[heir as usize].manager.spawn_orders_waiting(), 1, "the order waits");
+    rig.with_adoption();
+    let (taken, out) = logins_over(rig, SUCCESSION_ROUNDS, true);
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "placed on the heir");
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: true, endpoint: Some(rig_endpoint(heir)) };
+    assert_eq!(out, [(heir, ack)], "answered ok, not refused");
+    rig.connect_login(heir, NEW_LOGIN_CLIENT, FRESH_PLAYER, Some(centre_of(rh)), LOGIN_TOKEN, 2);
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT) == [(heir, rh)]), "its body, once");
+    assert_settled_whole(rig, &succession, &[]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_unrelated_login_on_the_heir_waits_for_the_adoption_and_is_placed() {
+    sweep_hosts("an_unrelated_login_on_the_heir_waits_for_the_adoption_and_is_placed", unrelated_login);
+}
