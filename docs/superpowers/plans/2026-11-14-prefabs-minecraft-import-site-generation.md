@@ -558,3 +558,17 @@ were verified against the pre-plan generator.
 - A broken built-in prefab file aborts every server start (kept loud on purpose).
 - A world started once with `--prefab` keeps its saved huts; a later run without the flag generates
   neighbouring regions without them. Nothing records which source a world was generated with.
+
+**Checks owed, and hunks left for their files' owners (plan 3)**
+
+- `just test-threads` did not pass when this stage finished: 7 `game` `peer_schedule::` cut tests failed,
+  in code the R4 work had open and uncommitted at the time; `handoff_schedule::` (28), `voxel_body` and
+  `threaded_world` passed, and `just determinism-wasm` passed. Nothing of this stage touches the peer,
+  coordinator or world-manager code — but the check is owed: re-run it once R4 settles.
+- Nobody has launched the game with `--prefab` yet (it opens a window): `just run --reset --prefab
+  dev-hut` is the first live look. Client tests were not run (ask-first), including the new
+  `debug_embarked_collects_prefabs`.
+- Left uncommitted (their files held other people's work): `crates/client/src/debug_launch.rs` (the
+  `--prefab` flag, its USAGE text, its test, a warning when used on an existing world) and `justfile` (a
+  comment on the `run` recipe) — alongside plan 1's `EMBEDDED_BLOCK_TEXTURES` entries in
+  `crates/client/src/renderer/mod.rs` and the `prefab-view`, `prefab-check` and `mc-import` recipes.
