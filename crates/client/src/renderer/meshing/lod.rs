@@ -958,6 +958,39 @@ mod tests {
         );
     }
 
+    /// Regression (2026-09-19, live): a LOD root arrives as hundreds of cells
+    /// in one frame. The raster lane meshes `max_in_flight` of them per batch
+    /// and must keep the rest queued — a `queue.remove()` on every changed
+    /// cell once left only the first batch of each root meshed, so
+    /// neighbouring regions rendered as a thin strip.
+    #[test]
+    fn raster_mode_meshes_every_cell_of_a_root_larger_than_the_task_budget() {
+        let mut app = pipeline_app(MeshBudgets {
+            max_in_flight: 8,
+            uploads_per_frame: 8,
+        });
+        let budget = app.world().resource::<MeshBudgets>().max_in_flight;
+        let cells: Vec<Entity> = (0..budget * 3)
+            .map(|i| spawn_lod_chunk(&mut app, Vec3::ZERO, Vec3::X * 64.0 * i as f32, 2, floor_grid()))
+            .collect();
+
+        let all_ready = |app: &mut App| {
+            cells
+                .iter()
+                .all(|&cell| app.world().entity(cell).contains::<LodRasterReady>())
+        };
+        assert!(
+            wait_until(&mut app, all_ready),
+            "only {} of {} cells were ever meshed",
+            cells
+                .iter()
+                .filter(|&&cell| app.world().entity(cell).contains::<LodRasterReady>())
+                .count(),
+            cells.len()
+        );
+        assert_eq!(app.world().resource::<LodBuildQueue>().pending_count(), 0);
+    }
+
     #[test]
     fn lod_build_queue_reports_the_raster_backlog() {
         let raster = Entity::from_bits(101);
