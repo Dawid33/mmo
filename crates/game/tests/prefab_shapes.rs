@@ -181,3 +181,31 @@ fn layer_validity() {
         assert!(s.is_valid(), "{s:?}");
     }
 }
+
+/// Absolute handedness, pinned by literal voxels: the self-consistency tests above would all still pass if
+/// every turn were counter-clockwise. North is -Z, east is +X, a quarter turn goes north -> east.
+#[test]
+fn absolute_handedness() {
+    let last = BLOCK_VOXELS - 1;
+    assert_eq!(turn_voxel([0, 0, 0], 1), [last, 0, 0]);
+    assert_eq!(turn_voxel([last, 0, 0], 1), [last, 0, last]);
+
+    let stairs = |facing, corner| Shape::Stairs { facing, half: Half::Bottom, corner };
+    // East-facing: the high half is the east (+X) half.
+    let east = stairs(Facing::East, StairCorner::Straight);
+    assert!(east.filled(last, last, 0));
+    assert!(!east.filled(0, last, 0));
+    // South-facing: the high half is the south (+Z) half.
+    let south = stairs(Facing::South, StairCorner::Straight);
+    assert!(south.filled(0, last, last));
+    assert!(!south.filled(0, last, 0));
+    // North-facing outer-left: the high quadrant is north-west (-X, -Z).
+    let outer = stairs(Facing::North, StairCorner::OuterLeft);
+    assert!(outer.filled(0, last, 0));
+    assert!(!outer.filled(last, last, 0));
+    // An open trapdoor facing east: the panel stands on the west (-X) edge and faces east.
+    let door = Shape::Trapdoor { facing: Facing::East, half: Half::Bottom, open: true };
+    let mid = BLOCK_VOXELS / 2;
+    assert!(door.filled(0, mid, mid));
+    assert!(!door.filled(last, mid, mid));
+}

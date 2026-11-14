@@ -245,3 +245,42 @@ fn one_chunk_of_a_monument() {
     assert_eq!(stamp.writes.len(), CHUNK_BLOCKS * CHUNK_BLOCKS * CHUNK_BLOCKS);
     assert!(stamp.carve.is_empty());
 }
+
+/// Mirror, then turn, in literals. Cells (1,0,0) stone and (2,0,0) north-facing bottom OuterLeft stairs;
+/// placement anchor [10, 5, 20], mirror, one clockwise turn. Mirror sends cell offset (2,0,0) to (-2,0,0),
+/// one clockwise turn sends (x, z) = (-2, 0) to (0, -2): the stairs land at [10, 5, 18], the stone at
+/// [10, 5, 19].
+#[test]
+fn mirror_then_turn_in_literals() {
+    let mut f = empty("mt", [3, 1, 1]);
+    f.boxes.push(FileBox { min: [1, 0, 0], size: [1, 1, 1], mat: 0 });
+    f.shaped.push(named(
+        [2, 0, 0],
+        Shape::Stairs { facing: Facing::North, half: Half::Bottom, corner: StairCorner::OuterLeft },
+        1,
+    ));
+    let p = build(&f);
+    let at = Placement { anchor: [10, 5, 20], turn: 1, mirror: true };
+    let mut got: BTreeMap<[i32; 3], Entry> = BTreeMap::new();
+    for chunk in chunks_touched(&p, &at) {
+        let Some(stamp) = layout_chunk(&p, &at, chunk) else { continue };
+        for (i, b, c) in stamp.writes {
+            got.insert(world_of(chunk, i), Some((b, c)));
+        }
+    }
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[&[10, 5, 19]], Some((Block { id: STONE, data: [0; 3] }, None)));
+    let (block, chisel) = got[&[10, 5, 18]].clone().unwrap();
+    assert_eq!(block, Block { id: OAK, data: [0; 3] });
+    let chisel = chisel.unwrap();
+    // North/OuterLeft mirrored is north/OuterRight, turned once is east/OuterRight.
+    let shape = Shape::Stairs { facing: Facing::East, half: Half::Bottom, corner: StairCorner::OuterRight };
+    assert_eq!(chisel, shape.chisel(OAK));
+    // By hand: north/OuterRight has its high quadrant at x >= half, z < half (north-east). One clockwise
+    // turn takes north-east to south-east: x >= half, z >= half. The lower half is always full.
+    let half = BLOCK_VOXELS / 2;
+    assert_eq!(
+        chisel,
+        ChiselData::from_fn(vec![OAK], |x, y, z| (y < half || (x >= half && z >= half)).then_some(0))
+    );
+}
