@@ -3,6 +3,7 @@
 
 pub mod codec;
 pub mod file;
+pub mod layout;
 pub mod resolve;
 pub mod shapes;
 pub mod turn;
@@ -20,4 +21,8 @@ pub use file::{
 pub use resolve::{
     prefab_name_key, resolve, Cell, Problem, ResolvedPrefab, ResolvedShape, Trust, PREFAB_BUCKET_BLOCKS,
     MARKER_MARGIN, UNTRUSTED_MAX_BUCKET_REFS, UNTRUSTED_MAX_COLUMN_WORK, UNTRUSTED_MAX_EXTENT, UNTRUSTED_MAX_ITEMS,
+};
+pub use layout::{
+    cell_of_world, chunks_touched, layout_chunk, marker_in_world, placement_bounds, world_of_cell, ChunkStamp,
+    Placement,
 };
