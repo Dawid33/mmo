@@ -1603,7 +1603,8 @@ fn claim_is_sets_the_host_claim() {
     let link = h.manager.world_link_mut().and_then(|l| l.as_inline_mut()).unwrap();
     let grant = game::EmbarkRequest { civ, people: people[0..2].to_vec(), region: RegionCoords::new(2, 0) };
     let id = RequestId { host: 0, boot: 99, seq: 0 };
-    link.coordinator_mut().handle(0, HostMsg::Request { id, player: a, req: WorldRequest::Embark(grant) }, 10);
+    let hop = link.coordinator().hop_of(a);
+    link.coordinator_mut().handle(0, HostMsg::Request { id, player: a, hop, req: WorldRequest::Embark(grant) }, 10);
     let Some(Claim::Fortress(site)) = link.coordinator().claim_of(a) else { panic!("the coordinator granted A a fortress") };
     link.set_up(true);
     h.drain_packets();

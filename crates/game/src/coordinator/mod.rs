@@ -372,7 +372,7 @@ impl Coordinator {
                     self.history.defer_directive(directive);
                 }
             }
-            HostMsg::Request { id, player, req } => self.request(host, id, player, req),
+            HostMsg::Request { id, player, hop, req } => self.request(host, id, player, hop, req),
             HostMsg::Settle { id, req } => self.settle(host, id, req),
             HostMsg::PlayerOnline(p) => self.player_online(host, p),
             HostMsg::PlayerOffline { player, hop } => self.player_offline(host, player, hop),
@@ -860,11 +860,25 @@ impl Coordinator {
         self.push(Target::Host(host), CoordMsg::Reply { id, reply });
     }
 
-    fn request(&mut self, host: u32, id: RequestId, player: PlayerId, req: WorldRequest) {
+    /// Whether a request of `player` made at placement `hop` on `host` is of an older
+    /// placement than the one the coordinator knows: below its hop, or at it while the
+    /// player is online on another host (two hosts are never online at one hop).
+    fn from_older_placement(&self, host: u32, player: PlayerId, hop: u64) -> bool {
+        let known = self.hop_of(player);
+        hop < known || (hop == known && self.online_on.get(&player).is_some_and(|on| *on != host))
+    }
+
+    fn request(&mut self, host: u32, id: RequestId, player: PlayerId, hop: u64, req: WorldRequest) {
         if let Some(reply) = self.memo.get(&id) {
             log::debug!("coordinator: {id:?} repeated; answering from the memo");
             let reply = reply.clone();
             return self.push(Target::Host(host), CoordMsg::Reply { id, reply });
+        }
+        // A state-changing request of an older placement of its player grants nothing:
+        // refused through the settle path (memoised), as a zombie's is.
+        if req.changes_state() && self.from_older_placement(host, player, hop) {
+            log::warn!("coordinator: {id:?} of {player:?} at hop {hop} from host {host} is of an older placement: refused");
+            return self.settle(host, id, req);
         }
         let memoise = req.changes_state();
         let reply = match req {

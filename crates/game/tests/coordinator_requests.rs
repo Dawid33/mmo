@@ -506,6 +506,38 @@ fn lifecycle_on_stale_link_lands_before_attach() {
     assert!(ahead.into_inner() > 0, "no seed landed a lifecycle message ahead of the Attach");
 }
 
+/// The host numbers each placement of a player (its `PlayerOnline`), and stamps every
+/// request it makes for the player with that number, so the coordinator can tell a request
+/// of an older placement.
+#[test]
+fn host_stamps_requests_with_the_players_hop() {
+    let mut w = World::new(0);
+    let mark = w.mark();
+    w.send(ServerEvent::connected(A));
+    w.drain();
+    let req = w.embark_request();
+    w.packet(A, ClientPacket::Embark(req));
+    w.drain();
+    let sent = w.sent_since(mark);
+    let placed: Vec<u64> = sent
+        .iter()
+        .filter_map(|m| match m {
+            HostMsg::PlayerOnline(o) => Some(o.hop),
+            _ => None,
+        })
+        .collect();
+    let stamped: Vec<u64> = sent
+        .iter()
+        .filter_map(|m| match m {
+            HostMsg::Request { hop, req: WorldRequest::Embark(_), .. } => Some(*hop),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(placed.len(), 1, "A is placed once: {sent:?}");
+    assert!(placed[0] > 0, "a placement has a number above the never-placed 0");
+    assert_eq!(stamped, placed, "the Embark carries the hop A was placed at");
+}
+
 /// A request already sent when the link drops — its reply lost with the connection, or
 /// still on its way — is sent again after the `Attach`: the coordinator answers it from
 /// its memo, and the host takes the first reply only (a second one for the same id is

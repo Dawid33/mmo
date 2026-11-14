@@ -396,7 +396,7 @@ fn directive_not_sent_before_save() {
     link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() });
     // The fortress region runs: the founding embodies the party there by directives.
     link.send(HostMsg::RegionStarted { rc: req.region, incarnation: 1 });
-    link.send(HostMsg::Request { id, player, req: WorldRequest::Embark(req.clone()) });
+    link.send(HostMsg::Request { id, player, hop: 0, req: WorldRequest::Embark(req.clone()) });
 
     let deadline = Instant::now() + WAIT;
     let (mut directives, mut replies, mut attached) = (0, 0, false);
@@ -454,7 +454,7 @@ fn fenced_coordinator_stops() {
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
     link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() });
-    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: 0, req: WorldRequest::Embark(req) });
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the fenced coordinator kept running");
         std::thread::sleep(Duration::from_millis(10));
@@ -494,7 +494,7 @@ fn overlapping_start_claims_before_it_loads() {
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
     link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() });
-    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: 0, req: WorldRequest::Embark(req) });
     while store.failing_writes_left() > 1 {
         assert!(Instant::now() < deadline, "the founding's save was never tried");
         std::thread::sleep(Duration::from_millis(5));

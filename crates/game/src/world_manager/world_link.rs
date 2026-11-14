@@ -21,6 +21,8 @@ pub const ATTACH_WAIT_MS: u64 = 2000;
 pub(super) struct PendingRequest {
     client: ClientId,
     player: PlayerId,
+    /// The player's hop here when asked: a resend carries it, not the hop of the day.
+    hop: u64,
     req: WorldRequest,
     /// When the client asked: the timeout runs from here.
     sent_ms: u64,
@@ -447,7 +449,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             .pending_requests
             .iter()
             .filter(|(id, _)| !queued.contains(id))
-            .map(|(id, p)| (*id, HostMsg::Request { id: *id, player: p.player, req: p.req.clone() }))
+            .map(|(id, p)| (*id, HostMsg::Request { id: *id, player: p.player, hop: p.hop, req: p.req.clone() }))
             .collect();
         // Settle-only: a request its client was told failed is never executed now.
         resend.extend(
@@ -1000,10 +1002,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("client {client}: a world request with no player; refused");
             return self.answer_unavailable(client, &req);
         };
+        let hop = self.hop_here(player);
         let id = RequestId { host: self.world_host(), boot: self.world_boot, seq: self.next_request_seq };
         self.next_request_seq += 1;
-        self.pending_requests.insert(id, PendingRequest { client, player, req: req.clone(), sent_ms: now_ms });
-        self.world_send(HostMsg::Request { id, player, req });
+        self.pending_requests.insert(id, PendingRequest { client, player, hop, req: req.clone(), sent_ms: now_ms });
+        self.world_send(HostMsg::Request { id, player, hop, req });
     }
 
     /// The answer a request gets when the world services cannot give one.

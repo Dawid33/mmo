@@ -161,7 +161,11 @@ pub enum HostMsg {
     /// A player's world request. A replay of an id whose first reply is still on its way
     /// (in the coordinator's queue or on the link) is answered again from the memo, so one
     /// id may get two `Reply`s: the host answers the first and drops any later one by id.
-    Request { id: RequestId, player: PlayerId, req: WorldRequest },
+    ///
+    /// `hop` is the player's placement number on the asking host when the request was
+    /// made. A state-changing request of an older placement (below the coordinator's hop
+    /// for the player, or at it while the player is online on another host) is refused.
+    Request { id: RequestId, player: PlayerId, hop: u64, req: WorldRequest },
     /// A state-changing request that timed out toward its client (who was told the world
     /// is unavailable), sent again after an `Attach` to learn its fate — never to run it:
     /// the coordinator answers from its memo if it applied the request, else it memoises

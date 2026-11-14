@@ -11,6 +11,9 @@ use crate::history_handover::{land_map, start, years_before};
 
 const A: PlayerId = PlayerId(1);
 const B: PlayerId = PlayerId(2);
+/// The hop a player is placed at by [`online`] and `report`, and so the hop its requests
+/// carry in most tests.
+const PLACED: u64 = 1;
 /// Seeds per seeded test.
 const SEEDS: u64 = 32;
 
@@ -59,11 +62,11 @@ fn coordinator() -> (Coordinator, CivId, Vec<PersonId>) {
 }
 
 fn embark(id: u64, player: PlayerId, civ: CivId, people: &[PersonId], region: RegionCoords) -> HostMsg {
-    HostMsg::Request { id: rid(id), player, req: WorldRequest::Embark(EmbarkRequest { civ, people: people.to_vec(), region }) }
+    HostMsg::Request { id: rid(id), player, hop: PLACED, req: WorldRequest::Embark(EmbarkRequest { civ, people: people.to_vec(), region }) }
 }
 
 fn request(id: u64, player: PlayerId, req: WorldRequest) -> HostMsg {
-    HostMsg::Request { id: rid(id), player, req }
+    HostMsg::Request { id: rid(id), player, hop: PLACED, req }
 }
 
 /// Save as a store that commits at once would, then take what may leave.
@@ -213,18 +216,19 @@ fn return_in_use_only_while_online() {
     assert_eq!(reply_to(&commit(&mut c), 4), WorldReply::Returned { site, region });
     assert_eq!(c.claim_of(B), Some(Claim::Fortress(site)));
     assert_eq!(c.claim_of(A), None, "the offline claimant lost it");
-    // A comes back holding the old claim in its record: it is B's now.
+    // A comes back holding the old claim in its record: it is B's now. (Its placement is
+    // numbered 2, and its requests from here carry that.)
     c.handle(0, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
     assert_eq!(c.claim_of(A), None);
     assert!(
         c.take_msgs().iter().any(|m| matches!(m, CoordMsg::ClaimIs { player: A, claim: None, .. })),
         "A's host is told to drop the fortress B plays"
     );
-    c.handle(0, request(5, A, WorldRequest::ReturnTo(site)), 0);
+    c.handle(0, HostMsg::Request { id: rid(5), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
     assert_eq!(reply_to(&commit(&mut c), 5), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
     // B retires: the site is free again.
     c.handle(0, HostMsg::ReleaseClaim { player: B }, 0);
-    c.handle(0, request(6, A, WorldRequest::ReturnTo(site)), 0);
+    c.handle(0, HostMsg::Request { id: rid(6), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
     assert_eq!(reply_to(&commit(&mut c), 6), WorldReply::Returned { site, region });
 }
 
@@ -1053,7 +1057,7 @@ fn memo_ids(c: &Coordinator) -> Vec<RequestId> {
 }
 
 fn request_as(id: RequestId, player: PlayerId, req: WorldRequest) -> HostMsg {
-    HostMsg::Request { id, player, req }
+    HostMsg::Request { id, player, hop: PLACED, req }
 }
 
 /// More answers than the old count cap, none settled: every one is kept, so a replay of
@@ -2287,7 +2291,7 @@ fn host_succeeded_parks_its_regions_and_takes_its_players_offline() {
     c.handle(0, attach(0, 1, vec![RunningRegion { rc: r1, incarnation: 1, people: Vec::new() }], vec![report(B, None, false)]), 0);
     commit(&mut c);
     assert_eq!((c.region_host(r0), c.online_on(A)), (Some(1), Some(1)));
-    c.handle(0, HostMsg::Request { id: RequestId { host: 0, boot: 7, seq: 2 }, player: B, req: WorldRequest::ReturnTo(site) }, 0);
+    c.handle(0, HostMsg::Request { id: RequestId { host: 0, boot: 7, seq: 2 }, player: B, hop: PLACED, req: WorldRequest::ReturnTo(site) }, 0);
     let out = commit(&mut c);
     assert!(replies(&out).iter().any(|(_, r)| *r == WorldReply::EmbarkRefused(EmbarkRefusal::InUse)), "A plays it: {out:?}");
     // Host 1 lapses and is succeeded by host 0.
@@ -2302,7 +2306,7 @@ fn host_succeeded_parks_its_regions_and_takes_its_players_offline() {
     }
     assert_eq!(c.online_on(A), None, "A went offline with its host");
     assert_eq!((c.region_host(r1), c.online_on(B)), (Some(0), Some(0)), "host 0's stand");
-    c.handle(0, HostMsg::Request { id: RequestId { host: 0, boot: 7, seq: 3 }, player: B, req: WorldRequest::ReturnTo(site) }, 20);
+    c.handle(0, HostMsg::Request { id: RequestId { host: 0, boot: 7, seq: 3 }, player: B, hop: PLACED, req: WorldRequest::ReturnTo(site) }, 20);
     let out = commit(&mut c);
     assert!(
         replies(&out).iter().any(|(_, r)| *r == WorldReply::Returned { site, region }),
@@ -2345,7 +2349,7 @@ fn a_succeeded_boots_messages_are_dropped() {
     c.handle(1, attach_as(1, 2, 101, vec![report(B, None, false)]), 20);
     let id = RequestId { host: 1, boot: 101, seq: 1 };
     let req = WorldRequest::Embark(EmbarkRequest { civ, people: people[0..2].to_vec(), region: rc(8, 0) });
-    c.handle(1, HostMsg::Request { id, player: A, req: req.clone() }, 20);
+    c.handle(1, HostMsg::Request { id, player: A, hop: PLACED, req: req.clone() }, 20);
     let out = commit_routed(&mut c);
     assert_eq!(c.region_host(r), None, "the zombie's region start is dropped");
     assert_eq!((c.online_on(A), c.online_on(B)), (None, None), "its players are not online");
@@ -2362,7 +2366,7 @@ fn a_succeeded_boots_messages_are_dropped() {
         .collect();
     assert_eq!(refused, vec![&WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)], "{out:?}");
     // Memoised: a resend gets the same refusal, never an embark.
-    c.handle(1, HostMsg::Request { id, player: A, req }, 21);
+    c.handle(1, HostMsg::Request { id, player: A, hop: PLACED, req }, 21);
     assert!(replies(&commit(&mut c)).iter().all(|(_, r)| *r == WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)));
     // Another boot of the ordinal is a new host.
     c.handle(1, attach_as(1, 3, 999, vec![report(B, None, false)]), 30);
@@ -2649,4 +2653,54 @@ fn cut_peer_counts_are_relayed_between_participants_only() {
     commit_routed(&mut c);
     c.handle(1, HostMsg::CutPeerCount { cut, peer: 0, received_through: 4, boot: 100 }, now + 2);
     assert!(counts(&commit_routed(&mut c)).is_empty(), "nor once it is over");
+}
+
+/// An `Embark` request of `player` made at placement `hop`.
+fn embark_at(id: u64, player: PlayerId, hop: u64, civ: CivId, people: &[PersonId], region: RegionCoords) -> HostMsg {
+    HostMsg::Request {
+        id: rid(id),
+        player,
+        hop,
+        req: WorldRequest::Embark(EmbarkRequest { civ, people: people.to_vec(), region }),
+    }
+}
+
+/// A places P at hop 3, P moves to B at hop 4, and A's `Embark`, queued before the move,
+/// arrives late: nothing is founded and P's claim is as it was; the refusal is memoised
+/// (the same id, resent after P has moved on again, gets the same answer).
+#[test]
+fn a_request_from_an_older_placement_is_refused_not_granted() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(0, online_at(A, None, false, 3), 0);
+    c.handle(1, online_at(A, None, false, 4), 0);
+    assert_eq!((c.online_on(A), c.hop_of(A)), (Some(1), 4));
+    let sites = c.history().sites().count();
+    c.handle(0, embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
+    assert_eq!(c.history().sites().count(), sites, "no site is founded");
+    assert_eq!(c.claim_of(A), None, "the claim is unchanged");
+    assert_eq!(c.online_on(A), Some(1), "A stays on host 1");
+    // At the same hop as the known one, from a host A is not on: refused as well.
+    c.handle(0, embark_at(2, A, 4, civ, &people[0..2], rc(8, 0)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
+    assert_eq!(c.claim_of(A), None);
+    // A query of the old placement is no state change: answered.
+    c.handle(0, request(3, A, WorldRequest::EmbarkOptions), 0);
+    assert!(matches!(reply_to(&commit(&mut c), 3), WorldReply::EmbarkOptions(_)));
+    // Memoised: A is offline again at a higher hop, and the first request's id still
+    // gets the refusal, never a grant.
+    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 5 }, 0);
+    c.handle(0, embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
+    assert_eq!(c.claim_of(A), None);
+}
+
+/// A request at the player's current hop, from the host it is online on, is granted.
+#[test]
+fn a_request_at_the_current_hop_is_granted() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(0, online_at(A, None, false, 3), 0);
+    c.handle(0, embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
+    let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("granted") };
+    assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
 }
