@@ -308,6 +308,12 @@ pub struct MultiRig {
     pub adopting: bool,
     /// Adoption reads asked and not answered yet: `(rounds left, heir, succession, predecessor)`.
     pub adoptions_pending: Vec<(u32, u32, game::SuccessionId, u32)>,
+    /// Every adoption read answered: `(succession, heir)`, in order.
+    pub adopted: Vec<(game::SuccessionId, u32)>,
+    /// Test hook: the first start of every region the store answer of an adoption read
+    /// hands the heir fails its load (`InlineSpawner::fail_next_start`), as a store read
+    /// error on the region's thread would.
+    pub fail_adoption_loads: bool,
     /// Successions a rollback abandoned ([`Self::roll_back`]).
     pub abandoned: BTreeSet<game::SuccessionId>,
     /// The rig store's world generation (raised by [`Self::roll_back`]).
@@ -420,6 +426,8 @@ impl MultiRig {
                 forgiven: BTreeSet::new(),
                 adopting: false,
                 adoptions_pending: Vec::new(),
+                adopted: Vec::new(),
+                fail_adoption_loads: false,
                 abandoned: BTreeSet::new(),
                 generation: RIG_GENERATION,
             };
@@ -1096,6 +1104,12 @@ impl MultiRig {
     /// rig store ([`Self::declare_in_store`]) and the store's answer handed back — the orders
     /// go out to the survivors. The successions declared.
     pub fn run_succession(&mut self, dead: u32) -> Vec<game::Succession> {
+        self.run_successions(&[dead])
+    }
+
+    /// [`Self::run_succession`] of several killed hosts at once: every one of them vouched
+    /// dead in the same lease reads, declared in one batch.
+    pub fn run_successions(&mut self, deads: &[u32]) -> Vec<game::Succession> {
         let n = self.hosts.len() as u32;
         self.core().set_crash_policy(game::CrashPolicy::Succession);
         let declared_dead: BTreeSet<(u32, u64)> =
@@ -1104,12 +1118,12 @@ impl MultiRig {
         for r in 0..SUCCESSION_DECLARE_ROUNDS {
             let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
             let rows: Vec<game::coordinator::HostSeen> = (0..n)
-                .filter(|h| !self.dead.contains(h) || *h == dead)
+                .filter(|h| !self.dead.contains(h) || deads.contains(h))
                 .map(|h| {
                     let boot = self.boots[h as usize];
                     let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
-                    // Every live host beats every round; the dead one is vouched.
-                    let seen_ms = if h == dead { 0 } else { now + 1 };
+                    // Every live host beats every round; the dead ones are vouched.
+                    let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
                     game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms }
                 })
                 .collect();
@@ -1120,7 +1134,7 @@ impl MultiRig {
             if d.is_some() {
                 break;
             }
-            assert!(r + 1 < SUCCESSION_DECLARE_ROUNDS, "host {dead} was never declared (seed {})", self.seed);
+            assert!(r + 1 < SUCCESSION_DECLARE_ROUNDS, "hosts {deads:?} were never declared (seed {})", self.seed);
             self.cut_round();
         }
         let d = d.expect("declared");
@@ -1231,8 +1245,14 @@ impl MultiRig {
                 }
             }
             let m = &mut self.hosts[h as usize].manager;
+            if self.fail_adoption_loads {
+                for rc in regions.keys() {
+                    m.spawner_mut().fail_next_start(*rc);
+                }
+            }
             m.spawner_mut().add_portable(regions);
             m.adopted_rows(id, rows, located);
+            self.adopted.push((id, h));
             self.hosts[h as usize].settle();
         }
     }

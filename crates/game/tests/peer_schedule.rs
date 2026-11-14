@@ -6127,8 +6127,10 @@ fn an_heir_holds_inherited_land_until_it_adopts() {
 
 // --- Successions: the heir's half (R4 Task 9) ----------------------------------------
 
-/// Seeds swept per schedule mode by the heir's tests.
+/// Seeds swept per schedule mode by the heir's tests that must hit their case.
 const HEIR_SEEDS: u64 = SEEDS;
+/// Seeds swept per schedule mode by the heir's other tests.
+const HEIR_SWEEP_SEEDS: u64 = SEEDS / 2;
 
 /// [`succession_world`], the rig answering the heir's adoption reads as the server does.
 fn heir_world(rig: &mut MultiRig) -> Vec<RegionCoords> {
@@ -6143,7 +6145,7 @@ fn heir_world(rig: &mut MultiRig) -> Vec<RegionCoords> {
 /// [`sweep`] over 2 and 3 hosts.
 fn sweep_hosts(name: &str, scenario: fn(&mut MultiRig)) {
     for hosts in [2, 3] {
-        sweep(&format!("{name} ({hosts} hosts)"), hosts, 1, HEIR_SEEDS, scenario);
+        sweep(&format!("{name} ({hosts} hosts)"), hosts, 1, HEIR_SWEEP_SEEDS, scenario);
     }
 }
 
@@ -6266,6 +6268,27 @@ fn assert_settled_whole(rig: &mut MultiRig, s: &game::Succession, live: &[game::
     assert_restored_once(rig, live);
 }
 
+/// `player` (of the rig's test clients) is in the running world exactly once — one body or
+/// one parked record — the last committed cut wrote its record from one part, and the world
+/// restarted from that cut holds it once: its stored record, logged in, makes one body.
+fn assert_player_once(rig: &mut MultiRig, player: game::PlayerId) {
+    let clients: Vec<game::ClientId> = rig.players.iter().filter(|(_, p)| **p == player).map(|(c, _)| *c).collect();
+    let bodies: usize = clients.iter().map(|c| rig.player_owners(*c).len()).sum();
+    let parked = rig.parked_on(player).len();
+    assert_eq!(bodies + parked, 1, "player {} has {bodies} bodies and {parked} parked records", player.0);
+    assert_eq!(rig.last_cut_writers(player).len(), 1, "the last cut writes player {} once", player.0);
+    let record = rig.committed_players[&player].clone();
+    let mut again = rig.rebuild_from_last_cut();
+    let home = again.owner(record.region);
+    again.connect_home(home, RESTORED_CLIENT, player, record);
+    assert!(until(&mut again, BODY_ROUNDS, |r| r.player_owners(RESTORED_CLIENT).len() == 1), "its stored record makes a body");
+    until_quiet(&mut again);
+    assert_eq!(again.player_owners(RESTORED_CLIENT).len(), 1, "one body of player {} in the restarted world", player.0);
+}
+
+/// The session id a player logs in with in a restarted world.
+const RESTORED_CLIENT: game::ClientId = 21;
+
 /// The world restarted from the last committed cut holds each of `ids` once, its regions
 /// running.
 fn assert_restored_once(rig: &MultiRig, ids: &[game::EntityId]) {
@@ -6338,8 +6361,9 @@ fn entity_that_entered_the_dead_host_after_the_cut_returns_once_on_the_heir() {
 
 /// Two slimes cross the survivor/dead seam twice after the last committed cut — one
 /// S→D→S, one D→S→D — then the dead host dies: each is where its LAST crossing took it,
-/// once.
-fn ping_ponged(rig: &mut MultiRig) {
+/// once. `false` when a cut committed meanwhile (the survivor's journal no longer holds
+/// both crossings).
+fn ping_ponged(rig: &mut MultiRig) -> bool {
     let chain = heir_world(rig);
     let (rs, rd) = (chain[0], chain[1]);
     let (s, dead) = (rig.owner(rs), rig.owner(rd));
@@ -6349,17 +6373,23 @@ fn ping_ponged(rig: &mut MultiRig) {
         assert!(cross_to(rig, id, from, (first, to)), "{id:?} never reached {to:?}: {:?}", rig.owners_of(id));
         assert!(cross_to(rig, id, to, (second, from)), "{id:?} never came back to {from:?}: {:?}", rig.owners_of(id));
     }
+    // Both crossings of each are in the survivor's journal: the latest decides.
+    let both = |rig: &MultiRig, id| {
+        journalled(rig, s, dead, game::Subject::Entity(id), true) && journalled(rig, s, dead, game::Subject::Entity(id), false)
+    };
+    let hit = both(rig, a) && both(rig, b);
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     assert_settled_whole(rig, &succession, &[a, b]);
     rig.run(rd);
     assert!(until_landed(rig, b), "D→S→D never landed: {:?}", rig.owners_of(b));
+    hit
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn entity_that_ping_ponged_is_resolved_by_its_last_crossing() {
-    sweep_hosts("entity_that_ping_ponged_is_resolved_by_its_last_crossing", ping_ponged);
+    sweep_hosts_hits("entity_that_ping_ponged_is_resolved_by_its_last_crossing", ping_ponged);
 }
 
 /// Three hosts: a slime walks S1→D→S2 after the last committed cut, then D dies. S1's
@@ -6387,7 +6417,7 @@ fn entity_that_passed_through_the_dead_host_to_a_third_host_is_not_replayed() {
         "entity_that_passed_through_the_dead_host_to_a_third_host_is_not_replayed",
         3,
         1,
-        HEIR_SEEDS,
+        HEIR_SWEEP_SEEDS,
         passed_through,
     );
 }
@@ -6471,7 +6501,9 @@ fn player_handed_to_the_dead(rig: &mut MultiRig, on_the_wire: bool) -> bool {
     assert_settled_whole(rig, &succession, &[]);
     assert_eq!(rig.parked_on(P_PLAYER), [succession.heir], "parked once, on the heir");
     assert!(rig.player_owners(P_CLIENT).is_empty(), "no body");
+    until_committed(rig, 1);
     assert_eq!(rig.committed_players[&P_PLAYER].region, rd, "its record stands where the hand-off took it");
+    assert_player_once(rig, P_PLAYER);
     hit
 }
 
@@ -6509,6 +6541,8 @@ fn player_left_the_dead(rig: &mut MultiRig) -> bool {
     assert_eq!(rig.player_owners(P_CLIENT), [(s, rs)], "it plays on the survivor");
     assert!(rig.parked_on(P_PLAYER).is_empty(), "parked nowhere");
     assert_eq!(rig.hosts[s as usize].manager.player_of(P_CLIENT), Some(P_PLAYER), "online there");
+    until_committed(rig, 1);
+    assert_player_once(rig, P_PLAYER);
     hit
 }
 
@@ -6543,6 +6577,8 @@ fn player_on_the_dead_since_the_cut(rig: &mut MultiRig) {
         rig.cut_round();
     }
     assert_eq!(rig.player_owners(LOGIN_CLIENT), [(heir, rd)], "once");
+    until_committed(rig, 1);
+    assert_player_once(rig, P_PLAYER);
 }
 
 #[test]
@@ -6556,11 +6592,15 @@ fn player_on_the_dead_host_since_before_the_cut_is_placed_from_the_store_on_the_
 
 /// A resident of a survivor's region (its site there) walks into the dead host's region
 /// after the last committed cut, and the host dies a seeded few rounds later — the body
-/// received there or still on its way. The heir never delivers a person's bundle (it
-/// reports it absorbed, so the history holds the person abstract and respawns it when it
-/// may): from the heir's adoption on, the person is exactly once — a body or abstract —
-/// and never two bodies, all along. `false` when the body never left the survivor.
-fn person_into_the_dying(rig: &mut MultiRig) -> bool {
+/// received there or still on its way (`waiting == false`); or, with `waiting`, the host
+/// dies first and the resident walks into the inherited region while the heir holds it
+/// masked (the body waits on the heir for its land's owner). A slime stored in the dead
+/// host's region leaves it after the cut, so the heir loads that region at its adoption.
+/// The heir never delivers a person's bundle: right after its adoption it has reported the
+/// crossing absorbed (when a survivor's `Sent` entry was the latest) and holds no arrival
+/// or body of the person; from the adoption on the person is exactly once — a body or
+/// abstract — and never two bodies, all along. `false` when the seed missed the case.
+fn person_into_inherited(rig: &mut MultiRig, waiting: bool) -> bool {
     let hosts = rig.hosts.len() as u32;
     let chain = host_chain(hosts);
     let (rs, rd) = (chain[0], chain[1]);
@@ -6571,32 +6611,66 @@ fn person_into_the_dying(rig: &mut MultiRig) -> bool {
         rig.run(*rc);
     }
     world_cuts_over(rig, history);
-    rig.with_adoption();
-    let dead = rig.owner(rd);
+    if !waiting {
+        rig.with_adoption();
+    }
+    rig.parked_hold = true;
+    let (s, dead) = (rig.owner(rs), rig.owner(rd));
     let mut seen = std::collections::BTreeMap::new();
     assert!(
         until(rig, CROSS_ROUNDS, |rig| people.iter().all(|p| person_bodies(rig, *p).len() == 1)),
         "the site's people never got their bodies"
     );
+    let slime = slime_in(rig, rd, 0);
     until_committed(rig, 1);
+    assert!(cross_to(rig, slime, rd, (s, rs)), "the slime never left {rd:?}");
     let p = people[0];
     let (_, rc, id) = person_bodies(rig, p)[0];
-    assert!(rig.teleport(rc, id, past_seam(rc, rd, REGION_SIZE / 2.0)));
-    for _ in 0..crate::common::multi_rig::mix(rig.seed, 77) % 6 {
-        rig.round();
-        assert!(person_bodies(rig, p).len() <= 1, "two bodies of {p:?}");
-    }
-    let hit = journalled(rig, rig.owner(rs), dead, game::Subject::Entity(id), true);
-    rig.kill(dead);
-    let succession = rig.run_succession(dead).remove(0);
-    for _ in 0..SUCCESSION_ROUNDS {
-        if rig.core().succession_progress().iter().any(|(i, _, adopted)| *i == succession.id && *adopted) {
-            break;
+    let (hit, succession) = if waiting {
+        rig.kill(dead);
+        let succession = rig.run_succession(dead).remove(0);
+        until_applied(rig, &succession);
+        let heir = succession.heir;
+        let (_, rc, id) = person_bodies(rig, p)[0];
+        assert!(rig.teleport(rc, id, past_seam(rc, rd, REGION_SIZE / 2.0)));
+        let waits = until(rig, CROSS_ROUNDS, |rig| rig.hosts[heir as usize].manager.unowned_waiting_ids().iter().any(|(_, i)| *i == id));
+        rig.with_adoption();
+        (waits, succession)
+    } else {
+        assert!(rig.teleport(rc, id, past_seam(rc, rd, REGION_SIZE / 2.0)));
+        for _ in 0..crate::common::multi_rig::mix(rig.seed, 77) % 6 {
+            rig.round();
+            assert!(person_bodies(rig, p).len() <= 1, "two bodies of {p:?}");
         }
+        let hit = journalled(rig, s, dead, game::Subject::Entity(id), true);
+        rig.kill(dead);
+        (hit, rig.run_succession(dead).remove(0))
+    };
+    let heir = succession.heir;
+    let mut adopted = false;
+    for _ in 0..SUCCESSION_ROUNDS {
         rig.cut_round();
         assert!(person_bodies(rig, p).len() <= 1, "two bodies of {p:?}");
+        if rig.adopted.contains(&(succession.id, heir)) {
+            adopted = true;
+            break;
+        }
     }
-    until_settled(rig, &succession);
+    assert!(adopted, "the heir never adopted");
+    // Right after the adoption: the person's bundle was not delivered here.
+    let m = &rig.hosts[heir as usize].manager;
+    let arriving = m.in_flight_ids().iter().chain(m.pending_arrival_ids().iter()).any(|(i, _)| *i == id);
+    assert!(!arriving, "the heir delivered {p:?}'s bundle (seed {}, link delay {})", rig.seed, rig.link_delay);
+    // (A body the history makes for the person has a new id: its journey home may start in
+    // the inherited region.)
+    assert!(person_bodies(rig, p).iter().all(|(_, _, e)| *e != id), "the bundle of {p:?} was delivered as a body");
+    let reported = rig.sent_to_coordinator(heir).into_iter().any(|m| {
+        matches!(m, game::HostMsg::PersonCrossed { person, to, delivered: false } if person == p && to == rd)
+    });
+    if hit {
+        assert!(reported, "the heir reported {p:?}'s crossing absorbed");
+    }
+    assert_settled_whole(rig, &succession, &[slime]);
     rig.run(rd);
     for _ in 0..CROSS_ROUNDS {
         rig.cut_round();
@@ -6609,10 +6683,24 @@ fn person_into_the_dying(rig: &mut MultiRig) -> bool {
     hit
 }
 
+fn person_into_the_dying(rig: &mut MultiRig) -> bool {
+    person_into_inherited(rig, false)
+}
+
+fn person_waiting_on_the_heir(rig: &mut MultiRig) -> bool {
+    person_into_inherited(rig, true)
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn person_crossing_into_a_host_that_dies_is_spawned_once() {
     sweep_hosts_hits("person_crossing_into_a_host_that_dies_is_spawned_once", person_into_the_dying);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_person_waiting_on_the_heir_for_its_land_is_spawned_once() {
+    sweep_hosts_hits("a_person_waiting_on_the_heir_for_its_land_is_spawned_once", person_waiting_on_the_heir);
 }
 
 /// Replies carrying items, owed to the dead host (the survivor's link to it down, so they
@@ -6641,6 +6729,16 @@ fn intent_owed(rig: &mut MultiRig) {
         "the items lie in {rd:?} on the heir: {} of {total}",
         pile_items(rig, rd)
     );
+    // The world restarted from the store holds them once.
+    until_committed(rig, 1);
+    let mut again = rig.rebuild_from_last_cut();
+    again.run(rd);
+    assert!(
+        until(&mut again, CROSS_ROUNDS, |r| u64::from(pile_items(r, rd)) == total),
+        "the restarted world's {rd:?} holds the items once: {} of {total}",
+        pile_items(&mut again, rd)
+    );
+    again.assert_items(total);
 }
 
 #[test]
@@ -6799,6 +6897,11 @@ fn leave_kind(rig: &mut MultiRig) {
     assert!(until_landed(rig, stayed), "the slime that stayed is restored on the heir");
     assert!(until_landed(rig, crosser), "the slime held for the leaver lands on the heir");
     assert_eq!((live_count(rig, stayed), live_count(rig, crosser)), (1, 1));
+    until_committed(rig, 1);
+    for id in [stayed, crosser] {
+        assert_eq!(rig.stored_places(id).len(), 1, "{id:?} stored once: {:?}", rig.stored_places(id));
+    }
+    assert_restored_once(rig, &[stayed, crosser]);
 }
 
 #[test]
@@ -6913,4 +7016,149 @@ fn a_transfer_the_waiting_heir_bounced_to_the_dead_host_is_delivered_once() {
         HEIR_SEEDS,
         heir_bounces_while_waiting,
     );
+}
+
+// --- Fix round 1 -------------------------------------------------------------------
+
+/// A region the heir loads for its adoption fails its first load (a store read error on
+/// its thread): it stays pinned and is started again at its retry, and no cut part of the
+/// heir is taken without it — the settle waits for it. Then the world is whole as ever.
+fn pinned_load_fails(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    rig.fail_adoption_loads = true;
+    let (rs, rd) = (chain[0], chain[1]);
+    let (s, dead) = (rig.owner(rs), rig.owner(rd));
+    let id = slime_in(rig, rd, 0);
+    until_committed(rig, 1);
+    assert!(cross_to(rig, id, rd, (s, rs)), "the slime never left {rd:?}");
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    let heir = succession.heir;
+    let failed = until(rig, SUCCESSION_ROUNDS, |rig| rig.hosts[heir as usize].manager.is_unavailable(rd));
+    assert!(failed, "the heir's load of {rd:?} failed once");
+    assert_settled_whole(rig, &succession, &[id]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_pinned_region_whose_load_fails_is_retried_and_the_settle_waits_for_it() {
+    sweep_hosts("a_pinned_region_whose_load_fails_is_retried_and_the_settle_waits_for_it", pinned_load_fails);
+}
+
+/// The test player plays on the dead host since the last committed cut, walks to a
+/// survivor and back after it (the survivor's `Sent` entry is the latest), then the host
+/// dies. While the heir holds the land masked, a spawn order for the player (its stored
+/// record in the inherited region) waits on the heir. Once the heir adopts, the player's
+/// parked record is the journal's — not the base cut's — and the login makes one body.
+fn held_spawn_finds_the_journal(rig: &mut MultiRig) -> bool {
+    let chain = succession_world(rig);
+    rig.parked_hold = true;
+    let (rs, rd) = (chain[0], chain[1]);
+    let (s, dead) = (rig.owner(rs), rig.owner(rd));
+    rig.connect_home(dead, P_CLIENT, P_PLAYER, centre_of(rd));
+    let (_, _, body) = until_body(rig);
+    until_committed(rig, 1);
+    let base = rig.committed_players[&P_PLAYER].clone();
+    assert!(rig.teleport(rd, body, past_seam(rd, rs, REGION_SIZE / 2.0)));
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(P_CLIENT) == [(s, rs)]), "the player never reached {rs:?}");
+    let (_, _, body) = rig.player_body(P_CLIENT).expect("its body");
+    assert!(rig.teleport(rs, body, past_seam(rs, rd, REGION_SIZE / 2.0)));
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(P_CLIENT) == [(dead, rd)]), "the player never came back");
+    let hit = journalled(rig, s, dead, game::Subject::Player(P_PLAYER), true) && rig.committed_players[&P_PLAYER] == base;
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    let heir = succession.heir;
+    until_applied(rig, &succession);
+    rig.hosts[heir as usize].manager.set_entry_host(heir);
+    let order = game::ServerEvent::SpawnOrder {
+        origin: heir,
+        hops: 0,
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: 4,
+        player: P_PLAYER,
+        record_region: Some(rd),
+    };
+    rig.hosts[heir as usize].event(order);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        assert!(rig.serve_logins().is_empty(), "nothing placed while the land is masked");
+    }
+    assert_eq!(rig.hosts[heir as usize].manager.spawn_orders_waiting(), 1, "the order waits");
+    rig.with_adoption();
+    let mut taken = Vec::new();
+    for _ in 0..SUCCESSION_ROUNDS {
+        rig.round();
+        taken.extend(rig.serve_logins());
+        if !taken.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "the heir took the order");
+    let parked = rig.hosts[heir as usize].manager.parked_record(P_PLAYER).cloned().expect("parked from the journal");
+    assert_eq!(parked.region, rd);
+    if hit {
+        assert_ne!(parked.pose.translation, base.pose.translation, "the journal's record, not the base cut's");
+    }
+    // The login connects with the store's (base cut) record: the parked one wins.
+    rig.connect_login(heir, NEW_LOGIN_CLIENT, P_PLAYER, Some(base), LOGIN_TOKEN, 4);
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT).len() == 1), "one body");
+    assert!(rig.parked_on(P_PLAYER).is_empty(), "the parked record became the body");
+    assert_settled_whole(rig, &succession, &[]);
+    until_committed(rig, 1);
+    assert_player_once(rig, P_PLAYER);
+    hit
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_spawn_order_held_while_the_land_is_masked_finds_the_journals_record() {
+    sweep_hosts_hits("a_spawn_order_held_while_the_land_is_masked_finds_the_journals_record", held_spawn_finds_the_journal);
+}
+
+/// Three hosts: two die at once and are declared in one batch, both to the one survivor —
+/// an heir of two predecessors. Both successions settle in one cut whose part of the heir
+/// adopts both; every slime (resting in each dead host's region, and crossing to and from
+/// one of them after the cut) is in the world once.
+fn heir_of_two(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (s, d1, d2) = (rig.owner(chain[0]), rig.owner(chain[1]), rig.owner(chain[2]));
+    let rest = [slime_in(rig, chain[1], 0), slime_in(rig, chain[2], 1)];
+    let (x, y) = (slime_in(rig, chain[0], 2), slime_in(rig, chain[1], 3));
+    until_committed(rig, 1);
+    assert!(cross_to(rig, x, chain[0], (d1, chain[1])), "x never reached {:?}", chain[1]);
+    assert!(cross_to(rig, y, chain[1], (s, chain[0])), "y never reached {:?}", chain[0]);
+    rig.kill(d1);
+    rig.kill(d2);
+    let successions = rig.run_successions(&[d1, d2]);
+    assert_eq!(successions.len(), 2, "two successions, one batch");
+    assert!(successions.iter().all(|x| x.heir == s && x.survivors == [s]), "one heir: {successions:?}");
+    for succession in &successions {
+        assert_settled_whole(rig, succession, &[]);
+    }
+    assert!(
+        rig.adopts.iter().any(|(_, h, a)| *h == s && a.contains(&d1) && a.contains(&d2)),
+        "one cut adopts both: {:?}",
+        rig.adopts
+    );
+    let settled: std::collections::BTreeSet<_> = rig.successions.iter().filter_map(|(_, c)| *c).collect();
+    assert_eq!(settled.len(), 1, "both settle in one cut");
+    for rc in &chain {
+        rig.run(*rc);
+    }
+    until_quiet(rig);
+    let all = [rest[0], rest[1], x, y];
+    for id in all {
+        assert_eq!(live_count(rig, id), 1, "{id:?} once (seed {})", rig.seed);
+    }
+    until_committed(rig, 1);
+    for id in all {
+        assert_eq!(rig.stored_places(id).len(), 1, "{id:?} stored once: {:?}", rig.stored_places(id));
+    }
+    assert_restored_once(rig, &all);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_heir_of_two_predecessors_settles_both_in_one_cut() {
+    sweep("an_heir_of_two_predecessors_settles_both_in_one_cut", 3, 1, HEIR_SWEEP_SEEDS, heir_of_two);
 }

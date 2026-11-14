@@ -2396,3 +2396,43 @@ fn a_host_attaching_after_a_rollback_is_told_the_generation() {
     assert!(out.contains(&(Target::Host(2), CoordMsg::Generation(4))), "{out:?}");
     assert_eq!(c.online_on(A), None, "the stale attach is not applied");
 }
+
+/// R4 Task 9 (fix round 1): a person's crossing reported TWICE across a succession. The
+/// dead host delivered P into its region `b` and reported it (`delivered: true`) before it
+/// died; its succession parks `b` in the history (P abstract again, its body gone with the
+/// host); then the heir, resolving the survivor's `Sent` entry for P, reports the same
+/// crossing absorbed (`delivered: false`). The second step never makes a body: P stays
+/// abstract — no spawn of P anywhere — exactly once.
+#[test]
+fn a_crossing_reported_delivered_then_absorbed_by_the_heir_is_one_person() {
+    let (mut c, _civ, people) = coordinator();
+    c.set_cut_epoch(3);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.set_expected_hosts([0, 1].into_iter().collect());
+    let (a, b) = (rc(0, 0), rc(1, 0));
+    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    c.handle(1, attach(1, 1, Vec::new(), Vec::new()), 0);
+    c.handle(0, HostMsg::RegionStarted { rc: a, incarnation: 1 }, 0);
+    c.handle(1, HostMsg::RegionStarted { rc: b, incarnation: 1 }, 0);
+    let out = commit(&mut c);
+    let p = people[0];
+    assert_eq!(body_delta(&out, p), 1, "P's body in a: {out:?}");
+    // P walks from host 0's `a` into host 1's `b`, which reports it delivered.
+    c.handle(1, HostMsg::PersonCrossed { person: p, to: b, delivered: true }, 0);
+    assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(b));
+    // Host 1 dies and host 0 succeeds it: `b` parks in the history with nobody.
+    read_leases(&mut c, 2, &[1], &[], 10);
+    let d = c.declare_wanted(10).expect("declared");
+    c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(0))), 10);
+    let mut spawned = body_delta(&commit(&mut c), p);
+    assert!(!matches!(c.history().person(p).unwrap().location, Location::InRegion(_)), "P is abstract");
+    let before = c.history().person(p).unwrap().location;
+    // The heir reports the same crossing absorbed.
+    c.handle(0, HostMsg::PersonCrossed { person: p, to: b, delivered: false }, 20);
+    c.maintain(20);
+    spawned += body_delta(&commit(&mut c), p);
+    let after = c.history().person(p).unwrap().location;
+    assert_eq!(spawned, 0, "no body of P is made by either step");
+    assert!(!matches!(after, Location::InRegion(_)), "P stays abstract: {before:?} → {after:?}");
+}

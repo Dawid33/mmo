@@ -2813,6 +2813,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         // A world cut: every region answered, so this host's marks go now; the part is
         // complete once every participant's mark is in.
         let id = self.pending_cut.as_ref().expect("checked").id;
+        // An heir's part never goes without a region it pinned for an adoption (its load
+        // failed, or it is waiting for its retry): the part fails, the coordinator aborts
+        // the cut, and a later one is taken once the region runs (R4, `succession.rs`).
+        if self.world_cut.as_ref().is_some_and(|r| r.cut == id) {
+            let held = self.pending_cut.as_ref().map(|c| c.regions.keys().copied().collect::<BTreeSet<_>>()).unwrap_or_default();
+            if let Some(rc) = self.pinned_missing(|rc| held.contains(rc)) {
+                log::warn!("[server] world cut {}: {rc:?}, pinned for an adoption, is not in this part; it fails", id.0);
+                self.world_cut_fail(crate::CutFailure::Aborted);
+                return;
+            }
+        }
         if !self.world_cut_marks_in(id) {
             return;
         }
@@ -3717,7 +3728,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer_unreceived: self.peer_unreceived(),
             unowned_waiting: self.unowned_waiting_total(),
             journal_entries: self.journal.len(),
-            succession_seam_events: self.succession_seam_events,
+            succession_seam_events: self.succession_seam_events(),
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),
@@ -3788,6 +3799,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.sessions.iter().filter(|(_, s)| s.subscribed.contains(&rc)).map(|(c, _)| *c).collect();
             if !subscribers.is_empty() {
                 log::info!("[server] retrying {rc:?} for {} subscriber(s)", subscribers.len());
+            }
+            if self.succession_pinned.contains(&rc) {
+                // Loaded for an adoption (R4): its settle cut waits for it.
+                log::info!("[server] retrying {rc:?}, pinned for an adoption");
+                self.ensure_running(rc);
             }
             for client in subscribers {
                 self.subscribe(client, rc);
@@ -4211,8 +4227,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // Held for a region that ran here, or one whose owner this host does not
                 // know (its owner gets it with the mailbox: never lost).
                 let unowned = |rc: &RegionCoords| !self.owns(*rc) && !self.is_foreign(*rc);
-                let waiting =
-                    owner.filter(|rc| self.parked.contains_key(rc) || self.regions.contains_key(rc) || unowned(rc));
+                // A region pinned for an adoption (R4) runs again at its retry.
+                let waiting = owner.filter(|rc| {
+                    self.parked.contains_key(rc) || self.regions.contains_key(rc) || unowned(rc) || self.succession_pinned.contains(rc)
+                });
                 match waiting {
                     Some(rc) => {
                         let accounted_in = self.inbound_accounted;

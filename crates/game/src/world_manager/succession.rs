@@ -69,8 +69,12 @@
 //! 4. **Load.** Every inherited region the store holds a dropped entity in (`located`), and
 //!    every one an owed intent or reply goes to, starts now — the drop set left out of its
 //!    store state ([`RegionSpawner::forget_entities`]) — pinned (`succession_pinned`) so it
-//!    cannot park before the settle cut writes it. (The store's stale-row guard refuses a
-//!    part missing one: the safety net, not the mechanism.)
+//!    cannot park before the settle cut writes it. A pinned region whose load fails (or that
+//!    is unavailable now) stays pinned and starts again at its retry (`retry_unavailable`);
+//!    a reply for it waits in its mailbox; and no cut part of this host is taken while a
+//!    pinned region is not in it (`try_complete_cut`: the part fails, the coordinator aborts
+//!    the cut, a later one is taken once the region runs) — "wait, never guess". (The
+//!    store's stale-row guard refuses a part missing one: the safety net, not the mechanism.)
 //! 5. **Answer** [`crate::HostMsg::SuccessionAdopted`]. From here until
 //!    `SuccessionDone { settled: true }` every cut part of this host adopts the predecessor
 //!    ([`crate::WorldCut::adopts`]: the store replaces its in-flight rows with this part's) —
@@ -80,11 +84,15 @@
 //!
 //! **Where the mask is lifted.** `adopt_inherited` (lift the mask, flush what waited for
 //! the land, retry held spawn orders) runs AFTER the drop set is installed in the spawner
-//! and the rows are filtered, and after the people are reported absorbed, but BEFORE the
-//! rows, bundles and owed messages go on: the flush may start an inherited region, which
-//! must already leave the drop set out, and a person must be reported before their region
-//! runs (the history would embody them in it); everything delivered afterwards finds the
-//! land owned (`owns`), so nothing of it waits for an owner or bounces.
+//! and the rows are filtered, after the people are reported absorbed and after the
+//! journalled players are parked, but BEFORE the rows, bundles and owed messages go on: the
+//! flush may start an inherited region, which must already leave the drop set out; a person
+//! must be reported before their region runs (the history would embody them in it); a spawn
+//! order held while the land was masked must find the journal's parked record (the newer
+//! one), not place the player from the store's base-cut record; and everything delivered
+//! afterwards finds the land owned (`owns`), so nothing of it waits for an owner or bounces.
+//! A report that comes after the resolution is dropped: the drop set and the resolution are
+//! made from the same reports.
 //!
 //! **Who accounts for what the heir delivers — the three sender cases** (`world_cut.rs`,
 //! re-derived for a succession; no world cut runs from the declaration until the heir's
@@ -273,7 +281,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-
     fn try_apply_succession(&mut self, id: SuccessionId) {
         let Some(run) = self.successions.get(&id).filter(|r| !r.applied) else { return };
         let base = self.journal.base();
@@ -452,6 +459,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("[server] succession {}: host {from}'s report came after it was over; dropped", id.0);
             return;
         }
+        if self.adoptions.contains_key(&id) {
+            // The drop set was made from the reports as they were: never replaced.
+            log::warn!("[server] succession {}: host {from}'s report came after the resolution; dropped", id.0);
+            return;
+        }
         if let Some(run) = self.successions.get(&id) {
             if run.order.heir != self.ordinal() {
                 log::error!("[server] succession {}: host {from}'s report came here; the heir is {}", id.0, run.order.heir);
@@ -602,6 +614,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::error!("[server] succession {}: adoption rows for a succession over here; ignored", id.0);
             return;
         };
+        // The reports the drop set was made from (no report is filed after the resolution).
         let mut reports = self.succession_reports.remove(&id).unwrap_or_default();
         reports.retain(|h, _| order.survivors.contains(h));
         // 1. Resolve: per subject the latest event decides.
@@ -623,68 +636,30 @@ impl<S: RegionSpawner> WorldManager<S> {
             InFlightRow::Transfer { bundle, .. } => !drop.contains(&bundle.id),
             InFlightRow::Intent { .. } => true,
         });
-        // 4a. No region of the predecessor's starts from the store with a dropped entity:
+        // No region of the predecessor's starts from the store with a dropped entity:
         // installed before the mask is lifted (its flush may start one).
         let all_drop = self.adoption_drop_union();
         self.spawner.forget_entities(&all_drop);
-        // 3a. A person's bundle is never delivered: the receiving host reports the crossing,
-        // and this host is that host now — absorbed (no region of the land runs yet), so the
-        // history holds the person abstract and respawns them when it may.
-        let now_ms = self.clock_ms;
-        let mut people = 0usize;
-        for (target, bundle) in &resolved.people {
-            if let (EntityKind::Person { person }, true) = (bundle.kind, self.world.is_some()) {
-                self.note_moved(person, *target, Step::Absorbed { at: bundle_at(bundle) });
-                self.world_send(HostMsg::PersonCrossed { person, to: *target, delivered: false });
-                people += 1;
-            }
-        }
+        // What needs nothing of the land goes first: people reported absorbed (before any
+        // region of it runs), players parked (a spawn order held while the land was masked
+        // finds the journal's record once the mask lifts).
+        let people = self.absorb_people(&resolved.people);
+        let parked = self.park_players(id, &resolved.players);
         // The land is this host's from here: what waited for it goes on.
         self.adopt_inherited(id);
         self.restore_in_flight(rows.clone());
-        // 3. Deliver, as any crossing (through `accept_arrival`: the region applies it at its
-        // next slot, never on receipt).
-        for (target, stamp, bundle) in resolved.bundles.iter().cloned() {
-            if self.owns(target) {
-                self.accept_arrival(None, target, stamp, bundle, now_ms);
-            } else {
-                let msg = Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
-                match self.foreign_host(target) {
-                    Some(owner) => self.send_reliable(owner, msg, false),
-                    None => self.wait_for_owner(target, msg, false, None),
-                }
-            }
-        }
-        let mut parked = 0usize;
-        for (handoff, record) in resolved.players.iter().cloned() {
-            if self.park_from_journal(id, handoff, record) {
-                parked += 1;
-            }
-        }
-        // 4. Load every inherited region the store holds a dropped entity in — and every one
-        // an owed intent or reply goes to (it never ran here: a reply for it would have
-        // nowhere to wait) — pinned until the settle cut writes it.
-        let owed_targets = reports.values().flat_map(|r| r.owed.iter()).flat_map(crate::intents_in).map(|m| peers::peer_intent_target(&m));
-        let to_load: BTreeSet<RegionCoords> = located.iter().map(|(_, rc)| *rc).chain(owed_targets).collect();
-        let mut pinned = BTreeSet::new();
-        for rc in to_load {
-            if self.owns(rc) {
-                self.ensure_running(rc);
-                if self.regions.contains_key(&rc) {
-                    pinned.insert(rc);
-                }
-            }
-        }
-        // Owed intents and replies, in each sender's order, as if that sender's session had
-        // brought them (not accounted in any cut but this host's next).
-        let mut owed = 0usize;
-        for (from, report) in std::mem::take(&mut reports) {
-            for msg in report.owed {
-                owed += 1;
-                self.peer_reliable_in(from, msg, false);
-            }
-        }
-        self.succession_pinned.extend(pinned.iter().copied());
+        // 3. Deliver.
+        self.deliver_bundles(&resolved.bundles);
+        // 4. Load, pinned: every region the store holds a dropped entity in, and every one an
+        // owed intent or reply goes to (a reply for a region that never ran here would have
+        // nowhere to wait).
+        let owed_targets = reports
+            .values()
+            .flat_map(|r| r.owed.iter())
+            .flat_map(crate::intents_in)
+            .map(|m| peers::peer_intent_target(&m));
+        let pinned = self.load_pinned(located.iter().map(|(_, rc)| *rc).chain(owed_targets).collect());
+        let owed = self.apply_owed(reports);
         self.succession_seam_events += resolved.entries as u64;
         log::info!(
             "[server] succession {}: adopted host {pred}'s land — {} journal entries resolved, {} bundle(s) delivered, \
@@ -702,6 +677,80 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // 5. Answered: the coordinator's next cut settles it (its part here adopts `pred`).
         self.world_send(HostMsg::SuccessionAdopted { id });
+    }
+
+    /// Step 3 for people: a person's bundle is never delivered. The receiving host reports
+    /// the crossing, and this host is that host now — absorbed (no region of the land runs
+    /// yet), so the history holds the person abstract and respawns them when it may. How
+    /// many were reported.
+    fn absorb_people(&mut self, people: &[(RegionCoords, crate::EntityBundle)]) -> usize {
+        let mut reported = 0;
+        for (target, bundle) in people {
+            if let (EntityKind::Person { person }, true) = (bundle.kind, self.world.is_some()) {
+                self.note_moved(person, *target, Step::Absorbed { at: bundle_at(bundle) });
+                self.world_send(HostMsg::PersonCrossed { person, to: *target, delivered: false });
+                reported += 1;
+            }
+        }
+        reported
+    }
+
+    /// Step 3 for players: each parked here from its journalled record. How many.
+    fn park_players(&mut self, id: SuccessionId, players: &[(crate::PlayerHandoff, PlayerRecord)]) -> usize {
+        players.iter().cloned().filter(|(h, record)| self.park_from_journal(id, h.clone(), record.clone())).count()
+    }
+
+    /// Step 3 for entities: each bundle arrives as any crossing from another host does
+    /// (through `accept_arrival`: its region applies it at its next slot, never on receipt);
+    /// a target another host owns gets it sent, one with no owner known keeps it waiting.
+    fn deliver_bundles(&mut self, bundles: &[(RegionCoords, crate::Tick, crate::EntityBundle)]) {
+        let now_ms = self.clock_ms;
+        for (target, stamp, bundle) in bundles.iter().cloned() {
+            if self.owns(target) {
+                self.accept_arrival(None, target, stamp, bundle, now_ms);
+            } else {
+                let msg = Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
+                match self.foreign_host(target) {
+                    Some(owner) => self.send_reliable(owner, msg, false),
+                    None => self.wait_for_owner(target, msg, false, None),
+                }
+            }
+        }
+    }
+
+    /// Step 4: every region of `regions` this host owns starts, and is pinned until its
+    /// succession is over — also one whose load fails, or that is unavailable now: it is
+    /// started again at its retry (`retry_unavailable`), and no cut part of this host is
+    /// taken without it (`try_complete_cut`). The pinned regions.
+    fn load_pinned(&mut self, regions: BTreeSet<RegionCoords>) -> BTreeSet<RegionCoords> {
+        let mut pinned = BTreeSet::new();
+        let owned: Vec<RegionCoords> = regions.into_iter().filter(|rc| self.owns(*rc)).collect();
+        for rc in owned {
+            self.succession_pinned.insert(rc);
+            self.ensure_running(rc);
+            pinned.insert(rc);
+        }
+        pinned
+    }
+
+    /// The `owed` intents and replies of every report, in each sender's order, as if that
+    /// sender's session had brought them (accounted in no cut but this host's next). How
+    /// many.
+    fn apply_owed(&mut self, reports: BTreeMap<u32, SuccessionReportIn>) -> usize {
+        let mut owed = 0;
+        for (from, report) in reports {
+            for msg in report.owed {
+                owed += 1;
+                self.peer_reliable_in(from, msg, false);
+            }
+        }
+        owed
+    }
+
+    /// A region this host pinned for an adoption that `held` says a pending cut part does
+    /// not hold, if any: such a part is never taken — "wait, never guess".
+    pub(super) fn pinned_missing(&self, held: impl Fn(&RegionCoords) -> bool) -> Option<RegionCoords> {
+        self.succession_pinned.iter().copied().find(|rc| !held(rc))
     }
 
     /// A player a survivor handed (or moved) to the predecessor, its journal's latest:
