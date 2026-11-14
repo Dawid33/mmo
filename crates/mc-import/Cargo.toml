@@ -1,0 +1,17 @@
+[package]
+name = "mc-import"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Minecraft Sponge schematic (.schem) reader and importer into game prefabs."
+autotests = false
+
+[dependencies]
+game = { path = "../game" }
+flate2 = "1"
+ron = "0.12"
+serde = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

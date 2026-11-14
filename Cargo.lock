@@ -5263,6 +5263,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-import"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "game",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
