@@ -28,6 +28,7 @@ mod lod_bricks;
 mod player_walk;
 mod scene_hash_golden;
 mod sites_kit;
+mod sites_town;
 mod slopes;
 mod structure_coarse;
 mod structure_dev;
