@@ -39,6 +39,11 @@ pub struct RigWorldLink {
     hold: Arc<std::sync::atomic::AtomicBool>,
     /// `HopIs` messages the host read ([`MultiRig::hop_is_received`]).
     hop_is: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test hook ([`MultiRig::hold_orders`]): while set, a succession order and everything
+    /// after it wait on the link (what came before it is read).
+    hold_orders: Arc<std::sync::atomic::AtomicBool>,
+    /// What the order hold kept back, in order.
+    stash: std::collections::VecDeque<game::CoordMsg>,
 }
 
 impl game::WorldLink for RigWorldLink {
@@ -52,7 +57,17 @@ impl game::WorldLink for RigWorldLink {
         if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
             return None;
         }
-        let msg = self.inner.recv();
+        // Everything ready is kept in order here; an order (and what follows) waits while
+        // the order hold is set.
+        while let Some(m) = self.inner.recv() {
+            self.stash.push_back(m);
+        }
+        let holding = self.hold_orders.load(std::sync::atomic::Ordering::SeqCst);
+        let msg = match self.stash.front() {
+            None => None,
+            Some(game::CoordMsg::Succession { .. }) if holding => None,
+            Some(_) => self.stash.pop_front(),
+        };
         if matches!(msg, Some(game::CoordMsg::HopIs { .. })) {
             self.hop_is.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -265,6 +280,8 @@ pub struct MultiRig {
     pub world_hold: Vec<Arc<std::sync::atomic::AtomicBool>>,
     /// Each host's count of `HopIs` read ([`RigWorldLink`]).
     pub world_hop_is: Vec<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Each host's [`RigWorldLink`] order-hold flag ([`Self::hold_orders`]).
+    pub world_hold_orders: Vec<Arc<std::sync::atomic::AtomicBool>>,
     /// Made without a spawner schedule (every region ticks in lockstep).
     pub lockstep: bool,
     /// The rig's in-memory two-phase store (world cuts, [`Self::drive_world_cuts`]):
@@ -421,6 +438,7 @@ impl MultiRig {
                 world_sent: Vec::new(),
                 world_hold: Vec::new(),
                 world_hop_is: Vec::new(),
+                world_hold_orders: Vec::new(),
                 lockstep: schedule.is_none(),
                 parts: BTreeMap::new(),
                 decided: BTreeMap::new(),
@@ -476,9 +494,11 @@ impl MultiRig {
             self.world_hold.push(hold.clone());
             let hop_is = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             self.world_hop_is.push(hop_is.clone());
+            let hold_orders = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.world_hold_orders.push(hold_orders.clone());
             let rig = &mut self.hosts[h];
             let now = rig.now_ms;
-            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is }), world_boot(self.boots[h]), now);
+            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default() }), world_boot(self.boots[h]), now);
             rig.settle();
         }
         self.coordinator = Some(core);
@@ -1193,11 +1213,13 @@ impl MultiRig {
             let sent = Arc::new(Mutex::new(Vec::new()));
             let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let hop_is = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let hold_orders = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.world_hold_orders[h as usize] = hold_orders.clone();
             self.world_sent[h as usize] = sent.clone();
             self.world_hold[h as usize] = hold.clone();
             self.world_hop_is[h as usize] = hop_is.clone();
             let rig = &mut self.hosts[h as usize];
-            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is }), world_boot(boot), now);
+            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default() }), world_boot(boot), now);
             rig.settle();
         }
     }
@@ -1440,6 +1462,12 @@ impl MultiRig {
     /// Hold back (`true`) or release what the coordinator sends host `h`.
     pub fn hold_world(&mut self, h: u32, hold: bool) {
         self.world_hold[h as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Hold back (`true`) or release the succession orders the coordinator sends host `h`
+    /// (and whatever follows one): what comes before an order is read as usual.
+    pub fn hold_orders(&mut self, h: u32, hold: bool) {
+        self.world_hold_orders[h as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// What host `h` sent its coordinator so far.

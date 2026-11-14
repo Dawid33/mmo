@@ -1342,6 +1342,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// the first read). Empty: it held no land, so no `Leave` succession can owe an heir
     /// anything of it — its next boot's hello releases the held session at once.
     left_land: BTreeMap<u32, Option<BTreeSet<crate::SuperRegion>>>,
+    /// Peers whose `left_land` the boot path noted before any directory read: filled at the
+    /// first one (`world_cut.rs` `left_land_read`).
+    left_land_unread: BTreeSet<u32>,
+    /// Peers leaving in a cut not decided here whose NEXT boot already showed it holds land
+    /// it left with (its `Owns` came before the late `CutDone`): released at the decision.
+    pair_owns_seen: BTreeSet<u32>,
     /// Each peer's boot as its latest hello named it.
     peer_boots: BTreeMap<u32, u64>,
     /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
@@ -1544,6 +1550,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             left_peers: BTreeMap::new(),
             returning_peers: BTreeMap::new(),
             left_land: BTreeMap::new(),
+            left_land_unread: BTreeSet::new(),
+            pair_owns_seen: BTreeSet::new(),
             peer_boots: BTreeMap::new(),
             world_cut_done: Vec::new(),
             inbound_accounted: None,

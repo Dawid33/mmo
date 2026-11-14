@@ -235,6 +235,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // like one for an unknown owner — placed once the heir holds the land (the
                 // heir holds every order until it adopted), else refused at
                 // `SPAWN_SYNC_WAIT_MS` (the login service answers 503, the client retries).
+                // Asked at the next scan of `ask_for_land`: up to `LAND_WANTED_EVERY_MS` later.
                 let region = self.spawn_region(req.record_region);
                 self.note_land_wanted(region);
                 self.hold_spawn(req, since_ms, "its region's host left the world; its land is asked for")

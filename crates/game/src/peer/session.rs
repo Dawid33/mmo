@@ -84,6 +84,9 @@ pub struct PeerSession {
     /// Volatile messages sent while reachable, out on the next pump.
     volatile_out: Vec<Volatile>,
     held: bool,
+    /// [`PeerSession::hold_on_new_boot`]: a hello of another peer boot holds the session
+    /// before anything goes out to it.
+    hold_new_boot: bool,
     /// [`PeerSession::reset_connection`]: the connection seen last is gone, whatever the
     /// link's connection value says.
     reset: bool,
@@ -111,6 +114,7 @@ impl PeerSession {
             state: Conn::None,
             volatile_out: Vec::new(),
             held: false,
+            hold_new_boot: false,
             reset: false,
             refused: std::collections::BTreeSet::new(),
             refused_logged: std::collections::BTreeSet::new(),
@@ -201,6 +205,27 @@ impl PeerSession {
     pub fn hold(&mut self) {
         self.held = true;
         self.volatile_out.clear();
+    }
+
+    /// While set, a hello of a peer boot other than the one this session's numbering is
+    /// addressed to holds the session ([`PeerSession::hold`]) before anything is sent to it:
+    /// the peer is leaving in a world cut not decided yet (`world_cut.rs`).
+    pub fn hold_on_new_boot(&mut self, on: bool) {
+        self.hold_new_boot = on;
+    }
+
+    /// Renumber what is queued from 1 if nothing of the current numbering was ever sent
+    /// (a held session whose entries before a cut's mark were just forgotten,
+    /// [`PeerSession::drop_through_mark`], after a new peer boot's hello: it expects 1).
+    pub fn renumber_unsent(&mut self) {
+        if self.max_sent != 0 {
+            return;
+        }
+        for (i, (seq, _)) in self.out.iter_mut().enumerate() {
+            *seq = i as u64 + 1;
+        }
+        self.next_seq = self.out.len() as u64 + 1;
+        self.sent_through = 0;
     }
 
     /// Undo [`PeerSession::hold`]: the queue goes out, in order, on the next pump.
@@ -384,6 +409,11 @@ impl PeerSession {
             // The peer has none of our numbers (a new peer boot, or a peer that never
             // counted this boot): restart the numbering of everything still owed.
             log::debug!("peer {}: renumbering {} unacknowledged from 1", self.peer, self.out.len());
+            if self.hold_new_boot && self.send_boot.is_some_and(|b| b != h.boot) {
+                // A leaving peer's next boot (R4 drain): nothing of the leaving boot's time
+                // goes to it before the leave is decided here.
+                self.held = true;
+            }
             self.send_boot = Some(h.boot);
             for (i, (seq, _)) in self.out.iter_mut().enumerate() {
                 *seq = i as u64 + 1;

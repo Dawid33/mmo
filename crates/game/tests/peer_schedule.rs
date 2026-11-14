@@ -7675,3 +7675,230 @@ fn ownerless_returns(rig: &mut MultiRig) {
 fn an_ownerless_leaver_returns_and_a_cut_with_it_commits() {
     sweep_hosts("an_ownerless_leaver_returns_and_a_cut_with_it_commits", ownerless_returns);
 }
+
+// --- Task 11 fix round 2 -----------------------------------------------------------
+
+/// Items a reply to the leaver's region carries in [`late_leave_note`].
+const LATE_ITEMS: u32 = 4;
+
+/// Three hosts: L (`chain[1]`) leaves; survivor S (`chain[0]`) learns the leave cut's
+/// commit LATE — its coordinator link held from its `CutPrepared` on. Meanwhile S sends a
+/// slime and an item-carrying reply toward L's region (held by the leave pair), L exits,
+/// survivor T needs L's land (a slime of it held for L) and the coordinator declares the
+/// `Leave` succession; S's directory is read again and shows the heir. L's next boot (it
+/// owns nothing) says hello to S — before S learns the commit (`hello_first`), or after S
+/// learned it and before the order. S must NOT release to the new boot: what it held
+/// reaches the heir once (journal `Sent` / `owed`), the items exactly; the world restarted
+/// from the settle's cut holds every id once.
+fn late_leave_note(rig: &mut MultiRig, hello_first: bool) {
+    crate::common::install_real_block_props();
+    let chain = heir_world(rig);
+    let (rs, rd, rt) = (chain[0], chain[1], chain[2]);
+    let (s, leaver, t) = (rig.owner(rs), rig.owner(rd), rig.owner(rt));
+    keeper_may_park(rig, leaver);
+    let from_s = slime_in(rig, rs, 1);
+    let from_t = slime_in(rig, rt, 2);
+    until_committed(rig, 1);
+    rig.with_land_on_demand(0);
+    rig.hosts[leaver as usize].manager.request_leave();
+    let mut cut = None;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        rig.cut_round();
+        let leaving = rig.hosts[leaver as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[s as usize].manager.world_cut_state() == leaving.map(|c| (c, "prepared")) {
+            cut = leaving;
+            break;
+        }
+    }
+    let cut = cut.expect("S prepared its part of the leave cut");
+    rig.hold_world(s, true);
+    // Toward L while the leave pair holds back what S sends it.
+    assert!(push_over(rig, from_s, rs, rd));
+    let due = world_tick(rig) + 5;
+    rig.hosts[s as usize].manager.send_reliable_for_test(leaver, game::Reliable::Intent(refusal_of(rs, rd, due, LATE_ITEMS)), false);
+    rig.items = Some(u64::from(LATE_ITEMS));
+    assert!(until_decided(rig, cut), "the leave cut commits");
+    rig.kill(leaver);
+    assert!(push_over(rig, from_t, rt, rd));
+    let succession = until_land_declared(rig);
+    assert_eq!((succession.predecessor, succession.kind), (leaver, game::SuccessionKind::Leave));
+    assert!(succession.survivors.contains(&s));
+    assert!(rig.hosts[s as usize].manager.successions().is_empty(), "S has the order not yet");
+    rig.read_directory(s);
+    let heir_seen = if succession.heir == s { game::Owner::Me } else { game::Owner::Host(succession.heir) };
+    assert_eq!(rig.hosts[s as usize].manager.owner_of(rd), heir_seen, "S's directory shows the heir");
+    let s_left = |rig: &MultiRig| rig.hosts[s as usize].manager.peer_left(leaver);
+    if !hello_first {
+        // S learns the commit (its `CutDone`), not the order.
+        rig.hold_orders(s, true);
+        rig.hold_world(s, false);
+        assert!(until(rig, CROSS_ROUNDS, |r| s_left(r)), "S noted the leave");
+    }
+    rig.start(leaver);
+    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    rig.core().set_expected_hosts(live);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        if !hello_first {
+            assert!(s_left(rig), "S holds what it owes the heir (seed {}, link delay {})", rig.seed, rig.link_delay);
+        }
+    }
+    rig.hold_world(s, false);
+    rig.hold_orders(s, false);
+    for _ in 0..SUCCESSION_ROUNDS {
+        if !rig.hosts[s as usize].manager.successions().is_empty() {
+            break;
+        }
+        rig.round();
+    }
+    assert!(!rig.hosts[s as usize].manager.successions().is_empty(), "S applied the order");
+    assert_settled_whole(rig, &succession, &[from_s, from_t]);
+    rig.run(rd);
+    for id in [from_s, from_t] {
+        assert!(until_landed(rig, id), "{id:?} landed");
+        assert_eq!(live_count(rig, id), 1, "{id:?} once (hello first: {hello_first})");
+    }
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| u32::from(pile_items(rig, rd)) == LATE_ITEMS),
+        "the items lie in {rd:?} on the heir: {}",
+        pile_items(rig, rd)
+    );
+    rig.assert_items(u64::from(LATE_ITEMS));
+    until_committed(rig, 1);
+    assert_restored_once(rig, &[from_s, from_t]);
+}
+
+fn late_note_hello_first(rig: &mut MultiRig) {
+    late_leave_note(rig, true);
+}
+
+fn late_note_then_hello(rig: &mut MultiRig) {
+    late_leave_note(rig, false);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_survivor_that_learns_the_leave_late_still_reports_what_it_held() {
+    sweep("a_survivor_that_learns_the_leave_late_still_reports_what_it_held (hello first)", 3, 1, HEIR_SWEEP_SEEDS, late_note_hello_first);
+    sweep("a_survivor_that_learns_the_leave_late_still_reports_what_it_held (note first)", 3, 1, HEIR_SWEEP_SEEDS, late_note_then_hello);
+}
+
+/// Fix round 2 (minor 3): a rolling restart that S learns late. L leaves; S's coordinator
+/// link is held from its `CutPrepared` on (its `CutDone` comes late); S sends a slime into
+/// L's region meanwhile (held by the leave pair); L's next boot comes back holding its land
+/// (no declaration) and says hello to S BEFORE S learns the commit. S notes the boot that
+/// LEFT (not the one that said hello), treats the new boot as back at the late `CutDone`
+/// and, its land shown again, releases: the slime reaches L's region once.
+fn back_before_the_late_cut_done(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let (s, leaver) = (rig.owner(rs), rig.owner(rd));
+    keeper_may_park(rig, leaver);
+    let id = slime_in(rig, rs, 1);
+    until_committed(rig, 1);
+    rig.hosts[leaver as usize].manager.request_leave();
+    let mut cut = None;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        rig.cut_round();
+        let leaving = rig.hosts[leaver as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[s as usize].manager.world_cut_state() == leaving.map(|c| (c, "prepared")) {
+            cut = leaving;
+            break;
+        }
+    }
+    let cut = cut.expect("S prepared its part of the leave cut");
+    rig.hold_world(s, true);
+    assert!(push_over(rig, id, rs, rd));
+    assert!(until_decided(rig, cut), "the leave cut commits");
+    rig.kill(leaver);
+    rig.start(leaver);
+    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    rig.core().set_expected_hosts(live);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert!(!rig.hosts[s as usize].manager.peer_is_reachable(leaver), "nothing goes to the new boot before S learns the leave");
+    rig.hold_world(s, false);
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| !rig.hosts[s as usize].manager.peer_left(leaver) && rig.hosts[s as usize].manager.peer_is_reachable(leaver)),
+        "S released its session to the new boot at the late CutDone (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    // The new boot has no keeper: an observer of it subscribes to L's region.
+    let watcher = 31;
+    rig.hosts[leaver as usize].event(game::ServerEvent::ObserverConnected { client: watcher, player: game::PlayerId(310) });
+    rig.hosts[leaver as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), watcher));
+    assert!(until_landed(rig, id), "the slime landed");
+    assert_eq!(rig.owners_of(id), [(leaver, rd)], "in L's region, on its new boot");
+    assert_eq!(live_count(rig, id), 1);
+    until_committed(rig, 1);
+    assert_restored_once(rig, &[id]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_leaver_back_before_its_leave_is_learned_gets_what_waited_once() {
+    sweep_hosts("a_leaver_back_before_its_leave_is_learned_gets_what_waited_once", back_before_the_late_cut_done);
+}
+
+/// Fix round 2 (boot path): survivor S leaves and stops; L leaves; T needs L's land and the
+/// `Leave` succession is declared (T the heir and only survivor); S boots again — after the
+/// declaration, the succession still open — and notes L as left from the store
+/// (`note_left_peers`). S's new boot is no survivor (it registered after the declaration),
+/// so no order ever comes to it, and it holds nothing of L's time: its directory, read
+/// first, gives L no land (the heir's now), so L's next boot is released at its hello —
+/// not held for an order that never comes. A cut with all three commits, the succession
+/// settles, and the slime T held for L lands once.
+fn boot_after_the_declaration(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd, rt) = (chain[0], chain[1], chain[2]);
+    let (s, leaver, t) = (rig.owner(rs), rig.owner(rd), rig.owner(rt));
+    keeper_may_park(rig, s);
+    keeper_may_park(rig, leaver);
+    let from_t = slime_in(rig, rt, 2);
+    until_committed(rig, 1);
+    for h in [s, leaver] {
+        rig.hosts[h as usize].manager.request_leave();
+        let cut = until_leave_begun(rig, t, h);
+        assert!(until_decided(rig, cut), "host {h}'s leave cut commits");
+        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[t as usize].manager.peer_left(h)), "T noted host {h}'s leave");
+        rig.kill(h);
+    }
+    let left_as = rig.boots[leaver as usize];
+    rig.with_land_on_demand(0);
+    assert!(push_over(rig, from_t, rt, rd));
+    let succession = until_land_declared(rig);
+    assert_eq!((succession.predecessor, succession.heir, succession.survivors.clone()), (leaver, t, vec![t]));
+    // S boots again, the succession open.
+    rig.start(s);
+    rig.hosts[s as usize].manager.note_left_peers([(leaver, left_as)]);
+    assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S's new boot holds L's session");
+    rig.start(leaver);
+    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    rig.core().set_expected_hosts(live);
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| {
+            let m = &rig.hosts[s as usize].manager;
+            !m.peer_left(leaver) && m.peer_is_reachable(leaver)
+        }),
+        "S's new boot released L's new boot at its hello (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    assert!(rig.hosts[s as usize].manager.successions().is_empty(), "no order comes to a host that is no survivor");
+    assert_settled_whole(rig, &succession, &[from_t]);
+    let (_, parts) = rig.last_committed();
+    assert_eq!(parts.len(), 3, "a cut of all three committed");
+    rig.run(rd);
+    assert!(until_landed(rig, from_t), "the slime landed");
+    assert_eq!(live_count(rig, from_t), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_booted_after_a_leave_declaration_releases_the_leavers_next_boot() {
+    sweep("a_host_booted_after_a_leave_declaration_releases_the_leavers_next_boot", 3, 1, HEIR_SWEEP_SEEDS, boot_after_the_declaration);
+}

@@ -129,6 +129,13 @@ pub(super) struct LeavePair {
     pub cut: CutId,
     /// Held back, in order (each already wrapped: this host accounts for it in `cut`).
     pub held: Vec<Reliable>,
+    /// The peer leaves in `cut` (else this host does): the boot that leaves (its latest
+    /// hello at the `BeginCut`) and, under `claim`, the land this host's directory gave it
+    /// then (`None`: not read yet — unknown, never filled later). Taken when the pair is
+    /// made: the cut cannot commit without this host's part and no `Leave` succession can
+    /// precede that commit, so the directory still shows the leaver's land here — a
+    /// `CutDone` learned late may come after a declaration moved it.
+    pub leaver: Option<(Option<u64>, Option<BTreeSet<crate::SuperRegion>>)>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -207,10 +214,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         // that peer from now until the cut is decided waits here, in this host's part.
         let peers: Vec<u32> = self.world_cut_peers(cut).into_iter().collect();
         for p in peers.into_iter().filter(|p| i_leave || leaving.contains(p)) {
+            let leaver = leaving.contains(&p).then(|| (self.peer_boots.get(&p).copied(), self.land_of(p)));
+            if leaver.is_some() {
+                if let Some(peer) = self.peers.get_mut(&p) {
+                    peer.session.hold_on_new_boot(true);
+                }
+            }
             // A pair of an earlier cut is ended when that cut is decided, and no cut begins
             // before that: one still here would be a lost `CutDone` — what it held goes
             // out (as for an abort) rather than being overwritten.
-            if let Some(stale) = self.leave_pairs.insert(p, LeavePair { cut, held: Vec::new() }) {
+            if let Some(stale) = self.leave_pairs.insert(p, LeavePair { cut, held: Vec::new(), leaver }) {
                 log::error!("[server] a leave pair with host {p} of cut {} was never ended; what it held goes out", stale.cut.0);
                 for msg in stale.held {
                     self.queue_now(p, msg);
@@ -322,27 +335,51 @@ impl<S: RegionSpawner> WorldManager<S> {
         for ordinal in pairs {
             let pair = self.leave_pairs.remove(&ordinal).expect("listed");
             if let Some(peer) = self.peers.get_mut(&ordinal) {
+                peer.session.hold_on_new_boot(false);
                 if committed {
                     peer.session.hold();
                     peer.session.drop_through_mark(cut);
+                    // A next boot's hello may have come already (held at once): it counts
+                    // what is left from 1.
+                    peer.session.renumber_unsent();
                 } else {
                     peer.session.release();
                 }
             }
+            let mut back = None;
             if committed && !me_leaving {
-                let boot = self.peer_boots.get(&ordinal).copied();
+                // The boot that left and its land, as noted when the leave began (a hello of
+                // its NEXT boot may have come before this `CutDone`).
+                let (boot, land) = pair.leaver.clone().unwrap_or((self.peer_boots.get(&ordinal).copied(), None));
                 log::info!(
                     "[server] host {ordinal} left in world cut {}: {} message(s) wait for its return",
                     cut.0,
                     pair.held.len()
                 );
                 self.left_peers.insert(ordinal, boot);
-                self.note_left_land(ordinal);
+                if self.ownership.0.directory().is_some() {
+                    self.left_land.insert(ordinal, land);
+                }
+                back = self.peer_boots.get(&ordinal).copied().filter(|b| Some(*b) != boot);
             }
             for msg in pair.held {
                 self.queue_now(ordinal, msg);
             }
+            // Its next boot said hello already: as at that hello, now that it is noted (and
+            // as at its `Owns`, if that showed it holds land it left with).
+            let owns_seen = self.pair_owns_seen.remove(&ordinal);
+            if let Some(b) = back {
+                self.peer_hello_boot(ordinal, b);
+                self.returning_owns(ordinal, owns_seen);
+            }
         }
+    }
+
+    /// Under `claim`: the land host `ordinal` holds as this host's directory gives it now
+    /// (`None`: the directory was not read whole yet).
+    fn land_of(&self, ordinal: u32) -> Option<BTreeSet<crate::SuperRegion>> {
+        let directory = self.ownership.0.directory()?;
+        directory.is_read().then(|| directory.owned_by(ordinal).into_iter().collect())
     }
 
     /// Hosts the world store says left in a committed leave cut (their `hosts` row is
@@ -362,24 +399,37 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             log::info!("[server] host {ordinal} left the world cleanly (boot {boot}): not awaited until it returns");
             self.left_peers.insert(ordinal, Some(boot));
-            self.note_left_land(ordinal);
+            // Boot path: this boot holds no message of the departed boot's time (it was not
+            // running then), so its held session only gates NEW traffic, and that goes by
+            // this host's directory: once it is read, what it gives the departed host stands
+            // — land it still holds (not given away yet: an order will come, this host being
+            // a survivor), or none (it never held any, or a `Leave` succession of it was
+            // declared before this boot registered: then this host is no survivor, no order
+            // comes, and nothing it holds is owed to the heir — its directory sent that land's
+            // traffic to the heir from the start).
+            if self.ownership.0.directory().is_some() {
+                match self.land_of(ordinal) {
+                    Some(land) => {
+                        self.left_land.insert(ordinal, Some(land));
+                    }
+                    None => {
+                        self.left_land.insert(ordinal, None);
+                        self.left_land_unread.insert(ordinal);
+                    }
+                }
+            }
         }
     }
 
-    /// Under `claim`: the land host `ordinal` holds as this host's directory gives it, noted
-    /// when its leave is (`left_land`; `None` until the directory was read whole).
-    fn note_left_land(&mut self, ordinal: u32) {
-        let Some(directory) = self.ownership.0.directory() else { return };
-        let land = directory.is_read().then(|| directory.owned_by(ordinal).into_iter().collect());
-        self.left_land.insert(ordinal, land);
-    }
-
-    /// The directory was read whole: a departed host's land not noted yet is noted now, and a
-    /// returning boot of a host that left holding none is released (`peer_hello_boot`).
+    /// The directory was read whole: a departed host's land the boot path could not note yet
+    /// is noted now, and a returning boot of a host that left holding none is released
+    /// (`peer_hello_boot`). A leave seen in a cut is never noted here (`LeavePair::leaver`).
     pub(super) fn left_land_read(&mut self) {
-        let unread: Vec<u32> = self.left_land.iter().filter(|(_, l)| l.is_none()).map(|(o, _)| *o).collect();
-        for o in unread {
-            self.note_left_land(o);
+        for o in std::mem::take(&mut self.left_land_unread) {
+            if self.left_land.contains_key(&o) {
+                let land = self.land_of(o);
+                self.left_land.insert(o, land);
+            }
         }
         let back: Vec<u32> = self.returning_peers.keys().copied().collect();
         for o in back {
@@ -400,6 +450,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///   that left owns nothing, and what waited goes to the heir (`succession.rs`).
     pub(super) fn peer_hello_boot(&mut self, from: u32, boot: u64) {
         self.peer_boots.insert(from, boot);
+        if let Some(pair) = self.leave_pairs.get(&from) {
+            if pair.leaver.as_ref().is_some_and(|(left_as, _)| *left_as != Some(boot)) {
+                // The next boot of a host leaving in a cut not decided here yet: nothing goes
+                // to it before the decision (`end_leaves` decides as at this hello).
+                log::info!("[server] host {from} is back (boot {boot}) before its leave cut was decided here: held");
+                if let Some(peer) = self.peers.get_mut(&from) {
+                    peer.session.hold();
+                }
+            }
+            return;
+        }
         let back = self.left_peers.get(&from).is_some_and(|left_as| *left_as != Some(boot));
         if !back {
             return;
@@ -423,6 +484,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Host `from`, back from a leave, holds `reclaimed` super-regions of the land it left
     /// with (its [`Reliable::Owns`], under `claim`): its held session goes out.
     pub(super) fn returning_owns(&mut self, from: u32, reclaimed: bool) {
+        if reclaimed && self.leave_pairs.get(&from).is_some_and(|p| p.leaver.is_some()) {
+            // Its leave is not decided here yet: `end_leaves` releases it then.
+            self.pair_owns_seen.insert(from);
+            return;
+        }
         if reclaimed && self.returning_peers.remove(&from).is_some() {
             self.release_left(from);
         }
@@ -433,6 +499,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.left_peers.remove(&from);
         self.returning_peers.remove(&from);
         self.left_land.remove(&from);
+        self.left_land_unread.remove(&from);
         if let Some(peer) = self.peers.get_mut(&from) {
             log::info!("[server] host {from} is back: what waited for it goes out");
             peer.session.release();
@@ -800,7 +867,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (`leave_pairs`), never queued.
     #[doc(hidden)]
     pub fn hold_for_leave_for_test(&mut self, ordinal: u32, cut: CutId, msg: Reliable) {
-        self.leave_pairs.entry(ordinal).or_insert_with(|| LeavePair { cut, held: Vec::new() }).held.push(msg);
+        self.leave_pairs.entry(ordinal).or_insert_with(|| LeavePair { cut, held: Vec::new(), leaver: None }).held.push(msg);
     }
 
     /// Test support: every crossing in flight with the world cut its sender accounts for it

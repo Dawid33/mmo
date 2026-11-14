@@ -1262,10 +1262,10 @@ impl CoordinatorRuntime {
             }
         }
         if let Some(e) = failed {
+            // Throttled; the rest of the pump runs on as usual.
             self.warn_cuts(now, &format!("the owners of land asked for could not be read ({e}); the hosts ask again"));
-            // The rest of the pump runs on the next pass.
-            return Ok(());
         }
+        let Some(p) = self.successions.as_mut() else { return Ok(()) };
         if self.core.rollback_wanted() {
             if p.rollback_rx.is_none() && now >= p.rollback_retry_at {
                 p.rollback_rx = Some(self.store.rollback_world_later(self.fence));
