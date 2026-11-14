@@ -244,6 +244,23 @@ const HALO_WATCH_STEPS: usize = (6000 / game::TICK_RATE) as usize;
 /// predict.
 const HALO_JOIN_SETTLE_STEPS: usize = (game::UNLOAD_GRACE_MS / game::TICK_RATE) as usize + 10;
 
+/// Top of [`floored`]'s ground, in voxels = world units (half a block).
+const FLOOR_TOP_VOXELS: u32 = 8;
+
+/// A floor [`FLOOR_TOP_VOXELS`] high under every chunk column of every region:
+/// ground everywhere, so a slime hops wherever it is spawned.
+fn floored(_: game::RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    let air = game::Block::new(game::BlockId::AIR);
+    let mut out = Vec::new();
+    for x in 0..game::REGION_CHUNKS {
+        for z in 0..game::REGION_CHUNKS {
+            let sub = game::SubChunk::Dense(Box::new(game::Chunk::flat_floor(FLOOR_TOP_VOXELS)));
+            out.push((game::ColumnCoords::new(x, z), game::Column::new(0, air, air, vec![sub])));
+        }
+    }
+    out
+}
+
 /// A one-block floor under every chunk column of the regions at x <= 0; the
 /// rest is void, so no slime spawns there.
 fn floored_west(rc: game::RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
@@ -374,10 +391,6 @@ const MIN_CONTENDED_STEPS: usize = TWO_SOURCES_WATCH_STEPS / 4;
 /// Server schedules `two_hosts_shuffled_server_order_does_not_mispredict` runs.
 const SHUFFLED_SERVER_SEEDS: u64 = 6;
 
-/// Top of the floor of `client::local_server::lightweight_test_generator` (its
-/// `Chunk::flat_floor(8)`), in voxels = world units.
-const LIGHTWEIGHT_GROUND_TOP: f32 = 8.0;
-
 /// `ReconcileStats::kind_slot` of everything relayed between regions.
 const TRANSFER_KIND: usize = 2;
 
@@ -389,9 +402,10 @@ const TRANSFER_KIND: usize = 2;
 /// as it hops out of the band and in). Returns the `transfer>transfer`
 /// mispredictions over the watch, all mispredictions, and the steps the server's
 /// west or north region mirrored both bodies. Converged before and after.
+/// `h` stands on [`floored`] ground, so the slime hops.
 fn two_sources_in_one_slot(mut h: SimHarness) -> (u64, u64, usize) {
     let bv = game::BLOCK_VOXELS as f32;
-    let ground = LIGHTWEIGHT_GROUND_TOP;
+    let ground = FLOOR_TOP_VOXELS as f32;
     let spawn = game::SPAWN_REGION;
     let north_west = game::RegionCoords::new(spawn.x - 1, spawn.z - 1);
     let targets = [game::RegionCoords::new(spawn.x - 1, spawn.z), game::RegionCoords::new(spawn.x, spawn.z - 1)];
@@ -455,7 +469,7 @@ fn two_sources_in_one_slot(mut h: SimHarness) -> (u64, u64, usize) {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn two_neighbours_halo_in_one_slot_does_not_mispredict() {
-    let (transfers, total, contended) = two_sources_in_one_slot(SimHarness::threaded(1));
+    let (transfers, total, contended) = two_sources_in_one_slot(SimHarness::threaded_with_generator(1, Box::new(floored)));
     assert!(contended >= MIN_CONTENDED_STEPS, "only {contended} steps had both bodies mirrored in the west or the north region");
     assert_eq!(transfers, 0, "transfer>transfer mispredictions ({total} in all, {contended} contended steps)");
     assert_eq!(total, 0, "mispredictions of other kinds ({contended} contended steps)");
@@ -469,7 +483,7 @@ fn two_neighbours_halo_in_one_slot_does_not_mispredict() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn two_hosts_shuffled_server_order_does_not_mispredict() {
     for seed in 0..SHUFFLED_SERVER_SEEDS {
-        let mut h = SimHarness::with_hosts(2).with_server_schedule(seed);
+        let mut h = SimHarness::with_hosts_with_generator(2, || Box::new(floored)).with_server_schedule(seed);
         let north_west = game::RegionCoords::new(game::SPAWN_REGION.x - 1, game::SPAWN_REGION.z - 1);
         assert_ne!(h.owner(game::SPAWN_REGION), h.owner(north_west), "the two sources run on different hosts");
         let (transfers, total, contended) = two_sources_in_one_slot(h);
@@ -497,10 +511,10 @@ const THIRD_PARTY_PAST_STEPS: usize = 20;
 #[ignore = "slow: >100ms — run via just test-full"]
 fn crossing_with_a_third_party_halo_in_the_slot_does_not_mispredict() {
     let bv = game::BLOCK_VOXELS as f32;
-    let ground = LIGHTWEIGHT_GROUND_TOP;
+    let ground = FLOOR_TOP_VOXELS as f32;
     let spawn = game::SPAWN_REGION;
     let north = neighbour(spawn, Dir::North);
-    let mut h = SimHarness::with_near_radius(1);
+    let mut h = SimHarness::with_generator(1, Box::new(floored));
     let mut slime = None;
     h.with_server_region(spawn, |r| {
         let tick = r.current_tick();
