@@ -51,7 +51,9 @@ fn region_of_host(host: u32) -> RegionCoords {
     match host {
         0 => A,
         1 => B,
-        _ => C,
+        2 => C,
+        // Super-region (2, 0) at the default side 16.
+        _ => RegionCoords { x: 32, z: 0 },
     }
 }
 
@@ -453,4 +455,125 @@ fn sqlite_declares_nothing() {
     assert!(matches!(h.rollback_world(c), Err(StoreError::Unsupported(_))));
     assert!(h.open_successions().unwrap().is_empty());
     h.shutdown();
+}
+
+// ---- Fix round 1: a declared-dead host wins nothing; several predecessors; refusals ----------
+
+/// Host 1 is declared dead while its process still runs: its `claim_free` of a free row is
+/// refused as fenced and the row stays free.
+#[test]
+fn a_dead_hosts_claim_of_a_free_row_is_refused() {
+    let Some(w) = World::new(2) else { return };
+    w.vouch(1);
+    w.declared(1, 0);
+    let free = (9, 9);
+    let err = w.hosts[1].claim_free(1, boot_of(1), vec![free]).unwrap_err();
+    assert_eq!(err, StoreError::Fenced { sr: None });
+    assert!(w.h.owners().unwrap().iter().all(|(sr, _, _)| *sr != free), "the row was not created");
+    // The heir claims it as usual.
+    let won = w.hosts[0].claim_free(0, boot_of(0), vec![free]).unwrap();
+    assert_eq!(won.epochs.keys().copied().collect::<Vec<_>>(), vec![free]);
+    w.shutdown();
+}
+
+/// A free row host 1 won just before its declaration moves to the heir with the rest.
+#[test]
+fn a_claim_committed_just_before_the_declaration_moves_with_the_rest() {
+    let Some(w) = World::new(2) else { return };
+    let late = (9, 9);
+    let won = w.hosts[1].claim_free(1, boot_of(1), vec![late]).unwrap();
+    w.vouch(1);
+    let s = w.declared(1, 0);
+    assert_eq!(s.moved.len(), 3, "its two boot rows and the late one: {:?}", s.moved);
+    assert!(s.moved.contains(&(late, won.epochs[&late] + 1)));
+    assert!(w.h.owned_by(1).unwrap().epochs.is_empty(), "the dead ordinal owns nothing");
+    w.shutdown();
+}
+
+/// A boot declared dead between its `owned_by` and its re-claim takes nothing back from the
+/// heir; a live boot re-claims its own rows.
+#[test]
+fn a_dead_boots_reclaim_is_refused() {
+    let Some(w) = World::new(2) else { return };
+    let own: Vec<_> = w.fences[1].epochs.keys().copied().collect();
+    w.vouch(1);
+    let s = w.declared(1, 0);
+    let err = w.hosts[1].claim_super_regions_live(1, boot_of(1), own.clone()).unwrap_err();
+    assert_eq!(err, StoreError::Fenced { sr: None });
+    let heir = w.h.owned_by(0).unwrap();
+    for (sr, e) in &s.moved {
+        assert_eq!(heir.epochs.get(sr), Some(e), "still the heir's");
+    }
+    let mine: Vec<_> = w.fences[0].epochs.keys().copied().collect();
+    let again = w.hosts[0].claim_super_regions_live(0, boot_of(0), mine.clone()).unwrap();
+    assert_eq!(again.epochs.keys().copied().collect::<Vec<_>>(), mine);
+    w.shutdown();
+}
+
+/// Two predecessors in one call: one shared heir, then (another world) two heirs.
+#[test]
+fn several_predecessors_in_one_call() {
+    let Some(w) = World::new(3) else { return };
+    w.vouch(1);
+    w.vouch(2);
+    let done = w.h.declare_succession(vec![(2, boot_of(2)), (1, boot_of(1))], vec![0, 0], SuccessionKind::Crash, w.c, 0).unwrap();
+    let Declared::Done(s) = done else { panic!("{done:?}") };
+    assert_eq!(s.iter().map(|s| (s.predecessor, s.heir)).collect::<Vec<_>>(), vec![(2, 0), (1, 0)], "the call's order");
+    assert!(s[0].id != s[1].id);
+    for s in &s {
+        assert_eq!(s.survivors, vec![0], "neither predecessor survives");
+    }
+    assert_eq!(w.h.owned_by(0).unwrap().epochs.len(), 1 + 1 + 2, "all of 1's and 2's land is 0's");
+    assert_eq!((w.state_of(1).0, w.state_of(2).0), (HOST_DEAD, HOST_DEAD));
+    assert_eq!(w.h.open_successions().unwrap(), s);
+    // Settled together.
+    w.hosts[0].prepare_cut(part(1, 0, vec![]), w.h.owned_by(0).unwrap(), 0).recv().unwrap().unwrap();
+    let ids: Vec<_> = s.iter().map(|s| s.id).collect();
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![0], vec![], w.c, 0, ids).unwrap());
+    assert!(w.h.open_successions().unwrap().is_empty());
+    w.shutdown();
+
+    let Some(w) = World::new(4) else { return };
+    exec(&w.w, "UPDATE hosts SET seen_ms = 0 WHERE ordinal IN (1, 2)");
+    let done = w.h.declare_succession(vec![(1, boot_of(1)), (2, boot_of(2))], vec![0, 3], SuccessionKind::Crash, w.c, 0).unwrap();
+    let Declared::Done(s) = done else { panic!("{done:?}") };
+    assert_eq!(s.iter().map(|s| (s.predecessor, s.heir)).collect::<Vec<_>>(), vec![(1, 0), (2, 3)]);
+    assert_eq!(s[0].survivors, vec![0, 3]);
+    assert_eq!(w.h.owned_by(3).unwrap().epochs.len(), 2, "3's own and 2's");
+    assert_eq!(w.h.owned_by(0).unwrap().epochs.len(), 3, "0's own and 1's two");
+    w.shutdown();
+}
+
+/// An heir whose lease is not fresh (lapsed, or vouched dead), and a predecessor already
+/// dead: `Gone`, nothing written.
+#[test]
+fn a_stale_heir_or_a_dead_predecessor_is_gone() {
+    let Some(w) = World::new(3) else { return };
+    w.vouch(1);
+    w.lapse(2);
+    assert_eq!(w.declare(1, 2, SuccessionKind::Crash).unwrap(), Declared::Gone(vec![2]), "a lapsed heir");
+    w.vouch(2);
+    assert_eq!(w.declare(1, 2, SuccessionKind::Crash).unwrap(), Declared::Gone(vec![2]), "a vouched heir");
+    assert_eq!(w.state_of(1), (HOST_LIVE, false));
+    assert_eq!(w.h.owned_by(1).unwrap(), w.fences[1]);
+    exec(&w.w, &format!("UPDATE hosts SET state = {HOST_DEAD} WHERE ordinal = 1"));
+    assert_eq!(w.declare(1, 0, SuccessionKind::Crash).unwrap(), Declared::Gone(vec![1]), "already dead");
+    assert!(w.h.open_successions().unwrap().is_empty());
+    w.shutdown();
+}
+
+/// Malformed calls are refused before anything is read or written.
+#[test]
+fn malformed_declarations_are_unsupported() {
+    let Some(w) = World::new(3) else { return };
+    let unsupported = |dead: Vec<(u32, u64)>, heirs: Vec<u32>| {
+        let r = w.h.declare_succession(dead, heirs, SuccessionKind::Crash, w.c, 0);
+        assert!(matches!(r, Err(StoreError::Unsupported(_))), "{r:?}");
+    };
+    unsupported(vec![], vec![]);
+    unsupported(vec![(1, boot_of(1))], vec![0, 2]);
+    unsupported(vec![(1, boot_of(1)), (1, boot_of(1))], vec![0, 2]);
+    unsupported(vec![(1, boot_of(1)), (2, boot_of(2))], vec![2, 0]);
+    assert!(w.h.open_successions().unwrap().is_empty());
+    w.shutdown();
 }

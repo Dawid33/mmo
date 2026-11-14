@@ -168,7 +168,8 @@ pub enum StoreError {
     Corrupt(String),
     /// A fenced write or load whose claim is no longer the stored one:
     /// another process claimed the super-region (`sr`) — or, with `sr` `None`,
-    /// the coordinator row — since. Nothing was written.
+    /// the coordinator row — since; also (`sr` `None`) a host's claim whose boot's
+    /// `hosts` row is no longer live (declared dead or replaced). Nothing was written.
     Fenced { sr: Option<SuperRegion> },
     /// A cut prepared by a host whose generation (`mine`) is behind the world's
     /// (`stored`): the world restarted from another save since; nothing was written.
@@ -251,7 +252,8 @@ impl fmt::Display for StoreError {
             ),
             StoreError::Fenced { sr: None } => write!(
                 f,
-                "the world coordinator was claimed by another process since this one claimed it; nothing was written"
+                "the world coordinator was claimed by another process since this one claimed it, or (a host's claim) \
+                 this boot's hosts row was declared dead or replaced; nothing was written"
             ),
             StoreError::StaleGeneration { stored, mine } => write!(
                 f,

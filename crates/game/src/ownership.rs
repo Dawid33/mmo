@@ -44,6 +44,36 @@ pub const HOST_DEAD: i64 = 1;
 /// `super_regions.owner` of a free row (no host holds it).
 pub const NO_OWNER: i64 = -1;
 
+/// A succession's id (R4, the store's `successions.id`): one host's land given to one heir.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SuccessionId(pub u64);
+
+/// Why a host's land moved to an heir (R4): it crashed (its lease lapsed, or its next boot
+/// vouched it dead) or it left clean. Stored as `successions.kind`: 0 crash, 1 leave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SuccessionKind {
+    Crash,
+    Leave,
+}
+
+impl SuccessionKind {
+    /// The stored `successions.kind` value.
+    pub fn code(self) -> i64 {
+        match self {
+            SuccessionKind::Crash => 0,
+            SuccessionKind::Leave => 1,
+        }
+    }
+
+    pub fn from_code(code: i64) -> Option<SuccessionKind> {
+        match code {
+            0 => Some(SuccessionKind::Crash),
+            1 => Some(SuccessionKind::Leave),
+            _ => None,
+        }
+    }
+}
+
 /// Environment: `allinone` (default), `static` or `claim`.
 pub const OWNERSHIP_ENV: &str = "VOXEL_OWNERSHIP";
 /// Environment: this host's ordinal (`static` / `claim` only), `0..hosts`.

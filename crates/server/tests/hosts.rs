@@ -2873,13 +2873,13 @@ fn claim_host(db: &PgDb, dir: &std::path::Path, ordinal: u32, boot: u64) -> (Sim
         &stop,
     )
     .expect("the peer links start");
-    claims.reclaim_own().expect("its own rows re-claimed");
+    claims.reclaim_own(boot).expect("its own rows re-claimed");
     let generation = links.registered().generation;
     let mut sim = Sim::with_spawner(ordinal, s, boot, generation, &mut links, InlineSpawner::default());
     sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal, HOSTS)), s);
     let (rows, live) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
     sim.manager.directory_read(rows, live);
-    sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone()));
+    sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone(), boot));
     (sim, links, claims)
 }
 
@@ -2969,7 +2969,7 @@ fn a_host_restarted_cleanly_reclaims_its_own_rows() {
     let (first, first_links, first_claims) = claim_host(&db, &dir, 1, 3001);
     let store = first_claims.store().clone();
     let mine = vec![(0, 1), (2, 2)];
-    first_claims.add(store.claim_free(1, mine.clone()).unwrap());
+    first_claims.add(store.claim_free(1, 3001, mine.clone()).unwrap());
     let before = store.owners().unwrap();
     drop(first);
     drop(first_links);

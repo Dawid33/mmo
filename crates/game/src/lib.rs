@@ -112,7 +112,7 @@ pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{
     heir_of, ownership_from_env, ownership_from_values, rendezvous_owner, super_region_of, AllInOne, CrashPolicy, Directory,
-    Owner, Ownership, PgClaim, Static, SuperRegion, DEFAULT_SUPER_REGION_REGIONS, HOST_DEAD, HOST_HEARTBEAT_MS, HOST_LEASE_MS,
+    Owner, Ownership, PgClaim, Static, SuccessionId, SuccessionKind, SuperRegion, DEFAULT_SUPER_REGION_REGIONS, HOST_DEAD, HOST_HEARTBEAT_MS, HOST_LEASE_MS,
     HOST_LIVE, NO_OWNER,
 };
 pub use pathfind::*;

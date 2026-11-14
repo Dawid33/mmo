@@ -679,25 +679,37 @@ impl StoreHandle {
 
     /// Claims `srs` for `owner` (one transaction): each super-region's epoch
     /// goes up by one (a new one starts at 1), fencing whoever held it.
+    /// Unguarded: a boot's claim before it registered (`AllInOne`, `Static`), tools and tests.
     pub fn claim_super_regions(&self, owner: u32, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
-        self.ask(|r| Request::ClaimSuperRegions(owner, srs, r))
+        self.ask(|r| Request::ClaimSuperRegions(owner, srs, None, r))
+    }
+
+    /// [`Self::claim_super_regions`] by a registered boot (`boot`): refused with `Fenced { sr:
+    /// None }` (nothing claimed) unless host `owner`'s `hosts` row is still that live boot —
+    /// a boot declared dead (R4) cannot take its rows back from the heir. What a `claim` host
+    /// re-claims its own rows with.
+    pub fn claim_super_regions_live(&self, owner: u32, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+        self.ask(|r| Request::ClaimSuperRegions(owner, srs, Some(boot), r))
     }
 
     /// Claims for `owner` only the super-regions of `srs` that no host holds: absent rows
     /// (epoch 1) and free ones (owner [`NO_OWNER`], epoch + 1); a row another owner holds is
     /// left alone, so of two claimers of one free row exactly one wins. One transaction,
     /// like [`Self::claim_super_regions`]. The fence holds the rows won (possibly none).
-    pub fn claim_free(&self, owner: u32, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
-        self.ask(|r| Request::ClaimFree(owner, srs, r))
+    /// Refused with `Fenced { sr: None }` (nothing claimed) unless host `owner`'s `hosts` row
+    /// is still the live boot `boot`: a host declared dead (R4) wins nothing.
+    pub fn claim_free(&self, owner: u32, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+        self.ask(|r| Request::ClaimFree(owner, boot, srs, r))
     }
 
     /// [`Self::claim_free`], answered on the receiver.
     pub fn claim_free_later(
         &self,
         owner: u32,
+        boot: u64,
         srs: Vec<SuperRegion>,
     ) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
-        self.ask_later(|r| Request::ClaimFree(owner, srs, r))
+        self.ask_later(|r| Request::ClaimFree(owner, boot, srs, r))
     }
 
     /// Frees the super-regions `owner` holds under `fence` (owner [`NO_OWNER`], epoch + 1:

@@ -93,9 +93,10 @@ pub(crate) enum Request {
     LoadHistory(Reply<Option<Vec<u8>>>),
     CommitCut(Box<WorldCut>, Fence, Reply<CutCommitted>),
     ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
-    ClaimSuperRegions(u32, Vec<SuperRegion>, Reply<Fence>),
-    /// Claim only the absent or free super-regions of the list.
-    ClaimFree(u32, Vec<SuperRegion>, Reply<Fence>),
+    /// Claim the list; with a boot, only while that boot's `hosts` row is live.
+    ClaimSuperRegions(u32, Vec<SuperRegion>, Option<u64>, Reply<Fence>),
+    /// Claim only the absent or free super-regions of the list, as the live boot given.
+    ClaimFree(u32, u64, Vec<SuperRegion>, Reply<Fence>),
     /// Free the fence's super-regions.
     Release(Fence, Reply<()>),
     ClaimCoordinator(Reply<CoordinatorFence>),
@@ -479,13 +480,13 @@ async fn serve(
                 };
                 r.send(on_pool!(&pool, resolve_player(&token)))
             }),
-            Request::ClaimSuperRegions(owner, srs, r) => tokio::spawn(async move {
+            Request::ClaimSuperRegions(owner, srs, live, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
-                r.send(on_pool!(&pool, claim_super_regions(owner, srs, s)))
+                r.send(on_pool!(&pool, claim_super_regions(owner, srs, s, live)))
             }),
-            Request::ClaimFree(owner, srs, r) => tokio::spawn(async move {
+            Request::ClaimFree(owner, boot, srs, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
-                r.send(on_pool!(&pool, claim_free(owner, srs, s)))
+                r.send(on_pool!(&pool, claim_free(owner, boot, srs, s)))
             }),
             Request::Release(fence, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
@@ -598,8 +599,8 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
     match req {
         Request::CommitCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PutTiled(_, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::ClaimSuperRegions(_, _, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::ClaimFree(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::ClaimSuperRegions(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::ClaimFree(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::Release(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimCoordinator(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SaveCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),

@@ -41,6 +41,30 @@ fn owned_by_is_the_claimed_fence() {
     });
 }
 
+/// Host `owner`'s live boot, registering one (boot `7000 + owner`) if it has no row: a
+/// `claim_free` is refused unless its claimer's `hosts` row is that live boot.
+pub(crate) fn live_boot(h: &StoreHandle, owner: u32) -> u64 {
+    if let Some(r) = h.hosts().unwrap().into_iter().find(|r| r.ordinal == owner && r.state == world_store::HOST_LIVE) {
+        return r.boot;
+    }
+    let row = world_store::HostRow {
+        ordinal: owner,
+        boot: 7000 + u64::from(owner),
+        generation: 0,
+        clean: false,
+        state: 0,
+        seen_ms: 0,
+        reg: 0,
+        peer_addr: None,
+        peer_cert: None,
+        quic: None,
+        webtransport: None,
+        wt_cert_hash: None,
+    };
+    crate::handle::register(h, row, &Fence::default()).unwrap();
+    7000 + u64::from(owner)
+}
+
 /// A cut that writes nothing but the world tick: fenced by every super-region of its fence.
 fn empty_cut(id: u64) -> WorldCut {
     WorldCut { id: CutId(id), host: 0, tick: 100 * id, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] }
@@ -63,7 +87,7 @@ fn claim_free_takes_absent_and_free_rows_only() {
         let h = open(url);
         let [x, y, z] = TEST_SUPER_REGIONS;
         let a = h.claim_super_regions(0, vec![x, y]).unwrap();
-        let b = h.claim_free(1, vec![x, z]).unwrap();
+        let b = h.claim_free(1, live_boot(&h, 1), vec![x, z]).unwrap();
         assert_eq!(b.owner, 1);
         assert_eq!(b.epochs, [(z, 1)].into_iter().collect(), "only the absent row is won");
         let rows = h.owners().unwrap();
@@ -75,9 +99,9 @@ fn claim_free_takes_absent_and_free_rows_only() {
         h.shutdown();
         raw_exec(url, "UPDATE super_regions SET owner = -1 WHERE sx = 0 AND sz = -1");
         let h = open(url);
-        let c = h.claim_free(2, vec![x, y]).unwrap();
+        let c = h.claim_free(2, live_boot(&h, 2), vec![x, y]).unwrap();
         assert_eq!(c.epochs, [(y, 2)].into_iter().collect(), "only the free row is won");
-        assert_eq!(h.claim_free(3, vec![]).unwrap().epochs, Default::default(), "nothing asked, nothing won");
+        assert_eq!(h.claim_free(3, live_boot(&h, 3), vec![]).unwrap().epochs, Default::default(), "nothing asked, nothing won");
         h.shutdown();
     });
 }
@@ -96,10 +120,11 @@ fn two_claimers_of_one_free_row_one_wins() {
         }
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let claim = |h: &StoreHandle, owner: u32| {
+            let boot = live_boot(h, owner);
             let (h, barrier) = (h.clone(), barrier.clone());
             std::thread::spawn(move || {
                 barrier.wait();
-                h.claim_free(owner, vec![sr]).unwrap()
+                h.claim_free(owner, boot, vec![sr]).unwrap()
             })
         };
         let (ta, tb) = (claim(&a, 2 * round), claim(&b, 2 * round + 1));
@@ -132,7 +157,7 @@ fn released_rows_are_free_and_the_old_fence_is_refused() {
         // A release is fenced too: the old fence holds nothing any more.
         let err = h.release(0, &old).unwrap_err();
         assert!(matches!(err, StoreError::Fenced { sr: Some(_) }), "{err}");
-        let new = h.claim_free(1, vec![x]).unwrap();
+        let new = h.claim_free(1, live_boot(&h, 1), vec![x]).unwrap();
         assert_eq!(new.epochs, [(x, old.epochs[&x] + 2)].into_iter().collect());
         // A release names its owner: another owner's fence is refused, nothing freed.
         let err = h.release(2, &new).unwrap_err();

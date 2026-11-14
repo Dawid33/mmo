@@ -186,17 +186,18 @@ impl HostClaims {
     }
 
     /// Re-claims what the store says this host's ordinal holds (its previous boot's rows,
-    /// `owned_by`) with `claim_super_regions` — every epoch bumped, so that boot is fenced
-    /// from now on — and makes it the fence. Called once, right after this boot registered
-    /// (a registered live row is this ordinal's: no other process may hold its rows then).
-    /// How many super-regions it re-claimed.
-    pub fn reclaim_own(&self) -> Result<usize, StoreError> {
+    /// `owned_by`) with `claim_super_regions_live` as boot `boot` — every epoch bumped, so
+    /// that boot is fenced from now on — and makes it the fence. Called once, right after this
+    /// boot registered (a registered live row is this ordinal's: no other process may hold its
+    /// rows then). Refused with `Fenced` if this boot was declared dead meanwhile (its rows
+    /// went to an heir between `owned_by` and the claim). How many super-regions it re-claimed.
+    pub fn reclaim_own(&self, boot: u64) -> Result<usize, StoreError> {
         let owner = self.fence().owner;
         let srs: Vec<SuperRegion> = self.store.owned_by(owner)?.epochs.into_keys().collect();
         if srs.is_empty() {
             return Ok(0);
         }
-        let fence = self.store.claim_super_regions(owner, srs)?;
+        let fence = self.store.claim_super_regions_live(owner, boot, srs)?;
         let n = fence.epochs.len();
         self.replace(fence);
         Ok(n)
@@ -360,11 +361,14 @@ impl DirectoryRead {
 /// claim in flight), grows the fence ([`HostClaims::add`]) and answers the manager
 /// ([`game::WorldManager::claimed`]). A claim that won less than it asked (another host was
 /// faster), or that failed (a lock timeout among them: retried after [`CLAIM_RETRY_MS`],
-/// never fatal), triggers a directory read; so does the manager's
+/// never fatal), triggers a directory read — except a claim refused as `Fenced` (this boot
+/// was declared dead or replaced, R4): that sets the [`Fenced`] flag and claims nothing more; so does the manager's
 /// [`game::WorldManager::take_directory_wanted`], and every [`world_store::TERRAIN_POLL_SECS`]
 /// as a backstop ([`game::WorldManager::directory_read`]).
 pub struct DirectoryKeeper {
     claims: HostClaims,
+    /// This process's boot: every claim is refused unless its `hosts` row is still that live boot.
+    boot: u64,
     claiming: Option<(usize, Receiver<Result<Fence, StoreError>>)>,
     no_claim_before: Option<Instant>,
     /// The directory read in flight, with its number.
@@ -408,10 +412,11 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
 impl DirectoryKeeper {
     /// The keeper of `claims` (its owner is this host); its first backstop read comes one
     /// period from now (a boot reads the directory itself, [`read_directory`]).
-    pub fn new(claims: HostClaims) -> DirectoryKeeper {
+    pub fn new(claims: HostClaims, boot: u64) -> DirectoryKeeper {
         let next_read = Instant::now() + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
         DirectoryKeeper {
             claims,
+            boot,
             claiming: None,
             no_claim_before: None,
             reading: None,
@@ -464,6 +469,11 @@ impl DirectoryKeeper {
                             manager.claimed(rows);
                         }
                     }
+                    Err(e) if self.claims.note_refusal(&e) => {
+                        // Declared dead or replaced: the main loop sees the flag and exits fenced.
+                        log::error!("[server] claiming super-regions was refused ({e}); this host is fenced");
+                        return;
+                    }
                     Err(e) => {
                         self.warn(&format!("claiming super-regions failed ({e}); asked again in {CLAIM_RETRY_MS} ms"));
                         self.no_claim_before = Some(Instant::now() + Duration::from_millis(CLAIM_RETRY_MS));
@@ -503,14 +513,15 @@ impl DirectoryKeeper {
             self.reads_started += 1;
             self.reading = Some((self.reads_started, DirectoryRead::start(self.claims.store())));
         }
-        let may_claim = self.claiming.is_none()
+        let may_claim = !self.claims.fenced().is_set()
+            && self.claiming.is_none()
             && self.claims_wait_for_read.is_none()
             && self.no_claim_before.is_none_or(|at| now >= at);
         if may_claim {
             let wanted = manager.take_claims_wanted();
             if !wanted.is_empty() {
                 log::debug!("[server] claiming free super-region(s) {wanted:?} as host {owner}");
-                self.claiming = Some((wanted.len(), self.claims.store().claim_free_later(owner, wanted)));
+                self.claiming = Some((wanted.len(), self.claims.store().claim_free_later(owner, self.boot, wanted)));
             }
         }
     }
@@ -538,6 +549,26 @@ mod tests {
 
     fn memory_store() -> StoreHandle {
         StoreHandle::open(&world_store::StoreUrl::Memory, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap()
+    }
+
+    /// Registers host `ordinal` as boot `boot` (claims on demand need a live `hosts` row).
+    fn register(store: &StoreHandle, ordinal: u32, boot: u64) {
+        let row = HostRow {
+            ordinal,
+            boot,
+            generation: 0,
+            clean: false,
+            state: game::HOST_LIVE,
+            seen_ms: 0,
+            reg: 0,
+            peer_addr: None,
+            peer_cert: None,
+            quic: None,
+            webtransport: None,
+            wt_cert_hash: None,
+        };
+        let verdict = store.register_host(row, &Fence::default(), game::CrashPolicy::Rollback).unwrap();
+        assert!(matches!(verdict, world_store::BootVerdict::Registered(_)), "{verdict:?}");
     }
 
     #[test]
@@ -577,7 +608,8 @@ mod tests {
         let store = memory_store();
         let (x, y) = ((0, 0), (0, -1));
         let claims = HostClaims::claim_srs(store.clone(), 0, vec![x]).unwrap();
-        claims.add(store.claim_free(0, vec![y]).unwrap());
+        register(&store, 0, 10);
+        claims.add(store.claim_free(0, 10, vec![y]).unwrap());
         assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![y, x]);
         claims.commit_cut(empty_cut(1)).recv().unwrap().expect("both rows are held");
         // Another process takes the added row: the next commit is fenced on it, and that
@@ -631,7 +663,8 @@ mod tests {
         let store = memory_store();
         let sr = (0, 3);
         store.claim_super_regions(1, vec![sr]).unwrap();
-        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), 0));
+        register(&store, 0, 10);
+        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), 0), 10);
         let mut m = Wanting { sr, read: false, events: Vec::new() };
         let deadline = Instant::now() + Duration::from_secs(10);
         while !m.read {
@@ -645,6 +678,50 @@ mod tests {
         assert_eq!(m.events, ["claim", "read"], "one claim, then the read; no claim of the lost row in between");
         assert!(keeper.claims.fence().epochs.is_empty(), "nothing won");
         store.shutdown();
+    }
+
+    /// A claim refused because this boot's `hosts` row is no longer live (declared dead, or
+    /// replaced) fences the host: the flag is set and nothing more is claimed.
+    #[test]
+    fn a_claim_by_a_replaced_boot_fences_the_host() {
+        let store = memory_store();
+        register(&store, 0, 10);
+        register(&store, 0, 11);
+        let claims = HostClaims::none(store.clone(), 0);
+        let mut keeper = DirectoryKeeper::new(claims.clone(), 10);
+        let mut m = Free { sr: (0, 3), asked: 0 };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !claims.fenced().is_set() {
+            assert!(Instant::now() < deadline, "the refused claim never fenced the host");
+            keeper.pump(&mut m);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for _ in 0..20 {
+            keeper.pump(&mut m);
+        }
+        assert_eq!(m.asked, 1, "nothing claimed after the refusal");
+        assert!(store.owners().unwrap().is_empty(), "nothing won");
+        store.shutdown();
+    }
+
+    /// A manager that always wants one free super-region.
+    struct Free {
+        sr: SuperRegion,
+        asked: u32,
+    }
+
+    impl ClaimingManager for Free {
+        fn take_claims_wanted(&mut self) -> Vec<SuperRegion> {
+            self.asked += 1;
+            vec![self.sr]
+        }
+        fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>) {
+            panic!("won {rows:?} as a replaced boot");
+        }
+        fn directory_read(&mut self, _rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<u32>) {}
+        fn take_directory_wanted(&mut self) -> bool {
+            false
+        }
     }
 
     #[test]

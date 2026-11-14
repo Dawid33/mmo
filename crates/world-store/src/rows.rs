@@ -42,7 +42,7 @@ fn fence_race(e: sqlx::Error, sr: SuperRegion) -> StoreError {
 }
 
 /// u64 → i64, bit for bit.
-fn i(v: u64) -> i64 {
+pub(crate) fn i(v: u64) -> i64 {
     v as i64
 }
 
@@ -279,12 +279,15 @@ macro_rules! engine_rows {
             /// fenced). Rows are upserted in key order. Callers hold the writer lock.
             ///
             /// `opened` is the super-region side this handle read at open (`srs` are of that
-            /// side): see [`check_side`].
+            /// side): see [`check_side`]. `live`: the claimer's boot — the claim is refused
+            /// unless that boot's `hosts` row is live ([`check_live`]); `None` (a boot claim
+            /// before registration, `AllInOne` / `Static`, tools) checks nothing.
             pub(crate) async fn claim_super_regions(
                 pool: &Pool,
                 owner: u32,
                 srs: Vec<SuperRegion>,
                 opened: u32,
+                live: Option<u64>,
             ) -> Result<Fence, StoreError> {
                 let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
                 let mut tx = begin_claim(pool).await?;
@@ -308,8 +311,41 @@ macro_rules! engine_rows {
                     let epoch: i64 = row.try_get(0)?;
                     epochs.insert((sx, sz), u(epoch));
                 }
+                if let Some(boot) = live {
+                    tx = check_live(pool, tx, owner, boot).await?;
+                }
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
+            }
+
+            /// Refuses a claim by `owner` (boot `boot`) unless that boot's `hosts` row is live:
+            /// a host declared dead (R4, its land moved to an heir) or replaced by another boot
+            /// wins nothing — `Fenced { sr: None }`, the transaction rolled back. The LAST
+            /// statement of the claim (Postgres: the row `FOR SHARE`): the claim never holds
+            /// the `hosts` row while it waits behind a staged part's rows (the heartbeat's
+            /// short lock timeout would starve), and `FOR SHARE` serialises with a
+            /// declaration's `FOR NO KEY UPDATE` of the row — a claim that locks first commits
+            /// before the declaration moves the predecessor's rows (the newly won ones too); one
+            /// that locks after sees the row dead.
+            async fn check_live(pool: &Pool, mut tx: Tx, owner: u32, boot: u64) -> Result<Tx, StoreError> {
+                let sql = format!(
+                    "SELECT 1 FROM hosts WHERE ordinal = $1 AND boot = $2 AND state = {}{}",
+                    crate::HOST_LIVE,
+                    $share_lock
+                );
+                let row = sqlx::query(&sql).bind(i64::from(owner)).bind(i(boot)).fetch_optional(&mut *tx).await;
+                match row {
+                    Ok(Some(_)) => Ok(tx),
+                    Ok(None) => {
+                        tx.rollback().await?;
+                        log::warn!(
+                            "[world-store] host {owner} boot {boot} claimed super-regions, but its hosts row is not that \
+                             live boot (declared dead or replaced): refused, nothing claimed"
+                        );
+                        Err(StoreError::Fenced { sr: None })
+                    }
+                    Err(e) => Err(claim_error(pool, tx, e).await),
+                }
             }
 
             /// Claims for `owner` the super-regions of `srs` that are absent or free (owner
@@ -318,11 +354,13 @@ macro_rules! engine_rows {
             /// one epoch + 1; a row another owner holds is left alone. Fenced first-writer-wins: the
             /// upsert's `WHERE owner = -1` is evaluated on the row's newest version (Postgres
             /// re-checks it after waiting for another claimer's row lock), so of two claimers
-            /// exactly one takes a row. The fence holds the rows won (possibly none). Callers
-            /// hold the writer lock.
+            /// exactly one takes a row. The fence holds the rows won (possibly none). Refused
+            /// (`Fenced { sr: None }`, nothing claimed) unless `boot`'s `hosts` row is live
+            /// ([`check_live`]). Callers hold the writer lock.
             pub(crate) async fn claim_free(
                 pool: &Pool,
                 owner: u32,
+                boot: u64,
                 srs: Vec<SuperRegion>,
                 opened: u32,
             ) -> Result<Fence, StoreError> {
@@ -353,6 +391,7 @@ macro_rules! engine_rows {
                         epochs.insert((sx, sz), u(epoch));
                     }
                 }
+                let tx = check_live(pool, tx, owner, boot).await?;
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
             }
@@ -1308,7 +1347,16 @@ macro_rules! engine_rows {
             ) -> Result<CutCommitted, StoreError> {
                 let t = i(cut.tick);
                 check_fence(conn, fence, &commit_check_set(cut, fence, s)).await?;
-                check_adopts(&mut *conn, cut.host, &cut.adopts).await?;
+                if !cut.adopts.is_empty() {
+                    // An heir writes as itself: its cut, its fence (an all-in-one fence runs every host).
+                    if !fence.all_hosts && cut.host != fence.owner {
+                        return Err(StoreError::Unsupported(format!(
+                            "host {}'s cut adopts host rows under host {}'s fence",
+                            cut.host, fence.owner
+                        )));
+                    }
+                    check_adopts(&mut *conn, cut.host, &cut.adopts).await?;
+                }
                 check_entities_once(cut)?;
                 // Every region's entities go first. Only this cut's (this part's) own
                 // regions' rows are deleted and inserted, by region: the rows are keyed

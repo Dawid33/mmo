@@ -1038,7 +1038,7 @@ pub fn run() -> claims::ServerExit {
             if claim_on_demand {
                 // Registered: this ordinal's rows are this boot's now. Re-claimed with their
                 // epochs bumped, so the boot before is fenced at its next write.
-                match claimed.reclaim_own() {
+                match claimed.reclaim_own(boot) {
                     Ok(n) => info!("[server] re-claimed {n} super-regions as host {} (claim on demand)", ownership.ordinal()),
                     Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
                     Err(e) => fatal(&format!("re-claiming this host's super-regions: {e}")),
@@ -1075,7 +1075,7 @@ pub fn run() -> claims::ServerExit {
             .unwrap_or_else(|e| fatal(&format!("reading the ownership directory: {e}")));
         info!("[server] ownership directory: {} super-regions, live hosts {live:?}", rows.len());
         manager.directory_read(rows, live);
-        directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone()));
+        directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone(), boot));
     }
     manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {

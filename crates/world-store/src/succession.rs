@@ -23,37 +23,10 @@ use std::collections::BTreeSet;
 use game::{CutId, HOST_DEAD, HOST_LEASE_MS, HOST_LIVE};
 use sqlx::{PgPool, Row};
 
+use crate::rows::i;
 use crate::{CoordinatorFence, StoreError, SuperRegion};
 
-/// A succession's id (`successions.id`, one more than the highest).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SuccessionId(pub u64);
-
-/// Why a host's land moved: it crashed (its lease lapsed or it was vouched dead) or it
-/// left clean. Stored as `successions.kind`: 0 crash, 1 leave.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SuccessionKind {
-    Crash,
-    Leave,
-}
-
-impl SuccessionKind {
-    /// The `successions.kind` value.
-    pub fn code(self) -> i64 {
-        match self {
-            SuccessionKind::Crash => 0,
-            SuccessionKind::Leave => 1,
-        }
-    }
-
-    pub fn from_code(code: i64) -> Option<SuccessionKind> {
-        match code {
-            0 => Some(SuccessionKind::Crash),
-            1 => Some(SuccessionKind::Leave),
-            _ => None,
-        }
-    }
-}
+pub use game::{SuccessionId, SuccessionKind};
 
 /// One host's land given to one heir ([`crate::StoreHandle::declare_succession`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,7 +58,9 @@ pub enum Declared {
     /// caller rolls the world back.
     SuccessionOpen,
     /// These rows are gone: no row, another boot, already dead or already succeeded — or,
-    /// named as heirs, not live with a fresh lease any more.
+    /// named as heirs, not live with a fresh lease any more. The list mixes predecessor and
+    /// heir ordinals (sorted): the caller does not tell them apart — it forgets the whole
+    /// declaration and re-observes (its next lease read gives a new lapsed set and new heirs).
     Gone(Vec<u32>),
 }
 
@@ -132,12 +107,11 @@ pub(crate) const SUCCESSION_UNSUPPORTED: &str = "successions need several hosts,
 
 /// The `lock_timeout` of a declaration ran out: a staged cut part (or another transaction)
 /// holds a predecessor's row. Nothing was written; the caller declares again later.
-fn declare_error(e: sqlx::Error, lock_timeout_ms: u64) -> StoreError {
+fn declare_error(what: &str, e: sqlx::Error, lock_timeout_ms: u64) -> StoreError {
     match &e {
         sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => StoreError::Backend(format!(
-            "a succession's declaration waited longer than its lock_timeout ({lock_timeout_ms} ms) for a row a \
-             staged cut part or another transaction holds; nothing was written — declare again once the cut is \
-             decided ({e})"
+            "{what} waited longer than its lock_timeout ({lock_timeout_ms} ms) for a row a staged cut part or \
+             another transaction holds; nothing was written — retry once the cut is decided ({e})"
         )),
         _ => e.into(),
     }
@@ -150,12 +124,12 @@ async fn lock_coordinator_and_world(
     tx: &mut sqlx::PgConnection,
     fence: CoordinatorFence,
     generation: Option<u64>,
-) -> Result<u64, StoreError> {
+) -> Result<u64, DeclareError> {
     let epoch: Option<i64> = sqlx::query_scalar("SELECT epoch FROM coordinator WHERE id = 1 FOR SHARE")
         .fetch_optional(&mut *tx)
         .await?;
     if epoch.map(|e| e as u64) != Some(fence.epoch) {
-        return Err(StoreError::Fenced { sr: None });
+        return Err(StoreError::Fenced { sr: None }.into());
     }
     let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
         .fetch_optional(&mut *tx)
@@ -163,7 +137,7 @@ async fn lock_coordinator_and_world(
         .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
     if let Some(mine) = generation {
         if stored as u64 != mine {
-            return Err(StoreError::StaleGeneration { stored: stored as u64, mine });
+            return Err(StoreError::StaleGeneration { stored: stored as u64, mine }.into());
         }
     }
     Ok(stored as u64)
@@ -172,6 +146,11 @@ async fn lock_coordinator_and_world(
 /// The database clock in ms (as `rows`' `NOW_MS` for Postgres: `clock_timestamp()`, not the
 /// transaction's start — this one may have waited for locks).
 const PG_NOW_MS: &str = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
+/// What a declaration's lock timeout names.
+const DECLARING: &str = "a succession's declaration";
+/// What a rollback's lock timeout names.
+const ROLLING_BACK: &str = "a world rollback";
 
 /// [`crate::StoreHandle::declare_succession`] (Postgres): see the module docs for the locks.
 pub(crate) async fn declare(
@@ -197,15 +176,14 @@ pub(crate) async fn declare(
     let declared = declare_in(&mut tx, &dead, &heirs, &predecessors, kind, fence, generation).await;
     match declared {
         Ok(Declared::Done(s)) => {
-            tx.commit().await.map_err(|e| declare_error(e, lock_timeout_ms))?;
+            tx.commit().await.map_err(|e| declare_error(DECLARING, e, lock_timeout_ms))?;
             Ok(Declared::Done(s))
         }
         Ok(other) => {
             tx.rollback().await?;
             Ok(other)
         }
-        Err(DeclareError::Store(e)) => Err(e),
-        Err(DeclareError::Sql(e)) => Err(declare_error(e, lock_timeout_ms)),
+        Err(e) => Err(e.into_store(DECLARING, lock_timeout_ms)),
     }
 }
 
@@ -213,6 +191,15 @@ pub(crate) async fn declare(
 enum DeclareError {
     Store(StoreError),
     Sql(sqlx::Error),
+}
+
+impl DeclareError {
+    fn into_store(self, what: &str, lock_timeout_ms: u64) -> StoreError {
+        match self {
+            DeclareError::Store(e) => e,
+            DeclareError::Sql(e) => declare_error(what, e, lock_timeout_ms),
+        }
+    }
 }
 
 impl From<sqlx::Error> for DeclareError {
@@ -255,7 +242,7 @@ async fn declare_in(
              FROM hosts WHERE ordinal = $1 FOR NO KEY UPDATE"
         ))
         .bind(i64::from(*ordinal))
-        .bind(HOST_LEASE_MS as i64)
+        .bind(i(HOST_LEASE_MS))
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {
@@ -283,7 +270,7 @@ async fn declare_in(
              WHERE ordinal = $1 AND clean = 0 AND state = {HOST_LIVE}"
         ))
         .bind(i64::from(*heir))
-        .bind(HOST_LEASE_MS as i64)
+        .bind(i(HOST_LEASE_MS))
         .fetch_optional(&mut *tx)
         .await?;
         if fresh != Some(true) && !gone.contains(heir) {
@@ -304,11 +291,13 @@ async fn declare_in(
     ))
     .fetch_all(&mut *tx)
     .await?;
-    let survivors: Vec<u32> = live
-        .into_iter()
-        .filter_map(|o| u32::try_from(o).ok())
-        .filter(|o| !predecessors.contains(o))
-        .collect();
+    let mut survivors = Vec::with_capacity(live.len());
+    for o in live {
+        let o = u32::try_from(o).map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {o}")))?;
+        if !predecessors.contains(&o) {
+            survivors.push(o);
+        }
+    }
     let base_cut: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(cut_id), 0) FROM cut_decisions WHERE committed = 1")
         .fetch_one(&mut *tx)
         .await?;
@@ -317,7 +306,7 @@ async fn declare_in(
         if kind == SuccessionKind::Crash {
             sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE ordinal = $1 AND boot = $2"))
                 .bind(i64::from(*predecessor))
-                .bind(*boot as i64)
+                .bind(i(*boot))
                 .execute(&mut *tx)
                 .await?;
         }
@@ -352,7 +341,7 @@ async fn declare_in(
         )
         .bind(id)
         .bind(i64::from(*predecessor))
-        .bind(*boot as i64)
+        .bind(i(*boot))
         .bind(i64::from(*heir))
         .bind(kind.code())
         .bind(base_cut)
@@ -386,14 +375,19 @@ async fn declare_in(
 pub(crate) async fn rollback_world(pool: &PgPool, fence: CoordinatorFence, lock_timeout_ms: u64) -> Result<u64, StoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
-    let stored = lock_coordinator_and_world(&mut tx, fence, None).await?;
-    let generation = stored + 1;
-    sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(generation as i64).execute(&mut *tx).await?;
-    let abandoned = sqlx::query("UPDATE successions SET abandoned = 1 WHERE settled_cut IS NULL AND abandoned = 0")
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    tx.commit().await?;
+    let rolled = async {
+        let stored = lock_coordinator_and_world(&mut tx, fence, None).await?;
+        let generation = stored + 1;
+        sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(i(generation)).execute(&mut *tx).await?;
+        let abandoned = sqlx::query("UPDATE successions SET abandoned = 1 WHERE settled_cut IS NULL AND abandoned = 0")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        Ok::<_, DeclareError>((generation, abandoned))
+    }
+    .await;
+    let (generation, abandoned) = rolled.map_err(|e| e.into_store(ROLLING_BACK, lock_timeout_ms))?;
+    tx.commit().await.map_err(|e| declare_error(ROLLING_BACK, e, lock_timeout_ms))?;
     log::warn!("[world-store] world rolled back to generation {generation}; {abandoned} open successions abandoned");
     Ok(generation)
 }
