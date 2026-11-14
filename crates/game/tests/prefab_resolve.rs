@@ -328,3 +328,51 @@ fn covered_bucket_keeps_file_order_and_carve_stays_below_boxes() {
     assert_eq!(p.cell([6, 1, 6]), Cell::Carve);
     assert_eq!(p.solid_count(), 32);
 }
+
+#[test]
+fn an_empty_named_shape_is_a_bad_shape() {
+    let mut f = empty("w", [2, 2, 2]);
+    f.shaped.push(FileShaped {
+        at: [0, 0, 0],
+        shape: FileShape::Named { shape: Shape::Wall { sides: Sides::default(), post: false }, mat: 0 },
+    });
+    assert!(resolve(&f, &names, Trust::Builtin).unwrap_err().contains(&Problem::BadShape { index: 0 }));
+}
+
+#[test]
+fn column_bottom_matches_cell() {
+    let p = resolve(&lcg_file(), &names, Trust::Builtin).expect("resolves");
+    let mut some = 0;
+    for x in 0..40 {
+        for z in 0..40 {
+            let bottom = (0..20).find(|&y| matches!(p.cell([x, y, z]), Cell::Block(_) | Cell::Shaped(_)));
+            assert_eq!(p.column_bottom(x, z), bottom, "column ({x}, {z})");
+            some += bottom.is_some() as u32;
+        }
+    }
+    assert!(some > 0);
+    assert_eq!(p.column_bottom(-1, 0), None);
+    assert_eq!(p.column_bottom(40, 0), None);
+}
+
+#[test]
+fn each_duplicated_position_is_reported_once() {
+    let mut f = empty("d", [2, 1, 1]);
+    let carpet = |at, mat| FileShaped { at, shape: FileShape::Named { shape: Shape::Carpet, mat } };
+    for _ in 0..3 {
+        f.shaped.push(carpet([0, 0, 0], 0));
+    }
+    f.shaped.push(carpet([1, 0, 0], 0));
+    f.shaped.push(carpet([1, 0, 0], 99)); // a twin that fails to resolve is still a duplicate
+    let problems = resolve(&f, &names, Trust::Builtin).unwrap_err();
+    let dups: Vec<_> = problems.iter().filter(|p| matches!(p, Problem::DuplicateShaped { .. })).collect();
+    assert_eq!(dups.len(), 2, "{problems:?}");
+}
+
+#[test]
+fn an_untrusted_file_over_a_cap_returns_at_once() {
+    let mut f = empty("big", [UNTRUSTED_MAX_EXTENT + 1, 1, 1]);
+    f.shaped.push(FileShaped { at: [0, 0, 0], shape: FileShape::Named { shape: Shape::Layer { layers: 0 }, mat: 0 } });
+    let err = resolve(&f, &names, Trust::Untrusted).unwrap_err();
+    assert!(err.iter().all(|p| matches!(p, Problem::TooLarge { .. })), "{err:?}");
+}

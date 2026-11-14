@@ -80,9 +80,12 @@ pub enum ResolvedShape {
     Cuboids { cuboids: Vec<([u8; 3], [u8; 3], u8)>, mats: Vec<BlockId> },
 }
 
+/// The block written for a `Cuboids` shape is `mats[0]` (layout writes `mats.first()`); the material the
+/// column profile reports for it ([`ResolvedShape::top_material`], so `column_top`) is that of its highest
+/// voxel instead.
 impl ResolvedShape {
     /// The material of the highest voxel (the later cuboid wins a tie).
-    fn top_material(&self) -> Option<BlockId> {
+    pub fn top_material(&self) -> Option<BlockId> {
         match self {
             ResolvedShape::Named { mat, .. } => Some(*mat),
             ResolvedShape::Cuboids { cuboids, mats } => cuboids
@@ -143,6 +146,8 @@ pub struct ResolvedPrefab {
     buckets: BTreeMap<[i32; 3], Bucket>,
     /// `x + z * size.x`.
     profile: Vec<Option<(i32, BlockId)>>,
+    /// Lowest Block or Shaped cell per column, same indexing.
+    bottoms: Vec<Option<i32>>,
     solid: u64,
 }
 
@@ -207,6 +212,10 @@ pub fn resolve(
     if columns > MAX_PROFILE_COLUMNS && !dims.iter().any(|&d| d > extent_limit) {
         problems.push(Problem::TooLarge { what: "columns", limit: MAX_PROFILE_COLUMNS as usize });
     }
+    // An untrusted file over a cap is refused before any of its content is looked at.
+    if trust == Trust::Untrusted && !problems.is_empty() {
+        return Err(problems);
+    }
 
     let mut palette = Vec::with_capacity(file.palette.len());
     for name in &file.palette {
@@ -249,6 +258,29 @@ pub fn resolve(
         }
     }
 
+    if trust == Trust::Untrusted {
+        let (mut refs, mut cols) = (0u64, 0u64);
+        for (i, b) in boxes.iter().chain(carve.iter()).enumerate() {
+            if is_empty_box(b) {
+                continue;
+            }
+            refs += (0..3)
+                .map(|a| ((b.max[a] - 1) / PREFAB_BUCKET_BLOCKS - b.min[a] / PREFAB_BUCKET_BLOCKS + 1) as u64)
+                .product::<u64>();
+            if i < boxes.len() {
+                cols += (b.max[0] - b.min[0]) as u64 * (b.max[2] - b.min[2]) as u64;
+            }
+            if refs > UNTRUSTED_MAX_BUCKET_REFS {
+                problems.push(Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_BUCKET_REFS as usize });
+                return Err(problems);
+            }
+            if cols > UNTRUSTED_MAX_COLUMN_WORK {
+                problems.push(Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_COLUMN_WORK as usize });
+                return Err(problems);
+            }
+        }
+    }
+
     let mut shaped: Vec<ResShaped> = Vec::with_capacity(file.shaped.len());
     for (i, s) in file.shaped.iter().enumerate() {
         if !inside(s.at, dims) {
@@ -256,7 +288,7 @@ pub fn resolve(
         }
         let resolved = match &s.shape {
             FileShape::Named { shape, mat } => {
-                if !shape.is_valid() {
+                if !shape.is_valid() || shape.is_empty() {
                     problems.push(Problem::BadShape { index: i });
                 }
                 pal(*mat, "shaped", i, &mut problems).map(|mat| ResolvedShape::Named { shape: *shape, mat })
@@ -288,21 +320,12 @@ pub fn resolve(
         }
     }
     shaped.sort_by_key(|s| s.at);
-    let mut reported = Vec::new();
-    for w in shaped.windows(2) {
-        if w[0].at == w[1].at && reported.last() != Some(&w[0].at) {
-            problems.push(Problem::DuplicateShaped { at: w[0].at });
-            reported.push(w[0].at);
-        }
-    }
-    // A duplicate whose twin failed to resolve is still a duplicate in the file.
-    let mut seen = BTreeMap::new();
-    for s in &file.shaped {
-        *seen.entry(s.at).or_insert(0u32) += 1;
-    }
-    for (at, n) in seen {
-        if n > 1 && !reported.contains(&at) {
-            problems.push(Problem::DuplicateShaped { at });
+    // Each duplicated position once, whether or not its twins resolved: one sorted pass over the file.
+    let mut ats: Vec<[i32; 3]> = file.shaped.iter().map(|s| s.at).collect();
+    ats.sort_unstable();
+    for run in ats.chunk_by(|a, b| a == b) {
+        if run.len() > 1 {
+            problems.push(Problem::DuplicateShaped { at: run[0] });
         }
     }
 
@@ -317,27 +340,6 @@ pub fn resolve(
 
     if !problems.is_empty() {
         return Err(problems);
-    }
-
-    if trust == Trust::Untrusted {
-        let (mut refs, mut cols) = (0u64, 0u64);
-        for (i, b) in boxes.iter().chain(carve.iter()).enumerate() {
-            if is_empty_box(b) {
-                continue;
-            }
-            refs += (0..3)
-                .map(|a| ((b.max[a] - 1) / PREFAB_BUCKET_BLOCKS - b.min[a] / PREFAB_BUCKET_BLOCKS + 1) as u64)
-                .product::<u64>();
-            if i < boxes.len() {
-                cols += (b.max[0] - b.min[0]) as u64 * (b.max[2] - b.min[2]) as u64;
-            }
-            if refs > UNTRUSTED_MAX_BUCKET_REFS {
-                return Err(vec![Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_BUCKET_REFS as usize }]);
-            }
-            if cols > UNTRUSTED_MAX_COLUMN_WORK {
-                return Err(vec![Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_COLUMN_WORK as usize }]);
-            }
-        }
     }
 
     let mut buckets: BTreeMap<[i32; 3], Bucket> = BTreeMap::new();
@@ -383,7 +385,7 @@ pub fn resolve(
         }
     }
 
-    let profile = column_profile(dims, &boxes, &shaped);
+    let (profile, bottoms) = column_profile(dims, &boxes, &shaped);
 
     Ok(ResolvedPrefab {
         name_key: prefab_name_key(&file.name),
@@ -399,6 +401,7 @@ pub fn resolve(
         shaped,
         buckets,
         profile,
+        bottoms,
         solid,
     })
 }
@@ -435,11 +438,17 @@ fn occupied_cells(bucket: &Bucket, boxes: &[ResBox], shaped: &[ResShaped], lo: [
     grid.iter().filter(|&&c| c).count() as u64
 }
 
-/// Top solid cell per column, from box bounds (never per cell). Shaped wins a tie at the same height,
-/// a later box wins over an earlier one.
-fn column_profile(dims: [u32; 3], boxes: &[ResBox], shaped: &[ResShaped]) -> Vec<Option<(i32, BlockId)>> {
+/// Top solid cell (and material) and bottom solid cell per column, from box bounds (never per cell).
+/// Shaped wins a tie at the same height, a later box wins over an earlier one.
+#[allow(clippy::type_complexity)]
+fn column_profile(
+    dims: [u32; 3],
+    boxes: &[ResBox],
+    shaped: &[ResShaped],
+) -> (Vec<Option<(i32, BlockId)>>, Vec<Option<i32>>) {
     let (w, d) = (dims[0] as usize, dims[2] as usize);
     let mut profile: Vec<Option<(i32, BlockId)>> = vec![None; w * d];
+    let mut bottoms: Vec<Option<i32>> = vec![None; w * d];
     for b in boxes {
         if is_empty_box(b) {
             continue;
@@ -452,16 +461,24 @@ fn column_profile(dims: [u32; 3], boxes: &[ResBox], shaped: &[ResShaped]) -> Vec
                     *slot = Some((top, b.mat));
                 }
             }
+            for slot in &mut bottoms[row + b.min[0] as usize..row + b.max[0] as usize] {
+                if slot.is_none_or(|y| b.min[1] < y) {
+                    *slot = Some(b.min[1]);
+                }
+            }
         }
     }
     for s in shaped {
         let Some(mat) = s.shape.top_material() else { continue };
-        let slot = &mut profile[s.at[2] as usize * w + s.at[0] as usize];
-        if slot.is_none_or(|(y, _)| s.at[1] >= y) {
-            *slot = Some((s.at[1], mat));
+        let i = s.at[2] as usize * w + s.at[0] as usize;
+        if profile[i].is_none_or(|(y, _)| s.at[1] >= y) {
+            profile[i] = Some((s.at[1], mat));
+        }
+        if bottoms[i].is_none_or(|y| s.at[1] < y) {
+            bottoms[i] = Some(s.at[1]);
         }
     }
-    profile
+    (profile, bottoms)
 }
 
 impl ResolvedPrefab {
@@ -548,6 +565,14 @@ impl ResolvedPrefab {
             return None;
         }
         self.profile[z as usize * self.size[0] as usize + x as usize]
+    }
+
+    /// Lowest Block or Shaped cell of column (x, z); None for an empty column or outside.
+    pub fn column_bottom(&self, x: i32, z: i32) -> Option<i32> {
+        if !self.in_bounds([x, 0, z]) {
+            return None;
+        }
+        self.bottoms[z as usize * self.size[0] as usize + x as usize]
     }
 
     /// Block + Shaped cells.
