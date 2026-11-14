@@ -585,15 +585,20 @@ fn tree_blocks(
 /// glacier ice; its water and cover stay.
 fn pad_samples(samples: &mut [ColSample], near: &[&structures::StructurePlacement], (x0, z0): (i32, i32), nz: usize) {
     for (k, c) in samples.iter_mut().enumerate() {
-        let (x, z) = (x0 + (k / nz) as i32, z0 + (k % nz) as i32);
-        if let structures::PadEffect::Level { surface, .. } = structures::pad_at(near, x, z, c.s) {
-            c.s = surface;
-            c.top = surface;
-            c.ice_from = c.water_top + 1;
-        }
-        if structures::blocks_trees(near, x, z, TREE_REACH_BLOCKS) {
-            c.trees = false;
-        }
+        pad_sample(c, near, x0 + (k / nz) as i32, z0 + (k % nz) as i32);
+    }
+}
+
+/// Levels one sample, of world block column `(x, z)`, under the structures' pads and keeps trees off
+/// their keep-out (see [`pad_samples`]). Every place generation samples a ground column pads it with this.
+fn pad_sample(c: &mut ColSample, near: &[&structures::StructurePlacement], x: i32, z: i32) {
+    if let structures::PadEffect::Level { surface, .. } = structures::pad_at(near, x, z, c.s) {
+        c.s = surface;
+        c.top = surface;
+        c.ice_from = c.water_top + 1;
+    }
+    if structures::blocks_trees(near, x, z, TREE_REACH_BLOCKS) {
+        c.trees = false;
     }
 }
 
@@ -931,10 +936,21 @@ pub fn coarse_tile(
     if let Some(world) = forged::active() {
         return coarse_tile_forged(world, key, mats);
     }
+    coarse_tile_with(key, seed, mats, structures::active())
+}
+
+/// `coarse_tile` with an explicit structure source and no forged world (procedural terrain from
+/// `seed`). `coarse_tile` is this with `structures::active()` when no forged world is installed.
+pub fn coarse_tile_with(
+    key: &game::lod::LodKey,
+    seed: u64,
+    mats: Materials,
+    structures: &dyn structures::StructureSource,
+) -> Vec<game::lod::LodCell> {
     let (ox, oz, span) = coarse_patch_window(key, &mats);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed })
+    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed }, structures)
 }
 
 /// `coarse_tile` for an explicit forged world (tests, tools). A coarse cell is
@@ -945,6 +961,16 @@ pub fn coarse_tile_forged(
     key: &game::lod::LodKey,
     mats: Materials,
 ) -> Vec<game::lod::LodCell> {
+    coarse_tile_forged_with(world, key, mats, structures::active())
+}
+
+/// `coarse_tile_forged` with an explicit structure source.
+pub fn coarse_tile_forged_with(
+    world: &forged::ForgedWorld,
+    key: &game::lod::LodKey,
+    mats: Materials,
+    structures: &dyn structures::StructureSource,
+) -> Vec<game::lod::LodCell> {
     // One cell column of margin past the key, for the steep-face fill's
     // neighbours (rounded to the profile lattice, so surfaces stay
     // bit-identical to any other window's).
@@ -952,7 +978,7 @@ pub fn coarse_tile_forged(
     let (ox, oz, span) = coarse_patch_window(key, &mats);
     let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
     let trees_from = TreeSource { habitat: world, seed: world.seed() };
-    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from)
+    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from, structures)
 }
 
 /// The cell-column margin (blocks) `coarse_tile_forged` adds past a key,
@@ -977,9 +1003,21 @@ pub fn coarse_water(key: &game::lod::LodKey, seed: u64, mats: Materials) -> game
     if let Some(world) = forged::active() {
         return coarse_water_forged(world, key, mats);
     }
+    coarse_water_with(key, seed, mats, structures::active())
+}
+
+/// `coarse_water` with an explicit structure source and no forged world (procedural terrain from
+/// `seed`): a pad that raises ground to or above the water top removes the water there, as it does in
+/// full generation.
+pub fn coarse_water_with(
+    key: &game::lod::LodKey,
+    seed: u64,
+    mats: Materials,
+    structures: &dyn structures::StructureSource,
+) -> game::lod::LodWater {
     let (ox, oz, span) = coarse_window(key);
     let grid = TerrainPipeline::new(seed).profile_grid(ox as f64, oz as f64, span as f64);
-    water_from_patch(&ProceduralPatch(grid), key, &mats)
+    water_from_patch(&ProceduralPatch(grid), key, &mats, structures)
 }
 
 /// `coarse_water` for an explicit forged world (tests, tools).
@@ -988,8 +1026,18 @@ pub fn coarse_water_forged(
     key: &game::lod::LodKey,
     mats: Materials,
 ) -> game::lod::LodWater {
+    coarse_water_forged_with(world, key, mats, structures::active())
+}
+
+/// `coarse_water_forged` with an explicit structure source.
+pub fn coarse_water_forged_with(
+    world: &forged::ForgedWorld,
+    key: &game::lod::LodKey,
+    mats: Materials,
+    structures: &dyn structures::StructureSource,
+) -> game::lod::LodWater {
     let (ox, oz, span) = coarse_window(key);
-    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats)
+    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats, structures)
 }
 
 /// One LOD column's `(water_top, depth)` (see [`coarse_water`]).
@@ -1001,19 +1049,35 @@ fn lod_water_column(c: &ColSample) -> (i16, u8) {
     (c.water_top as i16, (c.water_top - c.top).min(max) as u8)
 }
 
-fn water_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: &Materials) -> game::lod::LodWater {
+fn water_from_patch(
+    patch: &dyn Patch,
+    key: &game::lod::LodKey,
+    mats: &Materials,
+    structures: &dyn structures::StructureSource,
+) -> game::lod::LodWater {
     let side = game::lod::LodWater::side_for(key);
     let n = usize::from(side);
     let (ox, oz, span_blocks) = coarse_window(key);
+    // Structures whose pads reach the key: every sample is inside it. None: the water is exactly what it
+    // is without a structure source.
+    let near = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, 0);
+    let padded = |mut c: ColSample, x: i32, z: i32| {
+        if !near.is_empty() {
+            pad_sample(&mut c, &near, x, z);
+        }
+        c
+    };
     let mut tops = Vec::with_capacity(n * n);
     if key.factor >= BLOCK_VOXELS as u32 {
-        // Blocks per cell edge, and the cell centre `coarse_from_patch` samples.
+        // Blocks per cell edge, and the cell centre `coarse_from_patch` samples (in the block column
+        // `ox + c * cb + cb / 2`).
         let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
         debug_assert_eq!(span_blocks / cb, i32::from(side));
         let centre = |o: i32, c: i32| (o + c * cb) as f64 + cb as f64 * 0.5;
         for cz in 0..i32::from(side) {
             for cx in 0..i32::from(side) {
-                tops.push(lod_water_column(&point_sample(patch, mats, centre(ox, cx), centre(oz, cz))));
+                let c = point_sample(patch, mats, centre(ox, cx), centre(oz, cz));
+                tops.push(lod_water_column(&padded(c, ox + cx * cb + cb / 2, oz + cz * cb + cb / 2)));
             }
         }
     } else {
@@ -1023,7 +1087,9 @@ fn water_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: &Materials
         let mut row = Vec::with_capacity(blocks);
         for bz in 0..span_blocks {
             row.clear();
-            row.extend((0..span_blocks).map(|bx| lod_water_column(&column_sample(patch, mats, ox + bx, oz + bz))));
+            row.extend((0..span_blocks).map(|bx| {
+                lod_water_column(&padded(column_sample(patch, mats, ox + bx, oz + bz), ox + bx, oz + bz))
+            }));
             for _ in 0..per {
                 for &top in &row {
                     tops.extend(std::iter::repeat_n(top, per));
@@ -1066,17 +1132,29 @@ fn crown_extent(tree: &trees::TreeSeed) -> Option<(i32, i32, i32)> {
     (lo <= hi).then_some((lo, hi, radius))
 }
 
+/// The coarse tile of `key` from `patch` (see [`coarse_tile`]). Structures from `structures` level the
+/// sampled ground under their pads, keep trees off their keep-out, and stand as each prefab column's
+/// solid silhouette above the terrain. With none in reach of the tile the output is exactly the
+/// structure-free one.
 fn coarse_from_patch(
     patch: &dyn Patch,
     key: &game::lod::LodKey,
     mats: Materials,
     trees_from: TreeSource,
+    structures: &dyn structures::StructureSource,
 ) -> Vec<game::lod::LodCell> {
     use game::lod::LodCell;
     use game::Voxel;
 
     // A LOD grid's edge in cells: the 32³ render/LOD brick.
     const G: i32 = BRICK_VOXELS as i32;
+    /// The voxel of cell `[cx, cy, cz]` (key-local), its 32³ grid made (all air) if missing.
+    fn cell_mut(grids: &mut BTreeMap<[i32; 3], Vec<Voxel>>, [cx, cy, cz]: [i32; 3]) -> &mut Voxel {
+        let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
+        let (lx, ly, lz) = (cx.rem_euclid(G) as usize, cy.rem_euclid(G) as usize, cz.rem_euclid(G) as usize);
+        let g = grids.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
+        &mut g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz]
+    }
     // Blocks per cell edge: 1 at factor 16, 2 at 32, 4 at 64, 16 at 256.
     debug_assert!(key.factor >= game::lod::COARSE_MIN_FACTOR, "sub-block factor {}", key.factor);
     let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
@@ -1085,17 +1163,36 @@ fn coarse_from_patch(
     debug_assert_eq!(cells % G, 0, "a key is a whole number of 32³ grids");
 
     let (ox, oz, _) = coarse_window(key);
+    // Tree placement reads surfaces up to `tree_m` past the key; each surface's
+    // slope reads one block further (still inside the patch's
+    // `TREE_PATCH_MARGIN`).
+    let tree_m = TREE_PATCH_MARGIN - PATCH_MARGIN;
+
+    // Structures reaching any column the tile samples (their pads: cell columns
+    // one out, tree surfaces and their slopes) or a tree surface's keep-out.
+    // None: the tile is exactly what it is without a structure source.
+    let near = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, (tree_m + TREE_REACH_BLOCKS).max(cb));
+    // Pads `c`, the sample of world block column (x, z).
+    let padded = |mut c: ColSample, x: i32, z: i32| {
+        if !near.is_empty() {
+            pad_sample(&mut c, &near, x, z);
+        }
+        c
+    };
 
     // Centre (world metres) of cell column (cx, cz).
     let centre = |cx: i32, cz: i32| {
         ((ox + cx * cb) as f64 + cb as f64 * 0.5, (oz + cz * cb) as f64 + cb as f64 * 0.5)
     };
+    // The block column holding that centre: where structures read the cell column.
+    let centre_block = |cx: i32, cz: i32| (ox + cx * cb + cb / 2, oz + cz * cb + cb / 2);
     // The column of cell column (cx, cz), sampled at its centre (with
     // whether it is unbounded); cell columns just outside the key are
     // sampled too.
     let cell_sample = |cx: i32, cz: i32| {
         let (mx, mz) = centre(cx, cz);
-        point_sample(patch, &mats, mx, mz)
+        let (x, z) = centre_block(cx, cz);
+        padded(point_sample(patch, &mats, mx, mz), x, z)
     };
     let samples: Vec<ColSample> =
         (0..cells).flat_map(|cz| (0..cells).map(move |cx| (cx, cz))).map(|(cx, cz)| cell_sample(cx, cz)).collect();
@@ -1108,7 +1205,7 @@ fn coarse_from_patch(
     };
     let strata = patch.strata(&mats);
 
-    let mut grids: std::collections::BTreeMap<[i32; 3], Vec<Voxel>> = Default::default();
+    let mut grids: BTreeMap<[i32; 3], Vec<Voxel>> = Default::default();
     for cz in 0..cells {
         for cx in 0..cells {
             let c = samples[(cz * cells + cx) as usize];
@@ -1155,12 +1252,37 @@ fn coarse_from_patch(
                     }
                     mats.biome.ice
                 };
-                let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
-                let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
-                let g = grids
-                    .entry(group)
-                    .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-                g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz] = Voxel::new(mat);
+                *cell_mut(&mut grids, [cx, cy, cz]) = Voxel::new(mat);
+            }
+        }
+    }
+
+    // Structures: each prefab column's silhouette over its cell column's
+    // centre block column, from the first cell above the (padded) terrain top
+    // through the cell holding the prefab column's top block, in its top
+    // block's material; into air cells only, a later placement winning.
+    if !near.is_empty() {
+        for cz in 0..cells {
+            for cx in 0..cells {
+                let (x, z) = centre_block(cx, cz);
+                let first = samples[(cz * cells + cx) as usize].top.div_euclid(cb) + 1;
+                let mut profile: BTreeMap<i32, BlockId> = BTreeMap::new();
+                for p in &near {
+                    let (min, max) = p.bounds();
+                    if x < min[0] || x >= max[0] || z < min[2] || z >= max[2] {
+                        continue;
+                    }
+                    let Some((top, mat)) = game::prefab::column_top_world(&p.prefab, &p.at, x, z) else { continue };
+                    for cy in first..=top.div_euclid(cb) {
+                        profile.insert(cy, mat);
+                    }
+                }
+                for (cy, mat) in profile {
+                    let v = cell_mut(&mut grids, [cx, cy, cz]);
+                    if v.is_air() {
+                        *v = Voxel::new(mat);
+                    }
+                }
             }
         }
     }
@@ -1168,10 +1290,7 @@ fn coarse_from_patch(
     // Trees: each a leaves column from its crown's base to its top over its
     // crown disc (and always over its trunk), into air cells only.
     if mats.trees.enabled() {
-        // Placement reads surfaces up to `m` past the key; each surface's
-        // slope reads one block further (still inside the patch's
-        // `TREE_PATCH_MARGIN`).
-        let m = TREE_PATCH_MARGIN - PATCH_MARGIN;
+        let m = tree_m;
         let sample_memo = std::cell::RefCell::new(std::collections::HashMap::new());
         let sample = |x: i32, z: i32| {
             assert!(
@@ -1181,7 +1300,7 @@ fn coarse_from_patch(
             );
             let cached = sample_memo.borrow().get(&(x, z)).copied();
             cached.unwrap_or_else(|| {
-                let c = column_sample(patch, &mats, x, z);
+                let c = padded(column_sample(patch, &mats, x, z), x, z);
                 sample_memo.borrow_mut().insert((x, z), c);
                 c
             })
@@ -1222,10 +1341,7 @@ fn coarse_from_patch(
                         continue;
                     }
                     for cy in cy0..=cy1 {
-                        let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
-                        let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
-                        let g = grids.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-                        let v = &mut g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz];
+                        let v = cell_mut(&mut grids, [cx, cy, cz]);
                         if v.is_air() {
                             *v = leaves;
                         }
