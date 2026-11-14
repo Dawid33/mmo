@@ -26,7 +26,16 @@ const USAGE: &str = "usage:
 type Failure = (u8, String);
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = Vec::new();
+    for a in std::env::args_os().skip(1) {
+        match a.into_string() {
+            Ok(a) => args.push(a),
+            Err(a) => {
+                eprintln!("argument {a:?} is not valid UTF-8\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     match run(&args) {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(code),
@@ -169,13 +178,14 @@ fn report(path: &str) -> Result<bool, Failure> {
     let sp = split(&v, table, &SplitOptions::default());
     let [x, y, z] = v.size;
     println!(
-        "{}  {x}\u{d7}{y}\u{d7}{z}  data {}  author \"{}\"  non-air {}  ground {}  builds {}",
+        "{}  {x}\u{d7}{y}\u{d7}{z}  data {}  author \"{}\"  non-air {}  ground {}  builds {}{}",
         file_name(path),
         v.data_version,
         v.author,
         non_air_cells(&v),
         sp.ground_layers,
-        sp.builds.len()
+        sp.builds.len(),
+        if sp.builds.len() < 2 { "  \u{2192} whole" } else { "" }
     );
     let opts = ConvertOptions {
         name: "report".into(),
@@ -234,10 +244,14 @@ fn split_names(prefix: &str, builds: &[Build]) -> Vec<String> {
         .enumerate()
         .map(|(i, b)| {
             let labelled = b.label.as_deref().map(slug).filter(|s| !s.is_empty()).map(|s| format!("{prefix}-{s}"));
-            let name = match labelled {
-                Some(n) if !taken.contains(&n) => n,
-                _ => format!("{prefix}-{:0width$}", i + 1),
-            };
+            // One uniqueness step for every name: a label such as "03" can collide with a numbered one.
+            let wanted = labelled.unwrap_or_else(|| format!("{prefix}-{:0width$}", i + 1));
+            let mut name = wanted.clone();
+            let mut n = 2;
+            while taken.contains(&name) {
+                name = format!("{wanted}-{n}");
+                n += 1;
+            }
             taken.insert(name.clone());
             name
         })
@@ -263,7 +277,7 @@ fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry)
     let base = if base.is_empty() { "prefab".to_string() } else { base };
 
     // (name, region) per prefab to write.
-    let mut jobs: Vec<(String, Option<([u32; 3], [u32; 3])>)> = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
     if is_split {
         let mut so = SplitOptions::default();
         if let Some(g) = o.gap {
@@ -272,9 +286,16 @@ fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry)
         if let Some(m) = o.min_blocks {
             so.min_blocks = m;
         }
+        // Without an explicit --ground (an explicit `--ground auto` counts as asked), fewer than two
+        // builds means a single building or decoration: import the whole file instead.
+        let explicit = o.ground.is_some();
         let ground = o.ground.unwrap_or(GroundMode::Auto);
         so.ground = ground;
         let sp = split(&v, table, &so);
+        if !explicit && sp.builds.len() < 2 {
+            eprintln!("note: {}: one build, imported whole", file_name(path));
+            return finish(path, &v, &hash, vec![(base, None)], o, registry, &out_dir);
+        }
         let auto = ground == GroundMode::Auto;
         if sp.builds.is_empty() {
             warn(format!("{}: split found no builds", file_name(path)));
@@ -308,8 +329,28 @@ fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry)
         jobs.push((base, None));
     }
 
-    let mut tags = o.tags.clone();
-    tags.push("imported".to_string());
+    finish(path, &v, &hash, jobs, o, registry, &out_dir)
+}
+
+type Job = (String, Option<([u32; 3], [u32; 3])>);
+
+/// Converts, writes and resolves each job.
+fn finish(
+    path: &str,
+    v: &BlockVolume,
+    hash: &str,
+    jobs: Vec<Job>,
+    o: &Opts,
+    registry: &BlockRegistry,
+    out_dir: &Path,
+) -> Result<bool, Failure> {
+    let table = Table::builtin();
+    let mut tags: Vec<String> = Vec::new();
+    for t in o.tags.iter().map(String::as_str).chain(["imported"]) {
+        if !tags.iter().any(|x| x == t) {
+            tags.push(t.to_string());
+        }
+    }
     let mut ok = true;
     let mut made_dir = false;
     for (name, region) in jobs {
@@ -320,15 +361,20 @@ fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry)
             author: o.author.clone().unwrap_or_else(|| v.author.clone()),
             source: file_name(path),
             licence: o.licence.clone(),
-            source_hash: hash.clone(),
+            source_hash: hash.to_string(),
             tags: tags.clone(),
         };
-        let Some((file, report)) = convert(&v, table, &opts) else {
-            eprintln!("{name}: nothing to convert, skipped");
+        let Some((file, report)) = convert(v, table, &opts) else {
+            if region.is_some() {
+                eprintln!("{name}: nothing to convert, skipped");
+            } else {
+                warn(format!("{}: nothing to convert", file_name(path)));
+                ok = false;
+            }
             continue;
         };
         if !made_dir {
-            std::fs::create_dir_all(&out_dir).map_err(|e| (2, format!("{}: {e}", out_dir.display())))?;
+            std::fs::create_dir_all(&out_dir).map_err(|e| (1, format!("{}: {e}", out_dir.display())))?;
             made_dir = true;
         }
         let bin = out_dir.join(format!("{name}{BIN_SUFFIX}"));
@@ -359,3 +405,32 @@ fn summary_line(name: &str, size: &[u32; 3], r: &Report, markers: usize) {
     );
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build(label: Option<&str>) -> Build {
+        Build { min: [0; 3], max: [1; 3], blocks: 1, label: label.map(String::from) }
+    }
+
+    #[test]
+    fn a_label_cannot_collide_with_a_numbered_name() {
+        let b = [build(Some("03")), build(None), build(None)];
+        assert_eq!(split_names("p", &b), vec!["p-03", "p-02", "p-03-2"]);
+    }
+
+    #[test]
+    fn a_repeated_label_gets_a_suffix() {
+        let b = [build(Some("Zeus")), build(Some("zeus!")), build(None)];
+        assert_eq!(split_names("p", &b), vec!["p-zeus", "p-zeus-2", "p-03"]);
+    }
+
+    #[test]
+    fn a_hundred_builds_use_three_digits() {
+        let b: Vec<Build> = (0..100).map(|_| build(None)).collect();
+        let names = split_names("p", &b);
+        assert_eq!((names[0].as_str(), names[99].as_str()), ("p-001", "p-100"));
+        assert_eq!(names.iter().collect::<BTreeSet<_>>().len(), 100);
+    }
+}

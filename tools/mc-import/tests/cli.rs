@@ -22,6 +22,10 @@ fn text(o: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
 }
 
+fn done(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn temp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("mc-import-tool-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -124,6 +128,7 @@ fn import_writes_a_prefab_that_loads() {
     assert!(info.source_hash.chars().all(|c| c.is_ascii_hexdigit()));
     assert_eq!(info.mapping_version, mc_import::MAPPING_VERSION);
     assert!(out.join("my-house.report.txt").is_file());
+    done(&dir);
 }
 
 #[test]
@@ -145,21 +150,32 @@ fn split_writes_one_prefab_per_build() {
         assert_eq!(format!("{}.prefab.bin", file.name), *n);
         assert_eq!(file.size[1], 6, "{n} must not contain the plate");
     }
+    done(&dir);
+}
+
+fn listing(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .map(|r| r.map(|e| e.unwrap().path().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
 }
 
 #[test]
 fn report_writes_nothing() {
     let dir = temp_dir("report");
     let input = write_schem(&dir, "pillars.schem", &pillars());
-    let out = dir.join("out");
-    std::fs::create_dir_all(&out).unwrap();
+    let imports = repo_root().join("prefab-imports");
+    let (before_imports, before_dir) = (listing(&imports), listing(&dir));
     let o = run(&["report", input.to_str().unwrap()]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     let t = text(&o);
     assert!(t.contains("pillars.schem"), "{t}");
     assert!(t.contains("builds 3"), "{t}");
-    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
-    assert!(!repo_root().join("prefab-imports/pillars").exists());
+    assert!(!t.contains("whole"), "{t}");
+    assert_eq!(listing(&imports), before_imports);
+    assert_eq!(listing(&dir), before_dir);
+    done(&dir);
 }
 
 #[test]
@@ -174,6 +190,7 @@ fn bad_input() {
     assert!(text(&o).contains("usage"), "{}", text(&o));
     let o = run(&["import", junk.to_str().unwrap(), "--frobnicate"]);
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    done(&dir);
 }
 
 #[test]
@@ -183,4 +200,104 @@ fn refuses_to_write_under_assets() {
     let o = run(&["import", input.to_str().unwrap(), "--out", "assets/prefabs/imported-test"]);
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
     assert!(!repo_root().join("assets/prefabs/imported-test").exists());
+    done(&dir);
+}
+
+fn bins(out: &Path) -> Vec<String> {
+    listing(out).iter().filter_map(|p| p.rsplit('/').next()).filter(|n| n.ends_with(".prefab.bin")).map(String::from).collect()
+}
+
+fn load_bin(path: &Path) -> game::prefab::PrefabFile {
+    game::prefab::prefab_from_bin(&std::fs::read(path).unwrap(), None).unwrap()
+}
+
+#[test]
+fn a_lone_cube_is_imported_whole_by_split() {
+    let dir = temp_dir("cube");
+    let input = write_schem(&dir, "cube.schem", &schem([8, 8, 8], &[], |_, _, _| STONE));
+    let out = dir.join("out");
+    let o = run(&["split", input.to_str().unwrap(), "--out", out.to_str().unwrap(), "--prefix", "c"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("note:") && text(&o).contains("one build, imported whole"), "{}", text(&o));
+    assert_eq!(bins(&out), vec!["c.prefab.bin"]);
+    assert_eq!(load_bin(&out.join("c.prefab.bin")).size[1], 8);
+    done(&dir);
+}
+
+#[test]
+fn a_tiny_decoration_is_not_dropped() {
+    let dir = temp_dir("tiny");
+    let input = write_schem(&dir, "tiny.schem", &schem([5, 5, 5], &[], |x, y, z| {
+        if y == 0 && z == 2 && x < 3 { STONE } else { AIR }
+    }));
+    let out = dir.join("out");
+    let o = run(&["split", input.to_str().unwrap(), "--out", out.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(bins(&out), vec!["tiny.prefab.bin"]);
+    done(&dir);
+}
+
+#[test]
+fn an_explicit_ground_auto_does_not_fall_back() {
+    let dir = temp_dir("explicit");
+    let input = write_schem(&dir, "cube.schem", &schem([8, 8, 8], &[], |_, _, _| STONE));
+    let out = dir.join("out");
+    let o = run(&["split", input.to_str().unwrap(), "--out", out.to_str().unwrap(), "--ground", "auto"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("warning:"), "{}", text(&o));
+    assert!(!text(&o).contains("imported whole"), "{}", text(&o));
+    assert!(bins(&out).is_empty());
+    done(&dir);
+}
+
+#[test]
+fn report_marks_the_whole_fallback() {
+    let dir = temp_dir("repwhole");
+    let input = write_schem(&dir, "cube.schem", &schem([8, 8, 8], &[], |_, _, _| STONE));
+    let o = run(&["report", input.to_str().unwrap()]);
+    assert!(text(&o).contains("whole"), "{}", text(&o));
+    done(&dir);
+}
+
+#[test]
+fn import_of_an_empty_schematic_fails() {
+    let dir = temp_dir("empty");
+    let input = write_schem(&dir, "empty.schem", &schem([4, 4, 4], &[], |_, _, _| AIR));
+    let o = run(&["import", input.to_str().unwrap(), "--out", dir.join("o").to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("warning:") && text(&o).contains("nothing to convert"), "{}", text(&o));
+    done(&dir);
+}
+
+#[test]
+fn an_unwritable_out_fails_that_file_and_the_rest_continue() {
+    let dir = temp_dir("unwritable");
+    let input = write_schem(&dir, "house.schem", &house());
+    let blocker = write_schem(&dir, "blocker", b"a file, not a directory");
+    let o = run(&["import", input.to_str().unwrap(), "--out", blocker.join("sub").to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    done(&dir);
+}
+
+#[test]
+fn tags_are_deduplicated() {
+    let dir = temp_dir("tags");
+    let input = write_schem(&dir, "house.schem", &house());
+    let out = dir.join("out");
+    let o = run(&["import", input.to_str().unwrap(), "--out", out.to_str().unwrap(), "--tag", "imported", "--tag", "a", "--tag", "a"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(load_bin(&out.join("house.prefab.bin")).tags, vec!["imported", "a"]);
+    done(&dir);
+}
+
+#[test]
+fn a_non_utf8_argument_is_a_usage_error() {
+    use std::os::unix::ffi::OsStrExt;
+    let o = Command::new(env!("CARGO_BIN_EXE_mc-import"))
+        .arg("report")
+        .arg(std::ffi::OsStr::from_bytes(b"bad\xff.schem"))
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
 }
