@@ -233,8 +233,7 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   (`meshing/records.rs`, layout locked to `assets/shaders/voxel_pull.wgsl`) and drawn by `voxel_pull/`
   (`TerrainRenderConfig` in `config.rs`, `VOXEL_NEAR_RENDER=per-chunk|direct|gpu`); the render unit is the
   sim chunk on every backend (`meshing/chunk_mesh.rs` merges its bricks' records). Far terrain: the
-  server-streamed LOD rings (`lod_rings.rs`, raster); `far_voxel/` (`far_voxel.wgsl`,
-  `VOXEL_FAR_RENDER=brick`) is the brick raymarch — never suggest it, ask before removing it.
+  server-streamed LOD rings (`lod_rings.rs`, `meshing/lod.rs`), always rasterized.
   `voxel_pull.wgsl`, `voxel_pull_depth.wgsl` and `voxel_texture.wgsl` are compiled in (rebuild, no hot reload).
 - **Connections** (`connections.rs`): a session's `ConnectionSet` holds one connection per host, each open
   under its own key; `RegionElsewhere` opens an observer connection, and region traffic counts only from
@@ -251,7 +250,7 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
 - Bevy pinned at `0.19.1`; upgrades are deliberate migrations. Shader tests compose against stubs and miss
   upstream WGSL signature changes, so after a bump run `just pull-smoke` on a real adapter (a self-screenshot
   of the pulled near path only; it passed on Iris Xe 2026-11-14) and look at the terrain with `just run`
-  (nothing automated covers the LOD rings, water or `far_voxel` on a real adapter).
+  (nothing automated covers the LOD rings or water on a real adapter).
 
 **Slint UI** (`crates/slint-ui`) — built on the sibling checkout `../ui` (`~/Projects/ui`, needs a local
 Factorio install or `FACTORIO_DATA`; Wube's sprites are not shippable). Sources in `crates/slint-ui/ui/`,
