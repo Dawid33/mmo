@@ -198,7 +198,7 @@ Commands:
 | `mc-import batch <cuts.ron>` | Every cut in a cut list |
 | `mc-import report <world|file> [--box]` | Block census and what would not map, writing nothing |
 
-A **cut list** (`assets/prefabs/sources/<world>.cuts.ron`, in git) is the durable record: source world
+A **cut list** (`tools/mc-import/cuts/<world>.cuts.ron`, in git) is the durable record: source world
 (path + hash), then per cut a name, box, anchor, ground fit, tags and markers added by hand (connectors,
 fixtures). Re-running `batch` after a mapping or material change rebuilds every prefab; nobody edits an
 imported prefab by hand.
@@ -237,9 +237,10 @@ them. The report from the first real import decides what else joins.
 ### 5.4 Legal
 
 Unchanged from the research §9. In practice: a prefab carries `author`, `source`, `licence`; `batch`
-writes to `assets/prefabs/imported/`, which is **git-ignored until a cut list's licence field is filled**
-and a check (`just prefab-check`) refuses a built-in prefab without one. Read the EULA and Usage
-Guidelines before any imported build ships.
+writes to **`prefab-imports/` at the repo root** (git-ignored, and outside `assets/`, which the web release copies
+whole and `game`'s build script embeds whole — decided at the plan-1 final review). A prefab is *promoted* into
+`assets/prefabs/` only once its cut list records a licence; the loader refuses a built-in prefab that names
+a `source` without a `licence`. Read the EULA and Usage Guidelines before any imported build ships.
 
 ## 6. Sites in the world
 
@@ -318,7 +319,7 @@ of one prefab; `client debug gallery` shows every built-in prefab on a flat stri
 | B | Prefab core | File form (RON + bin), resolve, caps, column profile, `layout`, built-in set install, `just prefab-view`, `just prefab-check` | new `game/src/prefab/`, `game/build.rs`, `assets/prefabs/`, justfile | A |
 | C | Worldgen stamping | Placement sources, the structure pass (margin, pad, band, carve, seams), the coarse pass, genesis fixtures + containers, `Fixture` types in `RegionMeta`, the dev gallery and a hand-placed **test town** (half of the adventure roadmap's stage 0; its test cave waits for dungeons or is dug by hand) | `worldgen/src/lib.rs` (`columns_from_patch`, `coarse_from_patch`, `prefetch_region`), new `worldgen/src/structures.rs`, `game/src/region.rs`, `portable.rs`, `cache.rs`, `debug_launch.rs` | B |
 | D | Minecraft import | `mc-import` library and CLI: Anvil + box, `.schem`; mapping table, forms, air fill, report, `map`, cut lists | new `crates/mc-import`, `tools/mc-import`, `assets/mc_import/`, justfile | B |
-| E | Sample kit | Cut lists for the supplied worlds; connectors, tags, fixtures marked; gaps in the building set filled; the kit of §7 reviewed in the gallery | `assets/prefabs/sources/`, `blocks.ron` | C, D, the worlds |
+| E | Sample kit | Cut lists for the supplied worlds; connectors, tags, fixtures marked; gaps in the building set filled; the kit of §7 reviewed in the gallery | `tools/mc-import/cuts/`, `assets/prefabs/`, `blocks.ron` | C, D, the worlds |
 | F | Sites in the world | `Site.kind`, `site_plans` table and migration (SQLite + Postgres), written at world creation, installed at start in every role; map markers by kind; people spawn at fixtures | `history/records.rs`, `bootstrap.rs`, `world-store/migrations`, `server/src/world_file.rs`, `worldgen/src/sites/` | C |
 | G | Town generator | `SiteLayout`, strokes, `site-preview`; the lot-based town, in a style per climate (desert towns from the desert packs first — the library's bulk); then the wall ring → walled towns and fortresses | `worldgen/src/sites/{layout,strokes,town,walls}.rs` | E, F |
 | — | *Deferred* | Dungeons, lairs, the jigsaw technique | | a dungeon kit |
