@@ -14,17 +14,22 @@
 # Two replicas (var.replicas) protect against a deploy or a crashed pod: with
 # max_unavailable = 0 a new pod must be Ready (its health check answering, which
 # needs the database and Keycloak's discovery at start; afterwards /healthz is
-# static) before an old one stops, and a PodDisruptionBudget keeps one up during drains. They do NOT protect against the
-# node going down or the single PostgreSQL going down: both stay single points.
+# static) before an old one stops, and a PodDisruptionBudget (min_available = 1)
+# keeps one up during drains. That budget makes `kubectl drain` of this single
+# node wait on the second pod; a reboot without a drain is unaffected. The pods do
+# NOT protect against the node going down or the single PostgreSQL going down:
+# both stay single points.
 #
 # Public: only /v1/ and /.well-known/jwks.json. NOT public: the health check and
 # /metrics (the ServiceMonitor scrapes the Service inside the cluster).
 #
 # The signing key is generated here (ED25519, PKCS#8 PEM) and lives in the state:
 # every *.pem in the mounted directory is published, the last by file name signs.
-# Rotation: add a second key as 0002.pem in a later change; never replace
-# tls_private_key.signing, which invalidates the join tickets signed with the old
-# key (they live for seconds; refresh tokens are database rows, not affected).
+# Rotation: add a second key as 0002.pem in a later change, and add it to the
+# `checksum/secrets` annotation too, or the pods will not roll when it changes.
+# Never replace tls_private_key.signing: that invalidates the join tickets signed
+# in the last 5 minutes (JOIN_JWT_TTL_SECS = 300 in crates/login-api); refresh
+# tokens are database rows and not affected.
 
 locals {
   ns     = kubernetes_namespace_v1.login.metadata[0].name
@@ -100,8 +105,19 @@ resource "kubernetes_deployment_v1" "login" {
       spec {
         automount_service_account_token = false
         enable_service_links            = false
-        # A new pod must be Ready before an old one stops; 30 s lets requests drain.
+        # On deletion the endpoint is removed from the Service and the preStop
+        # sleep runs at the same time; Traefik needs a few seconds to stop routing
+        # to the pod, and the service refuses connections once it gets SIGTERM.
+        # In-flight requests then finish within the grace period (the sleep counts
+        # against it).
         termination_grace_period_seconds = 30
+        dynamic "host_aliases" {
+          for_each = var.issuer_host_alias_ip == null ? [] : [var.issuer_host_alias_ip]
+          content {
+            ip        = host_aliases.value
+            hostnames = [regex("^[a-z]+://([^/:]+)", var.issuer)[0]]
+          }
+        }
         volume {
           name = "bin"
           host_path {
@@ -176,6 +192,13 @@ resource "kubernetes_deployment_v1" "login" {
           port {
             name           = "http"
             container_port = local.port
+          }
+          lifecycle {
+            pre_stop {
+              exec {
+                command = ["sleep", "5"]
+              }
+            }
           }
           volume_mount {
             name       = "bin"

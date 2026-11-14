@@ -12,6 +12,12 @@ variable "state_bucket" {
   default     = "mmo-orion-tfstate-029905505680"
 }
 
+variable "issuer_host_alias_ip" {
+  description = "Pin the issuer's host name to this IP inside the pod (the Traefik Service's cluster IP) only if the pod cannot reach the issuer's public address. Default: no alias."
+  type        = string
+  default     = null
+}
+
 data "terraform_remote_state" "keycloak_realm" {
   backend = "s3"
   config = {
@@ -24,6 +30,8 @@ data "terraform_remote_state" "keycloak_realm" {
 module "login" {
   source = "../../../modules/login"
   issuer = data.terraform_remote_state.keycloak_realm.outputs.issuer
+
+  issuer_host_alias_ip = var.issuer_host_alias_ip
 }
 
 output "url" {

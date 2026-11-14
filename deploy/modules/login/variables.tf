@@ -27,6 +27,12 @@ variable "bin_host_path" {
   default     = "/srv/mmo/bin"
 }
 
+variable "issuer_host_alias_ip" {
+  description = "An IP the issuer's host name is pinned to inside the pod. Set it to the Traefik Service's cluster IP only if the pod cannot reach the issuer's public address; that IP changes if Traefik is reinstalled."
+  type        = string
+  default     = null
+}
+
 variable "issuer" {
   description = "Keycloak realm issuer URL (VOXEL_OIDC_ISSUER), e.g. https://auth.factoriosurvivalworld.com/realms/<realm>. The root passes it."
   type        = string
