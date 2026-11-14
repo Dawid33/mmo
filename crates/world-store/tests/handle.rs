@@ -355,6 +355,31 @@ fn corrupt_chunk_is_error() {
     });
 }
 
+/// Where a host's peer journal starts at boot: the newest COMMITTED world cut of
+/// `cut_decisions`, `CutId(0)` before any. A one-phase cut records no decision (a single
+/// host has no peers to journal); an aborted cut never counts.
+#[test]
+fn last_committed_cut_is_the_newest_committed_decision() {
+    each_backend("last_committed", true, |url| {
+        let h = open(url);
+        assert_eq!(h.last_committed_cut().unwrap(), CutId(0), "a fresh store: none");
+        let f = fence(&h);
+        let cut = first_cut(&h);
+        h.commit_cut(cut, f).recv().unwrap().unwrap();
+        assert_eq!(h.last_committed_cut().unwrap(), CutId(0), "a one-phase cut records no decision");
+        h.shutdown();
+
+        raw_exec(
+            url,
+            "INSERT INTO cut_decisions (cut_id, tick, committed, decided_utc) VALUES \
+             (5, 50, 1, 'now'), (7, 70, 1, 'now'), (9, 90, 0, 'now')",
+        );
+        let h = open(url);
+        assert_eq!(h.last_committed_cut().unwrap(), CutId(7), "the newest committed; the aborted 9 does not count");
+        h.shutdown();
+    });
+}
+
 #[test]
 fn shutdown_drains_queued_commits() {
     each_backend("drain", true, |url| {

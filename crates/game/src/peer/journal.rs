@@ -88,14 +88,26 @@ impl PeerLog {
 #[derive(Debug, Clone)]
 pub struct PeerJournal {
     peers: BTreeMap<u32, PeerLog>,
+    /// The other participants of each world cut begun here and not decided yet
+    /// ([`Self::cut_begun`]): whichever path reports the commit, it truncates toward them.
+    cuts: BTreeMap<CutId, BTreeSet<u32>>,
     base: CutId,
+    /// Test support: the marks the last truncating commit read, per peer `(out, in)`.
+    last_marks: Option<(CutId, BTreeMap<u32, (Option<u64>, Option<u64>)>)>,
 }
 
 impl PeerJournal {
     /// An empty journal from committed cut `base` (at boot: the store's last committed
     /// cut, `CutId(0)` before any).
     pub fn new(base: CutId) -> Self {
-        Self { peers: BTreeMap::new(), base }
+        Self { peers: BTreeMap::new(), cuts: BTreeMap::new(), base, last_marks: None }
+    }
+
+    /// This host takes part in world cut `cut` with `participants` (the other hosts of it):
+    /// remembered until the cut is decided, so a commit learned from the store (no
+    /// `CutDone`) truncates toward them as one learned from the coordinator does.
+    pub fn cut_begun(&mut self, cut: CutId, participants: &BTreeSet<u32>) {
+        self.cuts.insert(cut, participants.clone());
     }
 
     /// The last committed cut the journal counts from.
@@ -138,16 +150,23 @@ impl PeerJournal {
         log.marks_in.entry(cut).or_insert(at);
     }
 
-    /// World cut `cut` committed with `participants` (the other hosts of it; empty for a
-    /// one-phase cut): toward each, what the cut already explains is dropped (the module
-    /// docs). A direction whose mark this journal never saw keeps everything (never
-    /// guess). The base becomes `cut`; marks of it and earlier cuts are forgotten.
+    /// World cut `cut` committed with `participants` (the other hosts of it, joined with
+    /// those [`Self::cut_begun`] recorded; none for a one-phase cut): toward each, what the
+    /// cut already explains is dropped (the module docs). A direction whose mark this
+    /// journal never saw keeps everything (never guess). The base becomes `cut`; marks and
+    /// participants of it and earlier cuts are forgotten, so a second report of the same
+    /// commit (the store's poll, then the coordinator's `CutDone`) changes nothing.
     pub fn committed(&mut self, cut: CutId, participants: &BTreeSet<u32>) {
         self.base = self.base.max(cut);
+        let mut participants = participants.clone();
+        participants.extend(self.cuts.get(&cut).into_iter().flatten().copied());
+        self.cuts.retain(|c, _| *c > cut);
+        let mut read = BTreeMap::new();
         for (peer, log) in &mut self.peers {
             if participants.contains(peer) {
                 let out = log.marks_out.get(&cut).copied();
                 let inn = log.marks_in.get(&cut).copied();
+                read.insert(*peer, (out, inn));
                 log.rows.retain(|r| {
                     let mark = if r.queue_id.is_some() { out } else { inn };
                     let explained = r.accounted != Some(cut) && mark.is_some_and(|m| r.seq < m);
@@ -157,10 +176,15 @@ impl PeerJournal {
             log.marks_out.retain(|c, _| *c > cut);
             log.marks_in.retain(|c, _| *c > cut);
         }
+        // A second report of the same commit read no marks (they are gone): keep the first.
+        if !participants.is_empty() && self.last_marks.as_ref().is_none_or(|(c, _)| *c < cut) {
+            self.last_marks = Some((cut, read));
+        }
     }
 
     /// World cut `cut` was aborted: its marks are forgotten, every entry stays.
     pub fn aborted(&mut self, cut: CutId) {
+        self.cuts.remove(&cut);
         for log in self.peers.values_mut() {
             log.marks_out.remove(&cut);
             log.marks_in.remove(&cut);
@@ -176,6 +200,19 @@ impl PeerJournal {
     /// everything queued to `peer`; `None` for a received one).
     pub fn entries(&self, peer: u32) -> impl Iterator<Item = (&JournalEntry, Option<u64>)> {
         self.peers.get(&peer).into_iter().flat_map(|log| log.rows.iter().map(|r| (&r.entry, r.queue_id)))
+    }
+
+    /// Test support: the entries with `peer` as truncation reads them — `(entry, place
+    /// in the order, accounted cut)` — and the marks the last truncating commit read
+    /// (`(cut, peer → (this host's mark, the peer's mark))`, places in the same order).
+    #[doc(hidden)]
+    pub fn rows(&self, peer: u32) -> impl Iterator<Item = (&JournalEntry, u64, Option<CutId>)> {
+        self.peers.get(&peer).into_iter().flat_map(|log| log.rows.iter().map(|r| (&r.entry, r.seq, r.accounted)))
+    }
+
+    #[doc(hidden)]
+    pub fn last_marks(&self) -> Option<&(CutId, BTreeMap<u32, (Option<u64>, Option<u64>)>)> {
+        self.last_marks.as_ref()
     }
 
     /// Entries over every peer (the `[server]` line's `journal_entries=`).

@@ -197,6 +197,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
             run.beginning = false;
         }
+        // The journal truncates toward these when the cut commits, whoever reports it.
+        let participants = self.world_cut_peers(cut);
+        self.journal.cut_begun(cut, &participants);
         // A leave joins this host and a peer when either leaves: everything this host sends
         // that peer from now until the cut is decided waits here, in this host's part.
         let peers: Vec<u32> = self.world_cut_peers(cut).into_iter().collect();
@@ -405,7 +408,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// uncommitted entries stay for the next cut ([`Self::cut_failed`]) and the
     /// coordinator is told.
     pub fn world_cut_failed(&mut self, cut: CutId, why: CutFailure) {
-        self.cut_failed(cut);
+        // Not decided yet (the part may even be staged after a backend error and then
+        // committed): the journal keeps the cut's marks until its decision.
+        self.cut_settled_failed(cut);
         if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
             run.state = PartState::Failed;
         }

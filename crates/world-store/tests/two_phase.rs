@@ -209,6 +209,7 @@ fn commit_decision_applies_every_part_and_the_world_tick() {
     assert_eq!(h.load_in_flight(None).unwrap().len(), 2, "both hosts' in-flight rows");
     assert_eq!(h.world_info().unwrap().world_tick, 200, "the decision writes the world tick");
     assert_eq!(h.cut_decision(CutId(2)).unwrap(), Some(true));
+    assert_eq!(h.last_committed_cut().unwrap(), CutId(2), "the peer journal's boot base");
     assert_eq!(prepared(&w), 0);
     // Deciding again changes nothing and finds nothing left to commit.
     assert!(h.decide_cut(CutId(2), 200, true, vec![0, 1], vec![], c, 0, vec![]).unwrap());
@@ -272,6 +273,7 @@ fn abort_decision_leaves_nothing_and_no_prepared_xact() {
     assert!(h.load_in_flight(None).unwrap().is_empty());
     assert_eq!(h.world_info().unwrap().world_tick, 0);
     assert_eq!(h.cut_decision(CutId(3)).unwrap(), Some(false));
+    assert_eq!(h.last_committed_cut().unwrap(), CutId(0), "an aborted cut is no journal base");
     assert_eq!(prepared(&w), 0);
     h.shutdown();
 }

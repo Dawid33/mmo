@@ -5612,14 +5612,100 @@ fn journal_explains(rig: &mut MultiRig) {
             _ => {}
         }
         rig.cut_round();
-        rig.assert_journals_explain_the_cut();
+        let checked = rig.assert_journals_explain_the_cut();
+        JOURNAL_CHECKS.fetch_add(checked, std::sync::atomic::Ordering::SeqCst);
         r += 1;
     }
 }
 
+/// Moves [`journal_explains`] checked against the journals (not exempted as passing
+/// through a third host), over the sweep running now: only that test touches it.
+static JOURNAL_CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn journal_explains_every_difference_from_the_last_cut() {
-    sweep("journal_explains_every_difference_from_the_last_cut (2 hosts)", 2, 1, SEEDS / 4, journal_explains);
-    sweep("journal_explains_every_difference_from_the_last_cut (3 hosts)", 3, 1, SEEDS / 4, journal_explains);
+    use std::sync::atomic::Ordering::SeqCst;
+    for hosts in [2, 3] {
+        JOURNAL_CHECKS.store(0, SeqCst);
+        sweep(&format!("journal_explains_every_difference_from_the_last_cut ({hosts} hosts)"), hosts, 1, SEEDS / 4, journal_explains);
+        assert!(JOURNAL_CHECKS.load(SeqCst) > 0, "{hosts} hosts: no move was ever checked against the journals");
+    }
+}
+
+/// Rounds that push a random slime over the seam of `a` and `b` every third round.
+fn shuttle_round(rig: &mut MultiRig, slimes: &[game::EntityId], a: RegionCoords, b: RegionCoords, r: usize) {
+    if r % 3 == 0 {
+        let roll = crate::common::multi_rig::mix(rig.seed, r as u64);
+        push_over(rig, slimes[(roll % slimes.len() as u64) as usize], a, b);
+    }
+    rig.cut_round();
+}
+
+/// A host misses the coordinator's `CutDone` of a committed world cut and learns the
+/// commit from the store's poll instead (`cut_committed` with no participants, as the
+/// server's `settle_world` does): its journal truncates toward the cut's participants all
+/// the same (the property, both bounds), and the `CutDone` delivered afterwards changes
+/// nothing it holds. `false` if the cut aborted (the seed missed the case).
+fn polled_commit(rig: &mut MultiRig) -> bool {
+    let (a, b) = host_seam(2, 1);
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    let y = crate::common::above_floor_y();
+    let slimes: Vec<game::EntityId> =
+        (0..4).map(|i| rig.spawn_slime(if i % 2 == 0 { a } else { b }, [REGION_SIZE / 2.0 + i as f32, y, REGION_SIZE / 3.0])).collect();
+    let h = rig.owner(b);
+    let goal = committed(rig) + 1;
+    let mut r = 0usize;
+    while committed(rig) < goal {
+        assert!(r < WORLD_CUT_ROUNDS, "no world cut committed: {:?}", rig.decided);
+        shuttle_round(rig, &slimes, a, b, r);
+        r += 1;
+    }
+    // The next cut: once host `h` takes part in it, the coordinator's messages to it are held.
+    let cut = loop {
+        assert!(r < 2 * WORLD_CUT_ROUNDS, "host {h} never took part in another cut");
+        if let Some((c, "pending" | "marked")) = rig.hosts[h as usize].manager.world_cut_state() {
+            if !rig.decided.contains_key(&c) {
+                break c;
+            }
+        }
+        shuttle_round(rig, &slimes, a, b, r);
+        r += 1;
+    };
+    rig.hold_world(h, true);
+    while !rig.decided.contains_key(&cut) {
+        assert!(r < 3 * WORLD_CUT_ROUNDS, "cut {} never decided", cut.0);
+        shuttle_round(rig, &slimes, a, b, r);
+        r += 1;
+    }
+    if !rig.decided[&cut] {
+        rig.hold_world(h, false);
+        return false;
+    }
+    assert_eq!(rig.hosts[h as usize].manager.world_cut(), Some(cut), "host {h} has not heard the decision");
+    assert!(rig.hosts[h as usize].manager.peer_journal().base() < cut);
+    // The server's poll of the store finds the commit.
+    rig.hosts[h as usize].manager.cut_committed(cut, Vec::new());
+    assert_eq!(rig.hosts[h as usize].manager.peer_journal().base(), cut);
+    rig.assert_journals_explain_the_cut();
+    let other = 1 - h;
+    let held: Vec<game::JournalEntry> = rig.hosts[h as usize].manager.peer_journal().entries(other).map(|(e, _)| e.clone()).collect();
+    rig.hold_world(h, false);
+    while rig.hosts[h as usize].manager.world_cut() == Some(cut) {
+        assert!(r < 4 * WORLD_CUT_ROUNDS, "host {h} never heard the decision of cut {}", cut.0);
+        rig.cut_round();
+        r += 1;
+    }
+    let now: Vec<game::JournalEntry> = rig.hosts[h as usize].manager.peer_journal().entries(other).map(|(e, _)| e.clone()).collect();
+    assert!(now.starts_with(&held), "the late CutDone changed what the journal held: {held:?} → {now:?}");
+    rig.assert_journals_explain_the_cut();
+    true
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn journal_truncates_on_a_commit_found_by_polling() {
+    sweep_hits("journal_truncates_on_a_commit_found_by_polling", 2, 1, SEEDS / 4, polled_commit);
 }

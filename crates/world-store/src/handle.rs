@@ -561,6 +561,13 @@ impl StoreHandle {
         self.ask(Request::ResolvePrepared)
     }
 
+    /// The newest committed world cut (`CutId(0)` before any, and on a store whose cuts are
+    /// one-phase — a single host, SQLite — which records no decisions): a host's peer journal
+    /// counts from it at boot (`WorldManager::start_peer_journal`).
+    pub fn last_committed_cut(&self) -> Result<CutId, StoreError> {
+        self.ask(Request::LastCommittedCut)
+    }
+
     /// The stored decision on `cut` (`Some(true)`: committed), `None` while undecided.
     pub fn cut_decision(&self, cut: CutId) -> Result<Option<bool>, StoreError> {
         self.ask(|r| Request::CutDecision(cut, r))

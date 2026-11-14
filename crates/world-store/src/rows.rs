@@ -1196,6 +1196,15 @@ macro_rules! engine_rows {
                 Ok(d.map(|d| d != 0))
             }
 
+            /// The newest committed world cut (`cut_decisions`), `CutId(0)` before any: where
+            /// a host's peer journal starts at boot. A plain read.
+            pub(crate) async fn last_committed_cut(pool: &Pool) -> Result<CutId, StoreError> {
+                let c: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(cut_id), 0) FROM cut_decisions WHERE committed = 1")
+                    .fetch_one(pool)
+                    .await?;
+                Ok(CutId(u(c)))
+            }
+
             /// The whole cut in one transaction, ended as `end` says
             /// ([`CutEnd`]); any error rolls all of it back. On Postgres the transaction
             /// waits at most `lock_timeout_ms` for any row lock. Callers hold the writer lock.

@@ -620,28 +620,61 @@ impl MultiRig {
     }
 
     /// Every host's peer journal explains how the running world differs from the last
-    /// committed world cut, for every pair of hosts (A, B): every tracked entity the cut
-    /// stored on B that is live on A now (a running region of A, or A's `in_flight` /
-    /// `pending_arrivals`) has a `Received` entry from B on A AND a `Sent` entry toward A
-    /// on B — unless it passed through a third host (whose journal names it); the same for
-    /// every connected player, by the part that wrote its record and the host of its body.
-    /// A journal never counts from a cut later than the last committed one.
-    pub fn assert_journals_explain_the_cut(&mut self) {
+    /// committed world cut K, and holds nothing K already explains.
+    ///
+    /// Needed entries: for every pair of hosts (A, B), every tracked entity the store holds
+    /// on B that is live on A now (a running region of A, or A's `in_flight` /
+    /// `pending_arrivals`) has a `Received` entry from B on A AND a `Sent` entry toward A on
+    /// B — unless it went through a third host C (C has a `Received` entry from B and a
+    /// `Sent` entry toward A for it); the same for every connected player, by the part that
+    /// wrote its record and the host of its body. Returns how many moves were checked
+    /// without that exemption.
+    ///
+    /// No explained entry: every host that took part in K and counts from it has truncated
+    /// toward every other participant by both marks of K, and every entry left from before
+    /// a mark of its direction travelled wrapped in K. A journal never counts from a cut
+    /// later than K.
+    pub fn assert_journals_explain_the_cut(&mut self) -> usize {
         use game::{JournalEvent, Subject};
-        let Some((cut, _)) = &self.last_cut else { return };
+        let Some((cut, _)) = &self.last_cut else { return 0 };
         let cut = *cut;
         let n = self.hosts.len() as u32;
-        // (host, peer, sent?) → subjects; host → every subject its journal names.
+        let (_, parts) = self.last_committed();
+        let participants: BTreeSet<u32> = parts.keys().copied().collect();
+        // (host, peer, sent?) → subjects.
         let mut journalled: BTreeMap<(u32, u32, bool), BTreeSet<Subject>> = BTreeMap::new();
-        let mut named: BTreeMap<u32, BTreeSet<Subject>> = BTreeMap::new();
         for h in 0..n {
             let journal = self.hosts[h as usize].manager.peer_journal();
-            assert!(journal.base() <= cut, "host {h}'s journal counts from cut {} past the last committed {}", journal.base().0, cut.0);
+            let base = journal.base();
+            assert!(base <= cut, "host {h}'s journal counts from cut {} past the last committed {}", base.0, cut.0);
             for p in (0..n).filter(|p| *p != h) {
                 for (e, _) in journal.entries(p) {
                     let sent = matches!(e.event, JournalEvent::Sent(_));
                     journalled.entry((h, p, sent)).or_default().insert(e.subject);
-                    named.entry(h).or_default().insert(e.subject);
+                }
+            }
+            if base != cut || !participants.contains(&h) {
+                continue;
+            }
+            let Some((marked, marks)) = journal.last_marks() else {
+                panic!("host {h} counts from cut {} without having truncated by its marks (seed {})", cut.0, self.seed)
+            };
+            assert_eq!(*marked, cut, "host {h}'s last truncation was by cut {}, its base is {}", marked.0, cut.0);
+            for p in participants.iter().copied().filter(|p| *p != h) {
+                let Some(&(Some(out), Some(inn))) = marks.get(&p) else {
+                    panic!("host {h} truncated by cut {} without both marks with host {p}: {:?} (seed {})", cut.0, marks.get(&p), self.seed)
+                };
+                for (e, seq, accounted) in journal.rows(p) {
+                    let mark = if matches!(e.event, JournalEvent::Sent(_)) { out } else { inn };
+                    assert!(
+                        seq >= mark || accounted == Some(cut),
+                        "host {h} keeps {:?} with host {p} from before the mark of cut {}, not wrapped in it ({accounted:?}): \
+                         the cut explains it (seed {}, link delay {})",
+                        e.subject,
+                        cut.0,
+                        self.seed,
+                        self.link_delay
+                    );
                 }
             }
         }
@@ -672,11 +705,13 @@ impl MultiRig {
             }
         }
         let has = |key: (u32, u32, bool), s: &Subject| journalled.get(&key).is_some_and(|set| set.contains(s));
+        let mut checked = 0;
         for (subject, b, a) in moved {
-            let third = (0..n).any(|c| c != a && c != b && named.get(&c).is_some_and(|set| set.contains(&subject)));
-            if third {
+            let through_third = (0..n).any(|c| c != a && c != b && has((c, b, false), &subject) && has((c, a, true), &subject));
+            if through_third {
                 continue;
             }
+            checked += 1;
             assert!(
                 has((a, b, false), &subject),
                 "{subject:?}: stored on host {b} by cut {}, now on host {a}, which has no Received entry from {b} \
@@ -694,6 +729,7 @@ impl MultiRig {
                 self.link_delay
             );
         }
+        checked
     }
 
     /// The parts of the last committed cut that write `player`'s record.

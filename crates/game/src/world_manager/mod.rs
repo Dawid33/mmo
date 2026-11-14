@@ -2328,8 +2328,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (each written region's terrain version) are what the store holds.
     pub fn cut_committed(&mut self, id: CutId, versions: Vec<(RegionCoords, u64)>) {
         self.note_leave_settled(id, true);
-        // A world cut truncated the journal at its `CutDone` (`world_cut_decided`, which
-        // knows the participants); a one-phase cut only moves its base.
+        // The journal truncates toward the participants it recorded when the cut began
+        // (a commit learned from the store's poll, with no `CutDone`, does too); after a
+        // `CutDone` already did, or for a one-phase cut, only the base moves.
         self.journal.committed(id, &BTreeSet::new());
         if let Some(carried) = self.outstanding_cuts.remove(&id) {
             for (rc, seq) in carried {
@@ -2357,9 +2358,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// The store failed to commit cut `id`: its entries stay uncommitted, so
-    /// the next cut carries them again.
+    /// The store failed to commit cut `id` (one-phase), or world cut `id` was decided
+    /// aborted (its `CutDone`, or the store's poll): its entries stay uncommitted, so the
+    /// next cut carries them again.
     pub fn cut_failed(&mut self, id: CutId) {
+        // A decided abort, whether the coordinator's `CutDone` or the store's poll said so:
+        // the journal forgets its marks.
+        self.journal.aborted(id);
+        self.cut_settled_failed(id);
+    }
+
+    /// [`Self::cut_failed`] without the journal: this host's part failed before any decision.
+    pub(super) fn cut_settled_failed(&mut self, id: CutId) {
         self.note_leave_settled(id, false);
         self.outstanding_cuts.remove(&id);
     }

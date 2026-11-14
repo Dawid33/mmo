@@ -215,3 +215,37 @@ fn intents_and_orders_are_never_journalled() {
     j.sent(A, 20, &with_player, None, NOW);
     assert_eq!(kept(&j, A), vec![(Subject::Entity(id(1)), true), (Subject::Player(PlayerId(9)), true)]);
 }
+
+/// A world cut's commit learned from the store's poll (no `CutDone`, so no participants
+/// passed) truncates toward the participants recorded when the cut began; the `CutDone`
+/// that comes later, with its participants, changes nothing.
+#[test]
+fn a_commit_found_by_polling_truncates_and_a_late_cut_done_changes_nothing() {
+    let mut j = PeerJournal::new(CutId(4));
+    j.cut_begun(K, &participants(&[A]));
+    j.sent(A, 0, &transfer(1, 10), None, NOW);
+    j.received(A, &transfer(2, 10), None, NOW);
+    j.mark_out(A, K);
+    j.mark_in(A, K);
+    j.sent(A, 2, &transfer(3, 10), None, NOW);
+    j.received(B, &transfer(4, 10), None, NOW);
+    // The server's poll of the store: `cut_committed` passes no participants.
+    j.committed(K, &BTreeSet::new());
+    assert_eq!(j.base(), K);
+    assert_eq!(kept(&j, A), vec![(Subject::Entity(id(3)), true)], "truncated toward the recorded participant");
+    assert_eq!(kept(&j, B).len(), 1, "host {B} was not in the cut");
+    let after_poll: Vec<_> = j.entries(A).map(|(e, q)| (e.clone(), q)).collect();
+    // The coordinator's `CutDone` arrives late.
+    j.committed(K, &participants(&[A]));
+    let after_done: Vec<_> = j.entries(A).map(|(e, q)| (e.clone(), q)).collect();
+    assert_eq!(after_done, after_poll, "a second report of the commit changes nothing");
+    assert_eq!(j.base(), K);
+    // A begun cut aborted (by either path) leaves nothing recorded: a later commit of an
+    // unrelated cut truncates only toward its own participants.
+    j.cut_begun(CutId(6), &participants(&[A, B]));
+    j.aborted(CutId(6));
+    j.mark_out(B, CutId(7));
+    j.mark_in(B, CutId(7));
+    j.committed(CutId(7), &BTreeSet::new());
+    assert_eq!(kept(&j, B).len(), 1, "cut 6's participants were forgotten with its abort; cut 7 named none");
+}

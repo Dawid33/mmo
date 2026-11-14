@@ -1144,6 +1144,12 @@ pub fn run() -> claims::ServerExit {
     // reads it), and what its last cut caught on its way (into the mailboxes).
     let mut cuts = claims.map(|claims| {
         let store = claims.store().clone();
+        // The peer journal counts from the store's last committed world cut, before any peer
+        // traffic (the restored in-flight rows below are its first entries). A read error is
+        // fatal: a guessed base would be wrong (wait, never guess). One host, or SQLite:
+        // `CutId(0)` — one-phase cuts record no decision, and there is no peer to journal.
+        let journal_base = store.last_committed_cut().unwrap_or_else(|e| fatal(&format!("reading the last committed cut: {e}")));
+        manager.start_peer_journal(journal_base);
         let stored = store.stored_regions().unwrap_or_else(|e| fatal(&e.to_string()));
         let in_flight =
             store.load_in_flight(claims.fence().in_flight_scope()).unwrap_or_else(|e| fatal(&e.to_string()));

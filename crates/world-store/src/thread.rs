@@ -120,6 +120,7 @@ pub(crate) enum Request {
     ResolvePrepared(Reply<Vec<(CutId, bool)>>),
     CutDecision(CutId, Reply<Option<bool>>),
     CutDecided(CutId, Reply<Option<bool>>),
+    LastCommittedCut(Reply<CutId>),
     /// R4: the coordinator declares a succession (Postgres).
     DeclareSuccession(Box<Declare>, Reply<crate::Declared>),
     /// R4: the coordinator rolls the world back (Postgres).
@@ -430,6 +431,7 @@ async fn serve(
                 tokio::spawn(async move { r.send(on_pool!(&pool, regions_of_entities(ids))) })
             }
             Request::CutDecision(cut, r) => tokio::spawn(async move { r.send(on_pool!(&pool, cut_decision(cut))) }),
+            Request::LastCommittedCut(r) => tokio::spawn(async move { r.send(on_pool!(&pool, last_committed_cut())) }),
             Request::WorldInfo(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_info())) }),
             Request::ForgedArchive(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_archive())) }),
             Request::PutTiled(rows, r) => tokio::spawn(async move {
