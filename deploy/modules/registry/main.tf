@@ -9,8 +9,8 @@ data "aws_region" "current" {}
 resource "aws_ecr_repository" "repo" {
   for_each = toset(var.repositories)
   name     = each.value
-  # Releases are tagged with the git short sha; `bootstrap` is moved by the
-  # first push (scripts/orion_login_push.sh), hence mutable.
+  # One tag, `latest`, moved by every push (scripts/orion_login_push.sh); the
+  # cluster runs digests, so moving it is safe.
   image_tag_mutability = "MUTABLE"
   # Never delete a repository that still holds images.
   force_delete = false
@@ -19,32 +19,20 @@ resource "aws_ecr_repository" "repo" {
   }
 }
 
-# Rule 1 matches every image tagged `bootstrap*` and keeps up to 9999 of them:
-# an image matched by a higher-priority rule is never expired by a lower one, so
-# the image the login module starts from survives rule 2. Rule 2 (tag status
-# `any` must be the last rule) expires everything beyond the newest keep_images.
-# The data source checks the document against ECR's lifecycle-policy schema.
+# Only `latest` is kept. When a push moves it, the previous image becomes
+# untagged and this rule expires it untagged_expiry_days after it was pushed
+# (ECR evaluates lifecycle policies periodically, so "about a day"). The image
+# tagged `latest` is never matched. The data source checks the document against
+# ECR's lifecycle-policy schema.
 data "aws_ecr_lifecycle_policy_document" "keep" {
   rule {
     priority    = 1
-    description = "never expire the bootstrap image"
+    description = "expire untagged images ${var.untagged_expiry_days} day(s) after push"
     selection {
-      tag_status      = "tagged"
-      tag_prefix_list = ["bootstrap"]
-      count_type      = "imageCountMoreThan"
-      count_number    = 9999
-    }
-    action {
-      type = "expire"
-    }
-  }
-  rule {
-    priority    = 2
-    description = "keep the newest ${var.keep_images} images"
-    selection {
-      tag_status   = "any"
-      count_type   = "imageCountMoreThan"
-      count_number = var.keep_images
+      tag_status   = "untagged"
+      count_type   = "sinceImagePushed"
+      count_unit   = "days"
+      count_number = var.untagged_expiry_days
     }
     action {
       type = "expire"

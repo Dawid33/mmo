@@ -2,16 +2,20 @@
 # Releases the login service on orion (`just orion-login-push`, after
 # `just orion-login-build`): builds the image (deploy/images/login/Dockerfile,
 # from a staging directory holding only the binary and the Dockerfile), pushes
-# it to ECR as <repo>:<git short sha>[-dirty], then sets it on the Deployment BY
-# DIGEST (`kubectl set image … login=<repo>@sha256:…`, a rolling update: with two
-# replicas logins continue) and waits for the rollout. Tags are labels only: a
-# re-push under the same tag (e.g. `-dirty`) has a new digest and so always rolls
-# out; the digest already running is "nothing to roll out". A failed rollout
-# leaves the old pods serving and prints the way back (`kubectl rollout undo`); a
-# failed `set image` changed nothing (exit 2).
-# Before the login root is applied there is no Deployment: the image is also
-# pushed as <repo>:bootstrap (what the login module starts from) and the script
-# says to apply the login root.
+# it to ECR as <repo>:latest — the repository's only tag — and sets it on the
+# Deployment BY DIGEST (`kubectl set image … login=<repo>@sha256:…`, a rolling
+# update: with two replicas logins continue), then waits for the rollout. The
+# digest is what makes a moving `latest` safe: every push has its own, so it
+# always rolls out; the digest already running is "nothing to roll out".
+# The build's git revision (short sha, `-dirty` if crates/ or Cargo.lock have
+# uncommitted changes) is printed and kept as the image label
+# org.opencontainers.image.revision.
+# A failed rollout leaves the old pods serving and prints the way back
+# (`kubectl rollout undo`, to the previous digest: it works while that image is
+# still in ECR — untagged images expire about a day after their push — or in the
+# node's cache); a failed `set image` changed nothing (exit 2).
+# Before the login root is applied there is no Deployment: the script only
+# pushes and says to apply the login root (the module starts from `latest`).
 # Env: KUBE_CONTEXT (orion), AWS_REGION (eu-central-1), LOGIN_BIN
 # (target/release/login), IMAGE_REPOSITORY (default: the registry root's
 # `repository_url` output, read with $TOFU, default tofu).
@@ -34,20 +38,20 @@ if [ -z "$repo" ]; then
     fi
 fi
 registry="${repo%%/*}"
+image="$repo:latest"
 
-tag=$(git rev-parse --short HEAD)
+rev=$(git rev-parse --short HEAD)
 if [ -n "$(git status --porcelain -- crates Cargo.lock)" ]; then
-    tag="$tag-dirty"
-    echo "orion-login-push: uncommitted changes under crates/ or Cargo.lock: tagging $tag" >&2
+    rev="$rev-dirty"
+    echo "orion-login-push: uncommitted changes under crates/ or Cargo.lock: revision $rev" >&2
 fi
-image="$repo:$tag"
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp "$bin" "$stage/login"
 cp deploy/images/login/Dockerfile "$stage/Dockerfile"
-echo "orion-login: building $image"
-docker build -q -t "$image" "$stage" > /dev/null
+echo "orion-login: building $image (revision $rev)"
+docker build -q --label "org.opencontainers.image.revision=$rev" -t "$image" "$stage" > /dev/null
 
 aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry" > /dev/null
 docker push -q "$image" > /dev/null
@@ -58,7 +62,7 @@ if [ -z "$digest_ref" ]; then
     echo "orion-login-push: pushed $image but found no digest for $repo in its RepoDigests; nothing rolled out" >&2
     exit 1
 fi
-echo "orion-login: pushed $image ($digest_ref)"
+echo "orion-login: pushed $image ($digest_ref, revision $rev)"
 
 if current=$(kubectl --context "$ctx" -n login get deploy/login \
         -o jsonpath='{.spec.template.spec.containers[?(@.name=="login")].image}' 2>&1); then
@@ -66,7 +70,7 @@ if current=$(kubectl --context "$ctx" -n login get deploy/login \
         echo "orion-login: already running $digest_ref; nothing to roll out"
         exit 0
     fi
-    echo "orion-login: set image $image ($digest_ref), was $current"
+    echo "orion-login: set image $digest_ref (revision $rev), was $current"
     if ! err=$(kubectl --context "$ctx" -n login set image deploy/login "login=$digest_ref" 2>&1); then
         echo "$err" >&2
         echo "orion-login-push: $image is pushed but the Deployment was NOT changed (kubectl set image failed); still running $current" >&2
@@ -74,20 +78,18 @@ if current=$(kubectl --context "$ctx" -n login get deploy/login \
     fi
     if ! kubectl --context "$ctx" -n login rollout status deploy/login --timeout=5m; then
         {
-            echo "orion-login-push: the new pods ($image, $digest_ref) did not become ready."
+            echo "orion-login-push: the new pods ($digest_ref, revision $rev) did not become ready."
             echo "The old pods are still serving (a rolling update keeps them until the new ones are Ready)."
-            echo "Way back:"
+            echo "Way back (to the previous digest; works while that image is still in ECR, about a day, or in the node's cache):"
             echo "  kubectl --context $ctx -n login rollout undo deploy/login"
         } >&2
         exit 1
     fi
-    echo "orion-login: released $image ($digest_ref)"
+    echo "orion-login: released $digest_ref (revision $rev)"
 elif [[ "$current" == *NotFound* ]]; then
     # Absent Deployment (or namespace): the login root is not applied yet. The
-    # module starts from the :bootstrap TAG.
-    docker tag "$image" "$repo:bootstrap"
-    docker push -q "$repo:bootstrap" > /dev/null
-    echo "image pushed: $image (and :bootstrap); apply the login root"
+    # module starts from the `latest` tag.
+    echo "image pushed: $image ($digest_ref); apply the login root"
 else
     echo "$current" >&2
     echo "orion-login-push: $image is pushed but NOT rolled out — fix the cluster access and run \`kubectl --context $ctx -n login set image deploy/login login=$digest_ref\`" >&2

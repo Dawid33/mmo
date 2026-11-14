@@ -5,7 +5,7 @@
 # must be in ECR BEFORE the first apply: the Deployment waits for its rollout, and a
 # failed apply taints it. Order:
 #   just orion-init registry && just orion-plan registry && just orion-apply registry
-#   just orion-login-push     # first push: no Deployment yet, also tags `bootstrap`
+#   just orion-login-push     # first push: no Deployment yet, only pushes <repo>:latest
 #   just orion-init login && just orion-plan login && just orion-apply login
 # Releases afterwards: `just orion-login-push` (kubectl set image by digest, not an apply).
 # Operator commands: `just orion-login …` (e.g. `just orion-login world list`).
@@ -24,7 +24,7 @@ variable "issuer_host_alias_ip" {
 variable "image_tag" {
   description = "Tag the Deployment is created with (later releases: `just orion-login-push`)."
   type        = string
-  default     = "bootstrap"
+  default     = "latest"
 }
 
 data "terraform_remote_state" "registry" {

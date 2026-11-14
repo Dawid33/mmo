@@ -4,10 +4,10 @@ variable "repositories" {
   default     = ["mmo/login"]
 }
 
-variable "keep_images" {
-  description = "Images kept per repository; older ones expire (never the image tagged `bootstrap`)."
+variable "untagged_expiry_days" {
+  description = "Days after its push an untagged image (a release that `latest` has moved past) expires. The previous release stays pullable about that long: what `kubectl rollout undo` needs if the node's image cache does not hold it."
   type        = number
-  default     = 20
+  default     = 1
 }
 
 variable "pull_user_name" {

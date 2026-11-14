@@ -5,7 +5,7 @@
 # Applied BEFORE the login root: that root reads this state (repository URL,
 # registry host, the pull user's key), and its first pod needs an image here.
 #   just orion-init registry && just orion-plan registry && just orion-apply registry
-#   just orion-login-push   # the first push also tags the image `bootstrap`
+#   just orion-login-push   # pushes <repo>:latest (the only tag)
 #   just orion-apply login
 module "registry" {
   source = "../../../modules/registry"

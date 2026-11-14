@@ -15,9 +15,9 @@ variable "image_repository" {
 }
 
 variable "image_tag" {
-  description = "Tag the Deployment is CREATED with. Releases change the image with `kubectl set image` (`just orion-login-push`) and the Deployment ignores later changes to it, so changing this after the first apply does nothing."
+  description = "Tag the Deployment is CREATED with (`latest`, the repository's only tag). Releases set a digest with `kubectl set image` (`just orion-login-push`) and the Deployment ignores later changes to its image, so changing this after the first apply does nothing."
   type        = string
-  default     = "bootstrap"
+  default     = "latest"
 }
 
 variable "ecr_region" {

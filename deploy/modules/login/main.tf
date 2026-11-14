@@ -6,13 +6,17 @@
 #
 # The image is mmo/login in ECR (the registry root; deploy/images/login/Dockerfile:
 # debian + the release binary at /usr/local/bin/login, entrypoint `login`). The
-# Deployment is created with var.image_tag (`bootstrap`, pushed by the FIRST
-# `just orion-login-push`) and then ignores its image: releases are
-# `kubectl set image` to <repo>@sha256:<digest> (never a tag: a re-pushed tag
-# would not roll) by `just orion-login-push`, rolled back with
-# `kubectl rollout undo`, and a later apply never rolls a release back. Push
-# BEFORE the first apply: the Deployment waits for its rollout, so without the
-# image the apply blocks about 10 minutes, fails and taints the Deployment.
+# repository keeps one tag, `latest`. The Deployment is created with
+# var.image_tag (`latest`, pushed by the first `just orion-login-push`) and then
+# ignores its image: releases are `kubectl set image` to <repo>@sha256:<digest>
+# (never a tag: a re-pushed tag would not roll) by `just orion-login-push`, rolled
+# back with `kubectl rollout undo` (to the previous digest: it works while that
+# image is still in ECR, about a day, or in the node's cache), and a later apply
+# never rolls a release back. Push BEFORE the first apply: the Deployment waits
+# for its rollout, so without the image the apply blocks about 10 minutes, fails
+# and taints the Deployment. If the login root is ever destroyed and re-applied,
+# the node may hold a stale cached `latest`: run `just orion-login-push` after the
+# apply (it sets the digest) to be sure.
 # Pulling needs a token (ecr.tf): Secret login-ecr, made here at apply time and
 # rewritten every 6 hours by the CronJob ecr-refresh.
 #
@@ -147,7 +151,10 @@ resource "kubernetes_deployment_v1" "login" {
           name  = "login"
           image = "${var.image_repository}:${var.image_tag}"
           # The image's entrypoint is the binary itself (`login`), not a shell.
-          args              = ["serve"]
+          args = ["serve"]
+          # Safe with a moving `latest`: every release after the first sets a
+          # digest, and the very first pull happens on a node with no cached
+          # `latest` (but see the header on re-creating the root).
           image_pull_policy = "IfNotPresent"
           env {
             name  = "VOXEL_LOGIN_BIND"

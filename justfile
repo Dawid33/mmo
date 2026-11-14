@@ -1796,16 +1796,18 @@ orion-keycloak-admin-password:
 
 # The login service on orion (deploy/modules/login, root deploy/envs/orion/login): the pods run
 # the image mmo/login from ECR (deploy/images/login/Dockerfile: debian + the release binary;
-# the registry root). Releases are `kubectl set image` by digest, never an apply; the way back is
-# `just orion-kube -n login rollout undo deploy/login`.
+# the registry root; one tag, `latest`, older images expire about a day after `latest` moves on).
+# Releases are `kubectl set image` by digest, never an apply; the way back is
+# `just orion-kube -n login rollout undo deploy/login` (the previous digest: while it is still in ECR,
+# about a day, or in the node's cache).
 # Release build of the login binary (what orion-login-push puts in the image).
 orion-login-build:
     {{cap}} {{cargo}} build --release -p login --bin login
 
-# Build the image, push it to ECR as mmo/login:<git short sha> and `kubectl set image` it on the
-# login Deployment BY DIGEST (a re-push under the same tag still rolls out), waiting for the
-# rollout (scripts/orion_login_push.sh). Before the login root exists it only pushes, also as
-# :bootstrap (the tag the root's first apply starts from).
+# Build the image (labelled with the git revision), push it to ECR as mmo/login:latest and
+# `kubectl set image` it on the login Deployment BY DIGEST (every push rolls out), waiting for the
+# rollout (scripts/orion_login_push.sh). Before the login root exists it only pushes (the root's
+# first apply starts from `latest`).
 orion-login-push: orion-login-build
     KUBE_CONTEXT={{orion_context}} TOFU={{tofu}} scripts/orion_login_push.sh
 
