@@ -367,9 +367,11 @@ VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;s
 ```
 
 - `--prefab NAME[:DX,DZ[:TURN]]` (repeatable; the client joins the flags with `;`) makes the client start
-  its server with `VOXEL_DEV_STRUCTURES=<rx>,<rz>=<spec>`: the prefabs are laid out beside the landing
-  column of region `(rx, rz)` (a row along +x without offsets; each on a pad levelled to the ground at its
-  anchor). The region is `VOXEL_DEBUG_EMBARK_AT` if set, else `0,0`, and the automatic embark aims for it.
+  its server with `VOXEL_DEV_STRUCTURES=all=<spec>`: the prefabs stand beside the landing column of EVERY
+  region (else its centre), laid out lazily per region as a row along +x without offsets, each on a pad
+  levelled to the ground at its anchor. The embark is chosen as without the flag.
+- `VOXEL_DEV_STRUCTURES` by hand has two forms: `all=<spec>` (above) and `<rx>,<rz>=<spec>` (one region
+  only, an explicit list; the server logs the placement count).
 - `VOXEL_PREFAB_DIRS` (`:`-separated, relative to the current directory) adds prefab directories to
   `assets/prefabs`; the built-in set is always installed. A missing directory is a startup error.
 - It needs a region never saved before: use `--reset` (a saved region is never regenerated, so an

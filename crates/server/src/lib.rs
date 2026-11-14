@@ -897,10 +897,18 @@ pub fn run() -> claims::ServerExit {
     // Prefabs, and (only when the environment asks) a dev structure source: before the cache key and
     // anything that can generate terrain.
     {
-        let landing_of = |rc: game::RegionCoords| world_map.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing);
-        match dev_structures::install_from_env(&registry, &landing_of, world_seed, materials) {
-            Ok(Some(n)) => info!("[structures] {n} placements from VOXEL_DEV_STRUCTURES"),
-            Ok(None) => {}
+        let landings = dev_structures::requested().then(|| world_map.clone()).flatten().map(std::sync::Arc::new);
+        let landing_of: dev_structures::LandingOf = std::sync::Arc::new(move |rc: game::RegionCoords| {
+            landings.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing)
+        });
+        match dev_structures::install_from_env(&registry, landing_of, world_seed, materials) {
+            Ok(dev_structures::DevStructures::Off) => {}
+            Ok(dev_structures::DevStructures::Region { x, z, placements }) => {
+                info!("[structures] {placements} placements in region {x},{z} from VOXEL_DEV_STRUCTURES")
+            }
+            Ok(dev_structures::DevStructures::EveryRegion { spec }) => {
+                info!("[structures] every region: {spec} (from VOXEL_DEV_STRUCTURES)")
+            }
             Err(message) => panic!("{message}"),
         }
     }

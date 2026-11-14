@@ -3,6 +3,7 @@
 
 use game::prefab::Placement;
 use game::{BlockId, ColumnCoords, RegionCoords, SubChunk, CHUNK_BLOCKS};
+use server::dev_structures::{install_from_env, DevStructures, LandingOf};
 use worldgen::structures::{active, DEV_GAP_BLOCKS};
 
 const CB: i32 = CHUNK_BLOCKS as i32;
@@ -33,19 +34,22 @@ fn dev_structures_install_and_stamp() {
 
     // Off: no variable, no source; the built-in prefabs are installed anyway.
     std::env::remove_var("VOXEL_DEV_STRUCTURES");
-    let landing = |_: RegionCoords| Some([20u32, 20u32]);
+    let landing: LandingOf = std::sync::Arc::new(|_: RegionCoords| Some([20u32, 20u32]));
     // (A second install in this process would conflict, so the "off" call is the same set.)
-    assert_eq!(server::dev_structures::install_from_env(&registry, &landing, seed, mats), Ok(None));
+    assert_eq!(install_from_env(&registry, landing.clone(), seed, mats), Ok(DevStructures::Off));
     assert!(game::prefab::prefabs().named("dev-hut").is_some());
     assert!(active().placements_in(-100_000, -100_000, 100_000, 100_000, 0).is_empty());
 
     // On.
     std::env::set_var("VOXEL_DEV_STRUCTURES", "0,0=dev-hut");
-    assert_eq!(server::dev_structures::install_from_env(&registry, &landing, seed, mats), Ok(Some(1)));
+    assert_eq!(
+        install_from_env(&registry, landing, seed, mats),
+        Ok(DevStructures::Region { x: 0, z: 0, placements: 1 })
+    );
 
     let found = active().placements_in(0, 0, RB, RB, 0);
     assert_eq!(found.len(), 1);
-    let sp = found[0];
+    let sp = &found[0];
     assert_eq!(sp.prefab.name, "dev-hut");
     let ground = worldgen::ground_y(20 + DEV_GAP_BLOCKS, 20, seed, mats);
     assert!((-64..320).contains(&ground), "ground_y {ground}");
