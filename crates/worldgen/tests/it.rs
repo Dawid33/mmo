@@ -28,6 +28,7 @@ mod lod_bricks;
 mod player_walk;
 mod scene_hash_golden;
 mod slopes;
+mod structure_pass;
 mod structures;
 mod tile_map;
 mod tree_chop;

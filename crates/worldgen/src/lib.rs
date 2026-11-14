@@ -385,6 +385,17 @@ pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<
     generate_columns(coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, mats)
 }
 
+/// `generate_region` with an explicit structure source and no forged world (procedural terrain from
+/// `seed`).
+pub fn generate_region_with(
+    coords: RegionCoords,
+    seed: u64,
+    mats: Materials,
+    structures: &dyn structures::StructureSource,
+) -> Vec<(ColumnCoords, Column)> {
+    generate_columns_with(coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, mats, structures)
+}
+
 /// The columns `xs × zs` (region-local chunk columns) of region `coords`:
 /// exactly the same columns `generate_region` makes, however the region is
 /// split into windows.
@@ -400,11 +411,29 @@ pub fn generate_columns(
     let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
     if let Some(world) = forged::active() {
         let trees_from = TreeSource { habitat: world, seed: world.seed() };
-        return columns_from_patch(&world.patch(ox, oz, span), coords, xs, zs, mats, trees_from);
+        let patch = world.patch(ox, oz, span);
+        return columns_from_patch(&patch, coords, xs, zs, mats, trees_from, structures::active());
     }
+    generate_columns_with(coords, xs, zs, seed, mats, structures::active())
+}
+
+/// `generate_columns` with an explicit structure source and no forged world (procedural terrain from
+/// `seed`). `generate_columns` is this with `structures::active()` when no forged world is installed.
+pub fn generate_columns_with(
+    coords: RegionCoords,
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
+    seed: u64,
+    mats: Materials,
+    structures: &dyn structures::StructureSource,
+) -> Vec<(ColumnCoords, Column)> {
+    let cb = CHUNK_BLOCKS as i32;
+    let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
+    let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats, TreeSource { habitat: &habitat, seed })
+    let trees_from = TreeSource { habitat: &habitat, seed };
+    columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats, trees_from, structures)
 }
 
 /// Patch margin (blocks) past a window: wider when trees are on, which read
@@ -465,15 +494,26 @@ pub fn prefetch_lod_forged(world: &forged::ForgedWorld, key: &game::lod::LodKey)
     world.prefetch_rect(min, max)
 }
 
-/// `generate_region` for an explicit forged world (tests, tools).
+/// `generate_region` for an explicit forged world (tests, tools), with the installed structure source.
 pub fn generate_region_forged(
     world: &forged::ForgedWorld,
     coords: RegionCoords,
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
+    generate_region_forged_with(world, coords, mats, structures::active())
+}
+
+/// `generate_region_forged` with an explicit structure source.
+pub fn generate_region_forged_with(
+    world: &forged::ForgedWorld,
+    coords: RegionCoords,
+    mats: Materials,
+    structures: &dyn structures::StructureSource,
+) -> Vec<(ColumnCoords, Column)> {
     let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, &mats);
     let trees_from = TreeSource { habitat: world, seed: world.seed() };
-    columns_from_patch(&world.patch(ox, oz, span), coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from)
+    let patch = world.patch(ox, oz, span);
+    columns_from_patch(&patch, coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from, structures)
 }
 
 /// Material of a solid block: sand under standing water (lake and river
@@ -540,6 +580,84 @@ fn tree_blocks(
     out
 }
 
+/// Levels the samples (`samples[i * nz + j]` is world column `(x0 + i, z0 + j)`) under the structures'
+/// pads, from each column's natural surface, and keeps trees off their keep-out. A padded column loses its
+/// glacier ice; its water and cover stay.
+fn pad_samples(samples: &mut [ColSample], near: &[&structures::StructurePlacement], (x0, z0): (i32, i32), nz: usize) {
+    for (k, c) in samples.iter_mut().enumerate() {
+        let (x, z) = (x0 + (k / nz) as i32, z0 + (k % nz) as i32);
+        if let structures::PadEffect::Level { surface, .. } = structures::pad_at(near, x, z, c.s) {
+            c.s = surface;
+            c.top = surface;
+            c.ice_from = c.water_top + 1;
+        }
+        if structures::blocks_trees(near, x, z, TREE_REACH_BLOCKS) {
+            c.trees = false;
+        }
+    }
+}
+
+/// The band `(lo, hi)` of the chunk column at world block `(x, z)` grown to the structures whose box
+/// meets its footprint grown by one block (a carve beside it needs this column's wall stored): up to
+/// the box's top block, down to one block under its bottom (a carve's floor faces stored ground), never
+/// below `floor`.
+fn structure_band(
+    near: &[&structures::StructurePlacement],
+    [x, z]: [i32; 2],
+    (mut lo, mut hi): (i32, i32),
+    floor: i32,
+) -> (i32, i32) {
+    let cb = CHUNK_BLOCKS as i32;
+    for p in near {
+        let (min, max) = p.bounds();
+        if min[0] < x + cb + 1 && max[0] > x - 1 && min[2] < z + cb + 1 && max[2] > z - 1 {
+            hi = hi.max(max[1] - 1);
+            lo = lo.min((min[1] - 1).max(floor));
+        }
+    }
+    (lo, hi)
+}
+
+/// Writes the structures' cells of world chunk `chunk` into its block grid and chisel map: a carve is
+/// air, a write its block and chisel (a cell's old chisel — a slope's — goes unless the write has one).
+/// Nothing at or below `bedrock(lx, lz)`, the bedrock y of that block column.
+fn stamp_structures(
+    near: &[&structures::StructurePlacement],
+    chunk: [i32; 3],
+    blocks: &mut [Block],
+    chisel: &mut BTreeMap<BlockIndex, ChiselData>,
+    bedrock: &dyn Fn(usize, usize) -> i32,
+) {
+    let cb = CHUNK_BLOCKS as i32;
+    let lo = chunk.map(|c| c * cb);
+    let above_bedrock = |bi: BlockIndex| {
+        let (lx, ly, lz) = bi.xyz();
+        lo[1] + ly as i32 > bedrock(lx, lz)
+    };
+    for p in near {
+        let (min, max) = p.bounds();
+        if (0..3).any(|a| min[a] >= lo[a] + cb || max[a] <= lo[a]) {
+            continue;
+        }
+        let Some(stamp) = game::prefab::layout_chunk(&p.prefab, &p.at, chunk) else { continue };
+        for bi in stamp.carve.into_iter().filter(|&bi| above_bedrock(bi)) {
+            blocks[bi.linear()] = Block::new(BlockId::AIR);
+            chisel.remove(&bi);
+        }
+        for (bi, block, c) in stamp.writes.into_iter().filter(|w| above_bedrock(w.0)) {
+            blocks[bi.linear()] = block;
+            match c {
+                Some(c) => {
+                    chisel.insert(bi, c);
+                }
+                None => {
+                    chisel.remove(&bi);
+                }
+            }
+        }
+    }
+}
+
 /// The columns `xs × zs` (region-local chunk columns) of region `coords`,
 /// sampled from `patch` — which must cover them plus `patch_margin(&mats)`.
 /// Trees (when `mats.trees` is on) come from `trees_from`.
@@ -551,6 +669,10 @@ fn tree_blocks(
 /// water block faces implied ground: past the footprint's deepest soil, and
 /// to the lowest open block of every face-neighbouring block column (the
 /// cliff rule — a cliff's face is materialised, not implied).
+///
+/// Structures from `structures` level the ground under their pads, keep trees off their keep-out, grow
+/// the band over their boxes and are written after terrain and trees. With none in reach of the window
+/// the output is exactly the structure-free one.
 fn columns_from_patch(
     patch: &dyn Patch,
     coords: RegionCoords,
@@ -558,6 +680,7 @@ fn columns_from_patch(
     zs: std::ops::Range<usize>,
     mats: Materials,
     trees_from: TreeSource,
+    structures: &dyn structures::StructureSource,
 ) -> Vec<(ColumnCoords, Column)> {
     let cb = CHUNK_BLOCKS as i32;
     let air = Block::new(BlockId::AIR);
@@ -579,6 +702,13 @@ fn columns_from_patch(
         for j in 0..nz {
             samples.push(column_sample(patch, &mats, wx + i as i32 - ring, wz + j as i32 - ring));
         }
+    }
+    // Structures reaching the sampled ring (their pads) or its trees (their keep-out). None: the terrain
+    // is exactly what it is without a structure source.
+    let near = structures.placements_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
+    if !near.is_empty() {
+        // The whole ring, before slopes: slopes, the cliff rule and tree surfaces read it.
+        pad_samples(&mut samples, &near, (wx - ring, wz - ring), nz);
     }
     let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
     // Each column's slope, over the ring minus its outer block (`None`
@@ -655,6 +785,13 @@ fn columns_from_patch(
             // so the deepest soil (dirt/sand) of the lowest column is still
             // materialized, and down to every open neighbour block.
             lo = (lo - soil_max).min(open_lo);
+            if !near.is_empty() {
+                let floor = (0..cb * cb)
+                    .map(|i| at(fx + i / cb, fz + i % cb).s - game::UNDERGROUND_DEPTH + 1)
+                    .min()
+                    .unwrap();
+                (lo, hi) = structure_band(&near, [wx + fx, wz + fz], (lo, hi), floor);
+            }
 
             // Materialize whole sub-chunks [base_sub_y ..= top_sub_y]; below is
             // the ground recipe, above air. Whole blocks, and a slope chisel
@@ -748,6 +885,16 @@ fn columns_from_patch(
                 blocks[bi.linear()] = placed.block;
                 if let Some(c) = placed.chisel {
                     chisel.insert(bi, c);
+                }
+            }
+            // Structures, after terrain and trees, in the source's order (a later one wins).
+            if !near.is_empty() {
+                let rc = REGION_CHUNKS as i32;
+                let chunk_xz = [coords.x * rc + cx as i32, coords.z * rc + cz as i32];
+                let bedrock = |lx: usize, lz: usize| at(fx + lx as i32, fz + lz as i32).s - game::UNDERGROUND_DEPTH;
+                for (sub_i, (blocks, chisel)) in chunks.iter_mut().enumerate() {
+                    let sub_y = base_sub_y + sub_i as i32;
+                    stamp_structures(&near, [chunk_xz[0], sub_y, chunk_xz[1]], blocks, chisel, &bedrock);
                 }
             }
 
