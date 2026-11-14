@@ -1089,6 +1089,11 @@ pub struct WorldManager<S: RegionSpawner> {
     /// late ones and are dropped.
     incarnation_seen: BTreeMap<RegionCoords, u64>,
     next_incarnation: u64,
+    /// Messages bound for a region whose super-region nobody owns, or whose owner this host
+    /// does not know (`peers.rs`, [`crate::Owner::Free`] / [`crate::Owner::Unknown`]): kept
+    /// here, in order, until it has an owner ("wait, never guess"). A cut writes each as
+    /// this host's in-flight row ([`Self::cut_peer_rows`]), as for an absent peer.
+    unowned_waiting: BTreeMap<crate::SuperRegion, Vec<peers::UnownedWait>>,
     /// The session with each other host of the world (`peers.rs`, [`Self::set_peer`]).
     /// Empty for a single host.
     peers: BTreeMap<u32, peers::Peer>,
@@ -1317,6 +1322,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             incarnation: BTreeMap::new(),
             incarnation_seen: BTreeMap::new(),
             next_incarnation: 0,
+            unowned_waiting: BTreeMap::new(),
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
             peer_queued: BTreeMap::new(),
@@ -1474,6 +1480,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn can_move(&self, id: ClientId, target: RegionCoords) -> bool {
         if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
             log::debug!("client {id}: a move to {target:?} from a session whose body is on another host: refused");
+            return false;
+        }
+        if !self.owns(target) && !self.is_foreign(target) {
+            let owner = self.owner_of(target);
+            log::debug!("client {id}: a move to {target:?}, whose owner this host does not know ({owner:?}): refused");
             return false;
         }
         let bodiless = !self.homes.contains_key(&id) && !self.moving.contains_key(&id);
@@ -1973,9 +1984,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.hand_off_to_peer(rc, target, stamp, bundle, view, now_ms);
                         continue;
                     }
-                    if self.is_foreign(target) {
+                    if !self.owns(target) {
                         // Another host's region: to its owner, reachable or not (it
-                        // waits in the session); that host decides the arrival.
+                        // waits in the session); that host decides the arrival. A
+                        // region with no owner this host knows: it waits here for one.
                         self.depart_to_peer(rc, target, stamp, bundle, view);
                         continue;
                     }
@@ -2209,6 +2221,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         for m in self.intent_mailbox.values_mut().flatten() {
             m.in_source_view = !mine(m.accounted_in);
         }
+        for w in self.unowned_waiting.values_mut().flatten() {
+            w.in_source_view = !mine(w.accounted_in);
+        }
         // Transfers to other hosts, too.
         self.peer_in_source_view.clear();
         let mut dead = Vec::new();
@@ -2319,7 +2334,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// and a rebuild reads the store (the spec's §8 case 2).
     pub fn stored_terrain_changed(&mut self, versions: BTreeMap<RegionCoords, u64>) {
         for (rc, version) in versions {
-            let foreign = self.is_foreign(rc);
+            // Not this host's (another host's, or nobody's that it knows): as foreign.
+            let foreign = !self.owns(rc);
             if !foreign {
                 // This host's (it may have been another host's): no stale mark to keep.
                 self.foreign_halo_stale.remove(&rc);
@@ -2367,6 +2383,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // Another host's region: to its owner again.
                     let owner = self.foreign_host(target).expect("checked");
                     self.queue_to_peer(owner, crate::Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None });
+                }
+                InFlightRow::Transfer { target, bundle, stamp } if !self.owns(target) => {
+                    // No owner this host knows: it waits here for one, as it did.
+                    let msg = crate::Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
+                    self.wait_for_owner(target, msg, false, None);
                 }
                 InFlightRow::Transfer { target, bundle, stamp } => {
                     self.locations.insert(bundle.id, target);
@@ -3729,7 +3750,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Its incarnation marker goes on the output channel BEFORE the runner
         // exists: everything a previous (dead) runner left there comes
         // before it, everything this one sends after.
-        self.next_incarnation += 1;
+        // Ordered across hosts by the one world clock: a region started here after it ran on
+        // another host (an heir's, R4) gets a higher incarnation than any it had there.
+        self.next_incarnation = (self.next_incarnation + 1).max(self.spawner.world_tick());
         self.incarnation.insert(rc, self.next_incarnation);
         let _ = self.region_out_send.send((rc, RegionOutput::Incarnation(self.next_incarnation)));
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
@@ -3851,8 +3874,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             );
             return;
         }
-        if self.is_foreign(rc) {
-            // Another host runs it: the client is sent there (`peers.rs`).
+        if !self.owns(rc) {
+            // Another host runs it: the client is sent there (`peers.rs`); nobody this host
+            // knows of runs it: dropped, as for an unreachable owner.
             self.subscribe_elsewhere(client, rc);
             return;
         }
@@ -4014,7 +4038,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.route_intent(IntentMsg::Reply(SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 }), emitter, view);
             }
             (None, IntentMsg::Reply(s)) => {
-                let waiting = owner.filter(|rc| self.parked.contains_key(rc) || self.regions.contains_key(rc));
+                // Held for a region that ran here, or one whose owner this host does not
+                // know (its owner gets it with the mailbox: never lost).
+                let unowned = |rc: &RegionCoords| !self.owns(*rc) && !self.is_foreign(*rc);
+                let waiting =
+                    owner.filter(|rc| self.parked.contains_key(rc) || self.regions.contains_key(rc) || unowned(rc));
                 match waiting {
                     Some(rc) => {
                         let accounted_in = self.inbound_accounted;

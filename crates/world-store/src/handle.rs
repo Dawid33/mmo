@@ -92,8 +92,9 @@ pub enum WaitFor {
     /// declare it.
     Vouched,
 }
-/// `super_regions.owner` of a free row (no host holds it).
-pub const NO_OWNER: i64 = -1;
+/// `super_regions.owner` of a free row (no host holds it); defined in `game` (its
+/// directory mirrors the column).
+pub use game::NO_OWNER;
 
 /// A handle on the open store (see the crate docs and `thread.rs`).
 #[derive(Clone)]

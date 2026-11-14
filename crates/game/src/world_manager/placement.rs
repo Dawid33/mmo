@@ -48,6 +48,9 @@ pub const SPAWN_PIN_MS: u64 = 120_000;
 pub enum Placement {
     Here,
     Host(u32),
+    /// The region's super-region has no owner this host knows ([`crate::Owner::Free`] /
+    /// [`crate::Owner::Unknown`]): the order waits, as for a peer's sync.
+    Wait,
 }
 
 /// A spawn order of the login service ([`ServerEvent::SpawnOrder`], [`Reliable::SpawnOrder`]).
@@ -128,8 +131,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         match self.owner_of(region) {
             crate::Owner::Me => Placement::Here,
             crate::Owner::Host(h) => Placement::Host(h),
-            // Static policies never answer these (R4 Task 4 gives them their own answer).
-            crate::Owner::Free | crate::Owner::Unknown => Placement::Here,
+            crate::Owner::Free | crate::Owner::Unknown => Placement::Wait,
         }
     }
 
@@ -196,16 +198,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.spawn_refused(req);
         }
         match self.place_spawn(req.player, req.record_region) {
-            Placement::Here if !live && !self.peers_synced() => {
-                if self.clock_ms.saturating_sub(since_ms) >= SPAWN_SYNC_WAIT_MS {
-                    log::warn!(
-                        "[server] spawn order for player {}: a peer has not synced within {SPAWN_SYNC_WAIT_MS} ms; refused",
-                        req.player.0
-                    );
-                    return self.spawn_refused(req);
-                }
-                self.spawn_held.push((since_ms, req));
-            }
+            Placement::Here if !live && !self.peers_synced() => self.hold_spawn(req, since_ms, "a peer has not synced"),
+            Placement::Wait => self.hold_spawn(req, since_ms, "its region has no owner this host knows"),
             Placement::Here => {
                 log::info!("[server] spawn order for player {} (epoch {}) placed here", req.player.0, req.session_epoch);
                 // Its session connects here: the player stays here until it does.
@@ -230,6 +224,17 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
+    }
+
+    /// A spawn order that cannot be placed yet (`why`) waits for the next try
+    /// ([`Self::retry_held_spawns`]), at most [`SPAWN_SYNC_WAIT_MS`] from `since_ms`; then it
+    /// is refused.
+    fn hold_spawn(&mut self, req: SpawnRequest, since_ms: u64, why: &str) {
+        if self.clock_ms.saturating_sub(since_ms) >= SPAWN_SYNC_WAIT_MS {
+            log::warn!("[server] spawn order for player {}: {why} within {SPAWN_SYNC_WAIT_MS} ms; refused", req.player.0);
+            return self.spawn_refused(req);
+        }
+        self.spawn_held.push((since_ms, req));
     }
 
     fn spawn_refused(&mut self, req: SpawnRequest) {

@@ -13,7 +13,8 @@ fn super_region_floor_div() {
     assert_eq!(super_region_of(RegionCoords::new(16, -16), s), (1, -1));
 }
 
-use game::{ownership_from_values, rendezvous_owner, AllInOne, Owner, Ownership, Static};
+use game::{heir_of, ownership_from_values, rendezvous_owner, AllInOne, CrashPolicy, Directory, Owner, Ownership, PgClaim, Static};
+use std::collections::BTreeSet;
 
 fn owner_counts(hosts: u32) -> Vec<u32> {
     let mut counts = vec![0; hosts as usize];
@@ -102,4 +103,126 @@ fn rendezvous_keys_mirrored_super_regions_apart() {
         let owners = |sr| (2..=32).map(|hosts| rendezvous_owner(sr, hosts)).collect::<Vec<_>>();
         assert_ne!(owners(a), owners(b), "{a:?} and {b:?} share an owner at every host count");
     }
+}
+
+/// A [`Directory`] answers from its rows: an owned row is `Me` or `Host(n)`, a free row
+/// `Free`; a super-region with no row is `Unknown` until the first whole read
+/// ([`Directory::replace`]), `Free` after it.
+#[test]
+fn directory_answers_me_host_free_unknown() {
+    let mut d = Directory::default();
+    assert_eq!(d.get((0, 0), 1), Owner::Unknown, "never read: unknown");
+    d.set((0, 0), Some(1), 3);
+    assert_eq!(d.get((0, 0), 1), Owner::Me);
+    assert_eq!(d.get((0, 0), 2), Owner::Host(1));
+    assert_eq!(d.get((5, 5), 1), Owner::Unknown, "a row set alone tells nothing of the others");
+    d.replace(vec![((1, 0), Some(2), 1), ((2, 0), None, 4)]);
+    assert_eq!(d.get((1, 0), 1), Owner::Host(2));
+    assert_eq!(d.get((2, 0), 1), Owner::Free, "a free row");
+    assert_eq!(d.get((5, 5), 1), Owner::Free, "no row after a read: nobody ever claimed it");
+    assert_eq!(d.get((0, 0), 1), Owner::Me, "a row the read did not list stays");
+    assert_eq!(d.owned_by(1), vec![(0, 0)]);
+    assert_eq!(d.owned_by(2), vec![(1, 0)]);
+    assert!(d.owned_by(3).is_empty());
+
+    // The policy over it.
+    let mut claim = PgClaim::new(1, 3);
+    assert_eq!(claim.policy(), CrashPolicy::Succession);
+    assert_eq!(Ownership::owner_of(&claim, (0, 0)), Owner::Unknown);
+    claim.directory_mut().expect("a directory").replace(vec![((0, 0), Some(1), 1), ((0, 1), Some(0), 1)]);
+    assert_eq!(
+        [(0, 0), (0, 1), (0, 2)].map(|sr| Ownership::owner_of(&claim, sr)),
+        [Owner::Me, Owner::Host(0), Owner::Free]
+    );
+    assert_eq!(claim.claim_set(Some(game::MapExtent { origin: RegionCoords::new(0, 0), width: 1, height: 3 }), 1).len(), 1);
+    assert!(AllInOne.directory_mut().is_none() && Static { ordinal: 0, hosts: 2 }.directory_mut().is_none());
+    assert_eq!((AllInOne.policy(), Static { ordinal: 0, hosts: 2 }.policy()), (CrashPolicy::Rollback, CrashPolicy::Rollback));
+    let parsed = ownership_from_values(Some("claim"), Some("2"), Some("3")).expect("claim parses");
+    assert_eq!((parsed.ordinal(), parsed.hosts(), parsed.policy()), (2, 3, CrashPolicy::Succession));
+    assert_eq!(parsed.owner_of((0, 0)), Owner::Unknown, "nothing read yet");
+    for bad in [(Some("claim"), None, Some("3")), (Some("claim"), Some("3"), Some("3"))] {
+        assert!(ownership_from_values(bad.0, bad.1, bad.2).is_err(), "{bad:?}");
+    }
+}
+
+/// A row is only ever replaced by a newer epoch: a stale read (or a late `Owns`) never
+/// undoes a newer claim.
+#[test]
+fn directory_ignores_an_older_epoch() {
+    let mut d = Directory::default();
+    d.set((0, 0), Some(1), 5);
+    d.set((0, 0), Some(2), 4);
+    assert_eq!((d.get((0, 0), 9), d.epoch((0, 0))), (Owner::Host(1), Some(5)), "an older set is ignored");
+    d.replace(vec![((0, 0), None, 3)]);
+    assert_eq!(d.get((0, 0), 9), Owner::Host(1), "an older read is ignored");
+    d.set((0, 0), None, 6);
+    assert_eq!((d.get((0, 0), 9), d.epoch((0, 0))), (Owner::Free, Some(6)), "a newer epoch frees it");
+    d.replace(vec![((0, 0), Some(3), 7)]);
+    assert_eq!(d.get((0, 0), 9), Owner::Host(3), "a newer read takes it");
+}
+
+/// With every host of `VOXEL_HOSTS` live, the preferred owner is the R3 rendezvous owner
+/// for every super-region (a fresh world under `claim` lays out like `static`).
+#[test]
+fn preferred_is_the_rendezvous_owner_while_every_host_lives() {
+    let mut d = Directory::default();
+    assert_eq!(d.preferred((0, 0)), None, "nobody is live");
+    for hosts in 2..=6u32 {
+        d.set_live((0..hosts).collect());
+        for sx in -16..16 {
+            for sz in -16..16 {
+                assert_eq!(d.preferred((sx, sz)), Some(rendezvous_owner((sx, sz), hosts)), "({sx}, {sz}) of {hosts}");
+            }
+        }
+    }
+}
+
+/// A dead host's share moves; nobody else's does.
+#[test]
+fn preferred_moves_only_the_dead_hosts_share() {
+    let mut d = Directory::default();
+    for hosts in 2..=6u32 {
+        for dead in 0..hosts {
+            d.set_live((0..hosts).filter(|o| *o != dead).collect());
+            for sx in -16..16 {
+                for sz in -16..16 {
+                    let before = rendezvous_owner((sx, sz), hosts);
+                    let after = d.preferred((sx, sz)).expect("a live host");
+                    assert_ne!(after, dead, "({sx}, {sz}) went to the dead host");
+                    if before != dead {
+                        assert_eq!(after, before, "({sx}, {sz}) of {hosts} moved although host {before} lives");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The heir of a host is a pure function of who is live: the same set gives the same
+/// heir, never the predecessor itself, and `None` with nobody else live. Heirs spread
+/// over the survivors, and a survivor that dies too moves only its own heirships.
+#[test]
+fn heir_of_is_stable_and_never_the_predecessor() {
+    let live = |v: &[u32]| v.iter().copied().collect::<BTreeSet<u32>>();
+    assert_eq!(heir_of(3, &live(&[])), None);
+    assert_eq!(heir_of(3, &live(&[3])), None, "only the predecessor itself");
+    assert_eq!(heir_of(3, &live(&[1, 3])), Some(1));
+    let all = live(&[0, 1, 2, 3, 4, 5]);
+    let mut heirs = BTreeSet::new();
+    for predecessor in 0..32u32 {
+        let heir = heir_of(predecessor, &all).expect("survivors");
+        assert_ne!(heir, predecessor);
+        assert!(all.contains(&heir));
+        assert_eq!(heir_of(predecessor, &all), Some(heir), "stable");
+        heirs.insert(heir);
+        // Another host leaving the live set moves this heirship only if it was the heir.
+        for gone in all.iter().copied().filter(|o| *o != predecessor) {
+            let fewer: BTreeSet<u32> = all.iter().copied().filter(|o| *o != gone).collect();
+            let again = heir_of(predecessor, &fewer).expect("survivors");
+            if gone != heir {
+                assert_eq!(again, heir, "host {gone} leaving moved {predecessor}'s heir");
+            }
+        }
+    }
+    assert!(heirs.len() >= 3, "heirs spread over the survivors: {heirs:?}");
 }

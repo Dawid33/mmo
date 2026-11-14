@@ -759,3 +759,24 @@ fn restored_in_flight_arrivals_respect_the_mailbox_cap() {
     assert_eq!(h.manager.arrivals_despawned(), 3);
     assert!(h.manager.recently_despawned_arrivals().contains(&first), "the oldest made room");
 }
+
+/// A region's incarnation is never below the world tick it starts at (R4): one counter
+/// per process starting at 0 would give an heir's first start of a region a lower number
+/// than the dead owner's last one; the one world clock orders them across hosts.
+#[test]
+fn incarnations_rise_with_the_world_tick() {
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    let first = h.manager.region_incarnation(SPAWN_REGION).expect("the spawn region runs");
+    for i in 0..30 {
+        h.tick(i * 50);
+    }
+    let world = game::RegionSpawner::world_tick(h.manager.spawner_mut());
+    assert!(world >= 30, "the world ticked: {world}");
+    let neighbour = RegionCoords::new(1, 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(neighbour), 0), 1500);
+    let second = h.manager.region_incarnation(neighbour).expect("the neighbour runs");
+    assert!(second >= world, "started at world tick {world} with incarnation {second}");
+    assert!(second > first, "a later start has a higher incarnation ({first} then {second})");
+}

@@ -197,6 +197,9 @@ pub enum Place {
     Transit { to: u32 },
     /// In the state of a region parked on a host (only with [`MultiRig::parked_hold`]).
     Parked { host: u32, rc: RegionCoords },
+    /// Waiting on a host for its region's super-region to have an owner it knows
+    /// (`unowned_waiting`, [`MultiRig::with_directory`]).
+    Unowned { host: u32, sr: game::SuperRegion },
 }
 
 pub struct MultiRig {
@@ -258,6 +261,8 @@ pub struct MultiRig {
     /// ([`Place::Parked`], decoded every round — costly, so off by default): a test that
     /// parks whole hosts (every host leaving) turns it on.
     pub parked_hold: bool,
+    /// The directory every host answers from ([`Self::with_directory`]); `None` = `Static`.
+    pub directory: Option<Vec<(game::SuperRegion, Option<u32>, u64)>>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -354,6 +359,7 @@ impl MultiRig {
                 aborted_parts: Vec::new(),
                 strips,
                 parked_hold: false,
+                directory: None,
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -508,7 +514,8 @@ impl MultiRig {
                 InFlightRow::Intent { target, msg: IntentMsg::Intent(s) } => (*target, s.due),
                 InFlightRow::Intent { target, msg: IntentMsg::Reply(s) } => (*target, s.due),
             };
-            let owner = self.hosts[0].manager.owner_host(target).expect("a static owner");
+            // A region nobody owns (or whose owner is unknown) waits on its sender: its row.
+            let Some(owner) = self.hosts[h as usize].manager.owner_host(target) else { continue };
             // A host that left (Task 14) takes no part: what waits for it is the sender's row.
             let absent = self.hosts[h as usize].manager.peer_left(owner);
             assert!(
@@ -607,6 +614,25 @@ impl MultiRig {
         parts.iter().filter(|(_, p)| p.players.iter().any(|(q, _)| *q == player)).map(|(h, _)| *h).collect()
     }
 
+    /// Every host answers ownership from a `PgClaim` directory holding exactly `rows`
+    /// (`(super-region, owner, epoch)`; owner `None` = a free row) from now on: a
+    /// super-region with no row is `Unknown` (the directory is never read whole). The rows
+    /// must give every host its keeper's home as `Static` did. Kept by
+    /// [`Self::rebuild_from_last_cut`].
+    pub fn with_directory(&mut self, rows: Vec<(game::SuperRegion, Option<u32>, u64)>) {
+        let hosts = self.hosts.len() as u32;
+        for (h, rig) in self.hosts.iter_mut().enumerate() {
+            let mut claim = game::PgClaim::new(h as u32, hosts);
+            let directory = game::Ownership::directory_mut(&mut claim).expect("a directory");
+            for (sr, owner, epoch) in &rows {
+                directory.set(*sr, *owner, *epoch);
+            }
+            rig.manager.set_ownership(Box::new(claim), self.s);
+            assert!(rig.manager.owns(self.homes[h]), "the rows give host {h} its keeper's home");
+        }
+        self.directory = Some(rows);
+    }
+
     /// The world restarted from the store: every host restored from its committed parts
     /// (its regions from the stored ones, its in-flight rows put back on their way),
     /// lockstep, no link delay, each keeper back home.
@@ -615,6 +641,9 @@ impl MultiRig {
             self.committed.values().flat_map(|s| s.regions.iter().map(|(rc, r)| (*rc, r.clone()))).collect();
         let hosts = self.hosts.len() as u32;
         let mut rig = MultiRig::new_from(hosts, self.s, None, 0, 0, Some(regions));
+        if let Some(rows) = &self.directory {
+            rig.with_directory(rows.clone());
+        }
         for (h, store) in &self.committed {
             rig.hosts[*h as usize].manager.restore_in_flight(store.in_flight.clone());
         }
@@ -981,6 +1010,9 @@ impl MultiRig {
                         places.entry(id).or_default().push(Place::Parked { host, rc });
                     }
                 }
+            }
+            for (sr, id) in rig.manager.unowned_waiting_ids() {
+                places.entry(id).or_default().push(Place::Unowned { host, sr });
             }
             for (peer, id, sent) in rig.manager.peer_unreceived_ids() {
                 if sent {

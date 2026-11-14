@@ -37,6 +37,16 @@
 use super::*;
 use crate::{PeerEvent, PeerLink, PeerSession, Reliable, Volatile};
 
+/// A message waiting for its region to have an owner this host knows
+/// ([`WorldManager::wait_for_owner`]), with the cut flags a mailbox entry has.
+pub(super) struct UnownedWait {
+    msg: Reliable,
+    /// In its source's snapshot of the pending cut (not a row of it).
+    pub(super) in_source_view: bool,
+    /// The cut its sender accounts for it in (it came wrapped, [`Reliable::InCut`]).
+    pub(super) accounted_in: Option<crate::CutId>,
+}
+
 /// One other host: the session with it and the link it runs over.
 pub(super) struct Peer {
     pub(super) session: PeerSession,
@@ -815,9 +825,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `bundle` (in `target`'s frame), a body that is not a player, departed from `rc` at
-    /// `stamp` into `target`, which another host owns: it goes to that host, reachable or
-    /// not. The receiving host decides everything about its arrival (a person's
-    /// `PersonCrossed` included). `view`: departed after `rc` answered the pending cut.
+    /// `stamp` into `target`, which this host does not own: it goes to the host that does,
+    /// reachable or not; the receiving host decides everything about its arrival (a
+    /// person's `PersonCrossed` included). With no owner this host knows it waits here
+    /// ([`Self::wait_for_owner`]). `view`: departed after `rc` answered the pending cut.
     pub(super) fn depart_to_peer(
         &mut self,
         rc: RegionCoords,
@@ -831,11 +842,44 @@ impl<S: RegionSpawner> WorldManager<S> {
         debug_assert!(bundle.client.is_none(), "a player crosses hosts by hand_off_to_peer");
         // A person with a history: the receiving host reports the crossing
         // (`PersonCrossed`), never this one (`peer_schedule::person_crosses_host_seam_*`).
-        let owner = self.foreign_host(target).expect("depart_to_peer: another host owns the target");
-        log::debug!("[server] {:?} from {rc:?} into {target:?}: sent to host {owner}", bundle.id);
-        // It is on another host now: nothing here routes to it.
+        // It is on another host now (or waits for one): nothing here routes to it.
         self.locations.remove(&bundle.id);
-        self.send_reliable(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None }, view);
+        let id = bundle.id;
+        let msg = Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
+        match self.foreign_host(target) {
+            Some(owner) => {
+                log::debug!("[server] {id:?} from {rc:?} into {target:?}: sent to host {owner}");
+                self.send_reliable(owner, msg, view);
+            }
+            None => self.wait_for_owner(target, msg, view, None),
+        }
+    }
+
+    /// `msg` (a transfer) for `target`, whose super-region nobody owns or whose owner this
+    /// host does not know: it waits here until it has one, never assumed to be anyone's.
+    /// `view` / `accounted_in`: as a mailbox entry's (a cut row unless either says another
+    /// snapshot or part holds it).
+    pub(super) fn wait_for_owner(
+        &mut self,
+        target: RegionCoords,
+        msg: Reliable,
+        view: bool,
+        accounted_in: Option<crate::CutId>,
+    ) {
+        let sr = crate::super_region_of(target, self.ownership.1);
+        let owner = self.owner_of(target);
+        log::debug!("[server] {} for {target:?}: super-region {sr:?} is {owner:?} here; it waits", reliable_name(&msg));
+        self.unowned_waiting.entry(sr).or_default().push(UnownedWait { msg, in_source_view: view, accounted_in });
+    }
+
+    /// Test support: the entity of every transfer waiting for an owner
+    /// ([`Self::wait_for_owner`]), with its super-region.
+    pub fn unowned_waiting_ids(&self) -> Vec<(crate::SuperRegion, crate::EntityId)> {
+        let mut out = Vec::new();
+        for (sr, list) in &self.unowned_waiting {
+            out.extend(list.iter().filter_map(|w| transfer_id(&w.msg)).map(|id| (*sr, id)));
+        }
+        out
     }
 
     /// What this host sent a host that is NOT a participant of the cut (`participants`:
@@ -854,11 +898,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// host absent from the cut (a one-phase cut's peer may also hold an entry it received
     /// and has not acknowledged yet).
     pub(super) fn cut_peer_rows(&self, participants: &BTreeSet<u32>) -> Vec<InFlightRow> {
-        self.peer_entries()
+        let to_peers = self
+            .peer_entries()
             .into_iter()
             .filter(|(ordinal, _, _)| !participants.contains(ordinal))
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
-            .filter_map(|(_, _, r)| match r.inner() {
+            .map(|(_, _, r)| r);
+        // Waiting for an owner: no other part can write it (as toward an absent peer).
+        let unowned = self.unowned_waiting.values().flatten().filter(|w| !w.in_source_view).map(|w| &w.msg);
+        to_peers
+            .chain(unowned)
+            .filter_map(|r| match r.inner() {
                 // A person is never a row (the history respawns people, as `cut_crossing`
                 // drops them); a player handed over or moved is a record
                 // (`cut_peer_players`), not a row.
@@ -1156,6 +1206,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn peer_reliable_in(&mut self, from: u32, msg: Reliable, after: bool) {
         match msg {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
+                if !self.owns(target) && !self.is_foreign(target) {
+                    // Sent here, but this host knows no owner of it: it waits here for one
+                    // (a cut row), never sent back.
+                    log::warn!("[server] host {from} sent {:?} into {target:?}, whose owner this host does not know", bundle.id);
+                    let msg = Reliable::Transfer { target, stamp, bundle, player: None };
+                    self.wait_for_owner(target, msg, after, self.inbound_accounted);
+                    return;
+                }
                 if let Some(owner) = self.foreign_host(target) {
                     log::error!(
                         "[server] host {from} sent {:?} into {target:?}, which this host does not own (host {owner} does)",

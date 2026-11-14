@@ -2,7 +2,7 @@
 //! square super-regions of `s`×`s` regions, the unit a host claims and the
 //! world store fences (owner epochs).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::RegionCoords;
 
@@ -41,11 +41,14 @@ pub const HOST_LIVE: i64 = 0;
 /// `hosts.state`: the host's lease lapsed and a takeover marked it dead.
 pub const HOST_DEAD: i64 = 1;
 
-/// Environment: `allinone` (default) or `static`.
+/// `super_regions.owner` of a free row (no host holds it).
+pub const NO_OWNER: i64 = -1;
+
+/// Environment: `allinone` (default), `static` or `claim`.
 pub const OWNERSHIP_ENV: &str = "VOXEL_OWNERSHIP";
-/// Environment: this host's ordinal (`static` only), `0..hosts`.
+/// Environment: this host's ordinal (`static` / `claim` only), `0..hosts`.
 pub const HOST_ORDINAL_ENV: &str = "VOXEL_HOST_ORDINAL";
-/// Environment: how many hosts share the world (`static` only).
+/// Environment: how many hosts share the world (`static` / `claim` only).
 pub const HOSTS_ENV: &str = "VOXEL_HOSTS";
 
 /// splitmix64's finaliser (a stateless mix; the rendezvous weights).
@@ -60,19 +63,42 @@ fn splitmix64(mut z: u64) -> u64 {
 /// host with the highest weight for it, ties to the lower ordinal. Growing
 /// the host count moves only the super-regions the new host wins.
 pub fn rendezvous_owner(sr: (i32, i32), hosts: u32) -> u32 {
+    rendezvous_among(sr, 0..hosts.max(1)).unwrap_or(0)
+}
+
+/// [`rendezvous_owner`] over `ordinals` (ascending): the one with the highest weight for
+/// `sr`, ties to the lower ordinal; `None` for no ordinal.
+fn rendezvous_among(sr: SuperRegion, ordinals: impl IntoIterator<Item = u32>) -> Option<u32> {
     // Each coordinate in its own 32 bits (no sign extension: `(-1, 0)` and `(0, -1)`
     // must not share a key), mixed, then mixed again with the ordinal.
     let (sx, sz) = sr;
     let key = splitmix64(u64::from(sx as u32) | u64::from(sz as u32) << 32);
-    let weight = |ordinal: u32| splitmix64(key ^ u64::from(ordinal));
-    let mut best = (0, weight(0));
-    for ordinal in 1..hosts.max(1) {
-        let w = weight(ordinal);
-        if w > best.1 {
-            best = (ordinal, w);
+    highest_weight(key, ordinals)
+}
+
+/// The ordinal of `ordinals` (ascending) with the highest `splitmix64(key ^ ordinal)`,
+/// ties to the lower ordinal.
+fn highest_weight(key: u64, ordinals: impl IntoIterator<Item = u32>) -> Option<u32> {
+    let mut best: Option<(u32, u64)> = None;
+    for ordinal in ordinals {
+        let w = splitmix64(key ^ u64::from(ordinal));
+        if best.is_none_or(|(_, b)| w > b) {
+            best = Some((ordinal, w));
         }
     }
-    best.0
+    best.map(|(ordinal, _)| ordinal)
+}
+
+/// Keys [`heir_of`]'s weights apart from the super-regions' ([`rendezvous_owner`]).
+const HEIR_KEY_SALT: u64 = 0x4845_4952_0000_0000;
+
+/// The one live host that inherits all of `predecessor`'s super-regions (R4 decision 2):
+/// a rendezvous pick over `live` without the predecessor, keyed by the predecessor — the
+/// same live set always gives the same heir, and another host leaving the set moves the
+/// heirship only if it was the heir. `None` with no other live host.
+pub fn heir_of(predecessor: u32, live: &BTreeSet<u32>) -> Option<u32> {
+    let key = splitmix64(HEIR_KEY_SALT ^ u64::from(predecessor));
+    highest_weight(key, live.iter().copied().filter(|&o| o != predecessor))
 }
 
 /// A super-region's coordinates ([`super_region_of`]).
@@ -99,6 +125,10 @@ pub trait Ownership: Send + std::fmt::Debug {
     fn ordinal(&self) -> u32;
     /// Who simulates super-region `sr`.
     fn owner_of(&self, sr: SuperRegion) -> Owner;
+    /// What a crash of this host costs the world.
+    fn policy(&self) -> CrashPolicy;
+    /// The directory this policy answers from (`None` for `AllInOne` / `Static`).
+    fn directory_mut(&mut self) -> Option<&mut Directory>;
     /// How many hosts share the world (`VOXEL_HOSTS`; `AllInOne`: 1).
     fn hosts(&self) -> u32;
     /// Whether this process runs every host's regions (`AllInOne`): it adopts every
@@ -145,6 +175,12 @@ impl Ownership for AllInOne {
     fn owner_of(&self, _sr: SuperRegion) -> Owner {
         Owner::Me
     }
+    fn policy(&self) -> CrashPolicy {
+        CrashPolicy::Rollback
+    }
+    fn directory_mut(&mut self) -> Option<&mut Directory> {
+        None
+    }
     fn hosts(&self) -> u32 {
         1
     }
@@ -185,6 +221,115 @@ impl Ownership for Static {
             o => Owner::Host(o),
         }
     }
+    fn policy(&self) -> CrashPolicy {
+        CrashPolicy::Rollback
+    }
+    fn directory_mut(&mut self) -> Option<&mut Directory> {
+        None
+    }
+    fn hosts(&self) -> u32 {
+        self.hosts
+    }
+}
+
+/// The ownership directory as one host mirrors it (`super_regions.owner`): per super-region
+/// its owner (`None` = a free row) and the epoch of that row, and which hosts are live.
+/// A super-region with no row is `Unknown` until the first whole read
+/// ([`Directory::replace`]), `Free` after it (nobody ever claimed it).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Directory {
+    rows: BTreeMap<SuperRegion, (Option<u32>, u64)>,
+    /// Read whole at least once.
+    read: bool,
+    live: BTreeSet<u32>,
+}
+
+impl Directory {
+    /// Row `sr` is `owner` (`None`: free) at `epoch`; ignored when `epoch` is lower than
+    /// the stored one (a late message never undoes a newer claim).
+    pub fn set(&mut self, sr: SuperRegion, owner: Option<u32>, epoch: u64) {
+        if self.rows.get(&sr).is_some_and(|&(_, stored)| epoch < stored) {
+            return;
+        }
+        self.rows.insert(sr, (owner, epoch));
+    }
+
+    /// A whole read of the store's rows (`(super-region, owner, epoch)`): each one as
+    /// [`Self::set`] (a row read older than what a peer already said is kept as said), and
+    /// from now on a super-region with no row is `Free`. A row is never deleted in the
+    /// store, so one known here and missing from the read stays.
+    pub fn replace(&mut self, rows: impl IntoIterator<Item = (SuperRegion, Option<u32>, u64)>) {
+        self.read = true;
+        for (sr, owner, epoch) in rows {
+            self.set(sr, owner, epoch);
+        }
+    }
+
+    /// Who simulates `sr`, as host `me` sees it.
+    pub fn get(&self, sr: SuperRegion, me: u32) -> Owner {
+        match self.rows.get(&sr) {
+            Some(&(Some(owner), _)) if owner == me => Owner::Me,
+            Some(&(Some(owner), _)) => Owner::Host(owner),
+            Some(&(None, _)) => Owner::Free,
+            None if self.read => Owner::Free,
+            None => Owner::Unknown,
+        }
+    }
+
+    /// The epoch of row `sr`, if this directory has it.
+    pub fn epoch(&self, sr: SuperRegion) -> Option<u64> {
+        self.rows.get(&sr).map(|&(_, epoch)| epoch)
+    }
+
+    /// The super-regions host `ordinal` holds, in order.
+    pub fn owned_by(&self, ordinal: u32) -> Vec<SuperRegion> {
+        self.rows.iter().filter(|(_, (owner, _))| *owner == Some(ordinal)).map(|(sr, _)| *sr).collect()
+    }
+
+    /// The hosts that hold their lease now.
+    pub fn set_live(&mut self, live: BTreeSet<u32>) {
+        self.live = live;
+    }
+
+    /// The live host that should claim `sr` when it is free: [`rendezvous_owner`]
+    /// restricted to the live hosts (with every host of `VOXEL_HOSTS` live, exactly
+    /// `rendezvous_owner(sr, hosts)`; a dead host's share moves, nobody else's). `None`
+    /// while no host is known live.
+    pub fn preferred(&self, sr: SuperRegion) -> Option<u32> {
+        rendezvous_among(sr, self.live.iter().copied())
+    }
+}
+
+/// Ownership is a claim in Postgres (R4): super-regions are claimed on demand, and this
+/// host answers from its mirror of the directory ("wait, never guess": `Free` / `Unknown`
+/// are never assumed to be anyone's). A crash is inherited by one heir (`Succession`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PgClaim {
+    pub ordinal: u32,
+    pub hosts: u32,
+    pub directory: Directory,
+}
+
+impl PgClaim {
+    /// Host `ordinal` of `hosts`, its directory not read yet (everything `Unknown`).
+    pub fn new(ordinal: u32, hosts: u32) -> PgClaim {
+        PgClaim { ordinal, hosts, directory: Directory::default() }
+    }
+}
+
+impl Ownership for PgClaim {
+    fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    fn owner_of(&self, sr: SuperRegion) -> Owner {
+        self.directory.get(sr, self.ordinal)
+    }
+    fn policy(&self) -> CrashPolicy {
+        CrashPolicy::Succession
+    }
+    fn directory_mut(&mut self) -> Option<&mut Directory> {
+        Some(&mut self.directory)
+    }
     fn hosts(&self) -> u32 {
         self.hosts
     }
@@ -212,16 +357,19 @@ pub fn ownership_from_values(
             }
             Ok(Box::new(AllInOne))
         }
-        "static" => {
+        "static" | "claim" => {
             let ordinal =
                 number(HOST_ORDINAL_ENV, ordinal)?.ok_or_else(|| format!("{OWNERSHIP_ENV}={kind} needs {HOST_ORDINAL_ENV}"))?;
             let hosts = number(HOSTS_ENV, hosts)?.ok_or_else(|| format!("{OWNERSHIP_ENV}={kind} needs {HOSTS_ENV}"))?;
             if hosts == 0 || ordinal >= hosts {
                 return Err(format!("{HOST_ORDINAL_ENV}={ordinal} must be below {HOSTS_ENV}={hosts} (at least 1)"));
             }
+            if kind == "claim" {
+                return Ok(Box::new(PgClaim::new(ordinal, hosts)));
+            }
             Ok(Box::new(Static { ordinal, hosts }))
         }
-        other => Err(format!("{OWNERSHIP_ENV}={other:?} is neither allinone nor static")),
+        other => Err(format!("{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim")),
     }
 }
 

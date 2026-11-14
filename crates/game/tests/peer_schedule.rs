@@ -5234,3 +5234,119 @@ fn refused_login_ends_once(rig: &mut MultiRig) {
 fn a_login_refused_while_placed_ends_once() {
     sweep("a_login_refused_while_placed_ends_once", 2, 1, SEEDS / 4, refused_login_ends_once);
 }
+
+
+// --- R4 Task 4: a super-region with no owner this host knows ---------------------------
+
+/// Directory rows laid out as `static` would for the rig's hosts over every super-region
+/// within reach of the test regions and the keepers' homes (`s` = 1: a super-region is a
+/// region), at epoch 1 — but `free` as free rows and `unknown` with no row at all.
+fn rendezvous_rows(
+    rig: &MultiRig,
+    free: &[game::SuperRegion],
+    unknown: &[game::SuperRegion],
+) -> Vec<(game::SuperRegion, Option<u32>, u64)> {
+    let hosts = rig.hosts.len() as u32;
+    let mut rows = Vec::new();
+    for sx in -16..=48 {
+        for sz in -16..=48 {
+            let sr = (sx, sz);
+            if unknown.contains(&sr) {
+                continue;
+            }
+            let owner = (!free.contains(&sr)).then(|| game::rendezvous_owner(sr, hosts));
+            rows.push((sr, owner, 1));
+        }
+    }
+    rows
+}
+
+/// The super-region of `rc` in the rig (`s` regions per side).
+fn sr_of(rig: &MultiRig, rc: RegionCoords) -> game::SuperRegion {
+    game::super_region_of(rc, rig.s)
+}
+
+/// A slime walks from `a` into `b`, whose super-region is free: it waits on `a`'s host
+/// (`unowned_waiting`, nowhere else), the next committed world cut holds it once — as a
+/// row of the sender's part — and the world restarted from that cut holds it once again,
+/// waiting on the same host.
+fn into_a_free_super_region(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let rows = rendezvous_rows(rig, &[sr_of(rig, b)], &[]);
+    rig.with_directory(rows);
+    let ha = rig.owner(a);
+    assert_eq!(rig.hosts[ha as usize].manager.owner_of(b), game::Owner::Free);
+    rig.run(a);
+    world_cuts(rig);
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    let waiting = |rig: &MultiRig| -> Vec<(u32, game::SuperRegion, game::EntityId)> {
+        let mut out = Vec::new();
+        for (h, r) in rig.hosts.iter().enumerate() {
+            out.extend(r.manager.unowned_waiting_ids().into_iter().map(|(sr, id)| (h as u32, sr, id)));
+        }
+        out
+    };
+    let held = [(ha, sr_of(rig, b), id)];
+    assert!(until(rig, CROSS_ROUNDS, |rig| waiting(rig) == held), "the slime never waited: {:?}", waiting(rig));
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+        assert_eq!(waiting(rig), held, "it waits on host {ha} for an owner");
+        assert!(rig.owners_of(id).is_empty(), "in no region");
+        assert_eq!(rig.peer_unreceived(), 0, "sent to no host");
+    }
+    until_committed(rig, 1);
+    assert_eq!(rig.stored_places(id), [(ha, b, "row")], "a row of the sender's part, once");
+    assert_eq!(waiting(rig), held, "still waiting after the cut");
+
+    let mut again = rig.rebuild_from_last_cut();
+    assert_eq!(waiting(&again), held, "the restarted world holds it once, waiting on host {ha}");
+    again.run(a);
+    for _ in 0..WAIT_ROUNDS {
+        again.round();
+    }
+    assert_eq!(waiting(&again), held, "and keeps it waiting");
+    assert!(again.owners_of(id).is_empty());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn transfer_into_a_free_super_region_waits_and_is_a_row_of_the_senders_cut() {
+    sweep(
+        "transfer_into_a_free_super_region_waits_and_is_a_row_of_the_senders_cut",
+        2,
+        1,
+        SEEDS / 2,
+        into_a_free_super_region,
+    );
+}
+
+/// A player walks from `a` toward `b`, whose super-region this host has no row for
+/// (`Unknown`): never guessed — its body is handed back to `a`, its home and session stay,
+/// nothing is queued to any host or waits for an owner.
+fn clamped_at_an_unknown_seam(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let rows = rendezvous_rows(rig, &[], &[sr_of(rig, b)]);
+    rig.with_directory(rows);
+    let ha = rig.owner(a);
+    assert_eq!(rig.hosts[ha as usize].manager.owner_of(b), game::Owner::Unknown);
+    rig.run(a);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "handed back to {a:?}");
+    let m = &rig.hosts[ha as usize].manager;
+    assert_eq!(m.home_of(P_CLIENT), Some(a));
+    assert_eq!(m.session_kind(P_CLIENT), Some(game::SessionKind::Home));
+    assert!(m.departed().is_empty());
+    assert_eq!(rig.peer_unreceived(), 0, "nothing queued to any host");
+    assert!(rig.hosts.iter().all(|r| r.manager.unowned_waiting_ids().is_empty()), "nothing waits for an owner");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_is_clamped_at_a_seam_whose_owner_is_unknown() {
+    sweep("player_is_clamped_at_a_seam_whose_owner_is_unknown", 2, 1, SEEDS / 4, clamped_at_an_unknown_seam);
+}

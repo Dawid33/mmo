@@ -715,6 +715,14 @@ pub fn run() -> claims::ServerExit {
     let super_region_regions = claims::super_region_regions_from(std::env::var(claims::SUPER_REGION_REGIONS_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(&e));
     info!("[server] ownership: {ownership:?}, {super_region_regions} regions per super-region side");
+    if ownership.policy() == game::CrashPolicy::Succession {
+        // The directory parses, but nothing claims on demand or reads it yet: a host would
+        // start owning nothing and wait for ever.
+        fatal(&format!(
+            "{}=claim is not served by this build yet (claiming on demand is not wired); use static",
+            game::ownership::OWNERSHIP_ENV
+        ));
+    }
     if role == roles::Role::Host && ownership.runs_every_host() {
         log::warn!(
             "[server] role host with {} unset (all): this host claims every super-region — right for R2's one \
