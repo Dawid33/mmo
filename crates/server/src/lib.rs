@@ -1077,6 +1077,10 @@ pub fn run() -> claims::ServerExit {
         manager.directory_read(rows, live);
         directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone(), boot));
     }
+    // `claim` with several hosts: an heir's adoption reads (R4, a succession) — what it
+    // inherits, read on the store thread while this loop (and its heartbeat) runs on.
+    let mut adoption_reader =
+        claims.as_ref().filter(|_| claim_on_demand && hosts > 1).map(|claims| claims::AdoptionReader::new(claims.clone()));
     manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {
         manager.set_entry_host(entry);
@@ -1250,6 +1254,10 @@ pub fn run() -> claims::ServerExit {
         // `claim`: claims the manager wants, directory reads (never blocks).
         if let Some(keeper) = directory_keeper.as_mut() {
             keeper.pump(&mut manager);
+        }
+        // An heir: the store's half of an adoption (never blocks; `Fenced` sets the flag).
+        if let Some(reader) = adoption_reader.as_mut() {
+            reader.pump(&mut manager);
         }
         // Several hosts: the observer tickets other hosts vouched for since the last pass.
         observer_pass(&mut manager, observer_orders.as_deref(), &sinks);

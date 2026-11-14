@@ -207,6 +207,18 @@ pub enum Volatile {
     ClaimWanted(crate::SuperRegion),
 }
 
+/// The largest frame a peer link carries: the service link's limit
+/// (`svc_link::LINK_MAX_FRAME_BYTES`, which a server test pins equal). A bigger message is
+/// dropped by the link, never delivered.
+pub const PEER_FRAME_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// The bytes `body` takes on a peer link as one reliable frame (`encode_packet` of
+/// `PeerMsg::Reliable`, compressed as the wire compresses it), or `None` if it does not
+/// encode. Measured once per succession report, never per message.
+pub fn reliable_frame_bytes(body: &Reliable) -> Option<usize> {
+    crate::encode_packet(&PeerMsg::Reliable { seq: u64::MAX, body: body.clone() }).ok().map(|p| p.len())
+}
+
 /// One message on a peer link.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum PeerMsg {

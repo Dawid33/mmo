@@ -100,9 +100,14 @@
 //! inherited land: until the reports are resolved the heir cannot know which players a
 //! survivor's journal holds a newer record of, and placing one from the store's base-cut
 //! record could pick the stale copy. The held orders are retried right after the adoption
-//! (a player parked from a journal is then found here) or when the succession settles; an
-//! abandoned succession comes with a rollback, and the held orders die with the process
-//! (the login service times the join out). Other survivors are unchanged: their `departed`
+//! (a player parked from a journal is then found here) or when the succession settles, and
+//! on every peer pump meanwhile (`retry_held_spawns`): an order still held
+//! `SPAWN_SYNC_WAIT_MS` after it came is refused (`SpawnAck { ok: false }`, the client
+//! retries its join). An abandoned succession (`SuccessionDone { settled: false }`) lifts the
+//! mask, so a held order may be placed on this host at its next retry although a rollback
+//! follows (`Generation`): this host exits without a save and the session is refused like any
+//! other at a rollback — the player's stored record is untouched, so it is placed once, at
+//! the client's next join, never twice. Other survivors are unchanged: their `departed`
 //! pointers send a moved player's order on to the heir, which holds it.
 //!
 //! **Who accounts for what the heir delivers — the three sender cases** (`world_cut.rs`,
@@ -394,7 +399,24 @@ impl<S: RegionSpawner> WorldManager<S> {
             // A plain reliable message: no cut runs while the succession is unanswered, so it
             // is never wrapped (`world_cut_wrap` leaves a non-state message bare).
             let SuccessionReportIn { base_cut, entries, owed } = report;
-            self.queue_to_peer(heir, Reliable::SuccessionReport { id: s.id, base_cut, entries, owed });
+            let msg = Reliable::SuccessionReport { id: s.id, base_cut, entries, owed };
+            // A report the link cannot carry is never queued: the link would drop it at every
+            // resend, stalling this peer session until the rollback. Not sent, the heir never
+            // has every report, and the coordinator's deadline rolls the world back — the
+            // failure is explicit, named here with its size.
+            match crate::reliable_frame_bytes(&msg) {
+                Some(bytes) if bytes <= crate::PEER_FRAME_MAX_BYTES => {
+                    log::info!("[server] succession {}: the report to heir {heir} is {bytes} bytes on the link", s.id.0);
+                    self.queue_to_peer(heir, msg);
+                }
+                bytes => log::error!(
+                    "[server] succession {}: the report to heir {heir} is {} — over the peer link's {} byte frame \
+                     limit; NOT sent: the heir waits for it and the coordinator's deadline rolls the world back",
+                    s.id.0,
+                    bytes.map_or_else(|| "not encodable".to_string(), |b| format!("{b} bytes")),
+                    crate::PEER_FRAME_MAX_BYTES
+                ),
+            }
         }
         // 4. Re-route. The heir holds what it inherits until it adopts it (Task 9): its own
         // directory row is right (owner = itself, the new epoch), but `owner_of` answers
@@ -524,12 +546,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.spawner.forget_entities(&drop);
         }
         // Nothing of it is held any more (Task 9 adopts before the settle; an abandoned one
-        // ends with this process).
+        // comes with a rollback, and this process exits at its `Generation`).
         self.inheriting.retain(|_, s| *s != id);
         self.successions_done.insert(id);
-        // Spawn orders held while this host had it to adopt go on. An abandoned succession
-        // comes with a rollback (`Generation` follows): this host exits, its held orders are
-        // never answered, and the login service times the join out (the client retries).
+        // Spawn orders held while this host had it to adopt go on. After an abandoned one
+        // they are not retried here, but the next peer pump's `retry_held_spawns` (or their
+        // `SPAWN_SYNC_WAIT_MS` refusal) answers them: a placement then lands on a host about
+        // to exit for the rollback — no save, the stored record untouched — so the player is
+        // placed once, at the client's next join (see the module docs).
         if settled {
             self.retry_held_spawns();
         }

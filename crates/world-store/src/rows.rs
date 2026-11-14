@@ -485,6 +485,7 @@ macro_rules! engine_rows {
                 row: HostRow,
                 fence: &Fence,
                 policy: game::CrashPolicy,
+                lease_ms: u64,
             ) -> Result<crate::BootVerdict, StoreError> {
                 let mut tx = pool.begin().await?;
                 cut_lock_timeout(&mut *tx, crate::CLAIM_LOCK_TIMEOUT_MS).await?;
@@ -525,7 +526,7 @@ macro_rules! engine_rows {
                             let alive: i64 = sqlx::query(&sql)
                                 .bind(i64::from(row.ordinal))
                                 .bind(world)
-                                .bind(i(game::HOST_LEASE_MS))
+                                .bind(i(lease_ms))
                                 .fetch_one(&mut *tx)
                                 .await?
                                 .try_get(0)?;

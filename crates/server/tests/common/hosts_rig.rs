@@ -210,6 +210,15 @@ struct Sim {
     tap: Option<Vec<(RegionCoords, game::GameEvent)>>,
     /// Its claim loop under `claim` ownership (R4 Task 5 tests).
     keeper: Option<server::claims::DirectoryKeeper>,
+    /// Its lease beat, pumped every round as `server::run`'s main loop does (R4 takeover
+    /// tests), and the process's fenced flag it sets.
+    heartbeat: Option<server::lease::Heartbeat>,
+    fenced: server::claims::Fenced,
+    /// Its adoption reads, as `server::run`'s main loop pumps them (R4 takeover tests).
+    adopter: Option<server::claims::AdoptionReader>,
+    /// A hung main loop (R4 takeover tests): until then the host sits rounds out entirely —
+    /// no tick, no output handled, no beat, no peer pumped.
+    frozen_until: Option<Instant>,
 }
 
 /// A switch over every peer link of a host: down, its links say so, send nothing and drop
@@ -296,7 +305,7 @@ impl Sim {
         }
         manager.set_host_generation(generation);
         let reg = links.registered().reg;
-        Sim { ordinal, boot, reg, manager, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None, keeper: None }
+        Sim { ordinal, boot, reg, manager, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None, keeper: None, heartbeat: None, fenced: Default::default(), adopter: None, frozen_until: None }
     }
 
     /// A keeper client whose body stands in the middle of `rc` (this host's): `rc` runs.
@@ -333,6 +342,11 @@ impl Sim {
         for _ in self.packets.try_iter() {}
     }
 
+    /// Its main loop is hung at `at` ([`Sim::frozen_until`]).
+    fn frozen(&self, at: Instant) -> bool {
+        self.frozen_until.is_some_and(|until| at < until)
+    }
+
     /// The running regions holding `id`.
     fn holders(&mut self, id: EntityId) -> Vec<RegionCoords> {
         let mut out = Vec::new();
@@ -363,13 +377,18 @@ impl Pair {
 
     fn round(&mut self) {
         let now = self.now();
-        for sim in &mut self.sims {
+        let at = Instant::now();
+        for sim in self.sims.iter_mut().filter(|s| !s.frozen(at)) {
             sim.manager.spawner_mut().tick_all();
         }
-        let tick = self.sims[0].manager.spawner_mut().world_tick();
-        self.tick.store(tick, std::sync::atomic::Ordering::SeqCst);
-        for sim in &mut self.sims {
+        if let Some(sim) = self.sims.iter_mut().find(|s| !s.frozen(at)) {
+            let tick = sim.manager.spawner_mut().world_tick();
+            self.tick.store(tick, std::sync::atomic::Ordering::SeqCst);
+        }
+        for sim in self.sims.iter_mut().filter(|s| !s.frozen(at)) {
             sim.settle(now);
+            // The lease step of `server::run`'s loop (no heartbeat: nothing).
+            let _ = server::lease::pump_or_fence(&mut sim.heartbeat, &sim.fenced, at);
             sim.manager.maintain(now);
             if let Some(cuts) = sim.cuts.as_mut() {
                 cuts.pump(&mut sim.manager);
@@ -379,6 +398,9 @@ impl Pair {
             }
             if let Some(keeper) = sim.keeper.as_mut() {
                 keeper.pump(&mut sim.manager);
+            }
+            if let Some(adopter) = sim.adopter.as_mut() {
+                adopter.pump(&mut sim.manager);
             }
             if let Some(login) = &sim.login {
                 login.relay.pump(&mut sim.manager);

@@ -81,6 +81,11 @@ path = "tests/hosts.rs"
 required-features = ["test-hooks"]
 
 [[test]]
+name = "takeover"
+path = "tests/takeover.rs"
+required-features = ["test-hooks"]
+
+[[test]]
 name = "login_link"
 path = "tests/login_link.rs"
 

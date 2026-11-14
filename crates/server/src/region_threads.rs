@@ -48,10 +48,6 @@ pub struct ThreadRegionSpawner {
     /// never generates and never runs with an unseeded seam. `None`: no
     /// forged world to prefetch (tests, tools with their own generators).
     prefetch: Option<RegionPrefetch>,
-    /// Entities a restore from the world store leaves out
-    /// ([`RegionSpawner::forget_entities`]: an heir's drop set, R4), shared with each
-    /// region thread as it was when the region was spawned.
-    forgotten: std::sync::Arc<std::collections::BTreeSet<game::EntityId>>,
 }
 
 impl Default for ThreadRegionSpawner {
@@ -63,7 +59,6 @@ impl Default for ThreadRegionSpawner {
             generator: None,
             store: None,
             prefetch: None,
-            forgotten: std::sync::Arc::default(),
         }
     }
 }
@@ -127,7 +122,6 @@ impl RegionSpawner for ThreadRegionSpawner {
         };
         let store = self.store.clone();
         let prefetch = self.prefetch.clone();
-        let forgotten = self.forgotten.clone();
         let (clock, started) = (self.clock, self.started);
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
@@ -137,7 +131,8 @@ impl RegionSpawner for ThreadRegionSpawner {
                 let genesis_started = Instant::now();
                 let parked = matches!(seed, RegionSeed::Parked(..) | RegionSeed::Deferred(Some(_)));
                 // Never run in this process: the world store may have it. Read under the
-                // claims' current fence (`HostClaims::load_region`), not one captured at spawn.
+                // claims' current fence (`HostClaims::load_region`), not one captured at spawn,
+                // an heir's drop set left out (`HostClaims::forget_entities`).
                 let loaded = match (&seed, &store) {
                     (RegionSeed::Deferred(None), Some(store)) => store.load_region(id),
                     _ => Ok(None),
@@ -183,8 +178,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                 // Deferred seeds generate here, timed separately from the build.
                 let generate_time = std::cell::Cell::new(Duration::ZERO);
                 let runner = match stored {
-                    Some(mut stored) => {
-                        stored.entities.retain(|b| !forgotten.contains(&b.id));
+                    Some(stored) => {
                         let (region, terms) = game::restore_portable(id, stored);
                         let mut runner = RegionRunner::new(id, region, out);
                         runner.set_saved_terms(terms);
@@ -258,8 +252,13 @@ impl RegionSpawner for ThreadRegionSpawner {
         self.clock.tick_at(self.started.elapsed().as_millis() as u64)
     }
 
+    /// The drop set goes to the claims every region thread loads through
+    /// ([`crate::claims::HostClaims::forget_entities`]): a store load leaves it out. Parked
+    /// blobs and generated regions are never filtered. No store: nothing is ever loaded.
     fn forget_entities(&mut self, ids: &std::collections::BTreeSet<game::EntityId>) {
-        self.forgotten = std::sync::Arc::new(ids.clone());
+        if let Some(store) = &self.store {
+            store.forget_entities(ids);
+        }
     }
 
     fn reap(&mut self, id: RegionCoords) {

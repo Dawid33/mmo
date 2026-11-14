@@ -42,11 +42,21 @@ pub struct Heartbeat {
     pending: Option<Receiver<Result<bool, StoreError>>>,
     warned_at: Option<Instant>,
     replaced: bool,
+    /// Between two beats ([`HOST_HEARTBEAT_MS`]; a real-time test shortens it with the lease).
+    period: Duration,
 }
 
 impl Heartbeat {
     pub fn new(store: StoreHandle, ordinal: u32, boot: u64) -> Self {
-        Heartbeat { store, ordinal, boot, next_at: None, pending: None, warned_at: None, replaced: false }
+        let period = Duration::from_millis(HOST_HEARTBEAT_MS);
+        Heartbeat { store, ordinal, boot, next_at: None, pending: None, warned_at: None, replaced: false, period }
+    }
+
+    /// Test hook: a beat every `period` instead of [`HOST_HEARTBEAT_MS`] (with a lease the test
+    /// shortened in the store and the coordinator too).
+    #[cfg(feature = "test-hooks")]
+    pub fn set_period(&mut self, period: Duration) {
+        self.period = period;
     }
 
     /// Reads a beat's answer if it is there and sends the next beat when one is due (every
@@ -78,7 +88,7 @@ impl Heartbeat {
             }
         }
         if self.next_at.is_none_or(|at| now >= at) {
-            self.next_at = Some(now + Duration::from_millis(HOST_HEARTBEAT_MS));
+            self.next_at = Some(now + self.period);
             self.pending = Some(self.store.heartbeat_later(self.ordinal, self.boot));
         }
         LeaseState::Held

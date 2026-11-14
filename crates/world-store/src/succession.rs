@@ -17,10 +17,30 @@
 //! part of the predecessor holds those rows `FOR SHARE` until its cut is decided: the
 //! declaration waits for it, at most `lock_timeout` (the caller declares only between
 //! cuts; a timeout is a retry). It never locks a row a staged part could be waiting for.
+//!
+//! Two deadlock cycles with a CLAIM are possible, and both are safe (Postgres aborts one
+//! transaction with `40P01`, which writes nothing; each side treats that as a retry or a
+//! fence, never as a start-up error):
+//! 1. **A boot's re-claim of its own rows vs the declaration of that boot**
+//!    (`claim_super_regions_live`, `rows.rs`): the re-claim upserts the boot's
+//!    `super_regions` rows in key order, then takes its `hosts` row `FOR SHARE` (its last
+//!    statement); the declaration holds that `hosts` row `FOR NO KEY UPDATE` and waits for
+//!    the same `super_regions` rows. If the re-claim is aborted, the server re-reads its row
+//!    (`HostClaims::reclaim_own`): no longer its live boot (the declaration won) → the
+//!    fenced exit (3); still live → it re-claims once more. If the declaration is aborted,
+//!    the coordinator declares again after a fresh lease read (the re-claimed rows then move
+//!    to the heir, or the row is no longer lapsed).
+//! 2. **A zombie's `claim_free` vs a declaration of several predecessors**: the zombie B's
+//!    upsert `ON CONFLICT` locks a row of another predecessor A (the row stays A's: its
+//!    `WHERE owner = NO_OWNER` fails, but the conflict lock is taken), then waits for B's
+//!    `hosts` row `FOR SHARE`; the declaration holds A's and B's `hosts` rows and waits for
+//!    A's `super_regions` rows. An aborted claim is a failed claim (`DirectoryKeeper`: a
+//!    retry after `CLAIM_RETRY_MS`, then refused `Fenced` once B is dead); an aborted
+//!    declaration is retried as above.
 
 use std::collections::BTreeSet;
 
-use game::{CutId, HOST_DEAD, HOST_LEASE_MS, HOST_LIVE};
+use game::{CutId, HOST_DEAD, HOST_LIVE};
 use sqlx::{PgPool, Row};
 
 use crate::rows::i;
@@ -125,6 +145,7 @@ pub(crate) async fn declare(
     fence: CoordinatorFence,
     generation: u64,
     lock_timeout_ms: u64,
+    lease_ms: u64,
 ) -> Result<Declared, StoreError> {
     let predecessors: BTreeSet<u32> = dead.iter().map(|(o, _)| *o).collect();
     if dead.is_empty() || heirs.len() != dead.len() || predecessors.len() != dead.len() {
@@ -137,7 +158,7 @@ pub(crate) async fn declare(
     }
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
-    let declared = declare_in(&mut tx, &dead, &heirs, &predecessors, kind, fence, generation).await;
+    let declared = declare_in(&mut tx, &dead, &heirs, &predecessors, kind, fence, generation, lease_ms).await;
     match declared {
         Ok(Declared::Done(s)) => {
             tx.commit().await.map_err(|e| declare_error(DECLARING, e, lock_timeout_ms))?;
@@ -179,6 +200,8 @@ impl From<StoreError> for DeclareError {
 }
 
 /// The declaration's statements inside `tx`; anything but `Done` is rolled back by the caller.
+/// `lease_ms`: a row lapsed past it ([`game::HOST_LEASE_MS`] unless a test shortened it).
+#[allow(clippy::too_many_arguments)]
 async fn declare_in(
     tx: &mut sqlx::PgConnection,
     dead: &[(u32, u64)],
@@ -187,6 +210,7 @@ async fn declare_in(
     kind: SuccessionKind,
     fence: CoordinatorFence,
     generation: u64,
+    lease_ms: u64,
 ) -> Result<Declared, DeclareError> {
     lock_coordinator_and_world(&mut *tx, fence, Some(generation)).await?;
     let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
@@ -206,7 +230,7 @@ async fn declare_in(
              FROM hosts WHERE ordinal = $1 FOR NO KEY UPDATE"
         ))
         .bind(i64::from(*ordinal))
-        .bind(i(HOST_LEASE_MS))
+        .bind(i(lease_ms))
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {
@@ -234,7 +258,7 @@ async fn declare_in(
              WHERE ordinal = $1 AND clean = 0 AND state = {HOST_LIVE}"
         ))
         .bind(i64::from(*heir))
-        .bind(i(HOST_LEASE_MS))
+        .bind(i(lease_ms))
         .fetch_optional(&mut *tx)
         .await?;
         if fresh != Some(true) && !gone.contains(heir) {

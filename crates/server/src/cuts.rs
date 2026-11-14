@@ -41,11 +41,12 @@
 //! claims, registers or loads anything.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CutFailure, CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldCut, WorldManager};
-use world_store::{CutCommitted, CutNotice, NotifyMode, StoreError, StoreHandle};
+use world_store::{CutCommitted, CutNotice, Fence, NotifyMode, StoreError, StoreHandle};
 
 use crate::claims::{Fenced, HostClaims, ServerExit, WorldGeneration, FENCED_REFUSAL, ROLLBACK_REFUSAL};
 use crate::coordinator_rt::CoordinatorThread;
@@ -57,6 +58,8 @@ struct Pending {
     players: usize,
     queued: Instant,
     reply: Receiver<Result<CutCommitted, StoreError>>,
+    /// The fence the commit was checked against: a refusal is classified against it.
+    fence: Arc<Fence>,
 }
 
 /// Consecutive failed commits after which world saving is reported stuck
@@ -104,6 +107,9 @@ type Answer<T> = Receiver<Result<T, StoreError>>;
 struct WorldPart {
     id: CutId,
     tick: Tick,
+    /// The fence its prepare was checked against (`None`: not prepared by this writer): a
+    /// refusal is classified against it, not against a fence changed since.
+    fence: Option<Arc<Fence>>,
     /// The prepare's answer, while it has not come.
     reply: Option<Answer<CutCommitted>>,
     /// Staged (the prepare answered `Ok`): its region versions.
@@ -128,6 +134,7 @@ impl WorldPart {
         WorldPart {
             id,
             tick,
+            fence: None,
             reply,
             versions: None,
             maybe_staged: true,
@@ -242,8 +249,9 @@ impl CutWriter {
                 continue;
             }
             let (id, tick, regions, players) = (cut.id, cut.tick, cut.regions.len(), cut.players.len());
-            let reply = self.claims.commit_cut(cut);
-            self.pending.push(Pending { id, tick, regions, players, queued: Instant::now(), reply });
+            let fence = self.claims.fence();
+            let reply = self.claims.store().commit_cut(cut, (*fence).clone());
+            self.pending.push(Pending { id, tick, regions, players, queued: Instant::now(), reply, fence });
         }
         if self.world.is_some() {
             self.pump_world(manager);
@@ -332,8 +340,13 @@ impl CutWriter {
         }
         let generation = self.world.as_ref().expect("world cuts").mine();
         let tick = cut.tick;
-        let reply = self.claims.store().prepare_cut(cut, (*self.claims.fence()).clone(), generation);
-        self.part = Some(WorldPart::new(id, tick, Some(reply)));
+        // The manager's cut as it is: `adopts` included (an heir's parts adopt its
+        // predecessor from its `SuccessionAdopted` until the settle, R4).
+        let fence = self.claims.fence();
+        let reply = self.claims.store().prepare_cut(cut, (*fence).clone(), generation);
+        let mut part = WorldPart::new(id, tick, Some(reply));
+        part.fence = Some(fence);
+        self.part = Some(part);
     }
 
     /// A world part failed to be staged, or could not be: counted toward the stuck report.
@@ -350,7 +363,7 @@ impl CutWriter {
 
     /// The world part's prepare answer, the coordinator's `CutDone`s, and the settling.
     fn pump_world<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
-        let mut failure: Option<(CutId, Tick, StoreError)> = None;
+        let mut failure: Option<(CutId, Tick, StoreError, Option<Arc<Fence>>)> = None;
         if let Some(part) = self.part.as_mut() {
             let answer = match part.reply.as_ref().map(|r| r.try_recv()) {
                 Some(Ok(answer)) => Some(answer),
@@ -369,13 +382,14 @@ impl CutWriter {
                     Err(e) => {
                         // Only a `Backend` error may leave the part staged (its mark kept).
                         part.maybe_staged = matches!(e, StoreError::Backend(_));
-                        failure = Some((part.id, part.tick, e));
+                        failure = Some((part.id, part.tick, e, part.fence.clone()));
                     }
                 }
             }
         }
-        if let Some((id, tick, e)) = failure {
-            if self.claims.note_refusal(&e) {
+        if let Some((id, tick, e, fence)) = failure {
+            let fence = fence.unwrap_or_else(|| self.claims.fence());
+            if self.claims.note_refusal_under(&fence, &e) {
                 log::error!("[server] world cut {} was refused as fenced; this server was replaced and stops", id.0);
             }
             if let StoreError::StaleGeneration { stored, .. } = &e {
@@ -518,7 +532,7 @@ impl CutWriter {
 
     fn settle<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {
         if let Err(e) = &answer {
-            if self.claims.note_refusal(e) {
+            if self.claims.note_refusal_under(&p.fence, e) {
                 log::error!("[server] save cut {} was refused: {e}; this server was replaced and stops", p.id.0);
             }
         }

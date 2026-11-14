@@ -166,6 +166,9 @@ pub(crate) struct CutState {
     pub pending: std::sync::Mutex<Option<CutId>>,
     /// `lock_timeout` of every cut transaction, ms ([`crate::CUT_LOCK_TIMEOUT_MS`]).
     pub lock_timeout_ms: AtomicU64,
+    /// The host lease a declaration and a boot judge a row's `seen_ms` by, ms
+    /// ([`game::HOST_LEASE_MS`]; a test hook shortens it, [`crate::StoreHandle::set_host_lease_ms`]).
+    pub host_lease_ms: AtomicU64,
     /// Committed world cuts this handle decided that hold an entity in two regions
     /// ([`two_phase::report_entities_twice`]).
     pub entities_twice_cuts: AtomicU64,
@@ -178,6 +181,7 @@ impl CutState {
         CutState {
             pending: std::sync::Mutex::new(None),
             lock_timeout_ms: AtomicU64::new(crate::CUT_LOCK_TIMEOUT_MS),
+            host_lease_ms: AtomicU64::new(game::HOST_LEASE_MS),
             entities_twice_cuts: AtomicU64::new(0),
             entities_checked_cuts: AtomicU64::new(0),
         }
@@ -404,11 +408,12 @@ async fn serve(
             // timeout, for a staged part holding the predecessor's super-regions.
             Request::DeclareSuccession(d, r) => {
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
                         Pool::Pg(p) => {
                             let Declare { dead, heirs, kind, fence, generation } = *d;
-                            succession::declare(p, dead, heirs, kind, fence, generation, lock_timeout_ms).await
+                            succession::declare(p, dead, heirs, kind, fence, generation, lock_timeout_ms, lease_ms).await
                         }
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
@@ -515,10 +520,13 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, set_super_region_regions(n)))
             }),
-            Request::RegisterHost(row, fence, policy, r) => tokio::spawn(async move {
-                let _w = writer.lock().await;
-                r.send(on_pool!(&pool, register_host(row, &fence, policy)))
-            }),
+            Request::RegisterHost(row, fence, policy, r) => {
+                let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let _w = writer.lock().await;
+                    r.send(on_pool!(&pool, register_host(row, &fence, policy, lease_ms)))
+                })
+            }
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
             Request::WorldGeneration(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) }),
             // Postgres: no writer lock (it is in-process and a claim can hold it for a minute; a

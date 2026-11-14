@@ -68,6 +68,9 @@ struct Watched {
 #[derive(Clone, Debug, Default)]
 pub struct LeaseWatch {
     rows: BTreeMap<u32, Watched>,
+    /// The lease a row lapses after, ms: [`HOST_LEASE_MS`] unless a real-time test shortened
+    /// it ([`Coordinator::set_lease_dials`]).
+    lease_ms: Option<u64>,
     /// Successful reads observed so far: a declaration the store refused waits for a newer
     /// one ([`Coordinator::declared`]).
     reads: u64,
@@ -110,7 +113,8 @@ impl LeaseWatch {
             .values()
             .filter(|w| !w.row.clean && w.row.state == HOST_LIVE)
             .filter(|w| {
-                w.row.seen_ms == 0 || w.last_issued_ms.min(now_ms).saturating_sub(w.first_received_ms) >= HOST_LEASE_MS
+                w.row.seen_ms == 0
+                    || w.last_issued_ms.min(now_ms).saturating_sub(w.first_received_ms) >= self.lease_ms.unwrap_or(HOST_LEASE_MS)
             })
             .map(|w| (w.row.ordinal, w.row.boot))
             .collect()
@@ -163,6 +167,9 @@ pub(super) struct SuccessionRuns {
     declared: BTreeSet<(u32, u64)>,
     /// [`LeaseWatch::reads`] when the declaration in flight was handed out.
     declared_at_read: u64,
+    /// The deadline of a run, ms: [`SUCCESSION_DEADLINE_MS`] unless a real-time test changed
+    /// it ([`Coordinator::set_lease_dials`]).
+    deadline_ms: Option<u64>,
     /// The store refused the last declaration (`NotLapsed` / `Gone`) as of this read: no
     /// declaration until a newer read (the same observation would hand out the same batch
     /// on every runtime pass).
@@ -181,6 +188,7 @@ impl Default for SuccessionRuns {
             rollback: false,
             declared: BTreeSet::new(),
             declared_at_read: 0,
+            deadline_ms: None,
             refused_at_read: None,
             listed_early: Vec::new(),
         }
@@ -193,6 +201,15 @@ impl super::Coordinator {
     /// declares one.
     pub fn set_crash_policy(&mut self, policy: CrashPolicy) {
         self.successions.enabled = policy == CrashPolicy::Succession;
+    }
+
+    /// Test support (real-time tests): the lease a host lapses after and a run's deadline, ms,
+    /// instead of [`HOST_LEASE_MS`] and [`SUCCESSION_DEADLINE_MS`] — set together with the
+    /// store's (`world_store`'s `set_host_lease_ms`) and the hosts' heartbeat period.
+    #[doc(hidden)]
+    pub fn set_lease_dials(&mut self, lease_ms: u64, deadline_ms: u64) {
+        self.leases.lease_ms = Some(lease_ms);
+        self.successions.deadline_ms = Some(deadline_ms);
     }
 
     /// The store's open successions are not known yet (a coordinator starting): nothing is
@@ -423,9 +440,10 @@ impl super::Coordinator {
             .collect();
         if let Some((id, silent, adopted)) = late.first() {
             log::error!(
-                "coordinator: succession {} not answered within {SUCCESSION_DEADLINE_MS} ms (survivors {silent:?} silent, \
+                "coordinator: succession {} not answered within {} ms (survivors {silent:?} silent, \
                  adopted: {adopted}): the world rolls back",
-                id.0
+                id.0,
+                self.successions.deadline_ms.unwrap_or(SUCCESSION_DEADLINE_MS)
             );
             self.successions.rollback = true;
             return;
@@ -481,7 +499,8 @@ impl super::Coordinator {
         for h in attached {
             self.push(Target::Host(h), order(&s));
         }
-        let run = Run { s, applied: BTreeSet::new(), adopted: false, deadline_ms: now_ms + SUCCESSION_DEADLINE_MS };
+        let deadline = self.successions.deadline_ms.unwrap_or(SUCCESSION_DEADLINE_MS);
+        let run = Run { s, applied: BTreeSet::new(), adopted: false, deadline_ms: now_ms + deadline };
         self.successions.open.insert(run.s.id, run);
     }
 

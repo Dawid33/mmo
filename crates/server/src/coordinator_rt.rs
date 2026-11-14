@@ -469,9 +469,21 @@ pub struct CoordinatorThread {
     /// [`CoordinatorThread::hold_decision_retries`] is armed.
     #[cfg(feature = "test-hooks")]
     hold_decision_retries: Arc<AtomicBool>,
+    /// [`CoordinatorThread::hold_hosts_reads`] is armed.
+    #[cfg(feature = "test-hooks")]
+    hold_hosts_reads: Arc<AtomicBool>,
 }
 
 impl CoordinatorThread {
+    /// Test hook: while `held`, the `hosts` read in flight is not answered (one is issued if
+    /// none is) — a database that hangs: the lease watch sees nothing until it is released,
+    /// and the answer then counts from when that read was issued.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn hold_hosts_reads(&self, held: bool) {
+        self.hold_hosts_reads.store(held, Ordering::SeqCst);
+    }
+
     /// Test hook: a world cut decision whose write failed is not tried again (no abort is
     /// recorded for it) — a coordinator that dies right after the failure.
     #[doc(hidden)]
@@ -695,6 +707,9 @@ pub struct CoordinatorRuntime {
     /// Test hook ([`CoordinatorThread::hold_decision_retries`]).
     #[cfg(feature = "test-hooks")]
     hold_decision_retries: Arc<AtomicBool>,
+    /// Test hook ([`CoordinatorThread::hold_hosts_reads`]).
+    #[cfg(feature = "test-hooks")]
+    hold_hosts_reads: Arc<AtomicBool>,
     /// The core's `now_ms` 0 (its calendar was anchored there).
     started: Instant,
     /// No save is taken before this `now_ms` (after a failure).
@@ -765,6 +780,8 @@ impl CoordinatorRuntime {
         let crash_before_claim_reply = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "test-hooks")]
         let hold_decision_retries = Arc::new(AtomicBool::new(false));
+        #[cfg(feature = "test-hooks")]
+        let hold_hosts_reads = Arc::new(AtomicBool::new(false));
         let fence = start.fence;
         let mut core = start.coordinator;
         if start.source.needs_save() {
@@ -791,6 +808,8 @@ impl CoordinatorRuntime {
             crash_before_claim_reply: crash_before_claim_reply.clone(),
             #[cfg(feature = "test-hooks")]
             hold_decision_retries: hold_decision_retries.clone(),
+            #[cfg(feature = "test-hooks")]
+            hold_hosts_reads: hold_hosts_reads.clone(),
             started: Instant::now(),
             retry_at_ms: 0,
             failed_in_a_row: 0,
@@ -821,6 +840,8 @@ impl CoordinatorRuntime {
             crash_before_claim_reply,
             #[cfg(feature = "test-hooks")]
             hold_decision_retries,
+            #[cfg(feature = "test-hooks")]
+            hold_hosts_reads,
         }
     }
 
@@ -1000,6 +1021,10 @@ impl CoordinatorRuntime {
     fn feed_cuts(&mut self, now: u64) {
         let Some(cuts) = &self.cuts else { return };
         self.core.set_world_tick((cuts.tick)());
+        #[cfg(feature = "test-hooks")]
+        if self.hold_hosts_reads.load(Ordering::SeqCst) && self.hosts_rx.is_some() {
+            return;
+        }
         if let Some((issued_ms, rx)) = &self.hosts_rx {
             let issued_ms = *issued_ms;
             match rx.try_recv() {

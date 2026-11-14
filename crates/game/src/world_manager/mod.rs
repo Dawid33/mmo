@@ -342,7 +342,15 @@ pub struct InlineSpawner {
     stored_terrain: Option<std::sync::Arc<dyn crate::StoredTerrain>>,
     /// Entities a restore from `portable` leaves out ([`RegionSpawner::forget_entities`]).
     forgotten: BTreeSet<crate::EntityId>,
+    /// Test support ([`InlineSpawner::with_region_store`]): where a region that has not run
+    /// here and is not in `portable` is read from (a host test's world store).
+    region_store: Option<RegionStoreRead>,
 }
+
+/// A host test's world store, as a region thread reads it: the stored state of a region
+/// (`None`: never stored), or why it could not be read.
+pub type RegionStoreRead =
+    std::sync::Arc<dyn Fn(RegionCoords) -> Result<Option<crate::StoredRegion>, String> + Send + Sync>;
 
 impl InlineSpawner {
     /// Test support: every runner, now and spawned later, records its
@@ -382,6 +390,16 @@ impl InlineSpawner {
     pub fn with_portable(regions: BTreeMap<RegionCoords, crate::StoredRegion>) -> Self {
         let rounds = regions.values().map(|r| r.meta.tick).max().unwrap_or(0);
         Self { portable: regions, rounds, ..Self::default() }
+    }
+
+    /// Test support: a region that has not run here and is not in `portable` starts from
+    /// what `read` answers for it — as a server's region thread reads the world store at its
+    /// start (the drop set of [`RegionSpawner::forget_entities`] left out); a read error
+    /// answers `LoadFailed`, as there. A host test whose regions (an heir's inherited land
+    /// among them) start from Postgres.
+    pub fn with_region_store(mut self, read: RegionStoreRead) -> Self {
+        self.region_store = Some(read);
+        self
     }
 
     /// Test support: `rc` keeps ticking but leaves its inputs unread for the
@@ -546,7 +564,18 @@ impl RegionSpawner for InlineSpawner {
             return send;
         }
         let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
-        let stored = if never_ran { self.portable.remove(&id) } else { None };
+        let mut stored = if never_ran { self.portable.remove(&id) } else { None };
+        if let (true, None, Some(read)) = (never_ran, &stored, &self.region_store) {
+            match read(id) {
+                Ok(found) => stored = found,
+                Err(why) => {
+                    log::error!("region {id:?}: cannot load from the world store: {why}");
+                    let _ = out.send((id, RegionOutput::LoadFailed(why)));
+                    self.failed.insert(id, recv);
+                    return send;
+                }
+            }
+        }
         let runner = match stored {
             Some(mut stored) => {
                 stored.entities.retain(|b| !self.forgotten.contains(&b.id));
@@ -2819,8 +2848,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.world_cut.as_ref().is_some_and(|r| r.cut == id) {
             let held = self.pending_cut.as_ref().map(|c| c.regions.keys().copied().collect::<BTreeSet<_>>()).unwrap_or_default();
             if let Some(rc) = self.pinned_missing(|rc| held.contains(rc)) {
-                log::warn!("[server] world cut {}: {rc:?}, pinned for an adoption, is not in this part; it fails", id.0);
-                self.world_cut_fail(crate::CutFailure::Aborted);
+                // One warning per aborted settle cut (the failure's own line says it).
+                let reason = format!("{rc:?}, pinned for an adoption, is not in it (aborted; a later cut takes it)");
+                self.world_cut_fail_saying(crate::CutFailure::Aborted, Some(&reason));
                 return;
             }
         }

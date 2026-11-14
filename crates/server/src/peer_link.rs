@@ -497,24 +497,41 @@ fn route_listener(
 
 // --- the dialer --------------------------------------------------------------------------
 
-/// Host `ordinal`'s peer address and pin from the `hosts` table (`None`: no row, or the
-/// row names no listener yet).
-fn lookup(store: &StoreHandle, ordinal: u32) -> Result<Option<(SocketAddr, String)>, String> {
+/// What the `hosts` table says of a lower host to dial.
+#[derive(Debug, PartialEq, Eq)]
+enum Found {
+    /// Its live boot listens there, with that pin.
+    Listening(SocketAddr, String),
+    /// No row, or the row names no listener yet.
+    Missing,
+    /// Its row was declared dead (R4, a succession): that boot is never dialed again — a
+    /// zombie of it may still listen — until another boot of the ordinal registers.
+    Dead,
+}
+
+/// Host `ordinal`'s peer address and pin from the `hosts` table.
+fn lookup(store: &StoreHandle, ordinal: u32) -> Result<Found, String> {
     let rows = store.hosts().map_err(|e| e.to_string())?;
-    let Some(row) = rows.into_iter().find(|r| r.ordinal == ordinal) else { return Ok(None) };
+    let Some(row) = rows.into_iter().find(|r| r.ordinal == ordinal) else { return Ok(Found::Missing) };
+    if row.state != game::HOST_LIVE {
+        return Ok(Found::Dead);
+    }
     match (row.peer_addr, row.peer_cert) {
         (Some(addr), Some(pin)) => {
             let addr = addr.parse().map_err(|_| format!("host {ordinal}'s peer address {addr:?} is not ip:port"))?;
-            Ok(Some((addr, pin)))
+            Ok(Found::Listening(addr, pin))
         }
-        _ => Ok(None),
+        _ => Ok(Found::Missing),
     }
 }
 
 /// The thread behind a link to the lower host `peer`: finds it in the `hosts` table,
 /// dials it (a [`LinkDialer`] that redials one address for ever), re-reads the row every
 /// [`PEER_DISCOVERY_SECS`] while the peer is down and dials anew when it changed; on a
-/// close, drops the dialer (ending its connection) and dials again.
+/// close, drops the dialer (ending its connection) and reads the row again at once: the same
+/// live boot is dialed again, a boot declared dead (R4: the manager closes the link of a
+/// succeeded peer) is not — its dialer state is gone, and the row is re-read every
+/// [`PEER_DISCOVERY_SECS`] until the ordinal's next boot registers (live, another address).
 fn dial_peer(
     peer: u32,
     hello: LinkHello,
@@ -536,12 +553,15 @@ fn dial_peer(
     let mut tags = 0u64;
     let mut next_lookup = Instant::now();
     let mut said_missing = false;
+    let mut said_dead = false;
     loop {
         if live.is_none() && Instant::now() >= next_lookup {
             next_lookup = Instant::now() + discovery;
             match lookup(&store, peer) {
-                Ok(Some(found)) => {
+                Ok(Found::Listening(addr, pin)) => {
+                    let found = (addr, pin);
                     said_missing = false;
+                    said_dead = false;
                     if target.as_ref() != Some(&found) || dialer.is_none() {
                         if target.is_some() {
                             log::info!("[peers] host {peer}'s hosts row changed: dialing anew");
@@ -552,10 +572,20 @@ fn dial_peer(
                         target = Some(found);
                     }
                 }
-                Ok(None) => {
+                Ok(Found::Missing) => {
                     if !said_missing {
                         log::info!("[peers] host {peer} has no peer listener in the hosts table yet; looking again");
                         said_missing = true;
+                    }
+                }
+                Ok(Found::Dead) => {
+                    // A succeeded boot: nothing of it is dialed (a zombie may still listen
+                    // there); its next boot registers live, at an address read then.
+                    drop(dialer.take());
+                    target = None;
+                    if !said_dead {
+                        log::info!("[peers] host {peer}'s hosts row is dead (succeeded): not dialed until its next boot registers");
+                        said_dead = true;
                     }
                 }
                 Err(e) => log::warn!("[peers] reading host {peer}'s hosts row: {e}"),
@@ -576,9 +606,11 @@ fn dial_peer(
                 Ok(DialCmd::Close(tag)) => {
                     if live == Some(tag) {
                         live = None;
-                        log::warn!("[peers] closing the connection to host {peer}: dialing it again");
+                        log::warn!("[peers] closing the connection to host {peer}: its hosts row is read again before a redial");
+                        // Dropping the dialer ends the connection; the row decides the next dial
+                        // (the same live boot again, nobody if that boot was declared dead).
                         drop(dialer.take());
-                        dialer = target.as_ref().map(dial);
+                        next_lookup = Instant::now();
                         sent = Some(Inbound::Down(tag));
                     }
                 }
@@ -871,6 +903,13 @@ mod tests {
         assert_eq!(a.live.get(&2), Some(&PeerId(6)), "a replaced connection's end changes nothing");
         a.gone(2, PeerId(6));
         assert_eq!(a.admit(PeerId(8), &host(2, 4)), Ok((2, None)));
+    }
+
+    /// The peer link's frame limit the manager checks a succession report against (game) is
+    /// the service link's own.
+    #[test]
+    fn the_peer_frame_limit_is_the_service_links() {
+        assert_eq!(game::PEER_FRAME_MAX_BYTES, svc_link::LINK_MAX_FRAME_BYTES);
     }
 
     #[test]

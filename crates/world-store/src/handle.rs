@@ -192,6 +192,15 @@ impl StoreHandle {
             .map(|_| StoreError::Backend("injected decision failure (StoreHandle::fail_next_decisions)".into()))
     }
 
+    /// Test hook: the host lease (ms) this handle's declarations and registrations judge a
+    /// `hosts` row's `seen_ms` by — a row lapsed past it, a booting host counts another alive
+    /// within it (default [`game::HOST_LEASE_MS`]). Shared by every clone. Real-time tests
+    /// shorten it with the coordinator's watch and the heartbeat period, all together.
+    #[doc(hidden)]
+    pub fn set_host_lease_ms(&self, ms: u64) {
+        self.cuts.host_lease_ms.store(ms, Ordering::SeqCst);
+    }
+
     /// Test hook: the `lock_timeout` of this handle's later cut transactions, in ms
     /// (default [`crate::CUT_LOCK_TIMEOUT_MS`]). Shared by every clone.
     #[doc(hidden)]
@@ -664,10 +673,29 @@ impl StoreHandle {
         self.ask(|r| Request::LoadInFlightOf(host, fence, r))
     }
 
+    /// [`Self::load_in_flight_of`], answered on the receiver (an heir's adoption read, from
+    /// its main loop).
+    pub fn load_in_flight_of_later(
+        &self,
+        host: u32,
+        fence: &Fence,
+    ) -> crossbeam::channel::Receiver<Result<Vec<InFlightRow>, StoreError>> {
+        let fence = fence.clone();
+        self.ask_later(|r| Request::LoadInFlightOf(host, fence, r))
+    }
+
     /// The region of every stored row of each id (an id stored twice gives two entries, an
     /// unknown one none), in the order of `ids`, then by region.
     pub fn regions_of_entities(&self, ids: Vec<EntityId>) -> Result<Vec<(EntityId, RegionCoords)>, StoreError> {
         self.ask(|r| Request::RegionsOfEntities(ids, r))
+    }
+
+    /// [`Self::regions_of_entities`], answered on the receiver.
+    pub fn regions_of_entities_later(
+        &self,
+        ids: Vec<EntityId>,
+    ) -> crossbeam::channel::Receiver<Result<Vec<(EntityId, RegionCoords)>, StoreError>> {
+        self.ask_later(|r| Request::RegionsOfEntities(ids, r))
     }
 
     /// The player id and saved record of `key` (the `players.token` column:
@@ -854,6 +882,11 @@ impl StoreHandle {
     /// under it still checks the stored epoch.
     pub fn owned_by(&self, owner: u32) -> Result<Fence, StoreError> {
         self.ask(|r| Request::OwnedBy(owner, r))
+    }
+
+    /// [`Self::owned_by`], answered on the receiver.
+    pub fn owned_by_later(&self, owner: u32) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
+        self.ask_later(|r| Request::OwnedBy(owner, r))
     }
 
     /// The database's clock, in ms since the epoch (what `seen_ms` is stamped with).

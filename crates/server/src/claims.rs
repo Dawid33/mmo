@@ -9,7 +9,8 @@
 //!
 //! Under `claim` (R4) a host holds nothing at boot ([`HostClaims::none`]), registers, then
 //! re-claims its own rows ([`HostClaims::reclaim_own`]); the main loop's
-//! [`DirectoryKeeper`] claims free super-regions on demand and reads the directory.
+//! [`DirectoryKeeper`] claims free super-regions on demand and reads the directory; an heir's
+//! [`AdoptionReader`] reads what it inherits (R4, a succession).
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
-use game::{Ownership, RegionCoords, RegionSpawner, StoredRegion, WorldCut, WorldManager};
+use game::{EntityId, InFlightRow, Ownership, RegionCoords, RegionSpawner, StoredRegion, SuccessionId, WorldCut, WorldManager};
 use world_store::{Fence, HostRow, StoreError, StoreHandle, SuperRegion};
 
 /// The process exit status of a fenced host (another process took over its
@@ -134,6 +135,9 @@ pub struct HostClaims {
     /// [`HostClaims::add`] / [`HostClaims::replace`].
     fence: Arc<RwLock<Arc<Fence>>>,
     fenced: Fenced,
+    /// Entities a region load leaves out ([`HostClaims::forget_entities`]: an heir's drop
+    /// set, R4), read whole by every load.
+    forgotten: Arc<RwLock<Arc<BTreeSet<EntityId>>>>,
 }
 
 impl HostClaims {
@@ -191,7 +195,30 @@ impl HostClaims {
     /// boot registered (a registered live row is this ordinal's: no other process may hold its
     /// rows then). Refused with `Fenced` if this boot was declared dead meanwhile (its rows
     /// went to an heir between `owned_by` and the claim). How many super-regions it re-claimed.
+    ///
+    /// A claim that loses a lock conflict (Postgres picks it in a deadlock with a declaration
+    /// of this very boot — the declaration holds the `hosts` row and waits for the rows this
+    /// claim re-took, which waits for that row, `world_store::succession`'s lock notes — or
+    /// its lock timeout runs out) re-reads this boot's `hosts` row: no longer this live boot
+    /// (the declaration won) → `Fenced`, the fenced exit (3), never a start-up error; still
+    /// live → asked once more.
     pub fn reclaim_own(&self, boot: u64) -> Result<usize, StoreError> {
+        match self.reclaim_own_once(boot) {
+            Err(e) if is_lock_conflict(&e) => {
+                let owner = self.fence().owner;
+                let live = self.store.hosts()?.iter().any(|r| r.ordinal == owner && r.boot == boot && r.state == game::HOST_LIVE);
+                if !live {
+                    log::error!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}) to its own declaration: fenced");
+                    return Err(StoreError::Fenced { sr: None });
+                }
+                log::warn!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}); its row is still live: once more");
+                self.reclaim_own_once(boot)
+            }
+            other => other,
+        }
+    }
+
+    fn reclaim_own_once(&self, boot: u64) -> Result<usize, StoreError> {
         let owner = self.fence().owner;
         let srs: Vec<SuperRegion> = self.store.owned_by(owner)?.epochs.into_keys().collect();
         if srs.is_empty() {
@@ -204,7 +231,12 @@ impl HostClaims {
     }
 
     fn with_fence(store: StoreHandle, fence: Fence) -> HostClaims {
-        HostClaims { store, fence: Arc::new(RwLock::new(Arc::new(fence))), fenced: Fenced::default() }
+        HostClaims {
+            store,
+            fence: Arc::new(RwLock::new(Arc::new(fence))),
+            fenced: Fenced::default(),
+            forgotten: Arc::default(),
+        }
     }
 
     /// Claims, as owner 0, the super-regions of every region within `radius`
@@ -242,6 +274,31 @@ impl HostClaims {
         *current = Arc::new(grown);
     }
 
+    /// Grows the fence to what the store says this host holds now (`owned_by`, an heir's
+    /// inherited rows among them): every row of `held` is in it at `held`'s epoch, or at the
+    /// current one if that is higher (won since `held` was read). Nothing is dropped: a row
+    /// the current fence holds and `held` lacks was won after the read (a claim answered
+    /// meanwhile) or was taken from this host — then the next write under it is refused
+    /// `Fenced` and the host is fenced, as it must be.
+    pub fn grow_to(&self, held: Fence) {
+        let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(held.owner, current.owner, "a fence grows only by its own owner's rows");
+        let mut grown = (**current).clone();
+        for (sr, epoch) in held.epochs {
+            let e = grown.epochs.entry(sr).or_insert(epoch);
+            *e = (*e).max(epoch);
+        }
+        *current = Arc::new(grown);
+    }
+
+    /// From now on a region load leaves `ids` out of the stored state it returns (an heir's
+    /// drop set, R4: each lives elsewhere or comes from a survivor's journal); replaces the
+    /// previous set, an empty one ends the filtering. Shared by every clone (the region
+    /// threads load through one).
+    pub fn forget_entities(&self, ids: &BTreeSet<EntityId>) {
+        *self.forgotten.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(ids.clone());
+    }
+
     /// Swaps the fence for `fence` (what this host holds now, e.g. `owned_by`). The
     /// process's `all_hosts` is kept: it is how the process runs, not a stored row.
     pub fn replace(&self, mut fence: Fence) {
@@ -260,9 +317,21 @@ impl HostClaims {
     /// holds). A refusal naming a super-region it never claimed is a stray
     /// write of ours, not a takeover: logged, flag untouched. Returns whether
     /// the process is now fenced by `error`.
+    ///
+    /// Classified against the CURRENT fence: only for a refusal of no write's fence (a
+    /// claim's, `sr` `None`). A load's or commit's refusal is classified against the fence it
+    /// was made under ([`Self::note_refusal_under`]): the fence may have changed since.
     pub fn note_refusal(&self, error: &StoreError) -> bool {
+        self.note_refusal_under(&self.fence(), error)
+    }
+
+    /// [`Self::note_refusal`] for a load or commit made under `fence` (the snapshot it was
+    /// checked against): a refusal naming a super-region of `fence` concerns this host — it
+    /// held the row when it wrote — even if a later [`Self::grow_to`] / [`Self::replace`]
+    /// changed the fence meanwhile.
+    pub fn note_refusal_under(&self, fence: &Fence, error: &StoreError) -> bool {
         match error {
-            StoreError::Fenced { sr: Some(sr) } if !self.fence().epochs.contains_key(sr) => {
+            StoreError::Fenced { sr: Some(sr) } if !fence.epochs.contains_key(sr) => {
                 log::error!("[server] a write touched super-region {sr:?}, which this host never claimed; refused (not a takeover)");
                 false
             }
@@ -270,14 +339,25 @@ impl HostClaims {
         }
     }
 
-    /// Loads `rc` from the store under the current fence; a fence refusal also sets
-    /// the [`Fenced`] flag.
+    /// Loads `rc` from the store under the current fence, leaving out the entities of
+    /// [`Self::forget_entities`]; a fence refusal also sets the [`Fenced`] flag.
     pub fn load_region(&self, rc: RegionCoords) -> Result<Option<StoredRegion>, StoreError> {
-        let loaded = self.store.load_region(rc, &self.fence());
-        if let Err(e) = &loaded {
-            self.note_refusal(e);
+        let fence = self.fence();
+        let loaded = self.store.load_region(rc, &fence);
+        match loaded {
+            Err(e) => {
+                self.note_refusal_under(&fence, &e);
+                Err(e)
+            }
+            Ok(Some(mut region)) => {
+                let forgotten = self.forgotten.read().unwrap_or_else(|e| e.into_inner()).clone();
+                if !forgotten.is_empty() {
+                    region.entities.retain(|b| !forgotten.contains(&b.id));
+                }
+                Ok(Some(region))
+            }
+            Ok(None) => Ok(None),
         }
-        loaded
     }
 
     /// Queues `cut` for commit under the current fence; the answer arrives on the receiver.
@@ -527,6 +607,193 @@ impl DirectoryKeeper {
     }
 }
 
+/// Whether `e` is a lost lock conflict — Postgres chose the transaction in a deadlock
+/// (`40P01`) or its `lock_timeout` ran out (`55P03`); nothing was written, and asking again
+/// may succeed.
+pub fn is_lock_conflict(e: &StoreError) -> bool {
+    match e {
+        StoreError::Backend(why) => why.contains("deadlock detected") || why.contains("lock_timeout") || why.contains("lock timeout"),
+        _ => false,
+    }
+}
+
+// --- an heir's adoption (R4) ----------------------------------------------------------------
+
+/// After a failed adoption read, the next one is not started before this many ms.
+pub const ADOPTION_READ_RETRY_MS: u64 = 1_000;
+
+/// What the [`AdoptionReader`] asks of the manager (a trait so a test can play it).
+pub trait AdoptingManager {
+    fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, u32)>;
+    fn adoption_drop_set(&self, id: SuccessionId) -> Vec<EntityId>;
+    fn adoption_read_failed(&mut self, id: SuccessionId);
+    fn adopted_rows(&mut self, id: SuccessionId, rows: Vec<InFlightRow>, located: Vec<(EntityId, RegionCoords)>);
+}
+
+impl<S: RegionSpawner> AdoptingManager for WorldManager<S> {
+    fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, u32)> {
+        WorldManager::take_adoption_wanted(self)
+    }
+    fn adoption_drop_set(&self, id: SuccessionId) -> Vec<EntityId> {
+        WorldManager::adoption_drop_set(self, id)
+    }
+    fn adoption_read_failed(&mut self, id: SuccessionId) {
+        WorldManager::adoption_read_failed(self, id)
+    }
+    fn adopted_rows(&mut self, id: SuccessionId, rows: Vec<InFlightRow>, located: Vec<(EntityId, RegionCoords)>) {
+        WorldManager::adopted_rows(self, id, rows, located)
+    }
+}
+
+/// One adoption read in flight.
+struct AdoptionRead {
+    id: SuccessionId,
+    predecessor: u32,
+    drop: Vec<EntityId>,
+    started: Instant,
+    step: AdoptionStep,
+}
+
+enum AdoptionStep {
+    /// What this host holds now (`owned_by`): the inherited rows are in it.
+    Fence(Receiver<Result<Fence, StoreError>>),
+    /// The predecessor's in-flight rows and where the store holds each dropped entity.
+    Rows {
+        rows: Receiver<Result<Vec<InFlightRow>, StoreError>>,
+        located: Receiver<Result<Vec<(EntityId, RegionCoords)>, StoreError>>,
+        got: (Option<Vec<InFlightRow>>, Option<Vec<(EntityId, RegionCoords)>>),
+    },
+}
+
+/// An heir's adoption reads, driven from its main loop (never blocks — the heartbeat beats on
+/// meanwhile). When the manager has every survivor's report resolved it wants the store
+/// ([`game::WorldManager::take_adoption_wanted`]); this reads, one adoption at a time, on the
+/// store thread: what this host holds now (`owned_by_later`), which grows the fence by the
+/// inherited rows ([`HostClaims::grow_to`]) BEFORE anything of them loads; then, under that
+/// fence, the predecessor's in-flight rows of the base cut (`load_in_flight_of_later`) and the
+/// stored regions of the drop set (`regions_of_entities_later`); and hands them to the manager
+/// ([`game::WorldManager::adopted_rows`]). A read refused `Fenced` (this boot was replaced)
+/// sets the [`Fenced`] flag — the main loop exits fenced (3); any other failure (a lock
+/// timeout, the store down, a succession no longer open) gives the adoption back
+/// ([`game::WorldManager::adoption_read_failed`]) and asks again after
+/// [`ADOPTION_READ_RETRY_MS`] — "wait, never guess": the coordinator's deadline rolls the
+/// world back if it never succeeds.
+pub struct AdoptionReader {
+    claims: HostClaims,
+    read: Option<AdoptionRead>,
+    no_read_before: Option<Instant>,
+    warned: Option<Instant>,
+}
+
+impl AdoptionReader {
+    pub fn new(claims: HostClaims) -> AdoptionReader {
+        AdoptionReader { claims, read: None, no_read_before: None, warned: None }
+    }
+
+    /// An adoption read is in flight.
+    pub fn reading(&self) -> bool {
+        self.read.is_some()
+    }
+
+    fn warn(&mut self, what: &str) {
+        if self.warned.is_none_or(|at| at.elapsed() >= Duration::from_millis(DIRECTORY_WARN_MS)) {
+            self.warned = Some(Instant::now());
+            log::warn!("[server] {what}");
+        }
+    }
+
+    /// One pass: an answer that came moves the read on (or ends it); a new read starts when
+    /// the manager wants one and none is in flight.
+    pub fn pump(&mut self, manager: &mut impl AdoptingManager) {
+        if self.claims.fenced().is_set() {
+            return;
+        }
+        if self.read.is_none() && self.no_read_before.is_none_or(|at| Instant::now() >= at) {
+            if let Some((id, predecessor)) = manager.take_adoption_wanted() {
+                let drop = manager.adoption_drop_set(id);
+                let owner = self.claims.fence().owner;
+                log::info!(
+                    "[server] succession {}: reading host {predecessor}'s land for the adoption ({} dropped entities)",
+                    id.0,
+                    drop.len()
+                );
+                let step = AdoptionStep::Fence(self.claims.store().owned_by_later(owner));
+                self.read = Some(AdoptionRead { id, predecessor, drop, started: Instant::now(), step });
+            }
+        }
+        let Some(read) = self.read.as_mut() else { return };
+        let outcome: Option<Result<(), StoreError>> = match &mut read.step {
+            AdoptionStep::Fence(rx) => match rx.try_recv() {
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+                Ok(Err(e)) => Some(Err(e)),
+                Ok(Ok(held)) => {
+                    // The fence first: an inherited region loads (and a part is checked)
+                    // against it from the moment the manager owns the land.
+                    self.claims.grow_to(held);
+                    let fence = self.claims.fence();
+                    let store = self.claims.store();
+                    read.step = AdoptionStep::Rows {
+                        rows: store.load_in_flight_of_later(read.predecessor, &fence),
+                        located: store.regions_of_entities_later(read.drop.clone()),
+                        got: (None, None),
+                    };
+                    None
+                }
+            },
+            AdoptionStep::Rows { rows, located, got } => {
+                fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
+                    if slot.is_none() {
+                        match rx.try_recv() {
+                            Ok(answer) => *slot = Some(answer?),
+                            Err(TryRecvError::Empty) => {}
+                            Err(TryRecvError::Disconnected) => {
+                                return Err(StoreError::Backend("the world-store thread has stopped".into()))
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                match take(rows, &mut got.0).and_then(|()| take(located, &mut got.1)) {
+                    Err(e) => Some(Err(e)),
+                    Ok(()) if got.0.is_some() && got.1.is_some() => Some(Ok(())),
+                    Ok(()) => None,
+                }
+            }
+        };
+        let Some(outcome) = outcome else { return };
+        let read = self.read.take().expect("a read");
+        match outcome {
+            Ok(()) => {
+                let AdoptionStep::Rows { got: (Some(rows), Some(located)), .. } = read.step else {
+                    unreachable!("an adoption read ends with both answers")
+                };
+                log::info!(
+                    "[server] succession {}: host {}'s land read in {} ms ({} in-flight rows, {} stored rows of dropped entities)",
+                    read.id.0,
+                    read.predecessor,
+                    read.started.elapsed().as_millis(),
+                    rows.len(),
+                    located.len()
+                );
+                manager.adopted_rows(read.id, rows, located);
+            }
+            Err(e @ StoreError::Fenced { .. }) => {
+                self.claims.fenced().set();
+                log::error!("[server] succession {}: the adoption read was refused ({e}); this host is fenced", read.id.0);
+            }
+            Err(e) => {
+                manager.adoption_read_failed(read.id);
+                self.no_read_before = Some(Instant::now() + Duration::from_millis(ADOPTION_READ_RETRY_MS));
+                self.warn(&format!(
+                    "succession {}: reading host {}'s land failed ({e}); asked again in {ADOPTION_READ_RETRY_MS} ms",
+                    read.id.0, read.predecessor
+                ));
+            }
+        }
+    }
+}
+
 /// Environment: regions per super-region side; must match the world store's.
 pub const SUPER_REGION_REGIONS_ENV: &str = "VOXEL_SUPER_REGION_REGIONS";
 
@@ -624,6 +891,53 @@ mod tests {
         assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![x]);
         claims.commit_cut(empty_cut(3)).recv().unwrap().expect("x alone is still held");
         store.shutdown();
+    }
+
+    /// Requirement (R4 Task 10): a refusal is classified against the fence the refused write
+    /// was made under — a fence grown or replaced since (an heir's adoption, a re-claim) must
+    /// not turn a real takeover of a row the write held into a "stray write".
+    #[test]
+    fn a_refusal_is_classified_against_the_fence_the_write_used() {
+        let store = memory_store();
+        let (x, y) = ((0, 0), (0, -1));
+        let claims = HostClaims::claim_srs(store.clone(), 0, vec![x]).unwrap();
+        let used = claims.fence();
+        // Since the write: the fence no longer holds `x` (replaced by what holds now).
+        claims.replace(Fence { owner: 0, epochs: [(y, 1)].into_iter().collect(), all_hosts: false });
+        let refusal = StoreError::Fenced { sr: Some(x) };
+        assert!(!claims.clone().note_refusal(&refusal), "against the current fence it reads as a stray write");
+        assert!(!claims.fenced().is_set());
+        assert!(claims.note_refusal_under(&used, &refusal), "against the fence the write used: a takeover");
+        assert!(claims.fenced().is_set());
+        // A write that never held the row is still a stray write, not a takeover.
+        let other = HostClaims::claim_srs(store.clone(), 1, vec![y]).unwrap();
+        let stray = StoreError::Fenced { sr: Some(x) };
+        assert!(!other.note_refusal_under(&other.fence(), &stray));
+        assert!(!other.fenced().is_set());
+        store.shutdown();
+    }
+
+    /// An heir grows its fence by what the store says it holds now: every row at the higher
+    /// of the two epochs, nothing dropped.
+    #[test]
+    fn growing_to_what_is_held_keeps_newer_epochs_and_drops_nothing() {
+        let store = memory_store();
+        let claims = HostClaims::none(store.clone(), 0);
+        claims.replace(Fence { owner: 0, epochs: [((0, 0), 3), ((1, 0), 2)].into_iter().collect(), all_hosts: false });
+        claims.grow_to(Fence { owner: 0, epochs: [((0, 0), 2), ((2, 0), 5)].into_iter().collect(), all_hosts: false });
+        let epochs: Vec<(SuperRegion, u64)> = claims.fence().epochs.iter().map(|(sr, e)| (*sr, *e)).collect();
+        assert_eq!(epochs, [((0, 0), 3), ((1, 0), 2), ((2, 0), 5)]);
+        store.shutdown();
+    }
+
+    #[test]
+    fn lost_lock_conflicts_are_recognised() {
+        assert!(is_lock_conflict(&StoreError::Backend("error returned from database: deadlock detected".into())));
+        assert!(is_lock_conflict(&StoreError::Backend(
+            "a save cut waited longer than its lock_timeout (CUT_LOCK_TIMEOUT_MS) for a row lock".into()
+        )));
+        assert!(!is_lock_conflict(&StoreError::Backend("connection refused".into())));
+        assert!(!is_lock_conflict(&StoreError::Fenced { sr: None }));
     }
 
     /// A manager whose directory says `sr` is free until a read is applied, and that wants

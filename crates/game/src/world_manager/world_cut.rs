@@ -495,10 +495,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The part of the world cut, not complete yet, fails: the cut is dropped here, the
     /// coordinator is told, and the part stays `Failed` until its `CutDone`.
     pub(super) fn world_cut_fail(&mut self, why: CutFailure) {
+        self.world_cut_fail_saying(why, None);
+    }
+
+    /// [`Self::world_cut_fail`], its one warning saying `reason` (`None`: the failure itself)
+    /// — a caller that knows why the part fails logs one line, not two.
+    pub(super) fn world_cut_fail_saying(&mut self, why: CutFailure, reason: Option<&str>) {
         let Some(run) = self.world_cut.as_mut().filter(|r| r.state == PartState::Pending) else { return };
         run.state = PartState::Failed;
         let (cut, beginning) = (run.cut, run.beginning);
-        log::warn!("world cut {}: this host's part failed ({why:?})", cut.0);
+        match reason {
+            Some(reason) => log::warn!("world cut {}: this host's part failed: {reason}", cut.0),
+            None => log::warn!("world cut {}: this host's part failed ({why:?})", cut.0),
+        }
         if self.pending_cut.as_ref().is_some_and(|c| c.id == cut) {
             self.pending_cut = None;
         }
