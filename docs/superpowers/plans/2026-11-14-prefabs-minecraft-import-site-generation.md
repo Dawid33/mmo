@@ -142,15 +142,18 @@ anchor, turn, mirror, pad }>` as a pure function, independent of the box asked. 
    `prefetch_region`'s pinned tile rectangle does not grow.
 2. **Pad**: a placement may level the ground under its footprint (`pad: { level, skirt }`). The pad edits
    the sampled surface before columns are filled: inside the footprint the surface is `level`, across
-   `skirt` blocks it blends back. Slopes, soil depth and water see the padded surface. No trees grow on a
-   footprint or a pad.
-3. Carve, then write. Overlap between two placements resolves by a fixed rule (lower placement index
-   wins); a generator is expected not to overlap.
+   `skirt` blocks it blends back. Slopes, soil depth and water see the padded surface. Where pads meet,
+   any placement's own box wins before any skirt (then list order). No tree stands within reach of a
+   footprint (a crown from just outside may overhang), and no pad column under a box is sloped.
+3. Carve, then write. Overlap between two placements resolves by a fixed rule (the LATER placement in
+   the source's order wins — as built); a generator is expected not to overlap.
 4. The column band grows: `hi` to the top of the stamp, `lo` to its bottom, so cellars and dungeon rooms
-   are real chunks, not implied ground. Nothing is written at or below bedrock (`surface −
-   UNDERGROUND_DEPTH`); a placement that would is clipped and counted.
-5. Water: a prefab carries none. A block written into recipe water stands in it; a pad never lowers
-   ground below the water top. Bridges and quays work; flooded cellars are avoided by the placer.
+   are real chunks, not implied ground (the band reaches one block below the stamp, and neighbouring
+   columns' bands follow). Nothing is written at or below bedrock (`surface − UNDERGROUND_DEPTH`); a
+   placement that would is clipped, silently for now.
+5. Water: a prefab carries none. A block written into recipe water stands in it. A pad whose level is
+   below the water top is flooded — as built, the pass does not prevent it; the placer must not choose
+   such a level. A pad above the water top removes the water there.
 
 **Far rings**: `coarse_from_patch` gets the same pass in coarse form — the pad on the heights, then each
 placement's column profile rasterised into the cells, the way tree crowns are. Sub-block rings and saved
@@ -518,3 +521,40 @@ carved; `split` with default ground falls back to a whole-file import when it fi
 - `*_copper_bulb`, `*_copper_chest` fall back to `smooth_stone` (none in the library).
 - No fixture test pins "resolve before write"; several tests could not be seen failing before the code
   existed (noted in the task reports).
+
+## 13. Carried over from plan 3 (worldgen stamping — built 2026-11-14)
+
+Plan `2026-11-14-prefabs-3-worldgen-stamping.md` is built: `worldgen::structures` (placements, the
+`StructureSource` trait, `StructureList`, the ground pad), the structure pass in full generation and its
+far-terrain twin, `ground_y`, a dev source and the `--prefab` debug flag (see "Looking at a prefab in the
+game" in §8). With no source installed generation is byte-identical to before, pinned by checksums that
+were verified against the pre-plan generator.
+
+**Constraints on the site plans and generators (stages F, G) that this stage found**
+
+- **A source must not sample terrain while generating.** The dev source calls `ground_y` on demand, also
+  for neighbouring regions, outside the forged-tile rectangle a region pins; a failed load there panics a
+  region or LOD thread. Tolerable for a dev flag. The real source takes every pad level from the frozen
+  site table (heights sampled once, when the plan is written at world creation), so a placement query is
+  pure data.
+- **Far rings need a cheap answer.** A far key spanning many regions asks for every placement in its
+  span; with towns of hundreds of buildings that is too much per tile. Expect a per-site silhouette (or a
+  per-site bounds check that skips sites too small to show at that factor) rather than per-building work.
+- **Pads are per placement.** There is no shared terrace for a group of lots and no road grading; a town
+  on a slope gets one pad per building, each with its own skirt. The generator either sizes skirts to the
+  height difference, picks sites by relief, or this stage's pad grows a "site pad".
+- **Per-sample cost.** `pad_at` and `blocks_trees` scan every nearby placement for every sampled column
+  and recompute its bounds; fine for a handful, not for a town. Precompute bounds per query, or rasterise
+  each pad over its own rectangle.
+- **Not built:** `GroundFit::Follow` (roads, walls following ground), a foundation for a placement
+  without a pad (far terrain draws such a prefab as a pillar down to the ground), fixtures and containers
+  at genesis (stage C2, waits for R4), structures in water.
+
+**Smaller**
+
+- `ColumnGround.surface` stays at pad level over a carved cellar; the bedrock clip is silent.
+- A skirt over glacier ground strips the ice and can leave an ice cliff at its outer edge.
+- On a hillside the dev skirt (4 blocks) leaves 2–3 block steps; a generator should not copy it.
+- A broken built-in prefab file aborts every server start (kept loud on purpose).
+- A world started once with `--prefab` keeps its saved huts; a later run without the flag generates
+  neighbouring regions without them. Nothing records which source a world was generated with.
