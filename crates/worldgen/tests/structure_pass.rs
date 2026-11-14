@@ -43,6 +43,58 @@ fn no_source_is_byte_identical() {
     }
 }
 
+/// crc32 of the bincode of generation with NO structure source: these pin the "no structures
+/// installed" output (full columns and coarse LOD tiles) against the terrain before the structure pass
+/// existed, which `no_source_is_byte_identical` cannot (both its sides run the new code). Recorded at
+/// the plan's base commit f0df695e (before any structure code in `lib.rs`) and equal at the structure
+/// pass, at the default dials (region 64, chunk 16, no world file). Re-record only together with a deliberate
+/// terrain change, and say why in that commit:
+///
+/// ```sh
+/// STRUCTURE_GOLDEN_PRINT=1 just test-one worldgen "--test it -- --include-ignored --nocapture structure_pass::no_structure_output_is_pinned"
+/// ```
+const PINNED_REGIONS: [u32; 3] = [0x3B11_2A9C, 0x28C8_0944, 0xAA0F_DEE1];
+/// `generate_columns` over the forest region's west half.
+const PINNED_HALF_WINDOW: u32 = 0x6691_8C16;
+/// `coarse_tile` (cells: group, grid) and `coarse_water` of the forest region's key at factor 16, then 64.
+const PINNED_COARSE: [(u32, u32); 2] = [(0x804E_A0A4, 0xAB24_6ECB), (0x1B16_E5E7, 0x3661_EBE0)];
+
+/// The dials the pinned constants hold for (`scene_hash_golden`'s guard, chunk 16 only).
+fn golden_dials() -> bool {
+    game::CHUNK_BLOCKS == 16
+        && game::REGION_BLOCKS == 64
+        && option_env!("VOXEL_ISLAND_CELLS").is_none_or(|v| v.is_empty() || v == "0" || v == "16")
+        && std::env::var_os(worldgen::forged::WORLD_FILE_ENV).is_none_or(|v| v.is_empty())
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn no_structure_output_is_pinned() {
+    if !golden_dials() {
+        eprintln!("structure_pass::no_structure_output_is_pinned: non-default world dials, skipped");
+        return;
+    }
+    install_real_block_props();
+    let crc = |v: &[u8]| crc32fast::hash(v);
+    let regions = [forest(), RegionCoords::new(0, 0), RegionCoords::new(-3, -2)]
+        .map(|rc| crc(&bytes(&worldgen::generate_region(rc, SEED, mats()))));
+    let half = crc(&bytes(&worldgen::generate_columns(forest(), 0..REGION_CHUNKS / 2, 0..REGION_CHUNKS, SEED, mats())));
+    let coarse = [16, 64].map(|f| {
+        let key = game::lod::LodKey::for_region(f, forest());
+        let cells: Vec<_> = worldgen::coarse_tile(&key, SEED, mats()).into_iter().map(|c| (c.group, c.grid)).collect();
+        (crc(&bytes(&cells)), crc(&bytes(&worldgen::coarse_water(&key, SEED, mats()))))
+    });
+    if std::env::var_os("STRUCTURE_GOLDEN_PRINT").is_some() {
+        let hex = |v: u32| format!("0x{:04X}_{:04X}", v >> 16, v & 0xFFFF);
+        println!("PINNED_REGIONS = [{}]", regions.map(hex).join(", "));
+        println!("PINNED_HALF_WINDOW = {}", hex(half));
+        println!("PINNED_COARSE = [{}]", coarse.map(|(t, w)| format!("({}, {})", hex(t), hex(w))).join(", "));
+    }
+    assert_eq!(regions, PINNED_REGIONS, "generate_region without structures moved");
+    assert_eq!(half, PINNED_HALF_WINDOW, "generate_columns without structures moved");
+    assert_eq!(coarse, PINNED_COARSE, "coarse_tile / coarse_water without structures moved");
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_hut_stands_on_its_pad() {
@@ -99,6 +151,7 @@ fn window_independence_with_a_structure() {
     let level = world::ground(&bare, mx, mz);
     // A hut straddling the middle on both axes, its box and skirt crossing the window cuts.
     let sp = placed(&prefabs::hut(9, 6, 9), [mx - 4, level + 1, mz - 4], Some(Pad { level, skirt: 6 }));
+    world::assert_dry(&bare, &sp);
     let list = StructureList::new(vec![sp.clone()], 1);
     let whole = worldgen::generate_region_with(rc, SEED, mats(), &list);
     let by_col: BTreeMap<_, _> = whole.iter().map(|(cc, col)| ((cc.x, cc.z), bytes(col))).collect();
@@ -137,6 +190,7 @@ fn a_structure_crosses_a_region_corner_whole() {
     let bare = world::generate(&rcs, &NoStructures);
     let level = world::ground(&bare, cx, cz);
     let sp = placed(&prefabs::hut(20, 6, 20), [cx - 10, level + 1, cz - 10], Some(Pad { level, skirt: 4 }));
+    world::assert_dry(&bare, &sp);
     let r = world::generate(&rcs, &StructureList::new(vec![sp.clone()], 1));
     let (min, max) = sp.bounds();
     let mut regions = BTreeSet::new();
@@ -223,6 +277,7 @@ fn a_cellar_has_real_walls() {
             FileBox { min: [5, 7, 0], size: [1, 2, 5], mat: prefabs::PLANK },
         ];
         let sp = placed(&prefabs::resolve_file(f), [ex, level + 1, ez], Some(Pad { level, skirt: 4 }));
+        world::assert_dry(&bare, &sp);
         let r = world::generate(&[rc], &StructureList::new(vec![sp.clone()], 1));
         assert_cells(&r, &sp);
         let cells = prefabs::expected(&sp.prefab, &sp.at);
@@ -262,7 +317,9 @@ fn later_placements_override() {
     install_real_block_props();
     let rc = forest();
     let bare = world::generate(&[rc], &NoStructures);
-    let (ax, az) = (rc.x * RB + RB / 2 - 4, rc.z * RB + RB / 2 - 4);
+    // Both boxes (9 × 8 together) and their skirts on dry ground.
+    let (r0x, r0z) = (rc.x * RB, rc.z * RB);
+    let (ax, az) = world::dry_site(&bare, [r0x + 3, r0z + 3, r0x + RB - 3, r0z + RB - 3], 9, 8, 3).expect("a dry site");
     let level = world::ground(&bare, ax, az);
     let pad = Some(Pad { level, skirt: 3 });
     let a = placed(&prefabs::solid("a", [6, 3, 6], [0, 0, 0], prefabs::BRICK), [ax, level + 1, az], pad);

@@ -792,7 +792,7 @@ fn columns_from_patch(
             lo = (lo - soil_max).min(open_lo);
             if !near.is_empty() {
                 let floor = (0..cb * cb)
-                    .map(|i| at(fx + i / cb, fz + i % cb).s - game::UNDERGROUND_DEPTH + 1)
+                    .map(|i| at(fx + i / cb, fz + i % cb).top - game::UNDERGROUND_DEPTH + 1)
                     .min()
                     .unwrap();
                 (lo, hi) = structure_band(&near, [wx + fx, wz + fz], (lo, hi), floor);
@@ -896,7 +896,7 @@ fn columns_from_patch(
             if !near.is_empty() {
                 let rc = REGION_CHUNKS as i32;
                 let chunk_xz = [coords.x * rc + cx as i32, coords.z * rc + cz as i32];
-                let bedrock = |lx: usize, lz: usize| at(fx + lx as i32, fz + lz as i32).s - game::UNDERGROUND_DEPTH;
+                let bedrock = |lx: usize, lz: usize| at(fx + lx as i32, fz + lz as i32).top - game::UNDERGROUND_DEPTH;
                 for (sub_i, (blocks, chisel)) in chunks.iter_mut().enumerate() {
                     let sub_y = base_sub_y + sub_i as i32;
                     stamp_structures(&near, [chunk_xz[0], sub_y, chunk_xz[1]], blocks, chisel, &bedrock);

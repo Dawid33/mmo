@@ -10,6 +10,11 @@ use game::prefab::{placement_bounds, Placement, ResolvedPrefab};
 /// Level the ground under a placement. `level` is the world y of the top ground block inside the
 /// placement's x/z box (the prefab's lowest layer normally sits at level + 1); over `skirt` further
 /// columns the ground blends back to the natural surface.
+///
+/// The pad moves ground only, never water: where `level` (or a skirt column's blended surface) lies
+/// below the column's water top, that column is flooded — its recipe water fills the prefab's air — so
+/// a placer must not choose such a level. Every padded column, box and skirt alike, loses its glacier
+/// ice (and any ice on its water).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pad {
     pub level: i32,

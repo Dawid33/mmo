@@ -108,6 +108,17 @@ pub mod world {
         col.ground().unwrap().recipe_water(lx, lz).is_none() && ground(r, x, z) > SEA_TOP_BLOCK
     }
 
+    /// Panics unless every column the placement's pad reaches (its box grown by the skirt) is dry ground
+    /// in `r`: a test meant for land must not silently run on a lake bed or the sea floor.
+    pub fn assert_dry(r: &Regions, sp: &StructurePlacement) {
+        let [x0, z0, x1, z1] = sp.reach_xz();
+        for x in x0..x1 {
+            for z in z0..z1 {
+                assert!(dry(r, x, z), "the site of {:?} is wet at ({x}, {z})", sp.at.anchor);
+            }
+        }
+    }
+
     /// Every stored block with a tree id: world position → block.
     pub fn tree_blocks(r: &Regions) -> BTreeMap<[i32; 3], Block> {
         let mut out = BTreeMap::new();
