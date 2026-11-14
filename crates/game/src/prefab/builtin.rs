@@ -91,6 +91,13 @@ impl PrefabSet {
         self.by_key.values().map(|p| p.name.as_str())
     }
 
+    /// Every prefab, ascending by name.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<ResolvedPrefab>> {
+        let mut all: Vec<&Arc<ResolvedPrefab>> = self.by_key.values().collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        all.into_iter()
+    }
+
     pub fn len(&self) -> usize {
         self.by_key.len()
     }

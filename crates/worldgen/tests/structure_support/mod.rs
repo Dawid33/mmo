@@ -177,6 +177,26 @@ pub mod prefabs {
         }
     }
 
+    /// A `size` box prefab (no blocks) with these tags and `door` markers at the given cells.
+    pub fn house_box(name: &str, size: [u32; 3], tags: &[&str], doors: &[[i32; 3]]) -> PrefabFile {
+        let mut f = file(name, size, [0, 0, 0]);
+        f.tags = tags.iter().map(|t| t.to_string()).collect();
+        f.markers = doors
+            .iter()
+            .map(|&at| Marker { at, kind: "door".into(), turn: 0, props: Default::default() })
+            .collect();
+        f
+    }
+
+    /// A set built in memory from prefab files.
+    pub fn set_of(files: &[PrefabFile]) -> PrefabSet {
+        let reg = registry();
+        let texts: Vec<(String, String)> =
+            files.iter().map(|f| (format!("{}{}", f.name, RON_SUFFIX), prefab_to_ron(f))).collect();
+        PrefabSet::from_sources(texts.iter().map(|(n, t)| (n.as_str(), t.as_bytes())), &|n| reg.id_of(n))
+            .expect("the set resolves")
+    }
+
     pub const BRICK: u16 = 0;
     pub const PLANK: u16 = 1;
 

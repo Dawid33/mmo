@@ -16,6 +16,7 @@ pub mod pipeline;
 pub mod material;
 pub mod tile_map;
 pub mod world_store;
+pub mod sites;
 pub mod structures;
 pub mod trees;
 mod slopes;

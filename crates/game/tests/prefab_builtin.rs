@@ -215,3 +215,17 @@ fn a_missing_directory_is_an_error() {
     let err = loaded.unwrap_err();
     assert!(err.contains("not-there"), "{err}");
 }
+
+#[test]
+fn iter_is_ascending_by_name() {
+    let reg = registry();
+    let mut files = Vec::new();
+    for name in ["zeta", "alpha", "mid", "beta-2", "beta"] {
+        let mut f = dev_hut();
+        f.name = name.into();
+        files.push((format!("{name}{RON_SUFFIX}"), prefab_to_ron(&f)));
+    }
+    let set = PrefabSet::from_sources(files.iter().map(|(n, t)| (n.as_str(), t.as_bytes())), &|n| reg.id_of(n)).unwrap();
+    let names: Vec<&str> = set.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["alpha", "beta", "beta-2", "mid", "zeta"]);
+}
