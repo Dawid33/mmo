@@ -7,6 +7,8 @@ use game::prefab::*;
 use game::BlockId;
 use worldgen::structures::*;
 
+use crate::structure_support::box_distance;
+
 fn names(name: &str) -> Option<BlockId> {
     match name {
         "stone" => Some(BlockId(2)),
@@ -105,6 +107,22 @@ fn pad_levels_the_box_and_blends_the_skirt() {
     }
 }
 
+/// What two placements give under `pad_at`'s rule, from each one alone: the first box holding the
+/// column, else the first skirt reaching it.
+fn two_pads(a: &StructurePlacement, b: &StructurePlacement, x: i32, z: i32, natural: i32) -> PadEffect {
+    let (ea, eb) = (pad_at(&[a], x, z, natural), pad_at(&[b], x, z, natural));
+    let in_box = |e: PadEffect| matches!(e, PadEffect::Level { in_box: true, .. });
+    if in_box(ea) {
+        ea
+    } else if in_box(eb) {
+        eb
+    } else if ea != PadEffect::None {
+        ea
+    } else {
+        eb
+    }
+}
+
 #[test]
 fn the_first_placement_decides() {
     let a = boxed(0, 0, 10, 10, Some(Pad { level: 40, skirt: 4 }));
@@ -112,12 +130,45 @@ fn the_first_placement_decides() {
     let both = [&a, &b];
     for x in -10..25 {
         for z in -10..25 {
-            let first = pad_at(&[&a], x, z, 55);
-            let want = if first != PadEffect::None { first } else { pad_at(&[&b], x, z, 55) };
-            assert_eq!(pad_at(&both, x, z, 55), want);
+            assert_eq!(pad_at(&both, x, z, 55), two_pads(&a, &b, x, z, 55), "({x}, {z})");
         }
     }
+    // Both boxes hold (7, 7): the first decides.
     assert_eq!(pad_at(&both, 7, 7, 55), PadEffect::Level { surface: 40, in_box: true });
+    // Only B's box holds (12, 12), inside A's skirt: B's level.
+    assert_eq!(pad_at(&both, 12, 12, 55), PadEffect::Level { surface: 70, in_box: true });
+    // A pad-less placement first changes nothing.
+    let none = boxed(0, 0, 30, 30, None);
+    for x in -10..25 {
+        assert_eq!(pad_at(&[&none, &a, &b], x, 3, 55), pad_at(&both, x, 3, 55));
+    }
+}
+
+#[test]
+fn a_box_beats_an_earlier_skirt() {
+    // A's skirt (8) reaches six columns into B's box at x 12..22.
+    let a = boxed(0, 0, 10, 10, Some(Pad { level: 40, skirt: 8 }));
+    let b = boxed(12, 0, 10, 10, Some(Pad { level: 70, skirt: 2 }));
+    let both = [&a, &b];
+    for x in 12..22 {
+        for z in 0..10 {
+            assert_eq!(pad_at(&both, x, z, 55), PadEffect::Level { surface: 70, in_box: true }, "B's box at ({x}, {z})");
+        }
+    }
+    // Outside both boxes the earlier skirt still wins where it reaches.
+    let mut shared = 0;
+    for x in -12..30 {
+        for z in -12..20 {
+            if box_distance(&a, x, z) == 0 || box_distance(&b, x, z) == 0 {
+                continue;
+            }
+            let (ea, eb) = (pad_at(&[&a], x, z, 55), pad_at(&[&b], x, z, 55));
+            let want = if ea != PadEffect::None { ea } else { eb };
+            shared += usize::from(ea != PadEffect::None && eb != PadEffect::None);
+            assert_eq!(pad_at(&both, x, z, 55), want, "({x}, {z})");
+        }
+    }
+    assert!(shared > 0, "the skirts overlap somewhere outside the boxes");
 }
 
 #[test]

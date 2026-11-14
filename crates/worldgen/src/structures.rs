@@ -174,19 +174,25 @@ fn box_distance(min: [i32; 3], max: [i32; 3], x: i32, z: i32) -> i64 {
     gap(x, min[0], max[0]).max(gap(z, min[2], max[2]))
 }
 
-/// The surface of ground column (x, z) under these placements: the FIRST placement (in list order)
-/// whose pad reaches the column decides. Inside its x/z box: `Level { surface: level, in_box: true }`.
-/// At Chebyshev distance d in 1..=skirt from the box: `surface = level + (natural - level) * d /
-/// (skirt + 1)` (i64 arithmetic, truncating division), `in_box: false`. Otherwise `PadEffect::None`.
+/// The surface of ground column (x, z) under these placements. A box beats any skirt: the FIRST
+/// placement (in list order) with a pad whose x/z box holds the column decides, `Level { surface:
+/// level, in_box: true }`; only when no box holds it, the FIRST placement whose pad's skirt reaches it
+/// decides: at Chebyshev distance d in 1..=skirt from its box, `surface = level + (natural - level) * d
+/// / (skirt + 1)` (i64 arithmetic, truncating division), `in_box: false`. Otherwise `PadEffect::None`.
+/// A placement without a pad affects nothing.
 pub fn pad_at(placements: &[&StructurePlacement], x: i32, z: i32, natural: i32) -> PadEffect {
+    for p in placements {
+        let Some(pad) = p.pad else { continue };
+        let (min, max) = p.bounds();
+        if box_distance(min, max, x, z) == 0 {
+            return PadEffect::Level { surface: pad.level, in_box: true };
+        }
+    }
     for p in placements {
         let Some(pad) = p.pad else { continue };
         let skirt = pad.skirt.min(MAX_PAD_SKIRT) as i64;
         let (min, max) = p.bounds();
         let d = box_distance(min, max, x, z);
-        if d == 0 {
-            return PadEffect::Level { surface: pad.level, in_box: true };
-        }
         if d <= skirt {
             let level = pad.level as i64;
             let surface = level + (natural as i64 - level) * d / (skirt + 1);
