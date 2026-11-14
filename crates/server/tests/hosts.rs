@@ -1746,33 +1746,35 @@ fn dirty_restart_rolls_every_host_back_once() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn replaced_host_exits_fenced_at_its_next_heartbeat() {
-    use server::lease::{Heartbeat, LeaseState};
+    use server::lease::{pump_or_fence, Heartbeat};
 
     install_props();
     let Some(db) = PgDb::create("kreplaced") else { return };
     let dir = scratch("kreplaced");
     let mut w = world(&db, &dir);
     w.until_committed_after(&db, 0);
-    let mut beat = Heartbeat::new(w.claims[1].store().clone(), 1, 1001);
+    // Host 1's main-loop lease step, as `server::run` takes it every pass.
+    let fenced = w.claims[1].fenced().clone();
+    let mut beat = Some(Heartbeat::new(w.claims[1].store().clone(), 1, 1001));
     let live_until = Instant::now() + Duration::from_millis(game::HOST_HEARTBEAT_MS + 500);
     while Instant::now() < live_until {
         w.pair.round();
-        assert_eq!(beat.pump(Instant::now()), LeaseState::Held, "a live row holds its lease");
+        assert!(!pump_or_fence(&mut beat, &fenced, Instant::now()), "a live row holds its lease");
     }
+    assert!(!fenced.is_set());
     exec(&db, "UPDATE hosts SET state = 1 WHERE ordinal = 1");
     let marked = Instant::now();
-    let replaced_at = loop {
+    loop {
         w.pair.round();
-        if beat.pump(Instant::now()) == LeaseState::Replaced {
-            break Instant::now();
+        if pump_or_fence(&mut beat, &fenced, Instant::now()) {
+            break;
         }
         assert!(marked.elapsed() < Duration::from_secs(3), "no Replaced within 3 s of the row marked dead");
-    };
-    assert!(replaced_at - marked < Duration::from_secs(3));
+    }
+    assert!(marked.elapsed() < Duration::from_secs(3));
+    assert!(fenced.is_set(), "the lease step fenced the process");
     let b1 = seam_of(&w, 1);
     let saved = |db: &PgDb| query_i64s(db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", b1.x, b1.z));
-    // As the host loop does on `Replaced`: the process is fenced.
-    w.claims[1].fenced().set();
     let before = saved(&db);
     assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Fenced);
     assert_eq!(saved(&db), before, "a replaced host saves nothing on its way out");

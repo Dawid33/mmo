@@ -1854,22 +1854,22 @@ fn lease_watch_needs_a_full_lease_of_unchanged_reads() {
     let mut dead = seen(3, 7);
     dead.state = game::HOST_DEAD;
     for t in (0..game::HOST_LEASE_MS).step_by(1_000) {
-        w.observe(&[seen(1, 500), clean.clone(), dead.clone()], t);
+        w.observe(&[seen(1, 500), clean.clone(), dead.clone()], t, t);
         assert!(w.lapsed(t).is_empty(), "lapsed at {t} ms: {:?}", w.lapsed(t));
     }
-    w.observe(&[seen(1, 500), clean.clone(), dead.clone()], game::HOST_LEASE_MS);
+    w.observe(&[seen(1, 500), clean.clone(), dead.clone()], game::HOST_LEASE_MS, game::HOST_LEASE_MS);
     assert_eq!(w.lapsed(game::HOST_LEASE_MS), vec![(1, 101)]);
     // It beat: the count starts again from this read.
     let t0 = game::HOST_LEASE_MS + 1_000;
-    w.observe(&[seen(1, 2_000)], t0);
+    w.observe(&[seen(1, 2_000)], t0, t0);
     assert!(w.lapsed(t0).is_empty());
-    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS - 1);
+    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS - 1, t0 + game::HOST_LEASE_MS - 1);
     assert!(w.lapsed(t0 + game::HOST_LEASE_MS - 1).is_empty());
-    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS);
+    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS, t0 + game::HOST_LEASE_MS);
     assert_eq!(w.lapsed(t0 + game::HOST_LEASE_MS), vec![(1, 101)]);
     // Time alone, without a read, lapses nobody new.
     let mut fresh = LeaseWatch::default();
-    fresh.observe(&[seen(1, 2_000)], 0);
+    fresh.observe(&[seen(1, 2_000)], 0, 0);
     assert!(fresh.lapsed(10 * game::HOST_LEASE_MS).is_empty());
 }
 
@@ -1878,16 +1878,16 @@ fn lease_watch_needs_a_full_lease_of_unchanged_reads() {
 #[test]
 fn outage_longer_than_the_lease_declares_nobody() {
     let mut w = LeaseWatch::default();
-    w.observe(&[seen(0, 500), seen(1, 500)], 0);
+    w.observe(&[seen(0, 500), seen(1, 500)], 0, 0);
     for _ in 0..20 {
         w.observe_failed();
     }
     let back = 20_000;
-    w.observe(&[seen(0, 500), seen(1, 500)], back);
+    w.observe(&[seen(0, 500), seen(1, 500)], back, back);
     assert!(w.lapsed(back).is_empty(), "{:?}", w.lapsed(back));
-    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS - 1);
+    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS - 1, back + game::HOST_LEASE_MS - 1);
     assert!(w.lapsed(back + game::HOST_LEASE_MS - 1).is_empty());
-    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS);
+    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS, back + game::HOST_LEASE_MS);
     assert_eq!(w.lapsed(back + game::HOST_LEASE_MS), vec![(0, 100), (1, 101)]);
 }
 
@@ -1895,11 +1895,29 @@ fn outage_longer_than_the_lease_declares_nobody() {
 #[test]
 fn a_vouched_row_is_lapsed_at_once() {
     let mut w = LeaseWatch::default();
-    w.observe(&[seen(0, 500), seen(1, 0)], 42);
+    w.observe(&[seen(0, 500), seen(1, 0)], 42, 42);
     assert_eq!(w.lapsed(42), vec![(1, 101)]);
     // Unless it is clean (it left) or dead (already declared).
     let mut clean = seen(1, 0);
     clean.clean = true;
-    w.observe(&[clean], 43);
+    w.observe(&[clean], 43, 43);
     assert!(w.lapsed(43).is_empty());
+}
+
+/// A read stamped by when it was taken, not when it was handled: an answer issued at 1 s
+/// that the coordinator only got to at 12 s (a stall) shows the same beat as a read received
+/// at 0 — that is 1 s of evidence, not 12, so nobody lapses.
+#[test]
+fn a_late_answer_does_not_stretch_the_lease() {
+    let mut w = LeaseWatch::default();
+    w.observe(&[seen(1, 500)], 0, 0);
+    w.observe(&[seen(1, 500)], 1_000, 12_000);
+    assert!(w.lapsed(12_000).is_empty(), "{:?}", w.lapsed(12_000));
+    // A read issued a whole lease after the first one was received still shows it: lapsed.
+    w.observe(&[seen(1, 500)], game::HOST_LEASE_MS, game::HOST_LEASE_MS + 50);
+    assert_eq!(w.lapsed(game::HOST_LEASE_MS + 50), vec![(1, 101)]);
+    // A changed value counts from its first read's RECEIVE.
+    w.observe(&[seen(1, 900)], 20_000, 21_000);
+    w.observe(&[seen(1, 900)], 21_000 + game::HOST_LEASE_MS - 1, 40_000);
+    assert!(w.lapsed(40_000).is_empty());
 }

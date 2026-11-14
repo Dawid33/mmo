@@ -166,10 +166,23 @@ pub fn left_cleanly(store: &world_store::StoreHandle, me: u32) -> Result<Vec<(u3
     Ok(store.hosts()?.into_iter().filter(|r| r.clean && r.ordinal != me).map(|r| (r.ordinal, r.boot)).collect())
 }
 
+/// The payload of a [`PeerLinks::start`] error when the stop signal came while the boot
+/// waited to register ([`is_stopped`]).
+#[derive(Debug)]
+struct StoppedWhileRegistering;
+
+impl std::fmt::Display for StoppedWhileRegistering {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stopped while waiting to register")
+    }
+}
+
+impl std::error::Error for StoppedWhileRegistering {}
+
 /// Whether a [`PeerLinks::start`] error is the stop signal, set while the boot waited to
-/// register: exit 0.
+/// register: exit 0. (Only that error: any other, an EINTR among them, is not.)
 pub fn is_stopped(e: &io::Error) -> bool {
-    e.kind() == io::ErrorKind::Interrupted
+    e.get_ref().is_some_and(|e| e.is::<StoppedWhileRegistering>())
 }
 
 /// Whether a [`PeerLinks::start`] error is the store's fence (this boot was replaced
@@ -645,7 +658,7 @@ impl PeerLinks {
         let peer = Some((listener.local_addr().to_string(), listener.cert_sha256().to_string()));
         let registered = register(&store, fence, ordinal, boot, &endpoint, peer, policy, stop)
             .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "stopped while waiting to register"))?;
+            .ok_or_else(|| io::Error::other(StoppedWhileRegistering))?;
         log::info!(
             "[peers] host {ordinal} of {hosts}: peers dial {} (pin {})",
             listener.local_addr(),
@@ -706,6 +719,13 @@ impl PeerLinks {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn only_the_registration_stop_is_a_stop() {
+        assert!(is_stopped(&io::Error::other(StoppedWhileRegistering)));
+        assert!(!is_stopped(&io::Error::from(io::ErrorKind::Interrupted)));
+        assert!(!is_stopped(&io::Error::new(io::ErrorKind::Interrupted, "EINTR")));
+    }
 
     /// Frames written, by connection tag; and closes.
     #[derive(Clone, Default)]

@@ -1203,12 +1203,7 @@ pub fn run() -> claims::ServerExit {
         // The lease is beaten from THIS loop on purpose (R4 decision 3): a hung main loop must
         // stop beating although its sockets live, so the coordinator sees it lapse — a timer
         // thread would keep beating for a host that no longer runs.
-        if heartbeat.as_mut().is_some_and(|beat| beat.pump(std::time::Instant::now()) == lease::LeaseState::Replaced) {
-            log::error!(
-                "[server] replaced: this host's hosts row is no longer this live boot (declared dead, or \
-                 another boot of its ordinal registered); stopping"
-            );
-            fenced.set();
+        if lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now()) {
             break 'main;
         }
         manager.maintain(now_ms);

@@ -165,6 +165,13 @@ fn boot_verdicts() {
             prior_vouched: Some(true),
         },
         Case {
+            what: "a dirty live prior row, the only other fresh row of an older generation",
+            setup: &["UPDATE world SET generation = 1", "UPDATE hosts SET generation = 1 WHERE ordinal = 0"],
+            verdict: |v| matches!(v, BootVerdict::Registered(HostBoot { generation: 2, bumped: true, .. })),
+            generation: 2,
+            prior_vouched: None,
+        },
+        Case {
             what: "a dirty live prior row, nobody alive",
             setup: &["UPDATE hosts SET seen_ms = 1 WHERE ordinal = 1"],
             verdict: |v| matches!(v, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })),

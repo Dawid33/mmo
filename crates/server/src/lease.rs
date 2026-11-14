@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CrashPolicy, HOST_HEARTBEAT_MS};
+use crate::claims::Fenced;
 use world_store::{BootVerdict, Fence, HostBoot, HostRow, StoreError, StoreHandle, WaitFor};
 
 /// At most one warning per this many ms about heartbeats that fail.
@@ -84,10 +85,28 @@ impl Heartbeat {
     }
 }
 
+/// The host main loop's lease step: pumps `heartbeat` (if this process holds a lease) and,
+/// once it answers `Replaced`, logs it and sets `fenced` (the exit then refuses its sessions
+/// with `FENCED_REFUSAL` and saves nothing). `true`: the loop must end.
+pub fn pump_or_fence(heartbeat: &mut Option<Heartbeat>, fenced: &Fenced, now: Instant) -> bool {
+    let Some(beat) = heartbeat.as_mut() else { return false };
+    if beat.pump(now) == LeaseState::Held {
+        return false;
+    }
+    log::error!(
+        "[server] replaced: host {}'s hosts row is no longer this live boot (declared dead, or another boot \
+         of its ordinal registered); stopping",
+        beat.ordinal
+    );
+    fenced.set();
+    true
+}
+
 /// Registers `row` (the boot's ONE successful `register_host`) under `policy`, asking again
 /// every [`REGISTER_RETRY_MS`] while the verdict is `Wait` and logging (at most once per
 /// [`REGISTER_WAIT_LOG_MS`]) why. `Ok(None)`: `stop` was set while waiting — the caller exits 0.
-/// A store error (a fence refusal among them) ends the wait.
+/// A store error (a fence refusal among them) ends the wait. `stop` is only looked at between
+/// attempts: one attempt can block up to [`world_store::CLAIM_LOCK_TIMEOUT_MS`] (its lock timeout).
 pub fn register_or_wait(
     store: &StoreHandle,
     row: HostRow,

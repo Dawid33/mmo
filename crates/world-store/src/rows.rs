@@ -460,15 +460,15 @@ macro_rules! engine_rows {
                     .await?
                     .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
                     .try_get(0)?;
-                let prior = sqlx::query("SELECT generation, clean, state FROM hosts WHERE ordinal = $1")
+                let prior = sqlx::query("SELECT generation, clean, state, boot FROM hosts WHERE ordinal = $1")
                     .bind(i64::from(row.ordinal))
                     .fetch_optional(&mut *tx)
                     .await?;
                 let mut generation = world;
                 let mut bumped = false;
                 if let Some(prior) = prior {
-                    let (prior_generation, prior_clean, prior_state): (i64, i64, i64) =
-                        (prior.try_get(0)?, prior.try_get(1)?, prior.try_get(2)?);
+                    let (prior_generation, prior_clean, prior_state, prior_boot): (i64, i64, i64, i64) =
+                        (prior.try_get(0)?, prior.try_get(1)?, prior.try_get(2)?, prior.try_get(3)?);
                     if prior_clean == 0 && prior_generation == world {
                         if policy == game::CrashPolicy::Succession {
                             if prior_state != crate::HOST_LIVE {
@@ -476,21 +476,26 @@ macro_rules! engine_rows {
                                 tx.rollback().await?;
                                 return Ok(crate::BootVerdict::Wait(crate::WaitFor::Succession));
                             }
+                            // Alive: dirty, live, of this generation (a stale row of an older one
+                            // that beat lately runs a world that is gone) and beaten within a lease.
                             let sql = format!(
                                 "SELECT COUNT(*) FROM hosts WHERE ordinal <> $1 AND clean = 0 AND state = {live} \
-                                 AND {NOW_MS} - seen_ms <= $2",
+                                 AND generation = $2 AND {NOW_MS} - seen_ms <= $3",
                                 live = crate::HOST_LIVE,
                             );
                             let alive: i64 = sqlx::query(&sql)
                                 .bind(i64::from(row.ordinal))
+                                .bind(world)
                                 .bind(i(game::HOST_LEASE_MS))
                                 .fetch_one(&mut *tx)
                                 .await?
                                 .try_get(0)?;
                             if alive > 0 {
                                 // Another host runs: it inherits; this boot vouches for the death.
-                                sqlx::query("UPDATE hosts SET seen_ms = 0 WHERE ordinal = $1")
+                                // The boot judged dead above, and only it.
+                                sqlx::query("UPDATE hosts SET seen_ms = 0 WHERE ordinal = $1 AND boot = $2")
                                     .bind(i64::from(row.ordinal))
+                                    .bind(prior_boot)
                                     .execute(&mut *tx)
                                     .await?;
                                 tx.commit().await?;

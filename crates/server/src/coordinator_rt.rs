@@ -680,8 +680,8 @@ pub struct CoordinatorRuntime {
     cuts: Option<WorldCuts>,
     /// `now_ms` the expected hosts were last read at.
     hosts_read_ms: Option<u64>,
-    /// The hosts read in flight.
-    hosts_rx: Option<Answer<Vec<world_store::HostRow>>>,
+    /// The hosts read in flight, with the `now_ms` it was issued at.
+    hosts_rx: Option<(u64, Answer<Vec<world_store::HostRow>>)>,
     /// The decision being recorded (one at a time: the core runs one cut at a time).
     recording: Option<Recording>,
     /// Lookups of cut outcomes in flight or waiting to be tried again.
@@ -935,7 +935,8 @@ impl CoordinatorRuntime {
     fn feed_cuts(&mut self, now: u64) {
         let Some(cuts) = &self.cuts else { return };
         self.core.set_world_tick((cuts.tick)());
-        if let Some(rx) = &self.hosts_rx {
+        if let Some((issued_ms, rx)) = &self.hosts_rx {
+            let issued_ms = *issued_ms;
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
                 Ok(Ok(rows)) => {
@@ -956,7 +957,9 @@ impl CoordinatorRuntime {
                             seen_ms: r.seen_ms,
                         })
                         .collect();
-                    self.core.observe_leases(&seen, now);
+                    // Issue-to-receive stamps: an answer that waited in the channel through a
+                    // stall of this thread never stretches the span (`LeaseWatch::observe`).
+                    self.core.observe_leases(&seen, issued_ms, now);
                 }
                 Ok(Err(e)) => {
                     self.core.expected_hosts_unknown();
@@ -973,7 +976,7 @@ impl CoordinatorRuntime {
         }
         if self.hosts_read_ms.is_none_or(|at| now >= at + WORLD_CUT_HOSTS_REFRESH_MS) {
             self.hosts_read_ms = Some(now);
-            self.hosts_rx = Some(self.store.hosts_later());
+            self.hosts_rx = Some((now, self.store.hosts_later()));
         }
     }
 
