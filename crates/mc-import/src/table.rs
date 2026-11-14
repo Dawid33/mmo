@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 /// Bumped on any change to the table or the form rules that changes what a state becomes; recorded in
 /// imported prefab files.
-pub const MAPPING_VERSION: u32 = 1;
+pub const MAPPING_VERSION: u32 = 2;
 
 const BUILTIN: &str = include_str!("../data/materials.ron");
 

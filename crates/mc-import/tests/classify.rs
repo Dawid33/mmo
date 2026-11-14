@@ -80,18 +80,33 @@ fn forms() {
     // markers
     let door = Class::Marker { kind: "door".into(), turn: 2, solid: None };
     assert_eq!(st("minecraft:oak_door[facing=south,half=lower,hinge=left,open=false]").class, door);
+    // A closed gate is a fence across its facing; an open one is a marker.
     assert_eq!(
         st("minecraft:oak_fence_gate[facing=east,open=false]").class,
-        Class::Marker { kind: "gate".into(), turn: 1, solid: None }
+        shaped(Shape::Fence { sides: sides(true, false, true, false) }, "oak_planks")
+    );
+    assert_eq!(
+        st("minecraft:spruce_fence_gate[facing=south]").class,
+        shaped(Shape::Fence { sides: sides(false, true, false, true) }, "spruce_planks")
+    );
+    assert_eq!(
+        st("minecraft:oak_fence_gate[facing=north,open=false,in_wall=true]").class,
+        shaped(Shape::Fence { sides: sides(false, true, false, true) }, "oak_planks")
+    );
+    assert_eq!(
+        st("minecraft:oak_fence_gate[facing=west,open=true]").class,
+        Class::Marker { kind: "gate".into(), turn: 3, solid: None }
+    );
+    // An invisible wall (no post, no side) is not part of the build.
+    assert_eq!(
+        st("minecraft:cobblestone_wall[east=none,north=none,south=none,up=false,west=none]").class,
+        Class::Keep
     );
     assert_eq!(
         st("minecraft:chest[facing=north,type=single]").class,
         Class::Marker { kind: "loot".into(), turn: 0, solid: Some("chest".into()) }
     );
-    assert_eq!(
-        st("minecraft:barrel[facing=up]").class,
-        Class::Marker { kind: "loot".into(), turn: 0, solid: Some("chest".into()) }
-    );
+    assert_eq!(st("minecraft:barrel[facing=up]").class, block("spruce_planks"));
     assert_eq!(
         st("minecraft:wall_torch[facing=west]").class,
         Class::Marker { kind: "light".into(), turn: 3, solid: None }

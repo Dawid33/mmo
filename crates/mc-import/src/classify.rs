@@ -43,6 +43,23 @@ pub fn classify(state: &BlockState, table: &Table) -> Classified {
         return ok(Class::Air);
     }
 
+    let shaped = |base: Option<&str>, shape: Shape| match base {
+        Some(b) => Classified { class: Class::Shaped { shape, block: b.to_string() }, mapped: true },
+        None => Classified {
+            class: Class::Shaped { shape, block: table.fallback.clone() },
+            mapped: false,
+        },
+    };
+    let whole = |base: Option<&str>| match base {
+        Some(b) => Classified { class: Class::Block { block: b.to_string() }, mapped: true },
+        None => Classified { class: Class::Block { block: table.fallback.clone() }, mapped: false },
+    };
+    let base_of = |x: &str| -> Option<&str> {
+        [x.to_string(), format!("{x}s"), format!("{x}_planks"), format!("{x}_block"), format!("{x}_wool")]
+            .iter()
+            .find_map(|k| table.materials.get(k).map(String::as_str))
+    };
+
     // Keep, dropped and markers compete by specificity of their best match; ties go in this order.
     let keep = best(&table.keep, name).map(|(s, _)| s);
     let dropped = best(&table.dropped, name);
@@ -62,26 +79,15 @@ pub fn classify(state: &BlockState, table: &Table) -> Classified {
             if rule.kind == "door" && props.get("half").map(String::as_str) == Some("upper") {
                 return ok(Class::Air);
             }
+            // A closed gate is a fence of its wood across its facing; only an open one is a marker.
+            if rule.kind == "gate" && props.get("open").map(String::as_str) != Some("true") {
+                let across_x = matches!(facing_of(props), Facing::North | Facing::South);
+                let sides = Sides { north: !across_x, east: across_x, south: !across_x, west: across_x };
+                return shaped(base_of(name.strip_suffix("_fence_gate").unwrap_or(name)), Shape::Fence { sides });
+            }
             return ok(Class::Marker { kind: rule.kind.clone(), turn: turn_of(props), solid: rule.solid.clone() });
         }
     }
-
-    let shaped = |base: Option<&str>, shape: Shape| match base {
-        Some(b) => Classified { class: Class::Shaped { shape, block: b.to_string() }, mapped: true },
-        None => Classified {
-            class: Class::Shaped { shape, block: table.fallback.clone() },
-            mapped: false,
-        },
-    };
-    let whole = |base: Option<&str>| match base {
-        Some(b) => Classified { class: Class::Block { block: b.to_string() }, mapped: true },
-        None => Classified { class: Class::Block { block: table.fallback.clone() }, mapped: false },
-    };
-    let base_of = |x: &str| -> Option<&str> {
-        [x.to_string(), format!("{x}s"), format!("{x}_planks"), format!("{x}_block"), format!("{x}_wool")]
-            .iter()
-            .find_map(|k| table.materials.get(k).map(String::as_str))
-    };
 
     if name == "snow" {
         let layers: u8 = props.get("layers").and_then(|v| v.parse().ok()).unwrap_or(1);
@@ -114,6 +120,10 @@ pub fn classify(state: &BlockState, table: &Table) -> Classified {
         let side = |k: &str| matches!(props.get(k).map(String::as_str), Some("low" | "tall" | "true"));
         let sides = Sides { north: side("north"), east: side("east"), south: side("south"), west: side("west") };
         let post = props.get("up").map(String::as_str) != Some("false");
+        // No post and no side is an empty shape (an "invisible wall"): not part of the build.
+        if !post && !(sides.north || sides.east || sides.south || sides.west) {
+            return ok(Class::Keep);
+        }
         return shaped(base_of(x), Shape::Wall { sides, post });
     }
     let flag_sides = || {
