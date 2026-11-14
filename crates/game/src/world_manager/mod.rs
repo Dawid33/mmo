@@ -88,6 +88,10 @@ pub const PENDING_ARRIVALS_PER_REGION_MAX: usize = 2 * crate::slime::SLIME_CAP_P
 /// ([`crate::Volatile::ClaimWanted`], R4 `PgClaim`): once per this many ms while the need
 /// lasts (it is volatile — a lost one is asked again).
 pub const CLAIM_WANTED_EVERY_MS: u64 = 1_000;
+/// Most often a host asks the coordinator for the land of a host that left cleanly
+/// ([`crate::HostMsg::LandWanted`], R4 drain): once per this many ms per super-region while
+/// something here needs it (it is not queued while the link is down — asked again).
+pub const LAND_WANTED_EVERY_MS: u64 = 1_000;
 /// How many of the latest despawned arrivals' ids the manager remembers
 /// ([`WorldManager::recently_despawned_arrivals`], test support: the
 /// conservation check reads them as an allowed exit).
@@ -1214,6 +1218,14 @@ pub struct WorldManager<S: RegionSpawner> {
     claim_asks: BTreeSet<crate::SuperRegion>,
     /// The last `ClaimWanted` sent per super-region: to which host, at which `clock_ms`.
     claim_wanted_sent: BTreeMap<crate::SuperRegion, (u32, u64)>,
+    /// Super-regions of a host that left cleanly (`left_peers`) that a spawn placement here
+    /// needs (`placement.rs`): asked for with what waits in a held session
+    /// ([`crate::HostMsg::LandWanted`], `peers.rs`), forgotten once their owner is no
+    /// departed host.
+    land_wanted: BTreeSet<crate::SuperRegion>,
+    /// The last `LandWanted` sent per super-region, at which `clock_ms`
+    /// ([`LAND_WANTED_EVERY_MS`]).
+    land_wanted_sent: BTreeMap<crate::SuperRegion, u64>,
     /// An `Unknown` owner was hit: the server reads the directory whole
     /// ([`Self::take_directory_wanted`]).
     directory_wanted: bool,
@@ -1316,6 +1328,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Peers that left in a committed cut, with the boot they left as: their session is
     /// held until a hello of another boot.
     left_peers: BTreeMap<u32, Option<u64>>,
+    /// Under `claim` (R4 drain): peers in `left_peers` whose NEW boot said hello, with that
+    /// boot. Their held session is released only once the new boot shows it holds the land
+    /// it left with ([`crate::Reliable::Owns`] of a super-region this host's directory gives
+    /// it): a new boot that owns nothing registered after a `Leave` succession of its old
+    /// boot — what was held goes to the heir in this host's report instead.
+    returning_peers: BTreeMap<u32, u64>,
     /// Each peer's boot as its latest hello named it.
     peer_boots: BTreeMap<u32, u64>,
     /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
@@ -1482,6 +1500,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             claims_wanted: BTreeSet::new(),
             claim_asks: BTreeSet::new(),
             claim_wanted_sent: BTreeMap::new(),
+            land_wanted: BTreeSet::new(),
+            land_wanted_sent: BTreeMap::new(),
             directory_wanted: false,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
@@ -1513,6 +1533,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             leave_parked: false,
             leave_pairs: BTreeMap::new(),
             left_peers: BTreeMap::new(),
+            returning_peers: BTreeMap::new(),
             peer_boots: BTreeMap::new(),
             world_cut_done: Vec::new(),
             inbound_accounted: None,
@@ -3812,6 +3833,20 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// serving at once (fenced) and saves nothing.
     pub fn refuse_all_sessions(&mut self, why: &str) {
         for client in self.sessions.keys().copied() {
+            let _ = self.out.send((Some(client), ServerPacket::Refused(why.to_string())));
+        }
+    }
+
+    /// Every session open here now, by id (an exit remembers them before it parks them).
+    pub fn session_ids(&self) -> Vec<ClientId> {
+        self.sessions.keys().copied().collect()
+    }
+
+    /// Ends `clients` (sessions this host had, parked meanwhile) and every session still open
+    /// with `Refused(why)` (the server edge closes the connections); changes nothing else.
+    pub fn refuse_sessions(&mut self, clients: &[ClientId], why: &str) {
+        let all: BTreeSet<ClientId> = clients.iter().copied().chain(self.sessions.keys().copied()).collect();
+        for client in all {
             let _ = self.out.send((Some(client), ServerPacket::Refused(why.to_string())));
         }
     }

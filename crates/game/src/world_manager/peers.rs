@@ -117,6 +117,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.retry_held_spawns();
         // Free super-regions needed here whose preferred claimer is another host.
         self.ask_for_claims(now_ms);
+        // Land of a host that left cleanly, needed here (R4 drain).
+        self.ask_for_land(now_ms);
     }
 
     /// Who simulates `rc`, as this host knows it.
@@ -1023,6 +1025,50 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// Under `claim` (a directory): every super-region whose directory owner left cleanly and
+    /// has not come back (`left_peers`) that something here needs — a message held for that
+    /// host in its session (or waiting for one), or a spawn placement (`land_wanted`) — is
+    /// asked of the coordinator ([`HostMsg::LandWanted`]) at most once per
+    /// [`super::LAND_WANTED_EVERY_MS`]; it gives that host's land to an heir (R4 drain).
+    /// Called at the end of every [`Self::pump_peers`]. Never under `Static`: its leaver gets
+    /// what waits for it when it returns (R3).
+    fn ask_for_land(&mut self, now_ms: u64) {
+        if self.ownership.0.directory().is_none() || self.left_peers.is_empty() {
+            self.land_wanted.clear();
+            self.land_wanted_sent.clear();
+            return;
+        }
+        let s = self.ownership.1;
+        let mut needs: BTreeSet<crate::SuperRegion> = std::mem::take(&mut self.land_wanted);
+        for &o in self.left_peers.keys() {
+            let session = self.peers.get(&o).into_iter().flat_map(|p| p.session.unreceived());
+            let waiting = self.peer_waiting.get(&o).into_iter().flatten();
+            needs.extend(session.chain(waiting).filter_map(reliable_target).map(|rc| crate::super_region_of(rc, s)));
+        }
+        // Only land a departed host still holds.
+        needs.retain(|sr| matches!(self.owner_of_sr(*sr), crate::Owner::Host(h) if self.left_peers.contains_key(&h)));
+        self.land_wanted_sent.retain(|sr, _| needs.contains(sr));
+        for &sr in &needs {
+            let recent = self.land_wanted_sent.get(&sr).is_some_and(|&at| now_ms < at + super::LAND_WANTED_EVERY_MS);
+            if recent {
+                continue;
+            }
+            if !self.land_wanted_sent.contains_key(&sr) {
+                log::info!("[server] super-region {sr:?} of a host that left is needed here: asking the coordinator for it");
+            }
+            self.land_wanted_sent.insert(sr, now_ms);
+            self.world_send(HostMsg::LandWanted { sr });
+        }
+        // A placement's need stays while it is held (`retry_held_spawns` notes it again).
+        self.land_wanted = needs;
+    }
+
+    /// A spawn placement here needs `rc`, whose owner left cleanly (`placement.rs`): its
+    /// land is asked for ([`Self::ask_for_land`]).
+    pub(super) fn note_land_wanted(&mut self, rc: RegionCoords) {
+        self.land_wanted.insert(crate::super_region_of(rc, self.ownership.1));
+    }
+
     /// The server's answer to [`Self::take_claims_wanted`]: this host won `rows`
     /// (`(super-region, epoch)`, already in its fence). Its directory says so, every peer is
     /// told ([`Reliable::Owns`]) and what waited for those super-regions is delivered here.
@@ -1073,9 +1119,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("[server] host {from} claims {} super-region(s), but this host keeps no directory: ignored", rows.len());
             return;
         };
+        // A host back from a leave holds land it left with again (R4 drain).
+        let theirs = directory.owned_by(from);
+        let reclaimed = rows.iter().any(|(sr, _)| theirs.contains(sr));
         for (sr, epoch) in rows {
             directory.set(sr, Some(from), epoch);
         }
+        self.returning_owns(from, reclaimed);
         self.flush_unowned();
     }
 
@@ -1645,6 +1695,15 @@ pub fn intents_in(r: &Reliable) -> Vec<crate::IntentMsg> {
         Reliable::Intent(msg) => vec![*msg],
         Reliable::SuccessionReport { owed, .. } => owed.iter().flat_map(intents_in).collect(),
         _ => Vec::new(),
+    }
+}
+
+/// The region a state message is bound for (a transfer's, a move's, an intent's or reply's).
+fn reliable_target(r: &Reliable) -> Option<RegionCoords> {
+    match r.inner() {
+        Reliable::Transfer { target, .. } | Reliable::PlayerMove { target, .. } => Some(*target),
+        Reliable::Intent(m) => Some(peer_intent_target(m)),
+        _ => None,
     }
 }
 

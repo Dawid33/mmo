@@ -48,7 +48,7 @@ use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CutFailure, CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldCut, WorldManager};
 use world_store::{CutCommitted, CutNotice, Fence, NotifyMode, StoreError, StoreHandle};
 
-use crate::claims::{Fenced, HostClaims, ServerExit, WorldGeneration, FENCED_REFUSAL, ROLLBACK_REFUSAL};
+use crate::claims::{Fenced, HostClaims, ServerExit, WorldGeneration, FENCED_REFUSAL, LEAVING_REFUSAL, ROLLBACK_REFUSAL};
 use crate::coordinator_rt::CoordinatorThread;
 
 struct Pending {
@@ -618,6 +618,8 @@ fn leave_world<S: RegionSpawner>(
     // The players park at once (as an exit that saves on its own parks them first): their
     // clients' input is no longer read. Their records are in the leave cut (or, before it,
     // in any cut, as every park's are).
+    // Told why once the leave cut is committed (`LEAVING_REFUSAL`): parking ends them here.
+    let clients = manager.session_ids();
     manager.park_all_players(now_ms());
     manager.request_leave();
     let asked = Instant::now();
@@ -661,6 +663,9 @@ fn leave_world<S: RegionSpawner>(
         match manager.leave_outcome() {
             Some(true) if settled => {
                 log::info!("[server] left the world in cut {}: saved", manager.leaving_cut().map_or(0, |c| c.0));
+                // Only now, the cut committed with every player parked in it: a client told
+                // earlier could rejoin elsewhere before its record was saved (lost progress).
+                manager.refuse_sessions(&clients, LEAVING_REFUSAL);
                 cuts.finish_without_cut(manager);
                 return ServerExit::Clean;
             }

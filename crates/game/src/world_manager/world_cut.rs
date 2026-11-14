@@ -75,7 +75,10 @@
 //! [`crate::PeerSession::drop_through_mark`]), then queues what it held back behind it: the
 //! staying hosts keep it owed to the leaver's NEXT boot (their rows meanwhile: the leaver is
 //! absent from their cuts) and release the session on that boot's hello. Aborted: what was
-//! held back goes out as usual.
+//! held back goes out as usual. Under `claim` (R4 drain) a host that needs land of a host
+//! that left — a message held for it, a spawn placement — asks the coordinator for it
+//! (`peers.rs` `ask_for_land`, [`crate::HostMsg::LandWanted`]); its `Leave` succession hands
+//! the held messages to the heir instead (`succession.rs`). Under `Static` nothing changes.
 
 use super::*;
 use crate::{CutFailure, Reliable};
@@ -357,16 +360,39 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Host `from`'s hello of boot `boot`: a host that left comes back as another boot —
-    /// its held session goes out again.
+    /// its held session goes out again. Under `claim` (R4 drain) only once that boot shows it
+    /// re-claimed its land ([`Self::returning_owns`]): a boot registered after a `Leave`
+    /// succession of the one that left owns nothing, and what waited goes to the heir
+    /// (`succession.rs`) — "wait, never guess".
     pub(super) fn peer_hello_boot(&mut self, from: u32, boot: u64) {
         self.peer_boots.insert(from, boot);
         let back = self.left_peers.get(&from).is_some_and(|left_as| *left_as != Some(boot));
-        if back {
-            self.left_peers.remove(&from);
-            if let Some(peer) = self.peers.get_mut(&from) {
-                log::info!("[server] host {from} is back (boot {boot}): what waited for it goes out");
-                peer.session.release();
-            }
+        if !back {
+            return;
+        }
+        if self.ownership.0.directory().is_some() {
+            log::info!("[server] host {from} is back (boot {boot}): what waited for it goes out once it holds its land again");
+            self.returning_peers.insert(from, boot);
+            return;
+        }
+        self.release_left(from);
+    }
+
+    /// Host `from`, back from a leave, holds `reclaimed` super-regions of the land it left
+    /// with (its [`Reliable::Owns`], under `claim`): its held session goes out.
+    pub(super) fn returning_owns(&mut self, from: u32, reclaimed: bool) {
+        if reclaimed && self.returning_peers.remove(&from).is_some() {
+            self.release_left(from);
+        }
+    }
+
+    /// Host `from`, back as another boot, gets what waited for it.
+    fn release_left(&mut self, from: u32) {
+        self.left_peers.remove(&from);
+        self.returning_peers.remove(&from);
+        if let Some(peer) = self.peers.get_mut(&from) {
+            log::info!("[server] host {from} is back: what waited for it goes out");
+            peer.session.release();
         }
     }
 

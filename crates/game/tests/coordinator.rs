@@ -2436,3 +2436,151 @@ fn a_crossing_reported_delivered_then_absorbed_by_the_heir_is_one_person() {
     assert_eq!(spawned, 0, "no body of P is made by either step");
     assert!(!matches!(after, Location::InRegion(_)), "P stays abstract: {before:?} → {after:?}");
 }
+
+// ---- drain: a departed host's land on demand (R4 Task 11) ----------------------------------
+
+/// The super-region host 0 asks for (`LandWanted`): one of the departed host's.
+const WANTED: game::SuperRegion = (4, 4);
+
+/// Hosts `0..n` succeeding; host `leaver` asks to leave, leaves in a committed cut and its
+/// process is gone (detached). Every output drained; the clock at the leave's decision.
+fn departed(n: u32, leaver: u32) -> (Coordinator, u64) {
+    let mut c = succeeding(n);
+    c.handle(leaver, HostMsg::LeaveRequest, 100);
+    c.maintain(100 + game::LEAVE_BATCH_MS);
+    let cut = begun(&commit_routed(&mut c))[0].1;
+    let now = 100 + game::LEAVE_BATCH_MS + 1;
+    for h in 0..n {
+        c.handle(h, HostMsg::CutPrepared { cut }, now);
+    }
+    assert!(c.take_decision().expect("decided").commit);
+    c.decided(cut, true);
+    c.host_detached(leaver);
+    commit_routed(&mut c);
+    (c, now)
+}
+
+/// A read of hosts `0..n` at `now`: every host beating, `left` clean (its `hosts` row after
+/// its leave cut), `back` (another boot of `left`) dirty again.
+fn read_departed(c: &mut Coordinator, n: u32, left: u32, back: Option<u64>, now: u64) {
+    let rows: Vec<HostSeen> = (0..n)
+        .map(|h| {
+            let mut row = seen(h, now + 1);
+            if h == left {
+                match back {
+                    Some(boot) => row.boot = boot,
+                    None => row.clean = true,
+                }
+            }
+            row
+        })
+        .collect();
+    c.observe_leases(&rows, now, now);
+}
+
+/// Host 0 asks for `WANTED` at `now`; the runtime looks it up (`owner`'s) and says so.
+fn land_asked(c: &mut Coordinator, owner: u32, now: u64) {
+    c.handle(0, HostMsg::LandWanted { sr: WANTED }, now);
+    assert_eq!(c.take_land_lookups(), vec![WANTED], "the runtime looks the super-region up");
+    c.land_wanted(owner, now);
+}
+
+/// Host 1 left cleanly; host 0 needs its land. Nothing is declared for `HEIR_WAIT_MS` from
+/// the first request (asking again does not restart it); then ALL host 1's land goes to the
+/// heir `heir_of` picks over the live hosts, as a `Leave` succession of the boot that left,
+/// and its order goes to the survivors. Nothing under `Rollback` (`Static`).
+#[test]
+fn land_of_a_departed_host_waits_heir_wait_ms_then_is_inherited() {
+    let (mut c, t) = departed(3, 1);
+    read_departed(&mut c, 3, 1, None, t);
+    land_asked(&mut c, 1, t);
+    assert_eq!(c.declare_wanted(t), None, "it may come back: waited for");
+    let half = t + game::HEIR_WAIT_MS / 2;
+    read_departed(&mut c, 3, 1, None, half);
+    land_asked(&mut c, 1, half);
+    assert_eq!(c.take_land_lookups(), Vec::<game::SuperRegion>::new(), "each request looked up once");
+    let last = t + game::HEIR_WAIT_MS - 1;
+    read_departed(&mut c, 3, 1, None, last);
+    assert_eq!(c.declare_wanted(last), None, "not before HEIR_WAIT_MS from the FIRST request");
+    let due = t + game::HEIR_WAIT_MS;
+    read_departed(&mut c, 3, 1, None, due);
+    let d = c.declare_wanted(due).expect("its land is given away");
+    let live: std::collections::BTreeSet<u32> = [0, 2].into_iter().collect();
+    assert_eq!(d.dead, vec![(1, 101)], "the boot that left");
+    assert_eq!(d.heirs, vec![game::heir_of(1, &live).unwrap()]);
+    assert_eq!(d.kind, game::SuccessionKind::Leave);
+    assert_eq!(c.declare_wanted(due), None, "one declaration in flight");
+    let list = store_declares(&d, 3, 1, game::CutId(5));
+    c.declared(game::Declared::Done(list.clone()), due);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, list[0].id), (2, list[0].id)], "the order goes to the survivors");
+    read_departed(&mut c, 3, 1, None, due + 1);
+    assert_eq!(c.declare_wanted(due + 1), None, "declared once");
+    // Under `Rollback` (`Static`) a request is ignored.
+    let (mut r, t) = departed(3, 1);
+    r.set_crash_policy(game::CrashPolicy::Rollback);
+    read_departed(&mut r, 3, 1, None, t);
+    r.handle(0, HostMsg::LandWanted { sr: WANTED }, t);
+    assert!(r.take_land_lookups().is_empty(), "Static looks nothing up");
+    r.land_wanted(1, t);
+    read_departed(&mut r, 3, 1, None, t + game::HEIR_WAIT_MS);
+    assert_eq!(r.declare_wanted(t + game::HEIR_WAIT_MS), None, "Static never declares");
+}
+
+/// An ordinal at or beyond the configured host count (`VOXEL_HOSTS`) will not come back:
+/// its land is given away at the first request; one below the count waits.
+#[test]
+fn land_of_an_ordinal_beyond_the_host_count_is_inherited_at_once() {
+    let (mut c, t) = departed(3, 2);
+    c.set_host_count(2);
+    read_departed(&mut c, 3, 2, None, t);
+    land_asked(&mut c, 2, t);
+    let d = c.declare_wanted(t).expect("at once");
+    assert_eq!((d.dead.clone(), d.kind), (vec![(2, 102)], game::SuccessionKind::Leave));
+    let live: std::collections::BTreeSet<u32> = [0, 1].into_iter().collect();
+    assert_eq!(d.heirs, vec![game::heir_of(2, &live).unwrap()]);
+    // Within the count: waited for.
+    let (mut w, t) = departed(3, 1);
+    w.set_host_count(2);
+    read_departed(&mut w, 3, 1, None, t);
+    land_asked(&mut w, 1, t);
+    assert_eq!(w.declare_wanted(t), None, "ordinal 1 of 2 may come back");
+}
+
+/// The departed host registers again (another boot: its row dirty) or attaches before
+/// `HEIR_WAIT_MS`: the request is forgotten — nothing is declared, then or later; the store
+/// refusing a declaration that raced the registration (`Gone`) declares nothing either.
+#[test]
+fn a_returning_host_cancels_the_wait() {
+    let (mut c, t) = departed(2, 1);
+    read_departed(&mut c, 2, 1, None, t);
+    land_asked(&mut c, 1, t);
+    // Its next boot registers: the hosts read shows it dirty.
+    let mid = t + game::HEIR_WAIT_MS / 2;
+    read_departed(&mut c, 2, 1, Some(901), mid);
+    assert_eq!(c.declare_wanted(mid), None);
+    for at in [t + game::HEIR_WAIT_MS, t + 3 * game::HEIR_WAIT_MS] {
+        read_departed(&mut c, 2, 1, Some(901), at);
+        assert_eq!(c.declare_wanted(at), None, "forgotten: never declared ({at} ms)");
+    }
+    // Its next boot attaches before the hosts are read again: forgotten too.
+    let (mut a, t) = departed(2, 1);
+    read_departed(&mut a, 2, 1, None, t);
+    land_asked(&mut a, 1, t);
+    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 902, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() };
+    a.handle(1, back, t + 10);
+    commit_routed(&mut a);
+    // The read still shows the clean row of the boot that left (it lags the attach).
+    read_departed(&mut a, 2, 1, None, t + game::HEIR_WAIT_MS);
+    assert_eq!(a.declare_wanted(t + game::HEIR_WAIT_MS), None, "it is back: never declared");
+    // It registered just as the wait ran out: the store refuses the declaration (`Gone`)
+    // and the next read, showing the new boot, forgets the request.
+    let (mut g, t) = departed(2, 1);
+    read_departed(&mut g, 2, 1, None, t);
+    land_asked(&mut g, 1, t);
+    read_departed(&mut g, 2, 1, None, t + game::HEIR_WAIT_MS);
+    assert!(g.declare_wanted(t + game::HEIR_WAIT_MS).is_some());
+    g.declared(game::Declared::Gone(vec![1]), t + game::HEIR_WAIT_MS);
+    assert!(orders(&commit_routed(&mut g)).is_empty(), "nothing declared");
+    read_departed(&mut g, 2, 1, Some(903), t + game::HEIR_WAIT_MS + 1_000);
+    assert_eq!(g.declare_wanted(t + game::HEIR_WAIT_MS + 1_000), None, "forgotten once the new boot is read");
+}

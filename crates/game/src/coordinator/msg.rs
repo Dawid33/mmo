@@ -201,6 +201,13 @@ pub enum HostMsg {
     /// The heir of succession `id` resolved the survivors' journals, adopted the
     /// predecessor's rows and loaded its regions: ready to cut (R4, Task 9).
     SuccessionAdopted { id: SuccessionId },
+    /// Something on this host needs a region of super-region `sr`, whose directory owner
+    /// left in a committed leave cut (its `hosts` row clean) and has not come back (R4
+    /// drain). The coordinator looks the owner up and gives ALL its land to one heir by a
+    /// `Leave` succession — at once if that ordinal is beyond the configured host count,
+    /// after [`crate::HEIR_WAIT_MS`] otherwise — unless it registers again first. Sent at most
+    /// once per [`crate::LAND_WANTED_EVERY_MS`] per super-region; ignored under `Static`.
+    LandWanted { sr: SuperRegion },
 }
 
 /// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).

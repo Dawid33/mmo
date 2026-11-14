@@ -80,6 +80,12 @@ impl SuccessionKind {
 /// — it lost its journal, or cannot reach the base cut — must not stop saving for ever).
 pub const SUCCESSION_DEADLINE_MS: u64 = 30_000;
 
+/// How long (the coordinator's wall ms, from the first [`crate::HostMsg::LandWanted`] for
+/// it) the land of a host that left cleanly waits for that host to come back before it is
+/// given to an heir (R4 drain): a rolling restart gets its land back. An ordinal at or
+/// beyond the configured host count (`VOXEL_HOSTS`) is not waited for.
+pub const HEIR_WAIT_MS: u64 = 30_000;
+
 /// One host's land given to one heir (the store's `successions` row as declared; R4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Succession {

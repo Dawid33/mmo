@@ -128,6 +128,15 @@ impl PeerLink for SharedEnd {
     fn pump(&mut self, now_ms: u64) {
         self.end().pump(now_ms)
     }
+    /// As a QUIC connection closed by one end: both ends see it go and a new one come (the
+    /// dialer makes it), everything in transit lost — a hello on each side follows.
+    fn close(&mut self) {
+        let mut end = self.end();
+        if end.is_up() {
+            end.set_up(false);
+            end.set_up(true);
+        }
+    }
 }
 
 /// The hello host `ordinal` of the rig starts its sessions with.
@@ -318,6 +327,14 @@ pub struct MultiRig {
     pub abandoned: BTreeSet<game::SuccessionId>,
     /// The rig store's world generation (raised by [`Self::roll_back`]).
     pub generation: u64,
+    /// Hosts that left in a committed cut, with the boot that left (their `hosts` row is
+    /// clean): until another boot of theirs starts ([`Self::start_as`]).
+    pub left: BTreeMap<u32, u64>,
+    /// Whether the rig coordinator gives a departed host's land away when a host asks for
+    /// it ([`Self::with_land_on_demand`], [`Self::drive_land`]).
+    pub land_on_demand: bool,
+    /// The successions [`Self::drive_land`] declared, in order.
+    pub land_declared: Vec<game::Succession>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -430,6 +447,9 @@ impl MultiRig {
                 fail_adoption_loads: false,
                 abandoned: BTreeSet::new(),
                 generation: RIG_GENERATION,
+                left: BTreeMap::new(),
+                land_on_demand: false,
+                land_declared: Vec::new(),
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -513,9 +533,66 @@ impl MultiRig {
             rig.settle();
         }
         self.drive_world_cuts();
+        self.drive_land();
         for rig in &mut self.hosts {
             rig.settle();
         }
+    }
+
+    /// From now on the rig coordinator runs successions (`claim`) and gives a departed
+    /// host's land to an heir when a host asks for it (`LandWanted`), after `heir_wait_ms`
+    /// (instead of [`game::HEIR_WAIT_MS`]): every [`Self::cut_round`] does what the
+    /// coordinator runtime does ([`Self::drive_land`]).
+    pub fn with_land_on_demand(&mut self, heir_wait_ms: u64) {
+        let mut core = self.core();
+        core.set_crash_policy(game::CrashPolicy::Succession);
+        core.set_heir_wait_ms(heir_wait_ms);
+        drop(core);
+        self.land_on_demand = true;
+    }
+
+    /// One pass of the coordinator runtime's succession pump for drained land
+    /// ([`Self::with_land_on_demand`]): a read of the `hosts` rows (every live host beating,
+    /// every host that left clean as the boot that left), the super-regions hosts asked for
+    /// looked up in the rig's `super_regions` table, and a declaration the coordinator wants
+    /// executed in the rig store ([`Self::declare_in_store`]) and answered. The hosts a cut
+    /// needs are the live ones whose row is not clean.
+    pub fn drive_land(&mut self) {
+        if !self.land_on_demand {
+            return;
+        }
+        let n = self.hosts.len() as u32;
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let declared_dead: BTreeSet<(u32, u64)> =
+            self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
+        let rows: Vec<game::coordinator::HostSeen> = (0..n)
+            .filter(|h| !self.dead.contains(h) || self.left.contains_key(h))
+            .map(|h| {
+                let boot = self.boots[h as usize];
+                let clean = self.left.get(&h) == Some(&boot);
+                let state = if declared_dead.contains(&(h, boot)) && !clean { game::HOST_DEAD } else { game::HOST_LIVE };
+                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms: now + 1 }
+            })
+            .collect();
+        let expected: BTreeSet<u32> =
+            (0..n).filter(|h| !self.dead.contains(h) && self.left.get(h) != Some(&self.boots[*h as usize])).collect();
+        let mut core = self.core();
+        core.observe_leases(&rows, now, now);
+        core.set_expected_hosts(expected);
+        let lookups = core.take_land_lookups();
+        drop(core);
+        for sr in lookups {
+            if let Some(owner) = self.stored_owner(sr) {
+                self.core().land_wanted(owner, now);
+            }
+        }
+        let wanted = self.core().declare_wanted(now);
+        let Some(d) = wanted else { return };
+        let outcome = self.declare_in_store(&d);
+        if let game::Declared::Done(list) = &outcome {
+            self.land_declared.extend(list.iter().cloned());
+        }
+        self.core().declared(outcome, now);
     }
 
     /// What a server and the coordinator runtime do with a world cut, against the rig's
@@ -553,6 +630,12 @@ impl MultiRig {
             let decision = core.lock().unwrap_or_else(|e| e.into_inner()).take_decision();
             let Some(d) = decision else { break };
             let stored = self.decide_settling(d.cut, d.commit, &d.hosts, &d.settles);
+            if stored {
+                // Their `hosts` rows are clean now (`decide_cut`'s `leaving`).
+                for &h in &d.leaving {
+                    self.left.insert(h, self.boots[h as usize]);
+                }
+            }
             core.lock().unwrap_or_else(|e| e.into_inner()).decided(d.cut, stored);
         }
         let lookups = core.lock().unwrap_or_else(|e| e.into_inner()).take_cut_lookups();
@@ -1073,6 +1156,10 @@ impl MultiRig {
         self.hosts[h as usize] = rig;
         self.dead.remove(&h);
         self.boots[h as usize] = boot;
+        // Registered as another boot: its row is dirty again.
+        if self.left.get(&h).is_some_and(|left_as| *left_as != boot) {
+            self.left.remove(&h);
+        }
         for other in (0..n).filter(|o| *o != h && !self.dead.contains(o)) {
             let (a, b) = (h.min(other), h.max(other));
             let (ea, eb) = InlinePeerLink::pair(mix(self.seed, boot ^ u64::from(a * n + b)), self.link_delay);
@@ -1159,6 +1246,18 @@ impl MultiRig {
     pub fn declare_in_store(&mut self, d: &game::coordinator::Declare) -> game::Declared {
         if !self.open_successions().is_empty() {
             return game::Declared::SuccessionOpen;
+        }
+        if d.kind == game::SuccessionKind::Leave {
+            // A leave needs the clean row of that very boot (`declare_succession`): a boot
+            // registered since is another host (`Gone`), a dirty one did not leave.
+            for &(pred, boot) in &d.dead {
+                if self.boots[pred as usize] != boot || self.successions.iter().any(|(s, _)| (s.predecessor, s.predecessor_boot) == (pred, boot)) {
+                    return game::Declared::Gone(vec![pred]);
+                }
+                if self.left.get(&pred) != Some(&boot) {
+                    return game::Declared::NotLapsed(vec![pred]);
+                }
+            }
         }
         let n = self.hosts.len() as u32;
         let base_cut = self.last_cut.as_ref().map_or(CutId(0), |(c, _)| *c);

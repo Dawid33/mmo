@@ -129,11 +129,15 @@ impl PeerSession {
 
     /// Everything queued, or sent and not acknowledged, taken out in order: the session
     /// owes it to nobody any more (R4: a survivor re-routes what it owed a dead peer). The
-    /// numbering is not touched — a later boot of the peer renumbers what is queued after
-    /// this from 1 at its hello, as for every new peer boot.
+    /// next message queued follows the last number ever put on the wire: a later boot of the
+    /// peer renumbers it from 1 at its hello, as for every new peer boot; a boot already
+    /// counting this numbering (R4 drain: a leaver's new boot whose hello came while the
+    /// session was held — nothing of it was ever sent) sees no gap.
     pub fn take_unreceived(&mut self) -> Vec<Reliable> {
         self.volatile_out.clear();
-        self.out.drain(..).map(|(_, r)| r).collect()
+        let taken = self.out.drain(..).map(|(_, r)| r).collect();
+        self.next_seq = self.max_sent + 1;
+        taken
     }
 
     /// The link object was replaced; whatever connection was up is gone. The next

@@ -383,6 +383,7 @@ impl Coordinator {
             HostMsg::LeaveRequest => self.leave_request(host),
             HostMsg::SuccessionApplied { id } => self.succession_applied(host, id),
             HostMsg::SuccessionAdopted { id } => self.succession_adopted(host, id),
+            HostMsg::LandWanted { sr } => self.land_asked(host, sr),
         }
         self.push_directives();
     }

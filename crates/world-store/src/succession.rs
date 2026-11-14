@@ -8,6 +8,11 @@
 //! rollback ([`rollback_world`]) abandons the open ones; the land stays with the heirs.
 //! Postgres only: several hosts need it (SQLite answers `Unsupported`).
 //!
+//! A `Leave` declaration needs the predecessor's row clean and does not mark it dead; a claim
+//! by that boot is refused anyway — a claim's last statement (`rows.rs` `check_live`) needs
+//! the claimer's row live AND dirty, so a cleanly-left boot claims nothing from its leave
+//! cut's commit on, and its next boot registers dirty and claims normally.
+//!
 //! Locks (the declaration): `coordinator` `FOR SHARE`, then `world` `FOR NO KEY UPDATE`
 //! (it serialises with `decide_cut`, `register_host` and `rollback_world`, which take the
 //! same lock in the same order, and never waits for a claim's `FOR KEY SHARE`), then the

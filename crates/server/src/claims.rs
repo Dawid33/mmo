@@ -42,6 +42,11 @@ pub const FENCED_REFUSAL: &str = "this server was replaced; reconnect";
 /// What the client sees when the world restarts from an earlier save.
 pub const ROLLBACK_REFUSAL: &str = "the world is restarting; reconnect";
 
+/// What the client sees when its host left the world in a committed leave cut (its player
+/// parked and saved first): another host takes its land, the client joins again. The client
+/// matches this exact text to decide to rejoin.
+pub const LEAVING_REFUSAL: &str = "this server is stopping; reconnect";
+
 /// How a server's life ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerExit {

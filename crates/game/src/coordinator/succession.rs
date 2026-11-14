@@ -27,11 +27,27 @@
 //!   ([`Coordinator::rolled_back`] → [`CoordMsg::Generation`]).
 //! - A restarted coordinator reads the open successions ([`Coordinator::successions_open`])
 //!   and re-sends their orders; hosts answer again from memory (`Attach.successions`).
+//!
+//! **Drain** (Task 11, decision 7): a host that leaves parks everything in its leave cut, its
+//! `hosts` row turns clean and its claims STAY. When a live host needs one of its regions it
+//! says so ([`HostMsg::LandWanted`]); the runtime looks the owner up
+//! ([`Coordinator::take_land_lookups`] → [`Coordinator::land_wanted`]) and, when no host
+//! lapsed, [`Coordinator::declare_wanted`] hands out ONE `Leave` succession giving ALL that
+//! host's land to `heir_of` over the live attached hosts, with the same runs as a crash's —
+//! at once for an ordinal at or beyond the configured host count
+//! ([`Coordinator::set_host_count`]), else [`HEIR_WAIT_MS`] after the first request (a
+//! rolling restart gets its land back). Only between cuts, and only for the boot the latest
+//! hosts read shows clean and live; a request is forgotten once that ordinal is back (its row
+//! dirty, or attached and live), and the store refuses a declaration that a registration beat
+//! (`Gone`). Nothing is decided by the leaver. A restarted coordinator forgets the requests:
+//! the hosts ask again every [`crate::LAND_WANTED_EVERY_MS`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CoordMsg, Target};
-use crate::{CrashPolicy, Declared, Succession, SuccessionId, SuccessionKind, HOST_LEASE_MS, HOST_LIVE, SUCCESSION_DEADLINE_MS};
+use crate::{
+    CrashPolicy, Declared, Succession, SuccessionId, SuccessionKind, HEIR_WAIT_MS, HOST_LEASE_MS, HOST_LIVE, SUCCESSION_DEADLINE_MS,
+};
 
 /// One `hosts` row as the lease watch needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +107,11 @@ impl LeaseWatch {
         }
         self.rows = next;
         self.reads += 1;
+    }
+
+    /// Host `ordinal`'s row as the latest successful read showed it.
+    pub fn row(&self, ordinal: u32) -> Option<&HostSeen> {
+        self.rows.get(&ordinal).map(|w| &w.row)
     }
 
     /// Successful reads observed so far.
@@ -176,6 +197,18 @@ pub(super) struct SuccessionRuns {
     refused_at_read: Option<u64>,
     /// Ids an `Attach` listed before the open successions were known: answered then.
     listed_early: Vec<(u32, SuccessionId, bool)>,
+    /// Super-regions hosts asked for ([`crate::HostMsg::LandWanted`]) that the runtime is to
+    /// look up in the store ([`Coordinator::take_land_lookups`]).
+    land_lookups: BTreeSet<crate::SuperRegion>,
+    /// Hosts that left cleanly whose land is wanted ([`Coordinator::land_wanted`]), each with
+    /// the `clock_ms` of its FIRST request (asking again does not restart the wait).
+    land_wanted: BTreeMap<u32, u64>,
+    /// The configured host count (`VOXEL_HOSTS`, [`Coordinator::set_host_count`]): the land
+    /// of an ordinal at or beyond it is given away at once. Unknown: every ordinal waits.
+    host_count: Option<u32>,
+    /// The heir wait, ms: [`HEIR_WAIT_MS`] unless a real-time test changed it
+    /// ([`Coordinator::set_heir_wait_ms`]).
+    heir_wait_ms: Option<u64>,
 }
 
 impl Default for SuccessionRuns {
@@ -191,6 +224,10 @@ impl Default for SuccessionRuns {
             deadline_ms: None,
             refused_at_read: None,
             listed_early: Vec::new(),
+            land_lookups: BTreeSet::new(),
+            land_wanted: BTreeMap::new(),
+            host_count: None,
+            heir_wait_ms: None,
         }
     }
 }
@@ -277,7 +314,7 @@ impl super::Coordinator {
         }
         let lapsed = self.lapsed_undeclared(now_ms);
         if lapsed.is_empty() {
-            return None;
+            return self.leave_wanted(now_ms);
         }
         if let Some(run) = self.cuts_running_participants() {
             if let Some((h, _)) = lapsed.iter().find(|(h, _)| run.contains(h)) {
@@ -306,6 +343,7 @@ impl super::Coordinator {
         match outcome {
             Declared::Done(list) => {
                 for s in list {
+                    self.successions.land_wanted.remove(&s.predecessor);
                     log::warn!(
                         "coordinator: succession {} declared: host {} (boot {:#x}) → heir {}, {} super-region(s), base cut {}, \
                          survivors {:?}",
@@ -546,6 +584,115 @@ fn order(s: &Succession) -> CoordMsg {
 }
 
 impl super::Coordinator {
+    /// The configured host count (`VOXEL_HOSTS`): the land of a host that left cleanly with
+    /// an ordinal at or beyond it is given away at the first request (it will not come back).
+    pub fn set_host_count(&mut self, hosts: u32) {
+        self.successions.host_count = Some(hosts);
+    }
+
+    /// Test support (real-time tests): the heir wait, ms, instead of [`HEIR_WAIT_MS`].
+    #[doc(hidden)]
+    pub fn set_heir_wait_ms(&mut self, ms: u64) {
+        self.successions.heir_wait_ms = Some(ms);
+    }
+
+    /// Host `host` needs a region of `sr`, whose owner left cleanly
+    /// ([`crate::HostMsg::LandWanted`]): looked up by the runtime
+    /// ([`Self::take_land_lookups`]). Ignored unless successions run (`Static` never gives
+    /// land away: its leaver gets it back when it returns, R3).
+    pub(super) fn land_asked(&mut self, host: u32, sr: crate::SuperRegion) {
+        if !self.successions.enabled {
+            log::debug!("coordinator: host {host} wants super-region {sr:?}, but successions are off; ignored");
+            return;
+        }
+        self.successions.land_lookups.insert(sr);
+    }
+
+    /// The super-regions hosts asked for since the last call: the runtime reads their owners
+    /// in the store and answers [`Self::land_wanted`] for each owned one.
+    pub fn take_land_lookups(&mut self) -> Vec<crate::SuperRegion> {
+        std::mem::take(&mut self.successions.land_lookups).into_iter().collect()
+    }
+
+    /// Host `owner` holds a super-region a host asked for (the runtime's lookup): if it left
+    /// cleanly, ALL its land goes to one heir — at once if `owner` is at or beyond the
+    /// configured host count, else [`HEIR_WAIT_MS`] after the first such request — unless
+    /// that ordinal comes back first ([`Self::declare_wanted`] decides; the module docs).
+    pub fn land_wanted(&mut self, owner: u32, now_ms: u64) {
+        if !self.successions.enabled {
+            return;
+        }
+        self.clock_ms = self.clock_ms.max(now_ms);
+        if self.attached_live().contains(&owner) {
+            // Running: nothing of it to give away (a stale directory row of the asker).
+            return;
+        }
+        let wait = self.heir_wait_for(owner);
+        self.successions.land_wanted.entry(owner).or_insert_with(|| {
+            log::info!(
+                "coordinator: host {owner} left and its land is wanted: it goes to an heir in {wait} ms unless host {owner} \
+                 comes back"
+            );
+            now_ms
+        });
+    }
+
+    /// How long the land of departed host `owner` waits for it.
+    fn heir_wait_for(&self, owner: u32) -> u64 {
+        if self.successions.host_count.is_some_and(|n| owner >= n) {
+            0
+        } else {
+            self.successions.heir_wait_ms.unwrap_or(HEIR_WAIT_MS)
+        }
+    }
+
+    /// The `Leave` succession to declare now for drained land, if any (called by
+    /// [`Self::declare_wanted`] when no host lapsed): a wanted owner whose `hosts` row the
+    /// latest read shows clean and live, not declared yet, whose wait is over, with a live
+    /// attached heir, between cuts. A request is forgotten once its ordinal is back — its
+    /// row dirty (another boot registered) or the ordinal attached and live; a row not read
+    /// (yet) is waited for.
+    fn leave_wanted(&mut self, now_ms: u64) -> Option<Declare> {
+        if self.successions.land_wanted.is_empty() {
+            return None;
+        }
+        let attached: BTreeSet<u32> = self.attached_live().into_iter().collect();
+        let leases = &self.leases;
+        self.successions.land_wanted.retain(|owner, _| {
+            let back = attached.contains(owner) || leases.row(*owner).is_some_and(|r| !r.clean || r.state != HOST_LIVE);
+            if back {
+                log::info!("coordinator: host {owner} is back (or no longer left): its land is no longer given away");
+            }
+            !back
+        });
+        let mut due = None;
+        for (&owner, &first) in &self.successions.land_wanted {
+            let Some(row) = self.leases.row(owner) else { continue };
+            if self.successions.declared.contains(&(owner, row.boot)) {
+                continue;
+            }
+            if now_ms < first.saturating_add(self.heir_wait_for(owner)) {
+                continue;
+            }
+            due = Some((owner, row.boot));
+            break;
+        }
+        let (owner, boot) = due?;
+        if self.cuts_running_participants().is_some() {
+            // Only between cuts: the store's base cut is the one every survivor counts from.
+            return None;
+        }
+        let live: BTreeSet<u32> = attached.into_iter().filter(|h| *h != owner).collect();
+        let Some(heir) = crate::heir_of(owner, &live) else {
+            log::debug!("coordinator: host {owner}'s land is wanted and no live host is attached to inherit it");
+            return None;
+        };
+        log::warn!("coordinator: host {owner} (boot {boot:#x}) left and its land is wanted: giving it all to heir {heir}");
+        self.successions.declaring = true;
+        self.successions.declared_at_read = self.leases.reads();
+        Some(Declare { dead: vec![(owner, boot)], heirs: vec![heir], kind: SuccessionKind::Leave })
+    }
+
     /// A successful read of the `hosts` rows, issued at `issued_ms` and received at
     /// `received_ms` ([`LeaseWatch::observe`]).
     pub fn observe_leases(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {

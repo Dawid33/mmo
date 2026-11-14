@@ -321,9 +321,13 @@ macro_rules! engine_rows {
                 Ok(Fence { owner, epochs, all_hosts: false })
             }
 
-            /// Refuses a claim by `owner` (boot `boot`) unless that boot's `hosts` row is live:
-            /// a host declared dead (R4, its land moved to an heir) or replaced by another boot
-            /// wins nothing — `Fenced { sr: None }`, the transaction rolled back. The LAST
+            /// Refuses a claim by `owner` (boot `boot`) unless that boot's `hosts` row is live
+            /// and dirty: a host declared dead (R4, its land moved to an heir), replaced by
+            /// another boot, or that left cleanly (its leave cut committed: `clean = 1` — a
+            /// `Leave` succession does not mark the row dead, so `state` alone would let a
+            /// departed boot whose process still runs claim again) wins nothing —
+            /// `Fenced { sr: None }`, the transaction rolled back. A new boot registers dirty
+            /// and claims normally. The LAST
             /// statement of the claim (Postgres: the row `FOR SHARE`): the claim never holds
             /// the `hosts` row while it waits behind a staged part's rows (the heartbeat's
             /// short lock timeout would starve), and `FOR SHARE` serialises with a
@@ -332,7 +336,7 @@ macro_rules! engine_rows {
             /// that locks after sees the row dead.
             async fn check_live(pool: &Pool, mut tx: Tx, owner: u32, boot: u64) -> Result<Tx, StoreError> {
                 let sql = format!(
-                    "SELECT 1 FROM hosts WHERE ordinal = $1 AND boot = $2 AND state = {}{}",
+                    "SELECT 1 FROM hosts WHERE ordinal = $1 AND boot = $2 AND state = {} AND clean = 0{}",
                     crate::HOST_LIVE,
                     $share_lock
                 );
@@ -343,7 +347,7 @@ macro_rules! engine_rows {
                         tx.rollback().await?;
                         log::warn!(
                             "[world-store] host {owner} boot {boot} claimed super-regions, but its hosts row is not that \
-                             live boot (declared dead or replaced): refused, nothing claimed"
+                             live, dirty boot (declared dead, replaced, or left cleanly): refused, nothing claimed"
                         );
                         Err(StoreError::Fenced { sr: None })
                     }

@@ -1472,3 +1472,200 @@ fn thread_spawner_leaves_the_drop_set_out_of_a_store_load() {
     claims.store().clone().shutdown();
     t.stop(&db, &dir);
 }
+
+// ---- drain: a cleanly departed host's land on demand (R4 Task 11) ---------------------------
+
+/// The heir wait of the drain test (instead of `HEIR_WAIT_MS`, through the core's test hook).
+const HEIR_WAIT_TEST_MS: u64 = 500;
+
+impl Takeover {
+    /// The coordinator's heir wait, ms (its test hook).
+    fn heir_wait(&mut self, ms: u64) {
+        let c = self.w.coordinator.as_ref().expect("the coordinator is up");
+        c.thread.with_core(move |core| core.set_heir_wait_ms(ms), WAIT).expect("the core answers");
+    }
+
+    /// Host `h` exits as `server::run` does (`cuts::exit_world`: a leave cut), its lease
+    /// beating meanwhile, every other host running round by round; its outcome and the
+    /// packets its manager sent its clients on the way out. Its peer listener and
+    /// coordinator link go with it.
+    fn leave(&mut self, h: u32) -> (server::claims::ServerExit, Vec<(Option<ClientId>, ServerPacket)>) {
+        let i = self.w.pair.sims.iter().position(|s| s.ordinal == h).expect("the host is up");
+        let mut sim = self.w.pair.sims.remove(i);
+        for _ in sim.packets.try_iter() {}
+        let fenced = sim.fenced.clone();
+        let generation = self.w.generations[h as usize].clone();
+        let started = self.w.pair.started;
+        let region_out = sim.region_out.clone();
+        let cuts = sim.cuts.take();
+        let mut beat = sim.heartbeat.take();
+        let pair = &mut self.w.pair;
+        let exit = server::cuts::exit_world(
+            &mut sim.manager,
+            server::cuts::ExitParams {
+                region_out: &region_out,
+                now_ms: || started.elapsed().as_millis() as u64,
+                cuts,
+                coordinator: None,
+                fenced: &fenced,
+                world_generation: &generation,
+                park_timeout: server::cuts::EXIT_PARK_TIMEOUT,
+                save_timeout: Duration::from_secs(10),
+                now_tick: || 0,
+            },
+            |m| {
+                m.spawner_mut().tick_all();
+                m.spawner_mut().pump();
+                let _ = server::lease::pump_or_fence(&mut beat, &fenced, Instant::now());
+                pair.round();
+            },
+        );
+        self.w.switches[h as usize].drop_link();
+        self.w.links[h as usize] = None;
+        let packets = sim.packets.try_iter().collect();
+        (exit, packets)
+    }
+}
+
+/// The successions' `kind`s, by id.
+fn succession_kinds(db: &PgDb) -> Vec<i64> {
+    query_i64s(db, "SELECT kind FROM successions ORDER BY id")
+}
+
+/// Host 1 leaves in a committed cut (its player parked and saved first, then refused with
+/// `LEAVING_REFUSAL`); nothing is given away while nobody needs its land. A slime of host 0
+/// sent toward host 1's region waits in host 0's session; a player of host 1 logs in again:
+/// host 0 asks for the land, and after the heir wait (500 ms by the test hook) the
+/// coordinator gives ALL of host 1's land to host 0 as a `Leave` succession. While it waits
+/// a login is refused (the login service's 503) and retried, as the client does. The player
+/// stands where the leave cut parked them, once; the slime arrives once; every id is stored
+/// once; nobody restarted.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
+    install_props();
+    let Some(db) = PgDb::create("tk_drain") else { return };
+    let dir = scratch("tk_drain");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, true);
+    t.heir_wait(HEIR_WAIT_TEST_MS);
+    let generation = t.w.store.world_generation().unwrap();
+    let (a0, b1) = (t.seams[0], t.seams[1]);
+    let stayed = slime(&mut t, 1, b1, -3.0);
+    let (token, player) = t.player(11, b1);
+    assert_eq!(t.join(&token, 1), (true, Some(1)), "placed on host 1, which owns its record's region");
+    let client = t.connect(1, &token, 1);
+    t.until("the player has a body on host 1", WAIT, |t| t.bodies(client) == [(1, b1)]);
+    let _ = t.until_committed_after(&db, 0);
+    let boot1 = host_row(&db, 1).0;
+    let (exit, packets) = t.leave(1);
+    assert_eq!(exit, server::claims::ServerExit::Clean, "host 1 left");
+    assert!(
+        packets.iter().any(|(c, p)| *c == Some(client) && matches!(p, ServerPacket::Refused(why) if why == server::claims::LEAVING_REFUSAL)),
+        "the player's client is told the server is stopping: {packets:?}"
+    );
+    assert_eq!(host_row(&db, 1), (boot1, 1, game::HOST_LIVE), "host 1's row: clean, live, the boot that left");
+    let (left_in, _) = last_committed(&db);
+    let key = PlayerKey::Online(game::PlayerToken(token.clone())).store_key();
+    let parked = t.w.store.resolve_player(&key).unwrap().1.expect("the leave cut saved the player");
+    assert_eq!(parked.region, b1);
+    t.rounds(20);
+    assert!(successions(&db).is_empty(), "nothing is given away while nobody needs it");
+    // A slime toward host 1's region: it waits in host 0's session.
+    let crosser = slime(&mut t, 0, a0, 0.0);
+    assert!(push(&mut t, 0, crosser, a0, b1));
+    t.until("the slime waits for host 1", WAIT, |t| t.sim(0).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == 1 && *i == crosser));
+    // The player logs in again; refused while the land waits for its heir, retried.
+    let asked = Instant::now();
+    let mut epoch = 2;
+    let mut refused = 0;
+    let host = loop {
+        match t.join(&token, epoch) {
+            (true, host) => break host,
+            (false, _) => {
+                refused += 1;
+                assert!(successions(&db).is_empty() || refused < 20, "refused {refused} times after the succession");
+                assert!(asked.elapsed() < LONG, "never placed");
+                epoch += 1;
+            }
+        }
+    };
+    eprintln!("[takeover] the login on departed land was placed after {refused} refusal(s), {} ms", asked.elapsed().as_millis());
+    assert_eq!(host, Some(0), "placed on the heir");
+    assert_eq!(succession_kinds(&db), [game::SuccessionKind::Leave.code()], "one Leave succession");
+    let row = successions(&db)[0];
+    assert_eq!((row[1], row[2], row[5]), (1, 0, 0), "host 1's land to host 0: {row:?}");
+    assert!(row[3] >= left_in, "based on the leave cut or a later one: {row:?}, left in {left_in}");
+    let again = t.connect(0, &token, epoch);
+    t.until("the player has a body on the heir", WAIT, |t| !t.bodies(again).is_empty());
+    t.rounds(20);
+    assert_eq!(t.bodies(again), [(0, parked.region)], "one body, where the leave cut parked the player");
+    assert!(t.parked(player).is_empty(), "no parked copy left");
+    let row = t.until_settled(&db, 1);
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "nobody restarted");
+    assert!(!t.w.generations[0].is_set() && !t.sim(0).fenced.is_set());
+    assert_eq!(host_row(&db, 1), (boot1, 1, game::HOST_LIVE), "a leave marks no row dead");
+    let owners = t.w.store.owners().unwrap();
+    assert!(!owners.is_empty() && owners.iter().all(|(_, o, _)| *o == 0), "every super-region is host 0's: {owners:?}");
+    t.until("the slime arrived once", WAIT, |t| t.live(crosser).len() == 1 && t.sim(0).manager.peer_unreceived() == 0);
+    let after = t.until_committed_after(&db, row[4]);
+    let _ = t.until_committed_after(&db, after);
+    for id in [stayed, crosser] {
+        assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
+        stored_once(&t, &db, id, "after the drain");
+    }
+    assert_eq!(t.bodies(again).len(), 1, "the player once");
+    t.stop(&db, &dir);
+}
+
+/// R3's `clean_leave_and_return…` under `claim`: host 1 leaves in a committed cut; a slime
+/// toward its region waits on host 0, which asks for the land; host 1 comes back (another
+/// boot) within the heir wait — it re-claims what the directory still says is its own, the
+/// coordinator forgets the request (nothing is given away, also after the wait ran out), the
+/// held session is released by the new boot's hello and the slime arrives once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_leaver_that_returns_in_time_keeps_its_land() {
+    /// Long enough for the return, short enough to watch it run out.
+    const WAIT_MS: u64 = 8_000;
+    install_props();
+    let Some(db) = PgDb::create("tk_return") else { return };
+    let dir = scratch("tk_return");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    t.heir_wait(WAIT_MS);
+    let generation = t.w.store.world_generation().unwrap();
+    let (a0, b1) = (t.seams[0], t.seams[1]);
+    let _ = t.until_committed_after(&db, 0);
+    let own_before: BTreeSet<game::SuperRegion> = t.w.store.owned_by(1).unwrap().epochs.keys().copied().collect();
+    assert!(!own_before.is_empty());
+    assert_eq!(t.leave(1).0, server::claims::ServerExit::Clean, "host 1 left");
+    assert_eq!(host_row(&db, 1).1, 1, "its row is clean");
+    let id = slime(&mut t, 0, a0, 0.0);
+    assert!(push(&mut t, 0, id, a0, b1));
+    t.until("the slime waits for host 1", WAIT, |t| t.sim(0).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == 1 && *i == id));
+    let (left_in, _) = last_committed(&db);
+    let _ = t.until_committed_after(&db, left_in);
+    let rows = count(&db, &format!("SELECT COUNT(*) FROM in_flight WHERE host = 0 AND kind = 0 AND target_rx = {} AND target_rz = {}", b1.x, b1.z));
+    assert_eq!(rows, 1, "host 0's cut holds the waiting slime as a row");
+    // Host 1 returns before the heir wait ran out.
+    let back = Instant::now();
+    t.restart(&db, &dir, 1, 3001);
+    let own_after: BTreeSet<game::SuperRegion> = t.w.store.owned_by(1).unwrap().epochs.keys().copied().collect();
+    assert_eq!(own_after, own_before, "it re-claimed its land");
+    // Its region runs again (a visitor, as host 1's keeper made it run before it left).
+    t.watch(1, b1);
+    t.until("the slime arrived on host 1", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.peer_unreceived() == 0) && t.sim(1).holders(id) == [b1]);
+    // Past the heir wait (from the return, so past it from any request too): nothing given away.
+    t.until("the heir wait ran out", LONG, |_| back.elapsed() > Duration::from_millis(WAIT_MS + 2_000));
+    assert!(successions(&db).is_empty(), "the return cancelled the wait: {:?}", successions(&db));
+    let own_now: BTreeSet<game::SuperRegion> = t.w.store.owned_by(1).unwrap().epochs.keys().copied().collect();
+    assert_eq!(own_now, own_before, "host 1 keeps its land");
+    let k = t.until_committed_after(&db, last_committed(&db).0);
+    let _ = t.until_committed_after(&db, k);
+    assert_eq!(t.live(id).len(), 1, "once: {:?}", t.live(id));
+    stored_once(&t, &db, id, "after the return");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "a clean return keeps the generation");
+    for h in 0..2 {
+        assert!(!t.w.generations[h].is_set(), "no rollback");
+    }
+    t.stop(&db, &dir);
+}

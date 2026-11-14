@@ -278,6 +278,7 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::LeaveRequest => "LeaveRequest".to_string(),
         HostMsg::SuccessionApplied { id } => format!("SuccessionApplied {}", id.0),
         HostMsg::SuccessionAdopted { id } => format!("SuccessionAdopted {}", id.0),
+        HostMsg::LandWanted { sr } => format!("LandWanted {sr:?}"),
     }
 }
 
@@ -745,6 +746,8 @@ struct SuccessionPump {
     declare_retry_at: u64,
     rollback_rx: Option<Answer<u64>>,
     rollback_retry_at: u64,
+    /// The owners read for the super-regions hosts asked for (`LandWanted`), with them.
+    land_rx: Option<(Vec<game::SuperRegion>, Answer<Vec<(game::SuperRegion, i64, u64)>>)>,
 }
 
 impl CoordinatorRuntime {
@@ -1226,6 +1229,36 @@ impl CoordinatorRuntime {
                 self.warn_cuts(now, &format!("the open successions could not be read ({e}); no cut and no succession until they are"));
             }
             return Ok(());
+        }
+        // Land of a host that left, asked for (`LandWanted`): the owners read (a plain read),
+        // each owner told to the core, which decides when it is given away. A failed read is
+        // dropped: the hosts ask again every `LAND_WANTED_EVERY_MS`.
+        if let Some((srs, rx)) = &p.land_rx {
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => None,
+                Ok(answer) => Some(answer),
+                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+            };
+            if let Some(answer) = answer {
+                match answer {
+                    Ok(rows) => {
+                        let owners: BTreeMap<game::SuperRegion, i64> = rows.into_iter().map(|(sr, o, _)| (sr, o)).collect();
+                        let wanted: BTreeSet<u32> =
+                            srs.iter().filter_map(|sr| owners.get(sr)).filter_map(|o| u32::try_from(*o).ok()).collect();
+                        for owner in wanted {
+                            self.core.land_wanted(owner, now);
+                        }
+                    }
+                    Err(e) => log::debug!("[coordinator] the owners of land asked for could not be read ({e}); the hosts ask again"),
+                }
+                p.land_rx = None;
+            }
+        }
+        if p.land_rx.is_none() {
+            let srs = self.core.take_land_lookups();
+            if !srs.is_empty() {
+                p.land_rx = Some((srs, self.store.owners_later()));
+            }
         }
         if self.core.rollback_wanted() {
             if p.rollback_rx.is_none() && now >= p.rollback_retry_at {

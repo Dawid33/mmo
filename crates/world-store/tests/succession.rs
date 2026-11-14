@@ -578,3 +578,44 @@ fn malformed_declarations_are_unsupported() {
     assert!(w.h.open_successions().unwrap().is_empty());
     w.shutdown();
 }
+
+// ---- R4 Task 11: a cleanly-left boot claims nothing ------------------------------------------
+
+/// Host 1 leaves clean (its leave cut committed): from then on a claim by THAT boot — of a
+/// free row, or a re-claim of its own — is refused as fenced and writes nothing, before and
+/// after its `Leave` succession is declared (the declaration does not mark the row dead).
+/// Another boot of host 1 registers normally (dirty, live) and claims normally.
+#[test]
+fn a_cleanly_left_boot_claims_nothing() {
+    let Some(w) = World::new(2) else { return };
+    let own: Vec<_> = w.fences[1].epochs.keys().copied().collect();
+    w.hosts[0].prepare_cut(part(1, 0, vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[1].prepare_cut(part(1, 1, vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![0, 1], vec![1], w.c, 0, vec![]).unwrap());
+    assert_eq!(w.hosts[1].cut_decided(CutId(1)).unwrap(), Some(true));
+    assert_eq!(w.state_of(1), (HOST_LIVE, true), "left clean");
+    let free = (9, 9);
+    let refused = |w: &World| {
+        assert_eq!(w.hosts[1].claim_free(1, boot_of(1), vec![free]).unwrap_err(), StoreError::Fenced { sr: None });
+        assert_eq!(w.hosts[1].claim_super_regions_live(1, boot_of(1), own.clone()).unwrap_err(), StoreError::Fenced { sr: None });
+        assert!(w.h.owners().unwrap().iter().all(|(sr, _, _)| *sr != free), "the free row was not created");
+    };
+    refused(&w);
+    let before = w.h.owned_by(1).unwrap();
+    assert_eq!(before.epochs, w.fences[1].epochs, "its own rows untouched by the refused re-claim");
+    let s = match w.declare(1, 0, SuccessionKind::Leave).unwrap() {
+        Declared::Done(mut s) => s.remove(0),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(w.state_of(1), (HOST_LIVE, true), "a leave marks no row dead");
+    refused(&w);
+    assert!(w.h.owned_by(1).unwrap().epochs.is_empty(), "every row is the heir's");
+    assert_eq!(s.moved.len(), 2);
+    // Its next boot registers (dirty, live) and claims normally.
+    let next = w.hosts[1].register_host(HostRow { boot: 9001, ..row(1) }, &Fence { owner: 1, epochs: Default::default(), all_hosts: false }, CrashPolicy::Succession).unwrap();
+    assert!(matches!(next, world_store::BootVerdict::Registered(_)), "{next:?}");
+    assert_eq!(w.state_of(1), (HOST_LIVE, false));
+    let won = w.hosts[1].claim_free(1, 9001, vec![free]).unwrap();
+    assert_eq!(won.epochs.keys().copied().collect::<Vec<_>>(), vec![free]);
+    w.shutdown();
+}

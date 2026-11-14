@@ -411,7 +411,9 @@ pub fn hosts_beyond_count(rows: &[(u32, bool)], hosts: u32) -> Option<String> {
             "the world has dirty `hosts` rows of hosts {beyond:?}, but {}={hosts}: they ran before and did not \
              leave cleanly, and may hold state. World cuts do not begin while a dirty row has no attached host, \
              so the world is NOT saved: start this world with {}={} (all its hosts) until they leave cleanly; \
-             there is no worldctl command yet to retire a host's row (TODO.md)",
+             there is no worldctl command yet to retire a host's row (TODO.md). Under `claim` its land is given \
+             to a live host instead — once its lease lapsed, or, once it left cleanly, on demand: at once when \
+             a host needs a region of it (its ordinal is beyond the host count)",
             game::ownership::HOSTS_ENV,
             game::ownership::HOSTS_ENV,
             beyond.iter().max().map_or(hosts, |m| m + 1)
@@ -451,10 +453,13 @@ pub fn run_coordinator() -> ServerExit {
     let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
     let clock = CoordinatorClock::new(clock, phase);
     log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
-    let start = match world_file::ensure_coordinator_state(&store, &map, None).unwrap_or_else(|e| fatal(e)) {
+    let mut start = match world_file::ensure_coordinator_state(&store, &map, None).unwrap_or_else(|e| fatal(e)) {
         Some(start) => start,
         None => fatal("this world has no history (nobody can live in it): there is nothing to coordinate".into()),
     };
+    // R4 drain: the land of a host that left cleanly with an ordinal beyond the count is
+    // given away at once when wanted (it will not come back); below it, after `HEIR_WAIT_MS`.
+    start.coordinator.set_host_count(hosts);
     let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service link's token: {e}")));
     let bind = coordinator_addr_from(COORDINATOR_BIND_ENV, std::env::var(COORDINATOR_BIND_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(e));

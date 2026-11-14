@@ -32,6 +32,20 @@
 //!    announces it — and what this host sends the heir is ordinary traffic between
 //!    participants (`world_cut_wrap` unchanged).
 //!
+//! **A `Leave` succession** (R4 drain, Task 11) takes the same steps: the predecessor left
+//! in a committed leave cut, so its journal entries are `Sent` ones only — what the leave
+//! pair held back and what was sent since, all held in the session for its next boot — and
+//! the session, emptied, is released for that next boot. Its next boot registering races
+//! the declaration; the store decides (the declaration needs the clean row of that very boot,
+//! a registration makes it dirty under the same `world` row lock), and a survivor mirrors
+//! that order: a new boot's hello releases the held session only once that boot shows it
+//! holds the land it left with (its `Owns`, `world_cut.rs` `peer_hello_boot`) — which it can
+//! only if it re-claimed before any declaration (a later declaration is then refused,
+//! `Gone`). A new boot that owns nothing registered after the declaration: its order comes,
+//! and what was held goes to the heir in the report, the new boot renumbered from 1 — one
+//! copy either way. (Should a session ever be released and the order come after, nothing is
+//! reported: `apply_leave_overtaken`.)
+//!
 //! A run is forgotten at [`crate::CoordMsg::SuccessionDone`]; until then an `Attach` lists
 //! it as answered (a restarted coordinator counts it again), and the heir's as adopted once
 //! it is.
@@ -327,6 +341,16 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Steps 2–4 of the module docs for succession `s` (its base cut matches).
     fn apply_succession(&mut self, s: &Succession) {
         let (pred, heir, me) = (s.predecessor, s.heir, self.ordinal());
+        self.returning_peers.remove(&pred);
+        let released = !self.left_peers.contains_key(&pred);
+        if s.kind == crate::SuccessionKind::Leave && released && self.peer_boots.get(&pred).is_some_and(|b| *b != s.predecessor_boot) {
+            // Defensive (R4 drain, the module docs' race): the held session was released to
+            // a new boot of the leaver before this order came. `peer_hello_boot` releases
+            // only to a boot holding its land again, whose registration made the store
+            // refuse any later declaration — so this is not expected; if it happens, what
+            // was held is the new boot's now and none of it is reported (never twice).
+            return self.apply_leave_overtaken(s);
+        }
         // 2. Close: nothing more of the dead boot is read, its hello is refused for good.
         self.dead_boots.insert((pred, s.predecessor_boot));
         self.succeeded_peers.insert(pred, s.predecessor_boot);
@@ -335,6 +359,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer.session.refuse_boot(s.predecessor_boot);
             peer.link.close();
             owed_raw.extend(peer.session.take_unreceived());
+            // A session a committed leave held (R3) owes nothing now: the next boot of that
+            // ordinal is a new host — its hello renumbers from 1 and it is reachable again.
+            peer.session.release();
         }
         owed_raw.extend(self.peer_waiting.remove(&pred).unwrap_or_default());
         // What a leave held back was never queued (nor journalled): journalled now, so its
@@ -482,6 +509,40 @@ impl<S: RegionSpawner> WorldManager<S> {
         // What waited for an owner of a moved super-region goes on (to the heir, or here).
         self.flush_unowned();
         // Spawn orders that waited for the predecessor's sync go on.
+        self.retry_held_spawns();
+    }
+
+    /// [`Self::apply_succession`] of a `Leave` succession whose predecessor already came back
+    /// here as another boot (its hello released the held session): an empty report (nothing
+    /// this host holds is the departed boot's any more — what it held went to the new boot,
+    /// which hands what it does not own on to its owner) and the directory's rows moved to
+    /// the heir. The new boot keeps its session and stays live.
+    fn apply_leave_overtaken(&mut self, s: &Succession) {
+        let (pred, heir, me) = (s.predecessor, s.heir, self.ordinal());
+        log::warn!(
+            "[server] succession {}: host {pred} left as boot {:#x} and is back as another boot already; what was held for it \
+             went to the new boot: nothing to report",
+            s.id.0,
+            s.predecessor_boot
+        );
+        self.dead_boots.insert((pred, s.predecessor_boot));
+        self.left_peers.remove(&pred);
+        let report = SuccessionReportIn { base_cut: s.base_cut, entries: Vec::new(), owed: Vec::new() };
+        if heir == me {
+            self.file_succession_report(me, s.id, report);
+            for &(sr, _) in &s.moved {
+                self.inheriting.insert(sr, s.id);
+            }
+        } else {
+            let msg = Reliable::SuccessionReport { id: s.id, base_cut: s.base_cut, entries: Vec::new(), owed: Vec::new() };
+            self.queue_to_peer(heir, msg);
+        }
+        if let Some(directory) = self.ownership.0.directory_mut() {
+            for &(sr, epoch) in &s.moved {
+                directory.set(sr, Some(heir), epoch);
+            }
+        }
+        self.flush_unowned();
         self.retry_held_spawns();
     }
 

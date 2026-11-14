@@ -13,7 +13,11 @@
 //!   expected peer finished its first sync of the current connection — its backlog came
 //!   before its `Running` on the one ordered stream — so a peer that may hold the player
 //!   live has said so first ("wait, never guess"). Until then the order waits (at most
-//!   [`SPAWN_SYNC_WAIT_MS`], then it is refused). An order taken here keeps an online player
+//!   [`SPAWN_SYNC_WAIT_MS`], then it is refused). Under `claim` an order for land whose owner
+//!   left cleanly waits the same way while that land is asked for (R4 drain,
+//!   [`crate::HostMsg::LandWanted`]): placed once the heir holds it, else refused at
+//!   [`SPAWN_SYNC_WAIT_MS`] — while the coordinator waits out `HEIR_WAIT_MS` a login there is
+//!   answered 503 and the client retries. An order taken here keeps an online player
 //!   here — no hand-off at a host seam — until its new session connects ([`SPAWN_PIN_MS`]).
 //! - **Kick**: applied by the entry host and relayed to every other host; acknowledged to
 //!   the login service once every peer applied it. A peer that cannot be reached means no
@@ -224,6 +228,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.spawn_pins.retain(|_, p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS);
                 self.spawn_pins.insert(req.player, Pin { at_ms: now, epoch: req.session_epoch, told: false });
                 self.spawn_here.push(req);
+            }
+            Placement::Host(owner) if self.leave_blocks(owner) && self.ownership.0.directory().is_some() => {
+                // R4 drain: the owner left cleanly (or is leaving in a cut not decided here
+                // yet). Its land is asked for (`LandWanted`, once it left); the order waits
+                // like one for an unknown owner — placed once the heir holds the land (the
+                // heir holds every order until it adopted), else refused at
+                // `SPAWN_SYNC_WAIT_MS` (the login service answers 503, the client retries).
+                let region = self.spawn_region(req.record_region);
+                self.note_land_wanted(region);
+                self.hold_spawn(req, since_ms, "its region's host left the world; its land is asked for")
             }
             Placement::Host(owner) => {
                 if req.hops < SPAWN_RELAY_MAX_HOPS && self.peer_reachable(owner) {
