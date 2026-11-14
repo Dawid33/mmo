@@ -22,6 +22,9 @@ use server::player_store::{PlayerKey, PlayerStore, StorePlayers};
 use server::world_file::{ensure_coordinator_state, CoordinatorSource, CoordinatorStart};
 use world_store::{StoreHandle, StoreUrl};
 
+/// The placement hop the tests' `Attach` reports their player at, and so the hop of its requests.
+const ATTACHED_HOP: u64 = 1;
+
 /// Wall time any wait below may take before the test fails.
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -392,11 +395,11 @@ fn directive_not_sent_before_save() {
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     let player = PlayerId(1);
     let id = RequestId { host: 0, boot: 1, seq: 1 };
-    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() });
     // The fortress region runs: the founding embodies the party there by directives.
     link.send(HostMsg::RegionStarted { rc: req.region, incarnation: 1 });
-    link.send(HostMsg::Request { id, player, hop: 0, req: WorldRequest::Embark(req.clone()) });
+    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req.clone()) });
 
     let deadline = Instant::now() + WAIT;
     let (mut directives, mut replies, mut attached) = (0, 0, false);
@@ -452,9 +455,9 @@ fn fenced_coordinator_stops() {
     // Another coordinator takes the row; this one's next save is refused.
     store.claim_coordinator().unwrap();
     let player = PlayerId(1);
-    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() });
-    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: 0, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the fenced coordinator kept running");
         std::thread::sleep(Duration::from_millis(10));
@@ -492,9 +495,9 @@ fn overlapping_start_claims_before_it_loads() {
     // The founding's saves fail for a while (retried every 250 ms).
     store.fail_next_writes(2);
     let player = PlayerId(1);
-    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() });
-    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: 0, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
     while store.failing_writes_left() > 1 {
         assert!(Instant::now() < deadline, "the founding's save was never tried");
         std::thread::sleep(Duration::from_millis(5));

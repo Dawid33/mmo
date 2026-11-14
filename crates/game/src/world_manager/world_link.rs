@@ -22,6 +22,9 @@ pub(super) struct PendingRequest {
     client: ClientId,
     player: PlayerId,
     /// The player's hop here when asked: a resend carries it, not the hop of the day.
+    /// If the coordinator's `HopIs` renumbers the player's hop upward while this request is
+    /// pending, the coordinator refuses it though the player never left this host; accepted
+    /// ("wait, never guess"): the client retries.
     hop: u64,
     req: WorldRequest,
     /// When the client asked: the timeout runs from here.
