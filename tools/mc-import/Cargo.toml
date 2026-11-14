@@ -1,0 +1,22 @@
+[package]
+name = "mc-import-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line importer: `report`, `import` and `split` turn Sponge schematics (.schem) into prefab files."
+autotests = false
+
+[[bin]]
+name = "mc-import"
+path = "src/main.rs"
+
+[dependencies]
+mc-import = { path = "../../crates/mc-import" }
+game = { path = "../../crates/game" }
+crc32fast = { workspace = true }
+
+[dev-dependencies]
+flate2 = "1"
+
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
