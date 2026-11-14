@@ -304,6 +304,14 @@ pub struct MultiRig {
     /// Entities a killed host held, or that were on their way to or from it
     /// ([`Self::kill`]): no longer tracked — the heir's resolution (Task 9) brings them back.
     pub forgiven: BTreeSet<EntityId>,
+    /// Whether the rig answers an heir's adoption reads ([`Self::with_adoption`]).
+    pub adopting: bool,
+    /// Adoption reads asked and not answered yet: `(rounds left, heir, succession, predecessor)`.
+    pub adoptions_pending: Vec<(u32, u32, game::SuccessionId, u32)>,
+    /// Successions a rollback abandoned ([`Self::roll_back`]).
+    pub abandoned: BTreeSet<game::SuccessionId>,
+    /// The rig store's world generation (raised by [`Self::roll_back`]).
+    pub generation: u64,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -410,6 +418,10 @@ impl MultiRig {
                 successions: Vec::new(),
                 adopts: Vec::new(),
                 forgiven: BTreeSet::new(),
+                adopting: false,
+                adoptions_pending: Vec::new(),
+                abandoned: BTreeSet::new(),
+                generation: RIG_GENERATION,
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -609,10 +621,24 @@ impl MultiRig {
         }
         let staged: BTreeSet<u32> = self.parts.keys().filter(|(c, _)| *c == cut).map(|(_, h)| *h).collect();
         let listed: BTreeSet<u32> = hosts.iter().copied().collect();
-        let open: BTreeSet<game::SuccessionId> =
-            self.successions.iter().filter(|(_, settled)| settled.is_none()).map(|(s, _)| s.id).collect();
+        let open = self.open_successions();
         let named: BTreeSet<game::SuccessionId> = settles.iter().copied().collect();
         let stored = commit && staged == listed && open == named;
+        if stored && self.adopting {
+            // The pairing the store does not check (Task 9): the heir's part of a cut that
+            // settles a succession adopts its predecessor.
+            for (s, _) in self.successions.iter().filter(|(s, _)| named.contains(&s.id)) {
+                let adopts = self.parts.get(&(cut, s.heir)).map(|p| p.adopts.clone()).unwrap_or_default();
+                assert!(
+                    adopts.contains(&s.predecessor),
+                    "cut {} settles succession {} but heir {}'s part adopts {adopts:?} (seed {})",
+                    cut.0,
+                    s.id.0,
+                    s.heir,
+                    self.seed
+                );
+            }
+        }
         if stored {
             for (s, settled) in &mut self.successions {
                 if named.contains(&s.id) {
@@ -658,6 +684,17 @@ impl MultiRig {
     fn apply_part(&mut self, h: u32, part: &WorldCut) {
         if !part.adopts.is_empty() {
             self.adopts.push((part.id, h, part.adopts.clone()));
+        }
+        // An heir's part takes its predecessors' stored regions over (rows are keyed per
+        // region in the store: they are the heir's land now) and replaces their in-flight
+        // rows (what it kept of them is in its own).
+        for pred in &part.adopts {
+            if let Some(theirs) = self.committed.remove(pred) {
+                let mine = self.committed.entry(h).or_default();
+                for (rc, region) in theirs.regions {
+                    mine.regions.entry(rc).or_insert(region);
+                }
+            }
         }
         self.committed.entry(h).or_default().apply(part);
         self.committed_players.extend(part.players.iter().cloned());
@@ -712,7 +749,9 @@ impl MultiRig {
                     journalled.entry((h, p, sent)).or_default().insert(e.subject);
                 }
             }
-            if base != cut || !participants.contains(&h) {
+            // A cut with no other participant (the last host standing after a succession)
+            // truncates toward nobody.
+            if base != cut || !participants.contains(&h) || participants.len() == 1 {
                 continue;
             }
             let Some((marked, marks)) = journal.last_marks() else {
@@ -1104,7 +1143,7 @@ impl MultiRig {
     /// last committed cut, its survivors every live host but the predecessors.
     /// `SuccessionOpen` while one is open.
     pub fn declare_in_store(&mut self, d: &game::coordinator::Declare) -> game::Declared {
-        if self.successions.iter().any(|(_, settled)| settled.is_none()) {
+        if !self.open_successions().is_empty() {
             return game::Declared::SuccessionOpen;
         }
         let n = self.hosts.len() as u32;
@@ -1136,6 +1175,124 @@ impl MultiRig {
         }
         self.successions.extend(out.iter().cloned().map(|s| (s, None)));
         game::Declared::Done(out)
+    }
+
+    /// The rig store's open successions (neither settled nor abandoned).
+    pub fn open_successions(&self) -> BTreeSet<game::SuccessionId> {
+        self.successions
+            .iter()
+            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
+            .map(|(s, _)| s.id)
+            .collect()
+    }
+
+    /// From now on the rig answers every heir's adoption read as the server does (Task 9):
+    /// [`game::WorldManager::take_adoption_wanted`] is answered after 0..=`link_delay` rounds
+    /// (seeded) with the predecessor's in-flight rows of the last committed cut
+    /// (`load_in_flight_of`) and the stored regions of the drop set (`regions_of_entities`),
+    /// the predecessor's stored regions handed to the heir's spawner first (what its
+    /// region threads would read from the store).
+    pub fn with_adoption(&mut self) {
+        self.adopting = true;
+    }
+
+    /// One round of every heir's adoption reads ([`Self::with_adoption`]).
+    pub fn drive_adoptions(&mut self) {
+        if !self.adopting {
+            return;
+        }
+        for h in 0..self.hosts.len() as u32 {
+            if self.dead.contains(&h) {
+                continue;
+            }
+            while let Some((id, pred)) = self.hosts[h as usize].manager.take_adoption_wanted() {
+                let delay = (mix(self.seed, self.rounds * 64 + 7000 + u64::from(h)) % u64::from(self.link_delay + 1)) as u32;
+                self.adoptions_pending.push((delay, h, id, pred));
+            }
+        }
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.adoptions_pending).into_iter().partition(|(d, ..)| *d == 0);
+        self.adoptions_pending = later.into_iter().map(|(d, h, id, pred)| (d - 1, h, id, pred)).collect();
+        for (_, h, id, pred) in due {
+            if self.dead.contains(&h) {
+                continue;
+            }
+            let theirs = self.committed.get(&pred);
+            let rows = theirs.map(|s| s.in_flight.clone()).unwrap_or_default();
+            let regions: BTreeMap<RegionCoords, StoredRegion> = theirs.map(|s| s.regions.clone()).unwrap_or_default();
+            let drop: BTreeSet<EntityId> = self.hosts[h as usize].manager.adoption_drop_set(id).into_iter().collect();
+            let mut located = Vec::new();
+            for id in &drop {
+                for store in self.committed.values() {
+                    for (rc, region) in &store.regions {
+                        if region.entities.iter().any(|b| b.id == *id) {
+                            located.push((*id, *rc));
+                        }
+                    }
+                }
+            }
+            let m = &mut self.hosts[h as usize].manager;
+            m.spawner_mut().add_portable(regions);
+            m.adopted_rows(id, rows, located);
+            self.hosts[h as usize].settle();
+        }
+    }
+
+    /// Host `dead` (killed after a committed leave cut it left in) is declared dead as a
+    /// LEAVE succession ([`game::SuccessionKind::Leave`]): the rig store moves its land to
+    /// its heir and the coordinator sends the orders. The succession declared.
+    pub fn declare_leave(&mut self, dead: u32) -> game::Succession {
+        let n = self.hosts.len() as u32;
+        self.core().set_crash_policy(game::CrashPolicy::Succession);
+        let live: BTreeSet<u32> = (0..n).filter(|h| !self.dead.contains(h) && *h != dead).collect();
+        let heir = game::heir_of(dead, &live).expect("a live host");
+        let d = game::coordinator::Declare {
+            dead: vec![(dead, self.boots[dead as usize])],
+            heirs: vec![heir],
+            kind: game::SuccessionKind::Leave,
+        };
+        let outcome = self.declare_in_store(&d);
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let mut core = self.core();
+        core.declared(outcome.clone(), now);
+        core.set_expected_hosts(live);
+        drop(core);
+        match outcome {
+            game::Declared::Done(mut list) => list.remove(0),
+            other => panic!("the rig store refused the declaration: {other:?}"),
+        }
+    }
+
+    /// Host `dead` (killed while a succession is open) lapses: the coordinator wants the
+    /// world rolled back (cut rounds while it notices), the rig store abandons every open
+    /// succession and raises the world generation, and the coordinator tells every host
+    /// ([`game::CoordMsg::Generation`]). The new generation.
+    pub fn roll_back(&mut self, dead: u32) -> u64 {
+        let n = self.hosts.len() as u32;
+        for r in 0..SUCCESSION_DECLARE_ROUNDS {
+            let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+            let rows: Vec<game::coordinator::HostSeen> = (0..n)
+                .filter(|h| !self.dead.contains(h) || *h == dead)
+                .map(|h| {
+                    let seen_ms = if h == dead { 0 } else { now + 1 };
+                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h as usize], clean: false, state: game::HOST_LIVE, seen_ms }
+                })
+                .collect();
+            let mut core = self.core();
+            core.observe_leases(&rows, now, now);
+            core.maintain(now);
+            if core.rollback_wanted() {
+                break;
+            }
+            drop(core);
+            assert!(r + 1 < SUCCESSION_DECLARE_ROUNDS, "the coordinator never wanted a rollback (seed {})", self.seed);
+            self.cut_round();
+        }
+        let open = self.open_successions();
+        self.abandoned.extend(open);
+        self.generation += 1;
+        let generation = self.generation;
+        self.core().rolled_back(generation);
+        generation
     }
 
     /// The rig's coordinator, locked ([`Self::with_coordinator`]).
@@ -1404,6 +1561,7 @@ impl MultiRig {
             rig.settle();
         }
         self.drive_claims();
+        self.drive_adoptions();
         self.assert_conserved_world();
     }
 

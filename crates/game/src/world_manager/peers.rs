@@ -453,7 +453,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Parked from the hand-off, as a player crossing into a region whose load fails
             // is (`region_load_failed`); `park_handed` reports it offline.
             let record = handoff_record(target, &bundle, &h).expect("checked above");
-            log::error!("[server] player {} handed into {target:?}, which cannot take it now: parked", h.player.0);
+            if self.inherited_not_adopted(target) {
+                // A survivor that applied the succession hands it here before this heir
+                // adopted the land: expected, nothing is lost (the player logs in again).
+                log::info!("[server] player {} handed into {target:?}, inherited and not adopted yet: parked", h.player.0);
+            } else {
+                log::error!("[server] player {} handed into {target:?}, which cannot take it now: parked", h.player.0);
+            }
             self.park_handed(from, c, h.player, record, now_ms);
             self.login_parked_on_arrival(login);
             return;
@@ -559,7 +565,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.placed_by_handoff(h.player, h.hop);
         if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
-            log::error!("[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked", h.player.0);
+            if self.inherited_not_adopted(target) {
+                log::info!("[server] player {} moved into {target:?}, inherited and not adopted yet: parked", h.player.0);
+            } else {
+                log::error!("[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked", h.player.0);
+            }
             self.park_handed(from, c, h.player, record, now_ms);
             self.login_parked_on_arrival(h.login);
             return;
@@ -1472,7 +1482,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Apply host `from`'s reliable message; `after`: its sender accounts for it in the
     /// pending cut (what it creates here is in no part of this host's).
-    fn peer_reliable_in(&mut self, from: u32, msg: Reliable, after: bool) {
+    pub(super) fn peer_reliable_in(&mut self, from: u32, msg: Reliable, after: bool) {
         match msg {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
                 if !self.owns(target) && !self.is_foreign(target) {
@@ -1502,7 +1512,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.accept_arrival(None, target, stamp, *bundle, now_ms);
             }
             Reliable::Transfer { target, stamp, bundle, player: Some(handoff) } => {
-                if !self.owns(target) {
+                if !self.owns(target) && !self.inherited_not_adopted(target) {
                     // Parked here from the hand-off (`accept_handoff`): a region this host does
                     // not own is never started here. Never lost.
                     log::error!("[server] host {from} handed a player into {target:?}, which this host does not own");
@@ -1545,7 +1555,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             Reliable::PlayerMove { handoff, record, target } => {
-                if !self.owns(target) {
+                if !self.owns(target) && !self.inherited_not_adopted(target) {
                     // Parked here (`accept_move`): a region this host does not own is never
                     // started here, so its body could not be created. Never lost.
                     log::error!("[server] host {from} moved a player into {target:?}, which this host does not own");

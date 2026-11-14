@@ -1,7 +1,7 @@
-//! The survivor's half of a succession (R4, plan Task 8): host `predecessor` (process
-//! `predecessor_boot`) was declared dead and all its super-regions are `heir`'s now
-//! ([`crate::CoordMsg::Succession`]). Every live host named a survivor — the heir among them
-//! — answers it, in order:
+//! A succession (R4): the survivor's half (plan Task 8), then the heir's (Task 9). Host
+//! `predecessor` (process `predecessor_boot`) was declared dead and all its super-regions
+//! are `heir`'s now ([`crate::CoordMsg::Succession`]). **The survivor's half:** every live
+//! host named a survivor — the heir among them — answers it, in order:
 //!
 //! 1. **Base.** Its peer journal counts from `base_cut`, or it waits (the `CutDone` of that
 //!    cut is on its way: a report against another base would mix two cuts' traffic). Never
@@ -32,10 +32,73 @@
 //!    announces it — and what this host sends the heir is ordinary traffic between
 //!    participants (`world_cut_wrap` unchanged).
 //!
-//! The heir collects every survivor's report ([`WorldManager::succession_reports`]); what it
-//! does with them (resolve, adopt, deliver, load, `SuccessionAdopted`) is its own half
-//! (Task 9). A run is forgotten at [`crate::CoordMsg::SuccessionDone`]; until then an
-//! `Attach` lists it as answered (a restarted coordinator counts it again).
+//! A run is forgotten at [`crate::CoordMsg::SuccessionDone`]; until then an `Attach` lists
+//! it as answered (a restarted coordinator counts it again), and the heir's as adopted once
+//! it is.
+//!
+//! **The heir's half.** The heir holds what it inherits masked from step 4 on
+//! ([`WorldManager::inheriting`]: `owner_of` answers `Unknown` for it, so nothing of it
+//! starts, arrivals and placements wait). Once a report of EVERY survivor is in (its own
+//! included; "wait, never guess": a missing one blocks — the coordinator's deadline turns
+//! that into a rollback — and a report against another base cut is never resolved) it
+//! makes the drop set and asks the server for the store
+//! ([`WorldManager::take_adoption_wanted`]); the server's answer
+//! ([`WorldManager::adopted_rows`]) runs, in this order:
+//!
+//! 1. **Resolve.** Every entry grouped by subject; the highest stamp decides (two events of
+//!    one subject never share a stamp; if they do, a `Received` one wins — delivering too
+//!    could make two). `Received` latest: a survivor's copy lives on — nothing delivered.
+//!    `Sent` latest: the predecessor held it — its journalled message is delivered. The
+//!    **drop set** is every entity any entry names: none of them is taken from the
+//!    predecessor's store (it lives elsewhere, or comes from the journal). A body that hands
+//!    a player over is never delivered as an entity: its player's subject decides.
+//! 2. **Adopt rows.** The predecessor's in-flight rows of the base cut (the server read
+//!    them under the fence of what this host holds now): those of a dropped entity are
+//!    discarded, the rest put back on their way ([`WorldManager::restore_in_flight`]).
+//! 3. **Deliver.** A plain entity's bundle arrives through `accept_arrival` like any crossing
+//!    from another host (its region applies it at its next slot, never on receipt: the
+//!    slot-order rule); a target that moved on to another host is sent there. A person's
+//!    bundle is NOT delivered (the history's lists respawn people as their region starts —
+//!    delivering too would make two): this host, the receiving host now, reports the
+//!    crossing absorbed (`PersonCrossed { delivered: false }`), before any region of the
+//!    land starts, so a person whose crossing died with the predecessor is abstract, not
+//!    lost in a region that no longer holds their body. A player handed or moved to the
+//!    predecessor is parked here from the hand-off's record (no session will come: the
+//!    client was on the dead host), at its hop, never `departed`. Then the `owed` intents
+//!    and replies, in each sender's order, as if that sender's session had brought them.
+//! 4. **Load.** Every inherited region the store holds a dropped entity in (`located`), and
+//!    every one an owed intent or reply goes to, starts now — the drop set left out of its
+//!    store state ([`RegionSpawner::forget_entities`]) — pinned (`succession_pinned`) so it
+//!    cannot park before the settle cut writes it. (The store's stale-row guard refuses a
+//!    part missing one: the safety net, not the mechanism.)
+//! 5. **Answer** [`crate::HostMsg::SuccessionAdopted`]. From here until
+//!    `SuccessionDone { settled: true }` every cut part of this host adopts the predecessor
+//!    ([`crate::WorldCut::adopts`]: the store replaces its in-flight rows with this part's) —
+//!    the coordinator pairs that cut's `settles` with it. `SuccessionDone` unpins the
+//!    regions and lifts the drop set (the settle cut rewrote every stored region holding
+//!    one of them).
+//!
+//! **Where the mask is lifted.** `adopt_inherited` (lift the mask, flush what waited for
+//! the land, retry held spawn orders) runs AFTER the drop set is installed in the spawner
+//! and the rows are filtered, and after the people are reported absorbed, but BEFORE the
+//! rows, bundles and owed messages go on: the flush may start an inherited region, which
+//! must already leave the drop set out, and a person must be reported before their region
+//! runs (the history would embody them in it); everything delivered afterwards finds the
+//! land owned (`owns`), so nothing of it waits for an owner or bounces.
+//!
+//! **Who accounts for what the heir delivers — the three sender cases** (`world_cut.rs`,
+//! re-derived for a succession; no world cut runs from the declaration until the heir's
+//! `SuccessionAdopted`, and every cut pending with the predecessor was aborted before it):
+//! (i) a message the predecessor sent and a survivor received is that survivor's — in its
+//!     snapshot of the settle cut if applied by its tick, else its row (`Received` latest:
+//!     the heir drops it from the predecessor's store state and rows);
+//! (ii) a journalled bundle, player or owed message the heir delivers is the heir's own —
+//!     it went bare, no cut wraps it (`inbound_accounted` is none): in its snapshot of the
+//!     settle cut if applied by its tick, else its row (an arrival waiting, a parked record,
+//!     a mailbox entry);
+//! (iii) a message a survivor sends the heir for a moved region after its `Applied` is an
+//!     ordinary state message between participants and follows `world_cut_wrap`
+//!     unchanged (it waits on the heir while the land is masked: the heir's row).
 
 use super::*;
 use crate::{JournalEntry, JournalEvent, Reliable, Subject, Succession, SuccessionId};
@@ -57,6 +120,110 @@ pub struct SuccessionReportIn {
     pub base_cut: CutId,
     pub entries: Vec<JournalEntry>,
     pub owed: Vec<Reliable>,
+}
+
+/// Where an heir's adoption of a succession stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdoptionState {
+    /// Every report is in: the store read is wanted ([`WorldManager::take_adoption_wanted`]).
+    Wanted,
+    /// The server reads the store.
+    Asked,
+    /// Adopted (`SuccessionAdopted` sent): this host's cut parts adopt the predecessor
+    /// until the succession is over.
+    Adopted,
+}
+
+/// An heir's adoption of one succession.
+#[derive(Debug, Clone)]
+pub(super) struct Adoption {
+    pub predecessor: u32,
+    /// Every entity a survivor's journal names: never taken from the predecessor's store.
+    pub drop: BTreeSet<crate::EntityId>,
+    pub state: AdoptionState,
+    /// The regions started for it (pinned until the succession is over).
+    pub pinned: BTreeSet<RegionCoords>,
+}
+
+/// What the survivors' journals resolve to (the module docs' step 1).
+#[derive(Debug, Default)]
+struct Resolved {
+    /// Entries read.
+    entries: usize,
+    /// `Received` entries (a leave's reports should have none).
+    received: usize,
+    /// Subjects with two events at one stamp.
+    ties: usize,
+    /// Entity bundles to deliver: `(target, stamp, bundle)`, oldest stamp first.
+    bundles: Vec<(RegionCoords, crate::Tick, crate::EntityBundle)>,
+    /// People's bundles (never delivered): `(target, bundle)`.
+    people: Vec<(RegionCoords, crate::EntityBundle)>,
+    /// Players to park: the hand-off and the record, oldest first.
+    players: Vec<(crate::PlayerHandoff, PlayerRecord)>,
+}
+
+/// Step 1 of the heir's half: every entry of every report grouped by subject; the entry
+/// with the highest stamp decides (two events of one subject never share a stamp — a
+/// transfer is applied at stamp + 1; if two ever do, a `Received` one wins: a survivor
+/// holds the subject, and delivering too would make two). `Received` latest: nothing to
+/// deliver (the survivor's copy lives on). `Sent` latest: the message is delivered — an
+/// entity's bundle, a person's never (absorbed), a player's as a record to park; a body
+/// that hands a player over is never delivered as an entity (its player's subject decides).
+fn resolve(reports: &BTreeMap<u32, SuccessionReportIn>) -> Resolved {
+    let mut out = Resolved::default();
+    // subject → (stamp, sent, reporter, index)
+    let mut latest: BTreeMap<Subject, (crate::Tick, bool, u32, usize)> = BTreeMap::new();
+    for (from, report) in reports {
+        for (i, e) in report.entries.iter().enumerate() {
+            out.entries += 1;
+            let sent = matches!(e.event, JournalEvent::Sent(_));
+            out.received += usize::from(!sent);
+            let replace = match latest.get(&e.subject) {
+                None => true,
+                Some(&(stamp, _, _, _)) if e.stamp > stamp => true,
+                Some(&(stamp, was_sent, _, _)) if e.stamp == stamp => {
+                    out.ties += 1;
+                    was_sent && !sent
+                }
+                Some(_) => false,
+            };
+            if replace {
+                latest.insert(e.subject, (e.stamp, sent, *from, i));
+            }
+        }
+    }
+    let mut players = Vec::new();
+    for (subject, (stamp, sent, from, i)) in latest {
+        if !sent {
+            continue;
+        }
+        let JournalEvent::Sent(msg) = &reports[&from].entries[i].event else { continue };
+        match (subject, msg.as_ref()) {
+            // A body handing a player over: the player's subject decides.
+            (Subject::Entity(_), Reliable::Transfer { player: Some(_), .. }) => {}
+            (Subject::Entity(_), Reliable::Transfer { target, stamp, bundle, player: None }) => {
+                if matches!(bundle.kind, EntityKind::Person { .. }) {
+                    out.people.push((*target, (**bundle).clone()));
+                } else {
+                    out.bundles.push((*target, *stamp, (**bundle).clone()));
+                }
+            }
+            (Subject::Player(_), Reliable::Transfer { target, bundle, player: Some(h), .. }) => {
+                match peers::handoff_record(*target, bundle, h) {
+                    Some(record) => players.push((stamp, h.clone(), record)),
+                    None => log::error!("[server] a journalled hand-off of player {} carries no player", h.player.0),
+                }
+            }
+            (Subject::Player(_), Reliable::PlayerMove { handoff, record, .. }) => {
+                players.push((stamp, handoff.clone(), (**record).clone()));
+            }
+            (subject, _) => log::error!("[server] a journal entry about {subject:?} that is not its message; skipped"),
+        }
+    }
+    out.bundles.sort_by_key(|(_, stamp, b)| (*stamp, b.id));
+    players.sort_by_key(|(stamp, h, _)| (*stamp, h.player));
+    out.players = players.into_iter().map(|(_, h, r)| (h, r)).collect();
+    out
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -106,6 +273,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+
     fn try_apply_succession(&mut self, id: SuccessionId) {
         let Some(run) = self.successions.get(&id).filter(|r| !r.applied) else { return };
         let base = self.journal.base();
@@ -129,6 +297,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             run.applied = true;
         }
         self.world_send(HostMsg::SuccessionApplied { id });
+        // The heir: its own report is in now; the others may be too.
+        self.try_resolve_succession(id);
     }
 
     /// Steps 2–4 of the module docs for succession `s` (its base cut matches).
@@ -294,6 +464,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             report.owed.len()
         );
         self.succession_reports.entry(id).or_default().insert(from, report);
+        self.try_resolve_succession(id);
     }
 
     /// Host `from`'s [`Reliable::SuccessionReport`].
@@ -308,12 +479,26 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.file_succession_report(from, id, SuccessionReportIn { base_cut, entries, owed });
     }
 
-    /// The coordinator's [`crate::CoordMsg::SuccessionDone`]: the run and its reports end.
+    /// The coordinator's [`crate::CoordMsg::SuccessionDone`]: the run and its reports end; an
+    /// heir's adoption of it ends too — its regions unpinned, its drop set lifted from the
+    /// spawner (the settle cut rewrote every stored region that held one of them).
     pub(super) fn succession_done(&mut self, id: SuccessionId, settled: bool) {
         let run = self.successions.remove(&id);
         let reports = self.succession_reports.remove(&id);
         if run.is_some() || reports.is_some() {
             log::info!("[server] succession {} {}", id.0, if settled { "settled" } else { "abandoned" });
+        }
+        if let Some(adoption) = self.adoptions.remove(&id) {
+            self.succession_pinned = self.adoptions.values().flat_map(|a| a.pinned.iter().copied()).collect();
+            let unpinned: Vec<RegionCoords> =
+                adoption.pinned.iter().copied().filter(|rc| !self.succession_pinned.contains(rc)).collect();
+            let now_ms = self.clock_ms;
+            for rc in unpinned {
+                // Its keep-alive is the usual one from now on.
+                self.refresh_keepalive(rc, now_ms);
+            }
+            let drop = self.adoption_drop_union();
+            self.spawner.forget_entities(&drop);
         }
         // Nothing of it is held any more (Task 9 adopts before the settle; an abandoned one
         // ends with this process).
@@ -321,10 +506,246 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.successions_done.insert(id);
     }
 
-    /// The successions this host answered (`(id, adopted)`), for its `Attach`. Adopting is
-    /// the heir's (Task 9): never yet.
+    /// The successions this host answered (`(id, adopted)`), for its `Attach`: `adopted`
+    /// once this host, their heir, adopted them.
     pub(super) fn attach_successions(&self) -> Vec<(SuccessionId, bool)> {
-        self.successions.iter().filter(|(_, r)| r.applied).map(|(id, _)| (*id, false)).collect()
+        self.successions
+            .iter()
+            .filter(|(_, r)| r.applied)
+            .map(|(id, _)| (*id, self.adoptions.get(id).is_some_and(|a| a.state == AdoptionState::Adopted)))
+            .collect()
+    }
+
+    // --- The heir's half (Task 9) ---------------------------------------------------------
+
+    /// Succession `id` (this host its heir, applied here) is resolved once a report of every
+    /// survivor is in — never on part of them ("wait, never guess": a missing one blocks,
+    /// and the coordinator's deadline rolls the world back): its drop set is made and the
+    /// adoption read is wanted ([`Self::take_adoption_wanted`]).
+    fn try_resolve_succession(&mut self, id: SuccessionId) {
+        let me = self.ordinal();
+        let Some(run) = self.successions.get(&id) else { return };
+        if run.order.heir != me || !run.applied || self.adoptions.contains_key(&id) {
+            return;
+        }
+        let Some(reports) = self.succession_reports.get(&id) else { return };
+        let survivors: BTreeSet<u32> = run.order.survivors.iter().copied().collect();
+        if !survivors.iter().all(|h| reports.contains_key(h)) {
+            return;
+        }
+        let other_base: Vec<u32> =
+            reports.iter().filter(|(_, r)| r.base_cut != run.order.base_cut).map(|(h, _)| *h).collect();
+        if !other_base.is_empty() {
+            // Never mixed with another cut's traffic: it waits (for ever: the deadline).
+            log::error!(
+                "[server] succession {}: the reports of hosts {other_base:?} count from another cut than {}: not resolved",
+                id.0,
+                run.order.base_cut.0
+            );
+            return;
+        }
+        let drop: BTreeSet<crate::EntityId> = reports
+            .iter()
+            .filter(|(h, _)| survivors.contains(h))
+            .flat_map(|(_, r)| r.entries.iter())
+            .filter_map(|e| match e.subject {
+                Subject::Entity(eid) => Some(eid),
+                Subject::Player(_) => None,
+            })
+            .collect();
+        log::info!(
+            "[server] succession {}: every survivor's report is in; {} entit(ies) to drop from host {}'s store, adoption read wanted",
+            id.0,
+            drop.len(),
+            run.order.predecessor
+        );
+        let predecessor = run.order.predecessor;
+        self.adoptions.insert(id, Adoption { predecessor, drop, state: AdoptionState::Wanted, pinned: BTreeSet::new() });
+    }
+
+    /// The adoption the server reads the store for, if any: `(succession, predecessor)`.
+    /// It answers [`Self::adopted_rows`] with the predecessor's in-flight rows
+    /// (`load_in_flight_of`) and the stored regions of [`Self::adoption_drop_set`]
+    /// (`regions_of_entities`) — its fence already replaced by the claims it holds now — or
+    /// [`Self::adoption_read_failed`].
+    pub fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, u32)> {
+        let (id, a) = self.adoptions.iter_mut().find(|(_, a)| a.state == AdoptionState::Wanted)?;
+        a.state = AdoptionState::Asked;
+        Some((*id, a.predecessor))
+    }
+
+    /// The drop set of succession `id`'s adoption: every entity a survivor's journal names
+    /// (each lives elsewhere now, or is delivered from the journal) — none of them is taken
+    /// from the predecessor's store.
+    pub fn adoption_drop_set(&self, id: SuccessionId) -> Vec<crate::EntityId> {
+        self.adoptions.get(&id).map(|a| a.drop.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// The server could not read what [`Self::take_adoption_wanted`] asked for: asked again.
+    pub fn adoption_read_failed(&mut self, id: SuccessionId) {
+        if let Some(a) = self.adoptions.get_mut(&id).filter(|a| a.state == AdoptionState::Asked) {
+            log::warn!("[server] succession {}: the adoption read failed; asked again", id.0);
+            a.state = AdoptionState::Wanted;
+        }
+    }
+
+    /// The store's answer to [`Self::take_adoption_wanted`] for succession `id`: the
+    /// predecessor's in-flight `rows` of the base cut and where the store holds each entity
+    /// of the drop set (`located`). Steps 1–5 of the module docs, in the order they give.
+    pub fn adopted_rows(&mut self, id: SuccessionId, mut rows: Vec<InFlightRow>, located: Vec<(crate::EntityId, RegionCoords)>) {
+        let Some(adoption) = self.adoptions.get(&id).filter(|a| a.state == AdoptionState::Asked) else {
+            log::warn!("[server] succession {}: adoption rows that were not asked for (or are answered); ignored", id.0);
+            return;
+        };
+        let (pred, drop) = (adoption.predecessor, adoption.drop.clone());
+        let Some(order) = self.successions.get(&id).map(|r| r.order.clone()) else {
+            log::error!("[server] succession {}: adoption rows for a succession over here; ignored", id.0);
+            return;
+        };
+        let mut reports = self.succession_reports.remove(&id).unwrap_or_default();
+        reports.retain(|h, _| order.survivors.contains(h));
+        // 1. Resolve: per subject the latest event decides.
+        let resolved = resolve(&reports);
+        if order.kind == crate::SuccessionKind::Leave && resolved.received > 0 {
+            log::error!(
+                "[server] succession {} (a leave): {} entries say something came out of host {pred} after its cut; \
+                 resolved like any other",
+                id.0,
+                resolved.received
+            );
+        }
+        if resolved.ties > 0 {
+            log::error!("[server] succession {}: {} subject(s) with two events at one stamp (a Received kept)", id.0, resolved.ties);
+        }
+        // 2. Adopt rows: what a survivor holds or is delivered from a journal is not taken.
+        let all_rows = rows.len();
+        rows.retain(|r| match r {
+            InFlightRow::Transfer { bundle, .. } => !drop.contains(&bundle.id),
+            InFlightRow::Intent { .. } => true,
+        });
+        // 4a. No region of the predecessor's starts from the store with a dropped entity:
+        // installed before the mask is lifted (its flush may start one).
+        let all_drop = self.adoption_drop_union();
+        self.spawner.forget_entities(&all_drop);
+        // 3a. A person's bundle is never delivered: the receiving host reports the crossing,
+        // and this host is that host now — absorbed (no region of the land runs yet), so the
+        // history holds the person abstract and respawns them when it may.
+        let now_ms = self.clock_ms;
+        let mut people = 0usize;
+        for (target, bundle) in &resolved.people {
+            if let (EntityKind::Person { person }, true) = (bundle.kind, self.world.is_some()) {
+                self.note_moved(person, *target, Step::Absorbed { at: bundle_at(bundle) });
+                self.world_send(HostMsg::PersonCrossed { person, to: *target, delivered: false });
+                people += 1;
+            }
+        }
+        // The land is this host's from here: what waited for it goes on.
+        self.adopt_inherited(id);
+        self.restore_in_flight(rows.clone());
+        // 3. Deliver, as any crossing (through `accept_arrival`: the region applies it at its
+        // next slot, never on receipt).
+        for (target, stamp, bundle) in resolved.bundles.iter().cloned() {
+            if self.owns(target) {
+                self.accept_arrival(None, target, stamp, bundle, now_ms);
+            } else {
+                let msg = Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
+                match self.foreign_host(target) {
+                    Some(owner) => self.send_reliable(owner, msg, false),
+                    None => self.wait_for_owner(target, msg, false, None),
+                }
+            }
+        }
+        let mut parked = 0usize;
+        for (handoff, record) in resolved.players.iter().cloned() {
+            if self.park_from_journal(id, handoff, record) {
+                parked += 1;
+            }
+        }
+        // 4. Load every inherited region the store holds a dropped entity in — and every one
+        // an owed intent or reply goes to (it never ran here: a reply for it would have
+        // nowhere to wait) — pinned until the settle cut writes it.
+        let owed_targets = reports.values().flat_map(|r| r.owed.iter()).flat_map(crate::intents_in).map(|m| peers::peer_intent_target(&m));
+        let to_load: BTreeSet<RegionCoords> = located.iter().map(|(_, rc)| *rc).chain(owed_targets).collect();
+        let mut pinned = BTreeSet::new();
+        for rc in to_load {
+            if self.owns(rc) {
+                self.ensure_running(rc);
+                if self.regions.contains_key(&rc) {
+                    pinned.insert(rc);
+                }
+            }
+        }
+        // Owed intents and replies, in each sender's order, as if that sender's session had
+        // brought them (not accounted in any cut but this host's next).
+        let mut owed = 0usize;
+        for (from, report) in std::mem::take(&mut reports) {
+            for msg in report.owed {
+                owed += 1;
+                self.peer_reliable_in(from, msg, false);
+            }
+        }
+        self.succession_pinned.extend(pinned.iter().copied());
+        self.succession_seam_events += resolved.entries as u64;
+        log::info!(
+            "[server] succession {}: adopted host {pred}'s land — {} journal entries resolved, {} bundle(s) delivered, \
+             {parked} player(s) parked, {people} person(s) absorbed, {owed} owed intent(s)/repl(ies) applied, \
+             {} of {all_rows} in-flight row(s) kept, {} region(s) loaded and pinned",
+            id.0,
+            resolved.entries,
+            resolved.bundles.len(),
+            rows.len(),
+            pinned.len()
+        );
+        if let Some(a) = self.adoptions.get_mut(&id) {
+            a.state = AdoptionState::Adopted;
+            a.pinned = pinned;
+        }
+        // 5. Answered: the coordinator's next cut settles it (its part here adopts `pred`).
+        self.world_send(HostMsg::SuccessionAdopted { id });
+    }
+
+    /// A player a survivor handed (or moved) to the predecessor, its journal's latest:
+    /// parked here from what was sent — no session will come, the client was on the dead
+    /// host — at the hand-off's hop (never `departed`). `false` if this host holds the
+    /// player already (a login placed it meanwhile: that copy is the newer truth).
+    fn park_from_journal(&mut self, id: SuccessionId, h: crate::PlayerHandoff, record: PlayerRecord) -> bool {
+        if self.holds_player(h.player) {
+            log::warn!("[server] succession {}: player {} is here already; the journal's copy is dropped", id.0, h.player.0);
+            return false;
+        }
+        self.placed_by_handoff(h.player, h.hop);
+        let hop = self.hop_here(h.player);
+        self.world_send(HostMsg::PlayerOffline { player: h.player, hop });
+        self.parked_players.insert(h.player, record);
+        true
+    }
+
+    /// Whether `rc` is land this host inherits and has not adopted yet (the mask).
+    pub(super) fn inherited_not_adopted(&self, rc: RegionCoords) -> bool {
+        self.inheriting.contains_key(&crate::super_region_of(rc, self.ownership.1))
+    }
+
+    /// Every drop set of an adoption not over yet.
+    fn adoption_drop_union(&self) -> BTreeSet<crate::EntityId> {
+        self.adoptions.values().flat_map(|a| a.drop.iter().copied()).collect()
+    }
+
+    /// The predecessors this host adopted and whose successions are not settled: its cut
+    /// parts carry them ([`crate::WorldCut::adopts`]).
+    pub(super) fn adopting_predecessors(&self) -> Vec<u32> {
+        let set: BTreeSet<u32> =
+            self.adoptions.values().filter(|a| a.state == AdoptionState::Adopted).map(|a| a.predecessor).collect();
+        set.into_iter().collect()
+    }
+
+    /// Journal entries this host resolved as an heir, since it started (the `[server]` line).
+    pub fn succession_seam_events(&self) -> u64 {
+        self.succession_seam_events
+    }
+
+    /// The regions this host started for an adoption, pinned until its succession is over.
+    pub fn succession_pinned(&self) -> Vec<RegionCoords> {
+        self.succession_pinned.iter().copied().collect()
     }
 
     /// Whether host `ordinal`'s current boot was succeeded (until a hello of another boot):

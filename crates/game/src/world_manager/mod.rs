@@ -205,6 +205,15 @@ pub trait RegionSpawner {
 
     /// The world's current tick: where a region spawned now starts counting.
     fn world_tick(&self) -> crate::Tick;
+
+    /// From now on a region restored from the world store's stored state (one that has
+    /// not run in this process) leaves the entities `ids` out; an empty set ends that.
+    /// An heir (R4, `succession.rs`) installs its succession's drop set here before any
+    /// inherited region starts: those entities live elsewhere now, or are delivered from a
+    /// survivor's journal. Parked blobs and generated regions are never filtered (they
+    /// are this process's own state). The default keeps everything: a spawner that never
+    /// restores from the store has nothing to leave out.
+    fn forget_entities(&mut self, _ids: &BTreeSet<crate::EntityId>) {}
 }
 
 /// Chance (per mille, per region per round) that [`InlineSchedule::jittery`]
@@ -331,6 +340,8 @@ pub struct InlineSpawner {
     /// The world store's terrain, handed to every runner
     /// ([`InlineSpawner::with_stored_terrain`]).
     stored_terrain: Option<std::sync::Arc<dyn crate::StoredTerrain>>,
+    /// Entities a restore from `portable` leaves out ([`RegionSpawner::forget_entities`]).
+    forgotten: BTreeSet<crate::EntityId>,
 }
 
 impl InlineSpawner {
@@ -382,6 +393,13 @@ impl InlineSpawner {
         } else {
             self.inputs_held.remove(&rc);
         }
+    }
+
+    /// Test support: `regions` are in the world store too (another host's, committed since
+    /// this spawner was made — an heir's inherited land): a region of them that has not run
+    /// here starts from it. A newer copy replaces an older one.
+    pub fn add_portable(&mut self, regions: BTreeMap<RegionCoords, crate::StoredRegion>) {
+        self.portable.extend(regions);
     }
 
     /// Test support: the world tick is `tick` from now on (a host process started late
@@ -530,7 +548,8 @@ impl RegionSpawner for InlineSpawner {
         let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
         let stored = if never_ran { self.portable.remove(&id) } else { None };
         let runner = match stored {
-            Some(stored) => {
+            Some(mut stored) => {
+                stored.entities.retain(|b| !self.forgotten.contains(&b.id));
                 let (region, terms) = crate::restore_portable(id, stored);
                 let mut runner = RegionRunner::new(id, region, out);
                 runner.set_saved_terms(terms);
@@ -564,6 +583,10 @@ impl RegionSpawner for InlineSpawner {
 
     fn world_tick(&self) -> crate::Tick {
         self.rounds
+    }
+
+    fn forget_entities(&mut self, ids: &BTreeSet<crate::EntityId>) {
+        self.forgotten = ids.clone();
     }
 }
 
@@ -647,6 +670,9 @@ pub struct ManagerDepths {
     /// Entries of the peer journal ([`WorldManager::peer_journal`]): the state messages
     /// exchanged with other hosts since the last committed world cut.
     pub journal_entries: usize,
+    /// Journal entries this host resolved as an heir, since the manager started
+    /// ([`WorldManager::succession_seam_events`]).
+    pub succession_seam_events: u64,
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// since the manager started ([`WorldManager::arrivals_despawned`]).
     pub arrivals_despawned: u64,
@@ -1290,6 +1316,14 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Successions over here ([`crate::CoordMsg::SuccessionDone`]): a report of one that
     /// arrives late is dropped.
     successions_done: BTreeSet<crate::SuccessionId>,
+    /// The heir's adoptions (`succession.rs`), from the moment every report is in until
+    /// their succession is over.
+    adoptions: BTreeMap<crate::SuccessionId, succession::Adoption>,
+    /// Regions an heir started from the store for an adoption: never parked before the
+    /// settle cut (`succession.rs`).
+    succession_pinned: BTreeSet<RegionCoords>,
+    /// Journal entries this host's adoptions resolved (`[server]` line).
+    succession_seam_events: u64,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1447,6 +1481,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             succession_wait_logged_ms: None,
             inheriting: BTreeMap::new(),
             successions_done: BTreeSet::new(),
+            adoptions: BTreeMap::new(),
+            succession_pinned: BTreeSet::new(),
+            succession_seam_events: 0,
         }
     }
 
@@ -2212,6 +2249,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                     && !link.stopping
                     && link.subscribers.is_empty()
                     && !connected_homes.contains(*rc)
+                    // Started for an adoption: its state is the settle cut's (R4).
+                    && !self.succession_pinned.contains(*rc)
                     && link
                         .empty_since_ms
                         .map_or(false, |t| now_ms.saturating_sub(t) >= UNLOAD_GRACE_MS)
@@ -2861,7 +2900,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             players: players.into_iter().collect(),
             // The coordinator saves the history itself (durable before visible).
             history: None,
-            adopts: vec![],
+            // From `SuccessionAdopted` until the settle: what the coordinator's `settles`
+            // pairs with (`succession.rs`).
+            adopts: self.adopting_predecessors(),
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",
@@ -3676,6 +3717,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer_unreceived: self.peer_unreceived(),
             unowned_waiting: self.unowned_waiting_total(),
             journal_entries: self.journal.len(),
+            succession_seam_events: self.succession_seam_events,
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),
