@@ -961,7 +961,7 @@ impl MultiRig {
     }
 
     /// Host `h` reads the rig's `super_regions` table whole, every host live.
-    fn read_directory(&mut self, h: u32) {
+    pub fn read_directory(&mut self, h: u32) {
         let store = self.claim_store.as_ref().expect("with_claims");
         let rows: Vec<(game::SuperRegion, i64, u64)> =
             store.iter().map(|(sr, (owner, epoch))| (*sr, owner.map_or(game::NO_OWNER, i64::from), *epoch)).collect();
@@ -1017,6 +1017,24 @@ impl MultiRig {
         }
         for rig in &mut self.hosts {
             rig.settle();
+        }
+    }
+
+    /// Host `h` holds no super-region any more: each of its rows in the rig's `super_regions`
+    /// table is free (epoch + 1), and every live host's directory is read again — the state
+    /// of a host that never claimed anything (claim on demand: an idle host).
+    pub fn free_land_of(&mut self, h: u32) {
+        let store = self.claim_store.as_mut().expect("with_claims");
+        for (owner, epoch) in store.values_mut() {
+            if *owner == Some(h) {
+                *owner = None;
+                *epoch += 1;
+            }
+        }
+        for o in 0..self.hosts.len() as u32 {
+            if !self.dead.contains(&o) {
+                self.read_directory(o);
+            }
         }
     }
 

@@ -359,6 +359,12 @@ impl Directory {
         }
     }
 
+    /// Whether the directory was read whole at least once (until then a super-region with
+    /// no row is `Unknown`, and an empty [`Self::owned_by`] proves nothing).
+    pub fn is_read(&self) -> bool {
+        self.read
+    }
+
     /// The epoch of row `sr`, if this directory has it.
     pub fn epoch(&self, sr: SuperRegion) -> Option<u64> {
         self.rows.get(&sr).map(|&(_, epoch)| epoch)

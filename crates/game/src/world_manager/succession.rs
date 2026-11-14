@@ -346,8 +346,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         if s.kind == crate::SuccessionKind::Leave && released && self.peer_boots.get(&pred).is_some_and(|b| *b != s.predecessor_boot) {
             // Defensive (R4 drain, the module docs' race): the held session was released to
             // a new boot of the leaver before this order came. `peer_hello_boot` releases
-            // only to a boot holding its land again, whose registration made the store
-            // refuse any later declaration — so this is not expected; if it happens, what
+            // only to a boot holding its land again (whose registration made the store
+            // refuse any later declaration) or to one that left holding none (no `Leave`
+            // succession has anything to move) — so this is not expected; if it happens, what
             // was held is the new boot's now and none of it is reported (never twice).
             return self.apply_leave_overtaken(s);
         }
@@ -467,6 +468,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.observer_tickets.retain(|(_, owner), _| *owner != pred);
         self.peer_endpoints.remove(&pred);
         self.left_peers.remove(&pred);
+        self.left_land.remove(&pred);
         self.early_marks.remove(&pred);
         self.claim_wanted_sent.retain(|_, (to, _)| *to != pred);
         let mut departed_moved = 0usize;
@@ -519,14 +521,24 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the heir. The new boot keeps its session and stays live.
     fn apply_leave_overtaken(&mut self, s: &Succession) {
         let (pred, heir, me) = (s.predecessor, s.heir, self.ordinal());
-        log::warn!(
-            "[server] succession {}: host {pred} left as boot {:#x} and is back as another boot already; what was held for it \
-             went to the new boot: nothing to report",
+        // Unreachable by design (`peer_hello_boot` releases only to a boot holding its land
+        // again, or to one that left holding none — neither can have a `Leave` succession).
+        log::error!(
+            "[server] succession {}: host {pred} left as boot {:#x} and its session was already released to another boot; \
+             what was held went to that boot: nothing to report",
             s.id.0,
             s.predecessor_boot
         );
+        debug_assert!(false, "a Leave succession of a boot whose held session was released to its next boot");
+        // As the normal path: the departed boot is refused for good and noted succeeded.
         self.dead_boots.insert((pred, s.predecessor_boot));
+        self.succeeded_peers.insert(pred, s.predecessor_boot);
+        if let Some(peer) = self.peers.get_mut(&pred) {
+            peer.session.refuse_boot(s.predecessor_boot);
+            peer.link.close();
+        }
         self.left_peers.remove(&pred);
+        self.left_land.remove(&pred);
         let report = SuccessionReportIn { base_cut: s.base_cut, entries: Vec::new(), owed: Vec::new() };
         if heir == me {
             self.file_succession_report(me, s.id, report);

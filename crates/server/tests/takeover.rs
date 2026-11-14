@@ -1490,6 +1490,17 @@ impl Takeover {
     /// packets its manager sent its clients on the way out. Its peer listener and
     /// coordinator link go with it.
     fn leave(&mut self, h: u32) -> (server::claims::ServerExit, Vec<(Option<ClientId>, ServerPacket)>) {
+        self.leave_with(h, None, |_, _, _| {})
+    }
+
+    /// [`Takeover::leave`] with a leave timeout (`None`: the default) and `each` run every
+    /// round with the exiting process's fenced flag, world generation and the round number.
+    fn leave_with(
+        &mut self,
+        h: u32,
+        leave_timeout: Option<Duration>,
+        mut each: impl FnMut(&server::claims::Fenced, &server::claims::WorldGeneration, usize),
+    ) -> (server::claims::ServerExit, Vec<(Option<ClientId>, ServerPacket)>) {
         let i = self.w.pair.sims.iter().position(|s| s.ordinal == h).expect("the host is up");
         let mut sim = self.w.pair.sims.remove(i);
         for _ in sim.packets.try_iter() {}
@@ -1497,9 +1508,13 @@ impl Takeover {
         let generation = self.w.generations[h as usize].clone();
         let started = self.w.pair.started;
         let region_out = sim.region_out.clone();
-        let cuts = sim.cuts.take();
+        let mut cuts = sim.cuts.take();
+        if let (Some(c), Some(timeout)) = (cuts.as_mut(), leave_timeout) {
+            c.set_leave_timeout(timeout);
+        }
         let mut beat = sim.heartbeat.take();
         let pair = &mut self.w.pair;
+        let mut round = 0;
         let exit = server::cuts::exit_world(
             &mut sim.manager,
             server::cuts::ExitParams {
@@ -1518,6 +1533,8 @@ impl Takeover {
                 m.spawner_mut().pump();
                 let _ = server::lease::pump_or_fence(&mut beat, &fenced, Instant::now());
                 pair.round();
+                round += 1;
+                each(&fenced, &generation, round);
             },
         );
         self.w.switches[h as usize].drop_link();
@@ -1525,6 +1542,31 @@ impl Takeover {
         let packets = sim.packets.try_iter().collect();
         (exit, packets)
     }
+}
+
+/// Dirt carried by a reply for `to` (host 1's region), as a refused deposit from `from`
+/// returns it: `count` items into `to`'s piles once applied.
+fn items_reply(from: RegionCoords, to: RegionCoords, due: u64, count: u32) -> game::IntentMsg {
+    let n = game::REGION_BLOCKS as i32;
+    let across = |d: i32| match d {
+        1 => Some(n + 1),
+        -1 => Some(-2),
+        _ => None,
+    };
+    let (x, z) = (across(from.x - to.x).unwrap_or(n / 2), across(from.z - to.z).unwrap_or(n / 2));
+    let cell = game::WorldBlockPos::from_local(to, game::BlockPos::new(x, GROUND_BLOCKS as i32, z));
+    let stack = game::ItemStack { item: game::ItemId(1), count };
+    let intent = game::Intent::DepositItems { cell, stack, expire: due + game::PILE_DESPAWN_TICKS, pickup: due, by: EntityId::of_region(to) };
+    game::IntentMsg::Reply(game::SentReply { reply: game::IntentReply::Refused(intent, game::IntentRefusal::PileFull), hint: to, due, hops: 0 })
+}
+
+/// Items in the piles of running `rc` on host `h`.
+fn pile_items(t: &mut Takeover, h: u32, rc: RegionCoords) -> u32 {
+    let mut n = 0;
+    t.sim(h).manager.spawner_mut().with_region(rc, |r| {
+        n = r.data().item_piles().values().flat_map(|p| &p.stacks).map(|s| s.count).sum();
+    });
+    n
 }
 
 /// The successions' `kind`s, by id.
@@ -1574,6 +1616,11 @@ fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
     let crosser = slime(&mut t, 0, a0, 0.0);
     assert!(push(&mut t, 0, crosser, a0, b1));
     t.until("the slime waits for host 1", WAIT, |t| t.sim(0).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == 1 && *i == crosser));
+    // Items for host 1's region, sent after the leave: held with the slime (a `Leave`
+    // succession has no item window: they must arrive exactly).
+    const ITEMS: u32 = 7;
+    let due = t.sim(0).manager.spawner_mut().world_tick() + 5;
+    t.sim(0).manager.send_reliable_for_test(1, game::Reliable::Intent(items_reply(a0, b1, due, ITEMS)), false);
     // The player logs in again; refused while the land waits for its heir, retried.
     let asked = Instant::now();
     let mut epoch = 2;
@@ -1614,6 +1661,8 @@ fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
         stored_once(&t, &db, id, "after the drain");
     }
     assert_eq!(t.bodies(again).len(), 1, "the player once");
+    assert_eq!(pile_items(&mut t, 0, b1), ITEMS, "the held items lie in host 1's region on the heir, exactly");
+    assert_eq!(pile_items(&mut t, 0, a0), 0, "none came back to their sender");
     t.stop(&db, &dir);
 }
 
@@ -1642,6 +1691,12 @@ fn a_leaver_that_returns_in_time_keeps_its_land() {
     let id = slime(&mut t, 0, a0, 0.0);
     assert!(push(&mut t, 0, id, a0, b1));
     t.until("the slime waits for host 1", WAIT, |t| t.sim(0).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == 1 && *i == id));
+    // Host 0 asked for the land and the coordinator recorded the request (a return below
+    // must cancel a REAL wait).
+    t.until("the coordinator records host 0's request for host 1's land", WAIT, |t| {
+        let c = t.w.coordinator.as_ref().unwrap();
+        c.thread.with_core(|core| core.lands_wanted(), WAIT).expect("the core answers") == [1]
+    });
     let (left_in, _) = last_committed(&db);
     let _ = t.until_committed_after(&db, left_in);
     let rows = count(&db, &format!("SELECT COUNT(*) FROM in_flight WHERE host = 0 AND kind = 0 AND target_rx = {} AND target_rz = {}", b1.x, b1.z));
@@ -1668,4 +1723,64 @@ fn a_leaver_that_returns_in_time_keeps_its_land() {
         assert!(!t.w.generations[h].is_set(), "no rollback");
     }
     t.stop(&db, &dir);
+}
+
+/// Fix round 1 (minor 2): a host of several that stops is refused to its clients in every
+/// way its leave can end — its players were parked first, so only the ids remembered before
+/// the parks reach them. `case`: fenced while leaving, rolled back while leaving, or no
+/// leave cut at all (the coordinator gone: the host exits past its leave timeout).
+fn stopping_host_tells(case: &str) {
+    install_props();
+    let tag = format!("tk_tell_{case}");
+    let Some(db) = PgDb::create(&tag) else { return };
+    let dir = scratch(&tag);
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let _ = t.until_committed_after(&db, 0);
+    let (timeout, refusal) = match case {
+        "fenced" => (None, server::claims::FENCED_REFUSAL),
+        "rollback" => (None, server::claims::ROLLBACK_REFUSAL),
+        _ => {
+            kill_coordinator(&mut t.w);
+            (Some(Duration::from_millis(500)), server::claims::LEAVING_REFUSAL)
+        }
+    };
+    let generation = t.w.store.world_generation().unwrap();
+    let (exit, packets) = t.leave_with(1, timeout, |fenced, world, round| {
+        if round == 5 {
+            match case {
+                "fenced" => fenced.set(),
+                "rollback" => world.note(generation + 1),
+                _ => {}
+            }
+        }
+    });
+    let expected = match case {
+        "fenced" => server::claims::ServerExit::Fenced,
+        "rollback" => server::claims::ServerExit::WorldRolledBack,
+        _ => server::claims::ServerExit::Clean,
+    };
+    assert_eq!(exit, expected, "{case}");
+    assert!(
+        packets.iter().any(|(c, p)| *c == Some(KEEPER) && matches!(p, ServerPacket::Refused(why) if why == refusal)),
+        "{case}: the keeper's client is told {refusal:?}: {packets:?}"
+    );
+    t.stop(&db, &dir);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_host_fenced_while_leaving_tells_its_clients() {
+    stopping_host_tells("fenced");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_host_rolled_back_while_leaving_tells_its_clients() {
+    stopping_host_tells("rollback");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_host_leaving_without_a_cut_tells_its_clients() {
+    stopping_host_tells("late");
 }

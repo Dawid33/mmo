@@ -2584,3 +2584,22 @@ fn a_returning_host_cancels_the_wait() {
     read_departed(&mut g, 2, 1, Some(903), t + game::HEIR_WAIT_MS + 1_000);
     assert_eq!(g.declare_wanted(t + game::HEIR_WAIT_MS + 1_000), None, "forgotten once the new boot is read");
 }
+
+/// Fix round 1 (minor 4): an owners lookup answered just after its owner's declaration
+/// records the request again; it is pruned (the owner is declared), never kept for ever.
+#[test]
+fn a_request_for_land_already_declared_is_pruned() {
+    let (mut c, t) = departed(2, 1);
+    read_departed(&mut c, 2, 1, None, t);
+    land_asked(&mut c, 1, t);
+    let due = t + game::HEIR_WAIT_MS;
+    read_departed(&mut c, 2, 1, None, due);
+    let d = c.declare_wanted(due).expect("declared");
+    c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(5))), due);
+    assert!(c.lands_wanted().is_empty(), "the declared owner's request is done");
+    // A late lookup answer for the same owner: not recorded again.
+    c.land_wanted(1, due + 1);
+    assert!(c.lands_wanted().is_empty(), "pruned");
+    read_departed(&mut c, 2, 1, None, due + 2);
+    assert_eq!(c.declare_wanted(due + 2), None, "declared once");
+}

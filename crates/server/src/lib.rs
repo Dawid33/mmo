@@ -1315,15 +1315,18 @@ pub fn run() -> claims::ServerExit {
             save_timeout: EXIT_SAVE_TIMEOUT,
             now_tick: || world_clock.tick_at(start.elapsed().as_millis() as u64),
         },
-        // A host of several keeps its lease while it waits for its leave cut (R4): a lapse
-        // there would be declared a crash of a host whose part the leave cut is staging.
-        // A `Replaced` answer sets the fenced flag the exit watches.
+        // Under `claim` (`CrashPolicy::Succession`) a host of several keeps its lease while it
+        // waits for its leave cut (R4): a lapse there would be declared a crash of a host whose
+        // part the leave cut is staging; a `Replaced` answer sets the fenced flag the exit
+        // watches. Under `Static` nothing beats during the exit: R3's exit exactly.
         |_| {
-            lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now());
+            if claim_on_demand {
+                lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now());
+            }
         },
     );
-    // A host that left in a committed cut told its clients `LEAVING_REFUSAL`.
-    let left = outcome == claims::ServerExit::Clean && manager.leave_outcome() == Some(true);
+    // A host that left (in a committed cut or not) told its clients `LEAVING_REFUSAL`.
+    let left = outcome == claims::ServerExit::Clean && manager.leave_asked();
     if (left || matches!(outcome, claims::ServerExit::Fenced | claims::ServerExit::WorldRolledBack)) && had_sessions {
         // The refusals are on their way out through the writer task.
         std::thread::sleep(FENCED_EXIT_FLUSH);

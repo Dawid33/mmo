@@ -7544,9 +7544,25 @@ fn leaver_back_at_its_declaration(rig: &mut MultiRig, hello_first: bool) {
         for _ in 0..WAIT_ROUNDS {
             rig.round();
         }
-        // Its hello alone releases nothing: it holds none of the land it left with.
+        // Its hello alone releases nothing: it holds none of the land it left with. Not even
+        // once S's directory, read again (the backstop read), shows the heir holding that land
+        // before S applied the order: what S holds is owed to the heir.
         assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S still holds what waited for the leaver");
+        rig.read_directory(s);
+        for _ in 0..WAIT_ROUNDS {
+            rig.round();
+        }
+        assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S holds until it applied the order");
+        assert!(rig.hosts[s as usize].manager.successions().is_empty(), "the order is still held back");
         rig.hold_world(s, false);
+        let applied = |rig: &mut MultiRig| !rig.hosts[s as usize].manager.successions().is_empty();
+        for _ in 0..SUCCESSION_ROUNDS {
+            if applied(rig) {
+                break;
+            }
+            assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S holds until it applied the order");
+            rig.round();
+        }
     }
     assert_settled_whole(rig, &succession, &[crosser]);
     rig.run(rd);
@@ -7581,4 +7597,81 @@ fn a_leaver_back_after_its_survivor_applied_the_leave_gets_nothing_twice() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_leaver_whose_hello_beats_the_leave_order_gets_nothing_twice() {
     sweep_hosts("a_leaver_whose_hello_beats_the_leave_order_gets_nothing_twice", leaver_back_before_the_order);
+}
+
+// --- Task 11 fix round 1 -----------------------------------------------------------
+
+/// A host that holds no super-region (an idle host under claim on demand: its land freed
+/// here, every directory read again) leaves in a committed cut and exits; every survivor
+/// holds its session. Its next boot returns owning nothing: the survivors release what they
+/// held at its hello (their directory gives it no land, so no `Leave` succession can owe
+/// anything to an heir) — reliable traffic reaches it, a world cut with it COMMITS, and a
+/// login on land it then claims is placed on it, once.
+fn ownerless_returns(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let (s, leaver) = (rig.owner(rs), rig.owner(rd));
+    keeper_may_park(rig, leaver);
+    until_committed(rig, 1);
+    rig.free_land_of(leaver);
+    for h in 0..rig.hosts.len() as u32 {
+        assert_eq!(rig.hosts[h as usize].manager.owner_of(rd), game::Owner::Free, "host {h}: the leaver holds nothing");
+    }
+    rig.hosts[leaver as usize].manager.request_leave();
+    let cut = until_leave_begun(rig, s, leaver);
+    assert!(until_decided(rig, cut), "the leave cut commits");
+    let others: Vec<u32> = (0..rig.hosts.len() as u32).filter(|h| *h != leaver).collect();
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[*h as usize].manager.peer_left(leaver))),
+        "every other host holds its session"
+    );
+    rig.kill(leaver);
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    rig.start(leaver);
+    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    rig.core().set_expected_hosts(live);
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| {
+            let m = &rig.hosts[*h as usize].manager;
+            !m.peer_left(leaver) && m.peer_is_reachable(leaver)
+        })),
+        "every survivor released its session at the new boot's hello (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    // A world cut with the new boot in it commits.
+    let before = rig.last_committed().0;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if rig.last_committed().0 > before && rig.last_committed().1.contains_key(&leaver) {
+            break;
+        }
+        rig.cut_round();
+    }
+    let (after, parts) = rig.last_committed();
+    assert!(after > before && parts.contains_key(&leaver), "a cut with host {leaver} committed: {:?}", rig.decided);
+    // A login on land the new boot then claims (its preferred claimer) is placed there.
+    spawn_order_at(rig, s, P_PLAYER, rd, 1);
+    let (mut taken, mut out) = (Vec::new(), Vec::new());
+    for _ in 0..SUCCESSION_ROUNDS {
+        rig.cut_round();
+        taken.extend(rig.serve_logins());
+        collect_login_out(rig, &mut out);
+        if !out.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(rig.stored_owner(sr_of(rig, rd)), Some(leaver), "the new boot claimed it");
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [leaver], "placed on the new boot, once");
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1, ok: true, endpoint: Some(rig_endpoint(leaver)) };
+    assert_eq!(out, [(s, ack)]);
+    rig.connect_login(leaver, NEW_LOGIN_CLIENT, P_PLAYER, Some(centre_of(rd)), LOGIN_TOKEN, 1);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT) == [(leaver, rd)]), "one body, on the new boot");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_ownerless_leaver_returns_and_a_cut_with_it_commits() {
+    sweep_hosts("an_ownerless_leaver_returns_and_a_cut_with_it_commits", ownerless_returns);
 }

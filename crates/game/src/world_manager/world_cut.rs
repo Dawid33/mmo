@@ -247,6 +247,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.leaving_cut
     }
 
+    /// This host asked to leave ([`Self::request_leave`]): it is exiting.
+    pub fn leave_asked(&self) -> bool {
+        self.leave_requested
+    }
+
     /// This host parked everything for a leave cut (it stays parked: it is exiting).
     pub fn leave_parked(&self) -> bool {
         self.leave_parked
@@ -332,6 +337,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     pair.held.len()
                 );
                 self.left_peers.insert(ordinal, boot);
+                self.note_left_land(ordinal);
             }
             for msg in pair.held {
                 self.queue_now(ordinal, msg);
@@ -356,14 +362,42 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             log::info!("[server] host {ordinal} left the world cleanly (boot {boot}): not awaited until it returns");
             self.left_peers.insert(ordinal, Some(boot));
+            self.note_left_land(ordinal);
+        }
+    }
+
+    /// Under `claim`: the land host `ordinal` holds as this host's directory gives it, noted
+    /// when its leave is (`left_land`; `None` until the directory was read whole).
+    fn note_left_land(&mut self, ordinal: u32) {
+        let Some(directory) = self.ownership.0.directory() else { return };
+        let land = directory.is_read().then(|| directory.owned_by(ordinal).into_iter().collect());
+        self.left_land.insert(ordinal, land);
+    }
+
+    /// The directory was read whole: a departed host's land not noted yet is noted now, and a
+    /// returning boot of a host that left holding none is released (`peer_hello_boot`).
+    pub(super) fn left_land_read(&mut self) {
+        let unread: Vec<u32> = self.left_land.iter().filter(|(_, l)| l.is_none()).map(|(o, _)| *o).collect();
+        for o in unread {
+            self.note_left_land(o);
+        }
+        let back: Vec<u32> = self.returning_peers.keys().copied().collect();
+        for o in back {
+            if self.left_land.get(&o).is_some_and(|l| l.as_ref().is_some_and(|l| l.is_empty())) {
+                log::info!("[server] host {o} left holding no land: what waited for its new boot goes out");
+                self.release_left(o);
+            }
         }
     }
 
     /// Host `from`'s hello of boot `boot`: a host that left comes back as another boot —
-    /// its held session goes out again. Under `claim` (R4 drain) only once that boot shows it
-    /// re-claimed its land ([`Self::returning_owns`]): a boot registered after a `Leave`
-    /// succession of the one that left owns nothing, and what waited goes to the heir
-    /// (`succession.rs`) — "wait, never guess".
+    /// its held session goes out again. Under `claim` (R4 drain):
+    /// - it left holding NO land (`left_land`, as this host's directory gave it then): at
+    ///   once — no `Leave` succession can owe an heir anything of it. Its leave was noted
+    ///   before any directory read: once one is (`left_land_read`) — "wait, never guess";
+    /// - it left holding land: once that boot shows it re-claimed some of it
+    ///   ([`Self::returning_owns`]). A boot registered after a `Leave` succession of the one
+    ///   that left owns nothing, and what waited goes to the heir (`succession.rs`).
     pub(super) fn peer_hello_boot(&mut self, from: u32, boot: u64) {
         self.peer_boots.insert(from, boot);
         let back = self.left_peers.get(&from).is_some_and(|left_as| *left_as != Some(boot));
@@ -371,8 +405,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         if self.ownership.0.directory().is_some() {
-            log::info!("[server] host {from} is back (boot {boot}): what waited for it goes out once it holds its land again");
             self.returning_peers.insert(from, boot);
+            match self.left_land.get(&from) {
+                Some(Some(land)) if land.is_empty() => {
+                    log::info!("[server] host {from} is back (boot {boot}) and left holding no land: what waited for it goes out");
+                    self.release_left(from);
+                }
+                _ => log::info!(
+                    "[server] host {from} is back (boot {boot}): what waited for it goes out once it holds its land again"
+                ),
+            }
             return;
         }
         self.release_left(from);
@@ -390,6 +432,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn release_left(&mut self, from: u32) {
         self.left_peers.remove(&from);
         self.returning_peers.remove(&from);
+        self.left_land.remove(&from);
         if let Some(peer) = self.peers.get_mut(&from) {
             log::info!("[server] host {from} is back: what waited for it goes out");
             peer.session.release();

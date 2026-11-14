@@ -1030,7 +1030,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// host in its session (or waiting for one), or a spawn placement (`land_wanted`) — is
     /// asked of the coordinator ([`HostMsg::LandWanted`]) at most once per
     /// [`super::LAND_WANTED_EVERY_MS`]; it gives that host's land to an heir (R4 drain).
-    /// Called at the end of every [`Self::pump_peers`]. Never under `Static`: its leaver gets
+    /// Called at the end of every [`Self::pump_peers`], it looks through what is held at most
+    /// once per that period (a need that flickers keeps its super-region's last ask: the
+    /// timestamps go only once older than the period). Never under `Static`: its leaver gets
     /// what waits for it when it returns (R3).
     fn ask_for_land(&mut self, now_ms: u64) {
         if self.ownership.0.directory().is_none() || self.left_peers.is_empty() {
@@ -1038,6 +1040,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.land_wanted_sent.clear();
             return;
         }
+        if self.land_scanned_ms.is_some_and(|at| now_ms < at + super::LAND_WANTED_EVERY_MS) {
+            return;
+        }
+        self.land_scanned_ms = Some(now_ms);
         let s = self.ownership.1;
         let mut needs: BTreeSet<crate::SuperRegion> = std::mem::take(&mut self.land_wanted);
         for &o in self.left_peers.keys() {
@@ -1047,7 +1053,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Only land a departed host still holds.
         needs.retain(|sr| matches!(self.owner_of_sr(*sr), crate::Owner::Host(h) if self.left_peers.contains_key(&h)));
-        self.land_wanted_sent.retain(|sr, _| needs.contains(sr));
+        // Kept a second period: a need still there at the next scan is not logged again.
+        self.land_wanted_sent.retain(|_, at| now_ms < *at + 2 * super::LAND_WANTED_EVERY_MS);
         for &sr in &needs {
             let recent = self.land_wanted_sent.get(&sr).is_some_and(|&at| now_ms < at + super::LAND_WANTED_EVERY_MS);
             if recent {
@@ -1103,6 +1110,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         directory.replace(rows.into_iter().map(|(sr, owner, epoch)| (sr, u32::try_from(owner).ok(), epoch)));
         directory.set_live(live);
         self.directory_wanted = false;
+        self.left_land_read();
         self.flush_unowned();
     }
 

@@ -1226,6 +1226,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The last `LandWanted` sent per super-region, at which `clock_ms`
     /// ([`LAND_WANTED_EVERY_MS`]).
     land_wanted_sent: BTreeMap<crate::SuperRegion, u64>,
+    /// `clock_ms` of the last scan for land of departed hosts ([`LAND_WANTED_EVERY_MS`]: what
+    /// is held for them is looked through at most once per period, not every pump).
+    land_scanned_ms: Option<u64>,
     /// An `Unknown` owner was hit: the server reads the directory whole
     /// ([`Self::take_directory_wanted`]).
     directory_wanted: bool,
@@ -1334,6 +1337,11 @@ pub struct WorldManager<S: RegionSpawner> {
     /// it): a new boot that owns nothing registered after a `Leave` succession of its old
     /// boot — what was held goes to the heir in this host's report instead.
     returning_peers: BTreeMap<u32, u64>,
+    /// Under `claim`: for each peer in `left_peers`, the super-regions this host's directory
+    /// gave it when its leave was noted (`None`: the directory was not read yet — filled at
+    /// the first read). Empty: it held no land, so no `Leave` succession can owe an heir
+    /// anything of it — its next boot's hello releases the held session at once.
+    left_land: BTreeMap<u32, Option<BTreeSet<crate::SuperRegion>>>,
     /// Each peer's boot as its latest hello named it.
     peer_boots: BTreeMap<u32, u64>,
     /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
@@ -1502,6 +1510,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             claim_wanted_sent: BTreeMap::new(),
             land_wanted: BTreeSet::new(),
             land_wanted_sent: BTreeMap::new(),
+            land_scanned_ms: None,
             directory_wanted: false,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
@@ -1534,6 +1543,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             leave_pairs: BTreeMap::new(),
             left_peers: BTreeMap::new(),
             returning_peers: BTreeMap::new(),
+            left_land: BTreeMap::new(),
             peer_boots: BTreeMap::new(),
             world_cut_done: Vec::new(),
             inbound_accounted: None,

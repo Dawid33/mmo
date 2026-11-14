@@ -411,9 +411,10 @@ pub fn hosts_beyond_count(rows: &[(u32, bool)], hosts: u32) -> Option<String> {
             "the world has dirty `hosts` rows of hosts {beyond:?}, but {}={hosts}: they ran before and did not \
              leave cleanly, and may hold state. World cuts do not begin while a dirty row has no attached host, \
              so the world is NOT saved: start this world with {}={} (all its hosts) until they leave cleanly; \
-             there is no worldctl command yet to retire a host's row (TODO.md). Under `claim` its land is given \
-             to a live host instead — once its lease lapsed, or, once it left cleanly, on demand: at once when \
-             a host needs a region of it (its ordinal is beyond the host count)",
+             there is no worldctl command yet to retire a host's row (TODO.md). Under `claim` such a dirty row \
+             blocks cuts only until its lease lapses and it is declared dead (its land then goes to an heir). \
+             A CLEAN row beyond the count (a host that left in a committed cut) blocks nothing: under `claim` \
+             its land is given to a live host at once when a host needs a region of it",
             game::ownership::HOSTS_ENV,
             game::ownership::HOSTS_ENV,
             beyond.iter().max().map_or(hosts, |m| m + 1)

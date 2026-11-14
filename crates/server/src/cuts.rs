@@ -648,13 +648,13 @@ fn leave_world<S: RegionSpawner>(
         }
         cuts.pump(manager);
         if fenced.is_set() || cuts.fenced().is_set() {
-            manager.refuse_all_sessions(FENCED_REFUSAL);
+            manager.refuse_sessions(&clients, FENCED_REFUSAL);
             cuts.finish_without_cut(manager);
             log::error!("[server] fenced while leaving: nothing more is saved");
             return ServerExit::Fenced;
         }
         if world_generation.is_set() {
-            manager.refuse_all_sessions(ROLLBACK_REFUSAL);
+            manager.refuse_sessions(&clients, ROLLBACK_REFUSAL);
             cuts.finish_without_cut(manager);
             log::error!("[server] world rolled back while leaving: another host restarted dirty; nothing more is saved");
             return ServerExit::WorldRolledBack;
@@ -678,6 +678,8 @@ fn leave_world<S: RegionSpawner>(
             }
             Some(false) if settled => {
                 log::error!("[server] the leave cut was aborted: {LEFT_WITHOUT_A_CUT}");
+                // Stopping either way: the client rejoins the same way.
+                manager.refuse_sessions(&clients, LEAVING_REFUSAL);
                 cuts.finish_without_cut(manager);
                 return ServerExit::Clean;
             }
@@ -691,6 +693,7 @@ fn leave_world<S: RegionSpawner>(
         if late {
             let what = if begun.is_some() { "the leave cut was never decided" } else { "no leave cut began" };
             log::error!("[server] {what}: {LEFT_WITHOUT_A_CUT}");
+            manager.refuse_sessions(&clients, LEAVING_REFUSAL);
             cuts.finish_without_cut(manager);
             return ServerExit::Clean;
         }
@@ -777,6 +780,8 @@ pub fn exit_world<S: RegionSpawner>(
         }
         return leave_world(manager, cuts, region_out, &now_ms, fenced, world_generation, save_timeout, idle);
     }
+    // A refusal after the parks below reaches the sessions they ended only by id.
+    let clients = manager.session_ids();
     let given_up = park_for_exit(manager, region_out, now_ms, park_timeout, idle);
     let coordinator_exit = coordinator.map_or(ServerExit::Clean, |c| c.shutdown(save_timeout));
     if coordinator_exit == ServerExit::CoordinatorFailed {
@@ -791,7 +796,7 @@ pub fn exit_world<S: RegionSpawner>(
         return ServerExit::CoordinatorFailed;
     }
     if coordinator_exit == ServerExit::Fenced || fenced.is_set() {
-        manager.refuse_all_sessions(FENCED_REFUSAL);
+        manager.refuse_sessions(&clients, FENCED_REFUSAL);
         if let Some(cuts) = cuts {
             cuts.finish_without_cut(manager);
         }
@@ -810,7 +815,7 @@ pub fn exit_world<S: RegionSpawner>(
     // A fence refusal while parking (a cut answered late) still counts.
     cuts.pump(manager);
     if cuts.fenced().is_set() {
-        manager.refuse_all_sessions(FENCED_REFUSAL);
+        manager.refuse_sessions(&clients, FENCED_REFUSAL);
         cuts.finish_without_cut(manager);
         return ServerExit::Fenced;
     }
@@ -818,7 +823,7 @@ pub fn exit_world<S: RegionSpawner>(
     if cuts.finish(manager, now_tick(), save_timeout) {
         log::info!("[server] world saved");
     } else if fenced.is_set() {
-        manager.refuse_all_sessions(FENCED_REFUSAL);
+        manager.refuse_sessions(&clients, FENCED_REFUSAL);
         return ServerExit::Fenced;
     } else {
         log::error!("[server] the world was not saved at exit; it restarts from its last committed save");

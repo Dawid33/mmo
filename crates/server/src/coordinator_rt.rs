@@ -1233,6 +1233,7 @@ impl CoordinatorRuntime {
         // Land of a host that left, asked for (`LandWanted`): the owners read (a plain read),
         // each owner told to the core, which decides when it is given away. A failed read is
         // dropped: the hosts ask again every `LAND_WANTED_EVERY_MS`.
+        let mut failed = None;
         if let Some((srs, rx)) = &p.land_rx {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => None,
@@ -1249,7 +1250,7 @@ impl CoordinatorRuntime {
                             self.core.land_wanted(owner, now);
                         }
                     }
-                    Err(e) => log::debug!("[coordinator] the owners of land asked for could not be read ({e}); the hosts ask again"),
+                    Err(e) => failed = Some(e),
                 }
                 p.land_rx = None;
             }
@@ -1259,6 +1260,11 @@ impl CoordinatorRuntime {
             if !srs.is_empty() {
                 p.land_rx = Some((srs, self.store.owners_later()));
             }
+        }
+        if let Some(e) = failed {
+            self.warn_cuts(now, &format!("the owners of land asked for could not be read ({e}); the hosts ask again"));
+            // The rest of the pump runs on the next pass.
+            return Ok(());
         }
         if self.core.rollback_wanted() {
             if p.rollback_rx.is_none() && now >= p.rollback_retry_at {

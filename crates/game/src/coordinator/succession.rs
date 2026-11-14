@@ -627,6 +627,10 @@ impl super::Coordinator {
             // Running: nothing of it to give away (a stale directory row of the asker).
             return;
         }
+        if self.leases.row(owner).is_some_and(|r| self.successions.declared.contains(&(owner, r.boot))) {
+            // Its land was given away already (a lookup answered after the declaration).
+            return;
+        }
         let wait = self.heir_wait_for(owner);
         self.successions.land_wanted.entry(owner).or_insert_with(|| {
             log::info!(
@@ -635,6 +639,12 @@ impl super::Coordinator {
             );
             now_ms
         });
+    }
+
+    /// Test support: the departed hosts whose land is wanted now (requests not forgotten).
+    #[doc(hidden)]
+    pub fn lands_wanted(&self) -> Vec<u32> {
+        self.successions.land_wanted.keys().copied().collect()
     }
 
     /// How long the land of departed host `owner` waits for it.
@@ -657,9 +667,14 @@ impl super::Coordinator {
             return None;
         }
         let attached: BTreeSet<u32> = self.attached_live().into_iter().collect();
-        let leases = &self.leases;
+        let (leases, declared) = (&self.leases, &self.successions.declared);
         self.successions.land_wanted.retain(|owner, _| {
-            let back = attached.contains(owner) || leases.row(*owner).is_some_and(|r| !r.clean || r.state != HOST_LIVE);
+            let row = leases.row(*owner);
+            // Declared already (an owners lookup answered just after the declaration): done.
+            if row.is_some_and(|r| declared.contains(&(*owner, r.boot))) {
+                return false;
+            }
+            let back = attached.contains(owner) || row.is_some_and(|r| !r.clean || r.state != HOST_LIVE);
             if back {
                 log::info!("coordinator: host {owner} is back (or no longer left): its land is no longer given away");
             }
@@ -668,9 +683,6 @@ impl super::Coordinator {
         let mut due = None;
         for (&owner, &first) in &self.successions.land_wanted {
             let Some(row) = self.leases.row(owner) else { continue };
-            if self.successions.declared.contains(&(owner, row.boot)) {
-                continue;
-            }
             if now_ms < first.saturating_add(self.heir_wait_for(owner)) {
                 continue;
             }
