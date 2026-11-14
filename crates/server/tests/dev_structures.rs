@@ -3,7 +3,7 @@
 
 use game::prefab::Placement;
 use game::{BlockId, ColumnCoords, RegionCoords, SubChunk, CHUNK_BLOCKS};
-use server::dev_structures::{install_from_env, DevStructures, LandingOf};
+use server::dev_structures::{from_env, install_from_env, DevStructures, LandingOf, DEV_STRUCTURES_ENV, PREFAB_DIRS_ENV};
 use worldgen::structures::{active, DEV_GAP_BLOCKS};
 
 const CB: i32 = CHUNK_BLOCKS as i32;
@@ -35,6 +35,7 @@ fn dev_structures_install_and_stamp() {
     // Off: no variable, no source; the built-in prefabs are installed anyway.
     std::env::remove_var("VOXEL_DEV_STRUCTURES");
     let landing: LandingOf = std::sync::Arc::new(|_: RegionCoords| Some([20u32, 20u32]));
+    let pure_landing = landing.clone();
     // (A second install in this process would conflict, so the "off" call is the same set.)
     assert_eq!(install_from_env(&registry, landing.clone(), seed, mats), Ok(DevStructures::Off));
     assert!(game::prefab::prefabs().named("dev-hut").is_some());
@@ -66,4 +67,38 @@ fn dev_structures_install_and_stamp() {
         let p = [anchor[0] - 3 + dx, anchor[1], anchor[2] - 6 + dz];
         assert_eq!(read(&cols, p), bricks, "floor cell {p:?}");
     }
+
+    // The pure step (`from_env`): what would be installed, built again and again in this process with
+    // nothing installed. Every region's form first.
+    std::env::set_var(DEV_STRUCTURES_ENV, "all=dev-hut");
+    let setup = from_env(&registry, pure_landing.clone(), seed, mats).expect("all=dev-hut");
+    assert_eq!(setup.what, DevStructures::EveryRegion { spec: "dev-hut".into() });
+    assert!(setup.prefabs.named("dev-hut").is_some());
+    let source = setup.source.expect("a source for all=");
+    let row = source.placements_in(0, 0, 2 * RB, RB, 0);
+    for rc_x in [0, 1] {
+        let beside: Vec<_> =
+            row.iter().filter(|p| p.bounds().0[0] == rc_x * RB + 20 + DEV_GAP_BLOCKS && p.at.anchor[2] == 20).collect();
+        assert_eq!(beside.len(), 1, "one dev-hut beside region ({rc_x}, 0)'s landing: {row:?}");
+        assert_eq!(beside[0].prefab.name, "dev-hut");
+    }
+    // Errors, each naming the offending text.
+    for (value, names) in [
+        ("garbage", "garbage"),
+        ("0,0", "0,0"),
+        ("x,y=dev-hut", "\"x\""),
+        ("all=no-such-prefab", "no-such-prefab"),
+        ("0,0=", "0,0="),
+    ] {
+        std::env::set_var(DEV_STRUCTURES_ENV, value);
+        let e = from_env(&registry, pure_landing.clone(), seed, mats).err().unwrap_or_else(|| panic!("{value} accepted"));
+        assert!(e.contains(value) && e.contains(names), "{value}: {e}");
+    }
+    std::env::remove_var(DEV_STRUCTURES_ENV);
+    let missing = std::env::temp_dir().join("voxel-no-such-prefab-dir");
+    assert!(!missing.exists());
+    std::env::set_var(PREFAB_DIRS_ENV, &missing);
+    let e = from_env(&registry, pure_landing, seed, mats).err().expect("a missing prefab directory is an error");
+    assert!(e.contains(&*missing.to_string_lossy()), "{e}");
+    std::env::remove_var(PREFAB_DIRS_ENV);
 }
