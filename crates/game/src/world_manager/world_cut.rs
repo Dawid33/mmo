@@ -484,9 +484,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Host `from`, back from a leave, holds `reclaimed` super-regions of the land it left
     /// with (its [`Reliable::Owns`], under `claim`): its held session goes out.
     pub(super) fn returning_owns(&mut self, from: u32, reclaimed: bool) {
-        if reclaimed && self.leave_pairs.get(&from).is_some_and(|p| p.leaver.is_some()) {
-            // Its leave is not decided here yet: `end_leaves` releases it then.
-            self.pair_owns_seen.insert(from);
+        if let Some((left_as, _)) = self.leave_pairs.get(&from).and_then(|p| p.leaver.as_ref()) {
+            // Its leave is not decided here yet: `end_leaves` releases it then — but only for
+            // an `Owns` of its NEXT boot (`peer_boots` names that boot once its hello came;
+            // nothing of it arrives before). One the leaving boot queued before its
+            // `BeginCut` says nothing of the next boot.
+            if reclaimed && self.peer_boots.get(&from).is_some_and(|b| Some(*b) != *left_as) {
+                self.pair_owns_seen.insert(from);
+            }
             return;
         }
         if reclaimed && self.returning_peers.remove(&from).is_some() {

@@ -7690,11 +7690,11 @@ const LATE_ITEMS: u32 = 4;
 /// learned it and before the order. S must NOT release to the new boot: what it held
 /// reaches the heir once (journal `Sent` / `owed`), the items exactly; the world restarted
 /// from the settle's cut holds every id once.
-fn late_leave_note(rig: &mut MultiRig, hello_first: bool) {
+fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
     crate::common::install_real_block_props();
     let chain = heir_world(rig);
     let (rs, rd, rt) = (chain[0], chain[1], chain[2]);
-    let (s, leaver, t) = (rig.owner(rs), rig.owner(rd), rig.owner(rt));
+    let (s, leaver) = (rig.owner(rs), rig.owner(rd));
     keeper_may_park(rig, leaver);
     let from_s = slime_in(rig, rs, 1);
     let from_t = slime_in(rig, rt, 2);
@@ -7712,6 +7712,15 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool) {
     }
     let cut = cut.expect("S prepared its part of the leave cut");
     rig.hold_world(s, true);
+    if stale_owns {
+        // An `Owns` the LEAVING boot queued before its `BeginCut`, read by S after S's: it
+        // names land L still holds, but it is no news of L's next boot.
+        let store = rig.claim_store.as_ref().expect("claims");
+        let rows: Vec<(game::SuperRegion, u64)> =
+            store.iter().filter(|(_, (o, _))| *o == Some(leaver)).map(|(sr, (_, e))| (*sr, *e)).collect();
+        assert!(!rows.is_empty());
+        rig.hosts[s as usize].manager.apply_peer_reliable(leaver, game::Reliable::Owns { rows });
+    }
     // Toward L while the leave pair holds back what S sends it.
     assert!(push_over(rig, from_s, rs, rd));
     let due = world_tick(rig) + 5;
@@ -7770,11 +7779,24 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool) {
 }
 
 fn late_note_hello_first(rig: &mut MultiRig) {
-    late_leave_note(rig, true);
+    late_leave_note(rig, true, false);
 }
 
 fn late_note_then_hello(rig: &mut MultiRig) {
-    late_leave_note(rig, false);
+    late_leave_note(rig, false, false);
+}
+
+fn stale_owns_then_hello(rig: &mut MultiRig) {
+    late_leave_note(rig, true, true);
+}
+
+/// Fix round 3: [`late_leave_note`] with an `Owns` of the LEAVING boot read by S during the
+/// leave pair, then the new boot's hello before S's late `CutDone`: that `Owns` never counts
+/// as the new boot holding its land — S stays held and reports what it held to the heir.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_owns_of_the_leaving_boot_does_not_release_its_successor() {
+    sweep("an_owns_of_the_leaving_boot_does_not_release_its_successor", 3, 1, HEIR_SWEEP_SEEDS, stale_owns_then_hello);
 }
 
 #[test]
@@ -7901,4 +7923,68 @@ fn boot_after_the_declaration(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_host_booted_after_a_leave_declaration_releases_the_leavers_next_boot() {
     sweep("a_host_booted_after_a_leave_declaration_releases_the_leavers_next_boot", 3, 1, HEIR_SWEEP_SEEDS, boot_after_the_declaration);
+}
+
+/// Fix round 3: survivor S boots again after L's leave and BEFORE the declaration (so it is
+/// a survivor of it), but notes L as left only from a directory read AFTER the declaration
+/// (its boot-time read: modelled by noting the leave once the read shows the heir). L's next
+/// boot (owning nothing) says hello to S first: S releases it at once (no land noted), and
+/// then S's order takes `apply_leave_overtaken` — an empty report, the new boot's link left
+/// alone. Nothing is lost or duplicated: the settle is whole, T's held slime lands once.
+fn survivor_booted_between(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd, rt) = (chain[0], chain[1], chain[2]);
+    let (s, leaver, t) = (rig.owner(rs), rig.owner(rd), rig.owner(rt));
+    keeper_may_park(rig, s);
+    keeper_may_park(rig, leaver);
+    let from_t = slime_in(rig, rt, 2);
+    until_committed(rig, 1);
+    for h in [s, leaver] {
+        rig.hosts[h as usize].manager.request_leave();
+        let cut = until_leave_begun(rig, t, h);
+        assert!(until_decided(rig, cut), "host {h}'s leave cut commits");
+        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[t as usize].manager.peer_left(h)), "T noted host {h}'s leave");
+        rig.kill(h);
+    }
+    let left_as = rig.boots[leaver as usize];
+    // S boots again before the declaration: a survivor of it. Its order is held back.
+    rig.start(s);
+    let live: std::collections::BTreeSet<u32> = [s, t].into_iter().collect();
+    rig.core().set_expected_hosts(live);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s as usize].manager.world_attached()), "S attached");
+    rig.hold_world(s, true);
+    rig.with_land_on_demand(0);
+    assert!(push_over(rig, from_t, rt, rd));
+    let succession = until_land_declared(rig);
+    assert!(succession.survivors.contains(&s), "S is a survivor: {succession:?}");
+    rig.read_directory(s);
+    rig.hosts[s as usize].manager.note_left_peers([(leaver, left_as)]);
+    rig.start(leaver);
+    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    rig.core().set_expected_hosts(live);
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| {
+            let m = &rig.hosts[s as usize].manager;
+            !m.peer_left(leaver) && m.peer_is_reachable(leaver)
+        }),
+        "S released L's next boot at its hello"
+    );
+    rig.hold_world(s, false);
+    assert!(
+        until(rig, SUCCESSION_ROUNDS, |rig| rig.core().succession_progress().iter().any(|(i, a, _)| *i == succession.id && a.contains(&s))),
+        "S applied the order"
+    );
+    assert!(rig.hosts[s as usize].manager.peer_is_reachable(leaver), "the new boot's link is left alone");
+    assert_settled_whole(rig, &succession, &[from_t]);
+    rig.run(rd);
+    assert!(until_landed(rig, from_t), "the slime landed");
+    assert_eq!(live_count(rig, from_t), 1);
+    until_committed(rig, 1);
+    assert_restored_once(rig, &[from_t]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_survivor_booted_before_the_declaration_reports_nothing_of_a_released_leaver() {
+    sweep("a_survivor_booted_before_the_declaration_reports_nothing_of_a_released_leaver", 3, 1, HEIR_SWEEP_SEEDS, survivor_booted_between);
 }
