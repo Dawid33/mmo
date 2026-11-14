@@ -130,3 +130,21 @@ fn name_keys_do_not_collide() {
     assert_eq!(keys.len(), set.names().count());
     assert_eq!(keys.len(), set.len());
 }
+
+#[test]
+fn content_hash_follows_the_sources() {
+    let reg = registry();
+    let make = |srcs: &[(&str, &[u8])]| PrefabSet::from_sources(srcs.iter().copied(), &|n| reg.id_of(n)).unwrap();
+    let a = named_hut("a");
+    let b = named_hut("b");
+    let one = make(&[("a.prefab.ron", a.as_bytes()), ("b.prefab.ron", b.as_bytes())]);
+    let swapped = make(&[("b.prefab.ron", b.as_bytes()), ("a.prefab.ron", a.as_bytes())]);
+    assert_eq!(one.content_hash(), swapped.content_hash());
+    // One byte of one file: a trailing space after the RON text.
+    let mut a2 = a.clone().into_bytes();
+    a2.push(b' ');
+    let changed = make(&[("a.prefab.ron", &a2), ("b.prefab.ron", b.as_bytes())]);
+    assert_ne!(one.content_hash(), changed.content_hash());
+    assert_eq!(one, changed, "equality compares the resolved prefabs");
+    assert_eq!(make(&[]).content_hash(), 0);
+}

@@ -284,3 +284,19 @@ fn mirror_then_turn_in_literals() {
         ChiselData::from_fn(vec![OAK], |x, y, z| (y < half || (x >= half && z >= half)).then_some(0))
     );
 }
+
+#[test]
+fn cell_write_is_the_per_cell_transform() {
+    let p = busy();
+    let at = Placement { anchor: [0, 0, 0], turn: 3, mirror: true };
+    assert_eq!(cell_write(Cell::Keep, &at), None);
+    assert_eq!(cell_write(Cell::Carve, &at), Some(None));
+    assert_eq!(cell_write(Cell::Block(STONE), &at), Some(Some((Block { id: STONE, data: [0; 3] }, None))));
+    let Cell::Shaped(shape) = p.cell([14, 2, 3]) else { panic!("a stair is there") };
+    let Some(Some((b, Some(c)))) = cell_write(Cell::Shaped(shape), &at) else { panic!("a shaped write") };
+    let want = Shape::Stairs { facing: Facing::East, half: Half::Bottom, corner: StairCorner::OuterLeft }
+        .mirrored_x()
+        .turned(3);
+    assert_eq!(b, Block { id: OAK, data: [0; 3] });
+    assert_eq!(c, want.chisel(OAK));
+}

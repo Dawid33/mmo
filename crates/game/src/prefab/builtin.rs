@@ -10,9 +10,17 @@ use crate::registry::BlockId;
 
 pub const BUILTIN_PREFAB_DIR: &str = "assets/prefabs";
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct PrefabSet {
     by_key: BTreeMap<u32, Arc<ResolvedPrefab>>,
+    content_hash: u32,
+}
+
+/// Equal when the resolved prefabs are; the source bytes (and so `content_hash`) do not count.
+impl PartialEq for PrefabSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.by_key == other.by_key
+    }
 }
 
 impl PrefabSet {
@@ -22,6 +30,13 @@ impl PrefabSet {
         block_named: &dyn Fn(&str) -> Option<BlockId>,
     ) -> Result<Self, String> {
         let mut by_key: BTreeMap<u32, Arc<ResolvedPrefab>> = BTreeMap::new();
+        let sources: BTreeMap<&str, &[u8]> = sources.into_iter().collect();
+        let mut hasher = crc32fast::Hasher::new();
+        for (file_name, bytes) in &sources {
+            hasher.update(file_name.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(bytes);
+        }
         for (file_name, bytes) in sources {
             let Some(decoded) = prefab_from_named_bytes(file_name, bytes, None) else { continue };
             let file = decoded.map_err(|e| format!("{file_name}: {e}"))?;
@@ -48,7 +63,13 @@ impl PrefabSet {
             }
             by_key.insert(key, Arc::new(resolved));
         }
-        Ok(Self { by_key })
+        Ok(Self { by_key, content_hash: hasher.finalize() })
+    }
+
+    /// crc32 over the sources in sorted file-name order (name bytes, a 0 byte, content bytes, per file):
+    /// equal sources, equal hash; any changed byte, another hash.
+    pub fn content_hash(&self) -> u32 {
+        self.content_hash
     }
 
     pub fn get(&self, name_key: u32) -> Option<&Arc<ResolvedPrefab>> {
@@ -133,6 +154,6 @@ pub fn install_prefabs(set: PrefabSet) {
 
 /// The installed set, or an empty one when none was.
 pub fn prefabs() -> &'static PrefabSet {
-    static EMPTY: PrefabSet = PrefabSet { by_key: BTreeMap::new() };
+    static EMPTY: PrefabSet = PrefabSet { by_key: BTreeMap::new(), content_hash: 0 };
     PREFABS.get().unwrap_or(&EMPTY)
 }

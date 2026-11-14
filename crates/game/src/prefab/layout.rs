@@ -92,6 +92,31 @@ fn voxel_chisel(cuboids: &[([u8; 3], [u8; 3], u8)], mats: &[BlockId], at: &Place
 }
 
 type Write = (Block, Option<ChiselData>);
+type ChiselCache = BTreeMap<(Shape, BlockId), ChiselData>;
+
+/// What a prefab cell writes under a placement: `None` for Keep, `Some(None)` for Carve, `Some(Some(..))`
+/// for a block (with its chisel when the cell is shaped). The one definition of the mirror-then-turn of a
+/// shaped cell; `layout_chunk` and worldgen both go through it.
+pub fn cell_write(cell: Cell<'_>, at: &Placement) -> Option<Option<Write>> {
+    cell_write_cached(cell, at, &mut ChiselCache::new())
+}
+
+fn cell_write_cached(cell: Cell<'_>, at: &Placement, chisels: &mut ChiselCache) -> Option<Option<Write>> {
+    match cell {
+        Cell::Keep => None,
+        Cell::Carve => Some(None),
+        Cell::Block(id) => Some(Some((Block { id, data: [0; 3] }, None))),
+        Cell::Shaped(ResolvedShape::Named { shape, mat }) => {
+            let s = if at.mirror { shape.mirrored_x() } else { *shape }.turned(at.turn);
+            let chisel = chisels.entry((s, *mat)).or_insert_with(|| s.chisel(*mat)).clone();
+            Some(Some((Block { id: *mat, data: [0; 3] }, Some(chisel))))
+        }
+        Cell::Shaped(ResolvedShape::Cuboids { cuboids, mats }) => {
+            let id = mats.first().copied().unwrap_or_default();
+            Some(Some((Block { id, data: [0; 3] }, Some(voxel_chisel(cuboids, mats, at)))))
+        }
+    }
+}
 
 /// None when the chunk gets nothing.
 pub fn layout_chunk(p: &ResolvedPrefab, at: &Placement, chunk: [i32; 3]) -> Option<ChunkStamp> {
@@ -103,26 +128,13 @@ pub fn layout_chunk(p: &ResolvedPrefab, at: &Placement, chunk: [i32; 3]) -> Opti
     let cmin = [0, 1, 2].map(|i| a[i].min(b[i]));
     let cmax = [0, 1, 2].map(|i| a[i].max(b[i]) + 1);
 
-    let mut chisels: BTreeMap<(Shape, BlockId), ChiselData> = BTreeMap::new();
+    let mut chisels = ChiselCache::new();
     let mut cells: BTreeMap<BlockIndex, Option<Write>> = BTreeMap::new();
     p.for_each_cell(cmin, cmax, &mut |cell, c| {
         let w = world_of_cell(p, at, cell);
         let [x, y, z] = [0, 1, 2].map(|i| (w[i] - wmin[i]) as usize);
         debug_assert!(x < CHUNK_BLOCKS && y < CHUNK_BLOCKS && z < CHUNK_BLOCKS);
-        let entry: Option<Write> = match c {
-            Cell::Keep => return,
-            Cell::Carve => None,
-            Cell::Block(id) => Some((Block { id, data: [0; 3] }, None)),
-            Cell::Shaped(ResolvedShape::Named { shape, mat }) => {
-                let s = if at.mirror { shape.mirrored_x() } else { *shape }.turned(at.turn);
-                let chisel = chisels.entry((s, *mat)).or_insert_with(|| s.chisel(*mat)).clone();
-                Some((Block { id: *mat, data: [0; 3] }, Some(chisel)))
-            }
-            Cell::Shaped(ResolvedShape::Cuboids { cuboids, mats }) => {
-                let id = mats.first().copied().unwrap_or_default();
-                Some((Block { id, data: [0; 3] }, Some(voxel_chisel(cuboids, mats, at))))
-            }
-        };
+        let Some(entry) = cell_write_cached(c, at, &mut chisels) else { return };
         cells.insert(BlockIndex::from_xyz(x, y, z), entry);
     });
     if cells.is_empty() {
