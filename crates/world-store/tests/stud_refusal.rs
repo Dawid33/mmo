@@ -195,12 +195,12 @@ fn a_voxel_world_from_before_the_stud_switch_is_refused() {
     });
 }
 
-/// A fresh store migrates through `0011`: the voxel table and column are back, the stud
+/// A fresh store migrates (through `0011` and on to the newest): the voxel table and column are back, the stud
 /// ones gone, the world row is tied to voxels, and `regions.ground`'s default (the value
 /// `0011` gives rows it adds the column to) is an encoded empty list.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn an_empty_store_migrates_to_11_and_holds_voxel_tables() {
+fn an_empty_store_migrates_and_holds_voxel_tables() {
     each_backend("voxel_fresh", true, |url| {
         StoreHandle::open(url, Dials::BUILT, OpenMode::Writer).unwrap().shutdown();
         assert_eq!(applied(url), Some(newest_migration()));

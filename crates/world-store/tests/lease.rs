@@ -70,3 +70,38 @@ fn heartbeat_moves_seen_ms_for_the_live_boot_only() {
         h.shutdown();
     });
 }
+
+/// Postgres: a held lock on the host's own row makes a beat fail with an error after the
+/// lock timeout — it neither hangs nor answers `false` (which means "replaced").
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_heartbeat_behind_a_held_row_lock_errors_instead_of_waiting() {
+    use sqlx::Connection;
+    use world_store::{HEARTBEAT_LOCK_TIMEOUT_MS, StoreUrl};
+
+    if crate::common::pg_admin_url().is_none() {
+        return crate::common::skip_msg();
+    }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let db = rt.block_on(crate::common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
+    let h = open(&StoreUrl::Postgres(db.url.clone()));
+    let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
+    h.register_host(row(0, 10), &a).unwrap();
+    rt.block_on(async {
+        let mut conn = sqlx::PgConnection::connect(&db.url).await.unwrap();
+        let mut tx = conn.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM hosts WHERE ordinal = 0 FOR UPDATE").execute(&mut *tx).await.unwrap();
+        let started = std::time::Instant::now();
+        let h2 = h.clone();
+        let beat = tokio::task::spawn_blocking(move || h2.heartbeat(0, 10)).await.unwrap();
+        let waited = started.elapsed();
+        assert!(beat.is_err(), "a beat behind a row lock is an error, got {beat:?}");
+        assert!(waited < std::time::Duration::from_millis(HEARTBEAT_LOCK_TIMEOUT_MS * 3), "waited {waited:?}");
+        tx.rollback().await.unwrap();
+        // Released: the beat goes through again.
+        let h2 = h.clone();
+        assert!(tokio::task::spawn_blocking(move || h2.heartbeat(0, 10)).await.unwrap().unwrap());
+    });
+    h.shutdown();
+    drop(db);
+}

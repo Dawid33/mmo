@@ -46,6 +46,9 @@ pub const CLAIM_LOCK_TIMEOUT_MS: u64 = 60_000;
 /// How long a save cut's transaction (Postgres `lock_timeout`, both kinds) waits for
 /// any one row lock before it gives up: no cut sits on a lock for ever.
 pub const CUT_LOCK_TIMEOUT_MS: u64 = 10_000;
+/// How long a heartbeat waits for its `hosts` row lock (Postgres): well under the lease's beat
+/// period, so a beat blocked behind a registration or a decision fails fast (`Err`, not `Ok(false)`).
+pub const HEARTBEAT_LOCK_TIMEOUT_MS: u64 = 1_000;
 
 /// The build-time dials a world is tied to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

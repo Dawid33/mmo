@@ -645,14 +645,19 @@ impl StoreHandle {
 
     /// One lease beat: host `ordinal`'s row gets `seen_ms` = the database clock, if it is
     /// still boot `boot` and live. `false`: no such live row — the caller was replaced.
-    /// Unfenced on purpose: it writes only the caller's own row and proves nothing but
+    /// With Postgres a row lock held by a registration or a decision makes the beat fail with an error
+    /// after [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (not `false`). Unfenced on purpose: it writes only the caller's own row and proves nothing but
     /// liveness (ownership is what the fence proves, and every write still checks it).
     pub fn heartbeat(&self, ordinal: u32, boot: u64) -> Result<bool, StoreError> {
         self.ask(|r| Request::Heartbeat(ordinal, boot, r))
     }
 
     /// [`Self::heartbeat`], answered on the receiver.
-    pub fn heartbeat_later(&self, ordinal: u32, boot: u64) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+    pub fn heartbeat_later(
+        &self,
+        ordinal: u32,
+        boot: u64,
+    ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
         self.ask_later(|r| Request::Heartbeat(ordinal, boot, r))
     }
 

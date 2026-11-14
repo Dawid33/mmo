@@ -422,16 +422,20 @@ macro_rules! engine_rows {
                     .collect()
             }
 
-            /// One lease beat. UNFENCED on purpose: one statement over the caller's own `hosts` row
-            /// (Postgres: its row lock only, held to the statement's end; it touches neither `world`
-            /// nor `super_regions`, so it waits for no cut part, decision, registration or claim, and
-            /// none waits for it beyond that row). `false`: no live row of that boot.
+            /// One lease beat. UNFENCED on purpose: one statement over the caller's own `hosts` row.
+            /// Postgres: a short transaction with `lock_timeout` [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`]
+            /// — if a registration or a decision holds the row, the beat FAILS (`Err`: "no beat this
+            /// time"), it neither hangs nor answers `false`. It touches neither `world` nor
+            /// `super_regions`. `false`: no live row of that boot (the caller was replaced).
             pub(crate) async fn heartbeat(pool: &Pool, ordinal: u32, boot: u64) -> Result<bool, StoreError> {
                 let sql = format!(
                     "UPDATE hosts SET seen_ms = {NOW_MS} WHERE ordinal = $1 AND boot = $2 AND state = {}",
                     crate::HOST_LIVE
                 );
-                let done = sqlx::query(&sql).bind(i64::from(ordinal)).bind(i(boot)).execute(pool).await?;
+                let mut tx = pool.begin().await?;
+                cut_lock_timeout(&mut *tx, crate::HEARTBEAT_LOCK_TIMEOUT_MS).await?;
+                let done = sqlx::query(&sql).bind(i64::from(ordinal)).bind(i(boot)).execute(&mut *tx).await?;
+                tx.commit().await?;
                 Ok(done.rows_affected() == 1)
             }
 
@@ -454,11 +458,18 @@ macro_rules! engine_rows {
 
             /// The rows `owner` holds, as a fence. A plain read, no locks.
             pub(crate) async fn owned_by(pool: &Pool, owner: u32) -> Result<Fence, StoreError> {
+                let rows = sqlx::query("SELECT sx, sz, epoch FROM super_regions WHERE owner = $1")
+                    .bind(i64::from(owner))
+                    .fetch_all(pool)
+                    .await?;
                 let mut epochs = BTreeMap::new();
-                for (sr, o, epoch) in owners(pool).await? {
-                    if o == i64::from(owner) {
-                        epochs.insert(sr, epoch);
-                    }
+                for r in rows {
+                    let (sx, sz): (i64, i64) = (r.try_get(0)?, r.try_get(1)?);
+                    let sr = (
+                        i32::try_from(sx).map_err(|_| StoreError::Corrupt(format!("super_regions.sx {sx}")))?,
+                        i32::try_from(sz).map_err(|_| StoreError::Corrupt(format!("super_regions.sz {sz}")))?,
+                    );
+                    epochs.insert(sr, u(r.try_get(2)?));
                 }
                 Ok(Fence { owner, epochs, all_hosts: false })
             }
@@ -1221,7 +1232,8 @@ engine_rows!(
     " FOR UPDATE",
     true,
     Some("LOCK TABLE super_regions IN SHARE ROW EXCLUSIVE MODE"),
-    // clock_timestamp(), not now(): a registration's transaction may have waited for locks.
+    // clock_timestamp(), not now(): now() is the transaction's start, and a registration or a
+    // heartbeat transaction may have waited for locks before it stamps.
     "(extract(epoch from clock_timestamp()) * 1000)::bigint"
 );
 
