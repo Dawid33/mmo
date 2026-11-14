@@ -1,6 +1,6 @@
 //! Prefabs in the running game, for development: the built-in prefab set is always installed, and a
-//! dev structure source stamps named prefabs beside one region's landing column when the environment
-//! asks (`VOXEL_DEV_STRUCTURES`). Everything here runs once, at startup, before any terrain is generated.
+//! dev structure source stamps named prefabs (or lays out a town) beside regions' landing columns when the
+//! environment asks (`VOXEL_DEV_STRUCTURES`). Everything here runs once, at startup, before any terrain is generated.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,8 +14,10 @@ use worldgen::structures::{
 /// Extra prefab directories, `:`-separated, loaded together with `assets/prefabs`.
 pub const PREFAB_DIRS_ENV: &str = "VOXEL_PREFAB_DIRS";
 /// `<rx>,<rz>=<spec>`: the prefabs of `<spec>` (see `parse_dev_spec`) beside region (rx, rz)'s landing;
-/// `all=<spec>` / `home=<spec>`: the same beside every region's / the first region generated's landing;
-/// `town=<style>[:<arms>[:<arm_len>]]`: a town (see [`parse_town_spec`]) beside the first region generated's.
+/// `all=<spec>` / `home=<spec>`: the same beside every region's / the home region's landing;
+/// `town=<style>[:<arms>[:<arm_len>]]`: a town (see [`parse_town_spec`]) beside the home region's. The home
+/// is the first region announced to the source ([`announces_region`]): in a forged world the embark
+/// region, in a procedural one the spawn region.
 pub const DEV_STRUCTURES_ENV: &str = "VOXEL_DEV_STRUCTURES";
 
 /// Where a region's landing column is (region-local block x, z), if the world map says.
@@ -30,12 +32,30 @@ pub enum DevStructures {
     Region { x: i32, z: i32, placements: usize },
     /// `all=<spec>`: the spec's prefabs beside every region's landing, laid out lazily.
     EveryRegion { spec: String },
-    /// `home=<spec>`: the spec's prefabs beside the landing of the first region generated in full (the
-    /// embark region in a debug launch), and nowhere else.
+    /// `home=<spec>`: the spec's prefabs beside the landing of the home region — the first region whose
+    /// generation is announced ([`announces_region`]: in a forged world the embark region, never the spawn
+    /// region a fresh session waits in; in a procedural world the first region generated in full) — and
+    /// nowhere else.
     Home { spec: String },
-    /// `town=<style>[:<arms>[:<arm_len>]]`: one town of that style beside the landing of the first region
-    /// generated in full, and nowhere else.
+    /// `town=<style>[:<arms>[:<arm_len>]]`: one town of that style beside the landing (else the centre) of
+    /// the home region, chosen as for `Home`, and nowhere else.
     Town { style: String },
+}
+
+/// Whether the server's region-thread generator announces region `rc` to the structure source
+/// ([`StructureSource::region_requested`]) when it starts generating it. `forged`: a world map is
+/// installed (a world from the store).
+///
+/// In a forged world a fresh session (no player record, e.g. a debug launch with `--reset`) is created
+/// in [`game::world_manager::SPAWN_REGION`] and only waits there before it embarks, so that region is
+/// not announced: the embark target becomes the home of a `home=` / `town=` source. A procedural world
+/// (no world map, no embark) announces every region, the spawn region included.
+///
+/// Known edges: embarking on the spawn tile itself gets no announcement (no home, no town); and the
+/// first announced region still wins — the embark target's thread starts first, its neighbours a
+/// round-trip later, so in practice the home is the embark region.
+pub fn announces_region(rc: RegionCoords, forged: bool) -> bool {
+    !(forged && rc == game::world_manager::SPAWN_REGION)
 }
 
 /// Whether `VOXEL_DEV_STRUCTURES` asks for anything (the caller then builds a `LandingOf`).
@@ -53,7 +73,8 @@ pub struct DevSetup {
 }
 
 /// Installs the prefab set (always) and, when `VOXEL_DEV_STRUCTURES` is set and non-empty, a structure
-/// source with the dev placements: `<rx>,<rz>=<spec>` (one region), `all=<spec>` (every region) or `home=<spec>` (the first region generated). See
+/// source with the dev placements: `<rx>,<rz>=<spec>` (one region), `all=<spec>` (every region),
+/// `home=<spec>` (the home region, see [`DevStructures::Home`]) or `town=<style>…` (a town there). See
 /// [`from_env`]; on an error nothing is installed.
 pub fn install_from_env(
     registry: &game::BlockRegistry,

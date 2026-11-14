@@ -3,7 +3,10 @@
 
 use game::prefab::Placement;
 use game::{BlockId, ColumnCoords, RegionCoords, SubChunk, CHUNK_BLOCKS};
-use server::dev_structures::{from_env, parse_town_spec, install_from_env, DevStructures, LandingOf, DEV_STRUCTURES_ENV, PREFAB_DIRS_ENV};
+use server::dev_structures::{
+    announces_region, from_env, install_from_env, parse_town_spec, DevStructures, LandingOf, DEV_STRUCTURES_ENV,
+    PREFAB_DIRS_ENV,
+};
 use worldgen::structures::{active, DEV_GAP_BLOCKS};
 
 const CB: i32 = CHUNK_BLOCKS as i32;
@@ -25,8 +28,25 @@ fn read(cols: &[(ColumnCoords, game::Column)], [x, y, z]: [i32; 3]) -> BlockId {
     }
 }
 
+/// A forged world's fresh session waits in the spawn region before it embarks: that region is not
+/// announced, so the embark target becomes the home. A procedural world announces every region.
+#[test]
+fn the_spawn_region_is_not_announced_in_a_forged_world() {
+    let spawn = game::world_manager::SPAWN_REGION;
+    assert!(!announces_region(spawn, true));
+    assert!(announces_region(spawn, false));
+    for rc in [RegionCoords { x: 3, z: -1 }, RegionCoords { x: 0, z: 1 }, RegionCoords { x: -1, z: 0 }] {
+        assert!(announces_region(rc, true), "{rc:?}");
+        assert!(announces_region(rc, false), "{rc:?}");
+    }
+}
+
+/// Env vars are process-global and tests run on threads: every test that sets them holds this.
+static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn dev_structures_install_and_stamp() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
     game::install_block_props(registry.props());
     let mats = worldgen::material::Materials::from_names(|n| registry.id_of(n).unwrap());
@@ -140,4 +160,79 @@ fn dev_structures_install_and_stamp() {
     let e = from_env(&registry, pure_landing, seed, mats).err().expect("a missing prefab directory is an error");
     assert!(e.contains(&*missing.to_string_lossy()), "{e}");
     std::env::remove_var(PREFAB_DIRS_ENV);
+}
+
+/// Four small houses tagged `style` + `house` (a full stone-brick floor, plank walls, a door marker on
+/// the south face), written as `.prefab.ron` files: they pass the kit's rules.
+fn write_houses(dir: &std::path::Path, style: &str) {
+    for (i, (sx, sz)) in [(7, 6), (9, 7), (8, 8), (6, 9)].into_iter().enumerate() {
+        let (px, pz) = (sx / 2, sz - 1);
+        let ron = format!(
+            r#"(format: 2, name: "fix-house-{i}", size: ({sx}, 5, {sz}), anchor: ({px}, 0, {pz}),
+            palette: ["stone_bricks", "oak_planks"],
+            boxes: [(min: (0, 0, 0), size: ({sx}, 1, {sz}), mat: 0), (min: (0, 1, 0), size: ({sx}, 3, {sz}), mat: 1)],
+            carve: [(min: (1, 1, 1), size: ({}, 3, {})), (min: ({px}, 1, {pz}), size: (1, 2, 1))],
+            markers: [(at: ({px}, 1, {pz}), kind: "door")],
+            tags: ["{style}", "house"])"#,
+            sx - 2,
+            sz - 2
+        );
+        std::fs::write(dir.join(format!("fix-house-{i}.prefab.ron")), ron).unwrap();
+    }
+}
+
+/// The environment to the town: prefab files on disk, `VOXEL_PREFAB_DIRS`, `VOXEL_DEV_STRUCTURES=town=…`,
+/// the pure step, then the first region request lays the town out over the real procedural `ground_y` /
+/// `is_wet`, its plaza centred on the region's origin column as the server computes it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn env_to_town() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+    let mats = worldgen::material::Materials::from_names(|n| registry.id_of(n).unwrap());
+    let seed = worldgen::WORLD_SEED;
+    let dir = std::env::temp_dir().join(format!("voxel-dev-town-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_houses(&dir, "fixville");
+
+    // A forested region near spawn (by world position, the same land at any region size).
+    let home = RegionCoords::from_world(-1536.0, 2560.0);
+    let landing: LandingOf =
+        std::sync::Arc::new(move |rc: RegionCoords| (rc == home).then_some([20u32, 24u32]));
+    std::env::set_var(PREFAB_DIRS_ENV, &dir);
+    std::env::set_var(DEV_STRUCTURES_ENV, "town=fixville:4:48");
+    let setup = from_env(&registry, landing, seed, mats);
+    std::env::remove_var(DEV_STRUCTURES_ENV);
+    std::env::remove_var(PREFAB_DIRS_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+    let setup = setup.expect("town=fixville");
+    assert_eq!(setup.what, DevStructures::Town { style: "fixville".into() });
+    let source = setup.source.expect("a source for town=");
+    let everywhere = |s: &dyn worldgen::structures::StructureSource| {
+        (s.placements_in(-10_000, -10_000, 10_000, 10_000, 0), s.paints_in(-10_000, -10_000, 10_000, 10_000, 0))
+    };
+    let (placements, paints) = everywhere(&*source);
+    assert!(placements.is_empty() && paints.is_empty(), "nothing before a region is requested");
+
+    source.region_requested(home);
+    let (placements, paints) = everywhere(&*source);
+    let houses = placements.iter().filter(|p| p.prefab.name.starts_with("fix-house-")).count();
+    assert!(houses >= 1, "at least one house laid: {placements:?}");
+    let origin = [home.x * RB + 20, home.z * RB + 24];
+    let plaza = paints[0].rect;
+    assert_eq!(
+        [(plaza[0] + plaza[2] - 1) / 2, (plaza[1] + plaza[3] - 1) / 2],
+        origin,
+        "the plaza is centred on the landing column: {plaza:?}"
+    );
+    assert_eq!(paints[0].block, registry.id_of("smooth_stone").unwrap());
+    for p in &placements {
+        let pad = p.pad.expect("a house stands on a pad");
+        assert_eq!(p.bounds().0[1], pad.level + 1, "{p:?}");
+    }
+    // A second request moves nothing.
+    source.region_requested(RegionCoords { x: home.x + 1, z: home.z });
+    let (again, _) = everywhere(&*source);
+    assert_eq!(again.len(), placements.len());
 }
