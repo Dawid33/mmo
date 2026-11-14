@@ -1701,7 +1701,8 @@ kube *args:
 # https://share.factoriosurvivalworld.com), `zulip` (team chat at
 # https://chat.factoriosurvivalworld.com; uploads in Garage, its own PostgreSQL), `keycloak`
 # (identity provider at https://auth.factoriosurvivalworld.com) and `keycloak-realm` (its realm,
-# clients and mail, through the admin API: needs `just orion-keycloak-admin` running), `login` (the
+# clients and mail, through the admin API: needs `just orion-keycloak-admin` running), `registry`
+# (the ECR repository mmo/login and the cluster's pull-only IAM user), `login` (the
 # game's login service at https://login.factoriosurvivalworld.com) and `site` (the website at
 # https://factoriosurvivalworld.com, from website/). State lives in AWS S3 (deploy/envs/orion/backend.s3.tfbackend,
 # key orion/<root>.tfstate); AWS credentials come from the default chain
@@ -1710,7 +1711,7 @@ kube *args:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | login | site) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | registry | login | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
@@ -1727,7 +1728,8 @@ orion-plan root *args:
 # in Garage; the first garage apply runs before monitoring exists, so with
 # `-var metrics=false`), then picoshare (any time) and
 # keycloak -> keycloak-realm -> zulip (Zulip logs in through Keycloak, and keeps its files in Garage)
-# and login (the issuer comes from the realm's state; `just orion-login-push` BEFORE its first apply)
+# and registry -> login (the issuer comes from the realm's state, the image and the pull user from
+# registry's; `just orion-login-push` BEFORE login's first apply)
 # and site (the website reads the realm's issuer).
 [positional-arguments]
 orion-apply root *args:
@@ -1792,22 +1794,25 @@ orion-keycloak-admin:
 orion-keycloak-admin-password:
     @{{tofu}} -chdir=deploy/envs/orion/keycloak output -raw admin_password; echo
 
-# The login service on orion (deploy/modules/login, root deploy/envs/orion/login): the pod runs
-# stock debian over the release `login` binary shipped to /srv/mmo/bin on the box.
-# Release build of the login binary (what orion-login-push ships).
+# The login service on orion (deploy/modules/login, root deploy/envs/orion/login): the pods run
+# the image mmo/login from ECR (deploy/images/login/Dockerfile: debian + the release binary;
+# the registry root). Releases are `kubectl set image`, never an apply; the way back is
+# `just orion-kube -n login rollout undo deploy/login`.
+# Release build of the login binary (what orion-login-push puts in the image).
 orion-login-build:
     {{cap}} {{cargo}} build --release -p login --bin login
 
-# Ship the binary to the box and rolling-restart the login Deployment
-# (scripts/orion_login_push.sh; before the login root exists it only ships).
+# Build the image, push it to ECR as mmo/login:<git short sha> and `kubectl set image` it on the
+# login Deployment, waiting for the rollout (scripts/orion_login_push.sh). Before the login root
+# exists it only pushes, also as :bootstrap (what the root's first apply starts from).
 orion-login-push: orion-login-build
-    DEPLOY_HOST={{deploy_host}} KUBE_CONTEXT={{orion_context}} scripts/orion_login_push.sh
+    KUBE_CONTEXT={{orion_context}} TOFU={{tofu}} scripts/orion_login_push.sh
 
 # The login operator commands inside a login pod, where the database is,
 # e.g. `just orion-login world list`, `just orion-login account issue-refresh <email>`.
 [positional-arguments]
 orion-login *args:
-    kubectl --context {{orion_context}} -n login exec deploy/login -- /srv/mmo/bin/login "$@"
+    kubectl --context {{orion_context}} -n login exec deploy/login -- login "$@"
 
 # Follow the login service's log.
 orion-login-logs:
