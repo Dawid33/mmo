@@ -1328,6 +1328,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Per peer: a leave of the pending world cut joins this host and it (either leaves);
     /// what this host sends it meanwhile waits here (`world_cut.rs`, leave cuts).
     leave_pairs: BTreeMap<u32, world_cut::LeavePair>,
+    /// Per peer: the pending world cut runs with it in count mode — their link is down, the
+    /// session frozen until the cut's `CutDone` (`world_cut.rs`, the fourth case).
+    count_pairs: BTreeMap<u32, world_cut::CountPair>,
     /// Peers that left in a committed cut, with the boot they left as: their session is
     /// held until a hello of another boot.
     left_peers: BTreeMap<u32, Option<u64>>,
@@ -1547,6 +1550,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             leave_decided: false,
             leave_parked: false,
             leave_pairs: BTreeMap::new(),
+            count_pairs: BTreeMap::new(),
             left_peers: BTreeMap::new(),
             returning_peers: BTreeMap::new(),
             left_land: BTreeMap::new(),
@@ -2937,10 +2941,19 @@ impl<S: RegionSpawner> WorldManager<S> {
             cut.rows.push(InFlightRow::Intent { target: f.target, msg: f.msg });
         }
         // Transfers to other hosts not acknowledged yet (`cut_peer_rows`): to a host that is
-        // absent from the cut only. A participant's link that is down aborts the cut, so
-        // what this host sent a participant is in exactly one part by the mark rule (the
-        // receiver's before this host's mark; this host's snapshot after it).
+        // absent from the cut only. What this host sent a participant is in exactly one part
+        // by the mark rule (the receiver's before this host's mark; this host's snapshot
+        // after it) — or, toward one counted with across a down link, by its count
+        // (`cut_counted`: what is numbered above it is this part's, the rest the receiver's).
         cut.rows.extend(self.cut_peer_rows(&participants));
+        let mut counted_players = Vec::new();
+        for (peer, count) in self.world_cut_counts(id) {
+            let counted = self.cut_counted(peer, count, id, cut.tick);
+            cut.rows.extend(counted.rows);
+            counted_players.extend(counted.players);
+            let received = self.journal.received_len(peer);
+            self.journal.counted(peer, id, &counted.kept_sent, received);
+        }
         for (target, list) in &self.intent_mailbox {
             for m in list.iter().filter(|m| !m.in_source_view) {
                 cut.rows.push(InFlightRow::Intent { target: *target, msg: m.msg });
@@ -2973,6 +2986,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         // where they are headed. A snapshot holding the body wins (it came back during the
         // acknowledgement lag); the hand-off wins over an older record passing through.
         for (player, record) in self.cut_peer_players(&participants) {
+            if !cut.not_ours.contains_key(&player) {
+                players.entry(player).or_insert(record);
+            }
+        }
+        // Handed bare to a host counted with and numbered above its count: never received
+        // there before the cut is decided — this part's record after all (case 2 noted it as
+        // the receiver's), as for an absent peer.
+        for (player, record) in counted_players {
+            if cut.sent_bare.remove(&player) {
+                cut.not_ours.remove(&player);
+            }
             if !cut.not_ours.contains_key(&player) {
                 players.entry(player).or_insert(record);
             }

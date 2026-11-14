@@ -2603,3 +2603,50 @@ fn a_request_for_land_already_declared_is_pruned() {
     read_departed(&mut c, 2, 1, None, due + 2);
     assert_eq!(c.declare_wanted(due + 2), None, "declared once");
 }
+
+/// The counts relayed between participants of a running world cut.
+fn counts(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::CutId, u32, u64, u64)> {
+    out.iter()
+        .filter_map(|(to, m)| match (to, m) {
+            (Target::Host(h), CoordMsg::CutPeerCount { cut, from, received_through, boot }) => {
+                Some((*h, *cut, *from, *received_through, *boot))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// R4 Task 12: a participant's count of what it received from another participant of the
+/// running cut goes to that participant (as from the reporter), unchanged; a count naming
+/// the reporter itself, a host outside the cut, coming from a host outside it, or of
+/// another cut is dropped — and once the cut is decided (aborted for a lapsed participant
+/// here, as the coordinator does before any declaration) no count of it is relayed.
+#[test]
+fn cut_peer_counts_are_relayed_between_participants_only() {
+    let mut c = succeeding(3);
+    c.maintain(CUT_EVERY_MS);
+    let begun_now = begun(&commit_routed(&mut c));
+    assert_eq!(begun_now.len(), 3, "a cut of every host runs");
+    let cut = begun_now[0].1;
+    let now = CUT_EVERY_MS;
+    c.handle(0, HostMsg::CutPeerCount { cut, peer: 1, received_through: 7, boot: 101 }, now);
+    c.handle(1, HostMsg::CutPeerCount { cut, peer: 0, received_through: 0, boot: 0 }, now);
+    assert_eq!(counts(&commit_routed(&mut c)), [(1, cut, 0, 7, 101), (0, cut, 1, 0, 0)], "relayed to the peer, as from the reporter");
+    c.handle(0, HostMsg::CutPeerCount { cut, peer: 0, received_through: 3, boot: 100 }, now);
+    c.handle(0, HostMsg::CutPeerCount { cut, peer: 5, received_through: 3, boot: 105 }, now);
+    c.handle(5, HostMsg::CutPeerCount { cut, peer: 0, received_through: 3, boot: 100 }, now);
+    c.handle(0, HostMsg::CutPeerCount { cut: game::CutId(cut.0 + 1), peer: 2, received_through: 3, boot: 102 }, now);
+    assert!(counts(&commit_routed(&mut c)).is_empty(), "nothing relayed outside the cut's participants");
+    // Host 2 lapses: the cut is decided aborted before anything is declared, and a count
+    // sent after that is not relayed.
+    read_leases(&mut c, 3, &[2], &[], now + 1);
+    assert_eq!(c.declare_wanted(now + 1), None, "not while the cut runs");
+    assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)), "aborted first");
+    c.handle(0, HostMsg::CutPeerCount { cut, peer: 2, received_through: 4, boot: 102 }, now + 1);
+    c.handle(2, HostMsg::CutPeerCount { cut, peer: 0, received_through: 4, boot: 100 }, now + 1);
+    assert!(counts(&commit_routed(&mut c)).is_empty(), "no count of a decided cut is relayed");
+    c.decided(cut, false);
+    commit_routed(&mut c);
+    c.handle(1, HostMsg::CutPeerCount { cut, peer: 0, received_through: 4, boot: 100 }, now + 2);
+    assert!(counts(&commit_routed(&mut c)).is_empty(), "nor once it is over");
+}

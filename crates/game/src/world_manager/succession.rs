@@ -368,11 +368,24 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer.session.release();
         }
         owed_raw.extend(self.peer_waiting.remove(&pred).unwrap_or_default());
+        // A world cut counted with the predecessor and not decided here yet (its `CutDone`
+        // comes before any order on the coordinator's link; defensive): what it held back
+        // is reported as a leave's is, and the session thaws for the next boot.
+        let counted_held = match self.count_pairs.remove(&pred) {
+            Some(pair) => {
+                if let Some(peer) = self.peers.get_mut(&pred) {
+                    peer.session.thaw();
+                }
+                pair.held
+            }
+            None => Vec::new(),
+        };
         // What a leave held back was never queued (nor journalled): journalled now, so its
         // transfers and moves are `Sent` entries of the report like every other.
-        if let Some(pair) = self.leave_pairs.remove(&pred) {
+        let leave_held = self.leave_pairs.remove(&pred).map(|p| p.held).unwrap_or_default();
+        if !leave_held.is_empty() || !counted_held.is_empty() {
             let tick = self.spawner.world_tick();
-            for msg in pair.held {
+            for msg in leave_held.into_iter().chain(counted_held) {
                 let count = self.peer_queued.entry(pred).or_default();
                 let qid = *count;
                 *count += 1;

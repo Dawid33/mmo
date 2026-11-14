@@ -912,3 +912,86 @@ fn redacted_messages_hide_player_tokens() {
         assert!(format!("{body:?}").contains("tok-secret"), "the message itself is unchanged");
     }
 }
+
+/// R4 Task 12 (a world cut counted across a down link): a's 1..=30 to b, a seeded part
+/// through, b's acknowledgements of a seeded part of that lost; then the link drops and
+/// both sessions freeze. b's count of a's numbering is exactly what b received (counted
+/// against a's boot) and a's `owed_above` that count is exactly what b never got — the two
+/// partition the stream whatever was acknowledged. The link comes back while frozen: nothing
+/// is read or sent (b's count stays, a's owed stays). Thawed, b gets the rest once, in order.
+#[test]
+fn owed_above_and_received_through() {
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        run(seed, &mut a, &mut b, &mut now, |a, b| a.s.is_reachable() && b.s.is_reachable());
+        assert_eq!(b.s.received_through(), (0, Some(100)), "seed {seed}: nothing yet, counted against a's boot");
+        for n in 1..=30 {
+            a.s.queue(payload(n));
+        }
+        let through = roll(seed, 0) % 25;
+        for _ in 0..through {
+            now += 1;
+            a.pump(now);
+            if roll(seed, now) % 3 != 0 {
+                b.pump(now);
+            } else {
+                // b reads, its acknowledgement lost: what it got stays owed on a.
+                PeerLink::pump(&mut b.link, now);
+                for e in b.s.pump(&mut NoAcks(&mut b.link), now) {
+                    if let PeerEvent::Reliable(r) = &e {
+                        b.got.push(number(r));
+                    }
+                }
+            }
+        }
+        a.link.set_up(false);
+        a.pump(now + 1);
+        b.pump(now + 1);
+        now += 1;
+        a.s.freeze();
+        b.s.freeze();
+        let (count, boot) = b.s.received_through();
+        assert_eq!(boot, Some(100), "seed {seed}: counted against a's boot");
+        assert_eq!(b.got, (1..=count).collect::<Vec<_>>(), "seed {seed}: the count is what b received");
+        let owed: Vec<u64> = a.s.owed_above(count).map(number).collect();
+        assert_eq!(owed, (count + 1..=30).collect::<Vec<_>>(), "seed {seed}: owed above the count is what b lacks");
+        // Back while frozen: nothing read, nothing sent, nothing reachable.
+        a.link.set_up(true);
+        let sent_before = a.link.reliable_sent();
+        rounds(&mut a, &mut b, &mut now, 40);
+        assert_eq!(b.s.received_through(), (count, Some(100)), "seed {seed}: frozen, the count stays");
+        assert_eq!(b.got.len() as u64, count, "seed {seed}: nothing above the count arrived");
+        assert_eq!(a.link.reliable_sent(), sent_before, "seed {seed}: frozen, nothing sent");
+        assert!(!a.s.is_reachable() && !b.s.is_reachable(), "seed {seed}: frozen is not reachable");
+        assert_eq!(a.s.owed_above(count).map(number).collect::<Vec<_>>(), owed, "seed {seed}");
+        // A hold is not a freeze: releasing it thaws nothing.
+        a.s.release();
+        rounds(&mut a, &mut b, &mut now, 10);
+        assert_eq!(b.got.len() as u64, count, "seed {seed}: a release does not thaw");
+        a.s.thaw();
+        b.s.thaw();
+        run(seed, &mut a, &mut b, &mut now, |a, _| a.s.unreceived().count() == 0);
+        assert_eq!(b.got, (1..=30).collect::<Vec<_>>(), "seed {seed}: the rest once, in order");
+    }
+}
+
+/// A link end that loses every acknowledgement the session sends through it.
+struct NoAcks<'a>(&'a mut Tap);
+
+impl PeerLink for NoAcks<'_> {
+    fn send(&mut self, msg: PeerMsg) {
+        if !matches!(msg, PeerMsg::Ack { .. }) {
+            self.0.send(msg);
+        }
+    }
+    fn recv(&mut self) -> Option<PeerMsg> {
+        self.0.recv()
+    }
+    fn is_up(&self) -> bool {
+        self.0.is_up()
+    }
+    fn connection(&self) -> u64 {
+        self.0.connection()
+    }
+}

@@ -208,6 +208,13 @@ pub enum HostMsg {
     /// after [`crate::HEIR_WAIT_MS`] otherwise — unless it registers again first. Sent at most
     /// once per [`crate::LAND_WANTED_EVERY_MS`] per super-region; ignored under `Static`.
     LandWanted { sr: SuperRegion },
+    /// World cut `cut` runs here in count mode with participant `peer` (R4 Task 12,
+    /// `world_manager/world_cut.rs`): their link is down (or was not up at the `BeginCut`),
+    /// this host froze its session with it, and has received `received_through` of `peer`'s
+    /// numbering toward it, counted against `peer`'s process `boot` (0: no hello of `peer`
+    /// yet). The coordinator relays it to `peer` ([`CoordMsg::CutPeerCount`]), only between
+    /// participants of the running cut.
+    CutPeerCount { cut: CutId, peer: u32, received_through: u64, boot: u64 },
 }
 
 /// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).
@@ -309,6 +316,11 @@ pub enum CoordMsg {
     /// lost before a succession settled, or a succession's deadline): the world generation
     /// is this now — every host notes it and exits (`EXIT_WORLD_ROLLBACK`).
     Generation(u64),
+    /// Participant `from` of world cut `cut` has received `received_through` of this host's
+    /// numbering toward it, counted against this host's process `boot` (its
+    /// [`HostMsg::CutPeerCount`], relayed): everything numbered above it is this host's in
+    /// the cut (a boot that is not this host's own counts 0).
+    CutPeerCount { cut: CutId, from: u32, received_through: u64, boot: u64 },
 }
 
 impl CoordMsg {

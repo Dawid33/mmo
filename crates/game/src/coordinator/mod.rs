@@ -384,6 +384,9 @@ impl Coordinator {
             HostMsg::SuccessionApplied { id } => self.succession_applied(host, id),
             HostMsg::SuccessionAdopted { id } => self.succession_adopted(host, id),
             HostMsg::LandWanted { sr } => self.land_asked(host, sr),
+            HostMsg::CutPeerCount { cut, peer, received_through, boot } => {
+                self.cut_peer_count(host, cut, peer, received_through, boot)
+            }
         }
         self.push_directives();
     }

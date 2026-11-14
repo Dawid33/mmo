@@ -644,6 +644,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.world_begin_cut(cut, tick, &hosts, &leaving, generation)
             }
             CoordMsg::CutDone { cut, committed } => self.world_cut_decided(cut, committed),
+            CoordMsg::CutPeerCount { cut, from, received_through, boot } => {
+                self.world_cut_peer_count(cut, from, received_through, boot)
+            }
             CoordMsg::Succession { id, predecessor, predecessor_boot, heir, kind, base_cut, moved, survivors } => self
                 .succession_ordered(crate::Succession {
                     id,

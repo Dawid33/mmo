@@ -241,6 +241,9 @@ fn describe(msg: &CoordMsg) -> String {
         ),
         CoordMsg::SuccessionDone { id, settled } => format!("SuccessionDone {} (settled {settled})", id.0),
         CoordMsg::Generation(g) => format!("Generation({g})"),
+        CoordMsg::CutPeerCount { cut, from, received_through, boot } => {
+            format!("CutPeerCount {} from host {from}: {received_through} of boot {boot:#x}", cut.0)
+        }
     }
 }
 
@@ -279,6 +282,9 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::SuccessionApplied { id } => format!("SuccessionApplied {}", id.0),
         HostMsg::SuccessionAdopted { id } => format!("SuccessionAdopted {}", id.0),
         HostMsg::LandWanted { sr } => format!("LandWanted {sr:?}"),
+        HostMsg::CutPeerCount { cut, peer, received_through, boot } => {
+            format!("CutPeerCount {} toward host {peer}: {received_through} of boot {boot:#x}", cut.0)
+        }
     }
 }
 

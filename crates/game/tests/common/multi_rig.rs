@@ -330,6 +330,9 @@ pub struct MultiRig {
     /// Entities a killed host held, or that were on their way to or from it
     /// ([`Self::kill`]): no longer tracked — the heir's resolution (Task 9) brings them back.
     pub forgiven: BTreeSet<EntityId>,
+    /// Pairs [`Self::assert_journals_explain_the_cut`] checked as truncated by counts (R4
+    /// Task 12: a cut committed with their link down), so far.
+    pub counted_pairs_checked: usize,
     /// Whether the rig answers an heir's adoption reads ([`Self::with_adoption`]).
     pub adopting: bool,
     /// Adoption reads asked and not answered yet: `(rounds left, heir, succession, predecessor)`.
@@ -459,6 +462,7 @@ impl MultiRig {
                 successions: Vec::new(),
                 adopts: Vec::new(),
                 forgiven: BTreeSet::new(),
+                counted_pairs_checked: 0,
                 adopting: false,
                 adoptions_pending: Vec::new(),
                 adopted: Vec::new(),
@@ -839,8 +843,10 @@ impl MultiRig {
     ///
     /// No explained entry: every host that took part in K and counts from it has truncated
     /// toward every other participant by both marks of K, and every entry left from before
-    /// a mark of its direction travelled wrapped in K. A journal never counts from a cut
-    /// later than K.
+    /// a mark of its direction travelled wrapped in K — or, toward a participant K counted
+    /// with across a down link (R4 Task 12), by the counts: every entry left from before the
+    /// commit travelled wrapped in K or is a sent one above the peer's count. A journal never
+    /// counts from a cut later than K.
     pub fn assert_journals_explain_the_cut(&mut self) -> usize {
         use game::{JournalEvent, Subject};
         let Some((cut, _)) = &self.last_cut else { return 0 };
@@ -850,6 +856,7 @@ impl MultiRig {
         let participants: BTreeSet<u32> = parts.keys().copied().collect();
         // (host, peer, sent?) → subjects.
         let mut journalled: BTreeMap<(u32, u32, bool), BTreeSet<Subject>> = BTreeMap::new();
+        let mut counted_checked = 0;
         for h in 0..n {
             let journal = self.hosts[h as usize].manager.peer_journal();
             let base = journal.base();
@@ -869,7 +876,28 @@ impl MultiRig {
                 panic!("host {h} counts from cut {} without having truncated by its marks (seed {})", cut.0, self.seed)
             };
             assert_eq!(*marked, cut, "host {h}'s last truncation was by cut {}, its base is {}", marked.0, cut.0);
+            let counted = journal.last_counted().filter(|(c, _)| *c == cut).map(|(_, read)| read.clone()).unwrap_or_default();
             for p in participants.iter().copied().filter(|p| *p != h) {
+                // A pair counted across a down link (R4 Task 12): what is left from before the
+                // commit travelled wrapped in K, or is a sent entry above the peer's count.
+                if let Some(read) = counted.get(&p) {
+                    counted_checked += 1;
+                    for (e, seq, accounted, queue_id) in journal.rows_with_ids(p) {
+                        let kept = seq >= read.after
+                            || accounted == Some(cut)
+                            || queue_id.is_some_and(|id| read.kept_sent.contains(&id));
+                        assert!(
+                            kept,
+                            "host {h} keeps {:?} with host {p} it counted with in cut {}, inside the count, not wrapped in \
+                             it ({accounted:?}): the cut explains it (seed {}, link delay {})",
+                            e.subject,
+                            cut.0,
+                            self.seed,
+                            self.link_delay
+                        );
+                    }
+                    continue;
+                }
                 let Some(&(Some(out), Some(inn))) = marks.get(&p) else {
                     panic!("host {h} truncated by cut {} without both marks with host {p}: {:?} (seed {})", cut.0, marks.get(&p), self.seed)
                 };
@@ -887,6 +915,7 @@ impl MultiRig {
                 }
             }
         }
+        self.counted_pairs_checked += counted_checked;
         let mut moved: Vec<(Subject, u32, u32)> = Vec::new();
         let ids: Vec<EntityId> = self.tracked.keys().copied().collect();
         for id in ids {

@@ -539,6 +539,20 @@ impl Coordinator {
         });
     }
 
+    /// Host `host`'s count of what it received from participant `peer` in world cut `cut`
+    /// ([`crate::HostMsg::CutPeerCount`]): relayed to `peer` while `cut` runs undecided and
+    /// both are participants (two different ones); dropped otherwise — a count of a decided
+    /// cut (an abort for a lapsed participant included) is never used.
+    pub(super) fn cut_peer_count(&mut self, host: u32, cut: CutId, peer: u32, received_through: u64, boot: u64) {
+        let running = self.cuts.run.as_ref().filter(|r| r.cut == cut && r.verdict.is_none());
+        if !running.is_some_and(|r| host != peer && r.has(host) && r.has(peer)) {
+            log::debug!("coordinator: host {host}'s count toward host {peer} in cut {} dropped: not between participants of it running", cut.0);
+            return;
+        }
+        log::info!("coordinator: world cut {}: host {host} counts {received_through} from host {peer}; relayed", cut.0);
+        self.push(Target::Host(peer), CoordMsg::CutPeerCount { cut, from: host, received_through, boot });
+    }
+
     /// The participants of the running cut (decided or not, until its decision is
     /// recorded), if one runs.
     pub(super) fn cuts_running_participants(&self) -> Option<Vec<u32>> {

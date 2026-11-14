@@ -434,6 +434,40 @@ fn a_cut_with_one_host_detached_is_aborted_and_leaves_nothing_staged() {
 }
 
 
+/// R4 Task 12 (real links): the peer link between the two hosts is closed (`PeerGate`)
+/// and stays closed while a world cut that began after it commits — each host's count of
+/// the other relayed through the real coordinator — and nothing stays prepared. The link
+/// back, the next cut commits too and no entity is stored twice.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_cut_with_a_peer_link_down_commits() {
+    install_props();
+    let Some(db) = PgDb::create("wcount") else { return };
+    let dir = scratch("wcount");
+    let mut w = world(&db, &dir);
+    w.until_committed_after(&db, 0);
+    for sim in &w.pair.sims {
+        sim.gate.set_down(true);
+    }
+    w.pair.until("the peer link is seen down", |p| !p.sims[0].manager.peer_is_reachable(1) && !p.sims[1].manager.peer_is_reachable(0));
+    let coordinator = w.coordinator.as_ref().unwrap();
+    let running = coordinator.thread.inspect(|c| c.world_cut_running(), WAIT).flatten().map_or(0, |(c, _)| c.0 as i64);
+    let decided = decisions(&db).iter().map(|(c, _, _)| *c).max().unwrap_or(0);
+    let after = running.max(decided);
+    w.until_committed_after(&db, after);
+    assert!(w.pair.sims.iter().all(|s| s.gate.is_down()), "the link stayed down");
+    assert!(!w.pair.sims[0].manager.peer_is_reachable(1), "host 0 never reached host 1 meanwhile");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    for sim in &w.pair.sims {
+        sim.gate.set_down(false);
+    }
+    w.pair.until("the peer link is back", |p| p.sims[0].manager.peer_is_reachable(1) && p.sims[1].manager.peer_is_reachable(0));
+    let latest = decisions(&db).iter().map(|(c, _, _)| *c).max().unwrap_or(0);
+    w.until_committed_after(&db, latest);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
 /// Important 2: the coordinator's decision write and its first abort both fail: it keeps
 /// trying until an abort is stored, announces only that, and the next cut commits on
 /// both hosts — nothing stays staged.
@@ -1916,18 +1950,18 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     for _ in 0..10 {
         w.pair.round();
     }
-    // Not timing-dependent: no world cut holding the dig can commit while the link is down
-    // (each needs every participant's mark over it; one that is unreachable aborts the
-    // cut, `world_cut.rs`), and the dig came after the link was seen down — checked here.
-    assert!(
-        decisions(&db).iter().all(|(_, t, k)| !*k || *t <= dug_at),
-        "no cut after the dig committed while the link was down: {:?} (dug at {dug_at})",
-        decisions(&db)
-    );
+    // Since R4 Task 12 a world cut commits with the link down (counted across it,
+    // `world_cut.rs`): one holding the dig may already have — then the store brings the dig
+    // to b's halo with the link still down. Until one does, the dig's halo traffic is lost
+    // with the link.
     let saved = query_i64s(&db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", a.x, a.z));
-    assert!(saved.iter().all(|t| *t <= dug_at), "the store does not hold the dig yet: {saved:?} (dug at {dug_at})");
-    assert!(seen_from_b(&mut w.pair).is_some(), "the dig's halo traffic was lost with the link");
-    let parked_after = decisions(&db).iter().map(|(c, _, _)| *c).max().unwrap_or(0);
+    if saved.iter().all(|t| *t <= dug_at) {
+        assert!(
+            seen_from_b(&mut w.pair).is_some() || decisions(&db).iter().any(|(_, t, k)| *k && *t > dug_at),
+            "the dig's halo traffic was lost with the link"
+        );
+    }
+    let parked_after = decisions(&db).iter().filter(|(_, t, _)| *t <= dug_at).map(|(c, _, _)| *c).max().unwrap_or(0);
 
     // The link comes back; nothing on it carries a's parked terrain (a does not run).
     for sim in &w.pair.sims {

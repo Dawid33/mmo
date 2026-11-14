@@ -44,20 +44,63 @@
 //! For each state message exactly one of (bare, before the mark: B's), (wrapped case 1:
 //! A's snapshot), (wrapped case 3: A's row / record) holds, so restoring every host from K
 //! yields each entity, item and player once; a case-3 row with a foreign target is queued
-//! to its owner again on restore ([`WorldManager::restore_in_flight`]). A link that is down
-//! between two participants stops the marks: the cut aborts.
+//! to its owner again on restore ([`WorldManager::restore_in_flight`]).
 //!
-//! **Aborts.** A participant's link going down (or a newer generation) while the part is
-//! not complete, a region missing the tick or lost, a deadline, or another cut still
-//! pending fail the part ([`crate::HostMsg::CutFailed`]); the coordinator then aborts the
-//! cut for every participant. A complete part stays until its
-//! [`crate::CoordMsg::CutDone`] ([`WorldManager::take_world_cut_done`]).
+//! **4. Counted across a down link** (R4 Task 12, plan decision 9). A mark is only a
+//! position in a numbered stream: "everything before it reached the receiver". When the
+//! link between A and a participant B is down at A's `BeginCut`, or goes down while A's part
+//! is pending, or B's count comes first, the pair is in COUNT MODE for cut K: A freezes its
+//! session with B ([`crate::PeerSession::freeze`] — nothing read, nothing sent, no new
+//! connection taken up, until K's `CutDone`), and reports what it received of B's numbering
+//! ([`crate::PeerSession::received_through`], with the B boot it counted) to the coordinator
+//! ([`crate::HostMsg::CutPeerCount`]), which relays it to B. From then on what A sends B is
+//! held back (the leave pairs' path, `hold_for_leave`: never bare — case 1, or case 3 at
+//! once). A's count c_A is the stream position "everything up to here reached A, nothing
+//! after it ever will before K is decided" — exactly what B's mark would have told A, at
+//! a position A chose instead of B: **a count is a mark of the receiver's making**, and
+//! because the receiver is frozen from the moment it counts, the position cannot move.
+//! So for M in B's numbering toward A:
+//! - numbered ≤ c_A: A received it before freezing — the bare rule makes it A's (A's
+//!   snapshot if applied by T, else A's row / record, `in_source_view = false`), unless it
+//!   travelled wrapped in K (B's, as ever);
+//! - numbered > c_A: A never gets it before `CutDone` — B writes it in its part as for an
+//!   absent peer (`cut_counted`: a row or player record, its stamp / due raised to T), unless
+//!   it travelled wrapped in K (B's snapshot or case-3 row holds it already).
+//! A relayed count of ANOTHER process of B's (its `boot` not B's own) counted a numbering
+//! that no longer exists: A received nothing of B's current one, so B counts 0 — everything
+//! owed is B's. A part completes with, per participant, its `CutMark` or — counted with —
+//! its relayed count. The relayed count is also the peer's commitment to write what is
+//! above this host's count, so a pair in count mode always needs it, even when the peer's
+//! mark came before the freeze: that mark settles only the peer's direction (a mark already
+//! received wins over the count for what it covers — the count lies past it, the two agree).
+//! A part complete by marks when a peer's count arrives can never write what that peer
+//! lacks of it: it fails the cut (`CutFailed`, wait — never guess). Nothing waits for a dead
+//! coordinator: no count travels, and its detach aborts the cut as before.
+//!
+//! **Holds that meet on one session.** The freeze composes with the other holds; it never
+//! touches them, and they never thaw it:
+//!
+//! | session is also…                                   | what wins                                  |
+//! |----------------------------------------------------|--------------------------------------------|
+//! | in a leave pair of the same cut (the peer leaves, or this host does) | frozen until `CutDone`; what is sent meanwhile is held by the LEAVE pair; committed: held, entries ≤ the count dropped (`drop_through`, not through the mark: the leaver may lack it), the rest owed to the leaver's next boot; then thawed (still held) |
+//! | held for a peer that left (`left_peers`, its new boot a participant) | frozen until `CutDone`, then thawed and still held — its release stays the leave's (`peer_hello_boot` / `returning_owns`) |
+//! | declared dead (a succession)                        | the coordinator aborts a running cut with a lapsed participant before declaring, and `CutDone` precedes the order on its link: count mode ends first; an order meeting a count pair anyway thaws it and reports what it held |
+//! | a new boot's hello while frozen                    | not read until thawed: the numbering a count refers to never changes |
+//!
+//! **Aborts.** A participant running a newer generation while the part is not complete, a
+//! region missing the tick or lost, a deadline, or another cut still pending fail the part
+//! ([`crate::HostMsg::CutFailed`]); the coordinator then aborts the cut for every
+//! participant. A link that goes down is counted across instead (case 4). A complete part
+//! stays until its [`crate::CoordMsg::CutDone`] ([`WorldManager::take_world_cut_done`]).
 //!
 //! **The peer journal** (R4, `peer/journal.rs`) is this ownership read backwards: every
 //! transfer and player move queued to (`queue_now`) or received from (`peer_reliable`) a
 //! peer, with this host's marks and the peer's marks in between, is kept until a committed
 //! cut explains it — at `CutDone` (`world_cut_decided`) the entries that crossed bare (or
-//! wrapped in another cut) before the mark of their direction are forgotten.
+//! wrapped in another cut) before the mark of their direction are forgotten; for a pair
+//! counted with, by the counts instead ([`crate::PeerJournal::counted`]: a sent entry above
+//! the peer's count stays, received ones inside this host's count go). Every participant,
+//! counted with or not, is recorded at `BeginCut` (`PeerJournal::cut_begun`).
 //!
 //! **Leave cuts** (R3 Task 14). A host about to exit asks for one
 //! ([`WorldManager::request_leave`]); on the `BeginCut` naming it in `leaving` it parks every
@@ -138,13 +181,30 @@ pub(super) struct LeavePair {
     pub leaver: Option<(Option<u64>, Option<BTreeSet<crate::SuperRegion>>)>,
 }
 
+/// A participant the pending world cut runs with in count mode (the module docs' fourth
+/// case): their link was down at the `BeginCut`, went down while this part was pending, or
+/// the peer's own count came first. This host's session with it is frozen until the cut's
+/// `CutDone`, its count of the peer's numbering went to the coordinator
+/// ([`crate::HostMsg::CutPeerCount`]).
+#[derive(Debug)]
+pub(super) struct CountPair {
+    pub cut: CutId,
+    /// The peer's count of this host's numbering, relayed (`Some(0)` for a count of another
+    /// boot of this host): everything numbered above it is this part's.
+    pub theirs: Option<u64>,
+    /// What this host sent the peer from count mode on, held back until the cut is decided
+    /// (each wrapped: this part's, case 1 or 3) — unless a leave pair holds it.
+    pub held: Vec<Reliable>,
+}
+
 impl<S: RegionSpawner> WorldManager<S> {
     /// Take part in world cut `cut` at world tick `tick` with `hosts` (`leaving`: the
     /// hosts leaving in it, among them — a leaving host parks everything for it; every pair
     /// a leave joins holds back what it sends: the module docs). `Missed` when `tick` is
     /// closer than [`WORLD_CUT_MIN_LEAD_TICKS`] or past; `Aborted` while another cut is
-    /// pending here (it is left untouched), when a participant is not reachable, a region
-    /// thread is dead, or this host is named leaving without having asked.
+    /// pending here (it is left untouched), when a region thread is dead, or this host is
+    /// named leaving without having asked. A participant that is not reachable is counted
+    /// with (the module docs' fourth case).
     pub fn begin_world_cut(
         &mut self,
         cut: CutId,
@@ -188,11 +248,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             return Err(CutFailure::Aborted);
         }
         let peers: BTreeSet<u32> = all.into_iter().filter(|h| *h != me).collect();
-        // Every participant's link must be up: one that is down would never bring its mark
-        // (wait, never guess) — the cut is aborted at once.
-        if let Some(p) = peers.iter().find(|p| !self.peer_reachable(**p)) {
-            log::warn!("world cut {}: host {p} is not reachable; aborted", cut.0);
-            return Err(CutFailure::Aborted);
+        // A participant this host cannot reach now would never bring its mark: the pair
+        // counts instead (the fourth case), once the part is begun.
+        let unreachable: Vec<u32> = peers.iter().copied().filter(|p| !self.peer_reachable(*p)).collect();
+        // Count pairs end with their cut's `CutDone`, and no cut begins before that: one still
+        // here is a lost `CutDone` — it thaws and what it held goes out (as for an abort).
+        let stale: BTreeSet<CutId> = self.count_pairs.values().map(|c| c.cut).filter(|c| *c != cut).collect();
+        for c in stale {
+            log::error!("[server] count pairs of world cut {} were never ended; ended now", c.0);
+            self.end_counts(c);
         }
         // Marks of this cut that came before its `BeginCut`.
         let marks_in: BTreeSet<u32> = self.early_marks.iter().filter(|(p, c)| **c == cut && peers.contains(p)).map(|(p, _)| *p).collect();
@@ -207,9 +271,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
             run.beginning = false;
         }
-        // The journal truncates toward these when the cut commits, whoever reports it.
+        // The journal truncates toward these when the cut commits, whoever reports it —
+        // every participant, those it will count with included (by counts, then).
         let participants = self.world_cut_peers(cut);
         self.journal.cut_begun(cut, &participants);
+        for p in unreachable {
+            self.world_cut_count_mode(p, "not reachable at the BeginCut");
+        }
         // A leave joins this host and a peer when either leaves: everything this host sends
         // that peer from now until the cut is decided waits here, in this host's part.
         let peers: Vec<u32> = self.world_cut_peers(cut).into_iter().collect();
@@ -312,10 +380,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.leave_pairs.contains_key(&ordinal) || self.left_peers.contains_key(&ordinal)
     }
 
-    /// `msg` to `ordinal`, joined by a leave of the pending world cut: held back (`None`)
-    /// until the cut is decided; anything else is given back to be queued.
+    /// `msg` to `ordinal`, joined by a leave of the pending world cut or counted with in it:
+    /// held back (`None`) until the cut is decided — by the leave pair when there is one
+    /// (the hold-composition table: it decides what the held messages become) — anything
+    /// else is given back to be queued.
     pub(super) fn hold_for_leave(&mut self, ordinal: u32, msg: Reliable) -> Option<Reliable> {
-        match self.leave_pairs.get_mut(&ordinal) {
+        if let Some(pair) = self.leave_pairs.get_mut(&ordinal) {
+            pair.held.push(msg);
+            return None;
+        }
+        match self.count_pairs.get_mut(&ordinal) {
             Some(pair) => {
                 pair.held.push(msg);
                 None
@@ -334,11 +408,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         let me_leaving = self.leaving_cut == Some(cut);
         for ordinal in pairs {
             let pair = self.leave_pairs.remove(&ordinal).expect("listed");
+            // Counted across a down link: the other side received exactly up to its count
+            // (it may lack this host's mark; what is above the count is this part's rows).
+            let counted = self.count_pairs.get(&ordinal).filter(|c| c.cut == cut).and_then(|c| c.theirs);
             if let Some(peer) = self.peers.get_mut(&ordinal) {
                 peer.session.hold_on_new_boot(false);
                 if committed {
                     peer.session.hold();
-                    peer.session.drop_through_mark(cut);
+                    match counted {
+                        Some(count) => peer.session.drop_through(count),
+                        None => peer.session.drop_through_mark(cut),
+                    }
                     // A next boot's hello may have come already (held at once): it counts
                     // what is left from 1.
                     peer.session.renumber_unsent();
@@ -525,6 +605,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.peers.get(&ordinal).map(|p| p.session.unreceived().cloned().collect()).unwrap_or_default();
         out.extend(self.peer_waiting.get(&ordinal).into_iter().flatten().cloned());
         out.extend(self.leave_pairs.get(&ordinal).into_iter().flat_map(|p| p.held.iter().cloned()));
+        out.extend(self.count_pairs.get(&ordinal).into_iter().flat_map(|p| p.held.iter().cloned()));
         out
     }
 
@@ -617,6 +698,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_cut_seen = Some(self.world_cut_seen.map_or(cut, |s| s.max(cut)));
         self.early_marks.retain(|_, c| *c > cut);
         self.end_leaves(cut, committed);
+        self.end_counts(cut);
         if self.leaving_cut == Some(cut) {
             self.leave_decided = true;
         }
@@ -675,12 +757,62 @@ impl<S: RegionSpawner> WorldManager<S> {
             if self.marks_queued.len() > MARKS_QUEUED_KEPT {
                 self.marks_queued.remove(0);
             }
-            for p in peers {
+            // A pair counted with gets no mark: its relayed count stands for it.
+            let marked: Vec<u32> = peers.into_iter().filter(|p| !self.count_pairs.contains_key(p)).collect();
+            for p in marked {
                 self.queue_now(p, Reliable::CutMark { cut: id });
             }
         }
+        // Per participant its mark, or — counted with — its relayed count (a mark that came
+        // before the freeze settles only what the peer sent; this host's own stream needs the
+        // count it committed to by reporting its own).
         let run = self.world_cut.as_ref().expect("checked");
-        run.peers.is_subset(&run.marks_in)
+        run.peers.iter().all(|p| match self.count_pairs.get(p) {
+            Some(pair) => pair.theirs.is_some(),
+            None => run.marks_in.contains(p),
+        })
+    }
+
+    /// The pending world cut runs with participant `p` in count mode from now on (the module
+    /// docs' fourth case; `why`, for the log): the session is frozen until the cut's
+    /// `CutDone`, and this host's count of `p`'s numbering goes to the coordinator, relayed
+    /// to `p`. Only while this part is pending; once per pair.
+    pub(super) fn world_cut_count_mode(&mut self, p: u32, why: &str) {
+        let Some(run) = self.world_cut.as_ref().filter(|r| r.state == PartState::Pending && r.peers.contains(&p)) else { return };
+        let cut = run.cut;
+        if self.count_pairs.contains_key(&p) {
+            return;
+        }
+        let (count, boot) = match self.peers.get_mut(&p) {
+            Some(peer) => {
+                peer.session.freeze();
+                peer.session.received_through()
+            }
+            None => (0, None),
+        };
+        log::warn!(
+            "[server] world cut {}: host {p} {why}: counted across the link (received {count} of boot {:#x})",
+            cut.0,
+            boot.unwrap_or(0)
+        );
+        self.count_pairs.insert(p, CountPair { cut, theirs: None, held: Vec::new() });
+        self.world_send(HostMsg::CutPeerCount { cut, peer: p, received_through: count, boot: boot.unwrap_or(0) });
+    }
+
+    /// World cut `cut` is decided: each pair it counted with ends — the session thaws (a
+    /// hold of a leave stays: the hold-composition table) and what was held back for it is
+    /// queued.
+    fn end_counts(&mut self, cut: CutId) {
+        let pairs: Vec<u32> = self.count_pairs.iter().filter(|(_, c)| c.cut == cut).map(|(o, _)| *o).collect();
+        for ordinal in pairs {
+            let pair = self.count_pairs.remove(&ordinal).expect("listed");
+            if let Some(peer) = self.peers.get_mut(&ordinal) {
+                peer.session.thaw();
+            }
+            for msg in pair.held {
+                self.queue_now(ordinal, msg);
+            }
+        }
     }
 
     /// The other participants of world cut `id` (empty for a one-phase cut).
@@ -709,9 +841,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             return (msg, self.inbound_accounted);
         };
         let (cut, tick) = (run.cut, run.tick);
-        // To (or from) a host leaving in this cut nothing goes bare: it is held back until
-        // the cut is decided (`hold_for_leave`), so it is this part's (case 1 or 3).
-        let leave = self.leave_pairs.contains_key(&ordinal);
+        // To (or from) a host leaving in this cut, or one this part counts with, nothing goes
+        // bare: it is held back until the cut is decided (`hold_for_leave`), so it is this
+        // part's (case 1 or 3).
+        let leave = self.leave_pairs.contains_key(&ordinal) || self.count_pairs.contains_key(&ordinal);
         match run.state {
             PartState::Complete | PartState::Prepared | PartState::Failed => (msg, Some(cut)),
             PartState::Pending if view => (msg, Some(cut)),
@@ -839,6 +972,51 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.early_marks.insert(from, cut);
     }
 
+    /// Participant `from`'s count of this host's numbering toward it in world cut `cut`,
+    /// relayed by the coordinator ([`crate::CoordMsg::CutPeerCount`]).
+    pub(super) fn world_cut_peer_count(&mut self, cut: CutId, from: u32, received_through: u64, boot: u64) {
+        let Some(run) = self.world_cut.as_ref().filter(|r| r.cut == cut && r.peers.contains(&from)) else {
+            log::debug!("world cut {}: host {from}'s count of a cut not pending here; ignored", cut.0);
+            return;
+        };
+        match run.state {
+            PartState::Pending => {
+                // The peer froze: nothing more of this host's reaches it, and its mark will not
+                // come — this host counts too (its own count goes out now if not yet).
+                self.world_cut_count_mode(from, "counts across the link");
+                // A count of another process of this host: the peer received nothing of this
+                // one's numbering — everything owed it is this part's.
+                let own = self.peers.get(&from).map(|p| p.session.own_boot());
+                let theirs = if own == Some(boot) { received_through } else { 0 };
+                if theirs != received_through {
+                    log::warn!(
+                        "world cut {}: host {from} counted {received_through} of boot {boot:#x}, not this host's: 0 counted",
+                        cut.0
+                    );
+                }
+                if let Some(pair) = self.count_pairs.get_mut(&from).filter(|c| c.cut == cut) {
+                    pair.theirs = Some(theirs);
+                }
+                self.try_complete_cut();
+            }
+            PartState::Complete | PartState::Prepared if !self.count_pairs.contains_key(&from) => {
+                // This part is taken by the marks: it can never account for what the peer
+                // lacks of this host's numbering (it needs this host's count, which this part
+                // never committed to). Wait, never guess: the cut cannot commit — it fails now
+                // rather than at the deadline.
+                log::warn!("world cut {}: host {from} counts across the link, but this part is complete by marks; aborted", cut.0);
+                self.world_send(HostMsg::CutFailed { cut, why: CutFailure::Aborted });
+            }
+            _ => {}
+        }
+    }
+
+    /// The pairs the pending world cut `id` counts with and their relayed counts, for the
+    /// part's rows (`try_complete_cut`).
+    pub(super) fn world_cut_counts(&self, id: CutId) -> Vec<(u32, u64)> {
+        self.count_pairs.iter().filter(|(_, c)| c.cut == id).filter_map(|(o, c)| c.theirs.map(|t| (*o, t))).collect()
+    }
+
     /// The Attach's pending world cut (its outcome is asked for).
     pub(super) fn attach_pending_cut(&self) -> Option<CutId> {
         self.world_cut.as_ref().map(|r| r.cut)
@@ -887,6 +1065,20 @@ impl<S: RegionSpawner> WorldManager<S> {
     #[doc(hidden)]
     pub fn marks_queued(&self) -> &[(CutId, crate::Tick)] {
         &self.marks_queued
+    }
+
+    /// Test support: what this host's session with `ordinal` has received from it, and the
+    /// peer boot that count is of ([`crate::PeerSession::received_through`]).
+    #[doc(hidden)]
+    pub fn peer_received_through(&self, ordinal: u32) -> Option<(u64, Option<u64>)> {
+        self.peers.get(&ordinal).map(|p| p.session.received_through())
+    }
+
+    /// Test support: whether this host's session with `ordinal` is frozen for a world cut in
+    /// count mode (`world_cut.rs`).
+    #[doc(hidden)]
+    pub fn peer_frozen(&self, ordinal: u32) -> bool {
+        self.peers.get(&ordinal).is_some_and(|p| p.session.is_frozen())
     }
 
     /// Test support: the pending world cut part's state, as text (`None`: none).

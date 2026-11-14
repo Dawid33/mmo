@@ -60,7 +60,8 @@ enum Conn {
 ///   connection. **Volatile** ([`PeerSession::send_volatile`]): sent only while
 /// [`PeerSession::is_reachable`], lost with the connection, never replayed. Within one
 /// [`PeerSession::pump`] reliable messages go out before volatile ones; there is no order
-/// between the two classes.
+/// between the two classes. **Frozen** ([`PeerSession::freeze`], a world cut counted across a
+/// down link) nothing moves either way and both counts stand still until thawed.
 pub struct PeerSession {
     me: PeerHello,
     peer: u32,
@@ -84,6 +85,8 @@ pub struct PeerSession {
     /// Volatile messages sent while reachable, out on the next pump.
     volatile_out: Vec<Volatile>,
     held: bool,
+    /// [`PeerSession::freeze`]: nothing read, nothing sent, no new connection taken up.
+    frozen: bool,
     /// [`PeerSession::hold_on_new_boot`]: a hello of another peer boot holds the session
     /// before anything goes out to it.
     hold_new_boot: bool,
@@ -114,6 +117,7 @@ impl PeerSession {
             state: Conn::None,
             volatile_out: Vec::new(),
             held: false,
+            frozen: false,
             hold_new_boot: false,
             reset: false,
             refused: std::collections::BTreeSet::new(),
@@ -179,7 +183,56 @@ impl PeerSession {
     /// The link up (at the last pump), both hellos of this connection exchanged,
     /// generations equal, and not held.
     pub fn is_reachable(&self) -> bool {
-        self.state == Conn::Up && !self.held
+        self.state == Conn::Up && !self.held && !self.frozen
+    }
+
+    /// What this session has received from the peer: the last reliable number of the peer
+    /// boot it counts, and that boot (`None`: no hello of the peer yet). Frozen
+    /// ([`Self::freeze`]), it cannot grow: a world cut's count (`world_cut.rs`).
+    pub fn received_through(&self) -> (u64, Option<u64>) {
+        (self.received_through, self.recv_boot)
+    }
+
+    /// The boot of this host's process, as its hello names it (the boot a peer's count of
+    /// this session's numbering is counted against).
+    pub fn own_boot(&self) -> u64 {
+        self.me.boot
+    }
+
+    /// The peer boot this session's outgoing numbering is addressed to (`None`: no hello of
+    /// the peer yet).
+    pub fn addressed_to(&self) -> Option<u64> {
+        self.send_boot
+    }
+
+    /// What is still owed past the peer's count `count` of this numbering, in order: queued,
+    /// or sent and not acknowledged, numbered above `count`. With a frozen peer (its count
+    /// cannot grow) none of it reaches the peer before this session is thawed.
+    pub fn owed_above(&self, count: u64) -> impl Iterator<Item = &Reliable> {
+        self.out.iter().filter(move |(seq, _)| *seq > count).map(|(_, r)| r)
+    }
+
+    /// Freeze the session for a world cut counted across a down link (`world_cut.rs`, count
+    /// mode): from the next pump until [`Self::thaw`] nothing is read from the link (what
+    /// arrives waits there, in order), nothing is sent (reliable messages keep queuing,
+    /// volatile ones are dropped) and no new connection is taken up (a connection lost meanwhile
+    /// still reports `Down`). The incoming count ([`Self::received_through`]) and the outgoing
+    /// numbering cannot change while frozen. Independent of [`Self::hold`]: thawing never
+    /// releases a hold, and releasing a hold never thaws.
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+        self.volatile_out.clear();
+    }
+
+    /// Undo [`Self::freeze`]: the next pump reads what waited on the link (or takes up the
+    /// link's new connection with a hello) and sends as usual.
+    pub fn thaw(&mut self) {
+        self.frozen = false;
+    }
+
+    /// Whether the session is frozen ([`Self::freeze`]).
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     /// The current connection broke (a gap in the peer's numbering, an impossible ack):
@@ -233,6 +286,17 @@ impl PeerSession {
         self.held = false;
     }
 
+    /// Forget every entry numbered up to `count` — the peer's count of this numbering in a
+    /// world cut counted across a down link (`world_cut.rs`): it received them. Later
+    /// entries stay owed. As [`Self::drop_through_mark`], only for a HELD session whose peer
+    /// comes back as a new boot.
+    pub fn drop_through(&mut self, count: u64) {
+        debug_assert!(self.held, "drop_through on a session that is not held");
+        while self.out.front().is_some_and(|(seq, _)| *seq <= count) {
+            self.out.pop_front();
+        }
+    }
+
     /// Forget this side's `CutMark { cut }` and every entry before it (those belong to the
     /// cut); later entries stay owed. Without such a mark in the buffer, nothing changes.
     ///
@@ -262,7 +326,9 @@ impl PeerSession {
             self.lose_connection();
         }
         self.reset = false;
-        if !up {
+        if !up || self.frozen {
+            // Frozen: what arrives waits on the link, and a new connection is taken up only
+            // once thawed (its hello would move the counts).
             return events;
         }
         if self.connection.is_none() {

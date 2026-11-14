@@ -87,6 +87,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         for msg in self.peer_waiting.remove(&ordinal).unwrap_or_default() {
             session.queue(msg);
         }
+        if self.count_pairs.contains_key(&ordinal) {
+            // A pending world cut counts with that host (its count, 0, already went out):
+            // the new session stays frozen until the cut is decided.
+            session.freeze();
+        }
         self.peers.insert(ordinal, Peer { session, link, stale: false });
     }
 
@@ -181,18 +186,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.peers.values().map(|p| p.session.unreceived().count()).sum::<usize>()
             + self.peer_waiting.values().map(Vec::len).sum::<usize>()
             + self.leave_pairs.values().map(|p| p.held.len()).sum::<usize>()
+            + self.count_pairs.values().map(|p| p.held.len()).sum::<usize>()
     }
 
-    /// What a leave holds back for each host (`world_cut.rs`), never sent yet.
+    /// What a leave, or a world cut counted across a down link, holds back for each host
+    /// (`world_cut.rs`), never sent yet.
     fn leave_held(&self) -> impl Iterator<Item = (u32, &Reliable)> {
-        self.leave_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)))
+        let counted = self.count_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)));
+        self.leave_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r))).chain(counted)
     }
 
     /// Per host, what waits for it outside a session, never sent: waiting for a session
-    /// (`peer_waiting`), or held back by a leave.
+    /// (`peer_waiting`), or held back by a leave or a counted cut.
     fn never_sent(&self) -> impl Iterator<Item = (u32, Vec<&Reliable>)> {
         let waiting = self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
-        waiting.chain(self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>())))
+        let counted = self.count_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>()));
+        waiting.chain(self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>()))).chain(counted)
     }
 
     /// Test support: the entity of every [`Reliable::Transfer`] not acknowledged yet —
@@ -1221,6 +1230,52 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect()
     }
 
+    /// What world cut `cut` (at tick `tick`) counted across a down link writes for a peer
+    /// `ordinal` whose count of this host's numbering is `count` (the module docs of
+    /// `world_cut.rs`, the fourth case): every entry still owed it and numbered above the
+    /// count — the peer is frozen, none of it reaches it before the cut is decided — that did
+    /// not travel wrapped in `cut` (those are in this part already: its snapshot, case 1, or
+    /// its rows, case 3), as `cut_peer_rows` / `cut_peer_players` write it for an absent
+    /// peer, a transfer's stamp or an intent's due raised to at least `tick` (no receiver
+    /// region applies it before its snapshot); and the queue ids of everything owed above the
+    /// count (the journal's `kept_sent`). What waits for a session counts as above any count.
+    pub(super) fn cut_counted(&self, ordinal: u32, count: u64, cut: CutId, tick: crate::Tick) -> Counted {
+        let mut out = Counted::default();
+        let session: Vec<&Reliable> = self.peers.get(&ordinal).map(|p| p.session.owed_above(count).collect()).unwrap_or_default();
+        let waiting: Vec<&Reliable> = self.peer_waiting.get(&ordinal).map(|l| l.iter().collect()).unwrap_or_default();
+        // Their ids: a session's (or a waiting list's) entries are the last queued to that
+        // host (`peer_entries`), and those above the count are the last of them.
+        let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
+        let above: Vec<&Reliable> = session.into_iter().chain(waiting).collect();
+        let first = queued.saturating_sub(above.len() as u64);
+        for (i, r) in above.into_iter().enumerate() {
+            out.kept_sent.insert(first + i as u64);
+            if matches!(r, Reliable::InCut { cut: c, .. } if *c == cut) {
+                continue;
+            }
+            match r.inner() {
+                Reliable::Transfer { bundle, .. } if matches!(bundle.kind, EntityKind::Person { .. }) => {}
+                Reliable::Transfer { target, stamp, bundle, player: None } => {
+                    out.rows.push(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: (*stamp).max(tick) });
+                }
+                Reliable::Intent(msg) => {
+                    let mut msg = *msg;
+                    match &mut msg {
+                        crate::IntentMsg::Intent(s) => s.due = s.due.max(tick),
+                        crate::IntentMsg::Reply(s) => s.due = s.due.max(tick),
+                    }
+                    out.rows.push(InFlightRow::Intent { target: peer_intent_target(&msg), msg });
+                }
+                Reliable::Transfer { target, bundle, player: Some(h), .. } => {
+                    out.players.extend(handoff_record(*target, bundle, h).map(|record| (h.player, record)));
+                }
+                Reliable::PlayerMove { handoff, record, .. } => out.players.push((handoff.player, (**record).clone())),
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// Every player handed to a host that is NOT a participant of the cut (one-phase: any
     /// host) and not acknowledged yet — a walking hand-off ([`Reliable::Transfer`] with a
     /// player: its body's record, as the receiver would park it) or a move
@@ -1460,7 +1515,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 log::info!("[server] peer host {from} down");
                 self.peer_unsynced(from);
                 self.peer_lost(from);
-                self.world_cut_peer_lost(from);
+                // A pending world cut counts with it from here (`world_cut.rs`).
+                self.world_cut_count_mode(from, "went down");
             }
             PeerEvent::HigherGeneration(generation) => {
                 log::error!("[server] peer host {from} runs world generation {generation}, newer than ours: this host is stale");
@@ -1470,7 +1526,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 self.peer_unsynced(from);
                 self.peer_lost(from);
-                self.world_cut_peer_lost(from);
+                self.world_cut_peer_stale(from);
             }
             PeerEvent::Reliable(msg) => self.peer_reliable(from, msg),
             PeerEvent::Volatile(v) => self.peer_volatile(from, v),
@@ -1485,11 +1541,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// A participant's link of the pending world cut went down (or it runs a newer
-    /// generation): its mark may never come — this host's part fails.
-    fn world_cut_peer_lost(&mut self, from: u32) {
+    /// A participant of the pending world cut runs a newer generation: this host is stale —
+    /// its part fails. (A link that merely went down is counted across instead,
+    /// `world_cut.rs`.)
+    fn world_cut_peer_stale(&mut self, from: u32) {
         if self.world_cut.as_ref().is_some_and(|r| r.state == super::world_cut::PartState::Pending && r.peers.contains(&from)) {
-            log::warn!("[server] world cut: the link to host {from} went down while the cut was pending");
+            log::warn!("[server] world cut: host {from} runs a newer generation while the cut was pending");
             self.world_cut_fail(crate::CutFailure::Aborted);
         }
     }
@@ -1741,4 +1798,14 @@ fn reliable_name(r: &Reliable) -> &'static str {
         Reliable::Owns { .. } => "Owns",
         Reliable::SuccessionReport { .. } => "SuccessionReport",
     }
+}
+
+/// What a world cut counted across a down link writes for one peer
+/// ([`WorldManager::cut_counted`]).
+#[derive(Debug, Default)]
+pub(super) struct Counted {
+    pub rows: Vec<InFlightRow>,
+    pub players: Vec<(PlayerId, PlayerRecord)>,
+    /// The queue ids of everything owed above the count (the journal keeps these `Sent`).
+    pub kept_sent: BTreeSet<u64>,
 }
