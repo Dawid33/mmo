@@ -71,6 +71,7 @@ mod peer_journal;
 mod peer_schedule;
 mod peer_session;
 mod physics_goldens;
+mod prefab_shapes;
 mod play_region;
 mod random_ops;
 mod region_coords;
