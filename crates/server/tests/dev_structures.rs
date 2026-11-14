@@ -97,6 +97,26 @@ fn dev_structures_install_and_stamp() {
     assert_eq!(parse_town_spec(" medieval : 2 : 64 "), Ok(("medieval".into(), Some(2), Some(64))));
     assert_eq!(parse_town_spec("m:4:16"), Ok(("m".into(), Some(4), Some(16))));
     assert_eq!(parse_town_spec("m:1:256"), Ok(("m".into(), Some(1), Some(256))));
+    // The town spec's own rules, each by its own message (the kit is never reached).
+    for (spec, phrase) in [
+        ("", "non-empty"),
+        ("x:9", "must be 1..=4"),
+        ("x:0", "must be 1..=4"),
+        ("x:y", "must be 1..=4"),
+        ("x:2:5", "16..=256"),
+        ("x:2:300", "16..=256"),
+        ("x:2:32:4", "too many"),
+    ] {
+        let e = parse_town_spec(spec).err().unwrap_or_else(|| panic!("{spec:?} accepted"));
+        assert!(e.contains(phrase), "{spec:?}: {e}");
+        // Through `from_env` the same rejection, not the kit's ("found N house prefab(s)").
+        std::env::set_var(DEV_STRUCTURES_ENV, format!("town={spec}"));
+        let e = from_env(&registry, pure_landing.clone(), seed, mats).err().unwrap_or_else(|| panic!("town={spec} accepted"));
+        assert!(e.contains(phrase) && !e.contains("house prefab"), "town={spec}: {e}");
+    }
+    std::env::set_var(DEV_STRUCTURES_ENV, "town=medieval");
+    let e = from_env(&registry, pure_landing.clone(), seed, mats).err().expect("no houses in the built-in set");
+    assert!(e.contains("medieval") && e.contains("house prefab"), "{e}");
     // Errors, each naming the offending text.
     for (value, names) in [
         ("garbage", "garbage"),
@@ -108,13 +128,6 @@ fn dev_structures_install_and_stamp() {
         ("home=no-such-prefab", "no-such-prefab"),
         // The built-in set holds no tagged houses: the kit's own error names the style.
         ("town=medieval", "medieval"),
-        ("town=", "town="),
-        ("town=x:9", "9"),
-        ("town=x:0", "0"),
-        ("town=x:2:5", "5"),
-        ("town=x:2:300", "300"),
-        ("town=x:y", "y"),
-        ("town=x:2:3:4", "3:4"),
     ] {
         std::env::set_var(DEV_STRUCTURES_ENV, value);
         let e = from_env(&registry, pure_landing.clone(), seed, mats).err().unwrap_or_else(|| panic!("{value} accepted"));
