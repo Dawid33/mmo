@@ -81,6 +81,10 @@ const FOREIGN_INPUT_WARN_MS: u64 = 1_000;
 /// forever, nor hand the target an unbounded backlog in one burst when it
 /// starts.
 pub const PENDING_ARRIVALS_PER_REGION_MAX: usize = 2 * crate::slime::SLIME_CAP_PER_REGION;
+/// Most often a host asks another for a claim of one super-region
+/// ([`crate::Volatile::ClaimWanted`], R4 `PgClaim`): once per this many ms while the need
+/// lasts (it is volatile — a lost one is asked again).
+pub const CLAIM_WANTED_EVERY_MS: u64 = 1_000;
 /// How many of the latest despawned arrivals' ids the manager remembers
 /// ([`WorldManager::recently_despawned_arrivals`], test support: the
 /// conservation check reads them as an allowed exit).
@@ -628,6 +632,9 @@ pub struct ManagerDepths {
     /// Reliable messages to other hosts not acknowledged yet
     /// ([`WorldManager::peer_unreceived`]).
     pub peer_unreceived: usize,
+    /// Messages waiting for their super-region to have an owner this host knows
+    /// ([`WorldManager::unowned_waiting_total`]).
+    pub unowned_waiting: usize,
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// since the manager started ([`WorldManager::arrivals_despawned`]).
     pub arrivals_despawned: u64,
@@ -1093,7 +1100,26 @@ pub struct WorldManager<S: RegionSpawner> {
     /// does not know (`peers.rs`, [`crate::Owner::Free`] / [`crate::Owner::Unknown`]): kept
     /// here, in order, until it has an owner ("wait, never guess"). A cut writes each as
     /// this host's in-flight row ([`Self::cut_peer_rows`]), as for an absent peer.
+    ///
+    /// Not capped: every super-region listed here is wanted for a claim
+    /// ([`Self::take_claims_wanted`], `ClaimWanted` to its preferred host every
+    /// [`CLAIM_WANTED_EVERY_MS`]), so an entry lasts one claim round trip — unless no live
+    /// host that could claim it is reachable, which is exactly the bound of what waits in a
+    /// session for an unreachable peer (`peer_waiting`, a session's queue: uncapped too, for
+    /// as long as the outage). Counted on the `[server]` line (`unowned_waiting=`).
     unowned_waiting: BTreeMap<crate::SuperRegion, Vec<peers::UnownedWait>>,
+    /// Super-regions with no owner this host knows that something here needs (a subscribe,
+    /// a player clamped at their seam, a spawn placement, a move, a session's region): what
+    /// [`Self::take_claims_wanted`] answers from (with `unowned_waiting`'s keys), forgotten
+    /// once an owner is known (`peers.rs`).
+    claims_wanted: BTreeSet<crate::SuperRegion>,
+    /// Free super-regions a peer asked this host to claim ([`crate::Volatile::ClaimWanted`]).
+    claim_asks: BTreeSet<crate::SuperRegion>,
+    /// The last `ClaimWanted` sent per super-region: to which host, at which `clock_ms`.
+    claim_wanted_sent: BTreeMap<crate::SuperRegion, (u32, u64)>,
+    /// An `Unknown` owner was hit: the server reads the directory whole
+    /// ([`Self::take_directory_wanted`]).
+    directory_wanted: bool,
     /// The session with each other host of the world (`peers.rs`, [`Self::set_peer`]).
     /// Empty for a single host.
     peers: BTreeMap<u32, peers::Peer>,
@@ -1323,6 +1349,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             incarnation_seen: BTreeMap::new(),
             next_incarnation: 0,
             unowned_waiting: BTreeMap::new(),
+            claims_wanted: BTreeSet::new(),
+            claim_asks: BTreeSet::new(),
+            claim_wanted_sent: BTreeMap::new(),
+            directory_wanted: false,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
             peer_queued: BTreeMap::new(),
@@ -1477,7 +1507,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Whether `id`'s player can be moved into `target` from here: not when its session
     /// observes a body on another host, nor into another host's region with no body here
     /// to hand over (none is ever made here for such a region).
-    fn can_move(&self, id: ClientId, target: RegionCoords) -> bool {
+    fn can_move(&mut self, id: ClientId, target: RegionCoords) -> bool {
         if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
             log::debug!("client {id}: a move to {target:?} from a session whose body is on another host: refused");
             return false;
@@ -1485,6 +1515,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         if !self.owns(target) && !self.is_foreign(target) {
             let owner = self.owner_of(target);
             log::debug!("client {id}: a move to {target:?}, whose owner this host does not know ({owner:?}): refused");
+            // Wanted for a claim: the player's next try may go through.
+            self.note_unowned(target);
             return false;
         }
         let bodiless = !self.homes.contains_key(&id) && !self.moving.contains_key(&id);
@@ -1960,6 +1992,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                         // body. Foreign: another host owns it. Either way the
                         // crossing is refused and the entity handed back to where
                         // it left, on its seam.
+                        if !off_map && waking && self.owner_host(target).is_none() {
+                            // No owner known: wanted for a claim (`peers.rs`); the body
+                            // crosses once one is known.
+                            self.note_unowned(target);
+                        }
                         if off_map {
                             log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
                         } else if client.is_some_and(|c| self.is_foreign(target) && self.note_pinned_clamp(c)) {
@@ -2928,10 +2965,27 @@ impl<S: RegionSpawner> WorldManager<S> {
         bundle: crate::EntityBundle,
         now_ms: u64,
     ) {
-        let (source, left) = (source.map(|(rc, _)| rc), source.map(|(_, at)| at));
         // An inbound transfer is in this host's part unless its sender accounts for it in the
         // pending world cut (it came wrapped, `world_cut.rs`).
-        let view = source.map_or_else(|| self.inbound_accounted.is_some_and(|c| self.accounted_now(c)), |s| self.in_cut_view(s));
+        let view = source.map_or_else(
+            || self.inbound_accounted.is_some_and(|c| self.accounted_now(c)),
+            |(s, _)| self.in_cut_view(s),
+        );
+        self.accept_arrival_in_view(source, target, stamp, bundle, now_ms, view);
+    }
+
+    /// [`Self::accept_arrival`] with its cut view given: `view` = the arrival is in a
+    /// source's snapshot of the pending cut, or its sender's part (not a row of this host's).
+    pub(super) fn accept_arrival_in_view(
+        &mut self,
+        source: Option<(RegionCoords, [f32; 3])>,
+        target: RegionCoords,
+        stamp: crate::Tick,
+        bundle: crate::EntityBundle,
+        now_ms: u64,
+        view: bool,
+    ) {
+        let (source, left) = (source.map(|(rc, _)| rc), source.map(|(_, at)| at));
         // Where drops of a body that never arrives are put down: its source's side of the
         // seam, or (inbound) the target's own cell.
         let from = source.unwrap_or(target);
@@ -3370,6 +3424,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Its region's stored state could not be read: the session is
             // ended, the record kept for the next try.
             log::warn!("client {id}: its region {target:?} is unavailable; session refused");
+            // Nobody owns it (or this host does not know who does): wanted for a claim, so
+            // the next try may be placed.
+            self.note_unowned(target);
             // A region another host owns: the store holds the record already,
             // unchanged (our cut must not write it back). Nor is an off-map record
             // parked again (only the store can hold one): a cut writing it would touch a
@@ -3548,6 +3605,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             transfers_in_flight: self.in_flight_count(),
             pending_arrivals: self.pending_arrival_total(),
             peer_unreceived: self.peer_unreceived(),
+            unowned_waiting: self.unowned_waiting_total(),
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),

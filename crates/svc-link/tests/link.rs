@@ -331,10 +331,10 @@ fn listener_closes_a_peer() {
 
 #[test]
 fn hello_debug_never_shows_the_token() {
-    let h = LinkHello::new("s3cret-token".into(), PeerRole::Host { ordinal: 0, boot: 1, epoch: 2 });
+    let h = LinkHello::new("s3cret-token".into(), PeerRole::Host { ordinal: 0, boot: 1, reg: 2 });
     let shown = format!("{h:?}");
     assert!(!shown.contains("s3cret"), "{shown}");
-    assert!(shown.contains("redacted") && shown.contains("epoch: 2"), "{shown}");
+    assert!(shown.contains("redacted") && shown.contains("reg: 2"), "{shown}");
 }
 
 #[test]

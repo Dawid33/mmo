@@ -111,6 +111,13 @@ pub enum Reliable {
     /// as its own row / player record): the receiver never counts it in that cut. Never
     /// nested.
     InCut { cut: CutId, body: Box<Reliable> },
+    /// "These super-regions are mine at these epochs" (R4, `PgClaim`): sent to every peer
+    /// when the sender claims (`WorldManager::claimed`) and, whole, on every hello. The
+    /// receiver's directory takes each row unless it knows a newer epoch. Not a state
+    /// message: a cut never accounts for it and it never travels as [`Reliable::InCut`] —
+    /// the store's `super_regions` is the truth (every host reads it at boot and every
+    /// `TERRAIN_POLL_SECS`); `Owns` only lets a peer learn a claim sooner.
+    Owns { rows: Vec<(crate::SuperRegion, u64)> },
 }
 
 impl Reliable {
@@ -173,6 +180,10 @@ pub enum Volatile {
     /// The sender's region parked (its final halo already sent): no longer running, but
     /// not lost — unlike [`Volatile::RegionDown`] (a lost region: its mirrors end).
     RegionParked(RegionCoords),
+    /// The sender needs a region of this free super-region and this host is its preferred
+    /// claimer (R4, `PgClaim`): claim it. Sent at most once per
+    /// [`crate::CLAIM_WANTED_EVERY_MS`] per super-region while the need lasts.
+    ClaimWanted(crate::SuperRegion),
 }
 
 /// One message on a peer link.

@@ -198,6 +198,8 @@ fn pump_until(
 struct Sim {
     ordinal: u32,
     boot: u64,
+    /// Its registration number (`hosts.reg`): what its coordinator hello carries.
+    reg: u64,
     manager: WorldManager<InlineSpawner>,
     region_out: Receiver<(RegionCoords, RegionOutput)>,
     packets: Receiver<(Option<ClientId>, ServerPacket)>,
@@ -210,6 +212,8 @@ struct Sim {
     terrain: Option<server::cuts::TerrainWatch>,
     /// While set, every event its regions processed, in order (a replay's input).
     tap: Option<Vec<(RegionCoords, game::GameEvent)>>,
+    /// Its claim loop under `claim` ownership (R4 Task 5 tests).
+    keeper: Option<server::claims::DirectoryKeeper>,
 }
 
 /// A switch over every peer link of a host: down, its links say so, send nothing and drop
@@ -295,7 +299,8 @@ impl Sim {
             manager.set_peer(other, PeerSession::new(hello, other), link);
         }
         manager.set_host_generation(generation);
-        Sim { ordinal, boot, manager, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None }
+        let reg = links.registered().reg;
+        Sim { ordinal, boot, reg, manager, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None, keeper: None }
     }
 
     /// A keeper client whose body stands in the middle of `rc` (this host's): `rc` runs.
@@ -375,6 +380,9 @@ impl Pair {
             }
             if let Some(watch) = sim.terrain.as_mut() {
                 watch.pump(&mut sim.manager);
+            }
+            if let Some(keeper) = sim.keeper.as_mut() {
+                keeper.pump(&mut sim.manager);
             }
             if let Some(login) = &sim.login {
                 login.relay.pump(&mut sim.manager);
@@ -863,9 +871,9 @@ fn decisions(db: &PgDb) -> Vec<(i64, i64, bool)> {
 }
 
 /// Host `ordinal`'s link to the coordinator at `addr` (its pin in `cert_file`), its hello
-/// carrying the host's claim `epoch`.
-fn quic_world_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: u32, boot: u64, epoch: u64) -> server::roles::QuicWorldLink {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal, boot, epoch });
+/// carrying the host's registration number `reg`.
+fn quic_world_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: u32, boot: u64, reg: u64) -> server::roles::QuicWorldLink {
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal, boot, reg });
     server::roles::QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_HOSTS_TEST_UNSET_PIN", &cert_file), hello)
 }
 
@@ -982,7 +990,7 @@ fn world(db: &PgDb, dir: &std::path::Path) -> World {
     let mut generations = Vec::new();
     for (ordinal, sim) in pair.sims.iter_mut().enumerate() {
         let c = &claims[ordinal];
-        let link = quic_world_link(coordinator.addr, cert.clone(), ordinal as u32, 1000 + ordinal as u64, c.fence().claim_epoch());
+        let link = quic_world_link(coordinator.addr, cert.clone(), ordinal as u32, 1000 + ordinal as u64, sim.reg);
         let switch = SwitchLink(Arc::new(std::sync::Mutex::new((Some(link), 0))));
         switches.push(switch.clone());
         sim.manager.set_world_link(Box::new(switch), 1000 + ordinal as u64, 0);
@@ -1061,7 +1069,7 @@ fn a_cut_with_one_host_detached_is_aborted_and_leaves_nothing_staged() {
     });
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     // Host 1 back: the next cut commits.
-    switches[1].replace(quic_world_link(coordinator.addr, cert, 1, 1001, claims[1].fence().claim_epoch()));
+    switches[1].replace(quic_world_link(coordinator.addr, cert, 1, 1001, pair.sims[1].reg));
     pair.until("a later world cut committed", |_| decisions(&db).iter().any(|(c, _, k)| *k && *c as u64 > running.0 .0));
     pair.until("both hosts settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
@@ -1248,7 +1256,7 @@ fn lost_cut_done_is_settled_from_the_store() {
     w.pair.until("host 1 settled its part with its link down", |p| p.sims[1].cuts.as_ref().unwrap().world_part().is_none());
     assert!(!w.pair.sims[1].manager.world_attached(), "host 1's link is still down");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    let link = quic_world_link(w.coordinator.as_ref().unwrap().addr, w.cert.clone(), 1, 1001, w.claims[1].fence().claim_epoch());
+    let link = quic_world_link(w.coordinator.as_ref().unwrap().addr, w.cert.clone(), 1, 1001, w.pair.sims[1].reg);
     w.switches[1].replace(link);
     w.until_committed_after(&db, cut.0 as i64);
     w.stop(&dir);
@@ -1341,8 +1349,7 @@ fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
     let old = std::mem::replace(&mut w.store, store);
     old.shutdown();
     for sim in &w.pair.sims {
-        let epoch = w.claims[sim.ordinal as usize].fence().claim_epoch();
-        w.switches[sim.ordinal as usize].replace(quic_world_link(coordinator.addr, w.cert.clone(), sim.ordinal, sim.boot, epoch));
+        w.switches[sim.ordinal as usize].replace(quic_world_link(coordinator.addr, w.cert.clone(), sim.ordinal, sim.boot, sim.reg));
     }
     w.coordinator = Some(coordinator);
 }
@@ -1378,7 +1385,7 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: u32, boot: u
     sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
     let switch = SwitchLink(Arc::new(std::sync::Mutex::new((None, 0))));
     if let Some(c) = &w.coordinator {
-        switch.replace(quic_world_link(c.addr, w.cert.clone(), h, boot, claims.fence().claim_epoch()));
+        switch.replace(quic_world_link(c.addr, w.cert.clone(), h, boot, registered.reg));
     }
     w.switches[h as usize] = switch.clone();
     sim.manager.set_world_link(Box::new(switch), boot, 0);
@@ -2836,4 +2843,156 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     w.until_committed_after(&db, 0);
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
+}
+
+// ---- R4 Task 5: claiming on demand --------------------------------------------------------
+
+/// Host `ordinal` booted as `server::run` boots it under `claim`: registered FIRST with an
+/// empty fence, then its own rows re-claimed (epochs bumped), its manager on a `PgClaim`
+/// directory read from the store, its claim loop ([`server::claims::DirectoryKeeper`]).
+fn claim_host(db: &PgDb, dir: &std::path::Path, ordinal: u32, boot: u64) -> (Sim, PeerLinks, HostClaims) {
+    let store = db.open();
+    let s = store.super_region_regions();
+    let claims = HostClaims::none(store.clone(), ordinal);
+    let config = PeerLinkConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        cert_hash_file: dir.join(format!("host-{ordinal}.peer.cert-sha256")),
+        delay: Duration::ZERO,
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut links = PeerLinks::start(
+        ordinal,
+        HOSTS,
+        boot,
+        endpoint(ordinal),
+        TOKEN.into(),
+        store.clone(),
+        &claims.fence(),
+        config,
+        CrashPolicy::Succession,
+        &stop,
+    )
+    .expect("the peer links start");
+    claims.reclaim_own().expect("its own rows re-claimed");
+    let generation = links.registered().generation;
+    let mut sim = Sim::with_spawner(ordinal, s, boot, generation, &mut links, InlineSpawner::default());
+    sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal, HOSTS)), s);
+    let (rows, live) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
+    sim.manager.directory_read(rows, live);
+    sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone()));
+    (sim, links, claims)
+}
+
+/// The first region (lowest corner) of each of `n` super-regions of the claimed map.
+fn super_region_corners(s: u32, n: usize) -> Vec<(game::SuperRegion, RegionCoords)> {
+    let e = extent();
+    let side = (e.width as i32 + s as i32 - 1) / s as i32;
+    let all: Vec<(game::SuperRegion, RegionCoords)> = (0..side)
+        .flat_map(|sx| (0..side).map(move |sz| (sx, sz)))
+        .map(|(sx, sz)| ((sx, sz), RegionCoords::new(sx * s as i32, sz * s as i32)))
+        .collect();
+    assert!(all.len() >= n, "the map has {} super-regions, not {n}", all.len());
+    all.into_iter().take(n).collect()
+}
+
+/// Two hosts of a fresh world under `claim`: nothing is claimed until something needs a
+/// region. A client (an observer session on host 0) asks for one region in each of 8
+/// super-regions — asking again each round, as a client re-asks — until the store holds
+/// an owner for each: every owner is the one `static` gives (`rendezvous_owner` with every
+/// host live, R4 decision 11), and both hosts' directories say so.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn fresh_world_under_claim_lays_out_like_static() {
+    install_props();
+    let Some(db) = PgDb::create("claimlayout") else { return };
+    let dir = scratch("claimlayout");
+    let mut sims = Vec::new();
+    let mut links = Vec::new();
+    let mut claims = Vec::new();
+    for ordinal in 0..HOSTS {
+        let (sim, l, c) = claim_host(&db, &dir, ordinal, 2000 + u64::from(ordinal));
+        sims.push(sim);
+        links.push(l);
+        claims.push(c);
+    }
+    let s = claims[0].store().super_region_regions();
+    let mut pair = Pair { sims, started: Instant::now(), tick: Arc::new(std::sync::atomic::AtomicU64::new(0)) };
+    pair.until("every peer synced", |p| p.sims.iter().all(|s| s.manager.peers_synced()));
+    assert!(claims[0].store().owners().unwrap().is_empty(), "a fresh world: nothing claimed at boot");
+    let (visitor, player) = (5, PlayerId(77));
+    let now = pair.now();
+    assert!(pair.sims[0].manager.handle_server_event(ServerEvent::ObserverConnected { client: visitor, player }, now));
+    let visits = super_region_corners(s, 8);
+    let store = claims[0].store().clone();
+    pair.until("every visited super-region claimed", |p| {
+        let now = p.now();
+        for (_, rc) in &visits {
+            let ev = ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(*rc), visitor);
+            assert!(p.sims[0].manager.handle_server_event(ev, now));
+        }
+        let owners = store.owners().unwrap();
+        visits.iter().all(|(sr, _)| owners.iter().any(|(o, owner, _)| o == sr && *owner != game::NO_OWNER))
+    });
+    let owners = store.owners().unwrap();
+    for (sr, rc) in &visits {
+        let row = owners.iter().find(|(o, _, _)| o == sr).expect("a row");
+        assert_eq!(row.1, i64::from(game::rendezvous_owner(*sr, HOSTS)), "{sr:?} is claimed as static lays it out");
+        pair.until("both directories know it", |p| {
+            p.sims.iter().all(|sim| sim.manager.owner_host(*rc) == Some(game::rendezvous_owner(*sr, HOSTS)))
+        });
+    }
+    // Each host's fence holds exactly what it claimed.
+    for (h, c) in claims.iter().enumerate() {
+        let mine: Vec<game::SuperRegion> =
+            owners.iter().filter(|(_, o, _)| *o == h as i64).map(|(sr, _, _)| *sr).collect();
+        assert_eq!(c.fence().epochs.keys().copied().collect::<Vec<_>>(), mine, "host {h}'s fence");
+    }
+    drop(pair);
+    drop(links);
+    for c in claims {
+        c.store().clone().shutdown();
+    }
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host under `claim` that left cleanly (its `hosts` row clean, as a committed leave cut
+/// leaves it) boots again: it registers (no wait: its predecessor left clean), re-claims the
+/// rows the store says are its own at a higher epoch — the old boot's fence is refused from
+/// then on — and its directory answers `Me` for them.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_restarted_cleanly_reclaims_its_own_rows() {
+    install_props();
+    let Some(db) = PgDb::create("claimrestart") else { return };
+    let dir = scratch("claimrestart");
+    let (first, first_links, first_claims) = claim_host(&db, &dir, 1, 3001);
+    let store = first_claims.store().clone();
+    let mine = vec![(0, 1), (2, 2)];
+    first_claims.add(store.claim_free(1, mine.clone()).unwrap());
+    let before = store.owners().unwrap();
+    drop(first);
+    drop(first_links);
+    // Its leave cut committed (as `two_phase` marks it).
+    exec(&db, "UPDATE hosts SET clean = 1 WHERE ordinal = 1");
+    let (second, second_links, second_claims) = claim_host(&db, &dir, 1, 3002);
+    let after = store.owners().unwrap();
+    for sr in &mine {
+        let old = before.iter().find(|(o, _, _)| o == sr).expect("claimed before");
+        let new = after.iter().find(|(o, _, _)| o == sr).expect("still a row");
+        assert_eq!(new.1, 1, "{sr:?} is still host 1's");
+        assert!(new.2 > old.2, "{sr:?} re-claimed at a higher epoch: {} then {}", old.2, new.2);
+        assert_eq!(second_claims.fence().epochs.get(sr), Some(&new.2), "{sr:?} in the new boot's fence");
+        let rc = RegionCoords::new(sr.0 * store.super_region_regions() as i32, sr.1 * store.super_region_regions() as i32);
+        assert_eq!(second.manager.owner_of(rc), game::Owner::Me, "{sr:?}: the new boot's directory says Me");
+    }
+    let cut = game::WorldCut { id: game::CutId(1), host: 1, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None };
+    let refused = first_claims.commit_cut(cut).recv().unwrap();
+    assert!(matches!(refused, Err(world_store::StoreError::Fenced { .. })), "the old boot is fenced: {refused:?}");
+    drop(second);
+    drop(second_links);
+    first_claims.store().clone().shutdown();
+    second_claims.store().clone().shutdown();
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    let _ = std::fs::remove_dir_all(&dir);
 }

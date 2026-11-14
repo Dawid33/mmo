@@ -127,12 +127,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(&host) = self.departed.get(&player) {
             return Placement::Host(host);
         }
-        let region = record_region.filter(|rc| !crate::off_map(self.map_extent(), *rc)).unwrap_or(SPAWN_REGION);
+        let region = self.spawn_region(record_region);
         match self.owner_of(region) {
             crate::Owner::Me => Placement::Here,
             crate::Owner::Host(h) => Placement::Host(h),
             crate::Owner::Free | crate::Owner::Unknown => Placement::Wait,
         }
+    }
+
+    /// The region a login with `record_region` is placed in: its record's (off the map: the
+    /// spawn region), or [`SPAWN_REGION`] with no record.
+    fn spawn_region(&self, record_region: Option<RegionCoords>) -> RegionCoords {
+        record_region.filter(|rc| !crate::off_map(self.map_extent(), *rc)).unwrap_or(SPAWN_REGION)
     }
 
     /// Whether every peer that may hold a player live finished its first sync of its current
@@ -199,7 +205,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         match self.place_spawn(req.player, req.record_region) {
             Placement::Here if !live && !self.peers_synced() => self.hold_spawn(req, since_ms, "a peer has not synced"),
-            Placement::Wait => self.hold_spawn(req, since_ms, "its region has no owner this host knows"),
+            Placement::Wait => {
+                // Wanted for a claim: the order is placed once an owner is known.
+                let region = self.spawn_region(req.record_region);
+                self.note_unowned(region);
+                self.hold_spawn(req, since_ms, "its region has no owner this host knows")
+            }
             Placement::Here => {
                 log::info!("[server] spawn order for player {} (epoch {}) placed here", req.player.0, req.session_epoch);
                 // Its session connects here: the player stays here until it does.

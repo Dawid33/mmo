@@ -6,12 +6,19 @@
 //! store answers [`StoreError::Fenced`], and the process is fenced for good
 //! ([`Fenced`]): it stops ticking, refuses its clients and exits with
 //! [`EXIT_FENCED`] without a last save.
+//!
+//! Under `claim` (R4) a host holds nothing at boot ([`HostClaims::none`]), registers, then
+//! re-claims its own rows ([`HostClaims::reclaim_own`]); the main loop's
+//! [`DirectoryKeeper`] claims free super-regions on demand and reads the directory.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
-use game::{Ownership, RegionCoords, StoredRegion, WorldCut};
-use world_store::{Fence, StoreError, StoreHandle, SuperRegion};
+use crossbeam::channel::{Receiver, TryRecvError};
+use game::{Ownership, RegionCoords, RegionSpawner, StoredRegion, WorldCut, WorldManager};
+use world_store::{Fence, HostRow, StoreError, StoreHandle, SuperRegion};
 
 /// The process exit status of a fenced host (another process took over its
 /// super-regions): non-zero, and distinct from a start-up error (1).
@@ -140,14 +147,8 @@ impl HostClaims {
         extent: Option<game::MapExtent>,
         super_region_regions: u32,
     ) -> Result<HostClaims, String> {
+        HostClaims::check_side(&store, super_region_regions)?;
         let stored = store.super_region_regions();
-        if stored != super_region_regions {
-            return Err(format!(
-                "the world store was made with {stored} regions per super-region side but \
-                 {SUPER_REGION_REGIONS_ENV}={super_region_regions} (default {}); set it to {stored}",
-                game::DEFAULT_SUPER_REGION_REGIONS
-            ));
-        }
         let srs: Vec<SuperRegion> = ownership.claim_set(extent, stored).into_iter().collect();
         let mut fence = store
             .claim_super_regions(ownership.ordinal(), srs)
@@ -158,10 +159,47 @@ impl HostClaims {
         Ok(HostClaims::with_fence(store, fence))
     }
 
+    /// Refuses a store whose super-region side differs from `super_region_regions`
+    /// (`VOXEL_SUPER_REGION_REGIONS`).
+    pub fn check_side(store: &StoreHandle, super_region_regions: u32) -> Result<(), String> {
+        let stored = store.super_region_regions();
+        if stored != super_region_regions {
+            return Err(format!(
+                "the world store was made with {stored} regions per super-region side but \
+                 {SUPER_REGION_REGIONS_ENV}={super_region_regions} (default {}); set it to {stored}",
+                game::DEFAULT_SUPER_REGION_REGIONS
+            ));
+        }
+        Ok(())
+    }
+
     /// Claims exactly `srs` as `owner`.
     pub fn claim_srs(store: StoreHandle, owner: u32, srs: Vec<SuperRegion>) -> Result<HostClaims, StoreError> {
         let fence = store.claim_super_regions(owner, srs)?;
         Ok(HostClaims::with_fence(store, fence))
+    }
+
+    /// Host `owner` holding nothing yet: what a host claiming on demand (`claim`) registers
+    /// under — a boot told to wait must not have touched its predecessor's rows.
+    pub fn none(store: StoreHandle, owner: u32) -> HostClaims {
+        HostClaims::with_fence(store, Fence { owner, epochs: std::collections::BTreeMap::new(), all_hosts: false })
+    }
+
+    /// Re-claims what the store says this host's ordinal holds (its previous boot's rows,
+    /// `owned_by`) with `claim_super_regions` — every epoch bumped, so that boot is fenced
+    /// from now on — and makes it the fence. Called once, right after this boot registered
+    /// (a registered live row is this ordinal's: no other process may hold its rows then).
+    /// How many super-regions it re-claimed.
+    pub fn reclaim_own(&self) -> Result<usize, StoreError> {
+        let owner = self.fence().owner;
+        let srs: Vec<SuperRegion> = self.store.owned_by(owner)?.epochs.into_keys().collect();
+        if srs.is_empty() {
+            return Ok(0);
+        }
+        let fence = self.store.claim_super_regions(owner, srs)?;
+        let n = fence.epochs.len();
+        self.replace(fence);
+        Ok(n)
     }
 
     fn with_fence(store: StoreHandle, fence: Fence) -> HostClaims {
@@ -196,7 +234,8 @@ impl HostClaims {
     /// commit is checked against them too (fenced anywhere = fenced).
     pub fn add(&self, more: Fence) {
         let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
-        debug_assert_eq!(more.owner, current.owner, "a fence grows only by its own owner's rows");
+        // Hard: another owner's rows in this fence would let this host write as that owner.
+        assert_eq!(more.owner, current.owner, "a fence grows only by its own owner's rows");
         let mut grown = (**current).clone();
         grown.epochs.extend(more.epochs);
         *current = Arc::new(grown);
@@ -206,7 +245,7 @@ impl HostClaims {
     /// process's `all_hosts` is kept: it is how the process runs, not a stored row.
     pub fn replace(&self, mut fence: Fence) {
         let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
-        debug_assert_eq!(fence.owner, current.owner, "a fence is replaced only by its own owner's");
+        assert_eq!(fence.owner, current.owner, "a fence is replaced only by its own owner's");
         fence.all_hosts = current.all_hosts;
         *current = Arc::new(fence);
     }
@@ -246,6 +285,168 @@ impl HostClaims {
         cut: WorldCut,
     ) -> crossbeam::channel::Receiver<Result<world_store::CutCommitted, StoreError>> {
         self.store.commit_cut(cut, (*self.fence()).clone())
+    }
+}
+
+// --- the directory and claiming on demand (R4, `claim`) -----------------------------------
+
+/// The hosts holding their lease by `rows` at the database clock `now_ms`: live, not left
+/// clean, and beaten within [`game::HOST_LEASE_MS`] (what a booting host counts as alive).
+pub fn live_hosts(rows: &[HostRow], now_ms: u64) -> BTreeSet<u32> {
+    rows.iter()
+        .filter(|r| r.state == game::HOST_LIVE && !r.clean && now_ms.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS)
+        .map(|r| r.ordinal)
+        .collect()
+}
+
+/// The directory read whole, blocking (a boot, before the main loop): every `super_regions`
+/// row (`(super-region, owner or NO_OWNER, epoch)`) and the live hosts ([`live_hosts`]).
+/// Plain reads, no locks.
+pub fn read_directory(store: &StoreHandle, me: u32) -> Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<u32>), StoreError> {
+    let rows = store.owners()?;
+    let hosts = store.hosts()?;
+    let mut live = live_hosts(&hosts, store.db_now_ms()?);
+    live.insert(me);
+    Ok((rows, live))
+}
+
+/// After a failed claim, no new one for this long.
+pub const CLAIM_RETRY_MS: u64 = 1_000;
+/// At most one warning per this long about failed claims or directory reads.
+pub const DIRECTORY_WARN_MS: u64 = 10_000;
+
+/// A directory read in flight: its three plain reads, each answered on its own receiver.
+struct DirectoryRead {
+    owners: Receiver<Result<Vec<(SuperRegion, i64, u64)>, StoreError>>,
+    hosts: Receiver<Result<Vec<HostRow>, StoreError>>,
+    now: Receiver<Result<u64, StoreError>>,
+    got: (Option<Vec<(SuperRegion, i64, u64)>>, Option<Vec<HostRow>>, Option<u64>),
+}
+
+impl DirectoryRead {
+    fn start(store: &StoreHandle) -> DirectoryRead {
+        DirectoryRead { owners: store.owners_later(), hosts: store.hosts_later(), now: store.db_now_ms_later(), got: (None, None, None) }
+    }
+
+    /// The read's rows and live hosts once all three answered; an error as soon as one fails.
+    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<u32>), StoreError>> {
+        fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
+            if slot.is_none() {
+                match rx.try_recv() {
+                    Ok(answer) => *slot = Some(answer?),
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => return Err(StoreError::Backend("the world-store thread has stopped".into())),
+                }
+            }
+            Ok(())
+        }
+        let read = take(&self.owners, &mut self.got.0).and_then(|()| take(&self.hosts, &mut self.got.1)).and_then(|()| take(&self.now, &mut self.got.2));
+        if let Err(e) = read {
+            return Some(Err(e));
+        }
+        match &mut self.got {
+            (rows @ Some(_), hosts @ Some(_), Some(now)) => {
+                let live = live_hosts(hosts.as_ref().expect("matched"), *now);
+                Some(Ok((rows.take().expect("matched"), live)))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A `claim` host's directory and claims, driven from its main loop (never blocks): the
+/// manager says what it wants ([`game::WorldManager::take_claims_wanted`], always rows its
+/// directory says are free), this claims it on the store thread (`claim_free_later`, one
+/// claim in flight), grows the fence ([`HostClaims::add`]) and answers the manager
+/// ([`game::WorldManager::claimed`]). A claim that won less than it asked (another host was
+/// faster), or that failed (a lock timeout among them: retried after [`CLAIM_RETRY_MS`],
+/// never fatal), triggers a directory read; so does the manager's
+/// [`game::WorldManager::take_directory_wanted`], and every [`world_store::TERRAIN_POLL_SECS`]
+/// as a backstop ([`game::WorldManager::directory_read`]).
+pub struct DirectoryKeeper {
+    claims: HostClaims,
+    claiming: Option<(usize, Receiver<Result<Fence, StoreError>>)>,
+    no_claim_before: Option<Instant>,
+    reading: Option<DirectoryRead>,
+    read_wanted: bool,
+    next_read: Instant,
+    warned: Option<Instant>,
+}
+
+impl DirectoryKeeper {
+    /// The keeper of `claims` (its owner is this host); its first backstop read comes one
+    /// period from now (a boot reads the directory itself, [`read_directory`]).
+    pub fn new(claims: HostClaims) -> DirectoryKeeper {
+        let next_read = Instant::now() + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
+        DirectoryKeeper { claims, claiming: None, no_claim_before: None, reading: None, read_wanted: false, next_read, warned: None }
+    }
+
+    fn warn(&mut self, what: &str) {
+        if self.warned.is_none_or(|at| at.elapsed() >= Duration::from_millis(DIRECTORY_WARN_MS)) {
+            self.warned = Some(Instant::now());
+            log::warn!("[server] {what}");
+        }
+    }
+
+    /// One pass: answers that came are handed to the manager, then the next read and claim
+    /// are started if due.
+    pub fn pump<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
+        let owner = self.claims.fence().owner;
+        if let Some((asked, rx)) = &self.claiming {
+            let asked = *asked;
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => None,
+                Ok(answer) => Some(answer),
+                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+            };
+            if let Some(answer) = answer {
+                self.claiming = None;
+                match answer {
+                    Ok(won) => {
+                        let rows: Vec<(SuperRegion, u64)> = won.epochs.iter().map(|(sr, e)| (*sr, *e)).collect();
+                        if rows.len() < asked {
+                            self.read_wanted = true;
+                        }
+                        if !rows.is_empty() {
+                            // The fence first: a load or cut in a won super-region is checked
+                            // against it from the moment the manager knows it owns it.
+                            self.claims.add(won);
+                            manager.claimed(rows);
+                        }
+                    }
+                    Err(e) => {
+                        self.warn(&format!("claiming super-regions failed ({e}); asked again in {CLAIM_RETRY_MS} ms"));
+                        self.no_claim_before = Some(Instant::now() + Duration::from_millis(CLAIM_RETRY_MS));
+                        self.read_wanted = true;
+                    }
+                }
+            }
+        }
+        if let Some(read) = self.reading.as_mut() {
+            if let Some(answer) = read.poll() {
+                self.reading = None;
+                match answer {
+                    Ok((rows, live)) => manager.directory_read(rows, live),
+                    Err(e) => self.warn(&format!("reading the ownership directory failed ({e}); read again later")),
+                }
+            }
+        }
+        if manager.take_directory_wanted() {
+            self.read_wanted = true;
+        }
+        let now = Instant::now();
+        if self.reading.is_none() && (self.read_wanted || now >= self.next_read) {
+            self.read_wanted = false;
+            self.next_read = now + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
+            self.reading = Some(DirectoryRead::start(self.claims.store()));
+        }
+        if self.claiming.is_none() && self.no_claim_before.is_none_or(|at| now >= at) {
+            let wanted = manager.take_claims_wanted();
+            if !wanted.is_empty() {
+                log::debug!("[server] claiming free super-region(s) {wanted:?} as host {owner}");
+                self.claiming = Some((wanted.len(), self.claims.store().claim_free_later(owner, wanted)));
+            }
+        }
     }
 }
 

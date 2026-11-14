@@ -715,14 +715,10 @@ pub fn run() -> claims::ServerExit {
     let super_region_regions = claims::super_region_regions_from(std::env::var(claims::SUPER_REGION_REGIONS_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(&e));
     info!("[server] ownership: {ownership:?}, {super_region_regions} regions per super-region side");
-    if ownership.policy() == game::CrashPolicy::Succession {
-        // The directory parses, but nothing claims on demand or reads it yet: a host would
-        // start owning nothing and wait for ever.
-        fatal(&format!(
-            "{}=claim is not served by this build yet (claiming on demand is not wired); use static",
-            game::ownership::OWNERSHIP_ENV
-        ));
-    }
+    // `claim` (R4): super-regions are claimed on demand by the preferred live host, the
+    // directory read from the store — a host role only.
+    let claim_on_demand = ownership.policy() == game::CrashPolicy::Succession;
+    roles::check_claim(role, claim_on_demand).unwrap_or_else(|e| fatal(&e));
     if role == roles::Role::Host && ownership.runs_every_host() {
         log::warn!(
             "[server] role host with {} unset (all): this host claims every super-region — right for R2's one \
@@ -958,22 +954,34 @@ pub fn run() -> claims::ServerExit {
     let mut peer_links: Option<peer_link::PeerLinks> = None;
     // A registered host's lease, beaten by the main loop.
     let mut heartbeat: Option<lease::Heartbeat> = None;
+    // This boot's registration number (`hosts.reg`): its coordinator hello carries it.
+    let mut host_reg = 0u64;
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
-        let claimed = claims::HostClaims::claim(store, ownership.as_ref(), extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
+        let claimed = if claim_on_demand {
+            // `claim`: REGISTER FIRST, holding nothing — a boot told to wait for its
+            // predecessor's succession must not have touched that boot's rows — then re-claim
+            // what the store says is this ordinal's (below).
+            claims::HostClaims::check_side(&store, super_region_regions).unwrap_or_else(|e| fatal(&e));
+            claims::HostClaims::none(store, ownership.ordinal())
+        } else {
+            claims::HostClaims::claim(store, ownership.as_ref(), extent, super_region_regions).unwrap_or_else(|e| fatal(&e))
+        };
         // Only now, with every epoch bumped (any split host is fenced), may `all` forget the anchor.
         roles::clear_anchor_after_claim(role, Some(claimed.store()), postgres).unwrap_or_else(|e| fatal(&e));
-        info!(
-            "[server] claimed {} super-regions as host {}",
-            claimed.fence().epochs.len(),
-            claimed.fence().owner
-        );
+        if !claim_on_demand {
+            info!(
+                "[server] claimed {} super-regions as host {}",
+                claimed.fence().epochs.len(),
+                claimed.fence().owner
+            );
+        }
         // A host registers once per boot, after its claim (and, with several hosts, once its
         // peer listener is bound: the row names its address and pin): a boot after one that
-        // never left clean raises the world's generation, which every other host then adopts.
+        // never left clean raises the world's generation, which every other host then adopts
+        // (`static`), or waits for its predecessor's succession (`claim`).
         if role == roles::Role::Host {
-            // R3's rule until the ownership policies carry their own (R4 Task 5).
-            let crash_policy = game::CrashPolicy::Rollback;
+            let crash_policy = ownership.policy();
             let fenced_exit = |e: &dyn std::fmt::Display| -> ! {
                 // Replaced between the claim and the registration: fenced, not a start-up error.
                 log::error!("[server] fenced while registering as host {}: {e}", ownership.ordinal());
@@ -1019,12 +1027,23 @@ pub fn run() -> claims::ServerExit {
             };
             heartbeat = Some(lease::Heartbeat::new(claimed.store().clone(), ownership.ordinal(), boot));
             info!(
-                "[server] registered host {} at world generation {}{}",
+                "[server] registered host {} at world generation {} (registration {}){}",
                 ownership.ordinal(),
                 registered.generation,
+                registered.reg,
                 if registered.bumped { " (raised: the previous boot did not exit clean)" } else { "" }
             );
+            host_reg = registered.reg;
             world_generation = claims::WorldGeneration::new(registered.generation);
+            if claim_on_demand {
+                // Registered: this ordinal's rows are this boot's now. Re-claimed with their
+                // epochs bumped, so the boot before is fenced at its next write.
+                match claimed.reclaim_own() {
+                    Ok(n) => info!("[server] re-claimed {n} super-regions as host {} (claim on demand)", ownership.ordinal()),
+                    Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
+                    Err(e) => fatal(&format!("re-claiming this host's super-regions: {e}")),
+                }
+            }
         }
         claimed
     });
@@ -1048,6 +1067,16 @@ pub fn run() -> claims::ServerExit {
     );
     let host_ordinal = ownership.ordinal();
     manager.set_ownership(ownership, super_region_regions);
+    // `claim`: the directory read whole before anything is placed or restored (until then
+    // every owner is `Unknown`), and the loop's claim keeper.
+    let mut directory_keeper = None;
+    if let Some(claims) = claims.as_ref().filter(|_| claim_on_demand) {
+        let (rows, live) = claims::read_directory(claims.store(), host_ordinal)
+            .unwrap_or_else(|e| fatal(&format!("reading the ownership directory: {e}")));
+        info!("[server] ownership directory: {} super-regions, live hosts {live:?}", rows.len());
+        manager.directory_read(rows, live);
+        directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone()));
+    }
     manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {
         manager.set_entry_host(entry);
@@ -1091,8 +1120,7 @@ pub fn run() -> claims::ServerExit {
         // `coordinator` thread joined by a channel link (`all`), or is its own
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
-            let epoch = claims.as_ref().map_or(0, |c| c.fence().claim_epoch());
-            let link = host_world_link(host_ordinal, boot, epoch).unwrap_or_else(|e| fatal(&e));
+            let link = host_world_link(host_ordinal, boot, host_reg).unwrap_or_else(|e| fatal(&e));
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {
@@ -1213,6 +1241,10 @@ pub fn run() -> claims::ServerExit {
             break 'main;
         }
         manager.maintain(now_ms);
+        // `claim`: claims the manager wants, directory reads (never blocks).
+        if let Some(keeper) = directory_keeper.as_mut() {
+            keeper.pump(&mut manager);
+        }
         // Several hosts: the observer tickets other hosts vouched for since the last pass.
         observer_pass(&mut manager, observer_orders.as_deref(), &sinks);
         // The login relay (several hosts): spawn orders taken, kicks relayed, answers out.
@@ -1565,16 +1597,16 @@ mod tests {
 /// `VOXEL_COORDINATOR_ADDR` with the service token, pinning the coordinator's
 /// certificate (`VOXEL_COORDINATOR_CERT_SHA256`, else the cert-hash file — waited for
 /// if the coordinator has not written it yet).
-/// `epoch`: the host's claim epoch ([`world_store::Fence::claim_epoch`]), in its hello: the
-/// coordinator keeps one connection per ordinal, the highest epoch's.
-fn host_world_link(ordinal: u32, boot: u64, epoch: u64) -> Result<roles::QuicWorldLink, String> {
+/// `reg`: the host's registration number (`hosts.reg`), in its hello: the coordinator admits
+/// only its `hosts` row's, while that row is live.
+fn host_world_link(ordinal: u32, boot: u64, reg: u64) -> Result<roles::QuicWorldLink, String> {
     let addr = roles::coordinator_addr_from(
         roles::COORDINATOR_ADDR_ENV,
         std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref(),
     )?;
     let token = svc_link::service_token_from_env().map_err(|e| format!("the service link's token: {e}"))?;
     let cert_file = roles::cert_hash_file_from(std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
-    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { ordinal, boot, epoch });
+    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { ordinal, boot, reg });
     info!("[server] the world coordinator is a separate process at {addr} (pin from {})", cert_file.display());
     Ok(roles::QuicWorldLink::connect(
         addr,

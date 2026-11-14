@@ -263,6 +263,14 @@ pub struct MultiRig {
     pub parked_hold: bool,
     /// The directory every host answers from ([`Self::with_directory`]); `None` = `Static`.
     pub directory: Option<Vec<(game::SuperRegion, Option<u32>, u64)>>,
+    /// The rig's `super_regions` table while hosts claim on demand ([`Self::with_claims`]):
+    /// owner (`None` = a free row) and epoch per super-region.
+    pub claim_store: Option<BTreeMap<game::SuperRegion, (Option<u32>, u64)>>,
+    /// Claims asked of the store and not answered yet: `(rounds left, host, super-regions)`
+    /// (at most one per host, as a server keeps one `claim_free` in flight).
+    pub claims_pending: Vec<(u32, u32, Vec<game::SuperRegion>)>,
+    /// Rounds played (the seed of each claim's answer delay).
+    pub rounds: u64,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -360,6 +368,9 @@ impl MultiRig {
                 strips,
                 parked_hold: false,
                 directory: None,
+                claim_store: None,
+                claims_pending: Vec::new(),
+                rounds: 0,
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -631,6 +642,96 @@ impl MultiRig {
             assert!(rig.manager.owns(self.homes[h]), "the rows give host {h} its keeper's home");
         }
         self.directory = Some(rows);
+    }
+
+    /// From now on every host claims on demand against the rig's `super_regions` table, made
+    /// from the rows [`Self::with_directory`] gave (call it first): each host reads it whole
+    /// (every host live), and every round ([`Self::drive_claims`]) a host's
+    /// `take_claims_wanted` is answered as `claim_free` answers it — after 0..=`link_delay`
+    /// rounds (seeded) — with `claimed`, and a directory read when it won less than it asked
+    /// or asked for one (`take_directory_wanted`).
+    pub fn with_claims(&mut self) {
+        let rows = self.directory.clone().expect("with_directory first");
+        self.claim_store = Some(rows.into_iter().map(|(sr, owner, epoch)| (sr, (owner, epoch))).collect());
+        for h in 0..self.hosts.len() as u32 {
+            self.read_directory(h);
+        }
+    }
+
+    /// Host `h` reads the rig's `super_regions` table whole, every host live.
+    fn read_directory(&mut self, h: u32) {
+        let store = self.claim_store.as_ref().expect("with_claims");
+        let rows: Vec<(game::SuperRegion, i64, u64)> =
+            store.iter().map(|(sr, (owner, epoch))| (*sr, owner.map_or(game::NO_OWNER, i64::from), *epoch)).collect();
+        let live: BTreeSet<u32> = (0..self.hosts.len() as u32).collect();
+        self.hosts[h as usize].manager.directory_read(rows, live);
+    }
+
+    /// One round of every host's claim loop (as the server's): directory reads asked for,
+    /// claims asked for (one in flight per host), claims due answered.
+    pub fn drive_claims(&mut self) {
+        if self.claim_store.is_none() {
+            return;
+        }
+        self.rounds += 1;
+        for h in 0..self.hosts.len() as u32 {
+            if self.hosts[h as usize].manager.take_directory_wanted() {
+                self.read_directory(h);
+            }
+            if self.claims_pending.iter().any(|(_, p, _)| *p == h) {
+                continue;
+            }
+            let wanted = self.hosts[h as usize].manager.take_claims_wanted();
+            if !wanted.is_empty() {
+                let delay = (mix(self.seed, self.rounds * 64 + u64::from(h)) % u64::from(self.link_delay + 1)) as u32;
+                self.claims_pending.push((delay, h, wanted));
+            }
+        }
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.claims_pending).into_iter().partition(|(d, _, _)| *d == 0);
+        self.claims_pending = later.into_iter().map(|(d, h, srs)| (d - 1, h, srs)).collect();
+        for (_, h, srs) in due {
+            let store = self.claim_store.as_mut().expect("with_claims");
+            let mut won = Vec::new();
+            for sr in &srs {
+                match store.get(sr).copied() {
+                    None => {
+                        store.insert(*sr, (Some(h), 1));
+                        won.push((*sr, 1));
+                    }
+                    Some((None, epoch)) => {
+                        store.insert(*sr, (Some(h), epoch + 1));
+                        won.push((*sr, epoch + 1));
+                    }
+                    Some((Some(_), _)) => {}
+                }
+            }
+            let short = won.len() < srs.len();
+            if !won.is_empty() {
+                self.hosts[h as usize].manager.claimed(won);
+            }
+            if short {
+                self.read_directory(h);
+            }
+        }
+        for rig in &mut self.hosts {
+            rig.settle();
+        }
+    }
+
+    /// The owner of `sr` in the rig's `super_regions` table ([`Self::with_claims`]).
+    pub fn stored_owner(&self, sr: game::SuperRegion) -> Option<u32> {
+        self.claim_store.as_ref().and_then(|s| s.get(&sr)).and_then(|(owner, _)| *owner)
+    }
+
+    /// Host `h` alone answers from a `PgClaim` directory read whole from `rows`
+    /// (`(super-region, owner, epoch)`), every host live; the others keep theirs.
+    pub fn set_directory(&mut self, h: u32, rows: Vec<(game::SuperRegion, Option<u32>, u64)>) {
+        let hosts = self.hosts.len() as u32;
+        let m = &mut self.hosts[h as usize].manager;
+        m.set_ownership(Box::new(game::PgClaim::new(h, hosts)), self.s);
+        let rows = rows.into_iter().map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, i64::from), epoch)).collect();
+        m.directory_read(rows, (0..hosts).collect());
+        assert!(m.owns(self.homes[h as usize]), "the rows give host {h} its keeper's home");
     }
 
     /// The world restarted from the store: every host restored from its committed parts
@@ -914,6 +1015,7 @@ impl MultiRig {
         for rig in &mut self.hosts {
             rig.settle();
         }
+        self.drive_claims();
         self.assert_conserved_world();
     }
 

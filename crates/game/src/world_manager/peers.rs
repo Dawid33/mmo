@@ -111,6 +111,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.flush_world();
         // A peer may have finished its sync: spawn orders waiting for it go on.
         self.retry_held_spawns();
+        // Free super-regions needed here whose preferred claimer is another host.
+        self.ask_for_claims(now_ms);
     }
 
     /// Who simulates `rc`, as this host knows it.
@@ -702,6 +704,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// unreachable.
     pub(super) fn subscribe_elsewhere(&mut self, client: ClientId, rc: RegionCoords) {
         if !self.reaches(rc) {
+            // With no owner known it is wanted for a claim; the subscribe is dropped all the
+            // same (the client asks again; holding it is Task 16's).
+            self.note_unowned(rc);
             log::debug!("client {client}: {rc:?}'s owner ({:?}) is not reachable; subscribe dropped", self.owner_of(rc));
             return;
         }
@@ -866,10 +871,199 @@ impl<S: RegionSpawner> WorldManager<S> {
         view: bool,
         accounted_in: Option<crate::CutId>,
     ) {
+        debug_assert!(
+            matches!(msg.inner(), Reliable::Transfer { player: None, .. }),
+            "only a transfer without a player waits for an owner"
+        );
         let sr = crate::super_region_of(target, self.ownership.1);
         let owner = self.owner_of(target);
         log::debug!("[server] {} for {target:?}: super-region {sr:?} is {owner:?} here; it waits", reliable_name(&msg));
         self.unowned_waiting.entry(sr).or_default().push(UnownedWait { msg, in_source_view: view, accounted_in });
+        self.note_unowned(target);
+    }
+
+    /// Every message waiting for an owner (the `[server]` counters line).
+    pub fn unowned_waiting_total(&self) -> usize {
+        self.unowned_waiting.values().map(Vec::len).sum()
+    }
+
+    // --- claiming on demand (R4, `PgClaim`) ------------------------------------------------
+
+    /// Something here needs `rc`, whose super-region has no owner this host knows: it is
+    /// wanted for a claim ([`Self::take_claims_wanted`]); an `Unknown` one also asks for a
+    /// directory read. Nothing for an owned region (`AllInOne` / `Static` never get here).
+    pub(super) fn note_unowned(&mut self, rc: RegionCoords) {
+        let sr = crate::super_region_of(rc, self.ownership.1);
+        match self.ownership.0.owner_of(sr) {
+            crate::Owner::Free => {
+                self.claims_wanted.insert(sr);
+            }
+            crate::Owner::Unknown => {
+                self.claims_wanted.insert(sr);
+                self.directory_wanted = true;
+            }
+            crate::Owner::Me | crate::Owner::Host(_) => {}
+        }
+    }
+
+    /// Every super-region with no owner something here needs, or a peer asked this host for.
+    fn unowned_needs(&self) -> BTreeSet<crate::SuperRegion> {
+        self.claims_wanted.iter().chain(&self.claim_asks).chain(self.unowned_waiting.keys()).copied().collect()
+    }
+
+    /// The free super-regions this host should claim now: something here needs a region of
+    /// one (a subscribe, a crossing, a spawn placement, a move, what waits for an owner) and
+    /// this host is its preferred live claimer ([`crate::Directory::preferred`]), or a peer
+    /// asked ([`Volatile::ClaimWanted`]). Only rows the directory says are `Free` — a claim
+    /// of a row another host holds would wait on that row's lock for nothing. The server
+    /// answers with [`Self::claimed`] (what it won); a need stays until an owner is known,
+    /// so an unanswered or lost claim is asked again. An `Unknown` one (or one with no live
+    /// claimer known) asks for a directory read instead.
+    pub fn take_claims_wanted(&mut self) -> Vec<crate::SuperRegion> {
+        let me = self.ordinal();
+        let mut out = Vec::new();
+        for sr in self.unowned_needs() {
+            match self.ownership.0.owner_of(sr) {
+                crate::Owner::Me | crate::Owner::Host(_) => self.forget_claim_need(sr),
+                crate::Owner::Unknown => self.directory_wanted = true,
+                crate::Owner::Free => {
+                    let preferred = self.ownership.0.directory().and_then(|d| d.preferred(sr));
+                    if preferred.is_none() {
+                        self.directory_wanted = true;
+                    }
+                    if preferred == Some(me) || self.claim_asks.contains(&sr) {
+                        out.push(sr);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `sr` has an owner now: nothing here wants it claimed any more.
+    fn forget_claim_need(&mut self, sr: crate::SuperRegion) {
+        self.claims_wanted.remove(&sr);
+        self.claim_asks.remove(&sr);
+        self.claim_wanted_sent.remove(&sr);
+    }
+
+    /// For each free super-region something here needs whose preferred live claimer is
+    /// another (reachable) host: that host is asked ([`Volatile::ClaimWanted`]) at most once
+    /// per [`CLAIM_WANTED_EVERY_MS`]. Called at the end of every [`Self::pump_peers`].
+    fn ask_for_claims(&mut self, now_ms: u64) {
+        let Some(directory) = self.ownership.0.directory() else { return };
+        let me = self.ordinal();
+        let mut asks = Vec::new();
+        for &sr in self.claims_wanted.iter().chain(self.unowned_waiting.keys()) {
+            if self.ownership.0.owner_of(sr) != crate::Owner::Free {
+                continue;
+            }
+            let Some(preferred) = directory.preferred(sr).filter(|&p| p != me) else { continue };
+            let recent = self.claim_wanted_sent.get(&sr).is_some_and(|&(to, at)| to == preferred && now_ms < at + CLAIM_WANTED_EVERY_MS);
+            if !recent {
+                asks.push((sr, preferred));
+            }
+        }
+        for (sr, to) in asks {
+            if !self.peer_reachable(to) {
+                continue;
+            }
+            if let Some(peer) = self.peers.get_mut(&to).filter(|p| !p.stale) {
+                log::debug!("[server] super-region {sr:?} is free and wanted here: host {to} asked to claim it");
+                peer.session.send_volatile(Volatile::ClaimWanted(sr));
+                self.claim_wanted_sent.insert(sr, (to, now_ms));
+            }
+        }
+    }
+
+    /// The server's answer to [`Self::take_claims_wanted`]: this host won `rows`
+    /// (`(super-region, epoch)`, already in its fence). Its directory says so, every peer is
+    /// told ([`Reliable::Owns`]) and what waited for those super-regions is delivered here.
+    pub fn claimed(&mut self, rows: Vec<(crate::SuperRegion, u64)>) {
+        let me = self.ordinal();
+        let Some(directory) = self.ownership.0.directory_mut() else {
+            log::error!("[server] {} super-region(s) claimed, but this host's ownership keeps no directory", rows.len());
+            return;
+        };
+        for &(sr, epoch) in &rows {
+            directory.set(sr, Some(me), epoch);
+        }
+        log::info!("[server] claimed super-region(s) {rows:?} on demand");
+        for &(sr, _) in &rows {
+            self.forget_claim_need(sr);
+        }
+        let peers: Vec<u32> = self.peers.keys().copied().collect();
+        for p in peers {
+            self.queue_to_peer(p, Reliable::Owns { rows: rows.clone() });
+        }
+        self.flush_unowned();
+    }
+
+    /// The directory read whole from the store (`(super-region, owner or NO_OWNER, epoch)`)
+    /// and the hosts holding their lease (`live`; this host counts as live): at boot, every
+    /// `TERRAIN_POLL_SECS` as a backstop, and when [`Self::take_directory_wanted`] asked.
+    /// A row older than what a peer already said is kept as said ([`crate::Directory::replace`]).
+    /// What waited for a super-region that has an owner now goes on.
+    pub fn directory_read(&mut self, rows: Vec<(crate::SuperRegion, i64, u64)>, mut live: BTreeSet<u32>) {
+        live.insert(self.ordinal());
+        let Some(directory) = self.ownership.0.directory_mut() else { return };
+        directory.replace(rows.into_iter().map(|(sr, owner, epoch)| (sr, u32::try_from(owner).ok(), epoch)));
+        directory.set_live(live);
+        self.directory_wanted = false;
+        self.flush_unowned();
+    }
+
+    /// Whether an `Unknown` owner was hit since the last call (the server then reads the
+    /// directory, [`Self::directory_read`]).
+    pub fn take_directory_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.directory_wanted)
+    }
+
+    /// Host `from` holds `rows` (`(super-region, epoch)`, its [`Reliable::Owns`]): its
+    /// directory says so unless it knows a newer epoch; what waited for them goes on.
+    fn peer_owns(&mut self, from: u32, rows: Vec<(crate::SuperRegion, u64)>) {
+        let Some(directory) = self.ownership.0.directory_mut() else {
+            log::warn!("[server] host {from} claims {} super-region(s), but this host keeps no directory: ignored", rows.len());
+            return;
+        };
+        for (sr, epoch) in rows {
+            directory.set(sr, Some(from), epoch);
+        }
+        self.flush_unowned();
+    }
+
+    /// Everything [`Self::wait_for_owner`] kept for a super-region that has an owner now
+    /// goes there, in order, with its cut flags: delivered here as an inbound arrival
+    /// (`Me`), or sent to its owner (`Host`).
+    fn flush_unowned(&mut self) {
+        let ready: Vec<crate::SuperRegion> = self
+            .unowned_waiting
+            .keys()
+            .copied()
+            .filter(|sr| matches!(self.ownership.0.owner_of(*sr), crate::Owner::Me | crate::Owner::Host(_)))
+            .collect();
+        for sr in ready {
+            let owner = self.ownership.0.owner_of(sr);
+            let list = self.unowned_waiting.remove(&sr).unwrap_or_default();
+            log::debug!("[server] super-region {sr:?} is {owner:?}: {} message(s) that waited for it go on", list.len());
+            for w in list {
+                let lineage = std::mem::replace(&mut self.inbound_accounted, w.accounted_in);
+                match (owner, w.msg) {
+                    (crate::Owner::Me, Reliable::Transfer { target, stamp, bundle, player: None }) => {
+                        let now_ms = self.clock_ms;
+                        self.accept_arrival_in_view(None, target, stamp, *bundle, now_ms, w.in_source_view);
+                    }
+                    (crate::Owner::Host(h), msg) => self.send_reliable(h, msg, w.in_source_view),
+                    (owner, msg) => {
+                        // `wait_for_owner` keeps only transfers without a player.
+                        log::error!("[server] a waiting {} for super-region {sr:?} ({owner:?}): kept", reliable_name(&msg));
+                        let keep = UnownedWait { msg, in_source_view: w.in_source_view, accounted_in: w.accounted_in };
+                        self.unowned_waiting.entry(sr).or_default().push(keep);
+                    }
+                }
+                self.inbound_accounted = lineage;
+            }
+        }
     }
 
     /// Test support: the entity of every transfer waiting for an owner
@@ -1096,6 +1290,18 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.send_to_region(to, RegionInput::Transfer(msg.into_event(), stamp));
                 }
             }
+            // A peer needs a region of `sr` and takes this host for its preferred claimer.
+            Volatile::ClaimWanted(sr) => match self.ownership.0.owner_of(sr) {
+                crate::Owner::Free => {
+                    self.claim_asks.insert(sr);
+                }
+                crate::Owner::Unknown => {
+                    self.claim_asks.insert(sr);
+                    self.directory_wanted = true;
+                }
+                // Owned: the asker learns it from that owner's `Owns` (or its next read).
+                crate::Owner::Me | crate::Owner::Host(_) => {}
+            },
             // An input the client sent to that host after its body left for this one.
             Volatile::Input { client, kind, stamp } => {
                 if kind.input_client() != Some(client) {
@@ -1120,6 +1326,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.peer_hello_boot(from, hello.boot);
                 // Where its clients connect (`RegionElsewhere`).
                 self.peer_endpoints.insert(from, hello.endpoint.clone());
+                // A directory (`PgClaim`): that host runs (it registered before it linked),
+                // and it learns every claim of this host — whatever `Owns` it missed.
+                let me = self.ordinal();
+                if let Some(directory) = self.ownership.0.directory_mut() {
+                    directory.note_live(from);
+                    let rows: Vec<(crate::SuperRegion, u64)> = directory
+                        .owned_by(me)
+                        .into_iter()
+                        .filter_map(|sr| directory.epoch(sr).map(|epoch| (sr, epoch)))
+                        .collect();
+                    if !rows.is_empty() {
+                        self.queue_to_peer(from, Reliable::Owns { rows });
+                    }
+                }
                 // Every region (stopping ones too: their `RegionDown` follows) bordering
                 // that host; it asks each for the seeds of its own neighbours of them.
                 let running: Vec<RegionCoords> =
@@ -1209,7 +1429,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if !self.owns(target) && !self.is_foreign(target) {
                     // Sent here, but this host knows no owner of it: it waits here for one
                     // (a cut row), never sent back.
-                    log::warn!("[server] host {from} sent {:?} into {target:?}, whose owner this host does not know", bundle.id);
+                    // Debug, not warn: one per transfer (counted as `unowned_waiting=`).
+                    log::debug!("[server] host {from} sent {:?} into {target:?}, whose owner this host does not know", bundle.id);
                     let msg = Reliable::Transfer { target, stamp, bundle, player: None };
                     self.wait_for_owner(target, msg, after, self.inbound_accounted);
                     return;
@@ -1283,6 +1504,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.accept_move(from, handoff, *record, target);
             }
             Reliable::PlayerParked { client, player } => self.player_parked_elsewhere(from, client, player),
+            Reliable::Owns { rows } => self.peer_owns(from, rows),
             msg @ (Reliable::SpawnOrder { .. }
             | Reliable::SpawnAck { .. }
             | Reliable::Kick { .. }
@@ -1377,5 +1599,6 @@ fn reliable_name(r: &Reliable) -> &'static str {
         Reliable::CutMark { .. } => "CutMark",
         Reliable::PlayerParked { .. } => "PlayerParked",
         Reliable::InCut { .. } => "InCut",
+        Reliable::Owns { .. } => "Owns",
     }
 }

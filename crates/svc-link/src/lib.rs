@@ -41,7 +41,9 @@ pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 /// 4: the coordinator's multi-host messages (`Attach.generation`, `ClaimIs`, `PlayerHandedTo`,
 /// hops, `LeaveRequest`), and the login relay between hosts (spawn orders, kicks, session ends;
 /// `SpawnAck` names the placing host's addresses).
-pub const LINK_PROTOCOL_VERSION: u32 = 4;
+/// 5: R4 — a host's hello carries its registration number (`PeerRole::Host::reg`, not a claim
+/// epoch); peers tell each other their claims (`Reliable::Owns`, `Volatile::ClaimWanted`).
+pub const LINK_PROTOCOL_VERSION: u32 = 5;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;
@@ -72,11 +74,11 @@ const CLOSE_NORMAL: u32 = 0;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeerRole {
-    /// A region host: its ordinal, its process start (`boot`), and its claim `epoch` (the
-    /// highest owner epoch of the super-regions it claimed): a process that claimed later
+    /// A region host: its ordinal, its process start (`boot`), and its registration number
+    /// `reg` (its `hosts` row's, one more than any before it): a boot that registered later
     /// has the higher one, so a listener keeping one peer per ordinal can tell a stale
-    /// process (about to be fenced) from its replacement.
-    Host { ordinal: u32, boot: u64, epoch: u64 },
+    /// process (about to be fenced) from its replacement — whatever it claims or loses.
+    Host { ordinal: u32, boot: u64, reg: u64 },
     Login,
     Coordinator,
 }

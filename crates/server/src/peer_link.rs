@@ -13,8 +13,8 @@
 //! listener's `PeerId`, or a dialer's `Up` count); a link drops frames whose tag is not
 //! its live connection's, so no frame of an older connection surfaces after
 //! [`PeerLink::connection`] changed. Of two live connections from one ordinal the newer
-//! replaces the older (the coordinator's admission: the higher claim epoch wins, ties to
-//! the newer).
+//! replaces the older (as the coordinator's admission: the higher registration number
+//! wins, ties to the newer).
 //!
 //! [`PEER_LINK_DELAY_MS_ENV`] holds every outgoing frame that long before it is written
 //! (order kept; a latency measurement knob, never on in play) and writes it when it is due:
@@ -407,23 +407,24 @@ impl PeerLink for QuicPeerLink {
 
 /// Which host peers the listener of host `mine` (of `hosts`) serves: a higher ordinal
 /// below `hosts` (the higher dials the lower), one live connection per ordinal — the
-/// highest claim epoch's, ties to the newer connection.
+/// highest registration number's (`hosts.reg`: a later boot of the ordinal registered
+/// later), ties to the newer connection.
 struct Admission {
     mine: u32,
     hosts: u32,
-    best_epoch: BTreeMap<u32, u64>,
+    best_reg: BTreeMap<u32, u64>,
     live: BTreeMap<u32, PeerId>,
 }
 
 impl Admission {
     fn new(mine: u32, hosts: u32) -> Self {
-        Admission { mine, hosts, best_epoch: BTreeMap::new(), live: BTreeMap::new() }
+        Admission { mine, hosts, best_reg: BTreeMap::new(), live: BTreeMap::new() }
     }
 
     /// `peer` said hello as `role`: its ordinal and the connection it replaces, or why
     /// it is refused.
     fn admit(&mut self, peer: PeerId, role: &PeerRole) -> Result<(u32, Option<PeerId>), String> {
-        let PeerRole::Host { ordinal, epoch, .. } = *role else {
+        let PeerRole::Host { ordinal, reg, .. } = *role else {
             return Err(format!("{role:?} is not a host"));
         };
         if ordinal >= self.hosts {
@@ -435,11 +436,11 @@ impl Admission {
         if ordinal < self.mine {
             return Err(format!("host {ordinal} is lower: this host dials it"));
         }
-        let best = self.best_epoch.get(&ordinal).copied().unwrap_or(0);
-        if epoch < best {
-            return Err(format!("host {ordinal} with claim epoch {epoch}: epoch {best} has it (a stale process)"));
+        let best = self.best_reg.get(&ordinal).copied().unwrap_or(0);
+        if reg < best {
+            return Err(format!("host {ordinal} with registration {reg}: registration {best} has it (a stale process)"));
         }
-        self.best_epoch.insert(ordinal, epoch);
+        self.best_reg.insert(ordinal, reg);
         Ok((ordinal, self.live.insert(ordinal, peer)))
     }
 
@@ -664,7 +665,7 @@ impl PeerLinks {
             listener.local_addr(),
             listener.cert_sha256()
         );
-        let hello = LinkHello::new(token, PeerRole::Host { ordinal, boot, epoch: fence.claim_epoch() });
+        let hello = LinkHello::new(token, PeerRole::Host { ordinal, boot, reg: registered.reg });
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
         let mut links: Vec<(u32, Box<dyn PeerLink + Send>)> = Vec::new();
         let mut routes = BTreeMap::new();
@@ -854,10 +855,10 @@ mod tests {
     }
 
     /// The listener admits higher ordinals below `hosts` only; of two connections of one
-    /// ordinal the newer replaces the older unless its claim epoch is lower.
+    /// ordinal the newer replaces the older unless its registration number is lower.
     #[test]
     fn admission_takes_higher_ordinals_and_the_newest_connection() {
-        let host = |ordinal, epoch| PeerRole::Host { ordinal, boot: 1, epoch };
+        let host = |ordinal, reg| PeerRole::Host { ordinal, boot: 1, reg };
         let mut a = Admission::new(1, 3);
         assert!(a.admit(PeerId(1), &host(3, 1)).is_err(), "not below hosts");
         assert!(a.admit(PeerId(2), &host(1, 1)).is_err(), "itself");

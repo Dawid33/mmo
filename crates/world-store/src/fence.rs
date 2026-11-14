@@ -36,7 +36,8 @@ impl Fence {
 
     /// The claim's epoch as one number: the highest owner epoch it set (0 with no
     /// super-regions). A later claim of the same super-regions bumps every epoch, so the
-    /// process that claimed last has the higher one (its service-link hello carries it).
+    /// process that claimed last has the higher one. (A host's service-link hello carries
+    /// its registration number instead, `hosts.reg`: claims change during a boot's life.)
     pub fn claim_epoch(&self) -> u64 {
         self.epochs.values().copied().max().unwrap_or(0)
     }

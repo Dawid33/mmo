@@ -129,6 +129,10 @@ pub trait Ownership: Send + std::fmt::Debug {
     fn policy(&self) -> CrashPolicy;
     /// The directory this policy answers from (`None` for `AllInOne` / `Static`).
     fn directory_mut(&mut self) -> Option<&mut Directory>;
+    /// [`Self::directory_mut`], to read.
+    fn directory(&self) -> Option<&Directory> {
+        None
+    }
     /// How many hosts share the world (`VOXEL_HOSTS`; `AllInOne`: 1).
     fn hosts(&self) -> u32;
     /// Whether this process runs every host's regions (`AllInOne`): it adopts every
@@ -291,6 +295,12 @@ impl Directory {
         self.live = live;
     }
 
+    /// Host `ordinal` is live too (its peer link said hello: it registered and runs) until
+    /// the next [`Self::set_live`].
+    pub fn note_live(&mut self, ordinal: u32) {
+        self.live.insert(ordinal);
+    }
+
     /// The live host that should claim `sr` when it is free: [`rendezvous_owner`]
     /// restricted to the live hosts (with every host of `VOXEL_HOSTS` live, exactly
     /// `rendezvous_owner(sr, hosts)`; a dead host's share moves, nobody else's). `None`
@@ -329,6 +339,9 @@ impl Ownership for PgClaim {
     }
     fn directory_mut(&mut self) -> Option<&mut Directory> {
         Some(&mut self.directory)
+    }
+    fn directory(&self) -> Option<&Directory> {
+        Some(&self.directory)
     }
     fn hosts(&self) -> u32 {
         self.hosts

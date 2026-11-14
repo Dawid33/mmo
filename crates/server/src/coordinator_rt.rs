@@ -287,7 +287,7 @@ struct Routes {
     refused: BTreeSet<PeerId>,
     /// Connected host peers and their ordinals (a reconnect is a new peer).
     hosts: BTreeMap<PeerId, u32>,
-    /// The live connection of each ordinal, with the claim epoch its hello carried.
+    /// The live connection of each ordinal, with the registration number its hello carried.
     live: BTreeMap<u32, (PeerId, u64)>,
     /// `Attach`es handled whose echo has not been routed yet: (connection, epoch), in order.
     attaches: VecDeque<(PeerId, u64)>,
@@ -307,39 +307,29 @@ enum Admit {
 }
 
 impl Routes {
-    /// A host peer said hello as `ordinal` with claim `epoch`; `stored_epoch` is the
-    /// ordinal's claim epoch in the store (`StoreHandle::owner_claim_epoch`; `None`: it
-    /// claims nothing, epoch 0). A hello whose epoch is not the stored one is a stale host
-    /// process (its claims taken over, fenced at its next cut) and is refused — read from
-    /// the store, so this holds across a coordinator restart. Otherwise the newer
-    /// connection of an ordinal replaces the older.
-    ///
-    /// The stored epoch is `MAX(epoch)` over the ordinal's `super_regions` rows. A partial
-    /// takeover (another process claimed some of its super-regions, not all) leaves the
-    /// maximum of what the ordinal still holds: equal to the live process's claim epoch
-    /// unless the taken rows were its highest, in which case even the live process is
-    /// refused until it is fenced and restarts (it is losing its claim anyway). An ordinal
-    /// owning nothing has no rows: epoch 0, which a host that claimed nothing carries.
-    /// The inverted edge: if the super-region layout changes (more hosts, another side),
-    /// rows of the old layout the ordinal still owns keep their epochs while its new rows
-    /// may start lower — `MAX` then names an old row, so the restarted process (claim
-    /// epoch = its new rows' maximum) is refused while a stale process of the old layout
-    /// would be admitted. A layout change must clear the old rows first.
-    fn admit(&mut self, peer: PeerId, ordinal: u32, epoch: u64, stored_epoch: Option<u64>) -> Admit {
-        let stored = stored_epoch.unwrap_or(0);
-        if epoch != stored {
+    /// A host peer said hello as `ordinal` with registration number `reg`; `stored` is the
+    /// ordinal's `hosts` row as read now (its `reg` and `state`; `None`: no row, or it could
+    /// not be read). A hello whose `reg` is not the row's, or whose row is not live (its
+    /// lease lapsed and it was declared dead), is a stale host process — another boot of the
+    /// ordinal registered since, or it is being succeeded — and is refused; read from the
+    /// store, so this holds across a coordinator restart. Otherwise the newer connection of
+    /// an ordinal replaces the older. (Registration numbers replace R3's claim epochs: under
+    /// `claim` a host's claims change during its life, its registration never does.)
+    fn admit(&mut self, peer: PeerId, ordinal: u32, reg: u64, stored: Option<(u64, i64)>) -> Admit {
+        let current = matches!(stored, Some((stored_reg, state)) if stored_reg == reg && state == game::HOST_LIVE);
+        if !current {
             log::error!(
-                "[coordinator] refusing host {ordinal} (peer {}) with claim epoch {epoch}: the store has epoch {stored} \
-                 (a stale host process, fenced at its next cut)",
+                "[coordinator] refusing host {ordinal} (peer {}) with registration {reg}: its hosts row is {stored:?} \
+                 ((reg, state); a stale host process, or its row unreadable)",
                 peer.0
             );
             self.refused.insert(peer);
             return Admit::Refused;
         }
         let replaced = match self.live.get(&ordinal).copied() {
-            Some((live, live_epoch)) => {
+            Some((live, live_reg)) => {
                 log::warn!(
-                    "[coordinator] host {ordinal}: peer {} (claim epoch {epoch}) replaces peer {} (epoch {live_epoch}); \
+                    "[coordinator] host {ordinal}: peer {} (registration {reg}) replaces peer {} (registration {live_reg}); \
                      the old connection is closed and its messages ignored",
                     peer.0,
                     live.0
@@ -349,7 +339,7 @@ impl Routes {
             }
             None => None,
         };
-        self.live.insert(ordinal, (peer, epoch));
+        self.live.insert(ordinal, (peer, reg));
         self.hosts.insert(peer, ordinal);
         Admit::Admitted { replaced }
     }
@@ -408,13 +398,17 @@ impl Routes {
     }
 }
 
-/// Host `ordinal`'s claim epoch in the store, for its hello's admission; `Some(u64::MAX)`
-/// (refused: "wait, never guess" — the host redials) when the store cannot be read.
-fn stored_claim_epoch(store: &StoreHandle, ordinal: u32) -> Option<u64> {
-    store.owner_claim_epoch(ordinal).unwrap_or_else(|e| {
-        log::error!("[coordinator] host {ordinal}'s claim epoch could not be read ({e}); its hello is refused");
-        Some(u64::MAX)
-    })
+/// Host `ordinal`'s `hosts` row as stored — `(reg, state)` — for its hello's admission;
+/// `None` (refused: "wait, never guess" — the host redials) when it has no row or the store
+/// cannot be read.
+fn stored_registration(store: &StoreHandle, ordinal: u32) -> Option<(u64, i64)> {
+    match store.hosts() {
+        Ok(rows) => rows.into_iter().find(|r| r.ordinal == ordinal).map(|r| (r.reg, r.state)),
+        Err(e) => {
+            log::error!("[coordinator] host {ordinal}'s hosts row could not be read ({e}); its hello is refused");
+            None
+        }
+    }
 }
 
 /// Whether host `ordinal`'s `Attach` of world `generation` may be applied: not lower than
@@ -865,15 +859,15 @@ impl CoordinatorRuntime {
                 while let Ok((peer, event)) = l.events.try_recv() {
                     match event {
                         LinkEvent::Up(hello) => match hello.role {
-                            PeerRole::Host { ordinal, boot, epoch } => match l.routes.admit(
+                            PeerRole::Host { ordinal, boot, reg } => match l.routes.admit(
                                 peer,
                                 ordinal,
-                                epoch,
-                                stored_claim_epoch(&self.store, ordinal),
+                                reg,
+                                stored_registration(&self.store, ordinal),
                             ) {
                                 Admit::Admitted { replaced } => {
                                     log::info!(
-                                        "[coordinator] host {ordinal} connected (peer {}, boot {boot:#x}, claim epoch {epoch})",
+                                        "[coordinator] host {ordinal} connected (peer {}, boot {boot:#x}, registration {reg})",
                                         peer.0
                                     );
                                     l.routes.boots.insert(peer, boot);
@@ -1244,19 +1238,27 @@ mod tests {
         HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None }
     }
 
-    /// Any ordinal is served, each with one live connection; a hello whose claim epoch is
-    /// not the store's is refused (a stale process), first to connect or not.
+    /// A `hosts` row of registration `reg`, live.
+    fn live(reg: u64) -> Option<(u64, i64)> {
+        Some((reg, game::HOST_LIVE))
+    }
+
+    /// Any ordinal is served, each with one live connection; a hello whose registration is
+    /// not its `hosts` row's — or whose row is not live, or missing — is refused (a stale
+    /// process), first to connect or not.
     #[test]
     fn two_ordinals_are_served() {
         let mut r = Routes::default();
-        assert_eq!(r.admit(PeerId(2), 4, 1, Some(2)), Admit::Refused, "a stale epoch is refused, first or not");
-        assert_eq!(r.admit(PeerId(3), 0, 1, Some(1)), Admit::Admitted { replaced: None }, "host 0 is served");
-        assert_eq!(r.admit(PeerId(4), 1, 3, Some(3)), Admit::Admitted { replaced: None }, "and host 1");
-        assert_eq!(r.admit(PeerId(5), 0, 1, Some(1)), Admit::Admitted { replaced: Some(PeerId(3)) }, "host 0 reconnecting");
-        assert_eq!(r.admit(PeerId(6), 7, 0, None), Admit::Admitted { replaced: None }, "a host claiming nothing: epoch 0");
+        assert_eq!(r.admit(PeerId(2), 4, 1, live(2)), Admit::Refused, "a stale registration is refused, first or not");
+        assert_eq!(r.admit(PeerId(3), 0, 1, live(1)), Admit::Admitted { replaced: None }, "host 0 is served");
+        assert_eq!(r.admit(PeerId(4), 1, 3, live(3)), Admit::Admitted { replaced: None }, "and host 1");
+        assert_eq!(r.admit(PeerId(5), 0, 1, live(1)), Admit::Admitted { replaced: Some(PeerId(3)) }, "host 0 reconnecting");
+        assert_eq!(r.admit(PeerId(6), 7, 1, None), Admit::Refused, "a host with no hosts row");
+        assert_eq!(r.admit(PeerId(7), 8, 2, Some((2, game::HOST_DEAD))), Admit::Refused, "a host declared dead");
         assert_eq!(r.peer_of(0), Some(PeerId(5)));
         assert_eq!(r.peer_of(1), Some(PeerId(4)));
         assert_eq!(r.peer_of(4), None);
+        assert_eq!(r.peer_of(7), None);
         assert!(r.refused.contains(&PeerId(2)) && r.refused.contains(&PeerId(3)));
         assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 9 }), Route::Nobody, "an unmatched echo goes nowhere");
     }
@@ -1284,37 +1286,39 @@ mod tests {
         assert_eq!(r.route(Target::Every, &CoordMsg::Calendar(game::history::CalendarTick(1))), Route::Every);
     }
 
-    /// One live connection per ordinal, admitted by the store's claim epoch: a stale
-    /// process is refused even with nobody live (a restarted coordinator has no memory of
-    /// who connected); the replaced connection is refused, its pending attach echo
+    /// One live connection per ordinal, admitted by the `hosts` row's registration number:
+    /// a stale process is refused even with nobody live (a restarted coordinator has no
+    /// memory of who connected); the replaced connection is refused, its pending attach echo
     /// dropped, and only the live one is routed to.
     #[test]
-    fn one_live_peer_per_ordinal_by_claim_epoch() {
+    fn one_live_peer_per_ordinal_by_registration() {
         let mut r = Routes::default();
-        assert_eq!(r.admit(PeerId(1), 0, 5, Some(5)), Admit::Admitted { replaced: None });
+        assert_eq!(r.admit(PeerId(1), 0, 5, live(5)), Admit::Admitted { replaced: None });
         r.note(PeerId(1), 0, &attach(0, 3));
-        // The ordinal was claimed again (epoch 6): the old process is stale.
-        assert_eq!(r.admit(PeerId(2), 0, 5, Some(6)), Admit::Refused);
+        // The ordinal registered again (registration 6): the old process is stale.
+        assert_eq!(r.admit(PeerId(2), 0, 5, live(6)), Admit::Refused);
         assert!(r.refused.contains(&PeerId(2)));
         assert_eq!(r.peer_of(0), Some(PeerId(1)));
         // Its replacement takes over: the old connection is refused and its attach echo
         // goes nowhere.
-        assert_eq!(r.admit(PeerId(3), 0, 6, Some(6)), Admit::Admitted { replaced: Some(PeerId(1)) });
+        assert_eq!(r.admit(PeerId(3), 0, 6, live(6)), Admit::Admitted { replaced: Some(PeerId(1)) });
         assert!(r.refused.contains(&PeerId(1)) && !r.hosts.contains_key(&PeerId(1)));
         assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 3 }), Route::Nobody);
         r.note(PeerId(3), 0, &attach(0, 1));
         assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(3)));
         assert_eq!(r.peer_of(0), Some(PeerId(3)));
-        // The same epoch reconnecting (a dropped link of the live process): the newer wins.
-        assert_eq!(r.admit(PeerId(4), 0, 6, Some(6)), Admit::Admitted { replaced: Some(PeerId(3)) });
+        // The same registration reconnecting (a dropped link of the live process): the newer wins.
+        assert_eq!(r.admit(PeerId(4), 0, 6, live(6)), Admit::Admitted { replaced: Some(PeerId(3)) });
         // The old connection's Down does not unseat the live one.
         assert_eq!(r.gone(PeerId(3)), None);
         assert_eq!(r.peer_of(0), Some(PeerId(4)));
         assert_eq!(r.gone(PeerId(4)), Some(0));
         assert_eq!(r.peer_of(0), None);
-        // With nobody live, a stale epoch is still refused; the stored epoch is admitted.
-        assert_eq!(r.admit(PeerId(5), 0, 5, Some(6)), Admit::Refused);
-        assert_eq!(r.admit(PeerId(6), 0, 6, Some(6)), Admit::Admitted { replaced: None });
+        // With nobody live, a stale registration is still refused; the stored one is admitted
+        // — unless its row is no longer live (declared dead).
+        assert_eq!(r.admit(PeerId(5), 0, 5, live(6)), Admit::Refused);
+        assert_eq!(r.admit(PeerId(9), 0, 6, Some((6, game::HOST_DEAD))), Admit::Refused);
+        assert_eq!(r.admit(PeerId(6), 0, 6, live(6)), Admit::Admitted { replaced: None });
         // A refused Attach (an old world generation) closes the live connection.
         r.note(PeerId(6), 0, &attach(0, 2));
         assert_eq!(r.refuse(PeerId(6)), Some(0));

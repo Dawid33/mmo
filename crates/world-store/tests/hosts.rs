@@ -105,22 +105,3 @@ fn stale_generation_names_both_numbers() {
     assert!(text.contains('7') && text.contains('3'), "{text}");
 }
 
-/// A host's claim epoch as stored (what a coordinator admits a hello by): the highest
-/// epoch of the super-regions it holds; none for a host that holds none; a takeover of
-/// one of them leaves the old owner with what it still holds.
-#[test]
-fn owner_claim_epoch_is_the_highest_held() {
-    each_backend("hosts_claim_epoch", false, |url| {
-        let h = open(url);
-        assert_eq!(h.owner_claim_epoch(0).unwrap(), None);
-        let first = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0], TEST_SUPER_REGIONS[1]]).unwrap();
-        assert_eq!(h.owner_claim_epoch(0).unwrap(), Some(first.claim_epoch()));
-        let again = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0], TEST_SUPER_REGIONS[1]]).unwrap();
-        assert!(again.claim_epoch() > first.claim_epoch());
-        assert_eq!(h.owner_claim_epoch(0).unwrap(), Some(again.claim_epoch()), "the newer claim's");
-        let other = h.claim_super_regions(1, vec![TEST_SUPER_REGIONS[1]]).unwrap();
-        assert_eq!(h.owner_claim_epoch(1).unwrap(), Some(other.claim_epoch()));
-        assert_eq!(h.owner_claim_epoch(0).unwrap(), Some(again.epochs[&TEST_SUPER_REGIONS[0]]), "what host 0 still holds");
-        h.shutdown();
-    });
-}

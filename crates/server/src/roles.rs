@@ -105,6 +105,21 @@ pub fn check_several_hosts(role: Role, hosts: u32, postgres: bool, login_link: b
     Ok(())
 }
 
+/// What `VOXEL_OWNERSHIP=claim` refuses outside a host role.
+pub const CLAIM_NEEDS_ROLE_HOST: &str =
+    "VOXEL_OWNERSHIP=claim claims super-regions on demand and registers a lease: it needs VOXEL_ROLE=host";
+
+/// The start-up refusal of `claim` ownership (R4): only a `host` process claims on demand
+/// (it registers, beats a lease and reads the directory; a host role needs Postgres). Any
+/// number of hosts, one included (one-phase cuts, everything claimed on demand); several
+/// hosts still need what [`check_several_hosts`] asks.
+pub fn check_claim(role: Role, claim: bool) -> Result<(), String> {
+    if claim && role != Role::Host {
+        return Err(CLAIM_NEEDS_ROLE_HOST.to_string());
+    }
+    Ok(())
+}
+
 /// What a split role refuses to start on: the world's clock anchor says it is earlier
 /// than the saved world tick (a restored backup, a cleared-then-stale row).
 pub const CLOCK_BEHIND_WORLD_TICK: &str =
@@ -529,7 +544,7 @@ mod tests {
     }
 
     fn hello() -> LinkHello {
-        LinkHello::new("t".into(), svc_link::PeerRole::Host { ordinal: 0, boot: 1, epoch: 1 })
+        LinkHello::new("t".into(), svc_link::PeerRole::Host { ordinal: 0, boot: 1, reg: 1 })
     }
 
     fn calendar(t: u64) -> CoordMsg {

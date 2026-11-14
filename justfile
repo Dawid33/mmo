@@ -1157,7 +1157,7 @@ esac
 if [ "$n" -lt 1 ] || [ "$n" -gt 6 ] || [ "$o" -ge "$n" ]; then
     echo "dev host: need 0 <= ordinal < hosts <= 6 (host 6's peer port would be host 4's UDP port)" >&2; exit 1
 fi
-printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_ORDINAL=$o VOXEL_HOSTS=$n VOXEL_WORLD_DB=$5 \
+printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=claim VOXEL_HOST_ORDINAL=$o VOXEL_HOSTS=$n VOXEL_WORLD_DB=$5 \
     VOXEL_SERVICE_TOKEN_FILE=$dir/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
     VOXEL_SERVER_PORT=$((6466 + 10 * o)) VOXEL_WT_PORT=$((6467 + 10 * o)) VOXEL_PEER_BIND=127.0.0.1:$((6500 + o)) \
     VOXEL_PEER_LINK_DELAY_MS=$3
@@ -1192,7 +1192,7 @@ _dev-hosts-check ordinal hosts delay min_hosts:
     fi
 
 # A region host (VOXEL_ROLE=host) of the dev Postgres world: host `ordinal` of `hosts`
-# (static ownership), dialing the coordinator at 127.0.0.1:6480 (started first or later —
+# (claim ownership: super-regions claimed on demand by the preferred live host), dialing the coordinator at 127.0.0.1:6480 (started first or later —
 # it waits for the pin). Host n takes clients on UDP 6466 + 10n (WebTransport 6467 + 10n)
 # and its peer hosts on 127.0.0.1:6500 + n; `delay` holds every outgoing peer frame that
 # many ms (measurement only). One host (the defaults): as `just server` on 6466, local

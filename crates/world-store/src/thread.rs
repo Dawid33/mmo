@@ -106,7 +106,6 @@ pub(crate) enum Request {
     RegisterHost(crate::HostRow, Fence, game::CrashPolicy, Reply<crate::BootVerdict>),
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
-    OwnerClaimEpoch(u32, Reply<Option<u64>>),
     Heartbeat(u32, u64, Reply<bool>),
     Owners(Reply<Vec<(SuperRegion, i64, u64)>>),
     OwnedBy(u32, Reply<Fence>),
@@ -480,9 +479,6 @@ async fn serve(
             Request::Owners(r) => tokio::spawn(async move { r.send(on_pool!(&pool, owners())) }),
             Request::OwnedBy(owner, r) => tokio::spawn(async move { r.send(on_pool!(&pool, owned_by(owner))) }),
             Request::DbNowMs(r) => tokio::spawn(async move { r.send(on_pool!(&pool, db_now_ms())) }),
-            Request::OwnerClaimEpoch(owner, r) => {
-                tokio::spawn(async move { r.send(on_pool!(&pool, owner_claim_epoch(owner))) })
-            }
         };
         tasks.push(task);
     }

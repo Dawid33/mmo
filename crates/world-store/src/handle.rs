@@ -747,15 +747,14 @@ impl StoreHandle {
         self.ask(Request::DbNowMs)
     }
 
+    /// [`Self::db_now_ms`], answered on the receiver.
+    pub fn db_now_ms_later(&self) -> crossbeam::channel::Receiver<Result<u64, StoreError>> {
+        self.ask_later(Request::DbNowMs)
+    }
+
     /// The world's generation: how many dirty host restarts the world has seen.
     pub fn world_generation(&self) -> Result<u64, StoreError> {
         self.ask(Request::WorldGeneration)
-    }
-
-    /// Host `owner`'s claim epoch as stored: the highest epoch of the super-regions it
-    /// holds (`None`: it holds none). A process whose claim was taken over has a lower one.
-    pub fn owner_claim_epoch(&self, owner: u32) -> Result<Option<u64>, StoreError> {
-        self.ask(|r| Request::OwnerClaimEpoch(owner, r))
     }
 
     /// Commits everything queued before this call, then stops the thread and
