@@ -48,6 +48,13 @@ pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 /// The server's QUIC port override (`server::SERVER_PORT_ENV`).
 pub const SERVER_PORT_ENV: &str = "VOXEL_SERVER_PORT";
 
+/// The server's dev structure variable (`server::dev_structures::DEV_STRUCTURES_ENV`).
+pub const DEV_STRUCTURES_ENV: &str = "VOXEL_DEV_STRUCTURES";
+
+/// `<rx>,<rz>=<spec>` for the next server this client starts ([`DEV_STRUCTURES_ENV`]); taken by the start.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub struct DevStructures(pub String);
+
 /// How much of the server log's end [`LocalHost::log_tail`] reads.
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
@@ -123,6 +130,11 @@ impl LocalHost {
         Self::start_on(&server_binary(), terrain, log, port)
     }
 
+    /// [`start`](Self::start) with extra environment variables for the child.
+    pub fn start_with_env(terrain: &Path, log: &Path, port: Option<u16>, extra_env: &[(&str, &str)]) -> io::Result<LocalHost> {
+        Self::start_env(&server_binary(), terrain, log, port, extra_env)
+    }
+
     /// [`start`](Self::start) with an explicit binary, on a free port.
     pub fn start_with(binary: &Path, terrain: &Path, log: &Path) -> io::Result<LocalHost> {
         Self::start_on(binary, terrain, log, None)
@@ -130,6 +142,17 @@ impl LocalHost {
 
     /// [`start`](Self::start) with an explicit binary and port.
     pub fn start_on(binary: &Path, terrain: &Path, log: &Path, port: Option<u16>) -> io::Result<LocalHost> {
+        Self::start_env(binary, terrain, log, port, &[])
+    }
+
+    /// [`start_on`](Self::start_on) with extra environment variables for the child.
+    pub fn start_env(
+        binary: &Path,
+        terrain: &Path,
+        log: &Path,
+        port: Option<u16>,
+        extra_env: &[(&str, &str)],
+    ) -> io::Result<LocalHost> {
         let port = match port {
             Some(port) => port,
             None => free_udp_port()?,
@@ -144,6 +167,7 @@ impl LocalHost {
             .env("VOXEL_WORLD_DB", worldgen::world_store::store_path_for(terrain))
             .env(SINGLE_PLAYER_ENV, "1")
             .env(SERVER_PORT_ENV, port.to_string())
+            .envs(extra_env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(out)
             .stderr(err)

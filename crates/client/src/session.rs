@@ -659,7 +659,12 @@ mod flow {
         let pending = world.remove_resource::<PendingWorld>().expect("checked above");
         let log = server_log_path(&pending.entry_dir, &pending.terrain);
         let port = world.get_resource::<HostPort>().map(|p| p.0);
-        let host = match LocalHost::start(&pending.terrain, &log, port) {
+        let dev_structures = world.remove_resource::<crate::local_host::DevStructures>();
+        let extra_env: Vec<(&str, &str)> = dev_structures
+            .iter()
+            .map(|d| (crate::local_host::DEV_STRUCTURES_ENV, d.0.as_str()))
+            .collect();
+        let host = match LocalHost::start_with_env(&pending.terrain, &log, port, &extra_env) {
             Ok(host) => host,
             Err(e) => {
                 fail_start(world, format!("Could not start the server for {:?}: {e}", pending.name));
