@@ -26,11 +26,16 @@ ssh_ "mkdir -p $dir/bin"
 rsync -az -e "ssh -o BatchMode=yes" "$bin" "$host:$dir/bin/login.new"
 ssh_ "mv -f $dir/bin/login.new $dir/bin/login"
 
-if kubectl --context "$ctx" -n login get deploy/login >/dev/null 2>&1; then
+if out=$(kubectl --context "$ctx" -n login get deploy/login -o name 2>&1); then
     echo "orion-login: rolling restart"
     kubectl --context "$ctx" -n login rollout restart deploy/login
     kubectl --context "$ctx" -n login rollout status deploy/login --timeout=5m
     echo "orion-login: restarted"
-else
+elif [[ "$out" == *NotFound* ]]; then
+    # Absent Deployment (or namespace): the login root is not applied yet.
     echo "orion-login: binary shipped; apply the login root"
+else
+    echo "$out" >&2
+    echo "orion-login-push: the binary is on the box but was NOT rolled out — fix the cluster access and run \`kubectl --context $ctx -n login rollout restart deploy/login\`" >&2
+    exit 2
 fi

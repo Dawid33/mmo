@@ -1822,7 +1822,14 @@ orion-login-logs:
 # Put the login root's service token on the box (/srv/mmo/secrets/service-token, mode 600) for the
 # game host. The token travels through the pipe only.
 orion-login-token-push:
-    {{tofu}} -chdir=deploy/envs/orion/login output -raw service_token | ssh -o BatchMode=yes {{deploy_host}} 'umask 077; mkdir -p /srv/mmo/secrets; cat > /srv/mmo/secrets/service-token.new; mv -f /srv/mmo/secrets/service-token.new /srv/mmo/secrets/service-token'
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if {{tofu}} -chdir=deploy/envs/orion/login output -raw service_token | ssh -o BatchMode=yes {{deploy_host}} 'umask 077 && mkdir -p /srv/mmo/secrets && cat > /srv/mmo/secrets/service-token.new && [ -s /srv/mmo/secrets/service-token.new ] && mv -f /srv/mmo/secrets/service-token.new /srv/mmo/secrets/service-token || { rm -f /srv/mmo/secrets/service-token.new; exit 1; }'; then
+        echo "orion-login-token-push: token written to {{deploy_host}}:/srv/mmo/secrets/service-token"
+    else
+        echo "orion-login-token-push: failed — the token on the box is unchanged" >&2
+        exit 1
+    fi
 
 # Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
 # `smoke` / `test-one` while iterating and keep this for a broader sweep.
