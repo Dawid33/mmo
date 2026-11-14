@@ -1784,3 +1784,77 @@ fn a_host_rolled_back_while_leaving_tells_its_clients() {
 fn a_host_leaving_without_a_cut_tells_its_clients() {
     stopping_host_tells("late");
 }
+
+/// R4 Task 14: every host died, and host 1 will never come back. With nobody alive the
+/// operator retires it (`worldctl retire-host`, the real command against this world): the
+/// succession is opened offline — no survivors, heir host 0, based on the last committed cut.
+/// The coordinator (alive throughout) reads it from its next `hosts` read; host 0 boots
+/// (raising the generation: nobody was alive), gets the order as the heir, adopts host 1's
+/// land and in-flight rows from the store alone, and its first committed cut settles it.
+/// Conservation: every slime (on either side, one that crossed before the cut) is live once
+/// and stored exactly once after the settle; every super-region is host 0's; host 1's row is
+/// dead and clean.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
+    install_props();
+    let Some(db) = PgDb::create("tk_retired") else { return };
+    let dir = scratch("tk_retired");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let generation = t.w.store.world_generation().unwrap();
+    let (a0, b1) = (t.seams[0], t.seams[1]);
+    let crosser = slime(&mut t, 1, b1, 0.0);
+    assert!(push(&mut t, 1, crosser, b1, a0), "the crosser is pushed toward host 0");
+    t.until("the crosser arrived on host 0", WAIT, |t| t.live(crosser) == [(0, a0)]);
+    centre(&mut t, 0, crosser, a0);
+    let ids = [slime(&mut t, 0, a0, -3.0), slime(&mut t, 1, b1, -3.0), slime(&mut t, 1, b1, 3.0), crosser];
+    let k = t.until_committed_after(&db, 0);
+    let k = t.until_committed_after(&db, k);
+    t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
+    t.kill(0);
+    t.kill(1);
+    // Past every lease — the product's, which the command judges by: their last beats lie
+    // two leases back (time the test does not wait out).
+    let dead = Instant::now();
+    while dead.elapsed() < Duration::from_millis(LEASE_MS + 500) {
+        t.round();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    exec(&db, &format!("UPDATE hosts SET seen_ms = seen_ms - {}", 2 * game::HOST_LEASE_MS));
+    assert!(successions(&db).is_empty(), "nobody alive to inherit: nothing declared");
+    let url = db.0.url.clone();
+    let out = world_store::ctl::run(&["retire-host".to_string(), url.clone(), "1".to_string()]).expect("retired offline");
+    assert!(out.contains("heir 0"), "{out}");
+    let declared = successions(&db);
+    assert_eq!(declared.len(), 1);
+    assert_eq!(&declared[0][1..], &[1, 0, k, -1, 0], "host 1 → heir 0, based on the last cut, open");
+    assert_eq!(host_row(&db, 1).2, game::HOST_DEAD);
+    // The heir boots: nobody alive, so it raises the generation; the coordinator sends it the
+    // order (it is no survivor) and it adopts.
+    t.restart(&db, &dir, 0, 5000);
+    assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "the heir's boot raised the generation");
+    let row = t.until_settled(&db, 1);
+    assert_eq!((row[0], row[2], row[3], row[5]), (declared[0][0], 0, k, 0), "the offline succession settled: {row:?}");
+    let first_after = decisions(&db).into_iter().filter(|(c, _, ok)| *ok && *c > k).map(|(c, _, _)| c).min();
+    assert_eq!(first_after, Some(row[4]), "its first committed cut settled it");
+    let (_, clean, state) = host_row(&db, 1);
+    assert_eq!((clean, state), (1, game::HOST_DEAD), "host 1's row: settled clean, dead");
+    let owners = t.w.store.owners().unwrap();
+    assert!(!owners.is_empty() && owners.iter().all(|(_, o, _)| *o == 0), "every super-region is host 0's: {owners:?}");
+    assert!(t.w.store.load_in_flight(Some(1)).unwrap().is_empty(), "no row left under host 1");
+    // Conservation: every slime live once, and stored once after the settle.
+    t.watch(0, a0);
+    t.watch(0, b1);
+    t.until("both seam regions run on the heir", WAIT, |t| {
+        let running = t.sim(0).manager.running_regions();
+        running.contains(&a0) && running.contains(&b1)
+    });
+    let after = t.until_committed_after(&db, row[4]);
+    let _ = t.until_committed_after(&db, after);
+    for id in ids {
+        assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
+        stored_once(&t, &db, id, "after the offline succession settled");
+    }
+    assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "no further rollback");
+    t.stop(&db, &dir);
+}

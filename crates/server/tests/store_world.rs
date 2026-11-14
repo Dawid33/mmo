@@ -999,3 +999,52 @@ fn split_start_refuses_anchor_behind_world_tick() {
     store.shutdown();
     drop(db);
 }
+
+/// R3's residual: role `all` (one process claiming every super-region) on a world where other
+/// hosts ran in a split role and did not leave cleanly would abort their staged parts and fence
+/// them — refused at start, naming the rows and the remedies (`worldctl retire-host`,
+/// `worldctl rollback`). Its own ordinal's row, a clean row, a row of an older generation (a
+/// world rolled back since) and another role are not refused.
+#[test]
+fn role_all_beside_other_hosts_dirty_rows_is_refused() {
+    use server::roles::{check_all_role_beside_hosts, Role, ALL_ROLE_BESIDE_HOSTS};
+    let dir = scratch("role_all_beside");
+    let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
+    let row = |ordinal: u32| world_store::HostRow {
+        ordinal,
+        boot: 10 + u64::from(ordinal),
+        generation: 0,
+        clean: false,
+        state: world_store::HOST_LIVE,
+        seen_ms: 0,
+        reg: 0,
+        peer_addr: None,
+        peer_cert: None,
+        quic: None,
+        webtransport: None,
+        wt_cert_hash: None,
+    };
+    let open = || world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+    let store = open();
+    let none = world_store::Fence::default();
+    store.register_host(row(0), &none, game::CrashPolicy::Rollback).unwrap();
+    assert_eq!(check_all_role_beside_hosts(Role::All, &store, 0), Ok(()), "only its own ordinal's row");
+    store.register_host(row(1), &none, game::CrashPolicy::Rollback).unwrap();
+    store.register_host(row(2), &none, game::CrashPolicy::Rollback).unwrap();
+    let err = check_all_role_beside_hosts(Role::All, &store, 0).expect_err("hosts 1 and 2 ran and did not leave");
+    assert!(err.starts_with(ALL_ROLE_BESIDE_HOSTS), "{err}");
+    assert!(err.contains("[1, 2]") && err.contains("worldctl retire-host") && err.contains("worldctl rollback"), "{err}");
+    assert_eq!(check_all_role_beside_hosts(Role::Host, &store, 0), Ok(()), "a host of several runs beside them");
+    store.shutdown();
+    // Host 1 left cleanly; host 2's row is of a generation the world rolled back from.
+    raw_exec(&url, "UPDATE hosts SET clean = 1 WHERE ordinal = 1");
+    let store = open();
+    let err = check_all_role_beside_hosts(Role::All, &store, 0).expect_err("host 2 still");
+    assert!(err.contains("[2]") && !err.contains("[1, 2]"), "{err}");
+    store.shutdown();
+    raw_exec(&url, "UPDATE world SET generation = 1");
+    let store = open();
+    assert_eq!(check_all_role_beside_hosts(Role::All, &store, 0), Ok(()), "rolled back: its row holds nothing of this world");
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}

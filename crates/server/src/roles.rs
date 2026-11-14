@@ -400,6 +400,36 @@ pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, ho
     Ok(())
 }
 
+/// Why role `all` does not start on a world other hosts ran ([`check_all_role_beside_hosts`]).
+pub const ALL_ROLE_BESIDE_HOSTS: &str = "VOXEL_ROLE=all (one process running every region) is refused on a world with dirty \
+`hosts` rows of other hosts";
+
+/// Role `all` (`role`; any other role passes) on a store whose `hosts` table holds dirty rows
+/// of ordinals other than `me` at the world's generation: other hosts ran it in a split role
+/// and did not leave cleanly, so they may hold unsaved state, and this process — which claims
+/// every super-region and resolves every staged part — would abort their staged cut parts and
+/// fence them. Refused ([`ALL_ROLE_BESIDE_HOSTS`]), naming the rows and the remedies. A row of
+/// an older generation (the world rolled back since: it holds nothing of this world) or a
+/// clean one is no obstacle. A store whose rows cannot be read is refused too.
+pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle, me: u32) -> Result<(), String> {
+    if role != Role::All {
+        return Ok(());
+    }
+    let rows = store.hosts().map_err(|e| format!("{ALL_ROLE_BESIDE_HOSTS}: the hosts rows could not be read ({e})"))?;
+    let generation = store.world_generation().map_err(|e| format!("{ALL_ROLE_BESIDE_HOSTS}: the world generation could not be read ({e})"))?;
+    let others: Vec<u32> =
+        rows.iter().filter(|r| r.ordinal != me && !r.clean && r.generation == generation).map(|r| r.ordinal).collect();
+    if others.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{ALL_ROLE_BESIDE_HOSTS}: hosts {others:?} ran this world as split hosts and did not leave cleanly — they may hold \
+         unsaved state, and an `all` process would claim their land, abort their staged cut parts and fence them. Start them \
+         again (VOXEL_ROLE=host) until they leave cleanly; retire one that will never return with `worldctl retire-host \
+         <url> <ordinal>` (claim ownership); or restart the world from its last save with `worldctl rollback <url> --yes`"
+    ))
+}
+
 /// The warning for dirty `hosts` rows (`(ordinal, clean)`) of ordinals the coordinator does
 /// not serve (`>= hosts`): a mis-set-up world (started with more hosts before, stopped
 /// uncleanly). Never ignored — such a host may hold state no cut would save — so world cuts
@@ -410,8 +440,8 @@ pub fn hosts_beyond_count(rows: &[(u32, bool)], hosts: u32) -> Option<String> {
         format!(
             "the world has dirty `hosts` rows of hosts {beyond:?}, but {}={hosts}: they ran before and did not \
              leave cleanly, and may hold state. World cuts do not begin while a dirty row has no attached host, \
-             so the world is NOT saved: start this world with {}={} (all its hosts) until they leave cleanly; \
-             there is no worldctl command yet to retire a host's row (TODO.md). Under `claim` such a dirty row \
+             so the world is NOT saved: start this world with {}={} (all its hosts) until they leave cleanly, \
+             or retire one that will never return with `worldctl retire-host <url> <ordinal>`. Under `claim` such a dirty row \
              blocks cuts only until its lease lapses and it is declared dead (its land then goes to an heir). \
              A CLEAN row beyond the count (a host that left in a committed cut) blocks nothing: under `claim` \
              its land is given to a live host at once when a host needs a region of it",

@@ -227,11 +227,12 @@ macro_rules! engine_rows {
             }
 
             /// Begins a claim's transaction (also [`release`]'s): bounded (Postgres) by
-            /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] — a prepared cut part holds its host's rows `FOR
-            /// SHARE` until its cut is decided; one nobody decides would hold the claim for ever.
-            async fn begin_claim(pool: &Pool) -> Result<Tx, StoreError> {
+            /// `lock_ms` ([`crate::CLAIM_LOCK_TIMEOUT_MS`] unless a test lowered it) — a prepared
+            /// cut part holds its host's rows `FOR SHARE` until its cut is decided; one nobody
+            /// decides would hold the claim for ever.
+            async fn begin_claim(pool: &Pool, lock_ms: u64) -> Result<Tx, StoreError> {
                 let mut tx = pool.begin().await?;
-                cut_lock_timeout(&mut *tx, crate::CLAIM_LOCK_TIMEOUT_MS).await?;
+                cut_lock_timeout(&mut *tx, lock_ms).await?;
                 Ok(tx)
             }
 
@@ -239,26 +240,27 @@ macro_rules! engine_rows {
             /// SHARE`, the row [`set_super_region_regions`] locks first — it waits only for that
             /// `FOR UPDATE`, not for a cut's ordinary update of the world row) and refuses with
             /// [`StoreError::OtherSuperRegionSide`] if it is not `opened`, the side the handle read
-            /// at open (`worldctl super-region` changed it since).
-            async fn check_side(tx: &mut Tx, opened: u32) -> Result<(), StoreError> {
+            /// at open (`worldctl super-region` changed it since). A lock timeout on that read
+            /// is explained as any claim's is ([`claim_error`]).
+            async fn check_side(pool: &Pool, mut tx: Tx, opened: u32, lock_ms: u64) -> Result<Tx, StoreError> {
                 let key_share = if $share_lock.is_empty() { "" } else { " FOR KEY SHARE" };
                 let sql = format!("SELECT super_region_regions FROM world WHERE id = 1{key_share}");
-                let stored: i64 = sqlx::query(&sql)
-                    .fetch_optional(&mut **tx)
-                    .await?
-                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
-                    .try_get(0)?;
+                let row = match sqlx::query(&sql).fetch_optional(&mut *tx).await {
+                    Ok(row) => row,
+                    Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
+                };
+                let stored: i64 = row.ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?.try_get(0)?;
                 if stored != i64::from(opened) {
                     let stored = u32::try_from(stored).unwrap_or(0);
                     return Err(StoreError::OtherSuperRegionSide { stored, opened });
                 }
-                Ok(())
+                Ok(tx)
             }
 
             /// A claim's (or release's) statement error: a `lock_timeout` (Postgres `55P03`)
             /// ends the transaction and names the prepared transactions of this world that may
             /// hold the rows ([`crate::open::claim_timeout_message`]).
-            async fn claim_error(pool: &Pool, tx: Tx, e: sqlx::Error) -> StoreError {
+            async fn claim_error(pool: &Pool, tx: Tx, e: sqlx::Error, lock_ms: u64) -> StoreError {
                 match &e {
                     sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => {
                         drop(tx);
@@ -270,7 +272,7 @@ macro_rules! engine_rows {
                         .unwrap_or_default();
                         StoreError::LockConflict {
                             sqlstate: "55P03".into(),
-                            detail: crate::open::claim_timeout_message(crate::CLAIM_LOCK_TIMEOUT_MS, &gids),
+                            detail: crate::open::claim_timeout_message(lock_ms, &gids),
                         }
                     }
                     _ => e.into(),
@@ -291,10 +293,11 @@ macro_rules! engine_rows {
                 srs: Vec<SuperRegion>,
                 opened: u32,
                 live: Option<u64>,
+                lock_ms: u64,
             ) -> Result<Fence, StoreError> {
                 let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
-                let mut tx = begin_claim(pool).await?;
-                check_side(&mut tx, opened).await?;
+                let tx = begin_claim(pool, lock_ms).await?;
+                let mut tx = check_side(pool, tx, opened, lock_ms).await?;
                 let mut epochs = BTreeMap::new();
                 for (sx, sz) in srs {
                     let row = sqlx::query(
@@ -309,13 +312,13 @@ macro_rules! engine_rows {
                     .await;
                     let row = match row {
                         Ok(row) => row,
-                        Err(e) => return Err(claim_error(pool, tx, e).await),
+                        Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
                     };
                     let epoch: i64 = row.try_get(0)?;
                     epochs.insert((sx, sz), u(epoch));
                 }
                 if let Some(boot) = live {
-                    tx = check_live(pool, tx, owner, boot).await?;
+                    tx = check_live(pool, tx, owner, boot, lock_ms).await?;
                 }
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
@@ -334,7 +337,7 @@ macro_rules! engine_rows {
             /// declaration's `FOR NO KEY UPDATE` of the row — a claim that locks first commits
             /// before the declaration moves the predecessor's rows (the newly won ones too); one
             /// that locks after sees the row dead.
-            async fn check_live(pool: &Pool, mut tx: Tx, owner: u32, boot: u64) -> Result<Tx, StoreError> {
+            async fn check_live(pool: &Pool, mut tx: Tx, owner: u32, boot: u64, lock_ms: u64) -> Result<Tx, StoreError> {
                 let sql = format!(
                     "SELECT 1 FROM hosts WHERE ordinal = $1 AND boot = $2 AND state = {} AND clean = 0{}",
                     crate::HOST_LIVE,
@@ -351,7 +354,7 @@ macro_rules! engine_rows {
                         );
                         Err(StoreError::Fenced { sr: None })
                     }
-                    Err(e) => Err(claim_error(pool, tx, e).await),
+                    Err(e) => Err(claim_error(pool, tx, e, lock_ms).await),
                 }
             }
 
@@ -370,10 +373,11 @@ macro_rules! engine_rows {
                 boot: u64,
                 srs: Vec<SuperRegion>,
                 opened: u32,
+                lock_ms: u64,
             ) -> Result<Fence, StoreError> {
                 let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
-                let mut tx = begin_claim(pool).await?;
-                check_side(&mut tx, opened).await?;
+                let tx = begin_claim(pool, lock_ms).await?;
+                let mut tx = check_side(pool, tx, opened, lock_ms).await?;
                 let sql = format!(
                     "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
                      ON CONFLICT (sx, sz) DO UPDATE SET owner = excluded.owner, epoch = super_regions.epoch + 1 \
@@ -391,14 +395,14 @@ macro_rules! engine_rows {
                         .await;
                     let row = match row {
                         Ok(row) => row,
-                        Err(e) => return Err(claim_error(pool, tx, e).await),
+                        Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
                     };
                     if let Some(row) = row {
                         let epoch: i64 = row.try_get(0)?;
                         epochs.insert((sx, sz), u(epoch));
                     }
                 }
-                let tx = check_live(pool, tx, owner, boot).await?;
+                let tx = check_live(pool, tx, owner, boot, lock_ms).await?;
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
             }
@@ -407,11 +411,11 @@ macro_rules! engine_rows {
             /// `fence` and anything claimed before it is fenced) in one transaction: first
             /// [`check_fence`] over the fence's own rows (refused with `Fenced` unless they are
             /// all still `fence`'s), then one update per row in key order. Only the fence's rows
-            /// are freed: a release never skips the fence. `lock_timeout`
-            /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] like a claim. Callers hold the writer lock.
-            pub(crate) async fn release(pool: &Pool, fence: Fence) -> Result<(), StoreError> {
+            /// are freed: a release never skips the fence. `lock_timeout` `lock_ms`
+            /// ([`crate::CLAIM_LOCK_TIMEOUT_MS`]) like a claim. Callers hold the writer lock.
+            pub(crate) async fn release(pool: &Pool, fence: Fence, lock_ms: u64) -> Result<(), StoreError> {
                 let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
-                let mut tx = begin_claim(pool).await?;
+                let mut tx = begin_claim(pool, lock_ms).await?;
                 // `FOR SHARE` never waits for a staged part (it holds its rows `FOR SHARE` too);
                 // the updates below do.
                 check_fence(&mut *tx, &fence, &srs).await?;
@@ -429,7 +433,7 @@ macro_rules! engine_rows {
                         // Held `FOR SHARE` since the check (Postgres), under the writer lock (SQLite).
                         Ok(d) if d.rows_affected() == 1 => {}
                         Ok(_) => return Err(StoreError::Fenced { sr: Some((sx, sz)) }),
-                        Err(e) => return Err(claim_error(pool, tx, e).await),
+                        Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
                     }
                 }
                 tx.commit().await?;
@@ -473,7 +477,7 @@ macro_rules! engine_rows {
             /// The database clock in ms since the epoch (the one expression per engine).
             const NOW_MS: &str = $now_ms;
 
-            /// Registers a host boot (R3, R4): in one transaction (Postgres: `lock_timeout`
+            /// Registers a host boot (R3, R4): in one transaction (Postgres: `lock_timeout` `lock_ms`,
             /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] — it waits for what a claim waits for), with the fence
             /// checked over the fence's own super-regions first and then the world row locked
             /// (Postgres: `FOR NO KEY UPDATE`; SQLite has one writer) — the lock order of `commit_cut`.
@@ -493,20 +497,22 @@ macro_rules! engine_rows {
                 fence: &Fence,
                 policy: game::CrashPolicy,
                 lease_ms: u64,
+                lock_ms: u64,
             ) -> Result<crate::BootVerdict, StoreError> {
                 let mut tx = pool.begin().await?;
-                cut_lock_timeout(&mut *tx, crate::CLAIM_LOCK_TIMEOUT_MS).await?;
+                cut_lock_timeout(&mut *tx, lock_ms).await?;
                 let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
                 check_fence(&mut *tx, fence, &srs).await?;
                 // Postgres `FOR NO KEY UPDATE` (as `decide_cut`): serialises the generation
                 // with a decision and another boot, never waits for a claim's `FOR KEY SHARE`.
+                // A lock timeout here is explained as a claim's ([`claim_error`]).
                 let no_key = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
                 let sql = format!("SELECT generation FROM world WHERE id = 1{no_key}");
-                let world: i64 = sqlx::query(&sql)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
-                    .try_get(0)?;
+                let world_row = match sqlx::query(&sql).fetch_optional(&mut *tx).await {
+                    Ok(found) => found,
+                    Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
+                };
+                let world: i64 = world_row.ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?.try_get(0)?;
                 let prior = sqlx::query("SELECT generation, clean, state, boot FROM hosts WHERE ordinal = $1")
                     .bind(i64::from(row.ordinal))
                     .fetch_optional(&mut *tx)

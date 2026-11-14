@@ -313,6 +313,9 @@ impl Coordinator {
                     self.hop_of.clear();
                     self.online_reported.clear();
                     self.displaced_told.clear();
+                    // A rollback this coordinator did not order (`worldctl rollback`), or a
+                    // total crash's first boot: the store's open successions may differ.
+                    self.successions_reread();
                 }
                 self.forget_settled(host, boot, settled_below, true);
                 self.attach(host, epoch, running, online, handed);

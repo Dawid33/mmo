@@ -264,3 +264,24 @@ fn total_crash_bumps_once_and_everyone_resumes() {
         h.shutdown();
     });
 }
+
+/// R4 (one host under `claim`): the host's crash policy is `Succession` although its
+/// coordinator runs `Rollback` (one host: nobody to inherit). A dirty reboot of the lone
+/// host — its own row beat a moment ago — finds no OTHER live host: it raises the generation
+/// and registers at once, never waiting for a declaration nobody will make.
+#[test]
+fn a_lone_claim_host_restarts_after_a_crash_without_waiting() {
+    each_backend("lease_lone_claim", false, |url| {
+        let h = open(url);
+        assert!(matches!(boot_as(&h, 10, CrashPolicy::Succession), BootVerdict::Registered(HostBoot { bumped: false, .. })));
+        // It crashed right after a beat: its row is dirty, live and fresh.
+        assert!(h.heartbeat(0, 10).unwrap());
+        let started = std::time::Instant::now();
+        let again = boot_as(&h, 20, CrashPolicy::Succession);
+        assert!(matches!(again, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })), "{again:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "registered at once");
+        let rows = h.hosts().unwrap();
+        assert_eq!(rows.iter().map(|r| (r.ordinal, r.boot, r.state, r.clean)).collect::<Vec<_>>(), vec![(0, 20, HOST_LIVE, false)]);
+        h.shutdown();
+    });
+}

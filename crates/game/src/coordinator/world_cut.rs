@@ -66,9 +66,9 @@ impl std::fmt::Display for CutsBlocked {
             write!(
                 f,
                 " hosts {:?} have a dirty `hosts` row (they may hold state) but are not attached — start them \
-                 (VOXEL_HOST_ORDINAL); there is no worldctl command yet to retire a host that will never \
-                 return (TODO.md), so until it starts nothing is saved and stopping the others rolls the world \
-                 back to the last cut;",
+                 (VOXEL_HOST_ORDINAL), or retire one that will never return with `worldctl retire-host <url> \
+                 <ordinal>` (claim ownership: its land goes to an heir); until then nothing is saved and stopping \
+                 the others rolls the world back to the last cut;",
                 self.missing
             )?;
         }

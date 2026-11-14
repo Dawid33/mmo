@@ -125,6 +125,13 @@ pub(crate) enum Request {
     DeclareSuccession(Box<Declare>, Reply<crate::Declared>),
     /// R4: the coordinator rolls the world back (Postgres).
     RollbackWorld(CoordinatorFence, Reply<u64>),
+    /// R4: the operator rolls the world back (`worldctl rollback`; Postgres): `(generation,
+    /// successions abandoned)`.
+    RollbackWorldOperator(Reply<(u64, u64)>),
+    /// R4: the operator retires a host while no host runs (`worldctl retire-host`; Postgres).
+    RetireOffline(u32, Reply<crate::Retired>),
+    /// R4: the operator vouches for a lapsed host's death (`worldctl retire-host`; Postgres).
+    VouchHost(u32, Reply<crate::Vouched>),
     OpenSuccessions(Reply<Vec<crate::Succession>>),
     /// An heir reads its predecessor's in-flight rows.
     LoadInFlightOf(u32, Fence, Reply<Vec<game::InFlightRow>>),
@@ -166,6 +173,10 @@ pub(crate) struct CutState {
     pub pending: std::sync::Mutex<Option<CutId>>,
     /// `lock_timeout` of every cut transaction, ms ([`crate::CUT_LOCK_TIMEOUT_MS`]).
     pub lock_timeout_ms: AtomicU64,
+    /// `lock_timeout` of every claim, release and registration, ms
+    /// ([`crate::CLAIM_LOCK_TIMEOUT_MS`]; a test hook lowers it,
+    /// [`crate::StoreHandle::set_claim_lock_timeout_ms`]).
+    pub claim_lock_timeout_ms: AtomicU64,
     /// The host lease a declaration and a boot judge a row's `seen_ms` by, ms
     /// ([`game::HOST_LEASE_MS`]; a test hook shortens it, [`crate::StoreHandle::set_host_lease_ms`]).
     pub host_lease_ms: AtomicU64,
@@ -181,6 +192,7 @@ impl CutState {
         CutState {
             pending: std::sync::Mutex::new(None),
             lock_timeout_ms: AtomicU64::new(crate::CUT_LOCK_TIMEOUT_MS),
+            claim_lock_timeout_ms: AtomicU64::new(crate::CLAIM_LOCK_TIMEOUT_MS),
             host_lease_ms: AtomicU64::new(game::HOST_LEASE_MS),
             entities_twice_cuts: AtomicU64::new(0),
             entities_checked_cuts: AtomicU64::new(0),
@@ -428,6 +440,35 @@ async fn serve(
                     })
                 })
             }
+            Request::RollbackWorldOperator(r) => {
+                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    r.send(match &pool {
+                        Pool::Pg(p) => succession::rollback_world_operator(p, lock_timeout_ms).await,
+                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
+                    })
+                })
+            }
+            // No writer lock (as a declaration): it may wait, bounded, behind a staged part.
+            Request::RetireOffline(ordinal, r) => {
+                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    r.send(match &pool {
+                        Pool::Pg(p) => succession::retire_offline(p, ordinal, lock_timeout_ms, lease_ms).await,
+                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
+                    })
+                })
+            }
+            Request::VouchHost(ordinal, r) => {
+                let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    r.send(match &pool {
+                        Pool::Pg(p) => succession::vouch_host(p, ordinal, lease_ms).await,
+                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
+                    })
+                })
+            }
             Request::OpenSuccessions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, open_successions())) }),
             Request::LoadInFlightOf(host, fence, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight_of(host, &fence))) })
@@ -487,18 +528,27 @@ async fn serve(
                 };
                 r.send(on_pool!(&pool, resolve_player(&token)))
             }),
-            Request::ClaimSuperRegions(owner, srs, live, r) => tokio::spawn(async move {
-                let _w = writer.lock().await;
-                r.send(on_pool!(&pool, claim_super_regions(owner, srs, s, live)))
-            }),
-            Request::ClaimFree(owner, boot, srs, r) => tokio::spawn(async move {
-                let _w = writer.lock().await;
-                r.send(on_pool!(&pool, claim_free(owner, boot, srs, s)))
-            }),
-            Request::Release(fence, r) => tokio::spawn(async move {
-                let _w = writer.lock().await;
-                r.send(on_pool!(&pool, release(fence)))
-            }),
+            Request::ClaimSuperRegions(owner, srs, live, r) => {
+                let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let _w = writer.lock().await;
+                    r.send(on_pool!(&pool, claim_super_regions(owner, srs, s, live, lock_ms)))
+                })
+            }
+            Request::ClaimFree(owner, boot, srs, r) => {
+                let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let _w = writer.lock().await;
+                    r.send(on_pool!(&pool, claim_free(owner, boot, srs, s, lock_ms)))
+                })
+            }
+            Request::Release(fence, r) => {
+                let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let _w = writer.lock().await;
+                    r.send(on_pool!(&pool, release(fence, lock_ms)))
+                })
+            }
             Request::ClaimCoordinator(r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, claim_coordinator()))
@@ -522,9 +572,10 @@ async fn serve(
             }),
             Request::RegisterHost(row, fence, policy, r) => {
                 let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
+                let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     let _w = writer.lock().await;
-                    r.send(on_pool!(&pool, register_host(row, &fence, policy, lease_ms)))
+                    r.send(on_pool!(&pool, register_host(row, &fence, policy, lease_ms, lock_ms)))
                 })
             }
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
@@ -628,6 +679,9 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::DeclareSuccession(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RollbackWorld(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RollbackWorldOperator(r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RetireOffline(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::VouchHost(_, r) => r.send(Err(StoreError::ReadOnly)),
         // A read-only handle sends nothing, a notice included.
         Request::NotifyCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),

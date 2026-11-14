@@ -1074,3 +1074,63 @@ fn migration_behind_an_ordinary_lock_says_retry() {
     timeout.reset();
     StoreHandle::open(&w.url, Dials::BUILT, OpenMode::Writer).expect("migrates once the lock is gone").shutdown();
 }
+
+/// R3's 60 s claim bound (`CLAIM_LOCK_TIMEOUT_MS`, lowered by the test hook): a claim behind
+/// a staged part nobody decides gives up with `LockConflict` naming the part's gid and the
+/// remedy, writing nothing; so does one whose read of the `world` row (the super-region side,
+/// `FOR KEY SHARE`) waits behind another transaction's lock on it — the same explanation, not
+/// a raw error.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn claim_behind_a_staged_part_times_out_with_the_remedy() {
+    const WAIT_MS: u64 = 300;
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (f0, _) = fences(&h);
+    h.prepare_cut(part(16, 0), f0.clone(), 0).recv().unwrap().unwrap();
+    let gid = cut_gid(scalar_i64(&w, "SELECT oid::bigint FROM pg_database WHERE datname = current_database()") as u32, CutId(16), 0);
+    let other = open(&w.url);
+    other.set_claim_lock_timeout_ms(WAIT_MS);
+    let srs: Vec<_> = f0.epochs.keys().copied().collect();
+    let started = std::time::Instant::now();
+    let err = other.claim_super_regions(2, srs.clone()).unwrap_err();
+    let waited = started.elapsed();
+    let StoreError::LockConflict { sqlstate, detail } = &err else { panic!("a lock conflict: {err}") };
+    assert_eq!(sqlstate, "55P03");
+    assert!(detail.contains(&format!("{WAIT_MS} ms")) && detail.contains(&gid) && detail.contains("ROLLBACK PREPARED"), "{detail}");
+    assert!(waited >= Duration::from_millis(WAIT_MS) && waited < Duration::from_millis(WAIT_MS * 20), "waited {waited:?}");
+    assert_eq!(h.owned_by(0).unwrap(), f0, "nothing claimed");
+    assert!(!h.abort_cut(CutId(16), 1600).unwrap());
+    assert_eq!(h.cut_decided(CutId(16)).unwrap(), Some(false));
+    // The claim's read of the world row, behind a lock on it (`worldctl super-region`'s
+    // `FOR UPDATE`, held here by hand): the same explanation.
+    let url = match &w.url {
+        StoreUrl::Postgres(u) => u.clone(),
+        _ => unreachable!(),
+    };
+    let (locked_tx, locked_rx) = crossbeam::channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam::channel::bounded::<()>(1);
+    let holder = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+            let mut tx = c.begin().await.unwrap();
+            sqlx::query("SELECT 1 FROM world WHERE id = 1 FOR UPDATE").execute(&mut *tx).await.unwrap();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            tx.rollback().await.unwrap();
+            c.close().await.unwrap();
+        })
+    });
+    locked_rx.recv().unwrap();
+    let err = other.claim_super_regions(2, srs).unwrap_err();
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let StoreError::LockConflict { sqlstate, detail } = &err else { panic!("a lock conflict: {err}") };
+    assert_eq!(sqlstate, "55P03");
+    assert!(detail.contains("claiming super-regions waited longer than") && detail.contains(&format!("{WAIT_MS} ms")), "{detail}");
+    assert_eq!(h.owned_by(0).unwrap(), f0, "nothing claimed");
+    assert_eq!(prepared(&w), 0);
+    other.shutdown();
+    h.shutdown();
+}

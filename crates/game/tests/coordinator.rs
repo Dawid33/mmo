@@ -2704,3 +2704,209 @@ fn a_request_at_the_current_hop_is_granted() {
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("granted") };
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
 }
+
+// ---- R4 Task 14: a succession the operator opened offline; a rollback elsewhere --------------
+
+/// A coordinator with world cuts and successions on, host 0 attached and expected, the open
+/// successions known (none), its outputs drained.
+fn heir_alone() -> Coordinator {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_world_tick(100);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.set_expected_hosts([0].into_iter().collect());
+    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    commit_routed(&mut c);
+    c
+}
+
+/// The succession `worldctl retire-host` opens with no host alive: host 1 → heir 0, no
+/// survivors.
+fn offline_succession() -> game::Succession {
+    game::Succession {
+        id: game::SuccessionId(9),
+        predecessor: 1,
+        predecessor_boot: 101,
+        heir: 0,
+        kind: game::SuccessionKind::Crash,
+        base_cut: game::CutId(3),
+        moved: vec![((1, 0), 2)],
+        survivors: Vec::new(),
+    }
+}
+
+/// `worldctl retire-host` opened a succession while no host ran (no survivors): a running
+/// coordinator learns it from its next `hosts` read — a dead row it never declared makes it
+/// read the open successions again (once; no cut meanwhile) — and its order goes to the HEIR,
+/// which is no survivor, at once if attached, else when it attaches. The heir's answers are
+/// all a cut waits for; the settle cut names it, and its `SuccessionDone` reaches the heir.
+#[test]
+fn an_offline_succession_goes_to_its_heir_and_its_settle_tells_it() {
+    let mut c = heir_alone();
+    let s = offline_succession();
+    let mut dead = seen(1, 50);
+    dead.state = game::HOST_DEAD;
+    c.observe_leases(&[seen(0, 60), dead.clone()], 60, 60);
+    assert!(c.take_successions_reread(), "a dead row nobody here declared: the open successions are read again");
+    assert!(!c.take_successions_reread(), "asked once");
+    c.observe_leases(&[seen(0, 70), dead.clone()], 70, 70);
+    assert!(!c.take_successions_reread(), "the same dead row asks once");
+    c.maintain(2 * CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut until the open successions are read");
+    c.successions_open(vec![s.clone()], 2 * CUT_EVERY_MS);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to the heir, no survivor");
+    let mut now = 3 * CUT_EVERY_MS;
+    c.maintain(now);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "the heir has not answered");
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, now);
+    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, now);
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], true)]);
+    now += CUT_EVERY_MS;
+    c.maintain(now);
+    let next = begun(&commit_routed(&mut c));
+    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0], "the heir's cut begins");
+    let cut = next[0].1;
+    c.handle(0, HostMsg::CutPrepared { cut }, now);
+    let d = c.take_decision().expect("decided");
+    assert_eq!((d.commit, d.settles.clone()), (true, vec![s.id]), "the cut settles it");
+    c.decided(cut, true);
+    assert_eq!(succession_done(&commit_routed(&mut c)), vec![(Target::Host(0), s.id, true)], "the heir is told");
+    assert!(c.succession_progress().is_empty());
+    // A later read of the settled row (clean now) asks nothing.
+    dead.clean = true;
+    c.observe_leases(&[seen(0, 90), dead], 90, 90);
+    assert!(!c.take_successions_reread());
+    // Read before the heir attached: the order comes with its attach.
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.successions_unknown();
+    c.successions_open(vec![s.clone()], 0);
+    assert!(orders(&commit_routed(&mut c)).is_empty(), "the heir is not attached");
+    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 10);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "sent at its attach");
+    // An heir that answered from memory (its next attach) is not ordered again.
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 20);
+    let listing = HostMsg::Attach {
+        host: 0,
+        epoch: 2,
+        running: Vec::new(),
+        online: Vec::new(),
+        generation: 0,
+        boot: 7,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut: None,
+        successions: vec![(s.id, false)],
+    };
+    c.handle(0, listing, 30);
+    assert!(orders(&commit_routed(&mut c)).is_empty(), "applied already");
+}
+
+/// A world rollback the coordinator did not order (`worldctl rollback`): the store abandoned
+/// the open succession behind its back. A host attaching at the newer generation makes it read
+/// the open successions again; the run that is no longer open is dropped (abandoned, every
+/// host told), and declarations go on as usual.
+#[test]
+fn a_rollback_elsewhere_drops_the_abandoned_runs() {
+    let mut c = succeeding(3);
+    let s = declare_one(&mut c, 3, 2, 100);
+    commit_routed(&mut c);
+    assert!(!c.take_successions_reread());
+    let newer = HostMsg::Attach {
+        host: 0,
+        epoch: 2,
+        running: Vec::new(),
+        online: Vec::new(),
+        generation: 1,
+        boot: 7,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut: None,
+        successions: Vec::new(),
+    };
+    c.handle(0, newer, 200);
+    assert!(c.take_successions_reread(), "a newer generation: the open successions are read again");
+    c.maintain(200 + CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut until they are read");
+    c.successions_open(Vec::new(), 300);
+    let out = commit_routed(&mut c);
+    assert_eq!(succession_done(&out), vec![(Target::Every, s.id, false)], "abandoned: {out:?}");
+    assert!(c.succession_progress().is_empty());
+    assert!(!c.rollback_wanted(), "nothing for this coordinator to roll back");
+    // The runtime's store refusal of a decision at the old generation asks the same.
+    c.successions_reread();
+    assert!(c.take_successions_reread());
+}
+
+/// An offline succession waits for its heir to boot: its deadline starts with the heir's
+/// order, and the lapses of boots that were dead already when the world was retired (the
+/// heir's old boot, another host never restarted) are no second death. A boot seen beating
+/// since it opened that then lapses is: the world rolls back.
+#[test]
+fn an_offline_run_waits_for_its_heir_and_ignores_the_dead_already() {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    let s = offline_succession();
+    let mut dead = seen(1, 50);
+    dead.state = game::HOST_DEAD;
+    // Hosts 0 (the heir's old boot) and 2 died with host 1; the coordinator lives on.
+    c.observe_leases(&[seen(0, 40), dead.clone(), seen(2, 40)], 0, 0);
+    c.successions_open(vec![s.clone()], 0);
+    let long = 10 * game::SUCCESSION_DEADLINE_MS;
+    for now in [game::HOST_LEASE_MS, long] {
+        c.observe_leases(&[seen(0, 40), dead.clone(), seen(2, 40)], now, now);
+        c.maintain(now);
+        assert!(!c.rollback_wanted(), "at {now}: no heir booted yet, the dead were dead already");
+    }
+    assert_eq!(c.leases().lapsed(long), vec![(0, 100), (2, 102)], "both lapsed");
+    // The heir boots (a new boot), attaches, beats; host 2 stays down.
+    let heir_row = |seen_ms: u64| HostSeen { boot: 900, ..seen(0, seen_ms) };
+    c.handle(0, attach_as(0, 1, 900), long);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)]);
+    c.observe_leases(&[heir_row(long), dead.clone(), seen(2, 40)], long, long);
+    c.observe_leases(&[heir_row(long + 500), dead.clone(), seen(2, 40)], long + 500, long + 500);
+    c.maintain(long + game::SUCCESSION_DEADLINE_MS - 1);
+    assert!(!c.rollback_wanted(), "within the deadline from the heir's order");
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, long + 600);
+    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, long + 600);
+    c.maintain(long + 2 * game::SUCCESSION_DEADLINE_MS);
+    assert!(!c.rollback_wanted(), "answered: the deadline no longer matters");
+    // The heir's new boot, seen beating since the run opened, dies before the settle.
+    let late = long + 2 * game::SUCCESSION_DEADLINE_MS + game::HOST_LEASE_MS;
+    c.observe_leases(&[heir_row(long + 500), dead.clone(), seen(2, 40)], late, late);
+    c.maintain(late);
+    assert!(c.rollback_wanted(), "a death during the succession");
+    // Unanswered past the deadline counted from the heir's order: a rollback too.
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.successions_open(vec![s.clone()], 0);
+    c.handle(0, attach_as(0, 1, 7), 100);
+    commit_routed(&mut c);
+    c.maintain(100 + game::SUCCESSION_DEADLINE_MS - 1);
+    assert!(!c.rollback_wanted());
+    c.maintain(100 + game::SUCCESSION_DEADLINE_MS);
+    assert!(c.rollback_wanted(), "the heir never answered");
+}
+
+/// Host `host`'s `Attach` of boot `boot` (epoch `epoch`, nothing running or online).
+fn attach_as(host: u32, epoch: u64, boot: u64) -> HostMsg {
+    HostMsg::Attach {
+        host,
+        epoch,
+        running: Vec::new(),
+        online: Vec::new(),
+        generation: 0,
+        boot,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut: None,
+        successions: Vec::new(),
+    }
+}

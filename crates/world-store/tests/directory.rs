@@ -186,8 +186,9 @@ fn release_waits_for_no_staged_part() {
         ..empty_cut(1)
     };
     h.prepare_cut(part, fence.clone(), 0).recv().unwrap().expect("staged");
+    // The handle's other operations' answer for the same state: retry after the decision.
     let err = h.release(0, &fence).unwrap_err();
-    assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
+    assert_eq!(err, StoreError::CutPending(CutId(1)), "{err}");
     assert_eq!(h.owned_by(0).unwrap(), fence, "nothing was released");
     assert!(!h.abort_cut(CutId(1), 100).unwrap());
     assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(false));

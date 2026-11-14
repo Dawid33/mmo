@@ -609,7 +609,15 @@ clean-old-worlds *args:
 #     clears the world clock anchor (`dev-r3` runs it before every start);
 #   just worldctl super-region <url> <n>
 #     sets the super-region side (regions per side) of a world no host has claimed
-#     yet; its hosts and coordinator then run with VOXEL_SUPER_REGION_REGIONS=<n>.
+#     yet; its hosts and coordinator then run with VOXEL_SUPER_REGION_REGIONS=<n>;
+#   just worldctl retire-host <url> <ordinal>
+#     (claim ownership, Postgres) retires a host that will never return: refused while
+#     it beats ("stop it first"); with other hosts alive it only vouches for its death
+#     (the coordinator declares it, a running host inherits); with none alive it opens
+#     the succession itself — the lowest other ordinal inherits at its next boot;
+#   just worldctl rollback <url> --yes
+#     (Postgres) restarts the world from its last save: the generation goes up, open
+#     successions are abandoned, every running host exits 5 at its next save.
 # <url> = a .sqlite path or a postgres:// URL. A store a running server holds is
 # refused (its lock), never waited for. Built at `play_blocks`: the store's world
 # row and its world map are tied to the region size (pass region_blocks=N for others).

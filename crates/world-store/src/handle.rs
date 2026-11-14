@@ -654,6 +654,49 @@ impl StoreHandle {
         self.ask_later(|r| Request::RollbackWorld(fence, r))
     }
 
+    /// R4, `worldctl rollback` (the operator, who holds no coordinator fence): as
+    /// [`Self::rollback_world`] — `world.generation + 1`, every open succession abandoned (the
+    /// land stays with the heirs, the predecessors' in-flight rows go to them too) — under the
+    /// world row's lock alone, refusing nothing. Returns `(generation, successions
+    /// abandoned)`. A running coordinator is not fenced: its next decision at the old
+    /// generation is refused (`StaleGeneration`, recorded as an abort), and the hosts' parts
+    /// are refused the same way (a host then exits with the world-rollback code, 5). Postgres
+    /// only.
+    pub fn rollback_world_operator(&self) -> Result<(u64, u64), StoreError> {
+        self.ask(Request::RollbackWorldOperator)
+    }
+
+    /// R4, `worldctl retire-host` with NO host alive: opens a crash succession of host
+    /// `ordinal` vouched for by the operator — no coordinator fence, no journal (the world is
+    /// at its last cut as a whole) — in one transaction under the `world` row's lock, as
+    /// [`Self::declare_succession`] would: the row marked dead, the land moved to the heir (the
+    /// lowest other ordinal with a live `hosts` row) at `epoch + 1`, the `successions` row
+    /// inserted with no survivors and the last committed cut as its base. Refused, nothing
+    /// written, while any dirty live row beat within the lease ([`crate::Retired::Running`]),
+    /// with no other row to inherit ([`crate::Retired::NoHeir`]), or for a row that is not a
+    /// dirty live one or that an open succession names ([`crate::Retired::Refused`]). The heir
+    /// finds it at its next boot: the coordinator sends it the order. Postgres only.
+    pub fn retire_offline(&self, ordinal: u32) -> Result<crate::Retired, StoreError> {
+        self.ask(|r| Request::RetireOffline(ordinal, r))
+    }
+
+    /// R4, `worldctl retire-host` while other hosts live: host `ordinal`'s dirty live row gets
+    /// `seen_ms = 0` (vouched dead, as a boot of its ordinal would), unless it beat within the
+    /// lease ([`crate::Vouched::Running`]) — one statement under the row's lock, so a beat
+    /// either comes first (refused) or overwrites the vouch (the coordinator's declaration
+    /// re-checks the lapse: `NotLapsed`, harmless). The coordinator declares a vouched row at
+    /// its next read. Postgres only.
+    pub fn vouch_host(&self, ordinal: u32) -> Result<crate::Vouched, StoreError> {
+        self.ask(|r| Request::VouchHost(ordinal, r))
+    }
+
+    /// Test hook: the `lock_timeout` of this handle's later claims, releases and registrations,
+    /// in ms (instead of [`crate::CLAIM_LOCK_TIMEOUT_MS`]).
+    #[doc(hidden)]
+    pub fn set_claim_lock_timeout_ms(&self, ms: u64) {
+        self.cuts.claim_lock_timeout_ms.store(ms, Ordering::SeqCst);
+    }
+
     /// Every open succession (not settled, not abandoned), by id: what a restarted
     /// coordinator re-sends. Empty on SQLite.
     pub fn open_successions(&self) -> Result<Vec<Succession>, StoreError> {
@@ -755,9 +798,10 @@ impl StoreHandle {
     /// Frees the super-regions `owner` holds under `fence` (owner [`NO_OWNER`], epoch + 1:
     /// `fence` is fenced from then on). One transaction, fenced: `Fenced` (nothing freed)
     /// unless every row of `fence` is still stored with its owner and epoch; only those rows
-    /// are freed. Refused with `Unsupported` for a fence of another owner, and while this
-    /// handle has an undecided staged cut part (its rows would be freed under it: release
-    /// after [`Self::cut_decided`]). No host calls it on exit; tools and tests do.
+    /// are freed. Refused with `Unsupported` for a fence of another owner, and with
+    /// `CutPending` (as the handle's other operations) while this handle has an undecided
+    /// staged cut part (its rows would be freed under it: release after
+    /// [`Self::cut_decided`]). No host calls it on exit; tools and tests do.
     pub fn release(&self, owner: u32, fence: &Fence) -> Result<(), StoreError> {
         if fence.owner != owner {
             return Err(StoreError::Unsupported(format!(
@@ -766,10 +810,7 @@ impl StoreHandle {
             )));
         }
         if let Some(pending) = *self.cuts.pending() {
-            return Err(StoreError::Unsupported(format!(
-                "releasing super-regions while this handle's part of cut {} is staged and undecided",
-                pending.0
-            )));
+            return Err(StoreError::CutPending(pending));
         }
         self.ask(|r| Request::Release(fence.clone(), r))
     }

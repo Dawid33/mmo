@@ -26,11 +26,11 @@ const C: RegionCoords = RegionCoords { x: 16, z: 0 };
 /// A second super-region of host 1, with no region saved in it.
 const FAR: (i32, i32) = (5, 5);
 
-fn boot_of(ordinal: u32) -> u64 {
+pub(crate) fn boot_of(ordinal: u32) -> u64 {
     100 + u64::from(ordinal)
 }
 
-fn row(ordinal: u32) -> HostRow {
+pub(crate) fn row(ordinal: u32) -> HostRow {
     HostRow {
         ordinal,
         boot: boot_of(ordinal),
@@ -67,7 +67,7 @@ fn region() -> PortableRegion {
 }
 
 /// Host `host`'s part of cut `id`: its region and `in_flight`.
-fn part(id: u64, host: u32, in_flight: Vec<InFlightRow>) -> WorldCut {
+pub(crate) fn part(id: u64, host: u32, in_flight: Vec<InFlightRow>) -> WorldCut {
     WorldCut {
         id: CutId(id),
         host,
@@ -81,23 +81,23 @@ fn part(id: u64, host: u32, in_flight: Vec<InFlightRow>) -> WorldCut {
 }
 
 /// An intent row aimed at `rc` that tells itself apart by its target's `z`.
-fn in_flight(rc: RegionCoords) -> InFlightRow {
+pub(crate) fn in_flight(rc: RegionCoords) -> InFlightRow {
     InFlightRow::Intent { target: rc, msg: intent() }
 }
 
 /// A world of `n` hosts (0..n), each registered with its own fence (host 1 also holds
 /// [`FAR`]), and a claimed coordinator. Each host gets its own store handle.
-struct World {
-    w: PgWorld,
+pub(crate) struct World {
+    pub(crate) w: PgWorld,
     /// The coordinator's handle.
-    h: StoreHandle,
-    hosts: Vec<StoreHandle>,
-    fences: Vec<Fence>,
-    c: CoordinatorFence,
+    pub(crate) h: StoreHandle,
+    pub(crate) hosts: Vec<StoreHandle>,
+    pub(crate) fences: Vec<Fence>,
+    pub(crate) c: CoordinatorFence,
 }
 
 impl World {
-    fn new(n: u32) -> Option<World> {
+    pub(crate) fn new(n: u32) -> Option<World> {
         let w = pg_world()?;
         let h = open(&w.url);
         let s = h.super_region_regions();
@@ -122,21 +122,21 @@ impl World {
     }
 
     /// Host `o`'s row looks lapsed: its last beat lies two leases back.
-    fn lapse(&self, o: u32) {
+    pub(crate) fn lapse(&self, o: u32) {
         exec(&self.w, &format!("UPDATE hosts SET seen_ms = seen_ms - {} WHERE ordinal = {o}", 2 * game::HOST_LEASE_MS));
     }
 
     /// Host `o`'s row is vouched dead (its next boot found it dirty while others ran).
-    fn vouch(&self, o: u32) {
+    pub(crate) fn vouch(&self, o: u32) {
         exec(&self.w, &format!("UPDATE hosts SET seen_ms = 0 WHERE ordinal = {o}"));
     }
 
-    fn declare(&self, dead: u32, heir: u32, kind: SuccessionKind) -> Result<Declared, StoreError> {
+    pub(crate) fn declare(&self, dead: u32, heir: u32, kind: SuccessionKind) -> Result<Declared, StoreError> {
         self.h.declare_succession(vec![(dead, boot_of(dead))], vec![heir], kind, self.c, 0)
     }
 
     /// Declares `dead` crashed with `heir` and returns the one succession.
-    fn declared(&self, dead: u32, heir: u32) -> Succession {
+    pub(crate) fn declared(&self, dead: u32, heir: u32) -> Succession {
         match self.declare(dead, heir, SuccessionKind::Crash).unwrap() {
             Declared::Done(mut s) => {
                 assert_eq!(s.len(), 1);
@@ -146,12 +146,12 @@ impl World {
         }
     }
 
-    fn state_of(&self, o: u32) -> (i64, bool) {
+    pub(crate) fn state_of(&self, o: u32) -> (i64, bool) {
         let r = self.h.hosts().unwrap().into_iter().find(|r| r.ordinal == o).unwrap();
         (r.state, r.clean)
     }
 
-    fn shutdown(self) {
+    pub(crate) fn shutdown(self) {
         for hh in self.hosts {
             hh.shutdown();
         }
@@ -618,4 +618,52 @@ fn a_cleanly_left_boot_claims_nothing() {
     let won = w.hosts[1].claim_free(1, 9001, vec![free]).unwrap();
     assert_eq!(won.epochs.keys().copied().collect::<Vec<_>>(), vec![free]);
     w.shutdown();
+}
+
+// ---- R4 Task 14: a rollback strands no in-flight row -----------------------------------------
+
+/// After a world rollback (the coordinator's, fenced, or the operator's) the abandoned
+/// succession's land stays with its heir, and so do the predecessor's in-flight rows: they are
+/// re-keyed to the heir in the same transaction. The heir restarts from the cut owning the
+/// land and reads them as its own (`load_in_flight(Some(heir))`); the predecessor's ordinal,
+/// should it ever boot again, owns nothing and reads none — every row has exactly one reader.
+#[test]
+fn rollback_leaves_no_in_flight_row_without_a_reader() {
+    for operator in [false, true] {
+        let Some(w) = World::new(3) else { return };
+        let own0 = vec![in_flight(RegionCoords::new(0, 3))];
+        let dead1: Vec<InFlightRow> = (1..=2).map(|z| in_flight(RegionCoords::new(1, z))).collect();
+        let own2 = vec![in_flight(RegionCoords::new(16, 4))];
+        for (h, rows) in [(0, &own0), (1, &dead1), (2, &own2)] {
+            w.hosts[h].prepare_cut(part(1, h as u32, rows.clone()), w.fences[h].clone(), 0).recv().unwrap().unwrap();
+        }
+        assert!(w.h.decide_cut(CutId(1), 100, true, vec![0, 1, 2], vec![], w.c, 0, vec![]).unwrap());
+        for h in &w.hosts {
+            assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
+        }
+        w.vouch(1);
+        let s = w.declared(1, 0);
+        let generation = if operator { w.h.rollback_world_operator().unwrap().0 } else { w.h.rollback_world(w.c).unwrap() };
+        assert_eq!(generation, 1, "operator {operator}");
+        assert!(w.h.open_successions().unwrap().is_empty());
+        assert!(w.h.load_in_flight(Some(1)).unwrap().is_empty(), "operator {operator}: no row without a reader under host 1");
+        let mut heir_rows = w.h.load_in_flight(Some(0)).unwrap();
+        heir_rows.sort_by_key(|r| format!("{r:?}"));
+        let mut want: Vec<InFlightRow> = own0.iter().chain(&dead1).cloned().collect();
+        want.sort_by_key(|r| format!("{r:?}"));
+        assert_eq!(heir_rows, want, "operator {operator}: the heir reads its own and the predecessor's rows");
+        assert_eq!(w.h.load_in_flight(Some(2)).unwrap(), own2, "operator {operator}: another host's rows untouched");
+        let heir = w.h.owned_by(0).unwrap();
+        for (sr, e) in &s.moved {
+            assert_eq!(heir.epochs.get(sr), Some(e), "operator {operator}: the land stays with the heir");
+        }
+        // The heir's first part (after its restart at the new generation) replaces them all.
+        w.hosts[0].prepare_cut(part(2, 0, own0.clone()), heir, 1).recv().unwrap().unwrap();
+        w.hosts[2].prepare_cut(part(2, 2, own2.clone()), w.fences[2].clone(), 1).recv().unwrap().unwrap();
+        let c = w.h.claim_coordinator().unwrap();
+        assert!(w.h.decide_cut(CutId(2), 200, true, vec![0, 2], vec![], c, 1, vec![]).unwrap(), "operator {operator}");
+        assert_eq!(w.h.load_in_flight(Some(0)).unwrap(), own0);
+        assert_eq!(prepared(&w.w), 0);
+        w.shutdown();
+    }
 }

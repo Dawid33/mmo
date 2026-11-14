@@ -1137,6 +1137,11 @@ impl CoordinatorRuntime {
                 }
                 Some(Err(StoreError::Fenced { .. })) => return Err(()),
                 Some(Err(e)) => {
+                    if matches!(e, StoreError::StaleGeneration { .. }) {
+                        // The world rolled back without this coordinator (`worldctl rollback`):
+                        // the successions it runs may be abandoned.
+                        self.core.successions_reread();
+                    }
                     let (cut, aborting) = (r.d.cut.0, r.aborting);
                     let slow = now.saturating_sub(r.taken_ms) >= game::WORLD_CUT_DEADLINE_MS;
                     r.rx = None;
@@ -1212,6 +1217,13 @@ impl CoordinatorRuntime {
     /// [`WORLD_CUT_DECISION_RETRY_MS`]. `Err`: fenced.
     fn pump_successions(&mut self, now: u64) -> Result<(), ()> {
         let Some(p) = self.successions.as_mut() else { return Ok(()) };
+        // The core wants the open successions read again (the store changed them behind its
+        // back: an offline `worldctl retire-host`, a `worldctl rollback`): a read in flight is
+        // dropped — it may predate the change.
+        if self.core.take_successions_reread() {
+            p.open_known = false;
+            p.open_rx = None;
+        }
         if !p.open_known {
             if p.open_rx.is_none() && now >= p.open_retry_at {
                 p.open_rx = Some(self.store.open_successions_later());

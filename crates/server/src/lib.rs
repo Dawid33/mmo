@@ -791,6 +791,11 @@ pub fn run() -> claims::ServerExit {
         }
         _ => None,
     };
+    // Role `all` claims every super-region: refused (before it resolves, aborts or fences
+    // anything) on a world whose other hosts ran in a split role and did not leave cleanly.
+    if let Some(store) = &store {
+        roles::check_all_role_beside_hosts(role, store, ownership.ordinal()).unwrap_or_else(|e| fatal(&e));
+    }
     // On Postgres, before it claims, registers or loads anything: the world cut parts a
     // crash left staged are finished first (several hosts: and two-phase commit must be
     // available).

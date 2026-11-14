@@ -25,6 +25,28 @@
 //!   refused (`StoreError::OtherSuperRegionSide`); on SQLite the file lock admits one
 //!   writer. `n = 1` puts a host seam one region from the spawn (R3's go / no-go world).
 //!
+//! - `retire-host <url> <ordinal>` (R4, `claim` ownership, Postgres): retires a host that will
+//!   never come back, so its dirty `hosts` row stops blocking every world cut. Refused while
+//!   that host's row beat within [`game::HOST_LEASE_MS`] ("host N is running: stop it first"),
+//!   and for an ordinal with no dirty live row. With another host alive it only VOUCHES for the
+//!   death ([`StoreHandle::vouch_host`]: `seen_ms = 0`, as a boot of that ordinal would) — the
+//!   coordinator declares it at its next read and a running host inherits through the usual
+//!   succession. With NO host alive (every dirty row lapsed) it first resolves the cut parts a
+//!   crash left staged (as every process start does) and opens the succession itself
+//!   ([`StoreHandle::retire_offline`]): the lowest other ordinal with a live row is the heir; it
+//!   adopts at its next boot (the coordinator sends it the order) and its first committed world
+//!   cut settles it. With no other `hosts` row: refused. Under `static` ownership nothing
+//!   declares a vouched row and an heir does not run a static layout's other land: there the
+//!   remedy is `rollback` and a host of that ordinal.
+//! - `rollback <url> --yes` (R4, Postgres): the world restarts from its last committed cut —
+//!   `world.generation + 1`, every open succession abandoned (its land and the predecessor's
+//!   in-flight rows stay with the heir) — in one transaction under the `world` row's lock
+//!   ([`StoreHandle::rollback_world_operator`]). Refused without `--yes`. Running hosts learn
+//!   it at their next store write or peer hello (`StaleGeneration` / `HigherGeneration`: exit
+//!   5, then restart from the cut); a running coordinator's next decision at the old
+//!   generation is refused and recorded aborted, and it re-reads the open successions when a
+//!   host attaches at the new generation.
+//!
 //! No command prints a Postgres URL's credentials: stores are shown by
 //! [`StoreUrl`]'s `Display` (host and database only).
 //! - `export --db <url> <out.world>`: writes the stored forge file (the archive
@@ -39,7 +61,7 @@ use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
-[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>";
+[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl retire-host <url> <ordinal>\n       worldctl rollback <url> --yes";
 
 /// Runs one `worldctl` command (`args` without the program name); `Ok` is what it
 /// prints. Neither that nor an error ever shows a Postgres URL's credentials.
@@ -69,6 +91,18 @@ pub fn run(args: &[String]) -> Result<String, String> {
             let (db, n) = parse_super_region(&args[1..])?;
             set_super_region(&db, n)?;
             Ok(format!("worldctl: the world's super-regions are now {n} x {n} regions; run its hosts with VOXEL_SUPER_REGION_REGIONS={n}"))
+        }
+        Some("retire-host") => {
+            let (db, ordinal) = parse_retire_host(&args[1..])?;
+            retire_host(&db, ordinal)
+        }
+        Some("rollback") => {
+            let db = parse_rollback(&args[1..])?;
+            let (generation, abandoned) = rollback(&db)?;
+            Ok(format!(
+                "worldctl: rolled the world of {db} back to generation {generation} ({abandoned} open succession(s) \
+                 abandoned): every host restarts from the last save"
+            ))
         }
         _ => Err(USAGE.to_string()),
     }
@@ -145,6 +179,33 @@ fn parse_super_region(args: &[String]) -> Result<(StoreUrl, u32), String> {
         .ok_or_else(|| format!("super-region: n = {n:?} is not a whole number >= 1"))?;
     let db = StoreUrl::parse(url).map_err(|e| format!("super-region: the world store URL: {e}"))?;
     Ok((db, n))
+}
+
+/// `retire-host`'s store and ordinal: `<url> <ordinal>`. Errors never echo the URL.
+fn parse_retire_host(args: &[String]) -> Result<(StoreUrl, u32), String> {
+    let [url, ordinal] = args else { return Err(USAGE.to_string()) };
+    let ordinal = ordinal.trim().parse::<u32>().map_err(|_| format!("retire-host: {ordinal:?} is not a host ordinal"))?;
+    let db = StoreUrl::parse(url).map_err(|e| format!("retire-host: the world store URL: {e}"))?;
+    Ok((db, ordinal))
+}
+
+/// What a `rollback` without `--yes` says.
+const ROLLBACK_NEEDS_YES: &str = "rollback: refused without --yes — every host restarts from the last save (the world \
+generation goes up by one, every open succession is abandoned; play since the last committed world cut is lost)";
+
+/// `rollback`'s store: `<url> --yes`. Errors never echo the URL.
+fn parse_rollback(args: &[String]) -> Result<StoreUrl, String> {
+    let (url, yes) = match args {
+        [url] => (url, false),
+        [url, flag] if flag == "--yes" => (url, true),
+        [flag, url] if flag == "--yes" => (url, true),
+        _ => return Err(USAGE.to_string()),
+    };
+    let db = StoreUrl::parse(url).map_err(|e| format!("rollback: the world store URL: {e}"))?;
+    if !yes {
+        return Err(ROLLBACK_NEEDS_YES.to_string());
+    }
+    Ok(db)
 }
 
 fn parse_export(args: &[String]) -> Result<(StoreUrl, String), String> {
@@ -230,6 +291,73 @@ pub fn set_super_region(db: &StoreUrl, n: u32) -> Result<(), String> {
         )),
         Err(e) => Err(format!("super-region: {e}")),
     };
+    store.shutdown();
+    result
+}
+
+/// Retires host `ordinal` of `db` (see the module docs): what it did, or why not. Errors never
+/// echo the URL.
+pub fn retire_host(db: &StoreUrl, ordinal: u32) -> Result<String, String> {
+    if !matches!(db, StoreUrl::Postgres(_)) {
+        return Err("retire-host: a world of several hosts is a Postgres world; this store has one host, nothing to retire".into());
+    }
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("retire-host: the world store: {e}"))?;
+    let result = retire_on(&store, db, ordinal);
+    store.shutdown();
+    result
+}
+
+/// [`retire_host`] on an open store.
+fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: u32) -> Result<String, String> {
+    let fail = |e: crate::StoreError| format!("retire-host: {e}");
+    let rows = store.hosts().map_err(fail)?;
+    let now = store.db_now_ms().map_err(fail)?;
+    let fresh = |r: &crate::HostRow| r.seen_ms != 0 && now.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS;
+    let running = |r: &crate::HostRow| !r.clean && r.state == crate::HOST_LIVE && fresh(r);
+    if rows.iter().any(|r| r.ordinal == ordinal && running(r)) {
+        return Err(format!("retire-host: host {ordinal} is running: stop it first"));
+    }
+    let alive: Vec<u32> = rows.iter().filter(|r| r.ordinal != ordinal && running(r)).map(|r| r.ordinal).collect();
+    if !alive.is_empty() {
+        return match store.vouch_host(ordinal).map_err(fail)? {
+            crate::Vouched::Vouched => Ok(format!(
+                "worldctl: host {ordinal}'s row in {db} is vouched dead (seen_ms = 0); hosts {alive:?} run: the coordinator \
+                 declares host {ordinal} dead at its next read and one of them inherits its land (claim ownership)"
+            )),
+            crate::Vouched::Running => Err(format!("retire-host: host {ordinal} is running: stop it first")),
+            crate::Vouched::Refused(why) => Err(format!("retire-host: {why}")),
+        };
+    }
+    // Nobody alive: the parts a crash left staged are finished first (as every start does).
+    for (cut, committed) in store.resolve_prepared().map_err(fail)? {
+        log::warn!("[worldctl] world cut {} was left staged by a crash: {}", cut.0, if committed { "committed" } else { "aborted" });
+    }
+    match store.retire_offline(ordinal).map_err(fail)? {
+        crate::Retired::Opened(s) => Ok(format!(
+            "worldctl: host {ordinal} (boot {:#x}) of {db} retired while no host ran: succession {} opened, heir {} \
+             inherits its {} super-region(s) as of world cut {}; start host {} — it adopts them at its boot and its first \
+             committed world cut settles the succession",
+            s.predecessor_boot,
+            s.id.0,
+            s.heir,
+            s.moved.len(),
+            s.base_cut.0,
+            s.heir
+        )),
+        crate::Retired::Running(hosts) => Err(format!(
+            "retire-host: hosts {hosts:?} began beating meanwhile; nothing written — run retire-host again (it then vouches)"
+        )),
+        crate::Retired::NoHeir => Err(format!(
+            "retire-host: nothing to give host {ordinal}'s land to: start a host of another ordinal once, or start host {ordinal}"
+        )),
+        crate::Retired::Refused(why) => Err(format!("retire-host: {why}")),
+    }
+}
+
+/// Rolls `db`'s world back (`rollback --yes`): `(generation, successions abandoned)`.
+pub fn rollback(db: &StoreUrl) -> Result<(u64, u64), String> {
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("rollback: the world store: {e}"))?;
+    let result = store.rollback_world_operator().map_err(|e| format!("rollback: {e}"));
     store.shutdown();
     result
 }

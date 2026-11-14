@@ -50,6 +50,16 @@
 //! declaration and read after it, the order finds the session released already — nothing
 //! of the departed boot is held there, an empty report (`apply_leave_overtaken`).
 //!
+//! **An heir that is no survivor** (a succession `worldctl retire-host` opened while no host
+//! ran: `survivors` empty). The world was at its last cut as a whole, so nothing crossed that
+//! a journal would have to resolve; the heir booted after the retirement, owning the land
+//! from its first directory read (its boot re-claimed it). It takes the same steps with an
+//! empty report of its own (no mask: the land is already its own), resolves at once (no
+//! survivor to wait for), reads the predecessor's in-flight rows (`adopts`), answers
+//! `SuccessionAdopted`, and its first committed cut settles it. A boot that ran beside the
+//! dead boot (it met its hello, or journals traffic with it) never adopts such an order: what
+//! it exchanged would be accounted nowhere — the coordinator's deadline rolls back instead.
+//!
 //! A run is forgotten at [`crate::CoordMsg::SuccessionDone`]; until then an `Attach` lists
 //! it as answered (a restarted coordinator counts it again), and the heir's as adopted once
 //! it is.
@@ -290,8 +300,35 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         if !s.survivors.contains(&me) {
-            log::warn!("[server] succession {}: this host is not among its survivors {:?}; ignored", s.id.0, s.survivors);
-            return;
+            if s.heir != me {
+                log::warn!("[server] succession {}: this host is not among its survivors {:?}; ignored", s.id.0, s.survivors);
+                return;
+            }
+            // The heir, no survivor: a succession opened while no host ran (`worldctl
+            // retire-host`). Sound only for a boot that never ran beside the dead one — the
+            // world is at its last cut as a whole, so there is no journal to resolve. A boot
+            // that met it (a host that hung through the retirement and woke) holds traffic
+            // nobody would account for: never adopted; the coordinator's deadline rolls back.
+            let met = self.peer_boots.get(&s.predecessor) == Some(&s.predecessor_boot)
+                || self.journal.entries(s.predecessor).next().is_some();
+            if met {
+                log::error!(
+                    "[server] succession {}: this host is its heir but no survivor, and it ran beside host {}'s dead boot \
+                     {:#x}: not adopted (the world rolls back at the succession's deadline)",
+                    s.id.0,
+                    s.predecessor,
+                    s.predecessor_boot
+                );
+                return;
+            }
+            log::warn!(
+                "[server] succession {}: host {} (boot {:#x}) was retired while no host ran; this host, booted since, is its \
+                 heir: it adopts the land and in-flight rows from the store (base cut {})",
+                s.id.0,
+                s.predecessor,
+                s.predecessor_boot,
+                s.base_cut.0
+            );
         }
         log::warn!(
             "[server] succession {}: host {} (boot {:#x}) is dead, heir {}, base cut {}",
@@ -465,8 +502,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         // 4. Re-route. The heir holds what it inherits until it adopts it (Task 9): its own
         // directory row is right (owner = itself, the new epoch), but `owner_of` answers
         // `Unknown` for those super-regions meanwhile — no region of them starts from the
-        // store before the survivors' journals are resolved.
-        if heir == me {
+        // store before the survivors' journals are resolved. An heir that is no survivor (an
+        // offline retirement) booted owning that land and has no journal to wait for: the
+        // store's state is the truth, its regions may run already — nothing is masked.
+        if heir == me && s.survivors.contains(&me) {
             for &(sr, _) in &s.moved {
                 self.inheriting.insert(sr, s.id);
             }

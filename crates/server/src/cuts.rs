@@ -165,14 +165,66 @@ pub struct CutWriter {
     /// How long the exit waits for the `BeginCut` naming this host leaving
     /// ([`game::LEAVE_CUT_TIMEOUT_SECS`]; a test shortens it).
     leave_timeout: Duration,
-    /// The world-cut period (`VOXEL_SAVE_SECS`; `None`: not told): no world cut committed
-    /// for [`CUT_FAILURES_BEFORE_STUCK`] + 1 periods is reported stuck too — a cut the
-    /// coordinator never begins (a dirty `hosts` row of a host not running) fails nothing.
+    /// This host's own world-cut period (`VOXEL_SAVE_SECS`; `None`: not told): no world cut
+    /// committed for [`CUT_FAILURES_BEFORE_STUCK`] + 1 periods is reported stuck too — a cut
+    /// the coordinator never begins fails nothing. The coordinator's period may differ: the
+    /// gap between the last two commits seen here counts when it is longer.
     world_period: Option<Duration>,
     /// When a world cut last committed (or this writer started).
     world_saved: Instant,
+    /// When the last world cut committed, if one did.
+    last_commit: Option<Instant>,
+    /// The gap between the last two committed world cuts (the coordinator's period, as seen).
+    commit_gap: Option<Duration>,
     /// When absent world cuts were last reported.
     absent_warned: Option<Instant>,
+    /// The `hosts` read an absent-cut warning waits for (who has a dirty row).
+    absent_read: Option<Answer<Vec<world_store::HostRow>>>,
+}
+
+/// Why no world cut commits, as far as a host can tell (the coordinator's log says more).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AbsentCause {
+    /// The coordinator has not applied this host's latest `Attach` (it is down, or the link is).
+    pub coordinator_detached: bool,
+    /// Successions this host answers or adopts that are not over (no cut begins meanwhile).
+    pub successions: Vec<u64>,
+    /// Other hosts with a dirty live `hosts` row that this host cannot reach either.
+    pub dirty_unattached: Vec<u32>,
+}
+
+/// The host's "no world cut in N periods" warning: `stalled` without a commit, cuts expected
+/// about every `every` (this host's period, or the gap it saw between two commits), and each
+/// cause it can name.
+pub fn absent_cut_warning(stalled: Duration, every: Duration, cause: &AbsentCause) -> String {
+    let mut out = format!(
+        "[server] world saving is stuck: no world cut has committed in {} s (expected about every {} s)",
+        stalled.as_secs(),
+        every.as_secs()
+    );
+    let mut named = false;
+    if cause.coordinator_detached {
+        named = true;
+        out.push_str("; the coordinator is not attached (it is not running, or this host's link to it is down): no cut begins without it");
+    }
+    if !cause.successions.is_empty() {
+        named = true;
+        out.push_str(&format!(
+            "; a succession is running (successions {:?}): no cut begins until every survivor applied it and its heir adopted",
+            cause.successions
+        ));
+    }
+    for h in &cause.dirty_unattached {
+        named = true;
+        out.push_str(&format!(
+            "; host {h} has a dirty row and is not attached (it may hold unsaved state): start it, or retire it for good \
+             with `worldctl retire-host <url> {h}`"
+        ));
+    }
+    if !named {
+        out.push_str("; the coordinator's log says why");
+    }
+    out
 }
 
 impl CutWriter {
@@ -188,7 +240,10 @@ impl CutWriter {
             leave_timeout: Duration::from_secs(game::LEAVE_CUT_TIMEOUT_SECS),
             world_period: None,
             world_saved: Instant::now(),
+            last_commit: None,
+            commit_gap: None,
             absent_warned: None,
+            absent_read: None,
         }
     }
 
@@ -423,23 +478,45 @@ impl CutWriter {
             }
         }
         self.settle_world(manager);
-        self.warn_absent_cuts();
+        self.warn_absent_cuts(manager);
     }
 
-    /// No world cut committed for [`CUT_FAILURES_BEFORE_STUCK`] + 1 periods: reported once
-    /// per that span (the coordinator's log says why no cut begins).
-    fn warn_absent_cuts(&mut self) {
-        let Some(every) = self.world_period else { return };
+    /// No world cut committed for [`CUT_FAILURES_BEFORE_STUCK`] + 1 periods (this host's, or
+    /// the gap it saw between two commits when longer): reported once per that span, naming
+    /// what this host can see of the cause ([`absent_cut_warning`]) — the `hosts` rows read
+    /// first, on the store thread (the loop never waits).
+    fn warn_absent_cuts<S: RegionSpawner>(&mut self, manager: &WorldManager<S>) {
+        let Some(period) = self.world_period else { return };
+        let every = period.max(self.commit_gap.unwrap_or_default());
         let span = every * (CUT_FAILURES_BEFORE_STUCK + 1);
-        if self.world_saved.elapsed() >= span && self.absent_warned.is_none_or(|at| at.elapsed() >= span) {
-            self.absent_warned = Some(Instant::now());
-            log::error!(
-                "[server] world saving is stuck: no world cut has committed in {} s (the period is {} s); the \
-                 coordinator's log says why — a dirty `hosts` row of a host that is not running blocks every cut",
-                self.world_saved.elapsed().as_secs(),
-                every.as_secs()
-            );
+        if self.world_saved.elapsed() < span || self.absent_warned.is_some_and(|at| at.elapsed() < span) {
+            self.absent_read = None;
+            return;
         }
+        let rows = match self.absent_read.as_ref().map(|rx| rx.try_recv()) {
+            None => {
+                self.absent_read = Some(self.claims.store().hosts_later());
+                return;
+            }
+            Some(Err(TryRecvError::Empty)) => return,
+            Some(Ok(Ok(rows))) => rows,
+            // Unread: warned without the rows.
+            Some(Ok(Err(_)) | Err(TryRecvError::Disconnected)) => Vec::new(),
+        };
+        self.absent_read = None;
+        self.absent_warned = Some(Instant::now());
+        let me = self.claims.fence().owner;
+        let cause = AbsentCause {
+            coordinator_detached: !manager.world_attached(),
+            successions: manager.successions().into_iter().map(|(id, _)| id.0).collect(),
+            dirty_unattached: rows
+                .iter()
+                .filter(|r| r.ordinal != me && !r.clean && r.state == world_store::HOST_LIVE)
+                .filter(|r| !manager.peer_is_reachable(r.ordinal))
+                .map(|r| r.ordinal)
+                .collect(),
+        };
+        log::error!("{}", absent_cut_warning(self.world_saved.elapsed(), every, &cause));
     }
 
     /// Settle the world part once it is decided: the store first (`cut_decided`, which
@@ -495,6 +572,9 @@ impl CutWriter {
                     self.part = None;
                     self.failed_in_a_row = 0;
                     self.world_saved = Instant::now();
+                    if let Some(prev) = self.last_commit.replace(Instant::now()) {
+                        self.commit_gap = Some(prev.elapsed());
+                    }
                     game::perf_event!("world_saved", "cut={} world=1", id.0);
                     manager.cut_committed(id, versions);
                 }
@@ -926,6 +1006,38 @@ impl TerrainWatch {
                 TerrainRead::Since(tick) => self.store.stored_regions_since_later(tick),
                 TerrainRead::All => self.store.stored_regions_later(),
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host's absent-cut warning names each cause it can see, apart: the coordinator not
+    /// attached, a succession running, a host with a dirty row that is not attached — and
+    /// says when it sees none.
+    #[test]
+    fn absent_cut_warning_names_its_cause() {
+        let (stalled, every) = (Duration::from_secs(240), Duration::from_secs(60));
+        let detached = absent_cut_warning(stalled, every, &AbsentCause { coordinator_detached: true, ..AbsentCause::default() });
+        let succession = absent_cut_warning(stalled, every, &AbsentCause { successions: vec![4], ..AbsentCause::default() });
+        let dirty = absent_cut_warning(stalled, every, &AbsentCause { dirty_unattached: vec![2], ..AbsentCause::default() });
+        let unknown = absent_cut_warning(stalled, every, &AbsentCause::default());
+        for w in [&detached, &succession, &dirty, &unknown] {
+            assert!(w.contains("no world cut has committed in 240 s") && w.contains("about every 60 s"), "{w}");
+        }
+        assert!(detached.contains("the coordinator is not attached"), "{detached}");
+        assert!(succession.contains("a succession is running") && succession.contains("[4]"), "{succession}");
+        assert!(dirty.contains("host 2 has a dirty row and is not attached") && dirty.contains("worldctl retire-host <url> 2"), "{dirty}");
+        assert!(unknown.contains("the coordinator's log says why"), "{unknown}");
+        // Each names only its own cause.
+        let causes = ["the coordinator is not attached", "a succession is running", "has a dirty row and is not attached"];
+        for (w, own) in [(&detached, 0), (&succession, 1), (&dirty, 2)] {
+            for (i, c) in causes.iter().enumerate() {
+                assert_eq!(w.contains(c), i == own, "{w}");
+            }
+            assert!(!w.contains("log says why"), "{w}");
         }
     }
 }
