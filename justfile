@@ -1398,6 +1398,14 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
         if [ "$side" != 1 ]; then
             echo "go-nogo-r3: '$db' is not a world of 1-region super-regions (side '${side:-none}'): dropping it (this recipe's own)"
             psql -d mmo -c "DROP DATABASE $db" >/dev/null
+        else
+            # A store from before the voxel return (migration 11 not applied) is refused at start.
+            returned=$(psql -d "$db" -c "SELECT 1 FROM _sqlx_migrations WHERE version = 11 AND success" 2>/dev/null || true)
+            if [ "$returned" != 1 ]; then
+                echo "go-nogo-r3: '$db' is from before the voxel return (no migration 11): dropping it (this recipe's own)"
+                psql -d mmo -c "DROP DATABASE $db" >/dev/null
+                side=""
+            fi
         fi
     fi
     if [ "$side" != 1 ]; then

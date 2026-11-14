@@ -147,7 +147,7 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   threads over crossbeam channels. Tokio stays at the networking edge.
 - World store (`crates/world-store`, SQLite or Postgres via `VOXEL_WORLD_DB`) holds the forged world as
   tiles, regions, players, history; saved by periodic save cuts at one world tick. A store read ERROR never
-  regenerates a region (`LoadFailed`, retried later); only a missing row generates.
+  regenerates a region (`LoadFailed`, retried later), nor does a corrupt parked blob; only a missing row generates.
 - A cut part writes only rows of its own regions — **never add a table two hosts' parts can both write**.
   Entity rows are keyed per region (migrations 0009/0010), so the database no longer refuses a duplicate
   entity: the store does (a duplicate inside a part, or a stale row in another region the cut cannot be

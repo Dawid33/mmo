@@ -196,7 +196,8 @@ impl fmt::Display for StoreError {
             StoreError::OtherTerrain { stored: TerrainKind::Studs } => write!(
                 f,
                 "this world was saved on stud terrain, which this build no longer serves — re-forge it \
-                 (the debug world: `just run --reset`; a menu world: make a new one). Terrain is never \
+                 (the debug world: `just run --reset`; a menu world: make a new one; the dev Postgres worlds: \
+                 `just pg-reset`, which deletes all dev Postgres data). Terrain is never \
                  converted; nothing in the world was changed, so a build from before the voxel return \
                  still opens it"
             ),
