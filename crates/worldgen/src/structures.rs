@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use game::prefab::{placement_bounds, Placement, ResolvedPrefab};
+use game::BlockId;
 
 /// Level the ground under a placement. `level` is the world y of the top ground block inside the
 /// placement's x/z box (the prefab's lowest layer normally sits at level + 1); over `skirt` further
@@ -75,6 +76,33 @@ pub trait StructureSource: Send + Sync {
     /// generator or the manager's synchronous generator; a region restored from the store does not
     /// generate and so does not call it). Default: nothing.
     fn region_requested(&self, _rc: game::RegionCoords) {}
+    /// Paints whose rectangle grown by `margin` intersects the half-open query rectangle, in the
+    /// source's own fixed order. Must not depend on anything but its arguments. Default: none.
+    fn paints_in(&self, _x0: i32, _z0: i32, _x1: i32, _z1: i32, _margin: i32) -> Vec<Paint> {
+        Vec::new()
+    }
+}
+
+/// Replace the top ground block of every column in a rectangle (a road, a plaza). The ground keeps its
+/// height and its slope shape; only the block changes. Generation leaves a column unpainted where a
+/// placement's padded box holds it, where it is under water, and where glacier ice tops it; no tree
+/// stands on a painted column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Paint {
+    /// x0, z0, x1, z1 — world blocks, max exclusive.
+    pub rect: [i32; 4],
+    pub block: BlockId,
+}
+
+/// The paint for column (x, z): the FIRST paint in slice order whose rectangle contains it.
+pub fn paint_at(paints: &[Paint], x: i32, z: i32) -> Option<BlockId> {
+    paints
+        .iter()
+        .find(|p| {
+            let [x0, z0, x1, z1] = p.rect;
+            (x0..x1).contains(&x) && (z0..z1).contains(&z)
+        })
+        .map(|p| p.block)
 }
 
 /// No placements. `content_hash()` is 0.
@@ -89,16 +117,55 @@ impl StructureSource for NoStructures {
     }
 }
 
-/// An explicit list with a spatial index (x/z buckets of `STRUCTURE_BUCKET_BLOCKS`).
+/// An explicit list of placements and paints with a spatial index (x/z buckets of
+/// `STRUCTURE_BUCKET_BLOCKS`).
 pub struct StructureList {
     placements: Vec<Arc<StructurePlacement>>,
     buckets: BTreeMap<[i32; 2], Vec<u32>>,
+    paints: Vec<Paint>,
+    paint_buckets: BTreeMap<[i32; 2], Vec<u32>>,
     hash: u32,
+}
+
+/// Indices into the `buckets` of every bucket the half-open rectangle `[x0, x1) x [z0, z1)` meets, sorted
+/// and each once.
+fn bucket_ids(buckets: &BTreeMap<[i32; 2], Vec<u32>>, [x0, z0, x1, z1]: [i32; 4]) -> Vec<u32> {
+    let b = STRUCTURE_BUCKET_BLOCKS;
+    let mut ids: Vec<u32> = Vec::new();
+    for bx in x0.div_euclid(b)..=(x1 - 1).div_euclid(b) {
+        for bz in z0.div_euclid(b)..=(z1 - 1).div_euclid(b) {
+            if let Some(v) = buckets.get(&[bx, bz]) {
+                ids.extend_from_slice(v);
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Files item `i`, covering the half-open rectangle `[x0, x1) x [z0, z1)`, in every bucket it meets.
+fn bucket_insert(buckets: &mut BTreeMap<[i32; 2], Vec<u32>>, [x0, z0, x1, z1]: [i32; 4], i: usize) {
+    let b = STRUCTURE_BUCKET_BLOCKS;
+    if x0 >= x1 || z0 >= z1 {
+        return;
+    }
+    for bx in x0.div_euclid(b)..=(x1 - 1).div_euclid(b) {
+        for bz in z0.div_euclid(b)..=(z1 - 1).div_euclid(b) {
+            buckets.entry([bx, bz]).or_default().push(i as u32);
+        }
+    }
 }
 
 impl StructureList {
     /// `set_hash` = the prefab set's `content_hash()` the placements were drawn from.
     pub fn new(placements: Vec<StructurePlacement>, set_hash: u32) -> Self {
+        Self::with_paints(placements, Vec::new(), set_hash)
+    }
+
+    /// A list that also carries paints. They are hashed after the placements (rect and block, in
+    /// order): a list without paints hashes exactly as `new` always has.
+    pub fn with_paints(placements: Vec<StructurePlacement>, paints: Vec<Paint>, set_hash: u32) -> Self {
         let b = STRUCTURE_BUCKET_BLOCKS;
         let mut buckets: BTreeMap<[i32; 2], Vec<u32>> = BTreeMap::new();
         let mut h = crc32fast::Hasher::new();
@@ -124,13 +191,28 @@ impl StructureList {
                 None => h.update(&[0]),
             }
         }
-        Self { placements: placements.into_iter().map(Arc::new).collect(), buckets, hash: h.finalize() }
+        let mut paint_buckets: BTreeMap<[i32; 2], Vec<u32>> = BTreeMap::new();
+        for (i, p) in paints.iter().enumerate() {
+            bucket_insert(&mut paint_buckets, p.rect, i);
+            for v in p.rect {
+                h.update(&v.to_le_bytes());
+            }
+            h.update(&p.block.0.to_le_bytes());
+        }
+        Self {
+            placements: placements.into_iter().map(Arc::new).collect(),
+            buckets,
+            paints,
+            paint_buckets,
+            hash: h.finalize(),
+        }
     }
 
     pub fn len(&self) -> usize {
         self.placements.len()
     }
 
+    /// No placements (paints aside).
     pub fn is_empty(&self) -> bool {
         self.placements.is_empty()
     }
@@ -141,27 +223,32 @@ impl StructureSource for StructureList {
         if x0 >= x1 || z0 >= z1 {
             return Vec::new();
         }
-        let b = STRUCTURE_BUCKET_BLOCKS;
         // A placement reaches the rectangle when its box grown by `margin` meets it; equivalently the
         // rectangle grown by `margin` meets its box. Query the grown rectangle's buckets.
         let (gx0, gz0, gx1, gz1) = (x0 - margin, z0 - margin, x1 + margin, z1 + margin);
-        let mut ids: Vec<u32> = Vec::new();
-        for bx in gx0.div_euclid(b)..=(gx1 - 1).div_euclid(b) {
-            for bz in gz0.div_euclid(b)..=(gz1 - 1).div_euclid(b) {
-                if let Some(v) = self.buckets.get(&[bx, bz]) {
-                    ids.extend_from_slice(v);
-                }
-            }
-        }
-        ids.sort_unstable();
-        ids.dedup();
-        ids.into_iter()
+        bucket_ids(&self.buckets, [gx0, gz0, gx1, gz1])
+            .into_iter()
             .map(|i| &self.placements[i as usize])
             .filter(|p| {
                 let [a, c, d, e] = p.reach_xz();
                 a < gx1 && d > gx0 && c < gz1 && e > gz0
             })
             .cloned()
+            .collect()
+    }
+
+    fn paints_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Paint> {
+        if x0 >= x1 || z0 >= z1 || self.paints.is_empty() {
+            return Vec::new();
+        }
+        let (gx0, gz0, gx1, gz1) = (x0 - margin, z0 - margin, x1 + margin, z1 + margin);
+        bucket_ids(&self.paint_buckets, [gx0, gz0, gx1, gz1])
+            .into_iter()
+            .map(|i| self.paints[i as usize])
+            .filter(|p| {
+                let [a, c, d, e] = p.rect;
+                a < gx1 && d > gx0 && c < gz1 && e > gz0
+            })
             .collect()
     }
 

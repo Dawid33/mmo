@@ -635,6 +635,16 @@ fn pad_sample(c: &mut ColSample, near: &[&structures::StructurePlacement], x: i3
     boxed
 }
 
+/// The paint of one (padded) sample, of world block column `(x, z)`: keeps trees off a painted column,
+/// and returns the block its top terrain block takes — `None` when no paint holds it, or it lies in a
+/// pad's box (`in_box`), or it has no ground, or water stands over it, or glacier ice tops it. Every
+/// place generation samples a ground column paints it with this, after [`pad_sample`].
+fn paint_sample(c: &mut ColSample, paints: &[structures::Paint], in_box: bool, x: i32, z: i32) -> Option<BlockId> {
+    let block = structures::paint_at(paints, x, z)?;
+    c.trees = false;
+    (!in_box && has_ground(c) && c.water_top <= c.top && c.top == c.s).then_some(block)
+}
+
 /// The band `(lo, hi)` of the chunk column at world block `(x, z)` grown to the structures whose box
 /// meets its footprint grown by one block (a carve beside it needs this column's wall stored): up to
 /// the box's top block, down to one block under its bottom (a carve's floor faces stored ground), never
@@ -709,8 +719,10 @@ fn stamp_structures(
 /// cliff rule — a cliff's face is materialised, not implied).
 ///
 /// Structures from `structures` level the ground under their pads, keep trees off their keep-out, grow
-/// the band over their boxes and are written after terrain and trees. With none in reach of the window
-/// the output is exactly the structure-free one.
+/// the band over their boxes and are written after terrain and trees. Its paints recolour the top
+/// terrain block of their columns (`paint_sample`) and keep trees off them; heights, slopes, water and
+/// the `ColumnGround` stay. With no placement and no paint in reach of the window the output is exactly
+/// the structure-free one.
 fn columns_from_patch(
     patch: &dyn Patch,
     coords: RegionCoords,
@@ -745,12 +757,31 @@ fn columns_from_patch(
     // is exactly what it is without a structure source.
     let near_owned = structures.placements_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
     let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
+    // Paints over the sampled ring (the same query). None: the terrain is exactly what it is without.
+    let paints = structures.paints_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
     // Whether each sampled column lies in a pad's box, indexed like `samples` (empty: none does).
     let mut in_box = Vec::new();
     if !near.is_empty() {
         // The whole ring, before slopes: slopes, the cliff rule and tree surfaces read it.
         in_box = pad_samples(&mut samples, &near, (wx - ring, wz - ring), nz);
     }
+    // Each sampled column's top-block paint, indexed like `samples` (empty: none is painted). The whole
+    // ring, after the pads (a box beats a paint, a skirt is painted at its padded height): tree surfaces
+    // read it.
+    let mut paint_cells: Vec<Option<BlockId>> = Vec::new();
+    if !paints.is_empty() {
+        paint_cells = samples
+            .iter_mut()
+            .enumerate()
+            .map(|(k, c)| {
+                let boxed = in_box.get(k).copied().unwrap_or(false);
+                paint_sample(c, &paints, boxed, wx - ring + (k / nz) as i32, wz - ring + (k % nz) as i32)
+            })
+            .collect();
+    }
+    let paint_of = |bx: i32, bz: i32| {
+        paint_cells.get((bx + ring) as usize * nz + (bz + ring) as usize).copied().flatten()
+    };
     let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
     // Each column's slope, over the ring minus its outer block (`None`
     // there, and in a pad's box), indexed like `samples`.
@@ -887,6 +918,7 @@ fn columns_from_patch(
                 for lz in 0..CHUNK_BLOCKS {
                     let c = at(fx + lx as i32, fz + lz as i32);
                     let slope = slope_at(fx + lx as i32, fz + lz as i32);
+                    let paint = paint_of(fx + lx as i32, fz + lz as i32);
                     let soil = soil_depth(&c);
                     for by in base_sub_y * cb..=hi {
                         let sub_i = (by.div_euclid(cb) - base_sub_y) as usize;
@@ -899,10 +931,14 @@ fn columns_from_patch(
                             blocks[bi.linear()] = ground.block_at(lx, lz, by);
                         } else if by <= c.top {
                             // Solid: whole blocks, the top one a slope on a
-                            // slope column; bare rock is the recipe's.
-                            let block = match column_material(&mats, &c, by) {
-                                BlockId::AIR => ground.block_at(lx, lz, by),
-                                mat => Block::new(mat),
+                            // slope column (a painted top in the paint's
+                            // block); bare rock is the recipe's.
+                            let block = match paint.filter(|_| by == c.top) {
+                                Some(p) => Block::new(p),
+                                None => match column_material(&mats, &c, by) {
+                                    BlockId::AIR => ground.block_at(lx, lz, by),
+                                    mat => Block::new(mat),
+                                },
                             };
                             blocks[bi.linear()] = block;
                             if let Some(shape) = slope.filter(|_| by == c.top) {
@@ -1174,8 +1210,9 @@ fn crown_extent(tree: &trees::TreeSeed) -> Option<(i32, i32, i32)> {
 
 /// The coarse tile of `key` from `patch` (see [`coarse_tile`]). Structures from `structures` level the
 /// sampled ground under their pads, keep trees off their keep-out, and stand as each prefab column's
-/// solid silhouette above the terrain. With none in reach of the tile the output is exactly the
-/// structure-free one.
+/// solid silhouette above the terrain. A painted cell column (its centre block column, `paint_sample`)
+/// shows the paint in the cell holding its terrain top and carries no tree. With no placement and no
+/// paint in reach of the tile the output is exactly the structure-free one.
 fn coarse_from_patch(
     patch: &dyn Patch,
     key: &game::lod::LodKey,
@@ -1211,12 +1248,17 @@ fn coarse_from_patch(
     // Structures reaching any column the tile samples (their pads: cell columns
     // one out, tree surfaces and their slopes) or a tree surface's keep-out.
     // None: the tile is exactly what it is without a structure source.
-    let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, (tree_m + TREE_REACH_BLOCKS).max(cb));
+    let margin = (tree_m + TREE_REACH_BLOCKS).max(cb);
+    let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, margin);
     let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
-    // Pads `c`, the sample of world block column (x, z); with whether the column lies in a pad's box.
+    // Paints over the same columns. None: the tile is exactly what it is without.
+    let paints = structures.paints_in(ox, oz, ox + span_blocks, oz + span_blocks, margin);
+    // Pads and paints `c`, the sample of world block column (x, z); with whether the column lies in a
+    // pad's box and its top block's paint.
     let padded = |mut c: ColSample, x: i32, z: i32| {
         let in_box = !near.is_empty() && pad_sample(&mut c, &near, x, z);
-        (c, in_box)
+        let paint = if paints.is_empty() { None } else { paint_sample(&mut c, &paints, in_box, x, z) };
+        (c, in_box, paint)
     };
 
     // Centre (world metres) of cell column (cx, cz).
@@ -1231,15 +1273,17 @@ fn coarse_from_patch(
     let cell_sample = |cx: i32, cz: i32| {
         let (mx, mz) = centre(cx, cz);
         let (x, z) = centre_block(cx, cz);
-        padded(point_sample(patch, &mats, mx, mz), x, z).0
+        let (c, _, paint) = padded(point_sample(patch, &mats, mx, mz), x, z);
+        (c, paint)
     };
-    let samples: Vec<ColSample> =
+    // With each cell column's top-block paint.
+    let samples: Vec<(ColSample, Option<BlockId>)> =
         (0..cells).flat_map(|cz| (0..cells).map(move |cx| (cx, cz))).map(|(cx, cz)| cell_sample(cx, cz)).collect();
     let surface_of = |cx: i32, cz: i32| {
         if (0..cells).contains(&cx) && (0..cells).contains(&cz) {
-            samples[(cz * cells + cx) as usize].top
+            samples[(cz * cells + cx) as usize].0.top
         } else {
-            cell_sample(cx, cz).top
+            cell_sample(cx, cz).0.top
         }
     };
     let strata = patch.strata(&mats);
@@ -1247,7 +1291,7 @@ fn coarse_from_patch(
     let mut grids: BTreeMap<[i32; 3], Vec<Voxel>> = Default::default();
     for cz in 0..cells {
         for cx in 0..cells {
-            let c = samples[(cz * cells + cx) as usize];
+            let (c, paint) = samples[(cz * cells + cx) as usize];
             let (surface, water_top, unbounded) = (c.s, c.water_top, c.unbounded);
 
             // Under the soil band; a forged column also reaches down to its
@@ -1269,7 +1313,10 @@ fn coarse_from_patch(
                 if !is_solid && cy * cb > water_top {
                     continue;
                 }
-                let mat = if is_solid {
+                let mat = if let Some(p) = paint.filter(|_| cy == solid_hi) {
+                    // The cell holding a painted terrain top: the paint.
+                    p
+                } else if is_solid {
                     // The cell's topmost block of terrain — what shows from
                     // above, matching `game::lod::merge_group`.
                     let top = c.top.min(cy * cb + cb - 1);
@@ -1304,7 +1351,7 @@ fn coarse_from_patch(
         for cz in 0..cells {
             for cx in 0..cells {
                 let (x, z) = centre_block(cx, cz);
-                let first = samples[(cz * cells + cx) as usize].top.div_euclid(cb) + 1;
+                let first = samples[(cz * cells + cx) as usize].0.top.div_euclid(cb) + 1;
                 let mut profile: BTreeMap<i32, BlockId> = BTreeMap::new();
                 for p in &near {
                     let (min, max) = p.bounds();
@@ -1353,7 +1400,7 @@ fn coarse_from_patch(
             let cached = memo.borrow().get(&(x, z)).copied();
             cached.unwrap_or_else(|| {
                 // A column in a pad's box is never a slope, as in full generation.
-                let (c, in_box) = sample(x, z);
+                let (c, in_box, _) = sample(x, z);
                 let slope = !in_box && slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz).0).is_some();
                 let g = tree_ground(c, slope);
                 memo.borrow_mut().insert((x, z), g);
