@@ -173,9 +173,10 @@ impl HostLinks {
         match self.store.expire_pending_kicks(now, PENDING_KICK_TTL_SECS).await {
             // Unacknowledged for at least the TTL (the sweep runs every `KICK_RESEND_MS`).
             Ok(expired) => for kick in expired {
+                // Never the player token in a log: the world and the kick's epoch name it.
                 log::warn!(
-                    "[login] kick for world {} player {} dropped after at least {} s unacknowledged",
-                    kick.world_id, kick.player_token, PENDING_KICK_TTL_SECS
+                    "[login] kick for world {} (epoch {}) dropped after at least {} s unacknowledged",
+                    kick.world_id, kick.session_epoch, PENDING_KICK_TTL_SECS
                 );
             },
             Err(e) => log::error!("[login] expiring pending kicks: {e}"),

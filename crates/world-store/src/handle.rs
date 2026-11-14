@@ -671,7 +671,8 @@ impl StoreHandle {
     /// at its last cut as a whole) — in one transaction under the `world` row's lock, as
     /// [`Self::declare_succession`] would: the row marked dead, the land moved to the heir (the
     /// lowest other ordinal with a live `hosts` row) at `epoch + 1`, the `successions` row
-    /// inserted with no survivors and the last committed cut as its base. Refused, nothing
+    /// inserted with no survivors and the last committed cut as its base, and `world.generation`
+    /// raised (every process of the old generation is refused from then on). Refused, nothing
     /// written, while any dirty live row beat within the lease ([`crate::Retired::Running`]),
     /// with no other row to inherit ([`crate::Retired::NoHeir`]), or for a row that is not a
     /// dirty live one or that an open succession names ([`crate::Retired::Refused`]). The heir

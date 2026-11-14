@@ -261,18 +261,19 @@ macro_rules! engine_rows {
             /// ends the transaction and names the prepared transactions of this world that may
             /// hold the rows ([`crate::open::claim_timeout_message`]).
             async fn claim_error(pool: &Pool, tx: Tx, e: sqlx::Error, lock_ms: u64) -> StoreError {
+                claim_error_as(pool, tx, e, lock_ms, crate::open::CLAIMING).await
+            }
+
+            /// [`claim_error`] for what `what` names (a registration: [`crate::open::REGISTERING`]).
+            async fn claim_error_as(pool: &Pool, tx: Tx, e: sqlx::Error, lock_ms: u64, what: &str) -> StoreError {
                 match &e {
                     sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => {
                         drop(tx);
-                        let gids: Vec<String> = sqlx::query_scalar(
-                            "SELECT gid FROM pg_prepared_xacts WHERE database = current_database() ORDER BY gid",
-                        )
-                        .fetch_all(pool)
-                        .await
-                        .unwrap_or_default();
+                        let gids: Vec<String> =
+                            sqlx::query_scalar(crate::open::PREPARED_GIDS_SQL).fetch_all(pool).await.unwrap_or_default();
                         StoreError::LockConflict {
                             sqlstate: "55P03".into(),
-                            detail: crate::open::claim_timeout_message(lock_ms, &gids),
+                            detail: crate::open::claim_timeout_message(what, lock_ms, &gids),
                         }
                     }
                     _ => e.into(),
@@ -505,12 +506,12 @@ macro_rules! engine_rows {
                 check_fence(&mut *tx, fence, &srs).await?;
                 // Postgres `FOR NO KEY UPDATE` (as `decide_cut`): serialises the generation
                 // with a decision and another boot, never waits for a claim's `FOR KEY SHARE`.
-                // A lock timeout here is explained as a claim's ([`claim_error`]).
+                // A lock timeout here is explained as a claim's ([`claim_error_as`], as a registration).
                 let no_key = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
                 let sql = format!("SELECT generation FROM world WHERE id = 1{no_key}");
                 let world_row = match sqlx::query(&sql).fetch_optional(&mut *tx).await {
                     Ok(found) => found,
-                    Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
+                    Err(e) => return Err(claim_error_as(pool, tx, e, lock_ms, crate::open::REGISTERING).await),
                 };
                 let world: i64 = world_row.ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?.try_get(0)?;
                 let prior = sqlx::query("SELECT generation, clean, state, boot FROM hosts WHERE ordinal = $1")

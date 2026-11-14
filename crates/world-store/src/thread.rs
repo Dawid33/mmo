@@ -444,7 +444,7 @@ async fn serve(
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
-                        Pool::Pg(p) => succession::rollback_world_operator(p, lock_timeout_ms).await,
+                        Pool::Pg(p) => crate::operator::rollback_world_operator(p, lock_timeout_ms).await,
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
                 })
@@ -455,7 +455,7 @@ async fn serve(
                 let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
-                        Pool::Pg(p) => succession::retire_offline(p, ordinal, lock_timeout_ms, lease_ms).await,
+                        Pool::Pg(p) => crate::operator::retire_offline(p, ordinal, lock_timeout_ms, lease_ms).await,
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
                 })
@@ -464,7 +464,7 @@ async fn serve(
                 let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
-                        Pool::Pg(p) => succession::vouch_host(p, ordinal, lease_ms).await,
+                        Pool::Pg(p) => crate::operator::vouch_host(p, ordinal, lease_ms).await,
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
                 })

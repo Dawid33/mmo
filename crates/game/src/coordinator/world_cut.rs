@@ -586,6 +586,17 @@ impl Coordinator {
         self.cuts.attached.contains(&host)
     }
 
+    /// The boot host `host`'s latest `Attach` named (`None`: it never attached).
+    pub(super) fn attached_boot(&self, host: u32) -> Option<u64> {
+        self.cuts.boots.get(&host).copied()
+    }
+
+    /// The successions a commit decided here and not yet answered by the runtime would
+    /// settle: the store may hold them settled already.
+    pub(super) fn settles_pending(&self) -> Vec<SuccessionId> {
+        self.cuts.run.as_ref().filter(|r| r.verdict == Some(true)).map(|r| r.settles.clone()).unwrap_or_default()
+    }
+
     /// Host `host`'s boot `boot` was succeeded (R4): not expected, nor counted attached,
     /// until another boot of it comes.
     pub(super) fn note_succeeded(&mut self, host: u32, boot: u64) {

@@ -256,7 +256,8 @@ impl SpawnOrders {
     /// `msg` to every login peer connected now (none: lost, best effort).
     fn tell_login(&self, msg: HostToLogin) {
         let Some(login) = self.login.get() else {
-            log::warn!("[login-link] {:?} for the login service, which is not linked to this host: dropped", Redacted(&msg));
+            // `HostToLogin`'s `Debug` hides the player token.
+            log::warn!("[login-link] {msg:?} for the login service, which is not linked to this host: dropped");
             return;
         };
         let peers = login.peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -723,38 +724,6 @@ impl LoginRelay {
     }
 }
 
-/// `HostToLogin` as the log shows it: its `player_token` (the login service's key of a
-/// player — an identifier the logs must not spread, as the peer messages' `Debug` hides it)
-/// replaced by `<redacted>`.
-struct Redacted<'a>(&'a HostToLogin);
-
-impl std::fmt::Debug for Redacted<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const HIDDEN: &str = "<redacted>";
-        match self.0 {
-            HostToLogin::SpawnAck { player_token: _, session_epoch, ok, quic, webtransport, cert_hash } => f
-                .debug_struct("SpawnAck")
-                .field("player_token", &format_args!("{HIDDEN}"))
-                .field("session_epoch", session_epoch)
-                .field("ok", ok)
-                .field("quic", quic)
-                .field("webtransport", webtransport)
-                .field("cert_hash", cert_hash)
-                .finish(),
-            HostToLogin::SessionEnded { player_token: _, session_epoch } => f
-                .debug_struct("SessionEnded")
-                .field("player_token", &format_args!("{HIDDEN}"))
-                .field("session_epoch", session_epoch)
-                .finish(),
-            HostToLogin::KickAck { player_token: _, session_epoch } => f
-                .debug_struct("KickAck")
-                .field("player_token", &format_args!("{HIDDEN}"))
-                .field("session_epoch", session_epoch)
-                .finish(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -892,7 +861,7 @@ mod tests {
             HostToLogin::SessionEnded { player_token: token.into(), session_epoch: 4 },
             HostToLogin::KickAck { player_token: token.into(), session_epoch: 5 },
         ] {
-            let shown = format!("{:?}", Redacted(&msg));
+            let shown = format!("{msg:?}");
             assert!(!shown.contains(token), "the token is shown: {shown}");
             assert!(shown.contains("<redacted>") && shown.contains("session_epoch"), "{shown}");
         }

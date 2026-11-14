@@ -335,17 +335,19 @@ fn retire_offline_opens_a_succession_to_the_lowest_other_host() {
     let err = said(&url, &["retire-host", &url, "1"]).expect_err("named by the open succession");
     assert!(err.contains("succession"), "{err}");
     assert_eq!(w.h.open_successions().unwrap().len(), 1);
+    // The retirement raised the generation: the hosts that boot again run at 1.
+    assert_eq!(w.h.world_generation().unwrap(), 1);
     // The settle rule holds: only a commit naming it commits; it cleans host 0's row.
     let heir_part = |id: u64| game::WorldCut { adopts: vec![0], ..part(id, 1, rows0.clone()) };
-    w.hosts[1].prepare_cut(part(3, 1, vec![]), heir.clone(), 0).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(3, 2, vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
-    assert!(!w.h.decide_cut(CutId(3), 300, true, vec![1, 2], vec![], w.c, 0, vec![]).unwrap(), "settles nothing");
+    w.hosts[1].prepare_cut(part(3, 1, vec![]), heir.clone(), 1).recv().unwrap().unwrap();
+    w.hosts[2].prepare_cut(part(3, 2, vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
+    assert!(!w.h.decide_cut(CutId(3), 300, true, vec![1, 2], vec![], w.c, 1, vec![]).unwrap(), "settles nothing");
     for h in [1, 2] {
         assert_eq!(w.hosts[h].cut_decided(CutId(3)).unwrap(), Some(false));
     }
-    w.hosts[1].prepare_cut(heir_part(4), heir.clone(), 0).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(4, 2, vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(4), 400, true, vec![1, 2], vec![], w.c, 0, vec![s.id]).unwrap());
+    w.hosts[1].prepare_cut(heir_part(4), heir.clone(), 1).recv().unwrap().unwrap();
+    w.hosts[2].prepare_cut(part(4, 2, vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(4), 400, true, vec![1, 2], vec![], w.c, 1, vec![s.id]).unwrap());
     assert!(w.h.open_successions().unwrap().is_empty());
     assert_eq!(w.state_of(0), (HOST_DEAD, true));
     assert_eq!(w.h.load_in_flight(Some(1)).unwrap(), rows0, "adopted under the heir");
@@ -422,4 +424,38 @@ fn rollback_needs_yes_and_bumps_once() {
     assert_eq!(w.h.world_generation().unwrap(), 2);
     assert_eq!(prepared(&w.w), 0);
     w.shutdown();
+}
+
+/// An offline retirement raises the world generation itself (in its transaction), whatever
+/// the heir's row looks like — dirty (it crashed) or clean (it left): every process of the old
+/// generation is refused at its next write (a zombie that wakes, a coordinator still running),
+/// and the heir's next boot registers at the new generation without raising it again.
+#[test]
+fn retire_offline_bumps_the_generation_whatever_the_heirs_row() {
+    for heir_clean in [false, true] {
+        let Some(w) = World::new(3) else { return };
+        let url = url_of(&w);
+        if heir_clean {
+            exec(&w.w, "UPDATE hosts SET clean = 1 WHERE ordinal = 0");
+        }
+        lapse_all(&w);
+        said(&url, &["retire-host", &url, "1"]).expect("retired offline");
+        assert_eq!(w.h.world_generation().unwrap(), 1, "heir clean {heir_clean}: raised once");
+        // The old generation's processes: a host's part, the coordinator's decision.
+        let err = w.hosts[2].prepare_cut(part(1, 2, vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap_err();
+        assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 }, "heir clean {heir_clean}");
+        let err = w.h.decide_cut(CutId(1), 100, true, vec![0, 2], vec![], w.c, 0, vec![]).unwrap_err();
+        assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
+        // The heir boots: registered at the new generation, not raised again.
+        let next = w.hosts[0]
+            .register_host(world_store::HostRow { boot: 7000, ..crate::succession::row(0) }, &world_store::Fence::default(), game::CrashPolicy::Succession)
+            .unwrap();
+        assert!(
+            matches!(next, world_store::BootVerdict::Registered(world_store::HostBoot { generation: 1, bumped: false, .. })),
+            "heir clean {heir_clean}: {next:?}"
+        );
+        assert_eq!(w.h.world_generation().unwrap(), 1);
+        assert_eq!(prepared(&w.w), 0);
+        w.shutdown();
+    }
 }

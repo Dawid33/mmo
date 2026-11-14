@@ -1124,11 +1124,15 @@ fn claim_behind_a_staged_part_times_out_with_the_remedy() {
     });
     locked_rx.recv().unwrap();
     let err = other.claim_super_regions(2, srs).unwrap_err();
+    // A registration's read of the world row (`FOR NO KEY UPDATE`) behind it: its own words.
+    let reg = other.register_host(host_row(5), &Fence::default(), game::CrashPolicy::Rollback).unwrap_err();
     release_tx.send(()).unwrap();
     holder.join().unwrap();
     let StoreError::LockConflict { sqlstate, detail } = &err else { panic!("a lock conflict: {err}") };
     assert_eq!(sqlstate, "55P03");
     assert!(detail.contains("claiming super-regions waited longer than") && detail.contains(&format!("{WAIT_MS} ms")), "{detail}");
+    let StoreError::LockConflict { detail, .. } = &reg else { panic!("a lock conflict: {reg}") };
+    assert!(detail.starts_with("registering this host waited longer than"), "{detail}");
     assert_eq!(h.owned_by(0).unwrap(), f0, "nothing claimed");
     assert_eq!(prepared(&w), 0);
     other.shutdown();

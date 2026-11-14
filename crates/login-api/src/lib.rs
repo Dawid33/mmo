@@ -149,8 +149,9 @@ pub const SPAWN_ACK_TIMEOUT_MS: u64 = 3000;
 /// How long a host keeps a spawn order it has not seen a matching `Hello` for.
 pub const SPAWN_PENDING_TTL_SECS: u64 = 120;
 
-/// The login service to a world host, over the service link (`svc-link`, role `Login`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The login service to a world host, over the service link (`svc-link`, role `Login`). Its
+/// `Debug` hides `player_token` ([`REDACTED`]): no token reaches a log.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoginToHost {
     /// A join was granted: the host admits exactly this epoch's ticket for the player (and
     /// parks any session of the player it has, newest-wins), then acks.
@@ -163,8 +164,9 @@ pub enum LoginToHost {
     Kick { player_token: String, session_epoch: u64, reason: String },
 }
 
-/// A world host to the login service, over the service link.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A world host to the login service, over the service link. Its `Debug` hides
+/// `player_token` ([`REDACTED`]).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostToLogin {
     /// The answer to one [`LoginToHost::SpawnPlayer`] (matched by token and epoch). With
     /// several hosts the order may be taken by another host than the one the login service
@@ -185,9 +187,74 @@ pub enum HostToLogin {
     KickAck { player_token: String, session_epoch: u64 },
 }
 
+/// What the link messages' `Debug` shows instead of a player token.
+pub const REDACTED: &str = "<redacted>";
+
+impl std::fmt::Debug for LoginToHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hidden = format_args!("{REDACTED}");
+        match self {
+            LoginToHost::SpawnPlayer { player_token: _, session_epoch } => f
+                .debug_struct("SpawnPlayer")
+                .field("player_token", &hidden)
+                .field("session_epoch", session_epoch)
+                .finish(),
+            LoginToHost::Kick { player_token: _, session_epoch, reason } => f
+                .debug_struct("Kick")
+                .field("player_token", &hidden)
+                .field("session_epoch", session_epoch)
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for HostToLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hidden = format_args!("{REDACTED}");
+        match self {
+            HostToLogin::SpawnAck { player_token: _, session_epoch, ok, quic, webtransport, cert_hash } => f
+                .debug_struct("SpawnAck")
+                .field("player_token", &hidden)
+                .field("session_epoch", session_epoch)
+                .field("ok", ok)
+                .field("quic", quic)
+                .field("webtransport", webtransport)
+                .field("cert_hash", cert_hash)
+                .finish(),
+            HostToLogin::SessionEnded { player_token: _, session_epoch } => f
+                .debug_struct("SessionEnded")
+                .field("player_token", &hidden)
+                .field("session_epoch", session_epoch)
+                .finish(),
+            HostToLogin::KickAck { player_token: _, session_epoch } => f
+                .debug_struct("KickAck")
+                .field("player_token", &hidden)
+                .field("session_epoch", session_epoch)
+                .finish(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The link messages' `Debug` (what any log of them shows) never carries the token.
+    #[test]
+    fn link_messages_debug_hides_the_token() {
+        let t = "tok-secret-0123456789".to_string();
+        let shown = [
+            format!("{:?}", LoginToHost::SpawnPlayer { player_token: t.clone(), session_epoch: 1 }),
+            format!("{:?}", LoginToHost::Kick { player_token: t.clone(), session_epoch: 2, reason: "r".into() }),
+            format!("{:?}", HostToLogin::SpawnAck { player_token: t.clone(), session_epoch: 3, ok: true, quic: None, webtransport: None, cert_hash: None }),
+            format!("{:?}", HostToLogin::SessionEnded { player_token: t.clone(), session_epoch: 4 }),
+            format!("{:?}", HostToLogin::KickAck { player_token: t.clone(), session_epoch: 5 }),
+        ];
+        for s in shown {
+            assert!(!s.contains(&t) && s.contains(REDACTED) && s.contains("session_epoch"), "{s}");
+        }
+    }
 
     #[test]
     fn enums_serialize_snake_case() {

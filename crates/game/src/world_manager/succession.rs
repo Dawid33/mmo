@@ -300,7 +300,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         if !s.survivors.contains(&me) {
-            if s.heir != me {
+            if s.heir != me || !s.survivors.is_empty() {
                 log::warn!("[server] succession {}: this host is not among its survivors {:?}; ignored", s.id.0, s.survivors);
                 return;
             }
@@ -505,7 +505,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         // store before the survivors' journals are resolved. An heir that is no survivor (an
         // offline retirement) booted owning that land and has no journal to wait for: the
         // store's state is the truth, its regions may run already — nothing is masked.
-        if heir == me && s.survivors.contains(&me) {
+        if heir == me && !s.survivors.is_empty() {
             for &(sr, _) in &s.moved {
                 self.inheriting.insert(sr, s.id);
             }

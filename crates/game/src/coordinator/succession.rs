@@ -32,6 +32,16 @@
 //!   host ran has no survivors: its heir booted after it, has nothing to report or resolve and
 //!   adopts from the store alone; its answers are all a cut waits for, and its
 //!   `SuccessionDone` goes to it too.
+//! - **Answers are per boot.** An answer counts only while the boot that gave it is the
+//!   host's current one (its latest `Attach`): no cut names a run until the heir's CURRENT boot
+//!   adopted it and every survivor's current boot applied it. An offline run's heir that boots
+//!   again (it adopted, then died before the settle) has its answers forgotten at its new
+//!   boot's `Attach` and gets the order again — it adopts again from the store. A declared
+//!   run's recipient that attaches as another boot than the one the run counts on (its boot
+//!   when the run opened) lost its journal: no order goes to that boot and the world rolls
+//!   back. (`register_host` normally keeps such a boot out until then: a dirty reboot beside a
+//!   live host vouches for its old row and waits — that row lapses, a second death, a
+//!   rollback; with nobody alive it raises the generation, which fences the old heir's parts.)
 //! - A RUNNING coordinator reads the open successions again
 //!   ([`Coordinator::take_successions_reread`]) when the store changed them behind its back:
 //!   a `hosts` read shows a dead row it never declared (an offline `retire-host`), or a host
@@ -168,25 +178,33 @@ pub struct Declare {
 #[derive(Clone, Debug)]
 struct Run {
     s: Succession,
-    /// Survivors that answered `SuccessionApplied` (or listed it in an `Attach`).
-    applied: BTreeSet<u32>,
-    /// The heir answered `SuccessionAdopted`.
-    adopted: bool,
+    /// Recipients that answered `SuccessionApplied` (or listed it in an `Attach`), each with
+    /// the boot that answered: an answer counts only while that boot is the host's current one.
+    applied: BTreeMap<u32, u64>,
+    /// The boot of the heir that answered `SuccessionAdopted`.
+    adopted: Option<u64>,
+    /// A declared run's (survivors): each recipient's boot when the run opened (or at its first
+    /// `Attach` after): the boot whose journal the run counts on. Another boot of it means that
+    /// journal is gone — the run can never be answered: a rollback.
+    boots: BTreeMap<u32, u64>,
     /// `clock_ms` past which a run not answered by everyone rolls the world back. An offline
     /// run's (no survivors) counts from when its order first went to the heir: `u64::MAX`
     /// until then — the heir may boot long after the operator retired the host.
     deadline_ms: u64,
     /// An offline run's (no survivors): the boots the lease watch saw beat since it opened. A
     /// later lapse of one of them is a death during the succession (a rollback); a boot that
-    /// was dead already when the world was retired is not — it runs at the generation the
-    /// heir's boot left behind, and its next boot resumes from the cut.
+    /// was dead already when the world was retired is not — the retirement raised the
+    /// generation, so it is refused at its next write, and its next boot resumes from the cut.
     beat: BTreeSet<(u32, u64)>,
 }
 
 impl Run {
-    /// Every survivor applied it and the heir adopted it: a cut may settle it.
-    fn answered(&self) -> bool {
-        self.adopted && self.s.survivors.iter().all(|h| self.applied.contains(h))
+    /// Every survivor applied it and the heir adopted it, each by its CURRENT boot (`current`:
+    /// a host's boot as its latest `Attach` named it): a cut may settle it. An answer of a boot
+    /// that died since counts for nothing — the new boot holds nothing of what it adopted.
+    fn answered(&self, current: impl Fn(u32) -> Option<u64>) -> bool {
+        let by_current = |h: u32, boot: Option<u64>| boot.is_some() && boot == current(h);
+        by_current(self.s.heir, self.adopted) && self.s.survivors.iter().all(|h| by_current(*h, self.applied.get(h).copied()))
     }
 }
 
@@ -307,7 +325,11 @@ impl super::Coordinator {
         let rereading = std::mem::take(&mut self.successions.rereading);
         if rereading {
             let listed: BTreeSet<SuccessionId> = list.iter().map(|s| s.id).collect();
-            let gone: Vec<SuccessionId> = self.successions.open.keys().copied().filter(|id| !listed.contains(id)).collect();
+            // A run a commit decided here settles is not listed either once the store holds the
+            // commit: its decision's answer settles it ([`Self::successions_settled`]).
+            let settling: BTreeSet<SuccessionId> = self.settles_pending().into_iter().collect();
+            let gone: Vec<SuccessionId> =
+                self.successions.open.keys().copied().filter(|id| !listed.contains(id) && !settling.contains(id)).collect();
             for id in gone {
                 let run = self.successions.open.remove(&id).expect("listed above");
                 log::warn!(
@@ -419,6 +441,11 @@ impl super::Coordinator {
                         s.base_cut.0,
                         s.survivors
                     );
+                    if self.successions.open.contains_key(&s.id) {
+                        // A re-read listed it first (its dead row came before this answer):
+                        // opened and its predecessor taken out of the view then.
+                        continue;
+                    }
                     let predecessor = s.predecessor;
                     self.open_run(s, now_ms);
                     self.host_succeeded(predecessor);
@@ -495,24 +522,26 @@ impl super::Coordinator {
     /// the heir adopted it.
     #[doc(hidden)]
     pub fn succession_progress(&self) -> Vec<(SuccessionId, Vec<u32>, bool)> {
-        self.successions.open.iter().map(|(id, r)| (*id, r.applied.iter().copied().collect(), r.adopted)).collect()
+        self.successions.open.iter().map(|(id, r)| (*id, r.applied.keys().copied().collect(), r.adopted.is_some())).collect()
     }
 
-    /// Survivor (or heir) `host` applied succession `id`.
+    /// Survivor (or heir) `host` applied succession `id` — as the boot its latest `Attach` named.
     pub(super) fn succession_applied(&mut self, host: u32, id: SuccessionId) {
+        let boot = self.attached_boot(host).unwrap_or_default();
         match self.successions.open.get_mut(&id) {
             Some(run) if recipient(&run.s, host) => {
-                run.applied.insert(host);
+                run.applied.insert(host, boot);
             }
             Some(_) => log::warn!("coordinator: host {host} applied succession {}, which does not name it a survivor", id.0),
             None => log::debug!("coordinator: host {host} applied succession {}, which is not open", id.0),
         }
     }
 
-    /// The heir `host` adopted succession `id`.
+    /// The heir `host` adopted succession `id` — as the boot its latest `Attach` named.
     pub(super) fn succession_adopted(&mut self, host: u32, id: SuccessionId) {
+        let boot = self.attached_boot(host).unwrap_or_default();
         match self.successions.open.get_mut(&id) {
-            Some(run) if run.s.heir == host => run.adopted = true,
+            Some(run) if run.s.heir == host => run.adopted = Some(boot),
             Some(run) => log::warn!("coordinator: host {host} adopted succession {}, whose heir is {}", id.0, run.s.heir),
             None => log::debug!("coordinator: host {host} adopted succession {}, which is not open", id.0),
         }
@@ -520,8 +549,47 @@ impl super::Coordinator {
 
     /// An `Attach` of `host` listing the successions it answered (`(id, adopted)`): counted
     /// as answered again; every open one naming it a recipient (a survivor, or the heir) that
-    /// it did not list is sent (again).
+    /// it did not list is sent (again). Answers are per boot: an offline run's answers of
+    /// another boot of `host` are forgotten (its new boot adopts again); a declared run's
+    /// recipient attaching as another boot than the one it counts on lost its journal — no
+    /// order goes to that boot and the world rolls back.
     pub(super) fn succession_attach(&mut self, host: u32, answered: Vec<(SuccessionId, bool)>) {
+        let boot = self.attached_boot(host);
+        let mut lost = BTreeSet::new();
+        for run in self.successions.open.values_mut().filter(|r| recipient(&r.s, host)) {
+            let listed = answered.iter().any(|(id, _)| *id == run.s.id);
+            if run.s.survivors.is_empty() {
+                if !listed && run.applied.get(&host).is_some_and(|b| Some(*b) != boot) {
+                    log::warn!(
+                        "coordinator: succession {}: host {host} attaches as another boot than the one that answered: \
+                         its answers are forgotten, the order goes to the new boot",
+                        run.s.id.0
+                    );
+                    run.applied.remove(&host);
+                    if run.s.heir == host {
+                        run.adopted = None;
+                    }
+                }
+            } else if let Some(b) = boot {
+                match run.boots.get(&host) {
+                    Some(known) if *known != b => {
+                        log::error!(
+                            "coordinator: succession {}: survivor {host} attaches as boot {b:#x}, not {known:#x} — its journal \
+                             is gone: the world rolls back",
+                            run.s.id.0
+                        );
+                        lost.insert(run.s.id);
+                    }
+                    Some(_) => {}
+                    None => {
+                        run.boots.insert(host, b);
+                    }
+                }
+            }
+        }
+        if !lost.is_empty() {
+            self.successions.rollback = true;
+        }
         for (id, adopted) in answered {
             if !self.successions.open.contains_key(&id) {
                 if self.successions.known {
@@ -540,7 +608,7 @@ impl super::Coordinator {
             .successions
             .open
             .values()
-            .filter(|r| recipient(&r.s, host) && !r.applied.contains(&host))
+            .filter(|r| recipient(&r.s, host) && r.applied.get(&host).copied() != boot && !lost.contains(&r.s.id))
             .map(|r| r.s.clone())
             .collect();
         for s in orders {
@@ -557,12 +625,14 @@ impl super::Coordinator {
         if !r.enabled || r.rollback || r.open.is_empty() {
             return;
         }
+        let current = |h: u32| self.attached_boot(h);
         let late: Vec<(SuccessionId, Vec<u32>, bool)> = r
             .open
             .values()
-            .filter(|run| !run.answered() && now_ms >= run.deadline_ms)
+            .filter(|run| !run.answered(current) && now_ms >= run.deadline_ms)
             .map(|run| {
-                (run.s.id, run.s.survivors.iter().copied().filter(|h| !run.applied.contains(h)).collect(), run.adopted)
+                let silent = run.s.survivors.iter().copied().filter(|h| run.applied.get(h).copied() != current(*h)).collect();
+                (run.s.id, silent, run.adopted.is_some() && run.adopted == current(run.s.heir))
             })
             .collect();
         if let Some((id, silent, adopted)) = late.first() {
@@ -592,7 +662,8 @@ impl super::Coordinator {
         if !r.enabled {
             return None;
         }
-        let waiting: Vec<SuccessionId> = r.open.values().filter(|run| !run.answered()).map(|run| run.s.id).collect();
+        let current = |h: u32| self.attached_boot(h);
+        let waiting: Vec<SuccessionId> = r.open.values().filter(|run| !run.answered(current)).map(|run| run.s.id).collect();
         (!r.known || r.declaring || r.rollback || !waiting.is_empty()).then_some(waiting)
     }
 
@@ -622,6 +693,10 @@ impl super::Coordinator {
 
     /// Run `s` from `now_ms`: its orders go to the recipients attached now.
     fn open_run(&mut self, s: Succession, now_ms: u64) {
+        if self.successions.open.contains_key(&s.id) {
+            // Never re-opened: its answers are reset only by a boot change.
+            return;
+        }
         self.successions.declared.insert((s.predecessor, s.predecessor_boot));
         self.note_succeeded(s.predecessor, s.predecessor_boot);
         let attached: Vec<u32> = recipients(&s).into_iter().filter(|h| self.is_attached(*h)).collect();
@@ -629,7 +704,14 @@ impl super::Coordinator {
         // An offline run (no survivors) waits for its heir to boot: its deadline starts with
         // the heir's order.
         let deadline_ms = if s.survivors.is_empty() { u64::MAX } else { now_ms + deadline };
-        let run = Run { s: s.clone(), applied: BTreeSet::new(), adopted: false, deadline_ms, beat: BTreeSet::new() };
+        // A declared run counts on each recipient's boot of now (one not attached: its first
+        // `Attach`, [`Self::succession_attach`]).
+        let boots: BTreeMap<u32, u64> = if s.survivors.is_empty() {
+            BTreeMap::new()
+        } else {
+            recipients(&s).into_iter().filter_map(|h| self.attached_boot(h).map(|b| (h, b))).collect()
+        };
+        let run = Run { s: s.clone(), applied: BTreeMap::new(), adopted: None, deadline_ms, beat: BTreeSet::new(), boots };
         self.successions.open.insert(run.s.id, run);
         for h in attached {
             self.order_sent(&s, h);
@@ -826,7 +908,8 @@ impl super::Coordinator {
         }
         self.leases.observe(rows, issued_ms, received_ms);
         // Before the open successions are known, their pending read lists it anyway.
-        if !self.successions.enabled || !self.successions.known {
+        // A declaration in flight explains a dead row its answer will open.
+        if !self.successions.enabled || !self.successions.known || self.successions.declaring {
             return;
         }
         let unknown: Vec<(u32, u64)> = rows

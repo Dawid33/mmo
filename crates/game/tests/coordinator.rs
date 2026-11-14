@@ -2910,3 +2910,121 @@ fn attach_as(host: u32, epoch: u64, boot: u64) -> HostMsg {
         successions: Vec::new(),
     }
 }
+
+// ---- R4 Task 14 fix round 1: answers are per boot ---------------------------------------------
+
+/// The heir of an offline succession adopts, then its process dies and boots again before
+/// the settle cut (a new boot, nothing listed in its `Attach`): the old boot's answers do not
+/// count for the new one. The order goes to the new boot, and no cut begins — none names the
+/// succession — until the NEW boot has applied and adopted it.
+#[test]
+fn an_heir_that_reboots_after_adopting_must_adopt_again_before_any_settle() {
+    let mut c = heir_alone();
+    let s = offline_succession();
+    c.successions_unknown();
+    c.successions_open(vec![s.clone()], 10);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)]);
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 20);
+    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 20);
+    // The heir's process dies before any cut began and boots again.
+    c.handle(0, attach_as(0, 2, 900), 30);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to the new boot");
+    for now in [2 * CUT_EVERY_MS, 3 * CUT_EVERY_MS] {
+        c.maintain(now);
+        assert!(begun(&commit_routed(&mut c)).is_empty(), "at {now}: the new boot has not adopted");
+        assert!(c.take_decision().is_none());
+    }
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 3 * CUT_EVERY_MS);
+    c.maintain(4 * CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "applied, not adopted");
+    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 4 * CUT_EVERY_MS);
+    c.maintain(5 * CUT_EVERY_MS);
+    let next = begun(&commit_routed(&mut c));
+    assert_eq!(next.len(), 1, "the new boot adopted: the settle cut begins");
+    let cut = next[0].1;
+    c.handle(0, HostMsg::CutPrepared { cut }, 5 * CUT_EVERY_MS);
+    assert_eq!(c.take_decision().expect("decided").settles, vec![s.id]);
+    // An attach of the SAME boot listing it (a reconnect) keeps its answers: no order again.
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.handle(0, attach_as(0, 1, 900), 0);
+    c.successions_open(vec![s.clone()], 0);
+    commit_routed(&mut c);
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 1);
+    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 1);
+    let mut again = attach_as(0, 2, 900);
+    if let HostMsg::Attach { successions, .. } = &mut again {
+        *successions = vec![(s.id, true)];
+    }
+    c.handle(0, again, 2);
+    assert!(orders(&commit_routed(&mut c)).is_empty(), "the same boot answered already");
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], true)]);
+}
+
+/// A survivor of a declared succession attaches as ANOTHER boot before the settle: its journal
+/// is gone, so the run can never be answered — no order goes to the new boot (it would report
+/// an empty journal) and the world rolls back.
+#[test]
+fn a_survivor_that_reboots_during_a_declared_run_rolls_the_world_back() {
+    let mut c = succeeding(3);
+    let s = declare_one(&mut c, 3, 2, 100);
+    commit_routed(&mut c);
+    let other = 1 - s.heir;
+    c.handle(other, HostMsg::SuccessionApplied { id: s.id }, 150);
+    c.handle(other, attach_as(other, 2, 900), 200);
+    assert!(orders(&commit_routed(&mut c)).is_empty(), "no order to a boot that lost the journal");
+    c.maintain(201);
+    assert!(c.rollback_wanted(), "a survivor's journal is gone");
+}
+
+/// The coordinator's own declaration seen by a `hosts` read before its answer was handled (a
+/// dead row it has not noted yet) asks for no re-read; and a re-read that lists a run already
+/// open never re-opens it — its answers are kept, its order is not sent twice.
+#[test]
+fn a_declared_run_learned_twice_is_opened_once() {
+    let mut c = succeeding(3);
+    read_leases(&mut c, 3, &[2], &[], 100);
+    let d = c.declare_wanted(100).expect("declared");
+    let list = store_declares(&d, 3, 1, game::CutId(0));
+    let s = list[0].clone();
+    read_leases(&mut c, 3, &[], &[2], 110);
+    assert!(!c.take_successions_reread(), "the declaration in flight explains the dead row");
+    c.declared(game::Declared::Done(list.clone()), 113);
+    assert_eq!(orders(&commit_routed(&mut c)).len(), 2, "one order per survivor");
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 114);
+    c.successions_reread();
+    assert!(c.take_successions_reread());
+    c.successions_open(list, 115);
+    assert!(orders(&commit_routed(&mut c)).is_empty(), "not re-opened: no second order");
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], false)], "host 0's answer kept");
+}
+
+/// A run a decision in flight settles is no "abandoned" run: a re-read that no longer lists it
+/// (the commit already stored) does not announce it abandoned; the decision's answer settles it.
+#[test]
+fn a_run_settling_is_not_dropped_as_abandoned() {
+    let mut c = succeeding(3);
+    let s = declare_one(&mut c, 3, 2, 100);
+    for h in [0, 1] {
+        c.handle(h, HostMsg::SuccessionApplied { id: s.id }, 100);
+    }
+    c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 100);
+    commit_routed(&mut c);
+    let now = 100 + CUT_EVERY_MS;
+    c.maintain(now);
+    let (_, cut, _) = begun(&commit_routed(&mut c))[0];
+    c.handle(0, HostMsg::CutPrepared { cut }, now);
+    c.handle(1, HostMsg::CutPrepared { cut }, now);
+    let d = c.take_decision().expect("decided");
+    assert_eq!(d.settles, vec![s.id]);
+    // The store committed it; before its answer is handled a re-read comes back without it.
+    c.successions_reread();
+    assert!(c.take_successions_reread());
+    c.successions_open(Vec::new(), now + 1);
+    assert!(succession_done(&commit_routed(&mut c)).is_empty(), "not announced abandoned");
+    c.decided(cut, true);
+    let done = succession_done(&commit_routed(&mut c));
+    assert!(done.iter().all(|(_, id, settled)| *id == s.id && *settled) && !done.is_empty(), "{done:?}");
+}
