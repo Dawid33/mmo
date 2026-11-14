@@ -17,7 +17,8 @@ pub enum Facing {
 }
 
 impl Facing {
-    fn quarter_turns(self) -> u8 {
+    /// Clockwise quarter turns from north (north 0, east 1, south 2, west 3).
+    pub fn quarter_turns(self) -> u8 {
         match self {
             Facing::North => 0,
             Facing::East => 1,
@@ -26,7 +27,8 @@ impl Facing {
         }
     }
 
-    fn from_quarter_turns(n: u8) -> Self {
+    /// The facing `n` clockwise quarter turns from north (taken mod 4).
+    pub fn from_quarter_turns(n: u8) -> Self {
         match n % 4 {
             0 => Facing::North,
             1 => Facing::East,
@@ -137,6 +139,17 @@ impl Shape {
         match self {
             Shape::Layer { layers } => (1..=8).contains(&layers),
             _ => true,
+        }
+    }
+
+    /// True when the shape has no filled voxel. By rule, not by scanning: only a `Wall` with no post and
+    /// no side.
+    pub fn is_empty(self) -> bool {
+        match self {
+            Shape::Wall { sides, post } => {
+                !post && !(sides.north || sides.east || sides.south || sides.west)
+            }
+            _ => false,
         }
     }
 

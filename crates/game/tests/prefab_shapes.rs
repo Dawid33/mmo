@@ -209,3 +209,20 @@ fn absolute_handedness() {
     assert!(door.filled(0, mid, mid));
     assert!(!door.filled(last, mid, mid));
 }
+
+#[test]
+fn facing_quarter_turns_round_trip() {
+    for (n, f) in FACINGS.into_iter().enumerate() {
+        assert_eq!(f.quarter_turns(), n as u8);
+        assert_eq!(Facing::from_quarter_turns(n as u8), f);
+        assert_eq!(Facing::from_quarter_turns(n as u8 + 4), f);
+    }
+}
+
+#[test]
+fn only_a_bare_wall_is_empty() {
+    for s in all_shapes() {
+        assert_eq!(s.is_empty(), count(s) == 0, "{s:?}");
+    }
+    assert!(Shape::Wall { sides: Sides::default(), post: false }.is_empty());
+}

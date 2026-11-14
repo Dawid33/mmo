@@ -97,19 +97,10 @@ pub fn default_scale(size: [u32; 3]) -> u32 {
     (MAX_WIDTH.saturating_sub(2 * GAP) / blocks_wide.max(1)).max(1)
 }
 
-fn shape_material(shape: &ResolvedShape) -> Option<BlockId> {
-    match shape {
-        ResolvedShape::Named { mat, .. } => Some(*mat),
-        ResolvedShape::Cuboids { cuboids, mats } => {
-            cuboids.first().and_then(|(_, _, m)| mats.get(*m as usize).copied()).or_else(|| mats.first().copied())
-        }
-    }
-}
-
 fn cell_material(cell: Cell<'_>) -> Option<BlockId> {
     match cell {
         Cell::Block(id) => Some(id),
-        Cell::Shaped(s) => shape_material(s),
+        Cell::Shaped(s) => ResolvedShape::top_material(s),
         Cell::Keep | Cell::Carve => None,
     }
 }

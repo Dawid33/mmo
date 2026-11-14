@@ -11,6 +11,7 @@ use super::Shape;
 pub const PREFAB_FORMAT: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrefabFile {
     pub format: u16,
     pub name: String,
@@ -39,6 +40,7 @@ pub struct PrefabFile {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrefabMeta {
     #[serde(default)]
     pub author: String,
@@ -53,6 +55,7 @@ pub struct PrefabMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImportInfo {
     #[serde(default)]
     pub source_hash: String,
@@ -66,6 +69,7 @@ pub struct ImportInfo {
 
 /// `mat` is a palette index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileBox {
     pub min: [i32; 3],
     pub size: [u32; 3],
@@ -73,6 +77,7 @@ pub struct FileBox {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileShaped {
     pub at: [i32; 3],
     pub shape: FileShape,
@@ -86,15 +91,18 @@ pub enum FileShape {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileCarve {
     pub min: [i32; 3],
     pub size: [u32; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Marker {
     pub at: [i32; 3],
     pub kind: String,
+    /// Quarter turns clockwise seen from above; 0 = facing north (-Z).
     #[serde(default)]
     pub turn: u8,
     #[serde(default)]

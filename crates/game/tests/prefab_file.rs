@@ -90,3 +90,18 @@ fn named_bytes_picks_by_suffix() {
     assert_eq!(prefab_from_named_bytes("a.prefab.bin", &prefab_to_bin(&f), None), Some(Ok(f)));
     assert_eq!(prefab_from_named_bytes("a.txt", b"x", None), None);
 }
+
+#[test]
+fn a_misspelt_field_is_a_syntax_error() {
+    let src = r#"(format: 2, name: "x", size: (1, 1, 1), palette: ["stone"], carves: [])"#;
+    assert!(matches!(prefab_from_ron(src), Err(PrefabError::Syntax(_))));
+    // Nested structs refuse unknown fields too.
+    let src = r#"(format: 2, name: "x", size: (1, 1, 1), boxes: [(min: (0, 0, 0), size: (1, 1, 1), mat: 0, matt: 1)])"#;
+    assert!(matches!(prefab_from_ron(src), Err(PrefabError::Syntax(_))));
+}
+
+#[test]
+fn the_binary_round_trip_survives_strict_fields() {
+    let f = sample();
+    assert_eq!(prefab_from_bin(&prefab_to_bin(&f), None).unwrap(), f);
+}
