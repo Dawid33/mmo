@@ -22,9 +22,6 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 use super::bridge::{RegionRoots, SimTarget};
 use super::config::TerrainRenderConfig;
 use crate::world_scale::WorldScale;
-use super::far_voxel::lifecycle::FarVoxelUploadPending;
-use super::far_voxel::residency::FarVoxelResidency;
-use super::far_voxel::{FarBrickBuildTask, FarRasterFallback, FarVoxelReady};
 use super::lod_rings::LodRings;
 use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
 use super::meshing::queue::{ChunkKey, RemeshQueue};
@@ -69,7 +66,6 @@ pub struct BenchmarkRunSettings {
     pub client_worker_threads: Option<u32>,
     pub tokio_worker_threads: Option<u32>,
     pub requested_near_backend: Option<String>,
-    pub requested_far_backend: Option<String>,
     pub load_timeout: Duration,
 }
 
@@ -133,7 +129,6 @@ impl BenchmarkRunSettings {
             )?,
             tokio_worker_threads: parse_u32("TOKIO_WORKER_THREADS", get("TOKIO_WORKER_THREADS"))?,
             requested_near_backend: get("VOXEL_NEAR_RENDER"),
-            requested_far_backend: get("VOXEL_FAR_RENDER"),
             load_timeout: parse_u32(
                 "RENDER_BENCH_LOAD_TIMEOUT_SECS",
                 get("RENDER_BENCH_LOAD_TIMEOUT_SECS"),
@@ -159,7 +154,6 @@ pub struct BenchmarkReadiness {
     pub lod_build_queue_len: usize,
     pub pending_lod_events: usize,
     pub in_flight_tasks: usize,
-    pub far_residency_pending: usize,
     pub ready_lod_counts: BTreeMap<u32, usize>,
     backend_ready: bool,
     near_runtime: Option<NearRuntimeMode>,
@@ -184,7 +178,6 @@ impl BenchmarkReadiness {
             && self.lod_build_queue_len == 0
             && self.pending_lod_events == 0
             && self.in_flight_tasks == 0
-            && self.far_residency_pending == 0
             && self.backend_ready
             && has_full_lod_table
     }
@@ -238,7 +231,7 @@ pub enum BenchmarkPhase {
 const NON_AUTHORITATIVE_NEAR_REASON: &str =
     "near renderer mode changed during benchmark measurement";
 const NON_AUTHORITATIVE_FAR_REASON: &str =
-    "far renderer entered raster fallback during benchmark measurement";
+    "far renderer lost readiness during benchmark measurement";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NearRuntimeMode {
@@ -248,9 +241,7 @@ struct NearRuntimeMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum FarRuntimeBackend {
-    Brick,
     Raster,
-    Mixed,
     #[default]
     Unavailable,
 }
@@ -258,9 +249,7 @@ enum FarRuntimeBackend {
 impl FarRuntimeBackend {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Brick => "brick",
             Self::Raster => "raster",
-            Self::Mixed => "mixed",
             Self::Unavailable => "unavailable",
         }
     }
@@ -270,7 +259,7 @@ impl FarRuntimeBackend {
 struct RuntimeBackendState {
     near: Option<NearRuntimeMode>,
     far: FarRuntimeBackend,
-    /// True only when every required far cell uses the configured backend.
+    /// True only when every required far cell has its raster mesh.
     far_ready: bool,
 }
 
@@ -334,44 +323,21 @@ fn result_backend_state(
     }
 }
 
-const fn classify_far_runtime(
-    total_cells: usize,
-    brick_cells: usize,
-    raster_cells: usize,
-) -> (FarRuntimeBackend, bool) {
-    let backend = match (brick_cells > 0, raster_cells > 0) {
-        (true, true) => FarRuntimeBackend::Mixed,
-        (true, false) => FarRuntimeBackend::Brick,
-        (false, true) => FarRuntimeBackend::Raster,
-        (false, false) => FarRuntimeBackend::Unavailable,
-    };
-    (
-        backend,
-        total_cells > 0 && brick_cells.saturating_add(raster_cells) == total_cells,
-    )
+const fn classify_far_runtime(raster_cells: usize) -> FarRuntimeBackend {
+    if raster_cells > 0 {
+        FarRuntimeBackend::Raster
+    } else {
+        FarRuntimeBackend::Unavailable
+    }
 }
 
-const fn far_runtime_ready(
-    expected: FarRuntimeBackend,
-    far_expected: bool,
-    total_cells: usize,
-    brick_cells: usize,
-    raster_cells: usize,
-    raster_ready_cells: usize,
-) -> bool {
+const fn far_runtime_ready(far_expected: bool, total_cells: usize, raster_ready_cells: usize) -> bool {
     if !far_expected {
         // No LOD rings subscribed (`VOXEL_LOD_RINGS=off` / the tiny world):
         // there is no far backend to wait for, and stray cells are not ready.
         return total_cells == 0;
     }
-    if total_cells == 0 {
-        return false;
-    }
-    match expected {
-        FarRuntimeBackend::Brick => brick_cells == total_cells && raster_cells == 0,
-        FarRuntimeBackend::Raster => brick_cells == 0 && raster_ready_cells == total_cells,
-        FarRuntimeBackend::Mixed | FarRuntimeBackend::Unavailable => false,
-    }
+    total_cells > 0 && raster_ready_cells == total_cells
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -472,14 +438,8 @@ pub struct BenchmarkCapabilityMetrics {
     pub near_reserved_bytes: Option<u64>,
     pub far_cells: Option<u64>,
     pub far_resident_quads: Option<u64>,
-    pub far_visible_instances: Option<u64>,
-    pub far_proxy_vertices: Option<u64>,
     pub far_direct_draws: Option<u64>,
     pub far_indirect_draws: Option<u64>,
-    pub far_logical_bytes: Option<u64>,
-    pub far_reserved_bytes: Option<u64>,
-    pub unique_bricks: Option<u64>,
-    pub brick_dedup_ratio: Option<f64>,
     pub unavailable: Vec<UnavailableMetric>,
 }
 
@@ -503,14 +463,8 @@ struct BenchmarkSamples {
     near_reserved_bytes: Vec<u64>,
     far_cells: Vec<u64>,
     far_resident_quads: Vec<u64>,
-    far_visible_instances: Vec<u64>,
-    far_proxy_vertices: Vec<u64>,
     far_direct_draws: Vec<u64>,
     far_indirect_draws: Vec<u64>,
-    far_logical_bytes: Vec<u64>,
-    far_reserved_bytes: Vec<u64>,
-    unique_bricks: Vec<u64>,
-    brick_dedup_ratio: Vec<f64>,
     unavailable: Vec<UnavailableMetric>,
 }
 
@@ -533,14 +487,8 @@ impl Default for BenchmarkSamples {
             near_reserved_bytes: Vec::new(),
             far_cells: Vec::new(),
             far_resident_quads: Vec::new(),
-            far_visible_instances: Vec::new(),
-            far_proxy_vertices: Vec::new(),
             far_direct_draws: Vec::new(),
             far_indirect_draws: Vec::new(),
-            far_logical_bytes: Vec::new(),
-            far_reserved_bytes: Vec::new(),
-            unique_bricks: Vec::new(),
-            brick_dedup_ratio: Vec::new(),
             unavailable: Vec::new(),
         }
     }
@@ -570,17 +518,8 @@ impl BenchmarkSamples {
         push_optional(&mut self.near_reserved_bytes, metrics.near_reserved_bytes);
         push_optional(&mut self.far_cells, metrics.far_cells);
         push_optional(&mut self.far_resident_quads, metrics.far_resident_quads);
-        push_optional(
-            &mut self.far_visible_instances,
-            metrics.far_visible_instances,
-        );
-        push_optional(&mut self.far_proxy_vertices, metrics.far_proxy_vertices);
         push_optional(&mut self.far_direct_draws, metrics.far_direct_draws);
         push_optional(&mut self.far_indirect_draws, metrics.far_indirect_draws);
-        push_optional(&mut self.far_logical_bytes, metrics.far_logical_bytes);
-        push_optional(&mut self.far_reserved_bytes, metrics.far_reserved_bytes);
-        push_optional(&mut self.unique_bricks, metrics.unique_bricks);
-        push_optional(&mut self.brick_dedup_ratio, metrics.brick_dedup_ratio);
         self.unavailable.extend(metrics.unavailable.iter().cloned());
     }
 }
@@ -639,14 +578,12 @@ impl Plugin for RenderBenchmarkPlugin {
         }
 
         let shared = SharedRenderThreadSnapshot::default();
-        let far_draw_gate = super::far_voxel::pass::FarVoxelDrawGate::disabled();
         // The binary inserts the env-resolved scale before this plugin; a bare
         // app (tests) falls back to the production scale.
         let scale = *app.init_resource::<WorldScale>().world().resource::<WorldScale>();
         info!("render benchmark world scale: {scale}");
         app.insert_resource(BenchmarkSettingsResource(self.settings.clone()))
             .insert_resource(shared.clone())
-            .insert_resource(far_draw_gate.clone())
             .init_resource::<BenchmarkCapabilityMetricsInput>()
             .insert_resource(BenchmarkRuntime::new(scale, self.settings.load_timeout))
             .add_systems(
@@ -655,7 +592,7 @@ impl Plugin for RenderBenchmarkPlugin {
                     .after(super::bridge::drain_client_updates)
                     .after(super::lod_rings::apply_lod_events)
                     .after(super::meshing::lod::apply_lod_meshes)
-                    .after(super::far_voxel::gpu::publish_far_uploads)
+                    .after(super::meshing::lod_tiles::rebuild_lod_tiles)
                     .after(super::interpolate::interpolate_transforms)
                     .run_if(crate::session::world_systems_enabled()),
             );
@@ -663,7 +600,6 @@ impl Plugin for RenderBenchmarkPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .insert_resource(shared)
-                .insert_resource(far_draw_gate)
                 .init_resource::<super::voxel_pull::gpu::NearTelemetryEnabled>()
                 .add_systems(
                     Render,
@@ -689,8 +625,6 @@ struct BenchmarkScene<'w, 's> {
     lod_rings: Res<'w, LodRings>,
     in_flight_near: Query<'w, 's, (), With<MeshingTask>>,
     in_flight_lod: Query<'w, 's, (), With<LodMeshTask>>,
-    in_flight_bricks: Query<'w, 's, (), With<FarBrickBuildTask>>,
-    in_flight_far_uploads: Query<'w, 's, (), With<FarVoxelUploadPending>>,
     pending_snapshot_voxels: Query<'w, 's, (), With<super::bridge::PendingSnapshotVoxels>>,
     chunks: Query<'w, 's, Option<&'static TerrainQuadCount>, With<ChunkKey>>,
     far_cells: Query<
@@ -699,14 +633,11 @@ struct BenchmarkScene<'w, 's> {
         (
             &'static LodChunk,
             Option<&'static TerrainQuadCount>,
-            Has<FarVoxelReady>,
-            Has<FarRasterFallback>,
             Has<LodRasterReady>,
             Has<Mesh3d>,
             Has<ChunkQuads>,
         ),
     >,
-    far_residency: Option<Res<'w, FarVoxelResidency>>,
 }
 
 fn expected_lod_keys(
@@ -746,7 +677,6 @@ fn run_benchmark(
     scene: BenchmarkScene,
     mut cameras: Query<(Entity, &mut Transform, Option<&SimTarget>, &Camera), With<Camera3d>>,
     shared: Res<SharedRenderThreadSnapshot>,
-    far_draw_gate: Res<super::far_voxel::pass::FarVoxelDrawGate>,
     mut capabilities: ResMut<BenchmarkCapabilityMetricsInput>,
     mut runtime: ResMut<BenchmarkRuntime>,
     mut exits: MessageWriter<AppExit>,
@@ -761,49 +691,26 @@ fn run_benchmark(
         mode: near.active_mode,
         generation: near.mode_generation,
     });
-    let mut brick_cells = 0usize;
-    let mut raster_cells = 0usize;
     let mut raster_ready_cells = 0usize;
     let mut raster_resident_quads = 0u64;
     let mut ready_lod_counts = BTreeMap::new();
     let mut total_far_cells = 0usize;
-    for (lod, quads, brick_ready, fallback, raster_ready, has_mesh, has_quads) in &scene.far_cells {
+    for (lod, quads, raster_ready, has_mesh, has_quads) in &scene.far_cells {
         total_far_cells = total_far_cells.saturating_add(1);
-        let raster_draw_ready = raster_ready || has_mesh || has_quads;
-        let raster_active = fallback || raster_draw_ready;
-        if brick_ready {
-            brick_cells = brick_cells.saturating_add(1);
-        }
-        if raster_active {
-            raster_cells = raster_cells.saturating_add(1);
+        if raster_ready || has_mesh || has_quads {
+            raster_ready_cells = raster_ready_cells.saturating_add(1);
             raster_resident_quads =
                 raster_resident_quads.saturating_add(quads.map_or(0, |quads| u64::from(quads.0)));
-        }
-        if raster_draw_ready {
-            raster_ready_cells = raster_ready_cells.saturating_add(1);
-        }
-        let cell_ready_for_config = match render_config.far {
-            super::config::FarRenderBackend::BrickRaymarch => brick_ready && !raster_active,
-            super::config::FarRenderBackend::Raster => raster_draw_ready && !brick_ready,
-        };
-        if cell_ready_for_config {
             *ready_lod_counts.entry(lod.factor).or_insert(0) += 1;
         }
     }
-    let (far_runtime, _) = classify_far_runtime(total_far_cells, brick_cells, raster_cells);
-    let expected_far_runtime = match render_config.far {
-        super::config::FarRenderBackend::BrickRaymarch => FarRuntimeBackend::Brick,
-        super::config::FarRenderBackend::Raster => FarRuntimeBackend::Raster,
-    };
+    let far_runtime = classify_far_runtime(raster_ready_cells);
     let current_backends = RuntimeBackendState {
         near: near_runtime,
         far: far_runtime,
         far_ready: far_runtime_ready(
-            expected_far_runtime,
             !runtime.readiness.scale.lod_table.is_empty(),
             total_far_cells,
-            brick_cells,
-            raster_cells,
             raster_ready_cells,
         ),
     };
@@ -837,15 +744,9 @@ fn run_benchmark(
         pending_lod_events: scene.lod_rings.pending.len(),
         in_flight_tasks: scene.in_flight_near.iter().count()
             + scene.in_flight_lod.iter().count()
-            + scene.in_flight_bricks.iter().count()
-            + scene.in_flight_far_uploads.iter().count()
             // Region chunks whose snapshot voxels are still being derived
             // off-thread: not queued for meshing yet, but not loaded either.
             + scene.pending_snapshot_voxels.iter().count(),
-        far_residency_pending: scene
-            .far_residency
-            .as_deref()
-            .map_or(0, FarVoxelResidency::pending_work_count),
         ready_lod_counts,
         backend_ready: current_backends.near.is_some() && current_backends.far_ready,
         near_runtime: current_backends.near,
@@ -878,8 +779,6 @@ fn run_benchmark(
         if phase == BenchmarkPhase::Warming {
             runtime.backend_authority.lock(current_backends);
             runtime.load_to_ready_ms = Some(elapsed.as_secs_f64() * 1_000.0);
-            far_draw_gate.enable();
-            info!("render benchmark enabled the completed far scene for warmup");
         }
     }
 
@@ -909,21 +808,9 @@ fn run_benchmark(
         });
     }
     capabilities.0.far_cells = Some(total_far_cells as u64);
-    capabilities.0.far_resident_quads = matches!(
-        far_runtime,
-        FarRuntimeBackend::Raster | FarRuntimeBackend::Mixed
-    )
-    .then_some(raster_resident_quads);
-    if let Some(residency) = scene.far_residency.as_deref() {
-        capabilities.0.unique_bricks = Some(residency.unique_bricks() as u64);
-        capabilities.0.brick_dedup_ratio = residency.brick_dedup_ratio();
-    }
-    let telemetry_far_backend = if far_runtime == FarRuntimeBackend::Brick {
-        super::config::FarRenderBackend::BrickRaymarch
-    } else {
-        super::config::FarRenderBackend::Raster
-    };
-    let translated = translate_snapshot(&render_snapshot, telemetry_far_backend);
+    capabilities.0.far_resident_quads =
+        (far_runtime == FarRuntimeBackend::Raster).then_some(raster_resident_quads);
+    let translated = translate_snapshot(&render_snapshot);
     if render_config.near.uses_quad_records() {
         capabilities.0.near_active_chunks = translated.near.active_chunks;
         capabilities.0.near_frustum_survivors = translated.near.frustum_survivors;
@@ -937,25 +824,16 @@ fn run_benchmark(
     }
     capabilities.0.near_logical_bytes = translated.near.logical_bytes;
     capabilities.0.near_reserved_bytes = translated.near.reserved_bytes;
-    capabilities.0.far_visible_instances = translated.far.visible_instances;
-    capabilities.0.far_proxy_vertices = translated.far.proxy_vertices;
     match far_runtime {
-        FarRuntimeBackend::Brick => {
-            capabilities.0.far_direct_draws = Some(0);
-            capabilities.0.far_indirect_draws = translated.far.indirect_draws;
-        }
         FarRuntimeBackend::Raster => {
             capabilities.0.far_direct_draws = None;
             capabilities.0.far_indirect_draws = Some(0);
         }
-        FarRuntimeBackend::Mixed | FarRuntimeBackend::Unavailable => {
+        FarRuntimeBackend::Unavailable => {
             capabilities.0.far_direct_draws = None;
             capabilities.0.far_indirect_draws = None;
         }
     }
-    capabilities.0.far_logical_bytes = translated.far.logical_bytes;
-    capabilities.0.far_reserved_bytes = translated.far.reserved_bytes;
-    capabilities.0.unavailable.extend(translated.unavailable);
 
     if phase == BenchmarkPhase::Measuring {
         if let Some(frame_ms) = diagnostics
@@ -1064,18 +942,12 @@ fn build_result(
                 submitted_quads: CountSummary::from_samples(&samples.near_submitted_quads),
                 submitted_triangles: CountSummary::from_samples(&samples.near_submitted_triangles),
                 submitted_vertices: CountSummary::from_samples(&samples.near_submitted_vertices),
-                proxy_vertices: None,
-                unique_bricks: None,
-                brick_dedup_ratio: None,
             },
             far: GeometryScopeMetrics {
                 resident_quads: CountSummary::from_samples(&samples.far_resident_quads),
                 submitted_quads: None,
                 submitted_triangles: None,
                 submitted_vertices: None,
-                proxy_vertices: CountSummary::from_samples(&samples.far_proxy_vertices),
-                unique_bricks: CountSummary::from_samples(&samples.unique_bricks),
-                brick_dedup_ratio: FloatSummary::from_samples(&samples.brick_dedup_ratio),
             },
         },
         visibility: VisibilityMetrics {
@@ -1084,14 +956,12 @@ fn build_result(
                 active_cells: None,
                 frustum_survivors: CountSummary::from_samples(&samples.near_frustum_survivors),
                 hzb_survivors: CountSummary::from_samples(&samples.near_hzb_survivors),
-                visible_instances: None,
             },
             far: VisibilityScopeMetrics {
                 active_chunks: None,
                 active_cells: CountSummary::from_samples(&samples.far_cells),
                 frustum_survivors: None,
                 hzb_survivors: None,
-                visible_instances: CountSummary::from_samples(&samples.far_visible_instances),
             },
         },
         draws: DrawMetrics {
@@ -1108,10 +978,6 @@ fn build_result(
             near: MemoryScopeMetrics {
                 logical_bytes: CountSummary::from_samples(&samples.near_logical_bytes),
                 reserved_bytes: CountSummary::from_samples(&samples.near_reserved_bytes),
-            },
-            far: MemoryScopeMetrics {
-                logical_bytes: CountSummary::from_samples(&samples.far_logical_bytes),
-                reserved_bytes: CountSummary::from_samples(&samples.far_reserved_bytes),
             },
         },
         pipeline_statistics: PipelineStatistics {
@@ -1153,7 +1019,6 @@ fn build_result(
         &metrics,
         near_mode,
         near_visibility_source,
-        far_runtime,
         &mut unavailable_metrics,
     );
     unavailable_metrics.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1201,7 +1066,6 @@ fn build_result(
                 .map(ActiveNearMode::as_str)
                 .unwrap_or("unavailable")
                 .to_owned(),
-            far_backend_requested: settings.requested_far_backend.clone(),
             far_backend_resolved: far_runtime.as_str().to_owned(),
             adapter,
         },
@@ -1211,7 +1075,6 @@ fn build_result(
             lod_build_queue_len: runtime.last_readiness.lod_build_queue_len,
             pending_lod_events: runtime.last_readiness.pending_lod_events,
             in_flight_tasks: runtime.last_readiness.in_flight_tasks,
-            far_residency_pending: runtime.last_readiness.far_residency_pending,
             ready_lod_counts: runtime.last_readiness.ready_lod_counts.clone(),
             stable_frames: runtime.readiness.stable_frames(),
         },
@@ -1224,7 +1087,6 @@ fn populate_metric_unavailability(
     metrics: &BenchmarkMetrics,
     near_mode: Option<ActiveNearMode>,
     near_visibility_source: Option<ForwardCullSource>,
-    far_runtime: FarRuntimeBackend,
     unavailable: &mut Vec<UnavailableMetric>,
 ) {
     let mut mark = |path: &str, missing: bool, reason: UnavailableReason, detail: Option<&str>| {
@@ -1256,14 +1118,6 @@ fn populate_metric_unavailability(
             metrics.memory.near.reserved_bytes.is_none(),
         ),
         (
-            "metrics.memory.far.logical_bytes",
-            metrics.memory.far.logical_bytes.is_none(),
-        ),
-        (
-            "metrics.memory.far.reserved_bytes",
-            metrics.memory.far.reserved_bytes.is_none(),
-        ),
-        (
             "metrics.geometry.near.resident_quads",
             metrics.geometry.near.resident_quads.is_none(),
         ),
@@ -1289,24 +1143,8 @@ fn populate_metric_unavailability(
 
     for (path, missing) in [
         (
-            "metrics.geometry.near.proxy_vertices",
-            metrics.geometry.near.proxy_vertices.is_none(),
-        ),
-        (
-            "metrics.geometry.near.unique_bricks",
-            metrics.geometry.near.unique_bricks.is_none(),
-        ),
-        (
-            "metrics.geometry.near.brick_dedup_ratio",
-            metrics.geometry.near.brick_dedup_ratio.is_none(),
-        ),
-        (
             "metrics.visibility.near.active_cells",
             metrics.visibility.near.active_cells.is_none(),
-        ),
-        (
-            "metrics.visibility.near.visible_instances",
-            metrics.visibility.near.visible_instances.is_none(),
         ),
         (
             "metrics.visibility.far.active_chunks",
@@ -1381,11 +1219,10 @@ fn populate_metric_unavailability(
         Some("exact main-view direct draw count was not observed"),
     );
 
-    let far_is_brick = far_runtime == FarRuntimeBackend::Brick;
     mark(
         "metrics.geometry.far.resident_quads",
         metrics.geometry.far.resident_quads.is_none(),
-        if far_is_brick { not_applicable } else { sample },
+        sample,
         None,
     );
     for (path, missing) in [
@@ -1402,54 +1239,12 @@ fn populate_metric_unavailability(
             metrics.geometry.far.submitted_vertices.is_none(),
         ),
     ] {
-        mark(
-            path,
-            missing,
-            if far_is_brick {
-                not_applicable
-            } else {
-                readback_disabled
-            },
-            None,
-        );
+        mark(path, missing, readback_disabled, None);
     }
-    mark(
-        "metrics.geometry.far.proxy_vertices",
-        metrics.geometry.far.proxy_vertices.is_none(),
-        if far_is_brick { sample } else { not_applicable },
-        None,
-    );
-    for (path, missing) in [
-        (
-            "metrics.geometry.far.unique_bricks",
-            metrics.geometry.far.unique_bricks.is_none(),
-        ),
-        (
-            "metrics.geometry.far.brick_dedup_ratio",
-            metrics.geometry.far.brick_dedup_ratio.is_none(),
-        ),
-    ] {
-        mark(
-            path,
-            missing,
-            if far_is_brick { sample } else { not_applicable },
-            None,
-        );
-    }
-    mark(
-        "metrics.visibility.far.visible_instances",
-        metrics.visibility.far.visible_instances.is_none(),
-        if far_is_brick { sample } else { not_applicable },
-        None,
-    );
     mark(
         "metrics.draws.far.direct_draws",
         metrics.draws.far.direct_draws.is_none(),
-        if far_is_brick {
-            sample
-        } else {
-            readback_disabled
-        },
+        readback_disabled,
         Some("exact main-view direct draw count was not observed"),
     );
 
@@ -1515,7 +1310,6 @@ mod tests {
             lod_build_queue_len: 0,
             pending_lod_events: 0,
             in_flight_tasks: 0,
-            far_residency_pending: 0,
             ready_lod_counts,
             backend_ready: true,
             near_runtime: Some(NearRuntimeMode {
@@ -1573,9 +1367,9 @@ mod tests {
             WorldScale::TINY.lod_table,
             std::iter::empty(),
         ));
-        assert!(far_runtime_ready(FarRuntimeBackend::Raster, false, 0, 0, 0, 0));
-        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, false, 1, 0, 1, 1));
-        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, true, 0, 0, 0, 0));
+        assert!(far_runtime_ready(false, 0, 0));
+        assert!(!far_runtime_ready(false, 1, 1));
+        assert!(!far_runtime_ready(true, 0, 0));
 
         let one_region = BenchmarkReadiness {
             near_regions: 1,
@@ -1633,16 +1427,6 @@ mod tests {
         let mut tracker = ReadinessTracker::default();
         assert!(!tracker.observe(&BenchmarkReadiness {
             lod_build_queue_len: 1,
-            ..ready(&[])
-        }));
-        assert_eq!(tracker.stable_frames(), 0);
-    }
-
-    #[test]
-    fn readiness_rejects_far_residency_metadata_work() {
-        let mut tracker = ReadinessTracker::default();
-        assert!(!tracker.observe(&BenchmarkReadiness {
-            far_residency_pending: 2,
             ..ready(&[])
         }));
         assert_eq!(tracker.stable_frames(), 0);
@@ -1754,55 +1538,40 @@ mod tests {
     }
 
     #[test]
-    fn far_runtime_state_distinguishes_pure_brick_raster_and_mixed() {
-        assert_eq!(
-            classify_far_runtime(4, 4, 0),
-            (FarRuntimeBackend::Brick, true)
-        );
-        assert_eq!(
-            classify_far_runtime(4, 0, 4),
-            (FarRuntimeBackend::Raster, true)
-        );
-        assert_eq!(
-            classify_far_runtime(4, 3, 1),
-            (FarRuntimeBackend::Mixed, true)
-        );
-        assert_eq!(
-            classify_far_runtime(4, 3, 0),
-            (FarRuntimeBackend::Brick, false)
-        );
-        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, true, 4, 0, 4, 0));
-        assert!(far_runtime_ready(FarRuntimeBackend::Raster, true, 4, 0, 4, 4));
-        assert!(far_runtime_ready(FarRuntimeBackend::Brick, true, 4, 4, 0, 0));
+    fn far_runtime_state_is_raster_only_when_every_cell_is_meshed() {
+        assert_eq!(classify_far_runtime(4), FarRuntimeBackend::Raster);
+        assert_eq!(classify_far_runtime(0), FarRuntimeBackend::Unavailable);
+        assert!(!far_runtime_ready(true, 4, 0));
+        assert!(!far_runtime_ready(true, 4, 3));
+        assert!(far_runtime_ready(true, 4, 4));
     }
 
     #[test]
-    fn backend_authority_restarts_on_brick_fallback_during_warmup_and_fails_during_measurement() {
-        let pure_brick = RuntimeBackendState {
+    fn backend_authority_restarts_on_lost_far_readiness_during_warmup_and_fails_during_measurement() {
+        let raster = RuntimeBackendState {
             near: Some(NearRuntimeMode {
                 mode: ActiveNearMode::GroupedDirect,
                 generation: 1,
             }),
-            far: FarRuntimeBackend::Brick,
+            far: FarRuntimeBackend::Raster,
             far_ready: true,
         };
-        let mixed = RuntimeBackendState {
-            far: FarRuntimeBackend::Mixed,
+        let not_ready = RuntimeBackendState {
             far_ready: false,
-            ..pure_brick
+            ..raster
         };
 
         let mut warming = RunBackendAuthority::default();
-        warming.lock(pure_brick);
+        warming.lock(raster);
         assert_eq!(
-            warming.observe(BenchmarkPhase::Warming, mixed),
+            warming.observe(BenchmarkPhase::Warming, not_ready),
             AuthorityAction::RestartWarmup
         );
 
         let mut measuring = RunBackendAuthority::default();
-        measuring.lock(pure_brick);
+        measuring.lock(raster);
         assert_eq!(
-            measuring.observe(BenchmarkPhase::Measuring, mixed),
+            measuring.observe(BenchmarkPhase::Measuring, not_ready),
             AuthorityAction::Fail(NON_AUTHORITATIVE_FAR_REASON)
         );
     }
@@ -1855,7 +1624,6 @@ mod tests {
             &metrics,
             Some(ActiveNearMode::Disabled),
             None,
-            FarRuntimeBackend::Brick,
             &mut unavailable,
         );
 
@@ -1875,7 +1643,6 @@ mod tests {
             "metrics.geometry.far.submitted_quads",
             "metrics.geometry.far.submitted_triangles",
             "metrics.geometry.far.submitted_vertices",
-            "metrics.visibility.far.visible_instances",
             "metrics.draws.near.direct_draws",
             "metrics.pipeline_statistics.vertex_shader_invocations",
         ] {
@@ -1956,11 +1723,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_artifact_reports_actual_mixed_far_fallback_and_specific_reason() {
-        let settings = BenchmarkRunSettings::from_values(|name| match name {
-            "RENDER_BENCH_OUTPUT" => Some("unused.json".to_owned()),
-            "VOXEL_FAR_RENDER" => Some("brick".to_owned()),
-            _ => None,
+    fn failed_artifact_reports_the_actual_far_backend_and_specific_reason() {
+        let settings = BenchmarkRunSettings::from_values(|name| {
+            (name == "RENDER_BENCH_OUTPUT").then(|| "unused.json".to_owned())
         })
         .unwrap();
         let runtime = BenchmarkRuntime {
@@ -1976,7 +1741,7 @@ mod tests {
                 indirect_count: true,
             }),
             Some(ForwardCullSource::Hzb),
-            FarRuntimeBackend::Mixed,
+            FarRuntimeBackend::Unavailable,
             &runtime,
             None,
         );
@@ -1986,11 +1751,7 @@ mod tests {
             result.failure_reason.as_deref(),
             Some(NON_AUTHORITATIVE_FAR_REASON)
         );
-        assert_eq!(result.benchmark.far_backend_resolved, "mixed");
-        assert_eq!(
-            result.benchmark.far_backend_requested.as_deref(),
-            Some("brick")
-        );
+        assert_eq!(result.benchmark.far_backend_resolved, "unavailable");
     }
 
     #[test]
@@ -2002,11 +1763,11 @@ mod tests {
                 },
                 generation: 9,
             }),
-            far: FarRuntimeBackend::Brick,
+            far: FarRuntimeBackend::Raster,
             far_ready: true,
         };
         let actual_fallback = RuntimeBackendState {
-            far: FarRuntimeBackend::Mixed,
+            far: FarRuntimeBackend::Unavailable,
             far_ready: false,
             ..locked
         };
@@ -2034,7 +1795,6 @@ mod tests {
                 indirect_count: true,
             }),
             Some(ForwardCullSource::Frustum),
-            FarRuntimeBackend::Raster,
             &mut unavailable,
         );
 
@@ -2054,7 +1814,6 @@ mod tests {
                 indirect_count: true,
             }),
             Some(ForwardCullSource::Hzb),
-            FarRuntimeBackend::Raster,
             &mut hzb_unavailable,
         );
         assert_eq!(

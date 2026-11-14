@@ -401,10 +401,7 @@ mod tests {
     fn render_config(
         near: crate::renderer::config::NearRenderBackend,
     ) -> crate::renderer::config::TerrainRenderConfig {
-        crate::renderer::config::TerrainRenderConfig {
-            near,
-            far: crate::renderer::config::FarRenderBackend::Raster,
-        }
+        crate::renderer::config::TerrainRenderConfig { near }
     }
 
     #[test]

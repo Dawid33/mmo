@@ -171,7 +171,7 @@ pub struct LodChunk {
 /// (`x + 32*y + 32*32*z`), and the same reasoning as `bridge::VoxelData`: a
 /// dense grid is 64 KiB, the production ring table holds ~20 000 cells
 /// (~1.3 GB, over half the client's RSS when measured 2026-09-20), and only
-/// the async mesh / brick tasks ever need the expansion — so they do it.
+/// the async mesh tasks ever need the expansion — so they do it.
 #[derive(Component)]
 pub struct LodVoxelData(pub game::lod::PackedLodGrid);
 
@@ -208,28 +208,20 @@ pub struct LodNeighbors(pub BTreeMap<[i32; 3], Entity>);
 #[derive(Component)]
 pub struct LodMeshTask(Task<MeshOutput>);
 
-/// Observable backlog shared by raster LOD meshing and native brick builds.
-/// Benchmark readiness must include queued work, not only spawned tasks.
+/// Observable backlog of raster LOD mesh builds. Benchmark readiness must
+/// include queued work, not only spawned tasks.
 #[derive(Resource, Default)]
 pub struct LodBuildQueue {
     raster: BTreeSet<Entity>,
-    brick: BTreeSet<Entity>,
 }
 
 impl LodBuildQueue {
     pub fn enqueue_raster(&mut self, entity: Entity) {
         self.raster.insert(entity);
-        self.brick.remove(&entity);
-    }
-
-    pub fn enqueue_brick(&mut self, entity: Entity) {
-        self.brick.insert(entity);
-        self.raster.remove(&entity);
     }
 
     pub fn remove(&mut self, entity: Entity) {
         self.raster.remove(&entity);
-        self.brick.remove(&entity);
     }
 
     /// Whether `entity` waits for a raster mesh build.
@@ -238,35 +230,15 @@ impl LodBuildQueue {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.raster.len() + self.brick.len()
-    }
-
-    pub fn raster_pending_count(&self) -> usize {
         self.raster.len()
-    }
-
-    pub fn brick_pending_count(&self) -> usize {
-        self.brick.len()
     }
 
     pub(crate) fn raster_batch(&self, capacity: usize) -> Vec<Entity> {
         self.raster.iter().copied().take(capacity).collect()
     }
 
-    pub(crate) fn brick_batch(&self, capacity: usize) -> Vec<Entity> {
-        self.brick.iter().copied().take(capacity).collect()
-    }
-
-    pub(crate) fn brick_entities(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.brick.iter().copied()
-    }
-
     pub(crate) fn retain_raster(&mut self, mut keep: impl FnMut(Entity) -> bool) {
         self.raster.retain(|entity| keep(*entity));
-    }
-
-    pub(crate) fn retain_brick(&mut self, mut keep: impl FnMut(Entity) -> bool) {
-        self.brick.retain(|entity| keep(*entity));
     }
 }
 
@@ -281,18 +253,14 @@ pub struct LodRasterReady;
 #[derive(Resource, Default)]
 pub struct FarFrameUploads(pub usize);
 
-pub(crate) fn far_task_capacity(
-    max_in_flight: usize,
-    lod_in_flight: usize,
-    brick_in_flight: usize,
-) -> usize {
-    max_in_flight.saturating_sub(lod_in_flight + brick_in_flight)
+pub(crate) fn far_task_capacity(max_in_flight: usize, lod_in_flight: usize) -> usize {
+    max_in_flight.saturating_sub(lod_in_flight)
 }
 
 /// Drain changed `LodVoxelData` into mesh tasks, FIFO (no distance ranking —
-/// LOD is inherently low-priority background work). Raster LOD and brick
-/// preparation share a bounded far lane of `MeshBudgets.max_in_flight`; the
-/// independently bounded full-resolution lane does not consume this capacity.
+/// LOD is inherently low-priority background work). Raster LOD owns a bounded
+/// far lane of `MeshBudgets.max_in_flight`; the independently bounded
+/// full-resolution lane does not consume this capacity.
 ///
 /// The `Local` queue (not a bare `Changed<LodVoxelData>` filter alone) matters:
 /// Bevy consumes a system's change-detection window every time it runs, so an
@@ -306,38 +274,20 @@ pub fn spawn_lod_mesh_tasks(
     budgets: Res<MeshBudgets>,
     mut far_uploads: ResMut<FarFrameUploads>,
     lod_in_flight: Query<(), With<LodMeshTask>>,
-    brick_in_flight: Query<(), With<super::super::far_voxel::FarBrickBuildTask>>,
     changed: Query<Entity, Changed<LodVoxelData>>,
     grids: Query<(&LodVoxelData, Option<&LodNeighbors>)>,
-    raster_fallbacks: Query<(), With<super::super::far_voxel::FarRasterFallback>>,
-    new_raster_fallbacks: Query<Entity, Added<super::super::far_voxel::FarRasterFallback>>,
     layers: Res<BlockTextureLayers>,
-    render_config: Option<Res<super::super::config::TerrainRenderConfig>>,
 ) {
     far_uploads.0 = 0;
-    let brick_mode = render_config
-        .as_deref()
-        .is_some_and(|config| config.far == super::super::config::FarRenderBackend::BrickRaymarch);
     for e in changed.iter() {
         commands.entity(e).remove::<LodRasterReady>();
-        if brick_mode && !raster_fallbacks.contains(e) {
-            queue.enqueue_brick(e);
-        } else {
-            queue.enqueue_raster(e);
-        }
-    }
-    for e in new_raster_fallbacks.iter() {
         queue.enqueue_raster(e);
     }
-    queue.retain_raster(|e| grids.contains(e) && (!brick_mode || raster_fallbacks.contains(e)));
-    if queue.raster_pending_count() == 0 {
+    queue.retain_raster(|e| grids.contains(e));
+    if queue.pending_count() == 0 {
         return;
     }
-    let capacity = far_task_capacity(
-        budgets.max_in_flight,
-        lod_in_flight.iter().count(),
-        brick_in_flight.iter().count(),
-    );
+    let capacity = far_task_capacity(budgets.max_in_flight, lod_in_flight.iter().count());
     if capacity == 0 {
         return;
     }
@@ -970,10 +920,11 @@ mod tests {
     }
 
     #[test]
-    fn raster_and_brick_tasks_share_one_bounded_far_lane() {
-        assert_eq!(far_task_capacity(64, 0, 0), 64);
-        assert_eq!(far_task_capacity(64, 40, 10), 14);
-        assert_eq!(far_task_capacity(64, 64, 64), 0);
+    fn raster_tasks_share_one_bounded_far_lane() {
+        assert_eq!(far_task_capacity(64, 0), 64);
+        assert_eq!(far_task_capacity(64, 40), 24);
+        assert_eq!(far_task_capacity(64, 64), 0);
+        assert_eq!(far_task_capacity(64, 70), 0);
     }
 
     #[test]
@@ -1008,18 +959,15 @@ mod tests {
     }
 
     #[test]
-    fn lod_build_queue_reports_raster_and_brick_backlogs() {
+    fn lod_build_queue_reports_the_raster_backlog() {
         let raster = Entity::from_bits(101);
-        let brick = Entity::from_bits(102);
         let mut queue = LodBuildQueue::default();
 
         queue.enqueue_raster(raster);
-        queue.enqueue_brick(brick);
-        assert_eq!(queue.pending_count(), 2);
-        assert_eq!(queue.raster_pending_count(), 1);
-        assert_eq!(queue.brick_pending_count(), 1);
+        assert_eq!(queue.pending_count(), 1);
+        assert!(queue.contains_raster(raster));
 
         queue.remove(raster);
-        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_count(), 0);
     }
 }

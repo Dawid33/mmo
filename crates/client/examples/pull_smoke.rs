@@ -30,7 +30,7 @@ use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
-use client::renderer::config::{FarRenderBackend, NearRenderBackend, TerrainRenderConfig};
+use client::renderer::config::{NearRenderBackend, TerrainRenderConfig};
 use client::renderer::meshing::binary::{mesh_quads, CutoutTable, Face, PaddedVoxels, Quad, PADDED};
 use client::renderer::meshing::records::{pack_record, QuadRecord};
 use client::renderer::voxel_pull::gpu::{
@@ -114,7 +114,6 @@ fn main() {
     .insert_resource(ClearColor(CLEAR))
     .insert_resource(TerrainRenderConfig {
         near: NearRenderBackend::GpuDriven,
-        far: FarRenderBackend::Raster,
     })
     .insert_resource(indirect.clone())
     .add_plugins(VoxelPullPlugin)

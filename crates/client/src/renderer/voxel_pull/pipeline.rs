@@ -400,7 +400,57 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
 pub(crate) mod tests {
     use bevy::render::render_resource::Face;
 
-    use crate::renderer::far_voxel::pipeline::tests::validate_shader;
+    /// Compose `source` against stub `imports` and run naga validation on the
+    /// result. Shared with `slice_plane`'s shader test.
+    pub(crate) fn validate_shader(
+        source: String,
+        shader_defs: &[bevy::shader::ShaderDefVal],
+        imports: &[(&str, &str)],
+    ) -> Result<(), bevy::shader::ShaderCacheError> {
+        use bevy::asset::{uuid::Uuid, AssetId};
+        use bevy::render::render_resource::{DownlevelFlags, WgpuFeatures};
+        use bevy::shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
+
+        fn accept_module(
+            _: &(),
+            source: ShaderCacheSource<'_>,
+            _: &ValidateShader,
+        ) -> Result<(), ShaderCacheError> {
+            let module = match source {
+                ShaderCacheSource::Naga(module) => module,
+                ShaderCacheSource::Wgsl(source) => naga::front::wgsl::parse_str(&source)
+                    .map_err(|error| ShaderCacheError::CreateShaderModule(error.to_string()))?,
+                ShaderCacheSource::SpirV(_) => {
+                    return Err(ShaderCacheError::CreateShaderModule(
+                        "unexpected SPIR-V shader in WGSL validation test".into(),
+                    ));
+                }
+            };
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .map(|_| ())
+            .map_err(|error| ShaderCacheError::CreateShaderModule(error.to_string()))
+        }
+
+        let mut cache =
+            ShaderCache::new((), WgpuFeatures::empty(), DownlevelFlags::all(), accept_module);
+        for (index, (path, source)) in imports.iter().enumerate() {
+            cache.set_shader(
+                AssetId::Uuid {
+                    uuid: Uuid::from_u128(index as u128 + 1),
+                },
+                Shader::from_wgsl((*source).to_owned(), (*path).to_owned()),
+            );
+        }
+        let shader_id = AssetId::Uuid {
+            uuid: Uuid::from_u128(imports.len() as u128 + 1),
+        };
+        cache.set_shader(shader_id, Shader::from_wgsl(source, "shader_under_test.wgsl"));
+        cache.get(0, shader_id, shader_defs).map(drop)
+    }
 
     /// Minimal stand-ins for the Bevy modules `voxel_pull.wgsl` imports:
     /// only the names and types it uses, so a typo or a type/uniformity error

@@ -407,8 +407,7 @@ mod tests {
 
     #[test]
     fn slice_plane_shader_is_valid_wgsl() {
-        use crate::renderer::far_voxel::pipeline::tests::validate_shader;
-        use crate::renderer::voxel_pull::pipeline::tests::IMPORTS;
+        use crate::renderer::voxel_pull::pipeline::tests::{validate_shader, IMPORTS};
         let source = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../assets/shaders/slice_plane.wgsl"

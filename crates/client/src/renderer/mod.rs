@@ -30,7 +30,6 @@ pub mod compute; // off-main-thread jobs: Bevy's pool natively, Web Workers on w
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
-pub mod far_voxel;
 pub(crate) mod grid_debug;
 pub mod hud;
 pub(crate) mod input;
@@ -110,7 +109,6 @@ impl Plugin for SimBridgePlugin {
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
             voxel_pull::VoxelPullPlugin,
             fortress_view::FortressOverlayPlugin,
-            far_voxel::FarVoxelPlugin,
             model::BbModelPlugin,
             item_piles::ItemPilesPlugin,
         ))
@@ -215,16 +213,9 @@ impl Plugin for SimBridgePlugin {
                     // LOD meshes land in the same chain; culling moved to
                     // cull_plugin (PostUpdate) so it sees the current
                     // frame's frustum — it runs after this chain either way.
-                    far_voxel::lifecycle::sync_far_pass_readiness,
-                    far_voxel::lifecycle::resolve_far_upload_results,
                     meshing::lod::spawn_lod_mesh_tasks,
-                    far_voxel::lifecycle::queue_far_brick_tasks,
                     meshing::lod::apply_lod_meshes,
                     meshing::lod_tiles::rebuild_lod_tiles,
-                    far_voxel::lifecycle::remove_far_voxel_cells,
-                    far_voxel::lifecycle::refresh_far_neighbors,
-                    far_voxel::lifecycle::apply_far_brick_tasks,
-                    far_voxel::gpu::publish_far_uploads,
                 )
                     .chain(),
                 // LOD rings run in Update but outside the meshing chain:

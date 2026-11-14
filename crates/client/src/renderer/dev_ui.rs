@@ -256,7 +256,7 @@ pub fn dev_stats(
         ("Home region".into(), region(status.home_region)),
         ("Viewer region".into(), region(status.viewer_region)),
         ("Connection".into(), format!("{:?}", status.connection)),
-        ("Terrain".into(), format!("near {:?}, far {:?}", terrain.near, terrain.far)),
+        ("Terrain".into(), format!("near {:?}, far Raster", terrain.near)),
         ("Entities".into(), entities.to_string()),
         ("Date".into(), calendar.map_or("--".into(), |c| c.date().to_string())),
     ]
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(row(&rows, "Frame"), "16.67 ms");
         assert_eq!(row(&rows, "Position"), format!("1.0 / {:.1} / -3.0", 2.25f32));
         assert_eq!(row(&rows, "Home region"), "--");
-        assert_eq!(row(&rows, "Terrain"), format!("near {:?}, far {:?}", cfg.near, cfg.far));
+        assert_eq!(row(&rows, "Terrain"), format!("near {:?}, far Raster", cfg.near));
         assert_eq!(row(&rows, "Entities"), "42");
         assert_eq!(row(&rows, "Date"), "1 Granite 0");
         assert_eq!(row(&dev_stats(None, None, None, &HudStatus::default(), &cfg, 0, None), "Date"), "--");

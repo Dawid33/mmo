@@ -50,9 +50,6 @@ pub struct GeometryScopeMetrics {
     pub submitted_quads: Option<CountSummary>,
     pub submitted_triangles: Option<CountSummary>,
     pub submitted_vertices: Option<CountSummary>,
-    pub proxy_vertices: Option<CountSummary>,
-    pub unique_bricks: Option<CountSummary>,
-    pub brick_dedup_ratio: Option<FloatSummary>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -67,7 +64,6 @@ pub struct VisibilityScopeMetrics {
     pub active_cells: Option<CountSummary>,
     pub frustum_survivors: Option<CountSummary>,
     pub hzb_survivors: Option<CountSummary>,
-    pub visible_instances: Option<CountSummary>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -97,7 +93,6 @@ pub struct MemoryScopeMetrics {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct MemoryMetrics {
     pub near: MemoryScopeMetrics,
-    pub far: MemoryScopeMetrics,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -160,7 +155,6 @@ pub struct BenchmarkMetadata {
     pub lod_ring_table: Vec<(i32, u32)>,
     pub near_backend_requested: Option<String>,
     pub near_backend_resolved: String,
-    pub far_backend_requested: Option<String>,
     pub far_backend_resolved: String,
     pub adapter: Option<AdapterMetadata>,
 }
@@ -172,7 +166,6 @@ pub struct SerializableReadiness {
     pub lod_build_queue_len: usize,
     pub pending_lod_events: usize,
     pub in_flight_tasks: usize,
-    pub far_residency_pending: usize,
     pub ready_lod_counts: BTreeMap<u32, usize>,
     pub stable_frames: u32,
 }
@@ -198,7 +191,7 @@ impl BenchmarkResult {
         unavailable_metrics: Vec<UnavailableMetric>,
     ) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             status,
             failure_reason,
             benchmark,
@@ -272,7 +265,6 @@ mod tests {
                 lod_ring_table: vec![(2, 2)],
                 near_backend_requested: None,
                 near_backend_resolved: "gpu".to_owned(),
-                far_backend_requested: None,
                 far_backend_resolved: "raster".to_owned(),
                 adapter: None,
             },
@@ -295,9 +287,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v2_serializes_instrumentation_and_sample_counts() {
+    fn schema_v3_serializes_instrumentation_and_sample_counts() {
         let value = serde_json::to_value(fixture_result()).unwrap();
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 3);
         assert_eq!(value["benchmark"]["instrumentation"], "normal");
         assert_eq!(value["metrics"]["frame_wall_ms"]["sample_count"], 3);
         assert!(value["unavailable_metrics"].is_array());
@@ -339,7 +331,7 @@ mod tests {
         write_result_atomic(&path, &fixture_result()).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["schema_version"], 3);
         assert!(!fs::read_dir(&directory)
             .unwrap()
             .filter_map(Result::ok)

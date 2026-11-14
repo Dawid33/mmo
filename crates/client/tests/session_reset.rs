@@ -27,10 +27,10 @@ use client::renderer::bricks::BrickOf;
 use client::renderer::commander::selection::Selection;
 use client::renderer::commander::tiles::TileMirror;
 use client::renderer::commander::{CameraMode, CommanderCamera, CommanderView};
-use client::renderer::far_voxel::residency::FarVoxelResidency;
 use client::renderer::hud::HudStatus;
 use client::renderer::join_timeline::WorldReady;
 use client::renderer::lod_rings::LodRings;
+use client::renderer::meshing::lod::LodBuildQueue;
 use client::renderer::meshing::queue::{ChunkGrid, RemeshQueue};
 use client::renderer::slint_overlay::SlintLayer;
 use client::renderer::history_view::HistoryView;
@@ -230,7 +230,7 @@ fn assert_no_world_state(app: &mut App, fresh_ui: &[(&'static str, String)], fre
             && hv.embark_refusal.is_none(),
         "HistoryView"
     );
-    assert_eq!(w.resource::<FarVoxelResidency>().resident_count(), 0, "far residency");
+    assert_eq!(w.resource::<LodBuildQueue>().pending_count(), 0, "LodBuildQueue");
     assert!(!w.resource::<WorldReady>().0, "WorldReady");
     assert_eq!(w.resource::<LocalPlayer>().0, None, "LocalPlayer");
     assert_eq!(w.resource::<HudStatus>().home_region, None, "HudStatus");

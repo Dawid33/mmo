@@ -949,7 +949,6 @@ pub(crate) mod tests {
             // so pin the legacy per-chunk backend.
             .insert_resource(super::super::super::config::TerrainRenderConfig {
                 near: super::super::super::config::NearRenderBackend::PerChunk,
-                far: super::super::super::config::FarRenderBackend::Raster,
             })
             .insert_resource(budgets)
             .add_systems(

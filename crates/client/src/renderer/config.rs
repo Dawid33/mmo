@@ -29,24 +29,6 @@ impl NearRenderBackend {
     }
 }
 
-/// Beyond-near-window terrain rendering strategy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FarRenderBackend {
-    /// Rasterized server-streamed LOD meshes/records.
-    Raster,
-    /// Deduplicated brick data sampled by a raymarch pass.
-    BrickRaymarch,
-}
-
-impl FarRenderBackend {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Raster => "raster",
-            Self::BrickRaymarch => "brick",
-        }
-    }
-}
-
 /// Backend implementations compiled into this client build.
 ///
 /// Auto-selection is deliberately driven by this value rather than platform
@@ -56,7 +38,6 @@ impl FarRenderBackend {
 pub struct TerrainRenderCapabilities {
     pub grouped_direct: bool,
     pub gpu_driven: bool,
-    pub brick_raymarch: bool,
 }
 
 impl TerrainRenderCapabilities {
@@ -66,26 +47,22 @@ impl TerrainRenderCapabilities {
             // The render-world capability resolver still falls back to
             // grouped-direct when an adapter or pipeline misses a hard gate.
             gpu_driven: true,
-            // Brick mode remains opt-in until the hybrid benchmark hard gates
-            // have been measured on the target adapters.
-            brick_raymarch: false,
         }
     }
 }
 
-/// One resolved near/far renderer pairing shared by meshing and render setup.
+/// The resolved near renderer, shared by meshing and render setup. Far
+/// terrain (the LOD rings) is always rasterized.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerrainRenderConfig {
     pub near: NearRenderBackend,
-    pub far: FarRenderBackend,
 }
 
 impl TerrainRenderConfig {
-    /// Resolve optional environment values for a specified target/capability
+    /// Resolve an optional environment value for a specified target/capability
     /// set. The pure inputs keep platform and fallback behavior testable.
     pub fn resolve(
         near: Option<&str>,
-        far: Option<&str>,
         is_wasm: bool,
         capabilities: TerrainRenderCapabilities,
     ) -> Result<Self, TerrainRenderConfigError> {
@@ -95,7 +72,6 @@ impl TerrainRenderConfig {
             // `for_device` drops it to per-chunk once the adapter is known.
             return Ok(Self {
                 near: NearRenderBackend::GroupedDirect,
-                far: FarRenderBackend::Raster,
             });
         }
 
@@ -105,15 +81,10 @@ impl TerrainRenderConfig {
             None if capabilities.grouped_direct => NearRenderBackend::GroupedDirect,
             None => NearRenderBackend::PerChunk,
         };
-        let far = match far {
-            Some(value) => parse_far_backend(value)?,
-            None if capabilities.brick_raymarch => FarRenderBackend::BrickRaymarch,
-            None => FarRenderBackend::Raster,
-        };
-        Ok(Self { near, far })
+        Ok(Self { near })
     }
 
-    /// Reconcile the requested pairing with what the adapter can run. Both
+    /// Reconcile the requested backend with what the adapter can run. Both
     /// quad-record backends read their records from storage buffers in the
     /// VERTEX stage; a device without that (WebGL2, GLES 3.0) can only draw
     /// per-chunk meshes. Must be applied before any chunk is meshed, because
@@ -122,7 +93,6 @@ impl TerrainRenderConfig {
         if self.near.uses_quad_records() && !vertex_storage_buffers {
             Self {
                 near: NearRenderBackend::PerChunk,
-                far: self.far,
             }
         } else {
             self
@@ -130,22 +100,16 @@ impl TerrainRenderConfig {
     }
 
     /// Resolve the process environment on native. Browser builds intentionally
-    /// never read overrides and always return the portable pairing.
+    /// never read overrides and always return the portable backend.
     pub fn from_env() -> Result<Self, TerrainRenderConfigError> {
         #[cfg(target_arch = "wasm32")]
         {
-            Self::resolve(None, None, true, TerrainRenderCapabilities::compiled())
+            Self::resolve(None, true, TerrainRenderCapabilities::compiled())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let near = std::env::var("VOXEL_NEAR_RENDER").ok();
-            let far = std::env::var("VOXEL_FAR_RENDER").ok();
-            Self::resolve(
-                near.as_deref(),
-                far.as_deref(),
-                false,
-                TerrainRenderCapabilities::compiled(),
-            )
+            Self::resolve(near.as_deref(), false, TerrainRenderCapabilities::compiled())
         }
     }
 }
@@ -159,7 +123,6 @@ impl Default for TerrainRenderConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerrainRenderConfigError {
     InvalidNear(String),
-    InvalidFar(String),
 }
 
 impl fmt::Display for TerrainRenderConfigError {
@@ -168,10 +131,6 @@ impl fmt::Display for TerrainRenderConfigError {
             Self::InvalidNear(value) => write!(
                 f,
                 "invalid VOXEL_NEAR_RENDER value `{value}` (expected per-chunk, direct, or gpu)"
-            ),
-            Self::InvalidFar(value) => write!(
-                f,
-                "invalid VOXEL_FAR_RENDER value `{value}` (expected raster or brick)"
             ),
         }
     }
@@ -185,14 +144,6 @@ pub fn parse_near_backend(value: &str) -> Result<NearRenderBackend, TerrainRende
         "direct" => Ok(NearRenderBackend::GroupedDirect),
         "gpu" => Ok(NearRenderBackend::GpuDriven),
         value => Err(TerrainRenderConfigError::InvalidNear(value.to_owned())),
-    }
-}
-
-pub fn parse_far_backend(value: &str) -> Result<FarRenderBackend, TerrainRenderConfigError> {
-    match value {
-        "raster" => Ok(FarRenderBackend::Raster),
-        "brick" => Ok(FarRenderBackend::BrickRaymarch),
-        value => Err(TerrainRenderConfigError::InvalidFar(value.to_owned())),
     }
 }
 
@@ -223,7 +174,6 @@ mod tests {
     const CURRENT: TerrainRenderCapabilities = TerrainRenderCapabilities {
         grouped_direct: true,
         gpu_driven: false,
-        brick_raymarch: false,
     };
 
     #[test]
@@ -237,52 +187,41 @@ mod tests {
             Ok(NearRenderBackend::GroupedDirect)
         );
         assert_eq!(parse_near_backend("gpu"), Ok(NearRenderBackend::GpuDriven));
-        assert_eq!(parse_far_backend("raster"), Ok(FarRenderBackend::Raster));
-        assert_eq!(
-            parse_far_backend("brick"),
-            Ok(FarRenderBackend::BrickRaymarch)
-        );
     }
 
     #[test]
     fn native_auto_chooses_best_available_backends() {
         assert_eq!(
-            TerrainRenderConfig::resolve(None, None, false, CURRENT).unwrap(),
+            TerrainRenderConfig::resolve(None, false, CURRENT).unwrap(),
             TerrainRenderConfig {
                 near: NearRenderBackend::GroupedDirect,
-                far: FarRenderBackend::Raster,
             }
         );
         assert_eq!(
             TerrainRenderConfig::resolve(
                 None,
-                None,
                 false,
                 TerrainRenderCapabilities {
                     grouped_direct: true,
                     gpu_driven: true,
-                    brick_raymarch: true,
                 },
             )
             .unwrap(),
             TerrainRenderConfig {
                 near: NearRenderBackend::GpuDriven,
-                far: FarRenderBackend::BrickRaymarch,
             }
         );
     }
 
     #[test]
-    fn compiled_native_auto_enables_gpu_near_but_keeps_bricks_gated() {
+    fn compiled_native_auto_enables_gpu_near() {
         let capabilities = TerrainRenderCapabilities::compiled();
 
         assert!(capabilities.gpu_driven);
-        assert!(!capabilities.brick_raymarch);
         assert_eq!(
-            TerrainRenderConfig::resolve(None, None, false, capabilities).unwrap(),
+            TerrainRenderConfig::resolve(None, false, capabilities).unwrap(),
             TerrainRenderConfig {
                 near: NearRenderBackend::GpuDriven,
-                far: FarRenderBackend::Raster,
             }
         );
     }
@@ -290,10 +229,9 @@ mod tests {
     #[test]
     fn wasm_ignores_overrides_and_uses_portable_backends() {
         assert_eq!(
-            TerrainRenderConfig::resolve(Some("gpu"), Some("brick"), true, CURRENT).unwrap(),
+            TerrainRenderConfig::resolve(Some("gpu"), true, CURRENT).unwrap(),
             TerrainRenderConfig {
                 near: NearRenderBackend::GroupedDirect,
-                far: FarRenderBackend::Raster,
             }
         );
     }
@@ -301,22 +239,17 @@ mod tests {
     #[test]
     fn device_without_vertex_storage_falls_back_to_per_chunk() {
         for near in [NearRenderBackend::GroupedDirect, NearRenderBackend::GpuDriven] {
-            let config = TerrainRenderConfig {
-                near,
-                far: FarRenderBackend::Raster,
-            };
+            let config = TerrainRenderConfig { near };
             assert_eq!(config.for_device(true), config);
             assert_eq!(
                 config.for_device(false),
                 TerrainRenderConfig {
                     near: NearRenderBackend::PerChunk,
-                    far: FarRenderBackend::Raster,
                 }
             );
         }
         let per_chunk = TerrainRenderConfig {
             near: NearRenderBackend::PerChunk,
-            far: FarRenderBackend::Raster,
         };
         assert_eq!(per_chunk.for_device(false), per_chunk);
     }
@@ -324,16 +257,10 @@ mod tests {
     #[test]
     fn invalid_values_name_the_environment_variable() {
         assert_eq!(
-            TerrainRenderConfig::resolve(Some("meshlets"), None, false, CURRENT)
+            TerrainRenderConfig::resolve(Some("meshlets"), false, CURRENT)
                 .unwrap_err()
                 .to_string(),
             "invalid VOXEL_NEAR_RENDER value `meshlets` (expected per-chunk, direct, or gpu)"
-        );
-        assert_eq!(
-            TerrainRenderConfig::resolve(None, Some("fog"), false, CURRENT)
-                .unwrap_err()
-                .to_string(),
-            "invalid VOXEL_FAR_RENDER value `fog` (expected raster or brick)"
         );
     }
 

@@ -709,7 +709,7 @@ pull-smoke:
 
 # Production render benchmark: real server seed + full LOD table, fixed
 # 1920x1080 no-vsync client, three repeated JSON runs by default.
-# Pair modes: per-chunk+raster, direct+raster, gpu+raster, gpu+brick.
+# Pair modes: per-chunk+raster, direct+raster, gpu+raster (far terrain is always raster).
 # The `key=value` argument spelling intentionally matches benchmark reports:
 # `just render-bench backend=gpu+raster adapter=T600 repetitions=3 threads=4`.
 # `threads` caps both the Bevy worker pools and Tokio server workers so the
@@ -728,22 +728,15 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
     case "$selected_backend" in
         per-chunk|per-chunk+raster)
             near="per-chunk"
-            far="raster"
             ;;
         direct|direct+raster)
             near="direct"
-            far="raster"
             ;;
         gpu|gpu+raster)
             near="gpu"
-            far="raster"
-            ;;
-        gpu+brick)
-            near="gpu"
-            far="brick"
             ;;
         *)
-            echo "invalid backend '$selected_backend' (expected per-chunk+raster, direct+raster, gpu+raster, or gpu+brick)" >&2
+            echo "invalid backend '$selected_backend' (expected per-chunk+raster, direct+raster, or gpu+raster)" >&2
             exit 2
             ;;
     esac
@@ -775,7 +768,6 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
         RENDER_BENCH_REPETITION="$repetition" \
         RENDER_BENCH_OUTPUT="$output" \
         VOXEL_NEAR_RENDER="$near" \
-        VOXEL_FAR_RENDER="$far" \
         VOXEL_CLIENT_WORKER_THREADS="$selected_threads" \
         TOKIO_WORKER_THREADS="$selected_threads" \
         RUST_BACKTRACE=1 \

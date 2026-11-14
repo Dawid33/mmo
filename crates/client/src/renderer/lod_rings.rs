@@ -22,7 +22,6 @@ use game::lod::{LodKey, LodWater};
 use game::{LodPayload, RegionCoords};
 
 use super::bridge::{PendingSnapshotVoxels, RegionRoots, VoxelData};
-use super::far_voxel::FarVoxelReady;
 use super::meshing::lod;
 use super::meshing::lod::LodRasterReady;
 use super::meshing::visibility::ChunkConnectivity;
@@ -500,7 +499,6 @@ type ReadyLodCellFilter = (
     Or<(
         With<Mesh3d>,
         With<ChunkQuads>,
-        With<FarVoxelReady>,
         With<LodRasterReady>,
     )>,
     Without<LodWaterSurface>,
@@ -559,7 +557,6 @@ mod tests {
     use game::lod::PackedLodGrid;
     use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
-    use super::super::far_voxel::FarVoxelReady;
     use super::super::meshing::lod::{LodChunk, LodVoxelData};
     use super::super::meshing::queue::tests::{pipeline_app, wait_until};
     use super::super::meshing::queue::MeshBudgets;
@@ -669,33 +666,6 @@ mod tests {
             app.world().get_entity(old_root).is_err(),
             "pulled replacement is renderable"
         );
-        assert!(app.world().resource::<LodRings>().roots[&key]
-            .retiring
-            .is_none());
-    }
-
-    #[test]
-    fn re_receipt_retires_old_root_when_brick_replacement_is_ready() {
-        let mut app = rings_app();
-        let key = LodKey {
-            factor: 16,
-            coords: [0, 0],
-        };
-        let old_root = app.world_mut().spawn_empty().id();
-        let new_root = app.world_mut().spawn_empty().id();
-        app.world_mut().spawn((FarVoxelReady, ChildOf(new_root)));
-        app.world_mut().resource_mut::<LodRings>().roots.insert(
-            key,
-            LodSlot {
-                root: new_root,
-                retiring: Some(old_root),
-                retiring_frames: 0,
-            },
-        );
-
-        app.update();
-
-        assert!(app.world().get_entity(old_root).is_err());
         assert!(app.world().resource::<LodRings>().roots[&key]
             .retiring
             .is_none());

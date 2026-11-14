@@ -4,8 +4,8 @@
 //! evidence for a load that never finishes.
 //!
 //! `world_ready` deliberately mirrors the render benchmark's readiness gates
-//! (`render_bench::BenchmarkReadiness`) minus the benchmark-only ones (backend
-//! authority, far-voxel residency): every near region spawned, every expected
+//! (`render_bench::BenchmarkReadiness`) minus the benchmark-only one (backend
+//! authority): every near region spawned, every expected
 //! LOD key rooted, every queue drained and nothing in flight, held for
 //! [`WORLD_READY_STABLE_FRAMES`]. The system parks itself once that fires, so
 //! steady-state play pays one `bool` check per frame.
@@ -15,8 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use bevy::prelude::*;
 
 use super::bridge::{PendingSnapshotVoxels, RegionRoots};
-use super::far_voxel::lifecycle::FarVoxelUploadPending;
-use super::far_voxel::FarBrickBuildTask;
 use super::hud::HudStatus;
 use super::lod_rings::LodRings;
 use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
@@ -105,8 +103,6 @@ pub fn track_join_timeline(
     lod_build_queue: Res<LodBuildQueue>,
     in_flight_near: Query<(), With<MeshingTask>>,
     in_flight_lod: Query<(), With<LodMeshTask>>,
-    in_flight_bricks: Query<(), With<FarBrickBuildTask>>,
-    in_flight_far_uploads: Query<(), With<FarVoxelUploadPending>>,
     meshed_bricks: Query<(), (With<super::bricks::BrickOf>, With<TerrainQuadCount>)>,
     pending_snapshot_voxels: Query<(), With<PendingSnapshotVoxels>>,
     lod_cells: Query<(
@@ -162,10 +158,7 @@ pub fn track_join_timeline(
         remesh_queue: remesh_queue.dirty.len(),
         lod_build_queue: lod_build_queue.pending_count(),
         pending_lod_events: rings.pending.len(),
-        in_flight_tasks: in_flight_near_tasks
-            + in_flight_lod.iter().count()
-            + in_flight_bricks.iter().count()
-            + in_flight_far_uploads.iter().count(),
+        in_flight_tasks: in_flight_near_tasks + in_flight_lod.iter().count(),
     };
 
     if !state.first_mesh && !meshed_bricks.is_empty() {
