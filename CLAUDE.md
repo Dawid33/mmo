@@ -68,11 +68,10 @@ OpenTofu (not Terraform) in `deploy/`: local single-node k0s (`just deploy-local
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
 first; roots `platform` → `garage` (+ `garage-buckets`) = https://s3.factoriosurvivalworld.com, the S3-compatible
 object store on the box itself (one copy, no off-box backup; telemetry and Zulip files live there) → `monitoring`, `picoshare` = https://share.factoriosurvivalworld.com, `zulip` = https://chat.factoriosurvivalworld.com,
-`keycloak` (+ `keycloak-realm`) = https://auth.factoriosurvivalworld.com, the identity provider → `site` = https://factoriosurvivalworld.com, the static website from `website/` with the `orion`
+`keycloak` (+ `keycloak-realm`) = https://auth.factoriosurvivalworld.com, the identity provider → `login` = https://login.factoriosurvivalworld.com, the game's login service (two pods, its own PostgreSQL, metrics scraped; the release `login` binary is shipped to `/srv/mmo/bin` on the box with `just orion-login-push`, never an image, and the push rolling-restarts it; `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log; push BEFORE the first apply) → `site` = https://factoriosurvivalworld.com, the static website from `website/` with the `orion`
 Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
 bump re-diff `website/theme/orion/login/template.ftl` against the new `base` theme and run `just site-theme-check`); monitoring stack
 handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
-the login service on orion runs the release `login` binary from `/srv/mmo/bin` on the box (`just orion-login-push` ships it and rolling-restarts; `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log);
 the public web build `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
 `target/tools`, never the distro's). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
 print secrets.

@@ -1709,7 +1709,8 @@ kube *args:
 # https://share.factoriosurvivalworld.com), `zulip` (team chat at
 # https://chat.factoriosurvivalworld.com; uploads in Garage, its own PostgreSQL), `keycloak`
 # (identity provider at https://auth.factoriosurvivalworld.com) and `keycloak-realm` (its realm,
-# clients and mail, through the admin API: needs `just orion-keycloak-admin` running) and `site` (the website at
+# clients and mail, through the admin API: needs `just orion-keycloak-admin` running), `login` (the
+# game's login service at https://login.factoriosurvivalworld.com) and `site` (the website at
 # https://factoriosurvivalworld.com, from website/). State lives in AWS S3 (deploy/envs/orion/backend.s3.tfbackend,
 # key orion/<root>.tfstate); AWS credentials come from the default chain
 # (`AWS_PROFILE=…` to pick a profile). Every recipe pins the `orion` context,
@@ -1717,7 +1718,7 @@ kube *args:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | site) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | login | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
@@ -1734,6 +1735,7 @@ orion-plan root *args:
 # in Garage; the first garage apply runs before monitoring exists, so with
 # `-var metrics=false`), then picoshare (any time) and
 # keycloak -> keycloak-realm -> zulip (Zulip logs in through Keycloak, and keeps its files in Garage)
+# and login (the issuer comes from the realm's state; `just orion-login-push` BEFORE its first apply)
 # and site (the website reads the realm's issuer).
 [positional-arguments]
 orion-apply root *args:
@@ -1824,12 +1826,21 @@ orion-login-logs:
 orion-login-token-push:
     #!/usr/bin/env bash
     set -euo pipefail
-    if {{tofu}} -chdir=deploy/envs/orion/login output -raw service_token | ssh -o BatchMode=yes {{deploy_host}} 'umask 077 && mkdir -p /srv/mmo/secrets && cat > /srv/mmo/secrets/service-token.new && [ -s /srv/mmo/secrets/service-token.new ] && mv -f /srv/mmo/secrets/service-token.new /srv/mmo/secrets/service-token || { rm -f /srv/mmo/secrets/service-token.new; exit 1; }'; then
+    tok=$({{tofu}} -chdir=deploy/envs/orion/login output -raw service_token)
+    if [ -z "$tok" ]; then
+        echo "orion-login-token-push: the login root has no service token (apply it first)" >&2
+        exit 1
+    fi
+    n=$(printf '%s' "$tok" | wc -c | tr -d ' ')
+    # printf is a builtin: the token is never in a process argument list. The box installs the
+    # file only if it arrived whole (its size equals the expected byte count).
+    if printf '%s' "$tok" | ssh -o BatchMode=yes {{deploy_host}} "umask 077 && mkdir -p /srv/mmo/secrets && cat > /srv/mmo/secrets/service-token.new && [ \"\$(wc -c < /srv/mmo/secrets/service-token.new)\" -eq $n ] && mv -f /srv/mmo/secrets/service-token.new /srv/mmo/secrets/service-token || { rm -f /srv/mmo/secrets/service-token.new; exit 1; }"; then
         echo "orion-login-token-push: token written to {{deploy_host}}:/srv/mmo/secrets/service-token"
     else
         echo "orion-login-token-push: failed — the token on the box is unchanged" >&2
         exit 1
     fi
+    unset tok
 
 # Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
 # `smoke` / `test-one` while iterating and keep this for a broader sweep.
