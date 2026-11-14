@@ -80,18 +80,23 @@ fn read_palette(t: &Tag) -> Result<Vec<BlockState>, ImportError> {
     let mut slots: Vec<Option<BlockState>> = vec![None; m.len()];
     for (state, idx) in m {
         let i = idx.as_i32().ok_or_else(|| bad("palette index is not an int"))?;
-        let slot = usize::try_from(i).ok().and_then(|i| slots.get_mut(i)).ok_or_else(|| bad("palette index out of range"))?;
+        let slot = usize::try_from(i).ok().and_then(|i| slots.get_mut(i)).ok_or_else(|| bad("palette indices are not 0..n"))?;
         if slot.is_some() {
-            return Err(bad("palette index used twice"));
+            return Err(bad("palette indices are not 0..n (one is used twice)"));
         }
         *slot = Some(BlockState::parse(state)?);
     }
+    // Deliberately strict: indices must be exactly 0..n, each used once (every real file is).
     // `m.len()` distinct in-range indices fill every slot.
     Ok(slots.into_iter().flatten().collect())
 }
 
 /// Decodes exactly `cells` varints straight into the result.
 fn decode_cells(data: &[u8], cells: usize, palette_len: usize) -> Result<Vec<u16>, ImportError> {
+    // Every varint is at least one byte: bound the reservation by real input.
+    if data.len() < cells {
+        return Err(bad("block data is short"));
+    }
     let mut out = Vec::with_capacity(cells);
     let mut i = 0;
     for _ in 0..cells {

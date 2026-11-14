@@ -179,3 +179,29 @@ fn block_state_parsing() {
         assert!(BlockState::parse(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn huge_declared_volume_with_no_data_is_refused_promptly() {
+    let root = c(vec![
+        ("Version", V::Int(2)),
+        ("Width", V::Short(512)),
+        ("Height", V::Short(512)),
+        ("Length", V::Short(512)),
+        ("Palette", palette(&strs())),
+        ("BlockData", V::Bytes(vec![])),
+    ]);
+    let t = std::time::Instant::now();
+    let r = read_schem(&gzip(&nbt("Schematic", &root)));
+    assert!(matches!(r, Err(ImportError::NotASchematic(_))), "{r:?}");
+    assert!(t.elapsed().as_secs() < 2);
+}
+
+#[test]
+fn a_huge_list_of_tiny_tags_is_too_large() {
+    let list = V::List(1, (0..5_000_000).map(|_| V::Byte(0)).collect());
+    let bytes = gzip(&nbt("", &c(vec![("l", list)])));
+    assert!(matches!(
+        mc_import::parse_gzip_nbt(&bytes, mc_import::SCHEM_MAX_BYTES),
+        Err(ImportError::TooLarge)
+    ));
+}

@@ -6,6 +6,9 @@ use std::io::Read;
 
 /// Deepest list/compound nesting accepted.
 pub const NBT_MAX_DEPTH: usize = 64;
+/// Most tag payloads (list elements and compound entries alike) one parse may produce; a tiny gzip can
+/// otherwise expand into gigabytes of `Tag`s.
+pub const NBT_MAX_TAGS: usize = 1 << 22;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tag {
@@ -75,6 +78,7 @@ impl Tag {
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
+    tags: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -132,6 +136,10 @@ impl<'a> Reader<'a> {
     fn payload(&mut self, id: u8, depth: usize) -> Result<Tag, ImportError> {
         if depth > NBT_MAX_DEPTH {
             return Err(ImportError::BadNbt("nested too deeply".into()));
+        }
+        self.tags += 1;
+        if self.tags > NBT_MAX_TAGS {
+            return Err(ImportError::TooLarge);
         }
         Ok(match id {
             1 => Tag::Byte(self.u8()? as i8),
@@ -202,7 +210,7 @@ impl<'a> Reader<'a> {
 /// Parses one uncompressed, big-endian (Java) named root tag. Every length is checked against the bytes
 /// remaining before anything is allocated.
 pub fn parse_nbt(bytes: &[u8]) -> Result<(String, Tag), ImportError> {
-    let mut r = Reader { bytes, pos: 0 };
+    let mut r = Reader { bytes, pos: 0, tags: 0 };
     let id = r.u8()?;
     if id == 0 {
         return Err(ImportError::BadNbt("root tag is End".into()));
@@ -219,7 +227,7 @@ pub fn parse_gzip_nbt(bytes: &[u8], max_bytes: usize) -> Result<(String, Tag), I
     }
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut out = Vec::new();
-    decoder.take(max_bytes as u64 + 1).read_to_end(&mut out).map_err(|e| {
+    decoder.take((max_bytes as u64).saturating_add(1)).read_to_end(&mut out).map_err(|e| {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
             ImportError::Truncated
         } else {
