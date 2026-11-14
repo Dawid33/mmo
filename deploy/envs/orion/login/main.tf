@@ -7,7 +7,7 @@
 #   just orion-init registry && just orion-plan registry && just orion-apply registry
 #   just orion-login-push     # first push: no Deployment yet, also tags `bootstrap`
 #   just orion-init login && just orion-plan login && just orion-apply login
-# Releases afterwards: `just orion-login-push` (kubectl set image, not an apply).
+# Releases afterwards: `just orion-login-push` (kubectl set image by digest, not an apply).
 # Operator commands: `just orion-login …` (e.g. `just orion-login world list`).
 variable "state_bucket" {
   description = "The orion state bucket (../backend.s3.tfbackend), to read the keycloak-realm root's outputs."

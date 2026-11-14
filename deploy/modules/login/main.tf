@@ -8,7 +8,8 @@
 # debian + the release binary at /usr/local/bin/login, entrypoint `login`). The
 # Deployment is created with var.image_tag (`bootstrap`, pushed by the FIRST
 # `just orion-login-push`) and then ignores its image: releases are
-# `kubectl set image` by `just orion-login-push`, rolled back with
+# `kubectl set image` to <repo>@sha256:<digest> (never a tag: a re-pushed tag
+# would not roll) by `just orion-login-push`, rolled back with
 # `kubectl rollout undo`, and a later apply never rolls a release back. Push
 # BEFORE the first apply: the Deployment waits for its rollout, so without the
 # image the apply blocks about 10 minutes, fails and taints the Deployment.
