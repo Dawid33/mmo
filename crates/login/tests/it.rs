@@ -5,6 +5,7 @@ mod api;
 mod common;
 mod ctl;
 mod kicks;
+mod metrics;
 mod oidc;
 mod schema;
 mod store;

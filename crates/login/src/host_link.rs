@@ -40,6 +40,7 @@ pub const KICK_RESEND_MS: u64 = 2000;
 /// A kick the host never acknowledges is dropped (with a warning) after this long.
 pub const PENDING_KICK_TTL_SECS: u64 = 86_400;
 
+use crate::metrics::Metrics;
 use crate::{LoginStore, WorldRow};
 
 /// Why a spawn order was not acknowledged (the join answers 503 `WorldUnavailable`).
@@ -105,6 +106,7 @@ pub struct HostLinks {
     /// Per world, why its kicks cannot be sent (as last logged): the sweeper warns once per
     /// change, not every round.
     kick_blocked: Mutex<BTreeMap<String, String>>,
+    metrics: Metrics,
 }
 
 impl HostLinks {
@@ -119,7 +121,14 @@ impl HostLinks {
             links: Mutex::default(),
             kicks: Arc::new(Notify::new()),
             kick_blocked: Mutex::default(),
+            metrics: Metrics::new(),
         }
+    }
+
+    /// Report link state and pending kicks to `metrics` (before links are dialed).
+    pub fn with_metrics(mut self, metrics: Metrics) -> HostLinks {
+        self.metrics = metrics;
+        self
     }
 
     /// Start the kick sweeper on the current runtime (it ends when these links are dropped).
@@ -165,6 +174,7 @@ impl HostLinks {
             Ok(kicks) => kicks,
             Err(e) => return log::error!("[login] reading pending kicks: {e}"),
         };
+        self.metrics.pending_kicks(kicks.len() as u64);
         let mut world: Option<(String, Option<Arc<HostLink>>)> = None;
         for kick in kicks {
             if world.as_ref().is_none_or(|(id, _)| *id != kick.world_id) {
@@ -249,6 +259,7 @@ impl HostLinks {
             clock: self.clock.clone(),
             runtime,
             kicks: self.kicks.clone(),
+            metrics: self.metrics.clone(),
         };
         std::thread::Builder::new()
             .name(format!("host-link-{}", world.world_id))
@@ -308,6 +319,7 @@ struct Pump {
     runtime: tokio::runtime::Handle,
     /// Woken on every `Up`: pending kicks go out at once.
     kicks: Arc<Notify>,
+    metrics: Metrics,
 }
 
 impl Pump {
@@ -317,6 +329,7 @@ impl Pump {
                 LinkEvent::Up(_) => {
                     log::info!("[login] host link for world {} up", self.world);
                     self.up.send_replace(true);
+                    self.metrics.host_link(&self.world, true);
                     self.kicks.notify_one();
                 }
                 LinkEvent::Down(why) => {
@@ -324,6 +337,7 @@ impl Pump {
                         log::warn!("[login] host link for world {} down: {why}", self.world);
                     }
                     self.up.send_replace(false);
+                    self.metrics.host_link(&self.world, false);
                 }
                 LinkEvent::Msg(HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash }) => {
                     let waiter = self.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&(player_token, session_epoch));
@@ -358,5 +372,6 @@ impl Pump {
         }
         // The dialer is gone (its sender dropped): nothing more can be acked.
         self.up.send_replace(false);
+        self.metrics.host_link(&self.world, false);
     }
 }

@@ -6,7 +6,7 @@
 //! claim check runs.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use auth::JWT_LEEWAY_SECS;
@@ -14,6 +14,7 @@ use base64::Engine;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 
+use crate::metrics::Metrics;
 use crate::store::normalize_email;
 
 /// The keys are refetched (on an unknown `kid`) at most this often.
@@ -111,6 +112,8 @@ pub struct OidcVerifier {
     jwks_uri: Option<String>,
     /// Never held across an await.
     keys: RwLock<Keys>,
+    /// Counts key refetches; set once by `AppState::with_oidc`.
+    metrics: OnceLock<Metrics>,
 }
 
 fn parse_jwks(jwks_json: &str) -> Result<HashMap<String, DecodingKey>, OidcError> {
@@ -157,6 +160,7 @@ impl OidcVerifier {
             audience: audience.to_string(),
             jwks_uri,
             keys: RwLock::new(Keys { by_kid, last_fetch: None }),
+            metrics: OnceLock::new(),
         }
     }
 
@@ -171,6 +175,11 @@ impl OidcVerifier {
         }
         let by_kid = parse_jwks(&get_text(&client, &config.jwks_uri).await?)?;
         Ok(Self::with_keys(issuer, audience, Some(config.jwks_uri), by_kid))
+    }
+
+    /// Count this verifier's key refetches in `metrics` (the first call wins).
+    pub fn attach_metrics(&self, metrics: Metrics) {
+        let _ = self.metrics.set(metrics);
     }
 
     /// Check `access_token` at time `now_secs`.
@@ -242,7 +251,11 @@ impl OidcVerifier {
             }
             keys.last_fetch = Some(Instant::now());
         }
-        let by_kid = parse_jwks(&get_text(&http()?, uri).await?)?;
+        let fetched = async { parse_jwks(&get_text(&http()?, uri).await?) }.await;
+        if let Some(metrics) = self.metrics.get() {
+            metrics.jwks_refetch(fetched.is_ok());
+        }
+        let by_kid = fetched?;
         self.keys.write().unwrap_or_else(|e| e.into_inner()).by_kid = by_kid;
         self.verify(access_token, now_secs)
     }

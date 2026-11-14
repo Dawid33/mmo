@@ -20,14 +20,14 @@ const EMAIL: &str = "Dwarf@Example.org";
 const ORIGIN_OK: &str = "http://127.0.0.1:1334";
 const BODY_LIMIT: usize = 1 << 20;
 
-struct App {
-    router: Router,
+pub(crate) struct App {
+    pub(crate) router: Router,
     clock: Arc<AtomicU64>,
     store: LoginStore,
 }
 
 /// An app whose state `adjust` changes (host links, identity provider).
-async fn app_from(adjust: impl FnOnce(AppState) -> AppState) -> App {
+pub(crate) async fn app_from(adjust: impl FnOnce(AppState) -> AppState) -> App {
     let store = LoginStore::open("sqlite::memory:").await.unwrap();
     for (id, status) in [("w1", WorldStatus::Open), ("w2", WorldStatus::Open), ("shut", WorldStatus::Closed)] {
         store
@@ -58,31 +58,31 @@ async fn app_from(adjust: impl FnOnce(AppState) -> AppState) -> App {
     App { router: router(adjust(state)), clock, store }
 }
 
-async fn app() -> App {
+pub(crate) async fn app() -> App {
     app_from(|state| state).await
 }
 
-struct Resp {
-    status: StatusCode,
-    headers: axum::http::HeaderMap,
-    body: Vec<u8>,
+pub(crate) struct Resp {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: axum::http::HeaderMap,
+    pub(crate) body: Vec<u8>,
 }
 
 impl Resp {
-    fn json<T: DeserializeOwned>(&self) -> T {
+    pub(crate) fn json<T: DeserializeOwned>(&self) -> T {
         serde_json::from_slice(&self.body)
             .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&self.body)))
     }
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
-    fn error(&self) -> ApiErrorCode {
+    pub(crate) fn error(&self) -> ApiErrorCode {
         self.json::<ApiError>().code
     }
 }
 
 impl App {
-    async fn send(&self, req: Request<Body>) -> Resp {
+    pub(crate) async fn send(&self, req: Request<Body>) -> Resp {
         let r = self.router.clone().oneshot(req).await.unwrap();
         let status = r.status();
         let headers = r.headers().clone();
@@ -90,7 +90,7 @@ impl App {
         Resp { status, headers, body }
     }
 
-    async fn post<B: Serialize>(&self, path: &str, body: &B) -> Resp {
+    pub(crate) async fn post<B: Serialize>(&self, path: &str, body: &B) -> Resp {
         let req = Request::post(path)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_vec(body).unwrap()))
@@ -98,19 +98,19 @@ impl App {
         self.send(req).await
     }
 
-    async fn get(&self, path: &str) -> Resp {
+    pub(crate) async fn get(&self, path: &str) -> Resp {
         self.send(Request::get(path).body(Body::empty()).unwrap()).await
     }
 
     /// A new refresh token (a new family) of the account `EMAIL`, made verified when missing:
     /// what a login with the identity provider hands out.
-    async fn account(&self) -> String {
+    pub(crate) async fn account(&self) -> String {
         let email = login::normalize_email(EMAIL).unwrap();
         let id = self.store.ensure_verified_account(&email, self.now() as i64).await.unwrap();
         login::api::mint_refresh(&self.store, id, self.now() as i64).await.unwrap()
     }
 
-    async fn join(&self, refresh: &str, world: &str) -> Resp {
+    pub(crate) async fn join(&self, refresh: &str, world: &str) -> Resp {
         self.post(PATH_JOIN, &JoinRequest { refresh_token: refresh.into(), world: world.into() }).await
     }
 
@@ -120,7 +120,7 @@ impl App {
         Verifier::from_jwks(&r.json::<Jwks>())
     }
 
-    fn now(&self) -> u64 {
+    pub(crate) fn now(&self) -> u64 {
         self.clock.load(Ordering::SeqCst)
     }
 }
@@ -682,7 +682,7 @@ mod host_link {
 
 // ---- OIDC login ----
 
-const OIDC_ISSUER: &str = "https://auth.example/realms/mmo";
+pub(crate) const OIDC_ISSUER: &str = "https://auth.example/realms/mmo";
 
 fn oidc_config(issuer: &str) -> OidcConfig {
     OidcConfig { issuer: issuer.into(), audience: "mmo-login".into(), client_id: "game".into() }
@@ -696,7 +696,7 @@ fn with_oidc(mut state: AppState, issuer: &str, verifier: OidcVerifier) -> AppSt
     state.with_oidc(Arc::new(verifier))
 }
 
-async fn oidc_app() -> App {
+pub(crate) async fn oidc_app() -> App {
     app_from(|state| {
         let verifier = OidcVerifier::from_jwks(OIDC_ISSUER, "mmo-login", crate::common::OIDC_JWKS).unwrap();
         with_oidc(state, OIDC_ISSUER, verifier)
@@ -704,7 +704,7 @@ async fn oidc_app() -> App {
     .await
 }
 
-fn oidc_claims(issuer: &str, sub: &str) -> serde_json::Value {
+pub(crate) fn oidc_claims(issuer: &str, sub: &str) -> serde_json::Value {
     serde_json::json!({
         "iss": issuer, "aud": "mmo-login", "exp": T0 + 300, "sub": sub,
         "email": "Ann@X.io", "email_verified": true, "preferred_username": "ann",
@@ -712,7 +712,7 @@ fn oidc_claims(issuer: &str, sub: &str) -> serde_json::Value {
 }
 
 impl App {
-    async fn login_oidc(&self, token: String) -> Resp {
+    pub(crate) async fn login_oidc(&self, token: String) -> Resp {
         self.post(PATH_LOGIN_OIDC, &OidcLoginRequest { access_token: token }).await
     }
 }

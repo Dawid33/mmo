@@ -5,6 +5,7 @@ pub mod api;
 pub mod config;
 pub mod ctl;
 pub mod host_link;
+pub mod metrics;
 pub mod oidc;
 pub mod store;
 

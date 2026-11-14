@@ -15,7 +15,8 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use axum::extract::{FromRequest, Request, State};
+use axum::extract::{FromRequest, MatchedPath, Request, State};
+use axum::middleware::{self, Next};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -30,6 +31,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::LoginConfig;
 use crate::host_link::HostLinks;
+use crate::metrics::{JoinOutcome, Metrics, OidcOutcome};
 use crate::oidc::{OidcError, OidcVerifier};
 use crate::config::OidcConfig;
 use crate::store::{AccountRow, LoginError, LoginStore, OidcUpsert, RefreshOutcome};
@@ -64,6 +66,8 @@ pub struct AppState {
     pub host_links: Arc<HostLinks>,
     /// Verifies the identity provider's tokens; `None` = identity-provider login is off.
     pub oidc: Option<Arc<OidcVerifier>>,
+    /// The Prometheus metrics (`GET /metrics`).
+    pub metrics: Metrics,
 }
 
 impl AppState {
@@ -73,13 +77,15 @@ impl AppState {
         config: Arc<LoginConfig>,
         clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> AppState {
-        let host_links = Arc::new(HostLinks::new(None, store.clone(), clock.clone()));
-        AppState { store, signer, config, clock, host_links, oidc: None }
+        let metrics = Metrics::new();
+        let host_links = Arc::new(HostLinks::new(None, store.clone(), clock.clone()).with_metrics(metrics.clone()));
+        AppState { store, signer, config, clock, host_links, oidc: None, metrics }
     }
 
     /// Log players in with the identity provider's tokens, checked by `verifier` (the settings
     /// are `config.oidc`).
     pub fn with_oidc(mut self, verifier: Arc<OidcVerifier>) -> AppState {
+        verifier.attach_metrics(self.metrics.clone());
         self.oidc = Some(verifier);
         self
     }
@@ -94,7 +100,7 @@ impl AppState {
     /// Use these host links (tests: a short ack timeout).
     /// Starts their kick sweeper when called on a runtime.
     pub fn with_host_links(mut self, links: HostLinks) -> AppState {
-        self.host_links = Arc::new(links);
+        self.host_links = Arc::new(links.with_metrics(self.metrics.clone()));
         self.host_links.start();
         self
     }
@@ -283,17 +289,31 @@ async fn login_oidc(State(s): State<AppState>, ApiJson(req): ApiJson<OidcLoginRe
         // The provider's keys could not be fetched: our problem, not the player's.
         OidcError::Fetch(_) => {
             log::warn!("[login] identity-provider login unavailable: {e}");
+            s.metrics.oidc_login(OidcOutcome::ProviderUnavailable);
             Fail::provider_unavailable()
         }
         // The variant only: never the token or the claims.
         _ => {
             log::warn!("[login] identity-provider token refused: {e}");
+            s.metrics.oidc_login(OidcOutcome::Refused);
             Fail::identity_refused()
         }
     })?;
     let account = match s.store.upsert_oidc_account(&identity.subject, &identity.email, &identity.name, s.now_db()).await? {
-        OidcUpsert::Created(id) | OidcUpsert::Existing(id) | OidcUpsert::Adopted(id) => id,
+        OidcUpsert::Created(id) => {
+            s.metrics.oidc_login(OidcOutcome::Created);
+            id
+        }
+        OidcUpsert::Existing(id) => {
+            s.metrics.oidc_login(OidcOutcome::Existing);
+            id
+        }
+        OidcUpsert::Adopted(id) => {
+            s.metrics.oidc_login(OidcOutcome::Adopted);
+            id
+        }
         OidcUpsert::EmailTaken => {
+            s.metrics.oidc_login(OidcOutcome::EmailTaken);
             log::warn!("[login] identity-provider login refused: its email belongs to another account");
             return Err(Fail::identity_conflict());
         }
@@ -312,7 +332,14 @@ async fn config(State(s): State<AppState>) -> Result<Json<LoginConfigResponse>, 
 }
 
 async fn refresh(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest>) -> Result<Json<LoginResponse>, Fail> {
-    let (account, token) = rotate_refresh(&s, &req.refresh_token).await?;
+    let rotated = rotate_refresh(&s, &req.refresh_token).await;
+    // An internal error (database) is neither: the request counters show it as a 500.
+    match &rotated {
+        Ok(_) => s.metrics.refresh(true),
+        Err(f) if f.code != ApiErrorCode::Internal => s.metrics.refresh(false),
+        Err(_) => {}
+    }
+    let (account, token) = rotated?;
     Ok(Json(login_response(&account, token)))
 }
 
@@ -345,6 +372,18 @@ async fn worlds(State(s): State<AppState>) -> Result<Json<Vec<WorldEntry>>, Fail
 }
 
 async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> Result<Json<JoinResponse>, Fail> {
+    let result = join_inner(&s, req).await;
+    // Counted once, where the outcome is known. An internal error (database) is neither.
+    match &result {
+        Ok(_) => s.metrics.join(JoinOutcome::Ok),
+        Err(f) if f.code == ApiErrorCode::WorldUnavailable => s.metrics.join(JoinOutcome::WorldUnavailable),
+        Err(f) if f.code != ApiErrorCode::Internal => s.metrics.join(JoinOutcome::Refused),
+        Err(_) => {}
+    }
+    result
+}
+
+async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>, Fail> {
     // The world first, so a bad world id does not spend the client's refresh token.
     let Some(world) = s.store.world(&req.world).await? else {
         return Err(Fail::new(StatusCode::NOT_FOUND, ApiErrorCode::UnknownWorld, "no such world"));
@@ -357,7 +396,7 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     let presented = token_hash(&req.refresh_token);
     let Some(account_id) = s.store.live_refresh_account(presented, s.now_db()).await? else {
         // Not live: the rotation answers it (a spent token revokes its family).
-        rotate_refresh(&s, &req.refresh_token).await?;
+        rotate_refresh(s, &req.refresh_token).await?;
         return Err(Fail::revoked());
     };
     let Some(account) = s.store.account(account_id).await? else {
@@ -391,7 +430,7 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     };
     // Two joins racing with one token: the loser's spawn order is superseded by the winner's or
     // expires unused at the host; its rotation answers Reused (the family is revoked).
-    let (rotated, refresh_token) = rotate_refresh(&s, &req.refresh_token).await?;
+    let (rotated, refresh_token) = rotate_refresh(s, &req.refresh_token).await?;
     if rotated.account_id != account.account_id {
         return Err(Fail::revoked());
     }
@@ -432,6 +471,25 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+async fn metrics(State(s): State<AppState>) -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], s.metrics.render())
+}
+
+/// Counts every request but the scrape and the probe, by matched route template (`other` for an
+/// unmatched path, so a scanner cannot make series) and status.
+async fn count_requests(State(s): State<AppState>, req: Request, next: Next) -> Response {
+    let route = match req.extensions().get::<MatchedPath>() {
+        Some(path) => path.as_str().to_string(),
+        None => "other".to_string(),
+    };
+    let start = std::time::Instant::now();
+    let response = next.run(req).await;
+    if route != "/metrics" && route != "/healthz" {
+        s.metrics.http_request(&route, response.status().as_u16(), start.elapsed().as_secs_f64());
+    }
+    response
+}
+
 /// Exact origins from the config; an unparsable one is skipped with a warning.
 fn cors(config: &LoginConfig) -> CorsLayer {
     let origins: Vec<HeaderValue> = config
@@ -463,6 +521,8 @@ pub fn router(state: AppState) -> Router {
         .route(PATH_JOIN, post(join))
         .route(PATH_JWKS, get(jwks))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics))
         .layer(cors)
+        .layer(middleware::from_fn_with_state(state.clone(), count_requests))
         .with_state(state)
 }
