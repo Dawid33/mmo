@@ -182,7 +182,14 @@ pub fn split(volume: &BlockVolume, table: &Table, opts: &SplitOptions) -> Split 
     out
 }
 
-/// Gives each build the text of the nearest sign within `SIGN_REACH`.
+/// A label's slug must hold at least this many letters or digits.
+const MIN_LABEL_CHARS: usize = 3;
+/// A slug is cut to this many characters.
+const MAX_SLUG: usize = 60;
+
+/// Gives each build the text of the nearest sign within `SIGN_REACH`. A sign whose column lies inside any
+/// build's box is decoration and is ignored, as is text whose slug has fewer than `MIN_LABEL_CHARS`
+/// letters or digits.
 fn label_builds(volume: &BlockVolume, builds: &mut [Build]) {
     // Per build: (distance, (z, x, y), text) of the best sign so far.
     let mut best: Vec<Option<(i64, (i32, i32, i32), String)>> = vec![None; builds.len()];
@@ -190,8 +197,18 @@ fn label_builds(volume: &BlockVolume, builds: &mut [Build]) {
         if e.id != "minecraft:sign" && e.id != "minecraft:hanging_sign" {
             continue;
         }
-        let Some(text) = sign_text(&e.nbt) else { continue };
+        let Some(text) = sign_text(&e.nbt, volume.data_version) else { continue };
+        let text = text.trim().to_string();
+        if slug(&text).chars().filter(char::is_ascii_alphanumeric).count() < MIN_LABEL_CHARS {
+            continue;
+        }
         let (x, y, z) = (e.pos[0] as i64, e.pos[1], e.pos[2] as i64);
+        let inside = builds.iter().any(|b| {
+            (b.min[0] as i64..b.max[0] as i64).contains(&x) && (b.min[2] as i64..b.max[2] as i64).contains(&z)
+        });
+        if inside {
+            continue;
+        }
         let mut nearest: Option<(i64, usize)> = None;
         for (i, b) in builds.iter().enumerate() {
             let dx = (b.min[0] as i64 - x).max(x - (b.max[0] as i64 - 1)).max(0);
@@ -212,7 +229,8 @@ fn label_builds(volume: &BlockVolume, builds: &mut [Build]) {
     }
 }
 
-/// A file-name-safe name: lowercase ASCII letters, digits and `-`; "" when nothing is left.
+/// A file-name-safe name: lowercase ASCII letters, digits and `-`, at most 60 characters; "" when nothing
+/// is left.
 pub fn slug(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
@@ -222,5 +240,6 @@ pub fn slug(text: &str) -> String {
             out.push('-');
         }
     }
+    out.truncate(MAX_SLUG);
     out.trim_matches('-').to_string()
 }

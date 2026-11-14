@@ -6,7 +6,7 @@
 
 use crate::classify::{classify, Class};
 use crate::report::Report;
-use crate::{BlockEntity, BlockVolume, Table, Tag, MAPPING_VERSION};
+use crate::{BlockEntity, BlockVolume, ImportError, Table, Tag, MAPPING_VERSION};
 use game::prefab::{
     FileBox, FileCarve, FileShape, FileShaped, GroundFit, ImportInfo, Marker, PrefabFile, PrefabMeta, Shape,
     PREFAB_FORMAT,
@@ -32,7 +32,12 @@ pub struct ConvertOptions {
     pub licence: String,
     pub source_hash: String,
     pub tags: Vec<String>,
+    /// Most shaped cells plus markers one conversion may produce; `None` = [`CONVERT_MAX_RECORDS`].
+    pub max_records: Option<usize>,
 }
+
+/// A hostile file cannot make `convert` allocate more than this many shaped cells and markers.
+pub const CONVERT_MAX_RECORDS: usize = 1 << 23;
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -93,8 +98,12 @@ struct Grid<'a> {
     stride_z: usize,
     stride_y: usize,
     t: [usize; 3],
-    /// Passes the flood fill (air, keep, dropped, a marker without a solid).
+    /// Passes the flood fill (air, keep, dropped, a marker without a solid), barriers apart.
     passable: &'a [bool],
+    /// Per palette entry: a door marker (a barrier, and itself carved).
+    door: &'a [bool],
+    /// Per palette entry: plain air (the cell above a door is the door's upper half).
+    air: &'a [bool],
     /// May become carved (passable and not Keep).
     carvable: &'a [bool],
     /// Merge code of a solid cell, 0 for others.
@@ -108,6 +117,12 @@ impl Grid<'_> {
     #[inline]
     fn pid(&self, x: usize, y: usize, z: usize) -> usize {
         self.blocks[self.base + x + z * self.stride_z + y * self.stride_y] as usize
+    }
+    /// The flood fill may enter this cell: passable, and neither a door cell nor the air directly above one.
+    #[inline]
+    fn flows(&self, x: usize, y: usize, z: usize) -> bool {
+        let p = self.pid(x, y, z);
+        self.passable[p] && !self.door[p] && !(self.air[p] && y > 0 && self.door[self.pid(x, y - 1, z)])
     }
     #[inline]
     fn tidx(&self, x: usize, y: usize, z: usize) -> usize {
@@ -127,19 +142,33 @@ impl Grid<'_> {
     }
 }
 
-/// `None` when the region holds nothing solid.
-pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Option<(PrefabFile, Report)> {
+/// `Ok(None)` when the region holds nothing solid; `Err(TooLarge)` over the record cap;
+/// `Err(NotASchematic)` when the volume's cell array does not match its size.
+pub fn convert(
+    volume: &BlockVolume,
+    table: &Table,
+    opts: &ConvertOptions,
+) -> Result<Option<(PrefabFile, Report)>, ImportError> {
     let size = volume.size.map(|v| v as usize);
-    let total = size[0].checked_mul(size[1])?.checked_mul(size[2])?;
-    if volume.blocks.len() < total {
-        return None;
+    let total = size[0]
+        .checked_mul(size[1])
+        .and_then(|n| n.checked_mul(size[2]))
+        .ok_or(ImportError::TooLarge)?;
+    if volume.blocks.len() != total {
+        return Err(ImportError::NotASchematic(format!(
+            "{} cells for a {}x{}x{} volume",
+            volume.blocks.len(),
+            size[0],
+            size[1],
+            size[2]
+        )));
     }
     let (rmin, rmax) = match opts.region {
         Some((a, b)) => (a.map(|v| v as usize), [0, 1, 2].map(|i| (b[i] as usize).min(size[i]))),
         None => ([0; 3], size),
     };
     if (0..3).any(|i| rmin[i] >= rmax[i]) {
-        return None;
+        return Ok(None);
     }
 
     // Classify each palette entry once.
@@ -219,7 +248,17 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
         }
     }
     if lo[0] == usize::MAX {
-        return None;
+        return Ok(None);
+    }
+    // Count the records before allocating any (shaped cells and markers all lie inside the trimmed box).
+    let records: u64 = counts
+        .iter()
+        .enumerate()
+        .filter(|&(p, _)| matches!(kinds[p], Kind::Shaped(_) | Kind::Marker(_)))
+        .map(|(_, &n)| n)
+        .sum();
+    if records > opts.max_records.unwrap_or(CONVERT_MAX_RECORDS) as u64 {
+        return Err(ImportError::TooLarge);
     }
     let t = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let tcells = t[0] * t[1] * t[2];
@@ -238,6 +277,8 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
     let mut code = vec![0u32; TABLE_LEN];
     let mut passable = vec![false; TABLE_LEN];
     let mut carvable = vec![false; TABLE_LEN];
+    let mut door = vec![false; TABLE_LEN];
+    let mut air = vec![false; TABLE_LEN];
     // A material nothing in the region uses has no final index; such an entry never occurs in a cell.
     let code_of = |m: u32| final_of[m as usize].wrapping_add(1);
     for p in 0..TABLE_LEN {
@@ -245,9 +286,13 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
             Kind::Block(m) => code[p] = code_of(m),
             Kind::Marker(i) => match markers_list[i as usize].solid {
                 Some(m) => code[p] = code_of(m),
-                None => (passable[p], carvable[p]) = (true, true),
+                None => {
+                    (passable[p], carvable[p]) = (true, true);
+                    door[p] = markers_list[i as usize].kind == "door";
+                }
             },
-            Kind::Air | Kind::Drop(_) => (passable[p], carvable[p]) = (true, true),
+            Kind::Air => (passable[p], carvable[p], air[p]) = (true, true, true),
+            Kind::Drop(_) => (passable[p], carvable[p]) = (true, true),
             Kind::Keep => passable[p] = true,
             Kind::Shaped(_) => {}
         }
@@ -261,6 +306,8 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
         stride_y,
         t,
         passable: &passable,
+        door: &door,
+        air: &air,
         carvable: &carvable,
         code: &code,
         reached: None,
@@ -274,7 +321,7 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
         let mut queue: VecDeque<u32> = VecDeque::new();
         let push = |bits: &mut Bits, q: &mut VecDeque<u32>, g: &Grid, x: usize, y: usize, z: usize| {
             let i = g.tidx(x, y, z);
-            if !bits.get(i) && g.passable[g.pid(x, y, z)] {
+            if !bits.get(i) && g.flows(x, y, z) {
                 bits.set(i);
                 q.push_back(i as u32);
             }
@@ -347,7 +394,7 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
                         if info.kind == "sign" {
                             let pos = [(lo[0] + x) as i32, (lo[1] + y) as i32, (lo[2] + z) as i32];
                             if let Some(e) = entities.get(&pos) {
-                                let (text, unparsed) = sign_lines(&e.nbt);
+                                let (text, unparsed) = sign_lines(&e.nbt, volume.data_version);
                                 report.signs_unparsed += unparsed;
                                 if let Some(text) = text {
                                     props.insert("text".into(), text);
@@ -436,24 +483,40 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
         ground: GroundFit::Flat,
         tags: opts.tags.clone(),
     };
-    Some((file, report))
+    Ok(Some((file, report)))
 }
 
 /// A sign's plain text: `front_text.messages` (1.20+) or `Text1..Text4`; non-empty lines joined by a space.
-pub(crate) fn sign_text(nbt: &Tag) -> Option<String> {
-    sign_lines(nbt).0
+pub(crate) fn sign_text(nbt: &Tag, data_version: i32) -> Option<String> {
+    sign_lines(nbt, data_version).0
 }
 
-/// The sign's text, and how many of its lines were non-empty yet unreadable.
-fn sign_lines(nbt: &Tag) -> (Option<String>, u64) {
-    let raw: Vec<&str> = match nbt.get("front_text").and_then(|f| f.get("messages")).and_then(Tag::as_list) {
-        Some(msgs) => msgs.iter().take(4).filter_map(Tag::as_str).collect(),
-        None => ["Text1", "Text2", "Text3", "Text4"].iter().filter_map(|k| nbt.get(k).and_then(Tag::as_str)).collect(),
+/// From this data version (1.21.5) a sign message may be a plain string instead of JSON.
+const PLAIN_SIGN_TEXT_FROM: i32 = 4325;
+
+/// The sign's text, and how many of its lines were non-empty yet unreadable. Lines are trimmed and
+/// whitespace-only ones dropped.
+fn sign_lines(nbt: &Tag, data_version: i32) -> (Option<String>, u64) {
+    let raw: Vec<&Tag> = match nbt.get("front_text").and_then(|f| f.get("messages")).and_then(Tag::as_list) {
+        Some(msgs) => msgs.iter().take(4).collect(),
+        None => ["Text1", "Text2", "Text3", "Text4"].iter().filter_map(|k| nbt.get(k)).collect(),
     };
     let (mut lines, mut unparsed) = (Vec::new(), 0);
-    for r in raw {
-        match json_text(r) {
-            Some(t) if !t.is_empty() => lines.push(t),
+    for tag in raw {
+        let Some(r) = tag.as_str() else {
+            // A compound (or any other non-string) message is not read; an empty one is no text.
+            if !matches!(tag, Tag::Compound(m) if m.is_empty()) {
+                unparsed += 1;
+            }
+            continue;
+        };
+        let text = match json_text(r) {
+            Some(t) => Some(t),
+            None if data_version >= PLAIN_SIGN_TEXT_FROM => Some(r.to_string()),
+            None => None,
+        };
+        match text {
+            Some(t) if !t.trim().is_empty() => lines.push(t.trim().to_string()),
             Some(_) => {}
             None if !r.trim().is_empty() => unparsed += 1,
             None => {}

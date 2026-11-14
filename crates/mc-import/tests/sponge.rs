@@ -51,8 +51,18 @@ fn v2() -> Vec<u8> {
     v2_with(&strs(), varints(&cells()), 2)
 }
 
+/// Sponge v3: a block entity is `{ Id, Pos, Data: { the block entity's own NBT } }`.
 fn v3() -> Vec<u8> {
-    let sign = c(vec![("Pos", V::Ints(vec![1, 0, 2])), ("Id", s("minecraft:sign")), ("Text", s("hi"))]);
+    v3_with(&strs(), cells(), "hi")
+}
+
+fn v3_with(states: &[String], cells: Vec<u32>, text: &str) -> Vec<u8> {
+    let message = V::List(8, vec![s(&format!("{{\"text\":\"{text}\"}}"))]);
+    let sign = c(vec![
+        ("Pos", V::Ints(vec![1, 0, 2])),
+        ("Id", s("minecraft:sign")),
+        ("Data", c(vec![("Text", s("hi")), ("front_text", c(vec![("messages", message)]))])),
+    ]);
     let inner = c(vec![
         ("Version", V::Int(3)),
         ("DataVersion", V::Int(3700)),
@@ -62,8 +72,8 @@ fn v3() -> Vec<u8> {
         (
             "Blocks",
             c(vec![
-                ("Palette", palette(&strs())),
-                ("Data", V::Bytes(varints(&cells()))),
+                ("Palette", palette(states)),
+                ("Data", V::Bytes(varints(&cells))),
                 ("BlockEntities", V::List(10, vec![sign])),
             ]),
         ),
@@ -104,6 +114,41 @@ fn reads_a_v3_schematic() {
     assert_eq!(a.block_entities[0].pos, b.block_entities[0].pos);
     assert_eq!(a.block_entities[0].id, b.block_entities[0].id);
     assert_eq!((a.data_version, &a.name, &a.author), (b.data_version, &b.name, &b.author));
+}
+
+#[test]
+fn a_v3_block_entity_is_its_data_compound() {
+    let v = read_schem(&v3()).unwrap();
+    let nbt = &v.block_entities[0].nbt;
+    assert_eq!(nbt.get("Text").and_then(mc_import::Tag::as_str), Some("hi"));
+    assert!(nbt.get("Pos").is_none() && nbt.get("Id").is_none());
+    // A v2 one is the flat compound.
+    let v = read_schem(&v2()).unwrap();
+    assert_eq!(v.block_entities[0].nbt.get("Text").and_then(mc_import::Tag::as_str), Some("hi"));
+}
+
+#[test]
+fn a_v3_sign_text_reaches_the_marker() {
+    use mc_import::convert::{convert, AirMode, ConvertOptions};
+    let states: Vec<String> = ["minecraft:air", "minecraft:stone", "minecraft:oak_sign[rotation=0]"].map(String::from).to_vec();
+    let mut cells = vec![0u32; 24];
+    cells[0] = 1;
+    cells[1 + 2 * 3] = 2; // the sign at (1,0,2)
+    let v = read_schem(&v3_with(&states, cells, "Zeus")).unwrap();
+    let opts = ConvertOptions {
+        name: "t".into(),
+        air: AirMode::Auto,
+        region: None,
+        author: String::new(),
+        source: String::new(),
+        licence: String::new(),
+        source_hash: String::new(),
+        tags: vec![],
+        max_records: None,
+    };
+    let (f, _) = convert(&v, mc_import::Table::builtin(), &opts).unwrap().unwrap();
+    let sign = f.markers.iter().find(|m| m.kind == "sign").expect("sign marker");
+    assert_eq!(sign.props.get("text").map(String::as_str), Some("Zeus"));
 }
 
 #[test]

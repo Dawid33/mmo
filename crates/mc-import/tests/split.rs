@@ -141,7 +141,31 @@ fn a_sparse_layer_is_not_ground() {
 }
 
 #[test]
+fn a_sign_inside_a_build_does_not_label_it() {
+    let mut v = pillars([40, 12, 14], 2, &[3, 15, 30]);
+    // On the plate beside pillar 1 (x 15..19): "Zeus"; inside pillar 0's box (x 3..7, z 4..8): "Decor".
+    v.block_entities = vec![sign([20, 2, 5], "Zeus"), sign([4, 4, 5], "Decor")];
+    let s = split(&v, Table::builtin(), &opts());
+    let labels: Vec<_> = s.builds.iter().map(|b| b.label.clone()).collect();
+    assert_eq!(labels, vec![None, Some("Zeus".to_string()), None]);
+}
+
+#[test]
+fn short_labels_are_ignored_and_text_is_trimmed() {
+    let mut v = pillars([40, 12, 14], 2, &[3, 15, 30]);
+    v.block_entities = vec![sign([20, 2, 5], "d"), sign([10, 2, 5], "  Ab! "), sign([25, 2, 5], "  Hera  ")];
+    let s = split(&v, Table::builtin(), &opts());
+    let labels: Vec<_> = s.builds.iter().map(|b| b.label.clone()).collect();
+    // "d" (build 1) and "Ab!" (2 alphanumerics, build 0 or 1) are too short; "Hera" labels build 2.
+    assert_eq!(labels, vec![None, None, Some("Hera".to_string())]);
+}
+
+#[test]
 fn slug_rules() {
+    assert_eq!(slug(&"ab ".repeat(100)).len(), 59);
+    assert!(slug(&"a".repeat(200)).len() <= 60);
+    assert_eq!(slug(&format!("{}-b", "a".repeat(59))), "a".repeat(59));
+    assert!(!slug(&"word ".repeat(40)).ends_with('-'));
     assert_eq!(slug("Zeus Statue #2!"), "zeus-statue-2");
     assert_eq!(slug("Häuser"), "h-user");
     assert_eq!(slug("!!!"), "");

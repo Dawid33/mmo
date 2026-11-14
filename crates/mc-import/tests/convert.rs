@@ -1,11 +1,17 @@
-use game::prefab::{resolve, Cell, FileShape, Facing, Half, Shape, StairCorner, Trust};
+use game::prefab::{resolve, PrefabFile, Cell, FileShape, Facing, Half, Shape, StairCorner, Trust};
 use game::registry::BlockRegistry;
-use mc_import::convert::{convert, AirMode, ConvertOptions};
+use mc_import::convert::{convert as convert_raw, AirMode, ConvertOptions, CONVERT_MAX_RECORDS};
+use mc_import::{ImportError, Report};
 use mc_import::{BlockEntity, BlockVolume, Tag, Table};
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::common::vol;
+
+/// `convert` for a volume that is meant to be convertible.
+fn convert(v: &BlockVolume, t: &Table, o: &ConvertOptions) -> Option<(PrefabFile, Report)> {
+    convert_raw(v, t, o).unwrap()
+}
 
 fn opts(air: AirMode) -> ConvertOptions {
     ConvertOptions {
@@ -17,6 +23,7 @@ fn opts(air: AirMode) -> ConvertOptions {
         licence: "lic".into(),
         source_hash: "abc".into(),
         tags: vec![],
+        max_records: None,
     }
 }
 
@@ -29,8 +36,9 @@ fn registry() -> BlockRegistry {
 const BRICK: &str = "minecraft:stone_bricks";
 const AIR: &str = "minecraft:air";
 
-/// The 7x5x7 house at (2,1,2) of an 11x7x11 volume; `door` fills the doorway cell (house-local 0,1,3).
-fn house(door: &'static str) -> BlockVolume {
+/// The 7x5x7 house at (2,1,2) of an 11x7x11 volume; `door` fills the doorway cell (house-local 0,1,3),
+/// `upper` the cell above it (a door's upper half; the wall otherwise).
+fn house_doors(door: &'static str, upper: &'static str) -> BlockVolume {
     vol([11, 7, 11], move |x, y, z| {
         let (hx, hy, hz) = (x as i32 - 2, y as i32 - 1, z as i32 - 2);
         if !(0..7).contains(&hx) || !(0..5).contains(&hy) || !(0..7).contains(&hz) {
@@ -39,9 +47,16 @@ fn house(door: &'static str) -> BlockVolume {
         if (hx, hy, hz) == (0, 1, 3) {
             return door.into();
         }
+        if (hx, hy, hz) == (0, 2, 3) && upper != BRICK {
+            return upper.into();
+        }
         let room = (1..6).contains(&hx) && (1..4).contains(&hy) && (1..6).contains(&hz);
         if room { AIR.into() } else { BRICK.into() }
     })
+}
+
+fn house(door: &'static str) -> BlockVolume {
+    house_doors(door, BRICK)
 }
 
 #[test]
@@ -52,17 +67,38 @@ fn a_hollow_house() {
     assert_eq!(f.size, [7, 5, 7]);
     assert!(f.carve.is_empty());
     assert_eq!(r.carved, 0);
-    // A door is a marker with no solid: still passable.
-    let (f, _) = convert(&house("minecraft:oak_door[facing=east,half=lower]"), t, &opts(AirMode::Auto)).unwrap();
-    assert!(f.carve.is_empty());
+    // A door is a barrier for the flood fill and is itself carved (an opening: carve + marker); with both
+    // halves in the doorway the 75-cell room is carved plus the two door cells.
+    let doored = house_doors(
+        "minecraft:oak_door[facing=east,half=lower]",
+        "minecraft:oak_door[facing=east,half=upper]",
+    );
+    let (f, r) = convert(&doored, t, &opts(AirMode::Auto)).unwrap();
+    assert_eq!(r.carved, 77);
+    assert_eq!(f.carve.iter().map(|c| c.size.iter().product::<u32>()).sum::<u32>(), 77);
     assert_eq!(f.markers.len(), 1);
+    assert_eq!(f.markers[0].at, [0, 1, 3]);
+    assert_eq!(f.markers[0].kind, "door");
+    let reg = registry();
+    let res = resolve(&f, &|n| reg.id_of(n), Trust::Builtin).unwrap();
+    assert!(matches!(res.cell([3, 2, 3]), Cell::Carve));
+    assert!(matches!(res.cell([0, 1, 3]), Cell::Carve));
+    assert!(matches!(res.cell([0, 2, 3]), Cell::Carve));
+    // Keep mode carves nothing, door or not.
+    let (f, _) = convert(&doored, t, &opts(AirMode::Keep)).unwrap();
+    assert!(f.carve.is_empty());
+    // A door block with no upper half: the lower cell is the barrier, the room is still sealed.
+    let (_, r) = convert(&house("minecraft:oak_door[facing=east,half=lower]"), t, &opts(AirMode::Auto)).unwrap();
+    assert_eq!(r.carved, 76);
+    // Other markers without a solid (a torch in the doorway) stay passable.
+    let (f, _) = convert(&house("minecraft:wall_torch[facing=east]"), t, &opts(AirMode::Auto)).unwrap();
+    assert!(f.carve.is_empty());
     // A glass block closes it: the room is enclosed.
     let (f, r) = convert(&house("minecraft:glass"), t, &opts(AirMode::Auto)).unwrap();
     assert_eq!(f.size, [7, 5, 7]);
     assert_eq!(f.carve.len(), 1);
     assert_eq!(f.carve[0].size, [5, 3, 5]);
     assert_eq!(r.carved, 75);
-    let reg = registry();
     let res = resolve(&f, &|n| reg.id_of(n), Trust::Builtin).unwrap();
     assert!(matches!(res.cell([3, 2, 3]), Cell::Carve));
     assert!(matches!(res.cell([0, 2, 0]), Cell::Block(_)));
@@ -355,4 +391,171 @@ fn unparsed_sign_lines_are_counted() {
     assert!(!f.markers[0].props.contains_key("text"));
     assert_eq!(r.signs_unparsed, 2);
     assert!(r.to_text("x").contains("unparsed"));
+}
+
+/// An L-shaped house: its notch lies inside the trimmed box and outside the house, so it stays KEEP while
+/// the room is carved.
+#[test]
+fn an_l_shaped_house_keeps_its_notch() {
+    let t = Table::builtin();
+    // Footprint over x, z in 0..8 without the 4x4 corner x, z in 4..8; the volume has a 1-cell margin.
+    let inl = |x: i32, z: i32| (0..8).contains(&x) && (0..8).contains(&z) && !(x >= 4 && z >= 4);
+    let v = vol([10, 7, 10], |x, y, z| {
+        let (hx, hy, hz) = (x as i32 - 1, y as i32 - 1, z as i32 - 1);
+        if !inl(hx, hz) || !(0..5).contains(&hy) {
+            return AIR.into();
+        }
+        let edge = !(inl(hx - 1, hz) && inl(hx + 1, hz) && inl(hx, hz - 1) && inl(hx, hz + 1));
+        if hy == 0 || hy == 4 || edge { BRICK.into() } else { AIR.into() }
+    });
+    let room = (0..8).flat_map(|x| (0..8).map(move |z| (x, z))).filter(|&(x, z)| {
+        inl(x, z) && inl(x - 1, z) && inl(x + 1, z) && inl(x, z - 1) && inl(x, z + 1)
+    }).count() as u64
+        * 3;
+    assert!(room > 0);
+    let (f, r) = convert(&v, t, &opts(AirMode::Auto)).unwrap();
+    assert_eq!(f.size, [8, 5, 8]);
+    assert_eq!(r.carved, room);
+    let reg = registry();
+    let res = resolve(&f, &|n| reg.id_of(n), Trust::Builtin).unwrap();
+    for y in 0..5 {
+        for z in 4..8 {
+            for x in 4..8 {
+                assert!(matches!(res.cell([x, y, z]), Cell::Keep), "notch cell {x},{y},{z} must stay");
+            }
+        }
+    }
+    assert!(matches!(res.cell([1, 2, 1]), Cell::Carve));
+}
+
+/// A volume holding one of every shaped form the classifier can emit: all named shapes are valid and
+/// non-empty, and the prefab resolves.
+#[test]
+fn every_shaped_form_is_valid_and_resolves() {
+    let t = Table::builtin();
+    let mut states: Vec<String> = Vec::new();
+    for facing in ["north", "east", "south", "west"] {
+        for half in ["top", "bottom"] {
+            for shape in ["straight", "inner_left", "inner_right", "outer_left", "outer_right"] {
+                states.push(format!("minecraft:oak_stairs[facing={facing},half={half},shape={shape}]"));
+            }
+        }
+        states.push(format!("minecraft:spruce_trapdoor[facing={facing},half=top,open=true]"));
+        states.push(format!("minecraft:spruce_trapdoor[facing={facing},half=bottom,open=false]"));
+        states.push(format!("minecraft:oak_fence_gate[facing={facing},open=false]"));
+        states.push(format!("minecraft:oak_fence_gate[facing={facing},open=true]"));
+    }
+    for ty in ["top", "bottom", "double"] {
+        states.push(format!("minecraft:oak_slab[type={ty}]"));
+    }
+    for up in ["true", "false"] {
+        for side in ["none", "low", "tall"] {
+            states.push(format!("minecraft:cobblestone_wall[east={side},north=none,south=none,up={up},west={side}]"));
+            states.push(format!("minecraft:cobblestone_wall[east=none,north={side},south={side},up={up},west=none]"));
+        }
+    }
+    states.push("minecraft:cobblestone_wall[east=none,north=none,south=none,up=false,west=none]".into());
+    for (a, b) in [("true", "false"), ("false", "false"), ("true", "true")] {
+        states.push(format!("minecraft:oak_fence[east={a},north={b},south={a},west={b}]"));
+        states.push(format!("minecraft:glass_pane[east={a},north={b},south={a},west={b}]"));
+        states.push(format!("minecraft:iron_bars[east={a},north={b},south={a},west={b}]"));
+    }
+    states.push("minecraft:red_carpet".into());
+    for l in 1..=8 {
+        states.push(format!("minecraft:snow[layers={l}]"));
+    }
+    states.push("minecraft:barrel[facing=up]".into());
+    let n = states.len() as u32;
+    let v = vol([n, 1, 1], |x, _, _| states[x as usize].clone());
+    let (f, _) = convert(&v, t, &opts(AirMode::Keep)).unwrap();
+    assert!(!f.shaped.is_empty());
+    for s in &f.shaped {
+        match &s.shape {
+            FileShape::Named { shape, .. } => assert!(shape.is_valid() && !shape.is_empty(), "{shape:?}"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let reg = registry();
+    resolve(&f, &|n| reg.id_of(n), Trust::Builtin).unwrap();
+}
+
+#[test]
+fn barrels_are_plain_planks_and_gates_are_fences() {
+    let t = Table::builtin();
+    let v = vol([3, 1, 1], |x, _, _| {
+        ["minecraft:barrel[facing=north]", "minecraft:oak_fence_gate[facing=north,open=false]", "minecraft:oak_fence_gate[facing=north,open=true]"]
+            [x as usize]
+            .into()
+    });
+    let (f, r) = convert(&v, t, &opts(AirMode::Keep)).unwrap();
+    assert_eq!(f.boxes.len(), 1);
+    assert_eq!(f.palette[f.boxes[0].mat as usize], "spruce_planks");
+    assert_eq!(f.shaped.len(), 1);
+    assert_eq!(r.markers.get("gate"), Some(&1));
+    assert_eq!(r.markers.get("loot"), None);
+}
+
+fn sign_state_volume(data_version: i32, lines: Vec<Tag>) -> BlockVolume {
+    let mut v = vol([2, 1, 1], |x, _, _| if x == 0 { BRICK.into() } else { "minecraft:oak_sign[rotation=0]".into() });
+    v.data_version = data_version;
+    let front = comp(vec![("messages", Tag::List(lines))]);
+    v.block_entities =
+        vec![BlockEntity { pos: [1, 0, 0], id: "minecraft:sign".into(), nbt: comp(vec![("front_text", front)]) }];
+    v
+}
+
+#[test]
+fn plain_string_sign_lines_from_1_21_5() {
+    let t = Table::builtin();
+    let lines = || vec![s("Zeus"), s("  Temple "), s(""), s(r#"{"text":"x"}"#)];
+    // From data version 4325 a message may be a plain string.
+    let (f, r) = convert(&sign_state_volume(4325, lines()), t, &opts(AirMode::Auto)).unwrap();
+    assert_eq!(f.markers[0].props.get("text").map(String::as_str), Some("Zeus Temple x"));
+    assert_eq!(r.signs_unparsed, 0);
+    // Before it, such a line is unparsed (and counted); the JSON one still reads.
+    let (f, r) = convert(&sign_state_volume(4324, lines()), t, &opts(AirMode::Auto)).unwrap();
+    assert_eq!(f.markers[0].props.get("text").map(String::as_str), Some("x"));
+    assert_eq!(r.signs_unparsed, 2);
+    // Compound messages stay unparsed and counted, at any version.
+    let (f, r) = convert(&sign_state_volume(4325, vec![comp(vec![("text", s("Hi"))]), s("Ok")]), t, &opts(AirMode::Auto)).unwrap();
+    assert_eq!(f.markers[0].props.get("text").map(String::as_str), Some("Ok"));
+    assert_eq!(r.signs_unparsed, 1);
+}
+
+#[test]
+fn whitespace_only_sign_text_is_not_a_prop() {
+    let t = Table::builtin();
+    let (f, _) = convert(&sign_state_volume(3463, vec![s(r#"{"text":" "}"#), s(r#""  ""#)]), t, &opts(AirMode::Auto)).unwrap();
+    assert!(!f.markers[0].props.contains_key("text"));
+    let (f, _) = convert(&sign_state_volume(4325, vec![s("   ")]), t, &opts(AirMode::Auto)).unwrap();
+    assert!(!f.markers[0].props.contains_key("text"));
+}
+
+#[test]
+fn the_record_cap_is_an_error() {
+    let t = Table::builtin();
+    let stairs = "minecraft:oak_stairs[facing=north,half=bottom,shape=straight]";
+    let v = vol([3, 3, 3], |_, _, _| stairs.into());
+    let mut o = opts(AirMode::Auto);
+    o.max_records = Some(10);
+    assert_eq!(convert_raw(&v, t, &o).unwrap_err(), ImportError::TooLarge);
+    // At the cap it still converts.
+    o.max_records = Some(27);
+    assert_eq!(convert_raw(&v, t, &o).unwrap().unwrap().0.shaped.len(), 27);
+    // The default is the constant.
+    assert_eq!(CONVERT_MAX_RECORDS, 1 << 23);
+    assert!(convert_raw(&v, t, &opts(AirMode::Auto)).unwrap().is_some());
+}
+
+#[test]
+fn nothing_solid_is_none_and_an_inconsistent_volume_is_an_error() {
+    let t = Table::builtin();
+    let air = vol([3, 3, 3], |_, _, _| AIR.into());
+    assert!(convert_raw(&air, t, &opts(AirMode::Auto)).unwrap().is_none());
+    let mut bad = vol([3, 3, 3], |_, _, _| BRICK.into());
+    bad.blocks.pop();
+    assert!(matches!(convert_raw(&bad, t, &opts(AirMode::Auto)), Err(ImportError::NotASchematic(_))));
+    let mut bad = vol([3, 3, 3], |_, _, _| BRICK.into());
+    bad.blocks.push(0);
+    assert!(matches!(convert_raw(&bad, t, &opts(AirMode::Auto)), Err(ImportError::NotASchematic(_))));
 }
