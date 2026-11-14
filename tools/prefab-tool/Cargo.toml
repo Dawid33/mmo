@@ -1,0 +1,14 @@
+[package]
+name = "prefab-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line prefab tool: `view` renders a prefab as a PNG, `check` validates the built-in set."
+autotests = false
+
+[dependencies]
+game = { path = "../../crates/game" }
+png = "0.18"
+
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
