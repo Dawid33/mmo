@@ -6,6 +6,7 @@ pub mod convert;
 pub mod nbt;
 pub mod report;
 pub mod sponge;
+pub mod split;
 pub mod table;
 pub mod volume;
 
@@ -16,6 +17,7 @@ pub use convert::{convert, AirMode, ConvertOptions};
 pub use nbt::{parse_gzip_nbt, parse_nbt, Tag, NBT_MAX_DEPTH, NBT_MAX_TAGS};
 pub use report::Report;
 pub use sponge::{read_schem, SCHEM_MAX_BYTES, SCHEM_MAX_CELLS};
+pub use split::{slug, split, Build, GroundMode, Split, SplitOptions};
 pub use table::{Table, MAPPING_VERSION};
 pub use volume::{BlockEntity, BlockState, BlockVolume};
 

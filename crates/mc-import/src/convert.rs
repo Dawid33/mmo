@@ -435,7 +435,7 @@ pub fn convert(volume: &BlockVolume, table: &Table, opts: &ConvertOptions) -> Op
 }
 
 /// A sign's plain text: `front_text.messages` (1.20+) or `Text1..Text4`; non-empty lines joined by a space.
-fn sign_text(nbt: &Tag) -> Option<String> {
+pub(crate) fn sign_text(nbt: &Tag) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     if let Some(msgs) = nbt.get("front_text").and_then(|f| f.get("messages")).and_then(Tag::as_list) {
         lines.extend(msgs.iter().take(4).filter_map(Tag::as_str).filter_map(json_text));
