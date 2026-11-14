@@ -1,10 +1,13 @@
 # The game's login service on the orion k3s server: https://login.factoriosurvivalworld.com.
 # Needs ../platform (cert-manager's ClusterIssuer), ../monitoring (the ServiceMonitor kind),
-# ../keycloak and ../keycloak-realm applied first (the issuer comes from the realm root's state).
-# The binary must be on the node BEFORE the first apply (`just orion-login-push`): the
-# Deployment waits for its rollout, and a failed apply taints it.
-#   just orion-login-push
+# ../keycloak and ../keycloak-realm applied first (the issuer comes from the realm root's state),
+# and ../registry (the ECR repository and the pull user; read from its state). The image
+# must be in ECR BEFORE the first apply: the Deployment waits for its rollout, and a
+# failed apply taints it. Order:
+#   just orion-init registry && just orion-plan registry && just orion-apply registry
+#   just orion-login-push     # first push: no Deployment yet, also tags `bootstrap`
 #   just orion-init login && just orion-plan login && just orion-apply login
+# Releases afterwards: `just orion-login-push` (kubectl set image, not an apply).
 # Operator commands: `just orion-login …` (e.g. `just orion-login world list`).
 variable "state_bucket" {
   description = "The orion state bucket (../backend.s3.tfbackend), to read the keycloak-realm root's outputs."
@@ -18,6 +21,30 @@ variable "issuer_host_alias_ip" {
   default     = null
 }
 
+variable "image_tag" {
+  description = "Tag the Deployment is created with (later releases: `just orion-login-push`)."
+  type        = string
+  default     = "bootstrap"
+}
+
+data "terraform_remote_state" "registry" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket
+    region = var.aws_region
+    key    = "orion/registry.tfstate"
+  }
+}
+
+# The pull-only user, for the apply-time pull token only (Secret login-ecr). A
+# token made with the default chain's (administrator) credentials could push.
+provider "aws" {
+  alias      = "ecr_pull"
+  region     = data.terraform_remote_state.registry.outputs.region
+  access_key = data.terraform_remote_state.registry.outputs.pull_access_key_id
+  secret_key = data.terraform_remote_state.registry.outputs.pull_secret_access_key
+}
+
 data "terraform_remote_state" "keycloak_realm" {
   backend = "s3"
   config = {
@@ -29,7 +56,17 @@ data "terraform_remote_state" "keycloak_realm" {
 
 module "login" {
   source = "../../../modules/login"
+  providers = {
+    aws     = aws
+    aws.ecr = aws.ecr_pull
+  }
   issuer = data.terraform_remote_state.keycloak_realm.outputs.issuer
+
+  image_repository           = data.terraform_remote_state.registry.outputs.repository_url
+  image_tag                  = var.image_tag
+  ecr_region                 = data.terraform_remote_state.registry.outputs.region
+  ecr_pull_access_key_id     = data.terraform_remote_state.registry.outputs.pull_access_key_id
+  ecr_pull_secret_access_key = data.terraform_remote_state.registry.outputs.pull_secret_access_key
 
   issuer_host_alias_ip = var.issuer_host_alias_ip
 }

@@ -9,22 +9,43 @@ variable "host" {
   default     = "login.factoriosurvivalworld.com"
 }
 
-variable "image" {
-  description = "Stock base image the node's login binary runs in (glibc, no application code). Must be at least as new as the glibc the binary was built against."
+variable "image_repository" {
+  description = "The login image's ECR repository URL (<account>.dkr.ecr.<region>.amazonaws.com/mmo/login; the registry root's output)."
   type        = string
-  default     = "debian:trixie-slim"
 }
 
-variable "command" {
-  description = "The container's command: the binary itself, never a shell (a missing binary is then a StartError naming the path). `serve` is appended."
-  type        = list(string)
-  default     = ["/srv/mmo/bin/login"]
+variable "image_tag" {
+  description = "Tag the Deployment is CREATED with. Releases change the image with `kubectl set image` (`just orion-login-push`) and the Deployment ignores later changes to it, so changing this after the first apply does nothing."
+  type        = string
+  default     = "bootstrap"
 }
 
-variable "bin_host_path" {
-  description = "Directory on the node holding the release `login` binary (`just orion-login-push` fills it). Mounted read-only at /srv/mmo/bin."
+variable "ecr_region" {
+  description = "Region of the ECR registry (the refresher asks it for pull tokens)."
   type        = string
-  default     = "/srv/mmo/bin"
+}
+
+variable "ecr_pull_access_key_id" {
+  description = "Access key id of the pull-only IAM user (the registry root's output); the refresher's credentials."
+  type        = string
+}
+
+variable "ecr_pull_secret_access_key" {
+  description = "Its secret."
+  type        = string
+  sensitive   = true
+}
+
+variable "refresh_image" {
+  description = "Image of the pull-secret refresher (CronJob ecr-refresh): needs the AWS CLI, kubectl and a POSIX sh. Pinned; keep kubectl within one minor of the cluster."
+  type        = string
+  default     = "alpine/k8s:1.37.1"
+}
+
+variable "refresh_schedule" {
+  description = "When the refresher rewrites the pull secret. An ECR token lives 12 hours."
+  type        = string
+  default     = "0 */6 * * *"
 }
 
 variable "issuer_host_alias_ip" {

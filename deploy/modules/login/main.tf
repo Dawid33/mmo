@@ -4,12 +4,16 @@
 # trades a Keycloak access token for its own refresh token. Its own PostgreSQL is
 # in postgres.tf.
 #
-# The binary is NOT in the image: the pod runs stock debian over the release
-# `login` binary found on the node at var.bin_host_path (a read-only hostPath),
-# put there by `just orion-login-push`. Push the binary BEFORE the first apply:
-# the Deployment waits for its rollout, so without the binary (a missing directory
-# keeps the pod Pending, a missing binary is a StartError naming the path) the
-# apply blocks about 10 minutes, fails and taints the Deployment.
+# The image is mmo/login in ECR (the registry root; deploy/images/login/Dockerfile:
+# debian + the release binary at /usr/local/bin/login, entrypoint `login`). The
+# Deployment is created with var.image_tag (`bootstrap`, pushed by the FIRST
+# `just orion-login-push`) and then ignores its image: releases are
+# `kubectl set image` by `just orion-login-push`, rolled back with
+# `kubectl rollout undo`, and a later apply never rolls a release back. Push
+# BEFORE the first apply: the Deployment waits for its rollout, so without the
+# image the apply blocks about 10 minutes, fails and taints the Deployment.
+# Pulling needs a token (ecr.tf): Secret login-ecr, made here at apply time and
+# rewritten every 6 hours by the CronJob ecr-refresh.
 #
 # Two replicas (var.replicas) protect against a deploy or a crashed pod: with
 # max_unavailable = 0 a new pod must be Ready (its health check answering, which
@@ -95,6 +99,8 @@ resource "kubernetes_deployment_v1" "login" {
         labels = local.labels
         annotations = {
           # A changed secret rolls the pods (env and files are read at start).
+          # Not the pull secret (ecr.tf): it changes every 6 hours and is read
+          # by the kubelet, not by the pods.
           "checksum/secrets" = sha256(join(",", [
             random_password.db.result,
             random_password.service_token.result,
@@ -105,6 +111,10 @@ resource "kubernetes_deployment_v1" "login" {
       spec {
         automount_service_account_token = false
         enable_service_links            = false
+        # Does not depend on the CronJob: the Secret is filled at apply time.
+        image_pull_secrets {
+          name = kubernetes_secret_v1.ecr_pull.metadata[0].name
+        }
         # On deletion the endpoint is removed from the Service and the preStop
         # sleep runs at the same time; Traefik needs a few seconds to stop routing
         # to the pod, and the service refuses connections once it gets SIGTERM.
@@ -116,13 +126,6 @@ resource "kubernetes_deployment_v1" "login" {
           content {
             ip        = host_aliases.value
             hostnames = [regex("^[a-z]+://([^/:]+)", var.issuer)[0]]
-          }
-        }
-        volume {
-          name = "bin"
-          host_path {
-            path = var.bin_host_path
-            type = "Directory"
           }
         }
         volume {
@@ -141,9 +144,10 @@ resource "kubernetes_deployment_v1" "login" {
         }
         container {
           name  = "login"
-          image = var.image
-          # The binary itself, not a shell.
-          command = concat(var.command, ["serve"])
+          image = "${var.image_repository}:${var.image_tag}"
+          # The image's entrypoint is the binary itself (`login`), not a shell.
+          args              = ["serve"]
+          image_pull_policy = "IfNotPresent"
           env {
             name  = "VOXEL_LOGIN_BIND"
             value = "0.0.0.0:${local.port}"
@@ -201,11 +205,6 @@ resource "kubernetes_deployment_v1" "login" {
             }
           }
           volume_mount {
-            name       = "bin"
-            mount_path = "/srv/mmo/bin"
-            read_only  = true
-          }
-          volume_mount {
             name       = "keys"
             mount_path = "/keys"
             read_only  = true
@@ -236,6 +235,10 @@ resource "kubernetes_deployment_v1" "login" {
         }
       }
     }
+  }
+  # Releases set the image (`just orion-login-push`); an apply must not undo them.
+  lifecycle {
+    ignore_changes = [spec[0].template[0].spec[0].container[0].image]
   }
   depends_on = [kubernetes_stateful_set_v1.postgres]
 }

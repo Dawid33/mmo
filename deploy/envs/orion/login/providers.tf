@@ -11,7 +11,7 @@ variable "kube_context" {
 }
 
 variable "aws_region" {
-  description = "Only Route53 (a global service) is used here."
+  description = "Route53 (global) and the state bucket. The ECR token comes from the registry root's region (provider aws.ecr_pull in main.tf)."
   type        = string
   default     = "eu-central-1"
 }
