@@ -77,6 +77,7 @@ mod random_ops;
 mod prefab_file;
 mod prefab_resolve;
 mod prefab_layout;
+mod prefab_builtin;
 mod region_coords;
 mod region_from_chunks;
 mod region_from_columns;

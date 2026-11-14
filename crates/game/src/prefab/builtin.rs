@@ -1,0 +1,132 @@
+//! The game's own prefab set: embedded at build time, or read from disk in development.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
+
+use super::codec::{prefab_from_named_bytes, BIN_SUFFIX, RON_SUFFIX};
+use super::resolve::{prefab_name_key, resolve, ResolvedPrefab, Trust};
+use crate::registry::BlockId;
+
+pub const BUILTIN_PREFAB_DIR: &str = "assets/prefabs";
+/// Sub-directories never read or embedded: local import output and cut lists.
+pub const BUILTIN_SKIPPED_DIRS: &[&str] = &["imported", "sources"];
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PrefabSet {
+    by_key: BTreeMap<u32, Arc<ResolvedPrefab>>,
+}
+
+impl PrefabSet {
+    /// `(file name, bytes)` pairs. Errors name the file.
+    pub fn from_sources<'a>(
+        sources: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+        block_named: &dyn Fn(&str) -> Option<BlockId>,
+    ) -> Result<Self, String> {
+        let mut by_key: BTreeMap<u32, Arc<ResolvedPrefab>> = BTreeMap::new();
+        for (file_name, bytes) in sources {
+            let Some(decoded) = prefab_from_named_bytes(file_name, bytes, None) else { continue };
+            let file = decoded.map_err(|e| format!("{file_name}: {e}"))?;
+            let resolved = resolve(&file, block_named, Trust::Builtin).map_err(|problems| {
+                let all: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
+                format!("{file_name}: {} problem(s): {}", all.len(), all.join("; "))
+            })?;
+            let stem = file_name
+                .strip_suffix(RON_SUFFIX)
+                .or_else(|| file_name.strip_suffix(BIN_SUFFIX))
+                .unwrap_or(file_name);
+            if stem != resolved.name {
+                return Err(format!("{file_name}: the file stem must be the prefab's name \"{}\"", resolved.name));
+            }
+            if !resolved.meta.source.is_empty() && resolved.meta.licence.is_empty() {
+                return Err(format!("{file_name}: meta.source is set but meta.licence is empty"));
+            }
+            let key = resolved.name_key;
+            if let Some(other) = by_key.get(&key) {
+                return Err(format!(
+                    "{file_name}: prefab name \"{}\" has the same key as \"{}\"",
+                    resolved.name, other.name
+                ));
+            }
+            by_key.insert(key, Arc::new(resolved));
+        }
+        Ok(Self { by_key })
+    }
+
+    pub fn get(&self, name_key: u32) -> Option<&Arc<ResolvedPrefab>> {
+        self.by_key.get(&name_key)
+    }
+
+    pub fn named(&self, name: &str) -> Option<&Arc<ResolvedPrefab>> {
+        self.get(prefab_name_key(name)).filter(|p| p.name == name)
+    }
+
+    /// Ascending by key.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_key.values().map(|p| p.name.as_str())
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
+    }
+}
+
+/// `(file name, bytes)`, sorted by file name.
+pub fn embedded_prefab_sources() -> &'static [(&'static str, &'static [u8])] {
+    include!(concat!(env!("OUT_DIR"), "/builtin_prefabs.rs"))
+}
+
+fn read_dir_sorted(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if !BUILTIN_SKIPPED_DIRS.contains(&name.as_str()) {
+                read_dir_sorted(&path, out)?;
+            }
+        } else {
+            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            out.push((name, bytes));
+        }
+    }
+    Ok(())
+}
+
+/// From `disk_dir` when it exists (recursive, skipping [`BUILTIN_SKIPPED_DIRS`]), else the embedded copy.
+pub fn load_builtin_prefabs(
+    disk_dir: Option<&Path>,
+    block_named: &dyn Fn(&str) -> Option<BlockId>,
+) -> Result<PrefabSet, String> {
+    match disk_dir.filter(|d| d.is_dir()) {
+        Some(dir) => {
+            let mut files = Vec::new();
+            read_dir_sorted(dir, &mut files)?;
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            PrefabSet::from_sources(files.iter().map(|(n, b)| (n.as_str(), b.as_slice())), block_named)
+        }
+        None => PrefabSet::from_sources(embedded_prefab_sources().iter().copied(), block_named),
+    }
+}
+
+static PREFABS: OnceLock<PrefabSet> = OnceLock::new();
+
+/// Installs the process-global set. Idempotent for an equal set; panics on a different one.
+pub fn install_prefabs(set: PrefabSet) {
+    let installed = PREFABS.get_or_init(|| set.clone());
+    assert_eq!(*installed, set, "conflicting prefab sets installed in one process");
+}
+
+/// The installed set, or an empty one when none was.
+pub fn prefabs() -> &'static PrefabSet {
+    static EMPTY: PrefabSet = PrefabSet { by_key: BTreeMap::new() };
+    PREFABS.get().unwrap_or(&EMPTY)
+}

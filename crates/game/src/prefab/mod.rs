@@ -1,6 +1,7 @@
 //! Prefabs: pre-built structures stamped into the voxel world. This module
 //! holds the shape catalogue and the one rotation convention.
 
+pub mod builtin;
 pub mod codec;
 pub mod file;
 pub mod layout;
@@ -25,4 +26,8 @@ pub use resolve::{
 pub use layout::{
     cell_of_world, chunks_touched, layout_chunk, marker_in_world, placement_bounds, world_of_cell, ChunkStamp,
     Placement,
+};
+pub use builtin::{
+    embedded_prefab_sources, install_prefabs, load_builtin_prefabs, prefabs, PrefabSet, BUILTIN_PREFAB_DIR,
+    BUILTIN_SKIPPED_DIRS,
 };
