@@ -1,14 +1,18 @@
 //! Minecraft Sponge schematic (`.schem`) reader. Input is untrusted: every failure is an
 //! [`ImportError`] value, and no length field in a file drives an allocation before it is checked.
 
+pub mod classify;
 pub mod nbt;
 pub mod sponge;
+pub mod table;
 pub mod volume;
 
 use std::fmt;
 
+pub use classify::{classify, Class, Classified};
 pub use nbt::{parse_gzip_nbt, parse_nbt, Tag, NBT_MAX_DEPTH};
 pub use sponge::{read_schem, SCHEM_MAX_BYTES, SCHEM_MAX_CELLS};
+pub use table::{Table, MAPPING_VERSION};
 pub use volume::{BlockEntity, BlockState, BlockVolume};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
