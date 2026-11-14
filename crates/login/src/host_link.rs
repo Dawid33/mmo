@@ -92,6 +92,16 @@ struct HostLink {
     tx: Sender<LoginToHost>,
     up: watch::Receiver<bool>,
     waiters: Waiters,
+    /// Whether this is still the world's link; its pump writes the gauge only while it is.
+    /// Held across the check and the write, so a replacement cannot interleave.
+    current: Arc<Mutex<bool>>,
+}
+
+impl HostLink {
+    /// The world got another link (or none): this one's pump no longer reports.
+    fn retire(&self) {
+        *self.current.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    }
 }
 
 /// The links to the world hosts, by world id. Shared by every handler.
@@ -233,7 +243,15 @@ impl HostLinks {
     /// The link to `world`'s host (dialed on first use; redialed when its row changed).
     /// `Ok(None)`: the world has no host link (R2a: nothing is pushed).
     fn link(&self, world: &WorldRow) -> Result<Option<Arc<HostLink>>, SpawnError> {
-        let Some(addr) = &world.host_link else { return Ok(None) };
+        let Some(addr) = &world.host_link else {
+            // The row lost its link: the old one is retired and reads as down, once.
+            let mut links = self.links.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(old) = links.remove(&world.world_id) {
+                old.retire();
+                self.metrics.host_link(&world.world_id, false);
+            }
+            return Ok(None);
+        };
         let token = self.token.clone().ok_or(SpawnError::NoServiceToken)?;
         let addr: SocketAddr = addr.parse().map_err(|e| SpawnError::BadLink(format!("host_link {addr:?}: {e}")))?;
         let cert = world
@@ -250,6 +268,7 @@ impl HostLinks {
         let (tx, events) = LinkDialer::connect::<HostToLogin, LoginToHost>(addr, cert.clone(), hello);
         let (up_tx, up) = watch::channel(false);
         let waiters: Waiters = Arc::default();
+        let current = Arc::new(Mutex::new(true));
         let pump = Pump {
             world: world.world_id.clone(),
             events,
@@ -260,15 +279,20 @@ impl HostLinks {
             runtime,
             kicks: self.kicks.clone(),
             metrics: self.metrics.clone(),
+            current: current.clone(),
         };
         std::thread::Builder::new()
             .name(format!("host-link-{}", world.world_id))
             .spawn(move || pump.run())
             .map_err(|e| SpawnError::BadLink(format!("spawn the link thread: {e}")))?;
         log::info!("[login] host link for world {} dials {addr}", world.world_id);
-        let link = Arc::new(HostLink { addr, cert, tx, up, waiters });
+        let link = Arc::new(HostLink { addr, cert, tx, up, waiters, current });
         // A replaced link's dialer stops when its last sender (in a finishing join) drops.
-        links.insert(world.world_id.clone(), link.clone());
+        if let Some(old) = links.insert(world.world_id.clone(), link.clone()) {
+            old.retire();
+        }
+        // The new link is not up yet: the series follows it from now on.
+        self.metrics.host_link(&world.world_id, false);
         Ok(Some(link))
     }
 
@@ -320,16 +344,26 @@ struct Pump {
     /// Woken on every `Up`: pending kicks go out at once.
     kicks: Arc<Notify>,
     metrics: Metrics,
+    /// See [`HostLink::current`].
+    current: Arc<Mutex<bool>>,
 }
 
 impl Pump {
+    /// Set the gauge, unless this link was replaced meanwhile.
+    fn report(&self, up: bool) {
+        let current = self.current.lock().unwrap_or_else(|p| p.into_inner());
+        if *current {
+            self.metrics.host_link(&self.world, up);
+        }
+    }
+
     fn run(self) {
         for event in self.events.iter() {
             match event {
                 LinkEvent::Up(_) => {
                     log::info!("[login] host link for world {} up", self.world);
                     self.up.send_replace(true);
-                    self.metrics.host_link(&self.world, true);
+                    self.report(true);
                     self.kicks.notify_one();
                 }
                 LinkEvent::Down(why) => {
@@ -337,7 +371,7 @@ impl Pump {
                         log::warn!("[login] host link for world {} down: {why}", self.world);
                     }
                     self.up.send_replace(false);
-                    self.metrics.host_link(&self.world, false);
+                    self.report(false);
                 }
                 LinkEvent::Msg(HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash }) => {
                     let waiter = self.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&(player_token, session_epoch));
@@ -372,6 +406,6 @@ impl Pump {
         }
         // The dialer is gone (its sender dropped): nothing more can be acked.
         self.up.send_replace(false);
-        self.metrics.host_link(&self.world, false);
+        self.report(false);
     }
 }

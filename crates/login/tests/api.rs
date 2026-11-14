@@ -554,6 +554,58 @@ mod host_link {
         assert_eq!((r.status, r.error()), (StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable));
     }
 
+    /// How many pump threads of world `w1` are alive (Linux: thread names in /proc).
+    fn w1_pumps() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
+            .filter(|name| name.trim() == "host-link-w1")
+            .count()
+    }
+
+    async fn wait_for(what: &str, mut ok: impl AsyncFnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + LINK_WAIT;
+        while !ok().await {
+            assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    async fn host_link_gauge_follows_the_current_link() {
+        const UP: &str = "login_host_link_up{world=\"w1\"} 1";
+        const DOWN: &str = "login_host_link_up{world=\"w1\"} 0";
+        // Host A never acks, so a join waiting on it keeps A's link (and its pump) alive.
+        let host_a = FakeHost::start(Box::new(|_, _| None));
+        let a = linked_app(&[host_a.world("w1")], Duration::from_millis(600)).await;
+        let (first, refresh_b) = (a.account().await, a.account().await);
+        let stuck = a.join(&first, "w1");
+        let moved = async {
+            wait_for("link A up", async || a.get("/metrics").await.text().contains(UP)).await;
+            // The world moves to host B: the replacement link reports from now on.
+            let host_b = FakeHost::acking();
+            a.store.put_world(&host_b.world("w1")).await.unwrap();
+            assert_eq!(a.join(&refresh_b, "w1").await.status, StatusCode::OK);
+            assert!(a.get("/metrics").await.text().contains(UP));
+            host_b
+        };
+        let (stuck, host_b) = tokio::join!(stuck, moved);
+        // The join on A gave up, so A's replaced pump ends AFTER B is up: it must not read as down.
+        assert_eq!(stuck.status, StatusCode::SERVICE_UNAVAILABLE);
+        drop(host_a);
+        wait_for("A's pump to end", async || w1_pumps() == 1).await;
+        let body = a.get("/metrics").await.text();
+        assert!(body.contains(UP), "{body}");
+        // The world loses its host link: the series reads down, once.
+        let mut row = host_b.world("w1");
+        (row.host_link, row.host_link_cert) = (None, None);
+        a.store.put_world(&row).await.unwrap();
+        assert_eq!(a.join(&a.account().await, "w1").await.status, StatusCode::OK);
+        let body = a.get("/metrics").await.text();
+        assert!(body.contains(DOWN), "{body}");
+    }
+
     #[tokio::test]
     #[ignore = "slow: >100ms — run via just test-full"]
     async fn late_ack_never_answers_a_later_join() {
