@@ -523,11 +523,16 @@ impl RegionSpawner for InlineSpawner {
                 runner.set_saved_terms(terms);
                 runner
             }
-            None => seed.into_runner(
-                id,
-                out,
-                &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
-            ),
+            None => match seed.into_region_with(id, &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})")) {
+                Ok(region) => RegionRunner::new(id, region, out),
+                // It does not run, and is never regenerated.
+                Err(why) => {
+                    log::error!("region {id:?}: {why}");
+                    let _ = out.send((id, RegionOutput::LoadFailed(why)));
+                    self.failed.insert(id, recv);
+                    return send;
+                }
+            },
         };
         let mut runner = runner;
         if self.record_slot_hashes {
@@ -3706,22 +3711,21 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Worldgen happens on the region's thread (and not at all for a
             // parked region with a healthy blob).
             RegionSeed::Deferred(self.parked.remove(&rc))
+        } else if let Some(serialized) = self.parked.remove(&rc) {
+            // A parked region restores from its blob alone (never regenerated).
+            RegionSeed::Parked(serialized)
         } else {
             let watch = crate::perf::Stopwatch::start();
             let columns = self.generate_timed(rc); // now Vec<(ColumnCoords, Column)>
-            let parked = self.parked.contains_key(&rc);
             crate::perf_event!(
                 "region_generate",
-                "region={},{} ms={} columns={} parked={parked}",
+                "region={},{} ms={} columns={} parked=false",
                 rc.x,
                 rc.z,
                 crate::perf::ms(watch.elapsed()),
                 columns.len()
             );
-            match self.parked.remove(&rc) {
-                Some(serialized) => RegionSeed::Parked(serialized, columns),
-                None => RegionSeed::Fresh(columns),
-            }
+            RegionSeed::Fresh(columns)
         };
         // Its incarnation marker goes on the output channel BEFORE the runner
         // exists: everything a previous (dead) runner left there comes

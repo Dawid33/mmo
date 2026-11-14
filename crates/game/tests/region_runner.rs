@@ -101,16 +101,50 @@ fn shutdown_stops_and_park_restore_is_hash_exact() {
     };
 
     // Restore: the exact cycle-in path the manager uses.
-    let restored = RegionSeed::Parked(serialized, flat_columns()).into_region(id);
+    let restored = RegionSeed::Parked(serialized).into_region(id).unwrap();
     assert_eq!(before, crc(&restored), "hash(before park) == hash(after restore), bit-exact");
 }
 
+/// A parked blob is a region's whole state: one that does not decode fails
+/// the load on the inline spawner too (`LoadFailed`; the manager keeps the
+/// region stopped and retries later) and worldgen never runs in its place.
 #[test]
-fn corrupt_parked_blob_falls_back_to_generation() {
-    let id = RegionCoords::new(2, 2);
-    let garbage = SerializedRegion(vec![0xde, 0xad, 0xbe, 0xef]);
-    let region = RegionSeed::Parked(garbage, flat_columns()).into_region(id);
-    assert_eq!(region.data().ecs.entities.len(), 4, "fell back to the 2x2 fallback chunks");
+fn a_corrupt_parked_blob_fails_the_load_and_is_never_regenerated() {
+    use game::RegionSpawner;
+    let id = RegionCoords::new(1, -2);
+    let mut spawner = game::InlineSpawner::default();
+    let corrupt = SerializedRegion(vec![0xFF; 7]);
+    assert!(corrupt.to_rollback().is_err());
+    assert!(RegionSeed::Parked(SerializedRegion(vec![0xFF; 7])).into_region(id).is_err());
+    assert!(
+        RegionSeed::Deferred(Some(SerializedRegion(vec![0xFF; 7])))
+            .into_region_with(id, &|_| panic!("worldgen ran over a parked region"))
+            .is_err()
+    );
+
+    let (out, out_recv) = unbounded();
+    let input = spawner.spawn(id, RegionSeed::Parked(corrupt), out.clone());
+    let outputs: Vec<_> = out_recv.try_iter().collect();
+    assert_eq!(outputs.len(), 1, "only the failure is reported");
+    match &outputs[0] {
+        (rc, RegionOutput::LoadFailed(why)) => {
+            assert_eq!(*rc, id);
+            assert!(why.contains("parked state corrupt"), "{why}");
+        }
+        (_, other) => panic!("a corrupt parked region must fail its load, got {}", other.name()),
+    }
+    assert!(spawner.running().is_empty(), "the region does not run");
+    // Its channel stays open until the manager reaps it (not a crashed region).
+    assert!(input.send(RegionInput::Shutdown).is_ok());
+    spawner.pump();
+    spawner.tick_all();
+    assert!(out_recv.try_recv().is_err(), "nothing runs there");
+    spawner.reap(id);
+    assert!(input.send(RegionInput::Shutdown).is_err(), "reaped: the channel is closed");
+
+    // A fresh seed is what generation is for.
+    let _input = spawner.spawn(id, RegionSeed::Fresh(flat_columns()), out);
+    assert_eq!(spawner.running(), vec![id]);
 }
 
 #[test]

@@ -154,8 +154,8 @@ impl RegionSpawner for ThreadRegionSpawner {
                 };
                 let from_store = stored.is_some();
                 // The forged tiles of its 3x3 neighbourhood, pinned for the
-                // runner's life: its own generation (a fresh region, or a
-                // parked one whose blob is corrupt) and every halo seed of a
+                // runner's life: its own generation (a fresh region) and
+                // every halo seed of a
                 // never-run neighbour (`SeedHaloFromWorldgen`, also the
                 // fallback of `SeedHaloFromStore`, at start or on a reseed)
                 // then read only pinned tiles. A tile that will not load
@@ -181,15 +181,29 @@ impl RegionSpawner for ThreadRegionSpawner {
                         runner.set_saved_terms(terms);
                         runner
                     }
-                    None => seed.into_runner(id, out, &|rc| {
-                        let started = Instant::now();
-                        let columns = match &generator {
-                            Some(generate) => generate(rc),
-                            None => unreachable!("Deferred seed without a region generator"),
-                        };
-                        generate_time.set(started.elapsed());
-                        columns
-                    }),
+                    None => {
+                        let built = seed.into_region_with(id, &|rc| {
+                            let started = Instant::now();
+                            let columns = match &generator {
+                                Some(generate) => generate(rc),
+                                None => unreachable!("Deferred seed without a region generator"),
+                            };
+                            generate_time.set(started.elapsed());
+                            columns
+                        });
+                        match built {
+                            Ok(region) => RegionRunner::new(id, region, out),
+                            // A parked region's blob is its whole state (edits, entities,
+                            // piles). One that does not decode is a read error like a
+                            // store's: the region does not run (`LoadFailed`, retried by
+                            // the manager) — it is never regenerated, or the next cut
+                            // would save fresh ground over the stored region.
+                            Err(why) => {
+                                log::error!("[region {},{}] {why}", id.x, id.z);
+                                return fail(why);
+                            }
+                        }
+                    }
                 };
                 let mut runner = runner;
                 if let Some(g) = halo_generator {

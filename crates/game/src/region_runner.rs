@@ -228,65 +228,49 @@ impl RegionOutput {
 }
 
 /// How to build a region when it spawns: restored from the parking lot if
-/// possible, else generated. The fallback chunks make a corrupt parked blob
-/// recoverable (log + regenerate deterministically).
+/// possible, else generated. A parked blob that does not decode is a failed
+/// load ([`RegionSeed::into_region_with`]), never regenerated.
 pub enum RegionSeed {
     Fresh(Vec<(ColumnCoords, Column)>),
-    Parked(SerializedRegion, Vec<(ColumnCoords, Column)>),
+    Parked(SerializedRegion),
     /// The spawner generates the columns itself, on the region's own thread
     /// (`RegionSpawner::generates_columns`): `None` = never run, `Some` = the
     /// parked blob to restore. Worldgen then costs the manager thread nothing
     /// (it measured 0.1-0.9 s per region start, sequentially — 6-7 s for a 3x3
-    /// join), and a parked region generates only if its blob is corrupt.
+    /// join), and a parked region never generates.
     Deferred(Option<SerializedRegion>),
 }
 
 impl RegionSeed {
     /// For spawners that never receive a [`RegionSeed::Deferred`] (they do not
     /// `generates_columns`).
-    pub fn into_region(self, id: RegionId) -> Region {
+    pub fn into_region(self, id: RegionId) -> Result<Region, String> {
         self.into_region_with(id, &|rc| {
             unreachable!("Deferred seed for {rc:?} reached a spawner that does not generate columns")
         })
     }
 
-    /// `generate` is only called for a deferred seed that actually needs
-    /// columns: a never-run region, or a parked one whose blob is corrupt.
+    /// `generate` is only called for a never-run region's deferred seed.
+    ///
+    /// `Err` when a parked blob does not decode. That is a failed load like a
+    /// store's: the spawner answers [`RegionOutput::LoadFailed`] and the
+    /// region does not run. It is never regenerated — the blob was its whole
+    /// state (edits, entities, piles), and fresh ground in its place would be
+    /// saved over the stored region by the next cut.
     pub fn into_region_with(
         self,
         id: RegionId,
         generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
-    ) -> Region {
-        let restore = |serialized: SerializedRegion, fallback: &mut dyn FnMut() -> Vec<(ColumnCoords, Column)>| {
-            match serialized.to_rollback() {
-                Ok(rollback) => Region::new(rollback, None, id, None),
-                Err(e) => {
-                    log::error!("parked region {:?} corrupt ({e}); regenerating", id);
-                    Region::from_columns(id, fallback())
-                }
-            }
+    ) -> Result<Region, String> {
+        let restore = |serialized: SerializedRegion| match serialized.to_rollback() {
+            Ok(rollback) => Ok(Region::new(rollback, None, id, None)),
+            Err(e) => Err(format!("parked state corrupt: {e}")),
         };
         match self {
-            RegionSeed::Fresh(columns) => Region::from_columns(id, columns),
-            RegionSeed::Parked(serialized, fallback) => {
-                let mut fallback = Some(fallback);
-                restore(serialized, &mut || fallback.take().unwrap_or_default())
-            }
-            RegionSeed::Deferred(None) => Region::from_columns(id, generate(id)),
-            RegionSeed::Deferred(Some(serialized)) => restore(serialized, &mut || generate(id)),
+            RegionSeed::Fresh(columns) => Ok(Region::from_columns(id, columns)),
+            RegionSeed::Parked(serialized) | RegionSeed::Deferred(Some(serialized)) => restore(serialized),
+            RegionSeed::Deferred(None) => Ok(Region::from_columns(id, generate(id))),
         }
-    }
-}
-
-impl RegionSeed {
-    /// Build this seed's runner.
-    pub fn into_runner(
-        self,
-        id: RegionId,
-        out: Sender<(RegionCoords, RegionOutput)>,
-        generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
-    ) -> RegionRunner {
-        RegionRunner::new(id, self.into_region_with(id, generate), out)
     }
 }
 

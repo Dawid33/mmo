@@ -530,8 +530,7 @@ fn region_start_defers_worldgen_to_a_spawner_that_generates_columns() {
 }
 
 /// A deferred seed generates exactly when it has to: a fresh region once, a
-/// parked region never (the old eager path regenerated the columns on every
-/// resubscribe just to have a fallback for a corrupt blob).
+/// parked region never (a corrupt blob fails the load instead).
 #[test]
 fn deferred_seed_generates_only_for_fresh_regions() {
     use std::cell::Cell;
@@ -544,12 +543,12 @@ fn deferred_seed_generates_only_for_fresh_regions() {
         vec![(ColumnCoords::new(0, 0), Column::new(0, air, air, vec![sub]))]
     };
 
-    let fresh = game::RegionSeed::Deferred(None).into_region_with(id, &generate);
+    let fresh = game::RegionSeed::Deferred(None).into_region_with(id, &generate).unwrap();
     assert_eq!(calls.get(), 1);
     assert_eq!(fresh.terrain_snapshot().chunks.len(), 1);
 
     let parked = game::SerializedRegion::from_rollback(fresh.data());
-    let restored = game::RegionSeed::Deferred(Some(parked)).into_region_with(id, &generate);
+    let restored = game::RegionSeed::Deferred(Some(parked)).into_region_with(id, &generate).unwrap();
     assert_eq!(calls.get(), 1, "a valid parked region restores without worldgen");
     assert_eq!(restored.terrain_fingerprint(), fresh.terrain_fingerprint());
 }

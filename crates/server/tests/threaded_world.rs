@@ -833,7 +833,7 @@ fn body_crosses_seam_on_real_threads() {
     // The spawn region with the body in it, as the world store holds it.
     let b = game::BLOCK_VOXELS as f32;
     let units = movement::UNITS_PER_METER;
-    let mut region = game::RegionSeed::Fresh(seam_floor_columns(SPAWN_REGION)).into_region(SPAWN_REGION);
+    let mut region = game::RegionSeed::Fresh(seam_floor_columns(SPAWN_REGION)).into_region(SPAWN_REGION).unwrap();
     // A block in from the seam, 1.5 blocks above the floor (FLOOR_DEPTH
     // voxels deep), 8 m/s toward −z and 4 m/s up, spinning at 6 rad/s.
     let pose = game::Pose::from_translation(Vector::new(128.0, FLOOR_DEPTH as f32 + b / 2.0 + 1.5 * b, b));
