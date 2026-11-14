@@ -3,7 +3,8 @@
 //! function of its arguments; integer math only. Nothing here samples terrain except through the
 //! `ground` / `wet` closures it is given.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use game::prefab::{placement_bounds, Facing, Placement, ResolvedPrefab};
@@ -146,7 +147,8 @@ fn place_at(prefab: &Arc<ResolvedPrefab>, turn: u8, x0: i32, z0: i32, level: i32
     Placement { anchor: [x0 - min[0], level + 1 - min[1], z0 - min[2]], turn, mirror: false }
 }
 
-/// A pure function of its arguments. `ground(x, z)` is the natural ground height, `wet(x, z)` whether
+/// An arm side ends only when NO house has room left on the arm, not when the house picked first is too
+/// wide: a narrow house still fills the tail. A pure function of its arguments. `ground(x, z)` is the natural ground height, `wet(x, z)` whether
 /// the column is under water.
 pub fn layout_town(
     kit: &TownKit,
@@ -155,6 +157,12 @@ pub fn layout_town(
     ground: &dyn Fn(i32, i32) -> i32,
     wet: &dyn Fn(i32, i32) -> bool,
 ) -> TownLayout {
+    // The terrain closures may be costly (a terrain patch per call) and candidates ask the same columns
+    // again and again: each column is asked once per layout.
+    let ground_memo = RefCell::new(BTreeMap::new());
+    let wet_memo = RefCell::new(BTreeMap::new());
+    let ground = |x: i32, z: i32| *ground_memo.borrow_mut().entry((x, z)).or_insert_with(|| ground(x, z));
+    let wet = |x: i32, z: i32| *wet_memo.borrow_mut().entry((x, z)).or_insert_with(|| wet(x, z));
     let [ox, oz] = origin;
     let (h, s) = (p.plaza / 2, p.street_w / 2);
     let arms = p.arms.min(4);
@@ -213,16 +221,18 @@ pub fn layout_town(
                     }
                     room = true;
                     let r = world_rect(origin, d, (t, t + frontage), out_dir, (near, near + depth));
+                    let grown = [r[0] - 1, r[1] - 1, r[2] + 1, r[3] + 1];
+                    // Cheapest test first: a house already rejected never asks the terrain.
                     let (cx, cz) = ((r[0] + r[2] - 1).div_euclid(2), (r[1] + r[3] - 1).div_euclid(2));
                     let samples = [(r[0], r[1]), (r[2] - 1, r[1]), (r[0], r[3] - 1), (r[2] - 1, r[3] - 1), (cx, cz)];
-                    let heights = samples.map(|(x, z)| ground(x, z));
-                    let relief = heights.iter().max().unwrap() - heights.iter().min().unwrap();
-                    let grown = [r[0] - 1, r[1] - 1, r[2] + 1, r[3] + 1];
-                    let rejected = samples.iter().any(|&(x, z)| wet(x, z))
-                        || relief > p.max_relief
-                        || meet(grown, plaza)
+                    let rejected = meet(grown, plaza)
                         || boxes.iter().any(|&b| meet(grown, b))
-                        || strips.iter().any(|&b| meet(grown, b));
+                        || strips.iter().any(|&b| meet(grown, b))
+                        || samples.iter().any(|&(x, z)| wet(x, z))
+                        || {
+                            let heights = samples.map(|(x, z)| ground(x, z));
+                            heights.iter().max().unwrap() - heights.iter().min().unwrap() > p.max_relief
+                        };
                     if !rejected {
                         fitting.push((i, turn, frontage, r));
                     }

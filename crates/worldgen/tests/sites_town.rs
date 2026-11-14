@@ -309,14 +309,16 @@ fn a_town_repeats_no_house_while_the_kit_has_more() {
 #[test]
 fn a_small_kit_repeats_but_uses_every_house_and_fills_the_lots() {
     let kit = same_size_kit(3);
-    let l = layout_town(&kit, O, &small(5), &flat, &dry);
-    assert!(l.lots.len() > 3, "{}", l.lots.len());
-    for h in &kit.houses {
-        assert!(l.lots.iter().any(|lot| lot.name == h.prefab.name), "{} unused", h.prefab.name);
+    for seed in 1..=4 {
+        let l = layout_town(&kit, O, &small(seed), &flat, &dry);
+        assert!(l.lots.len() > 3, "seed {seed}: {}", l.lots.len());
+        for h in &kit.houses {
+            assert!(l.lots.iter().any(|lot| lot.name == h.prefab.name), "seed {seed}: {} unused", h.prefab.name);
+        }
+        // the repeats do not starve the lots: as many as the same arms hold with an endless kit
+        let wide = layout_town(&same_size_kit(60), O, &small(seed), &flat, &dry);
+        assert_eq!(l.lots.len(), wide.lots.len(), "seed {seed}");
     }
-    // the repeats do not starve the lots: as many as the same arms hold with an endless kit
-    let wide = layout_town(&same_size_kit(60), O, &small(5), &flat, &dry);
-    assert_eq!(l.lots.len(), wide.lots.len());
 }
 
 #[test]
@@ -325,4 +327,64 @@ fn the_pick_is_deterministic_with_the_no_repeat_rule() {
     let (a, b) = (layout_town(&kit, O, &small(9), &flat, &dry), layout_town(&kit, O, &small(9), &flat, &dry));
     assert_eq!(a.lots, b.lots);
     assert_eq!(a.skipped, b.skipped);
+}
+
+#[test]
+fn ground_is_asked_once_per_column_and_not_per_candidate() {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+    let kit = same_size_kit(40);
+    let p = small(3);
+    let asked = RefCell::new(BTreeSet::new());
+    let calls = RefCell::new(0u32);
+    let ground = |x: i32, z: i32| {
+        *calls.borrow_mut() += 1;
+        assert!(asked.borrow_mut().insert((x, z)), "ground asked twice for ({x}, {z})");
+        70
+    };
+    let l = layout_town(&kit, O, &p, &ground, &dry);
+    // One lot attempt (laid or skipped) reads at most its 5 corner/centre samples plus the middle of the
+    // front face; the memo makes a repeat free and a rejected candidate reads nothing, so 6 per attempt
+    // is a guaranteed ceiling, whatever the kit size (40 houses x 5 x lots would be ~10x this).
+    let attempts = l.lots.len() as u32 + l.skipped;
+    assert!(*calls.borrow() <= 6 * attempts, "{} calls for {attempts} attempts", calls.borrow());
+}
+
+/// Five houses too long for a short arm, one narrow one: an arm side is not ended by picking a wide one
+/// (the old rule broke on the first misfit pick, which here is 5 in 6).
+#[test]
+fn a_wide_house_does_not_end_the_arm_while_a_narrow_one_fits() {
+    let mut files: Vec<PrefabFile> =
+        (0..5).map(|i| town_house(&format!("wide{i}"), STYLE, [28, 5, 9], Facing::South, true)).collect();
+    files.push(town_house("narrow", STYLE, [7, 5, 7], Facing::South, true));
+    let kit = town_kit(&set_of(&files), STYLE).unwrap();
+    for seed in 1..=8 {
+        let p = TownParams { arms: 1, arm_len: 26, ..small(seed) };
+        let l = layout_town(&kit, O, &p, &flat, &dry);
+        for left in [true, false] {
+            let n = l.lots.iter().filter(|lot| lot.left == left).count();
+            // 7 wide + 2..5 gap: at least 2 narrow houses fit between 10 and 34
+            assert!(n >= 2, "seed {seed} left={left}: {n} lots");
+        }
+        assert!(l.lots.iter().all(|lot| !lot.name.starts_with("wide")));
+    }
+}
+
+#[test]
+fn a_lot_takes_a_small_house_where_big_ones_fail_relief() {
+    let mut files: Vec<PrefabFile> =
+        (0..3).map(|i| town_house(&format!("big{i}"), STYLE, [21, 5, 9], Facing::South, true)).collect();
+    files.extend((0..3).map(|i| town_house(&format!("sm{i}"), STYLE, [5, 5, 5], Facing::South, true)));
+    let kit = town_kit(&set_of(&files), STYLE).unwrap();
+    let slope = |x: i32, _: i32| 70 + (x - O[0]) / 2;
+    // relief of a 21-wide house is ~10 > 6; of a 5-wide one ~2
+    let p = TownParams { arms: 1, ..small(4) };
+    let l = layout_town(&kit, O, &p, &slope, &dry);
+    assert!(!l.lots.is_empty());
+    assert!(l.lots.iter().all(|lot| lot.name.starts_with("sm")), "{:?}", l.lots);
+    assert_eq!(l.skipped, 0, "a lot is skipped only when no house fits");
+    // nothing fits: every attempt is a skip
+    let none = layout_town(&kit, O, &TownParams { max_relief: 0, ..p }, &slope, &dry);
+    assert!(none.lots.is_empty());
+    assert!(none.skipped > 0);
 }
