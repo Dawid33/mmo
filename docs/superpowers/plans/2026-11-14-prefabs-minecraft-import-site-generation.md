@@ -586,3 +586,47 @@ were verified against the pre-plan generator.
   `--prefab` flag, its USAGE text, its test, a warning when used on an existing world) and `justfile` (a
   comment on the `run` recipe) — alongside plan 1's `EMBEDDED_BLOCK_TEXTURES` entries in
   `crates/client/src/renderer/mod.rs` and the `prefab-view`, `prefab-check` and `mc-import` recipes.
+
+## 14. Carried over from plan 4 (town generator — built 2026-11-14)
+
+Plan: `2026-11-14-prefabs-4-town-generator.md`. Built: the paint pass (`Paint`, `paints_in`; roads and
+plazas recolour the top ground block, full detail and LOD alike), the town kit (`worldgen::sites::kit`), the
+town layout (`worldgen::sites::town`), the dev town in the home region (`DevTownSource`,
+`VOXEL_DEV_STRUCTURES=town=<style>[:arms[:len]]`, `client debug embarked --town`, `just town <style>`),
+`worldgen::is_wet`, and `just town-preview <style> [--seed N] [--terrain flat|seed]` (a top-down PNG in
+`target/prefab-view/`).
+
+Tuned after the first pictures (task 6): a kit house is 5..=28 blocks a side and at least 60 % of its box's
+columns hold a block; a town repeats a house only when no unused one fits the lot; an arm side ends only
+when no house has room; a layout asks the terrain once per column and rejects by the cheapest rule first.
+Kit sizes from the imported library under those rules: medieval 60, astraia 24, desert 17, asian 12.
+
+Not done, in the order it will be felt:
+- **Nobody has stood in a town yet.** `just town medieval` has never been run by a person: the client was not
+  launched and client tests were not run. The home region was traced by hand, not seen.
+- **The home region is "in practice", not by rule.** The generator announces regions to the dev source and a
+  forged world's spawn region is skipped, so the embark target is announced first because its thread starts
+  first. With a near radius above 0 at spawn (`region_blocks=64`, `VOXEL_NEAR_RADIUS>=1`) a neighbour of the
+  spawn region wins instead. A fortress embarked on the spawn tile itself gets no town. The exact rule is a
+  hook from the manager on `Embarked` / `AdventureStarted` — in `world_manager`, left alone while R4 is live.
+  The `[structures]` line in `server.log` names the home region and the lots laid and skipped.
+- **Slopes.** On real terrain most lots are skipped for relief (`max_relief` 6; one preview laid 28 of 66),
+  and neighbouring pads meet in a step (the earlier house's skirt wins). Needs terracing or a site search
+  that prefers flat ground — the stage F site table is where a site is chosen.
+- **Kit quality is only as good as the tags.** L- and T-shaped houses pass the fill rule with their front on
+  an empty corner; the desert and astraia packs hold non-houses tagged `house` (a "bow" plan, flat pads);
+  asian reads as a row of shrines. Fix in `mc-sources/import-all.py` tags, or pick the front as the side with
+  the fewest filled columns between door and box edge.
+- **Cost.** `layout_town` takes about 4.6 s on real terrain (one `ground_y` patch per column asked), once, on
+  the first region thread to ask, while the other region threads wait. A patch-reusing sampler removes it.
+- **Hash.** `DevTownSource::content_hash` does not cover the kit constants or the layout algorithm; harmless
+  while the disk cache is off for dev sources, but the frozen site table needs a version in its key.
+- **LOD.** A 5-wide street shows in a coarse tile only where a cell centre falls on it; a neighbour's LOD tile
+  built during the layout window can miss its share of the town until that region's terrain changes.
+- A centrepiece hides the plaza paint under its whole box (a statue on a grass square); no coarse test has a
+  paint straddling a tile edge; `prefab-tool town`'s default scale looks at width only.
+- Left uncommitted (their files held other people's work): `crates/client/src/debug_launch.rs` (`--town`,
+  USAGE, its parse test) and `justfile` (`town`, `town-preview`) — alongside the earlier `--prefab` hunk, the
+  `EMBEDDED_BLOCK_TEXTURES` entries in `crates/client/src/renderer/mod.rs` and the `prefab-view`,
+  `prefab-check`, `mc-import` recipes.
+- Still owed from plan 3: `just test-threads` once R4's `peer_schedule::` tests pass again.
