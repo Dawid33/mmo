@@ -512,6 +512,19 @@ pub fn run_coordinator() -> ServerExit {
 mod tests {
     use super::*;
 
+    /// `claim` ownership is a host's only: refused for `all` and `coordinator`, accepted for
+    /// `host` (one host included); other ownerships are not this check's business.
+    #[test]
+    fn claim_needs_role_host() {
+        assert_eq!(check_claim(Role::All, true), Err(CLAIM_NEEDS_ROLE_HOST.to_string()));
+        assert_eq!(check_claim(Role::Coordinator, true), Err(CLAIM_NEEDS_ROLE_HOST.to_string()));
+        assert_eq!(check_claim(Role::Host, true), Ok(()));
+        assert_eq!(check_several_hosts(Role::Host, 1, true, false), Ok(()), "one host under claim needs nothing more");
+        for role in [Role::All, Role::Coordinator, Role::Host] {
+            assert_eq!(check_claim(role, false), Ok(()), "{role:?} without claim");
+        }
+    }
+
     #[test]
     fn clock_from_anchor_refuses_an_anchor_behind_the_world_tick() {
         let anchor = game::ClockAnchor { unix_ms: 1_000_000, tick: 100 };

@@ -185,7 +185,7 @@ fn register_host(store: &StoreHandle, ordinal: u32, boot: u64) -> world_store::H
         boot,
         generation: 0,
         clean: false,
-        state: 0,
+        state: game::HOST_LIVE,
         seen_ms: 0,
         reg: 0,
         peer_addr: None,

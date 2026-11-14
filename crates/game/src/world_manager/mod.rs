@@ -1106,7 +1106,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// [`CLAIM_WANTED_EVERY_MS`]), so an entry lasts one claim round trip — unless no live
     /// host that could claim it is reachable, which is exactly the bound of what waits in a
     /// session for an unreachable peer (`peer_waiting`, a session's queue: uncapped too, for
-    /// as long as the outage). Counted on the `[server]` line (`unowned_waiting=`).
+    /// as long as the outage) — or unless the claimer is reachable but its claims keep
+    /// failing (store errors, lock timeouts: retried every `CLAIM_RETRY_MS` on the server),
+    /// which lasts as long as the store's outage and grows by the departures into that
+    /// super-region meanwhile (slimes are bounded per region; their refill is not). Not
+    /// capped like `pending_arrivals` because an overflow here has no running target to put
+    /// drops down in, and a person in it may not be despawned. Counted on the `[server]` line
+    /// (`unowned_waiting=`).
     unowned_waiting: BTreeMap<crate::SuperRegion, Vec<peers::UnownedWait>>,
     /// Super-regions with no owner this host knows that something here needs (a subscribe,
     /// a player clamped at their seam, a spawn placement, a move, a session's region): what
