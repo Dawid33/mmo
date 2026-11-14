@@ -862,6 +862,32 @@ fn entities_stored_twice(db: &PgDb) -> i64 {
     )[0]
 }
 
+/// The rows of every entity stored in more than one region:
+/// `(birth_rx, birth_rz, serial, rx, rz, saved_tick)`, ordered by entity then region.
+fn entity_rows_stored_twice(db: &PgDb) -> Vec<[i64; 6]> {
+    let url = db.0.url.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use sqlx::Connection;
+            let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+            let v: Vec<(i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+                "SELECT e.birth_rx, e.birth_rz, e.serial, e.rx, e.rz, e.saved_tick FROM entities e \
+                 JOIN (SELECT birth_rx, birth_rz, serial FROM entities GROUP BY birth_rx, birth_rz, serial \
+                       HAVING COUNT(*) > 1) twice USING (birth_rx, birth_rz, serial) \
+                 ORDER BY e.birth_rx, e.birth_rz, e.serial, e.rx, e.rz",
+            )
+            .fetch_all(&mut c)
+            .await
+            .unwrap();
+            c.close().await.unwrap();
+            v.into_iter().map(|(a, b, c, d, e, f)| [a, b, c, d, e, f]).collect()
+        })
+    })
+    .join()
+    .unwrap()
+}
+
 /// The decided cuts: `(cut, tick, committed)`.
 fn decisions(db: &PgDb) -> Vec<(i64, i64, bool)> {
     let ids = query_i64s(db, "SELECT cut_id FROM cut_decisions ORDER BY cut_id");
@@ -1787,8 +1813,34 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     assert_eq!(saved(&db), before, "a replaced host saves nothing on its way out");
     // Host 0's cuts go on: host 1's dead row is no longer expected in a cut.
     let (last, _) = last_committed(&db);
-    w.until_committed_after(&db, last);
+    w.pair.until("a world cut of host 0 alone committed", |_| decisions(&db).iter().any(|(c, _, k)| *k && *c > last));
+    w.pair.until("host 0 settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
     assert_eq!(saved(&db), before, "nothing of host 1's region saved after it was replaced");
+    // Conservation, as far as this hand-made death allows. The row was marked dead by
+    // hand, under `Rollback`, with no succession: nothing adopts host 1's last committed
+    // part. (In the product only a declaration marks a row dead, in the same transaction
+    // as the succession that hands the land to an heir, and no cut commits until one
+    // settles it — the heir's part adopting those rows, the survivors' journals saying
+    // what crossed since.) So an entity that crossed from host 1 to host 0 after host 1's
+    // last committed cut is in host 0's rows now AND still in host 1's stale ones — that
+    // and nothing else: every entity stored twice is exactly one row of host 0's and one
+    // of a host 1 region never saved again (at or before host 1's last saved tick).
+    let s = w.claims[0].store().super_region_regions();
+    let owner = |rx: i64, rz: i64| {
+        let rc = RegionCoords::new(rx as i32, rz as i32);
+        (0..HOSTS).find(|&h| game::Static { ordinal: h, hosts: HOSTS }.owns(rc, s)).expect("an owned region")
+    };
+    let host1_last = before.iter().copied().max().expect("host 1's region was saved");
+    let twice = entity_rows_stored_twice(&db);
+    for rows in twice.chunk_by(|a, b| a[..3] == b[..3]) {
+        let mut owners: Vec<u32> = rows.iter().map(|r| owner(r[3], r[4])).collect();
+        owners.sort();
+        assert_eq!(owners, [0, 1], "an entity stored twice is one row of host 0's and one of host 1's: {twice:?}");
+        let stale = rows.iter().find(|r| owner(r[3], r[4]) == 1).unwrap();
+        assert!(stale[5] <= host1_last, "host 1's copy is from its last committed part (tick {host1_last}): {twice:?}");
+        let fresh = rows.iter().find(|r| owner(r[3], r[4]) == 0).unwrap();
+        assert!(fresh[5] > host1_last, "host 0's copy is from a cut it took alone: {twice:?}");
+    }
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }
