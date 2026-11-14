@@ -118,6 +118,19 @@ pub enum Reliable {
     /// the store's `super_regions` is the truth (every host reads it at boot and every
     /// `TERRAIN_POLL_SECS`); `Owns` only lets a peer learn a claim sooner.
     Owns { rows: Vec<(crate::SuperRegion, u64)> },
+    /// A survivor's report to the heir of succession `id` (R4, `world_manager/succession.rs`):
+    /// its peer journal against the predecessor since `base_cut` (every transfer and player
+    /// move exchanged with it, acknowledged or not — the journal records at queue time) and,
+    /// in `owed`, the intents and replies it still owed the predecessor, in order and
+    /// unwrapped (never a transfer or move: those are `Sent` entries). Not a state message:
+    /// it never travels [`Reliable::InCut`] — no world cut runs while a succession is open
+    /// and unanswered, and the heir's resolution (not a cut's mark) decides what it holds.
+    SuccessionReport {
+        id: crate::SuccessionId,
+        base_cut: CutId,
+        entries: Vec<super::JournalEntry>,
+        owed: Vec<Reliable>,
+    },
 }
 
 impl Reliable {
@@ -156,6 +169,14 @@ impl Reliable {
                 }
             }
             Reliable::InCut { body, .. } => body.redact(),
+            Reliable::SuccessionReport { entries, owed, .. } => {
+                for e in entries {
+                    if let super::JournalEvent::Sent(m) = &mut e.event {
+                        m.redact();
+                    }
+                }
+                owed.iter_mut().for_each(Reliable::redact);
+            }
             _ => {}
         }
     }

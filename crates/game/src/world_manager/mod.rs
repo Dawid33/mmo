@@ -25,8 +25,11 @@ use crate::save_cut::{
 
 mod peers;
 mod placement;
+mod succession;
 mod world_cut;
 mod world_link;
+pub use peers::intents_in;
+pub use succession::{SuccessionReportIn, SUCCESSION_WAIT_LOG_MS};
 pub use placement::{
     KickIn, LoginOut, Placement, SpawnRequest, KICK_MEMORY_MS, KICK_UNACKED_WARN_MS, SPAWN_PIN_MS, SPAWN_RELAY_MAX_HOPS,
     SPAWN_SYNC_WAIT_MS,
@@ -383,6 +386,12 @@ impl InlineSpawner {
 
     /// Swap the schedule on a live spawner (`None` = back to lockstep), for
     /// harnesses that construct their server before choosing one.
+    /// Test support: the world tick is `tick` from now on (a host process started late
+    /// into a running world: its clock is the world's, not zero).
+    pub fn set_world_tick(&mut self, tick: crate::Tick) {
+        self.rounds = tick;
+    }
+
     /// Test support: `rc`'s next start fails its load (`RegionOutput::LoadFailed`), as
     /// one whose stored state could not be read.
     pub fn fail_next_start(&mut self, rc: RegionCoords) {
@@ -1260,6 +1269,18 @@ pub struct WorldManager<S: RegionSpawner> {
     spawn_pins: BTreeMap<PlayerId, placement::Pin>,
     /// When an unacknowledgeable kick was last warned about ([`KICK_UNACKED_WARN_MS`]).
     kick_warned_ms: Option<u64>,
+    /// The successions this host was ordered to answer (R4, `succession.rs`), until the
+    /// coordinator says they are over.
+    successions: BTreeMap<crate::SuccessionId, succession::SurvivorRun>,
+    /// Peer boots declared dead (`(ordinal, boot)`, a succession): their hello is refused.
+    dead_boots: BTreeSet<(u32, u64)>,
+    /// Peers whose current boot was succeeded, with that boot: they hold nobody and are
+    /// awaited by nothing until a hello of another boot.
+    succeeded_peers: BTreeMap<u32, u64>,
+    /// The heir's: every survivor's report per succession (Task 9 resolves them).
+    succession_reports: BTreeMap<crate::SuccessionId, BTreeMap<u32, SuccessionReportIn>>,
+    /// When a succession waiting for its base cut was last logged.
+    succession_wait_logged_ms: Option<u64>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1410,6 +1431,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             login_out: Vec::new(),
             spawn_pins: BTreeMap::new(),
             kick_warned_ms: None,
+            successions: BTreeMap::new(),
+            dead_boots: BTreeSet::new(),
+            succeeded_peers: BTreeMap::new(),
+            succession_reports: BTreeMap::new(),
+            succession_wait_logged_ms: None,
         }
     }
 
@@ -2155,6 +2181,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.client_disconnected(c, now_ms);
         }
         self.close_idle_observers(now_ms);
+        // A succession waiting for its base cut (a commit found by the store's poll).
+        self.retry_successions();
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions
             .keys()
@@ -2332,6 +2360,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         // (a commit learned from the store's poll, with no `CutDone`, does too); after a
         // `CutDone` already did, or for a one-phase cut, only the base moves.
         self.journal.committed(id, &BTreeSet::new());
+        // A succession waiting for this base cut answers now.
+        self.retry_successions();
         if let Some(carried) = self.outstanding_cuts.remove(&id) {
             for (rc, seq) in carried {
                 if self.uncommitted.get(&rc).is_some_and(|u| u.seq == seq) {

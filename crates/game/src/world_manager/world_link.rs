@@ -422,7 +422,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         let (boot, settled_below) = (self.world_boot, self.lowest_outstanding());
         self.settled_below = settled_below;
         let pending_cut = self.attach_pending_cut();
-        self.link_send(HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut });
+        let successions = self.attach_successions();
+        self.link_send(HostMsg::Attach {
+            host,
+            epoch,
+            running,
+            online,
+            generation,
+            boot,
+            settled_below,
+            handed,
+            pending_cut,
+            successions,
+        });
         let queued: BTreeSet<RequestId> = self
             .outbox
             .iter()
@@ -530,7 +542,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    fn apply_world_msg(&mut self, msg: CoordMsg, now_ms: u64) {
+    pub(super) fn apply_world_msg(&mut self, msg: CoordMsg, now_ms: u64) {
         match msg {
             CoordMsg::SpawnPeople { .. } | CoordMsg::Directive { .. } if !self.world_attached() => {
                 // Decided before the coordinator applied our latest `Attach`, which
@@ -632,6 +644,22 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.world_begin_cut(cut, tick, &hosts, &leaving, generation)
             }
             CoordMsg::CutDone { cut, committed } => self.world_cut_decided(cut, committed),
+            CoordMsg::Succession { id, predecessor, predecessor_boot, heir, kind, base_cut, moved, survivors } => self
+                .succession_ordered(crate::Succession {
+                    id,
+                    predecessor,
+                    predecessor_boot,
+                    heir,
+                    kind,
+                    base_cut,
+                    moved,
+                    survivors,
+                }),
+            CoordMsg::SuccessionDone { id, settled } => self.succession_done(id, settled),
+            CoordMsg::Generation(generation) => {
+                log::error!("[server] the coordinator rolled the world back to generation {generation}: this host restarts");
+                self.higher_generation = Some(self.higher_generation.map_or(generation, |g| g.max(generation)));
+            }
         }
     }
 

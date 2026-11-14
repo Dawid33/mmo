@@ -74,6 +74,49 @@ impl SuccessionKind {
     }
 }
 
+/// How long (the coordinator's wall ms, from the declaration or its restart) a succession
+/// may wait for every survivor's `SuccessionApplied` and the heir's `SuccessionAdopted`:
+/// past it the world rolls back to the last committed cut (a survivor that can never report
+/// — it lost its journal, or cannot reach the base cut — must not stop saving for ever).
+pub const SUCCESSION_DEADLINE_MS: u64 = 30_000;
+
+/// One host's land given to one heir (the store's `successions` row as declared; R4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Succession {
+    pub id: SuccessionId,
+    pub predecessor: u32,
+    pub predecessor_boot: u64,
+    pub heir: u32,
+    pub kind: SuccessionKind,
+    /// The last committed world cut at the declaration (`CutId(0)`: none): what the heir
+    /// starts the predecessor's regions from.
+    pub base_cut: crate::CutId,
+    /// The super-regions moved to the heir, at their new epochs, in key order.
+    pub moved: Vec<(SuperRegion, u64)>,
+    /// Every other live dirty host at the declaration (the heir among them), by ordinal:
+    /// the hosts that report their journals to the heir.
+    pub survivors: Vec<u32>,
+}
+
+/// What a declaration of successions did (the store's answer). Anything but `Done` wrote
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Declared {
+    /// Declared: one succession per predecessor, in the call's order.
+    Done(Vec<Succession>),
+    /// Crash: these predecessors' rows beat within [`HOST_LEASE_MS`] (and were not
+    /// vouched), or left clean meanwhile; leave: these rows are not clean.
+    NotLapsed(Vec<u32>),
+    /// Another succession is open: a second failure before the first is settled — the
+    /// caller rolls the world back.
+    SuccessionOpen,
+    /// These rows are gone: no row, another boot, already dead or already succeeded — or,
+    /// named as heirs, not live with a fresh lease any more. The list mixes predecessor and
+    /// heir ordinals (sorted): the caller does not tell them apart — it forgets the whole
+    /// declaration and re-observes (its next lease read gives a new lapsed set and new heirs).
+    Gone(Vec<u32>),
+}
+
 /// Environment: `allinone` (default), `static` or `claim`.
 pub const OWNERSHIP_ENV: &str = "VOXEL_OWNERSHIP";
 /// Environment: this host's ordinal (`static` / `claim` only), `0..hosts`.
@@ -329,6 +372,12 @@ impl Directory {
     /// the next [`Self::set_live`].
     pub fn note_live(&mut self, ordinal: u32) {
         self.live.insert(ordinal);
+    }
+
+    /// Host `ordinal` was declared dead (a succession): not live until the next
+    /// [`Self::set_live`] or a hello of another boot of it ([`Self::note_live`]).
+    pub fn note_dead(&mut self, ordinal: u32) {
+        self.live.remove(&ordinal);
     }
 
     /// The live host that should claim `sr` when it is free: [`rendezvous_owner`]

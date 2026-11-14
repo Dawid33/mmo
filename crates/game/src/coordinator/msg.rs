@@ -8,7 +8,8 @@ use crate::history::{
     AdventureRefusal, CalendarTick, Directive, EmbarkRefusal, LegendsPage, LegendsQuery, PersonId, SiteId,
 };
 use crate::{
-    CivMarker, CutId, EmbarkOptions, EmbarkRequest, GameEventKind, PersonInfo, PlayerId, RegionCoords, SiteMarker, Tick,
+    CivMarker, CutId, EmbarkOptions, EmbarkRequest, GameEventKind, PersonInfo, PlayerId, RegionCoords, SiteMarker,
+    SuccessionId, SuccessionKind, SuperRegion, Tick,
 };
 
 /// One host's world request, unique across the host's restarts: `boot` is random per
@@ -137,6 +138,11 @@ pub enum HostMsg {
         /// ([`CoordMsg::CutDone`]): the coordinator answers it (from what it decided, or
         /// the store's decision, an undecided cut aborted).
         pending_cut: Option<CutId>,
+        /// The successions this host has answered (R4) and not yet heard settled
+        /// ([`CoordMsg::SuccessionDone`]): `(id, adopted)` — applied as a survivor, and, for
+        /// the heir, whether it adopted too. A restarted coordinator counts these as answered
+        /// again; an order not listed is (re)sent.
+        successions: Vec<(SuccessionId, bool)>,
     },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.
@@ -189,6 +195,12 @@ pub enum HostMsg {
     /// (`BeginCut { leaving }` naming it), parks everything for it and exits once it
     /// commits — its `hosts` row then clean, so its return keeps the world generation.
     LeaveRequest,
+    /// A survivor of succession `id` ([`CoordMsg::Succession`]) reported its journal to the
+    /// heir and re-routed what it owed the predecessor (R4).
+    SuccessionApplied { id: SuccessionId },
+    /// The heir of succession `id` resolved the survivors' journals, adopted the
+    /// predecessor's rows and loaded its regions: ready to cut (R4, Task 9).
+    SuccessionAdopted { id: SuccessionId },
 }
 
 /// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).
@@ -268,6 +280,28 @@ pub enum CoordMsg {
     BeginCut { cut: CutId, tick: Tick, hosts: Vec<u32>, leaving: Vec<u32>, generation: u64 },
     /// World cut `cut` is decided: `committed` (every part visible) or aborted (none).
     CutDone { cut: CutId, committed: bool },
+    /// Host `predecessor` (its process `predecessor_boot`) was declared dead (or left) and
+    /// all its super-regions (`moved`, at their new epochs) are `heir`'s now (R4). Sent to
+    /// every survivor (`survivors`, the heir among them): each reports its peer journal
+    /// against the predecessor relative to `base_cut` to the heir, re-routes what it owed
+    /// the predecessor, and answers [`HostMsg::SuccessionApplied`].
+    Succession {
+        id: SuccessionId,
+        predecessor: u32,
+        predecessor_boot: u64,
+        heir: u32,
+        kind: SuccessionKind,
+        base_cut: CutId,
+        moved: Vec<(SuperRegion, u64)>,
+        survivors: Vec<u32>,
+    },
+    /// Succession `id` is over: `settled` by a committed world cut, or abandoned (a world
+    /// rollback, followed by [`CoordMsg::Generation`]).
+    SuccessionDone { id: SuccessionId, settled: bool },
+    /// The coordinator rolled the world back to its last committed cut (R4: a second host
+    /// lost before a succession settled, or a succession's deadline): the world generation
+    /// is this now — every host notes it and exits (`EXIT_WORLD_ROLLBACK`).
+    Generation(u64),
 }
 
 impl CoordMsg {

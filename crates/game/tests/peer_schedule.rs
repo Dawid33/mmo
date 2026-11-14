@@ -5709,3 +5709,358 @@ fn polled_commit(rig: &mut MultiRig) -> bool {
 fn journal_truncates_on_a_commit_found_by_polling() {
     sweep_hits("journal_truncates_on_a_commit_found_by_polling", 2, 1, SEEDS / 4, polled_commit);
 }
+
+// --- Successions: the survivor's half (R4 Task 8) -------------------------------------
+
+/// Round budget for a succession's orders to be answered.
+const SUCCESSION_ROUNDS: usize = 200;
+
+/// A chain of one region per host (`host_chain`), every one running, the hosts answering
+/// ownership from a claim directory laid out as `static` would (the rig's `super_regions`
+/// table behind it), world cuts running.
+fn succession_world(rig: &mut MultiRig) -> Vec<RegionCoords> {
+    let chain = host_chain(rig.hosts.len() as u32);
+    let rows = rendezvous_rows(rig, &[], &[]);
+    rig.with_directory(rows);
+    rig.with_claims();
+    for rc in &chain {
+        rig.run(*rc);
+    }
+    world_cuts(rig);
+    chain
+}
+
+/// The heir of `dead` among the rig's other live hosts, and a survivor that is not it.
+fn heir_and_survivor(rig: &MultiRig, dead: u32) -> (u32, Option<u32>) {
+    let live: std::collections::BTreeSet<u32> =
+        (0..rig.hosts.len() as u32).filter(|h| *h != dead && !rig.dead.contains(h)).collect();
+    let heir = game::heir_of(dead, &live).expect("a live host");
+    (heir, live.into_iter().find(|h| *h != heir))
+}
+
+/// The coordinator's order of succession `s`.
+fn order_of(s: &game::Succession) -> game::CoordMsg {
+    game::CoordMsg::Succession {
+        id: s.id,
+        predecessor: s.predecessor,
+        predecessor_boot: s.predecessor_boot,
+        heir: s.heir,
+        kind: s.kind,
+        base_cut: s.base_cut,
+        moved: s.moved.clone(),
+        survivors: s.survivors.clone(),
+    }
+}
+
+/// Cut rounds until every survivor of `s` answered `SuccessionApplied` at the coordinator
+/// and the heir holds every survivor's report.
+fn until_applied(rig: &mut MultiRig, s: &game::Succession) {
+    for _ in 0..SUCCESSION_ROUNDS {
+        let applied = rig.core().succession_progress().into_iter().find(|(id, _, _)| *id == s.id).map(|(_, a, _)| a);
+        let reports: Vec<u32> =
+            rig.hosts[s.heir as usize].manager.succession_reports(s.id).map(|r| r.keys().copied().collect()).unwrap_or_default();
+        if applied.as_deref() == Some(&s.survivors[..]) && reports == s.survivors {
+            return;
+        }
+        rig.cut_round();
+    }
+    panic!(
+        "succession {} never answered: {:?} (seed {}, link delay {})",
+        s.id.0,
+        rig.core().succession_progress(),
+        rig.seed,
+        rig.link_delay
+    );
+}
+
+/// The survivor's order arrives BEFORE the `CutDone` of the succession's base cut (its
+/// world link held across that decision): it waits — no report leaves, its journal stays —
+/// and once the `CutDone` comes the report leaves, against the base cut, with the journal
+/// that cut truncated. Every survivor answers; the heir holds every report. `false` when
+/// the seed missed the case (the cut aborted, or truncated nothing).
+fn reports_against_the_base(rig: &mut MultiRig) -> bool {
+    let chain = succession_world(rig);
+    let dead = rig.owner(chain[1]);
+    let (heir, s) = heir_and_survivor(rig, dead);
+    let s = s.expect("three hosts");
+    let y = crate::common::above_floor_y();
+    let slimes: Vec<game::EntityId> =
+        (0..4).map(|i| rig.spawn_slime(chain[i % 3], [REGION_SIZE / 2.0 + i as f32, y, REGION_SIZE / 3.0])).collect();
+    let shuttle = |rig: &mut MultiRig, r: usize| {
+        let roll = crate::common::multi_rig::mix(rig.seed, r as u64);
+        if r % 3 == 0 {
+            let i = ((roll >> 16) % 2) as usize;
+            push_over(rig, slimes[(roll % slimes.len() as u64) as usize], chain[i], chain[i + 1]);
+        }
+        rig.cut_round();
+    };
+    let mut r = 0usize;
+    while committed(rig) < 1 {
+        assert!(r < WORLD_CUT_ROUNDS, "no world cut committed: {:?}", rig.decided);
+        shuttle(rig, r);
+        r += 1;
+    }
+    // The next cut host `s` takes part in: its decision is held from `s`.
+    let cut = loop {
+        assert!(r < 2 * WORLD_CUT_ROUNDS, "host {s} never took part in another cut");
+        if let Some((c, "pending" | "marked")) = rig.hosts[s as usize].manager.world_cut_state() {
+            if !rig.decided.contains_key(&c) {
+                break c;
+            }
+        }
+        shuttle(rig, r);
+        r += 1;
+    };
+    rig.hold_world(s, true);
+    while !rig.decided.contains_key(&cut) {
+        assert!(r < 3 * WORLD_CUT_ROUNDS, "cut {} never decided", cut.0);
+        shuttle(rig, r);
+        r += 1;
+    }
+    if !rig.decided[&cut] {
+        rig.hold_world(s, false);
+        return false;
+    }
+    let journal = rig.hosts[s as usize].manager.peer_journal().clone();
+    assert!(journal.base() < cut, "host {s} has not heard the commit");
+    let before: Vec<game::JournalEntry> = journal.entries(dead).map(|(e, _)| e.clone()).collect();
+    let truncated = {
+        let mut j = journal.clone();
+        j.committed(cut, &std::collections::BTreeSet::new());
+        j.take(dead)
+    };
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    assert_eq!((succession.base_cut, succession.heir), (cut, heir), "declared from the cut, to the heir");
+    // The order reaches `s` before the cut's decision.
+    rig.hosts[s as usize].manager.apply_coordinator_message(order_of(&succession));
+    for _ in 0..WAIT_ROUNDS {
+        let m = &rig.hosts[s as usize].manager;
+        assert_eq!(m.successions(), vec![(succession.id, false)], "host {s} waits for its base cut");
+        assert!(
+            !m.peer_owed(heir).iter().any(|msg| matches!(msg, game::Reliable::SuccessionReport { .. })),
+            "no report against another base"
+        );
+        rig.cut_round();
+    }
+    rig.hold_world(s, false);
+    until_applied(rig, &succession);
+    let report = &rig.hosts[heir as usize].manager.succession_reports(succession.id).expect("reports")[&s];
+    assert_eq!(report.base_cut, cut);
+    assert!(
+        report.entries.starts_with(&truncated),
+        "host {s}'s report holds its journal as cut {} truncated it: {} entries, {} expected first (seed {})",
+        cut.0,
+        report.entries.len(),
+        truncated.len(),
+        rig.seed
+    );
+    assert!(rig.hosts[s as usize].manager.peer_journal().entries(dead).next().is_none(), "taken");
+    // The heir filed its own; once it adopts (driven here: Task 9's), the next cut settles it.
+    let now = rig.hosts.iter().map(|h| h.now_ms).max().unwrap_or(0);
+    rig.core().handle(heir, game::HostMsg::SuccessionAdopted { id: succession.id }, now);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if rig.successions.iter().all(|(_, settled)| settled.is_some()) && rig.hosts[s as usize].manager.successions().is_empty() {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.successions.iter().all(|(_, settled)| settled.is_some()), "the next commit settles it: {:?}", rig.decided);
+    for h in [s, heir] {
+        assert!(rig.hosts[h as usize].manager.successions().is_empty(), "host {h} heard the settle");
+    }
+    truncated.len() < before.len()
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn survivor_reports_only_against_the_declared_base_cut() {
+    sweep_hits("survivor_reports_only_against_the_declared_base_cut", 3, 1, SEEDS / 4, reports_against_the_base);
+}
+
+/// What a survivor owed the dead host: intents and replies go to the heir in its report
+/// (`owed`, in order, unwrapped) — their items held exactly once all along — a transfer is
+/// a `Sent` journal entry (never owed), a spawn order is refused to its origin, and every
+/// other order is dropped: nothing stays owed to the dead host.
+fn owed_to_the_heir(rig: &mut MultiRig) {
+    crate::common::install_real_block_props();
+    let chain = succession_world(rig);
+    let dead = rig.owner(chain[1]);
+    let (heir, s) = heir_and_survivor(rig, dead);
+    let s = s.expect("three hosts");
+    let (rs, rd) = (chain.iter().copied().find(|rc| rig.owner(*rc) == s).expect("s's region"), chain[1]);
+    rig.link_down(s, dead);
+    let due = world_tick(rig) + 5;
+    let (first, second) = (refusal_of(rs, rd, due, OWED[1]), refusal_of(rs, rd, due + 1, OWED[2]));
+    let player = FRESH_PLAYER;
+    let token = || LOGIN_TOKEN.to_string();
+    let orders = [
+        game::Reliable::Intent(first),
+        game::Reliable::SpawnOrder { origin: s, hops: 1, player_token: token(), session_epoch: 3, player, record_region: Some(rd) },
+        game::Reliable::ObserverOrder { client: P_CLIENT, player, nonce: game::Nonce(5), ttl_secs: 30 },
+        game::Reliable::Kick { player_token: token(), session_epoch: 2, reason: "test".into() },
+        game::Reliable::KickAck { player_token: token(), session_epoch: 2 },
+        game::Reliable::SessionEnded { player_token: token(), session_epoch: 1 },
+        game::Reliable::PlayerParked { client: P_CLIENT, player },
+        game::Reliable::Owns { rows: Vec::new() },
+        game::Reliable::Intent(second),
+    ];
+    for msg in orders {
+        rig.hosts[s as usize].manager.send_reliable_for_test(dead, msg, false);
+    }
+    // A slime crossing into the dead host's region while the link is down: owed too.
+    let y = crate::common::above_floor_y();
+    let slime = rig.spawn_slime(rs, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
+    rig.round();
+    assert!(push_over(rig, slime, rs, rd), "the slime is in {rs:?}");
+    for _ in 0..CROSS_ROUNDS {
+        if rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, id, _)| *p == dead && *id == slime) {
+            break;
+        }
+        rig.round();
+    }
+    assert!(rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, id, _)| *p == dead && *id == slime));
+    rig.items = Some(u64::from(OWED[1] + OWED[2]));
+    rig.assert_conserved_world();
+    rig.hosts[s as usize].manager.take_login_out();
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    until_applied(rig, &succession);
+    let report = &rig.hosts[heir as usize].manager.succession_reports(succession.id).expect("reports")[&s];
+    assert_eq!(report.owed, vec![game::Reliable::Intent(first), game::Reliable::Intent(second)], "the intents, in order");
+    assert!(
+        report.entries.iter().any(|e| e.subject == game::Subject::Entity(slime) && matches!(e.event, game::JournalEvent::Sent(_))),
+        "the transfer is a Sent entry of the journal"
+    );
+    assert!(rig.hosts[s as usize].manager.peer_owed(dead).is_empty(), "nothing is owed to the dead host");
+    let out = rig.hosts[s as usize].manager.take_login_out();
+    assert!(
+        out.iter().any(|o| matches!(o, game::LoginOut::SpawnAck { ok: false, session_epoch: 3, .. })),
+        "the spawn order is refused to its origin: {out:?}"
+    );
+    // Items stay held exactly once (checked every round) while the report sits on the heir.
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn owed_state_messages_go_to_the_heir_and_orders_are_dropped() {
+    sweep("owed_state_messages_go_to_the_heir_and_orders_are_dropped", 3, 1, SEEDS / 4, owed_to_the_heir);
+}
+
+/// Rounds until host `from`'s `departed` points `player` at `to`.
+fn until_handed_to(rig: &mut MultiRig, from: u32, player: game::PlayerId, to: u32) {
+    for _ in 0..CROSS_ROUNDS {
+        if rig.hosts[from as usize].manager.departed().get(&player) == Some(&to) {
+            return;
+        }
+        rig.round();
+    }
+    panic!("host {from} never handed player {} to host {to}", player.0);
+}
+
+/// Two players walk from a survivor's region into the dead host's — one before a committed
+/// cut, one after the last one — then the host dies: the survivor's `departed` pointer of a
+/// player its report carries (a `Sent` entry) points at the heir, the other one's is gone
+/// (the store's record places it). `false` when the seed's cuts left no case of one kind.
+fn departed_pointers(rig: &mut MultiRig) -> bool {
+    let chain = succession_world(rig);
+    let dead = rig.owner(chain[1]);
+    let (heir, s) = heir_and_survivor(rig, dead);
+    let s = s.expect("three hosts");
+    let (rs, rd) = (chain.iter().copied().find(|rc| rig.owner(*rc) == s).expect("s's region"), chain[1]);
+    rig.connect_everywhere(s, P_CLIENT, P_PLAYER, centre_of(rs));
+    let (_, _, body) = until_body(rig);
+    assert!(rig.teleport(rs, body, past_seam(rs, rd, REGION_SIZE / 2.0)));
+    until_handed_to(rig, s, P_PLAYER, dead);
+    until_committed(rig, 1);
+    rig.connect_everywhere(s, P2_CLIENT, P2_PLAYER, record_at(rs, [REGION_SIZE / 2.0, REGION_SIZE / 3.0]));
+    let mut second = None;
+    for _ in 0..BODY_ROUNDS {
+        second = rig.player_body(P2_CLIENT);
+        if second.is_some() {
+            break;
+        }
+        rig.round();
+    }
+    let (_, _, body2) = second.expect("the second player has a body");
+    assert!(rig.teleport(rs, body2, past_seam(rs, rd, REGION_SIZE / 3.0)));
+    until_handed_to(rig, s, P2_PLAYER, dead);
+    // Which of them the survivor's journal still carries (a cut may have committed meanwhile).
+    let carried: std::collections::BTreeSet<game::PlayerId> = rig.hosts[s as usize]
+        .manager
+        .peer_journal()
+        .entries(dead)
+        .filter(|(e, _)| matches!(e.event, game::JournalEvent::Sent(_)))
+        .filter_map(|(e, _)| match e.subject {
+            game::Subject::Player(p) => Some(p),
+            game::Subject::Entity(_) => None,
+        })
+        .collect();
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    until_applied(rig, &succession);
+    let departed = rig.hosts[s as usize].manager.departed().clone();
+    for p in [P_PLAYER, P2_PLAYER] {
+        if carried.contains(&p) {
+            assert_eq!(departed.get(&p), Some(&heir), "player {} (carried) points at the heir", p.0);
+        } else {
+            assert_eq!(departed.get(&p), None, "player {} (not carried) is forgotten", p.0);
+        }
+    }
+    assert!(!departed.values().any(|h| *h == dead), "nothing points at the dead host: {departed:?}");
+    carried.contains(&P2_PLAYER) && !carried.contains(&P_PLAYER)
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn departed_pointers_follow_the_report_or_are_dropped() {
+    sweep_hits("departed_pointers_follow_the_report_or_are_dropped", 3, 1, SEEDS / 4, departed_pointers);
+}
+
+/// A super-region nobody claims in the rig's layout.
+const FAR_SR: game::SuperRegion = (90, 90);
+
+/// After the succession a process of the dead boot comes back (a zombie): every survivor
+/// refuses its hello — it is never reachable and gets nothing, not even what waits for its
+/// ordinal. Then a NEW boot of that ordinal starts: it is welcome — its session numbering
+/// starts fresh and what waited for the ordinal is delivered to it.
+fn zombie_refused(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let dead = rig.owner(chain[1]);
+    let (heir, _) = heir_and_survivor(rig, dead);
+    let old_boot = rig.boots[dead as usize];
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    until_applied(rig, &succession);
+    // The heir tells the dead ordinal of a claim: it waits for that ordinal's next boot.
+    rig.hosts[heir as usize].manager.send_reliable_for_test(dead, game::Reliable::Owns { rows: vec![(FAR_SR, 9)] }, false);
+    let far = RegionCoords::new(FAR_SR.0, FAR_SR.1);
+    rig.start_as(dead, old_boot);
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+        assert!(!rig.hosts[heir as usize].manager.peer_is_reachable(dead), "the dead boot is never reachable");
+        assert_eq!(rig.hosts[dead as usize].manager.owner_of(far), game::Owner::Free, "the zombie learns nothing");
+    }
+    rig.kill(dead);
+    let boot = rig.start(dead);
+    assert_ne!(boot, old_boot);
+    for _ in 0..CROSS_ROUNDS {
+        let m = &rig.hosts[heir as usize].manager;
+        if m.peer_is_reachable(dead) && m.peers_synced() && rig.hosts[dead as usize].manager.owner_of(far) == game::Owner::Host(heir) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.hosts[heir as usize].manager.peer_is_reachable(dead), "the new boot is welcome");
+    assert_eq!(rig.hosts[dead as usize].manager.owner_of(far), game::Owner::Host(heir), "and gets what waited for its ordinal");
+    assert!(rig.hosts[heir as usize].manager.peers_synced(), "the new boot synced: a store placement waits for nobody");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_boot_is_welcome() {
+    sweep("a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_boot_is_welcome", 2, 1, SEEDS / 4, zombie_refused);
+}

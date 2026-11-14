@@ -166,6 +166,8 @@ pub struct Coordinator {
     cuts: WorldCuts,
     /// Which hosts lost their lease (`succession.rs`), fed by the runtime's `hosts` reads.
     leases: LeaseWatch,
+    /// The successions declared and not settled yet (`succession.rs`).
+    successions: SuccessionRuns,
 }
 
 impl Coordinator {
@@ -200,6 +202,7 @@ impl Coordinator {
             calendar_anchor,
             cuts: WorldCuts::default(),
             leases: LeaseWatch::default(),
+            successions: SuccessionRuns::default(),
         };
         c.push_view(Target::Every);
         c
@@ -266,7 +269,18 @@ impl Coordinator {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
         match msg {
-            HostMsg::Attach { host: named, epoch, running, online, generation, boot, settled_below, handed, pending_cut } => {
+            HostMsg::Attach {
+                host: named,
+                epoch,
+                running,
+                online,
+                generation,
+                boot,
+                settled_below,
+                handed,
+                pending_cut,
+                successions,
+            } => {
                 if named != host {
                     log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");
                 }
@@ -283,6 +297,7 @@ impl Coordinator {
                 self.forget_settled(host, boot, settled_below, true);
                 self.attach(host, epoch, running, online, handed);
                 self.cut_attach(host, pending_cut, boot);
+                self.succession_attach(host, successions);
             }
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
@@ -346,6 +361,8 @@ impl Coordinator {
             HostMsg::CutPrepared { cut } => self.cut_prepared(host, cut),
             HostMsg::CutFailed { cut, why } => self.cut_failed(host, cut, why),
             HostMsg::LeaveRequest => self.leave_request(host),
+            HostMsg::SuccessionApplied { id } => self.succession_applied(host, id),
+            HostMsg::SuccessionAdopted { id } => self.succession_adopted(host, id),
         }
         self.push_directives();
     }
@@ -379,6 +396,7 @@ impl Coordinator {
             let to = self.region_host.get(&region).map_or(Target::Every, |h| Target::Host(*h));
             self.push(to, CoordMsg::Notice { region, line });
         }
+        self.maintain_successions(now_ms);
         self.maintain_cuts(now_ms);
     }
 

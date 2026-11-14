@@ -233,19 +233,29 @@ fn describe(msg: &CoordMsg) -> String {
             format!("BeginCut {} at {tick} of {hosts:?} leaving {leaving:?}", cut.0)
         }
         CoordMsg::CutDone { cut, committed } => format!("CutDone {} (committed {committed})", cut.0),
+        CoordMsg::Succession { id, predecessor, heir, base_cut, moved, survivors, .. } => format!(
+            "Succession {} (host {predecessor} → heir {heir}, base cut {}, {} super-regions, survivors {survivors:?})",
+            id.0,
+            base_cut.0,
+            moved.len()
+        ),
+        CoordMsg::SuccessionDone { id, settled } => format!("SuccessionDone {} (settled {settled})", id.0),
+        CoordMsg::Generation(g) => format!("Generation({g})"),
     }
 }
 
 /// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
 pub(crate) fn describe_host(msg: &HostMsg) -> String {
     match msg {
-        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut } => format!(
-            "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below}, \
-             pending_cut: {pending_cut:?} }} ({} regions, {} online, {} handed)",
-            running.len(),
-            online.len(),
-            handed.len()
-        ),
+        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut, successions } => {
+            format!(
+                "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below}, \
+                 pending_cut: {pending_cut:?}, successions: {successions:?} }} ({} regions, {} online, {} handed)",
+                running.len(),
+                online.len(),
+                handed.len()
+            )
+        }
         HostMsg::RegionStarted { rc, incarnation } => format!("RegionStarted {rc:?} incarnation {incarnation}"),
         HostMsg::RegionStopping { rc } => format!("RegionStopping {rc:?}"),
         HostMsg::RegionParked { rc, people } => format!("RegionParked {rc:?} ({} people)", people.len()),
@@ -266,6 +276,8 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::CutPrepared { cut } => format!("CutPrepared {}", cut.0),
         HostMsg::CutFailed { cut, why } => format!("CutFailed {} ({why:?})", cut.0),
         HostMsg::LeaveRequest => "LeaveRequest".to_string(),
+        HostMsg::SuccessionApplied { id } => format!("SuccessionApplied {}", id.0),
+        HostMsg::SuccessionAdopted { id } => format!("SuccessionAdopted {}", id.0),
     }
 }
 
@@ -637,6 +649,23 @@ pub fn start_listening_with(
     fenced: Fenced,
     cuts: Option<WorldCuts>,
 ) -> Result<ListeningCoordinator, String> {
+    start_listening_as(store, start, bind, token, cert_hash_file, fenced, cuts, game::CrashPolicy::Rollback)
+}
+
+/// [`start_listening_with`] for a world whose hosts' crashes cost `policy`: under
+/// `CrashPolicy::Succession` (several hosts, `claim`) the coordinator declares and runs
+/// successions ([`CoordinatorRuntime`]'s succession pump); under `Rollback` it never does.
+#[allow(clippy::too_many_arguments)]
+pub fn start_listening_as(
+    store: StoreHandle,
+    start: CoordinatorStart,
+    bind: std::net::SocketAddr,
+    token: String,
+    cert_hash_file: Option<std::path::PathBuf>,
+    fenced: Fenced,
+    cuts: Option<WorldCuts>,
+    policy: game::CrashPolicy,
+) -> Result<ListeningCoordinator, String> {
     let (listener, events, senders) = LinkListener::bind::<HostMsg, CoordMsg>(bind, token, cert_hash_file.clone())
         .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
     let (addr, cert_sha256) = (listener.local_addr(), listener.cert_sha256().to_string());
@@ -646,7 +675,8 @@ pub fn start_listening_with(
         start.source,
         cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
     );
-    let thread = CoordinatorRuntime::spawn(store, start, LinkSet::listener(listener, events, senders), fenced, cuts);
+    let links = LinkSet::listener(listener, events, senders);
+    let thread = CoordinatorRuntime::spawn_as(store, start, links, fenced, cuts, policy);
     Ok(ListeningCoordinator { thread, addr, cert_sha256 })
 }
 
@@ -682,6 +712,24 @@ pub struct CoordinatorRuntime {
     lookups: Vec<Lookup>,
     /// `now_ms` of the last warning about a failing world-cut store call.
     warned_ms: Option<u64>,
+    /// The successions' store calls (`CrashPolicy::Succession` with world cuts; `None`: the
+    /// coordinator never declares one).
+    successions: Option<SuccessionPump>,
+}
+
+/// The store calls of the core's successions ([`CoordinatorRuntime::pump_successions`]):
+/// each answered on a receiver, at most one of each kind in flight, a failure tried again
+/// after [`WORLD_CUT_DECISION_RETRY_MS`].
+#[derive(Default)]
+struct SuccessionPump {
+    /// The open successions were read at start ([`Coordinator::successions_open`]).
+    open_known: bool,
+    open_rx: Option<Answer<Vec<game::Succession>>>,
+    open_retry_at: u64,
+    declare_rx: Option<Answer<game::Declared>>,
+    declare_retry_at: u64,
+    rollback_rx: Option<Answer<u64>>,
+    rollback_retry_at: u64,
 }
 
 impl CoordinatorRuntime {
@@ -693,6 +741,22 @@ impl CoordinatorRuntime {
         links: LinkSet,
         fenced: Fenced,
         cuts: Option<WorldCuts>,
+    ) -> CoordinatorThread {
+        Self::spawn_as(store, start, links, fenced, cuts, game::CrashPolicy::Rollback)
+    }
+
+    /// [`Self::spawn`] for a world whose hosts' crashes cost `policy`: `Succession` with
+    /// world cuts (several hosts) runs successions; without world cuts (one host) or under
+    /// `Rollback`, none is ever declared. The lease watch is fed with every `hosts` read
+    /// (`feed_cuts`), which runs exactly when world cuts do — i.e. whenever several hosts
+    /// share the world — so successions are driven whenever they can be needed.
+    pub fn spawn_as(
+        store: StoreHandle,
+        start: CoordinatorStart,
+        links: LinkSet,
+        fenced: Fenced,
+        cuts: Option<WorldCuts>,
+        policy: game::CrashPolicy,
     ) -> CoordinatorThread {
         let (stop_tx, stop_rx) = crossbeam::channel::bounded(1);
         #[cfg(feature = "test-hooks")]
@@ -710,6 +774,12 @@ impl CoordinatorRuntime {
             core.set_cut_epoch(fence.epoch);
             core.set_world_cuts(c.every.as_millis() as u64);
         }
+        let successions = (cuts.is_some() && policy == game::CrashPolicy::Succession).then(|| {
+            core.set_crash_policy(policy);
+            // Nothing is declared and no cut begins until the open ones are read.
+            core.successions_unknown();
+            SuccessionPump::default()
+        });
         let runtime = CoordinatorRuntime {
             core,
             store,
@@ -730,6 +800,7 @@ impl CoordinatorRuntime {
             recording: None,
             lookups: Vec::new(),
             warned_ms: None,
+            successions,
         };
         let join = std::thread::Builder::new()
             .name("coordinator".into())
@@ -789,7 +860,7 @@ impl CoordinatorRuntime {
             if let Some(blocked) = self.core.take_cuts_blocked() {
                 self.warn_cuts(now, &blocked.to_string());
             }
-            if self.pump_save(now).is_err() || self.pump_cuts(now).is_err() {
+            if self.pump_save(now).is_err() || self.pump_cuts(now).is_err() || self.pump_successions(now).is_err() {
                 return self.fence_out();
             }
             let out = self.core.take_out();
@@ -992,7 +1063,19 @@ impl CoordinatorRuntime {
         }
         if self.recording.is_none() {
             if let Some(d) = self.core.take_decision() {
-                let rx = self.store.decide_cut_later(d.cut, d.tick, d.commit, d.hosts.clone(), d.leaving.clone(), self.fence, d.generation, Vec::new());
+                // `settles`: the open successions this cut settles if it commits — the core names
+                // them only once every survivor applied and the heir ADOPTED (the heir's part then
+                // carries `WorldCut::adopts`, Task 9); the store does not check that pairing.
+                let rx = self.store.decide_cut_later(
+                    d.cut,
+                    d.tick,
+                    d.commit,
+                    d.hosts.clone(),
+                    d.leaving.clone(),
+                    self.fence,
+                    d.generation,
+                    d.settles.clone(),
+                );
                 self.recording = Some(Recording { d, rx: Some(rx), aborting: false, taken_ms: now, retry_at: now });
             }
         }
@@ -1082,6 +1165,90 @@ impl CoordinatorRuntime {
         for (i, stored) in answered.iter().rev() {
             let l = self.lookups.remove(*i);
             self.core.cut_outcome(l.host, l.cut, *stored);
+        }
+        Ok(())
+    }
+
+    /// The successions' store calls (`CrashPolicy::Succession`; the core decides, see
+    /// `game::coordinator::succession`): first the open successions are read (a restart
+    /// re-sends their orders); then a wanted rollback is executed (`rollback_world`, the core
+    /// tells every host the new generation); else the core's next declaration is executed
+    /// (`declare_succession`) and its answer handed back. Never waits; a failure (a lock
+    /// timeout behind a staged part, the store down) is tried again after
+    /// [`WORLD_CUT_DECISION_RETRY_MS`]. `Err`: fenced.
+    fn pump_successions(&mut self, now: u64) -> Result<(), ()> {
+        let Some(p) = self.successions.as_mut() else { return Ok(()) };
+        if !p.open_known {
+            if p.open_rx.is_none() && now >= p.open_retry_at {
+                p.open_rx = Some(self.store.open_successions_later());
+            }
+            let answer = p.open_rx.as_ref().map(|rx| rx.try_recv());
+            let failed = match answer {
+                None | Some(Err(TryRecvError::Empty)) => None,
+                Some(Ok(Ok(list))) => {
+                    p.open_known = true;
+                    p.open_rx = None;
+                    log::info!("[coordinator] {} open succession(s) in the store", list.len());
+                    self.core.successions_open(list, now);
+                    None
+                }
+                Some(Ok(Err(e))) => Some(e.to_string()),
+                Some(Err(TryRecvError::Disconnected)) => Some("the world-store thread has stopped".into()),
+            };
+            if let Some(e) = failed {
+                p.open_rx = None;
+                p.open_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                self.warn_cuts(now, &format!("the open successions could not be read ({e}); no cut and no succession until they are"));
+            }
+            return Ok(());
+        }
+        if self.core.rollback_wanted() {
+            if p.rollback_rx.is_none() && now >= p.rollback_retry_at {
+                p.rollback_rx = Some(self.store.rollback_world_later(self.fence));
+            }
+            let answer = match p.rollback_rx.as_ref().map(|rx| rx.try_recv()) {
+                None | Some(Err(TryRecvError::Empty)) => return Ok(()),
+                Some(Ok(answer)) => answer,
+                Some(Err(TryRecvError::Disconnected)) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            p.rollback_rx = None;
+            match answer {
+                Ok(generation) => {
+                    game::perf_event!("world_rollback", "generation={generation}");
+                    self.core.rolled_back(generation);
+                }
+                Err(StoreError::Fenced { .. }) => return Err(()),
+                Err(e) => {
+                    p.rollback_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                    self.warn_cuts(now, &format!("the world rollback could not be recorded ({e}); trying again"));
+                }
+            }
+            return Ok(());
+        }
+        if let Some(rx) = &p.declare_rx {
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(()),
+                Ok(answer) => answer,
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            p.declare_rx = None;
+            match answer {
+                Ok(declared) => self.core.declared(declared, now),
+                Err(StoreError::Fenced { .. }) => return Err(()),
+                Err(e) => {
+                    // A lock timeout behind a staged part is a retry, not an error.
+                    self.core.declare_failed();
+                    p.declare_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                    log::debug!("[coordinator] a succession could not be declared yet ({e}); trying again");
+                }
+            }
+            return Ok(());
+        }
+        if now >= p.declare_retry_at {
+            if let Some(d) = self.core.declare_wanted(now) {
+                let generation = self.core.world_generation();
+                p.declare_rx = Some(self.store.declare_succession_later(d.dead, d.heirs, d.kind, self.fence, generation));
+            }
         }
         Ok(())
     }
@@ -1235,7 +1402,7 @@ mod tests {
     use game::RequestId;
 
     fn attach(host: u32, epoch: u64) -> HostMsg {
-        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None }
+        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }
     }
 
     /// A `hosts` row of registration `reg`, live.

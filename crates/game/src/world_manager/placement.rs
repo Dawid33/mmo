@@ -145,7 +145,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// connection (its `Running`, behind its backlog). A peer that left in a committed cut
     /// holds nobody.
     pub fn peers_synced(&self) -> bool {
-        self.peers.keys().all(|o| self.peer_synced.contains(o) || self.left_peers.contains_key(o))
+        self.peers.keys().all(|o| self.peer_synced.contains(o) || self.left_peers.contains_key(o) || self.peer_succeeded(*o))
     }
 
     /// Spawn orders this host takes, for the server to record ([`Self::spawn_answered`]).
@@ -253,7 +253,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The answer to a spawn order, to its `origin` (here: for the login service).
-    fn spawn_answer(&mut self, origin: u32, player_token: String, session_epoch: u64, ok: bool, endpoint: Option<crate::HostEndpoint>) {
+    pub(super) fn spawn_answer(&mut self, origin: u32, player_token: String, session_epoch: u64, ok: bool, endpoint: Option<crate::HostEndpoint>) {
         if origin == self.ordinal() {
             self.login_out.push(LoginOut::SpawnAck { player_token, session_epoch, ok, endpoint });
         } else {
@@ -312,7 +312,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.kick_here(&player_token, session_epoch, &reason);
         let mut waiting = BTreeSet::new();
         let mut complete = true;
-        let ordinals: Vec<u32> = self.peers.keys().copied().filter(|o| !self.left_peers.contains_key(o)).collect();
+        let ordinals: Vec<u32> =
+            self.peers.keys().copied().filter(|o| !self.left_peers.contains_key(o) && !self.peer_succeeded(*o)).collect();
         for o in ordinals {
             if self.peer_reachable(o) {
                 let kick = Reliable::Kick { player_token: player_token.clone(), session_epoch, reason: reason.clone() };

@@ -21,6 +21,10 @@ pub enum PeerEvent {
     /// The peer runs a newer world generation than this host (once per connection):
     /// nothing is exchanged with it; this host is stale.
     HigherGeneration(u64),
+    /// The peer said hello as a boot this session refuses ([`PeerSession::refuse_boot`]: a
+    /// process declared dead, R4): nothing is processed until the link's next connection
+    /// (the owner closes this one).
+    Refused(u64),
 }
 
 /// Where the current connection stands.
@@ -83,6 +87,8 @@ pub struct PeerSession {
     /// [`PeerSession::reset_connection`]: the connection seen last is gone, whatever the
     /// link's connection value says.
     reset: bool,
+    /// Peer boots whose hello is refused ([`PeerSession::refuse_boot`]).
+    refused: std::collections::BTreeSet<u64>,
 }
 
 impl PeerSession {
@@ -104,7 +110,27 @@ impl PeerSession {
             volatile_out: Vec::new(),
             held: false,
             reset: false,
+            refused: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// From now on a hello of peer boot `boot` is refused ([`PeerEvent::Refused`]): that
+    /// process was declared dead (R4, a succession) — a zombie of it must exchange nothing.
+    /// A hello of ANOTHER boot of the peer is a new host as ever (fresh numbering both ways).
+    /// The current connection, if any, counts as gone ([`Self::reset_connection`]): the next
+    /// pump sends a new hello and waits for the peer's.
+    pub fn refuse_boot(&mut self, boot: u64) {
+        self.refused.insert(boot);
+        self.reset_connection();
+    }
+
+    /// Everything queued, or sent and not acknowledged, taken out in order: the session
+    /// owes it to nobody any more (R4: a survivor re-routes what it owed a dead peer). The
+    /// numbering is not touched — a later boot of the peer renumbers what is queued after
+    /// this from 1 at its hello, as for every new peer boot.
+    pub fn take_unreceived(&mut self) -> Vec<Reliable> {
+        self.volatile_out.clear();
+        self.out.drain(..).map(|(_, r)| r).collect()
     }
 
     /// The link object was replaced; whatever connection was up is gone. The next
@@ -298,6 +324,13 @@ impl PeerSession {
     fn hello(&mut self, h: PeerHello, events: &mut Vec<PeerEvent>) {
         if h.ordinal != self.peer {
             log::warn!("peer {}: hello from host {} ignored", self.peer, h.ordinal);
+            return;
+        }
+        if self.refused.contains(&h.boot) {
+            log::warn!("peer {}: hello of boot {}, declared dead: refused", self.peer, h.boot);
+            self.state = Conn::Broken;
+            self.volatile_out.clear();
+            events.push(PeerEvent::Refused(h.boot));
             return;
         }
         if h.generation != self.me.generation {

@@ -480,6 +480,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.leave_decided = true;
         }
         self.world_cut_done.push((cut, committed));
+        // A succession waiting for this base cut answers now (R4).
+        self.retry_successions();
     }
 
     /// The pending cut `id` was dropped here (a region missed or was lost, a deadline):

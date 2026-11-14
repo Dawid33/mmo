@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CoordMsg, Coordinator, CutFailure, Target};
-use crate::{CutId, Tick};
+use crate::{CutId, SuccessionId, Tick};
 
 /// How far ahead of the coordinator's world tick a world cut is placed: every host gets
 /// the `BeginCut` and every region reaches the tick on its own clock (two seconds at 50 ms
@@ -55,6 +55,8 @@ pub struct CutsBlocked {
     pub missing: Vec<u32>,
     /// Hosts attached with no dirty `hosts` row (registered since the rows were last read).
     pub unexpected: Vec<u32>,
+    /// Open successions (R4) not answered yet by every survivor and their heir.
+    pub successions: Vec<SuccessionId>,
 }
 
 impl std::fmt::Display for CutsBlocked {
@@ -73,6 +75,14 @@ impl std::fmt::Display for CutsBlocked {
         if !self.unexpected.is_empty() {
             write!(f, " hosts {:?} are attached but have no dirty `hosts` row (registered since the last read?);", self.unexpected)?;
         }
+        if !self.successions.is_empty() {
+            let ids: Vec<u64> = self.successions.iter().map(|id| id.0).collect();
+            write!(
+                f,
+                " successions {ids:?} wait for their survivors' reports and their heir's adoption (the world rolls back \
+                 if they do not come within the succession deadline);"
+            )?;
+        }
         Ok(())
     }
 }
@@ -88,6 +98,12 @@ pub struct CutDecide {
     pub hosts: Vec<u32>,
     pub leaving: Vec<u32>,
     pub generation: u64,
+    /// The open successions this cut settles if it commits (R4): every one open when it
+    /// began — none begins while one is not answered by all its survivors and its heir, so
+    /// the heir's part of this cut adopts the predecessor's in-flight rows (`WorldCut::adopts`,
+    /// Task 9). The store records the commit as an abort unless this is exactly the set of
+    /// open successions.
+    pub settles: Vec<SuccessionId>,
 }
 
 /// The world cut running.
@@ -98,6 +114,8 @@ struct CutRun {
     hosts: Vec<u32>,
     leaving: Vec<u32>,
     generation: u64,
+    /// [`CutDecide::settles`].
+    settles: Vec<SuccessionId>,
     /// Participants whose part is staged.
     prepared: BTreeSet<u32>,
     /// `clock_ms` past which it is aborted.
@@ -161,6 +179,9 @@ pub(super) struct WorldCuts {
     blocked_noted: Option<u64>,
     /// The report not taken yet ([`Coordinator::take_cuts_blocked`]).
     blocked: Option<CutsBlocked>,
+    /// Hosts succeeded (R4), with the boot that died: not expected (nor counted attached)
+    /// until another boot of theirs attaches or registers, as for `left`.
+    succeeded: BTreeMap<u32, u64>,
 }
 
 impl Default for WorldCuts {
@@ -184,6 +205,7 @@ impl Default for WorldCuts {
             blocked_since: None,
             blocked_noted: None,
             blocked: None,
+            succeeded: BTreeMap::new(),
         }
     }
 }
@@ -233,6 +255,13 @@ impl Coordinator {
         self.cuts.left.retain(|h, left_as| match (boots.get(h), *left_as) {
             (Some(b), Some(l)) if *b != l => {
                 log::info!("coordinator: host {h} registered again (boot {b}): expected again");
+                false
+            }
+            _ => true,
+        });
+        self.cuts.succeeded.retain(|h, dead| match boots.get(h) {
+            Some(b) if b != dead => {
+                log::info!("coordinator: succeeded host {h} registered again (boot {b}): expected again");
                 false
             }
             _ => true,
@@ -290,6 +319,7 @@ impl Coordinator {
             hosts: run.hosts.clone(),
             leaving: run.leaving.clone(),
             generation: run.generation,
+            settles: run.settles.clone(),
         })
     }
 
@@ -326,6 +356,9 @@ impl Coordinator {
         }
         self.cuts.last_ms = self.clock_ms;
         self.remember_outcome(cut, committed);
+        if committed {
+            self.successions_settled(&run.settles);
+        }
     }
 
     /// `(host, cut)` pairs whose outcome is not known here: look each up in the store
@@ -361,6 +394,10 @@ impl Coordinator {
         if self.cuts.left.get(&host).is_some_and(|left_as| *left_as != Some(boot)) {
             log::info!("coordinator: host {host} is back (boot {boot}): expected again");
             self.cuts.left.remove(&host);
+        }
+        if self.cuts.succeeded.get(&host).is_some_and(|dead| *dead != boot) {
+            log::info!("coordinator: succeeded host {host} is back as boot {boot}: expected again");
+            self.cuts.succeeded.remove(&host);
         }
         let why = if self.cuts.run.as_ref().is_some_and(|r| r.has(host)) { "re-attached" } else { "attached, not in the cut" };
         self.abort_running(host, why);
@@ -427,21 +464,31 @@ impl Coordinator {
         // Every expected host attached, and no attached host outside the set (one that
         // registered since the last read would run unsaved state beside the cut). A host
         // that left is neither (its process may still be attached on its way out).
-        let left = &self.cuts.left;
-        let expected: BTreeSet<u32> = self.cuts.expected.iter().copied().filter(|h| !left.contains_key(h)).collect();
-        let attached: BTreeSet<u32> = self.cuts.attached.iter().copied().filter(|h| !left.contains_key(h)).collect();
-        if !self.cuts.expected_known || expected != attached || expected.is_empty() {
-            // A due cut blocked by a mismatch is reported (after the grace, once a period);
-            // an unknown read is the runtime's own warning, and no host at all is idle.
-            if self.cuts.expected_known && expected != attached {
+        // A succeeded host is neither either (a zombie of it may still be attached).
+        let (left, succeeded) = (&self.cuts.left, &self.cuts.succeeded);
+        let out = |h: &u32| !left.contains_key(h) && !succeeded.contains_key(h);
+        let expected: BTreeSet<u32> = self.cuts.expected.iter().copied().filter(out).collect();
+        let attached: BTreeSet<u32> = self.cuts.attached.iter().copied().filter(out).collect();
+        // R4: no cut while a succession is open and not answered by everyone (nor while one
+        // is being declared, a rollback is wanted, or the open ones are not known yet).
+        let waiting = self.successions_block_cuts();
+        let mismatch = self.cuts.expected_known && expected != attached;
+        if !self.cuts.expected_known || expected != attached || expected.is_empty() || waiting.is_some() {
+            // A due cut blocked by a mismatch, or by successions waiting for answers, is
+            // reported (after the grace, once a period); an unknown read is the runtime's own
+            // warning, and no host at all is idle.
+            let waiting = waiting.unwrap_or_default();
+            if mismatch || !waiting.is_empty() {
                 let since = *self.cuts.blocked_since.get_or_insert(now_ms);
                 let noted = self.cuts.blocked_noted.is_some_and(|at| now_ms < at.saturating_add(every));
                 if now_ms >= since.saturating_add(WORLD_CUT_BLOCKED_GRACE_MS) && !noted {
                     self.cuts.blocked_noted = Some(now_ms);
-                    self.cuts.blocked = Some(CutsBlocked {
-                        missing: expected.difference(&attached).copied().collect(),
-                        unexpected: attached.difference(&expected).copied().collect(),
-                    });
+                    let (missing, unexpected) = if mismatch {
+                        (expected.difference(&attached).copied().collect(), attached.difference(&expected).copied().collect())
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    self.cuts.blocked = Some(CutsBlocked { missing, unexpected, successions: waiting });
                 }
             } else {
                 self.cuts.blocked_since = None;
@@ -466,6 +513,7 @@ impl Coordinator {
             Vec::new()
         };
         let generation = self.generation_seen;
+        let settles = self.successions_to_settle();
         log::info!(
             "coordinator: world cut {} at tick {tick} (lead {}) of hosts {hosts:?}, leaving {leaving:?}",
             cut.0,
@@ -481,11 +529,45 @@ impl Coordinator {
             hosts,
             leaving,
             generation,
+            settles,
             prepared: BTreeSet::new(),
             deadline_ms: now_ms + WORLD_CUT_DEADLINE_MS,
             verdict: None,
             taken: false,
         });
+    }
+
+    /// The participants of the running cut (decided or not, until its decision is
+    /// recorded), if one runs.
+    pub(super) fn cuts_running_participants(&self) -> Option<Vec<u32>> {
+        self.cuts.run.as_ref().map(|r| r.participants().collect())
+    }
+
+    /// A participant `host` of the running cut lost its lease: the cut, not decided yet, is
+    /// aborted (a succession is declared only between cuts).
+    pub(super) fn abort_cut_for_lapse(&mut self, host: u32) {
+        self.abort_for(host, "lost its lease");
+    }
+
+    /// The hosts attached now that neither left nor were succeeded.
+    pub(super) fn attached_live(&self) -> Vec<u32> {
+        self.cuts
+            .attached
+            .iter()
+            .copied()
+            .filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h))
+            .collect()
+    }
+
+    pub(super) fn is_attached(&self, host: u32) -> bool {
+        self.cuts.attached.contains(&host)
+    }
+
+    /// Host `host`'s boot `boot` was succeeded (R4): not expected, nor counted attached,
+    /// until another boot of it comes.
+    pub(super) fn note_succeeded(&mut self, host: u32, boot: u64) {
+        self.cuts.succeeded.insert(host, boot);
+        self.cuts.leave_requests.remove(&host);
     }
 
     /// A running cut `host` takes part in, not decided yet, is aborted (`why`, for the log).

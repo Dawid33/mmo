@@ -671,7 +671,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
                 _ => assert!(Instant::now() < deadline, "the link never came up"),
             }
         }
-        link.send(game::HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None }).unwrap();
+        link.send(game::HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }).unwrap();
         (link, events)
     };
     let (stale, stale_events) = dial(1, first);

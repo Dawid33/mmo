@@ -470,7 +470,14 @@ pub fn run_coordinator() -> ServerExit {
     if hosts > 1 {
         log::info!("[coordinator] world cuts of {hosts} hosts");
     }
-    let coordinator = crate::coordinator_rt::start_listening_with(
+    // `claim` (R4): a crashed host's land is inherited by one heir — the coordinator declares
+    // and runs the successions. `static`: a crash rolls the world back (R3), never declared.
+    let claim = std::env::var(game::ownership::OWNERSHIP_ENV).is_ok_and(|v| v.trim() == "claim");
+    let policy = if claim && hosts > 1 { game::CrashPolicy::Succession } else { game::CrashPolicy::Rollback };
+    if policy == game::CrashPolicy::Succession {
+        log::info!("[coordinator] ownership `claim`: a crashed host's land goes to an heir (successions)");
+    }
+    let coordinator = crate::coordinator_rt::start_listening_as(
         store.clone(),
         start,
         bind,
@@ -478,6 +485,7 @@ pub fn run_coordinator() -> ServerExit {
         Some(cert_file),
         fenced.clone(),
         cuts,
+        policy,
     )
     .unwrap_or_else(|e| fatal(e));
 

@@ -26,43 +26,7 @@ use sqlx::{PgPool, Row};
 use crate::rows::i;
 use crate::{CoordinatorFence, StoreError, SuperRegion};
 
-pub use game::{SuccessionId, SuccessionKind};
-
-/// One host's land given to one heir ([`crate::StoreHandle::declare_succession`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Succession {
-    pub id: SuccessionId,
-    pub predecessor: u32,
-    pub predecessor_boot: u64,
-    pub heir: u32,
-    pub kind: SuccessionKind,
-    /// The last committed world cut at the declaration (`CutId(0)`: none): what the heir
-    /// starts the predecessor's regions from.
-    pub base_cut: CutId,
-    /// The super-regions moved to the heir, at their new epochs, in key order.
-    pub moved: Vec<(SuperRegion, u64)>,
-    /// Every other live dirty host at the declaration (the heir among them), by ordinal:
-    /// the hosts that report their journals to the heir.
-    pub survivors: Vec<u32>,
-}
-
-/// What [`crate::StoreHandle::declare_succession`] did. Anything but `Done` wrote nothing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Declared {
-    /// Declared: one succession per predecessor, in the call's order.
-    Done(Vec<Succession>),
-    /// Crash: these predecessors' rows beat within [`game::HOST_LEASE_MS`] (and were not
-    /// vouched), or left clean meanwhile; leave: these rows are not clean.
-    NotLapsed(Vec<u32>),
-    /// Another succession is open: a second failure before the first is settled — the
-    /// caller rolls the world back.
-    SuccessionOpen,
-    /// These rows are gone: no row, another boot, already dead or already succeeded — or,
-    /// named as heirs, not live with a fresh lease any more. The list mixes predecessor and
-    /// heir ordinals (sorted): the caller does not tell them apart — it forgets the whole
-    /// declaration and re-observes (its next lease read gives a new lapsed set and new heirs).
-    Gone(Vec<u32>),
-}
+pub use game::{Declared, Succession, SuccessionId, SuccessionKind};
 
 /// `successions.survivors`: ordinals, comma-separated.
 pub(crate) fn encode_survivors(survivors: &[u32]) -> String {

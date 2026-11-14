@@ -50,7 +50,7 @@ pub(super) struct UnownedWait {
 /// One other host: the session with it and the link it runs over.
 pub(super) struct Peer {
     pub(super) session: PeerSession,
-    link: Box<dyn PeerLink + Send>,
+    pub(super) link: Box<dyn PeerLink + Send>,
     /// It runs a newer world generation ([`PeerEvent::HigherGeneration`]): this host is
     /// stale and stops using the session (nothing is pumped or sent on it any more).
     stale: bool,
@@ -80,6 +80,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Already in it: ids of their own (`peer_entries`), ahead of what waited.
         *self.peer_queued.entry(ordinal).or_default() += prefilled as u64;
+        // A boot of that host declared dead (a succession) stays refused.
+        for &(_, boot) in self.dead_boots.iter().filter(|(o, _)| *o == ordinal) {
+            session.refuse_boot(boot);
+        }
         for msg in self.peer_waiting.remove(&ordinal).unwrap_or_default() {
             session.queue(msg);
         }
@@ -231,16 +235,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             let all: Vec<&Reliable> = peer.session.unreceived().collect();
             let sent = all.len() - unsent;
             for (i, r) in all.into_iter().enumerate() {
-                if let Reliable::Intent(msg) = r.inner() {
-                    out.push((ordinal, *msg, i < sent));
-                }
+                out.extend(intents_in(r).into_iter().map(|msg| (ordinal, msg, i < sent)));
             }
         }
         for (ordinal, list) in self.never_sent() {
-            out.extend(list.into_iter().filter_map(|r| match r.inner() {
-                Reliable::Intent(msg) => Some((ordinal, *msg, false)),
-                _ => None,
-            }));
+            out.extend(list.into_iter().flat_map(|r| intents_in(r).into_iter().map(move |msg| (ordinal, msg, false))));
         }
         out
     }
@@ -673,6 +672,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Host `from` handed `player` (of `client`) here and this host parked it with no
     /// session of the client: `from` ends the session it may still hold for the client.
     fn tell_parked(&mut self, from: u32, client: ClientId, player: PlayerId) {
+        if from == self.ordinal() {
+            // Handed here by a host declared dead since (a succession): nobody to tell.
+            log::info!("[server] player {} (client {client}) parked here with no session", player.0);
+            return;
+        }
         log::info!("[server] player {} (client {client}) parked here with no session: host {from} told", player.0);
         self.queue_to_peer(from, Reliable::PlayerParked { client, player });
     }
@@ -1055,7 +1059,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Everything [`Self::wait_for_owner`] kept for a super-region that has an owner now
     /// goes there, in order, with its cut flags: delivered here as an inbound arrival
     /// (`Me`), or sent to its owner (`Host`).
-    fn flush_unowned(&mut self) {
+    pub(super) fn flush_unowned(&mut self) {
         let ready: Vec<crate::SuperRegion> = self
             .unowned_waiting
             .keys()
@@ -1236,7 +1240,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The link to host `from` is gone (or it runs a newer generation): every region of
     /// it is gone for this host's halos.
-    fn peer_lost(&mut self, from: u32) {
+    pub(super) fn peer_lost(&mut self, from: u32) {
         let gone: Vec<RegionCoords> =
             self.foreign_running.iter().filter(|(_, &h)| h == from).map(|(rc, _)| *rc).collect();
         for n in gone {
@@ -1344,6 +1348,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 log::info!("[server] peer host {from} up (boot {})", hello.boot);
                 // A host that left and comes back as another boot gets what waited for it.
                 self.peer_hello_boot(from, hello.boot);
+                // A host succeeded as another boot is a new host now.
+                self.succession_hello(from, hello.boot);
                 // Where its clients connect (`RegionElsewhere`).
                 self.peer_endpoints.insert(from, hello.endpoint.clone());
                 // A directory (`PgClaim`): that host runs (it registered before it linked),
@@ -1387,6 +1393,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             PeerEvent::Reliable(msg) => self.peer_reliable(from, msg),
             PeerEvent::Volatile(v) => self.peer_volatile(from, v),
+            // A boot declared dead (a succession): its connection is closed for a fresh one.
+            PeerEvent::Refused(boot) => {
+                log::warn!("[server] host {from}'s boot {boot:#x} was declared dead: its hello is refused");
+                if let Some(peer) = self.peers.get_mut(&from) {
+                    peer.link.close();
+                }
+            }
         }
     }
 
@@ -1527,6 +1540,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             Reliable::PlayerParked { client, player } => self.player_parked_elsewhere(from, client, player),
             Reliable::Owns { rows } => self.peer_owns(from, rows),
+            Reliable::SuccessionReport { id, base_cut, entries, owed } => {
+                self.peer_succession_report(from, id, base_cut, entries, owed)
+            }
             msg @ (Reliable::SpawnOrder { .. }
             | Reliable::SpawnAck { .. }
             | Reliable::Kick { .. }
@@ -1598,6 +1614,16 @@ pub(super) fn peer_intent_target(msg: &crate::IntentMsg) -> RegionCoords {
     }
 }
 
+/// The intents and replies a reliable message carries: an intent's own, or those a
+/// succession report re-routes (`owed`).
+pub fn intents_in(r: &Reliable) -> Vec<crate::IntentMsg> {
+    match r.inner() {
+        Reliable::Intent(msg) => vec![*msg],
+        Reliable::SuccessionReport { owed, .. } => owed.iter().flat_map(intents_in).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The entity a reliable message carries, if it is a transfer.
 fn transfer_id(r: &Reliable) -> Option<crate::EntityId> {
     match r.inner() {
@@ -1622,5 +1648,6 @@ fn reliable_name(r: &Reliable) -> &'static str {
         Reliable::PlayerParked { .. } => "PlayerParked",
         Reliable::InCut { .. } => "InCut",
         Reliable::Owns { .. } => "Owns",
+        Reliable::SuccessionReport { .. } => "SuccessionReport",
     }
 }

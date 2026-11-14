@@ -640,6 +640,11 @@ impl StoreHandle {
         self.ask(|r| Request::RollbackWorld(fence, r))
     }
 
+    /// [`Self::rollback_world`], answered on the receiver.
+    pub fn rollback_world_later(&self, fence: CoordinatorFence) -> crossbeam::channel::Receiver<Result<u64, StoreError>> {
+        self.ask_later(|r| Request::RollbackWorld(fence, r))
+    }
+
     /// Every open succession (not settled, not abandoned), by id: what a restarted
     /// coordinator re-sends. Empty on SQLite.
     pub fn open_successions(&self) -> Result<Vec<Succession>, StoreError> {
