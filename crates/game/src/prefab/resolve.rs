@@ -20,10 +20,17 @@ pub const UNTRUSTED_MAX_ITEMS: usize = 65_536;
 /// The spatial index's cell; a prefab-internal constant, not `CHUNK_BLOCKS`.
 pub const PREFAB_BUCKET_BLOCKS: i32 = 16;
 
-/// Even a builtin prefab stays below this per axis (keeps every coordinate far from `i32` overflow).
-const HARD_MAX_EXTENT: u32 = 1 << 24;
-/// Most columns in the column profile, whatever the trust.
-const HARD_MAX_COLUMNS: u64 = 1 << 26;
+/// Overflow guard only, not a cost bound: no axis may exceed this, so every cell coordinate and bucket
+/// edge fits an `i32` with room to spare. Builtin files are trusted and otherwise uncapped.
+const MAX_AXIS: u32 = 1 << 30;
+/// Allocation guard only, not a cost bound: the column profile holds `size.x * size.z` entries.
+const MAX_PROFILE_COLUMNS: u64 = 1 << 26;
+/// Untrusted work budget: summed bucket overlaps of all boxes and carve boxes.
+pub const UNTRUSTED_MAX_BUCKET_REFS: u64 = 1 << 20;
+/// Untrusted work budget: summed column footprints (x extent times z extent) of all boxes.
+pub const UNTRUSTED_MAX_COLUMN_WORK: u64 = 1 << 24;
+/// A marker may lie this many cells outside the box on any axis (connectors, entrances).
+pub const MARKER_MARGIN: i32 = 64;
 const MAX_CUBOID_MATS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +167,11 @@ fn inside(at: [i32; 3], dims: [u32; 3]) -> bool {
     (0..3).all(|a| at[a] >= 0 && (at[a] as i64) < dims[a] as i64)
 }
 
+/// Within `MARKER_MARGIN` cells of `0..size` on every axis.
+fn near_box(at: [i32; 3], dims: [u32; 3]) -> bool {
+    (0..3).all(|a| at[a] as i64 >= -(MARKER_MARGIN as i64) && (at[a] as i64) < dims[a] as i64 + MARKER_MARGIN as i64)
+}
+
 fn is_empty_box(b: &ResBox) -> bool {
     (0..3).any(|a| b.min[a] >= b.max[a])
 }
@@ -182,7 +194,7 @@ pub fn resolve(
     }
     let extent_limit = match trust {
         Trust::Untrusted => UNTRUSTED_MAX_EXTENT,
-        Trust::Builtin => HARD_MAX_EXTENT,
+        Trust::Builtin => MAX_AXIS,
     };
     if dims.iter().any(|&d| d > extent_limit) {
         problems.push(Problem::TooLarge { what: "extent", limit: extent_limit as usize });
@@ -192,8 +204,8 @@ pub fn resolve(
         problems.push(Problem::TooLarge { what: "items", limit: UNTRUSTED_MAX_ITEMS });
     }
     let columns = dims[0] as u64 * dims[2] as u64;
-    if columns > HARD_MAX_COLUMNS && !dims.iter().any(|&d| d > extent_limit) {
-        problems.push(Problem::TooLarge { what: "columns", limit: HARD_MAX_COLUMNS as usize });
+    if columns > MAX_PROFILE_COLUMNS && !dims.iter().any(|&d| d > extent_limit) {
+        problems.push(Problem::TooLarge { what: "columns", limit: MAX_PROFILE_COLUMNS as usize });
     }
 
     let mut palette = Vec::with_capacity(file.palette.len());
@@ -206,7 +218,7 @@ pub fn resolve(
             }
         }
     }
-    // `Err(())`: out of range (reported); `Ok(None)`: names an unknown block (reported once above).
+    // `None`: the index is out of range (reported here) or names an unknown block (reported once above).
     let pal = |index: u16, list: &'static str, at: usize, problems: &mut Vec<Problem>| -> Option<BlockId> {
         match palette.get(index as usize) {
             Some(id) => *id,
@@ -250,7 +262,8 @@ pub fn resolve(
                 pal(*mat, "shaped", i, &mut problems).map(|mat| ResolvedShape::Named { shape: *shape, mat })
             }
             FileShape::Cuboids { cuboids, mats } => {
-                let ok = mats.len() <= MAX_CUBOID_MATS
+                let ok = !cuboids.is_empty()
+                    && mats.len() <= MAX_CUBOID_MATS
                     && cuboids.iter().all(|(min, max, m)| {
                         (*m as usize) < mats.len()
                             && (0..3).all(|a| min[a] < max[a] && (max[a] as usize) <= BLOCK_VOXELS)
@@ -297,13 +310,34 @@ pub fn resolve(
         if m.turn > 3 {
             problems.push(Problem::BadTurn { index: i });
         }
-        if !inside(m.at, dims) {
+        if !near_box(m.at, dims) {
             problems.push(Problem::OutsideSize { list: "markers", index: i });
         }
     }
 
     if !problems.is_empty() {
         return Err(problems);
+    }
+
+    if trust == Trust::Untrusted {
+        let (mut refs, mut cols) = (0u64, 0u64);
+        for (i, b) in boxes.iter().chain(carve.iter()).enumerate() {
+            if is_empty_box(b) {
+                continue;
+            }
+            refs += (0..3)
+                .map(|a| ((b.max[a] - 1) / PREFAB_BUCKET_BLOCKS - b.min[a] / PREFAB_BUCKET_BLOCKS + 1) as u64)
+                .product::<u64>();
+            if i < boxes.len() {
+                cols += (b.max[0] - b.min[0]) as u64 * (b.max[2] - b.min[2]) as u64;
+            }
+            if refs > UNTRUSTED_MAX_BUCKET_REFS {
+                return Err(vec![Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_BUCKET_REFS as usize }]);
+            }
+            if cols > UNTRUSTED_MAX_COLUMN_WORK {
+                return Err(vec![Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_COLUMN_WORK as usize }]);
+            }
+        }
     }
 
     let mut buckets: BTreeMap<[i32; 3], Bucket> = BTreeMap::new();

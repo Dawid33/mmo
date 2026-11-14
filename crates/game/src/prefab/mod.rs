@@ -19,5 +19,5 @@ pub use file::{
 };
 pub use resolve::{
     prefab_name_key, resolve, Cell, Problem, ResolvedPrefab, ResolvedShape, Trust, PREFAB_BUCKET_BLOCKS,
-    UNTRUSTED_MAX_EXTENT, UNTRUSTED_MAX_ITEMS,
+    MARKER_MARGIN, UNTRUSTED_MAX_BUCKET_REFS, UNTRUSTED_MAX_COLUMN_WORK, UNTRUSTED_MAX_EXTENT, UNTRUSTED_MAX_ITEMS,
 };

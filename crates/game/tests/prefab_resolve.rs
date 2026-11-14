@@ -231,3 +231,100 @@ fn a_monument_resolves_and_answers_locally() {
     assert_eq!(p.solid_count(), 72_000_000);
     assert_eq!(p.column_top(599, 0), Some((199, STONE)));
 }
+
+#[test]
+fn untrusted_work_budget_refuses_hostile_overlap() {
+    let mut f = empty("hostile", [256, 256, 256]);
+    for _ in 0..UNTRUSTED_MAX_ITEMS {
+        f.boxes.push(FileBox { min: [0, 0, 0], size: [256, 256, 256], mat: 0 });
+    }
+    let err = resolve(&f, &names, Trust::Untrusted).unwrap_err();
+    assert!(err.iter().any(|p| matches!(p, Problem::TooLarge { what: "box overlap", .. })), "{err:?}");
+    f.boxes.truncate(5);
+    assert!(resolve(&f, &names, Trust::Untrusted).is_ok());
+}
+
+#[test]
+fn untrusted_column_work_budget() {
+    // Few bucket refs (flat boxes) but a lot of column work.
+    let mut f = empty("flat", [256, 1, 256]);
+    for _ in 0..300 {
+        f.boxes.push(FileBox { min: [0, 0, 0], size: [256, 1, 256], mat: 0 });
+    }
+    let err = resolve(&f, &names, Trust::Untrusted).unwrap_err();
+    assert!(err.contains(&Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_COLUMN_WORK as usize }), "{err:?}");
+}
+
+#[test]
+fn markers_may_sit_a_margin_outside_the_box() {
+    let m = |at: [i32; 3]| Marker { at, kind: "door".into(), turn: 0, props: Default::default() };
+    let ok = |at: [i32; 3]| {
+        let mut f = empty("m", [4, 4, 4]);
+        f.markers.push(m(at));
+        resolve(&f, &names, Trust::Builtin).is_ok()
+    };
+    assert!(ok([-MARKER_MARGIN, 0, 0]));
+    assert!(!ok([-MARKER_MARGIN - 1, 0, 0]));
+    assert!(ok([0, 4 + MARKER_MARGIN - 1, 0]));
+    assert!(!ok([0, 4 + MARKER_MARGIN, 0]));
+    assert!(ok([0, 0, 3 + MARKER_MARGIN]));
+    assert!(!ok([0, 0, i32::MAX]));
+}
+
+#[test]
+fn an_empty_cuboid_list_is_a_bad_shape() {
+    let mut f = empty("e", [2, 2, 2]);
+    f.shaped.push(FileShaped { at: [0, 0, 0], shape: FileShape::Cuboids { cuboids: vec![], mats: vec![0] } });
+    assert!(resolve(&f, &names, Trust::Builtin).unwrap_err().contains(&Problem::BadShape { index: 0 }));
+}
+
+#[test]
+fn solid_count_and_column_top_match_cell() {
+    let p = resolve(&lcg_file(), &names, Trust::Builtin).expect("resolves");
+    let mut solid = 0u64;
+    for x in 0..40 {
+        for z in 0..40 {
+            let mut top = None;
+            for y in 0..20 {
+                let mat = match p.cell([x, y, z]) {
+                    Cell::Block(m) => Some(m),
+                    Cell::Shaped(ResolvedShape::Named { mat, .. }) => Some(*mat),
+                    Cell::Shaped(_) => unreachable!(),
+                    Cell::Keep | Cell::Carve => None,
+                };
+                if let Some(m) = mat {
+                    solid += 1;
+                    top = Some((y, m));
+                }
+            }
+            assert_eq!(p.column_top(x, z), top, "column ({x}, {z})");
+        }
+    }
+    assert_eq!(p.solid_count(), solid);
+    assert!(solid > 0);
+}
+
+#[test]
+fn covered_bucket_keeps_file_order_and_carve_stays_below_boxes() {
+    // A later box over an earlier one, inside a fully covered bucket.
+    let mut f = empty("cov", [16, 16, 16]);
+    f.boxes.push(FileBox { min: [0, 0, 0], size: [16, 16, 16], mat: 0 });
+    f.boxes.push(FileBox { min: [4, 4, 4], size: [4, 4, 4], mat: 1 });
+    let p = resolve(&f, &names, Trust::Builtin).unwrap();
+    assert_eq!(p.cell([5, 5, 5]), Cell::Block(OAK));
+    assert_eq!(p.cell([3, 5, 5]), Cell::Block(STONE));
+    assert_eq!(p.solid_count(), 4096);
+    // The covering box comes last: it hides the earlier one.
+    f.boxes.reverse();
+    let p = resolve(&f, &names, Trust::Builtin).unwrap();
+    assert_eq!(p.cell([5, 5, 5]), Cell::Block(STONE));
+    assert_eq!(p.solid_count(), 4096);
+    // A carve box over a box does not remove it.
+    let mut g = empty("carve", [8, 2, 8]);
+    g.boxes.push(FileBox { min: [0, 0, 0], size: [4, 2, 4], mat: 0 });
+    g.carve.push(FileCarve { min: [0, 0, 0], size: [8, 2, 8] });
+    let p = resolve(&g, &names, Trust::Builtin).unwrap();
+    assert_eq!(p.cell([1, 1, 1]), Cell::Block(STONE));
+    assert_eq!(p.cell([6, 1, 6]), Cell::Carve);
+    assert_eq!(p.solid_count(), 32);
+}
