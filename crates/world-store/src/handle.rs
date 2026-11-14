@@ -68,10 +68,30 @@ pub struct HostBoot {
     pub reg: u64,
 }
 
-/// [`HostRow::state`]: the host holds its lease.
-pub const HOST_LIVE: i64 = 0;
-/// [`HostRow::state`]: the host's lease lapsed and a takeover marked it dead.
-pub const HOST_DEAD: i64 = 1;
+/// [`HostRow::state`]: [`HOST_LIVE`] (the host holds its lease) or [`HOST_DEAD`] (its lease
+/// lapsed and a takeover marked it dead). Defined in `game` (the coordinator's lease watch
+/// reads them too).
+pub use game::{HOST_DEAD, HOST_LIVE};
+
+/// What [`StoreHandle::register_host`] answered a boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootVerdict {
+    /// The boot is registered: run.
+    Registered(HostBoot),
+    /// Not registered, nothing of this boot's written: ask again later.
+    Wait(WaitFor),
+}
+
+/// Why a boot under [`game::CrashPolicy::Succession`] waits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitFor {
+    /// The previous boot of this ordinal was declared dead and its land is being inherited.
+    Succession,
+    /// The previous boot of this ordinal never left clean while another host is alive: this
+    /// boot vouched for its death (its row's `seen_ms = 0`) and waits for the coordinator to
+    /// declare it.
+    Vouched,
+}
 /// `super_regions.owner` of a free row (no host holds it).
 pub const NO_OWNER: i64 = -1;
 
@@ -663,13 +683,18 @@ impl StoreHandle {
     }
 
     /// Registers this process's boot as host `row.ordinal` (once per boot, right after its
-    /// claim): one fence-checked transaction that bumps `world.generation` when the host's
-    /// previous boot never left clean (see [`HostBoot`]). `row.generation` and `row.clean`
-    /// are ignored; the row is stored with the world's generation and `clean = false`; `state`,
-    /// `seen_ms` and `reg` are ignored too: it is stored live, seen now (database clock), with
-    /// the next registration number.
-    pub fn register_host(&self, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
-        self.ask(|r| Request::RegisterHost(row, fence.clone(), r))
+    /// claim): one fence-checked transaction under the world row's lock, decided by the
+    /// ordinal's prior row. `Rollback` (R3): a prior boot that never left clean at the world's
+    /// generation bumps `world.generation` (see [`HostBoot`]). `Succession`: a clean, absent or
+    /// older-generation prior row registers; a dirty one at the world's generation marked dead
+    /// → [`WaitFor::Succession`] (nothing written); one still live while another dirty live
+    /// host beat within [`game::HOST_LEASE_MS`] → its `seen_ms = 0` (vouched),
+    /// [`WaitFor::Vouched`]; with nobody alive it bumps the generation as `Rollback` does.
+    /// `row.generation` and `row.clean` are ignored; the row is stored with the world's
+    /// generation and `clean = false`; `state`, `seen_ms` and `reg` are ignored too: it is
+    /// stored live, seen now (database clock), with the next registration number.
+    pub fn register_host(&self, row: HostRow, fence: &Fence, policy: game::CrashPolicy) -> Result<BootVerdict, StoreError> {
+        self.ask(|r| Request::RegisterHost(row, fence.clone(), policy, r))
     }
 
     /// Every registered host, by ordinal.

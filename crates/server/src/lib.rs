@@ -146,6 +146,7 @@ pub mod auth_edge;
 pub mod claims;
 pub mod coordinator_rt;
 pub mod cuts;
+pub mod lease;
 pub mod lod_workers;
 pub mod login_link;
 pub mod peer_link;
@@ -950,6 +951,8 @@ pub fn run() -> claims::ServerExit {
     // Several hosts: the peer listener and a link to every other host (dropped at the end
     // of `run`, sync code).
     let mut peer_links: Option<peer_link::PeerLinks> = None;
+    // A registered host's lease, beaten by the main loop.
+    let mut heartbeat: Option<lease::Heartbeat> = None;
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
         let claimed = claims::HostClaims::claim(store, ownership, extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
@@ -964,6 +967,8 @@ pub fn run() -> claims::ServerExit {
         // peer listener is bound: the row names its address and pin): a boot after one that
         // never left clean raises the world's generation, which every other host then adopts.
         if role == roles::Role::Host {
+            // R3's rule until the ownership policies carry their own (R4 Task 5).
+            let crash_policy = game::CrashPolicy::Rollback;
             let fenced_exit = |e: &dyn std::fmt::Display| -> ! {
                 // Replaced between the claim and the registration: fenced, not a start-up error.
                 log::error!("[server] fenced while registering as host {}: {e}", ownership.ordinal());
@@ -983,10 +988,15 @@ pub fn run() -> claims::ServerExit {
                     claimed.store().clone(),
                     &claimed.fence(),
                     config,
+                    crash_policy,
+                    &stop_signal,
                 )
                 .unwrap_or_else(|e| {
                     if peer_link::is_fenced(&e) {
                         fenced_exit(&e)
+                    }
+                    if peer_link::is_stopped(&e) {
+                        std::process::exit(0)
                     }
                     fatal(&format!("the peer links on {bind}: {e}"))
                 });
@@ -994,12 +1004,15 @@ pub fn run() -> claims::ServerExit {
                 peer_links = Some(links);
                 registered
             } else {
-                match peer_link::register(claimed.store(), &claimed.fence(), ownership.ordinal(), boot, &endpoint, None) {
-                    Ok(registered) => registered,
+                let fence = claimed.fence();
+                match peer_link::register(claimed.store(), &fence, ownership.ordinal(), boot, &endpoint, None, crash_policy, &stop_signal) {
+                    Ok(Some(registered)) => registered,
+                    Ok(None) => std::process::exit(0),
                     Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
                     Err(e) => fatal(&e.to_string()),
                 }
             };
+            heartbeat = Some(lease::Heartbeat::new(claimed.store().clone(), ownership.ordinal(), boot));
             info!(
                 "[server] registered host {} at world generation {}{}",
                 ownership.ordinal(),
@@ -1185,6 +1198,17 @@ pub fn run() -> claims::ServerExit {
         }
         if stop_signal.load(std::sync::atomic::Ordering::SeqCst) {
             info!("[server] stop signal: saving the world and exiting");
+            break 'main;
+        }
+        // The lease is beaten from THIS loop on purpose (R4 decision 3): a hung main loop must
+        // stop beating although its sockets live, so the coordinator sees it lapse — a timer
+        // thread would keep beating for a host that no longer runs.
+        if heartbeat.as_mut().is_some_and(|beat| beat.pump(std::time::Instant::now()) == lease::LeaseState::Replaced) {
+            log::error!(
+                "[server] replaced: this host's hosts row is no longer this live boot (declared dead, or \
+                 another boot of its ordinal registered); stopping"
+            );
+            fenced.set();
             break 'main;
         }
         manager.maintain(now_ms);

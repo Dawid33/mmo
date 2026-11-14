@@ -929,8 +929,9 @@ impl CoordinatorRuntime {
     }
 
     /// The world tick, and (every [`WORLD_CUT_HOSTS_REFRESH_MS`]) the hosts a cut needs:
-    /// those whose `hosts` row is not clean. A read that fails stops cuts until a good one
-    /// ([`Coordinator::expected_hosts_unknown`]).
+    /// those whose `hosts` row is not clean and live. A read that fails stops cuts until a good
+    /// one ([`Coordinator::expected_hosts_unknown`]). Every read feeds the lease watch
+    /// ([`game::coordinator::LeaseWatch`]); a failed one makes it forget what it saw.
     fn feed_cuts(&mut self, now: u64) {
         let Some(cuts) = &self.cuts else { return };
         self.core.set_world_tick((cuts.tick)());
@@ -940,14 +941,31 @@ impl CoordinatorRuntime {
                 Ok(Ok(rows)) => {
                     // A host that left and registered again (another boot) is expected again.
                     self.core.set_host_boots(rows.iter().map(|r| (r.ordinal, r.boot)).collect());
-                    self.core.set_expected_hosts(rows.iter().filter(|r| !r.clean).map(|r| r.ordinal).collect());
+                    // A row marked dead (a takeover declared it) runs nothing: not expected
+                    // (`decide_cut` reads the same predicate).
+                    self.core.set_expected_hosts(
+                        rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).map(|r| r.ordinal).collect(),
+                    );
+                    let seen: Vec<game::coordinator::HostSeen> = rows
+                        .iter()
+                        .map(|r| game::coordinator::HostSeen {
+                            ordinal: r.ordinal,
+                            boot: r.boot,
+                            clean: r.clean,
+                            state: r.state,
+                            seen_ms: r.seen_ms,
+                        })
+                        .collect();
+                    self.core.observe_leases(&seen, now);
                 }
                 Ok(Err(e)) => {
                     self.core.expected_hosts_unknown();
+                    self.core.leases_unread();
                     self.warn_cuts(now, &format!("the hosts could not be read ({e}); no world cut until they are"));
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.core.expected_hosts_unknown();
+                    self.core.leases_unread();
                     self.warn_cuts(now, "the world-store thread has stopped; no world cut");
                 }
             }

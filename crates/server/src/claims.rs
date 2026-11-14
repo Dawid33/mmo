@@ -61,8 +61,9 @@ impl ServerExit {
 }
 
 /// The process-wide "I was fenced" flag: set by the cut writer and the
-/// region threads when the store refuses them as fenced, polled by the main
-/// loop. Clones share it.
+/// region threads when the store refuses them as fenced, and by the main loop
+/// when its lease heartbeat answers that the boot was replaced
+/// ([`crate::lease::LeaseState::Replaced`]); polled by the main loop. Clones share it.
 #[derive(Clone, Debug, Default)]
 pub struct Fenced(Arc<AtomicBool>);
 

@@ -20,11 +20,13 @@
 mod link;
 mod msg;
 mod state;
+mod succession;
 mod world_cut;
 
 pub use link::*;
 pub use msg::*;
 pub use state::*;
+pub use succession::*;
 pub use world_cut::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -162,6 +164,8 @@ pub struct Coordinator {
     sites_key: Vec<(SiteId, bool, u32, bool)>,
     /// The world cuts of several hosts (`world_cut.rs`).
     cuts: WorldCuts,
+    /// Which hosts lost their lease (`succession.rs`), fed by the runtime's `hosts` reads.
+    leases: LeaseWatch,
 }
 
 impl Coordinator {
@@ -195,6 +199,7 @@ impl Coordinator {
             clock_ms: now_ms,
             calendar_anchor,
             cuts: WorldCuts::default(),
+            leases: LeaseWatch::default(),
         };
         c.push_view(Target::Every);
         c

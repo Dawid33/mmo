@@ -110,7 +110,10 @@ pub use mining::*;
 pub use migrate::Carried;
 pub use movement::{Immersion, Motion};
 pub use orders::*;
-pub use ownership::{rendezvous_owner, super_region_of, Ownership, DEFAULT_SUPER_REGION_REGIONS};
+pub use ownership::{
+    rendezvous_owner, super_region_of, CrashPolicy, Ownership, DEFAULT_SUPER_REGION_REGIONS, HOST_DEAD, HOST_HEARTBEAT_MS,
+    HOST_LEASE_MS, HOST_LIVE,
+};
 pub use pathfind::*;
 pub use peer::*;
 pub use path_plan::{

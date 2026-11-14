@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    RegionSpawner, ClientId, EntityId, HostEndpoint, InlineSpawner, Ownership, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId,
+    RegionSpawner, ClientId, CrashPolicy, EntityId, HostEndpoint, InlineSpawner, Ownership, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId,
     PlayerRecord, RegionCoords, RegionOutput, ServerEvent, ServerPacket, Volatile, WorldManager,
     REGION_SIZE,
 };
@@ -158,7 +158,9 @@ fn start_links(
         cert_hash_file: dir.join(format!("host-{ordinal}.peer.cert-sha256")),
         delay: Duration::ZERO,
     };
-    PeerLinks::start(ordinal, HOSTS, boot, endpoint(ordinal), token.into(), claims.store().clone(), &claims.fence(), config)
+    let store = claims.store().clone();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    PeerLinks::start(ordinal, HOSTS, boot, endpoint(ordinal), token.into(), store, &claims.fence(), config, CrashPolicy::Rollback, &stop)
         .expect("the peer links start")
 }
 
@@ -1733,6 +1735,51 @@ fn dirty_restart_rolls_every_host_back_once() {
         w.pair.round();
     }
     assert_eq!(holders_all(&mut w, id).len(), 1, "the slime once: {:?}", holders_all(&mut w, id));
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// A host whose `hosts` row was marked dead (a takeover declared it) learns it from its next
+/// heartbeat — the lease answers "replaced" — and its loop ends fenced within 3 s: its
+/// sessions refused, nothing more saved (its seam region's row stays as it was), nothing
+/// left prepared. The other host's cuts carry on without it: a dead row is not expected.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn replaced_host_exits_fenced_at_its_next_heartbeat() {
+    use server::lease::{Heartbeat, LeaseState};
+
+    install_props();
+    let Some(db) = PgDb::create("kreplaced") else { return };
+    let dir = scratch("kreplaced");
+    let mut w = world(&db, &dir);
+    w.until_committed_after(&db, 0);
+    let mut beat = Heartbeat::new(w.claims[1].store().clone(), 1, 1001);
+    let live_until = Instant::now() + Duration::from_millis(game::HOST_HEARTBEAT_MS + 500);
+    while Instant::now() < live_until {
+        w.pair.round();
+        assert_eq!(beat.pump(Instant::now()), LeaseState::Held, "a live row holds its lease");
+    }
+    exec(&db, "UPDATE hosts SET state = 1 WHERE ordinal = 1");
+    let marked = Instant::now();
+    let replaced_at = loop {
+        w.pair.round();
+        if beat.pump(Instant::now()) == LeaseState::Replaced {
+            break Instant::now();
+        }
+        assert!(marked.elapsed() < Duration::from_secs(3), "no Replaced within 3 s of the row marked dead");
+    };
+    assert!(replaced_at - marked < Duration::from_secs(3));
+    let b1 = seam_of(&w, 1);
+    let saved = |db: &PgDb| query_i64s(db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", b1.x, b1.z));
+    // As the host loop does on `Replaced`: the process is fenced.
+    w.claims[1].fenced().set();
+    let before = saved(&db);
+    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Fenced);
+    assert_eq!(saved(&db), before, "a replaced host saves nothing on its way out");
+    // Host 0's cuts go on: host 1's dead row is no longer expected in a cut.
+    let (last, _) = last_committed(&db);
+    w.until_committed_after(&db, last);
+    assert_eq!(saved(&db), before, "nothing of host 1's region saved after it was replaced");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }

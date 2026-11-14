@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, Sender};
@@ -121,9 +122,12 @@ impl PeerLinkConfig {
     }
 }
 
-/// Registers this boot as host `ordinal` — the boot's ONE `register_host` (a second in
-/// the same boot would raise the world generation) — with where players reach it
-/// (`endpoint`) and, with `peer`, its peer listener's address and pin.
+/// Registers this boot as host `ordinal` — the boot's ONE successful `register_host` (a
+/// second in the same boot would raise the world generation) — with where players reach it
+/// (`endpoint`) and, with `peer`, its peer listener's address and pin; under `policy` it may
+/// wait for its predecessor's succession first ([`crate::lease::register_or_wait`]).
+/// `Ok(None)`: `stop` was set while it waited.
+#[allow(clippy::too_many_arguments)]
 pub fn register(
     store: &StoreHandle,
     fence: &Fence,
@@ -131,7 +135,9 @@ pub fn register(
     boot: u64,
     endpoint: &HostEndpoint,
     peer: Option<(String, String)>,
-) -> Result<HostBoot, StoreError> {
+    policy: game::CrashPolicy,
+    stop: &AtomicBool,
+) -> Result<Option<HostBoot>, StoreError> {
     let (peer_addr, peer_cert) = peer.unzip();
     let row = HostRow {
         ordinal,
@@ -147,7 +153,7 @@ pub fn register(
         webtransport: endpoint.webtransport.clone(),
         wt_cert_hash: endpoint.cert_hash.clone(),
     };
-    store.register_host(row, fence)
+    crate::lease::register_or_wait(store, row, fence, policy, stop)
 }
 
 /// The other hosts that left the world cleanly in a committed leave cut, each with the boot
@@ -158,6 +164,12 @@ pub fn register(
 /// [`game::WorldManager::note_left_peers`]; a later boot is expected again from its hello.
 pub fn left_cleanly(store: &world_store::StoreHandle, me: u32) -> Result<Vec<(u32, u64)>, world_store::StoreError> {
     Ok(store.hosts()?.into_iter().filter(|r| r.clean && r.ordinal != me).map(|r| (r.ordinal, r.boot)).collect())
+}
+
+/// Whether a [`PeerLinks::start`] error is the stop signal, set while the boot waited to
+/// register: exit 0.
+pub fn is_stopped(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Interrupted
 }
 
 /// Whether a [`PeerLinks::start`] error is the store's fence (this boot was replaced
@@ -610,7 +622,8 @@ impl PeerLinks {
     /// the listener's address and pin and `endpoint`'s addresses — and starts a link to
     /// every other of `hosts` hosts: a higher ordinal dials this listener, a lower one is
     /// dialed at the address its `hosts` row names. `token` is the shared service token;
-    /// `fence` this boot's claim. A fenced registration is an error [`is_fenced`] knows.
+    /// `fence` this boot's claim; `policy` and `stop` as [`register`]'s. A fenced registration
+    /// is an error [`is_fenced`] knows, a stop while it waited one [`is_stopped`] knows.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         ordinal: u32,
@@ -621,6 +634,8 @@ impl PeerLinks {
         store: StoreHandle,
         fence: &Fence,
         config: PeerLinkConfig,
+        policy: game::CrashPolicy,
+        stop: &AtomicBool,
     ) -> io::Result<PeerLinks> {
         if let Some(dir) = config.cert_hash_file.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
@@ -628,7 +643,9 @@ impl PeerLinks {
         let (listener, events, senders) =
             LinkListener::bind::<PeerMsg, PeerMsg>(config.bind, token.clone(), Some(config.cert_hash_file.clone()))?;
         let peer = Some((listener.local_addr().to_string(), listener.cert_sha256().to_string()));
-        let registered = register(&store, fence, ordinal, boot, &endpoint, peer).map_err(io::Error::other)?;
+        let registered = register(&store, fence, ordinal, boot, &endpoint, peer, policy, stop)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "stopped while waiting to register"))?;
         log::info!(
             "[peers] host {ordinal} of {hosts}: peers dial {} (pin {})",
             listener.local_addr(),

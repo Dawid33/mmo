@@ -1836,3 +1836,70 @@ fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
     assert_eq!(begun(&commit_routed(&mut c)).len(), 3, "at once, all three");
     assert_eq!(c.take_cuts_blocked(), None);
 }
+
+// ---- the lease watch (R4) ----------------------------------------------------------------
+
+/// Host `ordinal`'s row as the coordinator reads it: dirty and live, last seen at `seen_ms`.
+fn seen(ordinal: u32, seen_ms: u64) -> HostSeen {
+    HostSeen { ordinal, boot: 100 + u64::from(ordinal), clean: false, state: game::HOST_LIVE, seen_ms }
+}
+
+/// A host is lapsed only once the coordinator itself read one `seen_ms` over a whole lease
+/// of its own clock; a beat in between restarts the count; clean or dead rows never lapse.
+#[test]
+fn lease_watch_needs_a_full_lease_of_unchanged_reads() {
+    let mut w = LeaseWatch::default();
+    let mut clean = seen(2, 7);
+    clean.clean = true;
+    let mut dead = seen(3, 7);
+    dead.state = game::HOST_DEAD;
+    for t in (0..game::HOST_LEASE_MS).step_by(1_000) {
+        w.observe(&[seen(1, 500), clean.clone(), dead.clone()], t);
+        assert!(w.lapsed(t).is_empty(), "lapsed at {t} ms: {:?}", w.lapsed(t));
+    }
+    w.observe(&[seen(1, 500), clean.clone(), dead.clone()], game::HOST_LEASE_MS);
+    assert_eq!(w.lapsed(game::HOST_LEASE_MS), vec![(1, 101)]);
+    // It beat: the count starts again from this read.
+    let t0 = game::HOST_LEASE_MS + 1_000;
+    w.observe(&[seen(1, 2_000)], t0);
+    assert!(w.lapsed(t0).is_empty());
+    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS - 1);
+    assert!(w.lapsed(t0 + game::HOST_LEASE_MS - 1).is_empty());
+    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS);
+    assert_eq!(w.lapsed(t0 + game::HOST_LEASE_MS), vec![(1, 101)]);
+    // Time alone, without a read, lapses nobody new.
+    let mut fresh = LeaseWatch::default();
+    fresh.observe(&[seen(1, 2_000)], 0);
+    assert!(fresh.lapsed(10 * game::HOST_LEASE_MS).is_empty());
+}
+
+/// Reads that fail for longer than a lease (a database outage) declare nobody: the watch
+/// forgets everything and needs a whole lease of good reads again.
+#[test]
+fn outage_longer_than_the_lease_declares_nobody() {
+    let mut w = LeaseWatch::default();
+    w.observe(&[seen(0, 500), seen(1, 500)], 0);
+    for _ in 0..20 {
+        w.observe_failed();
+    }
+    let back = 20_000;
+    w.observe(&[seen(0, 500), seen(1, 500)], back);
+    assert!(w.lapsed(back).is_empty(), "{:?}", w.lapsed(back));
+    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS - 1);
+    assert!(w.lapsed(back + game::HOST_LEASE_MS - 1).is_empty());
+    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS);
+    assert_eq!(w.lapsed(back + game::HOST_LEASE_MS), vec![(0, 100), (1, 101)]);
+}
+
+/// A row a booting host of the same ordinal vouched for (`seen_ms = 0`) is lapsed at once.
+#[test]
+fn a_vouched_row_is_lapsed_at_once() {
+    let mut w = LeaseWatch::default();
+    w.observe(&[seen(0, 500), seen(1, 0)], 42);
+    assert_eq!(w.lapsed(42), vec![(1, 101)]);
+    // Unless it is clean (it left) or dead (already declared).
+    let mut clean = seen(1, 0);
+    clean.clean = true;
+    w.observe(&[clean], 43);
+    assert!(w.lapsed(43).is_empty());
+}

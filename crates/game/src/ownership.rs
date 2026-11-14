@@ -15,6 +15,30 @@ pub fn super_region_of(rc: RegionCoords, s: u32) -> (i32, i32) {
     (rc.x.div_euclid(s), rc.z.div_euclid(s))
 }
 
+/// What a host's crash costs the world (R4). `Rollback`: the R3 rule — a host that
+/// boots after a boot of its ordinal that never left clean raises the world generation and
+/// every host restarts from the last cut. `Succession`: the dead host's land is inherited by
+/// a live host while the others run on; a boot that finds its predecessor's dirty row waits
+/// for that (or, if no host is alive, raises the generation as before).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrashPolicy {
+    Rollback,
+    Succession,
+}
+
+/// How often a host stamps its lease (`hosts.seen_ms`), from its MAIN loop: a hung loop must
+/// stop beating although its sockets live (a timer thread would keep a hung host alive).
+pub const HOST_HEARTBEAT_MS: u64 = 2_000;
+/// How long a host's lease lasts without a beat: the coordinator declares a host dead once
+/// it has read the same `seen_ms` over this long of its own successful reads; a booting host
+/// counts another host alive while `db_now - seen_ms` is within it.
+pub const HOST_LEASE_MS: u64 = 10_000;
+
+/// `hosts.state`: the host holds its lease.
+pub const HOST_LIVE: i64 = 0;
+/// `hosts.state`: the host's lease lapsed and a takeover marked it dead.
+pub const HOST_DEAD: i64 = 1;
+
 /// Environment: `allinone` (default) or `static`.
 pub const OWNERSHIP_ENV: &str = "VOXEL_OWNERSHIP";
 /// Environment: this host's ordinal (`static` only), `0..hosts`.

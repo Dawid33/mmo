@@ -427,16 +427,28 @@ macro_rules! engine_rows {
             /// The database clock in ms since the epoch (the one expression per engine).
             const NOW_MS: &str = $now_ms;
 
-            /// Registers a host boot (R3): in one transaction, with the fence checked over the fence's own
-            /// super-regions first and then the world row locked (Postgres: `FOR NO KEY UPDATE`; SQLite
-            /// has one writer) — the lock order of `commit_cut`. If the ordinal's row exists, is not clean and
-            /// still holds the world's generation, the previous boot died without a clean
-            /// save: `world.generation` goes up (`bumped`). The row is then upserted with
-            /// the new boot, the world's generation, `clean = 0`, `state` live, `seen_ms` now and `reg` one more
-            /// than the highest of any row (safe: the world-row lock serialises registrations).
-            /// `row.generation`, `row.clean`, `row.state`, `row.seen_ms` and `row.reg` are ignored. Callers hold the writer lock.
-            pub(crate) async fn register_host(pool: &Pool, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
+            /// Registers a host boot (R3, R4): in one transaction (Postgres: `lock_timeout`
+            /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] — it waits for what a claim waits for), with the fence
+            /// checked over the fence's own super-regions first and then the world row locked
+            /// (Postgres: `FOR NO KEY UPDATE`; SQLite has one writer) — the lock order of `commit_cut`.
+            /// The ordinal's prior row decides, if it is dirty and holds the world's generation (its
+            /// boot died without a clean save): `Rollback` → `world.generation` goes up (`bumped`);
+            /// `Succession` → marked dead: `Wait(Succession)`, nothing written; live while another
+            /// dirty live row beat within [`game::HOST_LEASE_MS`] (database clock): the prior row's
+            /// `seen_ms = 0` (vouched), `Wait(Vouched)`; nobody alive: bumped as `Rollback`. Otherwise
+            /// (no prior row, a clean one, an older generation) it registers at the world's
+            /// generation. Registering upserts the row with the new boot, the generation, `clean = 0`,
+            /// `state` live, `seen_ms` now and `reg` one more than the highest of any row (safe: the
+            /// world-row lock serialises registrations). `row.generation`, `row.clean`, `row.state`,
+            /// `row.seen_ms` and `row.reg` are ignored. Callers hold the writer lock.
+            pub(crate) async fn register_host(
+                pool: &Pool,
+                row: HostRow,
+                fence: &Fence,
+                policy: game::CrashPolicy,
+            ) -> Result<crate::BootVerdict, StoreError> {
                 let mut tx = pool.begin().await?;
+                cut_lock_timeout(&mut *tx, crate::CLAIM_LOCK_TIMEOUT_MS).await?;
                 let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
                 check_fence(&mut *tx, fence, &srs).await?;
                 // Postgres `FOR NO KEY UPDATE` (as `decide_cut`): serialises the generation
@@ -448,15 +460,44 @@ macro_rules! engine_rows {
                     .await?
                     .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
                     .try_get(0)?;
-                let prior = sqlx::query("SELECT generation, clean FROM hosts WHERE ordinal = $1")
+                let prior = sqlx::query("SELECT generation, clean, state FROM hosts WHERE ordinal = $1")
                     .bind(i64::from(row.ordinal))
                     .fetch_optional(&mut *tx)
                     .await?;
                 let mut generation = world;
                 let mut bumped = false;
                 if let Some(prior) = prior {
-                    let (prior_generation, prior_clean): (i64, i64) = (prior.try_get(0)?, prior.try_get(1)?);
+                    let (prior_generation, prior_clean, prior_state): (i64, i64, i64) =
+                        (prior.try_get(0)?, prior.try_get(1)?, prior.try_get(2)?);
                     if prior_clean == 0 && prior_generation == world {
+                        if policy == game::CrashPolicy::Succession {
+                            if prior_state != crate::HOST_LIVE {
+                                // Declared dead: its land is being inherited. Nothing written.
+                                tx.rollback().await?;
+                                return Ok(crate::BootVerdict::Wait(crate::WaitFor::Succession));
+                            }
+                            let sql = format!(
+                                "SELECT COUNT(*) FROM hosts WHERE ordinal <> $1 AND clean = 0 AND state = {live} \
+                                 AND {NOW_MS} - seen_ms <= $2",
+                                live = crate::HOST_LIVE,
+                            );
+                            let alive: i64 = sqlx::query(&sql)
+                                .bind(i64::from(row.ordinal))
+                                .bind(i(game::HOST_LEASE_MS))
+                                .fetch_one(&mut *tx)
+                                .await?
+                                .try_get(0)?;
+                            if alive > 0 {
+                                // Another host runs: it inherits; this boot vouches for the death.
+                                sqlx::query("UPDATE hosts SET seen_ms = 0 WHERE ordinal = $1")
+                                    .bind(i64::from(row.ordinal))
+                                    .execute(&mut *tx)
+                                    .await?;
+                                tx.commit().await?;
+                                return Ok(crate::BootVerdict::Wait(crate::WaitFor::Vouched));
+                            }
+                            // Nobody alive: a total crash restarts the world from its last cut.
+                        }
                         generation = world + 1;
                         bumped = true;
                         sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(generation).execute(&mut *tx).await?;
@@ -489,7 +530,7 @@ macro_rules! engine_rows {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                Ok(HostBoot { generation: u(generation), bumped, reg: u(reg) })
+                Ok(crate::BootVerdict::Registered(HostBoot { generation: u(generation), bumped, reg: u(reg) }))
             }
 
             /// Every host row, by ordinal.

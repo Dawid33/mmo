@@ -24,7 +24,9 @@ pub use codec::*;
 pub use counters::StoreCounters;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
-pub use handle::{CutCommitted, HOST_DEAD, HOST_LIVE, HostBoot, HostRow, NO_OWNER, StoreHandle, WorldInfo};
+pub use handle::{
+    BootVerdict, CutCommitted, HOST_DEAD, HOST_LIVE, HostBoot, HostRow, NO_OWNER, StoreHandle, WaitFor, WorldInfo,
+};
 pub use listen::{
     CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
     WORLD_DB_DIRECT_ENV,

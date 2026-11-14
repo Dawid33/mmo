@@ -11,7 +11,7 @@ use world_store::{Dials, Fence, HostRow, OpenMode, StoreError, StoreHandle, Stor
 
 use crate::codec::{chunk, intent, meta, region_ground};
 use crate::common;
-use crate::handle::{each_backend, open};
+use crate::handle::{each_backend, open, register};
 
 /// Host 0's region (super-region (0, 0)).
 const A: RegionCoords = RegionCoords { x: 0, z: 0 };
@@ -472,8 +472,8 @@ fn leaving_host_is_clean_only_if_committed() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    h.register_host(host_row(0), &f0).unwrap();
-    h.register_host(host_row(1), &f1).unwrap();
+    register(&h, host_row(0), &f0).unwrap();
+    register(&h, host_row(1), &f1).unwrap();
     let c = h.claim_coordinator().unwrap();
     let clean = |h: &StoreHandle| h.hosts().unwrap().iter().map(|r| (r.ordinal, r.clean)).collect::<Vec<_>>();
     let h1 = open(&w.url);
@@ -499,9 +499,9 @@ fn commit_beside_a_dirty_unlisted_host_becomes_an_abort() {
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
     let f2 = h.claim_super_regions(2, vec![(7, 7)]).unwrap();
-    h.register_host(host_row(0), &f0).unwrap();
-    h.register_host(host_row(1), &f1).unwrap();
-    h.register_host(host_row(2), &f2).unwrap();
+    register(&h, host_row(0), &f0).unwrap();
+    register(&h, host_row(1), &f1).unwrap();
+    register(&h, host_row(2), &f2).unwrap();
     let c = h.claim_coordinator().unwrap();
     prepare_both(&h, &h1, 40, &f0, &f1);
     assert!(!h.decide_cut(CutId(40), 4000, true, vec![0, 1], vec![], c, 0).unwrap());
@@ -522,8 +522,8 @@ fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
     let h = open(&w.url);
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
-    h.register_host(host_row(0), &f0).unwrap();
-    h.register_host(host_row(1), &f1).unwrap();
+    register(&h, host_row(0), &f0).unwrap();
+    register(&h, host_row(1), &f1).unwrap();
     let c = h.claim_coordinator().unwrap();
     let settle = |cut: u64| {
         h.cut_decided(CutId(cut)).unwrap();
@@ -539,7 +539,7 @@ fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
     settle(51);
     // Host 1 returns (clean row: no generation bump) while cut 52 of host 0 is pending.
     h.prepare_cut(part(52, 0), f0.clone(), 0).recv().unwrap().unwrap();
-    let boot = h1.register_host(host_row(1), &f1).unwrap();
+    let boot = register(&h1, host_row(1), &f1).unwrap();
     assert!(!boot.bumped);
     assert!(!h.decide_cut(CutId(52), 5200, true, vec![0], vec![], c, 0).unwrap(), "host 1 is dirty and unlisted");
     settle(52);
@@ -886,7 +886,7 @@ fn claim_holding_the_world_row_does_not_block_a_decision() {
             let booter = {
                 let (h, f0) = (h.clone(), f0.clone());
                 std::thread::spawn(move || {
-                    let _ = tx_boot.send(h.register_host(host_row(0), &f0));
+                    let _ = tx_boot.send(register(&h, host_row(0), &f0));
                 })
             };
             rx_boot.recv_timeout(Duration::from_secs(5)).expect("the boot does not wait").unwrap();

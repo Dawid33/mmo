@@ -103,7 +103,7 @@ pub(crate) enum Request {
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
     SetSuperRegionRegions(u32, Reply<bool>),
-    RegisterHost(crate::HostRow, Fence, Reply<crate::HostBoot>),
+    RegisterHost(crate::HostRow, Fence, game::CrashPolicy, Reply<crate::BootVerdict>),
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
     OwnerClaimEpoch(u32, Reply<Option<u64>>),
@@ -461,9 +461,9 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, set_super_region_regions(n)))
             }),
-            Request::RegisterHost(row, fence, r) => tokio::spawn(async move {
+            Request::RegisterHost(row, fence, policy, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
-                r.send(on_pool!(&pool, register_host(row, &fence)))
+                r.send(on_pool!(&pool, register_host(row, &fence, policy)))
             }),
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
             Request::WorldGeneration(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) }),
@@ -558,7 +558,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SetSuperRegionRegions(_, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::RegisterHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RegisterHost(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PrepareCut(c, _, _, r) => {
             cuts.settle(c.id);
             r.send(Err(StoreError::ReadOnly))

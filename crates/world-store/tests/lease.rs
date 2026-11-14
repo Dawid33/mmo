@@ -1,9 +1,10 @@
 //! The lease on a `hosts` row (R4): `register_host` stamps `seen_ms`, `state` and a rising
 //! `reg`; `heartbeat` moves `seen_ms` for the live boot only.
 
-use world_store::{HOST_LIVE, HostRow};
+use game::CrashPolicy;
+use world_store::{BootVerdict, Fence, HOST_LIVE, HostBoot, HostRow, WaitFor};
 
-use crate::handle::{TEST_SUPER_REGIONS, each_backend, open, raw_exec};
+use crate::handle::{TEST_SUPER_REGIONS, each_backend, open, raw_exec, register};
 
 fn row(ordinal: u32, boot: u64) -> HostRow {
     HostRow {
@@ -29,8 +30,8 @@ fn register_stamps_seen_and_a_rising_reg() {
         let h = open(url);
         let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
         let b = h.claim_super_regions(1, vec![TEST_SUPER_REGIONS[1]]).unwrap();
-        let boot0 = h.register_host(row(0, 10), &a).unwrap();
-        let boot1 = h.register_host(row(1, 11), &b).unwrap();
+        let boot0 = register(&h, row(0, 10), &a).unwrap();
+        let boot1 = register(&h, row(1, 11), &b).unwrap();
         assert_eq!((boot0.reg, boot1.reg), (1, 2));
         let now = h.db_now_ms().unwrap();
         let rows = h.hosts().unwrap();
@@ -39,7 +40,7 @@ fn register_stamps_seen_and_a_rising_reg() {
             assert!(r.seen_ms.abs_diff(now) < 5_000, "seen_ms {} vs db now {now}", r.seen_ms);
         }
         // A re-registration takes the next number.
-        assert_eq!(h.register_host(row(0, 12), &a).unwrap().reg, 3);
+        assert_eq!(register(&h, row(0, 12), &a).unwrap().reg, 3);
         h.shutdown();
     });
 }
@@ -49,7 +50,7 @@ fn heartbeat_moves_seen_ms_for_the_live_boot_only() {
     each_backend("lease_heartbeat", true, |url| {
         let h = open(url);
         let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
-        h.register_host(row(0, 10), &a).unwrap();
+        register(&h, row(0, 10), &a).unwrap();
         let seen = || h.hosts().unwrap()[0].seen_ms;
         let first = seen();
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -86,7 +87,7 @@ fn a_heartbeat_behind_a_held_row_lock_errors_instead_of_waiting() {
     let db = rt.block_on(crate::common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let h = open(&StoreUrl::Postgres(db.url.clone()));
     let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
-    h.register_host(row(0, 10), &a).unwrap();
+    register(&h, row(0, 10), &a).unwrap();
     rt.block_on(async {
         let mut conn = sqlx::PgConnection::connect(&db.url).await.unwrap();
         let mut tx = conn.begin().await.unwrap();
@@ -104,4 +105,155 @@ fn a_heartbeat_behind_a_held_row_lock_errors_instead_of_waiting() {
     });
     h.shutdown();
     drop(db);
+}
+
+/// Host 0's registration as a boot under `policy`: the boot after one of the same ordinal.
+fn boot_as(h: &world_store::StoreHandle, boot: u64, policy: CrashPolicy) -> BootVerdict {
+    h.register_host(row(0, boot), &Fence::default(), policy).unwrap()
+}
+
+/// Host 0 boots again (boot 20) under `Succession` after its previous boot (10) and host 1's
+/// (11) registered, by what its prior row says: the verdict, the world generation after it,
+/// and the prior row (boot, `seen_ms`) when it was left in place.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn boot_verdicts() {
+    struct Case {
+        what: &'static str,
+        /// Run against the store after both boots registered.
+        setup: &'static [&'static str],
+        verdict: fn(&BootVerdict) -> bool,
+        generation: u64,
+        /// The prior row is left as it was (boot 10), its `seen_ms` 0 (`Some(true)`, vouched)
+        /// or unchanged (`Some(false)`); `None`: replaced by boot 20.
+        prior_vouched: Option<bool>,
+    }
+    let cases = [
+        Case {
+            what: "no prior row",
+            setup: &["DELETE FROM hosts WHERE ordinal = 0"],
+            verdict: |v| matches!(v, BootVerdict::Registered(HostBoot { generation: 0, bumped: false, .. })),
+            generation: 0,
+            prior_vouched: None,
+        },
+        Case {
+            what: "a clean prior row",
+            setup: &["UPDATE hosts SET clean = 1 WHERE ordinal = 0"],
+            verdict: |v| matches!(v, BootVerdict::Registered(HostBoot { generation: 0, bumped: false, .. })),
+            generation: 0,
+            prior_vouched: None,
+        },
+        Case {
+            what: "a dirty prior row of an older generation (R3's resume)",
+            setup: &["UPDATE world SET generation = 1"],
+            verdict: |v| matches!(v, BootVerdict::Registered(HostBoot { generation: 1, bumped: false, .. })),
+            generation: 1,
+            prior_vouched: None,
+        },
+        Case {
+            what: "a dirty prior row marked dead (being inherited)",
+            setup: &["UPDATE hosts SET state = 1 WHERE ordinal = 0"],
+            verdict: |v| matches!(v, BootVerdict::Wait(WaitFor::Succession)),
+            generation: 0,
+            prior_vouched: Some(false),
+        },
+        Case {
+            what: "a dirty live prior row, another host alive",
+            setup: &[],
+            verdict: |v| matches!(v, BootVerdict::Wait(WaitFor::Vouched)),
+            generation: 0,
+            prior_vouched: Some(true),
+        },
+        Case {
+            what: "a dirty live prior row, nobody alive",
+            setup: &["UPDATE hosts SET seen_ms = 1 WHERE ordinal = 1"],
+            verdict: |v| matches!(v, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })),
+            generation: 1,
+            prior_vouched: None,
+        },
+    ];
+    each_backend("lease_verdicts", true, |url| {
+        for case in &cases {
+            raw_exec(url, "DELETE FROM hosts");
+            raw_exec(url, "UPDATE world SET generation = 0");
+            let h = open(url);
+            boot_as(&h, 10, CrashPolicy::Rollback);
+            h.register_host(row(1, 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
+            h.shutdown();
+            for sql in case.setup.iter() {
+                raw_exec(url, sql);
+            }
+            let h = open(url);
+            let before = h.hosts().unwrap().into_iter().find(|r| r.ordinal == 0);
+            let verdict = boot_as(&h, 20, CrashPolicy::Succession);
+            assert!((case.verdict)(&verdict), "{}: {verdict:?}", case.what);
+            assert_eq!(h.world_generation().unwrap(), case.generation, "{}: the world generation", case.what);
+            let prior = h.hosts().unwrap().into_iter().find(|r| r.ordinal == 0).expect("host 0's row");
+            match case.prior_vouched {
+                None => assert_eq!((prior.boot, prior.state), (20, HOST_LIVE), "{}: registered", case.what),
+                Some(vouched) => {
+                    let before = before.expect("a prior row");
+                    assert_eq!(prior.boot, 10, "{}: the prior row stays", case.what);
+                    let seen = if vouched { 0 } else { before.seen_ms };
+                    assert_eq!(prior.seen_ms, seen, "{}: the prior row's seen_ms", case.what);
+                }
+            }
+            h.shutdown();
+        }
+    });
+}
+
+/// `Rollback` is R3's rule whatever the lease says: a dirty boot at the world's generation
+/// raises it once (another host alive or not, the prior row dead or not), the others adopt.
+#[test]
+fn rollback_policy_keeps_the_r3_rule() {
+    each_backend("lease_rollback", true, |url| {
+        let h = open(url);
+        let reg = |ordinal: u32, boot: u64| -> HostBoot {
+            match h.register_host(row(ordinal, boot), &Fence::default(), CrashPolicy::Rollback).unwrap() {
+                BootVerdict::Registered(b) => b,
+                other => panic!("Rollback never waits: {other:?}"),
+            }
+        };
+        assert!(!reg(0, 1).bumped);
+        assert!(!reg(1, 2).bumped);
+        // A crashed and reboots while B is alive: its row was dirty at the world's generation.
+        let again = reg(0, 3);
+        assert_eq!((again.generation, again.bumped), (1, true));
+        // B restarts because it saw generation 1: its row says 0, so it adopts.
+        let adopted = reg(1, 4);
+        assert_eq!((adopted.generation, adopted.bumped), (1, false));
+        assert_eq!(h.world_generation().unwrap(), 1);
+        h.shutdown();
+        // A row marked dead changes nothing under Rollback: a second crash of B bumps again.
+        raw_exec(url, "UPDATE hosts SET state = 1 WHERE ordinal = 1");
+        let h = open(url);
+        match h.register_host(row(1, 5), &Fence::default(), CrashPolicy::Rollback).unwrap() {
+            BootVerdict::Registered(b) => assert_eq!((b.generation, b.bumped), (2, true)),
+            other => panic!("Rollback never waits: {other:?}"),
+        }
+        let rows = h.hosts().unwrap();
+        assert_eq!(rows.iter().map(|r| (r.ordinal, r.generation)).collect::<Vec<_>>(), vec![(0, 1), (1, 2)]);
+        h.shutdown();
+    });
+}
+
+/// Every host crashed (every dirty row lapsed): the first boot raises the generation, once;
+/// the next resumes at it.
+#[test]
+fn total_crash_bumps_once_and_everyone_resumes() {
+    each_backend("lease_total_crash", true, |url| {
+        let h = open(url);
+        h.register_host(row(0, 10), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        h.register_host(row(1, 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        h.shutdown();
+        raw_exec(url, "UPDATE hosts SET seen_ms = 1");
+        let h = open(url);
+        let a = h.register_host(row(0, 20), &Fence::default(), CrashPolicy::Succession).unwrap();
+        assert!(matches!(a, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })), "{a:?}");
+        let b = h.register_host(row(1, 21), &Fence::default(), CrashPolicy::Succession).unwrap();
+        assert!(matches!(b, BootVerdict::Registered(HostBoot { generation: 1, bumped: false, .. })), "{b:?}");
+        assert_eq!(h.world_generation().unwrap(), 1);
+        h.shutdown();
+    });
 }
