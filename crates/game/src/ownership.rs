@@ -2,6 +2,8 @@
 //! square super-regions of `s`×`s` regions, the unit a host claims and the
 //! world store fences (owner epochs).
 
+use std::collections::BTreeSet;
+
 use crate::RegionCoords;
 
 /// Regions per super-region side unless the world row says otherwise
@@ -73,108 +75,158 @@ pub fn rendezvous_owner(sr: (i32, i32), hosts: u32) -> u32 {
     best.0
 }
 
-/// Which regions this process simulates.
+/// A super-region's coordinates ([`super_region_of`]).
+pub type SuperRegion = (i32, i32);
+
+/// Who simulates a super-region, as this process knows it ("wait, never guess": a
+/// `Free` or `Unknown` super-region is treated like one whose owner is unreachable —
+/// a player is clamped at the seam, an intent is refused back, a transfer waits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ownership {
-    /// One process runs the whole world (single-player, the dev server).
-    AllInOne,
-    /// A fixed set of `hosts` processes share the world by rendezvous
-    /// hashing of its super-regions; this one is `ordinal`.
-    Static { ordinal: u32, hosts: u32 },
+pub enum Owner {
+    /// This process.
+    Me,
+    /// Another host, by ordinal.
+    Host(u32),
+    /// Nobody holds it (a free directory row, or none at all).
+    Free,
+    /// This process does not know (its directory was never read).
+    Unknown,
 }
 
-impl Ownership {
-    /// Whether this process owns (simulates) region `rc`, with `s` regions
-    /// per super-region side.
-    pub fn owns(&self, rc: RegionCoords, s: u32) -> bool {
-        self.owns_super_region(super_region_of(rc, s))
-    }
-
-    /// Whether this process owns super-region `sr`.
-    pub fn owns_super_region(&self, sr: (i32, i32)) -> bool {
-        match *self {
-            Ownership::AllInOne => true,
-            Ownership::Static { ordinal, hosts } => rendezvous_owner(sr, hosts) == ordinal,
-        }
-    }
-
-    /// The host that owns region `rc`, with `s` regions per super-region side
-    /// (`AllInOne`: host 0, the only one).
-    pub fn owner_of(&self, rc: RegionCoords, s: u32) -> u32 {
-        match *self {
-            Ownership::AllInOne => 0,
-            Ownership::Static { hosts, .. } => rendezvous_owner(super_region_of(rc, s), hosts),
-        }
-    }
-
+/// Which regions this process simulates: a policy over the super-regions.
+pub trait Ownership: Send + std::fmt::Debug {
     /// The host ordinal claims are made as (`AllInOne` is host 0).
-    pub fn ordinal(&self) -> u32 {
-        match *self {
-            Ownership::AllInOne => 0,
-            Ownership::Static { ordinal, .. } => ordinal,
-        }
+    fn ordinal(&self) -> u32;
+    /// Who simulates super-region `sr`.
+    fn owner_of(&self, sr: SuperRegion) -> Owner;
+    /// How many hosts share the world (`VOXEL_HOSTS`; `AllInOne`: 1).
+    fn hosts(&self) -> u32;
+    /// Whether this process runs every host's regions (`AllInOne`): it adopts every
+    /// host's in-flight rows and its cuts replace them all.
+    fn runs_every_host(&self) -> bool {
+        false
     }
-
-    /// The super-regions this process claims at start: those of the map
-    /// `extent` it owns (a procedural world has no extent and claims none).
-    pub fn claim_set(&self, extent: Option<crate::MapExtent>, s: u32) -> std::collections::BTreeSet<(i32, i32)> {
-        let Some(extent) = extent else { return Default::default() };
+    /// The super-regions this process claims at start: those of the map `extent` it owns
+    /// now (a procedural world has no extent and claims none).
+    fn claim_set(&self, extent: Option<crate::MapExtent>, s: u32) -> BTreeSet<SuperRegion> {
+        let Some(extent) = extent else { return BTreeSet::new() };
         let (w, h) = (extent.width as i32, extent.height as i32);
         let (lo, hi) = (
             super_region_of(extent.origin, s),
             super_region_of(RegionCoords::new(extent.origin.x + w - 1, extent.origin.z + h - 1), s),
         );
-        let mut set = std::collections::BTreeSet::new();
+        let mut set = BTreeSet::new();
         for sx in lo.0..=hi.0 {
             for sz in lo.1..=hi.1 {
-                if self.owns_super_region((sx, sz)) {
+                if self.owner_of((sx, sz)) == Owner::Me {
                     set.insert((sx, sz));
                 }
             }
         }
         set
     }
+}
 
-    /// The policy from the three environment values (unset / empty = absent).
-    pub fn from_values(ownership: Option<&str>, ordinal: Option<&str>, hosts: Option<&str>) -> Result<Ownership, String> {
-        fn blank(v: Option<&str>) -> Option<&str> {
-            v.map(str::trim).filter(|v| !v.is_empty())
-        }
-        let number = |name: &str, v: Option<&str>| -> Result<Option<u32>, String> {
-            blank(v)
-                .map(|v| v.parse::<u32>().map_err(|_| format!("{name}={v:?} is not a whole number")))
-                .transpose()
-        };
-        match blank(ownership).unwrap_or("allinone") {
-            "allinone" => {
-                if blank(ordinal).is_some() || blank(hosts).is_some() {
-                    return Err(format!(
-                        "{HOST_ORDINAL_ENV} / {HOSTS_ENV} are set but {OWNERSHIP_ENV} is allinone; set {OWNERSHIP_ENV}=static"
-                    ));
-                }
-                Ok(Ownership::AllInOne)
-            }
-            "static" => {
-                let ordinal = number(HOST_ORDINAL_ENV, ordinal)?
-                    .ok_or_else(|| format!("{OWNERSHIP_ENV}=static needs {HOST_ORDINAL_ENV}"))?;
-                let hosts =
-                    number(HOSTS_ENV, hosts)?.ok_or_else(|| format!("{OWNERSHIP_ENV}=static needs {HOSTS_ENV}"))?;
-                if hosts == 0 || ordinal >= hosts {
-                    return Err(format!("{HOST_ORDINAL_ENV}={ordinal} must be below {HOSTS_ENV}={hosts} (at least 1)"));
-                }
-                Ok(Ownership::Static { ordinal, hosts })
-            }
-            other => Err(format!("{OWNERSHIP_ENV}={other:?} is neither allinone nor static")),
-        }
+/// One process runs the whole world (single-player, the dev server).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AllInOne;
+
+impl AllInOne {
+    /// Whether this process owns region `rc`: always.
+    pub fn owns(&self, _rc: RegionCoords, _s: u32) -> bool {
+        true
+    }
+}
+
+impl Ownership for AllInOne {
+    fn ordinal(&self) -> u32 {
+        0
+    }
+    fn owner_of(&self, _sr: SuperRegion) -> Owner {
+        Owner::Me
+    }
+    fn hosts(&self) -> u32 {
+        1
+    }
+    fn runs_every_host(&self) -> bool {
+        true
+    }
+}
+
+/// A fixed set of `hosts` processes share the world by rendezvous hashing of its
+/// super-regions; this one is `ordinal` (R3 as built: never `Free` / `Unknown`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Static {
+    pub ordinal: u32,
+    pub hosts: u32,
+}
+
+impl Static {
+    /// Whether this process owns (simulates) region `rc`, with `s` regions per
+    /// super-region side.
+    pub fn owns(&self, rc: RegionCoords, s: u32) -> bool {
+        rendezvous_owner(super_region_of(rc, s), self.hosts) == self.ordinal
     }
 
-    /// The policy from `VOXEL_OWNERSHIP`, `VOXEL_HOST_ORDINAL`, `VOXEL_HOSTS`.
-    pub fn from_env() -> Result<Ownership, String> {
-        let get = |name: &str| std::env::var(name).ok();
-        Ownership::from_values(
-            get(OWNERSHIP_ENV).as_deref(),
-            get(HOST_ORDINAL_ENV).as_deref(),
-            get(HOSTS_ENV).as_deref(),
-        )
+    /// The host that owns region `rc`, with `s` regions per super-region side, as a
+    /// number (the trait's [`Ownership::owner_of`] answers per super-region).
+    pub fn owner_of(&self, rc: RegionCoords, s: u32) -> u32 {
+        rendezvous_owner(super_region_of(rc, s), self.hosts)
     }
+}
+
+impl Ownership for Static {
+    fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    fn owner_of(&self, sr: SuperRegion) -> Owner {
+        match rendezvous_owner(sr, self.hosts) {
+            o if o == self.ordinal => Owner::Me,
+            o => Owner::Host(o),
+        }
+    }
+    fn hosts(&self) -> u32 {
+        self.hosts
+    }
+}
+
+/// The policy from the three environment values (unset / empty = absent).
+pub fn ownership_from_values(
+    ownership: Option<&str>,
+    ordinal: Option<&str>,
+    hosts: Option<&str>,
+) -> Result<Box<dyn Ownership>, String> {
+    fn blank(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|v| !v.is_empty())
+    }
+    let number = |name: &str, v: Option<&str>| -> Result<Option<u32>, String> {
+        blank(v).map(|v| v.parse::<u32>().map_err(|_| format!("{name}={v:?} is not a whole number"))).transpose()
+    };
+    let kind = blank(ownership).unwrap_or("allinone");
+    match kind {
+        "allinone" => {
+            if blank(ordinal).is_some() || blank(hosts).is_some() {
+                return Err(format!(
+                    "{HOST_ORDINAL_ENV} / {HOSTS_ENV} are set but {OWNERSHIP_ENV} is allinone; set {OWNERSHIP_ENV}=static"
+                ));
+            }
+            Ok(Box::new(AllInOne))
+        }
+        "static" => {
+            let ordinal =
+                number(HOST_ORDINAL_ENV, ordinal)?.ok_or_else(|| format!("{OWNERSHIP_ENV}={kind} needs {HOST_ORDINAL_ENV}"))?;
+            let hosts = number(HOSTS_ENV, hosts)?.ok_or_else(|| format!("{OWNERSHIP_ENV}={kind} needs {HOSTS_ENV}"))?;
+            if hosts == 0 || ordinal >= hosts {
+                return Err(format!("{HOST_ORDINAL_ENV}={ordinal} must be below {HOSTS_ENV}={hosts} (at least 1)"));
+            }
+            Ok(Box::new(Static { ordinal, hosts }))
+        }
+        other => Err(format!("{OWNERSHIP_ENV}={other:?} is neither allinone nor static")),
+    }
+}
+
+/// The policy from `VOXEL_OWNERSHIP`, `VOXEL_HOST_ORDINAL`, `VOXEL_HOSTS`.
+pub fn ownership_from_env() -> Result<Box<dyn Ownership>, String> {
+    let get = |name: &str| std::env::var(name).ok();
+    ownership_from_values(get(OWNERSHIP_ENV).as_deref(), get(HOST_ORDINAL_ENV).as_deref(), get(HOSTS_ENV).as_deref())
 }

@@ -914,7 +914,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
     let (store, token, player) = bare_store(&dir);
     let s = store.super_region_regions();
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let ownership = game::Static { ordinal: mine, hosts: 2 };
     let foreign = (2..64)
         .map(|k| RegionCoords::new(k * s as i32, 0))
         .find(|rc| !ownership.owns(*rc, s))
@@ -944,7 +944,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
 
     let mut core = Core::open_with(&store, Box::new(flat_floor));
     assert!(!core.claims.fence().epochs.contains_key(&foreign_sr), "the foreign super-region is not ours");
-    core.manager.set_ownership(ownership, s);
+    core.manager.set_ownership(Box::new(ownership), s);
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: stored }, 0);
     core.tick(3);
     let refused = core._packets.try_iter().any(|(to, p)| to == Some(0) && matches!(p, ServerPacket::Refused(_)));

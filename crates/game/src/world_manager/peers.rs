@@ -103,20 +103,43 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.retry_held_spawns();
     }
 
-    /// The host that owns `rc`.
-    pub fn owner_of(&self, rc: RegionCoords) -> u32 {
-        self.ownership.0.owner_of(rc, self.ownership.1)
+    /// Who simulates `rc`, as this host knows it.
+    pub fn owner_of(&self, rc: RegionCoords) -> crate::Owner {
+        self.ownership.0.owner_of(crate::super_region_of(rc, self.ownership.1))
+    }
+
+    /// The host that simulates `rc` (this one included); `None` while nobody owns it or
+    /// this host does not know who does.
+    pub fn owner_host(&self, rc: RegionCoords) -> Option<u32> {
+        match self.owner_of(rc) {
+            crate::Owner::Me => Some(self.ordinal()),
+            crate::Owner::Host(h) => Some(h),
+            crate::Owner::Free | crate::Owner::Unknown => None,
+        }
+    }
+
+    /// The other host that owns `rc`, if another host does.
+    pub(super) fn foreign_host(&self, rc: RegionCoords) -> Option<u32> {
+        match self.owner_of(rc) {
+            crate::Owner::Host(h) => Some(h),
+            _ => None,
+        }
     }
 
     /// Whether another host owns `rc`.
     pub fn is_foreign(&self, rc: RegionCoords) -> bool {
-        !self.owns(rc)
+        self.foreign_host(rc).is_some()
     }
 
     /// Whether something can be put into `rc` now: this host owns it, or its owner's
-    /// session is reachable.
+    /// session is reachable. A region nobody owns, or whose owner this host does not
+    /// know, is reached by nobody ("wait, never guess").
     pub fn reaches(&self, rc: RegionCoords) -> bool {
-        self.owns(rc) || self.peer_reachable(self.owner_of(rc))
+        match self.owner_of(rc) {
+            crate::Owner::Me => true,
+            crate::Owner::Host(h) => self.peer_reachable(h),
+            crate::Owner::Free | crate::Owner::Unknown => false,
+        }
     }
 
     /// Whether host `ordinal`'s session is reachable now (and it is not of a newer
@@ -345,7 +368,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         now_ms: u64,
     ) {
         let client = bundle.client.as_ref().map(|(c, _)| *c).expect("a player's body");
-        let owner = self.owner_of(target);
+        let owner = self.foreign_host(target).expect("can_hand_off: another host owns the target");
         let (player, claim, park) = match self.parking.remove(&client) {
             // Disconnected, its park on the way to `rc`: parked where it lands.
             Some(p) => (p.player, claim_of(p.fortress, p.adventure), true),
@@ -451,7 +474,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (`departed`); the client's session here becomes an observer and is sent on to that
     /// host ([`crate::ServerPacket::RegionElsewhere`]).
     pub(super) fn move_to_peer(&mut self, client: ClientId, m: Moving, record: Option<Box<PlayerRecord>>, now_ms: u64) {
-        let owner = self.owner_of(m.target);
+        let owner = self.foreign_host(m.target).expect("finish_move: another host owns the target");
         // A move belongs to an online player (a disconnect turns it into a park).
         let Some(player) = self.player_of.remove(&client) else {
             log::error!("move of client {client} into {:?}: no player; nothing to hand over", m.target);
@@ -668,9 +691,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ticket that host expects ([`Self::observer_ticket`]). Nothing while that host is
     /// unreachable.
     pub(super) fn subscribe_elsewhere(&mut self, client: ClientId, rc: RegionCoords) {
-        let owner = self.owner_of(rc);
         if !self.reaches(rc) {
-            log::debug!("client {client}: {rc:?} is host {owner}'s, which is not reachable; subscribe dropped");
+            log::debug!("client {client}: {rc:?}'s owner ({:?}) is not reachable; subscribe dropped", self.owner_of(rc));
             return;
         }
         self.redirect(client, rc);
@@ -679,7 +701,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `client` is told to go to the host that owns `rc` (its endpoint as last known, a
     /// ticket that host is told to expect — queued like everything to it).
     fn redirect(&mut self, client: ClientId, rc: RegionCoords) {
-        let owner = self.owner_of(rc);
+        let Some(owner) = self.foreign_host(rc) else {
+            log::warn!("client {client}: {rc:?} is not another host's ({:?}); subscribe dropped", self.owner_of(rc));
+            return;
+        };
         let Some(endpoint) = self.peer_endpoints.get(&owner).cloned() else {
             log::warn!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known; subscribe dropped");
             return;
@@ -806,7 +831,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         debug_assert!(bundle.client.is_none(), "a player crosses hosts by hand_off_to_peer");
         // A person with a history: the receiving host reports the crossing
         // (`PersonCrossed`), never this one (`peer_schedule::person_crosses_host_seam_*`).
-        let owner = self.owner_of(target);
+        let owner = self.foreign_host(target).expect("depart_to_peer: another host owns the target");
         log::debug!("[server] {:?} from {rc:?} into {target:?}: sent to host {owner}", bundle.id);
         // It is on another host now: nothing here routes to it.
         self.locations.remove(&bundle.id);
@@ -877,14 +902,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `view`: sent after its source answered the pending cut (not a row of that cut).
     pub(super) fn intent_to_peer(&mut self, to: RegionCoords, msg: crate::IntentMsg, view: bool) {
         debug_assert_eq!(peer_intent_target(&msg), to, "an intent to a peer goes where its message says");
-        let owner = self.owner_of(to);
+        let owner = self.foreign_host(to).expect("intent_to_peer: another host owns the target");
         log::debug!("[server] {msg:?} for {to:?}: sent to host {owner}");
         self.send_reliable(owner, Reliable::Intent(msg), view);
     }
 
     /// `v` to the host that owns `rc`, if its session is up (else dropped: volatile).
     fn volatile_to_owner(&mut self, rc: RegionCoords, v: Volatile) {
-        let owner = self.owner_of(rc);
+        let Some(owner) = self.foreign_host(rc) else { return };
         if let Some(peer) = self.peers.get_mut(&owner).filter(|p| !p.stale) {
             peer.session.send_volatile(v);
         }
@@ -911,7 +936,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Whether `rc` borders a region host `peer` owns (one of its 8 neighbours).
     fn borders(&self, rc: RegionCoords, peer: u32) -> bool {
-        crate::halo::neighbours(rc).any(|n| !self.owns(n) && self.owner_of(n) == peer)
+        crate::halo::neighbours(rc).any(|n| self.foreign_host(n) == Some(peer))
     }
 
     /// This host's region `rc` started (`Volatile::RegionUp`), parked (`RegionParked`) or
@@ -1131,8 +1156,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn peer_reliable_in(&mut self, from: u32, msg: Reliable, after: bool) {
         match msg {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
-                if !self.owns(target) {
-                    let owner = self.owner_of(target);
+                if let Some(owner) = self.foreign_host(target) {
                     log::error!(
                         "[server] host {from} sent {:?} into {target:?}, which this host does not own (host {owner} does)",
                         bundle.id

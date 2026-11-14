@@ -963,7 +963,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// policy groups them by (`set_ownership`). A region it does not own is
     /// never started here and counts as unavailable (no retry timer: the
     /// owning process serves it).
-    ownership: (crate::Ownership, u32),
+    ownership: (Box<dyn crate::Ownership>, u32),
     /// The record a body's creation carries (a move's `CreateClientAt`, a
     /// restore's `RestorePlayer`), by client, with its target region: the only
     /// copy until the target applies the creation (its `EventProcessed`).
@@ -1278,7 +1278,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             items_destroyed: 0,
             clock_ms: 0,
             unavailable: BTreeMap::new(),
-            ownership: (crate::Ownership::AllInOne, crate::DEFAULT_SUPER_REGION_REGIONS),
+            ownership: (Box::new(crate::AllInOne), crate::DEFAULT_SUPER_REGION_REGIONS),
             creating: BTreeMap::new(),
             out,
             region_out_send,
@@ -2365,10 +2365,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             match row {
                 InFlightRow::Transfer { target, bundle, stamp } if self.is_foreign(target) => {
                     // Another host's region: to its owner again.
-                    self.queue_to_peer(
-                        self.owner_of(target),
-                        crate::Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None },
-                    );
+                    let owner = self.foreign_host(target).expect("checked");
+                    self.queue_to_peer(owner, crate::Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None });
                 }
                 InFlightRow::Transfer { target, bundle, stamp } => {
                     self.locations.insert(bundle.id, target);
@@ -2383,7 +2381,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 InFlightRow::Intent { target, msg } if self.is_foreign(target) => {
                     // Another host's region: to its owner again.
-                    self.queue_to_peer(self.owner_of(target), crate::Reliable::Intent(msg));
+                    let owner = self.foreign_host(target).expect("checked");
+                    self.queue_to_peer(owner, crate::Reliable::Intent(msg));
                 }
                 InFlightRow::Intent { target, msg } => {
                     if self.regions.get(&target).is_some_and(|l| !l.stopping) {
@@ -2728,7 +2727,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         // aborts.
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
         let world_cut = WorldCut {
-            host: self.ownership.0.ordinal(),
+            host: self.ordinal(),
             id: cut.id,
             tick: cut.tick,
             regions: cut.regions.into_iter().map(|(rc, (p, _))| (rc, p)).collect(),
@@ -3563,13 +3562,13 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Which regions this process simulates (default: all), with `s` regions
     /// per super-region side. Set before the first session.
-    pub fn set_ownership(&mut self, ownership: crate::Ownership, s: u32) {
+    pub fn set_ownership(&mut self, ownership: Box<dyn crate::Ownership>, s: u32) {
         self.ownership = (ownership, s);
     }
 
     /// Whether this process owns `rc` (another process simulates it if not).
     pub fn owns(&self, rc: RegionCoords) -> bool {
-        self.ownership.0.owns(rc, self.ownership.1)
+        self.owner_of(rc) == crate::Owner::Me
     }
 
     /// Whether nobody can be put into `rc` now: another host owns it and its session is

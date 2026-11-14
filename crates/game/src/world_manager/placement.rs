@@ -125,10 +125,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             return Placement::Host(host);
         }
         let region = record_region.filter(|rc| !crate::off_map(self.map_extent(), *rc)).unwrap_or(SPAWN_REGION);
-        if self.owns(region) {
-            Placement::Here
-        } else {
-            Placement::Host(self.owner_of(region))
+        match self.owner_of(region) {
+            crate::Owner::Me => Placement::Here,
+            crate::Owner::Host(h) => Placement::Host(h),
+            // Static policies never answer these (R4 Task 4 gives them their own answer).
+            crate::Owner::Free | crate::Owner::Unknown => Placement::Here,
         }
     }
 

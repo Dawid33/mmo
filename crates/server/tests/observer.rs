@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    ClientId, ClientPacket, Credential, HostEndpoint, InlinePeerLink, InlineSpawner, Ownership, PeerHello, PeerSession,
+    ClientId, ClientPacket, Credential, HostEndpoint, InlinePeerLink, InlineSpawner, PeerHello, PeerSession,
     PlayerId, PlayerRecord, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager, OBSERVER_IDLE_CLOSE_MS,
     OBSERVER_IDLE_REFUSAL, REGION_SIZE,
 };
@@ -107,7 +107,7 @@ fn land_map() -> game::WorldMap {
 /// The adjacent pair of regions nearest the origin whose owners differ: `(a, b)`, `a` host
 /// 0's (A), `b` host 1's (B).
 fn host_seam() -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| Ownership::Static { ordinal: 0, hosts: HOSTS }.owner_of(rc, S);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: HOSTS }.owner_of(rc, S);
     for z in 1..15 {
         for x in 1..14 {
             let (p, q) = (RegionCoords::new(x, z), RegionCoords::new(x + 1, z));
@@ -169,7 +169,7 @@ impl Host {
             lod_builder,
             lod_result_recv,
         );
-        manager.set_ownership(Ownership::Static { ordinal, hosts: HOSTS }, S);
+        manager.set_ownership(Box::new(game::Static { ordinal, hosts: HOSTS }), S);
         manager.set_endpoints(endpoint(ordinal, port), game::seeded_nonces(0x5EED + u64::from(ordinal)));
         manager.set_world_map(land_map());
         Host { manager, region_out, packets, log: Vec::new() }

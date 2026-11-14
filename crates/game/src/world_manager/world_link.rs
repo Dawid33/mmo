@@ -256,13 +256,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_view.as_ref().map(|v| v.civs.clone()).unwrap_or_default()
     }
 
-    /// The host's number in request ids and its `Attach`: its ordinal in a static
-    /// ownership, else 0.
+    /// The host's number in request ids and its `Attach`: its ordinal (`AllInOne`: 0).
     fn world_host(&self) -> u32 {
-        match self.ownership.0 {
-            crate::Ownership::Static { ordinal, .. } => ordinal,
-            crate::Ownership::AllInOne => 0,
-        }
+        self.ordinal()
     }
 
     /// What `client` plays, as a claim.

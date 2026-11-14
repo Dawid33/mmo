@@ -711,11 +711,11 @@ pub fn run() -> claims::ServerExit {
     let store = opened.store.clone();
     // Which regions this process simulates, and the super-region side that
     // decides it: a bad setting stops the start, naming the variable.
-    let ownership = game::Ownership::from_env().unwrap_or_else(|e| fatal(&e));
+    let ownership = game::ownership_from_env().unwrap_or_else(|e| fatal(&e));
     let super_region_regions = claims::super_region_regions_from(std::env::var(claims::SUPER_REGION_REGIONS_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(&e));
     info!("[server] ownership: {ownership:?}, {super_region_regions} regions per super-region side");
-    if role == roles::Role::Host && ownership == game::Ownership::AllInOne {
+    if role == roles::Role::Host && ownership.runs_every_host() {
         log::warn!(
             "[server] role host with {} unset (all): this host claims every super-region — right for R2's one \
              host per world (`just host` sets static 0 of 1)",
@@ -769,10 +769,7 @@ pub fn run() -> claims::ServerExit {
     };
     // Several hosts of one world (`VOXEL_HOSTS` > 1): only as `host`, on Postgres, with the
     // login link (ids and placement come from it).
-    let hosts = match ownership {
-        game::Ownership::Static { hosts, .. } => hosts,
-        game::Ownership::AllInOne => 1,
-    };
+    let hosts = ownership.hosts();
     let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
     roles::check_several_hosts(role, hosts, postgres, spawn_orders.is_some()).unwrap_or_else(|e| fatal(&e));
     // Several hosts: the login service is linked to one of them (the entry host); every host
@@ -955,7 +952,7 @@ pub fn run() -> claims::ServerExit {
     let mut heartbeat: Option<lease::Heartbeat> = None;
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
-        let claimed = claims::HostClaims::claim(store, ownership, extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
+        let claimed = claims::HostClaims::claim(store, ownership.as_ref(), extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
         // Only now, with every epoch bumped (any split host is fenced), may `all` forget the anchor.
         roles::clear_anchor_after_claim(role, Some(claimed.store()), postgres).unwrap_or_else(|e| fatal(&e));
         info!(
@@ -1041,6 +1038,7 @@ pub fn run() -> claims::ServerExit {
         lod_builder,
         lod_result_recv,
     );
+    let host_ordinal = ownership.ordinal();
     manager.set_ownership(ownership, super_region_regions);
     manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {
@@ -1054,7 +1052,7 @@ pub fn run() -> claims::ServerExit {
         peer_wake = links.wake();
         for (other, link) in links.take() {
             let hello = game::PeerHello {
-                ordinal: ownership.ordinal(),
+                ordinal: host_ordinal,
                 boot,
                 generation: world_generation.mine(),
                 endpoint: endpoint.clone(),
@@ -1066,7 +1064,7 @@ pub fn run() -> claims::ServerExit {
         // Before any placement: the hosts that left cleanly hold nobody (a spawn order does
         // not wait for them). A read that fails leaves every host expected (orders wait).
         if let Some(store) = &store {
-            match peer_link::left_cleanly(store, ownership.ordinal()) {
+            match peer_link::left_cleanly(store, host_ordinal) {
                 Ok(left) => manager.note_left_peers(left),
                 Err(e) => log::warn!("[server] reading which hosts left cleanly: {e}; every host is awaited"),
             }
@@ -1086,7 +1084,7 @@ pub fn run() -> claims::ServerExit {
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
             let epoch = claims.as_ref().map_or(0, |c| c.fence().claim_epoch());
-            let link = host_world_link(ownership.ordinal(), boot, epoch).unwrap_or_else(|e| fatal(&e));
+            let link = host_world_link(host_ordinal, boot, epoch).unwrap_or_else(|e| fatal(&e));
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {

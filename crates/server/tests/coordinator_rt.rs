@@ -127,7 +127,7 @@ impl Life {
     /// `boot`: this host process start's number in its request ids (unique per life, as
     /// `server::run`'s `host_boot`; a repeated one would be answered from the memo).
     fn start(store: &StoreHandle, map: &WorldMap, start: CoordinatorStart, boot: u64) -> Life {
-        let claims = HostClaims::claim(store.clone(), game::Ownership::AllInOne, Some(map.extent()), store.super_region_regions())
+        let claims = HostClaims::claim(store.clone(), &game::AllInOne, Some(map.extent()), store.super_region_regions())
             .unwrap();
         let mut regions = std::collections::BTreeMap::new();
         for rc in store.stored_regions().unwrap().into_keys() {

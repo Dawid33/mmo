@@ -202,12 +202,12 @@ impl Host {
     fn start(
         store: &StoreHandle,
         map: &WorldMap,
-        ownership: Ownership,
+        ownership: impl Ownership + Copy + 'static,
         link: impl FnOnce(u64) -> Box<dyn WorldLink + Send>,
         coordinator: Option<CoordinatorThread>,
         boot: u64,
     ) -> Host {
-        let claims = HostClaims::claim(store.clone(), ownership, Some(map.extent()), store.super_region_regions()).unwrap();
+        let claims = HostClaims::claim(store.clone(), &ownership, Some(map.extent()), store.super_region_regions()).unwrap();
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
@@ -224,7 +224,7 @@ impl Host {
             lod_builder,
             lod_result_recv,
         );
-        manager.set_ownership(ownership, store.super_region_regions());
+        manager.set_ownership(Box::new(ownership), store.super_region_regions());
         manager.set_stored_regions(store.stored_regions().unwrap());
         manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
         manager.set_world_link(link(claims.fence().claim_epoch()), boot, 0);
@@ -372,7 +372,7 @@ fn split_world_plays_like_all_in_one() {
     let req = embark_request(start.coordinator.history());
     let claims_fenced = Fenced::default();
     let (link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, claims_fenced).unwrap();
-    let mut host = Host::start(&store, &map, Ownership::AllInOne, |_| Box::new(link), Some(thread), 1);
+    let mut host = Host::start(&store, &map, game::AllInOne, |_| Box::new(link), Some(thread), 1);
     let all_packets = play_script(&mut host, a, &req);
     assert_eq!(host.exit(), ServerExit::Clean);
     let store = all_db.open();
@@ -388,7 +388,7 @@ fn split_world_plays_like_all_in_one() {
     let (a_split, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     assert_eq!(a_split, a, "the same player id in both worlds");
     let link = |epoch| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, 0, 1, epoch)) };
-    let mut host = Host::start(&host_store, &map, Ownership::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
     let split_packets = play_script(&mut host, a, &req);
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
@@ -448,7 +448,7 @@ fn host_survives_coordinator_absence_at_start() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |epoch| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 7, epoch)) };
-    let mut host = Host::start(&host_store, &map, Ownership::Static { ordinal: 0, hosts: 1 }, link, None, 7);
+    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 7);
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     let tick_before = host.manager.spawner_mut().world_tick();
     for _ in 0..20 {
@@ -513,7 +513,7 @@ fn standing_in(region: RegionCoords) -> game::PlayerRecord {
 /// where a player may found one and host `ordinal` (of two) owns.
 fn embark_request_on(h: &History, s: u32, ordinal: u32, taken: &[PersonId]) -> EmbarkRequest {
     let site = h.sites().next().expect("a site");
-    let owner = |rc: RegionCoords| Ownership::Static { ordinal: 0, hosts: 2 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: 2 }.owner_of(rc, s);
     let region = (2..46)
         .flat_map(|z| (2..46).map(move |x| RegionCoords::new(x, z)))
         .find(|r| owner(*r) == ordinal && h.player_embark_allowed(*r).is_ok())
@@ -548,12 +548,12 @@ fn two_hosts_attach_and_both_get_their_people() {
         let cert_file = cert_file.clone();
         move |epoch| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, ordinal, 10 + u64::from(ordinal), epoch)) }
     };
-    let mut h0 = Host::start(&store0, &map, Ownership::Static { ordinal: 0, hosts: 2 }, link(0), None, 10);
+    let mut h0 = Host::start(&store0, &map, game::Static { ordinal: 0, hosts: 2 }, link(0), None, 10);
     h0.until("host 0 attached", |h| h.manager.world_attached());
 
     // Host 0's player embarks into a region of host 0.
     let req0 = embark_request_on(&stored_history(&coordinator.store, &map), s, 0, &[]);
-    let owner = |rc: RegionCoords| Ownership::Static { ordinal: 0, hosts: 2 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: 2 }.owner_of(rc, s);
     let spawn0 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == 0).expect("a region of host 0");
     h0.send(ServerEvent::ClientConnected { client: A, player: a, record: Some(standing_in(spawn0)) });
     h0.send(ServerEvent::ClientPacket(ClientPacket::Embark(req0.clone()), A));
@@ -566,7 +566,7 @@ fn two_hosts_attach_and_both_get_their_people() {
     });
 
     // Host 1 attaches: nothing of host 0's parks.
-    let mut h1 = Host::start(&store1, &map, Ownership::Static { ordinal: 1, hosts: 2 }, link(1), None, 11);
+    let mut h1 = Host::start(&store1, &map, game::Static { ordinal: 1, hosts: 2 }, link(1), None, 11);
     until_both(&mut h0, &mut h1, "host 1 attached", |_, h1| h1.manager.world_attached());
     let req1 = {
         let taken = req0.people.clone();
@@ -623,7 +623,7 @@ fn stale_epoch_host_is_refused_by_a_restarted_coordinator() {
     let cert_file = dir.join("coordinator.cert-sha256");
     let store = db.open();
     let claim = || {
-        HostClaims::claim(store.clone(), Ownership::Static { ordinal: 0, hosts: 1 }, Some(map.extent()), store.super_region_regions())
+        HostClaims::claim(store.clone(), &game::Static { ordinal: 0, hosts: 1 }, Some(map.extent()), store.super_region_regions())
             .unwrap()
             .fence()
             .claim_epoch()
@@ -842,7 +842,7 @@ fn crash_mid_play(seed: u64) {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |epoch| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, epoch)) };
-    let mut host = Host::start(&host_store, &map, Ownership::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
@@ -944,7 +944,7 @@ fn embark_during_downtime_completes_once() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |epoch| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, epoch)) };
-    let mut host = Host::start(&host_store, &map, Ownership::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
 
     c1.kill();
@@ -1003,7 +1003,7 @@ fn embark_answered_then_crash_is_not_refounded() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |epoch| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, epoch)) };
-    let mut host = Host::start(&host_store, &map, Ownership::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     for _ in 0..10 {
@@ -1061,7 +1061,7 @@ fn request_timeout_answers_world_unavailable() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |epoch| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, epoch)) };
-    let mut host = Host::start(&host_store, &map, Ownership::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
     host.manager.set_world_request_timeout_ms(TIMEOUT_MS);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });

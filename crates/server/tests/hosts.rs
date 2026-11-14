@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    RegionSpawner, ClientId, CrashPolicy, EntityId, HostEndpoint, InlineSpawner, Ownership, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId,
+    RegionSpawner, ClientId, CrashPolicy, EntityId, HostEndpoint, InlineSpawner, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId,
     PlayerRecord, RegionCoords, RegionOutput, ServerEvent, ServerPacket, Volatile, WorldManager,
     REGION_SIZE,
 };
@@ -140,7 +140,7 @@ fn endpoint(ordinal: u32) -> HostEndpoint {
 fn claim(db: &PgDb, ordinal: u32) -> (StoreHandle, HostClaims) {
     let store = db.open();
     let s = store.super_region_regions();
-    let claims = HostClaims::claim(store.clone(), Ownership::Static { ordinal, hosts: HOSTS }, Some(extent()), s).unwrap();
+    let claims = HostClaims::claim(store.clone(), &game::Static { ordinal, hosts: HOSTS }, Some(extent()), s).unwrap();
     (store, claims)
 }
 
@@ -279,7 +279,7 @@ impl Sim {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let mut manager = flat_manager(spawner, out_send, region_out_send);
-        manager.set_ownership(Ownership::Static { ordinal, hosts: HOSTS }, s);
+        manager.set_ownership(Box::new(game::Static { ordinal, hosts: HOSTS }), s);
         manager.set_endpoints(endpoint(ordinal), game::seeded_nonces(0x5EED + u64::from(ordinal)));
         let gate = PeerGate::default();
         for (other, link) in links.take() {
@@ -396,7 +396,7 @@ impl Pair {
 /// The adjacent pair of claimed regions nearest the origin whose owners differ: `(a, b)`,
 /// `b` one step +x of `a`.
 fn host_seam(s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| Ownership::Static { ordinal: 0, hosts: HOSTS }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: HOSTS }.owner_of(rc, s);
     for z in 1..47 {
         for x in 1..46 {
             let (a, b) = (RegionCoords::new(x, z), RegionCoords::new(x + 1, z));
@@ -431,7 +431,7 @@ fn two_hosts(db: &PgDb, dir: &std::path::Path) -> (Pair, (RegionCoords, RegionCo
     let mut pair = Pair { sims, started: Instant::now(), tick: Arc::new(std::sync::atomic::AtomicU64::new(0)) };
     let now = pair.now();
     for rc in [seam.0, seam.1] {
-        let owner = pair.sims[0].manager.owner_of(rc);
+        let owner = pair.sims[0].manager.owner_host(rc).expect("an owned region");
         // A player id the store gave out (a cut writes only records of those).
         let (player, _) = all_claims[owner as usize].store().resolve_player(&format!("hosts-test-keeper-{owner}")).unwrap();
         pair.sims[owner as usize].keep(player, rc, now);
@@ -462,7 +462,7 @@ fn two_hosts_find_each_other_through_the_hosts_table_and_exchange_running_sets()
         assert_eq!(row.webtransport, endpoint(row.ordinal).webtransport);
     }
 
-    let (ha, hb) = (pair.sims[0].manager.owner_of(a) as usize, pair.sims[0].manager.owner_of(b) as usize);
+    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
     pair.until("each host knows the other's seam region runs", |p| {
         p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
     });
@@ -483,7 +483,7 @@ fn slime_crosses_between_real_hosts() {
     let Some(db) = PgDb::create("slime") else { return };
     let dir = scratch("slime");
     let (mut pair, (a, b), links, claims) = two_hosts(&db, &dir);
-    let (ha, hb) = (pair.sims[0].manager.owner_of(a) as usize, pair.sims[0].manager.owner_of(b) as usize);
+    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
     // Both know the other's region runs (a transfer is sent only to a running owner's region).
     pair.until("running sets exchanged", |p| {
         p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
@@ -543,7 +543,7 @@ fn a_block_broken_across_a_host_seam_changes_the_owner_and_the_halo() {
     let Some(db) = PgDb::create("seambreak") else { return };
     let dir = scratch("seambreak");
     let (mut pair, (a, b), links, claims) = two_hosts(&db, &dir);
-    let (ha, hb) = (pair.sims[0].manager.owner_of(a) as usize, pair.sims[0].manager.owner_of(b) as usize);
+    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
     assert_ne!(ha, hb, "a host seam");
     pair.until("running sets exchanged", |p| {
         p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
@@ -1286,7 +1286,7 @@ fn live_tick(w: &mut World) -> u64 {
 /// The seam region host `h` owns.
 fn seam_of(w: &World, h: u32) -> RegionCoords {
     let (a, b) = w.seam;
-    let owner = Ownership::Static { ordinal: h, hosts: HOSTS };
+    let owner = game::Static { ordinal: h, hosts: HOSTS };
     if owner.owns(a, w.claims[h as usize].store().super_region_regions()) {
         a
     } else {
@@ -1360,7 +1360,7 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: u32, boot: u
     let mut links = start_links(&claims, h, boot, TOKEN, dir, "127.0.0.1:0");
     let registered = links.registered();
     let s = store.super_region_regions();
-    let owner = Ownership::Static { ordinal: h, hosts: HOSTS };
+    let owner = game::Static { ordinal: h, hosts: HOSTS };
     let stored = store.stored_regions().unwrap();
     let regions: std::collections::BTreeMap<RegionCoords, game::StoredRegion> = stored
         .keys()
@@ -2460,7 +2460,7 @@ impl LoginWorld {
 
 /// `(the region host h owns, the other)` of the seam.
 fn sides(seam: (RegionCoords, RegionCoords), h: u32, w: &LoginWorld) -> (RegionCoords, RegionCoords) {
-    if w.pair.sims[0].manager.owner_of(seam.0) == h { (seam.0, seam.1) } else { (seam.1, seam.0) }
+    if w.pair.sims[0].manager.owner_host(seam.0) == Some(h) { (seam.0, seam.1) } else { (seam.1, seam.0) }
 }
 
 fn ack_quic(ack: &HostToLogin) -> (bool, Option<String>) {
@@ -2777,7 +2777,7 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     let dir = scratch("terrain");
     let mut w = world(&db, &dir);
     let (a, b) = w.seam;
-    let (ha, hb) = (w.pair.sims[0].manager.owner_of(a) as usize, w.pair.sims[0].manager.owner_of(b) as usize);
+    let (ha, hb) = (w.pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, w.pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
     for sim in &mut w.pair.sims {
         let store = w.claims[sim.ordinal as usize].store().clone();
         sim.terrain = Some(server::cuts::TerrainWatch::start(store, world_store::NotifyMode::Listen));

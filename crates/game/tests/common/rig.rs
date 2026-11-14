@@ -221,7 +221,7 @@ impl Rig {
     pub fn with_ownership(
         spawner: InlineSpawner,
         floor: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
-        ownership: game::Ownership,
+        ownership: Box<dyn game::Ownership>,
         s: u32,
     ) -> Self {
         let mut rig = Self::with_spawner(spawner, floor);

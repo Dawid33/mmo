@@ -1390,13 +1390,13 @@ fn non_owned_region_is_unavailable() {
     crate::common::install_real_block_props();
     let s = 1; // every region its own super-region
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let ownership = game::Static { ordinal: mine, hosts: 2 };
     let target = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
         .find(|rc| !ownership.owns(*rc, s))
         .expect("a 3x3 block has a region the other of two hosts owns");
     let mut h = floored_harness();
-    h.manager.set_ownership(ownership, s);
+    h.manager.set_ownership(Box::new(ownership), s);
     h.manager.set_world_map(game::WorldMap {
         origin: RegionCoords::new(-1, -1),
         width: 3,
@@ -1434,7 +1434,7 @@ fn foreign_region_play_moves_and_login_is_still_refused() {
     let s = 1; // every region its own super-region
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
     let other = 1 - mine;
-    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let ownership = game::Static { ordinal: mine, hosts: 2 };
     let target = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
         .find(|rc| !ownership.owns(*rc, s))
@@ -1448,7 +1448,7 @@ fn foreign_region_play_moves_and_login_is_still_refused() {
         received_from_boot: None,
     };
     let mut h = floored_harness();
-    h.manager.set_ownership(ownership, s);
+    h.manager.set_ownership(Box::new(ownership), s);
     h.manager.set_world_map(game::WorldMap {
         origin: RegionCoords::new(-1, -1),
         width: 3,
@@ -1465,7 +1465,7 @@ fn foreign_region_play_moves_and_login_is_still_refused() {
         peer.pump(&mut there, t);
     }
     assert!(h.manager.is_foreign(target));
-    assert_eq!(h.manager.owner_of(target), other);
+    assert_eq!(h.manager.owner_of(target), game::Owner::Host(other));
     assert!(h.manager.reaches(target), "the owner's session is up");
     assert!(!h.manager.is_unavailable(target), "a reachable foreign region is not unavailable");
     h.event(session(0, 0, None), 0);

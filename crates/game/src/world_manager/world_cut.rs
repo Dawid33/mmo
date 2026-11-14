@@ -136,7 +136,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         hosts: &[u32],
         leaving: &[u32],
     ) -> Result<(), CutFailure> {
-        let me = self.ownership.0.ordinal();
+        let me = self.ordinal();
         if leaving.contains(&me) && self.leave_requested {
             // This attempt's cut, whether this host manages to take part or not: its
             // outcome (an abort, if it fails here) is what the exit waits for.

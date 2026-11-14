@@ -257,7 +257,7 @@ impl SimHarness {
         }
     }
 
-    /// `hosts` hosts of one world (`Ownership::Static`,
+    /// `hosts` hosts of one world (`game::Static`,
     /// [`HARNESS_SUPER_REGION_REGIONS`] regions per super-region side), each an
     /// in-process manager on the lightweight flat world, every pair joined by an
     /// `InlinePeerLink` (no delay). The client logs in to the host that owns the spawn
@@ -275,7 +275,7 @@ impl SimHarness {
         assert!(hosts >= 1);
         let s = HARNESS_SUPER_REGION_REGIONS;
         let mut h = Self::with_config(&[], 1);
-        let home = game::Ownership::Static { ordinal: 0, hosts }.owner_of(game::SPAWN_REGION, s) as usize;
+        let home = game::Static { ordinal: 0, hosts }.owner_of(game::SPAWN_REGION, s) as usize;
         // Rebuild the servers as `hosts` unconnected hosts: the one-host server
         // `build` made has the local client's session and no peers.
         let mut servers = Vec::new();
@@ -288,7 +288,7 @@ impl SimHarness {
                 LocalServer::new_unconnected(from_client, to_client, generator())
                     .expect("local server");
             let manager = server.manager_mut();
-            manager.set_ownership(game::Ownership::Static { ordinal, hosts }, s);
+            manager.set_ownership(Box::new(game::Static { ordinal, hosts }), s);
             manager.set_endpoints(harness_endpoint(ordinal), game::seeded_nonces(0x5eed + u64::from(ordinal)));
             server.record_slot_start_hashes();
             servers.push(server);
@@ -334,7 +334,7 @@ impl SimHarness {
 
     /// The host that owns `rc` (index into the harness's hosts).
     pub fn owner(&mut self, rc: RegionCoords) -> u32 {
-        self.servers[0].manager_mut().owner_of(rc)
+        self.servers[0].manager_mut().owner_host(rc).expect("an owned region")
     }
 
     /// The host the client logged in to.
@@ -916,7 +916,7 @@ impl SimHarness {
     /// Server-side state surgery on a running region, e.g. before
     /// `connect()` so the client's snapshot already holds the change.
     pub fn with_server_region(&mut self, rc: RegionCoords, f: impl FnOnce(&mut game::Region)) {
-        let owner = self.servers[0].manager_mut().owner_of(rc) as usize;
+        let owner = self.servers[0].manager_mut().owner_host(rc).expect("an owned region") as usize;
         self.servers[owner].with_region(rc, f);
     }
 

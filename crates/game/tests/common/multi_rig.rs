@@ -1,6 +1,6 @@
 //! Several region hosts of one world in one test: a [`Rig`] per host (its own
 //! [`game::WorldManager`] on an [`game::InlineSpawner`], owning the regions
-//! `Ownership::Static` gives it), every pair of hosts joined by a seeded, delaying
+//! `game::Static` gives it), every pair of hosts joined by a seeded, delaying
 //! [`InlinePeerLink`] under a [`PeerSession`] at each end. Each host's world tick is its
 //! spawner's round count, so [`MultiRig::round`] ticks every host every round and checks
 //! they agree. Every host-seam test builds on it. [`MultiRig::with_coordinator`] gives
@@ -9,7 +9,7 @@ use super::cut_store::CutStore;
 use super::rig::{Rig, CLIENT};
 use game::{
     ClientId, ClientPacket, CutId, EntityId, HostEndpoint, InFlightRow, Intent, IntentMsg, InlinePeerLink, InlineSchedule,
-    InlineSpawner, Ownership, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId, PlayerRecord, RegionCoords,
+    InlineSpawner, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId, PlayerRecord, RegionCoords,
     RegionSpawner, Reliable, ServerEvent, StoredRegion, WorldCut, REGION_SIZE, TICK_RATE,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -145,7 +145,7 @@ pub fn rig_hello(ordinal: u32) -> PeerHello {
 /// The adjacent pair of regions nearest the origin whose owners differ (`hosts` hosts,
 /// `s` regions per super-region side): `(a, b)`, `b` one step +x or +z of `a`.
 pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| Ownership::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, s);
     for a in nearest_first(64) {
         for b in [RegionCoords::new(a.x + 1, a.z), RegionCoords::new(a.x, a.z + 1)] {
             if owner(a) != owner(b) {
@@ -160,7 +160,7 @@ pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
 /// regions per super-region side, 4 hosts), as `[a, a+x, a+x+z, a+z]` — a loop round
 /// its corner.
 pub fn four_host_corner(s: u32) -> [RegionCoords; 4] {
-    let owner = |rc: RegionCoords| Ownership::Static { ordinal: 0, hosts: 4 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: 4 }.owner_of(rc, s);
     for a in nearest_first(64) {
         let block = [
             a,
@@ -294,7 +294,7 @@ impl MultiRig {
         let mut rigs = Vec::new();
         let mut homes = Vec::new();
         for h in 0..hosts {
-            let ownership = Ownership::Static { ordinal: h, hosts };
+            let ownership = game::Static { ordinal: h, hosts };
             let mut spawner = match &stored {
                 Some(regions) => InlineSpawner::with_portable(regions.clone()),
                 None => InlineSpawner::default(),
@@ -302,7 +302,7 @@ impl MultiRig {
             if let Some(f) = schedule {
                 spawner.set_schedule(Some(f(mix(seed, u64::from(h)))));
             }
-            let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, ownership, s);
+            let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, Box::new(ownership), s);
             rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(seed, 2000 + u64::from(h))));
             rigs.push(rig);
             let home = nearest_first(64)
@@ -508,7 +508,7 @@ impl MultiRig {
                 InFlightRow::Intent { target, msg: IntentMsg::Intent(s) } => (*target, s.due),
                 InFlightRow::Intent { target, msg: IntentMsg::Reply(s) } => (*target, s.due),
             };
-            let owner = self.hosts[0].manager.owner_of(target);
+            let owner = self.hosts[0].manager.owner_host(target).expect("a static owner");
             // A host that left (Task 14) takes no part: what waits for it is the sender's row.
             let absent = self.hosts[h as usize].manager.peer_left(owner);
             assert!(
@@ -800,7 +800,7 @@ impl MultiRig {
 
     /// The host that owns `rc`.
     pub fn owner(&self, rc: RegionCoords) -> u32 {
-        self.hosts[0].manager.owner_of(rc)
+        self.hosts[0].manager.owner_host(rc).expect("an owned region")
     }
 
     /// The rig of the host that owns `rc`.

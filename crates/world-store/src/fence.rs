@@ -20,7 +20,7 @@ pub type SuperRegion = (i32, i32);
 pub struct Fence {
     pub owner: u32,
     pub epochs: BTreeMap<SuperRegion, u64>,
-    /// The process runs every host's regions (`Ownership::AllInOne`): it adopts every
+    /// The process runs every host's regions (`game::AllInOne`): it adopts every
     /// host's in-flight rows ([`Fence::in_flight_scope`]) and its cuts replace them all.
     /// Otherwise a host adopts and replaces only the rows of `owner` — never another
     /// host's, which that host still re-commits (adopting them would deliver them twice).

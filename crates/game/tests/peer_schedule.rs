@@ -834,7 +834,7 @@ fn one_phase_cut_holds_unreceived_intent_and_restore_requeues_it() {
 /// (`same`) or differ, among `hosts` hosts (`s` regions per super-region side),
 /// avoiding `taken`.
 fn x_pair(hosts: u32, s: u32, same: bool, taken: &[RegionCoords]) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Ownership::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, s);
     let mut all: Vec<RegionCoords> = (-8..=8).flat_map(|x| (-8..=8).map(move |z| RegionCoords::new(x, z))).collect();
     all.sort_by_key(|rc| (rc.x.abs() + rc.z.abs(), rc.x, rc.z));
     for a in all {
@@ -1193,7 +1193,7 @@ fn packets_to(rig: &MultiRig, h: u32) -> Vec<&game::ServerPacket> {
 /// The pair of regions nearest the origin whose owners differ, `b` one step -z of `a`
 /// (W walks a body toward -z).
 fn north_host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Ownership::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, s);
     for r in 0..64 {
         for x in -r..=r {
             for z in -r..=r {

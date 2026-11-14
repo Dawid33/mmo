@@ -136,7 +136,7 @@ impl HostClaims {
     /// (`VOXEL_SUPER_REGION_REGIONS`) is refused.
     pub fn claim(
         store: StoreHandle,
-        ownership: Ownership,
+        ownership: &dyn Ownership,
         extent: Option<game::MapExtent>,
         super_region_regions: u32,
     ) -> Result<HostClaims, String> {
@@ -154,7 +154,7 @@ impl HostClaims {
             .map_err(|e| format!("claiming the super-regions: {e}"))?;
         // All-in-one runs every host's regions: it adopts (and its cuts replace) every
         // host's in-flight rows.
-        fence.all_hosts = matches!(ownership, Ownership::AllInOne);
+        fence.all_hosts = ownership.runs_every_host();
         Ok(HostClaims::with_fence(store, fence))
     }
 
@@ -278,14 +278,14 @@ mod tests {
         let store = memory_store();
         let s = store.super_region_regions();
         let extent = game::MapExtent { origin: RegionCoords::new(-20, -5), width: 40, height: 10 };
-        let all = HostClaims::claim(store.clone(), Ownership::AllInOne, Some(extent), s).unwrap();
+        let all = HostClaims::claim(store.clone(), &game::AllInOne, Some(extent), s).unwrap();
         assert_eq!(all.fence().owner, 0);
         assert_eq!(all.fence().epochs.len(), 8, "every super-region of the extent");
-        let none = HostClaims::claim(store.clone(), Ownership::AllInOne, None, s).unwrap();
+        let none = HostClaims::claim(store.clone(), &game::AllInOne, None, s).unwrap();
         assert!(none.fence().epochs.is_empty(), "a world with no map claims nothing");
         let hosts = 3;
-        let mine = Ownership::Static { ordinal: 2, hosts };
-        let share = HostClaims::claim(store.clone(), mine, Some(extent), s).unwrap();
+        let mine = game::Static { ordinal: 2, hosts };
+        let share = HostClaims::claim(store.clone(), &mine, Some(extent), s).unwrap();
         assert_eq!(share.fence().owner, 2);
         assert!(share.fence().epochs.keys().all(|sr| game::rendezvous_owner(*sr, hosts) == 2));
         store.shutdown();
@@ -330,7 +330,7 @@ mod tests {
     fn a_different_super_region_side_refuses_the_start() {
         let store = memory_store();
         let stored = store.super_region_regions();
-        let err = HostClaims::claim(store.clone(), Ownership::AllInOne, None, stored + 1).err().expect("refused");
+        let err = HostClaims::claim(store.clone(), &game::AllInOne, None, stored + 1).err().expect("refused");
         assert!(err.contains(&stored.to_string()) && err.contains(&(stored + 1).to_string()), "{err}");
         assert!(err.contains(SUPER_REGION_REGIONS_ENV), "{err}");
         store.shutdown();
