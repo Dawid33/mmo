@@ -30,7 +30,13 @@ impl PrefabSet {
         block_named: &dyn Fn(&str) -> Option<BlockId>,
     ) -> Result<Self, String> {
         let mut by_key: BTreeMap<u32, Arc<ResolvedPrefab>> = BTreeMap::new();
-        let sources: BTreeMap<&str, &[u8]> = sources.into_iter().collect();
+        let mut collected: BTreeMap<&str, &[u8]> = BTreeMap::new();
+        for (file_name, bytes) in sources {
+            if collected.insert(file_name, bytes).is_some() {
+                return Err(format!("prefab {file_name}: this file name appears twice"));
+            }
+        }
+        let sources = collected;
         let mut hasher = crc32fast::Hasher::new();
         for (file_name, bytes) in &sources {
             hasher.update(file_name.as_bytes());

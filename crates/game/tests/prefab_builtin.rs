@@ -148,3 +148,30 @@ fn content_hash_follows_the_sources() {
     assert_eq!(one, changed, "equality compares the resolved prefabs");
     assert_eq!(make(&[]).content_hash(), 0);
 }
+
+#[test]
+fn a_repeated_file_name_is_refused() {
+    let reg = registry();
+    let a = named_hut("a");
+    let mut other = dev_hut();
+    other.name = "a".into();
+    other.meta.source = "elsewhere".into();
+    other.meta.licence = "CC0".into();
+    let b = prefab_to_ron(&other);
+    assert_ne!(a, b, "the two sources must differ");
+    let err = PrefabSet::from_sources(
+        [("a.prefab.ron", a.as_bytes()), ("a.prefab.ron", b.as_bytes())],
+        &|n| reg.id_of(n),
+    )
+    .unwrap_err();
+    assert!(err.contains("a.prefab.ron") && err.contains("twice"), "{err}");
+
+    let dir = temp_tree("repeated");
+    std::fs::create_dir_all(dir.join("more")).unwrap();
+    std::fs::write(dir.join("a.prefab.ron"), named_hut("a")).unwrap();
+    std::fs::write(dir.join("more").join("a.prefab.ron"), named_hut("a")).unwrap();
+    let loaded = load_builtin_prefabs(Some(&dir), &|n| reg.id_of(n));
+    std::fs::remove_dir_all(&dir).unwrap();
+    let err = loaded.unwrap_err();
+    assert!(err.contains("a.prefab.ron") && err.contains("twice"), "{err}");
+}
