@@ -3542,6 +3542,17 @@ fn received_unacked(rig: &mut MultiRig) -> bool {
     let places = rig.stored_places(id);
     assert_eq!(places.len(), 1, "{id:?} in exactly one part: {places:?} (seed {}, link delay {})", rig.seed, rig.link_delay);
     assert_eq!(places[0].0, hb, "the receiver's: {places:?}");
+    // A's journal keeps no entry of it: the counted cut explains it (B's part holds it).
+    let heard = |rig: &MultiRig| [ha, hb].iter().all(|h| rig.hosts[*h as usize].manager.peer_journal().base() == cut);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if heard(rig) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(heard(rig), "both hosts heard the commit");
+    rig.assert_journals_explain_the_cut();
+    assert!(rig.counted_pairs_checked > 0, "the cut was checked as counted");
     assert_restored_once(rig, &[id]);
     rig.link_up(ha, hb);
     until_quiet(rig);
@@ -3750,6 +3761,7 @@ fn leave_counted(rig: &mut MultiRig) {
     assert!(owed.iter().any(|r| carries(r, late)), "the slime held back is still owed");
     assert!(!owed.iter().any(|r| carries(r, got)), "what B counted is forgotten (seed {})", rig.seed);
     assert_eq!(rig.stored_places(got).iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), [hb], "B received it: B's part");
+    rig.assert_journals_explain_the_cut();
     for id in [early, late] {
         let places = rig.stored_places(id);
         assert!(
@@ -6011,9 +6023,11 @@ fn a_late_peer_learns_every_claim_at_its_hello() {
 
 // --- The peer journal (R4 Task 7) --------------------------------------------------
 
-/// Round budget for [`journal_explains`]: three committed world cuts and an aborted one.
+/// Round budget for [`journal_explains`]: three committed world cuts, one of them counted
+/// across a down link, and an aborted one.
 const JOURNAL_ROUNDS: usize = 900;
-/// Rounds a participant's link stays down under a pending world cut (it aborts the cut).
+/// Rounds a participant's link stays down under a pending world cut (the cut counts across
+/// it, R4 Task 12; it aborts only when the drop finds a part already complete by marks).
 const JOURNAL_DOWN_ROUNDS: usize = 6;
 
 /// `hosts` (2 or 3) regions in a chain, each adjacent to the next and every one owned by
@@ -6044,8 +6058,11 @@ fn aborted(rig: &MultiRig) -> usize {
 /// drops under some pending cuts — since R4 Task 12 those commit by counts (the pair's
 /// journals truncate by the counts), or abort when the drop finds a part complete. Every
 /// round, every host's peer journal explains every difference between the running world
-/// and the last committed cut ([`MultiRig::assert_journals_explain_the_cut`]); the run
-/// goes on until some cut was checked as truncated by counts.
+/// and the last committed cut ([`MultiRig::assert_journals_explain_the_cut`]). Once, a
+/// host's coordinator link is held past a cut's tick: it answers `Missed` and the cut aborts
+/// with traffic in flight (the journal forgets the cut's marks and counts, keeps every
+/// entry). The run goes on until some cut was checked as truncated by counts AND some cut
+/// aborted.
 fn journal_explains(rig: &mut MultiRig) {
     let chain = host_chain(rig.hosts.len() as u32);
     for rc in &chain {
@@ -6063,8 +6080,10 @@ fn journal_explains(rig: &mut MultiRig) {
     let goal = committed(rig) + 3;
     let mut down_until = None;
     let mut drops = 0usize;
+    // Host `z`'s coordinator link held to make a cut miss its tick (`Missed`: an abort).
+    let mut holding = false;
     let mut r = 0usize;
-    while committed(rig) < goal || rig.counted_pairs_checked == 0 || down_until.is_some() {
+    while committed(rig) < goal || rig.counted_pairs_checked == 0 || aborted(rig) == 0 || down_until.is_some() || holding {
         assert!(
             r < JOURNAL_ROUNDS,
             "{} committed, {} aborted world cuts, {} counted pairs checked: {:?}",
@@ -6087,13 +6106,29 @@ fn journal_explains(rig: &mut MultiRig) {
                 }
             }
         }
+        if holding {
+            let running = rig.core().world_cut_running();
+            if running.is_some_and(|(_, t)| world_tick(rig) >= t) {
+                rig.hold_world(z, false);
+                holding = false;
+            }
+        } else if aborted(rig) == 0
+            && committed(rig) >= 1
+            && down_until.is_none()
+            && rig.core().world_cut_running().is_none()
+            && (roll >> 48) % 3 == 0
+        {
+            rig.hold_world(z, true);
+            holding = true;
+        }
         match down_until {
             Some(until) if r >= until => {
                 rig.link_up(x, z);
                 down_until = None;
             }
             // About one cut in three loses the link, at a seeded moment of its pending part.
-            None if drops * 2 < committed(rig)
+            None if !holding
+                && drops * 2 < committed(rig)
                 && (roll >> 40) % 4 == 0
                 && matches!(rig.hosts[x as usize].manager.world_cut_state(), Some((_, "pending" | "marked"))) =>
             {
@@ -6108,6 +6143,7 @@ fn journal_explains(rig: &mut MultiRig) {
         JOURNAL_CHECKS.fetch_add(checked, std::sync::atomic::Ordering::SeqCst);
         r += 1;
     }
+    assert!(rig.counted_pairs_checked > 0 && aborted(rig) > 0, "a counted cut and an aborted one");
 }
 
 /// Moves [`journal_explains`] checked against the journals (not exempted as passing

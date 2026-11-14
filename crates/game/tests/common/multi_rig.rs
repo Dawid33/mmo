@@ -878,23 +878,44 @@ impl MultiRig {
             assert_eq!(*marked, cut, "host {h}'s last truncation was by cut {}, its base is {}", marked.0, cut.0);
             let counted = journal.last_counted().filter(|(c, _)| *c == cut).map(|(_, read)| read.clone()).unwrap_or_default();
             for p in participants.iter().copied().filter(|p| *p != h) {
-                // A pair counted across a down link (R4 Task 12): what is left from before the
-                // commit travelled wrapped in K, or is a sent entry above the peer's count.
+                // A pair counted across a down link (R4 Task 12). What is left from before the
+                // commit, unless it travelled wrapped in K, must be explained by the STORED
+                // parts, independently of the journal's own bookkeeping: a received entry is
+                // inside this host's count (its part holds it) — none may be left; a sent one is
+                // above the peer's count — this host's part of K holds it (a row, or the
+                // player's record) and the peer's does not.
                 if let Some(read) = counted.get(&p) {
                     counted_checked += 1;
-                    for (e, seq, accounted, queue_id) in journal.rows_with_ids(p) {
-                        let kept = seq >= read.after
-                            || accounted == Some(cut)
-                            || queue_id.is_some_and(|id| read.kept_sent.contains(&id));
-                        assert!(
-                            kept,
-                            "host {h} keeps {:?} with host {p} it counted with in cut {}, inside the count, not wrapped in \
-                             it ({accounted:?}): the cut explains it (seed {}, link delay {})",
-                            e.subject,
-                            cut.0,
-                            self.seed,
-                            self.link_delay
+                    let (mine, theirs) = (&parts[&h], &parts[&p]);
+                    let (my_ids, their_ids) = (part_entities(mine), part_entities(theirs));
+                    let writes = |part: &WorldCut, player: PlayerId| part.players.iter().any(|(q, _)| *q == player);
+                    for (e, seq, accounted) in journal.rows(p) {
+                        if seq >= read.after || accounted == Some(cut) {
+                            continue;
+                        }
+                        let where_ = format!(
+                            "host {h} keeps {:?} with host {p}, counted with in cut {} ({accounted:?}; seed {}, link delay {})",
+                            e.subject, cut.0, self.seed, self.link_delay
                         );
+                        let JournalEvent::Sent(msg) = &e.event else {
+                            panic!("{where_}: a received entry inside this host's count — the cut explains it");
+                        };
+                        match (e.subject, &**msg) {
+                            // A person is never a row (the history respawns people): nothing stored to check.
+                            (_, Reliable::Transfer { bundle, .. }) if matches!(bundle.kind, game::EntityKind::Person { .. }) => {}
+                            (Subject::Entity(id), Reliable::Transfer { player: None, .. }) => {
+                                assert!(my_ids.contains(&id), "{where_}: not in this host's part — the peer had it");
+                                assert!(!their_ids.contains(&id), "{where_}: in the peer's part — the cut explains it");
+                            }
+                            // A body handed over with its player: the player's record decides.
+                            (Subject::Entity(id), _) => {
+                                assert!(!their_ids.contains(&id), "{where_}: the body is in the peer's part");
+                            }
+                            (Subject::Player(player), _) => {
+                                assert!(writes(mine, player), "{where_}: this host's part does not write the player");
+                                assert!(!writes(theirs, player), "{where_}: the peer's part writes the player");
+                            }
+                        }
                     }
                     continue;
                 }

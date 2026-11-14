@@ -867,20 +867,24 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Every reliable message to another host not acknowledged yet (a session's, or
-    /// waiting for one), with its host and id. A session's entries (and a waiting list)
-    /// leave only from the front — acknowledged, or forgotten through a cut mark — and a
-    /// session is never replaced, so they are always the LAST ones queued to that host.
+    /// waiting for one), with its host and id ([`Self::peer_entries_of`]).
     fn peer_entries(&self) -> Vec<(u32, u64, &Reliable)> {
-        let mut out = Vec::new();
-        let lists = self.peers.iter().map(|(o, p)| (*o, p.session.unreceived().collect::<Vec<_>>()));
-        let waiting = self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
-        for (ordinal, list) in lists.chain(waiting) {
-            let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
-            // (Never short; saturating all the same, so a miscount cannot wrap.)
-            let first = queued.saturating_sub(list.len() as u64);
-            out.extend(list.into_iter().enumerate().map(|(i, r)| (ordinal, first + i as u64, r)));
-        }
-        out
+        let ordinals: BTreeSet<u32> = self.peers.keys().chain(self.peer_waiting.keys()).copied().collect();
+        ordinals.into_iter().flat_map(|o| self.peer_entries_of(o).into_iter().map(move |(id, r)| (o, id, r))).collect()
+    }
+
+    /// What this host owes host `ordinal` and it has not acknowledged (its session's, then
+    /// what waits for a session), in order, each with its id among everything queued to that
+    /// host. A session's entries (and a waiting list) leave only from the front —
+    /// acknowledged, or forgotten through a cut mark or count — and a session is never
+    /// replaced, so they are always the LAST ones queued to that host.
+    fn peer_entries_of(&self, ordinal: u32) -> Vec<(u64, &Reliable)> {
+        let mut list: Vec<&Reliable> = self.peers.get(&ordinal).map(|p| p.session.unreceived().collect()).unwrap_or_default();
+        list.extend(self.peer_waiting.get(&ordinal).into_iter().flatten());
+        let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
+        // (Never short; saturating all the same, so a miscount cannot wrap.)
+        let first = queued.saturating_sub(list.len() as u64);
+        list.into_iter().enumerate().map(|(i, r)| (first + i as u64, r)).collect()
     }
 
     /// `bundle` (in `target`'s frame), a body that is not a player, departed from `rc` at
@@ -1201,10 +1205,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///
     /// To a participant nothing is written here (`world_cut.rs`): a bare message before
     /// this host's mark is the receiver's; a wrapped one ([`Reliable::InCut`]) is in this
-    /// host's snapshot or was written as this part's row when it was sent. A participant's
-    /// link that is down aborts the cut, so a sender writes an in-transit row only for a
-    /// host absent from the cut (a one-phase cut's peer may also hold an entry it received
-    /// and has not acknowledged yet).
+    /// host's snapshot or was written as this part's row when it was sent; toward one the
+    /// cut counts with across a down link, what is above its count is written by
+    /// [`Self::cut_counted`]. (A one-phase cut's peer may also hold an entry it received
+    /// and has not acknowledged yet.)
     pub(super) fn cut_peer_rows(&self, participants: &BTreeSet<u32>) -> Vec<InFlightRow> {
         let to_peers = self
             .peer_entries()
@@ -1216,15 +1220,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         let unowned = self.unowned_waiting.values().flatten().filter(|w| !w.in_source_view).map(|w| &w.msg);
         to_peers
             .chain(unowned)
-            .filter_map(|r| match r.inner() {
-                // A person is never a row (the history respawns people, as `cut_crossing`
-                // drops them); a player handed over or moved is a record
-                // (`cut_peer_players`), not a row.
-                Reliable::Transfer { bundle, .. } if matches!(bundle.kind, EntityKind::Person { .. }) => None,
-                Reliable::Transfer { target, stamp, bundle, player: None } => {
-                    Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
-                }
-                Reliable::Intent(msg) => Some(InFlightRow::Intent { target: peer_intent_target(msg), msg: *msg }),
+            .filter_map(|r| match in_transit(r, None) {
+                InTransit::Row(row) => Some(row),
                 _ => None,
             })
             .collect()
@@ -1235,42 +1232,26 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `world_cut.rs`, the fourth case): every entry still owed it and numbered above the
     /// count — the peer is frozen, none of it reaches it before the cut is decided — that did
     /// not travel wrapped in `cut` (those are in this part already: its snapshot, case 1, or
-    /// its rows, case 3), as `cut_peer_rows` / `cut_peer_players` write it for an absent
-    /// peer, a transfer's stamp or an intent's due raised to at least `tick` (no receiver
-    /// region applies it before its snapshot); and the queue ids of everything owed above the
-    /// count (the journal's `kept_sent`). What waits for a session counts as above any count.
-    pub(super) fn cut_counted(&self, ordinal: u32, count: u64, cut: CutId, tick: crate::Tick) -> Counted {
-        let mut out = Counted::default();
-        let session: Vec<&Reliable> = self.peers.get(&ordinal).map(|p| p.session.owed_above(count).collect()).unwrap_or_default();
-        let waiting: Vec<&Reliable> = self.peer_waiting.get(&ordinal).map(|l| l.iter().collect()).unwrap_or_default();
-        // Their ids: a session's (or a waiting list's) entries are the last queued to that
-        // host (`peer_entries`), and those above the count are the last of them.
-        let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
-        let above: Vec<&Reliable> = session.into_iter().chain(waiting).collect();
-        let first = queued.saturating_sub(above.len() as u64);
-        for (i, r) in above.into_iter().enumerate() {
-            out.kept_sent.insert(first + i as u64);
+    /// its rows, case 3), as for an absent peer ([`in_transit`]), a transfer's stamp or an
+    /// intent's due raised to at least `tick` (no receiver region applies it before its
+    /// snapshot); and the ids of everything owed above the count (the journal's
+    /// `kept_sent`). What waits for a session counts as above any count.
+    pub(super) fn cut_counted(&self, ordinal: u32, count: u64, cut: CutId, tick: crate::Tick) -> CountedPart {
+        let mut out = CountedPart::default();
+        let mut entries = self.peer_entries_of(ordinal);
+        let above = self.peers.get(&ordinal).map_or(0, |p| p.session.owed_above(count).count())
+            + self.peer_waiting.get(&ordinal).map_or(0, Vec::len);
+        // Owed entries leave only from the front: those above the count are the last ones.
+        let above = entries.split_off(entries.len().saturating_sub(above));
+        for (id, r) in above {
+            out.kept_sent.insert(id);
             if matches!(r, Reliable::InCut { cut: c, .. } if *c == cut) {
                 continue;
             }
-            match r.inner() {
-                Reliable::Transfer { bundle, .. } if matches!(bundle.kind, EntityKind::Person { .. }) => {}
-                Reliable::Transfer { target, stamp, bundle, player: None } => {
-                    out.rows.push(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: (*stamp).max(tick) });
-                }
-                Reliable::Intent(msg) => {
-                    let mut msg = *msg;
-                    match &mut msg {
-                        crate::IntentMsg::Intent(s) => s.due = s.due.max(tick),
-                        crate::IntentMsg::Reply(s) => s.due = s.due.max(tick),
-                    }
-                    out.rows.push(InFlightRow::Intent { target: peer_intent_target(&msg), msg });
-                }
-                Reliable::Transfer { target, bundle, player: Some(h), .. } => {
-                    out.players.extend(handoff_record(*target, bundle, h).map(|record| (h.player, record)));
-                }
-                Reliable::PlayerMove { handoff, record, .. } => out.players.push((handoff.player, (**record).clone())),
-                _ => {}
+            match in_transit(r, Some(tick)) {
+                InTransit::Row(row) => out.rows.push(row),
+                InTransit::Player(player, record) => out.players.push((player, record)),
+                InTransit::Nothing => {}
             }
         }
         out
@@ -1292,11 +1273,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             .into_iter()
             .filter(|(ordinal, _, _)| !participants.contains(ordinal))
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
-            .filter_map(|(_, _, r)| match r.inner() {
-                Reliable::Transfer { target, bundle, player: Some(h), .. } => {
-                    handoff_record(*target, bundle, h).map(|record| (h.player, record))
-                }
-                Reliable::PlayerMove { handoff, record, .. } => Some((handoff.player, (**record).clone())),
+            .filter_map(|(_, _, r)| match in_transit(r, None) {
+                InTransit::Player(player, record) => Some((player, record)),
                 _ => None,
             })
             .collect()
@@ -1803,9 +1781,46 @@ fn reliable_name(r: &Reliable) -> &'static str {
 /// What a world cut counted across a down link writes for one peer
 /// ([`WorldManager::cut_counted`]).
 #[derive(Debug, Default)]
-pub(super) struct Counted {
+pub(super) struct CountedPart {
     pub rows: Vec<InFlightRow>,
     pub players: Vec<(PlayerId, PlayerRecord)>,
-    /// The queue ids of everything owed above the count (the journal keeps these `Sent`).
+    /// The ids of everything owed above the count (the journal keeps these `Sent`).
     pub kept_sent: BTreeSet<u64>,
+}
+
+/// What an unacknowledged message to another host is in a cut part that writes it (toward
+/// an absent peer, or above a counted peer's count).
+enum InTransit {
+    /// A transfer without a player (never a person's: the history respawns people), an
+    /// intent or a reply.
+    Row(InFlightRow),
+    /// A player handed over (its body's record, as the receiver would park it) or moved.
+    Player(PlayerId, PlayerRecord),
+    Nothing,
+}
+
+/// `r` (its [`Reliable::InCut`] wrapper aside) as [`InTransit`]; `floor`: a transfer's stamp
+/// or an intent's or reply's due raised to at least it.
+fn in_transit(r: &Reliable, floor: Option<crate::Tick>) -> InTransit {
+    let floor = floor.unwrap_or(0);
+    match r.inner() {
+        Reliable::Transfer { bundle, .. } if matches!(bundle.kind, EntityKind::Person { .. }) => InTransit::Nothing,
+        Reliable::Transfer { target, stamp, bundle, player: None } => {
+            InTransit::Row(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: (*stamp).max(floor) })
+        }
+        Reliable::Intent(msg) => {
+            let mut msg = *msg;
+            match &mut msg {
+                crate::IntentMsg::Intent(s) => s.due = s.due.max(floor),
+                crate::IntentMsg::Reply(s) => s.due = s.due.max(floor),
+            }
+            InTransit::Row(InFlightRow::Intent { target: peer_intent_target(&msg), msg })
+        }
+        Reliable::Transfer { target, bundle, player: Some(h), .. } => match handoff_record(*target, bundle, h) {
+            Some(record) => InTransit::Player(h.player, record),
+            None => InTransit::Nothing,
+        },
+        Reliable::PlayerMove { handoff, record, .. } => InTransit::Player(handoff.player, (**record).clone()),
+        _ => InTransit::Nothing,
+    }
 }

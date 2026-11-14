@@ -286,11 +286,6 @@ impl PeerJournal {
         self.last_counted.as_ref()
     }
 
-    /// Test support: [`Self::rows`] with each row's queue id (`None`: received).
-    #[doc(hidden)]
-    pub fn rows_with_ids(&self, peer: u32) -> impl Iterator<Item = (&JournalEntry, u64, Option<CutId>, Option<u64>)> {
-        self.peers.get(&peer).into_iter().flat_map(|log| log.rows.iter().map(|r| (&r.entry, r.seq, r.accounted, r.queue_id)))
-    }
 
     /// Entries over every peer (the `[server]` line's `journal_entries=`).
     pub fn len(&self) -> usize {

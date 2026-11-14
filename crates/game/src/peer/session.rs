@@ -199,12 +199,6 @@ impl PeerSession {
         self.me.boot
     }
 
-    /// The peer boot this session's outgoing numbering is addressed to (`None`: no hello of
-    /// the peer yet).
-    pub fn addressed_to(&self) -> Option<u64> {
-        self.send_boot
-    }
-
     /// What is still owed past the peer's count `count` of this numbering, in order: queued,
     /// or sent and not acknowledged, numbered above `count`. With a frozen peer (its count
     /// cannot grow) none of it reaches the peer before this session is thawed.

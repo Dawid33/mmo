@@ -436,8 +436,11 @@ fn a_cut_with_one_host_detached_is_aborted_and_leaves_nothing_staged() {
 
 /// R4 Task 12 (real links): the peer link between the two hosts is closed (`PeerGate`)
 /// and stays closed while a world cut that began after it commits — each host's count of
-/// the other relayed through the real coordinator — and nothing stays prepared. The link
-/// back, the next cut commits too and no entity is stored twice.
+/// the other relayed through the real coordinator — and nothing stays prepared. A slime
+/// crosses the seam toward the other host while the link is down: it waits in the sender's
+/// frozen session, above the receiver's count, so that cut stores it once — as the
+/// sender's in-flight row. The link back, it lands once, the next cut commits too, and it is
+/// stored once (in its region now).
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_cut_with_a_peer_link_down_commits() {
@@ -445,11 +448,15 @@ fn a_cut_with_a_peer_link_down_commits() {
     let Some(db) = PgDb::create("wcount") else { return };
     let dir = scratch("wcount");
     let mut w = world(&db, &dir);
+    let (a, b) = w.seam;
+    let (ha, hb) = (w.pair.sims[0].manager.owner_host(a).expect("owned") as usize, w.pair.sims[0].manager.owner_host(b).expect("owned") as usize);
     w.until_committed_after(&db, 0);
     for sim in &w.pair.sims {
         sim.gate.set_down(true);
     }
     w.pair.until("the peer link is seen down", |p| !p.sims[0].manager.peer_is_reachable(1) && !p.sims[1].manager.peer_is_reachable(0));
+    let id = spawn_slime_in(&mut w, ha as u32, a, REGION_SIZE + game::FLIP_HYSTERESIS + 2.0);
+    w.pair.until("the slime waits for the other host", |p| p.sims[ha].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id));
     let coordinator = w.coordinator.as_ref().unwrap();
     let running = coordinator.thread.inspect(|c| c.world_cut_running(), WAIT).flatten().map_or(0, |(c, _)| c.0 as i64);
     let decided = decisions(&db).iter().map(|(c, _, _)| *c).max().unwrap_or(0);
@@ -458,14 +465,37 @@ fn a_cut_with_a_peer_link_down_commits() {
     assert!(w.pair.sims.iter().all(|s| s.gate.is_down()), "the link stayed down");
     assert!(!w.pair.sims[0].manager.peer_is_reachable(1), "host 0 never reached host 1 meanwhile");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    assert_eq!(stored_times(&w, &db, id), (0, 1), "the slime is the sender's in-flight row, once");
     for sim in &w.pair.sims {
         sim.gate.set_down(false);
     }
-    w.pair.until("the peer link is back", |p| p.sims[0].manager.peer_is_reachable(1) && p.sims[1].manager.peer_is_reachable(0));
+    w.pair.until("the slime landed on the other host, once", |p| {
+        p.sims[hb].holders(id) == [b] && p.sims[ha].holders(id).is_empty() && p.sims.iter().all(|s| s.manager.peer_unreceived() == 0)
+    });
     let latest = decisions(&db).iter().map(|(c, _, _)| *c).max().unwrap_or(0);
     w.until_committed_after(&db, latest);
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    assert_eq!(stored_times(&w, &db, id), (1, 0), "the slime is stored once, in its region");
     w.stop(&dir);
+}
+
+/// How often the store holds `id`: `(region rows, in-flight rows)`.
+fn stored_times(w: &World, db: &PgDb, id: EntityId) -> (usize, usize) {
+    let rows = query_i64s(
+        db,
+        &format!(
+            "SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}",
+            id.birth_region.x, id.birth_region.z, id.serial
+        ),
+    )[0] as usize;
+    let flying = w
+        .store
+        .load_in_flight(None)
+        .unwrap()
+        .iter()
+        .filter(|r| matches!(r, game::InFlightRow::Transfer { bundle, .. } if bundle.id == id))
+        .count();
+    (rows, flying)
 }
 
 /// Important 2: the coordinator's decision write and its first abort both fail: it keeps
@@ -1944,22 +1974,23 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
         dug_at = r.current_tick() as i64;
         r.with_data(|d| assert!(d.set_block_safe(dig, game::Block::new(game::BlockId::AIR)), "the dig"));
     });
+    // Since R4 Task 12 a world cut commits with the link down (counted across it,
+    // `world_cut.rs`): once one holding the dig does, the store brings the dig to b's halo
+    // with the link still down. Before that the dig's halo traffic is lost with the link —
+    // checked at every look taken before any cut after the dig committed (the first one now:
+    // no cut past the dig can have committed yet).
+    let committed_past_dig = |db: &PgDb| decisions(db).iter().any(|(_, t, k)| *k && *t > dug_at);
+    assert!(!committed_past_dig(&db), "no cut past the dig yet");
+    assert!(seen_from_b(&mut w.pair).is_some(), "the dig's halo delta was lost with the link");
     let now = w.pair.now();
     assert!(w.pair.sims[ha].manager.handle_server_event(ServerEvent::ClientDisconnected(KEEPER), now));
     w.pair.until("a parked", |p| !p.sims[ha].manager.running_regions().contains(&a));
     for _ in 0..10 {
+        if committed_past_dig(&db) {
+            break;
+        }
+        assert!(seen_from_b(&mut w.pair).is_some(), "the dig's halo traffic and a's park were lost with the link");
         w.pair.round();
-    }
-    // Since R4 Task 12 a world cut commits with the link down (counted across it,
-    // `world_cut.rs`): one holding the dig may already have — then the store brings the dig
-    // to b's halo with the link still down. Until one does, the dig's halo traffic is lost
-    // with the link.
-    let saved = query_i64s(&db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", a.x, a.z));
-    if saved.iter().all(|t| *t <= dug_at) {
-        assert!(
-            seen_from_b(&mut w.pair).is_some() || decisions(&db).iter().any(|(_, t, k)| *k && *t > dug_at),
-            "the dig's halo traffic was lost with the link"
-        );
     }
     let parked_after = decisions(&db).iter().filter(|(_, t, _)| *t <= dug_at).map(|(c, _, _)| *c).max().unwrap_or(0);
 
