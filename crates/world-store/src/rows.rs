@@ -268,7 +268,10 @@ macro_rules! engine_rows {
                         .fetch_all(pool)
                         .await
                         .unwrap_or_default();
-                        StoreError::Backend(crate::open::claim_timeout_message(crate::CLAIM_LOCK_TIMEOUT_MS, &gids))
+                        StoreError::LockConflict {
+                            sqlstate: "55P03".into(),
+                            detail: crate::open::claim_timeout_message(crate::CLAIM_LOCK_TIMEOUT_MS, &gids),
+                        }
                     }
                     _ => e.into(),
                 }

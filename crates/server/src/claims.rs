@@ -201,20 +201,28 @@ impl HostClaims {
     /// claim re-took, which waits for that row, `world_store::succession`'s lock notes — or
     /// its lock timeout runs out) re-reads this boot's `hosts` row: no longer this live boot
     /// (the declaration won) → `Fenced`, the fenced exit (3), never a start-up error; still
-    /// live → asked once more.
+    /// live → asked once more. A second lost conflict re-reads the row again: not live →
+    /// `Fenced`; still live → that conflict is the error.
     pub fn reclaim_own(&self, boot: u64) -> Result<usize, StoreError> {
-        match self.reclaim_own_once(boot) {
-            Err(e) if is_lock_conflict(&e) => {
-                let owner = self.fence().owner;
-                let live = self.store.hosts()?.iter().any(|r| r.ordinal == owner && r.boot == boot && r.state == game::HOST_LIVE);
-                if !live {
-                    log::error!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}) to its own declaration: fenced");
-                    return Err(StoreError::Fenced { sr: None });
+        let owner = self.fence().owner;
+        let mut asked = 0;
+        loop {
+            asked += 1;
+            match self.reclaim_own_once(boot) {
+                Err(e) if e.is_lock_conflict() => {
+                    let live =
+                        self.store.hosts()?.iter().any(|r| r.ordinal == owner && r.boot == boot && r.state == game::HOST_LIVE);
+                    if !live {
+                        log::error!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}) to its own declaration: fenced");
+                        return Err(StoreError::Fenced { sr: None });
+                    }
+                    if asked >= 2 {
+                        return Err(e);
+                    }
+                    log::warn!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}); its row is still live: once more");
                 }
-                log::warn!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}); its row is still live: once more");
-                self.reclaim_own_once(boot)
+                other => return other,
             }
-            other => other,
         }
     }
 
@@ -607,16 +615,6 @@ impl DirectoryKeeper {
     }
 }
 
-/// Whether `e` is a lost lock conflict — Postgres chose the transaction in a deadlock
-/// (`40P01`) or its `lock_timeout` ran out (`55P03`); nothing was written, and asking again
-/// may succeed.
-pub fn is_lock_conflict(e: &StoreError) -> bool {
-    match e {
-        StoreError::Backend(why) => why.contains("deadlock detected") || why.contains("lock_timeout") || why.contains("lock timeout"),
-        _ => false,
-    }
-}
-
 // --- an heir's adoption (R4) ----------------------------------------------------------------
 
 /// After a failed adoption read, the next one is not started before this many ms.
@@ -651,6 +649,8 @@ struct AdoptionRead {
     predecessor: u32,
     drop: Vec<EntityId>,
     started: Instant,
+    /// The fence the reads are made under (grown once `owned_by` answered).
+    fence: Arc<Fence>,
     step: AdoptionStep,
 }
 
@@ -718,7 +718,8 @@ impl AdoptionReader {
                     drop.len()
                 );
                 let step = AdoptionStep::Fence(self.claims.store().owned_by_later(owner));
-                self.read = Some(AdoptionRead { id, predecessor, drop, started: Instant::now(), step });
+                let fence = self.claims.fence();
+                self.read = Some(AdoptionRead { id, predecessor, drop, started: Instant::now(), fence, step });
             }
         }
         let Some(read) = self.read.as_mut() else { return };
@@ -732,6 +733,7 @@ impl AdoptionReader {
                     // against it from the moment the manager owns the land.
                     self.claims.grow_to(held);
                     let fence = self.claims.fence();
+                    read.fence = fence.clone();
                     let store = self.claims.store();
                     read.step = AdoptionStep::Rows {
                         rows: store.load_in_flight_of_later(read.predecessor, &fence),
@@ -779,8 +781,13 @@ impl AdoptionReader {
                 manager.adopted_rows(read.id, rows, located);
             }
             Err(e @ StoreError::Fenced { .. }) => {
-                self.claims.fenced().set();
-                log::error!("[server] succession {}: the adoption read was refused ({e}); this host is fenced", read.id.0);
+                // Classified like every refusal, against the fence the reads were made under.
+                if self.claims.note_refusal_under(&read.fence, &e) {
+                    log::error!("[server] succession {}: the adoption read was refused ({e}); this host is fenced", read.id.0);
+                } else {
+                    manager.adoption_read_failed(read.id);
+                    self.no_read_before = Some(Instant::now() + Duration::from_millis(ADOPTION_READ_RETRY_MS));
+                }
             }
             Err(e) => {
                 manager.adoption_read_failed(read.id);
@@ -930,15 +937,6 @@ mod tests {
         store.shutdown();
     }
 
-    #[test]
-    fn lost_lock_conflicts_are_recognised() {
-        assert!(is_lock_conflict(&StoreError::Backend("error returned from database: deadlock detected".into())));
-        assert!(is_lock_conflict(&StoreError::Backend(
-            "a save cut waited longer than its lock_timeout (CUT_LOCK_TIMEOUT_MS) for a row lock".into()
-        )));
-        assert!(!is_lock_conflict(&StoreError::Backend("connection refused".into())));
-        assert!(!is_lock_conflict(&StoreError::Fenced { sr: None }));
-    }
 
     /// A manager whose directory says `sr` is free until a read is applied, and that wants
     /// it claimed while it is: the order of the keeper's claims and applied reads.

@@ -92,12 +92,15 @@ pub(crate) const SUCCESSION_UNSUPPORTED: &str = "successions need several hosts,
 /// The `lock_timeout` of a declaration ran out: a staged cut part (or another transaction)
 /// holds a predecessor's row. Nothing was written; the caller declares again later.
 fn declare_error(what: &str, e: sqlx::Error, lock_timeout_ms: u64) -> StoreError {
-    match &e {
-        sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => StoreError::Backend(format!(
+    match StoreError::lock_conflict_of(&e, |text| {
+        format!(
             "{what} waited longer than its lock_timeout ({lock_timeout_ms} ms) for a row a staged cut part or \
-             another transaction holds; nothing was written — retry once the cut is decided ({e})"
-        )),
-        _ => e.into(),
+             another transaction holds, or was chosen in a deadlock; nothing was written — retry once the cut is \
+             decided ({text})"
+        )
+    }) {
+        Some(lost) => lost,
+        None => e.into(),
     }
 }
 

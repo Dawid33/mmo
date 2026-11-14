@@ -473,9 +473,8 @@ pub fn run_coordinator() -> ServerExit {
     // `claim` (R4): a crashed host's land is inherited by one heir — the coordinator declares
     // and runs the successions. `static`: a crash rolls the world back (R3), never declared.
     // The coordinator has no ordinal of its own: the policy from `VOXEL_OWNERSHIP` alone.
-    let declared = game::crash_policy_from_value(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref())
+    let policy = coordinator_crash_policy(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref(), hosts)
         .unwrap_or_else(|e| fatal(e));
-    let policy = if hosts > 1 { declared } else { game::CrashPolicy::Rollback };
     if policy == game::CrashPolicy::Succession {
         log::info!("[coordinator] ownership `claim`: a crashed host's land goes to an heir (successions)");
     }
@@ -518,9 +517,34 @@ pub fn run_coordinator() -> ServerExit {
     exit
 }
 
+/// The crash policy of a coordinator serving `hosts` hosts of a world whose ownership is
+/// `ownership` (`VOXEL_OWNERSHIP`'s value; the coordinator has no ordinal of its own):
+/// `claim` with several hosts runs successions (R4); `static`, `allinone` and unset roll the
+/// world back (R3); ONE host always rolls back — there is no other host to inherit, and with
+/// one host the coordinator runs no world cuts, which a succession's settle needs. A bad
+/// value is an error.
+pub fn coordinator_crash_policy(ownership: Option<&str>, hosts: u32) -> Result<game::CrashPolicy, String> {
+    let declared = game::crash_policy_from_value(ownership)?;
+    Ok(if hosts > 1 { declared } else { game::CrashPolicy::Rollback })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The coordinator's crash-policy gate: only `claim` with several hosts declares
+    /// successions; one host always rolls back; a bad value is refused.
+    #[test]
+    fn coordinator_crash_policy_is_succession_only_for_claim_with_several_hosts() {
+        use game::CrashPolicy::{Rollback, Succession};
+        assert_eq!(coordinator_crash_policy(Some("static"), 2), Ok(Rollback));
+        assert_eq!(coordinator_crash_policy(Some("allinone"), 2), Ok(Rollback));
+        assert_eq!(coordinator_crash_policy(None, 3), Ok(Rollback));
+        assert_eq!(coordinator_crash_policy(Some("claim"), 2), Ok(Succession));
+        assert_eq!(coordinator_crash_policy(Some(" claim "), 4), Ok(Succession));
+        assert_eq!(coordinator_crash_policy(Some("claim"), 1), Ok(Rollback), "one host: nobody to inherit");
+        assert!(coordinator_crash_policy(Some("dynamic"), 2).is_err());
+    }
 
     /// `claim` ownership is a host's only: refused for `all` and `coordinator`, accepted for
     /// `host` (one host included); other ownerships are not this check's business.

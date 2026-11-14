@@ -539,6 +539,7 @@ fn dial_peer(
     inbound: Sender<Inbound>,
     cmds: Receiver<DialCmd>,
     wake: Sender<()>,
+    dialing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     type Dialer = (Sender<PeerMsg>, Receiver<LinkEvent<PeerMsg>>);
     let dial = |(addr, pin): &(SocketAddr, String)| -> Dialer {
@@ -555,6 +556,7 @@ fn dial_peer(
     let mut said_missing = false;
     let mut said_dead = false;
     loop {
+        dialing.store(dialer.is_some(), std::sync::atomic::Ordering::SeqCst);
         if live.is_none() && Instant::now() >= next_lookup {
             next_lookup = Instant::now() + discovery;
             match lookup(&store, peer) {
@@ -583,12 +585,23 @@ fn dial_peer(
                     // there); its next boot registers live, at an address read then.
                     drop(dialer.take());
                     target = None;
+                    dialing.store(false, std::sync::atomic::Ordering::SeqCst);
                     if !said_dead {
                         log::info!("[peers] host {peer}'s hosts row is dead (succeeded): not dialed until its next boot registers");
                         said_dead = true;
                     }
                 }
-                Err(e) => log::warn!("[peers] reading host {peer}'s hosts row: {e}"),
+                Err(e) => {
+                    log::warn!("[peers] reading host {peer}'s hosts row: {e}");
+                    // The store is unreachable: the last live target is dialed again rather
+                    // than leaving the link down through an outage. A boot found dead has no
+                    // target any more (forgotten above), so a zombie is never redialed here.
+                    if dialer.is_none() {
+                        if let Some(t) = target.as_ref() {
+                            dialer = Some(dial(t));
+                        }
+                    }
+                }
             }
         }
         let dial_events = dialer.as_ref().map_or_else(crossbeam::channel::never, |d| d.1.clone());
@@ -660,6 +673,8 @@ pub struct PeerLinks {
     links: Vec<(u32, Box<dyn PeerLink + Send>)>,
     registered: HostBoot,
     wake: Receiver<()>,
+    /// Per lower ordinal: whether its dialing thread holds a dialer now.
+    dialing: BTreeMap<u32, std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl PeerLinks {
@@ -701,6 +716,7 @@ impl PeerLinks {
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
         let mut links: Vec<(u32, Box<dyn PeerLink + Send>)> = Vec::new();
         let mut routes = BTreeMap::new();
+        let mut dialing = BTreeMap::new();
         for other in (0..hosts).filter(|&o| o != ordinal) {
             let (inbound, events) = crossbeam::channel::unbounded();
             let wire: Box<dyn PeerWire + Send> = if other > ordinal {
@@ -709,9 +725,11 @@ impl PeerLinks {
             } else {
                 let (cmds_tx, cmds) = crossbeam::channel::unbounded();
                 let (hello, store, wake) = (hello.clone(), store.clone(), wake_tx.clone());
+                let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                dialing.insert(other, flag.clone());
                 std::thread::Builder::new()
                     .name(format!("peer-dial-{other}"))
-                    .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake))?;
+                    .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake, flag))?;
                 Box::new(DialerWire(cmds_tx))
             };
             links.push((other, Box::new(QuicPeerLink::new(other, wire, events, config.delay, wake_tx.clone()))));
@@ -719,7 +737,7 @@ impl PeerLinks {
         std::thread::Builder::new()
             .name("peer-listener".into())
             .spawn(move || route_listener(Admission::new(ordinal, hosts), events, senders, routes, wake_tx))?;
-        Ok(PeerLinks { listener, links, registered, wake })
+        Ok(PeerLinks { listener, links, registered, wake, dialing })
     }
 
     /// The links, one per other host (by ordinal), for [`game::WorldManager::set_peer`];
@@ -741,6 +759,13 @@ impl PeerLinks {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.listener.local_addr()
+    }
+
+    /// Test support: whether this host's dialing thread for the lower host `peer` holds a
+    /// dialer now (`None`: `peer` is not dialed by this host). A dead boot's is dropped.
+    #[doc(hidden)]
+    pub fn dialing(&self, peer: u32) -> Option<bool> {
+        self.dialing.get(&peer).map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     pub fn cert_sha256(&self) -> &str {

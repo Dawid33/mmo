@@ -121,9 +121,13 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     let reg = links.registered().reg;
     let c = claims.clone();
     let read: game::RegionStoreRead = Arc::new(move |rc| c.load_region(rc).map_err(|e| e.to_string()));
+    // The drop set reaches the claims, whose `load_region` filters it: the server's filter.
+    let c = claims.clone();
+    let forget: game::RegionStoreForget = Arc::new(move |ids| c.forget_entities(ids));
     let mut spawner = InlineSpawner::default()
         .with_stored_terrain(Arc::new(world_store::TerrainFromStore(store.clone())))
-        .with_region_store(read);
+        .with_region_store(read)
+        .with_region_store_forget(forget);
     spawner.set_world_tick(t.w.pair.tick.load(Ordering::SeqCst));
     let mut sim = Sim::with_spawner(ordinal, s, boot, generation, &mut links, spawner);
     sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal, t.n)), s);
@@ -167,8 +171,19 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
 /// The coordinator of these tests: listening, `Succession` (or `policy`), world cuts every
 /// [`CUT_EVERY`] at the hosts' tick, the shortened lease.
 fn start_coordinator(store: StoreHandle, cert: PathBuf, tick: Arc<AtomicU64>, policy: CrashPolicy) -> server::coordinator_rt::ListeningCoordinator {
+    start_coordinator_every(store, cert, tick, policy, CUT_EVERY)
+}
+
+/// [`start_coordinator`] with world cuts every `every`.
+fn start_coordinator_every(
+    store: StoreHandle,
+    cert: PathBuf,
+    tick: Arc<AtomicU64>,
+    policy: CrashPolicy,
+    every: Duration,
+) -> server::coordinator_rt::ListeningCoordinator {
     let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
-    let cuts = server::coordinator_rt::WorldCuts { every: CUT_EVERY, tick: Box::new(move || tick.load(Ordering::SeqCst)) };
+    let cuts = server::coordinator_rt::WorldCuts { every, tick: Box::new(move || tick.load(Ordering::SeqCst)) };
     let c = server::coordinator_rt::start_listening_as(
         store,
         start,
@@ -272,11 +287,16 @@ impl Takeover {
     /// `n` fresh hosts under `claim` (each its keeper in its seam region, claimed on demand),
     /// a real coordinator (`policy`), the login service (`login`), every session up.
     fn start(db: &PgDb, dir: &std::path::Path, n: u32, policy: CrashPolicy, login: bool) -> Takeover {
+        Takeover::start_every(db, dir, n, policy, login, CUT_EVERY)
+    }
+
+    /// [`Takeover::start`] with world cuts every `every`.
+    fn start_every(db: &PgDb, dir: &std::path::Path, n: u32, policy: CrashPolicy, login: bool, every: Duration) -> Takeover {
         let booted: Vec<Booted> = (0..n).map(|h| register(db, dir, n, h, 2000 + u64::from(h))).collect();
         let store = open(db);
         let tick = Arc::new(AtomicU64::new(0));
         let cert = dir.join("coordinator.cert-sha256");
-        let coordinator = start_coordinator(store.clone(), cert.clone(), tick.clone(), policy);
+        let coordinator = start_coordinator_every(store.clone(), cert.clone(), tick.clone(), policy, every);
         let s = store.super_region_regions();
         let pair = Pair { sims: Vec::new(), started: Instant::now(), tick };
         let w = World {
@@ -567,6 +587,19 @@ fn push(t: &mut Takeover, h: u32, id: EntityId, from: RegionCoords, to: RegionCo
     pushed
 }
 
+/// Moves `id` (in `rc`, on host `h`) to the middle of `rc`.
+fn centre(t: &mut Takeover, h: u32, id: EntityId, rc: RegionCoords) {
+    let at = game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, above_ground_y(), REGION_SIZE / 2.0);
+    let mut moved = false;
+    t.sim(h).manager.spawner_mut().with_region(rc, |region| {
+        if let Some(&key) = region.data().id_index.get(&id) {
+            region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
+            moved = true;
+        }
+    });
+    assert!(moved, "{id:?} is in {rc:?} on host {h}");
+}
+
 /// `id` is in the world exactly once by the store (one `entities` row, or one in-flight
 /// row), after a committed cut: what a restart would see.
 fn stored_once(t: &Takeover, db: &PgDb, id: EntityId, what: &str) {
@@ -789,24 +822,34 @@ fn host_killed_before_prepare_is_succeeded_from_the_previous_cut() {
     install_props();
     let Some(db) = PgDb::create("tk_beforeprep") else { return };
     let dir = scratch("tk_beforeprep");
-    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    // Cuts every 3 s: the crossing below falls between two cuts, the kill into the next.
+    let mut t = Takeover::start_every(&db, &dir, 2, CrashPolicy::Succession, false, Duration::from_secs(3));
+    let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
     let crosser = slime(&mut t, 1, b1, 0.0);
     let stays = slime(&mut t, 1, b1, -5.0);
     let k = t.until_committed_after(&db, 0);
     let k = t.until_committed_after(&db, k);
-    // Over the seam to host 0 after K.
+    // Over the seam to host 0 after K (its journal entries are then the only record of it).
     assert!(push(&mut t, 1, crosser, b1, a0));
     t.until("the crosser lives on host 0", WAIT, |t| t.live(crosser) == [(0, a0)]);
+    // Away from the seam: it stays in a0 (a copy of it restored in b1 would be a second body,
+    // not one collapsing onto the same id in one region).
+    centre(&mut t, 0, crosser, a0);
+    let landed_after = decisions(&db).into_iter().filter(|(_, _, k)| *k).map(|(c, _, _)| c).max().unwrap();
     let cut = until_part(&mut t.w, 1, &["pending", "marked"]);
     let before = decisions(&db).into_iter().filter(|(c, _, k)| *k && *c < cut.0 as i64).map(|(c, _, _)| c).max().unwrap();
     assert!(before >= k);
+    assert_eq!(before, landed_after, "the crossing is after the last committed cut (the case under test)");
     t.kill(1);
     t.until("the cut decided", LONG, |_| decision_of(&db, cut).is_some());
     assert_eq!(decision_of(&db, cut), Some(false), "a part never staged: the cut is aborted");
     let row = t.until_settled(&db, 1);
     assert_eq!(row[3], before, "the succession is based on the cut before the aborted one: {row:?}");
     assert!(row[4] > cut.0 as i64, "settled by a later cut");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "nobody restarted");
+    assert_eq!(host_row(&db, 0).0, 2000, "host 0's boot is unchanged");
+    assert!(!t.w.generations[0].is_set() && !t.sim(0).fenced.is_set(), "host 0 runs on");
     t.watch(0, b1);
     t.until("b1 runs on the heir", WAIT, |t| t.sim(0).manager.running_regions().contains(&b1));
     let k2 = t.until_committed_after(&db, row[4]);
@@ -829,6 +872,7 @@ fn host_killed_after_prepare_is_succeeded_from_that_cut() {
     let Some(db) = PgDb::create("tk_afterprep") else { return };
     let dir = scratch("tk_afterprep");
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
     let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0), slime(&mut t, 1, b1, 5.0)];
     let _ = t.until_committed_after(&db, 0);
@@ -853,6 +897,9 @@ fn host_killed_after_prepare_is_succeeded_from_that_cut() {
     let row = t.until_settled(&db, 1);
     assert_eq!(row[3], cut.0 as i64, "the succession is based on the cut host 1 helped to stage: {row:?}");
     assert_eq!(saved_tick(&db, b1), tick, "host 1's region is as of that cut");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "nobody restarted");
+    assert_eq!(host_row(&db, 0).0, 2000, "host 0's boot is unchanged");
+    assert!(!t.w.generations[0].is_set() && !t.sim(0).fenced.is_set(), "host 0 runs on");
     t.watch(0, b1);
     t.until("b1 runs on the heir", WAIT, |t| t.sim(0).manager.running_regions().contains(&b1));
     let k = t.until_committed_after(&db, row[4]);
@@ -899,8 +946,8 @@ fn heir_killed_before_the_settle_rolls_the_world_back_once() {
     let row = successions(&db)[0];
     assert_eq!((row[4], row[5]), (-1, 1), "the succession is abandoned, never settled: {row:?}");
     let last = decisions(&db).into_iter().filter(|(_, _, k)| *k).map(|(c, _, _)| c).max().unwrap();
-    assert_eq!(last, k.max(last), "nothing committed after the base");
-    assert!(last <= row[3], "no cut committed after the base cut {} (last {last})", row[3]);
+    assert!(last >= k);
+    assert_eq!(last, row[3], "nothing committed after the base cut: the world restarts from it");
     let s = t.w.store.super_region_regions();
     let owners = t.w.store.owners().unwrap();
     let pred_sr = game::super_region_of(seams[pred as usize], s);
@@ -984,6 +1031,63 @@ fn coordinator_killed_mid_succession_finishes_it_after_its_restart() {
     t.stop(&db, &dir);
 }
 
+/// Row 7: the coordinator dies BEFORE declaring — host 1's row lapsed, nothing declared. Its
+/// restart remembers nothing of the lapse: it observes a whole lease again from its own first
+/// read, then declares; the succession settles as if nothing had happened, later. The
+/// generation is unchanged and every slime is once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn coordinator_killed_before_declaring_observes_a_whole_lease_again() {
+    install_props();
+    let Some(db) = PgDb::create("tk_coordfirst") else { return };
+    let dir = scratch("tk_coordfirst");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let generation = t.w.store.world_generation().unwrap();
+    let (a0, b1) = (t.seams[0], t.seams[1]);
+    let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0)];
+    let _ = t.until_committed_after(&db, 0);
+    t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
+    // Host 1 dies and the coordinator with it, before any lapse could be seen.
+    t.kill(1);
+    kill_coordinator(&mut t.w);
+    // Host 1's row lapses with nobody to declare it.
+    let dead = Instant::now();
+    while dead.elapsed() < Duration::from_millis(LEASE_MS + 1_000) {
+        t.round();
+    }
+    assert!(successions(&db).is_empty(), "nothing declared without a coordinator");
+    let store = open(&db);
+    server::roles::recover_staged_cuts(&store, 2).expect("the staged parts are resolved");
+    let restarted = Instant::now();
+    let c = start_coordinator(store.clone(), t.w.cert.clone(), t.w.pair.tick.clone(), CrashPolicy::Succession);
+    let old = std::mem::replace(&mut t.w.store, store);
+    old.shutdown();
+    let (o, boot, reg) = (0, t.sim(0).boot, t.sim(0).reg);
+    t.w.switches[o].replace(quic_world_link(c.addr, t.w.cert.clone(), 0, boot, reg));
+    t.w.coordinator = Some(c);
+    t.until("the succession declared", LONG, |_| !successions(&db).is_empty());
+    let declared_after = restarted.elapsed();
+    eprintln!("[takeover] the restarted coordinator declared {} ms after its start (lease {LEASE_MS} ms)", declared_after.as_millis());
+    assert!(
+        declared_after >= Duration::from_millis(LEASE_MS),
+        "the restart observed a whole lease of its own before declaring ({} ms)",
+        declared_after.as_millis()
+    );
+    let row = t.until_settled(&db, 1);
+    assert_eq!((row[2], row[5]), (0, 0), "{row:?}");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "no rollback");
+    assert_eq!(host_row(&db, 0).0, 2000, "host 0 never restarted");
+    assert!(!t.w.generations[0].is_set());
+    t.watch(0, b1);
+    let k = t.until_committed_after(&db, row[4]);
+    let _ = t.until_committed_after(&db, k);
+    for id in ids {
+        assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
+        stored_once(&t, &db, id, "after the settle");
+    }
+    t.stop(&db, &dir);
+}
+
 /// Row 8: host 1's process restarts before its old boot was declared: the new boot finds a
 /// live host and vouches for its predecessor (`seen_ms = 0`) and waits; the coordinator
 /// declares at its next read (no whole lease), the succession settles, and only then does
@@ -991,46 +1095,98 @@ fn coordinator_killed_mid_succession_finishes_it_after_its_restart() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
 fn restarted_process_of_a_dead_ordinal_waits_then_returns_owning_nothing() {
+    reboot_of_a_dead_ordinal(1, "tk_reboot");
+}
+
+/// Row 8 with the LOWER ordinal dead: host 0 dies and host 1 inherits. Host 1 dials host 0
+/// (the higher dials the lower), so this is the run in which a survivor's dialer meets a dead
+/// boot: once the row is declared dead it holds no dialer for it (a zombie listening there is
+/// never redialed); host 0's next boot registers after the settle at a new address, is
+/// dialed there and is reachable, owning nothing.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn restarted_process_of_dead_host_0_waits_then_returns_owning_nothing() {
+    reboot_of_a_dead_ordinal(0, "tk_reboot0");
+}
+
+fn reboot_of_a_dead_ordinal(dead: u32, tag: &str) {
     install_props();
-    let Some(db) = PgDb::create("tk_reboot") else { return };
-    let dir = scratch("tk_reboot");
+    let Some(db) = PgDb::create(tag) else { return };
+    let dir = scratch(tag);
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let heir = 1 - dead;
     let generation = t.w.store.world_generation().unwrap();
-    let (a0, b1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0)];
+    let heir_boot = host_row(&db, heir).0;
+    let (s0, s1) = (t.seams[0], t.seams[1]);
+    let ids = [slime(&mut t, 0, s0, 0.0), slime(&mut t, 1, s1, 0.0)];
     let _ = t.until_committed_after(&db, 0);
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
-    t.kill(1);
+    // The heir adopts only once the test has seen its dialer let go of a dead lower host.
+    let adopter = t.sim(heir).adopter.take();
+    t.kill(dead);
     let killed = Instant::now();
     let (booted, declared_after, settled_when_registered) = std::thread::scope(|scope| {
         let (db, dir) = (&db, &dir);
-        let boot = scope.spawn(move || register(db, dir, 2, 1, 3001));
+        let boot = scope.spawn(move || register(db, dir, 2, dead, 3000 + u64::from(dead)));
         let mut declared_after = None;
+        let mut adopter = adopter;
+        let mut idle_since: Option<Instant> = None;
         while !boot.is_finished() {
-            assert!(killed.elapsed() < LONG, "the new boot never registered");
+            assert!(killed.elapsed() < LONG, "the new boot of host {dead} never registered");
             t.round();
             if declared_after.is_none() && !successions(db).is_empty() {
                 declared_after = Some(killed.elapsed());
             }
+            if declared_after.is_some() && adopter.is_some() {
+                // Host 0 dead: host 1's dialer must drop the dead boot (and stay idle) before
+                // the adoption lets the new boot register. Host 1 dead: nothing dials it.
+                let dialing = t.w.links[heir as usize].as_ref().unwrap().dialing(dead);
+                match dialing {
+                    Some(true) => idle_since = None,
+                    Some(false) => {
+                        idle_since.get_or_insert_with(Instant::now);
+                    }
+                    None => idle_since = Some(Instant::now() - Duration::from_secs(10)),
+                }
+                let idle_long = idle_since.is_some_and(|at| at.elapsed() > Duration::from_secs(server::peer_link::PEER_DISCOVERY_SECS + 1));
+                assert!(
+                    killed.elapsed() < Duration::from_secs(20),
+                    "host {heir} still dials the dead boot of host {dead} ({dialing:?}) 20 s after the kill"
+                );
+                if idle_long {
+                    t.sim(heir).adopter = adopter.take();
+                }
+            }
         }
-        let settled = successions(db).iter().any(|r| r[1] == 1 && r[4] >= 0);
+        let settled = successions(db).iter().any(|r| r[1] == i64::from(dead) && r[4] >= 0);
         (boot.join().expect("the boot thread"), declared_after, settled)
     });
     let declared_after = declared_after.expect("declared before the boot registered");
-    eprintln!("[takeover] the vouched death was declared {} ms after the kill (lease {LEASE_MS} ms)", declared_after.as_millis());
+    eprintln!("[takeover] the vouched death of host {dead} was declared {} ms after the kill (lease {LEASE_MS} ms)", declared_after.as_millis());
+    assert!(declared_after < Duration::from_millis(LEASE_MS), "a vouched death is declared before a lease could lapse");
     assert!(settled_when_registered, "the new boot registered only after the succession settled");
     assert_eq!(booted.links.registered().generation, generation, "registered without raising the generation");
     assert!(!booted.links.registered().bumped);
     assert!(booted.claims.fence().epochs.is_empty(), "the new boot owns nothing");
     let sim = build(&mut t, booted, true);
-    t.w.pair.sims.push(sim);
-    t.until("host 1 attached again", WAIT, |t| t.up(1) && t.sim(1).manager.world_attached());
+    let i = t.w.pair.sims.iter().position(|s| s.ordinal > dead).unwrap_or(t.w.pair.sims.len());
+    t.w.pair.sims.insert(i, sim);
+    t.until("the new boot attached and the peers reach each other", WAIT, |t| {
+        t.up(dead)
+            && t.sim(dead).manager.world_attached()
+            && t.sim(dead).manager.peer_is_reachable(heir)
+            && t.sim(heir).manager.peer_is_reachable(dead)
+    });
+    if dead == 0 {
+        assert_eq!(t.w.links[1].as_ref().unwrap().dialing(0), Some(true), "host 1 dials host 0's new boot");
+    }
     let owners = t.w.store.owners().unwrap();
-    assert!(owners.iter().all(|(_, o, _)| *o == 0), "every super-region is host 0's: {owners:?}");
-    assert_eq!(host_row(&db, 0).0, 2000, "host 0 never restarted");
-    assert!(!t.w.generations[0].is_set());
-    t.watch(0, b1);
+    assert!(owners.iter().all(|(_, o, _)| *o == i64::from(heir)), "every super-region is host {heir}'s: {owners:?}");
+    assert_eq!(host_row(&db, heir).0, heir_boot, "host {heir} never restarted");
+    assert!(!t.w.generations[heir as usize].is_set());
+    t.watch(heir, t.seams[dead as usize]);
     let row = successions(&db)[0];
+    assert_eq!((row[1], row[2]), (i64::from(dead), i64::from(heir)), "{row:?}");
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
     for id in ids {
@@ -1072,7 +1228,7 @@ fn hung_host_is_replaced_and_exits_fenced_when_it_wakes() {
         }
         successions(&db).iter().any(|r| r[1] == 1 && r[4] >= 0)
     });
-    let b1_saved = query_i64s(&db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", b1.x, b1.z));
+    let b1_saved = saved_tick(&db, b1);
     // It wakes: its next beat says it was replaced.
     t.until("host 1 woke and knows it was replaced", LONG, |t| {
         strict(&db);
@@ -1083,6 +1239,10 @@ fn hung_host_is_replaced_and_exits_fenced_when_it_wakes() {
     assert!(!t.sim(0).manager.peer_is_reachable(1), "host 0 refuses the zombie's boot");
     assert_eq!(exit_host(&mut t.w, 1), server::claims::ServerExit::Fenced, "the zombie exits fenced");
     strict(&db);
+    // Nothing wrote b1 since the settle: not the zombie (fenced), not the heir (it does not
+    // run b1 until watched below).
+    assert!(!t.sim(0).manager.running_regions().contains(&b1), "the heir does not run b1 yet");
+    assert_eq!(saved_tick(&db, b1), b1_saved, "the zombie saved nothing of b1 after it woke");
     let row = t.until_settled(&db, 1);
     t.watch(0, b1);
     let k = t.until_committed_after(&db, row[4]);
@@ -1092,8 +1252,6 @@ fn hung_host_is_replaced_and_exits_fenced_when_it_wakes() {
         assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
         stored_once(&t, &db, id, "after the zombie's exit");
     }
-    let now_saved = query_i64s(&db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", b1.x, b1.z));
-    assert!(now_saved >= b1_saved, "only the heir wrote b1 since");
     // Its client joins again: the heir.
     let (ok, host) = t.join(&token, 2);
     assert_eq!((ok, host), (true, Some(0)), "the rejoin lands on the heir");
@@ -1200,17 +1358,52 @@ fn outage_longer_than_the_lease_declares_nobody() {
     t.stop(&db, &dir);
 }
 
-/// Static ownership keeps R3's crash policy: a host that dies and restarts dirty rolls the
-/// world back once (`dirty_restart_rolls_every_host_back_once` in `hosts.rs` is the R3
-/// test) — and no `successions` row is ever written, though the dead host's row lapses
-/// (nothing beats in the rig's static world): a `Succession` coordinator would declare it.
+/// [`World`] of two `static` hosts ([`two_hosts`]) whose coordinator runs the crash policy
+/// `policy` and whose hosts beat their leases (as `server::run`'s do), the lease shortened
+/// for every party as in the `claim` tests.
+fn static_world(db: &PgDb, dir: &std::path::Path, policy: CrashPolicy) -> World {
+    let (mut pair, seam, links, claims) = two_hosts(db, dir);
+    for (i, sim) in pair.sims.iter_mut().enumerate() {
+        claims[i].store().set_host_lease_ms(LEASE_MS);
+        let mut beat = server::lease::Heartbeat::new(claims[i].store().clone(), i as u32, sim.boot);
+        beat.set_period(Duration::from_millis(BEAT_MS));
+        sim.heartbeat = Some(beat);
+        sim.fenced = claims[i].fenced().clone();
+    }
+    let store = open(db);
+    let cert = dir.join("coordinator.cert-sha256");
+    let coordinator = start_coordinator(store.clone(), cert.clone(), pair.tick.clone(), policy);
+    let mut switches = Vec::new();
+    let mut generations = Vec::new();
+    for (ordinal, sim) in pair.sims.iter_mut().enumerate() {
+        let link = quic_world_link(coordinator.addr, cert.clone(), ordinal as u32, sim.boot, sim.reg);
+        let switch = SwitchLink(Arc::new(std::sync::Mutex::new((Some(link), 0))));
+        switches.push(switch.clone());
+        sim.manager.set_world_link(Box::new(switch), sim.boot, 0);
+        sim.manager.set_world_map(land_map());
+        let generation = server::claims::WorldGeneration::new(links[ordinal].registered().generation);
+        generations.push(generation.clone());
+        sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(claims[ordinal].clone(), generation));
+    }
+    pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+    let links = links.into_iter().map(Some).collect();
+    World { pair, seam, coordinator: Some(coordinator), cert, links, claims, store, switches, generations }
+}
+
+/// Static ownership keeps R3's crash policy. The coordinator's policy is what production
+/// derives for `VOXEL_OWNERSHIP=static` with two hosts ([`server::roles::coordinator_crash_policy`]),
+/// the hosts beat their leases, and host 1 dies: its row lapses with host 0 beating — exactly
+/// what a `Succession` coordinator declares — yet no `successions` row is ever written. Host
+/// 1 restarts dirty and the world rolls back once (R3's `dirty_restart_rolls_every_host_back_once`
+/// in `hosts.rs` is the R3 test).
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
 fn static_ownership_still_rolls_the_world_back() {
     install_props();
     let Some(db) = PgDb::create("tk_static") else { return };
     let dir = scratch("tk_static");
-    let mut w = world(&db, &dir);
+    let policy = server::roles::coordinator_crash_policy(Some("static"), 2).expect("a valid ownership");
+    let mut w = static_world(&db, &dir, policy);
     let generation = w.claims[0].store().world_generation().unwrap();
     let a0 = seam_of(&w, 0);
     let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
@@ -1218,9 +1411,10 @@ fn static_ownership_still_rolls_the_world_back() {
     let (first, _) = last_committed(&db);
     w.until_committed_after(&db, first);
     kill_host(&mut w, 1);
-    // Past a whole (product) lease with host 1 gone: a declaration would have come by now.
+    // Past the (shortened) lease with host 1 gone and host 0 beating: a `Succession`
+    // coordinator would have declared by now.
     let dead = Instant::now();
-    while dead.elapsed() < Duration::from_millis(game::HOST_LEASE_MS + 2_000) {
+    while dead.elapsed() < Duration::from_millis(3 * LEASE_MS) {
         w.pair.round();
     }
     assert_eq!(count(&db, "SELECT COUNT(*) FROM successions"), 0, "static never declares a succession");

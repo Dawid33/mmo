@@ -637,7 +637,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The server could not read what [`Self::take_adoption_wanted`] asked for: asked again.
     pub fn adoption_read_failed(&mut self, id: SuccessionId) {
         if let Some(a) = self.adoptions.get_mut(&id).filter(|a| a.state == AdoptionState::Asked) {
-            log::warn!("[server] succession {}: the adoption read failed; asked again", id.0);
+            // The server's reader warns (rate-limited); here only the state moves.
+            log::debug!("[server] succession {}: the adoption read failed; asked again", id.0);
             a.state = AdoptionState::Wanted;
         }
     }

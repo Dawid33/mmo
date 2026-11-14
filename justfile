@@ -1541,18 +1541,18 @@ test-r2:
 test-r3:
     MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test hosts -- --include-ignored --test-threads=1"
 
-# Region threading: a player walking across the seam between two regions that
-# run on different threads. Two layers, both tagged slow (so smoke / test-one /
-# test skip them and only the long `test-full` sweep ran them):
-#   - game `handoff_schedule`: the walk there and back under SEEDED scheduling
-#     jitter (permuted tick order, late inputs, missed ticks) — a failure
-#     names a seed that replays exactly — plus the rest of the game's seam
 # The takeover crash table (crates/server/tests/takeover.rs, all slow): hosts under `claim`
 # with a lease shortened for the test, a real coordinator declaring successions, an heir
 # adopting, every crash point of R4's table, against the dev Postgres (`pg-up`). Serial.
 test-r4:
     MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test takeover -- --include-ignored --test-threads=1"
 
+# Region threading: a player walking across the seam between two regions that
+# run on different threads. Two layers, both tagged slow (so smoke / test-one /
+# test skip them and only the long `test-full` sweep ran them):
+#   - game `handoff_schedule`: the walk there and back under SEEDED scheduling
+#     jitter (permuted tick order, late inputs, missed ticks) — a failure
+#     names a seed that replays exactly — plus the rest of the game's seam
 #     tests: the manager's handoff (`handoff_manager`), the halo, intents,
 #     mining / placing / chests / piles across a seam, slimes, people and
 #     bodies crossing, body arrivals, and entities crossing between hosts over

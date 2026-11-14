@@ -345,12 +345,18 @@ pub struct InlineSpawner {
     /// Test support ([`InlineSpawner::with_region_store`]): where a region that has not run
     /// here and is not in `portable` is read from (a host test's world store).
     region_store: Option<RegionStoreRead>,
+    /// Test support ([`InlineSpawner::with_region_store`]): told every drop set, so the
+    /// store reader filters its loads itself (the server's claims do).
+    region_store_forget: Option<RegionStoreForget>,
 }
 
 /// A host test's world store, as a region thread reads it: the stored state of a region
 /// (`None`: never stored), or why it could not be read.
 pub type RegionStoreRead =
     std::sync::Arc<dyn Fn(RegionCoords) -> Result<Option<crate::StoredRegion>, String> + Send + Sync>;
+
+/// The drop set handed to a host test's store reader ([`RegionSpawner::forget_entities`]).
+pub type RegionStoreForget = std::sync::Arc<dyn Fn(&BTreeSet<crate::EntityId>) + Send + Sync>;
 
 impl InlineSpawner {
     /// Test support: every runner, now and spawned later, records its
@@ -399,6 +405,15 @@ impl InlineSpawner {
     /// among them) start from Postgres.
     pub fn with_region_store(mut self, read: RegionStoreRead) -> Self {
         self.region_store = Some(read);
+        self
+    }
+
+    /// Test support: the drop set goes to `forget` (the store reader of
+    /// [`Self::with_region_store`], which then leaves it out itself — the server's
+    /// `HostClaims::forget_entities`), and this spawner no longer filters what that reader
+    /// returns: the reader's own filter is the one under test.
+    pub fn with_region_store_forget(mut self, forget: RegionStoreForget) -> Self {
+        self.region_store_forget = Some(forget);
         self
     }
 
@@ -565,9 +580,13 @@ impl RegionSpawner for InlineSpawner {
         }
         let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
         let mut stored = if never_ran { self.portable.remove(&id) } else { None };
+        let mut filter = true;
         if let (true, None, Some(read)) = (never_ran, &stored, &self.region_store) {
             match read(id) {
-                Ok(found) => stored = found,
+                Ok(found) => {
+                    stored = found;
+                    filter = self.region_store_forget.is_none();
+                }
                 Err(why) => {
                     log::error!("region {id:?}: cannot load from the world store: {why}");
                     let _ = out.send((id, RegionOutput::LoadFailed(why)));
@@ -578,7 +597,9 @@ impl RegionSpawner for InlineSpawner {
         }
         let runner = match stored {
             Some(mut stored) => {
-                stored.entities.retain(|b| !self.forgotten.contains(&b.id));
+                if filter {
+                    stored.entities.retain(|b| !self.forgotten.contains(&b.id));
+                }
                 let (region, terms) = crate::restore_portable(id, stored);
                 let mut runner = RegionRunner::new(id, region, out);
                 runner.set_saved_terms(terms);
@@ -616,6 +637,9 @@ impl RegionSpawner for InlineSpawner {
 
     fn forget_entities(&mut self, ids: &BTreeSet<crate::EntityId>) {
         self.forgotten = ids.clone();
+        if let Some(forget) = &self.region_store_forget {
+            forget(ids);
+        }
     }
 }
 

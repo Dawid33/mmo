@@ -172,7 +172,7 @@ pub fn ensure_world(
                 "{}: {why} — the file is kept; forge the world at a supported cell size (8 m or more)",
                 path.display()
             ),
-            e @ world_store::StoreError::Backend(_) => {
+            e @ (world_store::StoreError::Backend(_) | world_store::StoreError::LockConflict { .. }) => {
                 format!("importing {}: {e} — retry; the store and the file are untouched", path.display())
             }
             e => e.to_string(),
@@ -217,7 +217,7 @@ fn tile_from_archive(store: &StoreHandle) -> Result<(), String> {
 /// throws away what the store has saved — said in so many words.
 fn archive_tiling_error(e: world_store::StoreError) -> String {
     match e {
-        e @ world_store::StoreError::Backend(_) => {
+        e @ (world_store::StoreError::Backend(_) | world_store::StoreError::LockConflict { .. }) => {
             format!("tiling the world store's forge file: {e} — retry; the store is untouched")
         }
         e => format!(

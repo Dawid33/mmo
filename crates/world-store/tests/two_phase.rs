@@ -736,7 +736,8 @@ fn a_cut_blocked_on_a_foreign_lock_times_out() {
     for prepare in [false, true] {
         let rx = if prepare { h.prepare_cut(part(40, 0), f0.clone(), 0) } else { h.commit_cut(part(41, 0), f0.clone()) };
         let err = rx.recv_timeout(Duration::from_secs(5)).expect("the cut gives up").unwrap_err();
-        assert!(matches!(&err, StoreError::Backend(t) if t.contains("lock_timeout")), "prepare={prepare}: {err}");
+        assert!(matches!(&err, StoreError::LockConflict { sqlstate, detail } if sqlstate == "55P03" && detail.contains("lock_timeout")), "prepare={prepare}: {err}");
+        assert!(err.is_lock_conflict());
     }
     assert_eq!(prepared(&w), 0);
     rt.block_on(tx.rollback()).unwrap();

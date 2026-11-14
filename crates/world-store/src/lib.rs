@@ -187,12 +187,39 @@ pub enum StoreError {
     /// `worldctl super-region` changed it to `stored`: its super-regions are of the old
     /// side. Nothing was written; restart the process (with `VOXEL_SUPER_REGION_REGIONS`).
     OtherSuperRegionSide { stored: u32, opened: u32 },
+    /// A statement lost a row-lock conflict (Postgres): it was chosen in a deadlock
+    /// (`sqlstate` `40P01`) or its `lock_timeout` ran out (`55P03`). Nothing was written;
+    /// asking again may succeed ([`StoreError::is_lock_conflict`]). `detail` says what waited.
+    LockConflict { sqlstate: String, detail: String },
+}
+
+impl StoreError {
+    /// A lost row-lock conflict ([`StoreError::LockConflict`]): classified by its SQLSTATE where
+    /// the database error was converted, never by message text.
+    pub fn is_lock_conflict(&self) -> bool {
+        matches!(self, StoreError::LockConflict { .. })
+    }
+
+    /// `e` as a [`StoreError::LockConflict`] if its SQLSTATE is a deadlock (`40P01`) or a lock
+    /// timeout (`55P03`), with `detail` (given the error's text).
+    pub(crate) fn lock_conflict_of(e: &sqlx::Error, detail: impl FnOnce(&str) -> String) -> Option<StoreError> {
+        match e {
+            sqlx::Error::Database(d) => match d.code().as_deref() {
+                Some(code @ ("40P01" | "55P03")) => {
+                    Some(StoreError::LockConflict { sqlstate: code.to_string(), detail: detail(&e.to_string()) })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StoreError::Backend(e) => write!(f, "world store backend error: {e}"),
+            StoreError::LockConflict { sqlstate, detail } => write!(f, "world store lock conflict (SQLSTATE {sqlstate}): {detail}"),
             StoreError::Locked(what) => write!(
                 f,
                 "the world database is already in use by another process ({what}); stop that server first"
@@ -296,14 +323,14 @@ impl std::error::Error for StoreError {}
 
 impl From<sqlx::Error> for StoreError {
     fn from(e: sqlx::Error) -> Self {
-        match &e {
-            // `lock_not_available`: a save cut's `lock_timeout` ran out.
-            sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => StoreError::Backend(format!(
-                "a save cut waited longer than its lock_timeout (CUT_LOCK_TIMEOUT_MS) for a row lock another \
-                 transaction or prepared cut part holds; nothing was written ({e})"
-            )),
-            _ => StoreError::Backend(e.to_string()),
-        }
+        // `lock_not_available` (a cut's `lock_timeout` ran out) or `deadlock_detected`.
+        let lost = StoreError::lock_conflict_of(&e, |text| {
+            format!(
+                "a statement waited longer than its lock_timeout (CUT_LOCK_TIMEOUT_MS), or was chosen in a deadlock, \
+                 for a row lock another transaction or prepared cut part holds; nothing was written ({text})"
+            )
+        });
+        lost.unwrap_or_else(|| StoreError::Backend(e.to_string()))
     }
 }
 

@@ -380,8 +380,9 @@ impl CutWriter {
                         manager.world_cut_prepared(part.id);
                     }
                     Err(e) => {
-                        // Only a `Backend` error may leave the part staged (its mark kept).
-                        part.maybe_staged = matches!(e, StoreError::Backend(_));
+                        // Only a `Backend` error (a lost lock conflict among them) may leave the
+                        // part staged (its mark kept).
+                        part.maybe_staged = matches!(e, StoreError::Backend(_) | StoreError::LockConflict { .. });
                         failure = Some((part.id, part.tick, e, part.fence.clone()));
                     }
                 }

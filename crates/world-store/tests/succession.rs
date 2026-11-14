@@ -268,7 +268,8 @@ fn declare_waits_out_a_staged_part_with_a_timeout() {
     let started = Instant::now();
     let err = w.declare(1, 0, SuccessionKind::Crash).unwrap_err();
     let waited = started.elapsed();
-    assert!(matches!(&err, StoreError::Backend(m) if m.contains("lock_timeout")), "{err}");
+    assert!(matches!(&err, StoreError::LockConflict { sqlstate, detail } if sqlstate == "55P03" && detail.contains("lock_timeout")), "{err}");
+    assert!(err.is_lock_conflict());
     assert!(waited >= Duration::from_millis(WAIT_MS) && waited < Duration::from_millis(WAIT_MS * 10), "waited {waited:?}");
     // Nothing changed.
     assert_eq!(w.state_of(1), (HOST_LIVE, false));
