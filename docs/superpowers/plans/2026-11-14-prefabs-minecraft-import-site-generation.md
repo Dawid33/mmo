@@ -359,6 +359,22 @@ Checks every stage plan must carry, where they apply:
 - `WORLD_MAP_VERSION` bumps if F changes what `build_world_map` returns.
 - Client tests are ask-first; the gallery and the test town get one look on a real adapter.
 
+### Looking at a prefab in the game
+
+```
+just run --reset --prefab dev-hut
+VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;statuen-07"
+```
+
+- `--prefab NAME[:DX,DZ[:TURN]]` (repeatable; the client joins the flags with `;`) makes the client start
+  its server with `VOXEL_DEV_STRUCTURES=<rx>,<rz>=<spec>`: the prefabs are laid out beside the landing
+  column of region `(rx, rz)` (a row along +x without offsets; each on a pad levelled to the ground at its
+  anchor). The region is `VOXEL_DEBUG_EMBARK_AT` if set, else `0,0`, and the automatic embark aims for it.
+- `VOXEL_PREFAB_DIRS` (`:`-separated, relative to the current directory) adds prefab directories to
+  `assets/prefabs`; the built-in set is always installed. A missing directory is a startup error.
+- It needs a region never saved before: use `--reset` (a saved region is never regenerated, so an
+  existing world shows no structure). With neither variable set generation is untouched.
+
 ## 9. Decisions that change the plan if wrong
 
 1. **Frozen site plans (§6)** rather than sites derived from the map alone, or stamped at runtime.

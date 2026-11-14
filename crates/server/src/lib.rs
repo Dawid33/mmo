@@ -146,6 +146,7 @@ pub mod auth_edge;
 pub mod claims;
 pub mod coordinator_rt;
 pub mod cuts;
+pub mod dev_structures;
 pub mod lease;
 pub mod lod_workers;
 pub mod login_link;
@@ -893,6 +894,16 @@ pub fn run() -> claims::ServerExit {
     // the store with it (procedural worlds: none).
     let world_map = world_file::install_world(&mut opened);
     let world_seed = worldgen::WORLD_SEED;
+    // Prefabs, and (only when the environment asks) a dev structure source: before the cache key and
+    // anything that can generate terrain.
+    {
+        let landing_of = |rc: game::RegionCoords| world_map.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing);
+        match dev_structures::install_from_env(&registry, &landing_of, world_seed, materials) {
+            Ok(Some(n)) => info!("[structures] {n} placements from VOXEL_DEV_STRUCTURES"),
+            Ok(None) => {}
+            Err(message) => panic!("{message}"),
+        }
+    }
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
     let configured_lod_threads = std::env::var("LOD_BUILD_THREADS").ok();
