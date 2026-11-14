@@ -43,6 +43,13 @@ pub struct HostRow {
     pub generation: u64,
     /// The host's last save cut left it clean (cleared by every boot).
     pub clean: bool,
+    /// [`HOST_LIVE`] or [`HOST_DEAD`] (a takeover marks a host dead). Set by `register_host`.
+    pub state: i64,
+    /// The database clock (ms since the epoch) at the host's last registration or heartbeat.
+    pub seen_ms: u64,
+    /// The registration number: one more than every other row's at the host's last
+    /// registration (higher = registered later). Set by `register_host`.
+    pub reg: u64,
     pub peer_addr: Option<String>,
     pub peer_cert: Option<String>,
     pub quic: Option<String>,
@@ -57,7 +64,16 @@ pub struct HostRow {
 pub struct HostBoot {
     pub generation: u64,
     pub bumped: bool,
+    /// The registration number the boot's row was stored with ([`HostRow::reg`]).
+    pub reg: u64,
 }
+
+/// [`HostRow::state`]: the host holds its lease.
+pub const HOST_LIVE: i64 = 0;
+/// [`HostRow::state`]: the host's lease lapsed and a takeover marked it dead.
+pub const HOST_DEAD: i64 = 1;
+/// `super_regions.owner` of a free row (no host holds it).
+pub const NO_OWNER: i64 = -1;
 
 /// A handle on the open store (see the crate docs and `thread.rs`).
 #[derive(Clone)]
@@ -610,7 +626,9 @@ impl StoreHandle {
     /// Registers this process's boot as host `row.ordinal` (once per boot, right after its
     /// claim): one fence-checked transaction that bumps `world.generation` when the host's
     /// previous boot never left clean (see [`HostBoot`]). `row.generation` and `row.clean`
-    /// are ignored; the row is stored with the world's generation and `clean = false`.
+    /// are ignored; the row is stored with the world's generation and `clean = false`; `state`,
+    /// `seen_ms` and `reg` are ignored too: it is stored live, seen now (database clock), with
+    /// the next registration number.
     pub fn register_host(&self, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
         self.ask(|r| Request::RegisterHost(row, fence.clone(), r))
     }
@@ -623,6 +641,40 @@ impl StoreHandle {
     /// [`Self::hosts`], answered on the receiver.
     pub fn hosts_later(&self) -> crossbeam::channel::Receiver<Result<Vec<HostRow>, StoreError>> {
         self.ask_later(Request::Hosts)
+    }
+
+    /// One lease beat: host `ordinal`'s row gets `seen_ms` = the database clock, if it is
+    /// still boot `boot` and live. `false`: no such live row — the caller was replaced.
+    /// Unfenced on purpose: it writes only the caller's own row and proves nothing but
+    /// liveness (ownership is what the fence proves, and every write still checks it).
+    pub fn heartbeat(&self, ordinal: u32, boot: u64) -> Result<bool, StoreError> {
+        self.ask(|r| Request::Heartbeat(ordinal, boot, r))
+    }
+
+    /// [`Self::heartbeat`], answered on the receiver.
+    pub fn heartbeat_later(&self, ordinal: u32, boot: u64) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+        self.ask_later(|r| Request::Heartbeat(ordinal, boot, r))
+    }
+
+    /// Every super-region row, by super-region: its owner (`NO_OWNER` when free) and epoch.
+    pub fn owners(&self) -> Result<Vec<(SuperRegion, i64, u64)>, StoreError> {
+        self.ask(Request::Owners)
+    }
+
+    /// [`Self::owners`], answered on the receiver.
+    pub fn owners_later(&self) -> crossbeam::channel::Receiver<Result<Vec<(SuperRegion, i64, u64)>, StoreError>> {
+        self.ask_later(Request::Owners)
+    }
+
+    /// The rows `owner` holds now, as a fence (`all_hosts: false`). A plain read: a write
+    /// under it still checks the stored epoch.
+    pub fn owned_by(&self, owner: u32) -> Result<Fence, StoreError> {
+        self.ask(|r| Request::OwnedBy(owner, r))
+    }
+
+    /// The database's clock, in ms since the epoch (what `seen_ms` is stamped with).
+    pub fn db_now_ms(&self) -> Result<u64, StoreError> {
+        self.ask(Request::DbNowMs)
     }
 
     /// The world's generation: how many dirty host restarts the world has seen.

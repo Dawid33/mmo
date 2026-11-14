@@ -103,6 +103,10 @@ pub(crate) enum Request {
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
     OwnerClaimEpoch(u32, Reply<Option<u64>>),
+    Heartbeat(u32, u64, Reply<bool>),
+    Owners(Reply<Vec<(SuperRegion, i64, u64)>>),
+    OwnedBy(u32, Reply<Fence>),
+    DbNowMs(Reply<u64>),
     TwoPhaseReady(Reply<()>),
     /// A host's part of a two-phase cut, at the host's world generation.
     PrepareCut(Box<WorldCut>, Fence, u64, Reply<CutCommitted>),
@@ -451,6 +455,19 @@ async fn serve(
             }),
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
             Request::WorldGeneration(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) }),
+            // Postgres: no writer lock (it is in-process and a claim can hold it for a minute; a
+            // late beat would lapse the lease) — the statement writes only the caller's own row.
+            // SQLite has one writer at a time, so it takes the lock like every write.
+            Request::Heartbeat(ordinal, boot, r) => tokio::spawn(async move {
+                let _w = match &pool {
+                    Pool::Sqlite(_) => Some(writer.lock().await),
+                    Pool::Pg(_) => None,
+                };
+                r.send(on_pool!(&pool, heartbeat(ordinal, boot)))
+            }),
+            Request::Owners(r) => tokio::spawn(async move { r.send(on_pool!(&pool, owners())) }),
+            Request::OwnedBy(owner, r) => tokio::spawn(async move { r.send(on_pool!(&pool, owned_by(owner))) }),
+            Request::DbNowMs(r) => tokio::spawn(async move { r.send(on_pool!(&pool, db_now_ms())) }),
             Request::OwnerClaimEpoch(owner, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, owner_claim_epoch(owner))) })
             }

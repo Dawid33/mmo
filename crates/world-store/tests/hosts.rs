@@ -12,6 +12,9 @@ fn row(ordinal: u32, boot: u64) -> HostRow {
         // Ignored by `register_host`.
         generation: 99,
         clean: true,
+        state: 0,
+        seen_ms: 0,
+        reg: 0,
         peer_addr: None,
         peer_cert: None,
         quic: None,

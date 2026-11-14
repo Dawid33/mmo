@@ -171,7 +171,7 @@ pub(crate) enum CutEnd {
 }
 
 macro_rules! engine_rows {
-    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr, $claims_lock:expr) => {
+    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr, $claims_lock:expr, $now_ms:expr) => {
         pub(crate) mod $module {
             use sqlx::Row;
 
@@ -324,13 +324,17 @@ macro_rules! engine_rows {
                 Ok(())
             }
 
+            /// The database clock in ms since the epoch (the one expression per engine).
+            const NOW_MS: &str = $now_ms;
+
             /// Registers a host boot (R3): in one transaction, with the fence checked over the fence's own
             /// super-regions first and then the world row locked (Postgres: `FOR NO KEY UPDATE`; SQLite
             /// has one writer) — the lock order of `commit_cut`. If the ordinal's row exists, is not clean and
             /// still holds the world's generation, the previous boot died without a clean
             /// save: `world.generation` goes up (`bumped`). The row is then upserted with
-            /// the new boot, the world's generation and `clean = 0`. `row.generation` and
-            /// `row.clean` are ignored. Callers hold the writer lock.
+            /// the new boot, the world's generation, `clean = 0`, `state` live, `seen_ms` now and `reg` one more
+            /// than the highest of any row (safe: the world-row lock serialises registrations).
+            /// `row.generation`, `row.clean`, `row.state`, `row.seen_ms` and `row.reg` are ignored. Callers hold the writer lock.
             pub(crate) async fn register_host(pool: &Pool, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
                 let mut tx = pool.begin().await?;
                 let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
@@ -358,16 +362,24 @@ macro_rules! engine_rows {
                         sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(generation).execute(&mut *tx).await?;
                     }
                 }
-                sqlx::query(
-                    "INSERT INTO hosts (ordinal, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, updated_utc) \
-                     VALUES ($1, $2, $3, 0, $4, $5, $6, $7, $8, $9) \
+                let reg: i64 = sqlx::query("SELECT COALESCE(MAX(reg), 0) + 1 FROM hosts")
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get(0)?;
+                let sql = format!(
+                    "INSERT INTO hosts (ordinal, boot, generation, clean, state, seen_ms, reg, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, updated_utc) \
+                     VALUES ($1, $2, $3, 0, {live}, {NOW_MS}, $4, $5, $6, $7, $8, $9, $10) \
                      ON CONFLICT (ordinal) DO UPDATE SET boot = excluded.boot, generation = excluded.generation, clean = 0, \
+                     state = excluded.state, seen_ms = excluded.seen_ms, reg = excluded.reg, \
                      peer_addr = excluded.peer_addr, peer_cert = excluded.peer_cert, quic = excluded.quic, \
                      webtransport = excluded.webtransport, wt_cert_hash = excluded.wt_cert_hash, updated_utc = excluded.updated_utc",
-                )
+                    live = crate::HOST_LIVE,
+                );
+                sqlx::query(&sql)
                 .bind(i64::from(row.ordinal))
                 .bind(i(row.boot))
                 .bind(generation)
+                .bind(reg)
                 .bind(&row.peer_addr)
                 .bind(&row.peer_cert)
                 .bind(&row.quic)
@@ -377,13 +389,13 @@ macro_rules! engine_rows {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                Ok(HostBoot { generation: u(generation), bumped })
+                Ok(HostBoot { generation: u(generation), bumped, reg: u(reg) })
             }
 
             /// Every host row, by ordinal.
             pub(crate) async fn hosts(pool: &Pool) -> Result<Vec<HostRow>, StoreError> {
                 let rows = sqlx::query(
-                    "SELECT ordinal, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash \
+                    "SELECT ordinal, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, seen_ms, reg \
                      FROM hosts ORDER BY ordinal",
                 )
                 .fetch_all(pool)
@@ -402,9 +414,60 @@ macro_rules! engine_rows {
                             quic: r.try_get(6)?,
                             webtransport: r.try_get(7)?,
                             wt_cert_hash: r.try_get(8)?,
+                            state: r.try_get(9)?,
+                            seen_ms: u(r.try_get(10)?),
+                            reg: u(r.try_get(11)?),
                         })
                     })
                     .collect()
+            }
+
+            /// One lease beat. UNFENCED on purpose: one statement over the caller's own `hosts` row
+            /// (Postgres: its row lock only, held to the statement's end; it touches neither `world`
+            /// nor `super_regions`, so it waits for no cut part, decision, registration or claim, and
+            /// none waits for it beyond that row). `false`: no live row of that boot.
+            pub(crate) async fn heartbeat(pool: &Pool, ordinal: u32, boot: u64) -> Result<bool, StoreError> {
+                let sql = format!(
+                    "UPDATE hosts SET seen_ms = {NOW_MS} WHERE ordinal = $1 AND boot = $2 AND state = {}",
+                    crate::HOST_LIVE
+                );
+                let done = sqlx::query(&sql).bind(i64::from(ordinal)).bind(i(boot)).execute(pool).await?;
+                Ok(done.rows_affected() == 1)
+            }
+
+            /// Every `super_regions` row, by super-region. A plain read, no locks.
+            pub(crate) async fn owners(pool: &Pool) -> Result<Vec<(SuperRegion, i64, u64)>, StoreError> {
+                let rows = sqlx::query("SELECT sx, sz, owner, epoch FROM super_regions ORDER BY sx, sz")
+                    .fetch_all(pool)
+                    .await?;
+                rows.into_iter()
+                    .map(|r| {
+                        let (sx, sz): (i64, i64) = (r.try_get(0)?, r.try_get(1)?);
+                        let sr = (
+                            i32::try_from(sx).map_err(|_| StoreError::Corrupt(format!("super_regions.sx {sx}")))?,
+                            i32::try_from(sz).map_err(|_| StoreError::Corrupt(format!("super_regions.sz {sz}")))?,
+                        );
+                        Ok((sr, r.try_get(2)?, u(r.try_get(3)?)))
+                    })
+                    .collect()
+            }
+
+            /// The rows `owner` holds, as a fence. A plain read, no locks.
+            pub(crate) async fn owned_by(pool: &Pool, owner: u32) -> Result<Fence, StoreError> {
+                let mut epochs = BTreeMap::new();
+                for (sr, o, epoch) in owners(pool).await? {
+                    if o == i64::from(owner) {
+                        epochs.insert(sr, epoch);
+                    }
+                }
+                Ok(Fence { owner, epochs, all_hosts: false })
+            }
+
+            /// The database clock, ms since the epoch.
+            pub(crate) async fn db_now_ms(pool: &Pool) -> Result<u64, StoreError> {
+                let sql = format!("SELECT {NOW_MS}");
+                let now: i64 = sqlx::query(&sql).fetch_one(pool).await?.try_get(0)?;
+                Ok(u(now))
             }
 
             /// The highest epoch of the super-regions `owner` holds: its claim epoch
@@ -1148,7 +1211,8 @@ macro_rules! engine_rows {
 // SQLite needs no row lock: claims and commits all hold the store's writer
 // lock and one writer process holds the file lock.
 // `$lock_timeout`: whether a cut's transaction sets a `lock_timeout` (Postgres).
-engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false, None);
+// `$now_ms`: the engine's SQL for the database clock in ms since the epoch (`seen_ms`).
+engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false, None, "CAST(unixepoch('subsec') * 1000 AS INTEGER)");
 engine_rows!(
     pg,
     sqlx::Postgres,
@@ -1156,7 +1220,9 @@ engine_rows!(
     " FOR SHARE",
     " FOR UPDATE",
     true,
-    Some("LOCK TABLE super_regions IN SHARE ROW EXCLUSIVE MODE")
+    Some("LOCK TABLE super_regions IN SHARE ROW EXCLUSIVE MODE"),
+    // clock_timestamp(), not now(): a registration's transaction may have waited for locks.
+    "(extract(epoch from clock_timestamp()) * 1000)::bigint"
 );
 
 /// Announces committed cut `cut` at `tick` to every listener of this world (Postgres:

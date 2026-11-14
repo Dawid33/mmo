@@ -203,8 +203,7 @@ fn a_voxel_world_from_before_the_stud_switch_is_refused() {
 fn an_empty_store_migrates_to_11_and_holds_voxel_tables() {
     each_backend("voxel_fresh", true, |url| {
         StoreHandle::open(url, Dials::BUILT, OpenMode::Writer).unwrap().shutdown();
-        assert_eq!(applied(url), Some(VOXEL_RETURN));
-        assert_eq!(newest_migration(), VOXEL_RETURN);
+        assert_eq!(applied(url), Some(newest_migration()));
         assert!(!fails(url, "SELECT COUNT(*) FROM chunks"), "the voxel chunk table exists");
         assert!(!fails(url, "SELECT ground FROM regions"), "the voxel ground column exists");
         assert!(fails(url, "SELECT COUNT(*) FROM stud_chunks"), "the stud chunk table is gone");
@@ -213,7 +212,7 @@ fn an_empty_store_migrates_to_11_and_holds_voxel_tables() {
 
         // A row written without `ground` takes the column default: an empty list.
         let m = blob(url, &encode(FORMAT_REGION_META, &meta()));
-        migrate_to(url, VOXEL_RETURN, &[format!(
+        migrate_to(url, newest_migration(), &[format!(
             "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta) VALUES (5, 5, 1, 0, {m})"
         )]);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -252,7 +251,7 @@ fn a_read_only_handle_needs_migration_11() {
 fn a_world_marked_studs_is_refused_from_11_on() {
     each_backend("stud_mark", true, |url| {
         StoreHandle::open(url, Dials::BUILT, OpenMode::Writer).unwrap().shutdown();
-        migrate_to(url, VOXEL_RETURN, &["UPDATE world SET terrain = 1".to_string()]);
+        migrate_to(url, newest_migration(), &["UPDATE world SET terrain = 1".to_string()]);
         for mode in [OpenMode::Writer, OpenMode::ReadOnly] {
             let err = StoreHandle::open(url, Dials::BUILT, mode).err().unwrap_or_else(|| panic!("{mode:?} opened it"));
             assert_eq!(err, StoreError::OtherTerrain { stored: TerrainKind::Studs }, "{mode:?}");
