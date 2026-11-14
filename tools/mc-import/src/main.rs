@@ -21,7 +21,13 @@ const USAGE: &str = "usage:
   mc-import report <file.schem>...
   mc-import import <file.schem> [--name N] [--out DIR] [--air auto|carve|keep] [--licence TEXT] [--author TEXT] [--tag T]...
   mc-import split <file.schem> [--prefix P] [--out DIR] [--gap N] [--min-blocks N] [--ground auto|none|N]
-                  [--air auto|carve|keep] [--licence TEXT] [--author TEXT] [--tag T]...";
+                  [--labels] [--air auto|carve|keep] [--licence TEXT] [--author TEXT] [--tag T]...
+
+split is for showroom files (many separate builds on a plate). A single composition (a castle, a
+stadium) should be imported instead: the build count `report` prints is the cue. Builds are numbered
+<prefix>-<nn>; --labels names them after a nearby sign instead (signs inside a build are ignored).
+A prefab can be promoted into assets/prefabs/ only if it was imported with --licence.
+File stems repeat across packs: set --name (import) or --prefix (split) for each pack.";
 
 type Failure = (u8, String);
 
@@ -55,6 +61,7 @@ struct Opts {
     min_blocks: Option<u64>,
     ground: Option<GroundMode>,
     air: AirMode,
+    labels: bool,
     licence: String,
     author: Option<String>,
     tags: Vec<String>,
@@ -70,6 +77,7 @@ fn parse(cmd: &str, args: &[String]) -> Result<Opts, Failure> {
         min_blocks: None,
         ground: None,
         air: AirMode::Auto,
+        labels: false,
         licence: String::new(),
         author: None,
         tags: Vec::new(),
@@ -92,6 +100,7 @@ fn parse(cmd: &str, args: &[String]) -> Result<Opts, Failure> {
             "--licence" if cmd != "report" => o.licence = value("--licence")?,
             "--author" if cmd != "report" => o.author = Some(value("--author")?),
             "--tag" if cmd != "report" => o.tags.push(value("--tag")?),
+            "--labels" if cmd == "split" => o.labels = true,
             "--gap" if cmd == "split" => {
                 let v = value("--gap")?;
                 o.gap = Some(v.parse().map_err(|_| usage(format!("--gap: \"{v}\" is not a whole number")))?);
@@ -196,9 +205,14 @@ fn report(path: &str) -> Result<bool, Failure> {
         licence: String::new(),
         source_hash: hash,
         tags: Vec::new(),
+        max_records: None,
     };
     match convert(&v, table, &opts) {
-        Some((_, r)) => {
+        Err(e) => {
+            eprintln!("  not convertible: {e}");
+            return Ok(false);
+        }
+        Ok(Some((_, r))) => {
             let mut top: Vec<(&String, &u64)> = r.unmapped.iter().collect();
             top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
             if !top.is_empty() {
@@ -214,7 +228,7 @@ fn report(path: &str) -> Result<bool, Failure> {
                 println!("  sign lines unparsed: {}", r.signs_unparsed);
             }
         }
-        None => println!("  nothing convertible"),
+        Ok(None) => println!("  nothing convertible"),
     }
     Ok(true)
 }
@@ -235,15 +249,16 @@ fn under_assets(out: &Path) -> bool {
     parts.iter().any(|c| matches!(c, Component::Normal(n) if n.eq_ignore_ascii_case("assets")))
 }
 
-/// The prefab names of a split: `<prefix>-<slug of the label>`, else `<prefix>-<nn>` by build position.
-fn split_names(prefix: &str, builds: &[Build]) -> Vec<String> {
+/// The prefab names of a split: `<prefix>-<nn>` by build position; with `use_labels`,
+/// `<prefix>-<slug of the label>` for a build that has one.
+fn split_names(prefix: &str, builds: &[Build], use_labels: bool) -> Vec<String> {
     let width = if builds.len() >= 100 { 3 } else { 2 };
     let mut taken: BTreeSet<String> = BTreeSet::new();
     builds
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let labelled = b.label.as_deref().map(slug).filter(|s| !s.is_empty()).map(|s| format!("{prefix}-{s}"));
+            let labelled = b.label.as_deref().filter(|_| use_labels).map(slug).filter(|s| !s.is_empty()).map(|s| format!("{prefix}-{s}"));
             // One uniqueness step for every name: a label such as "03" can collide with a numbered one.
             let wanted = labelled.unwrap_or_else(|| format!("{prefix}-{:0width$}", i + 1));
             let mut name = wanted.clone();
@@ -313,7 +328,7 @@ fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry)
                 sp.ground_layers
             ));
         }
-        let names = split_names(&base, &sp.builds);
+        let names = split_names(&base, &sp.builds, o.labels);
         for i in 0..sp.builds.len() {
             for j in i + 1..sp.builds.len() {
                 let (a, b) = (&sp.builds[i], &sp.builds[j]);
@@ -334,7 +349,7 @@ fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry)
 
 type Job = (String, Option<([u32; 3], [u32; 3])>);
 
-/// Converts, writes and resolves each job.
+/// Converts, resolves and writes each job; a job that fails marks the run failed and the next one goes on.
 fn finish(
     path: &str,
     v: &BlockVolume,
@@ -363,35 +378,58 @@ fn finish(
             licence: o.licence.clone(),
             source_hash: hash.to_string(),
             tags: tags.clone(),
+            max_records: None,
         };
-        let Some((file, report)) = convert(v, table, &opts) else {
-            if region.is_some() {
+        let (file, report) = match convert(v, table, &opts) {
+            Ok(Some(done)) => done,
+            Ok(None) if region.is_some() => {
                 eprintln!("{name}: nothing to convert, skipped");
-            } else {
+                continue;
+            }
+            Ok(None) => {
                 warn(format!("{}: nothing to convert", file_name(path)));
                 ok = false;
+                continue;
             }
-            continue;
+            Err(e) => {
+                eprintln!("{name}: {e}");
+                ok = false;
+                continue;
+            }
         };
-        if !made_dir {
-            std::fs::create_dir_all(&out_dir).map_err(|e| (1, format!("{}: {e}", out_dir.display())))?;
-            made_dir = true;
-        }
-        let bin = out_dir.join(format!("{name}{BIN_SUFFIX}"));
-        let txt = out_dir.join(format!("{name}{REPORT_SUFFIX}"));
-        std::fs::write(&bin, prefab_to_bin(&file)).map_err(|e| (1, format!("{}: {e}", bin.display())))?;
-        std::fs::write(&txt, report.to_text(&name)).map_err(|e| (1, format!("{}: {e}", txt.display())))?;
-        summary_line(&name, &file.size, &report, file.markers.len());
-        let unmapped: u64 = report.unmapped.values().sum();
-        if unmapped > 0 || report.signs_unparsed > 0 {
-            warn(format!("{name}: {unmapped} unmapped cells, {} unparsed sign lines", report.signs_unparsed));
-        }
+        // A prefab that does not resolve is never written.
         if let Err(problems) = resolve(&file, &|n| registry.id_of(n), Trust::Builtin) {
-            eprintln!("{name}: does not resolve, {} problem(s):", problems.len());
+            eprintln!("{name}: does not resolve, {} problem(s), not written:", problems.len());
             for p in &problems {
                 eprintln!("  {p}");
             }
             ok = false;
+            continue;
+        }
+        if !made_dir {
+            match std::fs::create_dir_all(out_dir) {
+                Ok(()) => made_dir = true,
+                Err(e) => {
+                    eprintln!("{name}: {}: {e}", out_dir.display());
+                    ok = false;
+                    continue;
+                }
+            }
+        }
+        let bin = out_dir.join(format!("{name}{BIN_SUFFIX}"));
+        let txt = out_dir.join(format!("{name}{REPORT_SUFFIX}"));
+        let written = std::fs::write(&bin, prefab_to_bin(&file))
+            .map_err(|e| format!("{}: {e}", bin.display()))
+            .and_then(|()| std::fs::write(&txt, report.to_text(&name)).map_err(|e| format!("{}: {e}", txt.display())));
+        if let Err(e) = written {
+            eprintln!("{name}: {e}");
+            ok = false;
+            continue;
+        }
+        summary_line(&name, &file.size, &report, file.markers.len());
+        let unmapped: u64 = report.unmapped.values().sum();
+        if unmapped > 0 || report.signs_unparsed > 0 {
+            warn(format!("{name}: {unmapped} unmapped cells, {} unparsed sign lines", report.signs_unparsed));
         }
     }
     Ok(ok)
@@ -400,8 +438,8 @@ fn finish(
 fn summary_line(name: &str, size: &[u32; 3], r: &Report, markers: usize) {
     let unmapped: u64 = r.unmapped.values().sum();
     println!(
-        "{name}  {}x{}x{}  {} blocks  {} boxes  {} shaped  {markers} markers  {unmapped} unmapped",
-        size[0], size[1], size[2], r.blocks, r.boxes, r.shaped
+        "{name}  {}x{}x{}  {} blocks  {} boxes  {} shaped  {} carved  {markers} markers  {unmapped} unmapped",
+        size[0], size[1], size[2], r.blocks, r.boxes, r.shaped, r.carved
     );
 }
 
@@ -416,20 +454,30 @@ mod tests {
 
     #[test]
     fn a_label_cannot_collide_with_a_numbered_name() {
-        let b = [build(Some("03")), build(None), build(None)];
-        assert_eq!(split_names("p", &b), vec!["p-03", "p-02", "p-03-2"]);
+        // With a hundred builds the numbers have three digits, and a label of "003" can equal one.
+        let mut b: Vec<Build> = (0..100).map(|_| build(None)).collect();
+        b[0] = build(Some("003"));
+        let names = split_names("p", &b, true);
+        assert_eq!((names[0].as_str(), names[2].as_str()), ("p-003", "p-003-2"));
+        assert_eq!(names.iter().collect::<BTreeSet<_>>().len(), 100);
     }
 
     #[test]
     fn a_repeated_label_gets_a_suffix() {
         let b = [build(Some("Zeus")), build(Some("zeus!")), build(None)];
-        assert_eq!(split_names("p", &b), vec!["p-zeus", "p-zeus-2", "p-03"]);
+        assert_eq!(split_names("p", &b, true), vec!["p-zeus", "p-zeus-2", "p-03"]);
+    }
+
+    #[test]
+    fn labels_are_ignored_unless_asked_for() {
+        let b = [build(Some("Zeus")), build(None)];
+        assert_eq!(split_names("p", &b, false), vec!["p-01", "p-02"]);
     }
 
     #[test]
     fn a_hundred_builds_use_three_digits() {
         let b: Vec<Build> = (0..100).map(|_| build(None)).collect();
-        let names = split_names("p", &b);
+        let names = split_names("p", &b, false);
         assert_eq!((names[0].as_str(), names[99].as_str()), ("p-001", "p-100"));
         assert_eq!(names.iter().collect::<BTreeSet<_>>().len(), 100);
     }

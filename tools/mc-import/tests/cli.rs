@@ -144,11 +144,62 @@ fn split_writes_one_prefab_per_build() {
         .filter(|n| n.ends_with(".prefab.bin"))
         .collect();
     names.sort();
-    assert_eq!(names, vec!["p-01.prefab.bin", "p-03.prefab.bin", "p-zeus.prefab.bin"]);
+    // Labels are opt-in: by default the builds are only numbered.
+    assert_eq!(names, vec!["p-01.prefab.bin", "p-02.prefab.bin", "p-03.prefab.bin"]);
     for n in &names {
         let file = game::prefab::prefab_from_bin(&std::fs::read(out.join(n)).unwrap(), None).unwrap();
         assert_eq!(format!("{}.prefab.bin", file.name), *n);
         assert_eq!(file.size[1], 6, "{n} must not contain the plate");
+    }
+    done(&dir);
+}
+
+#[test]
+fn split_labels_are_opt_in() {
+    let dir = temp_dir("labels");
+    let input = write_schem(&dir, "pillars.schem", &pillars());
+    let out = dir.join("out");
+    let o = run(&["split", input.to_str().unwrap(), "--out", out.to_str().unwrap(), "--prefix", "p", "--labels"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let mut names: Vec<String> = listing(&out)
+        .iter()
+        .filter_map(|p| p.rsplit('/').next().map(String::from))
+        .filter(|n| n.ends_with(".prefab.bin"))
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["p-01.prefab.bin", "p-03.prefab.bin", "p-zeus.prefab.bin"]);
+    // `--labels` belongs to split.
+    let o = run(&["import", input.to_str().unwrap(), "--labels"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    done(&dir);
+}
+
+#[test]
+fn a_write_error_on_one_build_does_not_stop_the_others() {
+    let dir = temp_dir("writeerr");
+    let input = write_schem(&dir, "pillars.schem", &pillars());
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join("p-01.prefab.bin")).unwrap(); // a directory where a file goes
+    let o = run(&["split", input.to_str().unwrap(), "--out", out.to_str().unwrap(), "--prefix", "p"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("p-01"), "{}", text(&o));
+    assert!(out.join("p-02.prefab.bin").is_file() && out.join("p-03.prefab.bin").is_file(), "{}", text(&o));
+    done(&dir);
+}
+
+#[test]
+fn the_summary_line_counts_carved_cells_and_usage_explains_split() {
+    let dir = temp_dir("summary");
+    let input = write_schem(&dir, "house.schem", &schem([6, 5, 6], &[], |x, y, z| {
+        let wall = x == 0 || x == 5 || z == 0 || z == 5;
+        if y == 0 || y == 4 || wall { STONE } else { AIR }
+    }));
+    let o = run(&["import", input.to_str().unwrap(), "--out", dir.join("o").to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("48 carved"), "{}", text(&o));
+    let u = text(&run(&[]));
+    for needle in ["showroom", "--licence", "--labels", "--prefix"] {
+        assert!(u.contains(needle), "usage lacks {needle}: {u}");
     }
     done(&dir);
 }
