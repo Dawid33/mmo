@@ -153,6 +153,18 @@ fn cache_key(seed: u64, block_manifest: &str) -> Option<u32> {
 /// `region_chunks²` columns, so builds with different `REGION_CHUNKS` must
 /// never share a cache directory.
 fn cache_key_for(seed: u64, block_manifest: &str, region_chunks: usize, island_cells: u32) -> Option<u32> {
+    cache_key_with(seed, block_manifest, region_chunks, island_cells, crate::structures::active().content_hash())
+}
+
+/// `cache_key_for` with the structure source's identity given: hashed only when non-zero, after every
+/// other input, so the key is unchanged while no structures are installed.
+fn cache_key_with(
+    seed: u64,
+    block_manifest: &str,
+    region_chunks: usize,
+    island_cells: u32,
+    structures_hash: u32,
+) -> Option<u32> {
     let mut h = crc32fast::Hasher::new();
     h.update(&seed.to_le_bytes());
     h.update(block_manifest.as_bytes());
@@ -168,6 +180,9 @@ fn cache_key_for(seed: u64, block_manifest: &str, region_chunks: usize, island_c
     // different world files must never share a cache directory.
     if let Some(world) = crate::forged::active() {
         h.update(&world.content_crc().to_le_bytes());
+    }
+    if structures_hash != 0 {
+        h.update(&structures_hash.to_le_bytes());
     }
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
@@ -195,6 +210,7 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structures::StructureSource;
     use game::Block;
 
     fn temp_cache(tag: &str) -> (PathBuf, WorldgenCache) {
@@ -230,6 +246,32 @@ mod tests {
         let a = cache_key_for(7, "manifest", 32, 16).unwrap();
         let b = cache_key_for(7, "manifest", 128, 16).unwrap();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn the_cache_key_ignores_no_structures() {
+        // The key as it was before structures: the same inputs hashed by hand.
+        let mut h = crc32fast::Hasher::new();
+        h.update(&7u64.to_le_bytes());
+        h.update(b"manifest");
+        h.update(&32u64.to_le_bytes());
+        h.update(&(game::CHUNK_BLOCKS as u64).to_le_bytes());
+        h.update(&(game::REGION_BLOCKS as u64).to_le_bytes());
+        h.update(&16u32.to_le_bytes());
+        if let Some(world) = crate::forged::active() {
+            h.update(&world.content_crc().to_le_bytes());
+        }
+        let mut files = Vec::new();
+        collect_files(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files).unwrap();
+        files.sort();
+        for f in files {
+            h.update(f.to_string_lossy().as_bytes());
+            h.update(&fs::read(&f).unwrap());
+        }
+        let old = h.finalize();
+        let none = crate::structures::NoStructures.content_hash();
+        assert_eq!(cache_key_with(7, "manifest", 32, 16, none).unwrap(), old);
+        assert_ne!(cache_key_with(7, "manifest", 32, 16, 0xdead_beef).unwrap(), old);
     }
 
     #[test]

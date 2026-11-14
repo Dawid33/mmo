@@ -1737,3 +1737,20 @@ mod tests {
         );
     }
 }
+
+/// The y of the top ground block of world column (x, z) — the same value generation uses as the
+/// column's surface before any structure pad. Uses the installed forged world, else `seed`.
+pub fn ground_y(x: i32, z: i32, seed: u64, mats: Materials) -> i32 {
+    if let Some(world) = forged::active() {
+        return ground_y_forged(world, x, z, mats);
+    }
+    let (ox, oz, span) = patch_window(x, z, 1, &mats);
+    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
+    column_sample(&ProceduralPatch(grid), &mats, x, z).s
+}
+
+/// `ground_y` for an explicit forged world.
+pub fn ground_y_forged(world: &forged::ForgedWorld, x: i32, z: i32, mats: Materials) -> i32 {
+    let (ox, oz, span) = patch_window(x, z, 1, &mats);
+    column_sample(&world.patch(ox, oz, span), &mats, x, z).s
+}

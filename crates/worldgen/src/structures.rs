@@ -220,3 +220,104 @@ pub fn active() -> &'static dyn StructureSource {
         None => &NONE,
     }
 }
+
+/// One entry of a dev structure spec: `name`, `name:dx,dz`, or `name:dx,dz:turn` (turn 0..=3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevEntry {
+    pub prefab: String,
+    pub offset: Option<[i32; 2]>,
+    pub turn: u8,
+}
+
+/// Skirt of the pad under a dev structure, in blocks.
+pub const DEV_PAD_SKIRT: u32 = 4;
+/// Gap between dev structures in a row, and between the origin and the first, in blocks.
+pub const DEV_GAP_BLOCKS: i32 = 6;
+
+/// Parses `"dev-hut,statuen-06:40,0:1"`. Errors name the bad entry.
+pub fn parse_dev_spec(spec: &str) -> Result<Vec<DevEntry>, String> {
+    // `,` separates both entries and the dx,dz pair: a part that starts with a number continues the
+    // previous entry when that one has an offset (`:`) still missing its dz.
+    let mut raw: Vec<String> = Vec::new();
+    for part in spec.split(',') {
+        let starts_with_number = part.split(':').next().is_some_and(|h| h.parse::<i32>().is_ok());
+        match raw.last_mut() {
+            Some(last) if starts_with_number && last.contains(':') && !last.contains(',') => {
+                last.push(',');
+                last.push_str(part);
+            }
+            _ => raw.push(part.to_string()),
+        }
+    }
+    raw.iter().map(|e| parse_dev_entry(e)).collect()
+}
+
+fn parse_dev_entry(entry: &str) -> Result<DevEntry, String> {
+    let bad = |why: &str| format!("structure entry \"{entry}\": {why}");
+    let mut parts = entry.split(':');
+    let name = parts.next().unwrap_or("");
+    if name.is_empty() {
+        return Err(bad("missing prefab name"));
+    }
+    if name.parse::<i32>().is_ok() {
+        return Err(bad("a prefab name cannot be a bare number (a stray dz?)"));
+    }
+    let offset = match parts.next() {
+        None => None,
+        Some(o) => {
+            let (dx, dz) = o.split_once(',').ok_or_else(|| bad("offset must be dx,dz"))?;
+            let num = |s: &str| s.trim().parse::<i32>().map_err(|_| bad(&format!("\"{s}\" is not a number")));
+            Some([num(dx)?, num(dz)?])
+        }
+    };
+    let turn = match parts.next() {
+        None => 0,
+        Some(t) => match t.trim().parse::<u8>() {
+            Ok(t) if t <= 3 => t,
+            _ => return Err(bad("turn must be 0..=3")),
+        },
+    };
+    if parts.next().is_some() {
+        return Err(bad("too many ':' parts"));
+    }
+    Ok(DevEntry { prefab: name.to_string(), offset, turn })
+}
+
+/// Lays the entries out beside `origin` (a world x/z, e.g. a landing column): an entry with an offset
+/// is anchored at origin + offset; entries without one are put in a row along +x starting at
+/// origin.x + DEV_GAP_BLOCKS, each after the previous one's x extent plus DEV_GAP_BLOCKS, all at
+/// origin.z. Each prefab's anchor lands at (x, ground(x, z) + 1, z) with `Pad { level: ground(x, z),
+/// skirt: DEV_PAD_SKIRT }`, where `ground` is called for the ANCHOR column only. Unknown prefab → Err.
+pub fn dev_placements(
+    entries: &[DevEntry],
+    origin: [i32; 2],
+    prefabs: &game::prefab::PrefabSet,
+    ground: &dyn Fn(i32, i32) -> i32,
+) -> Result<Vec<StructurePlacement>, String> {
+    let mut next_min_x = origin[0] + DEV_GAP_BLOCKS;
+    let mut out = Vec::with_capacity(entries.len());
+    for e in entries {
+        let prefab = prefabs
+            .named(&e.prefab)
+            .ok_or_else(|| format!("unknown prefab \"{}\" in the dev structure spec", e.prefab))?
+            .clone();
+        let at = |x: i32, y: i32, z: i32| Placement { anchor: [x, y, z], turn: e.turn, mirror: false };
+        let [x, z] = match e.offset {
+            Some([dx, dz]) => [origin[0] + dx, origin[1] + dz],
+            None => {
+                // Where the box starts relative to the anchor, for this turn.
+                let (min, max) = placement_bounds(&prefab, &at(0, 0, 0));
+                let x = next_min_x - min[0];
+                next_min_x = x + max[0] + DEV_GAP_BLOCKS;
+                [x, origin[1]]
+            }
+        };
+        let level = ground(x, z);
+        out.push(StructurePlacement {
+            prefab,
+            at: at(x, level + 1, z),
+            pad: Some(Pad { level, skirt: DEV_PAD_SKIRT }),
+        });
+    }
+    Ok(out)
+}
