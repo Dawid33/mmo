@@ -188,6 +188,13 @@ pub mod prefabs {
         f
     }
 
+    /// Like [`house_box`], with a stone-brick floor over the whole box (every column filled).
+    pub fn floored_box(name: &str, size: [u32; 3], tags: &[&str], doors: &[[i32; 3]]) -> PrefabFile {
+        let mut f = house_box(name, size, tags, doors);
+        f.boxes = vec![FileBox { min: [0, 0, 0], size: [size[0], 1, size[2]], mat: BRICK }];
+        f
+    }
+
     /// A house box tagged `style` and `house`, its door in the middle of the `front` side; with `floor`, a
     /// stone-brick floor (cell layer y 0) so the stamped house has blocks to find.
     pub fn town_house(name: &str, style: &str, [x, y, z]: [u32; 3], front: Facing, floor: bool) -> PrefabFile {

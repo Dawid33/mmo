@@ -6,7 +6,11 @@ use std::sync::Arc;
 use game::prefab::{Facing, PrefabSet, ResolvedPrefab};
 
 pub const KIT_MIN_SIDE: i32 = 5;
-pub const KIT_MAX_SIDE: i32 = 48;
+/// A house is a house, not a hall: bigger than this and a lot holds one manor, not a town.
+pub const KIT_MAX_SIDE: i32 = 28;
+/// A house's box must have at least this percent of its (x, z) columns holding a block. A sparse box is
+/// a compound or a diagonal strip, and its front lands on nothing. Houses only, not the centre piece.
+pub const KIT_MIN_FILL_PCT: u32 = 60;
 pub const KIT_CENTRE_MAX_SIDE: i32 = 12;
 /// Fewer houses than this is no kit.
 const KIT_MIN_HOUSES: usize = 3;
@@ -32,6 +36,13 @@ pub struct TownKit {
 
 fn extents(p: &ResolvedPrefab) -> (i32, i32, i32) {
     (p.size[0] as i32, p.size[1] as i32, p.size[2] as i32)
+}
+
+/// Whether at least `KIT_MIN_FILL_PCT` percent of the box's (x, z) columns hold a block.
+fn filled_enough(p: &ResolvedPrefab) -> bool {
+    let (sx, _, sz) = extents(p);
+    let filled = (0..sz).flat_map(|z| (0..sx).map(move |x| (x, z))).filter(|&(x, z)| p.column_top(x, z).is_some()).count() as u64;
+    filled * 100 >= u64::from(KIT_MIN_FILL_PCT) * (sx as u64 * sz as u64)
 }
 
 /// The side of the box the entrance is on: among the `door` markers take those on the lowest marker y;
@@ -63,7 +74,8 @@ pub fn front_of(prefab: &ResolvedPrefab) -> Facing {
 }
 
 /// Houses: prefabs tagged both `style` and `house` whose x and z extents are within
-/// `KIT_MIN_SIDE..=KIT_MAX_SIDE`. Centrepieces: prefabs tagged `statue` or `decor` (any style) whose
+/// `KIT_MIN_SIDE..=KIT_MAX_SIDE` and at least `KIT_MIN_FILL_PCT` percent of whose columns hold a block
+/// (others are skipped). Centrepieces: prefabs tagged `statue` or `decor` (any style) whose
 /// extents are at most `KIT_CENTRE_MAX_SIDE`. Both ascending by name. Fewer than 3 houses is an error
 /// naming the style and how many were found.
 pub fn town_kit(set: &PrefabSet, style: &str) -> Result<TownKit, String> {
@@ -73,7 +85,7 @@ pub fn town_kit(set: &PrefabSet, style: &str) -> Result<TownKit, String> {
     let mut centrepieces = Vec::new();
     for p in set.iter() {
         let (x, y, z) = extents(p);
-        if has(p, style) && has(p, "house") && in_range(x) && in_range(z) {
+        if has(p, style) && has(p, "house") && in_range(x) && in_range(z) && filled_enough(p) {
             let front = front_of(p);
             let (frontage, depth) = match front {
                 Facing::North | Facing::South => (x, z),

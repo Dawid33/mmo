@@ -3,6 +3,7 @@
 //! function of its arguments; integer math only. Nothing here samples terrain except through the
 //! `ground` / `wet` closures it is given.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use game::prefab::{placement_bounds, Facing, Placement, ResolvedPrefab};
@@ -183,7 +184,7 @@ pub fn layout_town(
     if kit.houses.is_empty() {
         return out;
     }
-    let houses = kit.houses.len() as u64;
+    let mut used: BTreeSet<usize> = BTreeSet::new();
     let gap_span = (p.gap_max - p.gap_min + 1).max(1) as u64;
     let near = s + 1 + p.setback;
 
@@ -198,32 +199,49 @@ pub fn layout_town(
             let mut t = h + 1 + p.gap_min;
             let mut n: u32 = 0;
             loop {
-                let house = &kit.houses[(roll(p.seed, stream, n, 0) % houses) as usize];
-                let turn = turn_to_face(house.front, faces);
-                let trial = Placement { anchor: [0, 0, 0], turn, mirror: false };
-                let (tmin, tmax) = placement_bounds(&house.prefab, &trial);
-                let trial_rect = [tmin[0], tmin[2], tmax[0], tmax[2]];
-                let (frontage, depth) = (extent_along(trial_rect, d), extent_along(trial_rect, out_dir));
-                if t + frontage > h + 1 + p.arm_len {
+                // Every house that fits this lot, by the rules: room left on the arm, dry, level, clear.
+                let mut room = false;
+                let mut fitting: Vec<(usize, u8, i32, [i32; 4])> = Vec::new();
+                for (i, house) in kit.houses.iter().enumerate() {
+                    let turn = turn_to_face(house.front, faces);
+                    let trial = Placement { anchor: [0, 0, 0], turn, mirror: false };
+                    let (tmin, tmax) = placement_bounds(&house.prefab, &trial);
+                    let trial_rect = [tmin[0], tmin[2], tmax[0], tmax[2]];
+                    let (frontage, depth) = (extent_along(trial_rect, d), extent_along(trial_rect, out_dir));
+                    if t + frontage > h + 1 + p.arm_len {
+                        continue;
+                    }
+                    room = true;
+                    let r = world_rect(origin, d, (t, t + frontage), out_dir, (near, near + depth));
+                    let (cx, cz) = ((r[0] + r[2] - 1).div_euclid(2), (r[1] + r[3] - 1).div_euclid(2));
+                    let samples = [(r[0], r[1]), (r[2] - 1, r[1]), (r[0], r[3] - 1), (r[2] - 1, r[3] - 1), (cx, cz)];
+                    let heights = samples.map(|(x, z)| ground(x, z));
+                    let relief = heights.iter().max().unwrap() - heights.iter().min().unwrap();
+                    let grown = [r[0] - 1, r[1] - 1, r[2] + 1, r[3] + 1];
+                    let rejected = samples.iter().any(|&(x, z)| wet(x, z))
+                        || relief > p.max_relief
+                        || meet(grown, plaza)
+                        || boxes.iter().any(|&b| meet(grown, b))
+                        || strips.iter().any(|&b| meet(grown, b));
+                    if !rejected {
+                        fitting.push((i, turn, frontage, r));
+                    }
+                }
+                if !room {
                     break;
                 }
-                let r = world_rect(origin, d, (t, t + frontage), out_dir, (near, near + depth));
-                let (cx, cz) = ((r[0] + r[2] - 1).div_euclid(2), (r[1] + r[3] - 1).div_euclid(2));
-                let samples = [(r[0], r[1]), (r[2] - 1, r[1]), (r[0], r[3] - 1), (r[2] - 1, r[3] - 1), (cx, cz)];
-                let heights = samples.map(|(x, z)| ground(x, z));
-                let relief = heights.iter().max().unwrap() - heights.iter().min().unwrap();
-                let grown = [r[0] - 1, r[1] - 1, r[2] + 1, r[3] + 1];
-                let rejected = samples.iter().any(|&(x, z)| wet(x, z))
-                    || relief > p.max_relief
-                    || meet(grown, plaza)
-                    || boxes.iter().any(|&b| meet(grown, b))
-                    || strips.iter().any(|&b| meet(grown, b));
-                if rejected {
+                if fitting.is_empty() {
                     out.skipped += 1;
                     t += 4;
                     n += 1;
                     continue;
                 }
+                // No repeats while there is a choice: prefer the houses not yet placed in this town.
+                let fresh: Vec<_> = fitting.iter().filter(|f| !used.contains(&f.0)).copied().collect();
+                let pool = if fresh.is_empty() { &fitting } else { &fresh };
+                let (hi, turn, frontage, r) = pool[(roll(p.seed, stream, n, 0) % pool.len() as u64) as usize];
+                used.insert(hi);
+                let house = &kit.houses[hi];
                 // The middle column of the front face, rounding down along the arm.
                 let mid = world_rect(origin, d, (t + (frontage - 1) / 2, t + (frontage - 1) / 2 + 1), out_dir, (near, near + 1));
                 let level = ground(mid[0], mid[1]);

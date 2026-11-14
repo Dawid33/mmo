@@ -6,7 +6,7 @@ use worldgen::sites::kit::*;
 use worldgen::sites::town::*;
 use worldgen::structures::StructurePlacement;
 
-use crate::structure_support::prefabs::{house_box, set_of, town_houses};
+use crate::structure_support::prefabs::{house_box, set_of, town_house, town_houses};
 
 const ROAD: BlockId = BlockId(3);
 const PLAZA: BlockId = BlockId(4);
@@ -21,7 +21,7 @@ fn dry(_: i32, _: i32) -> bool {
 }
 
 fn houses() -> Vec<PrefabFile> {
-    town_houses(STYLE, false)
+    town_houses(STYLE, true)
 }
 
 fn kit() -> TownKit {
@@ -284,3 +284,45 @@ fn roll_is_stable() {
     }
 }
 
+
+/// `n` houses of one size, told apart by name.
+fn same_size_kit(n: usize) -> TownKit {
+    let files: Vec<PrefabFile> =
+        (0..n).map(|i| town_house(&format!("s{i:02}"), STYLE, [9, 5, 9], Facing::South, true)).collect();
+    town_kit(&set_of(&files), STYLE).unwrap()
+}
+
+#[test]
+fn a_town_repeats_no_house_while_the_kit_has_more() {
+    let kit = same_size_kit(80);
+    for seed in [1, 2, 3, 4] {
+        let l = layout_town(&kit, O, &small(seed), &flat, &dry);
+        assert!(l.lots.len() >= 8 && l.lots.len() <= 80, "seed {seed}: {}", l.lots.len());
+        let mut names: Vec<&str> = l.lots.iter().map(|lot| lot.name.as_str()).collect();
+        names.sort();
+        let n = names.len();
+        names.dedup();
+        assert_eq!(names.len(), n, "seed {seed}: a house repeats");
+    }
+}
+
+#[test]
+fn a_small_kit_repeats_but_uses_every_house_and_fills_the_lots() {
+    let kit = same_size_kit(3);
+    let l = layout_town(&kit, O, &small(5), &flat, &dry);
+    assert!(l.lots.len() > 3, "{}", l.lots.len());
+    for h in &kit.houses {
+        assert!(l.lots.iter().any(|lot| lot.name == h.prefab.name), "{} unused", h.prefab.name);
+    }
+    // the repeats do not starve the lots: as many as the same arms hold with an endless kit
+    let wide = layout_town(&same_size_kit(60), O, &small(5), &flat, &dry);
+    assert_eq!(l.lots.len(), wide.lots.len());
+}
+
+#[test]
+fn the_pick_is_deterministic_with_the_no_repeat_rule() {
+    let kit = same_size_kit(20);
+    let (a, b) = (layout_town(&kit, O, &small(9), &flat, &dry), layout_town(&kit, O, &small(9), &flat, &dry));
+    assert_eq!(a.lots, b.lots);
+    assert_eq!(a.skipped, b.skipped);
+}
