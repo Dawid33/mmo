@@ -58,6 +58,10 @@ pub fn classify(state: &BlockState, table: &Table) -> Classified {
             }
         }
         if let Some((_, rule)) = marker {
+            // A door is two cells; only the lower one is the marker, the upper is the top of the opening.
+            if rule.kind == "door" && props.get("half").map(String::as_str) == Some("upper") {
+                return ok(Class::Air);
+            }
             return ok(Class::Marker { kind: rule.kind.clone(), turn: turn_of(props), solid: rule.solid.clone() });
         }
     }

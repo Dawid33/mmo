@@ -148,13 +148,20 @@ fn forms() {
     assert_eq!(st("minecraft:stripped_warped_hyphae[axis=y]").class, block("stripped_warped"));
     assert_eq!(st("minecraft:stripped_birch_wood[axis=x]").class, block("stripped_birch"));
     assert_eq!(st("minecraft:black_concrete_powder").class, block("black_concrete"));
-    assert_eq!(st("minecraft:waxed_oxidized_cut_copper").class, block("copper_block"));
+    assert_eq!(st("minecraft:waxed_oxidized_cut_copper").class, block("prismarine"));
+    assert_eq!(st("minecraft:waxed_cut_copper").class, block("copper_block"));
+    assert_eq!(st("minecraft:exposed_cut_copper").class, block("copper_block"));
+    assert_eq!(st("minecraft:weathered_copper_block").class, block("cyan_terracotta"));
     assert_eq!(
         st("minecraft:waxed_oxidized_cut_copper_stairs[facing=north,half=bottom,shape=straight]").class,
         shaped(
             Shape::Stairs { facing: Facing::North, half: Half::Bottom, corner: StairCorner::Straight },
-            "copper_block"
+            "prismarine"
         )
+    );
+    assert_eq!(
+        st("minecraft:waxed_weathered_cut_copper_slab[type=top]").class,
+        shaped(Shape::Slab { half: Half::Top }, "cyan_terracotta")
     );
     assert_eq!(st("minecraft:dead_brain_coral_block").class, block("andesite"));
     assert_eq!(
@@ -162,6 +169,29 @@ fn forms() {
         shaped(Shape::Slab { half: Half::Top }, "smooth_sandstone")
     );
     assert!(st("minecraft:smooth_sandstone").mapped);
+}
+
+#[test]
+fn door_halves() {
+    let door = Class::Marker { kind: "door".into(), turn: 2, solid: None };
+    assert_eq!(st("minecraft:oak_door[facing=south,half=lower]").class, door);
+    assert_eq!(st("minecraft:oak_door[facing=south]").class, door);
+    assert_eq!(st("minecraft:oak_door[facing=south,half=upper]").class, Class::Air);
+    assert_eq!(st("minecraft:iron_door[half=upper,hinge=left]"), Classified { class: Class::Air, mapped: true });
+}
+
+#[test]
+fn missing_or_malformed_properties() {
+    assert_eq!(
+        st("minecraft:oak_stairs").class,
+        shaped(Shape::Stairs { facing: Facing::North, half: Half::Bottom, corner: StairCorner::Straight }, "oak_planks")
+    );
+    assert_eq!(st("minecraft:snow[layers=abc]").class, shaped(Shape::Layer { layers: 1 }, "snow"));
+    assert_eq!(st("minecraft:snow[layers=8]").class, block("snow"));
+    assert_eq!(
+        st("minecraft:sandstone_wall").class,
+        shaped(Shape::Wall { sides: Sides::default(), post: true }, "sandstone")
+    );
 }
 
 #[test]

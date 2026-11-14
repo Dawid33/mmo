@@ -95,7 +95,9 @@ impl Table {
     }
 }
 
-/// How specifically `key` matches `name`: exact beats prefix beats suffix; longer beats shorter.
+/// How specifically `key` matches `name`: 1000 = the exact name; 500 + len = a `prefix*` pattern (longer
+/// prefix wins); len = a `*suffix` pattern (longer suffix wins). So exact beats any prefix, which beats any
+/// suffix. When keep, dropped and marker rules tie on score, `classify` takes keep, then dropped, then marker.
 pub(crate) fn match_score(key: &str, name: &str) -> Option<usize> {
     if let Some(suffix) = key.strip_prefix('*') {
         name.ends_with(suffix).then_some(suffix.len())
