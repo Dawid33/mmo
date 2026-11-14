@@ -13,6 +13,7 @@ mod handle;
 mod listen;
 mod open;
 mod rows;
+mod succession;
 mod terrain;
 mod thread;
 mod two_phase;
@@ -32,6 +33,7 @@ pub use listen::{
     WORLD_DB_DIRECT_ENV,
 };
 pub use open::{LockGuard, MIGRATE_LOCK_TIMEOUT_MS, OpenMode, Pool, newest_migration, open_pool, set_migrate_lock_timeout_ms};
+pub use succession::{Declared, Succession, SuccessionId, SuccessionKind};
 pub use terrain::TerrainFromStore;
 pub use two_phase::cut_gid;
 pub use url::{StoreUrl, redact_url};

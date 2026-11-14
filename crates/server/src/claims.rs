@@ -568,6 +568,7 @@ mod tests {
             in_flight: vec![],
             players: vec![],
             history: None,
+            adopts: vec![],
         }
     }
 

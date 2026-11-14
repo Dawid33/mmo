@@ -1169,7 +1169,7 @@ fn cut_pending_on_a_host_settles_that_cut_first() {
     let mut w = world(&db, &dir);
     let other = game::CutId(77);
     let generation = w.generations[0].mine();
-    let empty = game::WorldCut { id: other, host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None };
+    let empty = game::WorldCut { id: other, host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
     let staged = w.claims[0].store().prepare_cut(empty, (*w.claims[0].fence()).clone(), generation).recv().unwrap();
     assert!(staged.is_ok(), "the other cut's part is staged: {staged:?}");
     w.pair.until("a world cut decided", |_| decisions(&db).iter().any(|(c, _, _)| *c as u64 != other.0));
@@ -1906,7 +1906,7 @@ fn role_all_on_postgres_resolves_an_orphan_part_before_its_claim() {
     let (store, claims) = claim(&db, 0);
     let generation = store.world_generation().unwrap();
     let srs: Vec<_> = claims.fence().epochs.keys().copied().collect();
-    let orphan = game::WorldCut { id: game::CutId(9), host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None };
+    let orphan = game::WorldCut { id: game::CutId(9), host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
     store.prepare_cut(orphan, (*claims.fence()).clone(), generation).recv().unwrap().expect("staged");
     // The host process dies: the part stays prepared.
     drop(claims);
@@ -2986,7 +2986,7 @@ fn a_host_restarted_cleanly_reclaims_its_own_rows() {
         let rc = RegionCoords::new(sr.0 * store.super_region_regions() as i32, sr.1 * store.super_region_regions() as i32);
         assert_eq!(second.manager.owner_of(rc), game::Owner::Me, "{sr:?}: the new boot's directory says Me");
     }
-    let cut = game::WorldCut { id: game::CutId(1), host: 1, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None };
+    let cut = game::WorldCut { id: game::CutId(1), host: 1, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
     let refused = first_claims.commit_cut(cut).recv().unwrap();
     assert!(matches!(refused, Err(world_store::StoreError::Fenced { .. })), "the old boot is fenced: {refused:?}");
     drop(second);

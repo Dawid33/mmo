@@ -345,6 +345,7 @@ fn r1_world_migrates_history_row() {
         in_flight: Vec::new(),
         players: Vec::new(),
         history: Some(r1.clone()),
+        adopts: vec![],
     };
     store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the R1 cut commits");
     assert_eq!(store.load_coordinator().unwrap(), None, "an R1 world has no coordinator row");

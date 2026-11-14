@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::counters::Counters;
 use crate::rows::{self, CutEnd};
+use crate::succession::{self, SUCCESSION_UNSUPPORTED};
 use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 use crate::{
     CoordinatorFence, CutCommitted, Dials, Fence, LockGuard, OpenMode, Pool, StoreError, StoreUrl, SuperRegion,
@@ -118,6 +119,14 @@ pub(crate) enum Request {
     ResolvePrepared(Reply<Vec<(CutId, bool)>>),
     CutDecision(CutId, Reply<Option<bool>>),
     CutDecided(CutId, Reply<Option<bool>>),
+    /// R4: the coordinator declares a succession (Postgres).
+    DeclareSuccession(Box<Declare>, Reply<crate::Declared>),
+    /// R4: the coordinator rolls the world back (Postgres).
+    RollbackWorld(CoordinatorFence, Reply<u64>),
+    OpenSuccessions(Reply<Vec<crate::Succession>>),
+    /// An heir reads its predecessor's in-flight rows.
+    LoadInFlightOf(u32, Fence, Reply<Vec<game::InFlightRow>>),
+    RegionsOfEntities(Vec<game::EntityId>, Reply<Vec<(game::EntityId, RegionCoords)>>),
     /// Finish the queued commits, then stop.
     Shutdown,
 }
@@ -131,8 +140,19 @@ pub(crate) struct Decision {
     pub leaving: Vec<u32>,
     pub fence: CoordinatorFence,
     pub generation: u64,
+    /// The open successions a commit settles (R4).
+    pub settles: Vec<crate::SuccessionId>,
     /// Test hook: fail after this many `COMMIT PREPARED`s.
     pub stop_after: Option<u32>,
+}
+
+/// [`crate::StoreHandle::declare_succession`]'s arguments.
+pub(crate) struct Declare {
+    pub dead: Vec<(u32, u64)>,
+    pub heirs: Vec<u32>,
+    pub kind: crate::SuccessionKind,
+    pub fence: CoordinatorFence,
+    pub generation: u64,
 }
 
 /// Cut state shared by a handle (and its clones) and its store thread.
@@ -334,9 +354,11 @@ async fn serve(
                     let (cut, tick) = (d.cut, d.tick);
                     let decided = match (&pool, world_tag) {
                         (Pool::Pg(p), Some(tag)) => {
-                            let Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after } = *d;
-                            two_phase::decide_cut(p, tag, cut, tick, commit, hosts, leaving, fence, generation, stop_after)
-                                .await
+                            let Decision { cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after } = *d;
+                            two_phase::decide_cut(
+                                p, tag, cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after,
+                            )
+                            .await
                         }
                         _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                     };
@@ -376,6 +398,36 @@ async fn serve(
                     _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                 })
             }),
+            // No writer lock (as a decision): a declaration waits, bounded by the cut lock
+            // timeout, for a staged part holding the predecessor's super-regions.
+            Request::DeclareSuccession(d, r) => {
+                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    r.send(match &pool {
+                        Pool::Pg(p) => {
+                            let Declare { dead, heirs, kind, fence, generation } = *d;
+                            succession::declare(p, dead, heirs, kind, fence, generation, lock_timeout_ms).await
+                        }
+                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
+                    })
+                })
+            }
+            Request::RollbackWorld(fence, r) => {
+                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    r.send(match &pool {
+                        Pool::Pg(p) => succession::rollback_world(p, fence, lock_timeout_ms).await,
+                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
+                    })
+                })
+            }
+            Request::OpenSuccessions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, open_successions())) }),
+            Request::LoadInFlightOf(host, fence, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight_of(host, &fence))) })
+            }
+            Request::RegionsOfEntities(ids, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, regions_of_entities(ids))) })
+            }
             Request::CutDecision(cut, r) => tokio::spawn(async move { r.send(on_pool!(&pool, cut_decision(cut))) }),
             Request::WorldInfo(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_info())) }),
             Request::ForgedArchive(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_archive())) }),
@@ -563,6 +615,8 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::AbortCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ResolvePrepared(r) => r.send(Err(StoreError::ReadOnly)),
         Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::DeclareSuccession(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RollbackWorld(_, r) => r.send(Err(StoreError::ReadOnly)),
         // A read-only handle sends nothing, a notice included.
         Request::NotifyCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),

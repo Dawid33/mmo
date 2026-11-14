@@ -851,6 +851,7 @@ fn body_crosses_seam_on_real_threads() {
         in_flight: Vec::new(),
         players: Vec::new(),
         history: None,
+        adopts: vec![],
     };
     let claims = HostClaims::claim_around(store.clone(), SPAWN_REGION, 3).unwrap();
     claims.commit_cut(cut).recv().unwrap().expect("the region is stored");

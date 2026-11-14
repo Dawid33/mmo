@@ -6,14 +6,17 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use game::{
-    CutId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, TerrainSnapshot, Tick,
+    CutId, EntityId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, TerrainSnapshot, Tick,
     WorldCut,
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::counters::{Counters, StoreCounters};
 use crate::thread::{self, Reply, Request, Stamped};
-use crate::{CoordinatorFence, Dials, Fence, OpenMode, StoreError, StoreUrl, SuperRegion};
+use crate::{
+    CoordinatorFence, Declared, Dials, Fence, OpenMode, StoreError, StoreUrl, Succession, SuccessionId, SuccessionKind,
+    SuperRegion,
+};
 
 /// The world row and whether a forged artifact is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -380,7 +383,10 @@ impl StoreHandle {
     /// super-region it claimed and every one the cut touches
     /// ([`crate::touched_super_regions`]). An empty fence with a cut that
     /// touches no super-region performs no check at all. Refused at once with
-    /// `CutPending` while this handle has an undecided prepared part.
+    /// `CutPending` while this handle has an undecided prepared part. A cut with
+    /// [`WorldCut::adopts`] also replaces those hosts' in-flight rows, and is refused with
+    /// `Unsupported` (nothing written) unless an open succession makes `cut.host` the heir
+    /// of each (R4).
     pub fn commit_cut(
         &self,
         cut: WorldCut,
@@ -417,6 +423,8 @@ impl StoreHandle {
     /// commits it. Refused with `StaleGeneration` (nothing staged) unless the world is
     /// at `generation`. The prepared part keeps its `FOR SHARE` on the host's
     /// super-regions, so another process's claim of them waits for the decision.
+    /// `adopts` as for [`StoreHandle::commit_cut`] (read without a lock: the decision that
+    /// settles the succession must not wait for this part).
     /// A part that prepares after its cut was decided finishes itself: committed, the
     /// answer is `Ok`; aborted, `CutAborted` (nothing written).
     ///
@@ -479,6 +487,12 @@ impl StoreHandle {
     /// and the call returns `false`. Then every staged part of the cut — listed or not —
     /// is committed or rolled back as the STORED decision says (a part already finished
     /// counts as done). Returns the stored decision. Postgres only.
+    ///
+    /// R4: a commit is also recorded as an abort unless `settles` is exactly the set of open
+    /// successions (read under the world row's lock); the commit this call records then
+    /// settles them in the same transaction — each gets `settled_cut = cut` and its
+    /// predecessor's row (of the boot that died) turns clean. Pass an empty `settles` while
+    /// none is open.
     #[allow(clippy::too_many_arguments)]
     pub fn decide_cut(
         &self,
@@ -489,12 +503,13 @@ impl StoreHandle {
         leaving: Vec<u32>,
         fence: CoordinatorFence,
         generation: u64,
+        settles: Vec<SuccessionId>,
     ) -> Result<bool, StoreError> {
         if let Some(e) = self.injected_decision_failure() {
             return Err(e);
         }
         let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after };
+        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after };
         self.ask(|r| Request::DecideCut(Box::new(d), r))
     }
 
@@ -509,12 +524,13 @@ impl StoreHandle {
         leaving: Vec<u32>,
         fence: CoordinatorFence,
         generation: u64,
+        settles: Vec<SuccessionId>,
     ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
         if let Some(e) = self.injected_decision_failure() {
             return Self::answered(Err(e));
         }
         let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after };
+        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after };
         self.ask_later(|r| Request::DecideCut(Box::new(d), r))
     }
 
@@ -566,6 +582,80 @@ impl StoreHandle {
     /// [`Self::cut_decided`], answered on the receiver (a host's main loop never waits).
     pub fn cut_decided_later(&self, cut: CutId) -> crossbeam::channel::Receiver<Result<Option<bool>, StoreError>> {
         self.ask_later(|r| Request::CutDecided(cut, r))
+    }
+
+    /// R4: the coordinator declares hosts `dead` (`(ordinal, boot)`: the boot it judged) and
+    /// gives each one's land to the heir at the same index of `heirs`, in ONE transaction
+    /// (`lock_timeout` this handle's cut lock timeout, [`crate::CUT_LOCK_TIMEOUT_MS`]):
+    /// fenced by `fence` (`Fenced { sr: None }`) under the world row's lock at `generation`
+    /// (`StaleGeneration`). Any open succession → [`Declared::SuccessionOpen`]. Each
+    /// predecessor row must be of its boot and live, not succeeded before (else `Gone`); a
+    /// `Crash` needs it dirty and lapsed — `seen_ms = 0` (vouched) or older than
+    /// [`game::HOST_LEASE_MS`] by the database clock — and a `Leave` needs it clean (else
+    /// `NotLapsed`); each heir must be live, dirty and beating (else `Gone`). Then: a crashed
+    /// row is marked [`HOST_DEAD`], each succession row is inserted (based on the last
+    /// committed cut; `survivors` = every other live dirty host, read under the lock
+    /// `register_host` takes) and every super-region of the predecessor moves to its heir at
+    /// `epoch + 1` — the heir reads its new fence with [`Self::owned_by`]; the predecessor's
+    /// next fenced write or load is refused. The moved rows wait for a staged part holding
+    /// them: declare only between cuts; a lock timeout (a `Backend` error, nothing written)
+    /// is a retry. Postgres only (`Unsupported` on SQLite). Nothing but `Done` writes.
+    pub fn declare_succession(
+        &self,
+        dead: Vec<(u32, u64)>,
+        heirs: Vec<u32>,
+        kind: SuccessionKind,
+        fence: CoordinatorFence,
+        generation: u64,
+    ) -> Result<Declared, StoreError> {
+        let d = thread::Declare { dead, heirs, kind, fence, generation };
+        self.ask(|r| Request::DeclareSuccession(Box::new(d), r))
+    }
+
+    /// [`Self::declare_succession`], answered on the receiver.
+    pub fn declare_succession_later(
+        &self,
+        dead: Vec<(u32, u64)>,
+        heirs: Vec<u32>,
+        kind: SuccessionKind,
+        fence: CoordinatorFence,
+        generation: u64,
+    ) -> crossbeam::channel::Receiver<Result<Declared, StoreError>> {
+        let d = thread::Declare { dead, heirs, kind, fence, generation };
+        self.ask_later(|r| Request::DeclareSuccession(Box::new(d), r))
+    }
+
+    /// R4: the world restarts from its last committed cut — `world.generation + 1` (every host
+    /// of the old generation is refused from then on) and every open succession abandoned
+    /// (the land stays with the heirs), in one transaction fenced by `fence` under the world
+    /// row's lock. Returns the new generation. Postgres only.
+    pub fn rollback_world(&self, fence: CoordinatorFence) -> Result<u64, StoreError> {
+        self.ask(|r| Request::RollbackWorld(fence, r))
+    }
+
+    /// Every open succession (not settled, not abandoned), by id: what a restarted
+    /// coordinator re-sends. Empty on SQLite.
+    pub fn open_successions(&self) -> Result<Vec<Succession>, StoreError> {
+        self.ask(Request::OpenSuccessions)
+    }
+
+    /// [`Self::open_successions`], answered on the receiver.
+    pub fn open_successions_later(&self) -> crossbeam::channel::Receiver<Result<Vec<Succession>, StoreError>> {
+        self.ask_later(Request::OpenSuccessions)
+    }
+
+    /// The in-flight rows the last committed cuts left for host `host`, read by its heir
+    /// `fence.owner`: refused with `Unsupported` unless an open succession makes it the heir
+    /// of `host` (as a cut part's [`WorldCut::adopts`]).
+    pub fn load_in_flight_of(&self, host: u32, fence: &Fence) -> Result<Vec<InFlightRow>, StoreError> {
+        let fence = fence.clone();
+        self.ask(|r| Request::LoadInFlightOf(host, fence, r))
+    }
+
+    /// The region of every stored row of each id (an id stored twice gives two entries, an
+    /// unknown one none), in the order of `ids`, then by region.
+    pub fn regions_of_entities(&self, ids: Vec<EntityId>) -> Result<Vec<(EntityId, RegionCoords)>, StoreError> {
+        self.ask(|r| Request::RegionsOfEntities(ids, r))
     }
 
     /// The player id and saved record of `key` (the `players.token` column:

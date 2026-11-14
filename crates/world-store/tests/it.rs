@@ -18,5 +18,6 @@ mod open;
 mod players;
 mod schema;
 mod stud_refusal;
+mod succession;
 mod two_phase;
 mod worldctl;

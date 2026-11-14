@@ -10,7 +10,7 @@ const A: RegionCoords = RegionCoords { x: 0, z: 0 };
 const B: RegionCoords = RegionCoords { x: 1, z: -1 };
 
 fn cut(id: u64, host: u32, tick: u64, in_flight: Vec<InFlightRow>) -> WorldCut {
-    WorldCut { id: CutId(id), host, tick, regions: vec![], in_flight, players: vec![], history: None }
+    WorldCut { id: CutId(id), host, tick, regions: vec![], in_flight, players: vec![], history: None, adopts: vec![] }
 }
 
 fn row(target: RegionCoords, reply_row: bool) -> InFlightRow {

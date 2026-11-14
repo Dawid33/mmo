@@ -614,6 +614,7 @@ mod tests {
             in_flight: Vec::new(),
             players: Vec::new(),
             history: Some(bytes),
+            adopts: vec![],
         };
         store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
     }

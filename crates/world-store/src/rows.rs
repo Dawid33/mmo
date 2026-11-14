@@ -962,12 +962,116 @@ macro_rules! engine_rows {
 
             /// The in-flight rows of host `host` (`None`: of every host), in order.
             pub(crate) async fn load_in_flight(pool: &Pool, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
+                let mut tx = begin_read(pool).await?;
+                let rows = in_flight_rows(&mut tx, host).await?;
+                tx.commit().await?;
+                Ok(rows)
+            }
+
+            /// The in-flight rows of host `host` for its heir `fence.owner` (R4): refused with
+            /// `Unsupported` unless an open succession makes `fence.owner` the heir of `host`
+            /// (checked in the same read transaction).
+            pub(crate) async fn load_in_flight_of(
+                pool: &Pool,
+                host: u32,
+                fence: &Fence,
+            ) -> Result<Vec<InFlightRow>, StoreError> {
+                let mut tx = begin_read(pool).await?;
+                check_adopts(&mut *tx, fence.owner, &[host]).await?;
+                let rows = in_flight_rows(&mut tx, Some(host)).await?;
+                tx.commit().await?;
+                Ok(rows)
+            }
+
+            /// Refuses (`Unsupported`) unless, for each of `adopts`, an open succession names
+            /// `heir` its heir. A plain read (no row lock): a staged part holding a lock on
+            /// `successions` would block the decision that settles it.
+            async fn check_adopts(conn: &mut Conn, heir: u32, adopts: &[u32]) -> Result<(), StoreError> {
+                for predecessor in adopts {
+                    let open: i64 = sqlx::query(
+                        "SELECT COUNT(*) FROM successions WHERE predecessor = $1 AND heir = $2 \
+                         AND settled_cut IS NULL AND abandoned = 0",
+                    )
+                    .bind(i64::from(*predecessor))
+                    .bind(i64::from(heir))
+                    .fetch_one(&mut *conn)
+                    .await?
+                    .try_get(0)?;
+                    if open == 0 {
+                        return Err(StoreError::Unsupported(format!(
+                            "host {heir} adopts host {predecessor}'s in-flight rows, but no open succession makes \
+                             it host {predecessor}'s heir"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+
+            /// Every open succession (not settled, not abandoned), by id.
+            pub(crate) async fn open_successions(pool: &Pool) -> Result<Vec<crate::Succession>, StoreError> {
+                let rows = sqlx::query(
+                    "SELECT id, predecessor, predecessor_boot, heir, kind, base_cut, survivors, moved FROM successions \
+                     WHERE settled_cut IS NULL AND abandoned = 0 ORDER BY id",
+                )
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|r| {
+                        let id = u(r.try_get(0)?);
+                        let ordinal = |v: i64| {
+                            u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("successions {id}: ordinal {v}")))
+                        };
+                        let kind: i64 = r.try_get(4)?;
+                        let survivors: String = r.try_get(6)?;
+                        let moved: String = r.try_get(7)?;
+                        Ok(crate::Succession {
+                            id: crate::SuccessionId(id),
+                            predecessor: ordinal(r.try_get(1)?)?,
+                            predecessor_boot: u(r.try_get(2)?),
+                            heir: ordinal(r.try_get(3)?)?,
+                            kind: crate::SuccessionKind::from_code(kind)
+                                .ok_or_else(|| StoreError::Corrupt(format!("successions {id}: kind {kind}")))?,
+                            base_cut: CutId(u(r.try_get(5)?)),
+                            survivors: crate::succession::decode_survivors(id, &survivors)?,
+                            moved: crate::succession::decode_moved(id, &moved)?,
+                        })
+                    })
+                    .collect()
+            }
+
+            /// The region of every stored row of each of `ids` (through `entities_id`, migration
+            /// 0010): an id stored in two regions gives two entries, an unknown one none. In the
+            /// order of `ids`, then by region.
+            pub(crate) async fn regions_of_entities(
+                pool: &Pool,
+                ids: Vec<EntityId>,
+            ) -> Result<Vec<(EntityId, RegionCoords)>, StoreError> {
+                let mut tx = begin_read(pool).await?;
+                let mut out = Vec::new();
+                for id in ids {
+                    let rows = sqlx::query(
+                        "SELECT rx, rz FROM entities WHERE birth_rx = $1 AND birth_rz = $2 AND serial = $3 ORDER BY rx, rz",
+                    )
+                    .bind(id.birth_region.x as i64)
+                    .bind(id.birth_region.z as i64)
+                    .bind(i(id.serial))
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    for r in rows {
+                        out.push((id, region_of(r.try_get(0)?, r.try_get(1)?)?));
+                    }
+                }
+                tx.commit().await?;
+                Ok(out)
+            }
+
+            async fn in_flight_rows(tx: &mut Tx, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
                 let rows = sqlx::query(
                     "SELECT seq, kind, target_rx, target_rz, stamp, payload FROM in_flight \
                      WHERE $1 IS NULL OR host = $1 ORDER BY seq",
                 )
                 .bind(host.map(i64::from))
-                .fetch_all(pool)
+                .fetch_all(&mut **tx)
                 .await?;
                 let mut out = Vec::with_capacity(rows.len());
                 for r in rows {
@@ -1204,6 +1308,7 @@ macro_rules! engine_rows {
             ) -> Result<CutCommitted, StoreError> {
                 let t = i(cut.tick);
                 check_fence(conn, fence, &commit_check_set(cut, fence, s)).await?;
+                check_adopts(&mut *conn, cut.host, &cut.adopts).await?;
                 check_entities_once(cut)?;
                 // Every region's entities go first. Only this cut's (this part's) own
                 // regions' rows are deleted and inserted, by region: the rows are keyed
@@ -1310,6 +1415,14 @@ macro_rules! engine_rows {
                     .bind(fence.in_flight_scope().map(|_| cut.host as i64))
                     .execute(&mut *conn)
                     .await?;
+                // An heir's part also replaces the rows of the predecessors it adopts (checked
+                // above): what it kept of them is in `cut.in_flight`, now under its own host.
+                for predecessor in &cut.adopts {
+                    sqlx::query("DELETE FROM in_flight WHERE host = $1")
+                        .bind(i64::from(*predecessor))
+                        .execute(&mut *conn)
+                        .await?;
+                }
                 // `seq` is the table's key across all hosts: each host owns a range
                 // (`host << 32`), so concurrent commits never collide and need no MAX read.
                 let base = (cut.host as i64) << 32;

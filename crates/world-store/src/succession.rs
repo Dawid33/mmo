@@ -1,0 +1,446 @@
+//! Successions (R4): when a host of a multi-host world dies (its lease lapsed, or its row
+//! was vouched dead by its next boot) or left clean, the coordinator declares it in ONE
+//! fenced transaction ([`declare`]) that marks a crashed host's row dead, inserts the
+//! `successions` row and moves every super-region of the predecessor to one heir with
+//! `epoch + 1` — that update is the claim; the heir only reads its new fence. Nothing else
+//! is written until the next committed world cut, whose decision settles the open
+//! successions in its own transaction (`two_phase::decide_cut`'s `settles`). A world
+//! rollback ([`rollback_world`]) abandons the open ones; the land stays with the heirs.
+//! Postgres only: several hosts need it (SQLite answers `Unsupported`).
+//!
+//! Locks (the declaration): `coordinator` `FOR SHARE`, then `world` `FOR NO KEY UPDATE`
+//! (it serialises with `decide_cut`, `register_host` and `rollback_world`, which take the
+//! same lock in the same order, and never waits for a claim's `FOR KEY SHARE`), then the
+//! predecessors' `hosts` rows `FOR NO KEY UPDATE` in ordinal order (a heartbeat waits for
+//! the declaration, so a beat between the lapse check and the update cannot be lost), then
+//! each predecessor's `super_regions` rows `FOR NO KEY UPDATE` in key order. A staged cut
+//! part of the predecessor holds those rows `FOR SHARE` until its cut is decided: the
+//! declaration waits for it, at most `lock_timeout` (the caller declares only between
+//! cuts; a timeout is a retry). It never locks a row a staged part could be waiting for.
+
+use std::collections::BTreeSet;
+
+use game::{CutId, HOST_DEAD, HOST_LEASE_MS, HOST_LIVE};
+use sqlx::{PgPool, Row};
+
+use crate::{CoordinatorFence, StoreError, SuperRegion};
+
+/// A succession's id (`successions.id`, one more than the highest).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SuccessionId(pub u64);
+
+/// Why a host's land moved: it crashed (its lease lapsed or it was vouched dead) or it
+/// left clean. Stored as `successions.kind`: 0 crash, 1 leave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuccessionKind {
+    Crash,
+    Leave,
+}
+
+impl SuccessionKind {
+    /// The `successions.kind` value.
+    pub fn code(self) -> i64 {
+        match self {
+            SuccessionKind::Crash => 0,
+            SuccessionKind::Leave => 1,
+        }
+    }
+
+    pub fn from_code(code: i64) -> Option<SuccessionKind> {
+        match code {
+            0 => Some(SuccessionKind::Crash),
+            1 => Some(SuccessionKind::Leave),
+            _ => None,
+        }
+    }
+}
+
+/// One host's land given to one heir ([`crate::StoreHandle::declare_succession`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Succession {
+    pub id: SuccessionId,
+    pub predecessor: u32,
+    pub predecessor_boot: u64,
+    pub heir: u32,
+    pub kind: SuccessionKind,
+    /// The last committed world cut at the declaration (`CutId(0)`: none): what the heir
+    /// starts the predecessor's regions from.
+    pub base_cut: CutId,
+    /// The super-regions moved to the heir, at their new epochs, in key order.
+    pub moved: Vec<(SuperRegion, u64)>,
+    /// Every other live dirty host at the declaration (the heir among them), by ordinal:
+    /// the hosts that report their journals to the heir.
+    pub survivors: Vec<u32>,
+}
+
+/// What [`crate::StoreHandle::declare_succession`] did. Anything but `Done` wrote nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Declared {
+    /// Declared: one succession per predecessor, in the call's order.
+    Done(Vec<Succession>),
+    /// Crash: these predecessors' rows beat within [`game::HOST_LEASE_MS`] (and were not
+    /// vouched), or left clean meanwhile; leave: these rows are not clean.
+    NotLapsed(Vec<u32>),
+    /// Another succession is open: a second failure before the first is settled — the
+    /// caller rolls the world back.
+    SuccessionOpen,
+    /// These rows are gone: no row, another boot, already dead or already succeeded — or,
+    /// named as heirs, not live with a fresh lease any more.
+    Gone(Vec<u32>),
+}
+
+/// `successions.survivors`: ordinals, comma-separated.
+pub(crate) fn encode_survivors(survivors: &[u32]) -> String {
+    survivors.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+}
+
+pub(crate) fn decode_survivors(id: u64, s: &str) -> Result<Vec<u32>, StoreError> {
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    s.split(',')
+        .map(|o| o.parse().map_err(|_| StoreError::Corrupt(format!("successions {id}: survivors {s:?}"))))
+        .collect()
+}
+
+/// `successions.moved`: `sx:sz:epoch`, comma-separated.
+pub(crate) fn encode_moved(moved: &[(SuperRegion, u64)]) -> String {
+    moved.iter().map(|((sx, sz), e)| format!("{sx}:{sz}:{e}")).collect::<Vec<_>>().join(",")
+}
+
+pub(crate) fn decode_moved(id: u64, s: &str) -> Result<Vec<(SuperRegion, u64)>, StoreError> {
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bad = || StoreError::Corrupt(format!("successions {id}: moved {s:?}"));
+    s.split(',')
+        .map(|m| {
+            let mut p = m.split(':');
+            match (p.next(), p.next(), p.next(), p.next()) {
+                (Some(sx), Some(sz), Some(e), None) => Ok((
+                    (sx.parse().map_err(|_| bad())?, sz.parse().map_err(|_| bad())?),
+                    e.parse().map_err(|_| bad())?,
+                )),
+                _ => Err(bad()),
+            }
+        })
+        .collect()
+}
+
+/// What every store that cannot declare a succession answers.
+pub(crate) const SUCCESSION_UNSUPPORTED: &str = "successions need several hosts, which need Postgres";
+
+/// The `lock_timeout` of a declaration ran out: a staged cut part (or another transaction)
+/// holds a predecessor's row. Nothing was written; the caller declares again later.
+fn declare_error(e: sqlx::Error, lock_timeout_ms: u64) -> StoreError {
+    match &e {
+        sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => StoreError::Backend(format!(
+            "a succession's declaration waited longer than its lock_timeout ({lock_timeout_ms} ms) for a row a \
+             staged cut part or another transaction holds; nothing was written — declare again once the cut is \
+             decided ({e})"
+        )),
+        _ => e.into(),
+    }
+}
+
+/// The coordinator row `FOR SHARE` (`Fenced { sr: None }` unless `fence` holds it), then
+/// the world row `FOR NO KEY UPDATE` (`StaleGeneration` unless at `generation`, when given).
+/// Returns the stored generation.
+async fn lock_coordinator_and_world(
+    tx: &mut sqlx::PgConnection,
+    fence: CoordinatorFence,
+    generation: Option<u64>,
+) -> Result<u64, StoreError> {
+    let epoch: Option<i64> = sqlx::query_scalar("SELECT epoch FROM coordinator WHERE id = 1 FOR SHARE")
+        .fetch_optional(&mut *tx)
+        .await?;
+    if epoch.map(|e| e as u64) != Some(fence.epoch) {
+        return Err(StoreError::Fenced { sr: None });
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
+    if let Some(mine) = generation {
+        if stored as u64 != mine {
+            return Err(StoreError::StaleGeneration { stored: stored as u64, mine });
+        }
+    }
+    Ok(stored as u64)
+}
+
+/// The database clock in ms (as `rows`' `NOW_MS` for Postgres: `clock_timestamp()`, not the
+/// transaction's start — this one may have waited for locks).
+const PG_NOW_MS: &str = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
+/// [`crate::StoreHandle::declare_succession`] (Postgres): see the module docs for the locks.
+pub(crate) async fn declare(
+    pool: &PgPool,
+    dead: Vec<(u32, u64)>,
+    heirs: Vec<u32>,
+    kind: SuccessionKind,
+    fence: CoordinatorFence,
+    generation: u64,
+    lock_timeout_ms: u64,
+) -> Result<Declared, StoreError> {
+    let predecessors: BTreeSet<u32> = dead.iter().map(|(o, _)| *o).collect();
+    if dead.is_empty() || heirs.len() != dead.len() || predecessors.len() != dead.len() {
+        return Err(StoreError::Unsupported(format!(
+            "a succession needs one heir per predecessor and each predecessor once (dead {dead:?}, heirs {heirs:?})"
+        )));
+    }
+    if let Some(h) = heirs.iter().find(|h| predecessors.contains(h)) {
+        return Err(StoreError::Unsupported(format!("host {h} cannot inherit while it is declared dead itself")));
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
+    let declared = declare_in(&mut tx, &dead, &heirs, &predecessors, kind, fence, generation).await;
+    match declared {
+        Ok(Declared::Done(s)) => {
+            tx.commit().await.map_err(|e| declare_error(e, lock_timeout_ms))?;
+            Ok(Declared::Done(s))
+        }
+        Ok(other) => {
+            tx.rollback().await?;
+            Ok(other)
+        }
+        Err(DeclareError::Store(e)) => Err(e),
+        Err(DeclareError::Sql(e)) => Err(declare_error(e, lock_timeout_ms)),
+    }
+}
+
+/// A declaration's statement error, kept raw so a lock timeout is named as one.
+enum DeclareError {
+    Store(StoreError),
+    Sql(sqlx::Error),
+}
+
+impl From<sqlx::Error> for DeclareError {
+    fn from(e: sqlx::Error) -> Self {
+        DeclareError::Sql(e)
+    }
+}
+
+impl From<StoreError> for DeclareError {
+    fn from(e: StoreError) -> Self {
+        DeclareError::Store(e)
+    }
+}
+
+/// The declaration's statements inside `tx`; anything but `Done` is rolled back by the caller.
+async fn declare_in(
+    tx: &mut sqlx::PgConnection,
+    dead: &[(u32, u64)],
+    heirs: &[u32],
+    predecessors: &BTreeSet<u32>,
+    kind: SuccessionKind,
+    fence: CoordinatorFence,
+    generation: u64,
+) -> Result<Declared, DeclareError> {
+    lock_coordinator_and_world(&mut *tx, fence, Some(generation)).await?;
+    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
+        .fetch_one(&mut *tx)
+        .await?;
+    if open > 0 {
+        return Ok(Declared::SuccessionOpen);
+    }
+    // The predecessors' rows, locked in ordinal order: a heartbeat waits for this transaction.
+    let mut sorted: Vec<(u32, u64)> = dead.to_vec();
+    sorted.sort();
+    let (mut gone, mut not_lapsed) = (Vec::new(), Vec::new());
+    for (ordinal, boot) in &sorted {
+        let row = sqlx::query(&format!(
+            "SELECT boot, clean, state, seen_ms = 0 OR {PG_NOW_MS} - seen_ms > $2, \
+             EXISTS (SELECT 1 FROM successions WHERE predecessor = $1 AND predecessor_boot = hosts.boot AND abandoned = 0) \
+             FROM hosts WHERE ordinal = $1 FOR NO KEY UPDATE"
+        ))
+        .bind(i64::from(*ordinal))
+        .bind(HOST_LEASE_MS as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            gone.push(*ordinal);
+            continue;
+        };
+        let (stored_boot, clean, state, lapsed, succeeded): (i64, i64, i64, bool, bool) =
+            (row.try_get(0)?, row.try_get(1)?, row.try_get(2)?, row.try_get(3)?, row.try_get(4)?);
+        if stored_boot as u64 != *boot || state != HOST_LIVE || succeeded {
+            gone.push(*ordinal);
+            continue;
+        }
+        let ready = match kind {
+            SuccessionKind::Crash => clean == 0 && lapsed,
+            SuccessionKind::Leave => clean != 0,
+        };
+        if !ready {
+            not_lapsed.push(*ordinal);
+        }
+    }
+    // Each heir: live, dirty and beating (a vouched row, `seen_ms = 0`, is not fresh).
+    for heir in heirs {
+        let fresh: Option<bool> = sqlx::query_scalar(&format!(
+            "SELECT seen_ms <> 0 AND {PG_NOW_MS} - seen_ms <= $2 FROM hosts \
+             WHERE ordinal = $1 AND clean = 0 AND state = {HOST_LIVE}"
+        ))
+        .bind(i64::from(*heir))
+        .bind(HOST_LEASE_MS as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if fresh != Some(true) && !gone.contains(heir) {
+            gone.push(*heir);
+        }
+    }
+    if !gone.is_empty() {
+        gone.sort();
+        return Ok(Declared::Gone(gone));
+    }
+    if !not_lapsed.is_empty() {
+        return Ok(Declared::NotLapsed(not_lapsed));
+    }
+    // Read under the world row's lock, which `register_host` takes: a host registering
+    // later never met the dead boot; a live one the coordinator is not attached to is listed.
+    let live: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT ordinal FROM hosts WHERE clean = 0 AND state = {HOST_LIVE} ORDER BY ordinal"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+    let survivors: Vec<u32> = live
+        .into_iter()
+        .filter_map(|o| u32::try_from(o).ok())
+        .filter(|o| !predecessors.contains(o))
+        .collect();
+    let base_cut: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(cut_id), 0) FROM cut_decisions WHERE committed = 1")
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut out = Vec::with_capacity(dead.len());
+    for ((predecessor, boot), heir) in dead.iter().zip(heirs) {
+        if kind == SuccessionKind::Crash {
+            sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE ordinal = $1 AND boot = $2"))
+                .bind(i64::from(*predecessor))
+                .bind(*boot as i64)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // Key order first (a claim upserts in key order too), then the claim itself.
+        sqlx::query("SELECT 1 FROM super_regions WHERE owner = $1 ORDER BY sx, sz FOR NO KEY UPDATE")
+            .bind(i64::from(*predecessor))
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query(
+            "UPDATE super_regions SET owner = $1, epoch = epoch + 1 WHERE owner = $2 RETURNING sx, sz, epoch",
+        )
+        .bind(i64::from(*heir))
+        .bind(i64::from(*predecessor))
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut moved = Vec::with_capacity(rows.len());
+        for r in rows {
+            let (sx, sz, epoch): (i64, i64, i64) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
+            let sr = (
+                i32::try_from(sx).map_err(|_| StoreError::Corrupt(format!("super_regions.sx {sx}")))?,
+                i32::try_from(sz).map_err(|_| StoreError::Corrupt(format!("super_regions.sz {sz}")))?,
+            );
+            moved.push((sr, epoch as u64));
+        }
+        moved.sort();
+        let id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM successions")
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO successions (id, predecessor, predecessor_boot, heir, kind, base_cut, settled_cut, abandoned, \
+             declared_utc, survivors, moved) VALUES ($1, $2, $3, $4, $5, $6, NULL, 0, $7, $8, $9)",
+        )
+        .bind(id)
+        .bind(i64::from(*predecessor))
+        .bind(*boot as i64)
+        .bind(i64::from(*heir))
+        .bind(kind.code())
+        .bind(base_cut)
+        .bind(crate::open::utc_now())
+        .bind(encode_survivors(&survivors))
+        .bind(encode_moved(&moved))
+        .execute(&mut *tx)
+        .await?;
+        log::info!(
+            "[world-store] succession {id}: host {predecessor} (boot {boot}, {kind:?}) → heir {heir}, {} super-regions, \
+             base cut {base_cut}, survivors {survivors:?}",
+            moved.len()
+        );
+        out.push(Succession {
+            id: SuccessionId(id as u64),
+            predecessor: *predecessor,
+            predecessor_boot: *boot,
+            heir: *heir,
+            kind,
+            base_cut: CutId(base_cut as u64),
+            moved,
+            survivors: survivors.clone(),
+        });
+    }
+    Ok(Declared::Done(out))
+}
+
+/// [`crate::StoreHandle::rollback_world`] (Postgres): under the coordinator fence and the
+/// world row's lock (the declaration's order), `world.generation + 1` and every open
+/// succession abandoned. Returns the new generation.
+pub(crate) async fn rollback_world(pool: &PgPool, fence: CoordinatorFence, lock_timeout_ms: u64) -> Result<u64, StoreError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
+    let stored = lock_coordinator_and_world(&mut tx, fence, None).await?;
+    let generation = stored + 1;
+    sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(generation as i64).execute(&mut *tx).await?;
+    let abandoned = sqlx::query("UPDATE successions SET abandoned = 1 WHERE settled_cut IS NULL AND abandoned = 0")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    log::warn!("[world-store] world rolled back to generation {generation}; {abandoned} open successions abandoned");
+    Ok(generation)
+}
+
+/// The ids of the open successions, in `tx` (no lock: `decide_cut` reads them under the
+/// world row's lock, which every declaration and rollback takes first).
+pub(crate) async fn open_ids(tx: &mut sqlx::PgConnection) -> Result<BTreeSet<u64>, StoreError> {
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
+        .fetch_all(&mut *tx)
+        .await?;
+    Ok(ids.into_iter().map(|i| i as u64).collect())
+}
+
+/// Settles `settles` with `cut` (inside the committing decision's transaction): each
+/// gets `settled_cut`, and each predecessor's row — of the boot that died — turns clean.
+pub(crate) async fn settle(tx: &mut sqlx::PgConnection, cut: CutId, settles: &[SuccessionId]) -> Result<(), StoreError> {
+    if settles.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<i64> = settles.iter().map(|s| s.0 as i64).collect();
+    sqlx::query("UPDATE successions SET settled_cut = $1 WHERE id = ANY($2) AND settled_cut IS NULL AND abandoned = 0")
+        .bind(cut.0 as i64)
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE hosts SET clean = 1 FROM successions s \
+         WHERE s.id = ANY($1) AND hosts.ordinal = s.predecessor AND hosts.boot = s.predecessor_boot",
+    )
+    .bind(&ids)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_lists_round_trip() {
+        let moved = vec![((-3, 4), 7), ((0, -1), 1)];
+        assert_eq!(decode_moved(1, &encode_moved(&moved)).unwrap(), moved);
+        assert_eq!(decode_moved(1, "").unwrap(), vec![]);
+        assert!(decode_moved(1, "1:2").is_err());
+        assert_eq!(decode_survivors(1, &encode_survivors(&[0, 2])).unwrap(), vec![0, 2]);
+        assert_eq!(decode_survivors(1, "").unwrap(), Vec::<u32>::new());
+        assert!(decode_survivors(1, "x").is_err());
+    }
+}

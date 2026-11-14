@@ -44,7 +44,7 @@ fn region(tick: u64, ground: bool) -> PortableRegion {
 }
 
 fn cut(id: u64, tick: u64, regions: Vec<(RegionCoords, PortableRegion)>) -> WorldCut {
-    WorldCut { id: CutId(id), host: 0, tick, regions, in_flight: vec![], players: vec![], history: None }
+    WorldCut { id: CutId(id), host: 0, tick, regions, in_flight: vec![], players: vec![], history: None, adopts: vec![] }
 }
 
 /// The next notice that is not a `Resync`, within `within`.

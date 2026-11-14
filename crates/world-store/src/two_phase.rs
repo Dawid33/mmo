@@ -3,8 +3,9 @@
 //! ([`crate::rows::CutEnd::Prepare`]); the coordinator then records ONE decision
 //! row (`cut_decisions`, first writer wins on the cut id) and finishes
 //! (`COMMIT PREPARED` / `ROLLBACK PREPARED`) every part of the cut that is staged.
-//! A commit is recorded only if exactly the listed hosts' parts are staged and every
-//! host whose `hosts` row is not clean is listed; otherwise
+//! A commit is recorded only if exactly the listed hosts' parts are staged, every
+//! host whose `hosts` row is not clean is listed and it settles exactly the open
+//! successions (R4, `crate::succession`); otherwise
 //! the decision becomes an abort. A host that gives up records an abort the same way
 //! ([`abort_cut`]); a part that prepares after its cut was decided finishes itself
 //! ([`finish_if_decided`]); a process starting up finishes or aborts whatever a crash
@@ -16,7 +17,8 @@
 //! wrote — but none on `world` (it reads the generation without a lock and writes no
 //! world tick). The decision locks `coordinator` (`FOR SHARE`), then `world`
 //! (`FOR NO KEY UPDATE`, a commit only — it never waits for a claim's `FOR KEY SHARE`),
-//! `cut_decisions` and `hosts`: no row a prepared part holds, so a decision never waits
+//! `cut_decisions`, `hosts` and (settling) `successions`: no row a prepared part holds
+//! (an heir's part reads `successions` without a lock), so a decision never waits
 //! for a part, nor for a claim waiting for one.
 //!
 //! None of this takes the store's writer lock: a prepare queued behind a part that
@@ -29,7 +31,7 @@ use game::{CutId, Tick};
 use sqlx::PgPool;
 
 use crate::rows::pg::cut_decision;
-use crate::{CoordinatorFence, StoreError};
+use crate::{CoordinatorFence, StoreError, SuccessionId};
 
 /// What every store that cannot prepare a cut answers.
 pub(crate) const TWO_PHASE_UNSUPPORTED: &str = "several hosts need max_prepared_transactions > 0 (Postgres)";
@@ -181,6 +183,7 @@ pub(crate) async fn decide_cut(
     leaving: Vec<u32>,
     fence: CoordinatorFence,
     generation: u64,
+    settles: Vec<SuccessionId>,
     stop_after: Option<u32>,
 ) -> Result<bool, StoreError> {
     let mut tx = pool.begin().await?;
@@ -252,6 +255,22 @@ pub(crate) async fn decide_cut(
                     );
                     commit = false;
                 }
+                // R4: a commit settles exactly the open successions — read under the world
+                // row's lock, which a declaration and a rollback take first. A commit that
+                // names fewer would let the heir's adoption commit unsettled (its next boot
+                // would adopt again); one that names more settles what is not open.
+                if commit {
+                    let open = crate::succession::open_ids(&mut tx).await?;
+                    let named: BTreeSet<u64> = settles.iter().map(|s| s.0).collect();
+                    if open != named || named.len() != settles.len() {
+                        log::warn!(
+                            "[world-store] cut {} cannot commit: it settles successions {named:?} but {open:?} are \
+                             open; recording an abort",
+                            cut.0
+                        );
+                        commit = false;
+                    }
+                }
             }
             let inserted = insert_decision(&mut *tx, cut, tick, commit).await?;
             // A host's abort may have won the insert meanwhile.
@@ -266,6 +285,7 @@ pub(crate) async fn decide_cut(
                     .bind(leaving)
                     .execute(&mut *tx)
                     .await?;
+                crate::succession::settle(&mut tx, cut, &settles).await?;
             }
             d
         }

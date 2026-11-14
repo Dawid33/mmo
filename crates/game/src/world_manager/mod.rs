@@ -2799,6 +2799,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             players: players.into_iter().collect(),
             // The coordinator saves the history itself (durable before visible).
             history: None,
+            adopts: vec![],
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",

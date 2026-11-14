@@ -43,7 +43,7 @@ fn owned_by_is_the_claimed_fence() {
 
 /// A cut that writes nothing but the world tick: fenced by every super-region of its fence.
 fn empty_cut(id: u64) -> WorldCut {
-    WorldCut { id: CutId(id), host: 0, tick: 100 * id, regions: vec![], in_flight: vec![], players: vec![], history: None }
+    WorldCut { id: CutId(id), host: 0, tick: 100 * id, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] }
 }
 
 /// A throwaway Postgres world (`None`, with the skip message, without the test database).

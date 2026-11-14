@@ -992,7 +992,7 @@ impl CoordinatorRuntime {
         }
         if self.recording.is_none() {
             if let Some(d) = self.core.take_decision() {
-                let rx = self.store.decide_cut_later(d.cut, d.tick, d.commit, d.hosts.clone(), d.leaving.clone(), self.fence, d.generation);
+                let rx = self.store.decide_cut_later(d.cut, d.tick, d.commit, d.hosts.clone(), d.leaving.clone(), self.fence, d.generation, Vec::new());
                 self.recording = Some(Recording { d, rx: Some(rx), aborting: false, taken_ms: now, retry_at: now });
             }
         }

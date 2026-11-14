@@ -39,6 +39,7 @@ fn cut(h: &StoreHandle, id: u64) -> WorldCut {
         in_flight: vec![InFlightRow::Intent { target: A, msg: intent() }],
         players: vec![(pid, player())],
         history: None,
+        adopts: vec![],
     }
 }
 

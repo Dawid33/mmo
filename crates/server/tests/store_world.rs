@@ -388,6 +388,7 @@ fn stale_world_map_is_rebuilt_at_start() {
         in_flight: Vec::new(),
         players: Vec::new(),
         history: Some(history.clone()),
+        adopts: vec![],
     };
     store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
     store.shutdown();
@@ -936,6 +937,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
         in_flight: Vec::new(),
         players: vec![(player, record.clone())],
         history: None,
+        adopts: vec![],
     };
     let other = HostClaims::claim_srs(store.clone(), 1 - mine, vec![foreign_sr]).unwrap();
     other.commit_cut(cut).recv().unwrap().expect("the other host's cut commits");

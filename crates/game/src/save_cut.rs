@@ -93,6 +93,10 @@ pub struct WorldCut {
     /// coordinator is the only writer of history state (its own `coordinator` row); an R1
     /// world's row is read once, to migrate it.
     pub history: Option<Vec<u8>>,
+    /// R4: host ordinals whose in-flight rows this part also replaces — the predecessors of
+    /// the open successions that made this host their heir (the store refuses any other).
+    /// Empty everywhere else.
+    pub adopts: Vec<u32>,
 }
 
 /// A region's snapshots not committed yet, merged ([`PortableRegion::merge`]);
