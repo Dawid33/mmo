@@ -798,6 +798,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         let count = self.peer_queued.entry(ordinal).or_default();
         let id = *count;
         *count += 1;
+        // Everything this host sends a peer is queued here, in order (a leave's held-back
+        // messages when they finally go): the journal sees each state message and each
+        // mark exactly where it goes on the session.
+        match &msg {
+            Reliable::CutMark { cut } => self.journal.mark_out(ordinal, *cut),
+            msg => self.journal.sent(ordinal, id, msg, None, self.spawner.world_tick()),
+        }
         match self.peers.get_mut(&ordinal) {
             Some(peer) => peer.session.queue(msg),
             None => {
@@ -810,6 +817,19 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         }
         id
+    }
+
+    /// The state messages exchanged with each peer host since the last committed world
+    /// cut (`peer/journal.rs`).
+    pub fn peer_journal(&self) -> &crate::PeerJournal {
+        &self.journal
+    }
+
+    /// At boot, before any peer traffic: the journal counts from `base`, the store's last
+    /// committed world cut (`CutId(0)`, the default, before any).
+    pub fn start_peer_journal(&mut self, base: crate::CutId) {
+        debug_assert!(self.journal.is_empty(), "the peer journal restarted with entries in it");
+        self.journal = crate::PeerJournal::new(base);
     }
 
     /// Every reliable message to another host not acknowledged yet (a session's, or
@@ -1391,6 +1411,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if matches!(*body, Reliable::InCut { .. }) || !body.is_state() {
                     log::error!("[server] host {from}: a wrapped {} for cut {}; applied as is", reliable_name(&body), cut.0);
                 }
+                self.journal.received(from, &body, Some(cut), self.spawner.world_tick());
                 self.note_wrapper(cut);
                 self.note_player_accounted(&body, cut);
                 let after = self.accounted_now(cut);
@@ -1413,6 +1434,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     );
                     self.world_cut_fail(crate::CutFailure::Aborted);
                 }
+                self.journal.received(from, &msg, None, self.spawner.world_tick());
                 // A player that left bare (the receiver's) and comes back bare is this
                 // host's again in the pending cut.
                 self.note_player_returned(&msg);

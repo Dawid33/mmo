@@ -619,6 +619,83 @@ impl MultiRig {
         out
     }
 
+    /// Every host's peer journal explains how the running world differs from the last
+    /// committed world cut, for every pair of hosts (A, B): every tracked entity the cut
+    /// stored on B that is live on A now (a running region of A, or A's `in_flight` /
+    /// `pending_arrivals`) has a `Received` entry from B on A AND a `Sent` entry toward A
+    /// on B — unless it passed through a third host (whose journal names it); the same for
+    /// every connected player, by the part that wrote its record and the host of its body.
+    /// A journal never counts from a cut later than the last committed one.
+    pub fn assert_journals_explain_the_cut(&mut self) {
+        use game::{JournalEvent, Subject};
+        let Some((cut, _)) = &self.last_cut else { return };
+        let cut = *cut;
+        let n = self.hosts.len() as u32;
+        // (host, peer, sent?) → subjects; host → every subject its journal names.
+        let mut journalled: BTreeMap<(u32, u32, bool), BTreeSet<Subject>> = BTreeMap::new();
+        let mut named: BTreeMap<u32, BTreeSet<Subject>> = BTreeMap::new();
+        for h in 0..n {
+            let journal = self.hosts[h as usize].manager.peer_journal();
+            assert!(journal.base() <= cut, "host {h}'s journal counts from cut {} past the last committed {}", journal.base().0, cut.0);
+            for p in (0..n).filter(|p| *p != h) {
+                for (e, _) in journal.entries(p) {
+                    let sent = matches!(e.event, JournalEvent::Sent(_));
+                    journalled.entry((h, p, sent)).or_default().insert(e.subject);
+                    named.entry(h).or_default().insert(e.subject);
+                }
+            }
+        }
+        let mut moved: Vec<(Subject, u32, u32)> = Vec::new();
+        let ids: Vec<EntityId> = self.tracked.keys().copied().collect();
+        for id in ids {
+            let stored: BTreeSet<u32> = self.stored_places(id).into_iter().map(|(h, _, _)| h).collect();
+            let mut live: BTreeSet<u32> = self.owners_of(id).into_iter().map(|(h, _)| h).collect();
+            for (h, rig) in self.hosts.iter().enumerate() {
+                let m = &rig.manager;
+                if m.in_flight_ids().iter().chain(m.pending_arrival_ids().iter()).any(|(i, _)| *i == id) {
+                    live.insert(h as u32);
+                }
+            }
+            for &b in &stored {
+                moved.extend(live.iter().filter(|a| **a != b).map(|a| (Subject::Entity(id), b, *a)));
+            }
+        }
+        let (_, parts) = self.last_committed();
+        let players: Vec<(ClientId, PlayerId, Vec<u32>)> = self
+            .players
+            .iter()
+            .map(|(c, p)| (*c, *p, parts.iter().filter(|(_, part)| part.players.iter().any(|(q, _)| q == p)).map(|(h, _)| *h).collect()))
+            .collect();
+        for (client, player, writers) in players {
+            if let Some((a, _, _)) = self.player_body(client) {
+                moved.extend(writers.into_iter().filter(|b| *b != a).map(|b| (Subject::Player(player), b, a)));
+            }
+        }
+        let has = |key: (u32, u32, bool), s: &Subject| journalled.get(&key).is_some_and(|set| set.contains(s));
+        for (subject, b, a) in moved {
+            let third = (0..n).any(|c| c != a && c != b && named.get(&c).is_some_and(|set| set.contains(&subject)));
+            if third {
+                continue;
+            }
+            assert!(
+                has((a, b, false), &subject),
+                "{subject:?}: stored on host {b} by cut {}, now on host {a}, which has no Received entry from {b} \
+                 (seed {}, link delay {})",
+                cut.0,
+                self.seed,
+                self.link_delay
+            );
+            assert!(
+                has((b, a, true), &subject),
+                "{subject:?}: stored on host {b} by cut {}, now on host {a}; host {b} has no Sent entry toward {a} \
+                 (seed {}, link delay {})",
+                cut.0,
+                self.seed,
+                self.link_delay
+            );
+        }
+    }
+
     /// The parts of the last committed cut that write `player`'s record.
     pub fn last_cut_writers(&self, player: PlayerId) -> Vec<u32> {
         let (_, parts) = self.last_committed();

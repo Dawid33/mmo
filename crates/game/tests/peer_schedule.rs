@@ -5527,3 +5527,99 @@ fn late_peer_learns(rig: &mut MultiRig) {
 fn a_late_peer_learns_every_claim_at_its_hello() {
     sweep("a_late_peer_learns_every_claim_at_its_hello", 2, 1, SEEDS / 2, late_peer_learns);
 }
+
+// --- The peer journal (R4 Task 7) --------------------------------------------------
+
+/// Round budget for [`journal_explains`]: three committed world cuts and an aborted one.
+const JOURNAL_ROUNDS: usize = 900;
+/// Rounds a participant's link stays down under a pending world cut (it aborts the cut).
+const JOURNAL_DOWN_ROUNDS: usize = 6;
+
+/// `hosts` (2 or 3) regions in a chain, each adjacent to the next and every one owned by
+/// another host (one region per super-region).
+fn host_chain(hosts: u32) -> Vec<RegionCoords> {
+    let (a, b) = host_seam(hosts, 1);
+    if hosts == 2 {
+        return vec![a, b];
+    }
+    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, 1);
+    for (x, y) in [(a, b), (b, a)] {
+        for c in [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| RegionCoords::new(y.x + dx, y.z + dz)) {
+            if owner(c) != owner(x) && owner(c) != owner(y) {
+                return vec![x, y, c];
+            }
+        }
+    }
+    panic!("no chain of {hosts} hosts at the seam {a:?} | {b:?}");
+}
+
+/// World cuts decided aborted so far.
+fn aborted(rig: &MultiRig) -> usize {
+    rig.decided.values().filter(|c| !**c).count()
+}
+
+/// Slimes and the test player shuttle along a chain of regions of every host (a slime
+/// may pass through the middle host to the far one) while world cuts run, and a link
+/// drops under some pending cuts so they abort. Every round, every host's peer journal
+/// explains every difference between the running world and the last committed cut
+/// ([`MultiRig::assert_journals_explain_the_cut`]).
+fn journal_explains(rig: &mut MultiRig) {
+    let chain = host_chain(rig.hosts.len() as u32);
+    for rc in &chain {
+        rig.run(*rc);
+    }
+    world_cuts(rig);
+    let home = rig.owner(chain[0]);
+    rig.connect_everywhere(home, P_CLIENT, P_PLAYER, stocked_record(chain[0], 7));
+    until_body(rig);
+    let y = crate::common::above_floor_y();
+    let slimes: Vec<game::EntityId> = (0..4)
+        .map(|i| rig.spawn_slime(chain[i % chain.len()], [REGION_SIZE / 2.0 + i as f32, y, REGION_SIZE / 3.0]))
+        .collect();
+    let (x, z) = (rig.owner(chain[0]), rig.owner(chain[1]));
+    let goal = committed(rig) + 3;
+    let mut down_until = None;
+    let mut r = 0usize;
+    while committed(rig) < goal || aborted(rig) == 0 || down_until.is_some() {
+        assert!(r < JOURNAL_ROUNDS, "{} committed, {} aborted world cuts: {:?}", committed(rig), aborted(rig), rig.decided);
+        let roll = crate::common::multi_rig::mix(rig.seed, r as u64);
+        if r % 3 == 0 {
+            let id = slimes[(roll % slimes.len() as u64) as usize];
+            let i = ((roll >> 16) % (chain.len() as u64 - 1)) as usize;
+            push_over(rig, id, chain[i], chain[i + 1]);
+        }
+        if r % 7 == 0 {
+            if let Some((_, rc, id)) = rig.player_body(P_CLIENT) {
+                if let Some(i) = chain.iter().position(|c| *c == rc) {
+                    let j = if i == 0 || (i + 1 < chain.len() && (roll >> 32) % 2 == 0) { i + 1 } else { i - 1 };
+                    rig.teleport(rc, id, past_seam(rc, chain[j], REGION_SIZE / 2.0));
+                }
+            }
+        }
+        match down_until {
+            Some(until) if r >= until => {
+                rig.link_up(x, z);
+                down_until = None;
+            }
+            // About one cut in three aborts, at a seeded moment of its pending part.
+            None if aborted(rig) * 2 < committed(rig)
+                && (roll >> 40) % 4 == 0
+                && matches!(rig.hosts[x as usize].manager.world_cut_state(), Some((_, "pending" | "marked"))) =>
+            {
+                rig.link_down(x, z);
+                down_until = Some(r + JOURNAL_DOWN_ROUNDS);
+            }
+            _ => {}
+        }
+        rig.cut_round();
+        rig.assert_journals_explain_the_cut();
+        r += 1;
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn journal_explains_every_difference_from_the_last_cut() {
+    sweep("journal_explains_every_difference_from_the_last_cut (2 hosts)", 2, 1, SEEDS / 4, journal_explains);
+    sweep("journal_explains_every_difference_from_the_last_cut (3 hosts)", 3, 1, SEEDS / 4, journal_explains);
+}

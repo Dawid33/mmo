@@ -635,6 +635,9 @@ pub struct ManagerDepths {
     /// Messages waiting for their super-region to have an owner this host knows
     /// ([`WorldManager::unowned_waiting_total`]).
     pub unowned_waiting: usize,
+    /// Entries of the peer journal ([`WorldManager::peer_journal`]): the state messages
+    /// exchanged with other hosts since the last committed world cut.
+    pub journal_entries: usize,
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// since the manager started ([`WorldManager::arrivals_despawned`]).
     pub arrivals_despawned: u64,
@@ -1132,6 +1135,10 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Reliable messages for a host that has no session yet, in order: queued into its
     /// session by [`Self::set_peer`]. Carried by cuts like a session's unreceived ones.
     peer_waiting: BTreeMap<u32, Vec<crate::Reliable>>,
+    /// The state messages exchanged with each peer since the last committed world cut
+    /// (R4, `peer/journal.rs`): never saved, never hashed. Fed where messages are queued
+    /// (`queue_now`) and received (`peer_reliable`), truncated when a cut is decided.
+    journal: crate::PeerJournal,
     /// Reliable messages queued to each host so far (`queue_to_peer`): the ids of what a
     /// session (or `peer_waiting`) still holds are the last of these, in order — entries
     /// leave only from the front (`peers.rs`, `peer_entries`).
@@ -1361,6 +1368,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             directory_wanted: false,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
+            journal: crate::PeerJournal::new(CutId(0)),
             peer_queued: BTreeMap::new(),
             peer_in_source_view: BTreeSet::new(),
             foreign_running: BTreeMap::new(),
@@ -2320,6 +2328,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (each written region's terrain version) are what the store holds.
     pub fn cut_committed(&mut self, id: CutId, versions: Vec<(RegionCoords, u64)>) {
         self.note_leave_settled(id, true);
+        // A world cut truncated the journal at its `CutDone` (`world_cut_decided`, which
+        // knows the participants); a one-phase cut only moves its base.
+        self.journal.committed(id, &BTreeSet::new());
         if let Some(carried) = self.outstanding_cuts.remove(&id) {
             for (rc, seq) in carried {
                 if self.uncommitted.get(&rc).is_some_and(|u| u.seq == seq) {
@@ -3613,6 +3624,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             pending_arrivals: self.pending_arrival_total(),
             peer_unreceived: self.peer_unreceived(),
             unowned_waiting: self.unowned_waiting_total(),
+            journal_entries: self.journal.len(),
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),

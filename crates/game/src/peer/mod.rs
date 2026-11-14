@@ -5,10 +5,12 @@
 //! a real link (QUIC) implements [`PeerLink`] at the server's networking edge, and time
 //! arrives as `now_ms`.
 
+pub mod journal;
 mod link;
 mod msg;
 mod session;
 
+pub use journal::{JournalEntry, JournalEvent, PeerJournal, Subject};
 pub use link::*;
 pub use msg::*;
 pub use session::*;

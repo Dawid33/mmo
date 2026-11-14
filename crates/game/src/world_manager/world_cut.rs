@@ -53,6 +53,12 @@
 //! cut for every participant. A complete part stays until its
 //! [`crate::CoordMsg::CutDone`] ([`WorldManager::take_world_cut_done`]).
 //!
+//! **The peer journal** (R4, `peer/journal.rs`) is this ownership read backwards: every
+//! transfer and player move queued to (`queue_now`) or received from (`peer_reliable`) a
+//! peer, with this host's marks and the peer's marks in between, is kept until a committed
+//! cut explains it — at `CutDone` (`world_cut_decided`) the entries that crossed bare (or
+//! wrapped in another cut) before the mark of their direction are forgotten.
+//!
 //! **Leave cuts** (R3 Task 14). A host about to exit asks for one
 //! ([`WorldManager::request_leave`]); on the `BeginCut` naming it in `leaving` it parks every
 //! player and region (their `Stopped` answers are the cut's; nothing is woken for it any
@@ -436,6 +442,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The coordinator's `CutDone`: the cut is over here (a part still pending is dropped:
     /// aborted elsewhere), and the server settles it ([`Self::take_world_cut_done`]).
     pub(super) fn world_cut_decided(&mut self, cut: CutId, committed: bool) {
+        // The journal forgets what the committed cut explains toward its participants (an
+        // abort forgets only its marks).
+        let participants = self.world_cut_peers(cut);
+        if committed {
+            self.journal.committed(cut, &participants);
+        } else {
+            self.journal.aborted(cut);
+        }
         if let Some(run) = self.world_cut.take_if(|r| r.cut == cut) {
             match run.state {
                 PartState::Pending => {
@@ -650,6 +664,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Host `from`'s mark of world cut `cut`.
     pub(super) fn peer_cut_mark(&mut self, from: u32, cut: CutId) {
+        self.journal.mark_in(from, cut);
         if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
             if run.peers.contains(&from) {
                 run.marks_in.insert(from);

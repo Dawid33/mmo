@@ -66,6 +66,7 @@ mod pathfind;
 mod portable;
 mod player;
 mod people;
+mod peer_journal;
 mod peer_schedule;
 mod peer_session;
 mod physics_goldens;
