@@ -58,6 +58,21 @@ pub fn placement_bounds(p: &ResolvedPrefab, at: &Placement) -> ([i32; 3], [i32; 
     ([0, 1, 2].map(|i| a[i].min(b[i])), [0, 1, 2].map(|i| a[i].max(b[i]) + 1))
 }
 
+/// The highest solid block of the prefab over world column (x, z) under this placement:
+/// (world y, top material). None when the column is outside the prefab or empty.
+pub fn column_top_world(p: &ResolvedPrefab, at: &Placement, x: i32, z: i32) -> Option<(i32, BlockId)> {
+    let c = cell_of_world(p, at, [x, at.anchor[1], z]);
+    let (cell_y, id) = p.column_top(c[0], c[2])?;
+    Some((at.anchor[1] + cell_y - p.anchor[1], id))
+}
+
+/// The lowest solid block of that column, as a world y.
+pub fn column_bottom_world(p: &ResolvedPrefab, at: &Placement, x: i32, z: i32) -> Option<i32> {
+    let c = cell_of_world(p, at, [x, at.anchor[1], z]);
+    let cell_y = p.column_bottom(c[0], c[2])?;
+    Some(at.anchor[1] + cell_y - p.anchor[1])
+}
+
 /// World chunk coordinates the bounds overlap, ascending.
 pub fn chunks_touched(p: &ResolvedPrefab, at: &Placement) -> Vec<[i32; 3]> {
     let (min, max) = placement_bounds(p, at);

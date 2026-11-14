@@ -300,3 +300,44 @@ fn cell_write_is_the_per_cell_transform() {
     assert_eq!(b, Block { id: OAK, data: [0; 3] });
     assert_eq!(c, want.chisel(OAK));
 }
+
+#[test]
+fn column_top_world_matches_the_layout() {
+    let p = busy();
+    for anchor in [[0, 0, 0], [-37, -5, 1000]] {
+        for (turn, mirror) in orientations() {
+            let at = Placement { anchor, turn, mirror };
+            // brute force: per world column, the highest and lowest written (non-carve) block of layout_chunk
+            let mut tops: BTreeMap<[i32; 2], (i32, i32)> = BTreeMap::new();
+            for chunk in chunks_touched(&p, &at) {
+                let Some(stamp) = layout_chunk(&p, &at, chunk) else { continue };
+                for (i, _, _) in &stamp.writes {
+                    let w = world_of(chunk, *i);
+                    let e = tops.entry([w[0], w[2]]).or_insert((w[1], w[1]));
+                    e.0 = e.0.max(w[1]);
+                    e.1 = e.1.min(w[1]);
+                }
+            }
+            let (min, max) = placement_bounds(&p, &at);
+            for z in min[2] - 1..=max[2] {
+                for x in min[0] - 1..=max[0] {
+                    let inside = (min[0]..max[0]).contains(&x) && (min[2]..max[2]).contains(&z);
+                    let top = column_top_world(&p, &at, x, z);
+                    let bottom = column_bottom_world(&p, &at, x, z);
+                    let Some(&(hi, lo)) = tops.get(&[x, z]) else {
+                        assert_eq!((top, bottom), (None, None), "empty or outside column {x},{z}");
+                        continue;
+                    };
+                    assert!(inside);
+                    let mat = match p.cell(cell_of_world(&p, &at, [x, hi, z])) {
+                        Cell::Block(id) => id,
+                        Cell::Shaped(s) => s.top_material().unwrap(),
+                        other => panic!("top cell {other:?}"),
+                    };
+                    assert_eq!(top, Some((hi, mat)), "top of {x},{z} anchor {anchor:?} turn {turn} mirror {mirror}");
+                    assert_eq!(bottom, Some(lo), "bottom of {x},{z} anchor {anchor:?} turn {turn} mirror {mirror}");
+                }
+            }
+        }
+    }
+}

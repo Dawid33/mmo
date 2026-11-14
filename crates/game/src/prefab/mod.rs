@@ -26,9 +26,9 @@ pub use resolve::{
     MARKER_MARGIN, UNTRUSTED_MAX_BUCKET_REFS, UNTRUSTED_MAX_COLUMN_WORK, UNTRUSTED_MAX_EXTENT, UNTRUSTED_MAX_ITEMS,
 };
 pub use layout::{
-    cell_of_world, cell_write, chunks_touched, layout_chunk, marker_in_world, placement_bounds, world_of_cell, ChunkStamp,
+    cell_of_world, cell_write, chunks_touched, column_bottom_world, column_top_world, layout_chunk, marker_in_world, placement_bounds, world_of_cell, ChunkStamp,
     Placement,
 };
 pub use builtin::{
-    embedded_prefab_sources, install_prefabs, load_builtin_prefabs, prefabs, PrefabSet, BUILTIN_PREFAB_DIR,
+    embedded_prefab_sources, install_prefabs, load_builtin_prefabs, load_prefab_dirs, prefabs, PrefabSet, BUILTIN_PREFAB_DIR,
 };

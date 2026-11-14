@@ -175,3 +175,43 @@ fn a_repeated_file_name_is_refused() {
     let err = loaded.unwrap_err();
     assert!(err.contains("a.prefab.ron") && err.contains("twice"), "{err}");
 }
+
+#[test]
+fn several_directories_load_as_one_set() {
+    let (a, b) = (temp_tree("dirs-a"), temp_tree("dirs-b"));
+    std::fs::write(a.join("a.prefab.ron"), named_hut("a")).unwrap();
+    std::fs::write(b.join("b.prefab.ron"), named_hut("b")).unwrap();
+    let reg = registry();
+    let set = load_prefab_dirs(&[&a, &b], &|n| reg.id_of(n));
+    let again = load_prefab_dirs(&[&a, &b], &|n| reg.id_of(n));
+    std::fs::remove_dir_all(&a).unwrap();
+    std::fs::remove_dir_all(&b).unwrap();
+    let set = set.unwrap();
+    assert_eq!(set.len(), 2);
+    assert!(set.named("a").is_some() && set.named("b").is_some());
+    assert_eq!(set.content_hash(), again.unwrap().content_hash());
+}
+
+#[test]
+fn the_same_name_in_two_directories_is_refused() {
+    let (a, b) = (temp_tree("same-a"), temp_tree("same-b"));
+    std::fs::write(a.join("a.prefab.ron"), named_hut("a")).unwrap();
+    std::fs::write(b.join("a.prefab.ron"), named_hut("a")).unwrap();
+    let reg = registry();
+    let loaded = load_prefab_dirs(&[&a, &b], &|n| reg.id_of(n));
+    std::fs::remove_dir_all(&a).unwrap();
+    std::fs::remove_dir_all(&b).unwrap();
+    let err = loaded.unwrap_err();
+    assert!(err.contains("a.prefab.ron") && err.contains("twice"), "{err}");
+}
+
+#[test]
+fn a_missing_directory_is_an_error() {
+    let a = temp_tree("missing-a");
+    let gone = a.join("not-there");
+    let reg = registry();
+    let loaded = load_prefab_dirs(&[&a, &gone], &|n| reg.id_of(n));
+    std::fs::remove_dir_all(&a).unwrap();
+    let err = loaded.unwrap_err();
+    assert!(err.contains("not-there"), "{err}");
+}

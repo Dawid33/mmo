@@ -150,6 +150,20 @@ pub fn load_builtin_prefabs(
     }
 }
 
+/// Like `load_builtin_prefabs(Some(dir))` over several directories, in order, as ONE set: the same file
+/// filter, the same "file stem = prefab name" and "a file name appears twice" rules across all of them.
+/// A directory that does not exist is an error naming it.
+pub fn load_prefab_dirs(
+    dirs: &[&Path],
+    block_named: &dyn Fn(&str) -> Option<BlockId>,
+) -> Result<PrefabSet, String> {
+    let mut files = Vec::new();
+    for dir in dirs {
+        read_dir_sorted(dir, &mut files)?;
+    }
+    PrefabSet::from_sources(files.iter().map(|(n, b)| (n.as_str(), b.as_slice())), block_named)
+}
+
 static PREFABS: OnceLock<PrefabSet> = OnceLock::new();
 
 /// Installs the process-global set. Idempotent for an equal set; panics on a different one.
