@@ -139,6 +139,13 @@ fn meet(a: [i32; 4], b: [i32; 4]) -> bool {
     a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
 }
 
+/// The middle column of a lot's front face (rounding down along the arm), as a one-column world rectangle:
+/// its ground gives the lot's pad level.
+fn front_middle(origin: [i32; 2], d: [i32; 2], out_dir: [i32; 2], t: i32, frontage: i32, near: i32) -> [i32; 4] {
+    let a = t + (frontage - 1) / 2;
+    world_rect(origin, d, (a, a + 1), out_dir, (near, near + 1))
+}
+
 /// The placement putting `prefab` (turned `turn`) with its x/z box at (`x0`, `z0`) and its lowest layer
 /// at `level + 1`.
 fn place_at(prefab: &Arc<ResolvedPrefab>, turn: u8, x0: i32, z0: i32, level: i32) -> Placement {
@@ -182,11 +189,16 @@ pub fn layout_town(
     if !kit.centrepieces.is_empty() {
         let c = &kit.centrepieces[(roll(p.seed, 0, 0, 0) % kit.centrepieces.len() as u64) as usize];
         let (sx, sz) = (c.size[0] as i32, c.size[2] as i32);
-        let level = ground(ox, oz);
-        let at = place_at(c, 0, ox - (sx - 1) / 2, oz - (sz - 1) / 2, level);
-        let (min, max) = placement_bounds(c, &at);
-        boxes.push([min[0], min[2], max[0], max[2]]);
-        out.placements.push(StructurePlacement { prefab: c.clone(), at, pad: Some(Pad { level, skirt: 0 }) });
+        let (x0, z0) = (ox - (sx - 1) / 2, oz - (sz - 1) / 2);
+        // A wet origin or box corner: no centrepiece (the plaza is painted anyway).
+        let corners = [(x0, z0), (x0 + sx - 1, z0), (x0, z0 + sz - 1), (x0 + sx - 1, z0 + sz - 1)];
+        if !wet(ox, oz) && !corners.iter().any(|&(x, z)| wet(x, z)) {
+            let level = ground(ox, oz);
+            let at = place_at(c, 0, x0, z0, level);
+            let (min, max) = placement_bounds(c, &at);
+            boxes.push([min[0], min[2], max[0], max[2]]);
+            out.placements.push(StructurePlacement { prefab: c.clone(), at, pad: Some(Pad { level, skirt: 0 }) });
+        }
     }
 
     if kit.houses.is_empty() {
@@ -224,7 +236,10 @@ pub fn layout_town(
                     let grown = [r[0] - 1, r[1] - 1, r[2] + 1, r[3] + 1];
                     // Cheapest test first: a house already rejected never asks the terrain.
                     let (cx, cz) = ((r[0] + r[2] - 1).div_euclid(2), (r[1] + r[3] - 1).div_euclid(2));
-                    let samples = [(r[0], r[1]), (r[2] - 1, r[1]), (r[0], r[3] - 1), (r[2] - 1, r[3] - 1), (cx, cz)];
+                    let [mx, mz, ..] = front_middle(origin, d, out_dir, t, frontage, near);
+                    // The corners, the centre, and the column whose ground gives the pad level.
+                    let samples =
+                        [(r[0], r[1]), (r[2] - 1, r[1]), (r[0], r[3] - 1), (r[2] - 1, r[3] - 1), (cx, cz), (mx, mz)];
                     let rejected = meet(grown, plaza)
                         || boxes.iter().any(|&b| meet(grown, b))
                         || strips.iter().any(|&b| meet(grown, b))
@@ -252,8 +267,7 @@ pub fn layout_town(
                 let (hi, turn, frontage, r) = pool[(roll(p.seed, stream, n, 0) % pool.len() as u64) as usize];
                 used.insert(hi);
                 let house = &kit.houses[hi];
-                // The middle column of the front face, rounding down along the arm.
-                let mid = world_rect(origin, d, (t + (frontage - 1) / 2, t + (frontage - 1) / 2 + 1), out_dir, (near, near + 1));
+                let mid = front_middle(origin, d, out_dir, t, frontage, near);
                 let level = ground(mid[0], mid[1]);
                 let at = place_at(&house.prefab, turn, r[0], r[1], level);
                 let bounds = placement_bounds(&house.prefab, &at);

@@ -11,6 +11,7 @@ pub const KIT_MAX_SIDE: i32 = 28;
 /// A house's box must have at least this percent of its (x, z) columns holding a block. A sparse box is
 /// a compound or a diagonal strip, and its front lands on nothing. Houses only, not the centre piece.
 pub const KIT_MIN_FILL_PCT: u32 = 60;
+/// A centrepiece's x and z extents are at most this (its footprint on the plaza; any height).
 pub const KIT_CENTRE_MAX_SIDE: i32 = 12;
 /// Fewer houses than this is no kit.
 const KIT_MIN_HOUSES: usize = 3;
@@ -75,8 +76,8 @@ pub fn front_of(prefab: &ResolvedPrefab) -> Facing {
 
 /// Houses: prefabs tagged both `style` and `house` whose x and z extents are within
 /// `KIT_MIN_SIDE..=KIT_MAX_SIDE` and at least `KIT_MIN_FILL_PCT` percent of whose columns hold a block
-/// (others are skipped). Centrepieces: prefabs tagged `statue` or `decor` (any style) whose
-/// extents are at most `KIT_CENTRE_MAX_SIDE`. Both ascending by name. Fewer than 3 houses is an error
+/// (others are skipped). Centrepieces: prefabs tagged `statue` or `decor` (any style) whose x and z
+/// extents are at most `KIT_CENTRE_MAX_SIDE` (a tall statue is fine: the plaza limits the footprint). Both ascending by name. Fewer than 3 houses is an error
 /// naming the style and how many were found.
 pub fn town_kit(set: &PrefabSet, style: &str) -> Result<TownKit, String> {
     let has = |p: &ResolvedPrefab, tag: &str| p.tags.iter().any(|t| t == tag);
@@ -84,7 +85,7 @@ pub fn town_kit(set: &PrefabSet, style: &str) -> Result<TownKit, String> {
     let mut houses = Vec::new();
     let mut centrepieces = Vec::new();
     for p in set.iter() {
-        let (x, y, z) = extents(p);
+        let (x, _, z) = extents(p);
         if has(p, style) && has(p, "house") && in_range(x) && in_range(z) && filled_enough(p) {
             let front = front_of(p);
             let (frontage, depth) = match front {
@@ -93,7 +94,7 @@ pub fn town_kit(set: &PrefabSet, style: &str) -> Result<TownKit, String> {
             };
             houses.push(KitHouse { prefab: p.clone(), front, frontage, depth });
         }
-        if (has(p, "statue") || has(p, "decor")) && x.max(y).max(z) <= KIT_CENTRE_MAX_SIDE {
+        if (has(p, "statue") || has(p, "decor")) && x.max(z) <= KIT_CENTRE_MAX_SIDE {
             centrepieces.push(p.clone());
         }
     }

@@ -106,3 +106,16 @@ fn the_fill_rule_leaves_centrepieces_alone() {
     let kit = town_kit(&set_of(&files), "medieval").unwrap();
     assert_eq!(kit.centrepieces.len(), 1);
 }
+
+/// The plaza footprint limits a centrepiece, not its height: a tall statue qualifies, a wide one not.
+#[test]
+fn a_centrepiece_is_limited_by_its_footprint_only() {
+    assert_eq!(KIT_CENTRE_MAX_SIDE, 12);
+    let mut files: Vec<_> = (0..3).map(|i| floored_box(&format!("ok{i}"), [8, 6, 8], &["medieval", "house"], &[])).collect();
+    files.push(house_box("tall", [5, 20, 5], &["decor"], &[]));
+    files.push(house_box("wide", [13, 5, 5], &["statue"], &[]));
+    files.push(house_box("deep", [5, 5, 13], &["decor"], &[]));
+    let kit = town_kit(&set_of(&files), "medieval").unwrap();
+    let cs: Vec<&str> = kit.centrepieces.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(cs, ["tall"]);
+}

@@ -1524,6 +1524,37 @@ mod tests {
         }
     }
 
+    /// A paint takes a bare column's top block and keeps trees off; not in a pad's box, not under water,
+    /// not on glacier ice.
+    #[test]
+    fn paint_sample_paints_bare_ground_only() {
+        let road = BlockId(7);
+        let paints = [structures::Paint { rect: [0, 0, 4, 4], block: road }];
+        let c = |s: i32, water_top: i32, top: i32| ColSample {
+            s,
+            water_top,
+            top,
+            ice_from: water_top + 1,
+            cover: None,
+            trees: true,
+            unbounded: false,
+        };
+        let bare = c(70, 63, 70);
+        let mut k = bare;
+        assert_eq!(paint_sample(&mut k, &paints, false, 1, 1), Some(road), "bare");
+        assert!(!k.trees);
+        let mut k = bare;
+        assert_eq!(paint_sample(&mut k, &paints, true, 1, 1), None, "in a box");
+        assert!(!k.trees);
+        let mut k = c(58, 63, 58);
+        assert_eq!(paint_sample(&mut k, &paints, false, 1, 1), None, "under water");
+        let mut k = c(70, 63, 74);
+        assert_eq!(paint_sample(&mut k, &paints, false, 1, 1), None, "glacier ice on top");
+        let mut k = bare;
+        assert_eq!(paint_sample(&mut k, &paints, false, 4, 1), None, "outside the paint");
+        assert!(k.trees, "an unpainted column keeps its trees");
+    }
+
     /// The engine's `SINGLE_BLOCK_TREES` (which blocks are trunk wood) names
     /// exactly worldgen's `Species::single_block` species.
     #[test]

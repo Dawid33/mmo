@@ -538,8 +538,9 @@ impl StructureSource for DevRegionSource {
 
 /// Dev placements beside the landing column of ONE region: the FIRST region whose full generation is
 /// to start running, as announced by the server's region-thread generator through
-/// [`StructureSource::region_requested`] (in the debug launch, the embark region, when it is generated
-/// fresh rather than restored from the store);
+/// [`StructureSource::region_requested`] (in a debug launch, the embark region, when it is generated
+/// fresh rather than restored from the store: the server does not announce a forged world's spawn
+/// region, where a fresh session waits before it embarks);
 /// nowhere else. The placements are `dev_placements(entries, origin_of(home), prefabs, ground)`, computed
 /// once, when the first request arrives; later requests are ignored. Until then `placements_in` is empty.
 ///
@@ -611,8 +612,17 @@ impl StructureSource for DevHomeSource {
 
     fn region_requested(&self, rc: game::RegionCoords) {
         self.home.get_or_init(|| {
-            let placements = dev_placements(&self.entries, (self.origin_of)(rc), &self.prefabs, &*self.ground)
-                .expect("checked in DevHomeSource::new");
+            let origin = (self.origin_of)(rc);
+            let placements =
+                dev_placements(&self.entries, origin, &self.prefabs, &*self.ground).expect("checked in DevHomeSource::new");
+            log::info!(
+                "[structures] home region {},{}: {} placement(s) beside column {},{}",
+                rc.x,
+                rc.z,
+                placements.len(),
+                origin[0],
+                origin[1]
+            );
             (rc, placements.into_iter().map(Arc::new).collect())
         });
     }
@@ -713,12 +723,18 @@ impl StructureSource for DevTownSource {
 
     fn region_requested(&self, rc: game::RegionCoords) {
         self.home.get_or_init(|| {
-            let layout = crate::sites::town::layout_town(
-                &self.kit,
-                (self.origin_of)(rc),
-                &self.params,
-                &*self.ground,
-                &*self.wet,
+            let origin = (self.origin_of)(rc);
+            let layout = crate::sites::town::layout_town(&self.kit, origin, &self.params, &*self.ground, &*self.wet);
+            log::info!(
+                "[structures] home region {},{}: a {} town at column {},{}: {} lot(s) laid, {} skipped, {}",
+                rc.x,
+                rc.z,
+                self.kit.style,
+                origin[0],
+                origin[1],
+                layout.lots.len(),
+                layout.skipped,
+                if layout.placements.len() > layout.lots.len() { "a centrepiece" } else { "no centrepiece" }
             );
             let placements = layout.placements.iter().cloned().map(Arc::new).collect();
             (rc, layout, placements)
