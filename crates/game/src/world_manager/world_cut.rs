@@ -710,6 +710,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.send_reliable(ordinal, msg, view);
     }
 
+    /// Test support: `msg` waits for a session with host `ordinal` (`peer_waiting`), as if
+    /// that host had none yet.
+    #[doc(hidden)]
+    pub fn wait_for_session_for_test(&mut self, ordinal: u32, msg: Reliable) {
+        *self.peer_queued.entry(ordinal).or_default() += 1;
+        self.peer_waiting.entry(ordinal).or_default().push(msg);
+    }
+
+    /// Test support: `msg` is held back for host `ordinal` as a leave of cut `cut` holds it
+    /// (`leave_pairs`), never queued.
+    #[doc(hidden)]
+    pub fn hold_for_leave_for_test(&mut self, ordinal: u32, cut: CutId, msg: Reliable) {
+        self.leave_pairs.entry(ordinal).or_insert_with(|| LeavePair { cut, held: Vec::new() }).held.push(msg);
+    }
+
     /// Test support: every crossing in flight with the world cut its sender accounts for it
     /// in (`None`: this host's).
     #[doc(hidden)]

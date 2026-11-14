@@ -68,6 +68,9 @@ struct Watched {
 #[derive(Clone, Debug, Default)]
 pub struct LeaseWatch {
     rows: BTreeMap<u32, Watched>,
+    /// Successful reads observed so far: a declaration the store refused waits for a newer
+    /// one ([`Coordinator::declared`]).
+    reads: u64,
 }
 
 impl LeaseWatch {
@@ -84,6 +87,12 @@ impl LeaseWatch {
             next.insert(row.ordinal, Watched { row: row.clone(), first_received_ms, last_issued_ms: issued_ms });
         }
         self.rows = next;
+        self.reads += 1;
+    }
+
+    /// Successful reads observed so far.
+    pub fn reads(&self) -> u64 {
+        self.reads
     }
 
     /// A read that failed: every observation is forgotten, so a lapse needs a whole lease
@@ -152,6 +161,14 @@ pub(super) struct SuccessionRuns {
     rollback: bool,
     /// The predecessors declared, `(ordinal, boot)`: never lapsed or declared again.
     declared: BTreeSet<(u32, u64)>,
+    /// [`LeaseWatch::reads`] when the declaration in flight was handed out.
+    declared_at_read: u64,
+    /// The store refused the last declaration (`NotLapsed` / `Gone`) as of this read: no
+    /// declaration until a newer read (the same observation would hand out the same batch
+    /// on every runtime pass).
+    refused_at_read: Option<u64>,
+    /// Ids an `Attach` listed before the open successions were known: answered then.
+    listed_early: Vec<(u32, SuccessionId, bool)>,
 }
 
 impl Default for SuccessionRuns {
@@ -163,6 +180,9 @@ impl Default for SuccessionRuns {
             open: BTreeMap::new(),
             rollback: false,
             declared: BTreeSet::new(),
+            declared_at_read: 0,
+            refused_at_read: None,
+            listed_early: Vec::new(),
         }
     }
 }
@@ -199,6 +219,26 @@ impl super::Coordinator {
             );
             self.open_run(s, now_ms);
         }
+        let early = std::mem::take(&mut self.successions.listed_early);
+        for (host, id, adopted) in early {
+            if self.successions.open.contains_key(&id) {
+                self.succession_applied(host, id);
+                if adopted {
+                    self.succession_adopted(host, id);
+                }
+            } else {
+                self.answer_closed(host, id);
+            }
+        }
+    }
+
+    /// Host `host` listed succession `id`, which is not open: it is over. An abandoned one
+    /// came with a world rollback, and a host of the older generation is refused (the
+    /// runtime) or told the generation (`rolled_back_to`) before its `Attach` is applied — so
+    /// an id a host of the current generation holds and that is not open was settled.
+    fn answer_closed(&mut self, host: u32, id: SuccessionId) {
+        log::info!("coordinator: host {host} holds succession {}, which is over: told it settled", id.0);
+        self.push(Target::Host(host), CoordMsg::SuccessionDone { id, settled: true });
     }
 
     /// The world generation the attached hosts run (what a declaration is checked against).
@@ -213,6 +253,9 @@ impl super::Coordinator {
     pub fn declare_wanted(&mut self, now_ms: u64) -> Option<Declare> {
         let r = &self.successions;
         if !r.enabled || !r.known || r.declaring || r.rollback || !r.open.is_empty() {
+            return None;
+        }
+        if r.refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
             return None;
         }
         let lapsed = self.lapsed_undeclared(now_ms);
@@ -235,6 +278,7 @@ impl super::Coordinator {
             lapsed.iter().map(|(h, _)| crate::heir_of(*h, &live).expect("a live host other than the predecessor")).collect();
         log::warn!("coordinator: hosts {lapsed:?} lost their lease: declaring them dead, heirs {heirs:?}");
         self.successions.declaring = true;
+        self.successions.declared_at_read = self.leases.reads();
         Some(Declare { dead: lapsed, heirs, kind: SuccessionKind::Crash })
     }
 
@@ -267,9 +311,11 @@ impl super::Coordinator {
             }
             Declared::NotLapsed(hosts) => {
                 log::info!("coordinator: hosts {hosts:?} beat again (or left) before the declaration: forgotten");
+                self.successions.refused_at_read = Some(self.successions.declared_at_read);
             }
             Declared::Gone(hosts) => {
                 log::info!("coordinator: hosts {hosts:?} were replaced or already succeeded: the declaration is forgotten");
+                self.successions.refused_at_read = Some(self.successions.declared_at_read);
             }
         }
     }
@@ -297,6 +343,9 @@ impl super::Coordinator {
         }
         self.successions.rollback = false;
         self.successions.declaring = false;
+        // A host attaching with an older generation from now on is told this one.
+        self.generation_seen = self.generation_seen.max(generation);
+        self.rolled_back_to = Some(generation);
         self.push(Target::Every, CoordMsg::Generation(generation));
     }
 
@@ -332,6 +381,14 @@ impl super::Coordinator {
     /// (again).
     pub(super) fn succession_attach(&mut self, host: u32, answered: Vec<(SuccessionId, bool)>) {
         for (id, adopted) in answered {
+            if !self.successions.open.contains_key(&id) {
+                if self.successions.known {
+                    self.answer_closed(host, id);
+                } else {
+                    self.successions.listed_early.push((host, id, adopted));
+                }
+                continue;
+            }
             self.succession_applied(host, id);
             if adopted {
                 self.succession_adopted(host, id);
@@ -393,7 +450,8 @@ impl super::Coordinator {
     }
 
     /// The open successions a cut beginning now settles if it commits (every one answered:
-    /// no cut begins otherwise).
+    /// no cut begins otherwise). Pairing: the heir answered `SuccessionAdopted`, so its part
+    /// of that cut carries `WorldCut::adopts` (Task 9) — the store does not check it.
     pub(super) fn successions_to_settle(&self) -> Vec<SuccessionId> {
         self.successions.open.keys().copied().collect()
     }

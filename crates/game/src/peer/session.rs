@@ -89,6 +89,8 @@ pub struct PeerSession {
     reset: bool,
     /// Peer boots whose hello is refused ([`PeerSession::refuse_boot`]).
     refused: std::collections::BTreeSet<u64>,
+    /// Refused boots already logged (one warning per boot).
+    refused_logged: std::collections::BTreeSet<u64>,
 }
 
 impl PeerSession {
@@ -111,6 +113,7 @@ impl PeerSession {
             held: false,
             reset: false,
             refused: std::collections::BTreeSet::new(),
+            refused_logged: std::collections::BTreeSet::new(),
         }
     }
 
@@ -327,7 +330,12 @@ impl PeerSession {
             return;
         }
         if self.refused.contains(&h.boot) {
-            log::warn!("peer {}: hello of boot {}, declared dead: refused", self.peer, h.boot);
+            // Once per boot: a zombie redials every few seconds.
+            if self.refused_logged.insert(h.boot) {
+                log::warn!("peer {}: hello of boot {}, declared dead: refused (and every later one)", self.peer, h.boot);
+            } else {
+                log::debug!("peer {}: hello of boot {}, declared dead: refused", self.peer, h.boot);
+            }
             self.state = Conn::Broken;
             self.volatile_out.clear();
             events.push(PeerEvent::Refused(h.boot));

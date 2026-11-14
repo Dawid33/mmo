@@ -2022,9 +2022,17 @@ fn lapsed_hosts_are_declared_in_one_batch_between_cuts() {
     assert_eq!(d.heirs, vec![game::heir_of(2, &live).unwrap(), game::heir_of(3, &live).unwrap()]);
     assert_eq!(d.kind, game::SuccessionKind::Crash);
     assert_eq!(c.declare_wanted(21), None, "one declaration in flight at a time");
-    // The store found them beating again: forgotten, observed again.
+    // The store found them beating again: forgotten — not declared again before a NEWER
+    // read of the rows (the watch's same observation would loop every runtime pass).
     c.declared(game::Declared::NotLapsed(vec![2, 3]), 22);
-    assert_eq!(c.declare_wanted(23).map(|d| d.dead), Some(vec![(2, 102), (3, 103)]), "asked again");
+    assert_eq!(c.declare_wanted(23), None, "no second declaration without a fresh read");
+    assert_eq!(c.declare_wanted(500), None, "time alone is no fresh read");
+    read_leases(&mut c, 4, &[2, 3], &[], 1_000);
+    assert_eq!(c.declare_wanted(1_000).map(|d| d.dead), Some(vec![(2, 102), (3, 103)]), "a fresh read: asked again");
+    c.declared(game::Declared::Gone(vec![2]), 1_001);
+    assert_eq!(c.declare_wanted(1_002), None, "`Gone` waits for a fresh read too");
+    read_leases(&mut c, 4, &[2, 3], &[], 2_000);
+    assert!(c.declare_wanted(2_000).is_some(), "a vouched row is lapsed at once on the next read");
     c.declare_failed();
     // Under `Rollback` (`Static`) nothing is ever declared.
     let mut r = succeeding(4);
@@ -2251,6 +2259,13 @@ fn restart_resends_open_successions_and_hosts_answer_again() {
     c.handle(0, HostMsg::CutPrepared { cut }, 3 * CUT_EVERY_MS);
     c.handle(1, HostMsg::CutPrepared { cut }, 3 * CUT_EVERY_MS);
     assert_eq!(c.take_decision().expect("decided").settles, vec![s.id]);
+    c.decided(cut, true);
+    commit_routed(&mut c);
+    // A host that missed the `SuccessionDone` (its link dropped) lists the id again: the
+    // coordinator no longer has it open — it was settled — and says so.
+    c.handle(other, attach_listing(other, 3, vec![(s.id, false)]), 4 * CUT_EVERY_MS);
+    let out = commit_routed(&mut c);
+    assert_eq!(succession_done(&out), vec![(Target::Host(other), s.id, true)], "{out:?}");
 }
 
 /// The succeeded host's history-live regions park and its online players go offline, as
@@ -2293,4 +2308,91 @@ fn host_succeeded_parks_its_regions_and_takes_its_players_offline() {
         replies(&out).iter().any(|(_, r)| *r == WorldReply::Returned { site, region }),
         "the fortress of the succeeded host's player is free for a return: {out:?}"
     );
+}
+
+/// A zombie of a succeeded boot (still linked to the coordinator, its process hung or cut
+/// off) changes nothing: its presence, region and attach messages are dropped, a request
+/// of it is refused `WorldUnavailable` (memoised); another boot of the ordinal is a new host.
+#[test]
+fn a_succeeded_boots_messages_are_dropped() {
+    let (mut c, civ, people) = coordinator();
+    c.set_cut_epoch(3);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.set_expected_hosts([0, 1].into_iter().collect());
+    let attach_as = |host: u32, epoch: u64, boot: u64, online: Vec<OnlinePlayer>| HostMsg::Attach {
+        host,
+        epoch,
+        running: Vec::new(),
+        online,
+        generation: 0,
+        boot,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut: None,
+        successions: Vec::new(),
+    };
+    c.handle(0, attach_as(0, 1, 100, Vec::new()), 0);
+    c.handle(1, attach_as(1, 1, 101, Vec::new()), 0);
+    commit(&mut c);
+    read_leases(&mut c, 2, &[1], &[], 10);
+    let d = c.declare_wanted(10).expect("declared");
+    c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(0))), 10);
+    commit(&mut c);
+    let r = rc(14, 0);
+    c.handle(1, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 20);
+    c.handle(1, online(A, None, false), 20);
+    c.handle(1, attach_as(1, 2, 101, vec![report(B, None, false)]), 20);
+    let id = RequestId { host: 1, boot: 101, seq: 1 };
+    let req = WorldRequest::Embark(EmbarkRequest { civ, people: people[0..2].to_vec(), region: rc(8, 0) });
+    c.handle(1, HostMsg::Request { id, player: A, req: req.clone() }, 20);
+    let out = commit_routed(&mut c);
+    assert_eq!(c.region_host(r), None, "the zombie's region start is dropped");
+    assert_eq!((c.online_on(A), c.online_on(B)), (None, None), "its players are not online");
+    assert_eq!(c.claim_of(A), None, "no claim granted to its player");
+    let refused: Vec<&WorldReply> = out
+        .iter()
+        .filter_map(|(to, m)| match m {
+            CoordMsg::Reply { id: i, reply } if *i == id => {
+                assert_eq!(*to, Target::Host(1));
+                Some(reply)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refused, vec![&WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)], "{out:?}");
+    // Memoised: a resend gets the same refusal, never an embark.
+    c.handle(1, HostMsg::Request { id, player: A, req }, 21);
+    assert!(replies(&commit(&mut c)).iter().all(|(_, r)| *r == WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)));
+    // Another boot of the ordinal is a new host.
+    c.handle(1, attach_as(1, 3, 999, vec![report(B, None, false)]), 30);
+    commit(&mut c);
+    assert_eq!(c.online_on(B), Some(1), "a new boot is applied");
+}
+
+/// After a rollback the coordinator runs the new generation: a host attaching with an
+/// older one (it missed the broadcast) is told the generation (and exits) — its attach is
+/// not applied.
+#[test]
+fn a_host_attaching_after_a_rollback_is_told_the_generation() {
+    let mut c = succeeding(3);
+    c.rolled_back(4);
+    commit_routed(&mut c);
+    assert_eq!(c.world_generation(), 4);
+    let stale = HostMsg::Attach {
+        host: 2,
+        epoch: 9,
+        running: Vec::new(),
+        online: vec![report(A, None, false)],
+        generation: 0,
+        boot: 7,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut: None,
+        successions: Vec::new(),
+    };
+    c.handle(2, stale, 50);
+    let out = commit_routed(&mut c);
+    assert!(out.contains(&(Target::Host(2), CoordMsg::Generation(4))), "{out:?}");
+    assert_eq!(c.online_on(A), None, "the stale attach is not applied");
 }

@@ -5892,6 +5892,10 @@ fn owed_to_the_heir(rig: &mut MultiRig) {
     rig.link_down(s, dead);
     let due = world_tick(rig) + 5;
     let (first, second) = (refusal_of(rs, rd, due, OWED[1]), refusal_of(rs, rd, due + 1, OWED[2]));
+    // Wrapped in a cut its sender accounted for it in: unwrapped in `owed`.
+    let wrapped = refusal_of(rs, rd, due + 2, OWED[0]);
+    // Waiting for a session, and held back by a leave: owed all the same, after the session's.
+    let (waiting, held) = (refusal_of(rs, rd, due + 3, OWED[0]), refusal_of(rs, rd, due + 4, OWED[1]));
     let player = FRESH_PLAYER;
     let token = || LOGIN_TOKEN.to_string();
     let orders = [
@@ -5903,11 +5907,16 @@ fn owed_to_the_heir(rig: &mut MultiRig) {
         game::Reliable::SessionEnded { player_token: token(), session_epoch: 1 },
         game::Reliable::PlayerParked { client: P_CLIENT, player },
         game::Reliable::Owns { rows: Vec::new() },
+        game::Reliable::InCut { cut: game::CutId(77), body: Box::new(game::Reliable::Intent(wrapped)) },
         game::Reliable::Intent(second),
     ];
     for msg in orders {
         rig.hosts[s as usize].manager.send_reliable_for_test(dead, msg, false);
     }
+    let m = &mut rig.hosts[s as usize].manager;
+    m.wait_for_session_for_test(dead, game::Reliable::Intent(waiting));
+    m.wait_for_session_for_test(dead, game::Reliable::CutMark { cut: game::CutId(78) });
+    m.hold_for_leave_for_test(dead, game::CutId(79), game::Reliable::InCut { cut: game::CutId(79), body: Box::new(game::Reliable::Intent(held)) });
     // A slime crossing into the dead host's region while the link is down: owed too.
     let y = crate::common::above_floor_y();
     let slime = rig.spawn_slime(rs, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
@@ -5920,14 +5929,15 @@ fn owed_to_the_heir(rig: &mut MultiRig) {
         rig.round();
     }
     assert!(rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, id, _)| *p == dead && *id == slime));
-    rig.items = Some(u64::from(OWED[1] + OWED[2]));
+    rig.items = Some(u64::from(OWED[1] + OWED[2] + OWED[0] + OWED[0] + OWED[1]));
     rig.assert_conserved_world();
     rig.hosts[s as usize].manager.take_login_out();
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     until_applied(rig, &succession);
     let report = &rig.hosts[heir as usize].manager.succession_reports(succession.id).expect("reports")[&s];
-    assert_eq!(report.owed, vec![game::Reliable::Intent(first), game::Reliable::Intent(second)], "the intents, in order");
+    let expected: Vec<game::Reliable> = [first, wrapped, second, waiting, held].into_iter().map(game::Reliable::Intent).collect();
+    assert_eq!(report.owed, expected, "the intents, in order (session, waiting, held), unwrapped");
     assert!(
         report.entries.iter().any(|e| e.subject == game::Subject::Entity(slime) && matches!(e.event, game::JournalEvent::Sent(_))),
         "the transfer is a Sent entry of the journal"
@@ -6063,4 +6073,54 @@ fn zombie_refused(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_boot_is_welcome() {
     sweep("a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_boot_is_welcome", 2, 1, SEEDS / 4, zombie_refused);
+}
+
+/// The heir's inherited land is held until it adopts: after the succession (every survivor
+/// applied) no region of a moved super-region starts on the heir — not for a subscribe, not
+/// for a store placement, not for the slimes crossing into it from the heir's own region
+/// and from the other survivor's — and every arrival is held once (waiting for an owner).
+/// Once the heir adopts (driven here: Task 9's), what waited is delivered, once.
+fn heir_holds_inherited_land(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let dead = rig.owner(chain[1]);
+    let (heir, s) = heir_and_survivor(rig, dead);
+    let s = s.expect("three hosts");
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    until_applied(rig, &succession);
+    let moved: Vec<RegionCoords> = succession.moved.iter().map(|((x, z), _)| RegionCoords::new(*x, *z)).collect();
+    let rd = chain[1];
+    assert!(moved.contains(&rd));
+    let y = crate::common::above_floor_y();
+    let mut slimes = Vec::new();
+    for h in [heir, s] {
+        let from = chain.iter().copied().find(|rc| *rc != rd && rig.owner(*rc) == h).expect("its region");
+        let id = rig.spawn_slime(from, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
+        rig.round();
+        assert!(push_over(rig, id, from, rd), "the slime is in {from:?}");
+        slimes.push(id);
+    }
+    rig.hosts[heir as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), crate::common::rig::CLIENT));
+    assert_eq!(rig.hosts[heir as usize].manager.place_spawn(FRESH_PLAYER, Some(rd)), game::Placement::Wait, "a placement waits");
+    for _ in 0..CROSS_ROUNDS {
+        rig.cut_round();
+        let running = rig.hosts[heir as usize].manager.running_regions();
+        assert!(!running.iter().any(|rc| moved.contains(rc)), "the heir started an inherited region: {running:?} (seed {})", rig.seed);
+    }
+    let waiting: Vec<game::EntityId> = rig.hosts[heir as usize].manager.unowned_waiting_ids().into_iter().map(|(_, id)| id).collect();
+    for id in &slimes {
+        assert_eq!(waiting.iter().filter(|w| *w == id).count(), 1, "{id:?} waits on the heir: {waiting:?}");
+    }
+    rig.hosts[heir as usize].manager.adopt_inherited(succession.id);
+    rig.round();
+    assert!(rig.hosts[heir as usize].manager.unowned_waiting_ids().is_empty(), "delivered once adopted");
+    for id in &slimes {
+        assert_eq!(live_count(rig, *id), 1, "{id:?} is held once");
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_heir_holds_inherited_land_until_it_adopts() {
+    sweep("an_heir_holds_inherited_land_until_it_adopts", 3, 1, SEEDS / 4, heir_holds_inherited_land);
 }

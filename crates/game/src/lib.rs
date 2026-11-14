@@ -111,7 +111,7 @@ pub use migrate::Carried;
 pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{
-    heir_of, ownership_from_env, ownership_from_values, rendezvous_owner, super_region_of, AllInOne, CrashPolicy, Directory,
+    crash_policy_from_value, heir_of, ownership_from_env, ownership_from_values, rendezvous_owner, super_region_of, AllInOne, CrashPolicy, Directory,
     Declared, Owner, Ownership, PgClaim, Static, Succession, SuccessionId, SuccessionKind, SuperRegion, DEFAULT_SUPER_REGION_REGIONS, HOST_DEAD, HOST_HEARTBEAT_MS, HOST_LEASE_MS,
     HOST_LIVE, NO_OWNER, SUCCESSION_DEADLINE_MS,
 };

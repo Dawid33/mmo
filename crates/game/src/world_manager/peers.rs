@@ -121,7 +121,16 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Who simulates `rc`, as this host knows it.
     pub fn owner_of(&self, rc: RegionCoords) -> crate::Owner {
-        self.ownership.0.owner_of(crate::super_region_of(rc, self.ownership.1))
+        self.owner_of_sr(crate::super_region_of(rc, self.ownership.1))
+    }
+
+    /// Who simulates super-region `sr`, as this host knows it — `Unknown` for one it
+    /// inherits by a succession it has not adopted yet (`succession.rs`, `inheriting`).
+    pub(super) fn owner_of_sr(&self, sr: crate::SuperRegion) -> crate::Owner {
+        if self.inheriting.contains_key(&sr) {
+            return crate::Owner::Unknown;
+        }
+        self.ownership.0.owner_of(sr)
     }
 
     /// The host that simulates `rc` (this one included); `None` while nobody owns it or
@@ -918,6 +927,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// directory read. Nothing for an owned region (`AllInOne` / `Static` never get here).
     pub(super) fn note_unowned(&mut self, rc: RegionCoords) {
         let sr = crate::super_region_of(rc, self.ownership.1);
+        if self.inheriting.contains_key(&sr) {
+            // This host's already (a succession not adopted yet): nothing to claim or read.
+            return;
+        }
         match self.ownership.0.owner_of(sr) {
             crate::Owner::Free => {
                 self.claims_wanted.insert(sr);
@@ -1064,10 +1077,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             .unowned_waiting
             .keys()
             .copied()
-            .filter(|sr| matches!(self.ownership.0.owner_of(*sr), crate::Owner::Me | crate::Owner::Host(_)))
+            .filter(|sr| matches!(self.owner_of_sr(*sr), crate::Owner::Me | crate::Owner::Host(_)))
             .collect();
         for sr in ready {
-            let owner = self.ownership.0.owner_of(sr);
+            let owner = self.owner_of_sr(sr);
             let list = self.unowned_waiting.remove(&sr).unwrap_or_default();
             log::debug!("[server] super-region {sr:?} is {owner:?}: {} message(s) that waited for it go on", list.len());
             for w in list {
@@ -1395,7 +1408,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             PeerEvent::Volatile(v) => self.peer_volatile(from, v),
             // A boot declared dead (a succession): its connection is closed for a fresh one.
             PeerEvent::Refused(boot) => {
-                log::warn!("[server] host {from}'s boot {boot:#x} was declared dead: its hello is refused");
+                // The session warned once per boot.
+                log::debug!("[server] host {from}'s boot {boot:#x} was declared dead: its connection is closed");
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.link.close();
                 }

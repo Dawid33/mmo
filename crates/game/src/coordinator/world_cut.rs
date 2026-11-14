@@ -513,6 +513,8 @@ impl Coordinator {
             Vec::new()
         };
         let generation = self.generation_seen;
+        // Only answered successions (every survivor applied, the heir ADOPTED: its part
+        // carries `adopts`, Task 9) — none begins otherwise; the store does not check it.
         let settles = self.successions_to_settle();
         log::info!(
             "coordinator: world cut {} at tick {tick} (lead {}) of hosts {hosts:?}, leaving {leaving:?}",
@@ -557,6 +559,13 @@ impl Coordinator {
             .copied()
             .filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h))
             .collect()
+    }
+
+    /// Whether a message of `host` comes from a succeeded boot of it (`boot`: the boot an
+    /// `Attach` names; otherwise the boot of its latest `Attach`): a zombie, ignored.
+    pub(super) fn from_succeeded_boot(&self, host: u32, boot: Option<u64>) -> bool {
+        let Some(&dead) = self.cuts.succeeded.get(&host) else { return false };
+        boot.or_else(|| self.cuts.boots.get(&host).copied()) == Some(dead)
     }
 
     pub(super) fn is_attached(&self, host: u32) -> bool {

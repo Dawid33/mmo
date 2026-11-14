@@ -472,8 +472,10 @@ pub fn run_coordinator() -> ServerExit {
     }
     // `claim` (R4): a crashed host's land is inherited by one heir — the coordinator declares
     // and runs the successions. `static`: a crash rolls the world back (R3), never declared.
-    let claim = std::env::var(game::ownership::OWNERSHIP_ENV).is_ok_and(|v| v.trim() == "claim");
-    let policy = if claim && hosts > 1 { game::CrashPolicy::Succession } else { game::CrashPolicy::Rollback };
+    // The coordinator has no ordinal of its own: the policy from `VOXEL_OWNERSHIP` alone.
+    let declared = game::crash_policy_from_value(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref())
+        .unwrap_or_else(|e| fatal(e));
+    let policy = if hosts > 1 { declared } else { game::CrashPolicy::Rollback };
     if policy == game::CrashPolicy::Succession {
         log::info!("[coordinator] ownership `claim`: a crashed host's land goes to an heir (successions)");
     }

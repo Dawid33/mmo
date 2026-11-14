@@ -1233,7 +1233,13 @@ impl CoordinatorRuntime {
             };
             p.declare_rx = None;
             match answer {
-                Ok(declared) => self.core.declared(declared, now),
+                Ok(declared) => {
+                    if let game::Declared::Done(list) = &declared {
+                        let dead: Vec<(u32, u64)> = list.iter().map(|s| (s.predecessor, s.predecessor_boot)).collect();
+                        self.close_succeeded(&dead);
+                    }
+                    self.core.declared(declared, now);
+                }
                 Err(StoreError::Fenced { .. }) => return Err(()),
                 Err(e) => {
                     // A lock timeout behind a staged part is a retry, not an error.
@@ -1251,6 +1257,22 @@ impl CoordinatorRuntime {
             }
         }
         Ok(())
+    }
+
+    /// The live connections of hosts just succeeded (`(ordinal, boot)`), if a zombie of that
+    /// boot is still connected (hung, or cut off from the store only): closed, its messages
+    /// ignored from now on. A fresh hello of it is refused by [`Routes::admit`] (its `hosts`
+    /// row is `HOST_DEAD` now), and the core drops whatever of it is still queued.
+    fn close_succeeded(&mut self, dead: &[(u32, u64)]) {
+        let Links::Listener(l) = &mut self.links.links else { return };
+        for &(ordinal, boot) in dead {
+            let Some(peer) = l.routes.peer_of(ordinal) else { continue };
+            if l.routes.boots.get(&peer) == Some(&boot) {
+                log::warn!("[coordinator] host {ordinal} (boot {boot:#x}) was succeeded: its connection is closed");
+                l.routes.refuse(peer);
+                l.senders.close(peer);
+            }
+        }
     }
 
     /// Settle the save in flight (if answered) and start the next one when due. `Err`:

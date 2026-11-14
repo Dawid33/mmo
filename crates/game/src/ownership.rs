@@ -427,6 +427,17 @@ impl Ownership for PgClaim {
     }
 }
 
+/// What a host crash costs a world run with `VOXEL_OWNERSHIP` = `ownership` (unset / empty:
+/// `allinone`): `claim` → `Succession`, `allinone` / `static` → `Rollback`. For a process
+/// that has no ordinal of its own (the coordinator); hosts ask their [`Ownership::policy`].
+pub fn crash_policy_from_value(ownership: Option<&str>) -> Result<CrashPolicy, String> {
+    match ownership.map(str::trim).filter(|v| !v.is_empty()).unwrap_or("allinone") {
+        "allinone" | "static" => Ok(CrashPolicy::Rollback),
+        "claim" => Ok(CrashPolicy::Succession),
+        other => Err(format!("{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim")),
+    }
+}
+
 /// The policy from the three environment values (unset / empty = absent).
 pub fn ownership_from_values(
     ownership: Option<&str>,

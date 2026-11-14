@@ -208,7 +208,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             let SuccessionReportIn { base_cut, entries, owed } = report;
             self.queue_to_peer(heir, Reliable::SuccessionReport { id: s.id, base_cut, entries, owed });
         }
-        // 4. Re-route.
+        // 4. Re-route. The heir holds what it inherits until it adopts it (Task 9): its own
+        // directory row is right (owner = itself, the new epoch), but `owner_of` answers
+        // `Unknown` for those super-regions meanwhile — no region of them starts from the
+        // store before the survivors' journals are resolved.
+        if heir == me {
+            for &(sr, _) in &s.moved {
+                self.inheriting.insert(sr, s.id);
+            }
+        }
         if let Some(directory) = self.ownership.0.directory_mut() {
             for &(sr, epoch) in &s.moved {
                 directory.set(sr, Some(heir), epoch);
@@ -270,6 +278,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A survivor's report of succession `id` (`from`; this host is its heir): kept for the
     /// heir's resolution (Task 9).
     fn file_succession_report(&mut self, from: u32, id: SuccessionId, report: SuccessionReportIn) {
+        if self.successions_done.contains(&id) {
+            log::warn!("[server] succession {}: host {from}'s report came after it was over; dropped", id.0);
+            return;
+        }
         if let Some(run) = self.successions.get(&id) {
             if run.order.heir != self.ordinal() {
                 log::error!("[server] succession {}: host {from}'s report came here; the heir is {}", id.0, run.order.heir);
@@ -298,10 +310,15 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The coordinator's [`crate::CoordMsg::SuccessionDone`]: the run and its reports end.
     pub(super) fn succession_done(&mut self, id: SuccessionId, settled: bool) {
-        if self.successions.remove(&id).is_some() || self.succession_reports.remove(&id).is_some() {
+        let run = self.successions.remove(&id);
+        let reports = self.succession_reports.remove(&id);
+        if run.is_some() || reports.is_some() {
             log::info!("[server] succession {} {}", id.0, if settled { "settled" } else { "abandoned" });
         }
-        self.succession_reports.remove(&id);
+        // Nothing of it is held any more (Task 9 adopts before the settle; an abandoned one
+        // ends with this process).
+        self.inheriting.retain(|_, s| *s != id);
+        self.successions_done.insert(id);
     }
 
     /// The successions this host answered (`(id, adopted)`), for its `Attach`. Adopting is
@@ -338,6 +355,26 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Every report held (the heir's), by succession and survivor.
     pub fn all_succession_reports(&self) -> &BTreeMap<SuccessionId, BTreeMap<u32, SuccessionReportIn>> {
         &self.succession_reports
+    }
+
+    /// The heir adopted succession `id` (Task 9 calls this once resolved and loaded): the
+    /// super-regions it inherits by it are its own from now on.
+    /// It lifts the `inheriting` mask of those super-regions and delivers what waited for them
+    /// (`flush_unowned`), then retries held spawn orders.
+    pub fn adopt_inherited(&mut self, id: SuccessionId) {
+        let before = self.inheriting.len();
+        self.inheriting.retain(|_, s| *s != id);
+        let lifted = before - self.inheriting.len();
+        if lifted > 0 {
+            log::info!("[server] succession {}: {lifted} inherited super-region(s) adopted", id.0);
+        }
+        self.flush_unowned();
+        self.retry_held_spawns();
+    }
+
+    /// The super-regions this host inherits and has not adopted yet, with their succession.
+    pub fn inheriting(&self) -> &BTreeMap<crate::SuperRegion, SuccessionId> {
+        &self.inheriting
     }
 
     /// Test support: whether this host's session with host `ordinal` is reachable now.

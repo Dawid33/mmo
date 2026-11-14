@@ -384,8 +384,6 @@ impl InlineSpawner {
         }
     }
 
-    /// Swap the schedule on a live spawner (`None` = back to lockstep), for
-    /// harnesses that construct their server before choosing one.
     /// Test support: the world tick is `tick` from now on (a host process started late
     /// into a running world: its clock is the world's, not zero).
     pub fn set_world_tick(&mut self, tick: crate::Tick) {
@@ -398,6 +396,8 @@ impl InlineSpawner {
         self.fail_starts.insert(rc);
     }
 
+    /// Swap the schedule on a live spawner (`None` = back to lockstep), for
+    /// harnesses that construct their server before choosing one.
     pub fn set_schedule(&mut self, schedule: Option<InlineSchedule>) {
         self.schedule = schedule;
         self.late.clear();
@@ -1281,6 +1281,15 @@ pub struct WorldManager<S: RegionSpawner> {
     succession_reports: BTreeMap<crate::SuccessionId, BTreeMap<u32, SuccessionReportIn>>,
     /// When a succession waiting for its base cut was last logged.
     succession_wait_logged_ms: Option<u64>,
+    /// The heir's: the super-regions it inherits by a succession it has not adopted yet
+    /// (`succession.rs`). The directory says they are this host's; [`Self::owner_of`] answers
+    /// `Unknown` for them until [`Self::adopt_inherited`], so every "owner unreachable" path
+    /// applies (a player is clamped, an intent refused back, a transfer and a placement wait)
+    /// and no region of them starts from the store before the survivors' journals resolve it.
+    inheriting: BTreeMap<crate::SuperRegion, crate::SuccessionId>,
+    /// Successions over here ([`crate::CoordMsg::SuccessionDone`]): a report of one that
+    /// arrives late is dropped.
+    successions_done: BTreeSet<crate::SuccessionId>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1436,6 +1445,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             succeeded_peers: BTreeMap::new(),
             succession_reports: BTreeMap::new(),
             succession_wait_logged_ms: None,
+            inheriting: BTreeMap::new(),
+            successions_done: BTreeSet::new(),
         }
     }
 

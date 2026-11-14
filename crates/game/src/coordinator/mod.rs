@@ -168,6 +168,9 @@ pub struct Coordinator {
     leases: LeaseWatch,
     /// The successions declared and not settled yet (`succession.rs`).
     successions: SuccessionRuns,
+    /// The generation of the last world rollback this coordinator ordered: a host attaching
+    /// with an older one is told it ([`CoordMsg::Generation`]) and not applied.
+    rolled_back_to: Option<u64>,
 }
 
 impl Coordinator {
@@ -203,6 +206,7 @@ impl Coordinator {
             cuts: WorldCuts::default(),
             leases: LeaseWatch::default(),
             successions: SuccessionRuns::default(),
+            rolled_back_to: None,
         };
         c.push_view(Target::Every);
         c
@@ -268,6 +272,22 @@ impl Coordinator {
     pub fn handle(&mut self, host: u32, msg: HostMsg, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
+        // A zombie of a succeeded boot (R4) changes nothing: its state-changing requests are
+        // refused (memoised), everything else is dropped.
+        let attach_boot = match &msg {
+            HostMsg::Attach { boot, .. } => Some(*boot),
+            _ => None,
+        };
+        if self.from_succeeded_boot(host, attach_boot) {
+            return self.zombie_message(host, msg);
+        }
+        // A host of a generation older than the coordinator's rollback: told, not applied.
+        if let HostMsg::Attach { generation, .. } = &msg {
+            if let Some(g) = self.rolled_back_to.filter(|g| generation < g) {
+                log::warn!("coordinator: host {host} attaches with generation {generation}, the world rolled back to {g}");
+                return self.push(Target::Host(host), CoordMsg::Generation(g));
+            }
+        }
         match msg {
             HostMsg::Attach {
                 host: named,
@@ -365,6 +385,20 @@ impl Coordinator {
             HostMsg::SuccessionAdopted { id } => self.succession_adopted(host, id),
         }
         self.push_directives();
+    }
+
+    /// A message of a succeeded boot of `host` (a zombie): a state-changing request is
+    /// refused `WorldUnavailable` (memoised, as a settle of it would be); anything else is
+    /// dropped — its presence, regions and attaches would point the coordinator's view at a
+    /// dead host again.
+    fn zombie_message(&mut self, host: u32, msg: HostMsg) {
+        match msg {
+            HostMsg::Request { id, req, .. } | HostMsg::Settle { id, req } if req.changes_state() => {
+                log::warn!("coordinator: a request of host {host}'s succeeded boot: refused");
+                self.settle(host, id, req);
+            }
+            other => log::debug!("coordinator: a message of host {host}'s succeeded boot dropped: {other:?}"),
+        }
     }
 
     /// A lifecycle message of `host` about `rc`, which another host announced since: stale,
