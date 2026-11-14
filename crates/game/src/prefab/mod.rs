@@ -3,6 +3,7 @@
 
 pub mod codec;
 pub mod file;
+pub mod resolve;
 pub mod shapes;
 pub mod turn;
 
@@ -15,4 +16,8 @@ pub use codec::{
 pub use file::{
     FileBox, FileCarve, FileShape, FileShaped, GroundFit, ImportInfo, Marker, PrefabError, PrefabFile, PrefabMeta,
     PREFAB_FORMAT,
+};
+pub use resolve::{
+    prefab_name_key, resolve, Cell, Problem, ResolvedPrefab, ResolvedShape, Trust, PREFAB_BUCKET_BLOCKS,
+    UNTRUSTED_MAX_EXTENT, UNTRUSTED_MAX_ITEMS,
 };

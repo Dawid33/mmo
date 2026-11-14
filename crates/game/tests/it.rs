@@ -75,6 +75,7 @@ mod prefab_shapes;
 mod play_region;
 mod random_ops;
 mod prefab_file;
+mod prefab_resolve;
 mod region_coords;
 mod region_from_chunks;
 mod region_from_columns;

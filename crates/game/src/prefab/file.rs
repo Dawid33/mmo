@@ -5,6 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::resolve::Problem;
 use super::Shape;
 
 pub const PREFAB_FORMAT: u16 = 2;
@@ -114,8 +115,7 @@ pub enum PrefabError {
     NotAPrefab,
     TooLarge,
     Corrupt,
-    /// Becomes `Vec<Problem>` in Task 4.
-    Problems(Vec<String>),
+    Problems(Vec<Problem>),
     Io(String),
 }
 
@@ -126,7 +126,7 @@ impl fmt::Display for PrefabError {
             PrefabError::NotAPrefab => write!(f, "not a prefab file"),
             PrefabError::TooLarge => write!(f, "prefab file too large"),
             PrefabError::Corrupt => write!(f, "prefab file is corrupt"),
-            PrefabError::Problems(p) => write!(f, "prefab has {} problem(s): {}", p.len(), p.join("; ")),
+            PrefabError::Problems(p) => write!(f, "prefab has {} problem(s): {}", p.len(), p.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("; ")),
             PrefabError::Io(s) => write!(f, "prefab i/o error: {s}"),
         }
     }
