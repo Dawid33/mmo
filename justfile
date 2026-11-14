@@ -1158,14 +1158,18 @@ coordinator hosts="1": (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3
 # Several hosts need the login service (jwt, world `dev`); one host keeps VOXEL_AUTH as set.
 # Refuses (exit 1) what `_dev-hosts-check` refuses, also under `--dry-run`.
 host_env_sh := '''
-o=$1 n=$2 dir=$4
+o=$1 n=$2 dir=$4 own=${6:-claim}
+case "$own" in
+    claim | static) ;;
+    *) echo "dev host: ownership is claim or static (the sixth word of just host), not $own" >&2; exit 1 ;;
+esac
 case "$o/$n/$3" in
     *[!0-9/]* | /* | */ | *//*) echo "dev host: ordinal, hosts and delay are whole numbers, given positionally (just host 1 2, not hosts=2)" >&2; exit 1 ;;
 esac
 if [ "$n" -lt 1 ] || [ "$n" -gt 6 ] || [ "$o" -ge "$n" ]; then
     echo "dev host: need 0 <= ordinal < hosts <= 6 (host 6's peer port would be host 4's UDP port)" >&2; exit 1
 fi
-printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=claim VOXEL_HOST_ORDINAL=$o VOXEL_HOSTS=$n VOXEL_WORLD_DB=$5 \
+printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=$own VOXEL_HOST_ORDINAL=$o VOXEL_HOSTS=$n VOXEL_WORLD_DB=$5 \
     VOXEL_SERVICE_TOKEN_FILE=$dir/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
     VOXEL_SERVER_PORT=$((6466 + 10 * o)) VOXEL_WT_PORT=$((6467 + 10 * o)) VOXEL_PEER_BIND=127.0.0.1:$((6500 + o)) \
     VOXEL_PEER_LINK_DELAY_MS=$3
@@ -1200,7 +1204,9 @@ _dev-hosts-check ordinal hosts delay min_hosts:
     fi
 
 # A region host (VOXEL_ROLE=host) of the dev Postgres world: host `ordinal` of `hosts`
-# (claim ownership: super-regions claimed on demand by the preferred live host), dialing the coordinator at 127.0.0.1:6480 (started first or later —
+# (ownership `claim` unless the sixth word is `static`, the old fixed layout, e.g.
+# `just host 1 2 0 static`: super-regions claimed on demand by the preferred live host, a
+# killed host's land moving to an heir for good), dialing the coordinator at 127.0.0.1:6480 (started first or later —
 # it waits for the pin). Host n takes clients on UDP 6466 + 10n (WebTransport 6467 + 10n)
 # and its peer hosts on 127.0.0.1:6500 + n; `delay` holds every outgoing peer frame that
 # many ms (measurement only). One host (the defaults): as `just server` on 6466, local
@@ -1208,12 +1214,15 @@ _dev-hosts-check ordinal hosts delay min_hosts:
 # login service's SpawnPlayer / Kick on 127.0.0.1:6490). Several hosts (`hosts` > 1, see
 # `dev-r3`, which runs them all): jwt with the login service, pins under target/dev-r3/,
 # and only host 0 binds the login link. Play region size.
-host ordinal="0" hosts="1" delay="0": (_dev-hosts-check ordinal hosts delay "1") (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
+# Ownership policy $6 (default `claim`; `static` is the old fixed layout, nothing else is
+# accepted): under `claim` a killed host's land goes to an heir and does not come back by
+# itself (a restarted host waits until its succession is settled and returns owning nothing).
+host ordinal="0" hosts="1" delay="0" ownership="claim": (_dev-hosts-check ordinal hosts delay "1") (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
-    env {{ shell(host_env_sh, ordinal, hosts, delay, if hosts == "1" { dev_r2_dir } else { dev_r3_dir }, dev_database_url) }} \
+    env {{ shell(host_env_sh, ordinal, hosts, delay, if hosts == "1" { dev_r2_dir } else { dev_r3_dir }, dev_database_url, ownership) }} \
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The split world with login: the dev Keycloak (`kc-up`) and Postgres (`pg-up`), the `dev-login`
@@ -1329,7 +1338,10 @@ go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 # own login state, pins and logs under target/go-nogo-r3/: never the dev world `mmo`,
 # target/dev-r3 or target/dev-login. Refuses to start while anything holds the dev stack's
 # ports (a `dev-r3`, `dev-r2`, `dev-login`, `run-online` or `server` up). Runs the two-host
-# stack through scripts/dev_r3.sh (release binaries; every peer frame held `delay` ms), then
+# stack through scripts/dev_r3.sh (release binaries, `claim` ownership like `dev-r3`: on the fresh
+# database with both hosts up the claims lay out exactly like `game::rendezvous_owner`, which the
+# autopilot's seam pick uses; a succession during the run moves the seam, so a host or
+# coordinator log that shows one makes the run INVALID; every peer frame held `delay` ms), then
 # `client debug online` twice under the autopilot shuttle, `seconds` each: across a seam
 # between two region threads of one host (`boundary=thread`), then across a seam between
 # the two hosts (`boundary=host`). Stops the stack (each host's leave cut; Ctrl-C at any
@@ -1345,6 +1357,9 @@ go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 # lost its session early or never had its state hash checked, or a group has < 20 crossings.
 # Exit code: 0 GO, 1 NO-GO, 2 INVALID, anything else: no verdict (the recipe failed).
 # A run that did not stop cleanly (e.g. a second Ctrl-C) leaves a dirty host row: the next
+# Every host runs under `claim` ownership: a host that is killed (`kill -9`) loses its lease,
+# its land moves to an heir (a succession) and does NOT come back by itself — the restarted
+# host waits until its succession is settled and then owns nothing.
 # run says so at its start and is likely INVALID (a host restarts once) — run it again.
 # Arguments are positional: `just go-nogo-r3 5`, `just adapter=6700 go-nogo-r3 2 90`.
 # Go / no-go for host seams: thread-seam vs host-seam shuttle on 2 hosts at `delay` ms.

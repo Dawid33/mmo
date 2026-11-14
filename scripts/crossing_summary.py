@@ -208,6 +208,8 @@ STACK_FAILURES = ("exited", "giving up", "stopped (failed)", "ended (", "killing
 # After the recipe's own stop: what a clean stop never says (a host that could not save its
 # leave cut, e.g. one that hung, is KILLed at the deadline).
 STACK_STOP_FAILURES = ("killing ", "could not confirm", "still running", "stopped (failed)")
+# What a host or the coordinator logs when a host's land is taken over (a run with one is INVALID).
+SUCCESSION_MARKS = ("[server] succession ", "declaring them dead")
 # A host's last `[server] window=` line may be at most this many seconds older than the
 # end of the host-seam shuttle (`autopilot_done`): 3 report windows (5 s each).
 HOST_SILENT_LIMIT_S = 15
@@ -331,6 +333,14 @@ def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, s
             reasons.append(f"{name}: the host started {starts} times (restarted during the run)")
         if not any("[server] window=" in line for line in text):
             reasons.append(f"{name}: no [server] counters line: conservation unchecked on that host")
+    for name, lines in {**server_logs, **(aux_logs or {})}.items():
+        # A takeover moves the land, so the seam the autopilot picked is not between the
+        # hosts it assumed: every succession line a host prints starts `[server] succession `
+        # (world_manager/succession.rs), the coordinator's declaration says `declaring them dead`
+        # (coordinator/succession.rs).
+        taken = next((line for line in clean(lines) if any(w in line for w in SUCCESSION_MARKS)), None)
+        if taken:
+            reasons.append(f"{name}: a succession happened (the land moved during the run): {taken.strip()[:160]}")
     for name, lines in {**server_logs, **(aux_logs or {})}.items():
         panic = next((line for line in clean(lines) if "panicked at" in line), None)
         if panic:

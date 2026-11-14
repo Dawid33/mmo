@@ -587,6 +587,9 @@ pub fn pick_loaded_seam(
     best.map(|(_, _, seam)| seam)
 }
 
+// The static hash is right for the probe: `just go-nogo-r3` forges a fresh database and starts both
+// hosts, so under `claim` ownership the claims lay out exactly like `rendezvous_owner` (a succession
+// during the run moves the seam; `crossing_summary.py --go-nogo` marks such a run INVALID).
 pub fn pick_seam(home: RegionCoords, hosts: u32, s: u32, want_host_seam: bool) -> (RegionCoords, RegionCoords) {
     let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
     let mut radius = PICK_SEAM_RADIUS;

@@ -6,7 +6,9 @@
 # its own (setsid: a terminal Ctrl-C reaches only this script), then watches them:
 #
 #   - a host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137
-#     (SIGKILL, e.g. `kill -9`) is started again after a back-off, at most
+#     (SIGKILL, e.g. `kill -9`) is started again after a back-off — but under `claim` ownership
+#     (what the hosts run) a killed host's land has moved to an heir by then and does NOT come
+#     back by itself: the restarted host waits until its succession is settled and owns nothing; at most
 #     DEV_R3_RESTART_MAX times within DEV_R3_RESTART_WINDOW_SECS; any other exit, or one
 #     restart too many, ends its loop — and never a restart once the stack is stopping;
 #   - when any member ends on its own (login, the coordinator, a host loop) the stack goes
@@ -52,6 +54,9 @@ pin_wait_secs=${DEV_R3_PIN_WAIT_SECS:-180}
 # game::WORLD_CUT_DEADLINE_MS (30 s) + server::EXIT_SAVE_TIMEOUT (30 s) after it began:
 # 90 s at worst, + 5 s margin. KILLing a host before that leaves its row dirty (the world
 # rolls back at its return); the usual leave takes ~3 s, and a second signal kills at once.
+# (Under `claim` ownership the leave waits for no heir: HEIR_WAIT_MS, 30 s, only delays giving
+# the land away after the host is gone; a crash's HOST_LEASE_MS 10 s and SUCCESSION_DEADLINE_MS
+# 30 s run on the survivors, not on the stopping host. Rechecked against the constants: 95 s holds.)
 host_stop_secs=${DEV_R3_HOST_STOP_SECS:-95}
 stop_secs=${DEV_R3_STOP_SECS:-60}
 restart_max=${DEV_R3_RESTART_MAX:-3}

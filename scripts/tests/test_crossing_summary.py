@@ -197,6 +197,17 @@ class GoNoGo(unittest.TestCase):
         panicked = CLIENT_OK + ["thread 'main' panicked at src/x.rs:1:1"]
         self.assertEqual(self.run_verdict(*good, clients={"thread run": panicked, "host run": CLIENT_OK})[0], "INVALID")
 
+    def test_invalid_when_a_succession_happened(self):
+        good = [crossing(0, 1.0, 2) for _ in range(30)], [crossing(1, 1.0, 2) for _ in range(30)]
+        self.assertEqual(self.run_verdict(*good)[0], "GO")
+        line = "WARN [server] succession 1: host 1 (boot 0x5) is dead, heir 0, base cut 3"
+        word, reasons, _ = self.run_verdict(*good, servers={"host-0.log": SERVER_OK + [line], "host-1.log": SERVER_OK})
+        self.assertEqual(word, "INVALID")
+        self.assertIn("succession", reasons[0])
+        declared = ["WARN coordinator: hosts [(1, 5)] lost their lease: declaring them dead, heirs [0]"]
+        aux = {"coordinator.log": ["INFO [server] role: coordinator"] + declared}
+        self.assertEqual(self.run_verdict(*good, aux=aux)[0], "INVALID")
+
     def test_invalid_when_a_host_panicked(self):
         panicked = SERVER_OK[:2] + ["thread 'region (3,4)' panicked at crates/game/src/x.rs:1:1:"] + SERVER_OK[2:]
         word, reasons, _ = self.run_verdict(*self.good(), servers={"host-0.log": SERVER_OK, "host-1.log": panicked})
