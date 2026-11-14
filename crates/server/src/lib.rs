@@ -957,11 +957,17 @@ pub fn run() -> claims::ServerExit {
     // Region starts generate on their own thread; the manager's copy of the
     // generator is only reached by paths that stay synchronous by design.
     let region_gen_cache = gen_cache.clone();
+    // A world map is installed exactly for a forged world (from the store; procedural: none).
+    let forged_world = world_map.is_some();
     let region_generator: region_threads::SharedRegionGenerator =
         std::sync::Arc::new(move |rc| {
-            // The first region to start running is the home region of a `home=` dev source; far-terrain
-            // and halo generation must not decide it, so only this generator announces.
-            worldgen::structures::active().region_requested(rc);
+            // The first region announced is the home region of a `home=` / `town=` dev source; far-terrain
+            // and halo generation must not decide it, so only this generator announces. In a forged world
+            // the spawn region, where a fresh session waits before it embarks, is never announced: the
+            // home is the embark region (`dev_structures::announces_region`).
+            if dev_structures::announces_region(rc, forged_world) {
+                worldgen::structures::active().region_requested(rc);
+            }
             region_gen_cache.generate_cached(rc, world_seed, materials)
         });
     // The world clock: ms since `start` (the manager's `now_ms` base) -> world
