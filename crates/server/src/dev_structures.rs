@@ -6,11 +6,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use game::RegionCoords;
-use worldgen::structures::{dev_placements, install, parse_dev_spec, DevHomeSource, DevRegionSource, StructureList, StructureSource};
+use worldgen::sites::{kit::town_kit, town::TownParams};
+use worldgen::structures::{
+    dev_placements, install, parse_dev_spec, DevHomeSource, DevRegionSource, DevTownSource, StructureList, StructureSource,
+};
 
 /// Extra prefab directories, `:`-separated, loaded together with `assets/prefabs`.
 pub const PREFAB_DIRS_ENV: &str = "VOXEL_PREFAB_DIRS";
-/// `<rx>,<rz>=<spec>`: the prefabs of `<spec>` (see `parse_dev_spec`) beside region (rx, rz)'s landing.
+/// `<rx>,<rz>=<spec>`: the prefabs of `<spec>` (see `parse_dev_spec`) beside region (rx, rz)'s landing;
+/// `all=<spec>` / `home=<spec>`: the same beside every region's / the first region generated's landing;
+/// `town=<style>[:<arms>[:<arm_len>]]`: a town (see [`parse_town_spec`]) beside the first region generated's.
 pub const DEV_STRUCTURES_ENV: &str = "VOXEL_DEV_STRUCTURES";
 
 /// Where a region's landing column is (region-local block x, z), if the world map says.
@@ -28,6 +33,9 @@ pub enum DevStructures {
     /// `home=<spec>`: the spec's prefabs beside the landing of the first region generated in full (the
     /// embark region in a debug launch), and nowhere else.
     Home { spec: String },
+    /// `town=<style>[:<arms>[:<arm_len>]]`: one town of that style beside the landing of the first region
+    /// generated in full, and nowhere else.
+    Town { style: String },
 }
 
 /// Whether `VOXEL_DEV_STRUCTURES` asks for anything (the caller then builds a `LandingOf`).
@@ -61,6 +69,39 @@ pub fn install_from_env(
     Ok(setup.what)
 }
 
+/// Fewest and most streets of a dev town.
+pub const TOWN_ARMS: std::ops::RangeInclusive<u8> = 1..=4;
+/// Shortest and longest street of a dev town, in blocks.
+pub const TOWN_ARM_LEN: std::ops::RangeInclusive<i32> = 16..=256;
+
+/// `<style>[:<arms>[:<arm_len>]]`: the style (non-empty, no whitespace, `:` or `;`), then optionally the
+/// number of streets (1..=4) and their length (16..=256). Errors name the offending text.
+pub fn parse_town_spec(spec: &str) -> Result<(String, Option<u8>, Option<i32>), String> {
+    let mut parts = spec.split(':');
+    let style = parts.next().unwrap_or("").trim();
+    if style.is_empty() || style.contains(|c: char| c.is_whitespace() || c == ';') {
+        return Err(format!("the town style \"{style}\" must be a non-empty name"));
+    }
+    let arms = match parts.next() {
+        None => None,
+        Some(a) => match a.trim().parse::<u8>() {
+            Ok(n) if TOWN_ARMS.contains(&n) => Some(n),
+            _ => return Err(format!("the number of streets \"{}\" must be 1..=4", a.trim())),
+        },
+    };
+    let arm_len = match parts.next() {
+        None => None,
+        Some(l) => match l.trim().parse::<i32>() {
+            Ok(n) if TOWN_ARM_LEN.contains(&n) => Some(n),
+            _ => return Err(format!("the street length \"{}\" must be 16..=256 blocks", l.trim())),
+        },
+    };
+    if let Some(extra) = parts.next() {
+        return Err(format!("\"{extra}\": too many ':' parts (town=<style>[:<arms>[:<arm_len>]])"));
+    }
+    Ok((style.to_string(), arms, arm_len))
+}
+
 /// Reads `VOXEL_PREFAB_DIRS` and `VOXEL_DEV_STRUCTURES` and builds what [`install_from_env`] installs,
 /// with no global side effect (the source's ground reads the installed forged world, if any, when it is
 /// asked). Every error names the offending text.
@@ -87,8 +128,7 @@ pub fn from_env(
         return Ok(DevSetup { prefabs: set, source: None, what: DevStructures::Off });
     }
     let bad = |why: &str| format!("{DEV_STRUCTURES_ENV}=\"{var}\": {why}");
-    let (region, spec) = var.split_once('=').ok_or_else(|| bad("expected <rx>,<rz>=<spec>, all=<spec> or home=<spec>"))?;
-    let entries = parse_dev_spec(spec).map_err(|e| bad(&e))?;
+    let (region, spec) = var.split_once('=').ok_or_else(|| bad("expected <rx>,<rz>=<spec>, all=<spec>, home=<spec> or town=<style>"))?;
     let edge = game::REGION_BLOCKS as i32;
     // The column the row is laid out beside: the region's landing, else its centre.
     let origin_of = move |rc: RegionCoords| {
@@ -96,6 +136,23 @@ pub fn from_env(
         [rc.x * edge + lx, rc.z * edge + lz]
     };
     let ground = move |x: i32, z: i32| worldgen::ground_y(x, z, seed, mats);
+    if region.trim() == "town" {
+        let (style, arms, arm_len) = parse_town_spec(spec).map_err(|e| bad(&e))?;
+        let kit = town_kit(&set, &style).map_err(|e| bad(&e))?;
+        let block = |n: &str| registry.id_of(n).ok_or_else(|| bad(&format!("the block \"{n}\" is not in the block registry")));
+        let mut params = TownParams::small(seed, block("cobbled_road")?, block("smooth_stone")?);
+        if let Some(a) = arms {
+            params.arms = a;
+        }
+        if let Some(l) = arm_len {
+            params.arm_len = l;
+        }
+        let wet = move |x: i32, z: i32| worldgen::is_wet(x, z, seed, mats);
+        let source =
+            DevTownSource::new(kit, params, set.content_hash(), Box::new(origin_of), Box::new(ground), Box::new(wet));
+        return Ok(DevSetup { prefabs: set, source: Some(Arc::new(source)), what: DevStructures::Town { style } });
+    }
+    let entries = parse_dev_spec(spec).map_err(|e| bad(&e))?;
     if region.trim() == "all" {
         let source = DevRegionSource::new(entries, &set, Box::new(origin_of), Box::new(ground)).map_err(|e| bad(&e))?;
         let what = DevStructures::EveryRegion { spec: spec.to_string() };

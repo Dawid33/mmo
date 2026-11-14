@@ -3,7 +3,7 @@
 
 use game::prefab::Placement;
 use game::{BlockId, ColumnCoords, RegionCoords, SubChunk, CHUNK_BLOCKS};
-use server::dev_structures::{from_env, install_from_env, DevStructures, LandingOf, DEV_STRUCTURES_ENV, PREFAB_DIRS_ENV};
+use server::dev_structures::{from_env, parse_town_spec, install_from_env, DevStructures, LandingOf, DEV_STRUCTURES_ENV, PREFAB_DIRS_ENV};
 use worldgen::structures::{active, DEV_GAP_BLOCKS};
 
 const CB: i32 = CHUNK_BLOCKS as i32;
@@ -93,6 +93,10 @@ fn dev_structures_install_and_stamp() {
     let row = source.placements_in(-10 * RB, -10 * RB, 10 * RB, 10 * RB, 0);
     assert_eq!(row.len(), 1);
     assert_eq!(row[0].bounds().0[0], RB + 20 + DEV_GAP_BLOCKS);
+    assert_eq!(parse_town_spec("medieval"), Ok(("medieval".into(), None, None)));
+    assert_eq!(parse_town_spec(" medieval : 2 : 64 "), Ok(("medieval".into(), Some(2), Some(64))));
+    assert_eq!(parse_town_spec("m:4:16"), Ok(("m".into(), Some(4), Some(16))));
+    assert_eq!(parse_town_spec("m:1:256"), Ok(("m".into(), Some(1), Some(256))));
     // Errors, each naming the offending text.
     for (value, names) in [
         ("garbage", "garbage"),
@@ -102,6 +106,15 @@ fn dev_structures_install_and_stamp() {
         ("0,0=", "0,0="),
         ("home=", "home="),
         ("home=no-such-prefab", "no-such-prefab"),
+        // The built-in set holds no tagged houses: the kit's own error names the style.
+        ("town=medieval", "medieval"),
+        ("town=", "town="),
+        ("town=x:9", "9"),
+        ("town=x:0", "0"),
+        ("town=x:2:5", "5"),
+        ("town=x:2:300", "300"),
+        ("town=x:y", "y"),
+        ("town=x:2:3:4", "3:4"),
     ] {
         std::env::set_var(DEV_STRUCTURES_ENV, value);
         let e = from_env(&registry, pure_landing.clone(), seed, mats).err().unwrap_or_else(|| panic!("{value} accepted"));

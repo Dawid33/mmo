@@ -915,6 +915,10 @@ pub fn run() -> claims::ServerExit {
                 info!("[structures] home region: {spec} (from VOXEL_DEV_STRUCTURES)");
                 true
             }
+            Ok(dev_structures::DevStructures::Town { style }) => {
+                info!("[structures] home region: a {style} town (from VOXEL_DEV_STRUCTURES)");
+                true
+            }
             Err(message) => panic!("{message}"),
         }
     };
