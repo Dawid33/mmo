@@ -179,10 +179,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static|claim`, `VOXEL_HOST_ORDINAL`,
   `VOXEL_HOSTS`, `VOXEL_SUPER_REGION_REGIONS` (16; checked against the world row). `just dev-r2` runs
   login + coordinator + host 0 (state in git-ignored `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
-- **Many hosts (R3 + R4 takeover, `VOXEL_HOSTS` > 1; plans `docs/superpowers/plans/2026-11-12-r3-multi-host.md`,
   **The coordinator takes the same `VOXEL_OWNERSHIP` as its hosts**: its own environment decides whether it
   declares successions (`roles::coordinator_crash_policy`); a host's `Attach` carries its crash policy, and a
   coordinator of several hosts refuses one that is not its own (the error names `VOXEL_OWNERSHIP`).
+- **Many hosts (R3 + R4 takeover, `VOXEL_HOSTS` > 1; plans `docs/superpowers/plans/2026-11-12-r3-multi-host.md`,
   `2026-11-13-r4-takeover.md` — R4 built; whole-branch review and the owner's hand checks pending, see
   `TODO.md`)**: needs role `host`, Postgres and the login link (`jwt`), else refused.
   - Hosts talk directly over peer links (`game::peer`: one `PeerSession` per other ordinal, `Reliable` /
