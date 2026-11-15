@@ -589,6 +589,7 @@ mod flow {
             debug_flags: game::DebugFlags,
             world_scale: WorldScale,
             credential: Option<game::Credential>,
+            host_target: Option<crate::netcode::HostTarget>,
         ) -> Command {
             Command::ConnectToServerAndScene(
                 self.game_send,
@@ -600,6 +601,7 @@ mod flow {
                 world_scale,
                 crate::netcode::ConnectPolicy::default(),
                 credential,
+                host_target,
             )
         }
     }
@@ -692,13 +694,23 @@ mod flow {
     pub(super) fn launch_when_ready(world: &mut World) {
         if let Some(JoinServer(addr)) = world.remove_resource::<JoinServer>() {
             info!("[session] joining the server on {addr}");
-            connect_session(world, addr, None);
+            connect_session(world, addr, None, None);
             return;
         }
         if let Some(join) = world.remove_resource::<PendingJoin>() {
             // The world id and address only: never the JWT.
             info!("[session] joining online world {:?} on {}", join.ticket.world, join.addr);
-            connect_session(world, join.addr, Some(join.credential()));
+            let host = crate::netcode::HostTarget {
+                quic: join
+                    .ticket
+                    .quic
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|q| !q.is_empty())
+                    .map_or_else(|| join.addr.to_string(), str::to_string),
+                cert_hash: join.ticket.cert_hash.clone(),
+            };
+            connect_session(world, join.addr, Some(join.credential()), Some(host));
             return;
         }
         if !world.contains_resource::<PendingWorld>() {
@@ -734,16 +746,21 @@ mod flow {
         );
         let addr = host.addr;
         world.insert_resource(host);
-        connect_session(world, addr, None);
+        connect_session(world, addr, None, None);
     }
 
     /// Fresh session channels, and the game thread told to connect them to `addr`.
-    fn connect_session(world: &mut World, addr: std::net::SocketAddr, credential: Option<game::Credential>) {
+    fn connect_session(
+        world: &mut World,
+        addr: std::net::SocketAddr,
+        credential: Option<game::Credential>,
+        host_target: Option<crate::netcode::HostTarget>,
+    ) {
         let channels = SessionChannels::new();
         channels.install(world);
         let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
         let scale = *world.resource::<WorldScale>();
-        let command = channels.connect(addr, debug_flags, scale, credential);
+        let command = channels.connect(addr, debug_flags, scale, credential, host_target);
         if world.resource::<GameThread>().0.send(command).is_err() {
             fail_start(world, "the game thread is gone".into());
         }

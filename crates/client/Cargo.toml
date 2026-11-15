@@ -48,6 +48,8 @@ bincode = { workspace = true }
 # The device sign-in opens the identity provider's page in the system browser (`login/flow.rs`).
 open = "5"
 quinn = { workspace = true }
+# The public web PKI roots for a host named by a public address (`quic_verify.rs`).
+webpki-roots = { workspace = true }
 tokio = { workspace = true, features = ["time", "rt", "sync"] } # connect retry: timeout + sleep; `rt`: the login-http thread's current-thread runtime; `sync`: netcode's outgoing bridge
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
@@ -124,6 +126,8 @@ block-mesh = { workspace = true }
 # The asset viewer's screen (examples/asset_viewer.rs).
 slint-ui-tools = { workspace = true }
 naga = { version = "29.0", features = ["wgsl-in"] }
+# Self-signed certificates for `quic_verify`'s tests.
+rcgen = { workspace = true }
 
 # `tests/web_frame_wasm.rs` on wasm32 (`just client-wasm`), the same version the game's
 # wasm tests use.

@@ -203,7 +203,7 @@ fn main() {
         let app_ends = (channels.game_send.clone(), channels.client_recv.clone(), channels.request_send.clone());
         if skip_menu {
             let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466));
-            command_send.send(channels.connect(addr, debug_flags.clone(), world_scale, None)).unwrap();
+            command_send.send(channels.connect(addr, debug_flags.clone(), world_scale, None, None)).unwrap();
         }
         let (game_send, client_recv, request_send) = app_ends;
         (command_send, game_send, client_recv, request_send)

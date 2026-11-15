@@ -11,14 +11,8 @@ use crate::connections::{ConnEvent, ConnHandle, ConnOpener};
 use crossbeam::channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use game::{ClientPacket, ServerPacket};
 use log::{error, info, warn};
-use quinn::{
-    crypto::rustls::QuicClientConfig,
-    rustls::{
-        self,
-        pki_types::{CertificateDer, ServerName, UnixTime},
-    },
-    ClientConfig, Endpoint, TransportConfig,
-};
+use crate::quic_verify::{client_crypto, host_of, policy_for, VerifyPolicy};
+use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, TransportConfig};
 
 /// Longest one connect attempt may take. A localhost handshake is
 /// milliseconds; without this an attempt against a not-yet-listening server
@@ -106,6 +100,16 @@ pub enum ConnTarget {
     Name(String),
 }
 
+/// A host as its endpoint names it: the QUIC address (`host:port`) and the
+/// certificate hash it hands out, if any (`HostEndpoint::cert_hash`, a login
+/// ticket's `cert_hash`). Decides how the connection verifies the host
+/// ([`policy_for`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostTarget {
+    pub quic: String,
+    pub cert_hash: Option<String>,
+}
+
 impl NetThread {
     /// Start the session's netcode runtime. Connections retry their connect by
     /// `policy` and give it up once `cancel` disconnects.
@@ -132,22 +136,25 @@ impl NetThread {
 
     /// Open a connection keyed `key` to `target`, presenting `credential` (`None`
     /// = the local player name) and sending what arrives on `outgoing` until its
-    /// sender drops (then it closes gracefully).
+    /// sender drops (then it closes gracefully). The host is verified by
+    /// `cert_hash` when there is one, else by the address ([`policy_for`]).
     pub fn connect(
         &self,
         key: u32,
         target: ConnTarget,
         credential: Option<game::Credential>,
         outgoing: Receiver<ClientPacket>,
+        cert_hash: Option<String>,
     ) {
         self.live.fetch_add(1, Ordering::SeqCst);
         let (events, policy, cancel) = (self.events.clone(), self.policy, self.cancel.clone());
         let work = self.runtime.spawn(async move {
-            let server = match target {
-                ConnTarget::Addr(addr) => addr,
-                ConnTarget::Name(name) => resolve(name).await?,
+            let (server, named) = match target {
+                ConnTarget::Addr(addr) => (addr, addr.to_string()),
+                ConnTarget::Name(name) => (resolve(name.clone()).await?, name),
             };
             let mut connection = ServerConnection::new(events, key, outgoing, server)
+                .with_verification(&named, cert_hash.as_deref())
                 .with_connect_policy(policy)
                 .with_credential(credential)
                 .with_cancel(cancel);
@@ -170,7 +177,9 @@ impl ConnOpener for NetThread {
     fn open(&mut self, key: u32, endpoint: &game::HostEndpoint, credential: game::Credential) -> ConnHandle {
         let (send, outgoing) = crossbeam::channel::unbounded();
         match &endpoint.quic {
-            Some(quic) => self.connect(key, ConnTarget::Name(quic.clone()), Some(credential), outgoing),
+            Some(quic) => {
+                self.connect(key, ConnTarget::Name(quic.clone()), Some(credential), outgoing, endpoint.cert_hash.clone())
+            }
             None => {
                 let ordinal = endpoint.ordinal;
                 let _ = self.events.send((key, ConnEvent::Closed(format!("host {ordinal} offers no QUIC address"))));
@@ -202,6 +211,10 @@ pub struct ServerConnection {
     key: u32,
     recv: Receiver<ClientPacket>,
     server: SocketAddr,
+    /// How the host's certificate is checked, and the name asked for in the
+    /// handshake (`localhost` unless a public name must match its certificate).
+    verify: VerifyPolicy,
+    server_name: String,
     connect_policy: ConnectPolicy,
     /// Disconnects (its sender drops) when the game thread abandons the
     /// session; `never()` when nobody can cancel.
@@ -223,10 +236,24 @@ impl ServerConnection {
             key,
             recv,
             server,
+            verify: policy_for(&server.to_string(), None),
+            server_name: "localhost".into(),
             connect_policy: ConnectPolicy::default(),
             cancel: crossbeam::channel::never(),
             credential: None,
         }
+    }
+
+    /// Verify the host `named` (`host:port`, as its endpoint gives it) by `cert_hash`
+    /// or, without one, by its address: loopback is not verified, a public name
+    /// must present a web PKI certificate for that name. The default is
+    /// [`policy_for`] the connection's address with no hash.
+    pub fn with_verification(mut self, named: &str, cert_hash: Option<&str>) -> Self {
+        self.verify = policy_for(named, cert_hash);
+        if self.verify == VerifyPolicy::WebPki {
+            self.server_name = host_of(named).to_string();
+        }
+        self
     }
 
     /// Identify as this local player instead of the configured name (test hook).
@@ -299,7 +326,9 @@ impl ServerConnection {
             if self.cancelled() {
                 return Ok(None);
             }
-            let connecting = endpoint.connect(self.server, "localhost").unwrap();
+            let connecting = endpoint
+                .connect(self.server, &self.server_name)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("cannot connect to {}: {e}", self.server)))?;
             let failure = match self.race_cancel(connecting, policy.attempt_timeout).await {
                 Raced::Cancelled => {
                     info!(
@@ -351,13 +380,7 @@ impl ServerConnection {
     /// Connect to the server and handle sending / receiving.
     pub async fn connect_and_handle(&mut self) -> Result<(), std::io::Error> {
         let mut config = ClientConfig::new(Arc::new(
-            QuicClientConfig::try_from(
-                rustls::ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(SkipServerVerification::new())
-                    .with_no_client_auth(),
-            )
-            .unwrap(),
+            QuicClientConfig::try_from(client_crypto(&self.verify)).expect("ring offers the QUIC initial cipher suite"),
         ));
         config.transport_config(Arc::new(client_transport()));
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
@@ -518,62 +541,6 @@ fn connection_lost(reason: impl std::fmt::Display) -> std::io::Error {
         std::io::ErrorKind::ConnectionAborted,
         format!("connection to server lost: {reason}"),
     )
-}
-
-/// Dummy certificate verifier that treats any certificate as valid.
-/// NOTE, such verification is vulnerable to MITM attacks, but convenient for testing.
-#[derive(Debug)]
-struct SkipServerVerification(Arc<rustls::crypto::CryptoProvider>);
-
-impl SkipServerVerification {
-    fn new() -> Arc<Self> {
-        Arc::new(Self(Arc::new(rustls::crypto::ring::default_provider())))
-    }
-}
-
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp: &[u8],
-        _now: UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
 }
 
 #[cfg(test)]

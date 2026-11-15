@@ -81,6 +81,9 @@ pub enum Command {
         crate::netcode::ConnectPolicy,
         // What the Hello carries; `None` = the local player name.
         Option<game::Credential>,
+        // The host as its ticket names it (address + certificate hash), to
+        // verify it by; `None` = `server`, unverified on loopback only.
+        Option<crate::netcode::HostTarget>,
     ),
     /// Quit the game thread. Should only be send when quitting the application.
     Quit,
@@ -103,6 +106,7 @@ pub fn start_game_thread() -> Sender<Command> {
                 world_scale,
                 connect_policy,
                 credential,
+                host_target,
             )) => {
                 let mut manager =
                     GameInstanceManager::new(sender, receiver, client_sender, server, debug_flags);
@@ -110,6 +114,7 @@ pub fn start_game_thread() -> Sender<Command> {
                 manager.set_request_recv(request_recv);
                 manager.set_connect_policy(connect_policy);
                 manager.set_credential(credential);
+                manager.set_host_target(host_target);
                 // The manager owns `client_sender`; keep a handle to report
                 // how the session ended. Exactly one report per session,
                 // then wait for the next command: a lost server must not
@@ -156,6 +161,9 @@ pub struct GameInstanceManager {
     /// The Hello's credential (`None` = the local player name).
     #[cfg(not(target_arch = "wasm32"))]
     credential: Option<game::Credential>,
+    /// The login connection's host as its ticket names it (`None` = `server`).
+    #[cfg(not(target_arch = "wasm32"))]
+    host_target: Option<crate::netcode::HostTarget>,
 
     /// Everything this session sends — the manager's own packets and the region
     /// runners' predictions — on its way to `conns` (`flush_outgoing`).
@@ -759,6 +767,8 @@ impl GameInstanceManager {
             connect_policy: crate::netcode::ConnectPolicy::default(),
             #[cfg(not(target_arch = "wasm32"))]
             credential: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            host_target: None,
             host: crate::regions::host::RegionHost::inline(),
             world_started: false,
             views: BTreeMap::new(),
@@ -873,6 +883,13 @@ impl GameInstanceManager {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_credential(&mut self, credential: Option<game::Credential>) {
         self.credential = credential;
+    }
+
+    /// Dial the login connection's host as this ticket names it, verified by its
+    /// certificate hash (`None` = dial `server` as given).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_host_target(&mut self, host_target: Option<crate::netcode::HostTarget>) {
+        self.host_target = host_target;
     }
 
     /// Take UI requests (`ClientRequest`) from this channel.
@@ -2448,11 +2465,16 @@ impl GameInstanceManager {
         let net = crate::netcode::NetThread::start(events_send, cancel_recv, self.connect_policy)
             .map_err(|e| GameError::Disconnected(format!("netcode runtime failed to start: {e}")))?;
         // The login connection: the home until told otherwise.
+        let (target, cert_hash) = match self.host_target.clone() {
+            Some(host) => (crate::netcode::ConnTarget::Name(host.quic), host.cert_hash),
+            None => (crate::netcode::ConnTarget::Addr(self.server), None),
+        };
         net.connect(
             crate::connections::LOGIN_CONN,
-            crate::netcode::ConnTarget::Addr(self.server),
+            target,
             self.credential.clone(),
             self.first_conn_recv.clone(),
+            cert_hash,
         );
         // Other hosts' connections run on the same netcode runtime.
         self.opener = Some(Box::new(net));
@@ -4319,6 +4341,7 @@ mod tests {
                     deadline: Duration::from_millis(150),
                 },
                 None,
+                None,
             ))
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -4378,6 +4401,7 @@ mod tests {
                     retry_interval: Duration::from_millis(10),
                     deadline: Duration::from_secs(60),
                 },
+                None,
                 None,
             ))
             .unwrap();
