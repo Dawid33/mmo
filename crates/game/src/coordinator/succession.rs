@@ -552,6 +552,11 @@ impl super::Coordinator {
         self.push(Target::Every, CoordMsg::Generation(generation));
     }
 
+    /// How many successions are open (declared or read back, not yet settled or abandoned).
+    pub fn successions_open_count(&self) -> usize {
+        self.successions.open.len()
+    }
+
     /// Test support: every open succession with the survivors that applied it and whether
     /// the heir adopted it.
     #[doc(hidden)]

@@ -147,6 +147,7 @@ pub mod claims;
 pub mod coordinator_rt;
 pub mod cuts;
 pub mod dev_structures;
+pub mod health;
 pub mod lease;
 pub mod lod_workers;
 pub mod login_link;
@@ -689,6 +690,7 @@ pub fn run() -> claims::ServerExit {
     }
     game::perf::init("server");
     info!("[server] role: {role:?}");
+    health::start_from_env("host").unwrap_or_else(|e| fatal(&e));
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -1096,6 +1098,8 @@ pub fn run() -> claims::ServerExit {
             );
             host_reg = registered.reg;
             world_generation = claims::WorldGeneration::new(registered.generation);
+            health::Health::global().world_generation(registered.generation);
+            health::Health::global().set_registered(true);
             if claim_on_demand {
                 // Registered: this ordinal's rows are this boot's now. Re-claimed with their
                 // epochs bumped, so the boot before is fenced at its next write.
@@ -1265,7 +1269,10 @@ pub fn run() -> claims::ServerExit {
             .spawn(move || watch_parent(std::io::stdin(), &gone))
             .expect("spawn the parent watch thread");
     }
+    // Role `all` registers nothing: ready once its main loop runs (a host already is).
+    health::Health::global().set_registered(true);
     'main: loop {
+        health::Health::global().loop_beat();
         let now_ms = start.elapsed().as_millis() as u64;
         crossbeam::channel::select! {
             recv(client_packet_recv) -> ev => match ev {
@@ -1360,6 +1367,8 @@ pub fn run() -> claims::ServerExit {
             store.as_ref(),
         );
     }
+    // Stopping: no longer ready (and no longer judged by its loop's beat).
+    health::Health::global().set_registered(false);
 
     // Orderly exit: park every player (regions answer `ParkPlayer` before
     // `Shutdown`), then everything else; the coordinator saves once more; a

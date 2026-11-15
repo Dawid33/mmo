@@ -910,6 +910,12 @@ impl CoordinatorRuntime {
                 Err(TryRecvError::Disconnected) => Some(crate::EXIT_SAVE_TIMEOUT),
             };
             let now = self.now_ms();
+            let health = crate::health::Health::global();
+            // The split coordinator's loop (role `coordinator`); in-process (role `all`) the
+            // host's main loop beats.
+            if matches!(self.links.links, Links::Listener(_)) {
+                health.loop_beat();
+            }
             self.drain_hosts(now);
             #[cfg(feature = "test-hooks")]
             for f in inspect.try_iter() {
@@ -923,6 +929,8 @@ impl CoordinatorRuntime {
             if self.pump_save(now).is_err() || self.pump_cuts(now).is_err() || self.pump_successions(now).is_err() {
                 return self.fence_out();
             }
+            health.world_generation(self.core.world_generation());
+            health.successions_open(self.core.successions_open_count() as u64);
             let out = self.core.take_out();
             #[cfg(feature = "test-hooks")]
             if self.crash_before_claim_reply.load(Ordering::SeqCst)
@@ -1093,9 +1101,10 @@ impl CoordinatorRuntime {
                     self.core.set_host_boots(rows.iter().map(|r| (r.ordinal, r.boot)).collect());
                     // A row marked dead (a takeover declared it) runs nothing: not expected
                     // (`decide_cut` reads the same predicate).
-                    self.core.set_expected_hosts(
-                        rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).map(|r| r.ordinal).collect(),
-                    );
+                    let live: BTreeSet<u32> =
+                        rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).map(|r| r.ordinal).collect();
+                    crate::health::Health::global().hosts_live(live.len() as u64);
+                    self.core.set_expected_hosts(live);
                     let seen: Vec<game::coordinator::HostSeen> = rows
                         .iter()
                         .map(|r| game::coordinator::HostSeen {
@@ -1177,6 +1186,14 @@ impl CoordinatorRuntime {
                         log::warn!("[coordinator] world cut {}: a commit was asked, the store recorded an abort", d.cut.0);
                     }
                     game::perf_event!("world_cut_decided", "cut={} tick={} committed={stored}", d.cut.0, d.tick);
+                    let health = crate::health::Health::global();
+                    health.cut_decided(stored);
+                    if stored {
+                        // Its commit settles the successions it names (`settles`).
+                        for _ in &d.settles {
+                            health.succession_settled();
+                        }
+                    }
                     if stored {
                         // The hosts' listeners re-read what it saved (Task 19). After the
                         // decision's own transaction, not waited for: a lost notice is
@@ -1347,6 +1364,7 @@ impl CoordinatorRuntime {
             match answer {
                 Ok(generation) => {
                     game::perf_event!("world_rollback", "generation={generation}");
+                    crate::health::Health::global().world_generation(generation);
                     self.core.rolled_back(generation);
                 }
                 Err(StoreError::Fenced { .. }) => return Err(()),
@@ -1368,6 +1386,9 @@ impl CoordinatorRuntime {
                 Ok(declared) => {
                     p.declare_failing_since = None;
                     if let game::Declared::Done(list) = &declared {
+                        for _ in list {
+                            crate::health::Health::global().succession_declared();
+                        }
                         let dead: Vec<(u32, u64)> = list.iter().map(|s| (s.predecessor, s.predecessor_boot)).collect();
                         self.close_succeeded(&dead);
                     }

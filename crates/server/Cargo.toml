@@ -34,6 +34,9 @@ svc-link = { path = "../svc-link" }
 auth = { workspace = true }
 login-api = { workspace = true }
 reqwest = { workspace = true }
+# The health and metrics endpoint (`VOXEL_HEALTH_BIND`, `health.rs`).
+axum = { workspace = true }
+prometheus = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 

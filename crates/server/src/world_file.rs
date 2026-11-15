@@ -246,6 +246,15 @@ pub fn ensure_world(
 /// [`EMPTY_STORE_POLL`]; `false` when `stop` is set first. Forges nothing. A store error while
 /// polling is logged (throttled like the wait) and the wait goes on.
 fn wait_for_forge(store: &StoreHandle, import: Option<&Path>, stop: Option<&AtomicBool>) -> bool {
+    let health = crate::health::Health::global();
+    health.set_waiting(Some("forge"));
+    let found = wait_for_forge_polling(store, import, stop);
+    health.set_waiting(None);
+    found
+}
+
+/// [`wait_for_forge`]'s polling.
+fn wait_for_forge_polling(store: &StoreHandle, import: Option<&Path>, stop: Option<&AtomicBool>) -> bool {
     let mut logged_at: Option<Instant> = None;
     loop {
         let looked = store.world_info().map(|info| info.has_artifact);

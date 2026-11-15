@@ -467,6 +467,7 @@ pub fn hosts_beyond_count(rows: &[(u32, bool)], hosts: u32) -> Option<String> {
 /// once more) or a fence.
 pub fn run_coordinator() -> ServerExit {
     let fatal = |e: String| -> ! { crate::fatal(&e) };
+    crate::health::start_from_env("coordinator").unwrap_or_else(|e| fatal(e));
     let source = world_file::resolve(
         std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref(),
         std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
@@ -542,11 +543,15 @@ pub fn run_coordinator() -> ServerExit {
         policy,
     )
     .unwrap_or_else(|e| fatal(e));
+    // The store is open and the hosts' listener bound: ready. Its thread beats the loop.
+    let health = crate::health::Health::global();
+    health.set_registered(true);
 
     let stop = early_stop.unwrap_or_else(crate::watch_stop_signals_on_thread);
     while !coordinator.thread.is_finished() && !stop.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(COORDINATOR_PROCESS_POLL);
     }
+    health.set_registered(false);
     if stop.load(std::sync::atomic::Ordering::SeqCst) {
         log::info!("[coordinator] stop signal: saving and exiting");
     } else {

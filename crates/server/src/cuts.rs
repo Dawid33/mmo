@@ -576,6 +576,7 @@ impl CutWriter {
                         self.commit_gap = Some(prev.elapsed());
                     }
                     game::perf_event!("world_saved", "cut={} world=1", id.0);
+                    crate::health::Health::global().world_saved();
                     manager.cut_committed(id, versions);
                 }
                 Ok(Some(false)) => {
@@ -923,6 +924,7 @@ fn settle<S: RegionSpawner>(manager: &mut WorldManager<S>, p: Pending, answer: R
                 p.players,
                 game::perf::ms(p.queued.elapsed())
             );
+            crate::health::Health::global().world_saved();
             manager.cut_committed(done.id, done.versions);
         }
         Err(e) => {

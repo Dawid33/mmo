@@ -163,13 +163,24 @@ pub fn register_or_wait(
 ) -> Result<Option<HostBoot>, StoreError> {
     let ordinal = row.ordinal;
     let mut logged_at: Option<Instant> = None;
+    let health = crate::health::Health::global();
     loop {
-        let why = match store.register_host(row.clone(), fence, policy)? {
-            BootVerdict::Registered(boot) => return Ok(Some(boot)),
-            BootVerdict::Wait(WaitFor::Succession) => {
+        let verdict = store.register_host(row.clone(), fence, policy);
+        let why = match verdict {
+            Ok(BootVerdict::Registered(boot)) => {
+                health.set_waiting(None);
+                return Ok(Some(boot));
+            }
+            Err(e) => {
+                health.set_waiting(None);
+                return Err(e);
+            }
+            Ok(BootVerdict::Wait(WaitFor::Succession)) => {
+                health.set_waiting(Some("succession"));
                 "an open succession is inheriting this ordinal's land; waiting for it to settle"
             }
-            BootVerdict::Wait(WaitFor::Vouched) => {
+            Ok(BootVerdict::Wait(WaitFor::Vouched)) => {
+                health.set_waiting(Some("vouched"));
                 "the previous process of this ordinal has not been declared dead yet; waiting for the coordinator"
             }
         };
@@ -181,6 +192,7 @@ pub fn register_or_wait(
         let retry_at = now + Duration::from_millis(REGISTER_RETRY_MS);
         while Instant::now() < retry_at {
             if stop.load(Ordering::SeqCst) {
+                health.set_waiting(None);
                 log::info!("[lease] host {ordinal}: stop signal while waiting to register; exiting");
                 return Ok(None);
             }
