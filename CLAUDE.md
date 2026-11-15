@@ -92,10 +92,11 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
 - `just test-one <crate> "<cargo test args>"` for exactly the touched tests. Integration tests are ONE
   `it` binary per crate (`--test it <file>::`); files that touch process-global state (`HASH_MODE`, the
   forged world, a logger, wasm32, perf gates) keep their own `[[test]]` target — a new such file needs one.
-  Server test targets `roles`, `coordinator_rt` and `hosts` need `--features test-hooks` (`just test-r2` /
-  `test-r3` / `test-server` pass it; `observer` does not); Postgres-backed tests take their throwaway
-  database from `crates/pg-test-support` (`MMO_TEST_DATABASE_URL`). Multi-host: `just test-r3` (real hosts
-  over real links, serial) plus the seeded layer `game` `peer_schedule::` (part of `just test-threads`); the
+  Server test targets `roles`, `coordinator_rt`, `hosts` and `takeover` need `--features test-hooks`
+  (`just test-r2` / `test-r3` / `test-r4` / `test-server` pass it; `observer` does not); Postgres-backed
+  tests take their throwaway database from `crates/pg-test-support` (`MMO_TEST_DATABASE_URL`). Multi-host:
+  `just test-r3` (real hosts over real links, serial), `just test-r4` (the takeover crash table, serial)
+  plus the seeded layer `game` `peer_schedule::` / `peer_journal::` (part of `just test-threads`); the
   browser's frame codec on wasm32: `just client-wasm`.
 - After a wide change run each touched crate's whole non-client suite once — filtered runs let two broken
   world-store tests sit unnoticed.
@@ -175,24 +176,57 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   `svc-link` (QUIC, shared `VOXEL_SERVICE_TOKEN[_FILE]`, pinned self-signed cert) when split. Split roles
   need Postgres (`VOXEL_WORLD_DB`) and refuse anything else. Env: `VOXEL_COORDINATOR_BIND`/`_ADDR`
   (127.0.0.1:6480), `VOXEL_COORDINATOR_CERT_HASH_FILE`/`_CERT_SHA256`, `VOXEL_HOST_LINK_BIND` (login→host
-  push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static`, `VOXEL_HOST_ORDINAL`,
+  push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static|claim`, `VOXEL_HOST_ORDINAL`,
   `VOXEL_HOSTS`, `VOXEL_SUPER_REGION_REGIONS` (16; checked against the world row). `just dev-r2` runs
   login + coordinator + host 0 (state in git-ignored `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
-- **Many hosts (R3, `VOXEL_HOSTS` > 1; plan `docs/superpowers/plans/2026-11-12-r3-multi-host.md` — built,
-  go/no-go pending, see `TODO.md`)**: needs role `host`, Postgres and the login link (`jwt`), else refused.
+- **Many hosts (R3 + R4 takeover, `VOXEL_HOSTS` > 1; plans `docs/superpowers/plans/2026-11-12-r3-multi-host.md`,
+  `2026-11-13-r4-takeover.md` — R4 built; whole-branch review and the owner's hand checks pending, see
+  `TODO.md`)**: needs role `host`, Postgres and the login link (`jwt`), else refused.
   - Hosts talk directly over peer links (`game::peer`: one `PeerSession` per other ordinal, `Reliable` /
     `Volatile` messages; `server/src/peer_link.rs`, QUIC over `svc-link`): crossings, halo, intents,
     forwarded input, player hand-offs. Each host registers once per boot in the `hosts` table
     (`register_host`: addresses, pins, `clean`); peers find each other there.
   - One tick numbering for all hosts from the world clock anchor (`world_clock.rs`; `worldctl clock-reset`).
-    A host that restarts after a crash raises the world generation and EVERY host exits
-    `EXIT_WORLD_ROLLBACK` (5): the whole world restarts from its last cut (no per-host failover yet).
+  - **Ownership** (`VOXEL_OWNERSHIP`, `game::ownership`): `static` = R3's fixed layout, a host crash raises
+    the world generation and EVERY host exits `EXIT_WORLD_ROLLBACK` (5); `claim` (default of `just host` /
+    `dev-r3` / `go-nogo-r3`; `dev-r2` stays `static`) = super-regions claimed on demand, a dead host's land
+    given to one heir while the others run on (`roles::coordinator_crash_policy`: only with several hosts).
+    A claim needs the claimer's live, dirty `hosts` row (a declared-dead or cleanly-left boot wins nothing).
+  - **Lease**: a host stamps `hosts.seen_ms` every `HOST_HEARTBEAT_MS` (2 s) from its MAIN loop — never a
+    timer thread (a hung loop must stop beating); the coordinator declares it dead after `HOST_LEASE_MS`
+    (10 s) of its own unchanged reads (`LeaseWatch`: a database outage declares nobody). The Postgres lease
+    clock is `clock_timestamp()`, never `now()`.
+  - **Succession** (`coordinator/succession.rs`, `world_manager/succession.rs`; migrations `0012_host_lease`,
+    `0013_successions`): one fenced transaction marks the dead row and moves ALL its land to one heir per
+    predecessor. Survivors report their peer journal against the dead host; the heir masks the inherited
+    land (`inheriting`) until it resolved every report and adopted, holds every login order until then, pins
+    the affected regions, and its parts carry `adopts` until the settle. No cut begins until every survivor
+    applied and the heir adopted (answers count per BOOT); the next commit decision names the open
+    successions (`settles`) — the store records any other set as an abort. Conserved: identities (entities,
+    players, people) exactly once; items and terrain edits that crossed the dead host's seams within one
+    save interval are not guaranteed (`succession_seam_events=` on the `[server]` line); a leave or an
+    offline retirement has no item window.
+  - **The world generation is the last resort**: `static` / `allinone`, a dirty boot with no other host
+    alive, a second failure before the settle / `SUCCESSION_DEADLINE_MS` (30 s) without every answer / a
+    recipient's reboot in a declared run, `worldctl rollback <url> --yes`; an offline `retire-host` raises it.
+  - **Boots** (`register_host`, `server/src/lease.rs`): a boot WAITS while an open succession names its
+    ordinal as predecessor (crash, offline retirement or leave) and registers after the settle owning
+    nothing — if the heir never returns, only `worldctl rollback --yes` gets it out; a dirty boot beside a
+    live host vouches its old row dead and waits. A registration stuck behind a lock exits 1 after
+    `CLAIM_LOCK_TIMEOUT_MS` (60 s).
   - Saves are coordinated world cuts in two phases (each host `prepare_cut`s its part, the coordinator
     decides; Postgres needs `max_prepared_transactions > 0`, the dev compose sets it); parts a crash left
     staged are resolved at start before anything else (`resolve_staged_cuts`). An exiting host asks for a
-    leave cut and exits 0 either way — not committed → its `hosts` row stays dirty → its return rolls back.
+    leave cut and exits 0 either way — not committed → its `hosts` row stays dirty (a crash to the others).
+  - **Drain**: a cleanly departed host keeps its land; `LandWanted` from a host needing it → a `Leave`
+    succession after `HEIR_WAIT_MS` (30 s; at once for an ordinal beyond the host count). A stopping host
+    tells its sessions why on every exit branch (`LEAVING_REFUSAL`, `FENCED_REFUSAL`, `ROLLBACK_REFUSAL`).
+  - `worldctl retire-host <url> <ordinal>` (`world-store/src/operator.rs`): hosts alive → only vouches the
+    row dead; none → a succession to the lowest other live-row ordinal, generation raised. `claim` only —
+    the store does not record the policy, so it cannot refuse a `static` world.
   - Login links to the entry host (`VOXEL_ENTRY_HOST`, default 0), which places each player on the host
-    that holds them (`world_manager/placement.rs`, relayed `SpawnOrder`s). Regions of another host reach a
+    that holds them (`world_manager/placement.rs`, relayed `SpawnOrder`s); a world request carries its
+    player's hop (`HostMsg::Request { hop }`, an older placement's is refused). Regions of another host reach a
     client through an observer session: `RegionElsewhere { endpoint, ticket }` → a second connection with
     `Credential::Observer` — no body, input only as its own `origin_client`.
   - Saved terrain of other hosts arrives by LISTEN/NOTIFY per cut with a polling backstop
@@ -204,7 +238,7 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     `VOXEL_SUPER_REGION_REGIONS=n`.
   - `just dev-r3 <hosts> [delay]` (positional, 2..6): login + coordinator + every host under
     `scripts/dev_r3.sh` (restarts a host on exit 5 or 137, at most 3 per 60 s; `DEV_R3_*` knobs in its
-    header; state `target/dev-r3/`); `just host <ordinal> <hosts> <delay>`; `just go-nogo-r3 <delay>
+    header; state `target/dev-r3/`); `just host <ordinal> <hosts> <delay> [static]`; `just go-nogo-r3 <delay>
     [seconds]` (own database and `target/go-nogo-r3/`; exit 0 GO, 1 NO-GO, 2 INVALID, 3 no verdict).
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
   with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
@@ -212,7 +246,12 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   thread exits `EXIT_COORDINATOR_FAILED` (4); a world rollback exits `EXIT_WORLD_ROLLBACK` (5). No advisory
   lock any more (SQLite keeps its flock). `OpenMode::ReadOnly` handles (export, tools) write nothing and need
   the newest schema. Never add a store write that skips the fence. A world cut's commit decision must list
-  every host with a non-clean `hosts` row (`two_phase::decide_cut` records an abort otherwise).
+  every host with a non-clean `hosts` row (`two_phase::decide_cut` records an abort otherwise). A succession
+  moves rows at `epoch + 1`: the replaced process is fenced at its next heartbeat (`lease.rs`
+  `pump_or_fence`) or write. A new `hosts` / `super_regions` / `successions` statement needs its lock walk
+  (lock order and the two safe deadlock cycles: the module notes of `world-store/src/succession.rs`; the
+  operator's in `operator.rs`, the one unfenced `successions` writer). The settles↔adopts pairing (a settled
+  succession's heir part carried `adopts`) is a coordinator-side invariant the store does not enforce.
 - **Link rules**: a re-`Attach` after any reconnect rebuilds the coordinator's view; requests are memoised by
   `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
   beats latency). Login pushes `SpawnPlayer`/`Kick` to the host's link; kicks are durable until acked
@@ -224,8 +263,15 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   kept until acked and re-sent after a drop; `Volatile` is sent only while the peer is reachable, never
   replayed. A state message the sender already accounts for in cut K travels as `Reliable::InCut { cut,
   body }`; a host marks `CutMark { K }` only once all its regions answered and its tick reached T. From a
-  leave cut's `BeginCut` until `CutDone` each side holds back what it would send the other. A peer link
-  down, or the coordinator down, means no cuts until it is back.
+  leave cut's `BeginCut` until `CutDone` each side holds back what it would send the other. A link that
+  drops mid-cut puts that pair in count mode (`PeerSession::freeze` / `thaw`, `HostMsg::CutPeerCount`
+  relayed by the coordinator) and the cut can still commit; one that drops after a side's part is complete
+  by marks still aborts it. The coordinator down means no cuts and no takeover until it is back.
+- **Peer journal** (`game/src/peer/journal.rs`): every host journals the state messages it exchanged with
+  each peer since the last committed cut — a succession's reports. Truncation rests on every
+  world-cut participant calling `PeerJournal::cut_begun`: any new path that joins a cut must call it. A new
+  state-bearing `Reliable` must be journalled or argued out. A new per-ordinal `WorldManager` field must be
+  handled in `world_manager/succession.rs`.
 
 **Client** (`crates/client`)
 - `renderer/` bridges sim state to Bevy (`bridge.rs`); predicted regions run like the server's (`regions/`,
@@ -240,7 +286,14 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   the connection its region maps to. Input, predictions, UI and LOD requests go to the home only; the home
   follows `PlayerRegion` from another connection only after a higher `ServerPacket::HomeHop`. In the
   browser the page opens one WebTransport session per host, pinned by `HostEndpoint.cert_hash`
-  (`web_endpoint::web_server_for_host`; page → worker framing in `web_frame.rs`).
+  (`web_endpoint::web_server_for_host`; page → worker framing in `web_frame.rs`). A home host remembers
+  subscribes it cannot answer yet and answers again after a succession; the client re-maps regions whose
+  owner changed (an observer connection never redirects: a region it cannot serve is asked of the home after
+  `OBSERVER_RETRY_MAX_MS`). A session whose home connection closed without a refusal, or was refused with
+  `FENCED_REFUSAL` / `ROLLBACK_REFUSAL` / `LEAVING_REFUSAL` / `PLAYER_PARKED_ELSEWHERE`, rejoins by itself
+  with its kept refresh token (`login::flow::rejoinable`; one join call at a time, `REJOIN_RETRY_MS` apart;
+  a 503 = not yet; gives up after `REJOIN_MAX_MS`; revoked → the sign-in screen). Native QUIC keep-alive
+  3 s / idle 10 s (`netcode.rs`, as WebTransport).
 - **Session lifecycle** (`session.rs`): any new per-world resource, system `Local` or entity root must be
   registered (`add_session_reset`, `SessionLocal`) or tagged `SessionScoped`, or it leaks into the next world.
 - UI is **Slint only** (no `bevy_ui`, no egui). `CursorPolicy` is the only cursor-grab writer. `dev_ui`
