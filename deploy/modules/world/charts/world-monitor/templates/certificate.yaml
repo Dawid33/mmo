@@ -1,0 +1,17 @@
+{{- with .Values.clientCertificate.issuer }}
+# The hosts' client-facing certificate (QUIC and WebTransport), mounted from
+# Secret client-tls at /run/voxel/client/. Needs the DNS record of publicHost
+# first; the host pods wait for the Secret.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: client-tls
+  namespace: {{ $.Release.Namespace }}
+spec:
+  secretName: client-tls
+  dnsNames:
+    - {{ required "publicHost is required with a client certificate" $.Values.publicHost | quote }}
+  issuerRef:
+    kind: ClusterIssuer
+    name: {{ . | quote }}
+{{- end }}

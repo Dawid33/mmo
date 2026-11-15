@@ -1,39 +1,113 @@
-variable "namespace" {
-  description = "Game namespace created by the platform module."
+variable "world_id" {
+  description = "The world's id: also its id in the login service's registry (VOXEL_WORLD_ID) and, by default, its namespace's suffix."
   type        = string
-  default     = "mmo"
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9]{0,30}$", var.world_id))
+    error_message = "world_id: a lower-case letter, then up to 30 lower-case letters or digits (as the postgres module's world ids)."
+  }
 }
 
-variable "db_instances" {
-  description = "Postgres instances (1 = no replica; the single-node target has nowhere to put a second)."
-  type        = number
-  default     = 1
-}
-
-variable "db_storage_size" {
-  type    = string
-  default = "5Gi"
-}
-
-variable "game_image" {
-  description = "Game server image. null = no game servers yet (the server still binds 127.0.0.1 and has no container image — multi-instance stage 3)."
+variable "namespace" {
+  description = "Namespace the world lives in; the module creates it. null = \"world-<world_id>\"."
   type        = string
   default     = null
 }
 
-variable "game_replicas" {
-  description = "Game server pods. On one node more pods add no capacity (the server already uses every core); 2 only to exercise the cross-pod path."
+variable "images" {
+  description = "Full image references the workloads are CREATED with: server (mmo/server: coordinator, hosts, toolbox) and web (mmo/web). Releases set digests with `kubectl set image` (scripts/world_update.sh) and every workload ignores later changes to its image, so changing these after the first apply does nothing."
+  type        = object({ server = string, web = string })
+}
+
+variable "image_pull_secret" {
+  description = "Name of a dockerconfigjson Secret in the namespace every pod lists in imagePullSecrets (the ecr-pull module's secret_name output, which also orders it before the pods). null = none (images already on the node)."
+  type        = string
+  default     = null
+}
+
+variable "database_url" {
+  description = "The world's PostgreSQL URL (the postgres module's world_urls[world_id]). Reaches pods only through Secret world-db."
+  type        = string
+  sensitive   = true
+}
+
+variable "service_token" {
+  description = "The login service's service token (login module output service_token): coordinator and hosts present it on their links. Reaches pods only as a mounted file."
+  type        = string
+  sensitive   = true
+}
+
+variable "hosts" {
+  description = "One entry per region host, in ordinal order: the node ports its per-host NodePort Service opens for QUIC and WebTransport (both UDP). The host count is the list's length."
+  type        = list(object({ quic_node_port = number, wt_node_port = number }))
+  validation {
+    condition     = length(var.hosts) >= 1
+    error_message = "hosts: at least one host."
+  }
+  validation {
+    condition = length(distinct(flatten([for h in var.hosts : [h.quic_node_port, h.wt_node_port]]))) == 2 * length(var.hosts) && alltrue(flatten([
+      for h in var.hosts : [for p in [h.quic_node_port, h.wt_node_port] : p >= 30000 && p <= 32767]
+    ]))
+    error_message = "hosts: every node port distinct and within 30000-32767."
+  }
+}
+
+variable "public_host" {
+  description = "The name or address clients dial (VOXEL_ADVERTISE_QUIC / _WT), e.g. game.errantry.renownandruin.com."
+  type        = string
+}
+
+variable "client_certificate" {
+  description = "The client-facing certificate of the hosts. null = each host's self-signed one, pinned by clients; set = a cert-manager Certificate client-tls for public_host from this ClusterIssuer (needs cert-manager and the DNS record first). The web Ingress gets TLS from the same issuer only when this is set."
+  type        = object({ issuer = string })
+  default     = null
+}
+
+variable "web" {
+  description = "The browser bundle (mmo/web): the Ingress host it is served on, and the login service's in-cluster URL its /login proxy forwards to (LOGIN_UPSTREAM). null = no web."
+  type        = object({ ingress_host = string, login_upstream = string })
+  default     = null
+}
+
+variable "auth" {
+  description = "The login service hosts verify join tickets with (VOXEL_LOGIN_URL). VOXEL_AUTH is always jwt: several hosts need the login link."
+  type        = object({ login_url = string })
+}
+
+variable "ownership" {
+  description = "Ownership mode of the coordinator and every host (one value: they must agree; main.tf's ownership_env is its one definition)."
+  type        = string
+  default     = "claim"
+  validation {
+    condition     = contains(["static", "claim"], var.ownership)
+    error_message = "ownership: static or claim (allinone is the single-process mode)."
+  }
+}
+
+variable "save_secs" {
+  description = "VOXEL_SAVE_SECS: the world-cut period."
   type        = number
-  default     = 1
+  default     = 60
 }
 
-variable "game_env" {
-  description = "Extra environment for the game server container (world file, thread counts, log level)."
-  type        = map(string)
-  default     = {}
+variable "super_region_regions" {
+  description = "VOXEL_SUPER_REGION_REGIONS: checked against the world row (worldctl super-region before the first claim)."
+  type        = number
+  default     = 16
 }
 
-variable "game_resources" {
-  type    = object({ cpu = string, memory = string })
-  default = { cpu = "2", memory = "4Gi" }
+variable "metrics" {
+  description = "A ServiceMonitor for the coordinator's and the hosts' /metrics. Needs the Prometheus operator's CRDs."
+  type        = bool
+  default     = true
+}
+
+variable "resources" {
+  description = "Per role: { cpu = \"<request>\", memory = \"<request = limit>\" }. No CPU limit (a throttled main loop is a missed heartbeat)."
+  type        = object({ coordinator = any, host = any })
+  validation {
+    condition = alltrue([
+      for r in [var.resources.coordinator, var.resources.host] : can(tostring(r.cpu)) && can(tostring(r.memory))
+    ])
+    error_message = "resources: coordinator and host each need cpu and memory."
+  }
 }

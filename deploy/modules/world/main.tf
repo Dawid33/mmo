@@ -1,97 +1,213 @@
-# The world: its Postgres database and (once an image exists) the game
-# server fleet. Needs the platform root applied first (CRDs, namespace).
+# One game world on Kubernetes (plan docs/superpowers/plans/2026-11-15-r5-k8s.md,
+# Task 11): a coordinator (coordinator.tf), N region hosts as a StatefulSet with
+# one NodePort Service per host (hosts.tf), a toolbox pod for worldctl (below),
+# the browser bundle (web.tf), the service-link identities (identities.tf), and
+# the ServiceMonitor and client Certificate through charts/world-monitor (below).
+#
+# Images: the workloads are created with var.images and then ignore their image;
+# releases set digests with `kubectl set image` (scripts/world_update.sh: hosts
+# stop first, then the images change, then the hosts come back). The object names
+# that script uses are fixed here: Deployments coordinator / toolbox / web with
+# containers of the same names, StatefulSet hosts with container host.
+#
+# The coordinator and the hosts are created without waiting for a rollout: with
+# VOXEL_EMPTY_STORE=wait they stay unready until the world is forged, which is
+# done afterwards from the toolbox
+# (`kubectl exec deploy/toolbox -- sh -c 'worldctl forge --db "$VOXEL_WORLD_DB" …'`).
+#
+# Stopping a world: scale hosts to 0 first (each asks for a leave cut, ≤ ~90 s),
+# then the coordinator, as world_update.sh does. A plain `kubectl delete
+# namespace` stops everything at once and is not a supported way to stop it.
+#
+# Files and the server's uid: the server image runs as uid/gid 10001. Every pod
+# of the server image runs as 10001 with fsGroup 10001, so mounted Secrets
+# (mode 0440: owner root, group 10001) and the ConfigMap (0444) are readable,
+# and the peer identity's emptyDir is writable.
 
 locals {
-  db_name = "mmo-db"
+  ns = kubernetes_namespace_v1.world.metadata[0].name
+  labels = {
+    "app.kubernetes.io/name"     = "world"
+    "app.kubernetes.io/instance" = var.world_id
+  }
+  # A workload's pod labels (and its Services' selectors).
+  coordinator_labels = merge(local.labels, { "app.kubernetes.io/component" = "coordinator" })
+  host_labels        = merge(local.labels, { "app.kubernetes.io/component" = "host" })
+  toolbox_labels     = merge(local.labels, { "app.kubernetes.io/component" = "toolbox" })
+  web_labels         = merge(local.labels, { "app.kubernetes.io/component" = "web" })
+
+  # The one definition of the ownership mode: coordinator and hosts must agree.
+  ownership_env = { VOXEL_OWNERSHIP = var.ownership }
+
+  uid            = 10001
+  secret_mode    = "0440"
+  health_port    = 9100
+  coordinator_fq = "coordinator.${local.ns}.svc.cluster.local"
+
+  # Mount points (the hash files' directories hold the identities' Secrets).
+  service_token_dir = "/run/voxel/service"
+  coordinator_dir   = "/run/voxel/coordinator"
+  host_link_dir     = "/run/voxel/host-link"
+  peer_dir          = "/run/voxel/peer"
+  client_cert_dir   = "/run/voxel/client"
+  host_env_dir      = "/etc/world/hosts"
+
+  # Env both the coordinator and the hosts get (plain values; secrets are refs).
+  server_env = merge(local.ownership_env, {
+    VOXEL_HOSTS                      = tostring(length(var.hosts))
+    VOXEL_SERVICE_TOKEN_FILE         = "${local.service_token_dir}/service-token"
+    VOXEL_COORDINATOR_CERT_HASH_FILE = "${local.coordinator_dir}/${local.link_file}"
+    VOXEL_EMPTY_STORE                = "wait"
+    VOXEL_SAVE_SECS                  = tostring(var.save_secs)
+    VOXEL_SUPER_REGION_REGIONS       = tostring(var.super_region_regions)
+    VOXEL_HEALTH_BIND                = "0.0.0.0:${local.health_port}"
+  })
+
+  # A changed secret rolls the coordinator (env and files are read at start). The
+  # hosts' template carries theirs too, but they are OnDelete: it applies at each
+  # host's next start. Not the pull secret: the kubelet reads that.
+  coordinator_checksum = sha256(join(",", [
+    var.database_url,
+    var.service_token,
+    tls_self_signed_cert.coordinator.cert_pem,
+  ]))
+  hosts_checksum = sha256(join(",", [
+    local.coordinator_checksum,
+    tls_self_signed_cert.host_link.cert_pem,
+  ]))
+
+  # Workload resources: request cpu and memory, limit memory only.
+  coordinator_resources = {
+    requests = { cpu = var.resources.coordinator.cpu, memory = var.resources.coordinator.memory }
+    limits   = { memory = var.resources.coordinator.memory }
+  }
+  host_resources = {
+    requests = { cpu = var.resources.host.cpu, memory = var.resources.host.memory }
+    limits   = { memory = var.resources.host.memory }
+  }
 }
 
-# CloudNativePG cluster. The operator generates the `<name>-app` secret whose
-# `uri` key is a ready-made DATABASE_URL, so no password ever enters state.
-resource "kubernetes_manifest" "db" {
-  manifest = {
-    apiVersion = "postgresql.cnpg.io/v1"
-    kind       = "Cluster"
-    metadata   = { name = local.db_name, namespace = var.namespace }
-    spec = {
-      instances = var.db_instances
-      storage   = { size = var.db_storage_size }
-      bootstrap = { initdb = { database = "mmo", owner = "mmo" } }
-    }
-  }
-  wait {
-    condition {
-      type   = "Ready"
-      status = "True"
-    }
-  }
-  timeouts {
-    create = "10m"
+resource "kubernetes_namespace_v1" "world" {
+  metadata {
+    name   = coalesce(var.namespace, "world-${var.world_id}")
+    labels = local.labels
   }
 }
 
-# Game servers. Each pod gets two Dynamic UDP host ports (QUIC + WebTransport)
-# on the node's address — the path verified on k0s-in-docker 2026-09-22.
-resource "kubernetes_manifest" "game" {
-  count = var.game_image == null ? 0 : 1
-  manifest = {
-    apiVersion = "agones.dev/v1"
-    kind       = "Fleet"
-    metadata   = { name = "world", namespace = var.namespace }
-    spec = {
-      replicas = var.game_replicas
-      template = {
-        spec = {
-          # Required once the pod has more than one container (the SDK
-          # stand-in below): which one is the game server.
-          container = "server"
-          ports = [
-            { name = "quic", portPolicy = "Dynamic", containerPort = 6466, protocol = "UDP" },
-            { name = "wt", portPolicy = "Dynamic", containerPort = 6467, protocol = "UDP" },
-          ]
-          # Health pings come from the sidecar below until the server speaks
-          # the Agones SDK itself.
-          health = { initialDelaySeconds = 30, periodSeconds = 5, failureThreshold = 6 }
-          template = {
-            spec = {
-              containers = [
-                {
-                  name  = "server"
-                  image = var.game_image
-                  env = concat(
-                    [{
-                      name      = "DATABASE_URL"
-                      valueFrom = { secretKeyRef = { name = "${local.db_name}-app", key = "uri" } }
-                    }],
-                    [for k, v in var.game_env : { name = k, value = v }],
-                  )
-                  resources = {
-                    requests = { cpu = var.game_resources.cpu, memory = var.game_resources.memory }
-                    limits   = { memory = var.game_resources.memory }
-                  }
-                },
-                {
-                  # Interim Agones SDK stand-in: mark Ready once, then send
-                  # health pings over the SDK sidecar's REST port. Replace with
-                  # the Rust SDK in the server (stage 3), which can also tell
-                  # the server its allocated host ports.
-                  name    = "sdk-ready"
-                  image   = "curlimages/curl:8.16.0"
-                  command = ["/bin/sh", "-c"]
-                  args = [join(" ", [
-                    "until curl -sf -X POST -d '{}' -H 'Content-Type: application/json' http://localhost:$${AGONES_SDK_HTTP_PORT}/ready; do sleep 1; done;",
-                    "while true; do curl -sf -X POST -d '{}' -H 'Content-Type: application/json' http://localhost:$${AGONES_SDK_HTTP_PORT}/health; sleep 2; done",
-                  ])]
-                  resources = {
-                    requests = { cpu = "5m", memory = "16Mi" }
-                    limits   = { memory = "32Mi" }
-                  }
-                },
-              ]
+# The database URL reaches pods only as this Secret's key `url` (env VOXEL_WORLD_DB).
+resource "kubernetes_secret_v1" "db" {
+  metadata {
+    name      = "world-db"
+    namespace = local.ns
+    labels    = local.labels
+  }
+  data = {
+    url = var.database_url
+  }
+}
+
+# The login service's token, mounted as a file (VOXEL_SERVICE_TOKEN_FILE).
+resource "kubernetes_secret_v1" "service" {
+  metadata {
+    name      = "world-service"
+    namespace = local.ns
+    labels    = local.labels
+  }
+  data = {
+    "service-token" = var.service_token
+  }
+}
+
+# Where worldctl runs (forge, clock-reset, super-region, retire-host, rollback):
+# `kubectl exec deploy/toolbox -- sh -c 'worldctl … "$VOXEL_WORLD_DB" …'`, so the
+# URL never appears on a command line outside the pod.
+resource "kubernetes_deployment_v1" "toolbox" {
+  metadata {
+    name      = "toolbox"
+    namespace = local.ns
+    labels    = local.toolbox_labels
+  }
+  spec {
+    replicas = 1
+    strategy {
+      type = "Recreate"
+    }
+    selector {
+      match_labels = local.toolbox_labels
+    }
+    template {
+      metadata {
+        labels = local.toolbox_labels
+        annotations = {
+          "checksum/secrets" = sha256(var.database_url)
+        }
+      }
+      spec {
+        automount_service_account_token = false
+        enable_service_links            = false
+        # `sleep` as PID 1 ignores SIGTERM; nothing to drain.
+        termination_grace_period_seconds = 1
+        dynamic "image_pull_secrets" {
+          for_each = var.image_pull_secret == null ? [] : [var.image_pull_secret]
+          content {
+            name = image_pull_secrets.value
+          }
+        }
+        security_context {
+          run_as_user     = local.uid
+          run_as_group    = local.uid
+          run_as_non_root = true
+          fs_group        = local.uid
+        }
+        container {
+          name              = "toolbox"
+          image             = var.images.server
+          image_pull_policy = "IfNotPresent"
+          command           = ["sleep", "infinity"]
+          env {
+            name = "VOXEL_WORLD_DB"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret_v1.db.metadata[0].name
+                key  = "url"
+              }
             }
+          }
+          security_context {
+            allow_privilege_escalation = false
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+          resources {
+            requests = { cpu = "10m", memory = "64Mi" }
+            limits   = { memory = "1Gi" }
           }
         }
       }
     }
   }
-  depends_on = [kubernetes_manifest.db]
+  # Releases set the image (world_update.sh); an apply must not undo them.
+  lifecycle {
+    ignore_changes = [spec[0].template[0].spec[0].container[0].image]
+  }
+}
+
+# Custom resources (a ServiceMonitor, a cert-manager Certificate) go through a
+# small local chart. Not released at all when neither is wanted, so a cluster
+# without cert-manager or the Prometheus operator needs neither.
+resource "helm_release" "monitor" {
+  count     = var.metrics || var.client_certificate != null ? 1 : 0
+  name      = "world-monitor"
+  namespace = local.ns
+  chart     = "${path.module}/charts/world-monitor"
+
+  values = [yamlencode({
+    metrics           = var.metrics
+    selectorLabels    = local.labels
+    publicHost        = var.public_host
+    clientCertificate = var.client_certificate == null ? {} : { issuer = var.client_certificate.issuer }
+  })]
+
+  depends_on = [kubernetes_service_v1.coordinator, kubernetes_service_v1.hosts]
 }

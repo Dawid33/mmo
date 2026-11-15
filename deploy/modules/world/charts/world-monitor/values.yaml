@@ -1,0 +1,11 @@
+# Set by deploy/modules/world/main.tf (helm_release.monitor).
+# A ServiceMonitor for port `health` (/metrics) of Services coordinator and hosts.
+metrics: false
+# The labels every world object carries (the module's local.labels).
+selectorLabels:
+  app.kubernetes.io/name: world
+# cert-manager Certificate client-tls for publicHost from this ClusterIssuer;
+# empty issuer = none (the hosts' own self-signed certificate, pinned).
+clientCertificate:
+  issuer: ""
+publicHost: ""

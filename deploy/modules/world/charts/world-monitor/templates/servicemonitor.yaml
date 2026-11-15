@@ -1,0 +1,21 @@
+{{- if .Values.metrics }}
+# The coordinator and every host serve /metrics on their port `health` (9100).
+# Services coordinator and hosts are headless, so each pod is its own target.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: world
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml .Values.selectorLabels | nindent 6 }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [coordinator, host]
+  endpoints:
+    - port: health
+      path: /metrics
+      interval: 15s
+{{- end }}
