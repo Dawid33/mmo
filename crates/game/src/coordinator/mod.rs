@@ -300,6 +300,8 @@ impl Coordinator {
                 handed,
                 pending_cut,
                 successions,
+                // Checked by the runtime against its own before the core sees the Attach.
+                policy: _,
             } => {
                 if named != host {
                     log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");

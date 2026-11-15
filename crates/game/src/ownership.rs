@@ -22,7 +22,7 @@ pub fn super_region_of(rc: RegionCoords, s: u32) -> (i32, i32) {
 /// every host restarts from the last cut. `Succession`: the dead host's land is inherited by
 /// a live host while the others run on; a boot that finds its predecessor's dirty row waits
 /// for that (or, if no host is alive, raises the generation as before).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CrashPolicy {
     Rollback,
     Succession,

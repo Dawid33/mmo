@@ -143,6 +143,11 @@ pub enum HostMsg {
         /// the heir, whether it adopted too. A restarted coordinator counts these as answered
         /// again; an order not listed is (re)sent.
         successions: Vec<(SuccessionId, bool)>,
+        /// What a crash of this host costs the world ([`crate::Ownership::policy`], from its
+        /// `VOXEL_OWNERSHIP`). A coordinator of several hosts refuses an `Attach` whose
+        /// policy is not its own: under `Rollback` it would never declare the succession a
+        /// `claim` host's restart waits for.
+        policy: crate::CrashPolicy,
     },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.

@@ -43,7 +43,9 @@ pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 /// `SpawnAck` names the placing host's addresses).
 /// 5: R4 — a host's hello carries its registration number (`PeerRole::Host::reg`, not a claim
 /// epoch); peers tell each other their claims (`Reliable::Owns`, `Volatile::ClaimWanted`).
-pub const LINK_PROTOCOL_VERSION: u32 = 5;
+/// 6: R4's fix wave — `HostMsg::Attach` carries the host's crash policy (`policy`): a
+/// coordinator of several hosts refuses one that is not its own.
+pub const LINK_PROTOCOL_VERSION: u32 = 6;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

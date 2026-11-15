@@ -439,6 +439,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             handed,
             pending_cut,
             successions,
+            policy: self.ownership.0.policy(),
         });
         let queued: BTreeSet<RequestId> = self
             .outbox

@@ -250,10 +250,10 @@ fn describe(msg: &CoordMsg) -> String {
 /// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
 pub(crate) fn describe_host(msg: &HostMsg) -> String {
     match msg {
-        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut, successions } => {
+        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut, successions, policy } => {
             format!(
                 "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below}, \
-                 pending_cut: {pending_cut:?}, successions: {successions:?} }} ({} regions, {} online, {} handed)",
+                 pending_cut: {pending_cut:?}, successions: {successions:?}, policy: {policy:?} }} ({} regions, {} online, {} handed)",
                 running.len(),
                 online.len(),
                 handed.len()
@@ -431,23 +431,48 @@ fn stored_registration(store: &StoreHandle, ordinal: u32) -> Option<(u64, i64)> 
 }
 
 /// Whether host `ordinal`'s `Attach` of world `generation` may be applied: not lower than
-/// the store's (a lower one is a stale process, about to exit: its link is closed). A
-/// store that cannot be read refuses it too (the host redials and attaches again).
-fn generation_current(store: &StoreHandle, ordinal: u32, generation: u64) -> bool {
+/// the store's. A lower one is a stale process: `Err(Some(stored))` — it is told the store's
+/// generation ([`CoordMsg::Generation`]: it exits for the rollback; nothing else may ever
+/// tell it, e.g. while no peer of the newer generation dials it) and ignored from then on.
+/// A store that cannot be read refuses it too (`Err(None)`: its link is closed, the host
+/// redials and attaches again).
+fn generation_current(store: &StoreHandle, ordinal: u32, generation: u64) -> Result<(), Option<u64>> {
     match store.world_generation() {
         Ok(stored) if generation < stored => {
             log::error!(
                 "[coordinator] host {ordinal}'s Attach runs world generation {generation}, older than the store's \
-                 {stored}: refused (a stale host process)"
+                 {stored}: refused (a stale host process; told to restart)"
             );
-            false
+            Err(Some(stored))
         }
-        Ok(_) => true,
+        Ok(_) => Ok(()),
         Err(e) => {
             log::error!("[coordinator] the world generation could not be read ({e}); host {ordinal}'s Attach is refused");
-            false
+            Err(None)
         }
     }
+}
+
+/// Whether a host whose crashes cost `host` (its `Attach`'s policy, from its
+/// `VOXEL_OWNERSHIP`) may attach to a coordinator that `declares` successions or not, serving
+/// `several` hosts. With one host nothing is compared (no other host could inherit: the
+/// coordinator runs `Rollback` whatever the host's word says). With several the two must
+/// agree: beside a `Rollback` coordinator a `claim` host that restarts waits for ever for a
+/// succession nobody declares (its dirty row then blocks every world cut), and beside a
+/// `Succession` coordinator a `static` host's crash would be given to an heir its fixed
+/// layout does not know.
+fn policy_agrees(declares: bool, several: bool, host: game::CrashPolicy) -> Result<(), String> {
+    let wants = host == game::CrashPolicy::Succession;
+    if !several || wants == declares {
+        return Ok(());
+    }
+    let word = |succession: bool| if succession { "claim" } else { "static (or unset)" };
+    Err(format!(
+        "the host runs {env}={}, this coordinator {env}={}: set the same {env} on the coordinator and on every host",
+        word(wants),
+        word(declares),
+        env = game::ownership::OWNERSHIP_ENV
+    ))
 }
 
 /// How the coordinator thread is asked to stop.
@@ -988,7 +1013,7 @@ impl CoordinatorRuntime {
                         },
                         LinkEvent::Msg(msg) => match l.routes.hosts.get(&peer).copied() {
                             Some(ordinal) => {
-                                if let HostMsg::Attach { generation, boot, .. } = &msg {
+                                if let HostMsg::Attach { generation, boot, policy, .. } = &msg {
                                     let hello = l.routes.boots.get(&peer).copied();
                                     if hello.is_some_and(|b| b != *boot) {
                                         log::warn!(
@@ -996,7 +1021,27 @@ impl CoordinatorRuntime {
                                             hello.unwrap_or_default()
                                         );
                                     }
-                                    if !generation_current(&self.store, ordinal, *generation) {
+                                    match generation_current(&self.store, ordinal, *generation) {
+                                        Ok(()) => {}
+                                        Err(stored) => {
+                                            l.routes.refuse(peer);
+                                            match stored {
+                                                // Told why, the link left open for the message to
+                                                // arrive (a close could overtake it); the process
+                                                // exits and its connection ends with it.
+                                                Some(stored) => {
+                                                    l.senders.send(peer, CoordMsg::Generation(stored));
+                                                }
+                                                None => {
+                                                    l.senders.close(peer);
+                                                }
+                                            }
+                                            self.core.host_detached(ordinal);
+                                            continue;
+                                        }
+                                    }
+                                    if let Err(why) = policy_agrees(self.successions.is_some(), self.cuts.is_some(), *policy) {
+                                        log::error!("[coordinator] host {ordinal}'s Attach is refused: {why}");
                                         l.routes.refuse(peer);
                                         l.senders.close(peer);
                                         self.core.host_detached(ordinal);
@@ -1506,7 +1551,21 @@ mod tests {
     use game::RequestId;
 
     fn attach(host: u32, epoch: u64) -> HostMsg {
-        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }
+        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }
+    }
+
+    #[test]
+    fn a_coordinator_of_several_hosts_takes_only_its_own_crash_policy() {
+        use game::CrashPolicy::{Rollback, Succession};
+        // One host: nothing to compare (`claim` with one host runs beside a `Rollback` coordinator).
+        assert!(policy_agrees(false, false, Succession).is_ok());
+        assert!(policy_agrees(false, false, Rollback).is_ok());
+        // Several hosts: the same word on both sides.
+        assert!(policy_agrees(true, true, Succession).is_ok());
+        assert!(policy_agrees(false, true, Rollback).is_ok());
+        let forgot = policy_agrees(false, true, Succession).unwrap_err();
+        assert!(forgot.contains("VOXEL_OWNERSHIP=claim") && forgot.contains("VOXEL_OWNERSHIP=static"), "{forgot}");
+        assert!(policy_agrees(true, true, Rollback).is_err());
     }
 
     /// A `hosts` row of registration `reg`, live.

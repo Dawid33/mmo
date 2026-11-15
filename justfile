@@ -1139,14 +1139,21 @@ _dev-r2-token: (_dev-token dev_r2_dir)
 # The world coordinator alone (VOXEL_ROLE=coordinator) for the dev Postgres world
 # (`just pg-up` first): serves hosts on 127.0.0.1:6480 and writes its pin to
 # target/dev-r2/coordinator.cert-sha256. Play region size. For a world of several
-# hosts pass the same `hosts` as to `host` (its token and pin are then under target/dev-r3/).
-coordinator hosts="1": (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
+# hosts pass the same `hosts` as to `host` (its token and pin are then under target/dev-r3/)
+# and the same `ownership` word (default as `host`'s: `claim` for several hosts, `static`
+# for one): the coordinator declares a dead host's succession only under `claim`, and
+# refuses the Attach of a host whose VOXEL_OWNERSHIP says otherwise.
+coordinator hosts="1" ownership=(if hosts == "1" { "static" } else { "claim" }): (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
     dir={{ if hosts == "1" { dev_r2_dir } else { dev_r3_dir } }}
-    VOXEL_ROLE=coordinator VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} \
+    case "{{ownership}}" in
+        claim | static) ;;
+        *) echo "coordinator: ownership is claim or static (the second word of just coordinator), not {{ownership}}" >&2; exit 1 ;;
+    esac
+    VOXEL_ROLE=coordinator VOXEL_OWNERSHIP={{ownership}} VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE=$dir/service-token \
         VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
         RUST_BACKTRACE=1 ./target/debug/server
@@ -1155,8 +1162,8 @@ coordinator hosts="1": (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3
 # delay $3 ms, secrets and pins under $4, world store $5. Host n listens for clients on
 # UDP 6466 + 10n (WebTransport 6467 + 10n) and for its peers on 127.0.0.1:6500 + n; only
 # host 0 (the entry host, VOXEL_ENTRY_HOST's default) binds the login link (127.0.0.1:6490).
-# Ownership policy $6 (default `claim`; `static` is the old fixed layout, nothing else is
-# accepted): under `claim` a killed host's land goes to an heir and does not come back by
+# Ownership policy $6 (default `claim`, the callers pass it; `static` is the old fixed layout,
+# nothing else is accepted): under `claim` a killed host's land goes to an heir and does not come back by
 # itself (a restarted host waits until its succession is settled and returns owning nothing).
 # Several hosts need the login service (jwt, world `dev`); one host keeps VOXEL_AUTH as set.
 # Refuses (exit 1) what `_dev-hosts-check` refuses, also under `--dry-run`.
@@ -1164,7 +1171,7 @@ host_env_sh := '''
 o=$1 n=$2 dir=$4 own=${6:-claim}
 case "$own" in
     claim | static) ;;
-    *) echo "dev host: ownership is claim or static (the sixth word of just host), not $own" >&2; exit 1 ;;
+    *) echo "dev host: ownership is claim or static (the fourth word of just host), not $own" >&2; exit 1 ;;
 esac
 case "$o/$n/$3" in
     *[!0-9/]* | /* | */ | *//*) echo "dev host: ordinal, hosts and delay are whole numbers, given positionally (just host 1 2, not hosts=2)" >&2; exit 1 ;;
@@ -1207,9 +1214,10 @@ _dev-hosts-check ordinal hosts delay min_hosts:
     fi
 
 # A region host (VOXEL_ROLE=host) of the dev Postgres world: host `ordinal` of `hosts`
-# (ownership `claim` unless the sixth word is `static`, the old fixed layout, e.g.
-# `just host 1 2 0 static`: super-regions claimed on demand by the preferred live host, a
-# killed host's land moving to an heir for good), dialing the coordinator at 127.0.0.1:6480 (started first or later —
+# (several hosts: ownership `claim` — super-regions claimed on demand by the preferred live
+# host, a killed host's land moving to an heir for good — unless the fourth word is `static`,
+# the old fixed layout, e.g. `just host 1 2 0 static`; ONE host defaults to `static`, as
+# `dev-r2`; the coordinator must run the same word, see `coordinator`), dialing the coordinator at 127.0.0.1:6480 (started first or later —
 # it waits for the pin). Host n takes clients on UDP 6466 + 10n (WebTransport 6467 + 10n)
 # and its peer hosts on 127.0.0.1:6500 + n; `delay` holds every outgoing peer frame that
 # many ms (measurement only). One host (the defaults): as `just server` on 6466, local
@@ -1217,7 +1225,7 @@ _dev-hosts-check ordinal hosts delay min_hosts:
 # login service's SpawnPlayer / Kick on 127.0.0.1:6490). Several hosts (`hosts` > 1, see
 # `dev-r3`, which runs them all): jwt with the login service, pins under target/dev-r3/,
 # and only host 0 binds the login link. Play region size.
-host ordinal="0" hosts="1" delay="0" ownership="claim": (_dev-hosts-check ordinal hosts delay "1") (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
+host ordinal="0" hosts="1" delay="0" ownership=(if hosts == "1" { "static" } else { "claim" }): (_dev-hosts-check ordinal hosts delay "1") (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
@@ -1305,8 +1313,9 @@ done
 # its land moves to an heir (a succession) and does NOT come back by itself — the restarted
 # host waits until its succession is settled and then owns nothing.
 # A host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137
-# (killed, e.g. `kill -9`) is started again after 1 s — at most 3 times within 60 s, then
-# its loop gives up. Any member ending otherwise (login, the coordinator, a host loop)
+# (killed, e.g. `kill -9`) — or 3 (EXIT_FENCED: replaced, e.g. a hung host that woke after its
+# succession; restarted only because the hosts run `claim`) — is started again after 1 s — at
+# most 3 times within 60 s, then its loop gives up. Any member ending otherwise (login, the coordinator, a host loop)
 # takes the whole stack down, exit 1. Ctrl-C stops the hosts first and waits for them (their
 # leave cut needs the coordinator; 95 s, a host's own exit bound), then the coordinator, then the login service (60 s
 # each); what outlives its deadline is KILLed, and a second Ctrl-C kills at once.
@@ -1325,7 +1334,7 @@ dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") kc-up pg-up _
     {{cap}} {{cargo}} build --bin server --bin worldctl
     ./target/debug/worldctl clock-reset {{dev_database_url}}
     DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} exec scripts/dev_r3.sh {{dev_r3_dir}} \
-        'VOXEL_ROLE=coordinator VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} VOXEL_SERVICE_TOKEN_FILE={{dev_r3_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r3_dir}}/coordinator.cert-sha256' \
+        'VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} VOXEL_SERVICE_TOKEN_FILE={{dev_r3_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r3_dir}}/coordinator.cert-sha256' \
         {{ shell(dev_r3_launch_sh, hosts, delay, dev_r3_dir, dev_database_url, host_env_sh) }}
 
 # `go-nogo-r3`'s own state (logs, login, pins) and its own world database on the dev Postgres.
@@ -1473,7 +1482,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     echo "the stack did not stop" >"$out/unclean"
     DEV_R3_SERVER=./target/release/server DEV_R3_LOGIN=$login DEV_R3_LOGIN_LOG=$out/login/login.log \
         DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} setsid scripts/dev_r3.sh "$stack" \
-        'VOXEL_ROLE=coordinator VOXEL_HOSTS=2 VOXEL_WORLD_DB={{go_nogo_db_url}} VOXEL_SERVICE_TOKEN_FILE={{go_nogo_dir}}/stack/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{go_nogo_dir}}/stack/coordinator.cert-sha256' \
+        'VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_HOSTS=2 VOXEL_WORLD_DB={{go_nogo_db_url}} VOXEL_SERVICE_TOKEN_FILE={{go_nogo_dir}}/stack/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{go_nogo_dir}}/stack/coordinator.cert-sha256' \
         {{ shell(dev_r3_launch_sh, "2", if delay =~ '^[0-9]+$' { delay } else { "0" }, go_nogo_dir / "stack", go_nogo_db_url, host_env_sh) }} \
         >"$out/stack.log" 2>&1 </dev/null &
     stack_pid=$!

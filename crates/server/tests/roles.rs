@@ -671,7 +671,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
                 _ => assert!(Instant::now() < deadline, "the link never came up"),
             }
         }
-        link.send(game::HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }).unwrap();
+        link.send(game::HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }).unwrap();
         (link, events)
     };
     let (stale, stale_events) = dial(1, first);
@@ -689,6 +689,135 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
         "the stale host is told nothing (no attach echo, no view)"
     );
     drop((stale, live));
+    coordinator.stop();
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A raw host link to the coordinator at `addr` (host 0, registration `reg`), up.
+fn raw_host_link(
+    addr: std::net::SocketAddr,
+    cert_file: &std::path::Path,
+    boot: u64,
+    reg: u64,
+) -> (crossbeam::channel::Sender<game::HostMsg>, Receiver<svc_link::LinkEvent<game::CoordMsg>>) {
+    let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", cert_file).unwrap();
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 0, boot, reg });
+    let (link, events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin, hello);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(svc_link::LinkEvent::Up(_)) => break,
+            _ => assert!(Instant::now() < deadline, "the link never came up"),
+        }
+    }
+    (link, events)
+}
+
+/// An empty `Attach` of host 0 at `generation` under `policy`.
+fn bare_attach(generation: u64, boot: u64, policy: game::CrashPolicy) -> game::HostMsg {
+    game::HostMsg::Attach {
+        host: 0,
+        epoch: 1,
+        running: Vec::new(),
+        online: Vec::new(),
+        generation,
+        boot,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut: None,
+        successions: Vec::new(),
+        policy,
+    }
+}
+
+/// A coordinator of SEVERAL hosts started without `VOXEL_OWNERSHIP=claim` (crash policy
+/// `Rollback`) refuses the `Attach` of a host that runs `claim` (`Succession`): it would
+/// never declare the succession that host's restart waits for (the fix wave's guard for the
+/// dev recipes that forgot the coordinator's ownership word). The link is closed, nothing is
+/// echoed; a host under the coordinator's own policy attaches.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_under_another_crash_policy_is_refused_by_the_coordinator() {
+    install_props();
+    let Some(db) = PgDb::create("policymismatch") else { return };
+    let map = land_map();
+    let dir = scratch("policymismatch");
+    let cert_file = dir.join("coordinator.cert-sha256");
+    let store = db.open();
+    let registered = register_host(&store, 0, 1);
+    let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
+    let cuts = coordinator_rt::WorldCuts { every: Duration::from_secs(3600), tick: Box::new(|| 0) };
+    let listening = coordinator_rt::start_listening_as(
+        store.clone(),
+        start,
+        "127.0.0.1:0".parse().unwrap(),
+        TOKEN.into(),
+        Some(cert_file.clone()),
+        Fenced::default(),
+        Some(cuts),
+        game::CrashPolicy::Rollback,
+    )
+    .expect("the coordinator listens");
+    let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.reg);
+    link.send(bare_attach(registered.generation, 1, game::CrashPolicy::Succession)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(svc_link::LinkEvent::Down(_)) => break,
+            Ok(svc_link::LinkEvent::Msg(game::CoordMsg::Attached { .. })) => {
+                panic!("a `claim` host attached to a coordinator that never declares a succession")
+            }
+            _ => assert!(Instant::now() < deadline, "the mismatched host's link was never closed"),
+        }
+    }
+    drop(link);
+    // The coordinator's own policy attaches.
+    let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.reg);
+    link.send(bare_attach(registered.generation, 1, game::CrashPolicy::Rollback)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(svc_link::LinkEvent::Msg(game::CoordMsg::Attached { epoch: 1 })) => break,
+            _ => assert!(Instant::now() < deadline, "the matching host's Attach was never echoed"),
+        }
+    }
+    drop(link);
+    assert_eq!(listening.thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host whose `Attach` runs an OLDER world generation than the store's is refused — and
+/// told the generation (`CoordMsg::Generation`), so the stale process exits for the world
+/// rollback instead of redialing for ever when no peer tells it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_of_an_older_generation_is_told_the_generation() {
+    install_props();
+    let Some(db) = PgDb::create("oldgen") else { return };
+    let map = land_map();
+    let dir = scratch("oldgen");
+    let cert_file = dir.join("coordinator.cert-sha256");
+    let store = db.open();
+    // The second registration of a dirty ordinal raises the generation (R3's rule).
+    let (first, second) = (register_host(&store, 0, 1), register_host(&store, 0, 2));
+    assert!(second.generation > first.generation);
+    let (coordinator, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
+    let (link, events) = raw_host_link(addr, &cert_file, 2, second.reg);
+    link.send(bare_attach(first.generation, 2, game::CrashPolicy::Rollback)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(svc_link::LinkEvent::Msg(game::CoordMsg::Generation(g))) => {
+                assert_eq!(g, second.generation);
+                break;
+            }
+            Ok(svc_link::LinkEvent::Msg(game::CoordMsg::Attached { .. })) => panic!("an older generation attached"),
+            _ => assert!(Instant::now() < deadline, "the stale host was never told the world generation"),
+        }
+    }
+    drop(link);
     coordinator.stop();
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);

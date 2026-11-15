@@ -310,7 +310,7 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     let mut c = Coordinator::from_state(state, grid(), 60_000).expect("state loads");
     assert!(matches!(c.take_msgs().as_slice(), [CoordMsg::View { .. }]));
     let running = RunningRegion { rc: r, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0]), (q, [4.0, 5.0, 6.0])] };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 60_000);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 60_000);
     let out = commit(&mut c);
     assert!(!out.iter().any(|m| matches!(m, CoordMsg::SpawnPeople { .. })), "a reattach spawns nothing: {out:?}");
     assert_eq!(events_about(&out, q), Vec::<GameEventKind>::new(), "Q's body stands");
@@ -511,7 +511,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     let (mut c, _, people) = coordinator();
     let r = rc(0, 0);
     let running = |bodies: Vec<(PersonId, [f32; 3])>| RunningRegion { rc: r, incarnation: 1, people: bodies };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     for p in &people {
@@ -520,7 +520,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     }
     // Re-attached with every body there: nothing more.
     let bodies: Vec<(PersonId, [f32; 3])> = people.iter().map(|p| (*p, [0.0; 3])).collect();
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     assert!(directives_for(&out, r).is_empty(), "{out:?}");
 }
@@ -553,7 +553,7 @@ fn crossing_held_behind_the_attach_keeps_one_body() {
         RunningRegion { rc: a, incarnation: 1, people: a_list },
         RunningRegion { rc: b, incarnation: 1, people: vec![(p, at)] },
     ];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     count(p, &out, &mut p_bodies);
     count(q, &out, &mut q_bodies);
@@ -588,7 +588,7 @@ fn attach_supersedes_unsent_directives() {
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
     let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1, hop: 1 }];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     assert!(directives_for(&out[..attached], r).is_empty(), "the stale spawn is dropped: {out:?}");
@@ -624,7 +624,7 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
         if order {
             running.reverse();
         }
-        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 0);
+        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
         let out = commit(&mut c);
         assert_eq!(body_delta(&out, p), 0, "order {order}: no despawn of P's only body: {out:?}");
         assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r1), "order {order}");
@@ -792,7 +792,7 @@ fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
 }
 
 fn attach(host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
-    HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }
+    HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }
 }
 
 fn report(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> OnlinePlayer {
@@ -1099,7 +1099,7 @@ fn settled_watermark_prunes_exactly_below() {
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host]);
     c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host], "an attach watermark of 0 prunes nothing");
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4), other_host], "the attach's watermark prunes below it");
     c.handle(1, HostMsg::Settled { boot: 7, below: 2 }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4)]);
@@ -1130,6 +1130,7 @@ fn new_boot_attach_drops_the_old_boots_memo() {
         handed: Vec::new(),
         pending_cut: None,
         successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
     };
     c.handle(0, attach_boot_9(2), 0);
     assert_eq!(memo_ids(&c), vec![other_host], "boot 7 of host 0 is gone");
@@ -1273,6 +1274,7 @@ fn reattach_mid_crossing_keeps_the_claim_online() {
             handed: vec![(A, HOST_B, 1)],
             pending_cut: None,
             successions: Vec::new(),
+            policy: game::CrashPolicy::Rollback,
         };
         c.handle(HOST_A, reattach, 0);
         assert_eq!(c.online_on(A), Some(HOST_B), "b_attaches {b_attaches}: in transit to B");
@@ -1361,6 +1363,7 @@ fn higher_generation_attach_resets_hops() {
         handed: Vec::new(),
         pending_cut: None,
         successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
     };
     c.handle(HOST_B, attach_gen(HOST_B, 1, 0, vec![report(A, fortress, false)]), 0);
     assert_eq!((c.online_on(A), c.hop_of(A)), (None, 5), "the same generation: hop 1 is stale");
@@ -1662,6 +1665,7 @@ fn reattach_with_a_pending_cut_gets_its_outcome() {
         handed: Vec::new(),
         pending_cut: Some(cut),
         successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
     };
     c.handle(1, reattach, CUT_EVERY_MS);
     assert_eq!(done(&commit_routed(&mut c)), [(1, cut, false)], "answered from the outcome remembered");
@@ -1772,7 +1776,7 @@ fn leave_requests_begin_one_cut_and_a_leaver_is_not_expected_until_its_next_boot
     c.decided(cut, true);
     commit_routed(&mut c);
     // Another boot of it attaches: expected again.
-    c.handle(1, HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() }, 1900);
+    c.handle(1, HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 1900);
     assert!(c.left_hosts().is_empty());
     commit_routed(&mut c);
     c.maintain(1900 + CUT_EVERY_MS);
@@ -1799,7 +1803,7 @@ fn attach_of_a_host_outside_the_running_cut_aborts_it() {
     let alone = begun(&commit_routed(&mut c));
     assert_eq!(alone.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0]);
     let cut = alone[0].1;
-    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() };
+    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
     c.handle(1, back, 1800);
     assert!(c.left_hosts().is_empty(), "another boot: back");
     commit_routed(&mut c);
@@ -2238,6 +2242,7 @@ fn restart_resends_open_successions_and_hosts_answer_again() {
         handed: Vec::new(),
         pending_cut: None,
         successions,
+        policy: game::CrashPolicy::Rollback,
     };
     let other = 1 - heir;
     c.handle(other, attach_listing(other, 1, Vec::new()), 0);
@@ -2335,6 +2340,7 @@ fn a_succeeded_boots_messages_are_dropped() {
         handed: Vec::new(),
         pending_cut: None,
         successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
     };
     c.handle(0, attach_as(0, 1, 100, Vec::new()), 0);
     c.handle(1, attach_as(1, 1, 101, Vec::new()), 0);
@@ -2394,6 +2400,7 @@ fn a_host_attaching_after_a_rollback_is_told_the_generation() {
         handed: Vec::new(),
         pending_cut: None,
         successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
     };
     c.handle(2, stale, 50);
     let out = commit_routed(&mut c);
@@ -2570,7 +2577,7 @@ fn a_returning_host_cancels_the_wait() {
     let (mut a, t) = departed(2, 1);
     read_departed(&mut a, 2, 1, None, t);
     land_asked(&mut a, 1, t);
-    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 902, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new() };
+    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 902, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
     a.handle(1, back, t + 10);
     commit_routed(&mut a);
     // The read still shows the clean row of the boot that left (it lags the attach).
@@ -2800,6 +2807,7 @@ fn an_offline_succession_goes_to_its_heir_and_its_settle_tells_it() {
         handed: Vec::new(),
         pending_cut: None,
         successions: vec![(s.id, false)],
+        policy: game::CrashPolicy::Rollback,
     };
     c.handle(0, listing, 30);
     assert!(orders(&commit_routed(&mut c)).is_empty(), "applied already");
@@ -2826,6 +2834,7 @@ fn a_rollback_elsewhere_drops_the_abandoned_runs() {
         handed: Vec::new(),
         pending_cut: None,
         successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
     };
     c.handle(0, newer, 200);
     assert!(c.take_successions_reread(), "a newer generation: the open successions are read again");
@@ -2908,6 +2917,7 @@ fn attach_as(host: u32, epoch: u64, boot: u64) -> HostMsg {
         handed: Vec::new(),
         pending_cut: None,
         successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
     }
 }
 

@@ -8,7 +8,11 @@
 #   - a host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137
 #     (SIGKILL, e.g. `kill -9`) is started again after a back-off — but under `claim` ownership
 #     (what the hosts run) a killed host's land has moved to an heir by then and does NOT come
-#     back by itself: the restarted host waits until its succession is settled and owns nothing; at most
+#     back by itself: the restarted host waits until its succession is settled and owns nothing;
+#     a host whose env words say VOXEL_OWNERSHIP=claim is also started again on exit 3
+#     (EXIT_FENCED: it was replaced — a hung host that woke after its succession — and returns
+#     as a host owning nothing; under `static` exit 3 stays fatal: two processes of one ordinal
+#     would fence each other); at most
 #     DEV_R3_RESTART_MAX times within DEV_R3_RESTART_WINDOW_SECS; any other exit, or one
 #     restart too many, ends its loop — and never a restart once the stack is stopping;
 #   - when any member ends on its own (login, the coordinator, a host loop) the stack goes
@@ -187,11 +191,15 @@ stop() {
 trap stop EXIT
 trap 'interrupted=1' INT TERM HUP
 
-# Host <n> with <env words...>: started again on exit 5 or 137, bounded; never once stopping.
+# Host <n> with <env words...>: started again on exit 5 or 137 — and on 3 under `claim`
+# ownership — bounded; never once stopping.
 host_loop() {
     local n=$1
     shift
-    local log=$dir/host-$n.log restarts=() rc spid now t
+    local log=$dir/host-$n.log restarts=() rc spid now t w claim=0
+    for w in "$@"; do
+        if [ "$w" = VOXEL_OWNERSHIP=claim ]; then claim=1; fi
+    done
     # Only the supervisor decides when a host stops; the server gets default dispositions.
     trap '' HUP TERM INT
     while :; do
@@ -206,8 +214,8 @@ host_loop() {
         wait "$spid" || rc=$?
         rm -f "$dir/host-$n.pid"
         if [ -e "$dir/stopping" ]; then exit "$rc"; fi
-        case $rc in
-            5 | 137) ;;
+        case $rc/$claim in
+            5/* | 137/* | 3/1) ;;
             *)
                 say "host $n exited $rc; see $log"
                 exit "$rc"
@@ -224,7 +232,7 @@ host_loop() {
             exit "$rc"
         fi
         restarts+=("$now")
-        say "host $n exited $rc (5: the world rolled back to its last cut; 137: killed): starting it again"
+        say "host $n exited $rc (5: the world rolled back to its last cut; 137: killed; 3: replaced, under claim): starting it again"
         sleep "$restart_backoff"
         if [ -e "$dir/stopping" ]; then exit "$rc"; fi
     done
