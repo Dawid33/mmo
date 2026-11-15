@@ -75,13 +75,34 @@ OpenTofu (not Terraform) in `deploy/`: the k3d twin of orion (`deploy/envs/local
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
 first; roots `platform` → `dns` (the `renownandruin.com` records no module makes) → `garage` (+ `garage-buckets`) = https://s3.errantry.renownandruin.com, the S3-compatible
 object store on the box itself (one copy, no off-box backup; telemetry and Zulip files live there) → `monitoring`, `picoshare` = https://share.errantry.renownandruin.com, `zulip` = https://chat.errantry.renownandruin.com,
-`keycloak` (+ `keycloak-realm`) = https://auth.errantry.renownandruin.com, the identity provider → `registry` (the ECR repository `mmo/login` and the cluster's pull-only IAM user) → `login` = https://login.errantry.renownandruin.com, the game's login service (two pods, its own PostgreSQL, metrics scraped; its image is `mmo/login` in ECR, pulled with a pull secret the CronJob `ecr-refresh` renews every 6 h; one tag, `latest`, and an image `latest` has moved past expires about a day later; a release is `just orion-login-push` — pushed as `latest` (git revision in an image label), set by digest with `kubectl set image`, never an apply — and the way back is `kubectl rollout undo` (works while the previous image is still in ECR or the node's cache); `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log; apply `registry` and push BEFORE the first apply) → `site` = https://www.errantry.renownandruin.com, the static website from `website/` with the `orion`
+`keycloak` (+ `keycloak-realm`) = https://auth.errantry.renownandruin.com, the identity provider → `registry` (the ECR repositories `mmo/login`, `mmo/server`, `mmo/web` and the cluster's pull-only IAM user) → `login` = https://login.errantry.renownandruin.com, the game's login service (two pods, its own PostgreSQL, metrics scraped; its image is `mmo/login` in ECR, pulled with a pull secret the CronJob `ecr-refresh` renews every 6 h; one tag, `latest`, and an image `latest` has moved past expires about a day later; a release is `just orion-login-push` — pushed as `latest` (git revision in an image label), set by digest with `kubectl set image`, never an apply — and the way back is `kubectl rollout undo` (works while the previous image is still in ECR or the node's cache); `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log; apply `registry` and push BEFORE the first apply) → `site` = https://www.errantry.renownandruin.com, the static website from `website/` with the `orion`
 Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
 bump re-diff `website/theme/orion/login/template.ftl` against the new `base` theme and run `just site-theme-check`); monitoring stack
 handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
-the public web build `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
-`target/tools`, never the distro's). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
+the OLD compose game on the box, `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
+`target/tools`, never the distro's; the new game is the `world` root below, and a page from this tree shows "Play online" against a `/login` the compose game does not serve). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
 print secrets.
+
+**The world on k8s (R5, built 2026-11-15; plan `docs/superpowers/plans/2026-11-15-r5-k8s.md`, "As built"; the
+hand steps are its Phase D)**: apply order `registry` (+ `just orion-world-push`) → `platform` (carries the
+CloudNativePG operator) → `garage-buckets` (bucket `world-backups`) → `postgres` (cluster `pg`, a database and
+role per world, a nightly dump CronJob to `world-backups` — same disk as the data, no off-box copy) → `dns` →
+`login` → `monitoring` → `world` (`deploy/modules/world`, namespace `world-<id>`: Deployment `coordinator`, StatefulSet
+`hosts`, a UDP NodePort pair per host, Deployment `toolbox` holding `worldctl`, Deployment `web` = page + `/login`
+proxy to the login service, the cert-manager Certificate `client-tls` for `game.errantry.renownandruin.com`, the
+`ecr-pull` secret). Pods never forge (`VOXEL_EMPTY_STORE=wait`): the forge runs in the toolbox (`just world-ctl forge
+--preset …`), then the pods turn Ready. Hosts are `Parallel` + **`OnDelete`**: `kubectl rollout status` never completes
+on them — wait on `status.readyReplicas`, as the recipes do. A release is **stop → replace images → start, never a
+rolling update** (`just orion-world-push` builds and pushes both images and prints digests; `orion-world-update
+<server> <web>` = `scripts/world_update.sh`; `orion-world-rollback`; `world-stop` / `world-start` leave every host
+through its leave cut first). Operator recipes (context `world_ctx`, namespace `world_ns`, default orion /
+`world-errantry`): `world-ctl <worldctl args>`, `world-status` (pods, node ports, each `/readyz` body),
+`world-logs|world-metrics <pod>`, `world-register` (prints the `just orion-login world add …` line, pins read from
+Secret `host-link-identity`), `orion-pg-backup-now`, `orion-pg-restore` (prints the restore into a scratch database,
+runs nothing). The twin runs the same module on k3d with the same recipes (`world_ctx=k3d-mmo world_ns=world-twin`):
+`twin-check` proves forge-wait, a killed host (a landless one: a Crash succession that settles), a clean leave, a
+coordinator restart, stop/start; it does NOT prove a takeover of OWNED land, a player, a browser pin, cert-manager,
+backups or load.
 
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
@@ -293,6 +314,21 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   world-cut participant calling `PeerJournal::cut_begun`: any new path that joins a cut must call it. A new
   state-bearing `Reliable` must be journalled or argued out. A new per-ordinal `WorldManager` field must be
   handled in `world_manager/succession.rs`.
+- **World on k8s variables (R5; each unset = today's behaviour)**: `VOXEL_COORDINATOR_ADDR` and login's `--link` accept
+  a NAME (`svc_link::LinkTarget`, resolved at EVERY dial — a restarted pod's new IP is found within the DNS TTL);
+  peers stay literal `ip:port`: `VOXEL_ADVERTISE_PEER` (a literal `ip:port`; required when the peer bind is a wildcard,
+  a pod passes `$(POD_IP):6500`). A link identity (`VOXEL_*_CERT_HASH_FILE`'s `<file>.cert` / `.key`) may sit on a
+  read-only mount (the pin file is then not written, a WARN), and a dialer's pin is derived from `<file>.cert` when
+  there is no pin file (`svc_link::read_cert_hash` / `pin_beside`). `VOXEL_EMPTY_STORE=forge|wait`: `wait` = a pod
+  never forges, it waits for `worldctl forge` (`mmo_waiting{why="forge"}`) and exits 0 on SIGTERM. `VOXEL_HEALTH_BIND`
+  (`ip:port`, unset = no listener; `server/src/health.rs`): `/livez` fails only when a REGISTERED process's main loop
+  has not passed for `LIVEZ_STALL_MS` (30 s = 3 × the lease — the lease always acts first; it never replaces or feeds
+  the lease heartbeat), `/readyz` is 200 once registered (503 body: `forge` / `succession` / `vouched` / `starting`),
+  `/metrics` is Prometheus text with a `role` label (`host` or `coordinator`; coordinator-only series are constant on a
+  host — alerts select `role="coordinator"`). `VOXEL_CLIENT_CERT` / `VOXEL_CLIENT_KEY` (PEM chain + key; the old
+  `VOXEL_WT_CERT` / `_KEY` are aliases): ONE certificate for the QUIC listener and WebTransport, files WAITED for at
+  start (a WARN at most every 60 s) and re-read every 60 s (a cert-manager renewal needs no restart); unset = a
+  self-signed P-256 certificate valid 14 days whose hash `HostEndpoint.cert_hash` carries (single-player too).
 
 **Client** (`crates/client`)
 - `renderer/` bridges sim state to Bevy (`bridge.rs`); predicted regions run like the server's (`regions/`,
@@ -316,6 +352,11 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   join call at a time, `REJOIN_RETRY_MS` apart; a 503 = not yet; a ticket's connect is bounded by
   `REJOIN_CONNECT_MS` (15 s), then a new join; gives up after `REJOIN_MAX_MS`; revoked → the sign-in screen). Native QUIC keep-alive
   3 s / idle 10 s (`netcode.rs`, as WebTransport).
+- **Native QUIC trust** (`quic_verify.rs`, `policy_for`): a host that advertises a `cert_hash` is pinned to it; with no
+  hash a non-loopback address must present a certificate the public web PKI vouches for (a typed-in "Join server"
+  address of a self-signed host now fails — it retries until the 120 s deadline); verification is skipped only for
+  loopback. The browser page's login is `VOXEL_LOGIN_URL`, else `{origin}/login` on an `https` non-loopback origin
+  (the web image proxies it); otherwise no "Play online".
 - **Session lifecycle** (`session.rs`): any new per-world resource, system `Local` or entity root must be
   registered (`add_session_reset`, `SessionLocal`) or tagged `SessionScoped`, or it leaks into the next world.
 - UI is **Slint only** (no `bevy_ui`, no egui). `CursorPolicy` is the only cursor-grab writer. `dev_ui`
