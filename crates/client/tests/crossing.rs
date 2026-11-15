@@ -704,6 +704,64 @@ mod two_hosts {
              (baseline {baseline:?}, new home skewed {followed:?})"
         );
     }
+
+    /// Most steps the regions of a dead host take to come back from its heir
+    /// (`observed_host_dies_and_its_regions_come_back_from_the_heir`).
+    const HEIR_STEPS: usize = 60;
+    /// Steps the observed host stays dead before its succession is declared.
+    const DEAD_STEPS: usize = 10;
+
+    /// R4 Task 16: the client's window spans its home host and another it only observes.
+    /// The observed host dies; the client's connection to it goes silent (a transport
+    /// notices only later), so nothing of the client changes until the coordinator's
+    /// succession gives the dead host's land to its heir — here the home, the only host
+    /// left. Once the heir adopted that land, the home names itself for every region it had
+    /// sent the client elsewhere for: the client re-maps each to the home connection
+    /// (released on the dead one), subscribes there, and the home runs and serves it. The
+    /// session never ended.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn observed_host_dies_and_its_regions_come_back_from_the_heir() {
+        let mut h = SimHarness::with_claimed_hosts(2);
+        h.connect();
+        let window = load_window(&mut h);
+        let home = h.home_host();
+        let other = 1 - home;
+        let observed: Vec<game::RegionCoords> = window.iter().copied().filter(|rc| h.owner(*rc) == other).collect();
+        assert!(!observed.is_empty(), "the window reaches the other host");
+        for rc in &observed {
+            assert!(h.client_region_loaded(*rc), "{rc:?} never loaded");
+            assert_eq!(h.client_region_host(*rc), Some(other), "{rc:?} comes from its owner");
+        }
+        h.kill_host(other);
+        h.step_n(DEAD_STEPS);
+        for rc in &observed {
+            assert_eq!(h.client_region_host(*rc), Some(other), "nothing is guessed before the succession");
+        }
+        assert_eq!(h.run_succession(other), home, "the home is the only host left: the heir");
+        let back = |h: &mut SimHarness| {
+            observed.iter().all(|rc| {
+                h.client_region_host(*rc) == Some(home)
+                    && h.client_region_loaded(*rc)
+                    && h.host_manager(home).running_regions().contains(rc)
+            })
+        };
+        for _ in 0..HEIR_STEPS {
+            if back(&mut h) {
+                break;
+            }
+            h.step();
+        }
+        for rc in &observed {
+            assert_eq!(h.client_region_host(*rc), Some(home), "{rc:?}'s traffic counts from the home (the heir) now");
+            assert!(h.host_manager(home).running_regions().contains(rc), "the heir runs {rc:?}");
+            assert!(h.client_region_loaded(*rc), "{rc:?} is held");
+        }
+        assert_eq!(h.client_home_host(), Some(home), "the session lives on, on its home");
+        assert_eq!(h.server_session(home), Some(game::SessionKind::Home));
+        h.step_n(DEAD_STEPS);
+        h.assert_regions_in_step();
+    }
 }
 
 /// The first cardinal neighbour of the spawn region the other host of `h` owns (the

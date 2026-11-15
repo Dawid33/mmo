@@ -349,8 +349,10 @@ pub const HOME_UNCONFIRMED_WARN_MS: u64 = 15_000;
 const _: () = assert!(HOME_UNCONFIRMED_WARN_MS > game::HANDOFF_SESSION_GRACE_MS);
 
 /// How long a subscribe sent through the home is remembered unanswered
-/// (`GameInstanceManager::asked_home`); a host that cannot reach a region's owner
-/// never answers.
+/// (`GameInstanceManager::asked_home`) once its region is held or left the window. One
+/// still wanted and not held is never forgotten: it is asked again every
+/// `connections::OBSERVER_RETRY_MAX_MS` (a home that cannot answer yet remembers it and
+/// answers when it can, R4; this is the backstop for an answer lost on the way).
 const ASKED_HOME_FORGET_MS: u64 = 10_000;
 
 /// Client-side rolling counters for reconciliation load and clock drift,
@@ -1629,7 +1631,13 @@ impl GameInstanceManager {
         }
         let stale: Vec<RegionCoords> = self.subscribed.difference(&desired).copied().collect();
         for rc in stale {
+            let served_elsewhere = self.conns.connection_of(rc) != self.conns.home();
             self.send_out(Outgoing::Region(rc, ClientPacket::ReleaseRegionConnection(rc)));
+            if served_elsewhere {
+                // The home remembers where it sent the client for it (it answers again
+                // after a succession of that host, R4) until it is released there too.
+                self.send_out(Outgoing::Home(ClientPacket::ReleaseRegionConnection(rc)));
+            }
             self.conns.release(rc);
             self.observer_retry.remove(&rc);
             self.drop_region(rc);
@@ -1981,6 +1989,35 @@ impl GameInstanceManager {
         self.send_out(Outgoing::Region(rc, ClientPacket::RequestRegionConnection(rc)));
     }
 
+    /// Every region still wanted and not held whose last subscribe through the home went
+    /// `connections::OBSERVER_RETRY_MAX_MS` ago unanswered is asked of the home again
+    /// (R4: a home that could not answer remembers it, but an answer may be lost — a
+    /// redirect to a host that died before the client got there). One waiting for its
+    /// observer retry (`observer_retry`) is left to it.
+    fn ask_unanswered_again(&mut self) {
+        let now = self.conn_clock_ms;
+        let home = self.conns.home();
+        let again: Vec<RegionCoords> = self
+            .asked_home
+            .iter()
+            .filter(|(rc, (_, at))| {
+                now.saturating_sub(*at) >= crate::connections::OBSERVER_RETRY_MAX_MS
+                    && self.subscribed.contains(*rc)
+                    && !self.host.contains(*rc)
+                    && self.conns.connection_of(**rc) == home
+                    && !self.observer_retry.contains_key(*rc)
+            })
+            .map(|(rc, _)| *rc)
+            .collect();
+        if again.is_empty() {
+            return;
+        }
+        info!("[client] {} region(s) the home has not answered for {} ms, asked again: {again:?}", again.len(), crate::connections::OBSERVER_RETRY_MAX_MS);
+        for rc in again {
+            self.request_region(rc);
+        }
+    }
+
     /// One subscribe of `rc` through the home was answered (a snapshot or a
     /// `RegionElsewhere`): whether one was outstanding.
     fn answered_home(&mut self, rc: RegionCoords) -> bool {
@@ -1992,7 +2029,8 @@ impl GameInstanceManager {
         true
     }
 
-    /// Once per client tick: close connections idle for `CONN_IDLE_CLOSE_MS`, forget
+    /// Once per client tick: close connections idle for `CONN_IDLE_CLOSE_MS`, ask the
+    /// home again for regions still wanted that it left unanswered, forget the other
     /// unanswered subscribes, and log once when the body (or a move) stays on another
     /// host than the home's with no `PlayerRegion` from there.
     fn maintain_connections(&mut self) {
@@ -2000,7 +2038,11 @@ impl GameInstanceManager {
         for key in self.conns.close_idle(now) {
             info!("[client] connection {key} served no region for {} ms: closed", crate::connections::CONN_IDLE_CLOSE_MS);
         }
-        self.asked_home.retain(|_, (_, at)| now.saturating_sub(*at) < ASKED_HOME_FORGET_MS);
+        self.ask_unanswered_again();
+        let (subscribed, host) = (&self.subscribed, &self.host);
+        self.asked_home.retain(|rc, (_, at)| {
+            now.saturating_sub(*at) < ASKED_HOME_FORGET_MS || (subscribed.contains(rc) && !host.contains(rc))
+        });
         let home_host = self.conns.home_ordinal();
         let body_elsewhere = self.home_region.is_some_and(|rc| self.region_host(rc) != home_host);
         if !(body_elsewhere || self.pending_move.is_some()) {
@@ -2235,6 +2277,17 @@ impl GameInstanceManager {
                 if !self.subscribed.contains(&region) && asked {
                     // Released while the answer was on its way.
                     log::debug!("[client] {region:?} is host {}'s, but no longer wanted", endpoint.ordinal);
+                } else if Some(endpoint.ordinal) == self.conns.home_ordinal() {
+                    // The home serves it now (R4: it inherited it from the host that did).
+                    // Never a move (that comes as `PlayerRegion`): one no longer wanted is a
+                    // late answer.
+                    if self.subscribed.contains(&region) {
+                        info!("[client] {region:?} is served by the home (host {}) now", endpoint.ordinal);
+                        self.conns.remap_to_home(region);
+                        self.request_region(region);
+                    } else {
+                        log::debug!("[client] {region:?} is the home's, but no longer wanted");
+                    }
                 } else if let Some(opener) = self.opener.as_mut() {
                     if !self.subscribed.contains(&region) {
                         // Unasked: the home moved the player to another host's region
@@ -2897,6 +2950,80 @@ mod manager_tests {
         manager.retry_observer_regions();
         assert!(asked(&manager), "near the body: asked for again within the near cap");
         assert!(manager.observer_retry.is_empty());
+    }
+
+    /// R4 Task 16: a subscribe through the home that is never answered (the home could not
+    /// reach the region's owner, and the answer it gave later was lost) is not forgotten
+    /// after `ASKED_HOME_FORGET_MS` while the region is still wanted and not held: it is
+    /// asked again every `OBSERVER_RETRY_MAX_MS` until the region is held, then forgotten.
+    /// One that left the window is forgotten and never asked again. A region whose observer
+    /// connection closed keeps being asked the same way after its first retry.
+    #[test]
+    fn an_unanswered_region_is_asked_again() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let opener = RecordingOpener::default();
+        manager.set_conn_opener(Box::new(opener.clone()));
+        let endpoint = |ordinal| game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None };
+        server_send.send(ServerPacket::Host(endpoint(0))).unwrap();
+        server_send.send(ServerPacket::PlayerRegion(Some(RegionCoords::new(0, 0)), 0)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let (wanted, gone, observed) = (RegionCoords::new(5, 0), RegionCoords::new(-5, 0), RegionCoords::new(0, 5));
+        let max = crate::connections::OBSERVER_RETRY_MAX_MS;
+        let t0 = manager.conn_clock_ms;
+        for rc in [wanted, gone, observed] {
+            manager.subscribed.insert(rc);
+            manager.request_region(rc);
+        }
+        // `observed` is host 1's; its connection closes before it served anything.
+        server_send
+            .send(ServerPacket::RegionElsewhere {
+                region: observed,
+                endpoint: endpoint(1),
+                ticket: game::ObserverTicket { client: 0, nonce: 1 },
+            })
+            .unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let one = manager.conns.conn_to(1).expect("a connection to host 1");
+        manager.close_observer(one, "closed in the test", false);
+        // `gone` leaves the window.
+        manager.subscribed.remove(&gone);
+        let _ = manager_packets(&manager);
+        // The home's packets since the last call: how often `rc` was asked.
+        let asked = |m: &GameInstanceManager, rc: RegionCoords| {
+            manager_packets(m).iter().filter(|p| matches!(p, ClientPacket::RequestRegionConnection(r) if *r == rc)).count()
+        };
+        let at = |m: &mut GameInstanceManager, ms: u64| {
+            m.conn_clock_ms = t0 + ms;
+            m.retry_observer_regions();
+            m.maintain_connections();
+        };
+        at(&mut manager, crate::connections::OBSERVER_RETRY_MS);
+        let first = manager_packets(&manager);
+        assert!(
+            first.iter().any(|p| matches!(p, ClientPacket::RequestRegionConnection(r) if *r == observed)),
+            "the closed connection's region is asked of the home: {first:?}"
+        );
+        at(&mut manager, ASKED_HOME_FORGET_MS);
+        assert!(manager.asked_home.contains_key(&wanted), "a region still wanted is not forgotten");
+        assert!(!manager.asked_home.contains_key(&gone), "one that left the window is");
+        assert!(manager_packets(&manager).is_empty(), "nothing asked before OBSERVER_RETRY_MAX_MS");
+        at(&mut manager, max);
+        let sent = manager_packets(&manager);
+        let count = |rc: RegionCoords| sent.iter().filter(|p| matches!(p, ClientPacket::RequestRegionConnection(r) if *r == rc)).count();
+        assert_eq!((count(wanted), count(gone), count(observed)), (1, 0, 0), "asked again after OBSERVER_RETRY_MAX_MS: {sent:?}");
+        at(&mut manager, crate::connections::OBSERVER_RETRY_MS + max);
+        assert_eq!(asked(&manager, observed), 1, "the closed connection's region too");
+        // `wanted` is held now: never asked again, then forgotten.
+        let mut world = game::World::new();
+        world.load(&wanted, Region::from_chunks(wanted, Vec::new()));
+        server_send.send(world.build_region_server_packet(&wanted)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert!(manager.loaded_regions().contains(&wanted));
+        at(&mut manager, 3 * max);
+        assert_eq!(asked(&manager, wanted), 0, "a held region is not asked again");
+        at(&mut manager, 3 * max + ASKED_HOME_FORGET_MS);
+        assert!(!manager.asked_home.contains_key(&wanted), "and forgotten");
+        assert!(manager.asked_home.contains_key(&observed), "one not held stays");
     }
 
     /// Fix round (Task 18 m4): a region subscribed and released twice through the home,

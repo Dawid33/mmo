@@ -226,8 +226,11 @@ impl ConnectionSet {
     /// The home sent `region`'s owner: open a connection to `endpoint.ordinal` unless one
     /// is live (one connection per host, however many regions; after the home moved, the
     /// old home's connection serves as this one), serve `region` from it and subscribe it
-    /// there. Never opens an observer connection to the home host itself (an observer
-    /// ticket must not replace the home session there).
+    /// there. A region another connection served is released there first (re-mapped: its
+    /// owner died and an heir took it, R4) — one host serves it at a time. Never opens an
+    /// observer connection to the home host itself (an observer ticket must not replace
+    /// the home session there): the home naming itself serves the region from the home
+    /// connection ([`Self::remap_to_home`]) and it is subscribed there.
     pub fn on_region_elsewhere(
         &mut self,
         region: RegionId,
@@ -241,7 +244,9 @@ impl ConnectionSet {
             return;
         };
         if ordinal == home {
-            log::warn!("[client] {region:?} is said to be host {ordinal}'s, which is the home: no observer connection");
+            log::info!("[client] {region:?} is served by the home (host {ordinal}) now");
+            self.remap_to_home(region);
+            self.route(Outgoing::Conn(self.home, ClientPacket::RequestRegionConnection(region)));
             return;
         }
         let key = match self.conn_to(ordinal) {
@@ -262,6 +267,16 @@ impl ConnectionSet {
             self.route(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(region)));
         }
         self.route(Outgoing::Conn(key, ClientPacket::RequestRegionConnection(region)));
+    }
+
+    /// `region` is served by the home connection from now on (the home named itself for
+    /// it, R4: it inherited the region from the host that served it): another connection
+    /// that served it lets it go. The caller subscribes it on the home.
+    pub fn remap_to_home(&mut self, region: RegionId) {
+        let home = self.home;
+        if let Some(old) = self.region_conn.insert(region, home).filter(|old| *old != home) {
+            self.route(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(region)));
+        }
     }
 
     /// Whether region traffic for `region` from `conn` counts: only from the connection
@@ -628,6 +643,59 @@ mod tests {
         assert!(!set.is_live(one));
         assert!(set.close_idle(u64::MAX).is_empty(), "never the home");
         assert!(set.is_live(LOGIN_CONN));
+    }
+
+    /// R4 Task 16: the home names itself for a region (it serves the region now — the heir
+    /// of the host that did): the region is mapped to the home connection and subscribed
+    /// there, never dialled as an observer; a region another host's connection served is
+    /// released there first.
+    #[test]
+    fn region_elsewhere_naming_the_home_subscribes_at_home() {
+        let (mut set, home) = home_on_0();
+        let mut opener = FakeOpener::default();
+        set.on_region_elsewhere(rc(1, 0), endpoint(0), ticket(), &mut opener);
+        assert!(opener.opened.is_empty(), "no connection to the home host");
+        assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))], "subscribed at home");
+        assert_eq!(set.connection_of(rc(1, 0)), LOGIN_CONN);
+        assert!(set.accepts(LOGIN_CONN, rc(1, 0)));
+        // One another host served until now.
+        set.on_region_elsewhere(rc(2, 0), endpoint(1), ticket(), &mut opener);
+        let one = set.conn_to(1).expect("a connection to host 1");
+        let _ = (opener.packets(1), sent(&home));
+        set.on_region_elsewhere(rc(2, 0), endpoint(0), ticket(), &mut opener);
+        assert_eq!(opener.packets(1), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(2, 0)))], "released where it was served");
+        assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(2, 0)))]);
+        assert!(set.accepts(LOGIN_CONN, rc(2, 0)), "the home's traffic counts");
+        assert!(!set.accepts(one, rc(2, 0)), "host 1's no longer does");
+        assert_eq!(opener.opened.len(), 1, "nothing more dialled");
+    }
+
+    /// R4 Task 16: a region one host served is named again as another's (its owner died
+    /// and an heir took it): released on the old connection and subscribed on the new one;
+    /// only the new connection's traffic counts. Named again as the home's, it moves to the
+    /// home connection the same way.
+    #[test]
+    fn a_second_region_elsewhere_remaps_the_region() {
+        let (mut set, home) = home_on_0();
+        let mut opener = FakeOpener::default();
+        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
+        let one = set.conn_to(1).expect("a connection to host 1");
+        let _ = opener.packets(1);
+        set.on_region_elsewhere(rc(1, 0), endpoint(2), ticket(), &mut opener);
+        let two = set.conn_to(2).expect("a connection to host 2");
+        assert_eq!(opener.packets(1), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
+        assert_eq!(opener.packets(2), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))]);
+        assert_eq!(host_of(&set, rc(1, 0)), Some(2));
+        assert!(set.accepts(two, rc(1, 0)));
+        assert!(!set.accepts(one, rc(1, 0)) && !set.accepts(LOGIN_CONN, rc(1, 0)), "one connection serves it");
+        assert!(sent(&home).is_empty(), "nothing about it goes home");
+        // Its owner dies too and the home inherits it.
+        set.on_region_elsewhere(rc(1, 0), endpoint(0), ticket(), &mut opener);
+        assert_eq!(opener.packets(2), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
+        assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))]);
+        assert_eq!(host_of(&set, rc(1, 0)), Some(0));
+        assert!(set.accepts(LOGIN_CONN, rc(1, 0)) && !set.accepts(two, rc(1, 0)));
+        assert!(opener.packets(1).is_empty());
     }
 
     #[test]
