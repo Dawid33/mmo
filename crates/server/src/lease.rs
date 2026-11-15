@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CrashPolicy, HOST_HEARTBEAT_MS};
 use crate::claims::Fenced;
-use world_store::{NewHost, Registered, StoreError, StoreHandle};
+use world_store::{Beat, NewHost, Registered, StoreError, StoreHandle};
 
 /// At most one warning per this many ms about heartbeats that fail.
 pub const HEARTBEAT_WARN_MS: u64 = 10_000;
@@ -34,9 +34,11 @@ pub struct Heartbeat {
     boot: u64,
     /// When the next beat is due (`None`: at the first pump).
     next_at: Option<Instant>,
-    pending: Option<Receiver<Result<bool, StoreError>>>,
+    pending: Option<Receiver<Result<Beat, StoreError>>>,
     warned_at: Option<Instant>,
     replaced: bool,
+    /// The drain mark the last successful beat reported ([`Self::drain_in_ms`]).
+    drain_in_ms: Option<i64>,
     /// Between two beats ([`HOST_HEARTBEAT_MS`]; a real-time test shortens it with the lease).
     period: Duration,
 }
@@ -44,7 +46,16 @@ pub struct Heartbeat {
 impl Heartbeat {
     pub fn new(store: StoreHandle, id: HostId, boot: u64) -> Self {
         let period = Duration::from_millis(HOST_HEARTBEAT_MS);
-        Heartbeat { store, id, boot, next_at: None, pending: None, warned_at: None, replaced: false, period }
+        Heartbeat { store, id, boot, next_at: None, pending: None, warned_at: None, replaced: false, drain_in_ms: None, period }
+    }
+
+    /// The row's drain mark as the last successful beat reported it (`worldctl drain`): ms
+    /// until this host is to leave, computed by the database at that beat (negative: past due);
+    /// `None`: not draining, or no beat answered yet. It is as old as that beat (at most about
+    /// [`HOST_HEARTBEAT_MS`] while beats get through); a failed beat leaves it as it was. Read
+    /// it from the main loop after [`pump_or_fence`]; no store read of its own.
+    pub fn drain_in_ms(&self) -> Option<i64> {
+        self.drain_in_ms
     }
 
     /// Test hook: a beat every `period` instead of [`HOST_HEARTBEAT_MS`] (with a lease the test
@@ -65,8 +76,11 @@ impl Heartbeat {
             return LeaseState::Replaced;
         }
         match self.store.heartbeat(self.id, self.boot) {
-            Ok(true) => LeaseState::Held,
-            Ok(false) => {
+            Ok(Beat { live: true, drain_in_ms }) => {
+                self.drain_in_ms = drain_in_ms;
+                LeaseState::Held
+            }
+            Ok(Beat { live: false, .. }) => {
                 self.replaced = true;
                 LeaseState::Replaced
             }
@@ -88,8 +102,11 @@ impl Heartbeat {
         if let Some(rx) = &self.pending {
             let failed = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return LeaseState::Held,
-                Ok(Ok(true)) => None,
-                Ok(Ok(false)) => {
+                Ok(Ok(Beat { live: true, drain_in_ms })) => {
+                    self.drain_in_ms = drain_in_ms;
+                    None
+                }
+                Ok(Ok(Beat { live: false, .. })) => {
                     self.pending = None;
                     self.replaced = true;
                     return LeaseState::Replaced;
@@ -208,6 +225,30 @@ mod tests {
         store.register_host(host(11), CrashPolicy::Succession).unwrap();
         assert_eq!(beat.beat_now("a later step"), LeaseState::Replaced);
         assert_eq!(beat.pump(Instant::now()), LeaseState::Replaced);
+        store.shutdown();
+    }
+
+    /// Elastic 1 Task 7: the beat surfaces the row's drain mark (`worldctl drain`) to the main
+    /// loop — the remaining ms of the last successful beat, no read of its own.
+    #[test]
+    fn a_beat_surfaces_the_drain_mark() {
+        let store = StoreHandle::open(&world_store::StoreUrl::Memory, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+        let me = store.register_host(host(10), CrashPolicy::Succession).unwrap().id;
+        let mut beat = Heartbeat::new(store.clone(), me, 10);
+        assert_eq!(beat.beat_now("a step"), LeaseState::Held);
+        assert_eq!(beat.drain_in_ms(), None);
+        store.drain_host(me, 60_000).unwrap();
+        assert_eq!(beat.drain_in_ms(), None, "known only from a beat");
+        // A pumped beat: sent at the first pump, its answer read at a later one.
+        let now = Instant::now();
+        assert_eq!(beat.pump(now), LeaseState::Held);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while beat.drain_in_ms().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            assert_eq!(beat.pump(now), LeaseState::Held);
+        }
+        let d = beat.drain_in_ms().expect("the pumped beat's answer");
+        assert!((59_000..=60_000).contains(&d), "{d}");
         store.shutdown();
     }
 }

@@ -119,7 +119,8 @@ pub(crate) enum Request {
     RegisterHost(crate::NewHost, game::CrashPolicy, Reply<crate::Registered>),
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
-    Heartbeat(HostId, u64, Reply<bool>),
+    Heartbeat(HostId, u64, Reply<crate::Beat>),
+    DrainHost(HostId, u64, Reply<()>),
     Owners(Reply<Vec<(SuperRegion, i64, u64)>>),
     OwnedBy(HostId, Reply<Fence>),
     DbNowMs(Reply<u64>),
@@ -335,7 +336,7 @@ async fn serve(
     // under a client-side deadline (`beats`).
     let (beat_tx, beater) = match beat {
         Some(options) => {
-            let (tx, rx) = mpsc::unbounded_channel::<Beat>();
+            let (tx, rx) = mpsc::unbounded_channel::<BeatJob>();
             (Some(tx), Some(tokio::spawn(beats(options, rx))))
         }
         None => (None, None),
@@ -519,6 +520,18 @@ async fn serve(
                         Pool::Pg(p) => crate::operator::vouch_host(p, ordinal, lease_ms, lock_timeout_ms).await,
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
+                })
+            }
+            // Postgres: no writer lock (as the heartbeat and the vouch: one statement over one
+            // `hosts` row, bounded by the cut lock timeout). SQLite: the writer lock, as every write.
+            Request::DrainHost(id, in_ms, r) => {
+                let lock_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let _w = match &pool {
+                        Pool::Sqlite(_) => Some(writer.lock().await),
+                        Pool::Pg(_) => None,
+                    };
+                    r.send(on_pool!(&pool, drain_host(id, in_ms, lock_ms)))
                 })
             }
             Request::OpenSuccessions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, open_successions())) }),
@@ -722,7 +735,7 @@ async fn serve(
 }
 
 /// A lease beat for the beat task: `(ordinal, boot, answer)`.
-type Beat = (HostId, u64, Reply<bool>);
+type BeatJob = (HostId, u64, Reply<crate::Beat>);
 
 /// `application_name` of a store's heartbeat connection.
 pub(crate) const HEARTBEAT_APP: &str = "mmo-heartbeat";
@@ -731,21 +744,17 @@ pub(crate) const HEARTBEAT_APP: &str = "mmo-heartbeat";
 /// of their own — never the shared pool's, which a burst of region loads, a long cut part
 /// and a claim waiting on a row lock can hold whole for longer than the lease. Each beat —
 /// connecting included — has a client-side deadline ([`crate::HEARTBEAT_DEADLINE_MS`]): one
-/// that fails or runs out answers an error ("no beat this time", never `false`) and its
+/// that fails or runs out answers an error ("no beat this time", never `live: false`) and its
 /// connection is DROPPED, so the next beat dials a new one instead of waiting on a socket
 /// that retransmits into a black hole. A short transaction whose `lock_timeout` is
 /// [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (`SET LOCAL`: nothing outlives the transaction, also
 /// behind a connection pooler): a beat behind a registration or a declaration of its own row
 /// fails fast. One statement over the caller's own `hosts` row, UNFENCED on purpose (as
 /// `rows`' `heartbeat`, which SQLite still uses).
-async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::UnboundedReceiver<Beat>) {
-    use sqlx::{ConnectOptions, Connection};
+async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::UnboundedReceiver<BeatJob>) {
+    use sqlx::{ConnectOptions, Connection, Row};
     let deadline = std::time::Duration::from_millis(crate::HEARTBEAT_DEADLINE_MS);
-    let sql = format!(
-        "UPDATE hosts SET seen_ms = {} WHERE id = $1 AND boot = $2 AND state = {}",
-        crate::succession::PG_NOW_MS,
-        crate::HOST_LIVE
-    );
+    let sql = crate::rows::heartbeat_sql(crate::succession::PG_NOW_MS);
     let mut conn: Option<sqlx::PgConnection> = None;
     while let Some((ordinal, boot, reply)) = rx.recv().await {
         let beat = async {
@@ -754,9 +763,9 @@ async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::Unbounde
             }
             let mut tx = conn.as_mut().expect("connected above").begin().await?;
             sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", crate::HEARTBEAT_LOCK_TIMEOUT_MS)).execute(&mut *tx).await?;
-            let done = sqlx::query(&sql).bind(i(ordinal.0)).bind(crate::rows::i(boot)).execute(&mut *tx).await?;
+            let row = sqlx::query(&sql).bind(i(ordinal.0)).bind(crate::rows::i(boot)).fetch_optional(&mut *tx).await?;
             tx.commit().await?;
-            Ok::<bool, sqlx::Error>(done.rows_affected() == 1)
+            Ok::<crate::Beat, sqlx::Error>(crate::rows::beat_of(row.map(|r| r.try_get::<Option<i64>, _>(0)).transpose()?))
         };
         let answer = match tokio::time::timeout(deadline, beat).await {
             Ok(Ok(beaten)) => Ok(beaten),
@@ -856,6 +865,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::RollbackWorldOperator(r) => r.send(Err(StoreError::ReadOnly)),
         Request::RetireOffline(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::VouchHost(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::DrainHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         // A read-only handle sends nothing, a notice included.
         Request::NotifyCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),

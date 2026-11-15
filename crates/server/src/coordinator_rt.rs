@@ -1365,6 +1365,7 @@ impl CoordinatorRuntime {
                             clean: r.clean,
                             state: r.state,
                             seen_ms: r.seen_ms,
+                            draining: r.drain_in_ms.is_some(),
                         })
                         .collect();
                     // Issue-to-receive stamps: an answer that waited in the channel through a

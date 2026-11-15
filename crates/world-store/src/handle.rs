@@ -66,6 +66,17 @@ pub struct HostRow {
     pub wt_cert_hash: Option<String>,
 }
 
+/// What one lease beat ([`StoreHandle::heartbeat`]) found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Beat {
+    /// The row is still the caller's live boot (its `seen_ms` moved). `false`: replaced.
+    pub live: bool,
+    /// The row's drain mark (`worldctl drain`): ms until the host is to leave, computed by the
+    /// database at the beat (`drain_at_ms - seen_ms`; negative: past due). `None`: not draining,
+    /// or not `live`.
+    pub drain_in_ms: Option<i64>,
+}
+
 /// What a process registers as ([`StoreHandle::register_host`]): everything of its row but
 /// what the store decides (the id, the generation, `clean`, `state`, `seen_ms`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -844,7 +855,9 @@ impl StoreHandle {
     /// left alone, so of two claimers of one free row exactly one wins. One transaction,
     /// like [`Self::claim_super_regions`]. The fence holds the rows won (possibly none).
     /// Refused with `Fenced { sr: None }` (nothing claimed) unless host `owner`'s `hosts` row
-    /// is still the live boot `boot`: a host declared dead (R4) wins nothing.
+    /// is still the live boot `boot`: a host declared dead (R4) wins nothing. A row marked
+    /// draining ([`Self::drain_host`]) wins nothing either, but is not refused: the fence holds
+    /// no rows, as when nothing was free.
     pub fn claim_free(&self, owner: HostId, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
         self.ask(|r| Request::ClaimFree(owner, boot, srs, r))
     }
@@ -962,11 +975,12 @@ impl StoreHandle {
     }
 
     /// One lease beat: host `ordinal`'s row gets `seen_ms` = the database clock, if it is
-    /// still boot `boot` and live. `false`: no such live row — the caller was replaced.
+    /// still boot `boot` and live, and the beat reports the row's drain mark ([`Beat`]).
+    /// `live: false`: no such live row — the caller was replaced.
     /// With Postgres a row lock held by a registration or a decision makes the beat fail with an error
-    /// after [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (not `false`). Unfenced on purpose: it writes only the caller's own row and proves nothing but
+    /// after [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (not `live: false`). Unfenced on purpose: it writes only the caller's own row and proves nothing but
     /// liveness (ownership is what the fence proves, and every write still checks it).
-    pub fn heartbeat(&self, ordinal: HostId, boot: u64) -> Result<bool, StoreError> {
+    pub fn heartbeat(&self, ordinal: HostId, boot: u64) -> Result<Beat, StoreError> {
         self.ask(|r| Request::Heartbeat(ordinal, boot, r))
     }
 
@@ -975,8 +989,19 @@ impl StoreHandle {
         &self,
         ordinal: HostId,
         boot: u64,
-    ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+    ) -> crossbeam::channel::Receiver<Result<Beat, StoreError>> {
         self.ask_later(|r| Request::Heartbeat(ordinal, boot, r))
+    }
+
+    /// Elastic 1, `worldctl drain`: marks host `id` draining — its `drain_at_ms` becomes the
+    /// database clock + `in_ms`, or stays where it is if that is earlier (a mark only moves
+    /// earlier: no postponement, no un-drain). ONE `UPDATE` of that one `hosts` row, unfenced
+    /// like the heartbeat (it changes no ownership; the lock notes are in `operator.rs`).
+    /// Refused ([`StoreError::NotDrainable`], nothing written) unless the row is dirty and live.
+    /// A draining host wins no new land ([`Self::claim_free`] returns no rows) and is not the
+    /// coordinator's gate host; it learns the mark at its next beat ([`Beat::drain_in_ms`]).
+    pub fn drain_host(&self, id: HostId, in_ms: u64) -> Result<(), StoreError> {
+        self.ask(|r| Request::DrainHost(id, in_ms, r))
     }
 
     /// Every super-region row, by super-region: its owner (`NO_OWNER` when free) and epoch.

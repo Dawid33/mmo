@@ -83,6 +83,9 @@ pub struct HostSeen {
     pub state: i64,
     /// The database clock at its last beat; 0 = vouched dead by a boot of its ordinal.
     pub seen_ms: u64,
+    /// The operator marked it draining (`hosts.drain_at_ms` set, `worldctl drain`): it is never
+    /// the gate host ([`super::Coordinator::gate_host`]).
+    pub draining: bool,
 }
 
 /// What the watch remembers of one ordinal's row.

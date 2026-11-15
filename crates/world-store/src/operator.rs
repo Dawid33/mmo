@@ -33,6 +33,18 @@
 //!   timeout fails that beat).
 //! - [`vouch_host`] (`retire-host` while hosts live): ONE `UPDATE` of the retired host's row
 //!   (its row lock only), guarded by the lapse — see the function.
+//! - `drain_host` (`worldctl drain`, Elastic 1; in `rows.rs`, both engines — SQLite under the
+//!   writer lock): ONE `UPDATE` of one dirty live `hosts` row's `drain_at_ms` (`LEAST` of the
+//!   old mark and the database clock + the notice: it only moves earlier), then, if it matched
+//!   nothing, a plain read of that row to say why; `lock_timeout` the cut lock timeout. UNFENCED
+//!   like the heartbeat: one `hosts` row, no ownership changed, nothing else wanted. It holds
+//!   that one row and waits for nothing after it, so — like a heartbeat, which also takes one
+//!   `hosts` row and nothing after it — it joins neither documented cycle (each needs a
+//!   transaction that holds `super_regions` rows and waits for a `hosts` row, or the reverse):
+//!   it waits at most its timeout for a declaration, retirement, registration or a claim's
+//!   `check_live` holding the row, and nothing waits on it but a beat or another mark of that
+//!   row. A heartbeat and a drain mark of one row serialise on it; the beat reads the mark it
+//!   finds (`drain_at_ms - seen_ms`, one statement).
 //! - [`rollback_world_operator`] (`rollback --yes`): `world` `FOR NO KEY UPDATE`, then
 //!   [`crate::succession::rollback_in`]'s updates of `world`, `successions` and `in_flight`. Serialised with
 //!   every declaration, registration and decision on `world`. The one row lock it can wait

@@ -412,7 +412,7 @@ fn restarted_listener_is_found_again() {
         }
     };
     // Host 1 runs on (its lease beaten): the restart is not a total crash.
-    assert!(s1.heartbeat(h(1), 2).unwrap(), "host 1's row is its live boot");
+    assert!(s1.heartbeat(h(1), 2).unwrap().live, "host 1's row is its live boot");
     let store2 = db.open();
     let (mut l2, again) = boot_links(&store2, next_id(&db), "host-0", 3, TOKEN, &dir, &new_bind.to_string());
     assert_eq!((again.id, l2.local_addr()), (h(2), new_bind), "a new id: the next one");

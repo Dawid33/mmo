@@ -1895,7 +1895,7 @@ fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
 
 /// Host `ordinal`'s row as the coordinator reads it: dirty and live, last seen at `seen_ms`.
 fn seen(ordinal: HostId, seen_ms: u64) -> HostSeen {
-    HostSeen { ordinal, boot: 100 + ordinal.0, clean: false, state: game::HOST_LIVE, seen_ms }
+    HostSeen { ordinal, boot: 100 + ordinal.0, clean: false, state: game::HOST_LIVE, seen_ms, draining: false }
 }
 
 /// A host is lapsed only once the coordinator itself read one `seen_ms` over a whole lease
@@ -3398,4 +3398,45 @@ fn a_login_order_with_no_host_is_dropped() {
     assert_eq!(c.login_order(spawn_order(2)), Some((h(4), CoordMsg::Login(spawn_order(2)))));
     c.host_detached(h(4));
     assert_eq!(c.login_order(spawn_order(3)), None, "detached: none again");
+}
+
+// --- Elastic 1 Task 7: a draining host is never the gate ------------------------------------
+
+/// A read of hosts `0..n` at `now`, every one beating; those of `draining` marked draining.
+fn read_draining(c: &mut Coordinator, n: u32, draining: &[HostId], now: u64) {
+    let rows: Vec<HostSeen> =
+        (0..u64::from(n)).map(h).map(|h| HostSeen { draining: draining.contains(&h), ..seen(h, now + 1) }).collect();
+    c.observe_leases(&rows, now, now);
+}
+
+/// A host the operator marked draining (`worldctl drain`) is not the gate host: the orders go
+/// to the lowest attached host that is not draining, from the hosts read that shows the mark
+/// on (no read of its own).
+#[test]
+fn a_draining_host_is_not_the_gate() {
+    let mut c = succeeding(3);
+    read_draining(&mut c, 3, &[], 100);
+    assert_eq!(c.gate_host(), Some(h(0)));
+    read_draining(&mut c, 3, &[h(0)], 200);
+    assert_eq!(c.gate_host(), Some(h(1)), "host 0 drains");
+    assert_eq!(c.login_order(spawn_order(1)), Some((h(1), CoordMsg::Login(spawn_order(1)))));
+    read_draining(&mut c, 3, &[h(0), h(1)], 300);
+    assert_eq!(c.gate_host(), Some(h(2)), "hosts 0 and 1 drain");
+    assert!(commit_routed(&mut c).iter().all(|(_, m)| !matches!(m, CoordMsg::Login(_))), "nothing queued");
+}
+
+/// Every attached live host draining: no gate host — the order is dropped (as with no host
+/// attached: the login service answers 503 at its timeout).
+#[test]
+fn every_host_draining_means_no_gate() {
+    let mut c = succeeding(3);
+    read_draining(&mut c, 3, &[h(0), h(1), h(2)], 100);
+    assert_eq!(c.gate_host(), None);
+    assert_eq!(c.login_order(spawn_order(1)), None);
+    assert!(commit_routed(&mut c).is_empty(), "nothing queued");
+    // A new host attaches (not draining): it takes the orders.
+    c.handle(h(3), attach(h(3), 1, Vec::new(), Vec::new()), 150);
+    commit_routed(&mut c);
+    read_draining(&mut c, 4, &[h(0), h(1), h(2)], 200);
+    assert_eq!(c.login_order(spawn_order(2)), Some((h(3), CoordMsg::Login(spawn_order(2)))));
 }

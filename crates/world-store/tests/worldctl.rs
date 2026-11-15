@@ -272,7 +272,7 @@ fn retire_vouches_while_others_live() {
     assert!(out.contains("vouched"), "{out}");
     assert_eq!(w.h.hosts().unwrap()[2].seen_ms, 0, "vouched: seen_ms = 0");
     assert!(w.h.open_successions().unwrap().is_empty(), "the command declares nothing itself");
-    assert!(w.hosts[2].heartbeat(hid(2), boot_of(hid(2))).unwrap());
+    assert!(w.hosts[2].heartbeat(hid(2), boot_of(hid(2))).unwrap().live);
     assert_eq!(w.declare(hid(2), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(2)]), "it beat: harmless");
     assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false));
     // Running again: a second vouch is refused.
@@ -409,6 +409,49 @@ fn hosts_lists_every_row() {
     assert_eq!(lines[2], "2 host-2 live dirty land=1 seen=vouched drain=-");
     let err = said(&url, &["hosts"]).expect_err("no url");
     assert!(err.contains("usage"), "{err}");
+    w.shutdown();
+}
+
+/// Elastic 1 Task 7: `drain <url> <host id> [--in <secs>]` marks a dirty live host draining
+/// and prints its `hosts` line; the default notice is `DRAIN_WARNING_SECS`; a later drain with
+/// more time does not postpone it; a dead, clean or absent row is refused, nothing written.
+#[test]
+fn drain_marks_a_live_host_and_refuses_a_dead_one() {
+    let Some(w) = World::new(4) else { return };
+    let url = url_of(&w);
+    let field = |line: &str, key: &str| -> i64 {
+        line.split(' ').find_map(|f| f.strip_prefix(key)).unwrap_or_else(|| panic!("{key} in {line}")).parse().unwrap()
+    };
+    let out = said(&url, &["drain", &url, "1", "--in", "60"]).expect("marked");
+    assert!(out.starts_with("1 host-1 live dirty land=2 seen="), "{out}");
+    assert!((59_000..=60_000).contains(&field(&out, "drain=")), "{out}");
+    // Again with more time: not postponed.
+    let out = said(&url, &["drain", &url, "1", "--in", "600"]).expect("marked");
+    assert!((59_000..=60_000).contains(&field(&out, "drain=")), "{out}");
+    // The default notice.
+    let out = said(&url, &["drain", &url, "2"]).expect("marked");
+    let d = field(&out, "drain=");
+    let full = i64::try_from(game::DRAIN_WARNING_SECS * 1000).unwrap();
+    assert!((full - 1_000..=full).contains(&d), "{out}");
+    // Host 0 dead, host 3 left cleanly, id 9 never issued: refused, nothing written.
+    exec(&w.w, "UPDATE hosts SET state = 1 WHERE id = 0");
+    exec(&w.w, "UPDATE hosts SET clean = 1 WHERE id = 3");
+    for (id, want) in [("0", "host 0"), ("3", "host 3"), ("9", "host 9")] {
+        let err = said(&url, &["drain", &url, id]).expect_err("refused");
+        assert!(err.starts_with("drain: ") && err.contains(want), "{id}: {err}");
+    }
+    let listed = said(&url, &["hosts", &url]).unwrap();
+    for line in listed.lines().filter(|l| l.starts_with("0 ") || l.starts_with("3 ")) {
+        assert!(line.ends_with(" drain=-"), "{line}");
+    }
+    for (list, want) in [
+        (vec!["drain", &url, "h1"], "not a host id"),
+        (vec!["drain", &url, "1", "--in", "soon"], "--in"),
+        (vec!["drain", &url], "usage"),
+    ] {
+        let err = said(&url, &list).expect_err("refused");
+        assert!(err.contains(want), "{list:?}: {err}");
+    }
     w.shutdown();
 }
 

@@ -171,6 +171,26 @@ pub(crate) enum CutEnd {
     Prepare { gid: String, generation: u64 },
 }
 
+/// The lease beat's one statement, the database clock being `now_ms` (shared by `rows`'
+/// `heartbeat` and the Postgres beat task): `seen_ms` moves for the caller's live boot only,
+/// and the row answers its drain mark as ms from that same clock reading (`drain_at_ms -
+/// seen_ms`, NULL when not draining). No row returned: not that live boot.
+pub(crate) fn heartbeat_sql(now_ms: &str) -> String {
+    format!(
+        "UPDATE hosts SET seen_ms = {now_ms} WHERE id = $1 AND boot = $2 AND state = {} RETURNING drain_at_ms - seen_ms",
+        crate::HOST_LIVE
+    )
+}
+
+/// A [`heartbeat_sql`] answer as a [`crate::Beat`]: `None` = no row (replaced); `Some(d)` = the
+/// live row and its remaining drain time.
+pub(crate) fn beat_of(row: Option<Option<i64>>) -> crate::Beat {
+    match row {
+        None => crate::Beat { live: false, drain_in_ms: None },
+        Some(drain_in_ms) => crate::Beat { live: true, drain_in_ms },
+    }
+}
+
 macro_rules! engine_rows {
     ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr, $claims_lock:expr, $now_ms:expr) => {
         pub(crate) mod $module {
@@ -320,7 +340,9 @@ macro_rules! engine_rows {
                     epochs.insert((sx, sz), u(epoch));
                 }
                 if let Some(boot) = live {
-                    tx = check_live(pool, tx, owner, boot, lock_ms).await?;
+                    // A draining host keeps re-claiming its OWN rows (it runs them until it
+                    // leaves): the drain mark is not looked at here, only in `claim_free`.
+                    (tx, _) = check_live(pool, tx, owner, boot, lock_ms).await?;
                 }
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
@@ -338,16 +360,21 @@ macro_rules! engine_rows {
             /// short lock timeout would starve), and `FOR SHARE` serialises with a
             /// declaration's `FOR NO KEY UPDATE` of the row — a claim that locks first commits
             /// before the declaration moves the predecessor's rows (the newly won ones too); one
-            /// that locks after sees the row dead.
-            async fn check_live(pool: &Pool, mut tx: Tx, owner: HostId, boot: u64, lock_ms: u64) -> Result<Tx, StoreError> {
+            /// that locks after sees the row dead. The second value: the row is marked
+            /// draining (`drain_at_ms` set) — read under the same lock, so a drain mark (one
+            /// `UPDATE` of the row) lands either before it (seen) or after the claim commits.
+            async fn check_live(pool: &Pool, mut tx: Tx, owner: HostId, boot: u64, lock_ms: u64) -> Result<(Tx, bool), StoreError> {
                 let sql = format!(
-                    "SELECT 1 FROM hosts WHERE id = $1 AND boot = $2 AND state = {} AND clean = 0{}",
+                    "SELECT drain_at_ms FROM hosts WHERE id = $1 AND boot = $2 AND state = {} AND clean = 0{}",
                     crate::HOST_LIVE,
                     $share_lock
                 );
                 let row = sqlx::query(&sql).bind(i(owner.0)).bind(i(boot)).fetch_optional(&mut *tx).await;
                 match row {
-                    Ok(Some(_)) => Ok(tx),
+                    Ok(Some(r)) => {
+                        let draining = r.try_get::<Option<i64>, _>(0)?.is_some();
+                        Ok((tx, draining))
+                    }
                     Ok(None) => {
                         tx.rollback().await?;
                         log::warn!(
@@ -375,9 +402,12 @@ macro_rules! engine_rows {
             /// waits for the first's commit and then inserts nothing), so of two claimers
             /// exactly one takes a row. The fence holds the rows won (possibly none). Refused
             /// (`Fenced { sr: None }`, nothing claimed) unless `boot`'s `hosts` row is live
-            /// ([`check_live`]). SQLite callers hold the writer lock; Postgres needs none (the
-            /// row locks serialise it, and holding the in-process lock while waiting for a row
-            /// would hold up this host's own cut part).
+            /// ([`check_live`]). A live row marked draining (`worldctl drain`) wins NOTHING but
+            /// is not refused: the transaction rolls back and the fence holds no rows — to the
+            /// caller exactly "nothing was free" (Elastic 1: a draining host takes no new land;
+            /// its own rows it still re-claims, [`claim_super_regions`]). SQLite callers hold
+            /// the writer lock; Postgres needs none (the row locks serialise it, and holding the
+            /// in-process lock while waiting for a row would hold up this host's own cut part).
             pub(crate) async fn claim_free(
                 pool: &Pool,
                 owner: HostId,
@@ -419,7 +449,17 @@ macro_rules! engine_rows {
                         epochs.insert((sx, sz), u(epoch));
                     }
                 }
-                let tx = check_live(pool, tx, owner, boot, lock_ms).await?;
+                let (tx, draining) = check_live(pool, tx, owner, boot, lock_ms).await?;
+                if draining {
+                    tx.rollback().await?;
+                    if !epochs.is_empty() {
+                        log::info!(
+                            "[world-store] host {owner} is draining: it wins no new land ({} free super-region(s) left free)",
+                            epochs.len()
+                        );
+                    }
+                    return Ok(Fence { owner, epochs: BTreeMap::new(), all_hosts: false });
+                }
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
             }
@@ -804,18 +844,57 @@ macro_rules! engine_rows {
             /// One lease beat. UNFENCED on purpose: one statement over the caller's own `hosts` row.
             /// Postgres: a short transaction with `lock_timeout` [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`]
             /// — if a registration or a decision holds the row, the beat FAILS (`Err`: "no beat this
-            /// time"), it neither hangs nor answers `false`. It touches neither `world` nor
-            /// `super_regions`. `false`: no live row of that boot (the caller was replaced).
-            pub(crate) async fn heartbeat(pool: &Pool, ordinal: HostId, boot: u64) -> Result<bool, StoreError> {
-                let sql = format!(
-                    "UPDATE hosts SET seen_ms = {NOW_MS} WHERE id = $1 AND boot = $2 AND state = {}",
-                    crate::HOST_LIVE
-                );
+            /// time"), it neither hangs nor answers `live: false`. It touches neither `world` nor
+            /// `super_regions`. `live: false`: no live row of that boot (the caller was
+            /// replaced); a live one also answers its drain mark ([`super::heartbeat_sql`]).
+            pub(crate) async fn heartbeat(pool: &Pool, ordinal: HostId, boot: u64) -> Result<crate::Beat, StoreError> {
+                let sql = super::heartbeat_sql(NOW_MS);
                 let mut tx = pool.begin().await?;
                 cut_lock_timeout(&mut *tx, crate::HEARTBEAT_LOCK_TIMEOUT_MS).await?;
-                let done = sqlx::query(&sql).bind(i(ordinal.0)).bind(i(boot)).execute(&mut *tx).await?;
+                let row = sqlx::query(&sql).bind(i(ordinal.0)).bind(i(boot)).fetch_optional(&mut *tx).await?;
                 tx.commit().await?;
-                Ok(done.rows_affected() == 1)
+                Ok(super::beat_of(row.map(|r| r.try_get::<Option<i64>, _>(0)).transpose()?))
+            }
+
+            /// The drain mark (`worldctl drain`, [`crate::StoreHandle::drain_host`]): ONE `UPDATE`
+            /// of host `id`'s row, UNFENCED like the heartbeat — it writes one `hosts` row's
+            /// `drain_at_ms` and changes no ownership (lock notes: `operator.rs`). The new
+            /// deadline is the database clock + `in_ms`, unless the row's mark is earlier
+            /// already: a mark only moves earlier. Only a dirty live row; otherwise
+            /// [`StoreError::NotDrainable`] naming why (read after the update matched nothing),
+            /// nothing written. Postgres: `lock_timeout` `lock_ms`.
+            pub(crate) async fn drain_host(pool: &Pool, id: HostId, in_ms: u64, lock_ms: u64) -> Result<(), StoreError> {
+                // One clock reading per statement: Postgres' `LEAST` skips a NULL; SQLite's
+                // two-argument `MIN` is NULL then (and `unixepoch` is fixed within a statement).
+                let deadline = if $share_lock.is_empty() {
+                    format!("COALESCE(MIN(drain_at_ms, {NOW_MS} + $2), {NOW_MS} + $2)")
+                } else {
+                    format!("LEAST(drain_at_ms, {NOW_MS} + $2)")
+                };
+                let sql = format!(
+                    "UPDATE hosts SET drain_at_ms = {deadline} WHERE id = $1 AND clean = 0 AND state = {}",
+                    crate::HOST_LIVE
+                );
+                let in_ms = i64::try_from(in_ms).map_err(|_| StoreError::Unsupported(format!("a drain in {in_ms} ms")))?;
+                let mut tx = pool.begin().await?;
+                cut_lock_timeout(&mut *tx, lock_ms).await?;
+                let done = sqlx::query(&sql).bind(i(id.0)).bind(in_ms).execute(&mut *tx).await?;
+                if done.rows_affected() == 1 {
+                    tx.commit().await?;
+                    log::warn!("[world-store] host {} marked draining: it leaves within {in_ms} ms", id.0);
+                    return Ok(());
+                }
+                let row = sqlx::query("SELECT clean, state FROM hosts WHERE id = $1").bind(i(id.0)).fetch_optional(&mut *tx).await?;
+                tx.rollback().await?;
+                let n = id.0;
+                let why = match row {
+                    None => format!("host {n} has no hosts row: nothing to drain (`worldctl hosts` lists the ids)"),
+                    Some(r) if r.try_get::<i64, _>(1)? != crate::HOST_LIVE => {
+                        format!("host {n} is dead (declared, its land inherited): nothing to drain")
+                    }
+                    Some(_) => format!("host {n} left cleanly: nothing to drain"),
+                };
+                Err(StoreError::NotDrainable(why))
             }
 
             /// Every `super_regions` row, by super-region. A plain read, no locks.

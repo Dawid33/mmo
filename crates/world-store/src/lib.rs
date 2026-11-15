@@ -27,7 +27,7 @@ pub use counters::StoreCounters;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{
-    CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, NO_OWNER, NewHost, Registered, StoreHandle, WorldInfo,
+    Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, NO_OWNER, NewHost, Registered, StoreHandle, WorldInfo,
 };
 pub use listen::{
     CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
@@ -227,6 +227,9 @@ pub enum StoreError {
     /// hosts' rows are live (dirty, live, of the world's generation, beaten within the lease):
     /// `live`, by id. Nothing was written — no id issued.
     NotAlone { live: Vec<game::HostId> },
+    /// A drain mark ([`StoreHandle::drain_host`]) for a row that is not a dirty live one —
+    /// absent, dead or left cleanly: why, naming the host by its bare number. Nothing written.
+    NotDrainable(String),
 }
 
 impl StoreError {
@@ -339,6 +342,7 @@ impl fmt::Display for StoreError {
             ),
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
+            StoreError::NotDrainable(why) => write!(f, "{why}"),
             StoreError::NotAlone { live } => write!(
                 f,
                 "a static host registers only when no other host runs, but hosts {} hold live rows; \

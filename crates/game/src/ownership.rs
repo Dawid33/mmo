@@ -36,6 +36,10 @@ pub const HOST_HEARTBEAT_MS: u64 = 2_000;
 /// counts another host alive while `db_now - seen_ms` is within it.
 pub const HOST_LEASE_MS: u64 = 10_000;
 
+/// The default notice of a drain (`worldctl drain <url> <host id>` without `--in`), in seconds:
+/// how long a host marked draining runs on (warning its players) before it leaves.
+pub const DRAIN_WARNING_SECS: u64 = 300;
+
 /// `hosts.state`: the host holds its lease.
 pub const HOST_LIVE: i64 = 0;
 /// `hosts.state`: the host's lease lapsed and a takeover marked it dead.

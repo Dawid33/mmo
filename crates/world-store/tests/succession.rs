@@ -177,7 +177,7 @@ fn declare_moves_every_super_region_and_fences_the_dead_host() {
     assert!(fenced(dead.load_region(B, &f1)), "load");
     assert_eq!(prepared(&w.w), 0);
     // Its lease is gone; its row is dead and still dirty.
-    assert!(!dead.heartbeat(hid(1), boot_of(hid(1))).unwrap());
+    assert!(!dead.heartbeat(hid(1), boot_of(hid(1))).unwrap().live);
     assert_eq!(w.state_of(hid(1)), (HOST_DEAD, false));
     assert_eq!(w.h.open_successions().unwrap(), vec![s]);
     w.shutdown();
@@ -190,7 +190,7 @@ fn declare_refuses_a_row_that_heartbeated() {
     assert_eq!(w.declare(hid(1), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(1)]));
     // Lapsed, then it beat again before the declaration.
     w.lapse(hid(1));
-    assert!(w.hosts[1].heartbeat(hid(1), boot_of(hid(1))).unwrap());
+    assert!(w.hosts[1].heartbeat(hid(1), boot_of(hid(1))).unwrap().live);
     assert_eq!(w.declare(hid(1), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(1)]));
     // Another boot of the ordinal is not the one the caller judged dead.
     w.lapse(hid(1));

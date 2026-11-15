@@ -690,6 +690,13 @@ worldctl *args:
 world-hosts-dev:
     just worldctl hosts {{dev_database_url}}
 
+# Mark a host of the dev Postgres world draining (`just worldctl drain <url> <id> --in <secs>`): it
+# wins no new land, is not the gate for logins and is to leave within `secs` (default 300, the
+# game's DRAIN_WARNING_SECS). The id is the number `world-hosts-dev` lists. A mark only moves
+# earlier. Needs `pg-up`.
+drain-dev id secs="300":
+    just worldctl drain {{dev_database_url}} {{id}} --in {{secs}}
+
 # Forge a world straight into a store: `just forge-db worlds/w.sqlite --size 32768 --cell 16`.
 forge-db db *args:
     just region_blocks={{play_blocks}} worldctl forge --db {{db}} {{args}}

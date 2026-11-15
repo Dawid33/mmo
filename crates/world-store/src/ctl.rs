@@ -29,6 +29,12 @@
 //!   `<id> <name> <live|dead> <clean|dirty> land=<super-regions owned> seen=<ms since its last
 //!   beat, or vouched> drain=<ms until it leaves, or ->` (a name-less row shows `-`). The id is
 //!   the bare number `retire-host` takes. Read-only (opened beside a running world).
+//! - `drain <url> <host id> [--in <secs>]` (Elastic 1): marks a dirty live host draining —
+//!   it is to leave within `<secs>` (default [`game::DRAIN_WARNING_SECS`]) — and prints its
+//!   `hosts` line. One statement over that one row ([`StoreHandle::drain_host`]); a mark only
+//!   moves earlier (a second drain with more time leaves it, with less brings it forward; there
+//!   is no un-drain). A draining host wins no new land and is not the gate host for logins; it
+//!   learns the mark at its next heartbeat. Refused for an absent, dead or clean row.
 //! - `retire-host <url> <host id>` (R4, `claim` ownership, Postgres): retires a host that will
 //!   never come back, so its dirty `hosts` row stops blocking every world cut (the id as
 //!   `worldctl hosts` lists it: issued at registration, never reused). Refused while
@@ -69,7 +75,7 @@ use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
-[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes";
+[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl drain <url> <host id> [--in <secs>]\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes";
 
 /// Runs one `worldctl` command (`args` without the program name); `Ok` is what it
 /// prints. Neither that nor an error ever shows a Postgres URL's credentials.
@@ -107,6 +113,10 @@ pub fn run(args: &[String]) -> Result<String, String> {
             let [url] = &args[1..] else { return Err(USAGE.to_string()) };
             let db = StoreUrl::parse(url).map_err(|e| format!("hosts: the world store URL: {e}"))?;
             list_hosts(&db)
+        }
+        Some("drain") => {
+            let (db, id, in_ms) = parse_drain(&args[1..])?;
+            drain_host(&db, id, in_ms)
         }
         Some("retire-host") => {
             let (db, id) = parse_retire_host(&args[1..])?;
@@ -211,6 +221,46 @@ fn parse_retire_host(args: &[String]) -> Result<(StoreUrl, HostId), String> {
         .map_err(|_| format!("retire-host: {id:?} is not a host id (the number `worldctl hosts <url>` lists)"))?;
     let db = StoreUrl::parse(url).map_err(|e| format!("retire-host: the world store URL: {e}"))?;
     Ok((db, id))
+}
+
+/// `drain`'s arguments: `<url> <host id> [--in <secs>]` → the store, the id, the notice in ms
+/// (default [`game::DRAIN_WARNING_SECS`]). Errors never echo the URL.
+fn parse_drain(args: &[String]) -> Result<(StoreUrl, HostId, u64), String> {
+    let (url, id, secs) = match args {
+        [url, id] => (url, id, None),
+        [url, id, flag, secs] if flag == "--in" => (url, id, Some(secs)),
+        _ => return Err(USAGE.to_string()),
+    };
+    let id = id
+        .trim()
+        .parse::<u64>()
+        .map(HostId)
+        .map_err(|_| format!("drain: {id:?} is not a host id (the number `worldctl hosts <url>` lists)"))?;
+    let secs = match secs {
+        None => game::DRAIN_WARNING_SECS,
+        Some(s) => s.trim().parse::<u64>().map_err(|_| format!("drain: --in {s:?} is not a number of seconds"))?,
+    };
+    let in_ms = secs.checked_mul(1000).filter(|ms| i64::try_from(*ms).is_ok()).ok_or_else(|| format!("drain: --in {secs}: too long"))?;
+    let db = StoreUrl::parse(url).map_err(|e| format!("drain: the world store URL: {e}"))?;
+    Ok((db, id, in_ms))
+}
+
+/// `worldctl drain`: marks host `id` of `db` draining within `in_ms` and prints its
+/// [`host_line`] as it stands after the mark. Errors never echo the URL.
+pub fn drain_host(db: &StoreUrl, id: HostId, in_ms: u64) -> Result<String, String> {
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("drain: the world store: {e}"))?;
+    let result = (|| {
+        let fail = |e: crate::StoreError| format!("drain: {e}");
+        store.drain_host(id, in_ms).map_err(fail)?;
+        let rows = store.hosts().map_err(fail)?;
+        let owners = store.owners().map_err(fail)?;
+        let now = store.db_now_ms().map_err(fail)?;
+        let row = rows.iter().find(|r| r.id == id).ok_or_else(|| format!("drain: host {}'s row is gone", id.0))?;
+        let land = owners.iter().filter(|(_, o, _)| u64::try_from(*o).is_ok_and(|o| o == id.0)).count();
+        Ok(host_line(row, land, now))
+    })();
+    store.shutdown();
+    result
 }
 
 /// What a `rollback` without `--yes` says.

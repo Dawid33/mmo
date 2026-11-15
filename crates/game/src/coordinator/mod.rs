@@ -472,16 +472,19 @@ impl Coordinator {
     }
 
     /// The gate host: the host the login service's orders go to ([`Self::login_order`]) — the
-    /// lowest attached host that neither left nor was succeeded ([`Self::takes_logins`]).
-    /// `None`: no host is attached (a login then times out and answers 503).
+    /// lowest attached host that neither left nor was succeeded, and is neither leaving nor
+    /// draining ([`Self::takes_logins`]). `None`: no such host (none attached, or every one
+    /// draining): a login then times out and answers 503.
     pub fn gate_host(&self) -> Option<HostId> {
         self.attached_live().into_iter().filter(|h| self.takes_logins(*h)).min()
     }
 
     /// Whether attached live host `host` may be the gate host: not leaving (its leave asked
-    /// for: it refuses every spawn order). Elastic 1 Task 7 adds "and not draining" HERE.
+    /// for: it refuses every spawn order) and not draining (the latest hosts read shows its row
+    /// marked, `worldctl drain` — no read of its own; after a failed read nothing is known and
+    /// a draining host may be the gate again until the next good one).
     fn takes_logins(&self, host: HostId) -> bool {
-        !self.leave_asked(host)
+        !self.leave_asked(host) && !self.leases.row(host).is_some_and(|r| r.draining)
     }
 
     /// An order of the login service: for the gate host of this moment ([`Self::gate_host`]),

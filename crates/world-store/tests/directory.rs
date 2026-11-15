@@ -100,6 +100,49 @@ fn claim_free_takes_absent_and_free_rows_only() {
     });
 }
 
+/// Elastic 1 Task 7: a host marked draining wins no new land — its `claim_free` returns no
+/// rows (as "nothing was free": no error, the host is not fenced) and the land stays free;
+/// another host still takes it.
+#[test]
+fn a_draining_host_claims_nothing() {
+    each_backend("dir_drain_claims", false, |url| {
+        let h = open(url);
+        let [x, y, _] = TEST_SUPER_REGIONS;
+        // y is a free row (claimed, then released); x has no row at all.
+        let old = h.claim_super_regions(hid(0), vec![y]).unwrap();
+        h.release(hid(0), &old).unwrap();
+        let free_epoch = old.epochs[&y] + 1;
+        let boot = live_boot(&h, hid(1));
+        h.drain_host(hid(1), 60_000).unwrap();
+        let won = h.claim_free(hid(1), boot, vec![x, y]).expect("no error: as if nothing were free");
+        assert_eq!((won.owner, won.epochs), (hid(1), Default::default()), "nothing won");
+        assert_eq!(h.owners().unwrap(), vec![(y, NO_OWNER, free_epoch)], "x stays absent, y free at its epoch");
+        // A host that is not draining takes both.
+        let other = h.claim_free(hid(2), live_boot(&h, hid(2)), vec![x, y]).unwrap();
+        assert_eq!(other.epochs, [(x, 1), (y, free_epoch + 1)].into_iter().collect());
+        h.shutdown();
+    });
+}
+
+/// A draining host keeps the land it owns until it leaves: its re-claim of its own rows still
+/// succeeds (the drain guard is only on `claim_free`), and its fence still commits a cut.
+#[test]
+fn a_draining_host_keeps_its_own_land() {
+    each_backend("dir_drain_keeps", false, |url| {
+        let h = open(url);
+        let [x, _, _] = TEST_SUPER_REGIONS;
+        let boot = live_boot(&h, hid(1));
+        let first = h.claim_free(hid(1), boot, vec![x]).unwrap();
+        assert_eq!(first.epochs, [(x, 1)].into_iter().collect());
+        h.drain_host(hid(1), 60_000).unwrap();
+        let mine = h.claim_super_regions_live(hid(1), boot, vec![x]).expect("its own rows, re-claimed");
+        assert_eq!(mine.epochs, [(x, 2)].into_iter().collect());
+        h.commit_cut(WorldCut { host: hid(1), ..empty_cut(1) }, mine).recv().unwrap().expect("its fence holds");
+        assert_eq!(h.world_info().unwrap().world_tick, 100, "the cut committed");
+        h.shutdown();
+    });
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn two_claimers_of_one_free_row_one_wins() {

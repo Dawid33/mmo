@@ -43,6 +43,17 @@
 //! only a FREE row, which no declaration, retirement or registration locks. That cycle cannot
 //! form any more.)
 //!
+//! **The drain mark** (Elastic 1 Task 7; `rows.rs` `drain_host`, `worldctl drain`): ONE
+//! `UPDATE` of one dirty live `hosts` row's `drain_at_ms`, UNFENCED like the heartbeat (it
+//! changes no ownership) — it holds that row and wants nothing after it, so it closes no cycle:
+//! like a heartbeat it only waits (at most its `lock_timeout`) for whoever holds the row — a
+//! declaration, a retirement, a registration's vouch or total crash, a claim's `check_live`
+//! `FOR SHARE` — and nothing waits for it while it waits. `claim_free`'s guard reads the mark
+//! in `check_live`'s own statement (the same `FOR SHARE` of the claimer's row, its last; no new
+//! lock): a mark that commits first is seen (the claim wins nothing and rolls back), one that
+//! comes after waits for the claim's commit (the land won just before is kept and leaves with
+//! the host). A re-claim of a host's OWN rows (`claim_super_regions_live`) ignores the mark.
+//!
 //! **A cut's begin** (`two_phase::record_cut_begin`, Elastic 1 Task 4): `coordinator` `FOR
 //! SHARE` (the fence, as `decide_cut` takes it first), a PLAIN read of `world.next_host_id`
 //! (no lock: a registration holding the world row commits its id before the read — below the
@@ -93,7 +104,8 @@
 //!   `in_flight` row and that no open succession names (the subqueries read without locks).
 //!   The rows it can lock are clean or dead: a heartbeat matches only a live row (a clean live
 //!   leaver's beat may wait for the delete and then answers `false` — it has left), a claim's
-//!   `check_live` locks only a live dirty row, `vouch_host` only a live dirty row; a cut part
+//!   `check_live` locks only a live dirty row, `vouch_host` and `drain_host` only a live dirty
+//!   row; a cut part
 //!   locks no `hosts` row; every statement that locks SEVERAL `hosts` rows (a declaration, a
 //!   settle, a retirement, another registration) holds `world` first. In a total crash the
 //!   dirty rows it deletes were locked above (`FOR NO KEY UPDATE`, upgraded by the delete —

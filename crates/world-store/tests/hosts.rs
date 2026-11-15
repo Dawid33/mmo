@@ -192,7 +192,7 @@ fn the_first_host_after_a_total_crash_takes_every_dirty_row() {
         // A and B were marked dead and, owning nothing, pruned in the same transaction: their
         // old processes are refused at their next beat.
         assert_eq!(ids(&h), vec![c.id]);
-        assert!(!h.heartbeat(a.id, 1).unwrap() && !h.heartbeat(b.id, 2).unwrap());
+        assert!(!h.heartbeat(a.id, 1).unwrap().live && !h.heartbeat(b.id, 2).unwrap().live);
         // The old fences are refused.
         let err = h.commit_cut(in_flight_cut(3, a.id, RegionCoords::new(0, 0)), fa).recv().unwrap().unwrap_err();
         assert!(matches!(err, StoreError::Fenced { .. }), "{err}");
@@ -293,14 +293,14 @@ fn lone_named_restart_takes_its_land_back(url: &StoreUrl, policy: CrashPolicy) {
     let a = reg(&h, "a", 1, policy);
     let fa = h.claim_super_regions(a.id, vec![TEST_SUPER_REGIONS[0]]).unwrap();
     h.commit_cut(in_flight_cut(1, a.id, RegionCoords::new(0, 0)), fa.clone()).recv().unwrap().unwrap();
-    assert!(h.heartbeat(a.id, 1).unwrap(), "A's lease is fresh");
+    assert!(h.heartbeat(a.id, 1).unwrap().live, "A's lease is fresh");
     let back = h.register_host(new_host("a", 2), policy).unwrap();
     assert_eq!((back.id, back.generation, back.bumped), (hid(2), 1, true), "{policy:?}");
     let want: std::collections::BTreeMap<_, _> = fa.epochs.iter().map(|(sr, e)| (*sr, e + 1)).collect();
     assert_eq!(h.owned_by(back.id).unwrap().epochs, want, "{policy:?}: A's land, epoch + 1");
     assert_eq!(h.load_in_flight(Some(back.id)).unwrap().len(), 1, "{policy:?}: A's in-flight row");
     assert_eq!(ids(&h), vec![back.id], "{policy:?}: A's row is gone");
-    assert!(!h.heartbeat(a.id, 1).unwrap(), "{policy:?}: the old process is replaced");
+    assert!(!h.heartbeat(a.id, 1).unwrap().live, "{policy:?}: the old process is replaced");
     h.shutdown();
 }
 
