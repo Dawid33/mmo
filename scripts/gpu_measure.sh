@@ -23,7 +23,9 @@ server_pid=$!
 trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 sleep 1
 echo ">> GPU measure ($WGPU_ADAPTER_NAME, ${secs}s) -> $out"
-INTEL_MEASURE="file=$out/measure.csv,renderpass,interval=1,batch_size=262144" \
+# batch_size is allocated per command buffer: 262144 took the client past 11 GB
+# within seconds of a 15 km world (OOM-killed, 2026-11-14); 8192 is enough.
+INTEL_MEASURE="file=$out/measure.csv,renderpass,interval=1,batch_size=8192" \
     VOXEL_EXIT_AFTER_SECS="$secs" ./target/release/client > "$out/client.log" 2>&1
 kill "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null
 grep -a "AdapterInfo" "$out/client.log" | head -1 | sed 's/.*AdapterInfo/AdapterInfo/' | cut -c1-120

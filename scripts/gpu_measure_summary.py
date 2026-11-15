@@ -12,7 +12,8 @@ the main opaque pass. Written for `just gpu-measure`.
 """
 import csv, sys, collections
 path = sys.argv[1]; last = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-rows = list(csv.DictReader(open(path)))
+# A capture cut off at exit ends in a short row: drop rows with missing fields.
+rows = [r for r in csv.DictReader(open(path)) if None not in r.values() and None not in r]
 frames = sorted({int(r['frame']) for r in rows})
 keep = set(frames[-last-5:-5])
 per_frame = collections.Counter()

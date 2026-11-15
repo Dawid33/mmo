@@ -25,6 +25,7 @@ context, bucket and IAM names, the `orion` login theme folder, storage keys). Th
 forged up front (geology, climate, biomes, history), players play regions from a top-down commander
 camera (fortress mode; adventure mode exists too). No phased plan: features land piece by piece,
 roughly modelling DF. Research: `docs/superpowers/specs/2026-10-20-dwarf-fortress-research/00-synthesis.md`.
+Game design (the two loops, adventure and fortress; what is decided, proposed and open): `docs/game-design.md`.
 Old RTS pivot is on branch `ds/rtsPivot`. `TODO.md` tracks the current direction.
 
 ## Building and running
@@ -46,7 +47,7 @@ changed build/run/test command updates its recipe in the same change.
 - **GPU**: `just adapter=6700 …` / `$VOXEL_ADAPTER` pins wgpu; unpinned, `client::adapter_pick` picks the
   best adapter (never the slow NVK T600 if anything better exists). Check the `AdapterInfo` log line.
 - **Debug launches** (`crates/client/src/debug_launch.rs`): `client debug embarked [--reset]` forges
-  `worlds/debug-embarked/` once and reuses it; add presets there. Worlds live in `worlds/<slug>/`
+  `worlds/debug-embarked/` once and reuses it (`--adventure`: adventure mode instead of the fortress); add presets there. Worlds live in `worlds/<slug>/`
   (git-ignored; `terrain.sqlite` store, `world.json`, `server.log`). Menu worlds spawn their own
   single-player server (`VOXEL_SINGLE_PLAYER=1`, free port). `VOXEL_SKIP_MENU=1` connects to the dev server.
 

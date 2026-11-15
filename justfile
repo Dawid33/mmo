@@ -30,7 +30,7 @@ world := ""
 export VOXEL_WORLD := world
 
 # How far you see, in metres (empty = default: the LOD ring table's reach —
-# 15,360 m at the play recipes' 256 m regions (~4,400 LOD keys), 1 km at 64/128).
+# 3,072 m at the play recipes' 256 m regions (624 LOD keys), 1 km at 64/128).
 # Builds a ring table by the pixel-budget rule (`game::lod::ring_table_for`), and
 # the exponential haze (visibility = 0.8 x reach) and camera far plane follow it:
 # `just view=4000 run` for a cheap short view. An explicit VOXEL_LOD_RINGS wins.
@@ -192,8 +192,13 @@ client:
 # (`client debug embarked`, crates/client/src/debug_launch.rs). The world is
 # worlds/debug-embarked/ (16 km / 32 m, forged on first run) and is REUSED, with
 # its fortress, on every later run; `just run --reset` (or deleting the
-# directory) re-forges it and embarks afresh. Builds both binaries — the client
-# spawns the world's server itself, like a menu start.
+# directory) re-forges it and embarks afresh. `just run --adventure` starts in
+# adventure mode instead, at the first populated site (`--adventure-at N` picks
+# the site). `just run --reset --prefab dev-hut` stamps a prefab beside the
+# landing of the region you embark in only (needs it never saved, so `--reset`; more
+# `--prefab`s join with `;`); `VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;statuen-07"`
+# adds a prefab directory. Builds both binaries — the client spawns the world's server itself,
+# like a menu start.
 run *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -202,6 +207,30 @@ run *args:
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
+
+# A town to stand in: `run --reset --town <style>` with every sub-directory of `prefab-imports/` added
+# to `VOXEL_PREFAB_DIRS` (the imported packs hold the houses tagged with a style), e.g.
+# `just town medieval` or `just town medieval:2:64` (STYLE[:ARMS[:LEN]]). One town of that style is laid
+# out beside the landing of the region you embark in (the spawn region a fresh session waits in before
+# embarking is skipped). It passes --reset: it DELETES and re-forges `worlds/debug-embarked/`, the world
+# `just run` reuses. Builds both binaries like `run`; more `args` follow.
+town style *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dirs=""
+    if [ -d prefab-imports ]; then
+        dirs=$(find prefab-imports -mindepth 1 -maxdepth 1 -type d | sort | paste -sd:)
+    fi
+    if [ -z "$dirs" ]; then
+        echo "no prefab packs: prefab-imports/ has no sub-directories (the houses of a town come from imported prefabs)" >&2
+        exit 1
+    fi
+    export VOXEL_PREFAB_DIRS="$dirs"
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
+    {{cap}} {{cargo}} build --bin client --bin server
+    RUST_BACKTRACE=1 ./target/debug/client debug embarked --reset --town {{style}} {{args}}
 
 run_two_port := "6476"
 
@@ -311,7 +340,11 @@ run-release *args:
 # target/fly-probe/; prints one pair of lines per crossing — game thread
 # (`region_crossing`: tick gaps, stalled/aligned home ticks, corrections,
 # snapshot loads) and render (`region_crossing_render`: worst frame, longest
-# sim-pose hold) — plus any main-thread stalls. e.g. `just adapter=6700 fly-probe 60`.
+# sim-pose hold) — plus any main-thread stalls, and the crossing timeline
+# (`crossing_start` / `crossing_step` / `crossing_done` from the render thread,
+# `crossing_flip` / `window_shift` / `window_loaded` / `lod_shift*` from the game
+# thread: every end point in ms since the start, and what reached or left the
+# GPU). e.g. `just adapter=6700 fly-probe 60`.
 # Scripted straight-line flight across region seams, one report per crossing.
 # Extra client features for fly-probe / shuttle-probe builds, e.g.
 # `just probe_features=gpu_error_panic shuttle-probe` (panic at the failing
@@ -344,7 +377,7 @@ fly-probe seconds="45":
     VOXEL_AUTOPILOT=1 VOXEL_AUTOPILOT_SECONDS={{seconds}} RUST_BACKTRACE=1 \
         ./{{probe_dir}}/release/client > "$out/client.log" 2>&1 || true
     grep -h "AdapterInfo" "$out/client.log" | head -1 || true
-    grep -hE "event=(world_ready|autopilot_start|region_crossing|region_crossing_render|main_stall|bridge_region_spawned|region_loaded)" \
+    grep -hE "event=(world_ready|autopilot_start|region_crossing|region_crossing_render|main_stall|bridge_region_spawned|region_loaded|crossing_[a-z]+|window_shift|window_loaded|lod_shift[a-z_]*)" \
         "$out/client.log" | sed -n '/autopilot_start/,$p' || true
     echo
     scripts/crossing_summary.py "$out/client.log"
@@ -548,6 +581,28 @@ tree-textures:
 # PNGs also go in EMBEDDED_BLOCK_TEXTURES (crates/client/src/renderer/mod.rs).
 block-textures *args:
     python3 tools/textures/gen.py {{args}}
+
+# Render a prefab (a name under assets/prefabs/ or a file path) as a PNG: plan,
+# south and east elevation. `just prefab-view dev-hut [-o out.png] [--scale N]`;
+# default output target/prefab-view/<name>.png.
+prefab-view *args:
+    {{cap}} {{cargo}} run --release -p prefab-tool -- view {{args}}
+
+# A top-down picture of a town layout from the prefab library: `just town-preview medieval --seed 1
+# [--terrain seed] [--dirs a:b] [--arms N] [--len N]`; default output target/prefab-view/town-<style>-<seed>.png.
+town-preview *args:
+    {{cap}} {{cargo}} run --release -p prefab-tool -- town {{args}}
+
+# Import Minecraft Sponge schematics as prefabs (run from the repo root): `just mc-import report <f.schem>...`
+# (what is in it, writes nothing), `import <f.schem> [--name N]` (whole file) or `split <f.schem> [--prefix P]`
+# (one prefab per build); output goes to prefab-imports/<file stem>/ (git-ignored, never assets/).
+mc-import *args:
+    {{cap}} {{cargo}} run --release -p mc-import-tool -- {{args}}
+
+# Validate the prefab set as the game loads it (default assets/prefabs): one line
+# per prefab, exit 1 on the first error. `just prefab-check [dir]`.
+prefab-check *args:
+    {{cap}} {{cargo}} run --release -p prefab-tool -- check {{args}}
 
 # Top-down PNG map of the generated world: colour relief + 16-bit heightmap +
 # terrain stats, into target/world-map/. Flags: --span <m> --size <px>
