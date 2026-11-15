@@ -2,6 +2,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -129,6 +130,24 @@ fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> io::Result<()> {
     })
 }
 
+/// Whether the read-only pin-file line was logged already (once per process).
+static READ_ONLY_PIN_SAID: AtomicBool = AtomicBool::new(false);
+
+/// How a failed pin-file write is logged. A directory that refuses new files (read-only
+/// filesystem or no write permission — the pin file is written through a temp file and a
+/// rename, so only the directory's own permission can refuse it) is the designed pod layout
+/// (the identity mounted read-only from a Secret; [`pin_beside`] derives the pin from the
+/// certificate): `Info`, the first time only (`said`), then `None`. Any other failure, on a
+/// directory that takes files, is a `Warn` each time.
+fn pin_write_level(e: &io::Error, said: &AtomicBool) -> Option<log::Level> {
+    match e.kind() {
+        io::ErrorKind::ReadOnlyFilesystem | io::ErrorKind::PermissionDenied => {
+            (!said.swap(true, Ordering::Relaxed)).then_some(log::Level::Info)
+        }
+        _ => Some(log::Level::Warn),
+    }
+}
+
 /// A stored cert and key that still belong together.
 fn stored_pair_valid(cert_der: &[u8], key_der: &[u8]) -> bool {
     let Ok(pair) = rcgen::KeyPair::try_from(key_der) else { return false };
@@ -140,9 +159,10 @@ fn stored_pair_valid(cert_der: &[u8], key_der: &[u8]) -> bool {
 /// (`<file>.cert`, `<file>.key`, key mode 0600) so a restarted listener keeps the pin its
 /// dialers hold; without one the identity is ephemeral. A stored pair that fails to load or
 /// does not match is regenerated. The pin file is rewritten only if missing or different, and
-/// failing to write it is a warning (the directory may be a read-only mount); a stored pair that
-/// is invalid is regenerated, which on a read-only directory fails with an error — an identity
-/// is never silently ephemeral when a file was asked for.
+/// failing to write it is logged ([`pin_write_level`]: once at info for a read-only directory, the
+/// designed pod layout; a warning otherwise); a stored pair that is invalid is regenerated,
+/// which on a read-only directory fails with an error — an identity is never silently ephemeral
+/// when a file was asked for.
 pub(crate) fn load_or_generate(hash_file: Option<&Path>) -> io::Result<LinkIdentity> {
     if let Some(file) = hash_file {
         let (cert_path, key_path) = (sibling(file, ".cert"), sibling(file, ".key"));
@@ -151,7 +171,15 @@ pub(crate) fn load_or_generate(hash_file: Option<&Path>) -> io::Result<LinkIdent
                 let pin = cert_sha256_hex(&cert_der);
                 if std::fs::read_to_string(file).ok().as_deref() != Some(pin.as_str()) {
                     if let Err(e) = write_atomic(file, pin.as_bytes(), false) {
-                        log::warn!("[svc-link] cannot write the pin file {}: {e}", file.display());
+                        match pin_write_level(&e, &READ_ONLY_PIN_SAID) {
+                            Some(log::Level::Info) => log::info!(
+                                "[svc-link] the pin file {} is not written: its directory is read-only ({e}); the pin \
+                                 is derived from the certificate",
+                                file.display()
+                            ),
+                            Some(_) => log::warn!("[svc-link] cannot write the pin file {}: {e}", file.display()),
+                            None => {}
+                        }
                     }
                 }
                 return Ok(LinkIdentity { cert_der, key_der });
@@ -239,6 +267,39 @@ mod tests {
             None => eprintln!("skipped: running as a user the directory mode does not bind (root)"),
             Some(r) => assert!(r.is_err(), "never silently ephemeral"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pin_file_a_read_only_directory_refuses_is_said_once_at_info() {
+        let dir = temp_dir("ro-pin");
+        let file = dir.join("link.pin");
+        set_mode(&dir, 0o555);
+        let skip = !dir_is_read_only(&dir);
+        let refused = write_atomic(&file, b"pin", false).err();
+        set_mode(&dir, 0o755);
+        let _ = std::fs::remove_dir_all(&dir);
+        if skip {
+            eprintln!("skipped: running as a user the directory mode does not bind (root)");
+            return;
+        }
+        let refused = refused.expect("a read-only directory refuses the pin file");
+        let said = AtomicBool::new(false);
+        assert_eq!(pin_write_level(&refused, &said), Some(log::Level::Info), "the designed pod layout");
+        assert_eq!(pin_write_level(&refused, &said), None, "said once");
+    }
+
+    #[test]
+    fn a_pin_file_that_fails_in_a_writable_directory_is_a_warning() {
+        let dir = temp_dir("rw-pin");
+        let file = dir.join("link.pin");
+        // The directory is writable; the pin's own path is taken by a directory.
+        std::fs::create_dir(&file).unwrap();
+        let failed = write_atomic(&file, b"pin", false).expect_err("a file cannot replace a directory");
+        let said = AtomicBool::new(false);
+        assert_eq!(pin_write_level(&failed, &said), Some(log::Level::Warn));
+        assert_eq!(pin_write_level(&failed, &said), Some(log::Level::Warn), "every time");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
