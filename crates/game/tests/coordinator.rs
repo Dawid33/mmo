@@ -1863,7 +1863,7 @@ fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
     let first = CUT_EVERY_MS + game::WORLD_CUT_BLOCKED_GRACE_MS;
     c.maintain(first);
     let blocked = c.take_cuts_blocked().expect("reported");
-    assert_eq!(blocked, game::CutsBlocked { missing: vec![2], unexpected: vec![], successions: vec![] });
+    assert_eq!(blocked, game::CutsBlocked { missing: vec![2], unexpected: vec![], successions: vec![], awaiting_heir: vec![] });
     let text = blocked.to_string();
     assert!(text.contains("NOT being saved") && text.contains("[2]") && text.contains("worldctl"), "{text}");
     c.maintain(first + CUT_EVERY_MS - 1);
@@ -2948,6 +2948,193 @@ fn attach_as(host: u32, epoch: u64, boot: u64) -> HostMsg {
         successions: Vec::new(),
         policy: game::CrashPolicy::Rollback,
     }
+}
+
+// ---- R4 final fix wave: the coordinator ----------------------------------------------------------
+
+/// Final review C-I3: a succession every recipient answered makes its settle cut due at once —
+/// not a whole save period later (the window in which a second failure rolls the world back,
+/// and for which the predecessor's next boot waits in `register_host`). An aborted settle cut
+/// is tried again after `SETTLE_CUT_RETRY_MS`; once settled, cuts follow their period again.
+#[test]
+fn an_answered_succession_makes_its_settle_cut_due_at_once() {
+    const PERIOD: u64 = 60_000;
+    let retry = game::SETTLE_CUT_RETRY_MS;
+    assert!(retry < PERIOD);
+    let mut c = succeeding(3);
+    c.set_world_cuts(PERIOD);
+    let s = declare_one(&mut c, 3, 2, 100);
+    commit_routed(&mut c);
+    let mut now = 100 + retry;
+    c.maintain(now);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "not answered: no cut");
+    for h in [0, 1] {
+        c.handle(h, HostMsg::SuccessionApplied { id: s.id }, now);
+    }
+    c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, now);
+    c.maintain(now);
+    let first = begun(&commit_routed(&mut c));
+    assert_eq!(first.len(), 2, "answered: the settle cut begins at once, {} ms into a {PERIOD} ms period", now);
+    let cut = first[0].1;
+    // It aborts (a pinned region not loaded yet): tried again after the retry wait, not at once.
+    c.handle(1, HostMsg::CutFailed { cut, why: CutFailure::Aborted }, now);
+    let d = c.take_decision().expect("decided");
+    assert_eq!((d.commit, d.settles.clone()), (false, vec![s.id]));
+    c.decided(cut, false);
+    commit_routed(&mut c);
+    c.maintain(now + retry - 1);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "an aborted settle cut is not tried again at once");
+    now += retry;
+    c.maintain(now);
+    let again = begun(&commit_routed(&mut c));
+    assert_eq!(again.len(), 2, "tried again after the retry wait");
+    let cut = again[0].1;
+    for h in [0, 1] {
+        c.handle(h, HostMsg::CutPrepared { cut }, now);
+    }
+    let d = c.take_decision().expect("decided");
+    assert_eq!((d.commit, d.settles.clone()), (true, vec![s.id]));
+    c.decided(cut, true);
+    commit_routed(&mut c);
+    assert!(c.succession_progress().is_empty(), "settled");
+    // Nothing open: the period rules again.
+    c.maintain(now + 2 * retry);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "no succession open: the next cut waits its period");
+    c.maintain(now + PERIOD);
+    assert_eq!(begun(&commit_routed(&mut c)).len(), 2);
+}
+
+/// Final review C-I4 (b): while only an offline run is open, the lapse of a boot that was
+/// dead already (never seen beating since the run opened) is no second death — but a
+/// VOUCHED row (`seen_ms == 0`: `worldctl retire-host` beside live hosts, or a boot of that
+/// ordinal) is a statement made now: it counts, the world rolls back (the run abandoned, its
+/// land staying with the heir), and the next pass can declare that host — else its dirty row
+/// blocks every cut and the open run blocks its declaration, for ever.
+#[test]
+fn a_vouched_lapse_counts_while_only_an_offline_run_is_open() {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    let s = offline_succession();
+    let mut dead = seen(1, 50);
+    dead.state = game::HOST_DEAD;
+    c.observe_leases(&[seen(0, 40), dead.clone(), seen(2, 40)], 0, 0);
+    c.successions_open(vec![s.clone()], 0);
+    let t = 10 * game::HOST_LEASE_MS;
+    let heir_row = |seen_ms: u64| HostSeen { boot: 900, ..seen(0, seen_ms) };
+    c.handle(0, attach_as(0, 1, 900), t);
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, t);
+    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, t);
+    commit_routed(&mut c);
+    c.observe_leases(&[heir_row(t), dead.clone(), seen(2, 40)], t, t);
+    c.maintain(t);
+    assert!(!c.rollback_wanted(), "host 2 was dead already when the world was retired: no second death");
+    // The operator vouches host 2 dead.
+    c.observe_leases(&[heir_row(t + 500), dead.clone(), seen(2, 0)], t + 500, t + 500);
+    c.maintain(t + 500);
+    assert!(c.rollback_wanted(), "a vouched row counts for an offline run too");
+}
+
+/// Final review C-I4 (a): an offline run whose heir never started has no deadline — the
+/// blocked-cuts report says so, names the heir and the way out (`worldctl rollback`), and no
+/// longer promises a rollback "within the succession deadline".
+#[test]
+fn blocked_cuts_name_an_offline_runs_absent_heir() {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_world_tick(100);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.set_expected_hosts([2].into_iter().collect());
+    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), 0);
+    let s = offline_succession();
+    c.successions_open(vec![s.clone()], 0);
+    commit_routed(&mut c);
+    c.maintain(CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "the run is not answered: no cut");
+    c.maintain(CUT_EVERY_MS + game::WORLD_CUT_BLOCKED_GRACE_MS);
+    let blocked = c.take_cuts_blocked().expect("reported");
+    assert_eq!(
+        blocked,
+        game::CutsBlocked { missing: vec![], unexpected: vec![], successions: vec![s.id], awaiting_heir: vec![(s.id, s.heir)] }
+    );
+    let text = blocked.to_string();
+    assert!(text.contains("heir, host 0") && text.contains("worldctl rollback"), "{text}");
+    assert!(!text.contains("within the succession deadline"), "no deadline runs before the heir's first attach: {text}");
+    // A declared run (survivors) still has its deadline, and says so.
+    let declared = game::CutsBlocked { missing: vec![], unexpected: vec![], successions: vec![s.id], awaiting_heir: vec![] };
+    assert!(declared.to_string().contains("within the succession deadline"));
+}
+
+/// Final review C minor 3: a rollback this coordinator ordered starts the hops over, as a
+/// newer-generation `Attach` does — the hosts restart with the cut's hops, below the ones
+/// known here (a state-changing request would be refused `WorldUnavailable` until renumbered).
+#[test]
+fn a_rollback_ordered_here_starts_the_hops_over() {
+    let mut c = succeeding(3);
+    let mut online = report(A, None, false);
+    online.hop = 5;
+    c.handle(0, attach(0, 2, Vec::new(), vec![online]), 10);
+    commit_routed(&mut c);
+    assert_eq!(c.hop_of(A), 5);
+    c.rolled_back(7);
+    assert_eq!(c.hop_of(A), 0, "hops start over at the rollback's generation");
+}
+
+/// Final review C minor 4 (ii): a hand-over to a host that was succeeded (its `PlayerHandedTo`
+/// handled after the declaration) leaves the player offline — "online on" a dead host would
+/// keep its fortress in use for nobody.
+#[test]
+fn a_player_handed_to_a_succeeded_host_is_offline() {
+    let mut c = succeeding(3);
+    c.handle(0, attach(0, 2, Vec::new(), vec![report(A, None, false)]), 10);
+    commit_routed(&mut c);
+    assert_eq!(c.online_on(A), Some(0));
+    let s = declare_one(&mut c, 3, 2, 100);
+    assert_eq!(s.predecessor, 2);
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 2, hop: PLACED }, 110);
+    assert_eq!(c.online_on(A), None, "handed to the dead host: offline, not online on it");
+    assert_eq!(c.hop_of(A), PLACED);
+}
+
+/// Final review C minor 6: a declaration's answer that arrives when none is in flight any
+/// more (a rollback cleared it: its transaction abandoned every open run) opens nothing.
+#[test]
+fn a_declaration_answered_after_a_rollback_opens_no_run() {
+    let mut c = succeeding(3);
+    read_leases(&mut c, 3, &[2], &[], 100);
+    let d = c.declare_wanted(100).expect("a lapsed host is declared");
+    let list = store_declares(&d, 3, 1, game::CutId(0));
+    c.rolled_back(5);
+    commit_routed(&mut c);
+    c.declared(game::Declared::Done(list), 120);
+    assert!(c.succession_progress().is_empty(), "the rollback abandoned it in the store: not run here");
+    assert!(orders(&commit_routed(&mut c)).is_empty(), "no order goes out");
+}
+
+/// Ledger T14: the heir of an offline run adopts, dies, and its next boot attaches long after
+/// the first order's deadline: the answers are reset AND the deadline starts again with the
+/// new boot's order — not a rollback at once.
+#[test]
+fn an_offline_runs_deadline_starts_again_with_a_rebooted_heirs_order() {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    let s = offline_succession();
+    c.successions_open(vec![s.clone()], 0);
+    c.handle(0, attach_as(0, 1, 7), 100);
+    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 110);
+    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 110);
+    commit_routed(&mut c);
+    let later = 100 + 5 * game::SUCCESSION_DEADLINE_MS;
+    c.handle(0, attach_as(0, 1, 8), later);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to the new boot");
+    c.maintain(later + game::SUCCESSION_DEADLINE_MS - 1);
+    assert!(!c.rollback_wanted(), "the new boot has a whole deadline from its order");
+    c.maintain(later + game::SUCCESSION_DEADLINE_MS);
+    assert!(c.rollback_wanted(), "and no longer");
 }
 
 // ---- R4 Task 14 fix round 1: answers are per boot ---------------------------------------------

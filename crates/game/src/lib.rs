@@ -95,7 +95,7 @@ pub use containers::*;
 pub use coordinator::{
     Claim, CoordMsg, Coordinator, CoordinatorState, CutDecide, CutFailure, CutsBlocked, HostMsg, InlineWorldLink,
     OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest, LEAVE_BATCH_MS, LEAVE_CUT_TIMEOUT_SECS,
-    WORLD_CUT_BLOCKED_GRACE_MS, WORLD_CUT_DEADLINE_MS, WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS,
+    SETTLE_CUT_RETRY_MS, WORLD_CUT_BLOCKED_GRACE_MS, WORLD_CUT_DEADLINE_MS, WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS,
 };
 pub use ground::*;
 pub use halo::{HaloChunk, HaloDelta, HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};

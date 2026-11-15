@@ -46,6 +46,12 @@ pub const LEAVE_CUT_TIMEOUT_SECS: u64 = 30;
 /// reports it ([`Coordinator::take_cuts_blocked`]): longer than the runtime's re-read of
 /// the rows, so a host starting up (attached before the next read) is not reported.
 pub const WORLD_CUT_BLOCKED_GRACE_MS: u64 = 5_000;
+/// A succession every recipient answered makes a world cut due this long after the last
+/// cut ended (R4), whatever the save period: its settle cut begins at once — the window in
+/// which a second failure rolls the world back, and the wait of the predecessor's next boot,
+/// are seconds, not a save period — and one that aborted (a pinned region still loading) is
+/// tried again after the same wait, not in a tight loop.
+pub const SETTLE_CUT_RETRY_MS: u64 = 2_000;
 
 /// No world cut begins: the hosts the cuts need (dirty `hosts` rows) are not the hosts
 /// attached. Its `Display` is the warning the coordinator logs.
@@ -57,6 +63,9 @@ pub struct CutsBlocked {
     pub unexpected: Vec<u32>,
     /// Open successions (R4) not answered yet by every survivor and their heir.
     pub successions: Vec<SuccessionId>,
+    /// Those of `successions` opened while no host ran (`worldctl retire-host`) whose heir
+    /// has not attached since, with that heir: no deadline runs for them until it does.
+    pub awaiting_heir: Vec<(SuccessionId, u32)>,
 }
 
 impl std::fmt::Display for CutsBlocked {
@@ -75,12 +84,22 @@ impl std::fmt::Display for CutsBlocked {
         if !self.unexpected.is_empty() {
             write!(f, " hosts {:?} are attached but have no dirty `hosts` row (registered since the last read?);", self.unexpected)?;
         }
-        if !self.successions.is_empty() {
-            let ids: Vec<u64> = self.successions.iter().map(|id| id.0).collect();
+        let ids: Vec<u64> =
+            self.successions.iter().filter(|id| !self.awaiting_heir.iter().any(|(a, _)| a == *id)).map(|id| id.0).collect();
+        if !ids.is_empty() {
             write!(
                 f,
                 " successions {ids:?} wait for their survivors' reports and their heir's adoption (the world rolls back \
                  if they do not come within the succession deadline);"
+            )?;
+        }
+        for (id, heir) in &self.awaiting_heir {
+            write!(
+                f,
+                " succession {} was opened while no host ran and waits for its heir, host {heir}, to start: no deadline \
+                 runs until it attaches — start host {heir} (VOXEL_HOST_ORDINAL={heir}), or give the succession up with \
+                 `worldctl rollback <url> --yes` (the world restarts from its last cut, the land stays with host {heir});",
+                id.0
             )?;
         }
         Ok(())
@@ -458,7 +477,10 @@ impl Coordinator {
         let Some(every) = self.cuts.every_ms else { return };
         // A leave batch due (its first request `LEAVE_BATCH_MS` old) begins at once.
         let leave_due = self.cuts.leave_requests.values().min().is_some_and(|first| now_ms >= first + LEAVE_BATCH_MS);
-        if !leave_due && now_ms < self.cuts.last_ms.saturating_add(every) {
+        // R4: an open succession every recipient answered is settled by the next cut — due
+        // `SETTLE_CUT_RETRY_MS` after the last cut ended, not a save period.
+        let settle_due = self.settle_due() && now_ms >= self.cuts.last_ms.saturating_add(every.min(SETTLE_CUT_RETRY_MS));
+        if !leave_due && !settle_due && now_ms < self.cuts.last_ms.saturating_add(every) {
             return;
         }
         // Every expected host attached, and no attached host outside the set (one that
@@ -488,7 +510,8 @@ impl Coordinator {
                     } else {
                         (Vec::new(), Vec::new())
                     };
-                    self.cuts.blocked = Some(CutsBlocked { missing, unexpected, successions: waiting });
+                    let awaiting_heir = self.successions_awaiting_heir(&waiting);
+                    self.cuts.blocked = Some(CutsBlocked { missing, unexpected, successions: waiting, awaiting_heir });
                 }
             } else {
                 self.cuts.blocked_since = None;
@@ -595,6 +618,11 @@ impl Coordinator {
     /// settle: the store may hold them settled already.
     pub(super) fn settles_pending(&self) -> Vec<SuccessionId> {
         self.cuts.run.as_ref().filter(|r| r.verdict == Some(true)).map(|r| r.settles.clone()).unwrap_or_default()
+    }
+
+    /// Whether `host`'s latest known boot was succeeded and no other boot of it came since.
+    pub(super) fn host_is_succeeded(&self, host: u32) -> bool {
+        self.cuts.succeeded.contains_key(&host)
     }
 
     /// Host `host`'s boot `boot` was succeeded (R4): not expected, nor counted attached,

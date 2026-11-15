@@ -1462,6 +1462,9 @@ impl MultiRig {
         let outcome = self.declare_in_store(&d);
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         let mut core = self.core();
+        // Declared by hand, not through `declare_wanted`: an answer is taken only while a
+        // declaration is in flight.
+        core.declaring_by_hand();
         core.declared(outcome.clone(), now);
         core.set_expected_hosts(live);
         drop(core);

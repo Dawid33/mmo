@@ -800,8 +800,18 @@ impl Coordinator {
             self.displace(player, host, hop);
         }
         self.hop_of.insert(player, hop);
-        self.online_on.insert(player, to);
         self.online_reported.remove(&player);
+        if self.host_is_succeeded(to) {
+            // Handed to a host declared dead (this message was on its way when the
+            // declaration came): nobody will report the player there — offline, not "online
+            // on" a dead ordinal (its fortress would stay in use for nobody). If the hand-off
+            // reached the dead host's journal the heir parks it and reports it offline too.
+            log::info!("coordinator: {player:?} handed by host {host} to host {to}, which was succeeded: offline");
+            self.online_on.remove(&player);
+            self.set_online(player, false);
+            return;
+        }
+        self.online_on.insert(player, to);
         self.set_online(player, true);
     }
 

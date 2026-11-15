@@ -42,7 +42,8 @@
 //!   back. (`register_host` normally keeps such a boot out until then: a dirty reboot beside a
 //!   live host vouches for its old row and waits — that row lapses, a second death, a
 //!   rollback; with nobody alive it raises the generation, which fences the old heir's parts.)
-//! - A RUNNING coordinator reads the open successions again
+//! - A RUNNING coordinator reads the open successions again — on these three triggers only,
+//!   never periodically —
 //!   ([`Coordinator::take_successions_reread`]) when the store changed them behind its back:
 //!   a `hosts` read shows a dead row it never declared (an offline `retire-host`), or a host
 //!   attaches at a newer generation, or (the runtime, [`Coordinator::successions_reread`]) a
@@ -324,6 +325,10 @@ impl super::Coordinator {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.successions.known = true;
         let rereading = std::mem::take(&mut self.successions.rereading);
+        // Dropping an unlisted run below relies on the store thread answering in the order it
+        // was asked: a declaration handed out before this read was asked is answered before
+        // it, so a run that declaration opened is in `open` AND in the list. (The runtime's
+        // succession pump asks for no declaration while a read is out.)
         if rereading {
             let listed: BTreeSet<SuccessionId> = list.iter().map(|s| s.id).collect();
             // A run a commit decided here settles is not listed either once the store holds the
@@ -430,6 +435,14 @@ impl super::Coordinator {
     /// The store's answer to the batch [`Self::declare_wanted`] handed out (the module docs).
     pub fn declared(&mut self, outcome: Declared, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
+        if !self.successions.declaring {
+            // No declaration is in flight any more: a rollback cleared it ([`Self::rolled_back`])
+            // while the runtime still held the store's answer — its transaction abandoned every
+            // open run, this one included. Running it would end in a second rollback at its
+            // deadline (the hosts restart for the first one and never answer).
+            log::warn!("coordinator: a declaration's answer came with none in flight (rolled back meanwhile): ignored");
+            return;
+        }
         self.successions.declaring = false;
         match outcome {
             Declared::Done(list) => {
@@ -469,6 +482,14 @@ impl super::Coordinator {
                 self.successions.refused_at_read = Some(self.successions.declared_at_read);
             }
         }
+    }
+
+    /// Test support: a declaration made by hand (not handed out by [`Self::declare_wanted`]) is
+    /// in flight — its answer ([`Self::declared`]) is taken.
+    #[doc(hidden)]
+    pub fn declaring_by_hand(&mut self) {
+        self.successions.declaring = true;
+        self.successions.declared_at_read = self.leases.reads();
     }
 
     /// The batch [`Self::declare_wanted`] handed out could not be executed (a store error, a
@@ -517,6 +538,14 @@ impl super::Coordinator {
         }
         self.successions.rollback = false;
         self.successions.declaring = false;
+        // Every host restarts from the cut, its hops with it (as a newer-generation `Attach`
+        // says, `handle`: this coordinator raised the generation itself, so no `Attach` is
+        // "newer" and nothing else would clear them).
+        if generation > self.generation_seen {
+            self.hop_of.clear();
+            self.online_reported.clear();
+            self.displaced_told.clear();
+        }
         // A host attaching with an older generation from now on is told this one.
         self.generation_seen = self.generation_seen.max(generation);
         self.rolled_back_to = Some(generation);
@@ -575,6 +604,9 @@ impl super::Coordinator {
                     run.applied.remove(&host);
                     if run.s.heir == host {
                         run.adopted = None;
+                        // The deadline starts again with the new boot's order (`order_sent`,
+                        // below): it counted from the old boot's, long past by now.
+                        run.deadline_ms = u64::MAX;
                     }
                 }
             } else if let Some(b) = boot {
@@ -653,7 +685,13 @@ impl super::Coordinator {
             return;
         }
         let open = &self.successions.open;
-        let counts = |d: &(u32, u64)| open.values().any(|run| !run.s.survivors.is_empty() || run.beat.contains(d));
+        // A vouched row (`seen_ms == 0`: `worldctl retire-host` beside live hosts, or a boot
+        // of that ordinal) is a statement made NOW, whatever the run: it counts for offline
+        // runs too — else that host's dirty row blocks every cut (so the run never settles)
+        // while the open run blocks its declaration, with no exit but the operator's rollback.
+        let vouched = |d: &(u32, u64)| self.leases.row(d.0).is_some_and(|r| r.boot == d.1 && r.seen_ms == 0);
+        let counts =
+            |d: &(u32, u64)| vouched(d) || open.values().any(|run| !run.s.survivors.is_empty() || run.beat.contains(d));
         let lapsed: Vec<(u32, u64)> = self.lapsed_undeclared(now_ms).into_iter().filter(|d| counts(d)).collect();
         if !lapsed.is_empty() {
             log::error!("coordinator: hosts {lapsed:?} lost their lease while a succession is open: the world rolls back");
@@ -672,6 +710,24 @@ impl super::Coordinator {
         let current = |h: u32| self.attached_boot(h);
         let waiting: Vec<SuccessionId> = r.open.values().filter(|run| !run.answered(current)).map(|run| run.s.id).collect();
         (!r.known || r.declaring || r.rollback || !waiting.is_empty()).then_some(waiting)
+    }
+
+    /// Whether an open succession is answered by everyone and nothing else holds cuts back: a
+    /// cut is due at once to settle it (`maintain_cuts`, [`super::SETTLE_CUT_RETRY_MS`]).
+    pub(super) fn settle_due(&self) -> bool {
+        let r = &self.successions;
+        r.enabled && !r.open.is_empty() && self.successions_block_cuts().is_none()
+    }
+
+    /// Those of `waiting` (open, unanswered) that were opened while no host ran and whose
+    /// heir has not been sent the order yet — it never attached: no deadline runs for them.
+    pub(super) fn successions_awaiting_heir(&self, waiting: &[SuccessionId]) -> Vec<(SuccessionId, u32)> {
+        waiting
+            .iter()
+            .filter_map(|id| self.successions.open.get(id))
+            .filter(|run| run.s.survivors.is_empty() && run.deadline_ms == u64::MAX)
+            .map(|run| (run.s.id, run.s.heir))
+            .collect()
     }
 
     /// The open successions a cut beginning now settles if it commits (every one answered:
