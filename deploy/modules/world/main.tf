@@ -181,7 +181,7 @@ resource "kubernetes_deployment_v1" "toolbox" {
           }
           resources {
             requests = { cpu = "10m", memory = "64Mi" }
-            limits   = { memory = "1Gi" }
+            limits   = { memory = var.resources.toolbox.memory }
           }
         }
       }

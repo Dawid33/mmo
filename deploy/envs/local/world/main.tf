@@ -47,6 +47,7 @@ module "world" {
   resources = {
     coordinator = { cpu = "50m", memory = "512Mi" }
     host        = { cpu = "100m", memory = "1Gi" }
+    toolbox     = { memory = "1Gi" }
   }
 }
 

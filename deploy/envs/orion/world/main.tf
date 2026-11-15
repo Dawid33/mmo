@@ -8,6 +8,11 @@
 #   just orion-init world && just orion-plan world && just orion-apply world
 # The coordinator and the hosts stay unready until the world is forged from the
 # toolbox (see modules/world/main.tf). Releases: scripts/world_update.sh.
+# An apply owns the replica counts (coordinator 1, hosts = length(var.hosts)): an
+# `orion-apply world` while the world is stopped (`just world-stop`) or in the middle
+# of an update STARTS it again on whatever images are set then (an interrupted
+# update's half-set images included). Apply only with the world running and no
+# update under way; images are never changed by an apply (ignore_changes).
 variable "state_bucket" {
   description = "The orion state bucket (../backend.s3.tfbackend), to read other roots' outputs."
   type        = string
@@ -100,6 +105,7 @@ module "world" {
   resources = {
     coordinator = { cpu = "100m", memory = "512Mi" }
     host        = { cpu = "1", memory = "2Gi" }
+    toolbox     = { memory = "1Gi" }
   }
 }
 

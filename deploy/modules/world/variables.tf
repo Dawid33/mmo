@@ -102,8 +102,12 @@ variable "metrics" {
 }
 
 variable "resources" {
-  description = "Per role: { cpu = \"<request>\", memory = \"<request = limit>\" }. No CPU limit (a throttled main loop is a missed heartbeat)."
-  type        = object({ coordinator = any, host = any })
+  description = "Per role: { cpu = \"<request>\", memory = \"<request = limit>\" }. No CPU limit (a throttled main loop is a missed heartbeat). toolbox = { memory = \"<limit>\" } (default 1Gi): the forge runs there (`worldctl forge`; an OOM is exit 137 with nothing written); its requests stay small."
+  type = object({
+    coordinator = any
+    host        = any
+    toolbox     = optional(object({ memory = string }), { memory = "1Gi" })
+  })
   validation {
     condition = alltrue([
       for r in [var.resources.coordinator, var.resources.host] : can(tostring(r.cpu)) && can(tostring(r.memory))

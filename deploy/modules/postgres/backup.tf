@@ -145,6 +145,16 @@ resource "kubernetes_cron_job_v1" "backup" {
                 name  = "DUMP_DIR"
                 value = "/dump"
               }
+              # Garage does not take the CRC checksums newer AWS CLIs send and expect by
+              # default: only when an operation requires one.
+              env {
+                name  = "AWS_REQUEST_CHECKSUM_CALCULATION"
+                value = "when_required"
+              }
+              env {
+                name  = "AWS_RESPONSE_CHECKSUM_VALIDATION"
+                value = "when_required"
+              }
               volume_mount {
                 name       = "scripts"
                 mount_path = "/scripts"
