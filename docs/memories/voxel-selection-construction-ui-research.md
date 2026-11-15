@@ -1,0 +1,7 @@
+---
+name: voxel-selection-construction-ui-research
+description: 2026-10-29 research on selection/designation/construction UI for the DF-style voxel fortress; report set + recommended 5-layer UI design
+metadata:
+  type: project
+---
+RESEARCH DONE 2026-10-29: docs/superpowers/specs/2026-10-29-voxel-selection-construction-ui/ (start at 00-synthesis.md; 01 colony games, 02 voxel editors, 03 techniques/rendering). Recommendation: explicit lockable working level that all picks respect (Going Medieval's lesson), DDA picker from cut plane, client-local box-list CSG selection, sim orders as box list + op id + priority, cell-indexed overlay in voxel_pull.wgsl, dithered ghost voxels in pulled-quad path, Slint toolbars. DECIDED 2026-10-29 (§6): Alt+wheel = working level (works mid-drag, makes boxes multi-level), wheel stays zoom; cut at top of working level, no occluder fade for MVP; chisel construction out of scope (whole blocks + furniture models); 1 tile = 1 m, characters 1–2 m, housing ~2 m by race → multi-level selection (e.g. deconstruct) is MVP, walls default to race height, 2-level objects pick as a whole, headroom is a validity reason. One race for now: dwarves, 2 m (DWARF_HEIGHT_LEVELS=2). PLAN WRITTEN 2026-10-29: docs/superpowers/plans/2026-10-29-fortress-selection-designation-ui.md (9 tasks: game::orders, sim state+Order event, level pick, TileMirror, working level, cutaway, overlay, tools, Slint bar); not executed; needs Dawid's boundary-overlay WIP committed first. Don't re-research. Builds on [[game-direction-pivot]].

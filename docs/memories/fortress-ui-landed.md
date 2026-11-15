@@ -1,0 +1,9 @@
+---
+name: fortress-ui-landed
+description: Fortress selection/designation/build UI IMPLEMENTED 2026-10-29 on develop (5564337..2bc8ad0); open follow-ups and live checks
+metadata:
+  type: project
+---
+IMPLEMENTED 2026-10-29 (develop 5564337..2bc8ad0, plan docs/superpowers/plans/2026-10-29-fortress-selection-designation-ui.md, superseded in parts by Dawid's live feedback): game::orders (Order Designate/Erase/CancelOp/DevCompleteAll, rollback designations+constructed maps, Build only PLACE_BLOCK, y within i16), client TileMirror, WorkingLevel (Alt+wheel, PgUp/PgDn, Home, C cut toggle + Slint "[C] Hide above"), z-cutaway in voxel_pull shaders (home rect only) + slice plane capping only where L and L+1 solid, per-cell overlay texture, tools G Dig / X Deconstruct / B Build / Z Erase with click-click OR click-drag corners (Alt+wheel between clicks = multi-level, no auto-extrusion), entities with feet above the cut hidden. Key bug found live: Bevy 0.19 BinnedRenderPhase persists across frames — remove before add (07eba55).
+
+Open follow-ups (not done): slice plane + overlay full rebuild on every TileMirror version bump (split chunk vs designation version); per-frame 65k validate on big drags; early-z loss while cut on (render-bench A/B); fold Slint ToolbarAction into UiAction after Dawid's slint refactor; chisel at L+1 vs plane coplanar edge; pending snapshot voxels read AIR in mirror; all-invalid orders take undo slots; next_seq resets per run; server never binds embedded ClientId to the connection (pre-existing, spoofable); Dig valid on water + anyone can DevCompleteAll/Erase others' designations (Dawid to decide). Live checks pending: VOXEL_OCCLUSION=on, shadows at cut, region edge, UI scale 2, 5 toolbar buttons fit. Workers/jobs consuming designations = next ([[game-direction-pivot]]). Related: [[voxel-selection-construction-ui-research]].

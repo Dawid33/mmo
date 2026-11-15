@@ -1,12 +1,860 @@
 # Multi-instance servers on Kubernetes with a shared Postgres world — investigation & proposal
 
-Date: 2026-09-20. Status: **research + proposal, nothing implemented.** Decisions marked
-**[DECIDE]** are the user's; everything else is a recommendation with its reasoning.
+Date: 2026-09-20, **revised 2026-11-06** (§0; user decisions in §0.3, §0.6, §0.9 and §0.10 — §0.10 is the final state of this pass). Status: the multi-instance part is **not
+implemented**; single-instance persistence shipped in a different form (files, §0.1). Decisions
+marked **[DECIDE]** are the user's; everything else is a recommendation with its reasoning.
+**Read §0 first** — §1–§12 are the 2026-09-20 text, kept as the record, with pointers where
+they went stale.
 
-Goal as stated: run several server processes for *one* game world on a k8s cluster, with
-chunk/world data saved to and loaded from a shared Postgres cluster. A loading screen when a
-player moves between instances is acceptable. The main question is how to subdivide the world
-and the work; benchmarking the move between instances is secondary but wanted.
+## 0. Revision 2026-11-06 — what changed since 2026-09-20 and what it means
+
+### 0.1 What changed (verified in code / docs on 2026-11-06)
+
+**Direction.**
+- **Dwarf Fortress pivot (2026-10-20).** One huge world, forged up front, is the game. Players
+  hold a *fortress* (a site) or play an *adventurer*; the MVP is fortress mode. The later
+  2026-09-20 direction "super region = one pod = its own finite world, loading screen between"
+  is superseded in its *own-world* part. There is one world file per world (the generator
+  defaults to 100 km ≈ 392² regions of 256 m). Whether a pod owns a *piece* of that world is
+  the open question this doc is about.
+- **Scale numbers moved.** Play regions are **256 m** (they were 64 m; per-region cost scales
+  with area, so ×16). The sim chunk is 16³ blocks. Cell mode was built and then removed. A
+  fortress client simulates the **3×3 fortress neighbourhood** (768 m square). LOD reaches a
+  **15 km horizon** (~4,400 LOD keys per client), so "view ≫ territory" (§3) is worse than
+  before. The §2 measurements (40 MiB/region, colliders dominate) are from 64 m regions with
+  2-block chunks: **stale, re-measure before quoting.**
+- **Terrain is a stored artifact** (`terrain.world`, keyed by `content_crc`). Continents can no
+  longer re-roll under a world, which defuses most of §6.1's pristine-policy hazard. What
+  remains is a *code* hazard: per-block sampling (trees, slopes, materials) still changes
+  between builds — the slope change bumped `REGION_FILE_VERSION` to 7 and set every save aside.
+- **World-global state now exists:**
+  - **The world history**: people, sites, civs, journeys and a calendar on wall time. It lives
+    inside `WorldManager`, is delivered into regions as sim events and is saved to
+    `terrain.history`.
+  - **World-global claims and tables**: embark / return / adventure exclusivity
+    (`fortress_of`, `adventurer_of`), the `WorldMap` sent on connect, and legends.
+
+  None of this partitions by region, so §4 has a new actor: a **world coordinator**.
+
+**Shipped single-instance persistence: files, not Postgres.** The Stage 0 Postgres plan
+(`plans/2026-09-22-durable-world-persistence.md`) was never executed: 0 of 9 tasks, and no
+sqlx in `Cargo.lock`. What shipped instead:
+- **Region autosave** (`server/src/region_store.rs`):
+  - Every 60 s, plus on park and at orderly exit, each region is written to
+    `<world>.regions/b<R>-c<C>/r.x.z.region`.
+  - The payload is the lz4 bincode **`Rollback` memory image**, which §6 argued against.
+    §6's warning has already come true once: a version bump set every save aside (as `.bak`)
+    and regenerated the regions. That is fine for dev; it is not fine for a world players own.
+  - Known limit: LOD for a saved region that has not run this session is built from pristine
+    worldgen. This is §8 case 2, unsolved even in one process.
+- **Player identity and records**:
+  - `PlayerId(u64)` behind a secret `PlayerToken`, sent in a `Hello` handshake as the first
+    packet. There is no authentication.
+  - Records go through the `PlayerStore` trait (`resolve` / `store`), which lives in `server`,
+    not `game`. Today's implementation is `FilePlayerStore` at `<world>.players/`, written by
+    a `player-saver` thread.
+  - **Decision 4 is implemented**: a disconnect *parks* the body, claims and inventory into a
+    `PlayerRecord`, and a reconnect restores it at the nearest standable cell.
+  - **The newest session takes over.** The 09-22 plan had chosen "reject double login".
+  - In-sim `ClientId` is still a per-process `usize`.
+- **Orderly exit** (last client gone, stdin closed, SIGINT/SIGTERM) parks every region, saves
+  them all and joins the savers. That is the drain primitive §10 needs.
+- **History** is saved every 60 s and at exit.
+
+**Planned and being implemented today: `plans/2026-11-06-seam-transparent-regions.md`.**
+It delivers several things this doc listed as prerequisites or missing pieces:
+- **One world tick numbering** (`WorldClock`, anchored to wall-clock ms), persisted with the
+  autosave.
+- **`EntityId { birth_region, serial }`**, allocated deterministically inside the region.
+  This is the persistent id §6.2 needed, and it needs no database sequence, because a region
+  has a single writer.
+- **Generated, exhaustively classified transfer bundles**: a portable entity format.
+- **Latency-tolerant cross-region messages.** A message applies at
+  `max(T+1, the receiver's next tick)`, is recorded in the receiver's event stream, and **no
+  region ever waits for another**. The manager keeps an `in_flight` table, re-delivers to a
+  respawned target, and a conservation invariant checks that no entity is duplicated or lost.
+- **Halo**: neighbours' terrain and entities, read-only, `HALO_BLOCKS` = 8, with an explicit
+  "gone" message instead of TTLs. **Intents** carry writes to anything a region does not own.
+  A **location directory** maps `EntityId` → region.
+- **Task 3.3 `held_key_across_seam_settles`** is the in-process "seamless crossing under
+  sustained input" that §1a named as the biggest prerequisite risk.
+
+**Deployment.**
+- `deploy/` (OpenTofu, single-node k0s in docker) exists, and the Agones test passed on
+  2026-09-22. The Fleet still waits for a game image.
+- **Real production today is one box running docker compose**: the bind-mounted server binary
+  in `debian:trixie-slim`, `VOXEL_BIND_ADDR=0.0.0.0` (so the "127.0.0.1 binds must go" item
+  is done), and WebTransport on a **Let's Encrypt certificate** for the hostname (not
+  cert-hash pinning).
+- The browser and native clients join by `host:port` (`--join`, the Join-server field).
+- Single-player already runs as **one server process per world**, spawned by the client.
+
+### 0.2 Section by section: what still holds
+
+| § | Verdict |
+|---|---|
+| 1 / TL;DR 1: the region is the partition unit, single writer per region | **Holds.** The seam plan keeps regions as the threading, rollback and persistence unit. |
+| 1 / TL;DR 3, §9: `Transfer` packet, client redirect | **Still needed** for login placement and drain. The client still has no redirect; it takes an address from the menu or the CLI. |
+| 1 / TL;DR 4, §6: durable ≠ parking format | **Holds, and is now urgent**, because the memory image is what actually ships. The seam plan's generated bundle + `EntityId` gives the entity half almost for free. Terrain rows are naturally per 16³ chunk or per column. |
+| 1 / TL;DR 5, §6.1, §1a.3: pristine policy | Freeze-on-first-run is **de facto implemented** (every region that ran is saved). The forged artifact removes the continent-scale reason for it; the per-block-code reason (above) keeps it right. |
+| §1a.1: super-region S = 8 | **Arithmetic slip.** At 64 m regions S = 8 was 512 m, not "≈ 8 km". At 256 m it is 2 km. A random 3×3 fortress neighbourhood straddles a super-region edge ~44 % of the time at S = 8 and ~23 % at S = 16. **Decided 2026-11-06: fixed super-regions stay the claim unit, start S = 16** (§0.3, §0.4e). |
+| §1a.2: seamless cross-pod (L2) is the goal | **Reopened, then decided 2026-11-06: seamless** (§0.3). DF changes the pressure: sites are ≥ `EMBARK_MIN_DISTANCE_REGIONS` (4 regions, 1 km) apart, so fortress players rarely meet a seam, and DF itself travels between sites on the world map. At the same time the seam plan makes L2 *much cheaper*: the region boundary becomes a message protocol (transfers, halo, intents, all T+1 and latency-tolerant) — exactly what a pod↔pod link would carry. |
+| §1a.4: logout extracts the body | **Done** (parking + `PlayerRecord`). |
+| §1a.5: Agones / single-node k0s | Agones is feasible on k0s; the public box runs docker compose. **Decided 2026-11-06:** compose for development (Postgres + services), k8s-native in production, tested on minikube, then a k0s/k3s test server (§0.3). On one node, more pods still add no capacity. |
+| §2: facts table | Largely stale: identity, persistence, the address, region size, LOD reach, ghosts (now halo), arrivals keyed by `EntityId`. Use §0.1. |
+| §3: constraints | Hold. A player still pins 9 regions, now at 16× the area each. The scaling ceiling is still one region per core. |
+| §4: options A / B / C | Decided: fixed super-regions with swappable ownership policies (§0.4b). A's main drawback — every new player lands on the one spawn pod — is gone, because embark picks a tile. C (gateway) is still rejected **for region traffic**, but world-level state now needs one owner: the world coordinator of §0.4a, which is narrower than C. |
+| §5: border levels L0 / L1 / L2 | L1 (observer connections) is now less interesting than L2-over-seam-protocol, because the halo already gives the near-seam detail L1 was for. |
+| §6.2: crash consistency | **Problem exists today, in one process**: regions answer `Save` at different ticks, so an entity crossing between two saves can be duplicated or lost on a crash restore. Fix: a **consistent cut at a world tick** — each region saves at the same world tick T, and the manager saves the `in_flight` transfers departed < T and not yet applied. The shared world tick from the seam plan makes this cheap; nothing has to wait. |
+| §7: leases + epoch fencing in Postgres | **Unchanged**, applies once there is more than one process. |
+| §8: LOD across instances | **Unchanged in shape.** Fix it single-process first (R1): a saved region becomes an LOD overlay source. The same code then serves foreign regions. |
+| §9: identity, front door, ticket | Identity half done (`PlayerId` / `PlayerToken`). Front door + signed ticket still needed for multi-pod. Newest-wins takeover across pods needs a fenced session row (`session_instance` / `epoch`). |
+| §10: k8s shape | Holds, with one simplification: with a hostname-bound Web-PKI certificate, one box needs no per-pod cert hashes. Multi-node needs per-node names (or the cert-hash route). Drain = wire SIGTERM / preStop to the orderly exit that exists. |
+| §11: benchmarks | The go/no-go metric becomes the seam plan's harness (conservation + `world_state_hash`) with an injected per-link delay, plus client corrections around the flip. |
+| §12: roadmap | **Replaced by §0.5.** |
+
+### 0.3 Decisions taken (user, 2026-11-06) — supersede §1a and the reopened questions
+
+1. **Seamless crossing between pods** (L2) is the goal. Cross-pod traffic is the seam
+   protocol of `plans/2026-11-06-seam-transparent-regions.md` (transfers, halo, intents, all
+   T+1 and latency-tolerant), carried over a host↔host link.
+2. **Transition to Postgres** now; it is not deferred until a second process exists. The file
+   stores stay behind the same traits for single-player and no-database runs.
+3. **Fixed super-regions are the claim unit**: an S×S square of regions on a grid fixed from
+   day one. `SUPER_REGION_SIZE` is a named tunable.
+4. **Development:**
+   - docker compose runs Postgres, and later the other services.
+   - The details are **relaxed and swappable**: *how* a process takes ownership of regions,
+     *how* processes are spawned and *how many* run are picked for testing convenience.
+5. **Production:** k8s-native mechanisms for ownership and spawning. They are tested locally
+   on minikube, then on a k0s or k3s test server for near-production testing (whichever gets
+   set up).
+6. **Login is its own centralised deployment.**
+   - It does all authentication.
+   - It **tells the region hosts to spawn a user**.
+   - Region hosts never authenticate anyone.
+
+### 0.4 What the decisions imply (recommendations)
+
+**(a) Process roles.**
+
+| Role | Count | Owns |
+|---|---|---|
+| **Login service** | one deployment (replicas share Postgres) | Authentication, accounts, the **session table** (one live session per player — "newest wins" is enforced here, centrally), placement (player → super-region → owning host), the `SpawnPlayer` order to that host, re-placement on reconnect and drain |
+| **Region host** | N processes / pods | The region threads of the super-regions it owns, client connections that carry a login-issued ticket, region and player writes to Postgres, links to neighbouring hosts |
+| **World coordinator** | singleton | World-global state that does not partition: history + calendar, site claims, embark / adventure exclusivity, the `WorldMap`, legends. It may share a process with the login service in development (open, §0.6) |
+| **Postgres** | one cluster | Durable truth plus the ownership fencing epochs |
+
+Today's single `server` binary becomes these roles. The binary can still run all of them in
+one process (the `AllInOne` setup below), which keeps single-player and `just run` working.
+
+**(b) Ownership is a policy behind a trait, fencing always lives in Postgres.**
+- Swappable ownership sources:
+  - `AllInOne`: one process owns everything (today).
+  - `Static`: dev config or env — host *i* owns these super-regions, or a modulo rule over N
+    hosts.
+  - `PgClaim`: claim on demand with lease rows, §7.
+  - `K8s`: prod — e.g. StatefulSet ordinal → a shard map, a k8s `Lease` per super-region, or
+    Agones allocation labels. The choice belongs to the k8s-stage spec.
+- **Invariant, whatever the source:** each super-region row in Postgres carries an **owner
+  epoch**. A new owner bumps it in a transaction when it takes over, and every region or
+  player write checks it in the same transaction.
+- Why the invariant matters: §7's argument still holds — a k8s `Lease` alone cannot fence a
+  Postgres write. A paused old owner would write over the new one. So k8s (or a dev config)
+  decides *who* owns a super-region, and the Postgres epoch makes a stale owner's writes fail.
+  This is also what makes relaxing the policy safe in development.
+
+**(c) Spawning is outside the binary.**
+- The binary reads its role and identity from env (12-factor): role, host index / name,
+  advertised address, `DATABASE_URL`, ownership policy.
+- **Development:** a `just` recipe and a dev compose file start Postgres + login + N hosts
+  (`--scale` or a loop). The count is a variable.
+- **Production:** a k8s controller (Deployment / StatefulSet / Agones Fleet) starts them.
+
+**(d) Login flow** (the "ticket" below is the signed access JWT, §0.7a). This replaces §9's model, where the client presented a ticket and the
+host loaded the record itself; now login *pushes* the spawn.
+```
+client → login (HTTPS): credentials                  → authenticate
+login: open session (player, session_epoch); an old live session → tell its host to park it
+login: player record → super-region → owner host     (Postgres: records + ownership rows)
+login → host (internal):  SpawnPlayer { player, session_epoch, ticket }
+host:  region thread restores / places the body (today's RestorePlayer path), holds the slot
+login → client: { host QUIC / WT address, ticket }
+client → host:  Hello { ticket }  → matched to the pending spawn → play
+```
+- **Crossing between hosts** does not involve login on the hot path. The receiving host
+  updates the session's current host in Postgres, so a reconnect is placed correctly.
+- **Logout / disconnect:** the host parks the body, writes the record (fenced) and tells login
+  that the session ended.
+- **Takeover:** login orders the old host to park and drop that session *before* it orders
+  the new spawn. That is the cross-host form of today's newest-wins.
+- **Credentials:** today's `PlayerToken` either becomes a credential the login service checks,
+  or is replaced (open, §0.6). The `Hello` the host receives carries the login ticket.
+
+**(e) Super-region size.** S is fixed but tunable. At 256 m regions, S = 8 is 2 km and
+S = 16 is 4 km. With a fixed grid, a fortress neighbourhood near a grid line spans two owners
+(~44 % of random placements at S = 8, ~23 % at S = 16). With seamless crossing that is a
+cost question, not a correctness one. **S = 16, configurable** (§0.7d).
+
+**(f) Client.**
+- It logs in over HTTPS first (native and browser), instead of taking `host:port` from a menu
+  or CLI.
+- It holds **one connection per host** that owns a region of its window, with a
+  `region → connection` routing table. This is required for seamless crossing.
+- Login gives it its home host; any other host comes from a `RegionElsewhere` redirect
+  carrying a ticket.
+
+### 0.5 Revised roadmap (replaces §12)
+
+- **Today: the seam-transparent plan.** It is the prerequisite for everything below.
+- **R0 — dev infrastructure:**
+  - a dev compose file (e.g. `deploy/dev/compose.yml`, separate from the production
+    `deploy/web/compose.yml`) with Postgres;
+  - `just pg-up` / `pg-down` / `pg-reset`;
+  - sqlx migrations.
+- **R1 — Postgres persistence, one host:**
+  - `RegionStore`, `PlayerStore` and a history store implemented on Postgres, with file
+    implementations kept;
+  - a portable region format (terrain per chunk / column + entity bundles keyed by
+    `EntityId`);
+  - a world-tick-consistent save cut that includes `in_flight`;
+  - LOD built from stored regions;
+  - re-measure sizes at 256 m / 16-block chunks.
+
+  The parts of `plans/2026-09-22-durable-world-persistence.md` that still fit are reused.
+- **R2 — split the roles, still one machine:** **DONE 2026-11-08** (`plans/2026-11-07-r2a-login-accounts.md`, `plans/2026-11-07-r2b-role-split.md`)
+  - a login service (auth, sessions, `SpawnPlayer`), the world coordinator and the region
+    host as separate processes;
+  - the `AllInOne` and `Static` ownership policies;
+  - super-region owner epochs in Postgres;
+  - client login over HTTPS.
+- **R3 — many hosts locally:**
+  - N hosts under `Static` ownership, launched by `just` / compose;
+  - a host↔host link carrying the seam protocol;
+  - client multi-connection.
+  - **Go / no-go:** conservation holds, and the client's corrections at a cross-host flip
+    match a cross-thread flip at p95 under 1–5 ms injected latency.
+- **R4 — takeover:** the `PgClaim` policy, failover tests (kill a host mid-crossing), drain
+  (SIGTERM → orderly exit → release → login re-places the players).
+- **R5 — k8s (§0.7b/c/e: StatefulSet + headless Service, per-pod NodePort Services, login Ingress, CloudNativePG; the Agones Fleet in `deploy/modules/world` is replaced):**
+  - images and a k8s-native ownership + spawning policy;
+  - run on minikube (the existing `deploy/` k0s-in-docker environment can stand in);
+  - then the k0s / k3s test server: readiness, metrics, blue/green by `build_id`.
+
+### 0.6 Resolved 2026-11-06 (second round) — see §0.7
+
+1. World coordinator: **its own deployment**.
+2. Auth: **email + password** at the login service. A **JWT** carries authentication between
+   services, and the JWT **contains the `PlayerToken`**.
+3. k8s ownership mechanism: **a StatefulSet**, confirmed by the Agones review (§0.7b′); the
+   user's OK is pending.
+4. Internal links go through **k8s Services**. Anything clients reach — login — gets an
+   **Ingress**.
+5. Super-region size: **S = 16 regions**, configurable (§0.7d).
+6. Single-player / offline: **file stores, one `AllInOne` process**.
+
+### 0.7 Design after the second round
+
+**(a) Auth and the JWT.**
+- **Login service:**
+  - Accounts are email + password, hashed with Argon2id. Login is rate-limited and the
+    endpoint is HTTPS-only behind the Ingress.
+  - Each account owns one player, i.e. one `PlayerToken` and its `PlayerId`.
+  - Login issues a short-lived **access JWT** (minutes) plus a refresh token that the login
+    service stores and can revoke.
+- **Signing:**
+  - The JWT is signed **asymmetrically** (EdDSA / ES256). Region hosts and the coordinator
+    hold only the public key (from a Secret / JWKS), so a compromised host cannot mint
+    tokens.
+  - Claims: `sub` = `PlayerId`, `player_token`, `session_epoch` (§0.4d), `exp`, `aud` = the
+    game hosts.
+- **Hosts:** the client's `Hello` carries the JWT instead of the bare token. The host checks
+  the signature, `exp` and `session_epoch` against the pending `SpawnPlayer` from login. The
+  JWT *is* the connect ticket, so no separate ticket is needed.
+- **Consequence of putting the `PlayerToken` in the JWT:** JWT payloads are only signed, not
+  encrypted — anyone holding the JWT (logs, proxies, browser storage) can read them. So the
+  `PlayerToken` must **stop being a secret**: today possessing it *is* the identity
+  (`FilePlayerStore::resolve`). In the multi-process game it becomes a stable,
+  non-secret player identifier, and identity comes only from a verified JWT signature. Hosts
+  must never accept a bare token again.
+- Single-player keeps today's token-only `Hello`, because its trust model is the local
+  machine. Encrypting the JWT (JWE) would avoid the change, at the cost of a more complex
+  token for no gain once the signature is what is trusted.
+
+**(b) Recommended k8s mechanism: a StatefulSet of region hosts, deterministic assignment,
+Postgres fencing.** No Agones.
+
+> **Reviewed 2026-11-06 — StatefulSet confirmed.** Agones was first dismissed here without a fresh
+> review. A proper review then ran: current docs and releases, plus real-world use and OpenKruise
+> Game. Raw findings with sources are in `specs/2026-11-06-agones-review/`
+> (`01-agones-features.md`, `02-persistent-world-experience.md`). The verdict and its reasons are
+> in (b′) below.
+
+**(b′) Agones review: the result.**
+- Facts are as of Agones **v1.62** (2026-11-04), which supports Kubernetes 1.34–1.36.
+- The two load-bearing claims (#2286 refused, v1.62) were not re-checked by hand; the GitHub
+  API was unreachable from here.
+
+| Need | Agones | StatefulSet + per-pod Services | OpenKruise Game (OKG) |
+|---|---|---|---|
+| Stable host identity (ownership, host↔host DNS) | **None.** Ordinal names were requested and closed "not planned" (#2286, 2023). A crashed server becomes Unhealthy (terminal); a Fleet replaces it under a new random name, possibly on a new port. A standalone named GameServer is never recreated | **Ordinals + per-pod DNS**; a crash restarts the same ordinal | Ordinal-like ids, reservable ids, per-pod DNS |
+| Client UDP ports / address | **Automatic**: Dynamic ports, two per server, address in status. On bare-metal k0s/k3s it falls back to the node's InternalIP unless the node has an ExternalIP (`--node-external-ip`) | Fixed NodePort per ordinal, generated by OpenTofu; `externalTrafficPolicy: Local` | HostPort / NodePort network plugins write the address back to the resource |
+| Long-lived servers | Allocated / `Reserve(0)` stay until `Shutdown()` | Native | Native |
+| Build upgrades | Fleet rolling updates **skip Allocated servers**, so you drain and shut down by hand. One report (Agones 1.39, Apr 2026) of an always-Allocated fleet stalling at half capacity; unverified whether 1.59's fix covers it | `updateStrategy: OnDelete` / `partition`, driven by our drain | In-place updates without recreating pods (its strongest feature) |
+| Single-node drains (k0s/k3s upgrades) | `eviction.safe: Never` → a PDB that **blocks `kubectl drain`** on one node (inference from standard k8s behaviour) | No PDB needed; drain = SIGTERM → orderly exit | n/a |
+| Assignment super-region → host | Needs the **coordinator in the assignment path** (members are dynamic). Counters/Lists (stable in 1.62, ≤ 1000 values) can *index* "who owns X", but do not stop two servers listing the same X | A rendezvous hash over ordinals, computed by everyone (same in dev); the coordinator only for pins | Same as StatefulSet |
+| Persistent-world precedent | None in Agones' docs. Nitrado GameFabric runs "Persistent Servers" on Agones through its own named-instance layer, mapping not documented | The #2286 requester (Minecraft network) used StatefulSets | Documented MMO zone-server use, almost all Chinese studios |
+| Footprint on one node | Controller ×2, allocator ×3 (LoadBalancer), extensions ×2, webhooks, an SDK sidecar per pod; minikube needs a narrowed port range; k3s/k0s not in its docs | Nothing beyond core k8s | Needs OpenKruise core, incl. a **privileged daemon per node**, with k3s fixes (kruise#1447); no k0s / minikube docs |
+| Rust | Official `agones` crate, released with each version | n/a | n/a |
+
+**Verdict: StatefulSet.**
+- Agones solves one thing we would otherwise hand-roll: ports and addresses. For that it charges
+  us the identity we need (super-region → host, host↔host DNS), a coordinator in the
+  assignment path, a single-node drain blocker and a sizeable control plane.
+- Its model is disposable session servers. The one persistent-world operator found had to
+  build its own named-instance layer on top.
+- OKG fits best on features but costs the most to run (privileged per-node daemon,
+  cloud-oriented network plugins). It is worth revisiting only if in-place updates without
+  pod recreation become a requirement.
+
+Consequences:
+- The Agones Fleet in `deploy/modules/world` is replaced in R5. The 2026-09-22 feasibility
+  test stays valid as evidence, but is no longer the plan.
+- **Build upgrades are a whole-world cutover**, not blue/green during play: client and server
+  must run the same sim build, so every player reconnects with the new client anyway. The
+  procedure: StatefulSet `OnDelete`, drain every host (orderly exit saves and releases), roll
+  all pods, players log in again.
+- **UDP exposure:**
+  - per-pod NodePort with `externalTrafficPolicy: Local` (no source NAT; free on one node);
+  - **Kubernetes ≥ 1.34** (also Agones' floor, and past kube-proxy's v1.32 UDP conntrack
+    cleanup — stale entries otherwise black-hole a restarted pod's port for up to ~120 s);
+  - the k0s/k3s node needs `--node-external-ip` (or equivalent) so the advertised address is
+    the public one;
+  - fallback if conntrack trouble shows up anyway: `hostNetwork` with port = base + 2·ordinal.
+- **Autoscaling across many nodes does not need Agones** (§0.7e). Revisit Agones only if we
+  ever want dynamic, non-ordinal host membership — and then the assignment moves into the
+  coordinator.
+
+*The original reasoning that follows is kept for the record; item 1's facts are superseded by
+(b′).*
+
+*Trade-off in prose.* There are four k8s-native ways to decide which pod runs which
+super-region:
+1. **Agones** (already in `deploy/modules/world` as a Fleet). It allocates game servers for
+   *sessions*: its Ready → Allocated → Shutdown lifecycle and random pod names fit a match
+   server, not a long-lived owner of a fixed piece of a persistent world. Its main gift,
+   per-pod dynamic UDP ports, is replaced below by per-pod Services.
+2. **A k8s `Lease` per super-region** (625 for a 100 km world at S = 16). This is dynamic
+   takeover, but it means hundreds of renewals against the API server, and (§7) a `Lease`
+   cannot fence a Postgres write — so it would duplicate the Postgres epoch it still needs.
+3. **A custom operator with a CRD** for assignments. This is the most "k8s" option and the
+   most work. It is only worth it once rebalancing needs to be smarter than a hash.
+4. **A StatefulSet.** It gives each host a **stable identity** (`region-host-0..N-1`), a
+   **stable DNS name** through a headless Service, ordered rolling updates, a PDB, graceful
+   termination, and **at most one pod per ordinal**. Ownership becomes a pure function of
+   `(super-region, replica count)` that every process computes the same way.
+
+Option 4's cost: when a host dies, k8s restarts **the same ordinal** rather than letting
+neighbours take over. That host's super-regions pause for a pod restart plus region restores
+(seconds to tens of seconds), and the players there see a stall or reconnect. Faster takeover
+(the `PgClaim` policy) can be layered on later, because fencing is in Postgres either way.
+
+*Recommendation: option 4.* It is the simplest option that is genuinely k8s-native, and
+development runs the very same assignment function:
+- **Assignment:**
+  - `owner(sx, sz) = rendezvous_hash(world_id, sx, sz, ordinal) → max over ordinals 0..N`.
+  - When the replica count changes, only ~1/N of the super-regions move. Those are handed
+    over: park, save, release the epoch; the new owner bumps the epoch and loads.
+  - An optional override table in Postgres (`super_region_pins`) pins a hot super-region to a
+    host (§4.1 rule 8).
+- **Fencing:** a `super_region_owner(sx, sz, ordinal, epoch)` row is bumped by the owner on
+  takeover, and every write checks it in the same transaction. This covers the cases a
+  StatefulSet does not: a force-deleted pod on a partitioned node, or a paused process
+  waking up.
+- **Development:** `just` / compose start N processes with `VOXEL_HOST_ORDINAL=i` and
+  `VOXEL_HOSTS=N`. That is the same function, so development exercises production's
+  assignment. The relaxations are `AllInOne` (one process owns everything) and
+  `VOXEL_OWNERSHIP=static:<file>` for hand-placed tests.
+- **Other workloads:**
+  - Login service: a Deployment (stateless, replicas ≥ 2) + ClusterIP Service + Ingress
+    (HTTPS).
+  - World coordinator: a Deployment with `replicas: 1` and a `Recreate` strategy. If it ever
+    runs two replicas, use a single k8s `Lease` for leader election — the one place a `Lease`
+    fits.
+  - Postgres: CloudNativePG, as `deploy/` already has.
+
+**(c) Networking.**
+- **Internal (Services):**
+  - login → coordinator: a ClusterIP Service.
+  - login → *a specific* host, and host ↔ host: through the **headless** Service's per-pod
+    DNS (`region-host-3.region-hosts.<ns>.svc`). A normal ClusterIP Service load-balances
+    across pods, which is wrong when the target must be the owner.
+- **Clients → login:** the Ingress (HTTPS).
+- **Clients → region hosts: cannot use an Ingress.**
+  - QUIC and WebTransport are UDP and must reach the *owning* pod end-to-end (§10). An
+    ingress terminates HTTP/3 and balances across pods.
+  - Use **one Service per host pod**, selected by the StatefulSet label
+    `statefulset.kubernetes.io/pod-name`, as `type: NodePort` with fixed ports per ordinal
+    (e.g. QUIC `30466 + 2i`, WebTransport `30467 + 2i`; generated by OpenTofu from the
+    replica count) and `externalTrafficPolicy: Local`.
+  - Later, with a load-balancer implementation (MetalLB / cloud), the same Services become
+    `type: LoadBalancer`.
+  - This is k8s-native, needs no Agones, and works the same on minikube, k0s and k3s.
+  - Login answers with `{node public host, port}` for the owning host, and the hosts read
+    their advertised ports from env.
+- **WebTransport certificate:** a Let's Encrypt certificate for the node's hostname covers
+  every port on it, as on today's box. Multi-node needs a name per node (cert-manager DNS-01,
+  wildcard), or the cert-hash route.
+
+**(d) Super-region size: S = 16 regions.**
+- At the 256 m play regions that is 4 km square. A 100 km world has 25 × 25 = 625
+  super-regions; the 16 km debug world has 4 × 4.
+- Why 16 and not 8:
+  - a fortress neighbourhood (3×3) straddles a super-region edge ~23 % of the time instead
+    of ~44 %;
+  - an adventurer crosses a host boundary every 4 km instead of every 2 km.
+
+  Why not 32: a host's load moves in 4 km units, which is already coarse. With fortresses
+  ≥ 1 km apart, one super-region holds at most ~16 fortresses (~144 regions), and per-region
+  cost at 256 m is still unmeasured.
+- Configuration:
+  - **runtime config, not a build dial**: `VOXEL_SUPER_REGION_REGIONS` (default 16), plus a
+    `world.super_region_regions` row that every process checks at startup, refusing to start
+    on a mismatch;
+  - expressed in **regions**, since the region size is itself a build dial.
+- Changing S is cheap **because storage is keyed by region, not by super-region**. S only
+  decides ownership, so changing it is a full restart that rebuilds the owner / epoch table,
+  with no data migration.
+- Revisit S after R3's host-load measurements.
+
+**(e) Autoscaling across many nodes, without Agones** (added 2026-11-06 after the user asked).
+*§0.10: no node autoscaling (a single server); host pod autoscaling becomes its own later plan (R6); KEDA is set aside.*
+Everything Agones would have provided across nodes is small code on
+[kube-rs](https://github.com/kube-rs/kube) (`kube` 5.0.0, 2026-11-01). Dynamic membership is
+never needed: StatefulSet ordinals stay dense when scaling (scale-up adds `N`, scale-down
+removes `N-1`).
+
+There are two levels, and they are independent.
+
+1. **Host count (pods): a StatefulSet `replicas` change.**
+   - **Scale-up:** pod `N` starts and the rendezvous hash over `0..N+1` moves ~1/(N+1) of the
+     super-regions to it. Each moving super-region is handed over: the old owner parks, saves
+     and releases its epoch; the new owner bumps the epoch and loads.
+   - **Scale-down:** k8s removes the **highest ordinal** with SIGTERM. Its orderly exit parks,
+     saves and releases, and the survivors take its super-regions. With rendezvous hashing
+     only that pod's super-regions move. `terminationGracePeriodSeconds` must cover the
+     worst-case drain.
+   - **Hosts must agree on `N`.** It is published in Postgres (`world.host_count`, bumped by
+     whoever scales), not read from each pod's view of the StatefulSet. A host claims a
+     super-region only after the previous owner's release, or after its lease lapsed. The
+     epoch makes a race harmless, just slower.
+   - **Who changes `replicas`:**
+     - **(i) Existing autoscalers, no code.** An HPA on custom metrics (Prometheus adapter), or
+       **KEDA** (Prometheus or PostgreSQL scaler on a load query), targeting the StatefulSet's
+       `scale` subresource. Signals: tick-budget % and running regions per host, not CPU
+       (§10). Use long stabilisation windows, because every scale step is a handover players
+       can feel.
+     - **(ii) Our own controller in Rust on kube-rs.** It can live in the world-coordinator
+       deployment, which already holds world-level decisions and reads load from Postgres. It
+       patches the `scale` subresource and writes `host_count`, and it can do what a generic
+       autoscaler cannot:
+       - scale *before* a predicted crowd (a pre-announced event, a busy embark);
+       - avoid scaling while a super-region is mid-handover;
+       - prefer off-peak scale-downs;
+       - use the `super_region_pins` table to move one hot super-region to the new host
+         instead of re-hashing.
+
+       Leader election is not needed while the coordinator runs one replica; otherwise use a
+       k8s `Lease` (the community `kube-leader-election` crate, 0.44).
+     - **Recommendation:** start with (i) KEDA (configuration only) once there are several
+       nodes. Write (ii) when handovers on scale steps prove too blunt — it is a few hundred
+       lines, and the coordinator is its natural home.
+2. **Nodes: an infrastructure autoscaler, not ours.**
+   - Kubernetes' **cluster-autoscaler** adds a node when pods are Pending and supports many
+     providers (Hetzner included; that is where the current box is).
+   - **Karpenter** is the AWS/Azure-native alternative.
+   - On a self-managed k0s/k3s server without a provider integration, adding a node is manual
+     (join token), and the host autoscaler above still works within the nodes that exist.
+   - Give region-host pods real CPU / memory requests (one region thread per core-ish), so
+     Pending → node scale-up triggers correctly, plus a pod anti-affinity preference to spread
+     hosts.
+
+**What multi-node needs from us** (what Agones did for us; ~100–200 lines on kube-rs + RBAC
+`get nodes`):
+- **Advertised address:** the downward API gives the node name. The host reads the `Node` via
+  kube-rs, takes its `ExternalIP` (or a per-node DNS name from a label) and publishes
+  `{address, QUIC port, WT port}` to Postgres for login.
+- **Ports:**
+  - per-pod NodePort Services, generated per ordinal (OpenTofu up to a maximum host count, or
+    created by the controller when scaling);
+  - `externalTrafficPolicy: Local` means the client must dial the node the pod runs on, which
+    the published address already ensures;
+  - alternative: `hostNetwork` + port = base + 2·ordinal, unique cluster-wide.
+- **WebTransport certificates:** one name per node (`node-k.<domain>`), each node's
+  certificate from cert-manager DNS-01 (one wildcard `*.<domain>` works for all). Cert-hash
+  pinning stays the fallback.
+- **Node loss:** the pod reschedules onto another node with the same ordinal, so its
+  super-regions resume at a new address. Login re-reads it from Postgres; clients reconnect.
+  Its stall lasts as long as reschedule + restore (§0.7b's StatefulSet cost).
+
+### 0.8 Plan summary and open questions (2026-11-06)
+
+**The plan in one paragraph.**
+- One forged world is split into a fixed grid of super-regions (16×16 regions, configurable).
+- Each super-region is owned by one **region host** in a StatefulSet, chosen by a rendezvous
+  hash over host ordinals and fenced by an owner epoch in Postgres.
+- Players cross between hosts **seamlessly**, using the seam-transparent protocol (world
+  tick, `EntityId`, T+1 transfers, halo, intents) over host↔host links.
+- A central **login service** (email + password, JWT carrying the `PlayerToken`) places
+  players and tells the owning host to spawn them.
+- A singleton **world coordinator** holds the history, site claims and other world-global
+  state.
+- **Postgres** holds everything durable: regions in a portable format, players, history, and
+  ownership.
+- **Development:** docker compose runs Postgres; ownership, spawning and process count are
+  relaxed there.
+- **Production:** k8s — minikube, then a k0s/k3s test server, then multi-node. KEDA (later
+  our own kube-rs controller) scales the hosts; cluster-autoscaler scales the nodes.
+- **Single-player** stays one `AllInOne` process on file stores.
+- Order: the seam plan (today) → R0 dev Postgres → R1 Postgres persistence on one host → R2
+  role split → R3 many hosts + the seamless go/no-go → R4 takeover / failover → R5 k8s.
+
+**Pending confirmation (recommendations already written):**
+1. StatefulSet over Agones (§0.7b′).
+2. Autoscaling: KEDA first, our own controller later (§0.7e).
+3. The portable region format replaces the memory-image blob (which stays only as a
+   same-build resume cache), and saves are cut at a world tick (§0.2, §0.5 R1).
+4. ~~Fallback if the seamless go/no-go fails~~ **Resolved §0.9: seamless only, no fallback.** static super-regions with an in-game border
+   mechanic (§1a.2) — still the fallback?
+
+**Open: answer before the R0/R1 spec:**
+
+5. **Resolved §0.9: one world per deployment, one logical database per world, shared login / database / panel.** ~~One world or many per deployment?~~ The game already has many worlds (`worlds/<slug>`).
+   Does the cluster run one world, or several with world selection at login? This shapes
+   every Postgres key (a `world_id` everywhere) and the login flow.
+6. **Checkpoint interval**, i.e. how much progress a crash may lose. Today: 60 s.
+7. **Resolved §0.9: no backups yet.** ~~Postgres operations:~~ CloudNativePG backups need an object store (S3-compatible:
+   Hetzner Object Storage, MinIO, …). Which one, and what retention / PITR window?
+
+**Open: answer before R2 (role split, login):**
+
+8. **Email:** verification and password reset need an outbound mail provider (SMTP / API).
+   Which one? Are verification and reset required at launch?
+9. **JWT lifetime vs long sessions:** recommended — the JWT is checked only at connect /
+   reconnect / cross-host handover, and revocation is a login → host kick. Keys are rotated
+   through a JWKS endpoint.
+10. **Internal call security** (login → host, coordinator ↔ host, host ↔ host): a
+    NetworkPolicy alone, a shared service token, or mTLS?
+11. **Coordinator downtime:** while it restarts, should hosts keep simulating, with world
+    events (embark, history, journeys) paused and queued? (Recommended.)
+12. **Personal data:** storing emails means GDPR duties — a privacy notice, account deletion
+    and data export. What does deleting an account do to the player's body and records?
+
+**Open: answer before R3 / R5 (scale, deployment):**
+
+13. **Resolved §0.9: to be decided.** ~~Target scale:~~ expected concurrent players and world size. This sizes S, hosts per
+    node, Postgres and the go/no-go thresholds.
+14. **Resolved §0.9(d): the forged world is stored in the database, tiled, and pulled piecewise.** ~~World file distribution:~~ every host loads the forged world (~1 GiB resident for a
+    100 km / 16 m world, §0.1), so N hosts cost N × 1 GiB. Ship it in the image, on a
+    read-only volume, or fetch it from object storage at start? Can hosts load only their
+    super-regions' part of it? (That would need a worldgen change.)
+15. **Resolved §0.9: LISTEN / NOTIFY.** ~~LOD across hosts:~~ each host builds the 15 km rings for its clients from saved regions
+    in Postgres (§8). Invalidate by polling `terrain_version`, or LISTEN/NOTIFY?
+16. **Images and CI:** where images are built and which registry. Today's deploy rsyncs a
+    binary.
+17. **Resolved §0.9: behind the Ingress.** ~~Web client hosting in k8s:~~ the static site behind the Ingress, or keep the current
+    Caddy box?
+18. **Resolved §0.9: Prometheus + Grafana.** ~~Observability:~~ a Prometheus / Grafana stack in the cluster (the local Pyroscope /
+    Grafana setup exists).
+19. **Client UX:** a login screen (Slint, native + browser), a "reconnecting" state for host
+    loss, and how a browser holds several WebTransport connections (one per host).
+
+**Known risks to keep in view:**
+- One overloaded region is still one core; nothing here splits it.
+- Seamless cross-host crossing is unproven until R3's go/no-go.
+- Per-region cost at 256 m is unmeasured, so host sizing and S are guesses until R1 / R3
+  measure them.
+
+### 0.9 Decisions, third round (user, 2026-11-06) and what follows
+
+**Decided:**
+1. **Seamless crossing only — no alternative.** The static-border fallback (§1a.2, §0.8 item
+   4) is dropped. If R3's go/no-go misses, the work is to fix the seam, not to fall back.
+2. **One world per deployment, one logical database per world.** Shared among all world
+   deployments: the login service, the database server, the management panel, the web
+   client and monitoring.
+3. **No Postgres backups yet.**
+4. **Target concurrent players: to be decided.**
+5. **The world store must work on Postgres *and* in a file:** SQLite for single-player /
+   single-server, so single-player needs no Postgres running.
+6. **Worldgen runs up front from a cluster management panel.** The panel creates the world's
+   database and seeds it with the generated world. **Servers pull only what they need from
+   the database.**
+7. **Terrain-change notification via LISTEN / NOTIFY.**
+8. **The web client goes behind the Ingress**, deployed with everything else.
+9. **Prometheus + Grafana.**
+
+**What follows (recommendations):**
+
+**(a) Deployment shape.**
+
+| Shared (one each) | Per world |
+|---|---|
+| Postgres server (CloudNativePG; one cluster, one **logical database per world** + one for login, declared with CNPG's `Database` resources) | world coordinator (one replica) |
+| login service + its database (accounts, sessions, the **world registry**: world id → database, coordinator Service, status) | region-host StatefulSet + per-pod NodePort Services |
+| management panel | the world's database (on the shared server) |
+| web client (static, behind the Ingress) | |
+| Prometheus + Grafana (kube-prometheus-stack), KEDA, cluster-autoscaler | |
+
+- Every world-scoped key lives *inside* that world's database, so no table needs a
+  `world_id` column.
+- A cross-world mix-up becomes a wrong-connection error, not a wrong-row bug.
+
+**(b) Accounts across worlds.**
+- An account (email + password) is global. A **player is per world**: an account has at most
+  one player in each world, each with its own `PlayerToken` / `PlayerId`.
+- Login flow gains a step: log in → pick a world (from the registry) → login issues a JWT for
+  *that* world, with claims `world`, `player_token`, `session_epoch` and `aud` = that world's
+  hosts.
+- Hosts reject a JWT for another world.
+- **Open:** may one account play several worlds at once (one session per world), or only one
+  in total?
+
+**(c) One storage layer, two backends.**
+- A `WorldStore` holds regions, players, history, the forged world (below) and ownership. Its
+  schema stays in the dialect subset both Postgres and SQLite share: integers, text, blobs
+  (`bytea` / `BLOB`), no Postgres-only types.
+- sqlx supports both. Two migration sets (`migrations/pg`, `migrations/sqlite`) kept in step
+  by a test that applies both and compares the logical schema.
+- Single-player: one **`<world>.sqlite`** file per world, replacing today's `terrain.world`,
+  `.regions/`, `.players/` and `.history`. WAL mode; one writer per world, held by an OS
+  file lock instead of epoch fencing.
+- What SQLite lacks is harmless there: change notification is in-process (no LISTEN), and
+  there is no pooling question.
+- **Export / import is the same schema copied**, so the panel can import a single-player
+  `.sqlite` world into a new Postgres database, or export one. A world is portable by design.
+- Recommended because it is cheap: a `just` tool to convert the existing file worlds into
+  SQLite once.
+
+**(d) The forged world in the database, pulled piecewise.** This is the largest new work item.
+- **Today:** a `WorldArtifact` is one zstd stream, and a server loads it whole: ~1 GiB
+  resident for 100 km / 16 m (§0.1). That cost repeats in every host, so it does not scale to
+  N hosts.
+- **Proposed layout:**
+  - **Global small tables:** world parameters, the geology column, lake bodies, river
+    reaches, volcano sites, edges, biome-region records, and the `WorldMap` tile summaries
+    the client gets on connect.
+  - **Tiled rasters:** one row per raster per **forge tile** (e.g. a super-region square plus
+    a halo of the cells bicubic sampling and river carving read across the edge), holding
+    height, uplift, bedding, temperature, precipitation, drainage, volcanism, salinity, biome,
+    savagery and region id.
+  - **A coarse whole-world layer** (downsampled rasters) for LOD and the world map, which reach
+    15 km and beyond — far past any host's tiles.
+- **A host loads:** the global tables, the coarse layer, and the tiles of its super-regions
+  plus their neighbours (for the halo and seam LOD). Memory then scales with territory, not
+  world size.
+- **Worldgen change needed:** `ForgedWorld` must sample through a tile cache instead of whole
+  rasters, and produce exactly the same bits as today for any sample.
+  - Pin it with a test: sample the whole world from tiles vs whole rasters, bit-equal.
+  - Coast distance is recomputed on load today; it must become a stored tiled raster (or be
+    computed per tile with a large enough halo).
+- **Regions are not pre-generated.** The seed is the forge output; a region is generated from
+  it the first time it runs and frozen then (freeze-on-first-run, §1a.3). Pre-generating
+  ~150k regions of a 100 km world would cost hours and terabytes for land nobody may visit.
+- **The forge runs as a k8s `Job` launched by the panel, not inside the panel.**
+  - A 100 km forge needs up to ~12 GiB and minutes (`play::MAX_PLAY_FORGE_RAM_BYTES`), so it
+    gets its own resource requests and can land on whichever node has room.
+  - It writes straight into the new database. Single-player forges in the client, as today,
+    into the `.sqlite` file.
+
+**(e) Cluster management panel** (new, shared).
+- It owns the world lifecycle:
+  - **create:** pick forge parameters (today's generator screen as a web page) → create the
+    database → run migrations → run the forge `Job` → register the world in the login
+    registry → create the world's coordinator + StatefulSet;
+  - **start / stop / scale** a world;
+  - **delete / archive**;
+  - **import / export** `.sqlite`.
+- It creates k8s objects through **kube-rs** (the same crate as the autoscaler, §0.7e)
+  rather than OpenTofu, since worlds come and go at runtime. OpenTofu keeps the shared
+  platform: CNPG, KEDA, monitoring, the Ingress, the panel itself.
+- **Open:** the panel's UI technology (web), and its access control (admin accounts in the
+  login database with a role, behind the Ingress).
+
+**(f) LISTEN / NOTIFY.**
+- A channel is per database, so per world, which suits one database per world.
+- The terrain write transaction sends `NOTIFY terrain_changed, '<rx>,<rz>,<terrain_version>'`.
+  Each host keeps one **direct** (unpooled) listening connection.
+- On reconnect, hosts re-sync with `terrain_version > last_seen`, because notifications are
+  lost while disconnected (§8).
+- Keep it off the hot checkpoint path. Through Postgres 18 a commit carrying NOTIFY takes a
+  global lock (§8), so only debounced terrain writes notify.
+
+**(g) Monitoring.** kube-prometheus-stack (Prometheus + Grafana + Alertmanager). Hosts,
+coordinators and login export `/metrics` (`metrics` + `metrics-exporter-prometheus`): today's
+`[server]` / `[region …]` counters, tick budget %, handovers, checkpoint latency, NOTIFY
+lag. The KEDA scaler reads from the same Prometheus. Grafana dashboards live in git.
+
+**(h) k3s or k0s? Recommendation: k3s, with k3d locally** (user asked 2026-11-06; from general
+knowledge of both projects, not a fresh web review — verify versions when installing).
+
+*Trade-off.* Both are single-binary, CNCF-conformant Kubernetes distributions that run on one
+node and grow to several. They differ in what they bundle and in the ecosystem around them.
+
+| Need | k3s (SUSE / Rancher) | k0s (Mirantis) |
+|---|---|---|
+| Ingress for login / web / panel | Bundled Traefik (can be swapped) | None bundled; install one |
+| Per-pod client UDP (NodePort / LoadBalancer) | flannel CNI (portmap included); bundled **ServiceLB** makes `type: LoadBalancer` work on bare metal with no MetalLB | kube-router by default; hostPort worked in our Agones test; no bundled LB |
+| Storage for CloudNativePG | Bundled local-path provisioner | Install one |
+| Public node address | `--node-external-ip`, widely documented | Configurable; less documented |
+| Hetzner + node autoscaling (§0.7e) | Mature community tooling (`hetzner-k3s`, `kube-hetzner`) with cluster-autoscaler integration | Generic cluster-autoscaler only; less ready-made |
+| Local copy of production | **k3d** (k3s in docker), same distribution as the server | k0s in docker (what `deploy/envs/local` does today) |
+| Upgrades | system-upgrade-controller | k0sctl / autopilot |
+| What we already have | Nothing | `deploy/envs/local` (OpenTofu, k0s in docker) and the 2026-09-22 setup notes |
+
+**Why k3s:**
+- It ships the three things we would otherwise add by hand on day one: an ingress, a bare-metal
+  LoadBalancer and a storage class.
+- It has the ready-made Hetzner + cluster-autoscaler path.
+- k3d gives local tests the exact distribution the test server runs. That is better parity
+  than minikube, which can stay as an occasional second check.
+
+**Cost:** move `deploy/envs/local` from k0s-in-docker to k3d. The node-creation part of the
+OpenTofu roots changes; the manifests and modules do not.
+
+**When k0s would win:** if a vanilla cluster with nothing bundled is wanted, or Mirantis
+support. Neither applies here.
+
+**Still open after this round:**
+- Confirmations: StatefulSet; KEDA → own controller; portable region format + world-tick
+  save cut.
+- Checkpoint interval (crash loss window).
+- Email provider; JWT lifetime / revocation; internal call security; coordinator-downtime
+  behaviour; GDPR / account deletion.
+- Images / CI and registry; client UX (login screen, world picker, reconnecting state, several
+  connections).
+- New this round: several worlds at once per account (b); the panel's UI and access control
+  (e); k3s + k3d instead of k0s (h, recommendation).
+
+### 0.10 Decisions, fourth round (user, 2026-11-06) — final state of this design pass
+
+**Decided:**
+1. **One Hetzner server runs everything** (the test server): k3s, the shared services and
+   every world. **No node autoscaling**; cluster-autoscaler is dropped from §0.7e.
+2. **Region-host pod autoscaling (up and down, to load regions) is wanted, but as a later
+   plan of its own.** KEDA is set aside for now. R5 runs a fixed replica count per world, set
+   in the panel.
+3. **Everything else proposed so far is accepted:**
+   - the StatefulSet (§0.7b′);
+   - the portable region format + world-tick save cut (R1);
+   - the §0.9 recommendations: accounts global / players per world, regions not
+     pre-generated, the panel driving k8s via kube-rs, `NOTIFY` details;
+   - k3s on the server, k3d locally.
+4. **One account may play several worlds at the same time, but only once per world.**
+   - Sessions are keyed `(account, world)`.
+   - "Newest session wins" applies per `(account, world)`: a second login to the same world
+     takes over and parks the first.
+   - Sessions in other worlds are untouched.
+5. **The management panel is a simple server-side-rendered website (htmx), served by Rust,**
+   using our crates directly for worldgen and the like.
+   - Recommendation: one Rust binary (axum + htmx templates) with a `forge` subcommand. The
+     panel launches that subcommand as a k8s `Job`, so a 100 km forge (up to ~12 GiB) does not
+     sit in the panel pod's memory limit.
+   - On the single server, running the forge in-process is acceptable too, with the panel
+     pod's limit raised.
+6. **The user installs k3s on the server separately** (another context). This repo only
+   targets it (kube context / kubeconfig), and k3d replaces k0s-in-docker locally.
+
+**Updated roadmap** (supersedes §0.5's R5 and §0.7e's node half):
+- R0 → R4 as in §0.5, with §0.9's storage layer: Postgres + SQLite, the forged world tiled
+  in the database, the management panel creating worlds.
+- **R5 — the single k3s server:**
+  - shared: CNPG with one logical database per world, login, the panel (htmx), the web
+    client behind the Traefik Ingress, kube-prometheus-stack;
+  - per world: the coordinator + a region-host StatefulSet with a fixed replica count and
+    per-pod NodePort Services;
+  - local twin: k3d.
+- **R6 — region-host pod autoscaling (separate plan):** scale on region load; drain the
+  highest ordinal on scale-down; `host_count` in Postgres (§0.7e level 1). The mechanism
+  (KEDA vs our own kube-rs controller in the coordinator) is decided in that plan.
+
+**Left for the individual specs** (defaults in brackets; none blocks R0 / R1):
+- Checkpoint interval [keep 60 s].
+- Email provider for verification and reset [pick at R2].
+- JWT lifetime [checked at connect / reconnect / handover; revoke = kick].
+- Internal call security [k8s NetworkPolicy + a shared service token at R2].
+- Coordinator downtime [hosts keep simulating, world events queue].
+- GDPR / account deletion [design at R2].
+- Image build + registry [decide at R5].
+- Client UX: login screen, world picker, reconnecting state, several connections [R2 / R3].
+
+### 0.11 Rate limiting overly active clients (design, 2026-11-06)
+
+> **DEFERRED (user, 2026-11-06): not part of the initial k8s transition (R0–R5).** Kept as the
+> design for a later plan. Its "When to build it" schedule below no longer applies.
+
+**Two rules shape everything:**
+1. **Limits live at the edges, never inside the sim.** Anything the sim decides must be
+   decided identically by the predicting client. Dropping or delaying a message *before* it
+   becomes a sim event is safe: the client just mispredicts and gets corrected. A limit inside
+   the deterministic sim would be a desync risk.
+2. **Limit as early and as cheaply as possible.** The kernel beats the QUIC handshake, which
+   beats decoding, which beats the manager / region threads.
+
+"Overly active" covers four different things, each limited at a different layer:
+- connection churn (reconnect storms, many connections per IP or account);
+- message floods on an open connection;
+- bandwidth;
+- *expensive* requests (LOD subscriptions, pathfinding orders, legends paging, person info).
+
+**Today** (verified in code):
+- The `Hello` has a size cap and a timeout (`HELLO_MAX_BYTES`, `HELLO_TIMEOUT`).
+- WebTransport has a 10 s idle timeout. quinn runs `TransportConfig::default()`.
+- Tick-stamped inputs are bounded in time (`MAX_INPUT_LEAD_TICKS`).
+- **Nothing limits message rate per client**, and the edge → manager channel
+  (`client_packet_send`) is **unbounded**, so a flood becomes memory growth on the server.
+- **Decode-path hazard, fix first:** client → server packets use the same `decode_packet` as
+  server snapshots. The decompressed-size cap is `MAX_DECOMPRESSED_PACKET_BYTES` (≥ 256 MiB,
+  scaling with region size), so one small malicious frame makes the server allocate that
+  much. Plain `bincode::deserialize` also has no limit on lengths inside a packet. Client
+  frames need their own small cap (a client never needs more than ~64 KiB) and bincode
+  options with a byte limit.
+
+**Layers, outermost first:**
+
+| # | Layer | What it stops | How |
+|---|---|---|---|
+| 1 | **Login service** (HTTP behind Traefik) | password guessing; ticket / connection churn | Traefik `RateLimit` middleware per IP (coarse). In-app token buckets per IP and per account on login, refresh and `SpawnPlayer` / JWT issuance — the counters live in Postgres or a shared cache, since login has ≥ 2 replicas. **This is the strongest connection limiter:** a host admits only a valid JWT that matches a pending spawn or a handover, so connection rate per account ≤ the rate login issues tickets |
+| 2 | **Node firewall** (nftables on the k3s host, managed as code) | UDP floods and handshake storms per source IP, before any process sees them | In a hook that runs before kube-proxy's DNAT: limit new UDP flows per source IP and cap packets/s per source IP on the game NodePort range, generously above real play. Coarse — it cannot tell a good player from a bad one. Volumetric DDoS is upstream (Hetzner's network protection), not ours |
+| 3 | **QUIC admission in the host** | handshakes from one IP / subnet; spoofed sources | quinn hands each attempt over as an `Incoming` *before* the crypto work: per-IP / per-/24 token bucket → `refuse()` / `ignore()`, and `retry()` (stateless address validation) when the source is unvalidated or the host is under load. Also cap concurrent connections per IP. For WebTransport, reject at the session request (`wtransport`'s incoming session / request API — verify its pre-handshake hooks; they are fewer than quinn's) |
+| 4 | **Per-connection transport limits** | bandwidth, stream abuse | Set `TransportConfig` explicitly instead of the defaults: few concurrent streams (the game uses a handful), small per-stream and per-connection receive windows, datagram buffer cap, idle timeout. QUIC flow control then is the byte-rate limit: a server that reads slowly blocks the client with backpressure instead of buffering |
+| 5 | **Per-connection message limiter in the edge task** (tokio, before anything reaches the manager) | message floods, expensive requests | A token bucket per connection **per message class**, with burst. **Bounded** per-client queue to the manager: when full, drop that client's newest non-input messages, never block the shared writer. Over-limit messages are dropped and counted. **Strikes:** sustained violation → disconnect + report to login, which refuses new tickets for that account for a cooldown that grows with repeats |
+| 6 | **Per-account limits across hosts** | one account multiplying its budget over several host connections | A client holds one connection per host in its window. Only the **home** connection carries input, so non-home ("observer") connections get a near-zero input budget. Global per-account budgets (e.g. orders per minute across the world) live in login / coordinator, not in any one host |
+
+**Message classes for layer 5** (starting budgets; named `pub const`s with an env override, per
+the tunables convention):
+
+| Class | Examples | Budget idea |
+|---|---|---|
+| Input | `PlayerInput` (tick-stamped) | ≈ 1 per tick (`1000 / TICK_RATE` /s) + burst for jitter; extra inputs for an already-filled tick are coalesced (keep the latest), not forwarded |
+| Orders / UI | `Order` (designations, `MoveTo`, `SetMode`), `UiAction`, inventory clicks | ~10/s, burst 20. Pathfinding orders get their own lower budget, since each can spend up to `MAX_PATH_NODES` of A* |
+| Queries | `RequestLegends`, `RequestPersonInfo`, `RequestEmbarkOptions` | a few per second (the client already self-paces person info at `PERSON_NAME_REQUESTS_PER_SEC`; the server must enforce, not trust) |
+| Streaming | `RequestLod` / `ReleaseLod` | a cap on **outstanding** LOD keys per client (the ring table's maximum, ~4,400 at the 15 km horizon, plus margin) and a request rate; extra requests are refused |
+| World moves | `PlayRegion`, `Embark`, `ReturnTo`, `StartAdventure` / `EndAdventure`, `Retire` | ≤ 1 per few seconds — each one parks and creates a body |
+
+**Clients should self-limit to the same budgets** (shared constants in `game`), so honest
+clients never hit the server limiter and never mispredict because of it.
+
+**Observability** (§0.9g): a Prometheus counter per class for drops, refused handshakes
+(per reason), strikes and disconnects. Alert on spikes. Grafana shows the worst offenders by
+`PlayerId`.
+
+**When to build it:**
+- **Now, single process, before any public test:** the client-frame decode caps; layer 5
+  (limiter + bounded per-client queues + strikes as disconnects); layer 4 explicit
+  `TransportConfig`; layer 3 per-IP admission.
+- **R2:** layer 1 (login limits, ticket issuance, cross-session strikes) and layer 6.
+- **R5:** layer 2 (nftables rules as code next to the k3s setup) and the Traefik middleware.
 
 ## 1. TL;DR
 
@@ -55,7 +903,8 @@ and the work; benchmarking the move between instances is secondary but wanted.
    (`floor(rx / S), floor(rz / S)`), one lease row per super-region; *owning* a super-region is
    free — only its running regions cost — so S can be generous. `SUPER_REGION_SIZE` is a named
    tunable; starting point S = 8 (64 regions, ≈ 8 km square: a fully active one still fits one
-   pod; S = 16 would not). A player near a super-region corner touches up to 4 of them.
+   pod; S = 16 would not). *(2026-11-06: "≈ 8 km" was a slip — 512 m at the then 64 m regions,
+   2 km at today's 256 m; see §0.2.)* A player near a super-region corner touches up to 4 of them.
 2. **Seamless crossing between pods is the goal (§5 level L2); no loading screen.** A hard
    border that appears at arbitrary, moving places is **unacceptable for gameplay**, so the
    "L0 with dynamic claims" intermediate stage in the original roadmap is dropped. **Fallback if
@@ -126,7 +975,7 @@ instances, multi-connection client, pod↔pod link, `Transfer` as fallback → *
 measurement → **3** k8s packaging → (fallback branch: static super-region policy + border
 mechanic).
 
-## 2. What exists today (verified in code, 2026-09-20)
+## 2. What exists today (verified in code, 2026-09-20 — largely stale, see §0.1)
 
 | Fact | Where |
 |---|---|
@@ -669,7 +1518,7 @@ Harness, in increasing realism:
    real cluster for WAN numbers. Per the repo's own caveats: release builds, and compare ratios
    not seconds while on the clamped laptop.
 
-## 12. Staged roadmap
+## 12. Staged roadmap (2026-09-20 — superseded by §0.5)
 
 Each stage is independently shippable and testable, and each would get its own spec → plan.
 

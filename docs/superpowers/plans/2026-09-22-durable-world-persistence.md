@@ -1,5 +1,7 @@
 # Durable World Persistence (multi-instance stage 0) Implementation Plan
 
+> **Status 2026-11-06: NOT executed, partly obsolete.** File-based region autosave, `PlayerStore` / `PlayerId` identity and logout-parks shipped instead (different format and newest-session-wins). Do not run this plan as written — see §0 of `specs/2026-09-20-multi-instance-k8s-postgres-research.md` (roadmap R0/R1; login moved to a separate service, §0.4d).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** One server instance whose world — frozen terrain, player bodies, inventories — lives in Postgres and survives restarts and crashes; players have a stable account identity; logout takes the body out of the world and login puts it back.

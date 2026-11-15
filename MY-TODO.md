@@ -1,0 +1,3 @@
+- redesign trees to fit brick style
+- change how block selection looks and works now that it is a brick system rather than voxel.
+- research 
