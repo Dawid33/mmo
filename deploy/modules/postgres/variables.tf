@@ -52,9 +52,13 @@ variable "backup" {
 }
 
 variable "backup_keep" {
-  description = "Dumps kept per world."
+  description = "Dumps kept per world (at least 1: pruning keeps the newest N)."
   type        = number
-  default     = 7
+  validation {
+    condition     = var.backup_keep >= 1 && var.backup_keep == floor(var.backup_keep)
+    error_message = "backup_keep must be a whole number >= 1."
+  }
+  default = 7
 }
 
 variable "backup_image" {
@@ -75,4 +79,10 @@ variable "resources" {
     limits   = optional(map(string), { memory = "1Gi" })
   })
   default = {}
+}
+
+variable "backup_scratch_size" {
+  description = "Size limit of the emptyDir the dumps pass through (all worlds' dumps at once)."
+  type        = string
+  default     = "10Gi"
 }

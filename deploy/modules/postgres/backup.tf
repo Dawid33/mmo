@@ -47,6 +47,8 @@ resource "kubernetes_cron_job_v1" "backup" {
       metadata {}
       spec {
         backoff_limit = 2
+        # A hung dump must not block the next night's run (concurrency Forbid).
+        active_deadline_seconds = 3600
         template {
           metadata {}
           spec {
@@ -93,6 +95,10 @@ resource "kubernetes_cron_job_v1" "backup" {
                 env {
                   name  = "DUMP_DIR"
                   value = "/dump"
+                }
+                env {
+                  name  = "KEEP"
+                  value = tostring(var.backup_keep)
                 }
                 volume_mount {
                   name       = "scripts"
@@ -162,7 +168,9 @@ resource "kubernetes_cron_job_v1" "backup" {
             }
             volume {
               name = "dump"
-              empty_dir {}
+              empty_dir {
+                size_limit = var.backup_scratch_size
+              }
             }
           }
         }

@@ -4,6 +4,7 @@ metadata:
   name: pg
 spec:
   instances: 1
+  enableSuperuserAccess: false
   imageName: {{ .Values.image | quote }}
   postgresql:
     parameters:
