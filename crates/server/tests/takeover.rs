@@ -1061,7 +1061,7 @@ fn coordinator_killed_mid_succession_finishes_it_after_its_restart() {
     let declared = successions(&db)[0];
     kill_coordinator(&mut t.w);
     let store = open(&db);
-    server::roles::recover_staged_cuts(&store, 2).expect("the staged parts are resolved");
+    server::roles::recover_staged_cuts(&store).expect("the staged parts are resolved");
     let tick = t.w.pair.tick.clone();
     let c = start_coordinator(store.clone(), t.w.cert.clone(), tick, CrashPolicy::Succession);
     let old = std::mem::replace(&mut t.w.store, store);
@@ -1115,7 +1115,7 @@ fn coordinator_killed_before_declaring_observes_a_whole_lease_again() {
     }
     assert!(successions(&db).is_empty(), "nothing declared without a coordinator");
     let store = open(&db);
-    server::roles::recover_staged_cuts(&store, 2).expect("the staged parts are resolved");
+    server::roles::recover_staged_cuts(&store).expect("the staged parts are resolved");
     let restarted = Instant::now();
     let c = start_coordinator(store.clone(), t.w.cert.clone(), t.w.pair.tick.clone(), CrashPolicy::Succession);
     let old = std::mem::replace(&mut t.w.store, store);
@@ -1168,9 +1168,31 @@ fn a_restarted_host_0_comes_back_as_a_new_host_owning_nothing() {
     reboot_of_a_dead_ordinal(h(0), "tk_reboot0");
 }
 
-fn reboot_of_a_dead_ordinal(dead: HostId, tag: &str) {
+/// Elastic 1 Task 5: the heir of a dead host may be its own restart. Two hosts; host `dead`
+/// is killed and its process restarts at once (a new id, owning nothing) before the lease
+/// could lapse. The name vouch declares the old id dead; the heir is picked by `heir_of` over
+/// the live attached ids — the survivor, or the restart itself if it attached first. `dead`
+/// is chosen so that `heir_of` over both would pick the RESTART: the test then covers a
+/// newcomer inheriting when the timing allows (either heir is correct). Either way every
+/// identity (two slimes and one crosser held in flight under the dead id) is live once and
+/// stored once, and the cuts after the settle commit.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn the_heir_of_a_dead_host_may_be_its_own_restart() {
+    let restart = h(2);
+    let dead = [h(1), h(0)]
+        .into_iter()
+        .find(|d| game::heir_of(*d, &[HostId(1 - d.0), restart].into_iter().collect()) == Some(restart))
+        .unwrap_or(h(1));
+    let Some(heir) = reboot_of_a_dead_ordinal(dead, "tk_heir_restart") else { return };
+    eprintln!("[takeover] host {dead} died and restarted as {restart}: the heir is {heir}");
+}
+
+/// [`a_restarted_host_comes_back_as_a_new_host_owning_nothing`]'s body; the heir (`None`: no
+/// test database).
+fn reboot_of_a_dead_ordinal(dead: HostId, tag: &str) -> Option<HostId> {
     install_props();
-    let Some(db) = PgDb::create(tag) else { return };
+    let Some(db) = PgDb::create(tag) else { return None };
     let dir = scratch(tag);
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let other = HostId(1 - dead.0);
@@ -1230,6 +1252,7 @@ fn reboot_of_a_dead_ordinal(dead: HostId, tag: &str) {
     }
     assert_eq!(t.w.store.world_generation().unwrap(), generation);
     t.stop(&db, &dir);
+    Some(heir)
 }
 
 /// Row 9: host 1's main loop hangs (no tick, no beat) past its lease while its sockets live:
@@ -1433,7 +1456,7 @@ fn static_world(db: &PgDb, dir: &std::path::Path, policy: CrashPolicy) -> World 
 }
 
 /// Static ownership keeps R3's crash policy. The coordinator's policy is what production
-/// derives for `VOXEL_OWNERSHIP=static` with two hosts ([`server::roles::coordinator_crash_policy`]),
+/// derives for `VOXEL_OWNERSHIP=static` ([`server::roles::coordinator_crash_policy`]),
 /// the hosts beat their leases, and host 1 dies: its row lapses with host 0 beating — exactly
 /// what a `Succession` coordinator declares — yet no `successions` row is ever written. Host
 /// Elastic 1: a static world is one host, so it recovers as a total crash — the whole world
@@ -1445,7 +1468,7 @@ fn static_ownership_still_rolls_the_world_back() {
     install_props();
     let Some(db) = PgDb::create("tk_static") else { return };
     let dir = scratch("tk_static");
-    let policy = server::roles::coordinator_crash_policy(Some("static"), 2).expect("a valid ownership");
+    let policy = server::roles::coordinator_crash_policy(Some("static")).expect("a valid ownership");
     let mut w = static_world(&db, &dir, policy);
     let generation = w.claims[0].store().world_generation().unwrap();
     let a0 = seam_of(&w, h(0));
@@ -1518,16 +1541,7 @@ fn thread_spawner_leaves_the_drop_set_out_of_a_store_load() {
 
 // ---- drain: a cleanly departed host's land on demand (R4 Task 11) ---------------------------
 
-/// The heir wait of the drain test (instead of `HEIR_WAIT_MS`, through the core's test hook).
-const HEIR_WAIT_TEST_MS: u64 = 500;
-
 impl Takeover {
-    /// The coordinator's heir wait, ms (its test hook).
-    fn heir_wait(&mut self, ms: u64) {
-        let c = self.w.coordinator.as_ref().expect("the coordinator is up");
-        c.thread.with_core(move |core| core.set_heir_wait_ms(ms), WAIT).expect("the core answers");
-    }
-
     /// Host `h` exits as `server::run` does (`cuts::exit_world`: a leave cut), its lease
     /// beating meanwhile, every other host running round by round; its outcome and the
     /// packets its manager sent its clients on the way out. Its peer listener and
@@ -1620,9 +1634,9 @@ fn succession_kinds(db: &PgDb) -> Vec<i64> {
 /// Host 1 leaves in a committed cut (its player parked and saved first, then refused with
 /// `LEAVING_REFUSAL`); nothing is given away while nobody needs its land. A slime of host 0
 /// sent toward host 1's region waits in host 0's session; a player of host 1 logs in again:
-/// host 0 asks for the land, and after the heir wait (500 ms by the test hook) the
-/// coordinator gives ALL of host 1's land to host 0 as a `Leave` succession. While it waits
-/// a login is refused (the login service's 503) and retried, as the client does. The player
+/// host 0 asks for the land, and the coordinator gives ALL of host 1's land to host 0 at once
+/// as a `Leave` succession. Until the heir adopted it a login may be refused (the login
+/// service's 503) and retried, as the client does. The player
 /// stands where the leave cut parked them, once; the slime arrives once; every id is stored
 /// once; nobody restarted.
 #[test]
@@ -1632,7 +1646,6 @@ fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
     let Some(db) = PgDb::create("tk_drain") else { return };
     let dir = scratch("tk_drain");
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, true);
-    t.heir_wait(HEIR_WAIT_TEST_MS);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
     let stayed = slime(&mut t, h(1), b1, -3.0);
@@ -1723,7 +1736,6 @@ fn a_clean_leave_keeps_the_generation_and_its_waiting_transfers_reach_the_heir()
     let Some(db) = PgDb::create("tk_leave") else { return };
     let dir = scratch("tk_leave");
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
-    t.heir_wait(HEIR_WAIT_TEST_MS);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
     let _ = t.until_committed_after(&db, 0);
@@ -1766,7 +1778,6 @@ fn both_hosts_stopped_together_leave_cleanly_and_new_hosts_inherit_by_leave_succ
     let Some(db) = PgDb::create("tk_bothleave") else { return };
     let dir = scratch("tk_bothleave");
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
-    t.heir_wait(HEIR_WAIT_TEST_MS);
     let generation = t.w.store.world_generation().unwrap();
     let k = t.until_committed_after(&db, 0);
     let seams = t.seams.clone();
@@ -1826,13 +1837,10 @@ fn both_hosts_stopped_together_leave_cleanly_and_new_hosts_inherit_by_leave_succ
 /// returns — its restarted process is a NEW host owning nothing (the generation kept), and the
 /// leaver's land is given AT ONCE to the host that asks for it (a `Leave` succession; no item
 /// window): the slime that waited for the leaver lands once, stored once.
-/// RED until Elastic 1 Task 5: the coordinator still waits `HEIR_WAIT_MS` (30 s) for a leaver
-/// below a configured host count — `game/src/coordinator/succession.rs` `heir_wait_for`
-/// (`self.successions.heir_wait_ms.unwrap_or(HEIR_WAIT_MS)`; no host count is set in-process).
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
 fn a_leavers_restart_is_a_new_host_and_its_land_is_given_at_once() {
-    /// What "at once" allows: a lease read and a cut round, far below `HEIR_WAIT_MS`.
+    /// What "at once" allows: a lease read and a cut round (the heir wait was 30 s).
     const AT_ONCE: Duration = Duration::from_secs(5);
     install_props();
     let Some(db) = PgDb::create("tk_return") else { return };

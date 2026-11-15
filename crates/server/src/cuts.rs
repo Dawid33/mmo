@@ -260,7 +260,7 @@ impl CutWriter {
         self.world_period = Some(every);
     }
 
-    /// A writer of a host of several (`VOXEL_HOSTS` > 1): its world cut parts are staged
+    /// A writer of a `claim` host (any number of hosts): its world cut parts are staged
     /// at `generation` and decided by the coordinator (see the module docs).
     pub fn with_world_cuts(claims: HostClaims, generation: WorldGeneration) -> Self {
         CutWriter { world: Some(generation), ..CutWriter::new(claims) }

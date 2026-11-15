@@ -857,7 +857,7 @@ fn coordinator_killed_before_the_decision_cut_is_absent() {
     assert_eq!(prepared(&db), 2, "both parts staged");
     kill_coordinator(&mut w);
     let store = db.open();
-    server::roles::recover_staged_cuts(&store, HOSTS).expect("the staged parts are resolved");
+    server::roles::recover_staged_cuts(&store).expect("the staged parts are resolved");
     assert_eq!(decision_of(&db, cut), Some(false), "the restart aborted the undecided cut");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     restart_coordinator_listening(&mut w, store);
@@ -904,7 +904,7 @@ fn coordinator_killed_between_commit_prepareds_cut_is_whole() {
     kill_coordinator(&mut w);
     assert_eq!(prepared(&db), 1, "the coordinator died with one part still prepared");
     let store = db.open();
-    server::roles::recover_staged_cuts(&store, HOSTS).expect("the staged parts are resolved");
+    server::roles::recover_staged_cuts(&store).expect("the staged parts are resolved");
     assert_eq!(prepared(&db), 0, "the restart committed the rest");
     let (a, b) = w.seam;
     for rc in [a, b] {

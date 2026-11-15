@@ -8073,9 +8073,6 @@ fn an_unrelated_login_on_the_heir_waits_for_the_adoption_and_is_placed() {
 
 // --- Drain: a departed host's land goes to an heir when someone needs it (R4 Task 11) ---
 
-/// The heir wait of these tests (instead of `HEIR_WAIT_MS`): 20 rounds.
-const HEIR_WAIT_RIG_MS: u64 = 20 * game::TICK_RATE;
-
 /// [`heir_world`] in which host `leaver` (the owner of `chain[1]`) leaves in a committed
 /// leave cut and its process exits; its keeper parks with it. The chain.
 fn drained_world(rig: &mut MultiRig, then: impl FnOnce(&mut MultiRig, &[RegionCoords])) -> Vec<RegionCoords> {
@@ -8125,7 +8122,7 @@ fn until_land_declared(rig: &mut MultiRig) -> game::Succession {
 /// survivor's slime crosses toward L's region and a deposit is put down there: both wait in
 /// the survivor's session, held for L's next boot. The survivor asks for the land
 /// (`LandWanted`, at most once per `LAND_WANTED_EVERY_MS` per super-region); the coordinator
-/// waits the heir wait out and gives ALL of L's land to the heir as a `Leave` succession;
+/// gives ALL of L's land to the heir at once as a `Leave` succession;
 /// the reports carry `Sent` entries only. The heir delivers what was held once — the slime
 /// lands once, the items are held exactly once every round and lie in L's region at the end
 /// (no item window: nothing crossed after the leave cut) — and drops nothing of L's store.
@@ -8137,7 +8134,7 @@ fn held_for_a_leaver(rig: &mut MultiRig) {
     let s = rig.owner(rs);
     let leaver = rig.owner(rd);
     let crosser = slime_in(rig, rs, 1);
-    rig.with_land_on_demand(HEIR_WAIT_RIG_MS);
+    rig.with_land_on_demand();
     let asked_from = rig.hosts[s.0 as usize].now_ms;
     assert!(push_over(rig, crosser, rs, rd));
     // An item-carrying reply for L's region, sent after the leave: held in the session too.
@@ -8203,17 +8200,15 @@ fn transfer_held_for_a_leaver_is_delivered_once_to_its_heir() {
     sweep_hosts("transfer_held_for_a_leaver_is_delivered_once_to_its_heir", held_for_a_leaver);
 }
 
-/// The heir wait of the login test: longer than a spawn order is held.
-const LOGIN_HEIR_WAIT_MS: u64 = game::SPAWN_SYNC_WAIT_MS + 1_000;
-
 /// The test player plays on host L, which leaves in a committed cut (the player parked and
 /// saved in its part) and exits. The login service orders the player's spawn at a survivor
 /// (its entry host): its record's region is L's, so the order waits and the survivor asks
-/// for the land (`LandWanted`) — while the coordinator waits the heir wait out, the order is
-/// refused at `SPAWN_SYNC_WAIT_MS` (the login service answers 503; the client retries).
-/// Once the land is the heir's and adopted, the retried order reaches the heir (relayed, or
-/// on the entry host itself), is placed there once, and the login makes one body where the
-/// leave cut parked the player.
+/// for the land (`LandWanted`); the coordinator gives it away at once (no heir wait). The
+/// order is placed once the land is the heir's and adopted — on the heir (relayed, or on the
+/// entry host itself) — or, if the ask, the declaration and the adoption took longer than
+/// `SPAWN_SYNC_WAIT_MS`, refused (the login service answers 503) and placed at the client's
+/// retry. Either way it is placed once, and the login makes one body where the leave cut
+/// parked the player.
 fn login_on_departed_land(rig: &mut MultiRig) {
     let chain = drained_world(rig, |rig, chain| {
         let leaver = rig.owner(chain[1]);
@@ -8224,9 +8219,8 @@ fn login_on_departed_land(rig: &mut MultiRig) {
     let (s, leaver) = (rig.owner(rs), rig.owner(rd));
     let parked = rig.committed_players[&P_PLAYER].clone();
     assert_eq!(parked.region, rd, "the leave cut parked the player in L's land");
-    rig.with_land_on_demand(LOGIN_HEIR_WAIT_MS);
+    rig.with_land_on_demand();
     spawn_order_at(rig, s, P_PLAYER, rd, 1);
-    let refused = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1, ok: false, endpoint: None };
     let (mut taken, mut out) = (Vec::new(), Vec::new());
     for _ in 0..SUCCESSION_ROUNDS {
         rig.cut_round();
@@ -8236,29 +8230,34 @@ fn login_on_departed_land(rig: &mut MultiRig) {
             break;
         }
     }
-    assert_eq!(out, [(s, refused)], "refused while the coordinator waits (the client retries)");
-    assert!(taken.is_empty() && rig.land_declared.is_empty(), "nothing placed, nothing declared yet");
     assert!(land_asks(rig, s).contains_key(&game::super_region_of(rd, rig.s)), "the entry host asked for the land");
     let succession = until_land_declared(rig);
     assert_eq!((succession.predecessor, succession.kind), (leaver, game::SuccessionKind::Leave));
     let heir = succession.heir;
-    let adopted = |rig: &mut MultiRig| rig.core().succession_progress().iter().any(|(i, _, a)| *i == succession.id && *a);
-    assert!(until(rig, SUCCESSION_ROUNDS, adopted), "the heir adopted");
-    // The client's retry.
-    spawn_order_at(rig, s, P_PLAYER, rd, 2);
-    let (mut taken, mut out) = (Vec::new(), Vec::new());
-    for _ in 0..SUCCESSION_ROUNDS {
-        rig.cut_round();
-        taken.extend(rig.serve_logins());
-        collect_login_out(rig, &mut out);
-        if !out.is_empty() {
-            break;
+    let refused = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1, ok: false, endpoint: None };
+    let epoch = if out == [(s, refused.clone())] {
+        assert!(taken.is_empty(), "a refused order placed nothing: {taken:?}");
+        let adopted = |rig: &mut MultiRig| rig.core().succession_progress().iter().any(|(i, _, a)| *i == succession.id && *a);
+        assert!(until(rig, SUCCESSION_ROUNDS, adopted) || rig.core().successions_open_count() == 0, "the heir adopted");
+        // The client's retry.
+        spawn_order_at(rig, s, P_PLAYER, rd, 2);
+        (taken, out) = (Vec::new(), Vec::new());
+        for _ in 0..SUCCESSION_ROUNDS {
+            rig.cut_round();
+            taken.extend(rig.serve_logins());
+            collect_login_out(rig, &mut out);
+            if !out.is_empty() {
+                break;
+            }
         }
-    }
+        2
+    } else {
+        1
+    };
     assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "placed on the heir, once");
-    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: true, endpoint: Some(rig_endpoint(heir)) };
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: epoch, ok: true, endpoint: Some(rig_endpoint(heir)) };
     assert_eq!(out, [(s, ack)], "the login service is told by its entry host");
-    rig.connect_login(heir, NEW_LOGIN_CLIENT, P_PLAYER, Some(parked.clone()), LOGIN_TOKEN, 2);
+    rig.connect_login(heir, NEW_LOGIN_CLIENT, P_PLAYER, Some(parked.clone()), LOGIN_TOKEN, epoch);
     // L's region starts on the heir for the body (from the leave cut's store state): a
     // jittery schedule may take longer than a running region's restore.
     assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT).len() == 1), "one body");
@@ -8468,7 +8467,7 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
     let from_s = slime_in(rig, rs, 1);
     let from_t = slime_in(rig, rt, 2);
     until_committed(rig, 1);
-    rig.with_land_on_demand(0);
+    rig.with_land_on_demand();
     rig.hosts[leaver.0 as usize].manager.request_leave();
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
@@ -8613,7 +8612,7 @@ fn back_before_the_late_cut_done(rig: &mut MultiRig) {
     }
     rig.hold_world(s, false);
     assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.peer_left(leaver)), "S noted the left id at the late CutDone");
-    rig.with_land_on_demand(0);
+    rig.with_land_on_demand();
     let succession = until_land_declared(rig);
     assert_eq!((succession.predecessor, succession.kind), (leaver, game::SuccessionKind::Leave));
     assert_settled_whole(rig, &succession, &[id]);
@@ -8657,7 +8656,7 @@ fn boot_after_the_declaration(rig: &mut MultiRig) {
         rig.kill(h);
     }
     let left_as = rig.boots[leaver.0 as usize];
-    rig.with_land_on_demand(0);
+    rig.with_land_on_demand();
     assert!(push_over(rig, from_t, rt, rd));
     let succession = until_land_declared(rig);
     assert_eq!((succession.predecessor, succession.heir, succession.survivors.clone()), (leaver, t, vec![t]));
@@ -8717,7 +8716,7 @@ fn survivor_booted_between(rig: &mut MultiRig) {
     rig.core().set_expected_hosts(live);
     assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s2.0 as usize].manager.world_attached()), "S' attached");
     rig.hold_world(s2, true);
-    rig.with_land_on_demand(0);
+    rig.with_land_on_demand();
     assert!(push_over(rig, from_t, rt, rd));
     let succession = until_land_declared(rig);
     assert!(succession.survivors.contains(&s2), "S' is a survivor: {succession:?}");
@@ -9255,8 +9254,10 @@ fn a_message_for_a_forgotten_host_is_never_lost_silently() {
         pending_inputs: Vec::new(),
     };
     let transfer = game::Reliable::Transfer { target, stamp: 10, bundle: Box::new(bundle), player: None };
+    let _ = m.take_directory_wanted();
     m.send_reliable_for_test(b, transfer, false);
     assert!(m.unowned_waiting_ids().iter().any(|(_, i)| *i == id), "the transfer waits for an owner, not lost");
+    assert!(m.take_directory_wanted(), "the directory that named the forgotten host is read again: the wait ends");
     assert_eq!(m.peer_dropped_for_dead(), dropped + 1, "the transfer is not dropped");
     // A player move: no path — the error, counted; a debug_assert in debug builds.
     let record = game::PlayerRecord {
@@ -9328,6 +9329,7 @@ fn a_third_host_joining_ends_shuffled_like_lockstep() {
         let shuffled = std::panic::catch_unwind(|| two_host_record(Some(InlineSchedule::shuffled), seed, third_host_joins_at_a_fixed_tick))
             .unwrap_or_else(|_| panic!("third_host_joins_at_a_fixed_tick broke under `shuffled`, seed {seed}"));
         assert_eq!(lockstep.len(), 3, "three hosts recorded");
+        assert_eq!(shuffled.len(), 3, "three hosts recorded under `shuffled` (seed {seed})");
         for (h, ((lf, ls), (sf, ss))) in lockstep.iter().zip(&shuffled).enumerate() {
             let what = format!("a third host joining: host {h}, shuffled seed {seed} vs lockstep");
             assert_same_streams(&what, ls, ss);

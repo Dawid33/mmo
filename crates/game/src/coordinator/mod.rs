@@ -163,7 +163,7 @@ pub struct Coordinator {
     calendar_day: u64,
     /// The sites as last broadcast ([`sites_key`]).
     sites_key: Vec<(SiteId, bool, u32, bool)>,
-    /// The world cuts of several hosts (`world_cut.rs`).
+    /// The world cuts of the `claim` hosts, any number (`world_cut.rs`).
     cuts: WorldCuts,
     /// Which hosts lost their lease (`succession.rs`), fed by the runtime's `hosts` reads.
     leases: LeaseWatch,

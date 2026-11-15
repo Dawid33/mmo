@@ -581,13 +581,11 @@ impl MultiRig {
     }
 
     /// From now on the rig coordinator runs successions (`claim`) and gives a departed
-    /// host's land to an heir when a host asks for it (`LandWanted`), after `heir_wait_ms`
-    /// (instead of [`game::HEIR_WAIT_MS`]): every [`Self::cut_round`] does what the
-    /// coordinator runtime does ([`Self::drive_land`]).
-    pub fn with_land_on_demand(&mut self, heir_wait_ms: u64) {
+    /// host's land to an heir as soon as a host asks for it (`LandWanted`): every
+    /// [`Self::cut_round`] does what the coordinator runtime does ([`Self::drive_land`]).
+    pub fn with_land_on_demand(&mut self) {
         let mut core = self.core();
         core.set_crash_policy(game::CrashPolicy::Succession);
-        core.set_heir_wait_ms(heir_wait_ms);
         drop(core);
         self.land_on_demand = true;
     }

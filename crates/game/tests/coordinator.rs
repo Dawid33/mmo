@@ -2538,36 +2538,29 @@ fn land_asked(c: &mut Coordinator, owner: HostId, now: u64) {
     c.land_wanted(owner, now);
 }
 
-/// Host 1 left cleanly; host 0 needs its land. Nothing is declared for `HEIR_WAIT_MS` from
-/// the first request (asking again does not restart it); then ALL host 1's land goes to the
-/// heir `heir_of` picks over the live hosts, as a `Leave` succession of the boot that left,
-/// and its order goes to the survivors. Nothing under `Rollback` (`Static`).
+/// Host 1 left cleanly; host 0 needs its land. Elastic 1: a cleanly departed host never
+/// returns as itself (a restarted process is a new host), so nothing waits for it — the
+/// runtime's lookup and the next `declare_wanted` at the SAME clock hand out ONE `Leave`
+/// succession giving ALL host 1's land to the heir `heir_of` picks over the live hosts, of the
+/// boot that left; its order goes to the survivors. Asking again declares nothing more.
+/// Nothing under `Rollback` (`Static`).
 #[test]
-fn land_of_a_departed_host_waits_heir_wait_ms_then_is_inherited() {
+fn land_of_a_host_that_left_is_given_at_once() {
     let (mut c, t) = departed(3, h(1));
     read_departed(&mut c, 3, h(1), None, t);
     land_asked(&mut c, h(1), t);
-    assert_eq!(c.declare_wanted(t), None, "it may come back: waited for");
-    let half = t + game::HEIR_WAIT_MS / 2;
-    read_departed(&mut c, 3, h(1), None, half);
-    land_asked(&mut c, h(1), half);
-    assert_eq!(c.take_land_lookups(), Vec::<game::SuperRegion>::new(), "each request looked up once");
-    let last = t + game::HEIR_WAIT_MS - 1;
-    read_departed(&mut c, 3, h(1), None, last);
-    assert_eq!(c.declare_wanted(last), None, "not before HEIR_WAIT_MS from the FIRST request");
-    let due = t + game::HEIR_WAIT_MS;
-    read_departed(&mut c, 3, h(1), None, due);
-    let d = c.declare_wanted(due).expect("its land is given away");
+    let d = c.declare_wanted(t).expect("its land is given away at once");
     let live: std::collections::BTreeSet<HostId> = [0, 2].into_iter().map(h).collect();
     assert_eq!(d.dead, vec![(h(1), 101)], "the boot that left");
     assert_eq!(d.heirs, vec![game::heir_of(h(1), &live).unwrap()]);
     assert_eq!(d.kind, game::SuccessionKind::Leave);
-    assert_eq!(c.declare_wanted(due), None, "one declaration in flight");
+    assert_eq!(c.declare_wanted(t), None, "one declaration in flight");
     let list = store_declares(&d, 3, 1, game::CutId(5));
-    c.declared(game::Declared::Done(list.clone()), due);
+    c.declared(game::Declared::Done(list.clone()), t);
     assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), list[0].id), (h(2), list[0].id)], "the order goes to the survivors");
-    read_departed(&mut c, 3, h(1), None, due + 1);
-    assert_eq!(c.declare_wanted(due + 1), None, "declared once");
+    read_departed(&mut c, 3, h(1), None, t + 1);
+    land_asked(&mut c, h(1), t + 1);
+    assert_eq!(c.declare_wanted(t + 1), None, "declared once");
     // Under `Rollback` (`Static`) a request is ignored.
     let (mut r, t) = departed(3, h(1));
     r.set_crash_policy(game::CrashPolicy::Rollback);
@@ -2575,67 +2568,38 @@ fn land_of_a_departed_host_waits_heir_wait_ms_then_is_inherited() {
     r.handle(h(0), HostMsg::LandWanted { sr: WANTED }, t);
     assert!(r.take_land_lookups().is_empty(), "Static looks nothing up");
     r.land_wanted(h(1), t);
-    read_departed(&mut r, 3, h(1), None, t + game::HEIR_WAIT_MS);
-    assert_eq!(r.declare_wanted(t + game::HEIR_WAIT_MS), None, "Static never declares");
+    assert_eq!(r.declare_wanted(t), None, "Static never declares");
 }
 
-/// An ordinal at or beyond the configured host count (`VOXEL_HOSTS`) will not come back:
-/// its land is given away at the first request; one below the count waits.
+/// A `Leave` declaration is only made between cuts and for a row the latest read shows clean
+/// and live: a running cut holds it back (declared once that cut is decided), and a store
+/// refusal (`Gone`: the row changed under it) waits for a fresh read, then asks again.
 #[test]
-fn land_of_an_ordinal_beyond_the_host_count_is_inherited_at_once() {
-    let (mut c, t) = departed(3, h(2));
-    c.set_host_count(2);
-    read_departed(&mut c, 3, h(2), None, t);
-    land_asked(&mut c, h(2), t);
-    let d = c.declare_wanted(t).expect("at once");
-    assert_eq!((d.dead.clone(), d.kind), (vec![(h(2), 102)], game::SuccessionKind::Leave));
-    let live: std::collections::BTreeSet<HostId> = [0, 1].into_iter().map(h).collect();
-    assert_eq!(d.heirs, vec![game::heir_of(h(2), &live).unwrap()]);
-    // Within the count: waited for.
-    let (mut w, t) = departed(3, h(1));
-    w.set_host_count(2);
-    read_departed(&mut w, 3, h(1), None, t);
-    land_asked(&mut w, h(1), t);
-    assert_eq!(w.declare_wanted(t), None, "ordinal 1 of 2 may come back");
-}
-
-/// The departed host registers again (another boot: its row dirty) or attaches before
-/// `HEIR_WAIT_MS`: the request is forgotten — nothing is declared, then or later; the store
-/// refusing a declaration that raced the registration (`Gone`) declares nothing either.
-#[test]
-fn a_returning_host_cancels_the_wait() {
-    let (mut c, t) = departed(2, h(1));
-    read_departed(&mut c, 2, h(1), None, t);
-    land_asked(&mut c, h(1), t);
-    // Its next boot registers: the hosts read shows it dirty.
-    let mid = t + game::HEIR_WAIT_MS / 2;
-    read_departed(&mut c, 2, h(1), Some(901), mid);
-    assert_eq!(c.declare_wanted(mid), None);
-    for at in [t + game::HEIR_WAIT_MS, t + 3 * game::HEIR_WAIT_MS] {
-        read_departed(&mut c, 2, h(1), Some(901), at);
-        assert_eq!(c.declare_wanted(at), None, "forgotten: never declared ({at} ms)");
+fn a_leave_declaration_waits_for_the_cut_and_a_refusal_for_a_fresh_read() {
+    let (mut c, t) = departed(3, h(1));
+    read_departed(&mut c, 3, h(1), None, t);
+    // A cut of hosts 0 and 2 runs.
+    c.set_expected_hosts([0, 2].into_iter().map(h).collect());
+    c.maintain(t + CUT_EVERY_MS);
+    let cut = begun(&commit_routed(&mut c));
+    assert_eq!(cut.len(), 2, "a cut of hosts 0 and 2 runs");
+    land_asked(&mut c, h(1), t + CUT_EVERY_MS);
+    assert_eq!(c.declare_wanted(t + CUT_EVERY_MS), None, "only between cuts");
+    let now = t + CUT_EVERY_MS + 1;
+    for hn in [0, 2] {
+        c.handle(h(hn), HostMsg::CutPrepared { cut: cut[0].1 }, now);
     }
-    // Its next boot attaches before the hosts are read again: forgotten too.
-    let (mut a, t) = departed(2, h(1));
-    read_departed(&mut a, 2, h(1), None, t);
-    land_asked(&mut a, h(1), t);
-    let back = HostMsg::Attach { host: h(1), epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 902, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
-    a.handle(h(1), back, t + 10);
-    commit_routed(&mut a);
-    // The read still shows the clean row of the boot that left (it lags the attach).
-    read_departed(&mut a, 2, h(1), None, t + game::HEIR_WAIT_MS);
-    assert_eq!(a.declare_wanted(t + game::HEIR_WAIT_MS), None, "it is back: never declared");
-    // It registered just as the wait ran out: the store refuses the declaration (`Gone`)
-    // and the next read, showing the new boot, forgets the request.
-    let (mut g, t) = departed(2, h(1));
-    read_departed(&mut g, 2, h(1), None, t);
-    land_asked(&mut g, h(1), t);
-    read_departed(&mut g, 2, h(1), None, t + game::HEIR_WAIT_MS);
-    assert!(g.declare_wanted(t + game::HEIR_WAIT_MS).is_some());
-    g.declared(game::Declared::Gone(vec![h(1)]), t + game::HEIR_WAIT_MS);
-    assert!(orders(&commit_routed(&mut g)).is_empty(), "nothing declared");
-    read_departed(&mut g, 2, h(1), Some(903), t + game::HEIR_WAIT_MS + 1_000);
-    assert_eq!(g.declare_wanted(t + game::HEIR_WAIT_MS + 1_000), None, "forgotten once the new boot is read");
+    assert!(c.take_decision().expect("decided").commit);
+    c.decided(cut[0].1, true);
+    commit_routed(&mut c);
+    let d = c.declare_wanted(now).expect("declared once the cut is decided");
+    assert_eq!((d.dead.clone(), d.kind), (vec![(h(1), 101)], game::SuccessionKind::Leave));
+    // The store refuses it: nothing declared, nothing asked again before a newer read.
+    c.declared(game::Declared::Gone(vec![h(1)]), now);
+    assert!(orders(&commit_routed(&mut c)).is_empty(), "nothing declared");
+    assert_eq!(c.declare_wanted(now + 1), None, "no fresh read yet");
+    read_departed(&mut c, 3, h(1), None, now + 2);
+    assert!(c.declare_wanted(now + 2).is_some(), "asked again after a fresh read");
 }
 
 /// Fix round 1 (minor 4): an owners lookup answered just after its owner's declaration
@@ -2645,16 +2609,67 @@ fn a_request_for_land_already_declared_is_pruned() {
     let (mut c, t) = departed(2, h(1));
     read_departed(&mut c, 2, h(1), None, t);
     land_asked(&mut c, h(1), t);
-    let due = t + game::HEIR_WAIT_MS;
-    read_departed(&mut c, 2, h(1), None, due);
-    let d = c.declare_wanted(due).expect("declared");
-    c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(5))), due);
+    let d = c.declare_wanted(t).expect("declared");
+    c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(5))), t);
     assert!(c.lands_wanted().is_empty(), "the declared owner's request is done");
     // A late lookup answer for the same owner: not recorded again.
-    c.land_wanted(h(1), due + 1);
+    c.land_wanted(h(1), t + 1);
     assert!(c.lands_wanted().is_empty(), "pruned");
-    read_departed(&mut c, 2, h(1), None, due + 2);
-    assert_eq!(c.declare_wanted(due + 2), None, "declared once");
+    read_departed(&mut c, 2, h(1), None, t + 2);
+    assert_eq!(c.declare_wanted(t + 2), None, "declared once");
+}
+
+// ---- no host count (Elastic 1 Task 5) -----------------------------------------------------
+
+/// A `claim` coordinator (world cuts, `Succession`) with ONE attached host, host 0; host 5
+/// (an issued id: no count bounds it) has a dirty row and is not attached.
+fn one_host_attached() -> Coordinator {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(3);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_world_tick(100);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), 0);
+    commit_routed(&mut c);
+    c
+}
+
+/// A `claim` coordinator declares successions whatever the number of hosts: one attached host,
+/// another lapses → a crash succession with the attached host as heir.
+#[test]
+fn a_claim_coordinator_declares_successions_with_one_host() {
+    let mut c = one_host_attached();
+    c.set_expected_hosts([0, 5].into_iter().map(h).collect());
+    let rows = [seen(h(0), 11), seen(h(5), 0)];
+    c.observe_leases(&rows, 10, 10);
+    let d = c.declare_wanted(10).expect("host 5 lapsed: declared");
+    assert_eq!((d.dead, d.heirs, d.kind), (vec![(h(5), 105)], vec![h(0)], game::SuccessionKind::Crash));
+}
+
+/// Ruling 6's degenerate case: the ONLY host lapses and nobody else is attached — no heir
+/// exists, so nothing is declared (no panic), and the blocked-cuts report names the host: the
+/// next registration finds nobody alive and its total-crash rule takes the land.
+#[test]
+fn the_only_host_lapsing_declares_nothing_and_blocks_cuts() {
+    let mut c = one_host_attached();
+    c.set_expected_hosts([0].into_iter().map(h).collect());
+    c.host_detached(h(0));
+    commit_routed(&mut c);
+    for now in [10, 10 + game::HOST_LEASE_MS, 10 + 3 * game::HOST_LEASE_MS] {
+        c.observe_leases(&[seen(h(0), 0)], now, now);
+        assert_eq!(c.declare_wanted(now), None, "no heir: nothing declared ({now} ms)");
+    }
+    assert_eq!(c.successions_open_count(), 0);
+    let due = 10 + 3 * game::HOST_LEASE_MS + CUT_EVERY_MS;
+    c.maintain(due);
+    c.maintain(due + game::WORLD_CUT_BLOCKED_GRACE_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut without the host");
+    let blocked = c.take_cuts_blocked().expect("reported");
+    assert_eq!(blocked.missing, vec![h(0)]);
+    let text = blocked.to_string();
+    assert!(text.contains("NOT being saved") && text.contains("[0]"), "{text}");
+    assert!(!text.contains("VOXEL_HOST_ORDINAL"), "no ordinal to configure: {text}");
+    assert!(text.contains("nobody else alive"), "the total-crash rule is named: {text}");
 }
 
 /// The counts relayed between participants of a running world cut.

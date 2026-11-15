@@ -16,8 +16,9 @@
 //!   [`SPAWN_SYNC_WAIT_MS`], then it is refused). Under `claim` an order for land whose owner
 //!   left cleanly waits the same way while that land is asked for (R4 drain,
 //!   [`crate::HostMsg::LandWanted`]): placed once the heir holds it, else refused at
-//!   [`SPAWN_SYNC_WAIT_MS`] — while the coordinator waits out `HEIR_WAIT_MS` a login there is
-//!   answered 503 and the client retries. An order taken here keeps an online player
+//!   [`SPAWN_SYNC_WAIT_MS`] (the coordinator gives that land away at once, but the ask, the
+//!   declaration and the heir's adoption may take longer) — a login there is then answered
+//!   503 and the client retries. An order taken here keeps an online player
 //!   here — no hand-off at a host seam — until its new session connects ([`SPAWN_PIN_MS`]).
 //! - **Kick**: applied by the entry host and relayed to every other host; acknowledged to
 //!   the login service once every peer applied it. A peer that cannot be reached means no

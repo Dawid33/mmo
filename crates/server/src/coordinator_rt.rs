@@ -13,7 +13,7 @@
 //! ([`start_listening`], the hosts' end is [`crate::roles::QuicWorldLink`]); the inline
 //! link ([`game::InlineWorldLink`]) stays for tests and wasm single-player.
 //!
-//! **World cuts** (several hosts, R3 Task 13; [`WorldCuts`]): the core picks the tick and
+//! **World cuts** (`claim` hosts, any number of them; R3 Task 13; [`WorldCuts`]): the core picks the tick and
 //! collects the hosts' parts; the runtime feeds it the world tick and the hosts the cut
 //! needs (those whose `hosts` row is not clean), records each decision in the store
 //! ([`StoreHandle::decide_cut`], under the coordinator's fence) and broadcasts the
@@ -467,16 +467,15 @@ fn generation_current(store: &StoreHandle, ordinal: HostId, generation: u64) -> 
 }
 
 /// Whether a host whose crashes cost `host` (its `Attach`'s policy, from its
-/// `VOXEL_OWNERSHIP`) may attach to a coordinator that `declares` successions or not, serving
-/// `several` hosts. With one host nothing is compared (no other host could inherit: the
-/// coordinator runs `Rollback` whatever the host's word says). With several the two must
-/// agree: beside a `Rollback` coordinator a `claim` host that restarts waits for ever for a
-/// succession nobody declares (its dirty row then blocks every world cut), and beside a
-/// `Succession` coordinator a `static` host's crash would be given to an heir its fixed
-/// layout does not know.
-fn policy_agrees(declares: bool, several: bool, host: game::CrashPolicy) -> Result<(), String> {
-    let wants = host == game::CrashPolicy::Succession;
-    if !several || wants == declares {
+/// `VOXEL_OWNERSHIP`) may attach to a coordinator started with policy `coordinator`: the two
+/// must agree, whatever the number of hosts (Elastic 1: no host count). Beside a `Rollback`
+/// coordinator a `claim` host would save in world cuts nobody runs and its crash would never
+/// be declared (its dirty row blocking the world for ever), and beside a `Succession`
+/// coordinator a `static` host's crash would be given to an heir its fixed layout does not
+/// know.
+fn policy_agrees(coordinator: game::CrashPolicy, host: game::CrashPolicy) -> Result<(), String> {
+    let (wants, declares) = (host == game::CrashPolicy::Succession, coordinator == game::CrashPolicy::Succession);
+    if wants == declares {
         return Ok(());
     }
     let word = |succession: bool| if succession { "claim" } else { "static (or unset)" };
@@ -652,7 +651,7 @@ struct Lookup {
     retry_at: u64,
 }
 
-/// World cuts for a coordinator serving several hosts ([`start_listening_with`]).
+/// World cuts for a coordinator of `claim` hosts, any number ([`start_listening_with`]).
 pub struct WorldCuts {
     /// The period between cuts (`VOXEL_SAVE_SECS`).
     pub every: Duration,
@@ -699,7 +698,7 @@ pub fn start_listening(
     start_listening_with(store, start, bind, token, cert_hash_file, fenced, None)
 }
 
-/// [`start_listening`], with world cuts of the hosts it serves (`cuts`: several hosts).
+/// [`start_listening`], with world cuts of the hosts it serves (`cuts`: `claim` hosts).
 pub fn start_listening_with(
     store: StoreHandle,
     start: CoordinatorStart,
@@ -713,7 +712,7 @@ pub fn start_listening_with(
 }
 
 /// [`start_listening_with`] for a world whose hosts' crashes cost `policy`: under
-/// `CrashPolicy::Succession` (several hosts, `claim`) the coordinator declares and runs
+/// `CrashPolicy::Succession` (`claim`, any number of hosts) the coordinator declares and runs
 /// successions ([`CoordinatorRuntime`]'s succession pump); under `Rollback` it never does.
 #[allow(clippy::too_many_arguments)]
 pub fn start_listening_as(
@@ -763,7 +762,7 @@ pub struct CoordinatorRuntime {
     /// No save is taken before this `now_ms` (after a failure).
     retry_at_ms: u64,
     failed_in_a_row: u32,
-    /// World cuts of several hosts (`None`: off).
+    /// World cuts of the `claim` hosts (`None`: off).
     cuts: Option<WorldCuts>,
     /// `now_ms` the expected hosts were last read at.
     hosts_read_ms: Option<u64>,
@@ -781,6 +780,9 @@ pub struct CoordinatorRuntime {
     /// The successions' store calls (`CrashPolicy::Succession` with world cuts; `None`: the
     /// coordinator never declares one).
     successions: Option<SuccessionPump>,
+    /// What a host crash costs the world, as this coordinator was started
+    /// (`VOXEL_OWNERSHIP`): every host's `Attach` must name the same ([`policy_agrees`]).
+    policy: game::CrashPolicy,
 }
 
 /// The store calls of the core's successions ([`CoordinatorRuntime::pump_successions`]):
@@ -816,10 +818,11 @@ impl CoordinatorRuntime {
     }
 
     /// [`Self::spawn`] for a world whose hosts' crashes cost `policy`: `Succession` with
-    /// world cuts (several hosts) runs successions; without world cuts (one host) or under
-    /// `Rollback`, none is ever declared. The lease watch is fed with every `hosts` read
-    /// (`feed_cuts`), which runs exactly when world cuts do — i.e. whenever several hosts
-    /// share the world — so successions are driven whenever they can be needed.
+    /// world cuts (`claim`, any number of hosts) runs successions; without world cuts (a lone
+    /// `static` host) or under `Rollback`, none is ever declared. The lease watch is fed with
+    /// every `hosts` read (`feed_cuts`), which runs exactly when world cuts do — so successions
+    /// are driven whenever they can be needed. Every `Attach` must name `policy`
+    /// ([`policy_agrees`]).
     pub fn spawn_as(
         store: StoreHandle,
         start: CoordinatorStart,
@@ -876,6 +879,7 @@ impl CoordinatorRuntime {
             lookups: Vec::new(),
             warned_ms: None,
             successions,
+            policy,
         };
         let join = std::thread::Builder::new()
             .name("coordinator".into())
@@ -1070,7 +1074,7 @@ impl CoordinatorRuntime {
                                             continue;
                                         }
                                     }
-                                    if let Err(why) = policy_agrees(self.successions.is_some(), self.cuts.is_some(), *policy) {
+                                    if let Err(why) = policy_agrees(self.policy, *policy) {
                                         log::error!("[coordinator] host {ordinal}'s Attach is refused: {why}");
                                         l.routes.refuse(peer);
                                         l.senders.close(peer);
@@ -1358,7 +1362,8 @@ impl CoordinatorRuntime {
             return Ok(());
         }
         // Land of a host that left, asked for (`LandWanted`): the owners read (a plain read),
-        // each owner told to the core, which decides when it is given away. A failed read is
+        // each owner told to the core, which gives it away at its next declaration between cuts
+        // (no heir wait: a host that left never returns as itself). A failed read is
         // dropped: the hosts ask again every `LAND_WANTED_EVERY_MS`.
         let mut failed = None;
         if let Some((srs, rx)) = &p.land_rx {
@@ -1644,18 +1649,15 @@ mod tests {
         HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }
     }
 
+    /// The same `VOXEL_OWNERSHIP` word on both sides, whatever the number of hosts (no count).
     #[test]
-    fn a_coordinator_of_several_hosts_takes_only_its_own_crash_policy() {
+    fn a_coordinator_takes_only_its_own_crash_policy() {
         use game::CrashPolicy::{Rollback, Succession};
-        // One host: nothing to compare (`claim` with one host runs beside a `Rollback` coordinator).
-        assert!(policy_agrees(false, false, Succession).is_ok());
-        assert!(policy_agrees(false, false, Rollback).is_ok());
-        // Several hosts: the same word on both sides.
-        assert!(policy_agrees(true, true, Succession).is_ok());
-        assert!(policy_agrees(false, true, Rollback).is_ok());
-        let forgot = policy_agrees(false, true, Succession).unwrap_err();
+        assert!(policy_agrees(Succession, Succession).is_ok());
+        assert!(policy_agrees(Rollback, Rollback).is_ok());
+        let forgot = policy_agrees(Rollback, Succession).unwrap_err();
         assert!(forgot.contains("VOXEL_OWNERSHIP=claim") && forgot.contains("VOXEL_OWNERSHIP=static"), "{forgot}");
-        assert!(policy_agrees(true, true, Rollback).is_err());
+        assert!(policy_agrees(Succession, Rollback).is_err());
     }
 
     /// A `hosts` row of registration `reg`, live.

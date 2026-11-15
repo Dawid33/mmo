@@ -385,22 +385,29 @@ impl WorldLink for QuicWorldLink {
 
 /// Why several hosts refuse a Postgres without two-phase commit.
 pub const SEVERAL_HOSTS_NEED_TWO_PHASE: &str =
-    "several hosts (VOXEL_OWNERSHIP=claim, or a coordinator's VOXEL_HOSTS > 1) need Postgres with max_prepared_transactions > 0 (their world cuts are staged in two phases)";
+    "several hosts (VOXEL_OWNERSHIP=claim, on the hosts and on their coordinator) need Postgres with max_prepared_transactions > 0 (their world cuts are staged in two phases)";
 
-/// Start-up of a split-role process on Postgres, before any claim, registration or region
-/// load: every world cut part a crash left staged is finished
-/// ([`crate::cuts::resolve_staged_cuts`]); with several hosts (`hosts` > 1) two-phase commit
-/// must be available ([`SEVERAL_HOSTS_NEED_TWO_PHASE`]). `Err`: why the process must not start.
-pub fn recover_staged_cuts(store: &world_store::StoreHandle, hosts: u32) -> Result<(), String> {
-    if hosts > 1 {
-        store.two_phase_ready().map_err(|e| format!("{SEVERAL_HOSTS_NEED_TWO_PHASE}: {e}"))?;
+/// A coordinator's start-up on Postgres, before it claims its row: EVERY world cut part a
+/// crash left staged is finished ([`crate::cuts::resolve_staged_cuts`]) — the cuts of a
+/// coordinator before this one are over. Count-free (Elastic 1): the parts are found by their
+/// prepared transactions' names, whatever hosts wrote them
+/// ([`world_store::StoreHandle::staged_cut_parts`]); none staged (a server without prepared
+/// transactions has none) is nothing to do. Whether two-phase commit must be available is the
+/// crash policy's business ([`check_two_phase`]). `Err`: why the process must not start.
+pub fn recover_staged_cuts(store: &world_store::StoreHandle) -> Result<(), String> {
+    let staged = match store.staged_cut_parts() {
+        Ok(staged) => staged,
+        // A store with no prepared transactions at all (SQLite) has none staged.
+        Err(world_store::StoreError::Unsupported(_)) => return Ok(()),
+        Err(e) => return Err(format!("the world cut parts left staged could not be read: {e}")),
+    };
+    if staged.is_empty() {
+        return Ok(());
     }
-    match crate::cuts::resolve_staged_cuts(store) {
-        Ok(_) => Ok(()),
-        // One host on a server without prepared transactions has none to resolve.
-        Err(world_store::StoreError::Unsupported(_)) if hosts <= 1 => Ok(()),
-        Err(e) => Err(format!("the world cut parts left staged could not be resolved: {e}")),
-    }
+    log::warn!("[coordinator] world cut parts left staged by a crash (cut, host): {staged:?}");
+    crate::cuts::resolve_staged_cuts(store)
+        .map(|_| ())
+        .map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))
 }
 
 /// Start-up of a `server::run` process, before it claims, registers or loads anything: on
@@ -490,30 +497,8 @@ pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle,
         "{ALL_ROLE_BESIDE_HOSTS}: hosts {others:?} ran this world as split hosts and did not leave cleanly — they may hold \
          unsaved state, and an `all` process would claim their land, abort their staged cut parts and fence them. Start them \
          again (VOXEL_ROLE=host) until they leave cleanly; retire one that will never return with `worldctl retire-host \
-         <url> <ordinal>` (claim ownership); or restart the world from its last save with `worldctl rollback <url> --yes`"
+         <url> <host id>` (claim ownership); or restart the world from its last save with `worldctl rollback <url> --yes`"
     ))
-}
-
-/// The warning for dirty `hosts` rows (`(ordinal, clean)`) of ordinals the coordinator does
-/// not serve (`>= hosts`): a mis-set-up world (started with more hosts before, stopped
-/// uncleanly). Never ignored — such a host may hold state no cut would save — so world cuts
-/// stay blocked until it starts (or its row is retired). `None`: none.
-pub fn hosts_beyond_count(rows: &[(HostId, bool)], hosts: u32) -> Option<String> {
-    let beyond: Vec<u64> = rows.iter().filter(|(o, clean)| !clean && o.0 >= u64::from(hosts)).map(|(o, _)| o.0).collect();
-    (!beyond.is_empty()).then(|| {
-        format!(
-            "the world has dirty `hosts` rows of hosts {beyond:?}, but {}={hosts}: they ran before and did not \
-             leave cleanly, and may hold state. World cuts do not begin while a dirty row has no attached host, \
-             so the world is NOT saved: start this world with {}={} (all its hosts) until they leave cleanly, \
-             or retire one that will never return with `worldctl retire-host <url> <ordinal>`. Under `claim` such a dirty row \
-             blocks cuts only until its lease lapses and it is declared dead (its land then goes to an heir). \
-             A CLEAN row beyond the count (a host that left in a committed cut) blocks nothing: under `claim` \
-             its land is given to a live host at once when a host needs a region of it",
-            game::ownership::HOSTS_ENV,
-            game::ownership::HOSTS_ENV,
-            beyond.iter().max().map_or(u64::from(hosts), |m| m + 1)
-        )
-    })
 }
 
 /// `VOXEL_ROLE=coordinator`: the world coordinator alone. Opens the Postgres world
@@ -540,30 +525,24 @@ pub fn run_coordinator() -> ServerExit {
     };
     let store = opened.store.clone().expect("a Postgres world has a store");
     let map = opened.map.clone().expect("a stored world has a map");
-    // Several hosts (`VOXEL_HOSTS` > 1): this coordinator runs their world cuts, every save
-    // period, at the world tick of its own clock (one host saves on its own).
-    let hosts = std::env::var(game::ownership::HOSTS_ENV).ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1);
+    // Elastic 1: no host count. `claim` (R4): any number of hosts, each with an issued id, all
+    // saving in world cuts this coordinator runs (every save period, at the world tick of its
+    // own clock), a crashed host's land inherited by one heir — the coordinator declares and
+    // runs the successions. `static` (or unset): one host alone, which saves on its own; a
+    // crash rolls the world back, never declared. The coordinator has no id of its own: the
+    // policy from `VOXEL_OWNERSHIP` alone. A `VOXEL_HOSTS` left in its environment is ignored.
+    let policy = coordinator_crash_policy(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref())
+        .unwrap_or_else(|e| fatal(e));
+    check_two_phase(policy, &store).unwrap_or_else(|e| fatal(e));
     // Before it claims the coordinator row: the world cut parts a crash left staged.
-    recover_staged_cuts(&store, hosts).unwrap_or_else(|e| fatal(e));
-    match store.hosts() {
-        Ok(rows) => {
-            let rows: Vec<(HostId, bool)> = rows.iter().map(|r| (r.id, r.clean)).collect();
-            if let Some(w) = hosts_beyond_count(&rows, hosts) {
-                log::warn!("[coordinator] {w}");
-            }
-        }
-        Err(e) => log::warn!("[coordinator] the hosts rows could not be read at start: {e}"),
-    }
+    recover_staged_cuts(&store).unwrap_or_else(|e| fatal(e));
     let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
     let clock = CoordinatorClock::new(clock, phase);
     log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
-    let mut start = match world_file::ensure_coordinator_state(&store, &map, None).unwrap_or_else(|e| fatal(e)) {
+    let start = match world_file::ensure_coordinator_state(&store, &map, None).unwrap_or_else(|e| fatal(e)) {
         Some(start) => start,
         None => fatal("this world has no history (nobody can live in it): there is nothing to coordinate".into()),
     };
-    // R4 drain: the land of a host that left cleanly with an ordinal beyond the count is
-    // given away at once when wanted (it will not come back); below it, after `HEIR_WAIT_MS`.
-    start.coordinator.set_host_count(hosts);
     let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service link's token: {e}")));
     let bind = coordinator_addr_from(COORDINATOR_BIND_ENV, std::env::var(COORDINATOR_BIND_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(e));
@@ -572,24 +551,13 @@ pub fn run_coordinator() -> ServerExit {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| fatal(format!("{}: {e}", dir.display())));
     }
     let fenced = Fenced::default();
-    // Elastic 1: `claim` hosts are any number of hosts (each with an issued id) and always save
-    // in world cuts, so a `claim` coordinator runs them whatever `VOXEL_HOSTS` says.
-    let claim_world = game::crash_policy_from_value(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref())
-        .is_ok_and(|p| p == game::CrashPolicy::Succession);
-    let cuts = (hosts > 1 || claim_world).then(|| crate::coordinator_rt::WorldCuts {
+    let claim_world = policy == game::CrashPolicy::Succession;
+    let cuts = claim_world.then(|| crate::coordinator_rt::WorldCuts {
         every: Duration::from_secs(crate::world_save_secs(std::env::var(crate::WORLD_SAVE_SECS_ENV).ok().as_deref())),
         tick: Box::new(move || clock.world_tick_now()),
     });
-    if hosts > 1 || claim_world {
-        log::info!("[coordinator] world cuts (VOXEL_HOSTS={hosts}, claim: {claim_world})");
-    }
-    // `claim` (R4): a crashed host's land is inherited by one heir — the coordinator declares
-    // and runs the successions. `static`: a crash rolls the world back (R3), never declared.
-    // The coordinator has no ordinal of its own: the policy from `VOXEL_OWNERSHIP` alone.
-    let policy = coordinator_crash_policy(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref(), hosts)
-        .unwrap_or_else(|e| fatal(e));
-    if policy == game::CrashPolicy::Succession {
-        log::info!("[coordinator] ownership `claim`: a crashed host's land goes to an heir (successions)");
+    if claim_world {
+        log::info!("[coordinator] ownership `claim`: world cuts of any number of hosts; a crashed host's land goes to an heir (successions)");
     }
     let coordinator = crate::coordinator_rt::start_listening_as(
         store.clone(),
@@ -624,15 +592,14 @@ pub fn run_coordinator() -> ServerExit {
     exit
 }
 
-/// The crash policy of a coordinator serving `hosts` hosts of a world whose ownership is
-/// `ownership` (`VOXEL_OWNERSHIP`'s value; the coordinator has no ordinal of its own):
-/// `claim` with several hosts runs successions (R4); `static`, `allinone` and unset roll the
-/// world back (R3); ONE host always rolls back — there is no other host to inherit, and with
-/// one host the coordinator runs no world cuts, which a succession's settle needs. A bad
-/// value is an error.
-pub fn coordinator_crash_policy(ownership: Option<&str>, hosts: u32) -> Result<game::CrashPolicy, String> {
-    let declared = game::crash_policy_from_value(ownership)?;
-    Ok(if hosts > 1 { declared } else { game::CrashPolicy::Rollback })
+/// The crash policy of a coordinator of a world whose ownership is `ownership`
+/// (`VOXEL_OWNERSHIP`'s value; the coordinator has no id of its own), from that word alone —
+/// no host count (Elastic 1): `claim` runs world cuts and successions whatever the number of
+/// hosts (one attached host inherits from another that lapses; with nobody left alive no
+/// heir exists, nothing is declared, and the next registration's total-crash rule takes the
+/// land); `static`, `allinone` and unset roll the world back (R3). A bad value is an error.
+pub fn coordinator_crash_policy(ownership: Option<&str>) -> Result<game::CrashPolicy, String> {
+    game::crash_policy_from_value(ownership)
 }
 
 #[cfg(test)]
@@ -648,18 +615,17 @@ mod tests {
 
     use super::*;
 
-    /// The coordinator's crash-policy gate: only `claim` with several hosts declares
-    /// successions; one host always rolls back; a bad value is refused.
+    /// The coordinator's crash-policy gate, from `VOXEL_OWNERSHIP` alone: `claim` declares
+    /// successions whatever the number of hosts; anything else rolls back; a bad value is refused.
     #[test]
-    fn coordinator_crash_policy_is_succession_only_for_claim_with_several_hosts() {
+    fn coordinator_crash_policy_is_succession_for_claim_alone() {
         use game::CrashPolicy::{Rollback, Succession};
-        assert_eq!(coordinator_crash_policy(Some("static"), 2), Ok(Rollback));
-        assert_eq!(coordinator_crash_policy(Some("allinone"), 2), Ok(Rollback));
-        assert_eq!(coordinator_crash_policy(None, 3), Ok(Rollback));
-        assert_eq!(coordinator_crash_policy(Some("claim"), 2), Ok(Succession));
-        assert_eq!(coordinator_crash_policy(Some(" claim "), 4), Ok(Succession));
-        assert_eq!(coordinator_crash_policy(Some("claim"), 1), Ok(Rollback), "one host: nobody to inherit");
-        assert!(coordinator_crash_policy(Some("dynamic"), 2).is_err());
+        assert_eq!(coordinator_crash_policy(Some("static")), Ok(Rollback));
+        assert_eq!(coordinator_crash_policy(Some("allinone")), Ok(Rollback));
+        assert_eq!(coordinator_crash_policy(None), Ok(Rollback));
+        assert_eq!(coordinator_crash_policy(Some("claim")), Ok(Succession), "one host or many");
+        assert_eq!(coordinator_crash_policy(Some(" claim ")), Ok(Succession));
+        assert!(coordinator_crash_policy(Some("dynamic")).is_err());
     }
 
     /// `claim` ownership is a host's only, on Postgres with the login link (any number of
@@ -690,16 +656,6 @@ mod tests {
         assert_eq!(clock_from_anchor(anchor, ahead, 111).unwrap_err(), CLOCK_BEHIND_WORLD_TICK);
         let (clock, phase) = clock_from_anchor(anchor, ahead + 3, 0).unwrap();
         assert_eq!((clock.tick_at(0), phase), (110, 3));
-    }
-
-    /// Final review I2: a dirty row beyond the configured host count is warned about,
-    /// a clean one or one within the count is not.
-    #[test]
-    fn dirty_rows_beyond_the_host_count_are_warned() {
-        assert_eq!(hosts_beyond_count(&[(h(0), false), (h(1), false)], 2), None);
-        assert_eq!(hosts_beyond_count(&[(h(0), false), (h(2), true)], 2), None, "a clean row left");
-        let w = hosts_beyond_count(&[(h(0), false), (h(1), false), (h(2), false)], 2).expect("warned");
-        assert!(w.contains("[2]") && w.contains("NOT saved") && w.contains("VOXEL_HOSTS=3"), "{w}");
     }
 
     #[test]

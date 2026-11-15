@@ -95,7 +95,7 @@ pub const NO_ADDRESS_ERROR: &str = "That world cannot be reached from this clien
 /// Longest a session whose home host was replaced keeps asking for a new
 /// join before it gives up on the world list. Covers a takeover's resolution
 /// (joins answered 503 until the heir has adopted) and a cleanly departed
-/// host's land waiting `HEIR_WAIT_MS` (30 s) for its heir.
+/// host's land being given to its heir (a `Leave` succession).
 pub const REJOIN_MAX_MS: u64 = 60_000;
 /// The wait between a rejoin's join answer and its next join call (one call
 /// at a time: a 503 itself may take the service's spawn-ack timeout).

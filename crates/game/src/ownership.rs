@@ -97,12 +97,6 @@ impl SuccessionKind {
 /// — it lost its journal, or cannot reach the base cut — must not stop saving for ever).
 pub const SUCCESSION_DEADLINE_MS: u64 = 30_000;
 
-/// How long (the coordinator's wall ms, from the first [`crate::HostMsg::LandWanted`] for
-/// it) the land of a host that left cleanly waits for that host to come back before it is
-/// given to an heir (R4 drain): a rolling restart gets its land back. An ordinal at or
-/// beyond the configured host count (`VOXEL_HOSTS`) is not waited for.
-pub const HEIR_WAIT_MS: u64 = 30_000;
-
 /// One host's land given to one heir (the store's `successions` row as declared; R4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Succession {
@@ -142,10 +136,6 @@ pub enum Declared {
 
 /// Environment: `allinone` (default), `static` or `claim`.
 pub const OWNERSHIP_ENV: &str = "VOXEL_OWNERSHIP";
-/// Environment: how many hosts the COORDINATOR serves (its world cuts and its crash policy;
-/// Elastic 1 Task 5 removes it). A host reads no host count: it is one host of any number
-/// (`claim`) or alone (`static`).
-pub const HOSTS_ENV: &str = "VOXEL_HOSTS";
 
 /// splitmix64's finaliser (a stateless mix; the rendezvous weights).
 fn splitmix64(mut z: u64) -> u64 {

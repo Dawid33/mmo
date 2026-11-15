@@ -80,10 +80,11 @@ impl std::fmt::Display for CutsBlocked {
         if !self.missing.is_empty() {
             write!(
                 f,
-                " hosts {:?} have a dirty `hosts` row (they may hold state) but are not attached — start them \
-                 (VOXEL_HOST_ORDINAL), or retire one that will never return with `worldctl retire-host <url> \
-                 <ordinal>` (claim ownership: its land goes to an heir); until then nothing is saved and stopping \
-                 the others rolls the world back to the last cut;",
+                " hosts {:?} have a dirty `hosts` row (they may hold state) but are not attached — under claim \
+                 ownership such a row is declared dead once its lease lapses and its land goes to a live host; with \
+                 nobody else alive no host can inherit it, and the next host to register takes the land of every \
+                 dirty row (the total crash: the world restarts from its last cut). `worldctl retire-host <url> \
+                 <id>` vouches for a death the lease has not seen yet. Until then nothing is saved;",
                 self.missing.iter().map(|h| h.0).collect::<Vec<_>>()
             )?;
         }
@@ -103,8 +104,9 @@ impl std::fmt::Display for CutsBlocked {
             let heir = heir.0;
             write!(
                 f,
-                " succession {} was opened while no host ran and waits for its heir, host {heir}, to start: no deadline \
-                 runs until it attaches — start host {heir} (VOXEL_HOST_ORDINAL={heir}), or give the succession up with \
+                " succession {} was opened while no host ran and waits for its heir, host {heir}, to attach: no deadline \
+                 runs until it does — a restarted process is a NEW host, so start any host (with nobody else alive its \
+                 registration abandons the succession and takes every dirty row's land), or give the succession up with \
                  `worldctl rollback <url> --yes` (the world restarts from its last cut, the land stays with host {heir});",
                 id.0
             )?;
@@ -237,8 +239,8 @@ impl Default for WorldCuts {
 }
 
 impl Coordinator {
-    /// World cuts every `every_ms` (0: off). Only with several hosts: one host saves on
-    /// its own (the one-phase cut) and never gets a `BeginCut`.
+    /// World cuts every `every_ms` (0: off). Only under `claim` (any number of hosts): a lone
+    /// `static` host saves on its own (the one-phase cut) and never gets a `BeginCut`.
     pub fn set_world_cuts(&mut self, every_ms: u64) {
         self.cuts.every_ms = (every_ms > 0).then_some(every_ms);
         self.cuts.last_ms = self.clock_ms;

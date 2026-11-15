@@ -55,7 +55,8 @@
 //! creates the identity a fence is built from; it writes no row a cut part writes except the
 //! `in_flight` and `super_regions` rows of a total crash, which it takes at `epoch + 1` (so every
 //! part or load fenced on the old epochs is refused). The lock walk, in this order:
-//! `world` → `successions` → `hosts` (several rows) → `super_regions` → `in_flight`:
+//! `world` → `hosts` (the name vouch) → `successions` → `hosts` (the dirty rows) → `super_regions`
+//! → `in_flight`:
 //! - `world` `FOR NO KEY UPDATE` first (SQLite: the writer lock): serialises the counter
 //!   `next_host_id`, the generation and every statement below with every other registration,
 //!   declaration, retirement, rollback and decision, which all take it first too. It never
@@ -100,10 +101,14 @@
 //! - The `INSERT` of the new row: a key nobody holds (never issued before).
 //!
 //! Against the cycle above: a registration takes `hosts` rows before `super_regions` rows, as a
-//! declaration does — so the one cycle it can join is cycle 1's shape: a ZOMBIE's re-claim of
-//! its own rows (`claim_super_regions_live`: `super_regions`, then its `hosts` row `FOR SHARE`)
-//! while a total-crash registration holds that zombie's dirty `hosts` row and waits for those
-//! `super_regions` rows. `40P01` aborts one: an aborted re-claim is a fenced re-read (the row is
+//! declaration does — so the one cycle it can join is cycle 1's shape: a re-claim of a row's
+//! own land (`claim_super_regions_live`: `super_regions`, then its `hosts` row `FOR SHARE`)
+//! while a total-crash registration holds that dirty `hosts` row and waits for those
+//! `super_regions` rows. The re-claimer is a ZOMBIE (its lease lapsed, its process still
+//! runs), or the process behind a row of the registration's own NAME within its lease: the
+//! name vouch does not count that row live, so a registration with nobody else alive is a
+//! total crash while the old process still runs and may re-claim. `40P01` aborts one: an
+//! aborted re-claim is a fenced re-read (the row is
 //! dead once the registration commits); an aborted registration wrote nothing and its process
 //! exits and starts again. It extends no other cycle: `claim_free` locks no row a registration
 //! locks (free rows only), a boot claim (`claim_super_regions` with no live check) locks no

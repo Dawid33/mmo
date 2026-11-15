@@ -145,9 +145,9 @@ pub enum HostMsg {
         /// again; an order not listed is (re)sent.
         successions: Vec<(SuccessionId, bool)>,
         /// What a crash of this host costs the world ([`crate::Ownership::policy`], from its
-        /// `VOXEL_OWNERSHIP`). A coordinator of several hosts refuses an `Attach` whose
-        /// policy is not its own: under `Rollback` it would never declare the succession a
-        /// `claim` host's restart waits for.
+        /// `VOXEL_OWNERSHIP`). A coordinator refuses an `Attach` whose policy is not its own,
+        /// whatever the number of hosts: under `Rollback` it would run no world cuts and never
+        /// declare a `claim` host's death.
         policy: crate::CrashPolicy,
     },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
@@ -214,8 +214,8 @@ pub enum HostMsg {
     /// Something on this host needs a region of super-region `sr`, whose directory owner
     /// left in a committed leave cut (its `hosts` row clean) and has not come back (R4
     /// drain). The coordinator looks the owner up and gives ALL its land to one heir by a
-    /// `Leave` succession — at once if that ordinal is beyond the configured host count,
-    /// after [`crate::HEIR_WAIT_MS`] otherwise — unless it registers again first. Sent at most
+    /// `Leave` succession at once (a host that left never returns as itself: a restarted
+    /// process is a new host). Sent at most
     /// once per [`crate::LAND_WANTED_EVERY_MS`] per super-region; ignored under `Static`.
     LandWanted { sr: SuperRegion },
     /// World cut `cut` runs here in count mode with participant `peer` (R4 Task 12,

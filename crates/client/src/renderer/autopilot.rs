@@ -61,6 +61,10 @@ const TAKE_OFF: &[(u64, Step)] = &[
 /// When the cruise keys go down, after the climb.
 const CRUISE_AT_MS: u64 = 1950;
 
+/// The probe's host count for [`pick_seam`] (`VOXEL_HOSTS`, as the go / no-go recipe sets
+/// it): the servers read no host count any more; only this probe does, to lay the seams out.
+const HOSTS_ENV: &str = "VOXEL_HOSTS";
+
 /// Default distance a shuttle leg runs past the boundary before reversing:
 /// clear of the seam margin the handoff scan uses, short enough to cross often.
 const SHUTTLE_OVERSHOOT_REGION_M: f32 = 6.0;
@@ -180,12 +184,12 @@ impl Autopilot {
                     Some(kind) => {
                         // Probe only: the client otherwise never reads the world's host layout.
                         let number = |key: &str| std::env::var(key).ok().and_then(|v| v.parse::<u32>().ok());
-                        let hosts = number(game::ownership::HOSTS_ENV).unwrap_or(1);
+                        let hosts = number(HOSTS_ENV).unwrap_or(1);
                         let s = number("VOXEL_SUPER_REGION_REGIONS").unwrap_or(game::DEFAULT_SUPER_REGION_REGIONS);
                         if kind == SeamKind::Host && hosts < 2 {
                             error!(
                                 "autopilot: VOXEL_AUTOPILOT_BOUNDARY=host needs {}>=2 (the world's host count); no autopilot",
-                                game::ownership::HOSTS_ENV
+                                HOSTS_ENV
                             );
                             return None;
                         }

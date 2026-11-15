@@ -1031,6 +1031,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
                 log::warn!("[server] a transfer of {:?} into {target:?} for host {ordinal}, which is forgotten: it waits for the owner", bundle.id);
                 self.wait_for_owner(target, Reliable::Transfer { target, stamp, bundle, player: None }, view, accounted);
+                // The directory that routed it here still names the forgotten host: read it
+                // again (the heir holds that land now), or nothing would deliver the transfer
+                // until the polling backstop.
+                self.directory_wanted = true;
             }
             msg if msg.is_state() => {
                 log::error!(

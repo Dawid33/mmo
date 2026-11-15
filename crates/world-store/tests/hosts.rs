@@ -95,8 +95,9 @@ fn an_id_is_never_issued_twice_after_a_prune() {
     });
 }
 
-/// Ruling 5: the in-flight key packs the host into the high 32 bits of a signed 64-bit `seq`:
-/// an id above [`HOST_ID_MAX`] is never issued, and the refusal writes nothing.
+/// The bound exists because the in-flight key packs the host id into the high 32 bits of a
+/// signed 64-bit `seq`: an id above [`HOST_ID_MAX`] is never issued, and the refusal writes
+/// nothing.
 #[test]
 fn an_id_above_the_bound_is_refused() {
     each_backend("hosts_bound", true, |url| {

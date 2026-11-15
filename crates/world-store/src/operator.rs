@@ -1,6 +1,9 @@
 //! The operator's commands (R4, `worldctl`, `ctl.rs`; Postgres only). No coordinator fence —
-//! the operator holds none; the two named exceptions to "only the coordinator's fenced
-//! transactions write `successions`" (and, for the rollback, `world.generation`):
+//! the operator holds none. "Only the coordinator's fenced transactions write `successions`"
+//! has three exceptions: the two operator commands below (the rollback also writes
+//! `world.generation`), and a total-crash registration (`rows.rs` `register_host`, Elastic 1),
+//! which abandons the open successions, unfenced, under the `world` row's lock — see the lock
+//! walk in `succession.rs`. The operator's:
 //! - [`retire_offline`] (`retire-host` with no host alive) — locks: `world` `FOR NO KEY
 //!   UPDATE` first (the declaration's second lock; it holds no `coordinator` lock), then EVERY
 //!   `hosts` row `FOR NO KEY UPDATE` in id order, then the retired host's `super_regions`
@@ -91,7 +94,7 @@ pub enum Retired {
     /// These hosts' dirty live rows beat within the lease: a host runs (vouch instead, or
     /// stop it). Nothing written.
     Running(Vec<HostId>),
-    /// No other ordinal has a live `hosts` row to inherit the land. Nothing written.
+    /// No other id has a live `hosts` row to inherit the land. Nothing written.
     NoHeir,
     /// The row cannot be retired (absent, dead, clean, or named by an open succession): why.
     /// Nothing written.
@@ -105,36 +108,36 @@ pub enum Vouched {
     Vouched,
     /// The row beat within the lease: that host runs. Nothing written.
     Running,
-    /// No dirty live row of that ordinal (absent, dead, clean): why. Nothing written.
+    /// No dirty live row of that id (absent, dead, clean): why. Nothing written.
     Refused(String),
 }
 
-/// Why host `ordinal`'s row (`(clean, state)`, `None`: absent) is no dirty live row, if it is not.
-pub(crate) fn not_retirable(ordinal: HostId, row: Option<(bool, i64)>) -> Option<String> {
-    let ordinal = ordinal.0;
+/// Why host `retired`'s row (`(clean, state)`, `None`: absent) is no dirty live row, if it is not.
+pub(crate) fn not_retirable(retired: HostId, row: Option<(bool, i64)>) -> Option<String> {
+    let retired = retired.0;
     match row {
-        None => Some(format!("host {ordinal} has no hosts row: nothing to retire")),
+        None => Some(format!("host {retired} has no hosts row: nothing to retire")),
         Some((_, state)) if state != HOST_LIVE => Some(format!(
-            "host {ordinal} was declared dead already: its land is inherited by its succession (worldctl rollback abandons \
+            "host {retired} was declared dead already: its land is inherited by its succession (worldctl rollback abandons \
              an open one)"
         )),
         Some((true, _)) => Some(format!(
-            "host {ordinal} left cleanly: it holds no unsaved state (under claim its land is given away when wanted); nothing \
+            "host {retired} left cleanly: it holds no unsaved state (under claim its land is given away when wanted); nothing \
              to retire"
         )),
         Some((false, _)) => None,
     }
 }
 
-/// Why the open succession `s` refuses retiring host `ordinal`, if it does: it names that host
+/// Why the open succession `s` refuses retiring host `retired`, if it does: it names that host
 /// (predecessor or heir), or it is the coordinator's (it has survivors, all gone now).
-pub(crate) fn open_succession_refuses(s: &Succession, ordinal: HostId) -> Option<String> {
+pub(crate) fn open_succession_refuses(s: &Succession, retired: HostId) -> Option<String> {
     let (id, predecessor, heir) = (s.id.0, s.predecessor, s.heir);
-    if predecessor == ordinal || heir == ordinal {
-        let (predecessor, heir, ordinal) = (predecessor.0, heir.0, ordinal.0);
+    if predecessor == retired || heir == retired {
+        let (predecessor, heir, retired) = (predecessor.0, heir.0, retired.0);
         return Some(format!(
-            "the open succession {id} (host {predecessor} → heir {heir}) names host {ordinal}: start host {heir} so it \
-             settles, or worldctl rollback"
+            "the open succession {id} (host {predecessor} → heir {heir}) names host {retired}: let it settle (its heir, \
+             host {heir}, attached and adopted), or worldctl rollback"
         ));
     }
     if !s.survivors.is_empty() {
@@ -170,10 +173,10 @@ async fn operator_error(pool: &PgPool, what: &str, e: DeclareError, lock_timeout
 }
 
 /// [`crate::StoreHandle::retire_offline`] (Postgres): see the module docs for the locks.
-pub(crate) async fn retire_offline(pool: &PgPool, ordinal: HostId, lock_timeout_ms: u64, lease_ms: u64) -> Result<Retired, StoreError> {
+pub(crate) async fn retire_offline(pool: &PgPool, retired: HostId, lock_timeout_ms: u64, lease_ms: u64) -> Result<Retired, StoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
-    let retired = retire_in(&mut tx, ordinal, lease_ms).await;
+    let retired = retire_in(&mut tx, retired, lease_ms).await;
     match retired {
         Ok(Retired::Opened(s)) => {
             tx.commit().await.map_err(|e| declare_error(RETIRING, e, lock_timeout_ms))?;
@@ -201,7 +204,7 @@ pub(crate) async fn retire_offline(pool: &PgPool, ordinal: HostId, lock_timeout_
 }
 
 /// [`retire_offline`]'s statements inside `tx`; anything but `Opened` is rolled back.
-async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) -> Result<Retired, DeclareError> {
+async fn retire_in(tx: &mut sqlx::PgConnection, retired: HostId, lease_ms: u64) -> Result<Retired, DeclareError> {
     // 1. The world row: serialised with every declaration, registration, rollback, decision.
     let stored = lock_world(&mut *tx).await?;
     // 2. Every `hosts` row, in id order (the declaration's order): a beat waits for this
@@ -225,8 +228,8 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
     if !running.is_empty() {
         return Ok(Retired::Running(running));
     }
-    let mine = hosts.iter().find(|h| h.0 == ordinal);
-    if let Some(why) = not_retirable(ordinal, mine.map(|h| (h.2, h.3))) {
+    let mine = hosts.iter().find(|h| h.0 == retired);
+    if let Some(why) = not_retirable(retired, mine.map(|h| (h.2, h.3))) {
         return Ok(Retired::Refused(why));
     }
     let boot = mine.expect("checked above").1;
@@ -246,12 +249,14 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
             moved: Vec::new(),
             survivors: crate::succession::decode_survivors(id as u64, &survivors)?,
         };
-        if let Some(why) = open_succession_refuses(&s, ordinal) {
+        if let Some(why) = open_succession_refuses(&s, retired) {
             return Ok(Retired::Refused(why));
         }
     }
-    // 4. The heir: the lowest other ordinal with a live row (dirty or clean: its next boot inherits).
-    let Some(heir) = hosts.iter().filter(|h| h.0 != ordinal && h.3 == HOST_LIVE).map(|h| h.0).min() else {
+    // 4. The heir: the lowest other live-row id (dirty or clean). Elastic 1: a restarted process
+    // is a new host, so that id may never attach again; the next registration then finds
+    // nobody alive and its total-crash rule abandons this succession and takes the land.
+    let Some(heir) = hosts.iter().filter(|h| h.0 != retired && h.3 == HOST_LIVE).map(|h| h.0).min() else {
         return Ok(Retired::NoHeir);
     };
     let base_cut: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(cut_id), 0) FROM cut_decisions WHERE committed = 1")
@@ -262,17 +267,17 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
     sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(i(stored + 1)).execute(&mut *tx).await?;
     // 6. As a declaration: the row dead, the land moved (key order, then the claim itself).
     sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"))
-        .bind(i(ordinal.0))
+        .bind(i(retired.0))
         .bind(i(boot))
         .execute(&mut *tx)
         .await?;
     sqlx::query("SELECT 1 FROM super_regions WHERE owner = $1 ORDER BY sx, sz FOR NO KEY UPDATE")
-        .bind(i(ordinal.0))
+        .bind(i(retired.0))
         .execute(&mut *tx)
         .await?;
     let rows = sqlx::query("UPDATE super_regions SET owner = $1, epoch = epoch + 1 WHERE owner = $2 RETURNING sx, sz, epoch")
         .bind(i(heir.0))
-        .bind(i(ordinal.0))
+        .bind(i(retired.0))
         .fetch_all(&mut *tx)
         .await?;
     let mut moved = Vec::with_capacity(rows.len());
@@ -291,7 +296,7 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
          declared_utc, survivors, moved) VALUES ($1, $2, $3, $4, $5, $6, NULL, 0, $7, '', $8)",
     )
     .bind(id)
-    .bind(i(ordinal.0))
+    .bind(i(retired.0))
     .bind(i(boot))
     .bind(i(heir.0))
     .bind(SuccessionKind::Crash.code())
@@ -302,7 +307,7 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
     .await?;
     Ok(Retired::Opened(Succession {
         id: SuccessionId(id as u64),
-        predecessor: ordinal,
+        predecessor: retired,
         predecessor_boot: boot,
         heir,
         kind: SuccessionKind::Crash,
@@ -312,28 +317,28 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
     }))
 }
 
-/// [`crate::StoreHandle::vouch_host`] (Postgres): ONE statement over host `ordinal`'s row
+/// [`crate::StoreHandle::vouch_host`] (Postgres): ONE statement over host `retired`'s row
 /// (its row lock; a heartbeat either commits first — then the row is fresh and nothing is
 /// written — or overwrites the vouch after, which the declaration's lapse re-check sees).
-pub(crate) async fn vouch_host(pool: &PgPool, ordinal: HostId, lease_ms: u64, lock_timeout_ms: u64) -> Result<Vouched, StoreError> {
+pub(crate) async fn vouch_host(pool: &PgPool, retired: HostId, lease_ms: u64, lock_timeout_ms: u64) -> Result<Vouched, StoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
     let done = sqlx::query(&format!(
         "UPDATE hosts SET seen_ms = 0 WHERE id = $1 AND clean = 0 AND state = {HOST_LIVE} \
          AND (seen_ms = 0 OR {PG_NOW_MS} - seen_ms > $2)"
     ))
-    .bind(i(ordinal.0))
+    .bind(i(retired.0))
     .bind(i(lease_ms))
     .execute(&mut *tx)
     .await?
     .rows_affected();
     if done == 1 {
         tx.commit().await?;
-        log::warn!("[world-store] the operator vouched for host {ordinal}'s death (seen_ms = 0)");
+        log::warn!("[world-store] the operator vouched for host {retired}'s death (seen_ms = 0)");
         return Ok(Vouched::Vouched);
     }
     let row = sqlx::query("SELECT clean, state FROM hosts WHERE id = $1")
-        .bind(i(ordinal.0))
+        .bind(i(retired.0))
         .fetch_optional(&mut *tx)
         .await?;
     tx.rollback().await?;
@@ -341,7 +346,7 @@ pub(crate) async fn vouch_host(pool: &PgPool, ordinal: HostId, lease_ms: u64, lo
         Some(r) => Some((r.try_get::<i64, _>(0)? != 0, r.try_get::<i64, _>(1)?)),
         None => None,
     };
-    Ok(match not_retirable(ordinal, row) {
+    Ok(match not_retirable(retired, row) {
         Some(why) => Vouched::Refused(why),
         None => Vouched::Running,
     })

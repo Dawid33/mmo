@@ -247,7 +247,7 @@ fn retire_refuses_a_heartbeating_host() {
     assert!(err.contains("host 1 is running: stop it first"), "{err}");
     for (list, want) in [
         (vec!["retire-host", &url, "7"], "no hosts row"),
-        (vec!["retire-host", &url, "x"], "ordinal"),
+        (vec!["retire-host", &url, "x"], "not a host id"),
         (vec!["retire-host", &url], "usage"),
     ] {
         let err = said(&url, &list).expect_err("refused");
@@ -367,7 +367,7 @@ fn retire_offline_with_no_other_host_is_refused() {
     lapse_all(&w);
     let err = said(&url, &["retire-host", &url, "1"]).expect_err("nobody to inherit");
     assert!(
-        err.contains("nothing to give host 1's land to: start a host of another ordinal once, or start host 1"),
+        err.contains("nothing to give host 1's land to (no other hosts row): start a host"),
         "{err}"
     );
     assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
@@ -380,6 +380,56 @@ fn retire_offline_with_no_other_host_is_refused() {
     let err = ctl::run(&args(&["retire-host", db.to_str().unwrap(), "1"])).expect_err("SQLite");
     assert!(err.contains("Postgres"), "{err}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---- Elastic 1 Task 5: host ids, not ordinals ---------------------------------------------
+
+/// `worldctl hosts <url>` prints one line per `hosts` row, by id, in the operator's format:
+/// `<id> <name> <live|dead> <clean|dirty> land=<n> seen=<age ms|vouched> drain=<ms|->`.
+#[test]
+fn hosts_lists_every_row() {
+    let Some(w) = World::new(3) else { return };
+    let url = url_of(&w);
+    // Host 0 left cleanly; host 1 (two super-regions) drains in about a minute; host 2 is vouched.
+    exec(&w.w, "UPDATE hosts SET clean = 1 WHERE id = 0");
+    exec(&w.w, "UPDATE hosts SET drain_at_ms = (extract(epoch from clock_timestamp()) * 1000)::bigint + 60000 WHERE id = 1");
+    w.vouch(hid(2));
+    let out = said(&url, &["hosts", &url]).expect("listed");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "one line per row: {out}");
+    let field = |line: &str, key: &str| -> String {
+        line.split(' ').find_map(|f| f.strip_prefix(key)).unwrap_or_else(|| panic!("{key} in {line}")).to_string()
+    };
+    assert!(lines[0].starts_with("0 host-0 live clean land=1 seen="), "{}", lines[0]);
+    assert!(field(lines[0], "seen=").parse::<u64>().unwrap() < game::HOST_LEASE_MS, "{}", lines[0]);
+    assert!(lines[0].ends_with(" drain=-"), "{}", lines[0]);
+    assert!(lines[1].starts_with("1 host-1 live dirty land=2 seen="), "{}", lines[1]);
+    let drain: i64 = field(lines[1], "drain=").parse().unwrap();
+    assert!((50_000..=60_000).contains(&drain), "{}", lines[1]);
+    assert_eq!(lines[2], "2 host-2 live dirty land=1 seen=vouched drain=-");
+    let err = said(&url, &["hosts"]).expect_err("no url");
+    assert!(err.contains("usage"), "{err}");
+    w.shutdown();
+}
+
+/// `retire-host` takes a host id as `worldctl hosts` lists it — any issued id, no count bounds
+/// it (here 41) — and a bad one is refused naming the listing.
+#[test]
+fn retire_host_takes_an_id() {
+    let Some(w) = World::new(2) else { return };
+    let url = url_of(&w);
+    exec(&w.w, "UPDATE world SET next_host_id = 41");
+    let late = open(&w.w.url);
+    let registered = late.register_host(crate::hosts::new_host("host-41", 4141), game::CrashPolicy::Succession).unwrap();
+    assert_eq!(registered.id, hid(41));
+    w.lapse(hid(41));
+    let out = said(&url, &["retire-host", &url, "41"]).expect("vouched");
+    assert!(out.contains("host 41") && out.contains("vouched"), "{out}");
+    assert!(said(&url, &["hosts", &url]).unwrap().lines().any(|l| l.starts_with("41 host-41 live dirty land=0 seen=vouched")));
+    let err = said(&url, &["retire-host", &url, "h41"]).expect_err("the Display form is not an id");
+    assert!(err.contains("not a host id") && err.contains("worldctl hosts"), "{err}");
+    late.shutdown();
+    w.shutdown();
 }
 
 /// `rollback` is refused without `--yes`; with it the world generation goes up exactly once,
