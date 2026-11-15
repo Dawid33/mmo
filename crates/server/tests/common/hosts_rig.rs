@@ -656,10 +656,15 @@ fn decisions(db: &PgDb) -> Vec<(i64, i64, bool)> {
     ids.into_iter().zip(ticks).zip(committed).map(|((c, t), k)| (c, t, k != 0)).collect()
 }
 
+/// The world id of the rig's service links (`VOXEL_WORLD_ID`): the coordinator's listeners,
+/// the hosts' coordinator hellos and the login service's (its registry row's `world_id`) all
+/// name it, so a real login service's hello is admitted.
+const RIG_WORLD: &str = "hosts";
+
 /// Host `ordinal`'s link to the coordinator at `addr` (its pin in `cert_file`), its hello
 /// carrying the host's registration number `reg`.
 fn quic_world_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, boot: u64, reg: u64) -> server::roles::QuicWorldLink {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg }, "");
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg }, RIG_WORLD);
     server::roles::QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_HOSTS_TEST_UNSET_PIN", &cert_file), hello)
 }
 
@@ -806,7 +811,7 @@ fn listening_coordinator(
         fenced,
         Some(cuts),
         policy,
-        "",
+        RIG_WORLD,
         Some(login),
     )
     .expect("the coordinator listens")

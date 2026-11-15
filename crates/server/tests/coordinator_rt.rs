@@ -639,6 +639,8 @@ fn a_host_peer_on_the_login_listener_is_closed() {
         Err(_) => {}
         Ok(other) => panic!("no host attached: nothing answers, the link stays up — got {other:?}"),
     }
+    let want = coordinator_rt::LoginCounts { orders: 1, orders_dropped: 1, ends_dropped: 0 };
+    assert_eq!(listening.login_counts(), Some(want), "received, and counted as dropped: no gate host");
     assert_eq!(listening.thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);

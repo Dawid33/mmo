@@ -1354,7 +1354,7 @@ struct LoginWorld {
 
 /// The login service's link to the coordinator at `at` (its pin), up.
 fn dial_login(at: &(std::net::SocketAddr, String)) -> Login {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login, "");
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login, RIG_WORLD);
     let (tx, events) = svc_link::LinkDialer::connect::<HostToLogin, LoginToHost>(at.0, at.1.clone(), hello);
     match events.recv_timeout(WAIT) {
         Ok(svc_link::LinkEvent::Up(_)) => {}
@@ -1620,7 +1620,7 @@ fn kick_reaches_a_session_on_a_non_entry_host_and_is_acked_once() {
     w.stop(&dir);
 }
 
-/// The host holding a player's record region cannot be reached: the entry host refuses the
+/// The host holding a player's record region cannot be reached: the gate host refuses the
 /// spawn order (the login service answers 503 `world_unavailable`).
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
@@ -1634,23 +1634,36 @@ fn spawn_for_an_unreachable_owner_is_refused() {
     // Host 1 is gone: its manager, its links and its coordinator link.
     kill_host(&mut w.w, h(1));
     w.w.pair.until("host 0 no longer reaches host 1", |p| !p.sims[0].manager.reaches(b1));
-    let ack = w.join(&token, 1);
-    assert_eq!(ack_quic(&ack), (false, None), "refused");
-    assert!(w.orders(h(0)).pending().by_token.is_empty(), "nothing ordered on host 0");
-    // The login service itself, over its own link to host 0: the join answers 503.
-    let (status, code) = login_join(&mut w, &token);
+    // The login service itself, over its own link to the coordinator, which relays to the
+    // gate (host 0): the gate refuses and the join answers 503 — on the refusal, well before
+    // the ack timeout (not by timing out on a link that never came up: `login_join` asserts
+    // the coordinator's login listener received the order).
+    let (status, code, took) = login_join(&mut w, &token);
     assert_eq!(status, 503);
     assert_eq!(code, login_api::ApiErrorCode::WorldUnavailable);
+    assert!(
+        took < Duration::from_millis(login_api::SPAWN_ACK_TIMEOUT_MS),
+        "answered by the gate's refusal, not the ack timeout ({took:?})"
+    );
+    assert!(w.orders(h(0)).pending().by_token.is_empty(), "nothing ordered on host 0");
+    // The same, hand-dialled at the coordinator (a later epoch): refused, nothing ordered.
+    let ack = w.join(&token, 2);
+    assert_eq!(ack_quic(&ack), (false, None), "refused");
     assert!(w.orders(h(0)).pending().by_token.is_empty(), "nothing ordered on host 0");
     w.stop(&dir);
 }
 
 /// A real login service (its HTTP API in-process, an in-memory store, its own link to the
-/// entry host) joins the account that owns `token` to the world while the hosts run round
-/// by round: the join's HTTP status and, for a failure, its error code.
-fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode) {
+/// coordinator's login listener, its hello naming the registry row's world — the rig's
+/// [`RIG_WORLD`], so it is admitted) joins the account that owns `token` to the world while
+/// the hosts run round by round: the join's HTTP status and body, and how long it took. It
+/// asserts the coordinator's login listener received the order (the link really came up:
+/// a join must never pass by timing out on a link that was refused).
+fn login_join_raw(w: &mut LoginWorld, token: &str) -> (u16, Vec<u8>, Duration) {
     use tower::ServiceExt;
-    const WORLD: &str = "hosts";
+    const WORLD: &str = RIG_WORLD;
+    let orders_before = w.w.coordinator.as_ref().unwrap().login_counts().expect("a login listener").orders;
+    let started = Instant::now();
     const NOW: u64 = 1_800_000_000;
     let (addr, pin) = (w.login_at.0.to_string(), w.login_at.1.clone());
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
@@ -1693,17 +1706,46 @@ fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode)
         let resp = login::router(state).oneshot(req).await.unwrap();
         let status = resp.status().as_u16();
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-        let err: login_api::ApiError = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{e}: {bytes:?}"));
-        (status, err.code)
+        (status, bytes.to_vec())
     });
     let deadline = Instant::now() + WAIT;
     while !joined.is_finished() {
         assert!(Instant::now() < deadline, "the join never answered");
         w.rounds(1);
     }
-    let out = rt.block_on(joined).unwrap();
+    let (status, bytes) = rt.block_on(joined).unwrap();
+    let took = started.elapsed();
     drop(rt);
-    out
+    let counts = w.w.coordinator.as_ref().unwrap().login_counts().unwrap();
+    assert!(counts.orders > orders_before, "the coordinator's login listener received the login service's order: {counts:?}");
+    (status, bytes, took)
+}
+
+/// [`login_join_raw`] that failed: its HTTP status and error code, and how long it took.
+fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode, Duration) {
+    let (status, bytes, took) = login_join_raw(w, token);
+    let err: login_api::ApiError = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("not an error body ({e}): HTTP {status}, {} bytes", bytes.len()));
+    (status, err.code, took)
+}
+
+/// The positive counterpart of `spawn_for_an_unreachable_owner_is_refused`: the real login
+/// service's HTTP join through the coordinator relay succeeds (200) with a ticket naming the
+/// host that took the order (the gate, host 0: the player's record is in its land).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_real_login_join_through_the_coordinator_names_the_placing_host() {
+    install_props();
+    let Some(db) = PgDb::create("lhttp") else { return };
+    let dir = scratch("lhttp");
+    let mut w = login_hosts(&db, &dir);
+    let (a0, _) = sides(w.w.seam, h(0), &w);
+    let token = w.player(9, PlayerId(912), Some(a0));
+    let (status, bytes, _) = login_join_raw(&mut w, &token);
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+    let joined: login_api::JoinResponse = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(joined.ticket.quic, endpoint(h(0)).quic, "the ticket names host 0, not the world row");
+    assert!(w.orders(h(0)).pending().by_token.contains_key(&token), "host 0 holds the pending spawn");
+    w.stop(&dir);
 }
 
 /// A host that left cleanly (a committed leave cut, its row clean) is what a booting host

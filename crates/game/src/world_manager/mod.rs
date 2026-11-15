@@ -750,6 +750,9 @@ pub struct ManagerDepths {
     /// State messages addressed to a forgotten host that no path could take, since start
     /// ([`WorldManager::peer_state_to_forgotten`]: a bug, each logged as an error).
     pub peer_state_to_forgotten: u64,
+    /// Login session ends dropped past [`LOGIN_ENDS_QUEUED_MAX`] while the coordinator link was
+    /// down, since the manager started ([`WorldLinkCounters::login_ends_dropped`]).
+    pub login_ends_dropped: u64,
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// since the manager started ([`WorldManager::arrivals_despawned`]).
     pub arrivals_despawned: u64,
@@ -3928,6 +3931,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             succession_seam_events: self.succession_seam_events(),
             peer_dropped_for_dead: self.peer_dropped_for_dead,
             peer_state_to_forgotten: self.peer_state_to_forgotten,
+            login_ends_dropped: self.world_counters.login_ends_dropped,
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),

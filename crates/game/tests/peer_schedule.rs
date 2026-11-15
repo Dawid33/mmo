@@ -9723,3 +9723,71 @@ fn session_end_waits_for_the_coordinator_link(rig: &mut MultiRig) {
 fn a_session_end_waits_for_the_coordinator_link() {
     sweep("a_session_end_waits_for_the_coordinator_link", 2, 1, SEEDS / 4, session_end_waits_for_the_coordinator_link);
 }
+
+/// Fix round 1 (M5): the gate host relays a login's order to the owner of the player's record
+/// region; the owner takes it (records epoch 1, pins the player for its session) and answers —
+/// and the gate dies before that answer is sent up its link. The login service gets no ack; the
+/// client's retry (epoch 2) goes through the gate of its moment, a survivor, and is placed. After
+/// the succession settles the player has exactly one body and one stored record.
+fn gate_dies_after_relaying(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    rig.parked_hold = true;
+    let gate = rig.core().gate_host().expect("a gate host");
+    let ro = chain.iter().copied().find(|rc| rig.owner(*rc) != gate).expect("a region the gate does not own");
+    let owner = rig.owner(ro);
+    let roster = GateRoster::from([(LOGIN_TOKEN.to_string(), (FRESH_PLAYER, ro))]);
+    until_committed(rig, 1);
+    let mut heard = Vec::new();
+    assert_eq!(order_at_gate(rig, game::LoginOrder::Spawn { player_token: LOGIN_TOKEN.into(), session_epoch: 1 }), Some(gate));
+    let mut taken = Vec::new();
+    for _ in 0..CROSS_ROUNDS {
+        taken.extend(gate_round(rig, &roster, &mut heard));
+        if !taken.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [owner], "the owner took the relayed order");
+    assert!(!heard.iter().any(spawn_ack_of(1)), "no ack has gone up the gate's link yet: {heard:?}");
+    // The gate dies with the owner's answer on its way to it (or held, unsent).
+    rig.kill(gate);
+    let succession = rig.run_succession(gate).remove(0);
+    until_applied(rig, &succession);
+    rig.with_adoption();
+    for _ in 0..WAIT_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+    }
+    assert!(!heard.iter().any(spawn_ack_of(1)), "the dead gate's order is never answered: {heard:?}");
+    let retry_gate = order_at_gate(rig, game::LoginOrder::Spawn { player_token: LOGIN_TOKEN.into(), session_epoch: 2 });
+    assert!(retry_gate.is_some_and(|g| g != gate), "the retry goes to a live host: {retry_gate:?}");
+    let mut taken = Vec::new();
+    for _ in 0..SUCCESSION_ROUNDS {
+        taken.extend(gate_round(rig, &roster, &mut heard));
+        if heard.iter().any(spawn_ack_of(2)) {
+            break;
+        }
+    }
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [owner], "the owner took the retry");
+    let want = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: true, endpoint: Some(rig_endpoint(owner)) };
+    let acks: Vec<&game::LoginOut> = heard.iter().filter(|o| matches!(o, game::LoginOut::SpawnAck { .. })).collect();
+    assert_eq!(acks, [&want], "one acknowledgement, of the retry, naming the owner");
+    rig.connect_login(owner, NEW_LOGIN_CLIENT, FRESH_PLAYER, Some(centre_of(ro)), LOGIN_TOKEN, 2);
+    let mut bodies = 0;
+    for _ in 0..SUCCESSION_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+        bodies = rig.player_owners(NEW_LOGIN_CLIENT).len();
+        if bodies == 1 {
+            break;
+        }
+    }
+    assert_eq!(bodies, 1, "one body");
+    assert_eq!(rig.player_owners(NEW_LOGIN_CLIENT), [(owner, ro)]);
+    assert_settled_whole(rig, &succession, &[]);
+    until_committed(rig, 1);
+    assert_player_once(rig, FRESH_PLAYER);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_gate_host_dying_after_relaying_an_order_places_the_retry_once() {
+    sweep_hosts("a_gate_host_dying_after_relaying_an_order_places_the_retry_once", gate_dies_after_relaying);
+}

@@ -138,10 +138,11 @@ pub struct LinkSet {
     login: Option<LoginSide>,
 }
 
-/// At most this many `SessionEnded` wait at the coordinator while no login service is linked
-/// (an ack is not kept: the login service resends its order or kick); beyond it the oldest is
-/// dropped with a warning (the login service then lists that session as open, as a lost
-/// `SessionEnded` always did).
+/// At most this many `SessionEnded` wait at the coordinator while no login service is KNOWN to
+/// be linked (an ack is not kept: the login service resends its order or kick; one sent onto a
+/// connection that drops right after is lost with it); beyond it the oldest is dropped and
+/// counted ([`LoginCounts::ends_dropped`]; the login service then lists that session as open,
+/// as a lost `SessionEnded` always did).
 pub const LOGIN_ENDS_HELD_MAX: usize = 4096;
 
 /// Where the coordinator listens for the login service ([`start_listening_as`]): the address
@@ -151,6 +152,37 @@ pub struct LoginListen {
     pub bind: std::net::SocketAddr,
     pub token: String,
     pub cert_hash_file: Option<std::path::PathBuf>,
+}
+
+/// What the coordinator's login relay counted since it started
+/// ([`ListeningCoordinator::login_counts`]); the drops are logged as counts, at most once per
+/// [`WORLD_CUT_RETRY_LOG_MS`], never one line per message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoginCounts {
+    /// Orders of a connected login service received.
+    pub orders: u64,
+    /// Of those, dropped: no gate host attached.
+    pub orders_dropped: u64,
+    /// `SessionEnded` dropped past [`LOGIN_ENDS_HELD_MAX`].
+    pub ends_dropped: u64,
+}
+
+/// [`LoginCounts`], shared with the [`ListeningCoordinator`] handle.
+#[derive(Default)]
+struct LoginTally {
+    orders: std::sync::atomic::AtomicU64,
+    orders_dropped: std::sync::atomic::AtomicU64,
+    ends_dropped: std::sync::atomic::AtomicU64,
+}
+
+impl LoginTally {
+    fn counts(&self) -> LoginCounts {
+        LoginCounts {
+            orders: self.orders.load(Ordering::SeqCst),
+            orders_dropped: self.orders_dropped.load(Ordering::SeqCst),
+            ends_dropped: self.ends_dropped.load(Ordering::SeqCst),
+        }
+    }
 }
 
 /// The coordinator's login listener: every order of a connected login service goes to the
@@ -164,17 +196,34 @@ struct LoginSide {
     peers: BTreeSet<PeerId>,
     /// `SessionEnded` held while no login service is connected ([`LOGIN_ENDS_HELD_MAX`]).
     held: VecDeque<HostToLogin>,
+    tally: Arc<LoginTally>,
+    /// The drops as last logged, and when ([`Self::report`]).
+    logged: LoginCounts,
+    logged_ms: Option<u64>,
 }
 
 impl LoginSide {
+    fn new(listener: LinkListener, events: Receiver<(PeerId, LinkEvent<LoginToHost>)>, senders: PeerSenders<HostToLogin>) -> Self {
+        LoginSide {
+            listener: Some(listener),
+            events,
+            senders,
+            peers: BTreeSet::new(),
+            held: VecDeque::new(),
+            tally: Arc::default(),
+            logged: LoginCounts::default(),
+            logged_ms: None,
+        }
+    }
+
     /// `msg` to every connected login service; none: a `SessionEnded` is held, an ack dropped.
     fn tell(&mut self, msg: HostToLogin) {
         if self.peers.is_empty() {
             match msg {
                 HostToLogin::SessionEnded { .. } => {
                     if self.held.len() >= LOGIN_ENDS_HELD_MAX {
-                        log::warn!("[coordinator] {LOGIN_ENDS_HELD_MAX} login session ends held for the login service; the oldest is dropped");
                         self.held.pop_front();
+                        self.tally.ends_dropped.fetch_add(1, Ordering::SeqCst);
                     }
                     self.held.push_back(msg);
                 }
@@ -186,6 +235,26 @@ impl LoginSide {
         for peer in &self.peers {
             self.senders.send(*peer, msg.clone());
         }
+    }
+
+    /// The drops since the last report, as one warning, at most once per
+    /// [`WORLD_CUT_RETRY_LOG_MS`] (`now_ms`).
+    fn report(&mut self, now_ms: u64) {
+        let c = self.tally.counts();
+        let new = (c.orders_dropped - self.logged.orders_dropped, c.ends_dropped - self.logged.ends_dropped);
+        if new == (0, 0) || self.logged_ms.is_some_and(|at| now_ms < at + WORLD_CUT_RETRY_LOG_MS) {
+            return;
+        }
+        log::warn!(
+            "[coordinator] login relay: {} orders dropped with no host attached (the login service answers 503), {} session \
+             ends dropped past {LOGIN_ENDS_HELD_MAX} held, since the last report (total {} / {})",
+            new.0,
+            new.1,
+            c.orders_dropped,
+            c.ends_dropped
+        );
+        self.logged = c;
+        self.logged_ms = Some(now_ms);
     }
 }
 
@@ -743,6 +812,14 @@ pub struct ListeningCoordinator {
     /// Where the login service dials and with which pin (the registry's `host_link` /
     /// `host_link_cert`), if it listens for one ([`LoginListen`]).
     pub login: Option<(std::net::SocketAddr, String)>,
+    login_tally: Option<Arc<LoginTally>>,
+}
+
+impl ListeningCoordinator {
+    /// What its login relay counted so far (`None`: it does not listen for the login service).
+    pub fn login_counts(&self) -> Option<LoginCounts> {
+        self.login_tally.as_ref().map(|t| t.counts())
+    }
 }
 
 /// The coordinator for a `VOXEL_ROLE=coordinator` process (its row claimed before its
@@ -806,11 +883,12 @@ pub fn start_listening_as(
                 listener.cert_sha256(),
                 l.cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
             );
-            Some(LoginSide { listener: Some(listener), events, senders, peers: BTreeSet::new(), held: VecDeque::new() })
+            Some(LoginSide::new(listener, events, senders))
         }
         None => None,
     };
     let login_at = login.as_ref().and_then(|l| l.listener.as_ref()).map(|l| (l.local_addr(), l.cert_sha256().to_string()));
+    let login_tally = login.as_ref().map(|l| l.tally.clone());
     let (listener, events, senders) =
         LinkListener::bind::<HostMsg, CoordMsg>(bind, token, world.to_string(), cert_hash_file.clone())
             .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
@@ -824,7 +902,7 @@ pub fn start_listening_as(
     let mut links = LinkSet::listener(listener, events, senders);
     links.login = login;
     let thread = CoordinatorRuntime::spawn_as(store, start, links, fenced, cuts, policy);
-    Ok(ListeningCoordinator { thread, addr, cert_sha256, login: login_at })
+    Ok(ListeningCoordinator { thread, addr, cert_sha256, login: login_at, login_tally })
 }
 
 /// The coordinator core with its store and fence (see the module docs).
@@ -1026,7 +1104,7 @@ impl CoordinatorRuntime {
                 health.loop_beat();
             }
             self.drain_hosts(now);
-            self.drain_login();
+            self.drain_login(now);
             #[cfg(feature = "test-hooks")]
             for f in inspect.try_iter() {
                 f(&mut self.core);
@@ -1199,7 +1277,7 @@ impl CoordinatorRuntime {
     /// moment ([`Coordinator::login_order`]) or, with none, is dropped (the login service
     /// answers 503 at its ack timeout and the client retries; a kick is resent). Only a peer
     /// whose hello said `PeerRole::Login` is served; any other is closed.
-    fn drain_login(&mut self) {
+    fn drain_login(&mut self, now: u64) {
         let Some(login) = self.links.login.as_mut() else { return };
         let mut relay = Vec::new();
         while let Ok((peer, event)) = login.events.try_recv() {
@@ -1224,18 +1302,19 @@ impl CoordinatorRuntime {
                     }
                 }
                 LinkEvent::Msg(msg) if login.peers.contains(&peer) => {
-                    let order = crate::login_link::order_from(msg);
-                    let epoch = order.session_epoch();
-                    match self.core.login_order(order) {
+                    login.tally.orders.fetch_add(1, Ordering::SeqCst);
+                    match self.core.login_order(crate::login_link::order_from(msg)) {
                         Some((gate, msg)) => relay.push((Target::Host(gate), msg)),
-                        None => log::warn!(
-                            "[coordinator] a login order (epoch {epoch}) and no host attached to take it: dropped (the login service answers 503)"
-                        ),
+                        // Counted; reported once per period below.
+                        None => {
+                            login.tally.orders_dropped.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
                 }
                 LinkEvent::Msg(_) => log::warn!("[coordinator] a message from login link peer {} that is not the login service: ignored", peer.0),
             }
         }
+        login.report(now);
         self.send(relay);
     }
 
@@ -1807,7 +1886,7 @@ mod tests {
     fn session_ends_wait_for_the_login_service_and_acks_do_not() {
         let (listener, events, senders) =
             LinkListener::bind::<LoginToHost, HostToLogin>("127.0.0.1:0".parse().unwrap(), "t".into(), String::new(), None).unwrap();
-        let mut login = LoginSide { listener: Some(listener), events, senders, peers: BTreeSet::new(), held: VecDeque::new() };
+        let mut login = LoginSide::new(listener, events, senders);
         let ended = |epoch| HostToLogin::SessionEnded { player_token: "tok".into(), session_epoch: epoch };
         login.tell(HostToLogin::KickAck { player_token: "tok".into(), session_epoch: 1 });
         login.tell(HostToLogin::SpawnAck { player_token: "tok".into(), session_epoch: 1, ok: true, quic: None, webtransport: None, cert_hash: None });
@@ -1818,11 +1897,23 @@ mod tests {
         assert_eq!(login.held.len(), LOGIN_ENDS_HELD_MAX, "bounded");
         assert_eq!(login.held.front(), Some(&ended(1)), "the oldest went");
         assert_eq!(login.held.back(), Some(&ended(LOGIN_ENDS_HELD_MAX as u64)));
+        assert_eq!(login.tally.counts(), LoginCounts { orders: 0, orders_dropped: 0, ends_dropped: 1 }, "counted, not logged one by one");
+        // Reported once per period: the first report takes the count; until the period ends
+        // nothing more is said, whatever is dropped.
+        login.report(1_000);
+        assert_eq!((login.logged, login.logged_ms), (login.tally.counts(), Some(1_000)));
+        login.tell(ended(LOGIN_ENDS_HELD_MAX as u64 + 1));
+        login.report(1_000 + WORLD_CUT_RETRY_LOG_MS - 1);
+        assert_eq!(login.logged.ends_dropped, 1, "not within the period");
+        login.report(1_000 + WORLD_CUT_RETRY_LOG_MS);
+        assert_eq!(login.logged.ends_dropped, 2, "the next period reports the new drop");
+        assert_eq!(login.held.back(), Some(&ended(LOGIN_ENDS_HELD_MAX as u64 + 1)), "the newest is kept");
         // A linked login service (a peer id the senders do not know is simply not reached):
         // nothing more is held.
         login.peers.insert(PeerId(99));
+        let held = login.held.len();
         login.tell(ended(9_999_999));
-        assert_eq!(login.held.len(), LOGIN_ENDS_HELD_MAX, "sent, not held");
+        assert_eq!(login.held.len(), held, "sent, not held");
         drop(login.listener.take());
     }
 

@@ -18,8 +18,25 @@ pub const WORLD_REQUEST_TIMEOUT_SECS: u64 = 120;
 pub const ATTACH_WAIT_MS: u64 = 2000;
 
 /// At most this many login session ends wait in the outbox while the coordinator link is
-/// down (`HostMsg::Login(SessionEnded)`); beyond it the oldest is dropped with a warning.
+/// KNOWN to be down (`HostMsg::Login(SessionEnded)`; one sent onto a link that drops right
+/// after is lost with it); beyond it the oldest is dropped and counted
+/// ([`WorldLinkCounters::login_ends_dropped`]).
 pub const LOGIN_ENDS_QUEUED_MAX: usize = 4096;
+
+/// Room for one more login message in `outbox` with at most `max` of them queued: the oldest
+/// is removed when `max` are there already. Whether one was dropped.
+fn make_room_for_login_end(outbox: &mut VecDeque<HostMsg>, max: usize) -> bool {
+    if outbox.iter().filter(|m| matches!(m, HostMsg::Login(_))).count() < max {
+        return false;
+    }
+    match outbox.iter().position(|m| matches!(m, HostMsg::Login(_))) {
+        Some(i) => {
+            outbox.remove(i);
+            true
+        }
+        None => false,
+    }
+}
 
 /// A player's world request sent (or queued) to the coordinator and not answered yet.
 #[derive(Debug, Clone)]
@@ -163,6 +180,9 @@ pub struct WorldLinkCounters {
     /// `SpawnPeople` / `Directive`s that arrived between the link going down and the
     /// coordinator's `Attached`: decided before the attach, superseded by it.
     pub stale_dropped: u64,
+    /// Login session ends dropped past [`LOGIN_ENDS_QUEUED_MAX`] while the link was known to
+    /// be down (counted, not logged one by one: the `[server]` line's `login_ends_dropped=`).
+    pub login_ends_dropped: u64,
 }
 
 /// What the world coordinator last told the host of the world
@@ -562,16 +582,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Before one more login session end is queued for the coordinator: at most
-    /// [`LOGIN_ENDS_QUEUED_MAX`] wait, the oldest dropped beyond (as the login service's
-    /// `SessionEnded` was always best effort: a lost one leaves that session listed open).
+    /// [`LOGIN_ENDS_QUEUED_MAX`] wait, the oldest dropped beyond and counted (the login
+    /// service's `SessionEnded` was always best effort: a lost one leaves that session listed
+    /// open). Not logged one by one: the count is in the `[server]` line.
     fn bound_queued_login_ends(&mut self) {
-        let queued = self.outbox.iter().filter(|m| matches!(m, HostMsg::Login(_))).count();
-        if queued < LOGIN_ENDS_QUEUED_MAX {
-            return;
-        }
-        if let Some(i) = self.outbox.iter().position(|m| matches!(m, HostMsg::Login(_))) {
-            log::warn!("world link down: {LOGIN_ENDS_QUEUED_MAX} login session ends queued; the oldest is dropped");
-            self.outbox.remove(i);
+        if make_room_for_login_end(&mut self.outbox, LOGIN_ENDS_QUEUED_MAX) {
+            self.world_counters.login_ends_dropped += 1;
         }
     }
 
@@ -1248,6 +1264,24 @@ mod attach_lists_tests {
     /// also unlisted). The held crossings replay A → C → …, so P must be in A's list,
     /// and in no other; a fallback to C would leave P in no list (the catch-up then
     /// respawns P at A beside a ghost or a second body).
+    /// Fix round 1 (M2): the host's queue of login session ends is bounded; the oldest goes,
+    /// other queued messages stay, and the drop is reported for the count.
+    #[test]
+    fn queued_login_ends_are_bounded_oldest_first() {
+        let end = |e| HostMsg::Login(LoginOut::SessionEnded { player_token: "t".into(), session_epoch: e });
+        let mut outbox: VecDeque<HostMsg> = VecDeque::new();
+        outbox.push_back(HostMsg::LeaveRequest);
+        let mut dropped = 0;
+        for e in 0..5 {
+            if make_room_for_login_end(&mut outbox, 3) {
+                dropped += 1;
+            }
+            outbox.push_back(end(e));
+        }
+        assert_eq!(dropped, 2);
+        assert_eq!(outbox, VecDeque::from([HostMsg::LeaveRequest, end(2), end(3), end(4)]));
+    }
+
     #[test]
     fn multi_hop_through_unlisted_regions_lists_the_first_region_left() {
         let (a, b, c, d) = (rc(1, 0), rc(2, 0), rc(3, 0), rc(4, 0));

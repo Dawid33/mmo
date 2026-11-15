@@ -455,7 +455,7 @@ fn start_login(db: &PgDb, at: (std::net::SocketAddr, String), n: u32) -> LoginSi
         let (tx, rx) = unbounded();
         events_of.insert(h, (Arc::new(SpawnOrders::new(server::auth_edge::system_clock())), tx, rx));
     }
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login, "");
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login, RIG_WORLD);
     let (tx, events) = svc_link::LinkDialer::connect::<HostToLogin, LoginToHost>(at.0, at.1, hello);
     match events.recv_timeout(WAIT) {
         Ok(svc_link::LinkEvent::Up(_)) => {}
