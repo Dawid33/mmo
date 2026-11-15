@@ -959,12 +959,12 @@ pg-psql *args:
 
 # ---- Dev Keycloak (deploy/dev) ---------------------------------------------
 
-# Start the dev Keycloak on 127.0.0.1:8180 (admin / admin) and wait until it is healthy.
+# Start the dev Keycloak on 127.0.0.1:8181 (8180 is orion's port-forward, `orion-keycloak-admin`) (admin / admin) and wait until it is healthy.
 # Realm `players` from deploy/dev/keycloak/players-realm.json, login theme website/theme/orion.
 # Its mail (email verification, password reset) lands in mailpit: http://127.0.0.1:8025.
 kc-up:
     docker compose -f deploy/dev/compose.yml up -d --wait keycloak
-    @echo "dev issuer: http://127.0.0.1:8180/realms/players"
+    @echo "dev issuer: http://127.0.0.1:8181/realms/players"
     @echo "dev mail:   http://127.0.0.1:8025"
 
 # Stop and remove the dev Keycloak and its mailpit, so the next `kc-up` imports the realm file again.
@@ -1064,7 +1064,7 @@ dev_email := "dev@localhost"
 # The dev Keycloak's realm (`just kc-up`): what the login service started by `dev-login`, `dev-r2`
 # and `dev-r3` trusts for player logins (`VOXEL_OIDC_ISSUER`). The audience (`mmo-login`) and the
 # client (`game`) are the login service's defaults and the realm file's `game` client.
-dev_oidc_issuer := "http://127.0.0.1:8180/realms/players"
+dev_oidc_issuer := "http://127.0.0.1:8181/realms/players"
 
 # How long `run-online` waits for the login service and the server to come up.
 online_wait_secs := "180"

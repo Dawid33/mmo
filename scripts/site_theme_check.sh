@@ -10,12 +10,12 @@
 # Pages: login, register (prompt=create), reset password, error (a foreign redirect_uri:
 # HTTP 400), device code, update password (logs in as `dev` first).
 #
-# Env: KC (http://127.0.0.1:8180), SITE (http://127.0.0.1:8182: redirect URI and brand link),
+# Env: KC (http://127.0.0.1:8181), SITE (http://127.0.0.1:8182: redirect URI and brand link),
 #      SKIP_LOGIN=1 skips the update-password page (a server without the `dev` user).
 # Prints `OK <page>` / `FAIL <page>: <why>` per page; exit 0 only if every page is OK.
 set -uo pipefail
 
-KC="${KC:-http://127.0.0.1:8180}"
+KC="${KC:-http://127.0.0.1:8181}"
 SITE="${SITE:-http://127.0.0.1:8182}"
 SKIP_LOGIN="${SKIP_LOGIN:-0}"
 REALM="$KC/realms/players"

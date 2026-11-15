@@ -3,7 +3,7 @@ const local = ["127.0.0.1", "localhost"].includes(location.hostname);
 
 export const CONFIG = {
   issuer: local
-    ? "http://127.0.0.1:8180/realms/players"
+    ? "http://127.0.0.1:8181/realms/players"
     : "https://auth.errantry.renownandruin.com/realms/players",
   clientId: "site",
   siteUrl: local ? "http://127.0.0.1:8182" : "https://www.errantry.renownandruin.com",

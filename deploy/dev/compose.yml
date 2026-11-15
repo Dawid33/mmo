@@ -41,7 +41,7 @@ services:
       # The login theme's brand link (theme.properties: siteUrl=${env.ORION_SITE_URL}).
       ORION_SITE_URL: http://127.0.0.1:8182
     ports:
-      - "127.0.0.1:8180:8080"
+      - "127.0.0.1:8181:8080"
     volumes:
       - ./keycloak/players-realm.json:/opt/keycloak/data/import/players-realm.json:ro
       # start-dev caches no themes: edits under website/theme/orion show on reload.
