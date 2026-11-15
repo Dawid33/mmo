@@ -67,14 +67,14 @@ fn join_only_menu_joins_the_typed_server() {
     overlay.ui().on_new_world(move || n.set(n.get() + 1));
     let (nx, ny) = (overlay.ui().get_new_button_x(), overlay.ui().get_new_button_y());
     overlay.ui().set_join_only(true);
-    overlay.ui().set_server_address("orion.factoriosurvivalworld.com".into());
+    overlay.ui().set_server_address("game.errantry.renownandruin.com".into());
     overlay.render();
 
     click(&mut overlay, nx, ny);
     assert_eq!(new.get(), 0, "New world is gone from the browser's menu");
     let (x, y) = (overlay.ui().get_join_button_x(), overlay.ui().get_join_button_y());
     click(&mut overlay, x, y);
-    assert_eq!(*joined.borrow(), ["orion.factoriosurvivalworld.com"]);
+    assert_eq!(*joined.borrow(), ["game.errantry.renownandruin.com"]);
 
     overlay.ui().set_server_address("".into());
     overlay.render();

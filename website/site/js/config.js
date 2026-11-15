@@ -8,5 +8,5 @@ export const CONFIG = {
   clientId: "site",
   siteUrl: local ? "http://127.0.0.1:8182" : "https://factoriosurvivalworld.com",
   chatUrl: "https://chat.factoriosurvivalworld.com/accounts/login/social/oidc/keycloak",
-  playUrl: "https://orion.factoriosurvivalworld.com/",
+  playUrl: "https://game.errantry.renownandruin.com/",
 };

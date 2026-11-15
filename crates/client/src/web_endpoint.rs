@@ -2,7 +2,7 @@
 //! the address the player typed on the main menu's Join server row. Pure and
 //! target-independent so it is unit-tested natively.
 //!
-//! - A real hostname (`orion.factoriosurvivalworld.com`, optionally
+//! - A real hostname (`game.errantry.renownandruin.com`, optionally
 //!   `host:port`, a pasted `https://host:port/` is fine too) is a deployment
 //!   (`just deploy`): the game server holds a real certificate for that
 //!   hostname, so the browser connects normally — no hash pinning — to
@@ -258,8 +258,8 @@ mod tests {
 
     #[test]
     fn the_field_prefills_the_built_for_server_then_the_page_host() {
-        let deployed = Some("orion.factoriosurvivalworld.com");
-        assert_eq!(default_server_address(deployed, "http:", "127.0.0.1"), "orion.factoriosurvivalworld.com");
+        let deployed = Some("game.errantry.renownandruin.com");
+        assert_eq!(default_server_address(deployed, "http:", "127.0.0.1"), "game.errantry.renownandruin.com");
         assert_eq!(default_server_address(Some("  "), "https:", "game.example.com"), "game.example.com");
         assert_eq!(default_server_address(None, "https:", "game.example.com"), "game.example.com");
         assert_eq!(default_server_address(None, "http:", "game.example.com"), LOCAL_SERVER_ADDRESS);

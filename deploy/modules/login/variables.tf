@@ -74,7 +74,7 @@ variable "oidc_client_id" {
 variable "cors_origins" {
   description = "Browser origins allowed to call the API (VOXEL_LOGIN_CORS_ORIGINS)."
   type        = list(string)
-  default     = ["https://orion.factoriosurvivalworld.com"]
+  default     = ["https://game.errantry.renownandruin.com"]
 }
 
 variable "postgres_image" {
