@@ -615,6 +615,32 @@ fn stored_once(t: &Takeover, db: &PgDb, id: EntityId, what: &str) {
     assert_eq!(rows.len() + flying, 1, "{what}: {id:?} is stored {} time(s) (rows {rows:?}, in flight {flying})", rows.len() + flying);
 }
 
+/// Whether the last committed cut's store holds `id` as an in-flight transfer under host `h`.
+fn in_flight_under(t: &Takeover, h: HostId, id: EntityId) -> bool {
+    t.w.store.load_in_flight(Some(h)).unwrap().iter().any(|r| matches!(r, game::InFlightRow::Transfer { bundle, .. } if bundle.id == id))
+}
+
+/// A crosser that leaves host `h`'s seam region `from` for a neighbour of it that `h` owns and
+/// does not run: it waits in `h`'s mailbox, so every committed cut from then on holds it as an
+/// in-flight row UNDER `h` (asserted: a test built on it is never vacuous). The crosser and
+/// its target region.
+fn park_in_flight(t: &mut Takeover, db: &PgDb, h: HostId, from: RegionCoords) -> (EntityId, RegionCoords) {
+    let parked = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .map(|(dx, dz)| RegionCoords::new(from.x + dx, from.z + dz))
+        .find(|rc| t.sim(h).manager.owner_of(*rc) == game::Owner::Me && !t.sim(h).manager.running_regions().contains(rc))
+        .expect("a neighbour that the host owns and does not run");
+    let crosser = slime(t, h, from, 3.0);
+    t.rounds(5);
+    assert!(push(t, h, crosser, from, parked), "the crosser is pushed toward {parked:?}");
+    let after = last_committed(db).0;
+    t.until("a committed cut holds the crosser in flight under its host", LONG, |t| {
+        last_committed(db).0 > after && in_flight_under(t, h, crosser)
+    });
+    assert!(t.live(crosser).is_empty(), "in flight, in no running region");
+    (crosser, parked)
+}
+
 // ---- the crash table -------------------------------------------------------------------------
 
 /// Row 1: a host dies between cuts. Its lease lapses, the coordinator declares it, the
@@ -1153,7 +1179,11 @@ fn reboot_of_a_dead_ordinal(dead: HostId, tag: &str) {
     let (s0, s1) = (t.seams[0], t.seams[1]);
     let ids = [slime(&mut t, h(0), s0, 0.0), slime(&mut t, h(1), s1, 0.0)];
     let _ = t.until_committed_after(&db, 0);
+    // Fix round 1: a crosser held IN FLIGHT under the host that dies (its row at the base cut).
+    let from = t.seams[dead.0 as usize];
+    let (crosser, parked) = park_in_flight(&mut t, &db, dead, from);
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
+    assert!(in_flight_under(&t, dead, crosser), "the base cut holds the crosser in flight under {dead}");
     assert!(!t.w.store.owned_by(dead).unwrap().epochs.is_empty(), "host {dead} claimed land");
     t.kill(dead);
     let killed = Instant::now();
@@ -1187,9 +1217,14 @@ fn reboot_of_a_dead_ordinal(dead: HostId, tag: &str) {
     assert!(owners.iter().all(|(_, o, _)| *o == other.0 as i64 || *o == new.0 as i64), "only live ids hold land: {owners:?}");
     assert_eq!(host_row(&db, other).0, other_boot, "host {other} never restarted");
     t.watch(heir, t.seams[dead.0 as usize]);
+    // The heir adopted the dead id's in-flight row: none is left under it, and the crosser
+    // reaches its region on the heir.
+    assert!(t.w.store.load_in_flight(Some(dead)).unwrap().is_empty(), "no row left under {dead}");
+    t.watch(heir, parked);
+    t.until("the crosser landed on the heir", LONG, |t| t.live(crosser) == [(heir, parked)]);
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
-    for id in ids {
+    for id in ids.into_iter().chain([crosser]) {
         assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
         stored_once(&t, &db, id, "after the return");
     }
@@ -1920,8 +1955,13 @@ fn a_registration_after_an_offline_succession_abandons_it_and_takes_the_world() 
     t.until("the crosser arrived on host 0", WAIT, |t| t.live(crosser) == [(h(0), a0)]);
     centre(&mut t, h(0), crosser, a0);
     let ids = [slime(&mut t, h(0), a0, -3.0), slime(&mut t, h(1), b1, -3.0), slime(&mut t, h(1), b1, 3.0), crosser];
+    let _ = t.until_committed_after(&db, 0);
+    // Fix round 1: a crosser held IN FLIGHT under host 1 (its row at the last cut): the total
+    // crash must move it to the first host back, which delivers it.
+    let (flying, parked) = park_in_flight(&mut t, &db, h(1), b1);
     let k = t.until_committed_after(&db, 0);
     let k = t.until_committed_after(&db, k);
+    assert!(in_flight_under(&t, h(1), flying), "the last cut holds the crosser in flight under host 1");
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
     t.kill(h(0));
     t.kill(h(1));
@@ -1953,6 +1993,7 @@ fn a_registration_after_an_offline_succession_abandons_it_and_takes_the_world() 
         assert!(*epoch > before.2, "{sr:?} taken at a higher epoch");
     }
     assert!(t.w.store.load_in_flight(Some(h(1))).unwrap().is_empty(), "no row left under host 1");
+    assert!(in_flight_under(&t, first, flying), "the total crash moved host 1's in-flight row to {first}");
     let second = t.restart(&db, &dir, h(1), 6001);
     assert!(t.w.claims[second.0 as usize].fence().epochs.is_empty(), "the next process owns nothing");
     assert_eq!(t.w.store.world_generation().unwrap(), generation + 2, "not raised again");
@@ -1960,13 +2001,15 @@ fn a_registration_after_an_offline_succession_abandons_it_and_takes_the_world() 
     // Conservation: every slime live once, and stored once from the last cut on.
     t.watch(first, a0);
     t.watch(first, b1);
+    t.watch(first, parked);
     t.until("both seam regions run on the first host back", WAIT, |t| {
         let running = t.sim(first).manager.running_regions();
         running.contains(&a0) && running.contains(&b1)
     });
+    t.until("the in-flight crosser landed on the first host back", LONG, |t| t.live(flying) == [(first, parked)]);
     let after = t.until_committed_after(&db, k);
     let _ = t.until_committed_after(&db, after);
-    for id in ids {
+    for id in ids.into_iter().chain([flying]) {
         assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
         stored_once(&t, &db, id, "after the total crash");
     }
