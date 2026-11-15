@@ -46,6 +46,9 @@ pub const PEER_CERT_HASH_FILE_ENV: &str = "VOXEL_PEER_CERT_HASH_FILE";
 pub const ADVERTISE_QUIC_ENV: &str = "VOXEL_ADVERTISE_QUIC";
 /// Environment: the WebTransport address browsers reach this host at (default: none).
 pub const ADVERTISE_WT_ENV: &str = "VOXEL_ADVERTISE_WT";
+/// Environment: the `ip:port` other hosts dial this host's peer listener at (the `hosts`
+/// row's `peer_addr`). Default: the bound address; required when the bind is a wildcard.
+pub const ADVERTISE_PEER_ENV: &str = "VOXEL_ADVERTISE_PEER";
 /// Environment: hold every outgoing peer frame this many ms (default 0: no queue at all).
 pub const PEER_LINK_DELAY_MS_ENV: &str = "VOXEL_PEER_LINK_DELAY_MS";
 /// What a host logs (WARN) at start when [`PEER_LINK_DELAY_MS_ENV`] is not 0.
@@ -79,6 +82,26 @@ pub fn peer_cert_hash_file_from(ordinal: u32, value: Option<&str>) -> PathBuf {
 /// `127.0.0.1:{port}` (the server's own port).
 pub fn advertise_quic_from(value: Option<&str>, port: u16) -> String {
     value.map(str::trim).filter(|v| !v.is_empty()).map_or_else(|| format!("127.0.0.1:{port}"), str::to_string)
+}
+
+/// The address peers dial from [`ADVERTISE_PEER_ENV`]'s value; unset or empty is `bound`.
+/// A set value must be a literal `ip:port` (peers parse it as one) and not a wildcard; a
+/// wildcard `bound` with nothing advertised is an error, as nobody can dial it.
+pub fn advertise_peer_from(value: Option<&str>, bound: SocketAddr) -> Result<SocketAddr, String> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => {
+            let addr: SocketAddr =
+                v.parse().map_err(|_| format!("{ADVERTISE_PEER_ENV}={v:?} is not an address (ip:port, no names)"))?;
+            if addr.ip().is_unspecified() {
+                return Err(format!("{ADVERTISE_PEER_ENV}={v:?} is a wildcard address nobody can dial"));
+            }
+            Ok(addr)
+        }
+        None if bound.ip().is_unspecified() => {
+            Err(format!("the peer listener is bound to the wildcard {bound}: set {ADVERTISE_PEER_ENV} to the ip:port peers dial"))
+        }
+        None => Ok(bound),
+    }
 }
 
 /// The advertised WebTransport address from [`ADVERTISE_WT_ENV`]'s value (none by default).
@@ -703,13 +726,15 @@ impl PeerLinks {
         }
         let (listener, events, senders) =
             LinkListener::bind::<PeerMsg, PeerMsg>(config.bind, token.clone(), Some(config.cert_hash_file.clone()))?;
-        let peer = Some((listener.local_addr().to_string(), listener.cert_sha256().to_string()));
+        let bound = listener.local_addr();
+        let advertised = advertise_peer_from(std::env::var(ADVERTISE_PEER_ENV).ok().as_deref(), bound)
+            .map_err(io::Error::other)?;
+        let peer = Some((advertised.to_string(), listener.cert_sha256().to_string()));
         let registered = register(&store, fence, ordinal, boot, &endpoint, peer, policy, stop)
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other(StoppedWhileRegistering))?;
         log::info!(
-            "[peers] host {ordinal} of {hosts}: peers dial {} (pin {})",
-            listener.local_addr(),
+            "[peers] host {ordinal} of {hosts}: peers dial {advertised} (bound {bound}, pin {})",
             listener.cert_sha256()
         );
         let hello = LinkHello::new(token, PeerRole::Host { ordinal, boot, reg: registered.reg });
@@ -777,6 +802,41 @@ impl PeerLinks {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn unset_advertises_the_bound_address() {
+        let bound = addr("127.0.0.1:6500");
+        assert_eq!(advertise_peer_from(None, bound), Ok(bound));
+        assert_eq!(advertise_peer_from(Some("  "), bound), Ok(bound));
+    }
+
+    #[test]
+    fn a_set_value_wins() {
+        assert_eq!(advertise_peer_from(Some("10.42.0.7:6500"), addr("0.0.0.0:6500")), Ok(addr("10.42.0.7:6500")));
+    }
+
+    #[test]
+    fn a_wildcard_bind_needs_an_advertised_address() {
+        for bound in ["0.0.0.0:6500", "[::]:6500"] {
+            let err = advertise_peer_from(None, addr(bound)).unwrap_err();
+            assert!(err.contains("VOXEL_ADVERTISE_PEER"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_wildcard_cannot_be_advertised() {
+        assert!(advertise_peer_from(Some("0.0.0.0:6500"), addr("127.0.0.1:6500")).is_err());
+        assert!(advertise_peer_from(Some("[::]:6500"), addr("127.0.0.1:6500")).is_err());
+    }
+
+    #[test]
+    fn a_name_is_refused() {
+        assert!(advertise_peer_from(Some("host-0.hosts:6500"), addr("127.0.0.1:6500")).is_err());
+    }
 
     #[test]
     fn only_the_registration_stop_is_a_stop() {
