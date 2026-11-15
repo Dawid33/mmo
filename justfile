@@ -1925,9 +1925,10 @@ orion-keycloak-admin-password:
 # Releases are `kubectl set image` by digest, never an apply; the way back is
 # `just orion-kube -n login rollout undo deploy/login` (the previous digest: while it is still in ECR,
 # about a day, or in the node's cache).
-# Release build of the login binary (what orion-login-push puts in the image).
+# Release build of the login binary (what orion-login-push puts in the image). It must use the
+# world's region size: the host link's hello refuses a login built at another VOXEL_REGION_BLOCKS.
 orion-login-build:
-    {{cap}} {{cargo}} build --release -p login --bin login
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release -p login --bin login
 
 # Build the image (labelled with the git revision), push it to ECR as mmo/login:latest and
 # `kubectl set image` it on the login Deployment BY DIGEST (every push rolls out), waiting for the
