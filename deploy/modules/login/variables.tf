@@ -20,20 +20,14 @@ variable "image_tag" {
   default     = "latest"
 }
 
-variable "ecr_region" {
-  description = "Region of the ECR registry (the refresher asks it for pull tokens)."
-  type        = string
-}
-
-variable "ecr_pull_access_key_id" {
-  description = "Access key id of the pull-only IAM user (the registry root's output); the refresher's credentials."
-  type        = string
-}
-
-variable "ecr_pull_secret_access_key" {
-  description = "Its secret."
-  type        = string
-  sensitive   = true
+variable "ecr" {
+  description = "Pulling the image from the private ECR registry (ecr.tf): the registry's region and the pull-only IAM user's key (the registry root's outputs; the key is the refresher's credentials). null = no pull secret, no refresher and no imagePullSecrets: the image is already on the node (the k3d twin imports it)."
+  type = object({
+    region            = string
+    access_key_id     = string
+    secret_access_key = string
+  })
+  default = null
 }
 
 variable "refresh_image" {
@@ -55,8 +49,9 @@ variable "issuer_host_alias_ip" {
 }
 
 variable "issuer" {
-  description = "Keycloak realm issuer URL (VOXEL_OIDC_ISSUER), e.g. https://auth.errantry.renownandruin.com/realms/<realm>. The root passes it."
+  description = "Keycloak realm issuer URL (VOXEL_OIDC_ISSUER), e.g. https://auth.errantry.renownandruin.com/realms/<realm>. The root passes it. null = no Keycloak login (VOXEL_OIDC_ISSUER unset: the k3d twin, which has no Keycloak)."
   type        = string
+  default     = null
 }
 
 variable "oidc_audience" {

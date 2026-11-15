@@ -70,7 +70,8 @@ changed build/run/test command updates its recipe in the same change.
 
 ### Deployment
 
-OpenTofu (not Terraform) in `deploy/`: local single-node k0s (`just deploy-local`, never the inner loop);
+OpenTofu (not Terraform) in `deploy/`: the k3d twin of orion (`deploy/envs/local/`, cluster `mmo`, context `k3d-mmo`:
+`just twin-up`, `twin-images`, `twin-apply`, `twin-check`, `twin-down`; never the inner loop);
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
 first; roots `platform` → `dns` (the `renownandruin.com` records no module makes) → `garage` (+ `garage-buckets`) = https://s3.errantry.renownandruin.com, the S3-compatible
 object store on the box itself (one copy, no off-box backup; telemetry and Zulip files live there) → `monitoring`, `picoshare` = https://share.errantry.renownandruin.com, `zulip` = https://chat.errantry.renownandruin.com,

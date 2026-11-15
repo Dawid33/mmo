@@ -18,7 +18,7 @@
 # the node may hold a stale cached `latest`: run `just orion-login-push` after the
 # apply (it sets the digest) to be sure.
 # Pulling needs a token (ecr.tf): Secret login-ecr, made here at apply time and
-# rewritten every 6 hours by the CronJob ecr-refresh.
+# rewritten every 6 hours by the CronJob ecr-refresh (none with var.ecr = null).
 #
 # Two replicas (var.replicas) protect against a deploy or a crashed pod: with
 # max_unavailable = 0 a new pod must be Ready (its health check answering, which
@@ -117,8 +117,12 @@ resource "kubernetes_deployment_v1" "login" {
         automount_service_account_token = false
         enable_service_links            = false
         # Does not depend on the CronJob: the Secret is filled at apply time.
-        image_pull_secrets {
-          name = kubernetes_secret_v1.ecr_pull.metadata[0].name
+        # None with var.ecr = null (ecr.tf).
+        dynamic "image_pull_secrets" {
+          for_each = kubernetes_secret_v1.ecr_pull[*].metadata[0].name
+          content {
+            name = image_pull_secrets.value
+          }
         }
         # On deletion the endpoint is removed from the Service and the preStop
         # sleep runs at the same time; Traefik needs a few seconds to stop routing
@@ -168,9 +172,12 @@ resource "kubernetes_deployment_v1" "login" {
             name  = "VOXEL_LOGIN_CORS_ORIGINS"
             value = join(",", var.cors_origins)
           }
-          env {
-            name  = "VOXEL_OIDC_ISSUER"
-            value = var.issuer
+          dynamic "env" {
+            for_each = var.issuer == null ? [] : [var.issuer]
+            content {
+              name  = "VOXEL_OIDC_ISSUER"
+              value = env.value
+            }
           }
           env {
             name  = "VOXEL_OIDC_AUDIENCE"

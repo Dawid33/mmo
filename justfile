@@ -1668,66 +1668,96 @@ physics-next-upstream:
         --test sub_shape_id --test two_sided_internal_edges --test lib
 
 # ---------------------------------------------------------------------------
-# Local deployment environment: a single-node k0s cluster in docker (the same
-# distribution as the planned single-node k0s host), configured by the
-# OpenTofu roots under deploy/envs/local. Everyday work does NOT need it —
-# `run` / `run-durable` stay native; this is for exercising the deployment
-# (Agones game servers, CloudNativePG, storage). Design + findings:
-# docs/superpowers/specs/2026-09-22-local-deployment-environment-design.md.
+# The k3d twin: a local single-node k3s (k3d, k3s in docker; cluster `mmo`, kube
+# context `k3d-mmo`) shaped like the orion server — k3d's bundled Traefik and
+# local-path stay on — with the OpenTofu roots under deploy/envs/local applied:
+# platform (the CloudNativePG operator) -> postgres (cluster `pg`, world `twin`) ->
+# login (no ECR, no Keycloak) -> world (namespace world-twin: a coordinator, two
+# hosts, toolbox, web). It runs the release images, never a client. Everyday work
+# does NOT need it (`run` stays native); it proves the deployment modules and the
+# server in pods (`twin-check`). k3d is a pinned binary under target/tools
+# (scripts/k3d.sh); the roots' state is under target/twin/ and as throwaway as the
+# cluster. The orion world recipes work on it too:
+# `just world_ctx=k3d-mmo world_ns=world-twin world-status`.
 tofu := "tofu"
-dev_cluster := "mmo-k0s"
-k0s_image := "docker.io/k0sproject/k0s:v1.35.8-k0s.1"
-dev_kubeconfig := justfile_directory() / "target/dev-cluster/kubeconfig"
+twin_ctx := "k3d-mmo"
 
-# Start (or create) the local k0s node. Kubelet eviction thresholds are
-# ABSOLUTE: the default "<15% disk free" taints the node disk-pressure on a
-# large, fairly full laptop disk and nothing schedules.
-dev-cluster-up:
+# Create (or start) the twin. Ports on 127.0.0.1 only: the hosts' UDP node ports
+# 30466-30469 and Traefik's port 80 as 8480 (http://game.localhost:8480/). Kubelet
+# eviction thresholds are ABSOLUTE: the default "<15% disk free" taints a large,
+# fairly full disk with disk-pressure and nothing schedules. The kubeconfig entry is
+# added to the default kubeconfig WITHOUT switching the current context.
+twin-up:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! docker start {{dev_cluster}} >/dev/null 2>&1; then
-        docker run -d --name {{dev_cluster}} --hostname {{dev_cluster}} --privileged --cgroupns=host \
-            -v {{dev_cluster}}-data:/var/lib/k0s -v {{dev_cluster}}-openebs:/var/openebs \
-            -p 127.0.0.1:16443:6443 {{k0s_image}} \
-            k0s controller --enable-worker --no-taints \
-            '--kubelet-extra-args=--eviction-hard=nodefs.available<5Gi,imagefs.available<5Gi,memory.available<500Mi --eviction-minimum-reclaim=nodefs.available=1Gi' >/dev/null
+    if scripts/k3d.sh cluster get mmo >/dev/null 2>&1; then
+        scripts/k3d.sh cluster start mmo
+    else
+        scripts/k3d.sh cluster create mmo --servers 1 --agents 0 \
+            --api-port 127.0.0.1:16550 \
+            -p '127.0.0.1:30466-30469:30466-30469/udp@server:0' \
+            -p '127.0.0.1:8480:80@loadbalancer' \
+            --k3s-arg '--kubelet-arg=eviction-hard=imagefs.available<5Gi,nodefs.available<5Gi,memory.available<500Mi@server:0' \
+            --k3s-arg '--kubelet-arg=eviction-minimum-reclaim=imagefs.available=1Gi,nodefs.available=1Gi@server:0' \
+            --kubeconfig-update-default --kubeconfig-switch-context=false --wait
     fi
-    mkdir -p "$(dirname {{dev_kubeconfig}})"
-    until docker exec {{dev_cluster}} k0s kubeconfig admin > {{dev_kubeconfig}}.tmp 2>/dev/null; do sleep 2; done
-    sed 's#server: https://.*:6443#server: https://127.0.0.1:16443#' {{dev_kubeconfig}}.tmp > {{dev_kubeconfig}} && rm {{dev_kubeconfig}}.tmp
-    until KUBECONFIG={{dev_kubeconfig}} kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done
-    echo "k0s node ready at $(docker inspect -f '{{{{range .NetworkSettings.Networks}}{{{{.IPAddress}}{{{{end}}' {{dev_cluster}}) (game server ports are reachable there); KUBECONFIG={{dev_kubeconfig}}"
+    kubectl --context {{twin_ctx}} wait --for=condition=Ready node --all --timeout=180s
+    echo "twin: cluster mmo is up (context {{twin_ctx}}); next: just twin-images && just twin-apply"
 
-# Stop the node, keeping its state (volumes {{dev_cluster}}-data / -openebs).
-dev-cluster-down:
-    docker stop {{dev_cluster}}
+# Build the release images (world-images-build, orion-login-build) as mmo/server:twin,
+# mmo/web:twin and mmo/login:twin, each from a staging directory as the push scripts
+# do, and import them into the twin's node (no registry).
+twin-images: world-images-build orion-login-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    stage=$(mktemp -d)
+    trap 'rm -rf "$stage"' EXIT
+    mkdir "$stage/server" "$stage/web" "$stage/login"
+    cp target/release/server target/release/worldctl deploy/images/server/Dockerfile "$stage/server/"
+    cp -R target/web "$stage/web/web"
+    cp deploy/images/web/Dockerfile deploy/images/web/nginx.conf "$stage/web/"
+    cp target/release/login deploy/images/login/Dockerfile "$stage/login/"
+    for name in server web login; do
+        echo "twin: building mmo/$name:twin"
+        docker build -q -t "mmo/$name:twin" "$stage/$name" > /dev/null
+    done
+    scripts/k3d.sh image import mmo/server:twin mmo/web:twin mmo/login:twin -c mmo
+    echo "twin: images imported; running pods keep their old image until they are re-created"
 
-# DESTRUCTIVE: remove the node and its volumes (database included) and the
-# local OpenTofu state that described them.
-dev-cluster-destroy:
-    -docker rm -f {{dev_cluster}}
-    -docker volume rm {{dev_cluster}}-data {{dev_cluster}}-openebs
-    rm -f deploy/envs/local/platform/terraform.tfstate* deploy/envs/local/world/terraform.tfstate* {{dev_kubeconfig}}
+# Apply the four local roots in order (platform -> postgres -> login -> world), without
+# asking: the cluster is a throwaway. Each root's .terraform lives under target/twin/.
+twin-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for r in platform postgres login world; do
+        echo "twin: applying deploy/envs/local/$r"
+        export TF_DATA_DIR="{{justfile_directory()}}/target/twin/$r/.terraform"
+        {{tofu}} -chdir=deploy/envs/local/$r init -input=false -reconfigure > /dev/null
+        {{tofu}} -chdir=deploy/envs/local/$r apply -input=false -auto-approve
+        if [ "$r" = postgres ]; then
+            # The operator creates the database after the apply returns; pods started before
+            # that exit on "database world_twin does not exist" and crash-loop until it does.
+            echo "twin: waiting for the operator to create database world_twin"
+            kubectl --context {{twin_ctx}} -n postgres wait database/world-twin --for=jsonpath='{.status.applied}'=true --timeout=300s
+        fi
+    done
+    echo "twin: applied; the world waits for its forge: just twin-check (forges and checks), or just world_ctx={{twin_ctx}} world_ns=world-twin world-ctl forge"
 
-# Apply the local environment: operators first (their CRDs must exist before
-# the world root can plan its custom resources), then the world.
-deploy-local: dev-cluster-up
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform init -input=false
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform apply -input=false -auto-approve
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world init -input=false
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world apply -input=false -auto-approve
+# The twin's integration check (scripts/twin_check.sh): pods wait for a forge, serve after
+# it, survive a killed host, a clean host leave, a coordinator restart, a world stop and
+# start; records memory. Run on a FRESH twin-apply (it forges the world). Exit 0 = pass.
+twin-check:
+    TWIN_CONTEXT={{twin_ctx}} scripts/twin_check.sh
 
-# Show what deploy-local would change, without changing anything.
-deploy-local-plan: dev-cluster-up
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform init -input=false
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform plan -input=false
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world init -input=false
-    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world plan -input=false
+# Delete the twin's cluster (its database included) and the roots' local state.
+twin-down:
+    -scripts/k3d.sh cluster delete mmo
+    rm -f target/twin/*.tfstate target/twin/*.tfstate.backup
 
-# kubectl against the local cluster, e.g. `just kube get gs -A`.
+# kubectl against the twin, e.g. `just twin-kube get pods -A`.
 [positional-arguments]
-kube *args:
-    KUBECONFIG={{dev_kubeconfig}} kubectl "$@"
+twin-kube *args:
+    kubectl --context {{twin_ctx}} "$@"
 
 # ---------------------------------------------------------------------------
 # The orion k3s server (Hetzner 5.9.7.138, kube context `orion`): OpenTofu roots

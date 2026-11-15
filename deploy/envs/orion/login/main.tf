@@ -62,11 +62,13 @@ module "login" {
   }
   issuer = data.terraform_remote_state.keycloak_realm.outputs.issuer
 
-  image_repository           = data.terraform_remote_state.registry.outputs.repository_url
-  image_tag                  = var.image_tag
-  ecr_region                 = data.terraform_remote_state.registry.outputs.region
-  ecr_pull_access_key_id     = data.terraform_remote_state.registry.outputs.pull_access_key_id
-  ecr_pull_secret_access_key = data.terraform_remote_state.registry.outputs.pull_secret_access_key
+  image_repository = data.terraform_remote_state.registry.outputs.repository_url
+  image_tag        = var.image_tag
+  ecr = {
+    region            = data.terraform_remote_state.registry.outputs.region
+    access_key_id     = data.terraform_remote_state.registry.outputs.pull_access_key_id
+    secret_access_key = sensitive(data.terraform_remote_state.registry.outputs.pull_secret_access_key)
+  }
 
   issuer_host_alias_ip = var.issuer_host_alias_ip
 }

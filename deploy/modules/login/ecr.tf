@@ -9,17 +9,25 @@
 # A missed refresh only matters to a pull: on this single node the image is
 # cached and pods restart without one (image_pull_policy IfNotPresent).
 # Manual run: `just orion-kube -n login create job --from=cronjob/ecr-refresh ecr-refresh-<n>`.
+#
+# All of it only with var.ecr set. var.ecr = null (the k3d twin: the image was
+# imported into the node) makes none of it and the pods list no imagePullSecrets.
+# The objects gained `count` after they were first applied on orion: the moved
+# blocks at the end keep their state addresses (a plan shows no change).
 
 locals {
   registry_host = split("/", var.image_repository)[0]
+  ecr           = var.ecr == null ? 0 : 1
 }
 
 # Read at every plan, and lands in the state like the other secrets here.
 data "aws_ecr_authorization_token" "pull" {
+  count    = local.ecr
   provider = aws.ecr
 }
 
 resource "kubernetes_secret_v1" "ecr_pull" {
+  count = local.ecr
   metadata {
     name      = "login-ecr"
     namespace = local.ns
@@ -30,8 +38,8 @@ resource "kubernetes_secret_v1" "ecr_pull" {
       auths = {
         (local.registry_host) = {
           username = "AWS"
-          password = data.aws_ecr_authorization_token.pull.password
-          auth     = data.aws_ecr_authorization_token.pull.authorization_token
+          password = data.aws_ecr_authorization_token.pull[0].password
+          auth     = data.aws_ecr_authorization_token.pull[0].authorization_token
         }
       }
     })
@@ -44,17 +52,19 @@ resource "kubernetes_secret_v1" "ecr_pull" {
 }
 
 resource "kubernetes_secret_v1" "ecr_pull_aws" {
+  count = local.ecr
   metadata {
     name      = "ecr-pull-aws"
     namespace = local.ns
   }
   data = {
-    AWS_ACCESS_KEY_ID     = var.ecr_pull_access_key_id
-    AWS_SECRET_ACCESS_KEY = var.ecr_pull_secret_access_key
+    AWS_ACCESS_KEY_ID     = var.ecr.access_key_id
+    AWS_SECRET_ACCESS_KEY = var.ecr.secret_access_key
   }
 }
 
 resource "kubernetes_service_account_v1" "ecr_refresh" {
+  count = local.ecr
   metadata {
     name      = "ecr-refresh"
     namespace = local.ns
@@ -64,6 +74,7 @@ resource "kubernetes_service_account_v1" "ecr_refresh" {
 }
 
 resource "kubernetes_role_v1" "ecr_refresh" {
+  count = local.ecr
   metadata {
     name      = "ecr-refresh"
     namespace = local.ns
@@ -71,12 +82,13 @@ resource "kubernetes_role_v1" "ecr_refresh" {
   rule {
     api_groups     = [""]
     resources      = ["secrets"]
-    resource_names = [kubernetes_secret_v1.ecr_pull.metadata[0].name]
+    resource_names = [kubernetes_secret_v1.ecr_pull[0].metadata[0].name]
     verbs          = ["get", "patch", "update"]
   }
 }
 
 resource "kubernetes_role_binding_v1" "ecr_refresh" {
+  count = local.ecr
   metadata {
     name      = "ecr-refresh"
     namespace = local.ns
@@ -84,16 +96,17 @@ resource "kubernetes_role_binding_v1" "ecr_refresh" {
   role_ref {
     api_group = "rbac.authorization.k8s.io"
     kind      = "Role"
-    name      = kubernetes_role_v1.ecr_refresh.metadata[0].name
+    name      = kubernetes_role_v1.ecr_refresh[0].metadata[0].name
   }
   subject {
     kind      = "ServiceAccount"
-    name      = kubernetes_service_account_v1.ecr_refresh.metadata[0].name
+    name      = kubernetes_service_account_v1.ecr_refresh[0].metadata[0].name
     namespace = local.ns
   }
 }
 
 resource "kubernetes_cron_job_v1" "ecr_refresh" {
+  count = local.ecr
   metadata {
     name      = "ecr-refresh"
     namespace = local.ns
@@ -110,7 +123,7 @@ resource "kubernetes_cron_job_v1" "ecr_refresh" {
         template {
           metadata {}
           spec {
-            service_account_name = kubernetes_service_account_v1.ecr_refresh.metadata[0].name
+            service_account_name = kubernetes_service_account_v1.ecr_refresh[0].metadata[0].name
             # This pod alone talks to the API server.
             automount_service_account_token = true
             enable_service_links            = false
@@ -121,12 +134,12 @@ resource "kubernetes_cron_job_v1" "ecr_refresh" {
               command = ["/bin/sh", "-c", file("${path.module}/ecr-refresh.sh")]
               env_from {
                 secret_ref {
-                  name = kubernetes_secret_v1.ecr_pull_aws.metadata[0].name
+                  name = kubernetes_secret_v1.ecr_pull_aws[0].metadata[0].name
                 }
               }
               env {
                 name  = "AWS_DEFAULT_REGION"
-                value = var.ecr_region
+                value = var.ecr.region
               }
               env {
                 name  = "REGISTRY_HOST"
@@ -134,7 +147,7 @@ resource "kubernetes_cron_job_v1" "ecr_refresh" {
               }
               env {
                 name  = "PULL_SECRET"
-                value = kubernetes_secret_v1.ecr_pull.metadata[0].name
+                value = kubernetes_secret_v1.ecr_pull[0].metadata[0].name
               }
               # The token's files live in memory only.
               env {
@@ -162,4 +175,34 @@ resource "kubernetes_cron_job_v1" "ecr_refresh" {
       }
     }
   }
+}
+
+moved {
+  from = kubernetes_secret_v1.ecr_pull
+  to   = kubernetes_secret_v1.ecr_pull[0]
+}
+
+moved {
+  from = kubernetes_secret_v1.ecr_pull_aws
+  to   = kubernetes_secret_v1.ecr_pull_aws[0]
+}
+
+moved {
+  from = kubernetes_service_account_v1.ecr_refresh
+  to   = kubernetes_service_account_v1.ecr_refresh[0]
+}
+
+moved {
+  from = kubernetes_role_v1.ecr_refresh
+  to   = kubernetes_role_v1.ecr_refresh[0]
+}
+
+moved {
+  from = kubernetes_role_binding_v1.ecr_refresh
+  to   = kubernetes_role_binding_v1.ecr_refresh[0]
+}
+
+moved {
+  from = kubernetes_cron_job_v1.ecr_refresh
+  to   = kubernetes_cron_job_v1.ecr_refresh[0]
 }
