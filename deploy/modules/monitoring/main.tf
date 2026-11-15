@@ -1,10 +1,18 @@
 # Observability on the orion k3s server: metrics (Prometheus -> Thanos -> S3),
 # logs (Alloy -> Loki -> S3), traces (OTLP -> Alloy -> Tempo -> S3), profiles
-# (Pyroscope -> S3), one Grafana in front. Buckets, IAM and secrets: s3.tf.
+# (Pyroscope -> S3), one Grafana in front. S3 is Garage on this server: s3.tf.
 # Handoff / design: docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md
 
 locals {
   ns = kubernetes_namespace_v1.monitoring.metadata[0].name
+
+  # Thanos (sidecar, store, compactor) reads its objstore Secret once, at start.
+  # This goes on those pods as an annotation, so pointing the Secret somewhere
+  # else (another endpoint, bucket or key) restarts them. The key's id only,
+  # never its secret.
+  objstore_checksum = nonsensitive(sha256(join("/", [
+    var.object_store.endpoint, local.buckets["thanos"], var.object_store_key.access_key,
+  ])))
 }
 
 resource "helm_release" "kube_prometheus_stack" {
@@ -25,16 +33,60 @@ resource "helm_release" "kube_prometheus_stack" {
     alertmanager_size = var.volume_sizes["alertmanager"]
     grafana_size      = var.volume_sizes["grafana"]
     thanos_image      = var.thanos_image
+    objstore_checksum = local.objstore_checksum
     grafana_host      = var.grafana_host
     ingress_class     = var.ingress_class
     cluster_issuer    = var.cluster_issuer
+
+    cpu_alert_threshold_percent = var.cpu_alert_threshold_percent
+    cpu_alert_for               = var.cpu_alert_for
+
+    # Only "is it set" reaches the values; the URL itself stays in the Secret.
+    zulip_alerts        = nonsensitive(var.zulip_alert_webhook_url != null)
+    zulip_alerts_secret = "alertmanager-zulip"
+
+    grafana_oidc           = var.grafana_oidc != null
+    grafana_password_login = var.grafana_password_login
+    grafana_oidc_secret    = "grafana-oidc"
+    grafana_oidc_name      = try(var.grafana_oidc.display_name, "")
+    grafana_oidc_client_id = try(var.grafana_oidc.client_id, "")
+    grafana_oidc_issuer    = try(var.grafana_oidc.issuer, "")
   })]
 
   depends_on = [
+    kubernetes_secret_v1.grafana_oidc,
+    kubernetes_secret_v1.alertmanager_zulip,
     kubernetes_secret_v1.thanos_objstore,
     kubernetes_secret_v1.grafana_admin,
     aws_route53_record.grafana,
   ]
+}
+
+# Grafana's OAuth client secret at the identity provider (var.grafana_oidc),
+# read by the Grafana pod as GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET.
+resource "kubernetes_secret_v1" "grafana_oidc" {
+  count = var.grafana_oidc != null ? 1 : 0
+  metadata {
+    name      = "grafana-oidc"
+    namespace = local.ns
+  }
+  data = {
+    client-secret = var.grafana_oidc_client_secret
+  }
+}
+
+# The Zulip bot URL Alertmanager posts alerts to (it carries the bot's API key).
+# Mounted into the Alertmanager pod by the operator (alertmanagerSpec.secrets)
+# and read through `url_file`.
+resource "kubernetes_secret_v1" "alertmanager_zulip" {
+  count = var.zulip_alert_webhook_url != null ? 1 : 0
+  metadata {
+    name      = "alertmanager-zulip"
+    namespace = local.ns
+  }
+  data = {
+    url = var.zulip_alert_webhook_url
+  }
 }
 
 resource "helm_release" "thanos" {
@@ -43,10 +95,11 @@ resource "helm_release" "thanos" {
   chart     = "${path.module}/charts/thanos"
 
   values = [yamlencode({
-    image          = var.thanos_image
-    objstoreSecret = kubernetes_secret_v1.thanos_objstore.metadata[0].name
-    sidecarService = "kps-thanos-discovery"
-    storageClass   = var.storage_class
+    image            = var.thanos_image
+    objstoreSecret   = kubernetes_secret_v1.thanos_objstore.metadata[0].name
+    objstoreChecksum = local.objstore_checksum
+    sidecarService   = "kps-thanos-discovery"
+    storageClass     = var.storage_class
     retention = {
       raw         = var.thanos_retention_raw
       fiveMinutes = var.thanos_retention_5m
@@ -69,8 +122,10 @@ resource "helm_release" "loki" {
   timeout    = 600
 
   values = [templatefile("${path.module}/values/loki.yaml.tftpl", {
-    bucket        = aws_s3_bucket.telemetry["loki"].bucket
-    region        = var.aws_region
+    bucket        = local.buckets["loki"]
+    endpoint      = var.object_store.endpoint
+    insecure      = var.object_store.insecure
+    region        = var.object_store.region
     retention     = var.loki_retention
     storage_class = var.storage_class
     size          = var.volume_sizes["loki"]
@@ -79,7 +134,6 @@ resource "helm_release" "loki" {
   depends_on = [
     helm_release.kube_prometheus_stack,
     kubernetes_secret_v1.s3_env,
-    aws_iam_user_policy.telemetry,
   ]
 }
 
@@ -92,9 +146,10 @@ resource "helm_release" "tempo" {
   timeout    = 600
 
   values = [templatefile("${path.module}/values/tempo.yaml.tftpl", {
-    bucket        = aws_s3_bucket.telemetry["tempo"].bucket
-    endpoint      = local.s3_endpoint
-    region        = var.aws_region
+    bucket        = local.buckets["tempo"]
+    endpoint      = var.object_store.endpoint
+    insecure      = var.object_store.insecure
+    region        = var.object_store.region
     retention     = var.tempo_retention
     storage_class = var.storage_class
     size          = var.volume_sizes["tempo"]
@@ -103,7 +158,6 @@ resource "helm_release" "tempo" {
   depends_on = [
     helm_release.kube_prometheus_stack,
     kubernetes_secret_v1.s3_env,
-    aws_iam_user_policy.telemetry,
   ]
 }
 
@@ -116,9 +170,10 @@ resource "helm_release" "pyroscope" {
   timeout    = 600
 
   values = [templatefile("${path.module}/values/pyroscope.yaml.tftpl", {
-    bucket        = aws_s3_bucket.telemetry["pyroscope"].bucket
-    endpoint      = local.s3_endpoint
-    region        = var.aws_region
+    bucket        = local.buckets["pyroscope"]
+    endpoint      = var.object_store.endpoint
+    insecure      = var.object_store.insecure
+    region        = var.object_store.region
     retention     = var.pyroscope_retention
     storage_class = var.storage_class
     size          = var.volume_sizes["pyroscope"]
@@ -127,7 +182,6 @@ resource "helm_release" "pyroscope" {
   depends_on = [
     helm_release.kube_prometheus_stack,
     kubernetes_secret_v1.s3_env,
-    aws_iam_user_policy.telemetry,
   ]
 }
 

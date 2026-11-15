@@ -21,7 +21,11 @@ loki:
       ruler: ${bucket}
       admin: ${bucket}
     s3:
+      # Garage (modules/garage), inside the cluster: host:port, path style.
+      endpoint: ${endpoint}
       region: ${region}
+      insecure: ${insecure}
+      s3ForcePathStyle: true
       # No static key: the AWS SDK reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
       # from the telemetry-s3 Secret (extraEnvFrom below).
   limits_config:

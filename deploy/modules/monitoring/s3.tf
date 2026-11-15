@@ -1,99 +1,52 @@
-# Telemetry object storage: one AWS S3 bucket per component (own lifecycle
-# rule each), an IAM user scoped to them, and its key as two Kubernetes Secrets.
-
-data "aws_caller_identity" "current" {}
+# Telemetry object storage: one bucket per component in Garage, the object store
+# on this same server (modules/garage). The buckets, their expiry backstop and
+# the access key are made by the garage-buckets root (tenant `telemetry`) and
+# come in as var.object_store / var.object_store_key; here they only become two
+# Kubernetes Secrets. The components talk to Garage inside the cluster, in plain
+# HTTP and path style (http://<endpoint>/<bucket>/<key>).
 
 locals {
-  components  = ["thanos", "loki", "tempo", "pyroscope"]
-  buckets     = { for c in local.components : c => "${var.bucket_prefix}-${c}-${data.aws_caller_identity.current.account_id}" }
-  s3_endpoint = "s3.${var.aws_region}.amazonaws.com"
+  components = ["thanos", "loki", "tempo", "pyroscope"]
+  buckets    = { for c in local.components : c => var.object_store.buckets[c] }
 }
 
-resource "aws_s3_bucket" "telemetry" {
-  for_each = local.buckets
-  bucket   = each.value
-  # Telemetry is disposable: `tofu destroy` may empty and delete the bucket.
-  force_destroy = true
-}
-
-resource "aws_s3_bucket_public_access_block" "telemetry" {
-  for_each                = local.buckets
-  bucket                  = aws_s3_bucket.telemetry[each.key].id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_ownership_controls" "telemetry" {
-  for_each = local.buckets
-  bucket   = aws_s3_bucket.telemetry[each.key].id
-  rule {
-    object_ownership = "BucketOwnerEnforced"
+# The stack kept its data in AWS S3 until 2026-11. Those buckets are left as
+# they are, with their data and their expiry rules: tofu only forgets them.
+# The IAM user that wrote to them is destroyed with this change. Once nothing
+# is wanted from them: aws s3 rb --force s3://mmo-orion-<component>-<account id>.
+removed {
+  from = aws_s3_bucket.telemetry
+  lifecycle {
+    destroy = false
   }
 }
 
-resource "aws_s3_bucket_server_side_encryption_configuration" "telemetry" {
-  for_each = local.buckets
-  bucket   = aws_s3_bucket.telemetry[each.key].id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
+removed {
+  from = aws_s3_bucket_public_access_block.telemetry
+  lifecycle {
+    destroy = false
   }
 }
 
-# No versioning (telemetry is disposable); expiry is a backstop past retention.
-resource "aws_s3_bucket_lifecycle_configuration" "telemetry" {
-  for_each = local.buckets
-  bucket   = aws_s3_bucket.telemetry[each.key].id
-  rule {
-    id     = "expire-backstop"
-    status = "Enabled"
-    filter {}
-    expiration {
-      days = var.bucket_expiry_days[each.key]
-    }
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 2
-    }
+removed {
+  from = aws_s3_bucket_ownership_controls.telemetry
+  lifecycle {
+    destroy = false
   }
 }
 
-resource "aws_iam_user" "telemetry" {
-  name = var.iam_user_name
-  tags = { purpose = "orion k3s telemetry - deploy/modules/monitoring" }
-}
-
-data "aws_iam_policy_document" "telemetry" {
-  statement {
-    sid       = "ListTelemetryBuckets"
-    actions   = ["s3:ListBucket", "s3:GetBucketLocation", "s3:ListBucketMultipartUploads"]
-    resources = [for k, _ in local.buckets : aws_s3_bucket.telemetry[k].arn]
-  }
-  statement {
-    sid = "ReadWriteTelemetryObjects"
-    actions = [
-      "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
-      "s3:AbortMultipartUpload",
-      "s3:ListMultipartUploadParts",
-    ]
-    resources = [for k, _ in local.buckets : "${aws_s3_bucket.telemetry[k].arn}/*"]
+removed {
+  from = aws_s3_bucket_server_side_encryption_configuration.telemetry
+  lifecycle {
+    destroy = false
   }
 }
 
-resource "aws_iam_user_policy" "telemetry" {
-  name   = "telemetry-buckets"
-  user   = aws_iam_user.telemetry.name
-  policy = data.aws_iam_policy_document.telemetry.json
-}
-
-# Rotate: tofu apply -replace=module.monitoring.aws_iam_access_key.telemetry
-# (then restart the pods so they read the new Secret).
-resource "aws_iam_access_key" "telemetry" {
-  user = aws_iam_user.telemetry.name
+removed {
+  from = aws_s3_bucket_lifecycle_configuration.telemetry
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "kubernetes_namespace_v1" "monitoring" {
@@ -110,9 +63,9 @@ resource "kubernetes_secret_v1" "s3_env" {
     namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
   }
   data = {
-    AWS_ACCESS_KEY_ID     = aws_iam_access_key.telemetry.id
-    AWS_SECRET_ACCESS_KEY = aws_iam_access_key.telemetry.secret
-    AWS_REGION            = var.aws_region
+    AWS_ACCESS_KEY_ID     = var.object_store_key.access_key
+    AWS_SECRET_ACCESS_KEY = var.object_store_key.secret_key
+    AWS_REGION            = var.object_store.region
   }
 }
 
@@ -126,11 +79,17 @@ resource "kubernetes_secret_v1" "thanos_objstore" {
     "objstore.yml" = yamlencode({
       type = "S3"
       config = {
-        bucket     = local.buckets["thanos"]
-        endpoint   = local.s3_endpoint
-        region     = var.aws_region
-        access_key = aws_iam_access_key.telemetry.id
-        secret_key = aws_iam_access_key.telemetry.secret
+        bucket             = local.buckets["thanos"]
+        endpoint           = var.object_store.endpoint
+        region             = var.object_store.region
+        insecure           = var.object_store.insecure
+        bucket_lookup_type = "path"
+        # Garage on spinning disks can take minutes to finish a large multipart
+        # upload (a block's 512 MB chunk file). Thanos's default wait is 2m; when
+        # it runs out Thanos asks again and gets NoSuchUpload for a finished upload.
+        http_config = { response_header_timeout = "15m" }
+        access_key  = var.object_store_key.access_key
+        secret_key  = var.object_store_key.secret_key
       }
     })
   }

@@ -1,6 +1,8 @@
 # Every value is set by deploy/modules/monitoring/main.tf.
 image: quay.io/thanos/thanos:v0.42.5
 objstoreSecret: thanos-objstore
+# Changes whenever the Secret points somewhere else (endpoint, bucket, key).
+objstoreChecksum: ""
 # Headless service of the Prometheus sidecars (kube-prometheus-stack thanosService).
 sidecarService: kps-thanos-discovery
 replicaLabel: prometheus_replica

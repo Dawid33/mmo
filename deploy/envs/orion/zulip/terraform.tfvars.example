@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars (git-ignored). Only admin_email is required: the S3
+# key comes from the garage-buckets root and every service password is generated.
+admin_email = "admin@example.com"
+
+# host              = "chat.errantry.renownandruin.com"
+# manage_dns_record = true   # false: the A record is made in the survival-world infra
+# kubeconfig        = "~/.kube/config"
+# kube_context      = "orion"
+# aws_region        = "eu-central-1"
+
+# Login through Keycloak (../keycloak and ../keycloak-realm applied first).
+# Step 1: keycloak_login = true, apply, and log in to Zulip through Keycloak as
+#         an organisation owner (register there with the SAME email).
+# Step 2: password_login = false, apply: the Keycloak button is the only way in.
+# keycloak_login = true
+# password_login = false
+
+# Outgoing mail (invitations, sign-up confirmations, password resets) goes
+# through AWS SES by default: the factoriosurvivalworld.com identity of the
+# survival-world infra, with a send-only login made here. To change the sender:
+# ses = { domain = "factoriosurvivalworld.com", sender = "chat-noreply@factoriosurvivalworld.com" }
+#
+# Another SMTP server instead (`noreply` pins the From address):
+# ses  = null
+# smtp = {
+#   host    = "smtp.example.com"
+#   user    = "..."
+#   noreply = "chat@example.com"
+# }
+# smtp_password = "..."

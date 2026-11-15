@@ -1,0 +1,14 @@
+# Keycloak serves /metrics on its management port, which no Ingress routes.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keycloak
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml .Values.selectorLabels | nindent 6 }}
+  endpoints:
+    - port: management
+      path: /metrics
+      interval: 30s

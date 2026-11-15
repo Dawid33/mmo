@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (git-ignored).
+#
+# This root manages Keycloak as a service account, made ONCE by hand in the admin
+# console (`just orion-keycloak-admin`, http://127.0.0.1:8180/admin/, realm `master`):
+#   1. Clients -> Create client. Client ID: opentofu. Next.
+#   2. Client authentication: On. Untick every flow except "Service accounts roles". Save.
+#   3. Tab "Service accounts roles" -> Assign role -> Realm roles -> admin.
+#   4. Tab "Client scopes" -> Add client scope -> kc-admin-api -> Add as Default.
+#      (Keycloak 26.8's admin API only accepts tokens carrying that scope's
+#      audience; without it every call answers 401 although the role is there.)
+#   5. Tab "Credentials" -> copy the Client secret here.
+keycloak_client_secret = "..."
+
+# keycloak_client_id = "opentofu"

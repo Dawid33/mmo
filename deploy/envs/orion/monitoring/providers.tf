@@ -11,7 +11,7 @@ variable "kube_context" {
 }
 
 variable "aws_region" {
-  description = "Region of the telemetry buckets."
+  description = "Region of the state bucket (the telemetry itself is in Garage; only the state and Grafana's DNS record are in AWS)."
   type        = string
   default     = "eu-central-1"
 }

@@ -13,8 +13,11 @@ tempo:
       backend: s3
       s3:
         bucket: ${bucket}
+        # Garage (modules/garage), inside the cluster: host:port, path style.
         endpoint: ${endpoint}
         region: ${region}
+        insecure: ${insecure}
+        forcepathstyle: true
       wal:
         path: /var/tempo/wal
   # The chart merges in its Jaeger receivers too (its Service template needs them); unused.

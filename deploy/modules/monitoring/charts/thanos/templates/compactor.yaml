@@ -21,6 +21,9 @@ spec:
       labels:
         {{- include "thanos.labels" . | nindent 8 }}
         app.kubernetes.io/component: compactor
+      annotations:
+        # The objstore Secret is read once, at start: a changed store restarts the pod.
+        checksum/objstore: {{ .Values.objstoreChecksum | quote }}
     spec:
       {{- include "thanos.securityContext" . | nindent 6 }}
       containers:

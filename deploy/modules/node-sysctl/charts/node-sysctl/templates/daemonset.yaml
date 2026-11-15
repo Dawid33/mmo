@@ -1,0 +1,48 @@
+# One pod per node. The init container is privileged only to write /proc/sys;
+# the values land in the pod template, so changing one rolls the DaemonSet and
+# re-applies it. Removing a sysctl here does not reset it on the node.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-sysctl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: node-sysctl
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-sysctl
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-sysctl
+    spec:
+      priorityClassName: system-node-critical
+      automountServiceAccountToken: false
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: sysctl
+          image: {{ .Values.images.init | quote }}
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -ec
+            - |
+              {{- range $name, $value := .Values.sysctls }}
+              sysctl -w {{ printf "%s=%s" $name $value | quote }}
+              {{- end }}
+      containers:
+        - name: pause
+          image: {{ .Values.images.pause | quote }}
+          resources:
+            requests: { cpu: 1m, memory: 4Mi }
+            limits: { memory: 16Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65535
+            capabilities:
+              drop: ["ALL"]

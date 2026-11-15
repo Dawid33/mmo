@@ -69,7 +69,76 @@ alloy:
 
       loki.source.kubernetes "pods" {
         targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.pods.receiver]
+      }
+
+      // Per-service fixes of what Loki would otherwise guess from the text.
+      loki.process "pods" {
         forward_to = [loki.write.default.receiver]
+
+        // Garage writes `<time>  INFO <module>: <message>` in colour, and words
+        // every non-2xx reply as `error <status> ...`. Loki finds no level
+        // field, falls back to keywords and files those INFO lines under
+        // `error` (the rest under `unknown`). So: strip the colour codes, read
+        // Garage's own level and send it along as structured metadata, which
+        // Loki's detected_level takes over. A 404 "Key not found" reply is a
+        // client asking for an object that is not there -- Thanos does it for
+        // every block's optional marker files, ~40k times a day -- and goes
+        // down to `trace`, the lowest level, instead of being dropped.
+        stage.match {
+          selector = "{namespace=\"garage\", container=\"garage\"}"
+
+          stage.decolorize {}
+
+          stage.regex {
+            expression = "^\\S+\\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\\s"
+          }
+
+          // The braces are escaped for Helm, which templates this file too:
+          // Alloy sees {{ "{{ ToLower .Value }}" }}.
+          stage.template {
+            source   = "level"
+            template = "{{ "{{ ToLower .Value }}" }}"
+          }
+
+          stage.match {
+            selector = "{namespace=\"garage\", container=\"garage\"} |= \"error 404 Not Found, Key not found\""
+
+            stage.template {
+              source   = "level"
+              template = "trace"
+            }
+          }
+
+          stage.structured_metadata {
+            values = {
+              level = "",
+            }
+          }
+        }
+
+        // Tempo (up to v3.1.1 at least) logs its idle poll as a failure: about
+        // once a minute the backend worker asks the scheduler for a compaction
+        // job, gets `NotFound: no jobs found`, and writes level=error plus a
+        // level=warn gRPC line. Upstream main already logs it at debug
+        // (`isExpectedSchedulerError` in modules/backendworker); no release has
+        // that yet and there is no setting for it. Until one does, file both
+        // lines under `debug` here. REMOVE this block after a Tempo bump that
+        // stops writing `error calling scheduler ... no jobs found`.
+        stage.match {
+          selector = "{namespace=\"monitoring\", container=\"tempo\"} |= \"desc = no jobs found\""
+
+          stage.template {
+            source   = "level"
+            template = "debug"
+          }
+
+          stage.structured_metadata {
+            values = {
+              level = "",
+            }
+          }
+        }
       }
 
       loki.write "default" {

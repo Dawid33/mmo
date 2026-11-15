@@ -1,5 +1,11 @@
 # Copy to terraform.tfvars (git-ignored) to override defaults. Nothing secret is
-# needed: S3 keys are created by tofu, the Grafana password is generated.
+# needed: the S3 key comes from the garage-buckets root, the Grafana password is generated.
+# (Optional and secret: the Zulip alert URL below.)
 # kubeconfig   = "~/.kube/config"
 # kube_context = "orion"
 # aws_region   = "eu-central-1"
+
+# Post every alert to a Zulip channel (needs ../zulip applied and an organisation
+# made). In Zulip: Settings -> Bots -> add an `Incoming webhook` bot, generate its
+# URL for the `Prometheus Alertmanager` integration and a channel, paste it here.
+# zulip_alert_webhook_url = "https://chat.errantry.renownandruin.com/api/v1/external/alertmanager?api_key=...&stream=alerts&desc=summary"

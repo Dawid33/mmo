@@ -14,7 +14,30 @@ kubeEtcd:
   enabled: false
 
 alertmanager:
+%{ if zulip_alerts ~}
+  # Every alert goes to Zulip (its Alertmanager integration: a webhook to a bot's
+  # URL, read from the mounted Secret so it never appears in these values).
+  # Without this block the chart's default stands: every alert to "null".
+  config:
+    route:
+      receiver: zulip
+      group_by: [alertname, cluster]
+      routes:
+        # Always-firing heartbeats of the stack itself.
+        - receiver: "null"
+          matchers:
+            - alertname =~ "Watchdog|InfoInhibitor"
+    receivers:
+      - name: "null"
+      - name: zulip
+        webhook_configs:
+          - url_file: /etc/alertmanager/secrets/${zulip_alerts_secret}/url
+            send_resolved: true
+%{ endif ~}
   alertmanagerSpec:
+%{ if zulip_alerts ~}
+    secrets: [${zulip_alerts_secret}]
+%{ endif ~}
     resources:
       requests: { cpu: 10m, memory: 32Mi }
       limits: { memory: 128Mi }
@@ -27,8 +50,25 @@ alertmanager:
             requests:
               storage: ${alertmanager_size}
 
-# Our own alert rules (Prometheus evaluates them, Alertmanager routes them).
+# Our own alert rules (Prometheus evaluates them, Alertmanager routes them;
+# Grafana lists them under Alerting -> Alert rules, data-source-managed).
 additionalPrometheusRulesMap:
+  node-cpu:
+    groups:
+      - name: node-cpu
+        rules:
+          - alert: NodeCpuHigh
+            # Whole-node CPU busy share (every core, every non-idle mode).
+            expr: |
+              100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > ${cpu_alert_threshold_percent}
+            for: ${cpu_alert_for}
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "CPU usage on {{ $labels.instance }} above ${cpu_alert_threshold_percent}%"
+              description: "Node {{ $labels.instance }} has averaged {{ printf \"%.1f\" $value }}% CPU over the last 5 minutes (for longer than ${cpu_alert_for})."
+
   world:
     groups:
       - name: world
@@ -190,6 +230,21 @@ prometheus:
     enabled: true
   thanosServiceMonitor:
     enabled: true
+  # Scrape targets outside this release.
+  additionalPodMonitors:
+    # k3s's bundled Traefik (kube-system, HelmChart `traefik`) serves Prometheus
+    # metrics on its `metrics` entrypoint (:9100) but ships no Service or monitor
+    # for it. Feeds the Traefik dashboard (dashboards/traefik.json).
+    - name: traefik
+      namespaceSelector:
+        matchNames: [kube-system]
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+      podMetricsEndpoints:
+        - port: metrics
+          path: /metrics
+          interval: 30s
   prometheusSpec:
     retention: ${retention}
     retentionSize: ${retention_size}
@@ -204,6 +259,10 @@ prometheus:
     scrapeConfigSelectorNilUsesHelmValues: false
     # The sidecar uploads 2 h blocks: local compaction must stay off.
     disableCompaction: true
+    # The sidecar reads the objstore Secret once: a changed store restarts the pod.
+    podMetadata:
+      annotations:
+        checksum/objstore: "${objstore_checksum}"
     thanos:
       image: ${thanos_image}
       objectStorageConfig:
@@ -239,6 +298,14 @@ grafana:
   resources:
     requests: { cpu: 20m, memory: 256Mi }
     limits: { memory: 1Gi }
+%{ if grafana_oidc ~}
+  # The OAuth client secret (Secret from main.tf), kept out of these values.
+  envValueFrom:
+    GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+      secretKeyRef:
+        name: ${grafana_oidc_secret}
+        key: client-secret
+%{ endif ~}
   plugins:
     - grafana-pyroscope-app
   grafana.ini:
@@ -247,9 +314,44 @@ grafana:
       root_url: https://${grafana_host}
     auth.anonymous:
       enabled: false
+%{ if !grafana_password_login ~}
+    # No username / password form: the identity provider's button is the only
+    # way in through the browser. Basic auth on the API stays on purpose: the
+    # dashboard / datasource sidecars reload Grafana with the admin credentials.
+    auth:
+      disable_login_form: true
+%{ endif ~}
+%{ if grafana_oidc ~}
+    # Login through the identity provider (Keycloak's staff realm). The role
+    # mapping is STRICT: a person without a grafana role
+    # there (claim grafana_roles: admin / editor / viewer) is refused, not made
+    # a Viewer. The local `admin` login stays as the way in when it is down.
+    auth.generic_oauth:
+      enabled: true
+      name: ${grafana_oidc_name}
+      client_id: ${grafana_oidc_client_id}
+      scopes: openid email profile
+      auth_url: ${grafana_oidc_issuer}/protocol/openid-connect/auth
+      token_url: ${grafana_oidc_issuer}/protocol/openid-connect/token
+      api_url: ${grafana_oidc_issuer}/protocol/openid-connect/userinfo
+      use_pkce: true
+      allow_sign_up: true
+      login_attribute_path: preferred_username
+      name_attribute_path: preferred_username
+      email_attribute_path: email
+      role_attribute_path: "contains(grafana_roles[*], 'admin') && 'Admin' || contains(grafana_roles[*], 'editor') && 'Editor' || contains(grafana_roles[*], 'viewer') && 'Viewer'"
+      role_attribute_strict: true
+%{ endif ~}
     analytics:
       reporting_enabled: false
       check_for_updates: false
+    # Day first everywhere. Grafana's defaults are ISO for full dates but
+    # month-first (MM/DD) on graph axes.
+    date_formats:
+      full_date: DD/MM/YYYY HH:mm:ss
+      interval_hour: DD/MM HH:mm
+      interval_day: DD/MM
+      interval_month: MM/YYYY
   ingress:
     enabled: true
     ingressClassName: ${ingress_class}

@@ -5,8 +5,11 @@ pyroscope:
     log.level: info
     storage.backend: s3
     storage.s3.bucket-name: ${bucket}
+    # Garage (modules/garage), inside the cluster: host:port, path style.
     storage.s3.endpoint: ${endpoint}
     storage.s3.region: ${region}
+    storage.s3.insecure: "${insecure}"
+    storage.s3.bucket-lookup-type: path-style
     retention-period: ${retention}
   # No static key: the S3 client's credential chain reads the telemetry-s3 env.
   extraEnvFrom:
