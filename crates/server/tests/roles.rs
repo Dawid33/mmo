@@ -546,99 +546,199 @@ fn live_on(host: &mut Host, id: game::EntityId) -> usize {
     n
 }
 
-/// Elastic 1 fix round 1 — the PRODUCTION path of a lone `static` host (an all-hosts fence, a
-/// one-phase cut writer, registered as `static`): a host alone leaves with a transfer in flight
-/// (a slime crossing into a region of its own that does not run: its last cut stores it as an
-/// in-flight row under its id), and its row is clean, as a committed leave cut leaves it. Its
-/// process starts again: a NEW id, not bumped (no dirty row: no total crash re-keys anything),
-/// so only the all-hosts fence makes it load the old id's row. The slime arrives exactly once
-/// and is stored exactly once, and after the new host's cut no in-flight row of the old id is
-/// left.
+/// A lone `static` host's process in `db` (named `host-1` both times it starts: the store's
+/// same-name vouch applies), on the production path — `Host::start` with `alone(me)`: an
+/// all-hosts fence, the one-phase `CutWriter` at its exit, registered as `static`.
+struct LoneStatic {
+    db: PgDb,
+    map: WorldMap,
+    dir: PathBuf,
+    cert_file: PathBuf,
+    addr: std::net::SocketAddr,
+    coordinator: Coordinator,
+    player: PlayerId,
+}
+
+impl LoneStatic {
+    fn new(tag: &str) -> Option<LoneStatic> {
+        install_props();
+        let db = PgDb::create(tag)?;
+        let map = land_map();
+        let dir = scratch(tag);
+        let cert_file = dir.join("coordinator.cert-sha256");
+        let (coordinator, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
+        let store = db.open();
+        let key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
+        let (player, _) = StorePlayers(store.clone()).resolve(&key).unwrap();
+        store.shutdown();
+        Some(LoneStatic { db, map, dir, cert_file, addr, coordinator, player })
+    }
+
+    /// The host process starts (named `host-1`: boot 1 every time).
+    fn start(&self) -> Host {
+        let store = self.db.open();
+        let (addr, cert_file) = (self.addr, self.cert_file.clone());
+        let link = move |reg: u64| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, HostId(reg), 1, reg)) };
+        let mut host = Host::start(&store, &self.map, |me| Box::new(alone(me)), link, None, 1);
+        assert_eq!(host.claims.fence().in_flight_scope(), None, "a lone static host's fence adopts every host's rows");
+        host.until("attached", |h| h.manager.world_attached());
+        host
+    }
+
+    /// Its player stands in `r` (r runs); a slime there crosses into `r` + x, a region of its own
+    /// that does not run: it waits in flight. The slime.
+    fn transfer_in_flight(&self, host: &mut Host, r: RegionCoords) -> game::EntityId {
+        let next = RegionCoords::new(r.x + 1, r.z);
+        host.send(ServerEvent::ClientConnected { client: A, player: self.player, record: Some(standing_in(r)) });
+        host.until("r runs", |h| h.manager.running_regions().contains(&r));
+        let mut id = None;
+        host.manager.spawner_mut().with_region(r, |region| {
+            let tick = region.current_tick();
+            let pos = game::parry::math::Vector::new(game::REGION_SIZE / 2.0, 30.0, game::REGION_SIZE / 2.0);
+            region.with_data(|d| {
+                let e = d.spawn_slime_safe(pos, 1, 0.0, tick);
+                id = *d.ecs.id.try_get(e);
+            });
+        });
+        let id = id.expect("the slime has an EntityId");
+        for _ in 0..3 {
+            host.round();
+        }
+        host.manager.spawner_mut().with_region(r, |region| {
+            let key = region.data().id_index[&id];
+            let at = game::rapier3d::math::Vector::new(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 30.0, game::REGION_SIZE / 2.0);
+            region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
+        });
+        host.until("the slime waits in flight for its region", |h| {
+            h.manager.in_flight_ids().iter().any(|(i, _)| *i == id) || h.manager.pending_arrival_ids().iter().any(|(i, _)| *i == id)
+        });
+        assert!(!host.manager.running_regions().contains(&next), "its target region does not run");
+        assert_eq!(live_on(host, id), 1);
+        id
+    }
+
+    /// The store's rows of `id` in regions (entity rows).
+    fn stored(&self, id: game::EntityId) -> i64 {
+        scalar(
+            &self.db,
+            &format!(
+                "SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}",
+                id.birth_region.x, id.birth_region.z, id.serial
+            ),
+        )
+    }
+
+    /// In-flight transfers of `id` under host `h`, as another process reads them.
+    fn in_flight(&self, h: HostId, id: game::EntityId) -> usize {
+        let store = self.db.open();
+        let n = store
+            .load_in_flight(Some(h))
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row, game::InFlightRow::Transfer { bundle, .. } if bundle.id == id))
+            .count();
+        store.shutdown();
+        n
+    }
+
+    fn generation(&self) -> u64 {
+        let store = self.db.open();
+        let g = store.world_generation().unwrap();
+        store.shutdown();
+        g
+    }
+
+    /// The new process's player stands in `next`: the slime arrives there, delivered once; the
+    /// host exits (its one-phase cut) — the slime stored once, nothing left under `old`.
+    fn deliver_and_check(&self, mut host: Host, id: game::EntityId, next: RegionCoords, old: HostId) {
+        host.send(ServerEvent::ClientConnected { client: A, player: self.player, record: Some(standing_in(next)) });
+        host.until("the slime arrived in its region", |h| {
+            let mut on = false;
+            if h.manager.running_regions().contains(&next) {
+                h.manager.spawner_mut().with_region(next, |region| on = region.data().id_index.contains_key(&id));
+            }
+            on
+        });
+        for _ in 0..10 {
+            host.round();
+        }
+        assert_eq!(live_on(&mut host, id), 1, "delivered exactly once");
+        assert_eq!(host.exit(), ServerExit::Clean);
+        assert_eq!(self.stored(id), 1, "stored exactly once");
+        assert_eq!(scalar(&self.db, &format!("SELECT COUNT(*) FROM in_flight WHERE host = {}", old.0)), 0, "nothing left under {old}");
+    }
+
+    fn stop(self) {
+        self.coordinator.stop();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Elastic 1 fix round 2 — the REAL production restart of a lone `static` host (`just dev-r2`'s
+/// host): it exits through its one-phase leave with a transfer in flight (its last cut stores it
+/// as an in-flight row under its id; its row stays DIRTY — a one-phase exit never marks it clean)
+/// and starts again under its name. The name lapses the old row, nobody else is live and a dirty
+/// row exists: the total-crash rule — a NEW id, the generation + 1, the old row's in-flight row
+/// re-keyed to the new id. The slime is delivered exactly once and stored exactly once, and
+/// nothing is left under the old id. (Before Elastic 1 this restart raised the generation too:
+/// the dirty prior row of the same ordinal bumped it.)
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_lone_static_restart_delivers_what_a_clean_leaver_left_in_flight_once() {
-    install_props();
-    let Some(db) = PgDb::create("staticflight") else { return };
-    let map = land_map();
-    let dir = scratch("staticflight");
-    let cert_file = dir.join("coordinator.cert-sha256");
-    let (coordinator, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
-    let key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
+fn a_lone_static_host_restarted_takes_its_dirty_row_and_delivers_its_in_flight_once() {
+    let Some(w) = LoneStatic::new("staticrestart") else { return };
     let (r, next) = (RegionCoords::new(10, 10), RegionCoords::new(11, 10));
-
-    let store = db.open();
-    let (a, _) = StorePlayers(store.clone()).resolve(&key).unwrap();
-    let link = |reg: u64| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), HostId(reg), 1, reg)) };
-    let mut host = Host::start(&store, &map, |me| Box::new(alone(me)), link, None, 1);
+    let mut host = w.start();
     let old = host.claims.fence().owner;
-    assert_eq!(host.claims.fence().in_flight_scope(), None, "a lone static host's fence adopts every host's rows");
-    host.until("attached", |h| h.manager.world_attached());
-    host.send(ServerEvent::ClientConnected { client: A, player: a, record: Some(standing_in(r)) });
-    host.until("r runs", |h| h.manager.running_regions().contains(&r));
-    let mut id = None;
-    host.manager.spawner_mut().with_region(r, |region| {
-        let tick = region.current_tick();
-        let pos = game::parry::math::Vector::new(game::REGION_SIZE / 2.0, 30.0, game::REGION_SIZE / 2.0);
-        region.with_data(|d| {
-            let e = d.spawn_slime_safe(pos, 1, 0.0, tick);
-            id = *d.ecs.id.try_get(e);
-        });
-    });
-    let id = id.expect("the slime has an EntityId");
-    for _ in 0..3 {
-        host.round();
-    }
-    host.manager.spawner_mut().with_region(r, |region| {
-        let key = region.data().id_index[&id];
-        let at = game::rapier3d::math::Vector::new(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 30.0, game::REGION_SIZE / 2.0);
-        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
-    });
-    host.until("the slime waits in flight for its region", |h| {
-        h.manager.in_flight_ids().iter().any(|(i, _)| *i == id) || h.manager.pending_arrival_ids().iter().any(|(i, _)| *i == id)
-    });
-    assert!(!host.manager.running_regions().contains(&next), "its target region does not run");
-    assert_eq!(live_on(&mut host, id), 1);
+    let id = w.transfer_in_flight(&mut host, r);
     assert_eq!(host.exit(), ServerExit::Clean);
-    // The exit shut the process's store down: read as another process.
-    let store = db.open();
-    let held = store.load_in_flight(Some(old)).unwrap();
-    assert_eq!(
-        held.iter().filter(|row| matches!(row, game::InFlightRow::Transfer { bundle, .. } if bundle.id == id)).count(),
-        1,
-        "the last cut holds the slime in flight under {old}"
-    );
-    assert_eq!(scalar(&db, &format!("SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}", id.birth_region.x, id.birth_region.z, id.serial)), 0, "in no region row");
-    // A committed leave cut leaves the row clean (a lone host's one-phase exit does not mark it:
-    // this is the case the all-hosts fence exists for — no total crash re-keys a clean row).
-    scalar(&db, &format!("WITH u AS (UPDATE hosts SET clean = 1 WHERE id = {} RETURNING 1) SELECT COUNT(*) FROM u", old.0));
-    let generation = store.world_generation().unwrap();
-    store.shutdown();
+    assert_eq!(w.in_flight(old, id), 1, "the last cut holds the slime in flight under {old}");
+    assert_eq!(w.stored(id), 0, "in no region row");
+    assert_eq!(scalar(&w.db, &format!("SELECT clean FROM hosts WHERE id = {}", old.0)), 0, "a one-phase exit leaves the row dirty");
+    let generation = w.generation();
 
-    let store = db.open();
-    let link = |reg: u64| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), HostId(reg), 2, reg)) };
-    let mut host = Host::start(&store, &map, |me| Box::new(alone(me)), link, None, 2);
+    let host = w.start();
     let new = host.claims.fence().owner;
     assert!(new != old, "a new id: {new}");
-    assert_eq!(store.world_generation().unwrap(), generation, "no dirty row: not bumped");
-    host.until("attached", |h| h.manager.world_attached());
-    host.send(ServerEvent::ClientConnected { client: A, player: a, record: Some(standing_in(next)) });
-    host.until("the slime arrived in its region", |h| {
-        let mut on = false;
-        if h.manager.running_regions().contains(&next) {
-            h.manager.spawner_mut().with_region(next, |region| on = region.data().id_index.contains_key(&id));
-        }
-        on
-    });
-    for _ in 0..10 {
-        host.round();
-    }
-    assert_eq!(live_on(&mut host, id), 1, "delivered exactly once");
+    assert_eq!(w.generation(), generation + 1, "a total crash: the generation + 1");
+    assert_eq!((w.in_flight(old, id), w.in_flight(new, id)), (0, 1), "the in-flight row is the new id's");
+    w.deliver_and_check(host, id, next, old);
+    assert_eq!(w.generation(), generation + 1, "raised once");
+    w.stop();
+}
+
+/// Elastic 1 fix round 1, renamed in fix round 2 — what the all-hosts fence of a lone `static`
+/// host is for: in-flight rows under a CLEAN row of another id, which no total crash re-keys.
+/// A lone static host never makes that state itself (its one-phase exit leaves its row dirty:
+/// see the test above). It arises when a world whose `claim` hosts left in a committed leave
+/// cut — the two-phase decision marks their rows clean, a leave cut holding transfers for land
+/// that does not run as in-flight rows — is started again as ONE `static` host (`dev-r3` stopped,
+/// then `dev-r2` on the same world). Here the SQL `clean = 1` stands in for that leave cut's
+/// decision over the earlier process's row. The new static host registers at the same generation
+/// (no dirty row: not bumped), and only its all-hosts fence loads the clean row's in-flight row:
+/// delivered exactly once, stored exactly once, nothing left under the old id. (Reverting
+/// `Static::runs_every_host` makes it time out waiting for the slime: the mutation check.)
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_lone_static_host_delivers_a_clean_leavers_in_flight_rows_once() {
+    let Some(w) = LoneStatic::new("staticflight") else { return };
+    let (r, next) = (RegionCoords::new(10, 10), RegionCoords::new(11, 10));
+    let mut host = w.start();
+    let old = host.claims.fence().owner;
+    let id = w.transfer_in_flight(&mut host, r);
     assert_eq!(host.exit(), ServerExit::Clean);
-    drop(store);
-    assert_eq!(scalar(&db, &format!("SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}", id.birth_region.x, id.birth_region.z, id.serial)), 1, "stored exactly once");
-    assert_eq!(scalar(&db, &format!("SELECT COUNT(*) FROM in_flight WHERE host = {}", old.0)), 0, "no in-flight row of the old id is left");
-    coordinator.stop();
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(w.in_flight(old, id), 1, "the last cut holds the slime in flight under {old}");
+    assert_eq!(w.stored(id), 0, "in no region row");
+    // Stand-in for a two-phase leave decision (a `claim` world's): the row is clean.
+    scalar(&w.db, &format!("WITH u AS (UPDATE hosts SET clean = 1 WHERE id = {} RETURNING 1) SELECT COUNT(*) FROM u", old.0));
+    let generation = w.generation();
+
+    let host = w.start();
+    let new = host.claims.fence().owner;
+    assert!(new != old, "a new id: {new}");
+    assert_eq!(w.generation(), generation, "no dirty row: not bumped");
+    assert_eq!(w.in_flight(old, id), 1, "the clean row's in-flight row stays under it: only the fence adopts it");
+    w.deliver_and_check(host, id, next, old);
+    w.stop();
 }
 
 /// `host` and `coordinator` refuse a world that is not in Postgres (SQLite, in-memory,
