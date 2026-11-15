@@ -230,7 +230,7 @@ fn main() {
 
     #[allow(unused_mut)]
     let mut primary_window = bevy::window::Window {
-        title: "Orion".into(),
+        title: "Errantry".into(),
         ..Default::default()
     };
     // Native presents without vsync by default, so the frame rate shows the

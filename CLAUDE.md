@@ -15,6 +15,12 @@ rollback netcode, a multi-region world. The client is a Bevy app; `game`, `serve
 engine-agnostic — **no Bevy, no windowing library** there. The terrain is voxel again since 2026-11-14 (the
 stud terrain was reverted): `docs/superpowers/plans/2026-11-13-voxel-terrain-return.md`.
 
+**Name:** the game is **Errantry: Renown and Ruin** ("Errantry" for short) — that is what players read
+(window and page titles, the menu, the website, login pages and mail). **Orion** is the project's code name:
+keep it wherever players do not look (code identifiers, `deploy/envs/orion`, `just orion-*`, the kube
+context, bucket and IAM names, the `orion` login theme folder, storage keys). The game is served at
+`game.errantry.renownandruin.com`.
+
 **Direction (2026-10-20):** a **Dwarf Fortress–style** game on the multi-region engine — a huge world
 forged up front (geology, climate, biomes, history), players play regions from a top-down commander
 camera (fortress mode; adventure mode exists too). No phased plan: features land piece by piece,
