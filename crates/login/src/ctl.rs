@@ -219,7 +219,7 @@ fn host_link_args(link: Option<String>, cert: Option<String>) -> Result<(Option<
     match (link, cert) {
         (None, None) => Ok((None, None)),
         (Some(link), Some(cert)) => {
-            link.parse::<std::net::SocketAddr>().map_err(|e| format!("--link {link:?}: {e} (expected ip:port)"))?;
+            svc_link::LinkTarget::parse(&link).map_err(|e| format!("--link {link:?}: {e} (expected host:port)"))?;
             let cert = cert.trim().to_ascii_lowercase();
             if cert.len() != 64 || !cert.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("--link-cert is the host link's SHA-256 pin: 64 hex digits".into());
@@ -277,6 +277,16 @@ fn keygen(dir: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_link_may_be_a_name() {
+        let pin = "ab".repeat(32);
+        let ok = host_link_args(Some("host-0.world.svc:6490".into()), Some(pin.clone())).unwrap();
+        assert_eq!(ok, (Some("host-0.world.svc:6490".into()), Some(pin.clone())));
+        assert!(host_link_args(Some("127.0.0.1:6490".into()), Some(pin.clone())).is_ok());
+        let err = host_link_args(Some("host-0".into()), Some(pin)).unwrap_err();
+        assert!(err.contains("expected host:port"), "{err}");
+    }
 
     fn a(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()

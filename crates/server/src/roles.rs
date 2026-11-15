@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
 use game::{CoordMsg, HostMsg, WorldLink};
-use svc_link::{LinkDialer, LinkEvent, LinkHello};
+use svc_link::{LinkDialer, LinkEvent, LinkHello, LinkTarget};
 use world_store::StoreUrl;
 
 use crate::claims::{Fenced, ServerExit};
@@ -218,6 +218,14 @@ pub fn coordinator_addr_from(var: &str, value: Option<&str>) -> Result<SocketAdd
     value.parse().map_err(|_| format!("{var}={value:?} is not an address (ip:port)"))
 }
 
+/// The coordinator's address as a host dials it: `host:port`, an IP or a DNS name (resolved at
+/// every dial); unset or empty is [`DEFAULT_COORDINATOR_ADDR`]. The coordinator's BIND stays
+/// `ip:port` ([`coordinator_addr_from`]).
+pub fn coordinator_dial_target_from(var: &str, value: Option<&str>) -> Result<LinkTarget, String> {
+    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_ADDR);
+    LinkTarget::parse(value).map_err(|e| format!("{var}={value:?} is not an address (host:port): {e}"))
+}
+
 /// The coordinator's cert-hash file from an env value; unset or empty is
 /// [`DEFAULT_COORDINATOR_CERT_HASH_FILE`].
 pub fn cert_hash_file_from(value: Option<&str>) -> PathBuf {
@@ -250,10 +258,11 @@ impl QuicWorldLink {
     /// Dial the coordinator at `addr` with `hello`; `pin` reads its certificate's
     /// SHA-256, retried every [`PIN_POLL`] until it answers.
     pub fn connect(
-        addr: SocketAddr,
+        addr: impl Into<LinkTarget>,
         mut pin: impl FnMut() -> io::Result<String> + Send + 'static,
         hello: LinkHello,
     ) -> QuicWorldLink {
+        let addr: LinkTarget = addr.into();
         let (out, out_rx) = crossbeam::channel::unbounded::<HostMsg>();
         let (events_tx, events) = crossbeam::channel::unbounded();
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
@@ -678,7 +687,14 @@ mod tests {
         assert_eq!(coordinator_addr_from(COORDINATOR_ADDR_ENV, None), Ok(want));
         assert_eq!(coordinator_addr_from(COORDINATOR_BIND_ENV, Some("")), Ok(want));
         assert_eq!(coordinator_addr_from(COORDINATOR_ADDR_ENV, Some("10.0.0.2:7000")), Ok("10.0.0.2:7000".parse().unwrap()));
-        let err = coordinator_addr_from(COORDINATOR_ADDR_ENV, Some("coordinator")).unwrap_err();
+        let err = coordinator_addr_from(COORDINATOR_BIND_ENV, Some("coordinator:6480")).unwrap_err();
+        assert!(err.contains(COORDINATOR_BIND_ENV), "{err}");
+        assert_eq!(coordinator_dial_target_from(COORDINATOR_ADDR_ENV, None).unwrap().to_string(), "127.0.0.1:6480");
+        assert_eq!(
+            coordinator_dial_target_from(COORDINATOR_ADDR_ENV, Some("coordinator:6480")).unwrap().to_string(),
+            "coordinator:6480"
+        );
+        let err = coordinator_dial_target_from(COORDINATOR_ADDR_ENV, Some("coordinator")).unwrap_err();
         assert!(err.contains(COORDINATOR_ADDR_ENV), "{err}");
         assert_eq!(cert_hash_file_from(None), PathBuf::from("target/dev-r2/coordinator.cert-sha256"));
         assert_eq!(cert_hash_file_from(Some("/x/pin")), PathBuf::from("/x/pin"));

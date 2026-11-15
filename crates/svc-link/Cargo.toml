@@ -12,7 +12,7 @@ crossbeam = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 quinn = { workspace = true }
-tokio = { workspace = true, features = ["time", "sync", "macros"] }
+tokio = { workspace = true, features = ["time", "sync", "macros", "net"] }
 rcgen = { workspace = true }
 sha2 = { workspace = true }
 

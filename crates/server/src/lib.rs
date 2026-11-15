@@ -1680,7 +1680,7 @@ mod tests {
 /// `reg`: the host's registration number (`hosts.reg`), in its hello: the coordinator admits
 /// only its `hosts` row's, while that row is live.
 fn host_world_link(ordinal: u32, boot: u64, reg: u64) -> Result<roles::QuicWorldLink, String> {
-    let addr = roles::coordinator_addr_from(
+    let addr = roles::coordinator_dial_target_from(
         roles::COORDINATOR_ADDR_ENV,
         std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref(),
     )?;

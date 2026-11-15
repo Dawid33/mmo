@@ -15,6 +15,7 @@
 
 mod cert;
 mod frame;
+mod target;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -35,6 +36,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, read_cert_hash, service_token_from_env};
 pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
+pub use target::LinkTarget;
 
 /// Wire version of the hello; a mismatch is refused. 2: a host's hello carries its claim epoch.
 /// 3: hosts link to each other (R3: `game::PeerMsg` frames between hosts).
@@ -482,7 +484,7 @@ fn client_config(pin: &str) -> io::Result<quinn::ClientConfig> {
 pub struct LinkDialer;
 
 impl LinkDialer {
-    /// Dial `addr`, pinning the listener's certificate to `cert_sha256`, and keep the link up:
+    /// Dial `target` (an address or a `host:port` name, resolved again at every attempt), pinning the listener's certificate to `cert_sha256`, and keep the link up:
     /// reconnect forever with backoff. `Down` is sent when a link drops or the first attempt of a
     /// down period fails; messages sent while down are dropped. The link ends when the returned
     /// sender is dropped, or when the receiver is dropped and the next event send fails (an idle
@@ -492,7 +494,7 @@ impl LinkDialer {
     /// Delivery is at-least-once around reconnects, never lossy after `Up`: a message sent just
     /// before the owner observes `Up` may also be delivered, so owners must be idempotent.
     pub fn connect<In, Out>(
-        addr: SocketAddr,
+        target: impl Into<LinkTarget>,
         cert_sha256: String,
         hello: LinkHello,
     ) -> (Sender<Out>, Receiver<LinkEvent<In>>)
@@ -500,6 +502,7 @@ impl LinkDialer {
         In: DeserializeOwned + Send + 'static,
         Out: Serialize + Send + 'static,
     {
+        let target: LinkTarget = target.into();
         let (out_tx, out_rx) = crossbeam::channel::unbounded::<Out>();
         let (event_tx, event_rx) = crossbeam::channel::unbounded::<LinkEvent<In>>();
         // The live connection's queue; None while down, so a send then is dropped.
@@ -527,10 +530,21 @@ impl LinkDialer {
                     .enable_all()
                     .build()
                     .expect("dialer runtime");
-                rt.block_on(dial_loop(addr, cert_sha256, hello, slot, stop, event_tx));
+                rt.block_on(dial_loop(target, cert_sha256, hello, slot, stop, event_tx));
             })
             .expect("spawn the dialer thread");
         (out_tx, event_rx)
+    }
+}
+
+/// Where a dial attempt goes, asked again before every attempt (a seam for the tests).
+trait Resolve {
+    async fn resolve(&self) -> io::Result<SocketAddr>;
+}
+
+impl Resolve for LinkTarget {
+    async fn resolve(&self) -> io::Result<SocketAddr> {
+        LinkTarget::resolve(self).await
     }
 }
 
@@ -570,7 +584,7 @@ async fn attempt(
 }
 
 async fn dial_loop<In, Out>(
-    addr: SocketAddr,
+    target: impl Resolve + std::fmt::Display,
     pin: String,
     hello: LinkHello,
     slot: Arc<Mutex<Option<UnboundedSender<Out>>>>,
@@ -580,22 +594,27 @@ async fn dial_loop<In, Out>(
     In: DeserializeOwned + Send + 'static,
     Out: Serialize + Send + 'static,
 {
-    let bind: SocketAddr = if addr.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
-    let (endpoint, config) = match Endpoint::client(bind).and_then(|e| Ok((e, client_config(&pin)?))) {
-        Ok(parts) => parts,
-        Err(e) => {
-            let _ = events.send(LinkEvent::Down(format!("dialer setup failed: {e}")));
-            return;
-        }
-    };
+    // Bound once, at the first address that resolves: IPv4 wildcard unless that one is IPv6.
+    let mut dialer: Option<(Endpoint, quinn::ClientConfig)> = None;
     let mut backoff = LINK_RETRY_MIN_MS;
     let mut announced_down = false;
     // Failed attempts since the last dial-failure line, and when that line went out.
     let mut unlogged_failures: u64 = 0;
     let mut last_dial_log: Option<std::time::Instant> = None;
     while !stop.load(Ordering::SeqCst) {
-        match attempt(&endpoint, addr, &config, &hello).await {
-            Ok((connection, send, recv)) => {
+        let tried = async {
+            let addr = target.resolve().await.map_err(|e| format!("resolve {target}: {e}"))?;
+            if dialer.is_none() {
+                let bind: SocketAddr = if addr.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
+                let parts = Endpoint::client(bind).and_then(|e| Ok((e, client_config(&pin)?)));
+                dialer = Some(parts.map_err(|e| format!("dialer setup failed: {e}"))?);
+            }
+            let (endpoint, config) = dialer.as_ref().expect("bound above");
+            attempt(endpoint, addr, config, &hello).await.map(|up| (addr, up))
+        }
+        .await;
+        match tried {
+            Ok((addr, (connection, send, recv))) => {
                 backoff = LINK_RETRY_MIN_MS;
                 unlogged_failures = 0;
                 last_dial_log = None;
@@ -603,7 +622,7 @@ async fn dial_loop<In, Out>(
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                log::info!("[svc-link] up to {addr}");
+                log::info!("[svc-link] up to {target} ({addr})");
                 // Hold the slot lock across `Up`: the out thread blocks on it until the slot is
                 // open, so anything the owner sends after seeing `Up` lands on this link.
                 let mut open = slot.lock().unwrap();
@@ -622,7 +641,7 @@ async fn dial_loop<In, Out>(
                         .await;
                 slot.lock().unwrap().take();
                 connection.close(CLOSE_NORMAL.into(), b"link ended");
-                log::warn!("[svc-link] link to {addr} down: {reason}");
+                log::warn!("[svc-link] link to {target} ({addr}) down: {reason}");
                 if events.send(LinkEvent::Down(reason)).is_err() {
                     break;
                 }
@@ -632,9 +651,9 @@ async fn dial_loop<In, Out>(
                 unlogged_failures += 1;
                 if last_dial_log.is_none_or(|t| t.elapsed() >= Duration::from_secs(LINK_DIAL_LOG_EVERY_SECS)) {
                     if last_dial_log.is_none() {
-                        log::warn!("[svc-link] dial {addr} failed: {why}");
+                        log::warn!("[svc-link] dial {target} failed: {why}");
                     } else {
-                        log::warn!("[svc-link] dial {addr} failed: {why} ({unlogged_failures} failed attempts since the last line)");
+                        log::warn!("[svc-link] dial {target} failed: {why} ({unlogged_failures} failed attempts since the last line)");
                     }
                     last_dial_log = Some(std::time::Instant::now());
                     unlogged_failures = 0;
@@ -653,5 +672,63 @@ async fn dial_loop<In, Out>(
         tokio::time::sleep(Duration::from_millis(backoff)).await;
         backoff = (backoff * 2).min(LINK_RETRY_MAX_MS);
     }
-    endpoint.close(CLOSE_NORMAL.into(), b"dialer stopped");
+    if let Some((endpoint, _)) = dialer {
+        endpoint.close(CLOSE_NORMAL.into(), b"dialer stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Fails its first lookup, then names the live listener; counts its calls.
+    struct FlakyResolver {
+        live: SocketAddr,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Resolve for FlakyResolver {
+        async fn resolve(&self) -> io::Result<SocketAddr> {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(io::Error::new(io::ErrorKind::NotFound, "no such host yet")),
+                _ => Ok(self.live),
+            }
+        }
+    }
+
+    impl std::fmt::Display for FlakyResolver {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("flaky:6480")
+        }
+    }
+
+    #[test]
+    fn dial_resolves_again_after_a_failed_attempt() {
+        let token = "t".to_string();
+        let (listener, _from_peers, _senders) =
+            LinkListener::bind::<u64, u64>(([127, 0, 0, 1], 0).into(), token.clone(), None).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = FlakyResolver { live: listener.local_addr(), calls: calls.clone() };
+        let hello = LinkHello::new(token, PeerRole::Coordinator);
+        let (slot, stop) = (Arc::<Mutex<Option<UnboundedSender<u64>>>>::default(), Arc::new(AtomicBool::new(false)));
+        let (event_tx, events) = crossbeam::channel::unbounded::<LinkEvent<u64>>();
+        let (pin, stop2) = (listener.cert_sha256().to_string(), stop.clone());
+        let dialer = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(dial_loop(resolver, pin, hello, slot, stop2, event_tx));
+        });
+        let mut up = false;
+        while let Ok(event) = events.recv_timeout(Duration::from_secs(10)) {
+            if matches!(event, LinkEvent::Up(_)) {
+                up = true;
+                break;
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        assert!(up, "the link came up on the second resolve");
+        assert!(calls.load(Ordering::SeqCst) >= 2, "the resolver was asked again");
+        // Left detached: a live link ends only when its connection does (idle timeout).
+        drop(dialer);
+    }
 }

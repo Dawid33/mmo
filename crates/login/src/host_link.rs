@@ -26,13 +26,12 @@
 //! then stays open in the registry (a later kick for it is a no-op on the host).
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam::channel::{Receiver, Sender};
 use login_api::{HostToLogin, LoginToHost, SPAWN_ACK_TIMEOUT_MS};
-use svc_link::{LinkDialer, LinkEvent, LinkHello, PeerRole};
+use svc_link::{LinkDialer, LinkEvent, LinkHello, LinkTarget, PeerRole};
 use tokio::sync::{Notify, oneshot, watch};
 
 /// How often pending kicks are resent while their link is up (and new ones looked for).
@@ -87,7 +86,7 @@ type Waiters = Arc<Mutex<BTreeMap<(String, u64), oneshot::Sender<(bool, SpawnPla
 
 /// One world's link: the dialer's sender, whether it is up, and the joins waiting for acks.
 struct HostLink {
-    addr: SocketAddr,
+    addr: LinkTarget,
     cert: String,
     tx: Sender<LoginToHost>,
     up: watch::Receiver<bool>,
@@ -254,7 +253,7 @@ impl HostLinks {
             return Ok(None);
         };
         let token = self.token.clone().ok_or(SpawnError::NoServiceToken)?;
-        let addr: SocketAddr = addr.parse().map_err(|e| SpawnError::BadLink(format!("host_link {addr:?}: {e}")))?;
+        let addr = LinkTarget::parse(addr).map_err(|e| SpawnError::BadLink(format!("host_link {addr:?}: {e}")))?;
         let cert = world
             .host_link_cert
             .clone()
@@ -266,7 +265,7 @@ impl HostLinks {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| SpawnError::BadLink("host links are used from the async runtime only".into()))?;
         let hello = LinkHello::new(token, PeerRole::Login);
-        let (tx, events) = LinkDialer::connect::<HostToLogin, LoginToHost>(addr, cert.clone(), hello);
+        let (tx, events) = LinkDialer::connect::<HostToLogin, LoginToHost>(addr.clone(), cert.clone(), hello);
         let (up_tx, up) = watch::channel(false);
         let waiters: Waiters = Arc::default();
         let current = Arc::new(Mutex::new(true));
