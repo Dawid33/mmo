@@ -525,9 +525,10 @@ macro_rules! engine_rows {
             /// 1. the world row (Postgres `FOR NO KEY UPDATE`, as every declaration, retirement,
             ///    rollback and decision; SQLite has one writer): `id = next_host_id`, refused above
             ///    [`crate::HOST_ID_MAX`]; `next_host_id = id + 1`;
-            /// 2. `Rollback` (`static`) and another row live → [`StoreError::NotAlone`];
-            /// 3. no live row and some dirty one (a total crash) → [`total_crash`];
-            /// 4. otherwise, a non-empty `name`: other dirty live rows of that name get `seen_ms = 0`;
+            /// 2. a non-empty `name`: other dirty live rows of that name get `seen_ms = 0` (so they
+            ///    are not live below: a restarted process's own old row never is);
+            /// 3. `Rollback` (`static`) and another row live → [`StoreError::NotAlone`];
+            /// 4. no live row and some dirty one (a total crash) → [`total_crash`];
             /// 5. [`prune_hosts`];
             /// 6. the new row: dirty, live, seen now, at the world's generation.
             ///
@@ -614,17 +615,35 @@ macro_rules! engine_rows {
                         ))
                     })?;
                 sqlx::query("UPDATE world SET next_host_id = $1 WHERE id = 1").bind(next + 1).execute(&mut **tx).await?;
-                // 2. `static` runs one host: refused beside another live row.
+                // 2. A restarted process's old id, by name, FIRST: lapsed now (declared at the
+                // coordinator's next read instead of a lease later), and never counted as live
+                // below — a lone host restarted within its lease is a total crash that takes its
+                // own land back, not a host beside itself. A wrongly vouched live host is fenced
+                // (its land moves at `epoch + 1`, here or by its succession), never duplicated.
+                if !host.name.is_empty() {
+                    let sql = format!(
+                        "UPDATE hosts SET seen_ms = 0 WHERE name = $1 AND clean = 0 AND state = {live}",
+                        live = crate::HOST_LIVE,
+                    );
+                    let vouched = sqlx::query(&sql).bind(&host.name).execute(&mut **tx).await?.rows_affected();
+                    if vouched > 0 {
+                        log::warn!(
+                            "[world-store] host {id} registers as {:?}: {vouched} older dirty row(s) of that name lapsed \
+                             (seen_ms = 0)",
+                            host.name
+                        );
+                    }
+                }
+                // 3. `static` runs one host: refused beside another live row.
                 let mut live = live_ids(tx, world, lease_ms).await?;
                 if policy == game::CrashPolicy::Rollback && !live.is_empty() {
                     return Ok(Err(live));
                 }
-                // 3. A total crash: nobody live, somebody dirty. Lock the open successions, then
+                // 4. A total crash: nobody live, somebody dirty. Lock the open successions, then
                 // every dirty row (id order), and judge again under those locks — a beat that
                 // landed meanwhile makes its row live after all (a beat waits for these locks
                 // from here on).
                 let mut generation = world;
-                let mut bumped = false;
                 let dirty: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hosts WHERE clean = 0").fetch_one(&mut **tx).await?;
                 if live.is_empty() && dirty > 0 {
                     if !$update_lock.is_empty() {
@@ -641,26 +660,8 @@ macro_rules! engine_rows {
                     if live.is_empty() {
                         total_crash(tx, id, world).await?;
                         generation = world + 1;
-                        bumped = true;
                     } else if policy == game::CrashPolicy::Rollback {
                         return Ok(Err(live));
-                    }
-                }
-                // 4. A restarted process's old id, by name: lapsed now, declared at the
-                // coordinator's next read instead of a lease later (a wrongly vouched live
-                // host is fenced by its succession, never duplicated).
-                if !bumped && !host.name.is_empty() {
-                    let sql = format!(
-                        "UPDATE hosts SET seen_ms = 0 WHERE name = $1 AND clean = 0 AND state = {live}",
-                        live = crate::HOST_LIVE,
-                    );
-                    let vouched = sqlx::query(&sql).bind(&host.name).execute(&mut **tx).await?.rows_affected();
-                    if vouched > 0 {
-                        log::warn!(
-                            "[world-store] host {id} registers as {:?}: {vouched} older dirty row(s) of that name lapsed \
-                             (seen_ms = 0) — the coordinator declares them at its next read",
-                            host.name
-                        );
                     }
                 }
                 // 5. Rows nothing needs any more.
@@ -685,7 +686,7 @@ macro_rules! engine_rows {
                     .bind(crate::open::utc_now())
                     .execute(&mut **tx)
                     .await?;
-                Ok(Ok(crate::Registered { id, generation: u(generation), bumped }))
+                Ok(Ok(crate::Registered { id, generation: u(generation), bumped: generation != world }))
             }
 
             /// A total crash at registration (decision 4; [`register_host`] step 3, the dirty rows

@@ -254,16 +254,22 @@ fn a_static_host_beside_a_live_row_is_refused() {
     });
 }
 
+/// A restarted process beside another live host: its old row (same name) lapses and nothing
+/// else — it is not a total crash (B is live), the new host owns nothing, A keeps its land
+/// until the coordinator declares it; B is untouched. An empty name vouches for nothing.
 #[test]
 fn a_same_named_registration_lapses_the_old_row() {
     each_backend("hosts_same_name", false, |url| {
         let h = open(url);
         let a = reg(&h, "a", 1, CrashPolicy::Succession);
         let b = reg(&h, "b", 2, CrashPolicy::Succession);
+        let fa = h.claim_super_regions(a.id, vec![TEST_SUPER_REGIONS[0]]).unwrap();
         let seen = |id: HostId| h.hosts().unwrap().into_iter().find(|r| r.id == id).unwrap().seen_ms;
         let b_seen = seen(b.id);
         let again = reg(&h, "a", 3, CrashPolicy::Succession);
-        assert_eq!((again.id, again.bumped), (hid(3), false));
+        assert_eq!((again.id, again.generation, again.bumped), (hid(3), 0, false));
+        assert!(h.owned_by(again.id).unwrap().epochs.is_empty(), "the new host owns nothing");
+        assert_eq!(h.owned_by(a.id).unwrap(), fa, "A's land is still A's");
         assert_eq!(seen(a.id), 0, "the older row named a lapsed");
         assert_eq!(seen(b.id), b_seen, "a row of another name is untouched");
         assert_ne!(seen(again.id), 0, "the new row is seen now");
@@ -273,6 +279,50 @@ fn a_same_named_registration_lapses_the_old_row() {
         reg(&h, "", 5, CrashPolicy::Succession);
         assert_eq!((seen(b.id), seen(again.id)), (b_seen, again_seen));
         assert!(h.hosts().unwrap().iter().filter(|r| r.name.is_empty()).all(|r| r.seen_ms != 0));
+        h.shutdown();
+    });
+}
+
+/// A lone host named `a` (live, dirty, its lease NOT lapsed, owning land and an in-flight row)
+/// restarted under `policy` by a process of the same name: the vouch comes first, so its old
+/// row is not live and the registration is a total crash — the new id takes the land at
+/// `epoch + 1` and the in-flight row; the old row is gone.
+fn lone_named_restart_takes_its_land_back(url: &StoreUrl, policy: CrashPolicy) {
+    let h = open(url);
+    let a = reg(&h, "a", 1, policy);
+    let fa = h.claim_super_regions(a.id, vec![TEST_SUPER_REGIONS[0]]).unwrap();
+    h.commit_cut(in_flight_cut(1, a.id, RegionCoords::new(0, 0)), fa.clone()).recv().unwrap().unwrap();
+    assert!(h.heartbeat(a.id, 1).unwrap(), "A's lease is fresh");
+    let back = h.register_host(new_host("a", 2), policy).unwrap();
+    assert_eq!((back.id, back.generation, back.bumped), (hid(2), 1, true), "{policy:?}");
+    let want: std::collections::BTreeMap<_, _> = fa.epochs.iter().map(|(sr, e)| (*sr, e + 1)).collect();
+    assert_eq!(h.owned_by(back.id).unwrap().epochs, want, "{policy:?}: A's land, epoch + 1");
+    assert_eq!(h.load_in_flight(Some(back.id)).unwrap().len(), 1, "{policy:?}: A's in-flight row");
+    assert_eq!(ids(&h), vec![back.id], "{policy:?}: A's row is gone");
+    assert!(!h.heartbeat(a.id, 1).unwrap(), "{policy:?}: the old process is replaced");
+    h.shutdown();
+}
+
+#[test]
+fn a_lone_named_host_restarted_within_the_lease_takes_its_land_back() {
+    each_backend("hosts_lone_named", false, |url| lone_named_restart_takes_its_land_back(url, CrashPolicy::Succession));
+}
+
+#[test]
+fn a_static_host_restarted_under_its_name_is_not_refused() {
+    each_backend("hosts_static_named", false, |url| lone_named_restart_takes_its_land_back(url, CrashPolicy::Rollback));
+}
+
+/// Without a name nothing is vouched: a `static` restart beside its own still-fresh old row
+/// is refused (why a host needs a name to restart at once).
+#[test]
+fn an_unnamed_static_restart_within_the_lease_is_refused() {
+    each_backend("hosts_static_unnamed", false, |url| {
+        let h = open(url);
+        let a = reg(&h, "", 1, CrashPolicy::Rollback);
+        let err = h.register_host(new_host("", 2), CrashPolicy::Rollback).unwrap_err();
+        assert_eq!(err, StoreError::NotAlone { live: vec![a.id] });
+        assert_eq!(ids(&h), vec![a.id]);
         h.shutdown();
     });
 }

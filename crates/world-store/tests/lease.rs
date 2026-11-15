@@ -117,8 +117,9 @@ fn a_heartbeat_does_not_wait_for_the_shared_pool() {
 }
 
 /// R4's lone `claim` host (its coordinator runs `Rollback`: nobody to inherit) restarted right
-/// after a beat — its old row dirty, live and fresh. Elastic 1: it never waits; it registers at
-/// once as a NEW host owning nothing, and its old row, of the same name, lapses (`seen_ms = 0`).
+/// after a beat — its old row dirty, live and fresh. Elastic 1: it never waits; its old row,
+/// of the same name, is vouched first and so not live: the registration is a total crash that
+/// takes the old row's land back (`hosts::a_lone_named_host_restarted_within_the_lease_…`).
 #[test]
 fn a_lone_claim_host_restarts_after_a_crash_without_waiting() {
     each_backend("lease_lone_claim", false, |url| {
@@ -128,11 +129,12 @@ fn a_lone_claim_host_restarts_after_a_crash_without_waiting() {
         let started = std::time::Instant::now();
         let again = h.register_host(crate::hosts::new_host("host", 20), CrashPolicy::Succession).unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "registered at once");
-        assert_eq!((again.id, again.generation, again.bumped), (hid(2), 0, false));
+        assert_eq!((again.id, again.generation, again.bumped), (hid(2), 1, true));
         let rows = h.hosts().unwrap();
         assert_eq!(
-            rows.iter().map(|r| (r.id, r.boot, r.state, r.clean, r.seen_ms == 0)).collect::<Vec<_>>(),
-            vec![(first.id, 10, HOST_LIVE, false, true), (again.id, 20, HOST_LIVE, false, false)]
+            rows.iter().map(|r| (r.id, r.boot, r.state, r.clean)).collect::<Vec<_>>(),
+            vec![(again.id, 20, HOST_LIVE, false)],
+            "the old row, dead and landless, is pruned"
         );
         h.shutdown();
     });

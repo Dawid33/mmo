@@ -54,6 +54,12 @@
 //!   waits for a claim's `FOR KEY SHARE` (`check_side`), and the claim never waits for it.
 //!   `UPDATE world SET next_host_id` (and, a total crash, `generation`) is the same row. A
 //!   refused registration (`NotAlone`, the id bound, any error) rolls back: no id is issued.
+//! - The name vouch, BEFORE anything is judged live: one `UPDATE hosts SET seen_ms = 0` over
+//!   the other dirty live rows of the new host's (non-empty) name — several `hosts` rows, under
+//!   `world`; against the one-row lockers as for the prune below (a heartbeat of such a row waits
+//!   for this transaction and then lands after the vouch: the declaration's lapse re-check sees
+//!   it). Those rows stay locked to the commit, so a restarted process's own old row is never
+//!   counted live, and in a total crash it is among the dirty rows locked next (already held).
 //! - The live read (`live_ids`) and the dirty count take no lock.
 //! - A total crash only: the open `successions` rows `FOR UPDATE` (every other writer of them
 //!   holds `world` first; a staged heir part reads them without a lock), then EVERY dirty
@@ -72,8 +78,6 @@
 //!   resolves staged parts before it registers. A part being written locks `super_regions`
 //!   first and `in_flight` after, as the registration does: no cycle. Nothing else here waits
 //!   for a row a part could be waiting for.
-//! - The name vouch (not a total crash): one `UPDATE hosts SET seen_ms = 0` over the dirty live
-//!   rows of one name — several rows, under `world`; against the one-row lockers as below.
 //! - The prune: one `DELETE` of clean or dead `hosts` rows that own no `super_regions` /
 //!   `in_flight` row and that no open succession names (the subqueries read without locks).
 //!   The rows it can lock are clean or dead: a heartbeat matches only a live row (a clean live

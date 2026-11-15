@@ -908,14 +908,16 @@ impl StoreHandle {
     /// lock (`rows.rs` `register_host`; its locks in the module notes of `succession.rs`) that
     /// issues the next id from `world.next_host_id` — never one issued before — and stores the
     /// row dirty, live and seen now. A new host owns nothing and never waits:
+    /// - first, other dirty live rows of the same non-empty `name` get `seen_ms = 0` (vouched:
+    ///   the coordinator declares them at its next read) and are not live below — a restarted
+    ///   process's own old row never counts as another host;
     /// - `Rollback` (`static`, one host) beside another live row → [`StoreError::NotAlone`],
     ///   nothing written;
-    /// - no other live row and at least one dirty one (a total crash): every open succession
-    ///   is abandoned (as a world rollback does), every dirty row's `super_regions` rows (at
-    ///   `epoch + 1`) and `in_flight` rows become the new host's, those rows are marked dead
-    ///   and `world.generation` goes up (`bumped`) — under every policy;
-    /// - otherwise other dirty live rows of the same non-empty `name` get `seen_ms = 0`
-    ///   (vouched: the coordinator declares them at its next read).
+    /// - no other live row and at least one dirty one (a total crash, or a lone host restarted
+    ///   under its name): every open succession is abandoned (as a world rollback does), every
+    ///   dirty row's `super_regions` rows (at `epoch + 1`) and `in_flight` rows become the new
+    ///   host's, those rows are marked dead and `world.generation` goes up (`bumped`) — under
+    ///   every policy.
     ///
     /// Then every clean or dead row that owns no `super_regions` and no `in_flight` row and
     /// that no open succession names is deleted (its id is never issued again).
