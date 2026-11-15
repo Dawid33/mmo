@@ -5246,15 +5246,11 @@ fn collect_login_out(rig: &mut MultiRig, out: &mut Vec<(HostId, game::LoginOut)>
     }
 }
 
-/// The host of a 3-host rig that owns neither `a` nor `b` (the entry host of the login
-/// tests: the login service is linked to it only), set as every host's entry host.
+/// The host of a 3-host rig that owns neither `a` nor `b` (the gate host of the login tests:
+/// the coordinator gives it the login service's orders).
 fn third_host_as_entry(rig: &mut MultiRig, a: RegionCoords, b: RegionCoords) -> HostId {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let entry = host_ids(rig.hosts.len() as u32).find(|h| *h != ha && *h != hb).expect("a third host");
-    for r in &mut rig.hosts {
-        r.manager.set_entry_host(entry);
-    }
-    entry
+    host_ids(rig.hosts.len() as u32).find(|h| *h != ha && *h != hb).expect("a third host")
 }
 
 /// `place_spawn`'s rules in order, each with the earlier ones absent: no record → the
@@ -5425,10 +5421,13 @@ fn spawn_behind_handoff(rig: &mut MultiRig) {
     assert_eq!(owners[0].0, placed, "on the host that took the order");
     assert!(rig.player_owners(P_CLIENT).is_empty(), "the old session's body is gone");
     assert!(rig.parked_on(P_PLAYER).is_empty(), "no parked copy beside the body");
+    // Elastic 1 Task 6: a session's end goes up the coordinator link of the host it ended on
+    // (A or B, never through the gate host).
     let ended_once = |epoch: u64| {
         let end = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: epoch };
         let ends: Vec<&(HostId, game::LoginOut)> = out.iter().filter(|(_, o)| *o == end).collect();
-        assert_eq!(ends, [&(entry, end.clone())], "login {epoch} ended once, told to the entry host: {out:?}");
+        assert_eq!(ends.len(), 1, "login {epoch} ended once: {out:?}");
+        assert!(ends[0].0 == ha || ends[0].0 == hb, "told by the host it ended on (A or B), not the gate host {entry}: {out:?}");
     };
     ended_once(1);
     if refused {
@@ -5485,7 +5484,7 @@ fn kick_crossing(rig: &mut MultiRig) {
     let acks: Vec<&(HostId, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ack).collect();
     assert_eq!(acks, [&(entry, ack.clone())], "acknowledged once, by the entry host: {out:?}");
     let ends: Vec<&(HostId, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ended).collect();
-    assert_eq!(ends, [&(entry, ended.clone())], "the login ended once, told to the entry host: {out:?}");
+    assert_eq!(ends, [&(parked[0], ended.clone())], "the login ended once, told by the host that parked it: {out:?}");
     // A resend (the login service's sweep) is acknowledged again and changes nothing.
     rig.hosts[entry.0 as usize].event(game::ServerEvent::Kick {
         player_token: LOGIN_TOKEN.into(),
@@ -5517,7 +5516,6 @@ fn kick_reaches_a_crossing_login_and_is_acked_once() {
 /// one.
 fn store_spawn_waits_for_sync(rig: &mut MultiRig) {
     let (b, ha, hb) = move_queued_link_down(rig, true);
-    rig.hosts[hb.0 as usize].manager.set_entry_host(hb);
     let order = game::ServerEvent::SpawnOrder {
         origin: hb,
         hops: 0,
@@ -5573,7 +5571,6 @@ fn spawn_from_the_store_waits_for_every_peer_sync() {
 /// entry host); rounds (the server answering) until host `h` told its login service
 /// something, or `budget` rounds. What it told.
 fn store_order_at(rig: &mut MultiRig, h: HostId, rc: RegionCoords, epoch: u64, budget: usize) -> Vec<(HostId, game::LoginOut)> {
-    rig.hosts[h.0 as usize].manager.set_entry_host(h);
     let order = game::ServerEvent::SpawnOrder {
         origin: h,
         hops: 0,
@@ -5664,7 +5661,6 @@ fn refused_order_unpins(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
-    rig.hosts[ha.0 as usize].manager.set_entry_host(ha);
     rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 2);
     let (_, _, id) = until_body(rig);
     let order = game::ServerEvent::SpawnOrder {
@@ -5696,7 +5692,6 @@ fn a_refused_order_does_not_keep_the_player() {
 fn refused_login_ends_once(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let ha = rig.owner(a);
-    rig.hosts[ha.0 as usize].manager.set_entry_host(ha);
     rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(b, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 1);
     let mut out = Vec::new();
     for _ in 0..WAIT_ROUNDS {
@@ -7838,7 +7833,6 @@ fn held_spawn_finds_the_journal(rig: &mut MultiRig) -> bool {
     let succession = rig.run_succession(dead).remove(0);
     let heir = succession.heir;
     until_applied(rig, &succession);
-    rig.hosts[heir.0 as usize].manager.set_entry_host(heir);
     let order = game::ServerEvent::SpawnOrder {
         origin: heir,
         hops: 0,
@@ -7953,7 +7947,6 @@ fn logins_over(rig: &mut MultiRig, rounds: usize, until_answer: bool) -> (Vec<(H
 /// A spawn order for `player` (session epoch `epoch`, its stored record in `rc`) as the
 /// login service gives it to host `entry`, its entry host.
 fn spawn_order_at(rig: &mut MultiRig, entry: HostId, player: game::PlayerId, rc: RegionCoords, epoch: u64) {
-    rig.hosts[entry.0 as usize].manager.set_entry_host(entry);
     let order = game::ServerEvent::SpawnOrder {
         origin: entry,
         hops: 0,
@@ -9470,4 +9463,263 @@ fn frozen_newcomer_dies_before_the_next_cut(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_frozen_newcomer_that_dies_before_the_next_cut_leaves_its_slime_once() {
     sweep("a_frozen_newcomer_that_dies_before_the_next_cut_leaves_its_slime_once", 2, 1, SEEDS / 4, frozen_newcomer_dies_before_the_next_cut);
+}
+
+// --- Elastic 1 Task 6: the login service's orders through the coordinator's gate host ---------
+
+/// The gate tests' login roster: a token's player and the region of its stored record (what
+/// the gate's server resolves through its player store).
+type GateRoster = std::collections::BTreeMap<String, (game::PlayerId, RegionCoords)>;
+
+/// The login service's order, as the coordinator runtime handles it: to the gate host of
+/// this moment ([`game::Coordinator::login_order`]); the gate host (`None`: dropped).
+fn order_at_gate(rig: &mut MultiRig, order: game::LoginOrder) -> Option<HostId> {
+    let gate = rig.core().gate_host();
+    let to = rig.core().login_order(order);
+    assert_eq!(to, gate, "the order goes to the gate host of its moment");
+    to
+}
+
+/// One round of what every live host's server does with the coordinator's login orders
+/// (`server::login_link::resolve_order` → the manager's `SpawnOrder` / `Kick`, origin: the
+/// host itself) and with its answers (up its own coordinator link, `send_login_out`), then a
+/// cut round (the links pumped). What reached the coordinator for the login service is
+/// appended to `heard`; the orders taken (as [`MultiRig::serve_logins`]).
+fn gate_round(rig: &mut MultiRig, roster: &GateRoster, heard: &mut Vec<game::LoginOut>) -> Vec<(HostId, game::SpawnRequest)> {
+    let live: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    for &h in &live {
+        for order in rig.hosts[h.0 as usize].manager.take_login_orders() {
+            let ev = match order {
+                game::LoginOrder::Spawn { player_token, session_epoch } => {
+                    let (player, rc) = roster[&player_token];
+                    game::ServerEvent::SpawnOrder { origin: h, hops: 0, player_token, session_epoch, player, record_region: Some(rc) }
+                }
+                game::LoginOrder::Kick { player_token, session_epoch, reason } => {
+                    game::ServerEvent::Kick { player_token, session_epoch, reason }
+                }
+            };
+            rig.hosts[h.0 as usize].event(ev);
+        }
+    }
+    let taken = rig.serve_logins();
+    for &h in &live {
+        rig.hosts[h.0 as usize].manager.send_login_out();
+    }
+    rig.cut_round();
+    heard.extend(rig.core().take_login_out());
+    taken
+}
+
+/// The login answers host `h` sent up its own coordinator link so far.
+fn sent_up(rig: &MultiRig, h: HostId) -> Vec<game::LoginOut> {
+    rig.world_sent[h.0 as usize]
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|m| match m {
+            game::HostMsg::Login(out) => Some(out.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn spawn_ack_of(epoch: u64) -> impl Fn(&game::LoginOut) -> bool {
+    move |o| matches!(o, game::LoginOut::SpawnAck { session_epoch, .. } if *session_epoch == epoch)
+}
+
+/// 2 hosts and a coordinator: the gate host (the lowest, A) gets the order of a player whose
+/// stored record lies in B's land; A relays it to B, which takes it. ONE `SpawnAck` reaches
+/// the coordinator — up A's link (the order's origin), none up B's — naming B; the login
+/// connects there and the player has one body, on B.
+fn placed_through_the_gate(rig: &mut MultiRig) {
+    rig.with_coordinator(quiet_history());
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let (gate, other, rb) = if ha < hb { (ha, hb, b) } else { (hb, ha, a) };
+    let roster = GateRoster::from([(LOGIN_TOKEN.to_string(), (FRESH_PLAYER, rb))]);
+    rig.run(rb);
+    let to = order_at_gate(rig, game::LoginOrder::Spawn { player_token: LOGIN_TOKEN.into(), session_epoch: 1 });
+    assert_eq!(to, Some(gate), "the lowest attached host is the gate");
+    let (mut heard, mut taken) = (Vec::new(), Vec::new());
+    for _ in 0..CROSS_ROUNDS {
+        taken.extend(gate_round(rig, &roster, &mut heard));
+        if heard.iter().any(spawn_ack_of(1)) {
+            break;
+        }
+    }
+    for _ in 0..WAIT_ROUNDS {
+        taken.extend(gate_round(rig, &roster, &mut heard));
+    }
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [other], "host {other} took the order");
+    let want = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1, ok: true, endpoint: Some(rig_endpoint(other)) };
+    assert_eq!(heard, [want.clone()], "one acknowledgement reached the coordinator, naming host {other}");
+    assert_eq!(sent_up(rig, gate), [want], "up the gate host's own link");
+    assert!(sent_up(rig, other).is_empty(), "nothing up host {other}'s link");
+    rig.connect_login(other, NEW_LOGIN_CLIENT, FRESH_PLAYER, Some(centre_of(rb)), LOGIN_TOKEN, 1);
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT).len() == 1), "a body");
+    assert_eq!(rig.player_owners(NEW_LOGIN_CLIENT), [(other, rb)], "one body, on host {other}");
+    assert!(rig.parked_on(FRESH_PLAYER).is_empty());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_player_parked_on_another_hosts_land_is_placed_through_the_gate() {
+    sweep("a_player_parked_on_another_hosts_land_is_placed_through_the_gate", 2, 1, SEEDS / 4, placed_through_the_gate);
+}
+
+/// Review Focus 3: the gate host holds a login's order (its peer has not synced: a store
+/// placement waits) and is killed. No `SpawnAck` ever reaches the coordinator (the login
+/// service answers 503 at its timeout); the client's retry — a new session epoch — goes to the
+/// gate host of ITS moment, the survivor, which is the dead host's heir: it holds the order
+/// until it adopted, then takes it. After the succession settles the player has exactly one
+/// body and one stored record.
+fn gate_dies_with_an_order(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    rig.parked_hold = true;
+    let gate = rig.core().gate_host().expect("a gate host");
+    let rg = chain.iter().copied().find(|rc| rig.owner(*rc) == gate).expect("the gate host's region");
+    let others: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| *h != gate).collect();
+    let roster = GateRoster::from([(LOGIN_TOKEN.to_string(), (FRESH_PLAYER, rg))]);
+    until_committed(rig, 1);
+    // The gate host's peers are away: it may not place from the store yet.
+    for &o in &others {
+        rig.link_down(gate, o);
+    }
+    let mut heard = Vec::new();
+    assert_eq!(order_at_gate(rig, game::LoginOrder::Spawn { player_token: LOGIN_TOKEN.into(), session_epoch: 1 }), Some(gate));
+    for _ in 0..3 {
+        assert!(gate_round(rig, &roster, &mut heard).is_empty(), "nothing placed while a peer has not synced");
+    }
+    assert_eq!(rig.hosts[gate.0 as usize].manager.spawn_orders_waiting(), 1, "the gate host holds the order");
+    rig.kill(gate);
+    let succession = rig.run_succession(gate).remove(0);
+    let heir = succession.heir;
+    until_applied(rig, &succession);
+    for _ in 0..WAIT_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+    }
+    assert!(!heard.iter().any(spawn_ack_of(1)), "the dead gate's order is never answered: {heard:?}");
+    // The client's retry (the login service's next join: epoch 2) reaches the gate of its moment.
+    let retry_gate = order_at_gate(rig, game::LoginOrder::Spawn { player_token: LOGIN_TOKEN.into(), session_epoch: 2 });
+    assert!(retry_gate.is_some_and(|g| g != gate), "the retry goes to a live host: {retry_gate:?}");
+    rig.with_adoption();
+    let mut taken = Vec::new();
+    for _ in 0..SUCCESSION_ROUNDS {
+        taken.extend(gate_round(rig, &roster, &mut heard));
+        if heard.iter().any(spawn_ack_of(2)) {
+            break;
+        }
+    }
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "the heir took the retry once it adopted");
+    let acks: Vec<&game::LoginOut> = heard.iter().filter(|o| matches!(o, game::LoginOut::SpawnAck { .. })).collect();
+    let want = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: true, endpoint: Some(rig_endpoint(heir)) };
+    assert_eq!(acks, [&want], "one acknowledgement, of the retry, naming the heir");
+    rig.connect_login(heir, NEW_LOGIN_CLIENT, FRESH_PLAYER, Some(centre_of(rg)), LOGIN_TOKEN, 2);
+    // Cut rounds: the hosts' upkeep and their world links run.
+    let mut bodies = 0;
+    for _ in 0..SUCCESSION_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+        bodies = rig.player_owners(NEW_LOGIN_CLIENT).len();
+        if bodies == 1 {
+            break;
+        }
+    }
+    assert_eq!(bodies, 1, "one body");
+    assert_settled_whole(rig, &succession, &[]);
+    until_committed(rig, 1);
+    assert_player_once(rig, FRESH_PLAYER);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_gate_host_dying_with_an_order_spawns_the_player_once() {
+    sweep_hosts("a_gate_host_dying_with_an_order_spawns_the_player_once", gate_dies_with_an_order);
+}
+
+/// Ruling 2: a kick of a session on another host than the gate. The gate applies it, relays
+/// it, and acknowledges it once its peer applied it — the peer's `KickAck` goes back to the
+/// gate over the peer link, never up the peer's own coordinator link — so exactly ONE
+/// `KickAck` reaches the coordinator, up the gate's link. The session's end goes up the link of
+/// the host it ended on, once. A resend of the kick (the login service's sweep) is
+/// acknowledged once more and changes nothing.
+fn kick_acked_once_through_the_gate(rig: &mut MultiRig) {
+    rig.with_coordinator(quiet_history());
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let (gate, other, ro) = if ha < hb { (ha, hb, b) } else { (hb, ha, a) };
+    let roster = GateRoster::from([(LOGIN_TOKEN.to_string(), (P_PLAYER, ro))]);
+    rig.run(ro);
+    rig.connect_login(other, P_CLIENT, P_PLAYER, Some(centre_of(ro)), LOGIN_TOKEN, 1);
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(P_CLIENT).len() == 1), "a body");
+    let kick = game::LoginOrder::Kick { player_token: LOGIN_TOKEN.into(), session_epoch: 1, reason: "signed out".into() };
+    assert_eq!(order_at_gate(rig, kick.clone()), Some(gate));
+    let ack = game::LoginOut::KickAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
+    let ended = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
+    let mut heard = Vec::new();
+    for _ in 0..CROSS_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+        if heard.contains(&ack) && heard.contains(&ended) {
+            break;
+        }
+    }
+    for _ in 0..WAIT_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+    }
+    assert!(rig.player_owners(P_CLIENT).is_empty(), "the kick parked the session");
+    assert_eq!(rig.parked_on(P_PLAYER), [other]);
+    assert_eq!(heard.iter().filter(|o| **o == ack).count(), 1, "acknowledged once: {heard:?}");
+    assert_eq!(heard.iter().filter(|o| **o == ended).count(), 1, "ended once: {heard:?}");
+    assert_eq!(sent_up(rig, gate), [ack.clone()], "the gate host acknowledged it");
+    assert_eq!(sent_up(rig, other), [ended], "host {other} sent only the session's end, never an ack");
+    heard.clear();
+    assert_eq!(order_at_gate(rig, kick), Some(gate));
+    for _ in 0..WAIT_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+    }
+    assert_eq!(heard, [ack], "a resend: one more acknowledgement, nothing else");
+    assert_eq!(rig.parked_on(P_PLAYER), [other]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_kick_of_a_session_on_another_host_is_acked_once_by_the_gate() {
+    sweep("a_kick_of_a_session_on_another_host_is_acked_once_by_the_gate", 2, 1, SEEDS / 4, kick_acked_once_through_the_gate);
+}
+
+/// Ruling 3: a login session ends on a host whose coordinator link is down. Nobody sends a
+/// `SessionEnded` again, so the host queues it (an ack it would drop: the login service
+/// resends its order or kick) and it reaches the coordinator once, after the re-attach.
+fn session_end_waits_for_the_coordinator_link(rig: &mut MultiRig) {
+    rig.with_coordinator(quiet_history());
+    let (a, _) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    let roster = GateRoster::new();
+    rig.run(a);
+    rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(centre_of(a)), LOGIN_TOKEN, 1);
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(P_CLIENT).len() == 1), "a body");
+    let mut heard = Vec::new();
+    rig.hosts[ha.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
+    rig.disconnect(ha, P_CLIENT);
+    for _ in 0..WAIT_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+    }
+    let ended = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
+    assert!(heard.is_empty(), "nothing while the link is down: {heard:?}");
+    rig.hosts[ha.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
+    for _ in 0..CROSS_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+        if !heard.is_empty() && rig.hosts[ha.0 as usize].manager.world_attached() {
+            break;
+        }
+    }
+    for _ in 0..WAIT_ROUNDS {
+        gate_round(rig, &roster, &mut heard);
+    }
+    assert_eq!(heard, [ended], "the session's end reached the coordinator once, after the re-attach");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_session_end_waits_for_the_coordinator_link() {
+    sweep("a_session_end_waits_for_the_coordinator_link", 2, 1, SEEDS / 4, session_end_waits_for_the_coordinator_link);
 }

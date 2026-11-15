@@ -273,7 +273,7 @@ fn two_hosts_started_with_the_same_environment_get_two_ids() {
     let dir = scratch("sameenv");
     let register = |boot: u64, dir: &std::path::Path| {
         let store = db.open();
-        let config = PeerLinkConfig { bind: "127.0.0.1:0".parse().unwrap(), cert_hash_file: dir.join(format!("{boot}.pin")), delay: Duration::ZERO };
+        let config = PeerLinkConfig { bind: "127.0.0.1:0".parse().unwrap(), cert_hash_file: dir.join(format!("{boot}.pin")), delay: Duration::ZERO, world: String::new() };
         let listener = PeerListener::bind(config, TOKEN.into()).unwrap();
         let (peer_addr, peer_cert) = listener.row_fields();
         let host = world_store::NewHost {
@@ -346,7 +346,7 @@ fn an_unregistered_peer_is_refused() {
     let (s0, l0, _c0) = fixed_host(&db, &dir, 1, TOKEN, "127.0.0.1:0");
     let (addr, pin) = (l0.local_addr(), l0.cert_sha256().to_string());
     let dial = |id: u64, boot: u64| {
-        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: h(id), boot, reg: id });
+        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: h(id), boot, reg: id }, "");
         svc_link::LinkDialer::connect::<PeerMsg, PeerMsg>(addr, pin.clone(), hello)
     };
     // Id 41 was never issued; id 0 is host 0 itself (dialed by nobody).
@@ -1340,70 +1340,50 @@ impl PlayerStore for RosterPlayers {
     }
 }
 
-/// Two hosts ([`two_hosts`]) whose login relays run (host 0 the entry host, its login link
-/// listening, the login service dialed in), over the players of `roster`.
+/// Two hosts and a real coordinator ([`world`]) whose login relays run, the login service
+/// dialed in to the COORDINATOR's login listener (Elastic 1 Task 6: it relays each order to the
+/// gate host, the lowest attached live one — host 0 — and the answers back), over the players
+/// of `roster`.
 struct LoginWorld {
-    pair: Pair,
-    seam: (RegionCoords, RegionCoords),
-    links: Vec<PeerLinks>,
-    claims: Vec<HostClaims>,
-    link: Option<LoginLink>,
+    w: World,
+    /// Where the login service dials (the coordinator's login listener) and its pin.
+    login_at: (std::net::SocketAddr, String),
     login: Login,
     roster: Roster,
 }
 
-/// The entry host of the login tests.
-const ENTRY: HostId = HostId(0);
-
-fn login_hosts(db: &PgDb, dir: &std::path::Path) -> LoginWorld {
-    let (mut pair, seam, links, claims) = two_hosts(db, dir);
-    let roster: Roster = Arc::default();
-    let players = server::player_store::shared(RosterPlayers(roster.clone()));
-    let mut link = None;
-    for sim in &mut pair.sims {
-        let (events_tx, events) = unbounded();
-        let orders = Arc::new(SpawnOrders::new(server::auth_edge::system_clock()));
-        let relay = LoginRelay::new(orders.clone(), players.clone(), events_tx.clone());
-        sim.manager.set_entry_host(ENTRY);
-        if sim.ordinal == ENTRY {
-            let pin = dir.join("host-link.cert-sha256");
-            link = Some(
-                server::login_link::start_relaying(
-                    "127.0.0.1:0".parse().unwrap(),
-                    TOKEN.into(),
-                    Some(pin),
-                    orders.clone(),
-                    players.clone(),
-                    events_tx,
-                    ENTRY,
-                )
-                .expect("the login link listens"),
-            );
-        }
-        sim.login = Some(SimLogin { orders, relay, events });
-    }
-    let l: &LoginLink = link.as_ref().unwrap();
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login);
-    let (tx, events) = svc_link::LinkDialer::connect::<HostToLogin, LoginToHost>(l.local_addr(), l.cert_sha256().to_string(), hello);
+/// The login service's link to the coordinator at `at` (its pin), up.
+fn dial_login(at: &(std::net::SocketAddr, String)) -> Login {
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login, "");
+    let (tx, events) = svc_link::LinkDialer::connect::<HostToLogin, LoginToHost>(at.0, at.1.clone(), hello);
     match events.recv_timeout(WAIT) {
         Ok(svc_link::LinkEvent::Up(_)) => {}
         other => panic!("the login link did not come up: {other:?}"),
     }
-    let login = Login { tx, events, seen: Vec::new() };
+    Login { tx, events, seen: Vec::new() }
+}
+
+fn login_hosts(db: &PgDb, dir: &std::path::Path) -> LoginWorld {
+    let mut w = world(db, dir);
+    let roster: Roster = Arc::default();
+    let players = server::player_store::shared(RosterPlayers(roster.clone()));
+    for sim in &mut w.pair.sims {
+        let (events_tx, events) = unbounded();
+        let orders = Arc::new(SpawnOrders::new(server::auth_edge::system_clock()));
+        let relay = LoginRelay::new(orders.clone(), players.clone(), events_tx);
+        sim.login = Some(SimLogin { orders, relay, events });
+    }
+    let login_at = w.coordinator.as_ref().unwrap().login.clone().expect("the coordinator listens for the login service");
+    let login = dial_login(&login_at);
     // Each host's first sync of the other is done (its `Running` came).
-    pair.until("every peer synced", |p| p.sims.iter().all(|s| s.manager.peers_synced()));
-    LoginWorld { pair, seam, links, claims, link, login, roster }
+    w.pair.until("every peer synced", |p| p.sims.iter().all(|s| s.manager.peers_synced()));
+    LoginWorld { w, login_at, login, roster }
 }
 
 impl LoginWorld {
-    fn stop(mut self, dir: &std::path::Path) {
-        drop(self.link.take());
-        drop(self.pair);
-        drop(self.links);
-        for c in self.claims {
-            c.store().clone().shutdown();
-        }
-        let _ = std::fs::remove_dir_all(dir);
+    fn stop(self, dir: &std::path::Path) {
+        drop(self.login);
+        self.w.stop(dir);
     }
 
     /// A login token of `player` whose stored record stands in the middle of `rc`
@@ -1426,7 +1406,7 @@ impl LoginWorld {
     }
 
     fn sim(&mut self, h: HostId) -> &mut Sim {
-        self.pair.sims.iter_mut().find(|s| s.ordinal == h).expect("the host is up")
+        self.w.pair.sims.iter_mut().find(|s| s.ordinal == h).expect("the host is up")
     }
 
     fn orders(&mut self, h: HostId) -> Arc<SpawnOrders> {
@@ -1443,14 +1423,14 @@ impl LoginWorld {
                 return from + i;
             }
             assert!(Instant::now() < deadline, "timed out waiting for the login service to hear: {what} (seen {:?})", self.login.seen);
-            self.pair.round();
+            self.w.pair.round();
         }
     }
 
     /// `rounds` rounds, the login service listening.
     fn rounds(&mut self, rounds: usize) {
         for _ in 0..rounds {
-            self.pair.round();
+            self.w.pair.round();
             self.login.drain();
         }
     }
@@ -1472,7 +1452,7 @@ impl LoginWorld {
         let orders = self.orders(h);
         orders.admit(token, epoch).expect("the ticket is admitted");
         let client = game::session_client_id(player, epoch);
-        let now = self.pair.now();
+        let now = self.w.pair.now();
         let manager = &mut self.sim(h).manager;
         let ev = ServerEvent::LoginConnected { client, player, record, player_token: token.into(), session_epoch: epoch };
         orders.announce(token, epoch, || assert!(manager.handle_server_event(ev, now))).expect("announced");
@@ -1481,7 +1461,7 @@ impl LoginWorld {
 
     /// The client's connection to host `h` closes, as its edge reports it.
     fn disconnect(&mut self, h: HostId, client: ClientId, token: &str, epoch: u64) {
-        let now = self.pair.now();
+        let now = self.w.pair.now();
         assert!(self.sim(h).manager.handle_server_event(ServerEvent::ClientDisconnected(client), now));
         self.orders(h).closed(token, epoch);
     }
@@ -1489,7 +1469,7 @@ impl LoginWorld {
     /// Where `client`'s body is: `(host, region)` of every running region holding it.
     fn bodies(&mut self, client: ClientId) -> Vec<(HostId, RegionCoords)> {
         let mut out = Vec::new();
-        for sim in &mut self.pair.sims {
+        for sim in &mut self.w.pair.sims {
             for rc in sim.manager.running_regions() {
                 sim.manager.spawner_mut().with_region(rc, |region| {
                     if region.data().player_entites.contains_key(&client) {
@@ -1529,7 +1509,7 @@ impl LoginWorld {
 
 /// `(the region host h owns, the other)` of the seam.
 fn sides(seam: (RegionCoords, RegionCoords), h: HostId, w: &LoginWorld) -> (RegionCoords, RegionCoords) {
-    if w.pair.sims[0].manager.owner_host(seam.0) == Some(h) { (seam.0, seam.1) } else { (seam.1, seam.0) }
+    if w.w.pair.sims[0].manager.owner_host(seam.0) == Some(h) { (seam.0, seam.1) } else { (seam.1, seam.0) }
 }
 
 fn ack_quic(ack: &HostToLogin) -> (bool, Option<String>) {
@@ -1548,7 +1528,7 @@ fn join_places_the_player_on_the_host_owning_its_record_region() {
     let Some(db) = PgDb::create("ljoin") else { return };
     let dir = scratch("ljoin");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, h(1), &w);
+    let (b1, _) = sides(w.w.seam, h(1), &w);
     let token = w.player(1, PlayerId(900), Some(b1));
     let ack = w.join(&token, 1);
     assert_eq!(ack_quic(&ack), (true, endpoint(h(1)).quic), "host 1 took it");
@@ -1575,7 +1555,7 @@ fn rejoin_within_a_cut_follows_the_departed_pointer() {
     let Some(db) = PgDb::create("lrejoin") else { return };
     let dir = scratch("lrejoin");
     let mut w = login_hosts(&db, &dir);
-    let (a0, b1) = sides(w.seam, h(0), &w);
+    let (a0, b1) = sides(w.w.seam, h(0), &w);
     let token = w.player(2, PlayerId(901), Some(a0));
     assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(0)).quic));
     let c1 = w.connect(h(0), &token, 1);
@@ -1586,7 +1566,7 @@ fn rejoin_within_a_cut_follows_the_departed_pointer() {
     }
     w.push_across(h(0), c1, a0, b1);
     let deadline = Instant::now() + WAIT;
-    while w.bodies(c1) != [(h(1), b1)] || w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
+    while w.bodies(c1) != [(h(1), b1)] || w.w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
         assert!(Instant::now() < deadline, "the player never crossed: {:?}", w.bodies(c1));
         w.rounds(1);
     }
@@ -1618,7 +1598,7 @@ fn kick_reaches_a_session_on_a_non_entry_host_and_is_acked_once() {
     let Some(db) = PgDb::create("lkick") else { return };
     let dir = scratch("lkick");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, h(1), &w);
+    let (b1, _) = sides(w.w.seam, h(1), &w);
     let token = w.player(3, PlayerId(902), Some(b1));
     assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(1)).quic));
     let client = w.connect(h(1), &token, 1);
@@ -1649,13 +1629,11 @@ fn spawn_for_an_unreachable_owner_is_refused() {
     let Some(db) = PgDb::create("lunreach") else { return };
     let dir = scratch("lunreach");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, h(1), &w);
+    let (b1, _) = sides(w.w.seam, h(1), &w);
     let token = w.player(4, PlayerId(903), Some(b1));
-    // Host 1 is gone: its manager and its links.
-    let i = w.pair.sims.iter().position(|s| s.ordinal == h(1)).unwrap();
-    drop(w.pair.sims.remove(i));
-    drop(w.links.remove(1));
-    w.pair.until("host 0 no longer reaches host 1", |p| !p.sims[0].manager.reaches(b1));
+    // Host 1 is gone: its manager, its links and its coordinator link.
+    kill_host(&mut w.w, h(1));
+    w.w.pair.until("host 0 no longer reaches host 1", |p| !p.sims[0].manager.reaches(b1));
     let ack = w.join(&token, 1);
     assert_eq!(ack_quic(&ack), (false, None), "refused");
     assert!(w.orders(h(0)).pending().by_token.is_empty(), "nothing ordered on host 0");
@@ -1674,8 +1652,7 @@ fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode)
     use tower::ServiceExt;
     const WORLD: &str = "hosts";
     const NOW: u64 = 1_800_000_000;
-    let link = w.link.as_ref().unwrap();
-    let (addr, pin) = (link.local_addr().to_string(), link.cert_sha256().to_string());
+    let (addr, pin) = (w.login_at.0.to_string(), w.login_at.1.clone());
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let token = token.to_string();
     let joined = rt.spawn(async move {
@@ -1758,7 +1735,8 @@ fn hosts_that_left_cleanly_are_read_at_boot() {
     w.stop(&dir);
 }
 
-/// A session on host 1 disconnects: its end reaches the login service through host 0.
+/// A session on host 1 (not the gate host) disconnects: its end reaches the login service once,
+/// up host 1's own coordinator link (Elastic 1 Task 6), relayed by the coordinator.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn session_ended_on_a_non_entry_host_reaches_login() {
@@ -1766,7 +1744,7 @@ fn session_ended_on_a_non_entry_host_reaches_login() {
     let Some(db) = PgDb::create("lended") else { return };
     let dir = scratch("lended");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, h(1), &w);
+    let (b1, _) = sides(w.w.seam, h(1), &w);
     let token = w.player(5, PlayerId(904), Some(b1));
     assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(1)).quic));
     let client = w.connect(h(1), &token, 1);
@@ -1796,7 +1774,7 @@ fn handoff_does_not_end_the_login_session() {
     let Some(db) = PgDb::create("lhandoff") else { return };
     let dir = scratch("lhandoff");
     let mut w = login_hosts(&db, &dir);
-    let (a0, b1) = sides(w.seam, h(0), &w);
+    let (a0, b1) = sides(w.w.seam, h(0), &w);
     let token = w.player(6, PlayerId(905), Some(a0));
     assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(0)).quic));
     let client = w.connect(h(0), &token, 1);
@@ -1807,7 +1785,7 @@ fn handoff_does_not_end_the_login_session() {
     }
     w.push_across(h(0), client, a0, b1);
     let deadline = Instant::now() + WAIT;
-    while w.bodies(client) != [(h(1), b1)] || w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
+    while w.bodies(client) != [(h(1), b1)] || w.w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
         assert!(Instant::now() < deadline, "the player never crossed: {:?}", w.bodies(client));
         w.rounds(1);
     }
@@ -2014,4 +1992,73 @@ fn a_host_restarted_cleanly_is_a_new_host_owning_nothing() {
     second_claims.store().clone().shutdown();
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Elastic 1 Task 6: the login service links to the coordinator, which relays to a live host.
+mod login_link {
+    use super::*;
+
+    /// A real coordinator and real hosts over real links on PostgreSQL: a `SpawnPlayer` on the
+    /// coordinator's login listener comes back as `SpawnAck { ok: true, quic: Some(_) }` (the
+    /// gate host, host 0, took it: the player's record is in its land), and a `Kick` as
+    /// `KickAck`.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn the_coordinator_relays_a_spawn_and_its_ack() {
+        install_props();
+        let Some(db) = PgDb::create("lrelay") else { return };
+        let dir = scratch("lrelay");
+        let mut w = login_hosts(&db, &dir);
+        let (a0, _) = sides(w.w.seam, h(0), &w);
+        let token = w.player(7, PlayerId(910), Some(a0));
+        let ack = w.join(&token, 1);
+        assert!(matches!(&ack, HostToLogin::SpawnAck { ok: true, quic: Some(_), .. }), "{ack:?}");
+        assert_eq!(ack_quic(&ack), (true, endpoint(h(0)).quic), "the gate host took it");
+        let from = w.login.seen.len();
+        w.login.tx.send(LoginToHost::Kick { player_token: token.clone(), session_epoch: 1, reason: "signed out".into() }).unwrap();
+        let kicked = HostToLogin::KickAck { player_token: token.clone(), session_epoch: 1 };
+        w.until_login("the kick ack", from, |m| *m == kicked);
+        w.rounds(20);
+        assert_eq!(w.login.seen[from..].iter().filter(|m| **m == kicked).count(), 1, "acknowledged once");
+        w.stop(&dir);
+    }
+
+    /// Ruling 3: a session ends while the login service is away from the coordinator; its
+    /// `SessionEnded` waits at the coordinator and reaches the login service once it is back,
+    /// once.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn a_session_end_while_the_login_service_is_away_reaches_it_on_its_return() {
+        install_props();
+        let Some(db) = PgDb::create("lheld") else { return };
+        let dir = scratch("lheld");
+        let mut w = login_hosts(&db, &dir);
+        let (b1, _) = sides(w.w.seam, h(1), &w);
+        let token = w.player(8, PlayerId(911), Some(b1));
+        assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(1)).quic));
+        let client = w.connect(h(1), &token, 1);
+        let deadline = Instant::now() + WAIT;
+        while w.bodies(client).is_empty() {
+            assert!(Instant::now() < deadline, "the player never got a body");
+            w.rounds(1);
+        }
+        // The login service goes away (its connection closes) and the coordinator notices.
+        let away = std::mem::replace(&mut w.login, Login { tx: unbounded().0, events: unbounded().1, seen: Vec::new() });
+        drop(away);
+        let settle = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < settle {
+            w.w.pair.round();
+        }
+        w.disconnect(h(1), client, &token, 1);
+        for _ in 0..40 {
+            w.w.pair.round();
+        }
+        // Back: the held end arrives, once.
+        w.login = dial_login(&w.login_at);
+        let want = HostToLogin::SessionEnded { player_token: token.clone(), session_epoch: 1 };
+        w.until_login("the held session end", 0, |m| *m == want);
+        w.rounds(20);
+        assert_eq!(w.ended(&token, 1), 1, "once");
+        w.stop(&dir);
+    }
 }

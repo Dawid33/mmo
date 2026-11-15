@@ -604,6 +604,11 @@ impl Coordinator {
         self.abort_for(host, "lost its lease");
     }
 
+    /// Whether `host` asked to leave (its request waits, or the cut it leaves in runs).
+    pub(super) fn leave_asked(&self, host: HostId) -> bool {
+        self.cuts.leave_requests.contains_key(&host) || self.cuts.run.as_ref().is_some_and(|r| r.leaving.contains(&host))
+    }
+
     /// The hosts attached now that neither left nor were succeeded.
     pub(super) fn attached_live(&self) -> Vec<HostId> {
         self.cuts

@@ -189,7 +189,7 @@ impl Coordinator {
 /// (waited for); its hello carries the host's registration number `reg` (the coordinator
 /// admits only its `hosts` row's, while live).
 fn quic_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, boot: u64, reg: u64) -> QuicWorldLink {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg });
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg }, "");
     QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file), hello)
 }
 
@@ -973,7 +973,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
     let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file).unwrap();
     let dial = |boot: u64, reg: u64| {
         // A host's hello names the id the store issued it (its registration number too).
-        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: HostId(reg), boot, reg });
+        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: HostId(reg), boot, reg }, "");
         let (link, events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin.clone(), hello);
         let deadline = Instant::now() + WAIT;
         loop {
@@ -1013,7 +1013,7 @@ fn raw_host_link(
     reg: u64,
 ) -> (crossbeam::channel::Sender<game::HostMsg>, Receiver<svc_link::LinkEvent<game::CoordMsg>>) {
     let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", cert_file).unwrap();
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: HostId(reg), boot, reg });
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: HostId(reg), boot, reg }, "");
     let (link, events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin, hello);
     let deadline = Instant::now() + WAIT;
     loop {
@@ -1068,6 +1068,8 @@ fn a_host_under_another_crash_policy_is_refused_by_the_coordinator() {
         Fenced::default(),
         Some(cuts),
         game::CrashPolicy::Rollback,
+        "",
+        None,
     )
     .expect("the coordinator listens");
     let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.id.0);

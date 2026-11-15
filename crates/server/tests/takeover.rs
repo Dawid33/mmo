@@ -131,7 +131,6 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     sim.manager.directory_read(rows, live);
     sim.manager.set_stored_regions(store.stored_regions().unwrap());
     sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
-    sim.manager.set_entry_host(ENTRY);
     // Before any placement, as `server::run`: the hosts that left cleanly hold nobody.
     sim.manager.note_left_peers(server::peer_link::left_cleanly(&store, ordinal).unwrap());
     sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone(), boot));
@@ -185,23 +184,10 @@ fn start_coordinator_every(
 ) -> server::coordinator_rt::ListeningCoordinator {
     let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
     let cuts = server::coordinator_rt::WorldCuts { every, tick: Box::new(move || tick.load(Ordering::SeqCst)) };
-    let c = server::coordinator_rt::start_listening_as(
-        store,
-        start,
-        "127.0.0.1:0".parse().unwrap(),
-        TOKEN.into(),
-        Some(cert),
-        server::claims::Fenced::default(),
-        Some(cuts),
-        policy,
-    )
-    .expect("the coordinator listens");
+    let c = listening_coordinator(store, start, &cert, cuts, server::claims::Fenced::default(), policy);
     c.thread.with_core(|core| core.set_lease_dials(LEASE_MS, DEADLINE_MS), WAIT).expect("the core answers");
     c
 }
-
-/// The entry host of the login side.
-const ENTRY: HostId = HostId(0);
 
 // ---- the login service (rejoins after a takeover) -----------------------------------------
 
@@ -224,10 +210,10 @@ impl PlayerStore for RosterThenStore {
     }
 }
 
-/// The login service's side: host 0's login link (it relays), each host's relay, the
-/// service's own connection to it.
+/// The login service's side: its connection to the coordinator's login listener (Elastic 1
+/// Task 6: the coordinator relays each order to the gate host and the answers back), each
+/// host's relay.
 struct LoginSide {
-    link: LoginLink,
     players: server::player_store::SharedPlayerStore,
     events_of: std::collections::BTreeMap<HostId, (Arc<SpawnOrders>, crossbeam::channel::Sender<ServerEvent>, Receiver<ServerEvent>)>,
     tx: crossbeam::channel::Sender<LoginToHost>,
@@ -324,7 +310,8 @@ impl Takeover {
         let mut t = Takeover { w, n, login: None, seams };
         t.w.seam = (t.seams[0], t.seams[1]);
         if login {
-            t.login = Some(start_login(db, dir, n));
+            let at = t.w.coordinator.as_ref().unwrap().login.clone().expect("the coordinator listens for the login service");
+            t.login = Some(start_login(db, at, n));
         }
         for b in booted {
             let sim = build(&mut t, b, false);
@@ -398,9 +385,7 @@ impl Takeover {
     }
 
     fn stop(mut self, db: &PgDb, dir: &std::path::Path) {
-        if let Some(login) = self.login.take() {
-            drop(login.link);
-        }
+        drop(self.login.take());
         assert_eq!(prepared(db), 0, "nothing stays prepared");
         self.w.stop(dir);
     }
@@ -460,8 +445,9 @@ impl Takeover {
     }
 }
 
-/// The login service's link to the entry host, and a relay on every host.
-fn start_login(db: &PgDb, dir: &std::path::Path, n: u32) -> LoginSide {
+/// The login service's link to the coordinator's login listener at `at` (its pin), and the
+/// relay state of every host `0..n`.
+fn start_login(db: &PgDb, at: (std::net::SocketAddr, String), n: u32) -> LoginSide {
     let roster: Roster = Arc::default();
     let players = server::player_store::shared(RosterThenStore { roster: roster.clone(), store: open(db) });
     let mut events_of = std::collections::BTreeMap::new();
@@ -469,26 +455,13 @@ fn start_login(db: &PgDb, dir: &std::path::Path, n: u32) -> LoginSide {
         let (tx, rx) = unbounded();
         events_of.insert(h, (Arc::new(SpawnOrders::new(server::auth_edge::system_clock())), tx, rx));
     }
-    let (orders, events_tx, _) = events_of[&ENTRY].clone();
-    // A relaying link needs relaying orders: the entry host's relay is made first.
-    let _entry = LoginRelay::new(orders.clone(), players.clone(), events_tx.clone());
-    let link = server::login_link::start_relaying(
-        "127.0.0.1:0".parse().unwrap(),
-        TOKEN.into(),
-        Some(dir.join("host-link.cert-sha256")),
-        orders,
-        players.clone(),
-        events_tx,
-        ENTRY,
-    )
-    .expect("the login link listens");
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login);
-    let (tx, events) = svc_link::LinkDialer::connect::<HostToLogin, LoginToHost>(link.local_addr(), link.cert_sha256().to_string(), hello);
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login, "");
+    let (tx, events) = svc_link::LinkDialer::connect::<HostToLogin, LoginToHost>(at.0, at.1, hello);
     match events.recv_timeout(WAIT) {
         Ok(svc_link::LinkEvent::Up(_)) => {}
         other => panic!("the login link did not come up: {other:?}"),
     }
-    LoginSide { link, players, events_of, tx, events, seen: Vec::new(), roster }
+    LoginSide { players, events_of, tx, events, seen: Vec::new(), roster }
 }
 
 impl Takeover {

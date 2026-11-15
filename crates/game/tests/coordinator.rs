@@ -3343,3 +3343,59 @@ fn a_survivor_detached_at_the_declaration_is_recorded_at_its_attach() {
     c.maintain(201);
     assert!(!c.rollback_wanted(), "no journal was counted on from a boot that was not attached");
 }
+
+// --- Elastic 1 Task 6: the login service's orders go through the coordinator ----------------
+
+fn spawn_order(epoch: u64) -> game::LoginOrder {
+    game::LoginOrder::Spawn { player_token: "tok-secret-login".into(), session_epoch: epoch }
+}
+
+/// An order of the login service goes to the lowest attached host that neither left nor was
+/// succeeded (the gate host of that moment), and nothing about it is kept: a resend after the
+/// gate changed goes to the new gate. A host asking to leave is never the gate.
+#[test]
+fn a_login_order_goes_to_the_lowest_live_host() {
+    let mut c = succeeding(3);
+    assert_eq!(c.gate_host(), Some(h(0)));
+    assert_eq!(c.login_order(spawn_order(1)), Some((h(0), CoordMsg::Login(spawn_order(1)))));
+    assert!(commit_routed(&mut c).iter().all(|(_, m)| !matches!(m, CoordMsg::Login(_))), "returned, not queued");
+    // Host 0 is lost (detached, then succeeded): the resend goes to host 1.
+    c.host_detached(h(0));
+    assert_eq!(c.login_order(spawn_order(1)), Some((h(1), CoordMsg::Login(spawn_order(1)))), "the resend: the gate of its moment");
+    let _ = declare_one(&mut c, 3, h(0), 100);
+    commit_routed(&mut c);
+    assert_eq!(c.gate_host(), Some(h(1)));
+    // Host 1 asks to leave: host 2 takes the orders.
+    c.handle(h(1), HostMsg::LeaveRequest, 200);
+    assert_eq!(c.gate_host(), Some(h(2)), "a leaving host is not the gate");
+    let kick = game::LoginOrder::Kick { player_token: "tok-secret-login".into(), session_epoch: 1, reason: "bye".into() };
+    assert_eq!(c.login_order(kick.clone()), Some((h(2), CoordMsg::Login(kick))));
+    // The answers come back untouched, in order, and are kept only until taken.
+    let ack = game::LoginOut::KickAck { player_token: "tok-secret-login".into(), session_epoch: 1 };
+    let end = game::LoginOut::SessionEnded { player_token: "tok-secret-login".into(), session_epoch: 1 };
+    c.handle(h(2), HostMsg::Login(ack.clone()), 300);
+    c.handle(h(1), HostMsg::Login(end.clone()), 300);
+    assert_eq!(c.take_login_out(), [ack, end]);
+    assert!(c.take_login_out().is_empty());
+    assert!(commit_routed(&mut c).is_empty(), "a host's answer changes nothing of the coordinator's");
+    // The token never shows in a log line of the order or the answer.
+    let shown = format!("{:?} {:?}", spawn_order(1), HostMsg::Login(game::LoginOut::SessionEnded { player_token: "tok-secret-login".into(), session_epoch: 1 }));
+    assert!(!shown.contains("tok-secret") && shown.contains("<redacted>"), "{shown}");
+}
+
+/// With no host attached the order is dropped: no gate host, nothing queued for anyone (the
+/// login service times out and answers 503; the client retries).
+#[test]
+fn a_login_order_with_no_host_is_dropped() {
+    let (mut c, _, _) = coordinator();
+    commit_routed(&mut c);
+    assert_eq!(c.gate_host(), None);
+    assert_eq!(c.login_order(spawn_order(1)), None);
+    assert!(commit_routed(&mut c).is_empty(), "nothing queued");
+    // A host attaches: the next order (the client's retry) goes to it.
+    c.handle(h(4), attach(h(4), 1, Vec::new(), Vec::new()), 0);
+    commit_routed(&mut c);
+    assert_eq!(c.login_order(spawn_order(2)), Some((h(4), CoordMsg::Login(spawn_order(2)))));
+    c.host_detached(h(4));
+    assert_eq!(c.login_order(spawn_order(3)), None, "detached: none again");
+}

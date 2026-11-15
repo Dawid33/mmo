@@ -566,3 +566,96 @@ fn coordinator_panic_skips_the_exit_cut() {
 fn h(n: u64) -> game::HostId {
     game::HostId(n)
 }
+
+// ---- Elastic 1 Task 6: the coordinator's login listener -------------------------------------
+
+const LOGIN_TEST_TOKEN: &str = "login-listener-test-token";
+
+/// A coordinator listening for hosts and for the login service (world "w"), as
+/// `run_coordinator` starts it, on a SQLite store (no host attaches in these tests).
+fn listening_with_login(dir: &Path) -> (StoreHandle, coordinator_rt::ListeningCoordinator) {
+    let store = open_store(dir);
+    let start = ensure_coordinator_state(&store, &land_map(), None).unwrap().unwrap();
+    let login = coordinator_rt::LoginListen {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        token: LOGIN_TEST_TOKEN.into(),
+        cert_hash_file: Some(dir.join("login-link.cert-sha256")),
+    };
+    let listening = coordinator_rt::start_listening_as(
+        store.clone(),
+        start,
+        "127.0.0.1:0".parse().unwrap(),
+        LOGIN_TEST_TOKEN.into(),
+        Some(dir.join("coordinator.cert-sha256")),
+        server::claims::Fenced::default(),
+        None,
+        game::CrashPolicy::Rollback,
+        "w",
+        Some(login),
+    )
+    .expect("the coordinator listens");
+    (store, listening)
+}
+
+/// Whether a dialer of `role` to (`addr`, `pin`) is closed — it saw its link come up (the
+/// hello passed), then go down — within the wait. `$in` / `$out`: the dialer's message types.
+macro_rules! closed_after_up {
+    ($in:ty, $out:ty, $addr:expr, $pin:expr, $role:expr) => {{
+        let hello = svc_link::LinkHello::new(LOGIN_TEST_TOKEN.into(), $role, "w");
+        let (_tx, events) = svc_link::LinkDialer::connect::<$in, $out>($addr, $pin.to_string(), hello);
+        let deadline = Instant::now() + WAIT;
+        let (mut up, mut closed) = (false, false);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match events.recv_timeout(left) {
+                Ok(svc_link::LinkEvent::Up(_)) => up = true,
+                Ok(svc_link::LinkEvent::Down(_)) if up => {
+                    closed = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        closed
+    }};
+}
+
+/// A host's hello on the coordinator's LOGIN listener is closed (only the login service is
+/// served there); the login service's own hello stays up, and its order — no host attached to
+/// take it — is dropped, not answered.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_peer_on_the_login_listener_is_closed() {
+    let dir = scratch("loginlistener");
+    let (store, listening) = listening_with_login(&dir);
+    let (addr, pin) = listening.login.clone().expect("a login listener");
+    let host = svc_link::PeerRole::Host { id: h(1), boot: 1, reg: 1 };
+    assert!(closed_after_up!(login_api::HostToLogin, login_api::LoginToHost, addr, &pin, host), "a host is closed on the login listener");
+    let hello = svc_link::LinkHello::new(LOGIN_TEST_TOKEN.into(), svc_link::PeerRole::Login, "w");
+    let (tx, events) = svc_link::LinkDialer::connect::<login_api::HostToLogin, login_api::LoginToHost>(addr, pin.clone(), hello);
+    assert!(matches!(events.recv_timeout(WAIT), Ok(svc_link::LinkEvent::Up(_))));
+    tx.send(login_api::LoginToHost::SpawnPlayer { player_token: "ab".repeat(16), session_epoch: 1 }).unwrap();
+    match events.recv_timeout(Duration::from_millis(700)) {
+        Err(_) => {}
+        Ok(other) => panic!("no host attached: nothing answers, the link stays up — got {other:?}"),
+    }
+    assert_eq!(listening.thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reverse: the login service's hello on the coordinator's HOST listener is closed.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_login_peer_on_the_host_listener_is_closed() {
+    let dir = scratch("hostlistener");
+    let (store, listening) = listening_with_login(&dir);
+    let (addr, pin) = (listening.addr, listening.cert_sha256.clone());
+    assert!(
+        closed_after_up!(game::CoordMsg, HostMsg, addr, &pin, svc_link::PeerRole::Login),
+        "the login service is closed on the hosts' listener"
+    );
+    assert_eq!(listening.thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}

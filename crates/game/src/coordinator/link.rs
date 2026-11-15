@@ -74,6 +74,21 @@ impl SharedCore {
     }
 }
 
+impl SharedCore {
+    /// An order of the login service, as the coordinator runtime handles one
+    /// ([`Coordinator::login_order`]): into the gate host's mailbox (read at its link's next
+    /// pumps, after what is already there). The gate host, or `None` (dropped: no gate host).
+    pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<HostId> {
+        self.route();
+        let (gate, msg) = self.coordinator.login_order(order)?;
+        match self.boxes.get_mut(&gate) {
+            Some(b) => b.push_back(msg),
+            None => log::debug!("shared inline coordinator: no link for gate host {gate}; a login order lost"),
+        }
+        Some(gate)
+    }
+}
+
 impl std::ops::Deref for SharedCore {
     type Target = Coordinator;
     fn deref(&self) -> &Coordinator {

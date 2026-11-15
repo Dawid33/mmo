@@ -15,7 +15,7 @@ use game::{
 };
 use login_api::{HostToLogin, LoginToHost};
 use server::claims::HostClaims;
-use server::login_link::{LoginLink, LoginRelay, SpawnOrders};
+use server::login_link::{LoginRelay, SpawnOrders};
 use server::player_store::{PlayerKey, PlayerStore};
 use server::peer_link::{PeerLinkConfig, PeerLinks, PeerListener};
 use world_store::{StoreHandle, StoreUrl};
@@ -179,6 +179,7 @@ fn boot_links(store: &StoreHandle, want: HostId, name: &str, boot: u64, token: &
         bind: bind.parse().unwrap(),
         cert_hash_file: dir.join(format!("{name}-{boot}.peer.cert-sha256")),
         delay: Duration::ZERO,
+        world: String::new(),
     };
     let listener = PeerListener::bind(config, token.into()).expect("the peer listener binds");
     let (peer_addr, peer_cert) = listener.row_fields();
@@ -658,7 +659,7 @@ fn decisions(db: &PgDb) -> Vec<(i64, i64, bool)> {
 /// Host `ordinal`'s link to the coordinator at `addr` (its pin in `cert_file`), its hello
 /// carrying the host's registration number `reg`.
 fn quic_world_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, boot: u64, reg: u64) -> server::roles::QuicWorldLink {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg });
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg }, "");
     server::roles::QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_HOSTS_TEST_UNSET_PIN", &cert_file), hello)
 }
 
@@ -761,16 +762,7 @@ fn world(db: &PgDb, dir: &std::path::Path) -> World {
         tick: Box::new(move || tick.load(std::sync::atomic::Ordering::SeqCst)),
     };
     let cert = dir.join("coordinator.cert-sha256");
-    let coordinator = server::coordinator_rt::start_listening_with(
-        store.clone(),
-        start,
-        "127.0.0.1:0".parse().unwrap(),
-        TOKEN.into(),
-        Some(cert.clone()),
-        server::claims::Fenced::default(),
-        Some(cuts),
-    )
-    .expect("the coordinator listens");
+    let coordinator = listening_coordinator(store.clone(), start, &cert, cuts, server::claims::Fenced::default(), game::CrashPolicy::Rollback);
     let mut switches = Vec::new();
     let mut generations = Vec::new();
     for (ordinal, sim) in pair.sims.iter_mut().enumerate() {
@@ -787,6 +779,37 @@ fn world(db: &PgDb, dir: &std::path::Path) -> World {
     pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
     let links = links.into_iter().map(Some).collect();
     World { pair, seam, coordinator: Some(coordinator), cert, links, claims, store, switches, generations }
+}
+
+/// A coordinator process as `run_coordinator` starts it: listening for hosts (its pin in
+/// `cert`) and for the login service (Elastic 1 Task 6: its pin beside, `login-link.cert-sha256`;
+/// `ListeningCoordinator::login` names where to dial), world cuts `cuts`, crash policy `policy`.
+fn listening_coordinator(
+    store: StoreHandle,
+    start: server::world_file::CoordinatorStart,
+    cert: &std::path::Path,
+    cuts: server::coordinator_rt::WorldCuts,
+    fenced: server::claims::Fenced,
+    policy: game::CrashPolicy,
+) -> server::coordinator_rt::ListeningCoordinator {
+    let login = server::coordinator_rt::LoginListen {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        token: TOKEN.into(),
+        cert_hash_file: Some(cert.with_file_name("login-link.cert-sha256")),
+    };
+    server::coordinator_rt::start_listening_as(
+        store,
+        start,
+        "127.0.0.1:0".parse().unwrap(),
+        TOKEN.into(),
+        Some(cert.to_path_buf()),
+        fenced,
+        Some(cuts),
+        policy,
+        "",
+        Some(login),
+    )
+    .expect("the coordinator listens")
 }
 
 /// Slot `i` of a per-host table (`World`'s, by host id): grown with `fill` up to it. Ids are
@@ -879,16 +902,7 @@ fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
         every: CUT_EVERY,
         tick: Box::new(move || tick.load(std::sync::atomic::Ordering::SeqCst)),
     };
-    let coordinator = server::coordinator_rt::start_listening_with(
-        store.clone(),
-        start,
-        "127.0.0.1:0".parse().unwrap(),
-        TOKEN.into(),
-        Some(w.cert.clone()),
-        server::claims::Fenced::default(),
-        Some(cuts),
-    )
-    .expect("the coordinator listens");
+    let coordinator = listening_coordinator(store.clone(), start, &w.cert, cuts, server::claims::Fenced::default(), game::CrashPolicy::Rollback);
     let old = std::mem::replace(&mut w.store, store);
     old.shutdown();
     for sim in &w.pair.sims {

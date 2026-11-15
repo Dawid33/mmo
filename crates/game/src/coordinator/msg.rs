@@ -225,6 +225,11 @@ pub enum HostMsg {
     /// yet). The coordinator relays it to `peer` ([`CoordMsg::CutPeerCount`]), only between
     /// participants of the running cut.
     CutPeerCount { cut: CutId, peer: HostId, received_through: u64, boot: u64 },
+    /// What this host tells the login service (Elastic 1 Task 6): the gate host's answer to a
+    /// [`CoordMsg::Login`] order (a `SpawnAck`, or a `KickAck` once every peer applied the
+    /// kick), or the end of a login session that left the world here. The coordinator forwards
+    /// it to the login service unchanged and keeps nothing of it.
+    Login(crate::LoginOut),
 }
 
 /// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).
@@ -335,6 +340,11 @@ pub enum CoordMsg {
     /// [`HostMsg::CutPeerCount`], relayed): everything numbered above it is this host's in
     /// the cut (a boot that is not this host's own counts 0).
     CutPeerCount { cut: CutId, from: HostId, received_through: u64, boot: u64 },
+    /// An order of the login service for the gate host (Elastic 1 Task 6,
+    /// [`crate::Coordinator::login_order`]): its server resolves it and the manager places a
+    /// spawn (here or on the host holding the player) or applies and relays a kick; the
+    /// answers come back as [`HostMsg::Login`].
+    Login(crate::LoginOrder),
 }
 
 impl CoordMsg {

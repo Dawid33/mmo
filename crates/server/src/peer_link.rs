@@ -129,17 +129,20 @@ pub struct PeerLinkConfig {
     pub bind: SocketAddr,
     pub cert_hash_file: PathBuf,
     pub delay: Duration,
+    /// The world the hosts' links name (`VOXEL_WORLD_ID`; empty when unset).
+    pub world: String,
 }
 
 impl PeerLinkConfig {
-    /// From [`PEER_BIND_ENV`], [`PEER_CERT_HASH_FILE_ENV`] and [`PEER_LINK_DELAY_MS_ENV`]
-    /// (a non-zero delay logs [`PEER_LINK_DELAY_WARNING`]).
+    /// From [`PEER_BIND_ENV`], [`PEER_CERT_HASH_FILE_ENV`], [`PEER_LINK_DELAY_MS_ENV`] and
+    /// `VOXEL_WORLD_ID` (a non-zero delay logs [`PEER_LINK_DELAY_WARNING`]).
     pub fn from_env(host_name: &str) -> Result<PeerLinkConfig, String> {
         let var = |name: &str| std::env::var(name).ok();
         let config = PeerLinkConfig {
             bind: peer_bind_from(var(PEER_BIND_ENV).as_deref())?,
             cert_hash_file: peer_cert_hash_file_from(host_name, var(PEER_CERT_HASH_FILE_ENV).as_deref()),
             delay: peer_link_delay_from(var(PEER_LINK_DELAY_MS_ENV).as_deref())?,
+            world: crate::login_link::link_world_from(var(crate::auth_edge::WORLD_ID_ENV).as_deref()),
         };
         if !config.delay.is_zero() {
             log::warn!("[peers] {PEER_LINK_DELAY_WARNING}: {} ms on every outgoing frame", config.delay.as_millis());
@@ -693,7 +696,7 @@ impl PeerListener {
             std::fs::create_dir_all(dir)?;
         }
         let (listener, events, senders) =
-            LinkListener::bind::<PeerMsg, PeerMsg>(config.bind, token.clone(), Some(config.cert_hash_file.clone()))?;
+            LinkListener::bind::<PeerMsg, PeerMsg>(config.bind, token.clone(), config.world.clone(), Some(config.cert_hash_file.clone()))?;
         let advertised = advertise_peer_from(std::env::var(ADVERTISE_PEER_ENV).ok().as_deref(), listener.local_addr())
             .map_err(io::Error::other)?;
         Ok(PeerListener { listener, events, senders, advertised, token, config })
@@ -740,7 +743,7 @@ impl PeerLinks {
             listener.local_addr(),
             listener.cert_sha256()
         );
-        let hello = LinkHello::new(token, PeerRole::Host { id: me, boot, reg: me.0 });
+        let hello = LinkHello::new(token, PeerRole::Host { id: me, boot, reg: me.0 }, config.world.clone());
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
         let live: LiveCache = std::sync::Arc::default();
         let live_row = cached_live_row(live.clone(), store.clone());

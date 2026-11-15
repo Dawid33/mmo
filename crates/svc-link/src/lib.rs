@@ -47,7 +47,11 @@ pub use target::LinkTarget;
 /// epoch); peers tell each other their claims (`Reliable::Owns`, `Volatile::ClaimWanted`).
 /// 6: R4's fix wave — `HostMsg::Attach` carries the host's crash policy (`policy`): a
 /// coordinator of several hosts refuses one that is not its own.
-pub const LINK_PROTOCOL_VERSION: u32 = 6;
+/// 7: Elastic 1 — host ids are issued at registration and 64 bits wide on the wire
+/// (`PeerHello`, `PeerRole::Host`, `HostEndpoint`, `RequestId`); the hello names its world
+/// ([`LinkHello::world`]); the login service links to the coordinator, which relays its orders
+/// to a live host and their answers back (`CoordMsg::Login`, `HostMsg::Login`).
+pub const LINK_PROTOCOL_VERSION: u32 = 7;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;
@@ -92,6 +96,10 @@ pub enum PeerRole {
 pub struct LinkHello {
     pub token: String,
     pub role: PeerRole,
+    /// The world the dialer serves (`VOXEL_WORLD_ID` of a host or coordinator, the registry
+    /// row's `world_id` of the login service). A listener refuses a hello of another world;
+    /// the empty id (a dev world with no id set) matches only the empty id.
+    pub world: String,
     pub region_blocks: u32,
     pub chunk_blocks: u32,
     pub protocol: u32,
@@ -102,6 +110,7 @@ impl std::fmt::Debug for LinkHello {
         f.debug_struct("LinkHello")
             .field("token", &"<redacted>")
             .field("role", &self.role)
+            .field("world", &self.world)
             .field("region_blocks", &self.region_blocks)
             .field("chunk_blocks", &self.chunk_blocks)
             .field("protocol", &self.protocol)
@@ -110,11 +119,12 @@ impl std::fmt::Debug for LinkHello {
 }
 
 impl LinkHello {
-    /// A hello for this build's world dials and the current protocol version.
-    pub fn new(token: String, role: PeerRole) -> Self {
+    /// A hello of `world` for this build's world dials and the current protocol version.
+    pub fn new(token: String, role: PeerRole, world: impl Into<String>) -> Self {
         Self {
             token,
             role,
+            world: world.into(),
             region_blocks: game::REGION_BLOCKS as u32,
             chunk_blocks: game::CHUNK_BLOCKS as u32,
             protocol: LINK_PROTOCOL_VERSION,
@@ -214,13 +224,17 @@ fn runtime(name: &str) -> io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name(name).enable_all().build()
 }
 
-/// Why a hello is refused, if it is.
-fn check_hello(hello: &LinkHello, token: &str) -> Result<(), String> {
+/// Why a hello is refused, if it is: `token` and `world` are the listener's.
+fn check_hello(hello: &LinkHello, token: &str, world: &str) -> Result<(), String> {
     if !cert::ct_eq(hello.token.as_bytes(), token.as_bytes()) {
         return Err("bad service token".to_string());
     }
     if hello.protocol != LINK_PROTOCOL_VERSION {
         return Err(format!("link protocol {} != {LINK_PROTOCOL_VERSION}", hello.protocol));
+    }
+    // Exact: the empty id (no `VOXEL_WORLD_ID`) matches only itself, never a named world.
+    if hello.world != world {
+        return Err(format!("the peer serves world {:?}, this listener world {world:?}", hello.world));
     }
     if hello.region_blocks != game::REGION_BLOCKS as u32 || hello.chunk_blocks != game::CHUNK_BLOCKS as u32 {
         return Err(format!(
@@ -235,12 +249,14 @@ fn check_hello(hello: &LinkHello, token: &str) -> Result<(), String> {
 }
 
 impl LinkListener {
-    /// Listen on `addr` (port 0 picks one; see [`local_addr`](Self::local_addr)). The certificate
-    /// is generated, and with `cert_hash_file` its SHA-256 hex is written there; the cert and key
-    /// persist beside it so a restarted listener keeps the pin its dialers hold.
+    /// Listen on `addr` (port 0 picks one; see [`local_addr`](Self::local_addr)) for peers of
+    /// `world` ([`LinkHello::world`]). The certificate is generated, and with `cert_hash_file`
+    /// its SHA-256 hex is written there; the cert and key persist beside it so a restarted
+    /// listener keeps the pin its dialers hold.
     pub fn bind<In, Out>(
         addr: SocketAddr,
         token: String,
+        world: String,
         cert_hash_file: Option<std::path::PathBuf>,
     ) -> io::Result<(LinkListener, Receiver<(PeerId, LinkEvent<In>)>, PeerSenders<Out>)>
     where
@@ -280,6 +296,7 @@ impl LinkListener {
         runtime.spawn(async move {
             let next_peer = Arc::new(AtomicU64::new(1));
             let token = Arc::new(token);
+            let world = Arc::new(world);
             let handshakes = Arc::new(tokio::sync::Semaphore::new(LINK_MAX_PENDING_HANDSHAKES));
             while let Some(incoming) = accept_endpoint.accept().await {
                 let Ok(permit) = handshakes.clone().try_acquire_owned() else {
@@ -290,11 +307,11 @@ impl LinkListener {
                     incoming.refuse();
                     continue;
                 };
-                let (event_tx, peers, token) = (event_tx.clone(), peers.clone(), token.clone());
+                let (event_tx, peers, token, world) = (event_tx.clone(), peers.clone(), token.clone(), world.clone());
                 let peer = PeerId(next_peer.fetch_add(1, Ordering::Relaxed));
                 tokio::spawn(async move {
                     let Ok(Ok(connection)) = tokio::time::timeout(LINK_HELLO_TIMEOUT, incoming).await else { return };
-                    serve_peer(connection, peer, token, event_tx, peers, permit).await;
+                    serve_peer(connection, peer, token, world, event_tx, peers, permit).await;
                 });
             }
         });
@@ -321,6 +338,7 @@ async fn serve_peer<In, Out>(
     connection: Connection,
     peer: PeerId,
     token: Arc<String>,
+    world: Arc<String>,
     events: Sender<(PeerId, LinkEvent<In>)>,
     peers: Arc<Mutex<BTreeMap<PeerId, UnboundedSender<Out>>>>,
     handshake_permit: tokio::sync::OwnedSemaphorePermit,
@@ -340,7 +358,7 @@ async fn serve_peer<In, Out>(
         Ok(Err(why)) => return refuse(&connection, &why).await,
         Err(_) => return refuse(&connection, "hello timed out").await,
     };
-    if let Err(why) = check_hello(&hello, &token) {
+    if let Err(why) = check_hello(&hello, &token, &world) {
         return refuse(&connection, &why).await;
     }
     // Authenticated: no longer a pending handshake.
@@ -707,10 +725,10 @@ mod tests {
     fn dial_resolves_again_after_a_failed_attempt() {
         let token = "t".to_string();
         let (listener, _from_peers, _senders) =
-            LinkListener::bind::<u64, u64>(([127, 0, 0, 1], 0).into(), token.clone(), None).unwrap();
+            LinkListener::bind::<u64, u64>(([127, 0, 0, 1], 0).into(), token.clone(), String::new(), None).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let resolver = FlakyResolver { live: listener.local_addr(), calls: calls.clone() };
-        let hello = LinkHello::new(token, PeerRole::Coordinator);
+        let hello = LinkHello::new(token, PeerRole::Coordinator, "");
         let (slot, stop) = (Arc::<Mutex<Option<UnboundedSender<u64>>>>::default(), Arc::new(AtomicBool::new(false)));
         let (event_tx, events) = crossbeam::channel::unbounded::<LinkEvent<u64>>();
         let (pin, stop2) = (listener.cert_sha256().to_string(), stop.clone());

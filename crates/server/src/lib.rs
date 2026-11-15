@@ -621,8 +621,8 @@ impl WorldIngress {
                     // The world must know: unsubscribe everywhere, let the home region's
                     // grace timer start — unless a newer connection holds the id now.
                     player_store::release_sink(&sinks, &send, id, |live| live.same_connection(&mine));
-                    // And the login service, for a session its spawn order admitted (with
-                    // several hosts the manager tells it, once the session left the world).
+                    // And the login service, for a session its spawn order admitted (role
+                    // `host`: the manager tells it, once the session left the world).
                     if let Some(ticket) = &ticket {
                         auth.session_closed(ticket);
                     }
@@ -890,16 +890,14 @@ pub fn run() -> claims::ServerExit {
         _ => HostId::SOLO,
     };
     let ownership = game::ownership_for(&ownership_word, host_id).unwrap_or_else(|e| fatal(&e));
-    // `claim`: the login service is linked to one host, the entry host (Elastic 1 interim,
-    // until the coordinator relays logins: the lowest live id at this host's start); every
-    // host relays its spawn orders and kicks to the host holding the player (`login_link`).
-    let entry_host = match (&store, claim_on_demand) {
-        (Some(store), true) => Some(login_link::entry_host_of(store, host_id).unwrap_or_else(|e| fatal(&e))),
-        _ => None,
-    };
-    let login_relay = match (&spawn_orders, entry_host) {
-        (Some((orders, _)), Some(entry)) => {
-            info!("[server] login relay: the login service is linked to host {entry}");
+    // Role `host` (any number of hosts, `static` or `claim`): the login service is linked to the
+    // coordinator, which hands each of its orders to one live host (the gate host); this host's
+    // relay resolves the orders it is given, places spawns here or on the host holding the
+    // player, and sends its answers up its own coordinator link (`login_link`). It never listens
+    // for the login service itself.
+    let login_relay = match (&spawn_orders, role) {
+        (Some((orders, _)), roles::Role::Host) => {
+            info!("[server] login relay: the login service is linked to the coordinator, which relays its orders here");
             Some(login_link::LoginRelay::new(orders.clone(), players.clone(), client_packet_send.clone()))
         }
         _ => None,
@@ -927,20 +925,17 @@ pub fn run() -> claims::ServerExit {
         .unwrap_or_else(|message| panic!("{message}"));
     let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
-    // The login service's push: a listener (dropped at the end of `run`, sync code).
-    // Several hosts: only the entry host listens (the others take what it relays).
-    let listens = entry_host.is_none_or(|entry| entry == host_id);
-    let _login_link = spawn_orders.filter(|_| listens).map(|(orders, token)| {
+    // The login service's push: a listener (dropped at the end of `run`, sync code) — role
+    // `all` only (one process; split roles: the coordinator listens, see above).
+    let _login_link = spawn_orders.filter(|_| role != roles::Role::Host).map(|(orders, token)| {
         let bind = login_link::bind_from(std::env::var(login_link::HOST_LINK_BIND_ENV).ok().as_deref())
             .unwrap_or_else(|e| fatal(&e));
         let pin_file =
             login_link::cert_hash_file_from(std::env::var(login_link::HOST_LINK_CERT_HASH_FILE_ENV).ok().as_deref());
+        let world = login_link::link_world_from(std::env::var(auth_edge::WORLD_ID_ENV).ok().as_deref());
         let (pin, events) = (Some(pin_file.clone()), client_packet_send.clone());
-        let link = match entry_host {
-            Some(_) => login_link::start_relaying(bind, token, pin, orders, players.clone(), events, host_id),
-            None => login_link::start(bind, token, pin, orders, players.clone(), events),
-        }
-        .unwrap_or_else(|e| fatal(&format!("the login link on {bind}: {e}")));
+        let link = login_link::start_in_world(bind, token, world, pin, orders, players.clone(), events)
+            .unwrap_or_else(|e| fatal(&format!("the login link on {bind}: {e}")));
         info!(
             "auth: login tickets need the login service's spawn orders, pushed to {} (pin {} in {})",
             link.local_addr(),
@@ -1158,9 +1153,6 @@ pub fn run() -> claims::ServerExit {
     let mut adoption_reader =
         claims.as_ref().filter(|_| claim_on_demand).map(|claims| claims::AdoptionReader::new(claims.clone()));
     manager.set_endpoints(endpoint.clone(), os_nonces());
-    if let Some(entry) = entry_host {
-        manager.set_entry_host(entry);
-    }
     // The coordinator refuses an `Attach` of an older world generation than the store's.
     manager.set_host_generation(world_generation.mine());
     // A session per other host, over its link; the links' wake-up (none with one host).
@@ -1357,9 +1349,18 @@ pub fn run() -> claims::ServerExit {
         }
         // Several hosts: the observer tickets other hosts vouched for since the last pass.
         observer_pass(&mut manager, observer_orders.as_deref(), &sinks);
-        // The login relay (several hosts): spawn orders taken, kicks relayed, answers out.
-        if let Some(relay) = &login_relay {
-            relay.pump(&mut manager);
+        // The login relay (role `host`): the coordinator's orders resolved, spawn orders taken,
+        // kicks relayed, answers up the coordinator link.
+        match &login_relay {
+            Some(relay) => relay.pump(&mut manager),
+            None => {
+                // No spawn orders here (no service token, or role `all`, whose login link answers
+                // itself): an order the coordinator relayed anyway cannot be taken.
+                let dropped = manager.take_login_orders();
+                if !dropped.is_empty() {
+                    log::warn!("[server] {} login orders from the coordinator, and this host takes none (no service token): dropped", dropped.len());
+                }
+            }
         }
         // A peer runs a newer world generation: this host is stale (polled above).
         if let Some(generation) = manager.take_higher_generation() {
@@ -1763,7 +1764,8 @@ fn host_world_link(ordinal: HostId, boot: u64, reg: u64) -> Result<roles::QuicWo
     )?;
     let token = svc_link::service_token_from_env().map_err(|e| format!("the service link's token: {e}"))?;
     let cert_file = roles::cert_hash_file_from(std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
-    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { id: ordinal, boot, reg });
+    let world = login_link::link_world_from(std::env::var(auth_edge::WORLD_ID_ENV).ok().as_deref());
+    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { id: ordinal, boot, reg }, world);
     info!("[server] the world coordinator is a separate process at {addr} (pin from {})", cert_file.display());
     Ok(roles::QuicWorldLink::connect(
         addr,

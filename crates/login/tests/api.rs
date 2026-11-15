@@ -331,8 +331,10 @@ mod host_link {
     /// How a fake host answers a spawn order: `Some(ok)` acks, `None` stays silent.
     type AckPolicy = Box<dyn Fn(&str, u64) -> Option<bool> + Send>;
 
-    /// A world host's login link on localhost: records every message, acks by policy.
+    /// A world's login link on localhost (its coordinator's, or a role-`all` server's) for ONE
+    /// world id (the hello names it, Elastic 1 Task 6): records every message, acks by policy.
     struct FakeHost {
+        world_id: &'static str,
         link: String,
         cert: String,
         seen: Arc<Mutex<Vec<LoginToHost>>>,
@@ -341,25 +343,36 @@ mod host_link {
     }
 
     impl FakeHost {
-        fn start(ack: AckPolicy) -> FakeHost {
-            Self::start_with("127.0.0.1:0", None, ack)
+        fn start(world_id: &'static str, ack: AckPolicy) -> FakeHost {
+            Self::start_with(world_id, "127.0.0.1:0", None, ack)
         }
 
         /// On `bind`, with its cert kept beside `pin_file` (a restart keeps its pin).
-        fn start_with(bind: &str, pin_file: Option<std::path::PathBuf>, ack: AckPolicy) -> FakeHost {
-            Self::start_placing(bind, pin_file, ack, SpawnPlace::default())
+        fn start_with(world_id: &'static str, bind: &str, pin_file: Option<std::path::PathBuf>, ack: AckPolicy) -> FakeHost {
+            Self::start_placing(world_id, bind, pin_file, ack, SpawnPlace::default())
         }
 
         /// [`Self::start_with`], its acks naming `place` (another host of the world took the
         /// order).
-        fn start_placing(bind: &str, pin_file: Option<std::path::PathBuf>, ack: AckPolicy, place: SpawnPlace) -> FakeHost {
-            let (listener, events, peers) =
-                LinkListener::bind::<LoginToHost, HostToLogin>(bind.parse().unwrap(), SERVICE_TOKEN.into(), pin_file)
-                    .unwrap();
+        fn start_placing(
+            world_id: &'static str,
+            bind: &str,
+            pin_file: Option<std::path::PathBuf>,
+            ack: AckPolicy,
+            place: SpawnPlace,
+        ) -> FakeHost {
+            let (listener, events, peers) = LinkListener::bind::<LoginToHost, HostToLogin>(
+                bind.parse().unwrap(),
+                SERVICE_TOKEN.into(),
+                world_id.into(),
+                pin_file,
+            )
+            .unwrap();
             let seen: Arc<Mutex<Vec<LoginToHost>>> = Arc::default();
             let (record, answer) = (seen.clone(), peers.clone());
             std::thread::spawn(move || serve(events, answer, record, ack, place));
             FakeHost {
+                world_id,
                 link: listener.local_addr().to_string(),
                 cert: listener.cert_sha256().to_string(),
                 seen,
@@ -368,11 +381,12 @@ mod host_link {
             }
         }
 
-        fn acking() -> FakeHost {
-            Self::start(Box::new(|_, _| Some(true)))
+        fn acking(world_id: &'static str) -> FakeHost {
+            Self::start(world_id, Box::new(|_, _| Some(true)))
         }
 
         fn world(&self, id: &str) -> WorldRow {
+            assert_eq!(id, self.world_id, "a fake host serves one world");
             WorldRow {
                 world_id: id.into(),
                 name: format!("World {id}"),
@@ -463,7 +477,7 @@ mod host_link {
 
     #[tokio::test]
     async fn join_pushes_spawn_player_and_waits_for_its_ack() {
-        let host = FakeHost::acking();
+        let host = FakeHost::acking("lw");
         let a = linked_app(&[host.world("lw")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
         let refresh = a.account().await;
         let r = a.join(&refresh, "lw").await;
@@ -498,7 +512,7 @@ mod host_link {
             webtransport: Some("https://host-1.example:7501".into()),
             cert_hash: Some("cd".repeat(32)),
         };
-        let host = FakeHost::start_placing("127.0.0.1:0", None, Box::new(|_, _| Some(true)), place.clone());
+        let host = FakeHost::start_placing("lw", "127.0.0.1:0", None, Box::new(|_, _| Some(true)), place.clone());
         let a = linked_app(&[host.world("lw")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
         let refresh = a.account().await;
         let r = a.join(&refresh, "lw").await;
@@ -511,7 +525,7 @@ mod host_link {
             host.world("lw").quic
         );
         // An ack that names nothing keeps the world row's addresses.
-        let plain = FakeHost::acking();
+        let plain = FakeHost::acking("pw");
         let world = plain.world("pw");
         let b = linked_app(&[world.clone()], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
         let refresh = b.account().await;
@@ -528,7 +542,7 @@ mod host_link {
         let world = WorldRow {
             host_link: Some(addr),
             host_link_cert: Some("ab".repeat(32)),
-            ..FakeHost::acking().world("down")
+            ..FakeHost::acking("down").world("down")
         };
         let a = linked_app(&[world], Duration::from_millis(50)).await;
         let refresh = a.account().await;
@@ -541,7 +555,7 @@ mod host_link {
 
     #[tokio::test]
     async fn join_fails_503_when_the_host_refuses_or_has_no_service_token() {
-        let host = FakeHost::start(Box::new(|_, _| Some(false)));
+        let host = FakeHost::start("lw", Box::new(|_, _| Some(false)));
         let a = linked_app(&[host.world("lw")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
         let refresh = a.account().await;
         let r = a.join(&refresh, "lw").await;
@@ -577,14 +591,14 @@ mod host_link {
         const UP: &str = "login_host_link_up{world=\"w1\"} 1";
         const DOWN: &str = "login_host_link_up{world=\"w1\"} 0";
         // Host A never acks, so a join waiting on it keeps A's link (and its pump) alive.
-        let host_a = FakeHost::start(Box::new(|_, _| None));
+        let host_a = FakeHost::start("w1", Box::new(|_, _| None));
         let a = linked_app(&[host_a.world("w1")], Duration::from_millis(600)).await;
         let (first, refresh_b) = (a.account().await, a.account().await);
         let stuck = a.join(&first, "w1");
         let moved = async {
             wait_for("link A up", async || a.get("/metrics").await.text().contains(UP)).await;
             // The world moves to host B: the replacement link reports from now on.
-            let host_b = FakeHost::acking();
+            let host_b = FakeHost::acking("w1");
             a.store.put_world(&host_b.world("w1")).await.unwrap();
             assert_eq!(a.join(&refresh_b, "w1").await.status, StatusCode::OK);
             assert!(a.get("/metrics").await.text().contains(UP));
@@ -610,7 +624,7 @@ mod host_link {
     #[ignore = "slow: >100ms — run via just test-full"]
     async fn late_ack_never_answers_a_later_join() {
         // The host acks nothing on its own; the test sends acks by hand.
-        let host = FakeHost::start(Box::new(|_, _| None));
+        let host = FakeHost::start("lw", Box::new(|_, _| None));
         let a = linked_app(&[host.world("lw")], Duration::from_millis(300)).await;
         let refresh = a.account().await;
         let r = a.join(&refresh, "lw").await;
@@ -639,7 +653,7 @@ mod host_link {
 
     #[tokio::test]
     async fn logout_all_sends_kick_to_each_world_with_a_session() {
-        let (h1, h2, h3) = (FakeHost::acking(), FakeHost::acking(), FakeHost::acking());
+        let (h1, h2, h3) = (FakeHost::acking("a"), FakeHost::acking("b"), FakeHost::acking("c"));
         let a = linked_app(&[h1.world("a"), h2.world("b"), h3.world("c")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
         let refresh = a.account().await;
         let v = a.verifier().await;
@@ -672,7 +686,7 @@ mod host_link {
     /// signs out everywhere: every session is kicked.
     #[tokio::test]
     async fn logout_all_with_a_reused_token_still_kicks() {
-        let host = FakeHost::acking();
+        let host = FakeHost::acking("a");
         let a = linked_app(&[host.world("a")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
         let refresh = a.account().await;
         let j: JoinResponse = a.join(&refresh, "a").await.json(); // rotates `refresh`
@@ -704,7 +718,7 @@ mod host_link {
         let dir = std::env::temp_dir().join(format!("login-kick-durable-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pin = dir.join("host.cert-sha256");
-        let first = FakeHost::start_with("127.0.0.1:0", Some(pin.clone()), Box::new(|_, _| Some(true)));
+        let first = FakeHost::start_with("a", "127.0.0.1:0", Some(pin.clone()), Box::new(|_, _| Some(true)));
         let (bind, world) = (first.link.clone(), first.world("a"));
         drop(first);
         let a = linked_app(&[world], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
@@ -719,7 +733,7 @@ mod host_link {
         tokio::time::sleep(Duration::from_millis(300)).await; // the sweeper dials and fails
         assert_eq!(a.store.pending_kicks().await.unwrap().len(), 1, "the kick is durable");
         // The host comes back on the same address and pin: the kick goes out and is acked.
-        let host = FakeHost::start_with(&bind, Some(pin), Box::new(|_, _| Some(true)));
+        let host = FakeHost::start_with("a", &bind, Some(pin), Box::new(|_, _| Some(true)));
         let kick = LoginToHost::Kick { player_token: token, session_epoch: 1, reason: login::api::KICK_LOGOUT_ALL.into() };
         let deadline = tokio::time::Instant::now() + LINK_WAIT * 2;
         while !host.seen().contains(&kick) && tokio::time::Instant::now() < deadline {

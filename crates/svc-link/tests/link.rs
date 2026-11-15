@@ -22,7 +22,7 @@ fn loopback() -> SocketAddr {
 }
 
 fn hello(token: &str) -> LinkHello {
-    LinkHello::new(token.to_string(), PeerRole::Coordinator)
+    LinkHello::new(token.to_string(), PeerRole::Coordinator, "")
 }
 
 fn next<T>(rx: &Receiver<T>) -> T {
@@ -58,7 +58,7 @@ fn expect_peer_up(rx: &Receiver<(PeerId, LinkEvent<Msg>)>) -> PeerId {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn round_trip_both_directions() {
-    let (listener, from_peers, senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let (to_listener, from_listener) = LinkDialer::connect::<Msg, Msg>(
         listener.local_addr(),
         listener.cert_sha256().to_string(),
@@ -82,7 +82,7 @@ fn round_trip_both_directions() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn wrong_token_refused() {
-    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let (_tx, rx) = LinkDialer::connect::<Msg, Msg>(
         listener.local_addr(),
         listener.cert_sha256().to_string(),
@@ -95,10 +95,40 @@ fn wrong_token_refused() {
     nothing(&from_peers);
 }
 
+/// Elastic 1 Task 6: a hello of another world is refused, whichever side names one; the
+/// empty id (no `VOXEL_WORLD_ID`) matches only the empty id; the same world is admitted.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_hello_for_another_world_is_refused() {
+    for (ours, theirs) in [("alpha", "beta"), ("alpha", ""), ("", "alpha")] {
+        let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), ours.into(), None).unwrap();
+        let h = LinkHello::new(TOKEN.into(), PeerRole::Coordinator, theirs);
+        let (_tx, rx) = LinkDialer::connect::<Msg, Msg>(listener.local_addr(), listener.cert_sha256().to_string(), h);
+        match next(&rx) {
+            LinkEvent::Down(why) => assert!(why.contains("world"), "listener {ours:?}, peer {theirs:?}: the reason names the world: {why}"),
+            other => panic!("listener {ours:?}, peer {theirs:?}: expected Down, got {other:?}"),
+        }
+        nothing(&from_peers);
+    }
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), "alpha".into(), None).unwrap();
+    let h = LinkHello::new(TOKEN.into(), PeerRole::Coordinator, "alpha");
+    let (_tx, rx) = LinkDialer::connect::<Msg, Msg>(listener.local_addr(), listener.cert_sha256().to_string(), h);
+    expect_up(&rx);
+    assert_eq!(expect_peer_up_hello(&from_peers).world, "alpha");
+}
+
+/// The hello of the next peer to come up.
+fn expect_peer_up_hello(rx: &Receiver<(PeerId, LinkEvent<Msg>)>) -> LinkHello {
+    match next(rx) {
+        (_, LinkEvent::Up(hello)) => hello,
+        other => panic!("expected Up, got {other:?}"),
+    }
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn wrong_cert_hash_refused() {
-    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let (_tx, rx) = LinkDialer::connect::<Msg, Msg>(listener.local_addr(), "00".repeat(32), hello(TOKEN));
     assert!(matches!(next(&rx), LinkEvent::Down(_)));
     nothing(&from_peers);
@@ -107,7 +137,7 @@ fn wrong_cert_hash_refused() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn mismatched_dials_refused() {
-    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let pin = listener.cert_sha256().to_string();
     for (label, edit) in [
         ("region", (|h: &mut LinkHello| h.region_blocks += 1) as fn(&mut LinkHello)),
@@ -130,7 +160,7 @@ fn mismatched_dials_refused() {
 fn dialer_reconnects_after_listener_restart() {
     let hash_file = temp_hash_file("restart");
     let (listener, from_peers, senders) =
-        LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), Some(hash_file.clone())).unwrap();
+        LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), Some(hash_file.clone())).unwrap();
     let addr = listener.local_addr();
     let pin = svc_link::read_cert_hash("SVC_LINK_TEST_UNSET_VAR", &hash_file).unwrap();
     assert_eq!(pin, listener.cert_sha256());
@@ -149,7 +179,7 @@ fn dialer_reconnects_after_listener_restart() {
     let (listener, from_peers, senders) = {
         let mut tries = 0;
         loop {
-            match LinkListener::bind::<Msg, Msg>(addr, TOKEN.into(), Some(hash_file.clone())) {
+            match LinkListener::bind::<Msg, Msg>(addr, TOKEN.into(), String::new(), Some(hash_file.clone())) {
                 Ok(parts) => break parts,
                 Err(e) if tries < 40 => {
                     tries += 1;
@@ -192,7 +222,7 @@ fn noise(len: usize) -> Vec<u8> {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn large_frame_ok_and_oversize_refused() {
-    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let (to_listener, from_listener) = LinkDialer::connect::<Msg, Msg>(
         listener.local_addr(),
         listener.cert_sha256().to_string(),
@@ -270,7 +300,7 @@ fn raw_client_config() -> quinn::ClientConfig {
 fn forged_compressed_hello_refused_before_decoding() {
     // A raw QUIC client sends a hello tagged lz4 that claims a huge output: the listener
     // must refuse it without decoding.
-    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let addr = listener.local_addr();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
@@ -294,7 +324,7 @@ fn forged_compressed_hello_refused_before_decoding() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn unauthenticated_peers_are_bounded() {
     const PENDING: usize = 16; // svc_link's LINK_MAX_PENDING_HANDSHAKES
-    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let addr = listener.local_addr();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
@@ -319,7 +349,7 @@ fn unauthenticated_peers_are_bounded() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn listener_closes_a_peer() {
-    let (listener, from_peers, senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let (_tx, rx) = LinkDialer::connect::<Msg, Msg>(listener.local_addr(), listener.cert_sha256().to_string(), hello(TOKEN));
     expect_up(&rx);
     let peer = expect_peer_up(&from_peers);
@@ -331,7 +361,7 @@ fn listener_closes_a_peer() {
 
 #[test]
 fn hello_debug_never_shows_the_token() {
-    let h = LinkHello::new("s3cret-token".into(), PeerRole::Host { id: game::HostId(0), boot: 1, reg: 2 });
+    let h = LinkHello::new("s3cret-token".into(), PeerRole::Host { id: game::HostId(0), boot: 1, reg: 2 }, "");
     let shown = format!("{h:?}");
     assert!(!shown.contains("s3cret"), "{shown}");
     assert!(shown.contains("redacted") && shown.contains("reg: 2"), "{shown}");
@@ -340,7 +370,7 @@ fn hello_debug_never_shows_the_token() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn messages_sent_right_after_up_are_never_lost() {
-    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), String::new(), None).unwrap();
     let pin = listener.cert_sha256().to_string();
     // Send the instant Up is seen, over many fresh links: the slot must already be open.
     for round in 0..25u64 {

@@ -29,9 +29,9 @@ fn dial_failures_log_once_per_period() {
     // A listener the dialer's pin does not match: every attempt fails fast (a closed UDP
     // port instead times out, 5 s per attempt), so 3 s holds many attempts at the 250 ms minimum.
     let (listener, _from_peers, _senders) =
-        svc_link::LinkListener::bind::<u64, u64>(([127, 0, 0, 1], 0).into(), "t".into(), None).unwrap();
+        svc_link::LinkListener::bind::<u64, u64>(([127, 0, 0, 1], 0).into(), "t".into(), String::new(), None).unwrap();
     let addr = listener.local_addr();
-    let hello = LinkHello::new("t".to_string(), PeerRole::Coordinator);
+    let hello = LinkHello::new("t".to_string(), PeerRole::Coordinator, "");
     let (_tx, _rx) = LinkDialer::connect::<u64, u64>(addr, "00".repeat(32), hello);
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(DIAL_FAILED_LINES.load(Ordering::SeqCst), 1, "one line for the whole down period");

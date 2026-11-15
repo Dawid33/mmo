@@ -64,9 +64,10 @@ impl Host {
 
     /// Start listening for the login service (once).
     fn listen(&mut self, bind: std::net::SocketAddr, pin_file: Option<std::path::PathBuf>) {
-        let link = login_link::start(
+        let link = login_link::start_in_world(
             bind,
             SERVICE_TOKEN.into(),
+            WORLD.into(),
             pin_file,
             self.orders.clone(),
             self.players.clone(),
@@ -101,7 +102,7 @@ impl Host {
 
     fn login(&self, role: PeerRole) -> Login {
         let link = self.link.as_ref().unwrap();
-        let hello = LinkHello::new(SERVICE_TOKEN.into(), role);
+        let hello = LinkHello::new(SERVICE_TOKEN.into(), role, WORLD);
         let (tx, events) = LinkDialer::connect(link.local_addr(), link.cert_sha256().to_string(), hello);
         match events.recv_timeout(LINK_WAIT) {
             Ok(LinkEvent::Up(_)) => {}
@@ -632,6 +633,7 @@ fn kick_queued_while_the_link_is_down_parks_once_it_is_up() {
         let (probe, _events, _senders) = svc_link::LinkListener::bind::<LoginToHost, HostToLogin>(
             "127.0.0.1:0".parse().unwrap(),
             SERVICE_TOKEN.into(),
+            String::new(),
             Some(pin_file.clone()),
         )
         .unwrap();

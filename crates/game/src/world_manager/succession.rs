@@ -305,7 +305,7 @@ fn resolve(reports: &BTreeMap<HostId, SuccessionReportIn>) -> Resolved {
 /// `other` (holds no host, or holds one only for a moment that a forgotten host never reaches:
 /// `world_cut` names participants of a cut that is decided before any host is forgotten;
 /// `spawn_held` / `spawn_here` / `kicks_in` are answered within `SPAWN_SYNC_WAIT_MS`;
-/// `entry_host` is the login link's; `cut_refused_for` is a test-support record of a refusal; `successions`, `succession_reports`, `adoptions` end at
+/// `login_orders` are taken by the server in the same pass; `cut_refused_for` is a test-support record of a refusal; `successions`, `succession_reports`, `adoptions` end at
 /// `SuccessionDone`, where the predecessor is forgotten; `forgotten_hosts` is the tombstone).
 /// Kinds: `key_map` / `key_set` keyed by the host; `pair_set` of `(host, _)`; `value_map`
 /// whose values are hosts; `value_first` / `value_second` whose value tuples hold the host
@@ -347,7 +347,7 @@ macro_rules! host_fields {
             asked_elsewhere_answered_ms, observer_orders, nonces, observer_revocations,
             foreign_input_warned_ms, unseeded_warned, world_cut, world_cut_seen, wrapper_seen, marks_queued,
             leave_requested, leaving_cut, leave_outcome, leave_decided, leave_parked, world_cut_done,
-            inbound_accounted, entry_host, logins, spawn_held, spawn_here, kicks_in, kicked, login_out,
+            inbound_accounted, login_orders, logins, spawn_held, spawn_here, kicks_in, kicked, login_out,
             spawn_pins, kick_warned_ms, successions, succession_reports, succession_wait_logged_ms, inheriting,
             successions_done, adoptions, succession_pinned, succession_seam_events
             ],

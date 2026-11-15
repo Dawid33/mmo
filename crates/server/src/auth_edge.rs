@@ -557,7 +557,7 @@ impl Authenticator {
     }
 
     /// The connection of an announced session admitted with `ticket` closed: the login link
-    /// forgets it. One host tells the login service here; several hosts leave that to the
+    /// forgets it. Role `all` tells the login service here; role `host` leaves that to the
     /// manager, which knows whether the session left the world or only this host
     /// ([`SpawnOrders::closed`]).
     pub fn session_closed(&self, ticket: &SessionTicket) {
@@ -567,8 +567,8 @@ impl Authenticator {
     }
 
     /// Whether login sessions are announced to the manager with their login
-    /// ([`game::ServerEvent::LoginConnected`]): several hosts relay the login service's
-    /// orders between them ([`SpawnOrders::relay_through`]).
+    /// ([`game::ServerEvent::LoginConnected`]): role `host`, whose relay takes the login service's
+    /// orders from the coordinator ([`SpawnOrders::relay_through`]).
     pub fn relays_logins(&self) -> bool {
         matches!(&self.admission, Admission::SpawnOrders(orders) if orders.relays())
     }

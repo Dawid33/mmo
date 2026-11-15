@@ -172,6 +172,9 @@ pub struct Coordinator {
     /// The generation of the last world rollback this coordinator ordered: a host attaching
     /// with an older one is told it ([`CoordMsg::Generation`]) and not applied.
     rolled_back_to: Option<u64>,
+    /// What the hosts told the login service ([`HostMsg::Login`]), in arrival order, for the
+    /// runtime to forward ([`Self::take_login_out`]). Nothing about an order is kept.
+    login_out: Vec<crate::LoginOut>,
 }
 
 impl Coordinator {
@@ -208,6 +211,7 @@ impl Coordinator {
             leases: LeaseWatch::default(),
             successions: SuccessionRuns::default(),
             rolled_back_to: None,
+            login_out: Vec::new(),
         };
         c.push_view(Target::Every);
         c
@@ -272,7 +276,10 @@ impl Coordinator {
     /// Apply one message of host `host` (the ordinal its link is for).
     pub fn handle(&mut self, host: HostId, msg: HostMsg, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
-        self.dirty_since_save = true;
+        // An answer for the login service changes nothing of the coordinator's (no save).
+        if !matches!(msg, HostMsg::Login(_)) {
+            self.dirty_since_save = true;
+        }
         // A zombie of a succeeded boot (R4) changes nothing: its state-changing requests are
         // refused (memoised), everything else is dropped.
         let attach_boot = match &msg {
@@ -288,6 +295,11 @@ impl Coordinator {
                 log::warn!("coordinator: host {host} attaches with generation {generation}, the world rolled back to {g}");
                 return self.push(Target::Host(host), CoordMsg::Generation(g));
             }
+        }
+        // For the login service, forwarded as it is.
+        if let HostMsg::Login(out) = msg {
+            self.login_out.push(out);
+            return;
         }
         match msg {
             HostMsg::Attach {
@@ -402,6 +414,7 @@ impl Coordinator {
             HostMsg::CutPeerCount { cut, peer, received_through, boot } => {
                 self.cut_peer_count(host, cut, peer, received_through, boot)
             }
+            HostMsg::Login(_) => unreachable!("handled above"),
         }
         self.push_directives();
     }
@@ -456,6 +469,35 @@ impl Coordinator {
     /// The messages free to leave now, in order, each with the host(s) it is for.
     pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
         std::mem::take(&mut self.out)
+    }
+
+    /// The gate host: the host the login service's orders go to ([`Self::login_order`]) — the
+    /// lowest attached host that neither left nor was succeeded ([`Self::takes_logins`]).
+    /// `None`: no host is attached (a login then times out and answers 503).
+    pub fn gate_host(&self) -> Option<HostId> {
+        self.attached_live().into_iter().filter(|h| self.takes_logins(*h)).min()
+    }
+
+    /// Whether attached live host `host` may be the gate host: not leaving (its leave asked
+    /// for: it refuses every spawn order). Elastic 1 Task 7 adds "and not draining" HERE.
+    fn takes_logins(&self, host: HostId) -> bool {
+        !self.leave_asked(host)
+    }
+
+    /// An order of the login service: for the gate host of this moment ([`Self::gate_host`]),
+    /// as the message to send it — the runtime sends it; nothing is stored here (a resend of
+    /// the order, or of a kick, goes to the gate host of ITS moment, and the hosts' answers
+    /// come back as [`HostMsg::Login`]). `None`: no gate host — the order is dropped (the
+    /// login service answers 503 at its timeout; a kick is resent).
+    pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<(HostId, CoordMsg)> {
+        let gate = self.gate_host()?;
+        Some((gate, CoordMsg::Login(order)))
+    }
+
+    /// What the hosts told the login service since the last call ([`HostMsg::Login`]), in
+    /// order, untouched: the runtime forwards it.
+    pub fn take_login_out(&mut self) -> Vec<crate::LoginOut> {
+        std::mem::take(&mut self.login_out)
     }
 
 

@@ -32,10 +32,10 @@ mod world_link;
 pub use peers::intents_in;
 pub use succession::{SuccessionReportIn, SUCCESSION_WAIT_LOG_MS};
 pub use placement::{
-    KickIn, LoginOut, Placement, SpawnRequest, KICK_MEMORY_MS, KICK_UNACKED_WARN_MS, SPAWN_PIN_MS, SPAWN_RELAY_MAX_HOPS,
+    KickIn, LoginOrder, LoginOut, Placement, SpawnRequest, KICK_MEMORY_MS, KICK_UNACKED_WARN_MS, SPAWN_PIN_MS, SPAWN_RELAY_MAX_HOPS,
     SPAWN_SYNC_WAIT_MS,
 };
-pub use world_link::{WorldLinkCounters, ATTACH_WAIT_MS, WORLD_REQUEST_TIMEOUT_SECS};
+pub use world_link::{WorldLinkCounters, ATTACH_WAIT_MS, LOGIN_ENDS_QUEUED_MAX, WORLD_REQUEST_TIMEOUT_SECS};
 use world_link::{PendingRequest, Step, WorldAttach, WorldViewCache};
 
 /// Level hint for an adventure landing: above any surface, so it clamps to the
@@ -151,9 +151,9 @@ pub enum ServerEvent {
     /// `client` is the id the home host knows the session by; `player` its player. When
     /// the body arrives here ([`crate::PlayerHandoff`]) the session becomes the home.
     ObserverConnected { client: ClientId, player: crate::PlayerId },
-    /// The login service ordered a spawn of `player` (several hosts: the entry host's login
-    /// link resolved the token and read the stored record's region; `None` = no record).
-    /// Entered at host `origin`, forwarded `hops` times so far. The manager places it
+    /// The login service ordered a spawn of `player` (role `host`: the coordinator gave the
+    /// order to this host, the gate host, whose server resolved the token and read the stored
+    /// record's region; `None` = no record). Entered at host `origin`, forwarded `hops` times so far. The manager places it
     /// ([`WorldManager::place_spawn`]): here, or relayed to the host that holds the player.
     SpawnOrder {
         origin: HostId,
@@ -163,8 +163,7 @@ pub enum ServerEvent {
         player: crate::PlayerId,
         record_region: Option<RegionCoords>,
     },
-    /// [`ServerEvent::ClientConnected`] of a session a login ticket admitted (several
-    /// hosts): the manager keeps its login — it travels with the player to another host,
+    /// [`ServerEvent::ClientConnected`] of a session a login ticket admitted (role `host`): the manager keeps its login — it travels with the player to another host,
     /// and its end (the session leaving the world) is reported to the login service.
     LoginConnected {
         client: ClientId,
@@ -173,7 +172,7 @@ pub enum ServerEvent {
         player_token: String,
         session_epoch: u64,
     },
-    /// The login service's kick, applied to the entry host's admission state already: a
+    /// The login service's kick, applied to the gate host's admission state already: a
     /// session of the login handed here is parked, and every other host is told.
     Kick { player_token: String, session_epoch: u64, reason: String },
     /// A login session ended at the edge before the manager knew it (refused on connect):
@@ -1422,8 +1421,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// it creates is noted as accounted for in that cut, and a state message it makes goes
     /// wrapped the same way (`world_cut.rs`).
     inbound_accounted: Option<CutId>,
-    /// The host the login service is linked to ([`Self::set_entry_host`]; `None`: this one).
-    entry_host: Option<HostId>,
+    /// The login service's orders the coordinator gave this host (the gate host), for the
+    /// server to resolve ([`Self::take_login_orders`]; `placement.rs`).
+    login_orders: Vec<LoginOrder>,
     /// The login (token, session epoch) of each session whose player this host holds, from
     /// [`ServerEvent::LoginConnected`] or a hand-off (`placement.rs`).
     logins: BTreeMap<ClientId, (String, u64)>,
@@ -1630,7 +1630,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer_boots: BTreeMap::new(),
             world_cut_done: Vec::new(),
             inbound_accounted: None,
-            entry_host: None,
+            login_orders: Vec::new(),
             logins: BTreeMap::new(),
             peer_synced: BTreeSet::new(),
             spawn_held: Vec::new(),

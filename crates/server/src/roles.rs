@@ -559,6 +559,19 @@ pub fn run_coordinator() -> ServerExit {
     if claim_world {
         log::info!("[coordinator] ownership `claim`: world cuts of any number of hosts; a crashed host's land goes to an heir (successions)");
     }
+    // Its links name the world (`VOXEL_WORLD_ID`, empty when unset: then only peers that name
+    // none are admitted — hosts and the login service must agree). The login service links to
+    // the coordinator (Elastic 1 Task 6), never to a host: the coordinator relays its orders to a
+    // live host and the answers back.
+    let world = crate::login_link::link_world_from(std::env::var(crate::auth_edge::WORLD_ID_ENV).ok().as_deref());
+    let login = crate::coordinator_rt::LoginListen {
+        bind: crate::login_link::login_bind_from(std::env::var(crate::login_link::LOGIN_LINK_BIND_ENV).ok().as_deref())
+            .unwrap_or_else(|e| fatal(e)),
+        token: token.clone(),
+        cert_hash_file: Some(crate::login_link::login_cert_hash_file_from(
+            std::env::var(crate::login_link::LOGIN_LINK_CERT_HASH_FILE_ENV).ok().as_deref(),
+        )),
+    };
     let coordinator = crate::coordinator_rt::start_listening_as(
         store.clone(),
         start,
@@ -568,6 +581,8 @@ pub fn run_coordinator() -> ServerExit {
         fenced.clone(),
         cuts,
         policy,
+        &world,
+        Some(login),
     )
     .unwrap_or_else(|e| fatal(e));
     // The store is open and the hosts' listener bound: ready. Its thread beats the loop.
@@ -670,7 +685,7 @@ mod tests {
     }
 
     fn hello() -> LinkHello {
-        LinkHello::new("t".into(), svc_link::PeerRole::Host { id: HostId::SOLO, boot: 1, reg: 1 })
+        LinkHello::new("t".into(), svc_link::PeerRole::Host { id: HostId::SOLO, boot: 1, reg: 1 }, "")
     }
 
     fn calendar(t: u64) -> CoordMsg {

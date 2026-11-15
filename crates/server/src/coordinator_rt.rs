@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
 use game::coordinator::Target;
 use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
+use login_api::{HostToLogin, LoginToHost};
 use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
 use world_store::{CoordinatorFence, StoreError, StoreHandle};
 
@@ -133,6 +134,59 @@ pub fn channel_link() -> (ChannelWorldLink, HostEnd) {
 /// host processes connected to its service-link listener (`VOXEL_ROLE=coordinator`).
 pub struct LinkSet {
     links: Links,
+    /// The login service's listener (role `coordinator`, Elastic 1 Task 6; `None`: no login).
+    login: Option<LoginSide>,
+}
+
+/// At most this many `SessionEnded` wait at the coordinator while no login service is linked
+/// (an ack is not kept: the login service resends its order or kick); beyond it the oldest is
+/// dropped with a warning (the login service then lists that session as open, as a lost
+/// `SessionEnded` always did).
+pub const LOGIN_ENDS_HELD_MAX: usize = 4096;
+
+/// Where the coordinator listens for the login service ([`start_listening_as`]): the address
+/// (`VOXEL_LOGIN_LINK_BIND`), the service token, the pin file
+/// (`VOXEL_LOGIN_LINK_CERT_HASH_FILE`).
+pub struct LoginListen {
+    pub bind: std::net::SocketAddr,
+    pub token: String,
+    pub cert_hash_file: Option<std::path::PathBuf>,
+}
+
+/// The coordinator's login listener: every order of a connected login service goes to the
+/// gate host of its moment ([`Coordinator::login_order`]); every host's answer
+/// ([`HostMsg::Login`]) goes to every connected login service, unchanged. No order is kept.
+struct LoginSide {
+    listener: Option<LinkListener>,
+    events: Receiver<(PeerId, LinkEvent<LoginToHost>)>,
+    senders: PeerSenders<HostToLogin>,
+    /// The connected login services (peers whose hello said `PeerRole::Login`).
+    peers: BTreeSet<PeerId>,
+    /// `SessionEnded` held while no login service is connected ([`LOGIN_ENDS_HELD_MAX`]).
+    held: VecDeque<HostToLogin>,
+}
+
+impl LoginSide {
+    /// `msg` to every connected login service; none: a `SessionEnded` is held, an ack dropped.
+    fn tell(&mut self, msg: HostToLogin) {
+        if self.peers.is_empty() {
+            match msg {
+                HostToLogin::SessionEnded { .. } => {
+                    if self.held.len() >= LOGIN_ENDS_HELD_MAX {
+                        log::warn!("[coordinator] {LOGIN_ENDS_HELD_MAX} login session ends held for the login service; the oldest is dropped");
+                        self.held.pop_front();
+                    }
+                    self.held.push_back(msg);
+                }
+                // `HostToLogin`'s `Debug` hides the player token.
+                other => log::debug!("[coordinator] no login service is linked: {other:?} dropped"),
+            }
+            return;
+        }
+        for peer in &self.peers {
+            self.senders.send(*peer, msg.clone());
+        }
+    }
 }
 
 enum Links {
@@ -143,7 +197,7 @@ enum Links {
 
 impl LinkSet {
     pub fn one(host: HostEnd) -> Self {
-        LinkSet { links: Links::Channels(vec![host]) }
+        LinkSet { links: Links::Channels(vec![host]), login: None }
     }
 
     /// The hosts that connect to `listener`; its events and senders are the ones
@@ -161,6 +215,7 @@ impl LinkSet {
                 senders,
                 routes: Routes::default(),
             }),
+            login: None,
         }
     }
 }
@@ -245,6 +300,8 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::CutPeerCount { cut, from, received_through, boot } => {
             format!("CutPeerCount {} from host {from}: {received_through} of boot {boot:#x}", cut.0)
         }
+        // Its `Debug` hides the player token.
+        CoordMsg::Login(order) => format!("Login({order:?})"),
     }
 }
 
@@ -286,6 +343,8 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::CutPeerCount { cut, peer, received_through, boot } => {
             format!("CutPeerCount {} toward host {peer}: {received_through} of boot {boot:#x}", cut.0)
         }
+        // Its `Debug` hides the player token.
+        HostMsg::Login(out) => format!("Login({out:?})"),
     }
 }
 
@@ -681,6 +740,9 @@ pub struct ListeningCoordinator {
     pub addr: std::net::SocketAddr,
     /// The listener certificate's SHA-256 (also written to the cert-hash file, if one).
     pub cert_sha256: String,
+    /// Where the login service dials and with which pin (the registry's `host_link` /
+    /// `host_link_cert`), if it listens for one ([`LoginListen`]).
+    pub login: Option<(std::net::SocketAddr, String)>,
 }
 
 /// The coordinator for a `VOXEL_ROLE=coordinator` process (its row claimed before its
@@ -708,12 +770,15 @@ pub fn start_listening_with(
     fenced: Fenced,
     cuts: Option<WorldCuts>,
 ) -> Result<ListeningCoordinator, String> {
-    start_listening_as(store, start, bind, token, cert_hash_file, fenced, cuts, game::CrashPolicy::Rollback)
+    start_listening_as(store, start, bind, token, cert_hash_file, fenced, cuts, game::CrashPolicy::Rollback, "", None)
 }
 
 /// [`start_listening_with`] for a world whose hosts' crashes cost `policy`: under
 /// `CrashPolicy::Succession` (`claim`, any number of hosts) the coordinator declares and runs
 /// successions ([`CoordinatorRuntime`]'s succession pump); under `Rollback` it never does.
+/// Its listeners admit only peers of world `world` ([`svc_link::LinkHello::world`]); with
+/// `login` it also listens for the login service (a second listener: one message pair per
+/// listener) and relays its orders to the gate host.
 #[allow(clippy::too_many_arguments)]
 pub fn start_listening_as(
     store: StoreHandle,
@@ -724,9 +789,31 @@ pub fn start_listening_as(
     fenced: Fenced,
     cuts: Option<WorldCuts>,
     policy: game::CrashPolicy,
+    world: &str,
+    login: Option<LoginListen>,
 ) -> Result<ListeningCoordinator, String> {
-    let (listener, events, senders) = LinkListener::bind::<HostMsg, CoordMsg>(bind, token, cert_hash_file.clone())
-        .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
+    let login = match login {
+        Some(l) => {
+            if let Some(dir) = l.cert_hash_file.as_deref().and_then(std::path::Path::parent).filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            let (listener, events, senders) =
+                LinkListener::bind::<LoginToHost, HostToLogin>(l.bind, l.token, world.to_string(), l.cert_hash_file.clone())
+                    .map_err(|e| format!("the coordinator's login link on {}: {e}", l.bind))?;
+            log::info!(
+                "[coordinator] the login service dials {} (pin {}{})",
+                listener.local_addr(),
+                listener.cert_sha256(),
+                l.cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
+            );
+            Some(LoginSide { listener: Some(listener), events, senders, peers: BTreeSet::new(), held: VecDeque::new() })
+        }
+        None => None,
+    };
+    let login_at = login.as_ref().and_then(|l| l.listener.as_ref()).map(|l| (l.local_addr(), l.cert_sha256().to_string()));
+    let (listener, events, senders) =
+        LinkListener::bind::<HostMsg, CoordMsg>(bind, token, world.to_string(), cert_hash_file.clone())
+            .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
     let (addr, cert_sha256) = (listener.local_addr(), listener.cert_sha256().to_string());
     log::info!(
         "[coordinator] the world coordinator (epoch {}), state {:?}; hosts dial {addr} (pin {cert_sha256}{})",
@@ -734,9 +821,10 @@ pub fn start_listening_as(
         start.source,
         cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
     );
-    let links = LinkSet::listener(listener, events, senders);
+    let mut links = LinkSet::listener(listener, events, senders);
+    links.login = login;
     let thread = CoordinatorRuntime::spawn_as(store, start, links, fenced, cuts, policy);
-    Ok(ListeningCoordinator { thread, addr, cert_sha256 })
+    Ok(ListeningCoordinator { thread, addr, cert_sha256, login: login_at })
 }
 
 /// The coordinator core with its store and fence (see the module docs).
@@ -938,6 +1026,7 @@ impl CoordinatorRuntime {
                 health.loop_beat();
             }
             self.drain_hosts(now);
+            self.drain_login();
             #[cfg(feature = "test-hooks")]
             for f in inspect.try_iter() {
                 f(&mut self.core);
@@ -963,6 +1052,7 @@ impl CoordinatorRuntime {
                 return ServerExit::CoordinatorFailed;
             }
             self.send(out);
+            self.forward_login();
             if let Some(timeout) = stopping {
                 return self.finish(timeout);
             }
@@ -985,6 +1075,9 @@ impl CoordinatorRuntime {
             Links::Listener(l) => {
                 sel.recv(&l.events);
             }
+        }
+        if let Some(login) = &self.links.login {
+            sel.recv(&login.events);
         }
         if let Some(save) = &self.pending_save {
             sel.recv(save);
@@ -1099,6 +1192,65 @@ impl CoordinatorRuntime {
                     }
                 }
             }
+        }
+    }
+
+    /// The login service's connections and orders: an order goes to the gate host of this
+    /// moment ([`Coordinator::login_order`]) or, with none, is dropped (the login service
+    /// answers 503 at its ack timeout and the client retries; a kick is resent). Only a peer
+    /// whose hello said `PeerRole::Login` is served; any other is closed.
+    fn drain_login(&mut self) {
+        let Some(login) = self.links.login.as_mut() else { return };
+        let mut relay = Vec::new();
+        while let Ok((peer, event)) = login.events.try_recv() {
+            match event {
+                LinkEvent::Up(hello) if hello.role == PeerRole::Login => {
+                    log::info!("[coordinator] the login service connected (peer {})", peer.0);
+                    login.peers.insert(peer);
+                    if !login.held.is_empty() {
+                        log::info!("[coordinator] {} login session ends held for the login service: sent", login.held.len());
+                    }
+                    for msg in std::mem::take(&mut login.held) {
+                        login.senders.send(peer, msg);
+                    }
+                }
+                LinkEvent::Up(hello) => {
+                    log::warn!("[coordinator] login link peer {} is {:?}, not the login service: closed", peer.0, hello.role);
+                    login.senders.close(peer);
+                }
+                LinkEvent::Down(why) => {
+                    if login.peers.remove(&peer) {
+                        log::info!("[coordinator] the login service (peer {}) left: {why}", peer.0);
+                    }
+                }
+                LinkEvent::Msg(msg) if login.peers.contains(&peer) => {
+                    let order = crate::login_link::order_from(msg);
+                    let epoch = order.session_epoch();
+                    match self.core.login_order(order) {
+                        Some((gate, msg)) => relay.push((Target::Host(gate), msg)),
+                        None => log::warn!(
+                            "[coordinator] a login order (epoch {epoch}) and no host attached to take it: dropped (the login service answers 503)"
+                        ),
+                    }
+                }
+                LinkEvent::Msg(_) => log::warn!("[coordinator] a message from login link peer {} that is not the login service: ignored", peer.0),
+            }
+        }
+        self.send(relay);
+    }
+
+    /// What the hosts told the login service ([`HostMsg::Login`]) to every connected login
+    /// service, unchanged ([`LoginSide::tell`]).
+    fn forward_login(&mut self) {
+        let out = self.core.take_login_out();
+        match self.links.login.as_mut() {
+            Some(login) => {
+                for answer in out {
+                    login.tell(crate::login_link::answer_from(answer));
+                }
+            }
+            None if !out.is_empty() => log::debug!("[coordinator] {} answers for a login service this coordinator does not serve: dropped", out.len()),
+            None => {}
         }
     }
 
@@ -1628,6 +1780,9 @@ impl CoordinatorRuntime {
             }
             Links::Listener(l) => drop(l.listener.take()),
         }
+        if let Some(login) = self.links.login.as_mut() {
+            drop(login.listener.take());
+        }
     }
 }
 
@@ -1644,6 +1799,32 @@ mod tests {
 
     use super::*;
     use game::RequestId;
+
+    /// Ruling 3 of Elastic 1 Task 6: with no login service linked, a `SessionEnded` is held (at
+    /// most [`LOGIN_ENDS_HELD_MAX`], the oldest dropped) and an ack dropped (the login service
+    /// resends its order or kick); once one is linked, answers go to it at once.
+    #[test]
+    fn session_ends_wait_for_the_login_service_and_acks_do_not() {
+        let (listener, events, senders) =
+            LinkListener::bind::<LoginToHost, HostToLogin>("127.0.0.1:0".parse().unwrap(), "t".into(), String::new(), None).unwrap();
+        let mut login = LoginSide { listener: Some(listener), events, senders, peers: BTreeSet::new(), held: VecDeque::new() };
+        let ended = |epoch| HostToLogin::SessionEnded { player_token: "tok".into(), session_epoch: epoch };
+        login.tell(HostToLogin::KickAck { player_token: "tok".into(), session_epoch: 1 });
+        login.tell(HostToLogin::SpawnAck { player_token: "tok".into(), session_epoch: 1, ok: true, quic: None, webtransport: None, cert_hash: None });
+        assert!(login.held.is_empty(), "acks are not held");
+        for epoch in 0..=LOGIN_ENDS_HELD_MAX as u64 {
+            login.tell(ended(epoch));
+        }
+        assert_eq!(login.held.len(), LOGIN_ENDS_HELD_MAX, "bounded");
+        assert_eq!(login.held.front(), Some(&ended(1)), "the oldest went");
+        assert_eq!(login.held.back(), Some(&ended(LOGIN_ENDS_HELD_MAX as u64)));
+        // A linked login service (a peer id the senders do not know is simply not reached):
+        // nothing more is held.
+        login.peers.insert(PeerId(99));
+        login.tell(ended(9_999_999));
+        assert_eq!(login.held.len(), LOGIN_ENDS_HELD_MAX, "sent, not held");
+        drop(login.listener.take());
+    }
 
     fn attach(host: HostId, epoch: u64) -> HostMsg {
         HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }

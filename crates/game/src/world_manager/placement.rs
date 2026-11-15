@@ -1,14 +1,21 @@
-//! Login placement across hosts (several hosts): the login service pushes its spawn orders
-//! and kicks to ONE host (the entry host); the managers relay them to the host that holds
-//! the player, over the same reliable peer streams that carry hand-offs and parks — so an
-//! order relayed by the host a player left arrives behind the hand-off that took it away.
+//! Login placement across hosts: the login service pushes its spawn orders and kicks to the
+//! world coordinator, which hands each to ONE live host, the *gate host*
+//! ([`crate::Coordinator::gate_host`], [`crate::CoordMsg::Login`]); the server resolves it
+//! there ([`WorldManager::take_login_orders`]) and the managers relay it to the host that
+//! holds the player, over the same reliable peer streams that carry hand-offs and parks — so
+//! an order relayed by the host a player left arrives behind the hand-off that took it away.
+//! Every answer goes up its producer's own coordinator link ([`crate::HostMsg::Login`],
+//! [`WorldManager::send_login_out`]); the coordinator forwards it to the login service and
+//! keeps nothing of it. (Role `all`, one process: its server answers the login service itself.)
 //!
 //! - **Spawn**: [`WorldManager::place_spawn`] names the host (here, or another one). Here:
 //!   the server records the pending order ([`WorldManager::take_spawn_here`]) and answers
 //!   ([`WorldManager::spawn_answered`]); the acknowledgement names this host's endpoint and
-//!   goes back to the order's origin ([`crate::Reliable::SpawnAck`]), which tells the login
-//!   service ([`WorldManager::take_login_out`]). Another host: the order is forwarded while
-//!   it is reachable and the order has hops left ([`SPAWN_RELAY_MAX_HOPS`]); else refused.
+//!   goes back to the order's origin, the gate host ([`crate::Reliable::SpawnAck`]), which
+//!   tells the login service ([`WorldManager::take_login_out`]). Another host: the order is
+//!   forwarded while it is reachable and the order has hops left ([`SPAWN_RELAY_MAX_HOPS`]);
+//!   else refused. A gate host that dies holding an order answers nothing: the login service
+//!   times out (503) and the client's retry reaches the gate host of that moment.
 //!   A player is placed here FROM THE STORE (no live state of it here) only once every
 //!   expected peer finished its first sync of the current connection — its backlog came
 //!   before its `Running` on the one ordered stream — so a peer that may hold the player
@@ -20,14 +27,18 @@
 //!   declaration and the heir's adoption may take longer) — a login there is then answered
 //!   503 and the client retries. An order taken here keeps an online player
 //!   here — no hand-off at a host seam — until its new session connects ([`SPAWN_PIN_MS`]).
-//! - **Kick**: applied by the entry host and relayed to every other host; acknowledged to
-//!   the login service once every peer applied it. A peer that cannot be reached means no
-//!   acknowledgement (the login service resends: kicks stay durable). A session handed
+//! - **Kick**: applied by the gate host and relayed to every other host; acknowledged to
+//!   the login service by the gate host alone, once every peer applied it (a peer's
+//!   [`crate::Reliable::KickAck`] comes back to the gate, never up the peer's own link). A
+//!   peer that cannot be reached means no acknowledgement (the login service resends: kicks
+//!   stay durable; each resend goes to the gate host of that moment). A session handed
 //!   here carries its login ([`crate::PlayerHandoff::login`]), so a kick finds it here too;
 //!   a kick is remembered for [`KICK_MEMORY_MS`] for a hand-off still on its way.
 //! - **Session end**: reported only when a login session leaves the WORLD (its home session
 //!   disconnects or parks), never when its player is handed to another host — the login
-//!   service drops a session's pending kick on its end.
+//!   service drops a session's pending kick on its end. It goes up the coordinator link of
+//!   the host where the session ended (queued while that link is down, at most
+//!   `LOGIN_ENDS_QUEUED_MAX`, `world_link.rs`).
 
 use super::*;
 use crate::HostId;
@@ -83,13 +94,71 @@ pub struct KickIn {
     pub reason: String,
 }
 
-/// What the server tells the login service ([`WorldManager::take_login_out`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What the server tells the login service ([`WorldManager::take_login_out`]; up the
+/// coordinator link as [`crate::HostMsg::Login`]). Its `Debug` never shows the player token.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoginOut {
     /// `endpoint`: the host that took the order (`None` when refused).
     SpawnAck { player_token: String, session_epoch: u64, ok: bool, endpoint: Option<crate::HostEndpoint> },
     KickAck { player_token: String, session_epoch: u64 },
     SessionEnded { player_token: String, session_epoch: u64 },
+}
+
+impl std::fmt::Debug for LoginOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const HIDDEN: &str = "<redacted>";
+        match self {
+            LoginOut::SpawnAck { session_epoch, ok, endpoint, .. } => f
+                .debug_struct("SpawnAck")
+                .field("player_token", &HIDDEN)
+                .field("session_epoch", session_epoch)
+                .field("ok", ok)
+                .field("endpoint", endpoint)
+                .finish(),
+            LoginOut::KickAck { session_epoch, .. } => {
+                f.debug_struct("KickAck").field("player_token", &HIDDEN).field("session_epoch", session_epoch).finish()
+            }
+            LoginOut::SessionEnded { session_epoch, .. } => {
+                f.debug_struct("SessionEnded").field("player_token", &HIDDEN).field("session_epoch", session_epoch).finish()
+            }
+        }
+    }
+}
+
+/// An order of the login service, relayed by the coordinator to the gate host
+/// ([`crate::CoordMsg::Login`]); the gate's server resolves it (its player store, its
+/// admission state) into [`ServerEvent::SpawnOrder`] / [`ServerEvent::Kick`]. Its `Debug`
+/// never shows the player token.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LoginOrder {
+    Spawn { player_token: String, session_epoch: u64 },
+    Kick { player_token: String, session_epoch: u64, reason: String },
+}
+
+impl LoginOrder {
+    /// The order's session epoch.
+    pub fn session_epoch(&self) -> u64 {
+        match self {
+            LoginOrder::Spawn { session_epoch, .. } | LoginOrder::Kick { session_epoch, .. } => *session_epoch,
+        }
+    }
+}
+
+impl std::fmt::Debug for LoginOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const HIDDEN: &str = "<redacted>";
+        match self {
+            LoginOrder::Spawn { session_epoch, .. } => {
+                f.debug_struct("Spawn").field("player_token", &HIDDEN).field("session_epoch", session_epoch).finish()
+            }
+            LoginOrder::Kick { session_epoch, reason, .. } => f
+                .debug_struct("Kick")
+                .field("player_token", &HIDDEN)
+                .field("session_epoch", session_epoch)
+                .field("reason", reason)
+                .finish(),
+        }
+    }
 }
 
 /// How often a kick that cannot be acknowledged (a peer out of reach) is warned about; the
@@ -117,10 +186,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.ownership.0.me()
     }
 
-    /// The host the login service is linked to (several hosts, `VOXEL_ENTRY_HOST`): a login
-    /// session ending on another host is told to it. Unset: this host tells it itself.
-    pub fn set_entry_host(&mut self, entry: HostId) {
-        self.entry_host = Some(entry);
+    /// This host's id (its ownership's: the id its registration issued; `HostId::SOLO` alone).
+    pub fn host_id(&self) -> HostId {
+        self.ordinal()
     }
 
     /// Where `player` of a login is placed, in order: online, parked or parking here →
@@ -164,9 +232,33 @@ impl<S: RegionSpawner> WorldManager<S> {
         std::mem::take(&mut self.kicks_in)
     }
 
-    /// What the login service is to be told (the entry host; one host: itself).
+    /// What the login service is to be told from this host (the gate host's answers to the
+    /// orders it took, and the ends of the sessions that left the world here). Role `host`
+    /// sends them up its coordinator link instead ([`Self::send_login_out`]).
     pub fn take_login_out(&mut self) -> Vec<LoginOut> {
         std::mem::take(&mut self.login_out)
+    }
+
+    /// Everything the login service is to be told from this host, up this host's own
+    /// coordinator link ([`crate::HostMsg::Login`]; the coordinator forwards it unchanged).
+    pub fn send_login_out(&mut self) {
+        for out in std::mem::take(&mut self.login_out) {
+            self.world_send(crate::HostMsg::Login(out));
+        }
+    }
+
+    /// The server could not take a login order of the coordinator (its player unresolved): the
+    /// login service is told so ([`LoginOut::SpawnAck`] `ok: false`; a kick is never refused —
+    /// unapplied, it is not answered and the login service resends it).
+    pub fn login_order_refused(&mut self, player_token: String, session_epoch: u64) {
+        self.login_out.push(LoginOut::SpawnAck { player_token, session_epoch, ok: false, endpoint: None });
+    }
+
+    /// The login service's orders the coordinator gave this host (the gate host), in order,
+    /// for the server to resolve (its player store and admission state) into
+    /// [`ServerEvent::SpawnOrder`] (origin: this host) / [`ServerEvent::Kick`].
+    pub fn take_login_orders(&mut self) -> Vec<LoginOrder> {
+        std::mem::take(&mut self.login_orders)
     }
 
     /// Test support: the spawn orders waiting for every peer's first sync.
@@ -328,7 +420,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The login service's kick, already applied to this host's admission state (the
-    /// entry host): a session of the login handed here is parked, and every other host is
+    /// gate host): a session of the login handed here is parked, and every other host is
     /// told. Acknowledged ([`LoginOut::KickAck`]) once every peer applied it; a peer out of
     /// reach means no acknowledgement (the login service resends).
     pub(super) fn login_kick(&mut self, player_token: String, session_epoch: u64, reason: String) {
@@ -405,15 +497,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// A login session leaves the world here: the login service is told (through the entry
-    /// host when this is another one).
+    /// A login session leaves the world here: the login service is told, by this host (up
+    /// its own coordinator link; never through a peer — [`Reliable::SessionEnded`] is no
+    /// longer sent).
     pub(super) fn login_session_ended(&mut self, player_token: String, session_epoch: u64) {
-        match self.entry_host {
-            Some(entry) if entry != self.ordinal() => {
-                self.queue_to_peer(entry, Reliable::SessionEnded { player_token, session_epoch });
-            }
-            _ => self.login_out.push(LoginOut::SessionEnded { player_token, session_epoch }),
-        }
+        self.login_out.push(LoginOut::SessionEnded { player_token, session_epoch });
     }
 
     /// `client`'s session leaves the world: its login (if any) ends.
@@ -447,6 +535,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch });
                 }
             }
+            // No longer sent (Elastic 1: each host tells its own coordinator link): kept only
+            // because `Reliable` is append-only.
             Reliable::SessionEnded { player_token, session_epoch } => {
                 self.login_out.push(LoginOut::SessionEnded { player_token, session_epoch });
             }

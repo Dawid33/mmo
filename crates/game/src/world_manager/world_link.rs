@@ -17,6 +17,10 @@ pub const WORLD_REQUEST_TIMEOUT_SECS: u64 = 120;
 /// coordinator with what it has.
 pub const ATTACH_WAIT_MS: u64 = 2000;
 
+/// At most this many login session ends wait in the outbox while the coordinator link is
+/// down (`HostMsg::Login(SessionEnded)`); beyond it the oldest is dropped with a warning.
+pub const LOGIN_ENDS_QUEUED_MAX: usize = 4096;
+
 /// A player's world request sent (or queued) to the coordinator and not answered yet.
 #[derive(Debug, Clone)]
 pub(super) struct PendingRequest {
@@ -539,18 +543,44 @@ impl<S: RegionSpawner> WorldManager<S> {
                 | HostMsg::ReleaseClaim { .. }
                 | HostMsg::PlayerHandedTo { .. }
                 | HostMsg::LeaveRequest
+                // Nobody sends a session's end again; an ack is (the login service resends
+                // its order or kick), so an ack is not queued.
+                | HostMsg::Login(LoginOut::SessionEnded { .. })
         );
         // `Settled` is not queued: the next `Attach` carries the watermark.
         match &mut self.world_attach {
-            WorldAttach::Down | WorldAttach::Gathering { .. } if queued => self.outbox.push_back(msg),
+            WorldAttach::Down | WorldAttach::Gathering { .. } if queued => {
+                if matches!(msg, HostMsg::Login(_)) {
+                    self.bound_queued_login_ends();
+                }
+                self.outbox.push_back(msg)
+            }
             WorldAttach::Down => log::debug!("world link down: {msg:?} dropped"),
             WorldAttach::Gathering { held, .. } => held.push(msg),
             WorldAttach::Sent { .. } | WorldAttach::Attached => self.link_send(msg),
         }
     }
 
+    /// Before one more login session end is queued for the coordinator: at most
+    /// [`LOGIN_ENDS_QUEUED_MAX`] wait, the oldest dropped beyond (as the login service's
+    /// `SessionEnded` was always best effort: a lost one leaves that session listed open).
+    fn bound_queued_login_ends(&mut self) {
+        let queued = self.outbox.iter().filter(|m| matches!(m, HostMsg::Login(_))).count();
+        if queued < LOGIN_ENDS_QUEUED_MAX {
+            return;
+        }
+        if let Some(i) = self.outbox.iter().position(|m| matches!(m, HostMsg::Login(_))) {
+            log::warn!("world link down: {LOGIN_ENDS_QUEUED_MAX} login session ends queued; the oldest is dropped");
+            self.outbox.remove(i);
+        }
+    }
+
     pub(super) fn apply_world_msg(&mut self, msg: CoordMsg, now_ms: u64) {
         match msg {
+            // For the server to resolve (`take_login_orders`), whatever the attach's state: the
+            // coordinator sends one only to an attached host, and an order changes nothing here
+            // until it is resolved.
+            CoordMsg::Login(order) => self.login_orders.push(order),
             CoordMsg::SpawnPeople { .. } | CoordMsg::Directive { .. } if !self.world_attached() => {
                 // Decided before the coordinator applied our latest `Attach`, which
                 // re-decided every listed region from its bodies: stale.

@@ -92,12 +92,13 @@ pub enum Reliable {
     /// The answer to a [`Reliable::SpawnOrder`], to its `origin`: `endpoint` is the host
     /// that took it (where the client connects), `None` when refused.
     SpawnAck { player_token: String, session_epoch: u64, ok: bool, endpoint: Option<HostEndpoint> },
-    /// The login service's kick, from the host it entered at: applied here, then answered
+    /// The login service's kick, from the gate host it entered at: applied here, then answered
     /// with [`Reliable::KickAck`].
     Kick { player_token: String, session_epoch: u64, reason: String },
     KickAck { player_token: String, session_epoch: u64 },
-    /// A login session left the world on the sender (to the host the login service is
-    /// linked to, which tells it).
+    /// A login session left the world on the sender. NO LONGER SENT (Elastic 1 Task 6: each
+    /// host tells the login service up its own coordinator link, `HostMsg::Login`); kept
+    /// because this enum is append-only on the wire.
     SessionEnded { player_token: String, session_epoch: u64 },
     /// The sender's in-band mark of a world save cut: what it sent before the mark
     /// belongs to the cut's receiver side, what follows to the next cut.

@@ -284,7 +284,7 @@ pub fn announce_session(
     auth.announce(session.ticket.as_ref(), || {
         let record = session.record.clone();
         let event = match &session.ticket {
-            // Several hosts: the manager keeps the session's login (it travels with the
+            // Role `host`: the manager keeps the session's login (it travels with the
             // player, and the manager reports its end).
             Some(ticket) if relay => game::ServerEvent::LoginConnected {
                 client,

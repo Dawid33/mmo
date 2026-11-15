@@ -39,16 +39,20 @@
 //! out, and the supersede shares the manager's event channel with the connects: the new
 //! session's `ClientConnected` always comes after the old one's park was asked for.
 //!
-//! **Several hosts** (R3): only the entry host ([`entry_host_of`]) listens for the login
-//! service; its link RELAYS ([`start_relaying`]): a `SpawnPlayer` becomes a
-//! [`ServerEvent::SpawnOrder`] the manager places — here, or on the host that holds the
-//! player, over the peer stream (`game`'s `placement.rs`) — and a `Kick`, applied here first,
-//! goes to every host. Every host's main loop plays the server's half of it
-//! ([`LoginRelay::pump`]): it records the spawn orders its manager takes (as above: the
-//! supersede first) and applies the kicks relayed to it, and the entry host's tells the login
-//! service what the managers answered (`SpawnAck` naming the host that took the order,
-//! `KickAck` once every host applied a kick, `SessionEnded` only when a session left the
-//! world, never on a hand-off to another host).
+//! **Split roles** (Elastic 1 Task 6): a role-`host` process never listens for the login
+//! service. The login service links to the COORDINATOR (`coordinator_rt`'s login listener,
+//! [`LOGIN_LINK_BIND_ENV`]), which converts each order ([`order_from`]) and relays it to one
+//! live host, the gate host (`game::CoordMsg::Login`). There the main loop plays the server's
+//! half ([`LoginRelay::pump`]): it resolves the order ([`resolve_order`]) into a
+//! [`ServerEvent::SpawnOrder`] the manager places — here, or on the host that holds the player,
+//! over the peer stream (`game`'s `placement.rs`) — or a `Kick`, applied here first and then
+//! relayed to every host. Every host records the spawn orders its manager takes (as above: the
+//! supersede first) and applies the kicks relayed to it, and sends what its manager answered up
+//! its own coordinator link (`game::HostMsg::Login`): `SpawnAck` naming the host that took the
+//! order (from the gate host, the order's origin), `KickAck` once every host applied a kick
+//! (from the gate host), `SessionEnded` only when a session left the world, never on a
+//! hand-off to another host (from the host it ended on). The coordinator converts each answer
+//! ([`answer_from`]) and forwards it unchanged.
 
 use game::HostId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,29 +69,20 @@ use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
 use crate::auth_edge::{Clock, REFUSE_SUPERSEDED};
 use crate::player_store::{PlayerKey, SharedPlayerStore};
 
-/// Where the host listens for the login service (`ip:port`).
+/// Where a role-`all` server listens for the login service (`ip:port`).
 pub const HOST_LINK_BIND_ENV: &str = "VOXEL_HOST_LINK_BIND";
 pub const DEFAULT_HOST_LINK_BIND: &str = "127.0.0.1:6490";
 /// Where the host writes its link certificate's SHA-256 pin (the login registry's
 /// `host_link_cert`); its cert and key persist beside it (keep it under a git-ignored dir).
 pub const HOST_LINK_CERT_HASH_FILE_ENV: &str = "VOXEL_HOST_LINK_CERT_HASH_FILE";
 pub const DEFAULT_HOST_LINK_CERT_HASH_FILE: &str = "target/dev-r2/host-0.cert-sha256";
-
-/// The entry host of a `claim` world as host `me` finds it at its start: the lowest id with a
-/// live, dirty `hosts` row (`me` when there is none lower). The entry host listens for the
-/// login service; the others relay to it. Elastic 1 interim: ids are issued, so no setting can
-/// name the entry in advance (`VOXEL_ENTRY_HOST` is ignored); a restarted entry host is a new,
-/// higher id — until the coordinator relays logins (Elastic 1 Task 6) the first host started
-/// is the entry for good.
-pub fn entry_host_of(store: &world_store::StoreHandle, me: HostId) -> Result<HostId, String> {
-    let rows = store.hosts().map_err(|e| format!("reading the hosts rows for the entry host: {e}"))?;
-    Ok(entry_host_among(rows.iter().filter(|r| !r.clean && r.state == game::HOST_LIVE).map(|r| r.id), me))
-}
-
-/// [`entry_host_of`] over the live dirty ids `live`.
-pub fn entry_host_among(live: impl IntoIterator<Item = HostId>, me: HostId) -> HostId {
-    live.into_iter().chain([me]).min().unwrap_or(me)
-}
+/// Where the coordinator (role `coordinator`) listens for the login service (`ip:port`).
+pub const LOGIN_LINK_BIND_ENV: &str = "VOXEL_LOGIN_LINK_BIND";
+pub const DEFAULT_LOGIN_LINK_BIND: &str = "127.0.0.1:6490";
+/// Where the coordinator writes its login listener's SHA-256 pin (the login registry's
+/// `host_link_cert`); its cert and key persist beside it.
+pub const LOGIN_LINK_CERT_HASH_FILE_ENV: &str = "VOXEL_LOGIN_LINK_CERT_HASH_FILE";
+pub const DEFAULT_LOGIN_LINK_CERT_HASH_FILE: &str = "target/dev-r2/login-link.cert-sha256";
 
 /// The refusal of a ticket no pending spawn order matches.
 pub const REFUSE_NO_SPAWN_ORDER: &str = "no spawn order for this login — log in again";
@@ -145,13 +140,78 @@ pub fn jwt_admission(token_configured: bool, env: Option<&str>) -> Result<JwtAdm
 
 /// The listen address from an env value; unset or empty is [`DEFAULT_HOST_LINK_BIND`].
 pub fn bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
-    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_HOST_LINK_BIND);
-    value.parse().map_err(|_| format!("{HOST_LINK_BIND_ENV}={value:?} is not an address (ip:port)"))
+    addr_from(HOST_LINK_BIND_ENV, value, DEFAULT_HOST_LINK_BIND)
 }
 
 /// The pin file from an env value; unset or empty is [`DEFAULT_HOST_LINK_CERT_HASH_FILE`].
 pub fn cert_hash_file_from(value: Option<&str>) -> PathBuf {
     PathBuf::from(value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_HOST_LINK_CERT_HASH_FILE))
+}
+
+/// The coordinator's login listen address from an env value; unset or empty is
+/// [`DEFAULT_LOGIN_LINK_BIND`].
+pub fn login_bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
+    addr_from(LOGIN_LINK_BIND_ENV, value, DEFAULT_LOGIN_LINK_BIND)
+}
+
+/// The coordinator's login pin file from an env value; unset or empty is
+/// [`DEFAULT_LOGIN_LINK_CERT_HASH_FILE`].
+pub fn login_cert_hash_file_from(value: Option<&str>) -> PathBuf {
+    PathBuf::from(value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_LOGIN_LINK_CERT_HASH_FILE))
+}
+
+fn addr_from(env: &str, value: Option<&str>, default: &str) -> Result<SocketAddr, String> {
+    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(default);
+    value.parse().map_err(|_| format!("{env}={value:?} is not an address (ip:port)"))
+}
+
+/// The world id this process's service links name (`VOXEL_WORLD_ID`, trimmed; unset: empty —
+/// a dev world with no id, whose links admit only peers with no id either).
+pub fn link_world_from(value: Option<&str>) -> String {
+    value.map(str::trim).unwrap_or_default().to_string()
+}
+
+/// The login service's message, as the coordinator relays it to the gate host.
+pub fn order_from(msg: LoginToHost) -> game::LoginOrder {
+    match msg {
+        LoginToHost::SpawnPlayer { player_token, session_epoch } => game::LoginOrder::Spawn { player_token, session_epoch },
+        LoginToHost::Kick { player_token, session_epoch, reason } => game::LoginOrder::Kick { player_token, session_epoch, reason },
+    }
+}
+
+/// A host's answer, as the coordinator forwards it to the login service.
+pub fn answer_from(out: game::LoginOut) -> HostToLogin {
+    match out {
+        game::LoginOut::SpawnAck { player_token, session_epoch, ok, endpoint } => spawn_ack(player_token, session_epoch, ok, endpoint),
+        game::LoginOut::KickAck { player_token, session_epoch } => HostToLogin::KickAck { player_token, session_epoch },
+        game::LoginOut::SessionEnded { player_token, session_epoch } => HostToLogin::SessionEnded { player_token, session_epoch },
+    }
+}
+
+/// The gate host's server resolves an order the coordinator relayed (`me`: this host, the
+/// order's origin): a spawn → [`ServerEvent::SpawnOrder`] for the manager to place (`None`: its
+/// player could not be resolved — refused, [`game::WorldManager::login_order_refused`]); a kick
+/// → applied to this host's admission state first (a revoked session's supersede sent on
+/// `events`), then [`ServerEvent::Kick`] for the manager to relay (`None`: not applied — a
+/// player store failure — so not answered: the login service resends it).
+pub fn resolve_order(
+    order: game::LoginOrder,
+    orders: &SpawnOrders,
+    players: &SharedPlayerStore,
+    events: &Sender<ServerEvent>,
+    me: HostId,
+) -> Option<ServerEvent> {
+    match order {
+        game::LoginOrder::Spawn { player_token, session_epoch } => {
+            let (player, record) = resolve(players, &player_token)?;
+            let record_region = record.map(|r| r.region);
+            Some(ServerEvent::SpawnOrder { origin: me, hops: 0, player_token, session_epoch, player, record_region })
+        }
+        game::LoginOrder::Kick { player_token, session_epoch, reason } => {
+            kick(orders, players, events, &player_token, session_epoch, reason.clone())
+                .then_some(ServerEvent::Kick { player_token, session_epoch, reason })
+        }
+    }
 }
 
 /// The spawn orders a host holds and has not seen a matching ticket for.
@@ -233,7 +293,7 @@ pub struct SpawnOrders {
     now: Clock,
     /// Set once the link listens.
     login: OnceLock<LoginPeers>,
-    /// Several hosts ([`Self::relay_through`]): the manager's event channel.
+    /// Role `host` ([`Self::relay_through`]): the manager's event channel.
     relay: OnceLock<Sender<ServerEvent>>,
 }
 
@@ -242,7 +302,7 @@ impl SpawnOrders {
         SpawnOrders { state: Mutex::default(), now, login: OnceLock::new(), relay: OnceLock::new() }
     }
 
-    /// Several hosts: login sessions are announced with their login
+    /// Role `host` (any number of hosts): login sessions are announced with their login
     /// ([`ServerEvent::LoginConnected`]) and their ends are the manager's to report — a
     /// session refused at the edge goes to it as [`ServerEvent::SessionEnded`]. Set once,
     /// before anything connects; `false` if it was set already.
@@ -389,7 +449,7 @@ impl SpawnOrders {
 
     /// The session admitted with (`token`, `epoch`) ended without ever playing (refused at
     /// its announcement, or its player unresolved): forgotten (unless a newer one of the
-    /// player is live) and reported to the login service (several hosts: through the
+    /// player is live) and reported to the login service (role `host`: through the
     /// manager, [`ServerEvent::SessionEnded`]).
     pub fn ended(&self, token: &str, epoch: u64) {
         self.forget(token, epoch);
@@ -457,48 +517,45 @@ pub fn start(
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
 ) -> io::Result<LoginLink> {
-    start_with(bind, token, cert_hash_file, orders, players, events, None)
+    start_with(bind, token, String::new(), cert_hash_file, orders, players, events)
 }
 
-/// [`start`] for the entry host `ordinal` of several: `SpawnPlayer` goes to the manager
-/// ([`ServerEvent::SpawnOrder`]) and a `Kick` applied here goes on to it
-/// ([`ServerEvent::Kick`]); their answers to the login service come from
-/// [`LoginRelay::pump`] (`orders` must relay: [`LoginRelay::new`]).
-pub fn start_relaying(
+/// [`start`] for the login service of world `world` ([`svc_link::LinkHello::world`]).
+pub fn start_in_world(
     bind: SocketAddr,
     token: String,
+    world: String,
     cert_hash_file: Option<PathBuf>,
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
-    ordinal: HostId,
 ) -> io::Result<LoginLink> {
-    if !orders.relays() {
-        return Err(io::Error::other("a relaying login link needs relaying spawn orders (LoginRelay::new)"));
-    }
-    start_with(bind, token, cert_hash_file, orders, players, events, Some(ordinal))
+    start_with(bind, token, world, cert_hash_file, orders, players, events)
 }
 
 fn start_with(
     bind: SocketAddr,
     token: String,
+    world: String,
     cert_hash_file: Option<PathBuf>,
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
-    relay: Option<HostId>,
 ) -> io::Result<LoginLink> {
+    if orders.relays() {
+        return Err(io::Error::other("relaying spawn orders (role host) take the coordinator's orders, not a login link"));
+    }
     if let Some(dir) = cert_hash_file.as_deref().and_then(std::path::Path::parent).filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let (listener, link_events, senders) = LinkListener::bind::<LoginToHost, HostToLogin>(bind, token, cert_hash_file)?;
+    let (listener, link_events, senders) = LinkListener::bind::<LoginToHost, HostToLogin>(bind, token, world, cert_hash_file)?;
     if orders.login.set(LoginPeers { senders: senders.clone(), peers: Mutex::default() }).is_err() {
         return Err(io::Error::other("these spawn orders already have a login link"));
     }
     log::info!("[login-link] listening for the login service on {}", listener.local_addr());
     std::thread::Builder::new()
         .name("login-link".into())
-        .spawn(move || serve(link_events, senders, orders, players, events, relay))?;
+        .spawn(move || serve(link_events, senders, orders, players, events))?;
     Ok(LoginLink { listener })
 }
 
@@ -508,7 +565,6 @@ fn serve(
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
-    relay: Option<HostId>,
 ) {
     let login_peers = |f: &mut dyn FnMut(&mut BTreeSet<PeerId>)| {
         if let Some(login) = orders.login.get() {
@@ -540,38 +596,14 @@ fn serve(
                     log::warn!("[login-link] message from peer {} that is not the login service: ignored", peer.0);
                     continue;
                 }
-                match (msg, relay) {
-                    (LoginToHost::SpawnPlayer { player_token, session_epoch }, None) => {
+                match msg {
+                    LoginToHost::SpawnPlayer { player_token, session_epoch } => {
                         let ok = spawn(&orders, &players, &events, &player_token, session_epoch);
                         senders.send(peer, spawn_ack(player_token, session_epoch, ok, None));
                     }
-                    // Several hosts: the manager places it (here or on the host holding the
-                    // player); `LoginRelay::pump` answers.
-                    (LoginToHost::SpawnPlayer { player_token, session_epoch }, Some(origin)) => {
-                        match resolve(&players, &player_token) {
-                            Some((player, record)) => {
-                                let record_region = record.map(|r| r.region);
-                                let order =
-                                    ServerEvent::SpawnOrder { origin, hops: 0, player_token, session_epoch, player, record_region };
-                                let _ = events.send(order);
-                            }
-                            None => {
-                                senders.send(peer, spawn_ack(player_token, session_epoch, false, None));
-                            }
-                        }
-                    }
-                    (LoginToHost::Kick { player_token, session_epoch, reason }, relay) => {
-                        if !kick(&orders, &players, &events, &player_token, session_epoch, reason.clone()) {
-                            continue;
-                        }
-                        match relay {
-                            // Applied here: on to every host; acknowledged once all applied it.
-                            Some(_) => {
-                                let _ = events.send(ServerEvent::Kick { player_token, session_epoch, reason });
-                            }
-                            None => {
-                                senders.send(peer, HostToLogin::KickAck { player_token, session_epoch });
-                            }
+                    LoginToHost::Kick { player_token, session_epoch, reason } => {
+                        if kick(&orders, &players, &events, &player_token, session_epoch, reason) {
+                            senders.send(peer, HostToLogin::KickAck { player_token, session_epoch });
                         }
                     }
                 }
@@ -681,10 +713,11 @@ fn kick(
     }
 }
 
-/// The server's half of the login relay between several hosts, on every host: the spawn
-/// orders its manager takes are recorded (the player's sessions superseded first, as one
-/// host does), the kicks relayed to it applied, and — on the entry host — what the managers
-/// answered goes to the login service.
+/// The server's half of the login relay on every role-`host` process (any number of hosts):
+/// the login service's orders the coordinator gave this host (the gate host) are resolved
+/// ([`resolve_order`]), the spawn orders its manager takes are recorded (the player's sessions
+/// superseded first, as one host does), the kicks relayed to it applied, and what its manager
+/// answered goes up its own coordinator link (`game::HostMsg::Login`).
 pub struct LoginRelay {
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
@@ -701,8 +734,30 @@ impl LoginRelay {
         LoginRelay { orders, players, events }
     }
 
-    /// After the manager's upkeep: what it took, was relayed and answered.
+    /// After the manager's upkeep: the coordinator's orders resolved (they reach the manager on
+    /// its event channel, with the supersedes a kick sent first), what it took and was relayed
+    /// handled, and what it answered sent up its coordinator link.
     pub fn pump<S: game::RegionSpawner>(&self, manager: &mut game::WorldManager<S>) {
+        let me = manager.host_id();
+        for order in manager.take_login_orders() {
+            let epoch = order.session_epoch();
+            let spawn_token = match &order {
+                game::LoginOrder::Spawn { player_token, .. } => Some(player_token.clone()),
+                game::LoginOrder::Kick { .. } => None,
+            };
+            match resolve_order(order, &self.orders, &self.players, &self.events, me) {
+                Some(ev) => {
+                    let _ = self.events.send(ev);
+                }
+                None => match spawn_token {
+                    Some(token) => manager.login_order_refused(token, epoch),
+                    // `kick` said why (logged without the token); unanswered, resent.
+                    None => {}
+                },
+            }
+            // A kick or a spawn resolves its player with a synchronous store read: see below.
+            crate::health::Health::global().loop_beat();
+        }
         for order in manager.take_spawn_here() {
             let ok = order_player(&self.orders, &self.events, &order.player_token, order.session_epoch, order.player);
             manager.spawn_answered(order, ok);
@@ -716,18 +771,7 @@ impl LoginRelay {
             crate::health::Health::global().loop_beat();
             manager.kick_applied(k, applied);
         }
-        for out in manager.take_login_out() {
-            let msg = match out {
-                game::LoginOut::SpawnAck { player_token, session_epoch, ok, endpoint } => {
-                    spawn_ack(player_token, session_epoch, ok, endpoint)
-                }
-                game::LoginOut::KickAck { player_token, session_epoch } => HostToLogin::KickAck { player_token, session_epoch },
-                game::LoginOut::SessionEnded { player_token, session_epoch } => {
-                    HostToLogin::SessionEnded { player_token, session_epoch }
-                }
-            };
-            self.orders.tell_login(msg);
-        }
+        manager.send_login_out();
     }
 }
 
@@ -852,18 +896,52 @@ mod tests {
     }
 
     #[test]
-    fn the_entry_host_is_the_lowest_live_id() {
-        assert_eq!(entry_host_among([h(7), h(3)], h(9)), h(3));
-        assert_eq!(entry_host_among([], h(9)), h(9), "alone: itself");
-        assert_eq!(entry_host_among([h(12)], h(9)), h(9));
-    }
-
-    #[test]
     fn host_link_env_defaults() {
         assert_eq!(bind_from(None).unwrap().to_string(), DEFAULT_HOST_LINK_BIND);
         assert_eq!(bind_from(Some(" 0.0.0.0:7000 ")).unwrap().to_string(), "0.0.0.0:7000");
         assert!(bind_from(Some("nope")).is_err());
         assert_eq!(cert_hash_file_from(Some("")), PathBuf::from(DEFAULT_HOST_LINK_CERT_HASH_FILE));
+        assert_eq!(login_bind_from(None).unwrap().to_string(), DEFAULT_LOGIN_LINK_BIND);
+        assert!(login_bind_from(Some("nope")).unwrap_err().contains(LOGIN_LINK_BIND_ENV));
+        assert_eq!(login_cert_hash_file_from(None), PathBuf::from(DEFAULT_LOGIN_LINK_CERT_HASH_FILE));
+        assert_eq!(link_world_from(None), "");
+        assert_eq!(link_world_from(Some(" dev ")), "dev");
+    }
+
+    /// The coordinator's conversions keep every field; the order's and the answer's `Debug`
+    /// never show the token.
+    #[test]
+    fn orders_and_answers_convert_and_hide_the_token() {
+        let token = "tok-secret-0123456789";
+        let spawn = order_from(LoginToHost::SpawnPlayer { player_token: token.into(), session_epoch: 3 });
+        assert_eq!(spawn, game::LoginOrder::Spawn { player_token: token.into(), session_epoch: 3 });
+        let kick = order_from(LoginToHost::Kick { player_token: token.into(), session_epoch: 4, reason: "bye".into() });
+        assert_eq!(kick, game::LoginOrder::Kick { player_token: token.into(), session_epoch: 4, reason: "bye".into() });
+        for shown in [format!("{spawn:?}"), format!("{kick:?}")] {
+            assert!(!shown.contains(token) && shown.contains("<redacted>"), "{shown}");
+        }
+        let endpoint = game::HostEndpoint { id: HostId(7), quic: Some("q:1".into()), webtransport: Some("https://w/".into()), cert_hash: Some("ab".into()) };
+        let ack = game::LoginOut::SpawnAck { player_token: token.into(), session_epoch: 3, ok: true, endpoint: Some(endpoint) };
+        assert!(!format!("{ack:?}").contains(token));
+        assert_eq!(
+            answer_from(ack),
+            HostToLogin::SpawnAck {
+                player_token: token.into(),
+                session_epoch: 3,
+                ok: true,
+                quic: Some("q:1".into()),
+                webtransport: Some("https://w/".into()),
+                cert_hash: Some("ab".into())
+            }
+        );
+        assert_eq!(
+            answer_from(game::LoginOut::KickAck { player_token: token.into(), session_epoch: 4 }),
+            HostToLogin::KickAck { player_token: token.into(), session_epoch: 4 }
+        );
+        assert_eq!(
+            answer_from(game::LoginOut::SessionEnded { player_token: token.into(), session_epoch: 5 }),
+            HostToLogin::SessionEnded { player_token: token.into(), session_epoch: 5 }
+        );
     }
 
     /// What `tell_login` logs of a message it drops names its kind and epoch, never the

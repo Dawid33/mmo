@@ -1,5 +1,7 @@
-//! The login service's side of the world hosts' service links (`svc-link`, role `Login`):
-//! [`HostLinks`] keeps one [`LinkDialer`] per world whose registry row names a `host_link`,
+//! The login service's side of the worlds' service links (`svc-link`, role `Login`):
+//! [`HostLinks`] keeps one [`LinkDialer`] per world whose registry row names a `host_link` —
+//! the address the login service dials: a world's coordinator (split roles; it relays to a
+//! live host and back), or a role-`all` server — its hello naming the row's `world_id`,
 //! pushes [`LoginToHost::SpawnPlayer`] on a join (and waits for its ack) and
 //! [`LoginToHost::Kick`] on revocation, and records [`HostToLogin::SessionEnded`].
 //!
@@ -264,7 +266,8 @@ impl HostLinks {
         }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| SpawnError::BadLink("host links are used from the async runtime only".into()))?;
-        let hello = LinkHello::new(token, PeerRole::Login);
+        // The world row's id: the coordinator (or a role-`all` server) admits only its own world.
+        let hello = LinkHello::new(token, PeerRole::Login, world.world_id.clone());
         let (tx, events) = LinkDialer::connect::<HostToLogin, LoginToHost>(addr.clone(), cert.clone(), hello);
         let (up_tx, up) = watch::channel(false);
         let waiters: Waiters = Arc::default();
