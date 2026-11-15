@@ -362,12 +362,21 @@ macro_rules! engine_rows {
             /// Claims for `owner` the super-regions of `srs` that are absent or free (owner
             /// [`crate::NO_OWNER`]), in one transaction like [`claim_super_regions`] (same
             /// `lock_timeout`, same side check, rows in key order): a new row gets epoch 1, a free
-            /// one epoch + 1; a row another owner holds is left alone. Fenced first-writer-wins: the
-            /// upsert's `WHERE owner = -1` is evaluated on the row's newest version (Postgres
-            /// re-checks it after waiting for another claimer's row lock), so of two claimers
+            /// one epoch + 1; a row another owner holds is left alone — and never LOCKED: two
+            /// statements per super-region, an `INSERT … ON CONFLICT DO NOTHING` (an absent row)
+            /// then, if that inserted nothing, an `UPDATE … WHERE owner = -1` (a free one; a row
+            /// that does not match is not locked). An upsert's `ON CONFLICT DO UPDATE … WHERE`
+            /// would lock the conflicting row BEFORE its `WHERE` — a row another host holds
+            /// `FOR SHARE` in a staged cut part, so the claim would wait for that cut's decision
+            /// (which may wait for this host's own part). Fenced first-writer-wins: the update's
+            /// `WHERE owner = -1` is evaluated on the row's newest version (Postgres
+            /// re-checks it after waiting for another claimer's row lock, and a second insert
+            /// waits for the first's commit and then inserts nothing), so of two claimers
             /// exactly one takes a row. The fence holds the rows won (possibly none). Refused
             /// (`Fenced { sr: None }`, nothing claimed) unless `boot`'s `hosts` row is live
-            /// ([`check_live`]). Callers hold the writer lock.
+            /// ([`check_live`]). SQLite callers hold the writer lock; Postgres needs none (the
+            /// row locks serialise it, and holding the in-process lock while waiting for a row
+            /// would hold up this host's own cut part).
             pub(crate) async fn claim_free(
                 pool: &Pool,
                 owner: u32,
@@ -379,27 +388,33 @@ macro_rules! engine_rows {
                 let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
                 let tx = begin_claim(pool, lock_ms).await?;
                 let mut tx = check_side(pool, tx, opened, lock_ms).await?;
-                let sql = format!(
-                    "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
-                     ON CONFLICT (sx, sz) DO UPDATE SET owner = excluded.owner, epoch = super_regions.epoch + 1 \
-                     WHERE super_regions.owner = {} \
+                let insert = "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
+                              ON CONFLICT (sx, sz) DO NOTHING RETURNING epoch";
+                let take_free = format!(
+                    "UPDATE super_regions SET owner = $3, epoch = epoch + 1 WHERE sx = $1 AND sz = $2 AND owner = {} \
                      RETURNING epoch",
                     crate::NO_OWNER
                 );
                 let mut epochs = BTreeMap::new();
                 for (sx, sz) in srs {
-                    let row = sqlx::query(&sql)
-                        .bind(i64::from(sx))
-                        .bind(i64::from(sz))
-                        .bind(i64::from(owner))
-                        .fetch_optional(&mut *tx)
-                        .await;
-                    let row = match row {
-                        Ok(row) => row,
-                        Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
-                    };
-                    if let Some(row) = row {
-                        let epoch: i64 = row.try_get(0)?;
+                    let mut won = None;
+                    for sql in [insert, take_free.as_str()] {
+                        let row = sqlx::query(sql)
+                            .bind(i64::from(sx))
+                            .bind(i64::from(sz))
+                            .bind(i64::from(owner))
+                            .fetch_optional(&mut *tx)
+                            .await;
+                        match row {
+                            Ok(Some(row)) => {
+                                won = Some(row.try_get::<i64, _>(0)?);
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
+                        }
+                    }
+                    if let Some(epoch) = won {
                         epochs.insert((sx, sz), u(epoch));
                     }
                 }
@@ -443,13 +458,24 @@ macro_rules! engine_rows {
 
             /// Locks (Postgres: `FOR SHARE`) and checks every super-region of
             /// `srs` in `tx`: each must be claimed in `fence` and stored with its
-            /// owner and epoch. The first that is not → `Fenced`.
+            /// owner and epoch. The first that is not → `Fenced`. Postgres: before it locks
+            /// anything the transaction's idle limit is set ([`crate::FENCED_TX_IDLE_MS`]) —
+            /// a client that freezes holding these locks loses its session, and the locks
+            /// with it, after a lease.
             async fn check_fence(
                 conn: &mut Conn,
                 fence: &Fence,
                 srs: &std::collections::BTreeSet<SuperRegion>,
             ) -> Result<(), StoreError> {
                 let srs: Vec<SuperRegion> = srs.iter().copied().collect();
+                if $lock_timeout && !srs.is_empty() {
+                    let ms = crate::fenced_tx_idle_ms();
+                    sqlx::Executor::execute(
+                        &mut *conn,
+                        format!("SET LOCAL idle_in_transaction_session_timeout = '{ms}ms'").as_str(),
+                    )
+                    .await?;
+                }
                 for batch in srs.chunks(FENCE_CHECK_BATCH) {
                     let sql = fence_check_sql(batch.len(), $share_lock);
                     let mut q = sqlx::query(&sql);
@@ -475,6 +501,17 @@ macro_rules! engine_rows {
                 Ok(())
             }
 
+            /// Test support ([`crate::StoreHandle::freeze_in_fenced_tx`]): a transaction that
+            /// passed the real fence check over all of `fence`'s super-regions (Postgres: they
+            /// are held `FOR SHARE`) and is handed back OPEN, for the caller to sit on.
+            #[allow(dead_code)]
+            pub(crate) async fn fenced_tx_held(pool: &Pool, fence: &Fence) -> Result<Tx, StoreError> {
+                let mut tx = pool.begin().await?;
+                let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
+                check_fence(&mut *tx, fence, &srs).await?;
+                Ok(tx)
+            }
+
             /// The database clock in ms since the epoch (the one expression per engine).
             const NOW_MS: &str = $now_ms;
 
@@ -486,7 +523,9 @@ macro_rules! engine_rows {
             /// boot died without a clean save): `Rollback` → `world.generation` goes up (`bumped`);
             /// `Succession` → marked dead: `Wait(Succession)`, nothing written; live while another
             /// dirty live row beat within [`game::HOST_LEASE_MS`] (database clock): the prior row's
-            /// `seen_ms = 0` (vouched), `Wait(Vouched)`; nobody alive: bumped as `Rollback`. Otherwise
+            /// `seen_ms = 0` (vouched), `Wait(Vouched)`; nobody alive: bumped as `Rollback`, and every
+            /// other dirty live row's `seen_ms` set to now (a fresh lease: the others of a total
+            /// crash boot seconds apart and must not be inherited at once). Otherwise
             /// (no prior row, a clean one, an older generation) it registers at the world's
             /// generation. Registering upserts the row with the new boot, the generation, `clean = 0`,
             /// `state` live, `seen_ms` now and `reg` one more than the highest of any row (safe: the
@@ -574,6 +613,23 @@ macro_rules! engine_rows {
                                 return Ok(crate::BootVerdict::Wait(crate::WaitFor::Vouched));
                             }
                             // Nobody alive: a total crash restarts the world from its last cut.
+                            // The other hosts come back seconds apart: every other dirty live
+                            // row gets a fresh lease (a vouch is undone), so the coordinator —
+                            // which may have watched those rows stand still for longer than a
+                            // lease already — starts its count again instead of declaring them
+                            // dead the moment this boot attaches (their land would be this
+                            // host's for good). One that is really gone lapses one lease later.
+                            // `clock_timestamp()`, the lease clock. Lock walk: under the `world`
+                            // row lock taken above, which every other statement locking SEVERAL
+                            // `hosts` rows takes first (a declaration, a retirement, a settle);
+                            // a heartbeat and a vouch hold one row and want nothing else; a
+                            // claim takes its own `hosts` row last and wants nothing after it
+                            // (the module notes of `succession.rs`).
+                            let sql = format!(
+                                "UPDATE hosts SET seen_ms = {NOW_MS} WHERE ordinal <> $1 AND clean = 0 AND state = {live}",
+                                live = crate::HOST_LIVE,
+                            );
+                            sqlx::query(&sql).bind(i64::from(row.ordinal)).execute(&mut *tx).await?;
                         }
                         generation = world + 1;
                         bumped = true;

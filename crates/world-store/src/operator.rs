@@ -317,9 +317,9 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: u32, lease_ms: u64) -> 
 /// [`crate::StoreHandle::vouch_host`] (Postgres): ONE statement over host `ordinal`'s row
 /// (its row lock; a heartbeat either commits first — then the row is fresh and nothing is
 /// written — or overwrites the vouch after, which the declaration's lapse re-check sees).
-pub(crate) async fn vouch_host(pool: &PgPool, ordinal: u32, lease_ms: u64) -> Result<Vouched, StoreError> {
+pub(crate) async fn vouch_host(pool: &PgPool, ordinal: u32, lease_ms: u64, lock_timeout_ms: u64) -> Result<Vouched, StoreError> {
     let mut tx = pool.begin().await?;
-    sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", crate::CUT_LOCK_TIMEOUT_MS)).execute(&mut *tx).await?;
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
     let done = sqlx::query(&format!(
         "UPDATE hosts SET seen_ms = 0 WHERE ordinal = $1 AND clean = 0 AND state = {HOST_LIVE} \
          AND (seen_ms = 0 OR {PG_NOW_MS} - seen_ms > $2)"

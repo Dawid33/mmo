@@ -55,6 +55,35 @@ pub const CUT_LOCK_TIMEOUT_MS: u64 = 10_000;
 /// How long a heartbeat waits for its `hosts` row lock (Postgres): well under the lease's beat
 /// period, so a beat blocked behind a registration or a decision fails fast (`Err`, not `Ok(false)`).
 pub const HEARTBEAT_LOCK_TIMEOUT_MS: u64 = 1_000;
+/// The client-side deadline of one heartbeat (Postgres), connecting included: a beat on a
+/// connection that stopped answering (a black-holed path to the database retransmits for
+/// minutes) is given up after it, that connection dropped, and the next beat goes on a new
+/// one — so one stuck socket cannot lapse a healthy host's lease.
+pub const HEARTBEAT_DEADLINE_MS: u64 = game::HOST_HEARTBEAT_MS;
+/// How long a FENCED transaction (Postgres: a cut part being written, a region load — both
+/// hold their super-region rows `FOR SHARE`) may sit idle between two statements before the
+/// database ends its session (`idle_in_transaction_session_timeout`, set `LOCAL` by the fence
+/// check): the lease. A host frozen or cut off inside such a transaction would otherwise hold
+/// those row locks for as long as its TCP connection lives, and its own succession's
+/// declaration waits for them. A healthy host is never idle that long inside a transaction —
+/// one that is has lost its lease anyway. A prepared part is not a session: untouched.
+pub const FENCED_TX_IDLE_MS: u64 = game::HOST_LEASE_MS;
+
+thread_local! {
+    /// [`FENCED_TX_IDLE_MS`] as the transactions of this thread's store set it (a store's
+    /// statements all run on its own thread; a test hook shortens it,
+    /// [`StoreHandle::set_fenced_tx_idle_ms`]).
+    static FENCED_TX_IDLE: std::cell::Cell<u64> = const { std::cell::Cell::new(FENCED_TX_IDLE_MS) };
+}
+
+/// The idle limit a fenced transaction begun on this thread sets, ms.
+pub(crate) fn fenced_tx_idle_ms() -> u64 {
+    FENCED_TX_IDLE.with(std::cell::Cell::get)
+}
+
+pub(crate) fn set_fenced_tx_idle_ms_here(ms: u64) {
+    FENCED_TX_IDLE.with(|c| c.set(ms));
+}
 
 /// The build-time dials a world is tied to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

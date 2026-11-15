@@ -96,13 +96,46 @@ fn a_heartbeat_behind_a_held_row_lock_errors_instead_of_waiting() {
         let h2 = h.clone();
         let beat = tokio::task::spawn_blocking(move || h2.heartbeat(0, 10)).await.unwrap();
         let waited = started.elapsed();
-        assert!(beat.is_err(), "a beat behind a row lock is an error, got {beat:?}");
+        assert!(matches!(&beat, Err(e) if e.is_lock_conflict()), "a beat behind a row lock is a lock conflict, got {beat:?}");
         assert!(waited < std::time::Duration::from_millis(HEARTBEAT_LOCK_TIMEOUT_MS * 3), "waited {waited:?}");
         tx.rollback().await.unwrap();
         // Released: the beat goes through again.
         let h2 = h.clone();
         assert!(tokio::task::spawn_blocking(move || h2.heartbeat(0, 10)).await.unwrap().unwrap());
     });
+    h.shutdown();
+    drop(db);
+}
+
+/// Final review A-I2 (Postgres): a beat never waits for a connection of the store's shared
+/// pool — a burst of region loads, a long cut part and a claim waiting on a row lock can
+/// hold all of them for longer than the lease, and a healthy host would be declared dead.
+/// It goes out on the heartbeat's own connection.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_heartbeat_does_not_wait_for_the_shared_pool() {
+    use world_store::{STORE_POOL_MAX, StoreUrl};
+
+    if crate::common::pg_admin_url().is_none() {
+        return crate::common::skip_msg();
+    }
+    const HELD_MS: u64 = 3_000;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let db = rt.block_on(crate::common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
+    let h = open(&StoreUrl::Postgres(db.url.clone()));
+    let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
+    register(&h, row(0, 10), &a).unwrap();
+    let before = h.hosts().unwrap()[0].seen_ms;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    h.hold_pool_connections(STORE_POOL_MAX, HELD_MS).unwrap();
+    let started = std::time::Instant::now();
+    assert!(h.heartbeat(0, 10).unwrap(), "the live boot's beat");
+    let waited = started.elapsed();
+    assert!(waited < std::time::Duration::from_millis(HELD_MS / 2), "the beat waited {waited:?} for the busy shared pool");
+    // Another boot of the ordinal is still answered `false` on that connection.
+    assert!(!h.heartbeat(0, 11).unwrap());
+    // (The read waits for the pool; the beat above did not.)
+    assert!(h.hosts().unwrap()[0].seen_ms > before);
     h.shutdown();
     drop(db);
 }
@@ -205,6 +238,50 @@ fn boot_verdicts() {
                     assert_eq!(prior.seen_ms, seen, "{}: the prior row's seen_ms", case.what);
                 }
             }
+            h.shutdown();
+        }
+    });
+}
+
+/// Final review A-I3 — a total crash: the first boot back finds nobody alive and raises the
+/// generation; under `Succession` it also gives every OTHER dirty live row a fresh lease
+/// (`seen_ms` = the database clock now, a vouch undone), so a host that boots a second later
+/// is not declared dead at once and its land inherited for good — a host that is really gone
+/// is still declared one lease later. Under `Rollback` nothing reads the lease: untouched.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn the_first_boot_after_a_total_crash_gives_the_other_rows_a_fresh_lease() {
+    each_backend("lease_total_crash", true, |url| {
+        for (policy, stale, refreshed) in [
+            (CrashPolicy::Succession, "UPDATE hosts SET seen_ms = 1 WHERE ordinal IN (1, 2)", true),
+            // Host 1 vouched dead (by an earlier boot of its own), host 2 long stale.
+            (CrashPolicy::Succession, "UPDATE hosts SET seen_ms = CASE ordinal WHEN 1 THEN 0 ELSE 1 END WHERE ordinal IN (1, 2)", true),
+            (CrashPolicy::Rollback, "UPDATE hosts SET seen_ms = 1 WHERE ordinal IN (1, 2)", false),
+        ] {
+            raw_exec(url, "DELETE FROM hosts");
+            raw_exec(url, "UPDATE world SET generation = 0");
+            let h = open(url);
+            for (ordinal, boot) in [(0, 10), (1, 11), (2, 12), (3, 13)] {
+                h.register_host(row(ordinal, boot), &Fence::default(), CrashPolicy::Rollback).unwrap();
+            }
+            h.shutdown();
+            raw_exec(url, stale);
+            // Host 3 left clean; its row is no lease anybody waits for.
+            raw_exec(url, "UPDATE hosts SET clean = 1, seen_ms = 1 WHERE ordinal = 3");
+            let h = open(url);
+            let verdict = h.register_host(row(0, 20), &Fence::default(), policy).unwrap();
+            assert!(matches!(verdict, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })), "{policy:?}: {verdict:?}");
+            let now = h.db_now_ms().unwrap();
+            let rows = h.hosts().unwrap();
+            for r in rows.iter().filter(|r| r.ordinal == 1 || r.ordinal == 2) {
+                assert_eq!((r.boot, r.generation, r.state), (10 + u64::from(r.ordinal), 0, HOST_LIVE), "the row is otherwise as it was");
+                if refreshed {
+                    assert!(r.seen_ms.abs_diff(now) < 5_000, "{policy:?}: host {}'s lease starts again: {} vs db now {now}", r.ordinal, r.seen_ms);
+                } else {
+                    assert_eq!(r.seen_ms, 1, "{policy:?}: host {}'s row is untouched", r.ordinal);
+                }
+            }
+            assert_eq!(rows.iter().find(|r| r.ordinal == 3).unwrap().seen_ms, 1, "{policy:?}: a clean row is no lease");
             h.shutdown();
         }
     });

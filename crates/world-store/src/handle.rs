@@ -88,7 +88,11 @@ pub enum BootVerdict {
 /// Why a boot under [`game::CrashPolicy::Succession`] waits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitFor {
-    /// The previous boot of this ordinal was declared dead and its land is being inherited.
+    /// An OPEN succession names this ordinal as its predecessor — a crash's, a leave's or an
+    /// offline retirement's, whatever the generations — or (a hand-made row only) its previous
+    /// boot is marked dead: its land and its in-flight rows are being inherited. The boot
+    /// registers once the succession is settled (or abandoned by a world rollback), owning
+    /// nothing.
     Succession,
     /// The previous boot of this ordinal never left clean while another host is alive: this
     /// boot vouched for its death (its row's `seen_ms = 0`) and waits for the coordinator to
@@ -206,6 +210,37 @@ impl StoreHandle {
     #[doc(hidden)]
     pub fn set_cut_lock_timeout_ms(&self, ms: u64) {
         self.cuts.lock_timeout_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// How many committed world cuts this handle (and its clones) decided settled a
+    /// succession whose predecessor still had in-flight rows under its ordinal — the heir's
+    /// part did not adopt them (each reported once with `error!`; the settle↔adopts pairing
+    /// is the coordinator's invariant, the store only detects a breach).
+    pub fn cuts_settled_unadopted(&self) -> u64 {
+        self.cuts.settled_unadopted_cuts.load(Ordering::SeqCst)
+    }
+
+    /// Test hook: the idle limit of this store's later fenced transactions, in ms (default
+    /// [`crate::FENCED_TX_IDLE_MS`]).
+    #[doc(hidden)]
+    pub fn set_fenced_tx_idle_ms(&self, ms: u64) -> Result<(), StoreError> {
+        self.ask(|r| Request::TestHook(crate::thread::TestHook::FencedTxIdleMs(ms), r))
+    }
+
+    /// Test hook: a FROZEN host — this store opens a fenced transaction over `fence`'s
+    /// super-regions (the real fence check: `FOR SHARE` on them) and then sends nothing more
+    /// on it for `hold_ms`, as a process stopped inside a cut part or a region load. Answers
+    /// once the locks are held. (Postgres.)
+    #[doc(hidden)]
+    pub fn freeze_in_fenced_tx(&self, fence: Fence, hold_ms: u64) -> Result<(), StoreError> {
+        self.ask(|r| Request::TestHook(crate::thread::TestHook::FreezeInFencedTx(fence, hold_ms), r))
+    }
+
+    /// Test hook: `n` connections of this store's shared pool are taken and held for
+    /// `hold_ms` (a burst of region loads, a long cut part). Answers once they are held.
+    #[doc(hidden)]
+    pub fn hold_pool_connections(&self, n: u32, hold_ms: u64) -> Result<(), StoreError> {
+        self.ask(|r| Request::TestHook(crate::thread::TestHook::HoldConnections(n, hold_ms), r))
     }
 
     /// How many committed world cuts this handle (and its clones) decided were found to

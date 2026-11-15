@@ -284,6 +284,95 @@ fn declare_waits_out_a_staged_part_with_a_timeout() {
     w.shutdown();
 }
 
+/// Final review A-I1: a host FROZEN inside an open fenced transaction (stopped, its VM
+/// paused, its machine gone without a FIN — in the middle of a cut part or a region load)
+/// holds its super-regions `FOR SHARE` for as long as its session lives, and its own
+/// succession's declaration needs those rows. The fence check bounds the transaction's idle
+/// time (`FENCED_TX_IDLE_MS`, the lease): the database ends the session, the locks go, and
+/// the declaration — retried by the coordinator — goes through.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_frozen_in_a_fenced_transaction_does_not_block_its_declaration_for_ever() {
+    let Some(w) = World::new(2) else { return };
+    const IDLE_MS: u64 = 600;
+    const WAIT_MS: u64 = 200;
+    w.h.set_cut_lock_timeout_ms(WAIT_MS);
+    w.hosts[1].set_fenced_tx_idle_ms(IDLE_MS).unwrap();
+    // Host 1 freezes holding its rows (and would for 5 s: far longer than the idle limit).
+    w.hosts[1].freeze_in_fenced_tx(w.fences[1].clone(), 5_000).unwrap();
+    w.vouch(1);
+    let err = w.declare(1, 0, SuccessionKind::Crash).unwrap_err();
+    assert!(err.is_lock_conflict(), "the frozen transaction holds the rows: {err}");
+    // Past the idle limit the session is gone; the retried declaration succeeds.
+    let deadline = Instant::now() + Duration::from_millis(IDLE_MS * 5);
+    let s = loop {
+        match w.declare(1, 0, SuccessionKind::Crash) {
+            Ok(Declared::Done(mut s)) => break s.remove(0),
+            Ok(other) => panic!("declared: {other:?}"),
+            Err(e) if e.is_lock_conflict() => {
+                assert!(Instant::now() < deadline, "the frozen host's locks never went: {e}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(s.moved.len(), 2);
+    assert_eq!(w.state_of(1), (HOST_DEAD, false));
+    w.shutdown();
+}
+
+/// Final review A-M1: `claim_free` never locks a row it cannot win. A row another host holds
+/// — here `FOR SHARE` in that host's staged cut part — is left alone at once (an upsert's
+/// `ON CONFLICT DO UPDATE … WHERE` locked it before its `WHERE`, and the claim waited for that
+/// cut's decision while holding this store's writer lock, which its own part needs).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn claim_free_does_not_wait_for_a_row_another_host_holds() {
+    let Some(w) = World::new(2) else { return };
+    const WAIT_MS: u64 = 500;
+    w.hosts[0].set_claim_lock_timeout_ms(WAIT_MS);
+    w.hosts[1].prepare_cut(part(1, 1, vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+    let theirs: Vec<world_store::SuperRegion> = w.fences[1].epochs.keys().copied().collect();
+    let started = Instant::now();
+    let won = w.hosts[0].claim_free(0, boot_of(0), theirs).expect("a claim that wins nothing is no error");
+    let waited = started.elapsed();
+    assert!(won.epochs.is_empty(), "host 1 holds them: {won:?}");
+    assert!(waited < Duration::from_millis(WAIT_MS / 2), "the claim waited {waited:?} behind a row it could not win");
+    assert_eq!(w.h.owned_by(1).unwrap(), w.fences[1], "host 1's rows are untouched");
+    assert!(!w.h.abort_cut(CutId(1), 100).unwrap());
+    w.shutdown();
+}
+
+/// Final review A-I4: the store cannot refuse a settle whose heir part did not adopt the
+/// predecessor's in-flight rows (the pairing is the coordinator's), but it DETECTS it: the
+/// rows that outlive the settle under the predecessor's ordinal are reported (an error line
+/// and a counter). A settle whose heir part adopted them reports nothing.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_settle_whose_heir_part_did_not_adopt_is_reported() {
+    for adopting in [false, true] {
+        let Some(w) = World::new(2) else { return };
+        w.hosts[0].prepare_cut(part(1, 0, vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+        w.hosts[1].prepare_cut(part(1, 1, vec![in_flight(A)]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+        assert!(w.h.decide_cut(CutId(1), 100, true, vec![0, 1], vec![], w.c, 0, vec![]).unwrap());
+        assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
+        w.vouch(1);
+        let s = w.declared(1, 0);
+        let heir = w.h.owned_by(0).unwrap();
+        let adopts = if adopting { vec![1] } else { vec![] };
+        w.hosts[0].prepare_cut(WorldCut { adopts, ..part(2, 0, vec![]) }, heir, 0).recv().unwrap().unwrap();
+        assert!(w.h.decide_cut(CutId(2), 200, true, vec![0], vec![], w.c, 0, vec![s.id]).unwrap());
+        // The post-commit checks run after the decision is answered.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while w.h.cuts_checked_for_entities_twice() < 2 {
+            assert!(Instant::now() < deadline, "the post-commit checks of cut 2 ran");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(w.h.cuts_settled_unadopted(), u64::from(!adopting), "adopting: {adopting}");
+        w.shutdown();
+    }
+}
+
 #[test]
 fn commit_without_naming_the_open_succession_becomes_an_abort() {
     let Some(w) = World::new(2) else { return };

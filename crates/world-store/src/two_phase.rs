@@ -433,6 +433,46 @@ pub(crate) async fn report_entities_twice(pool: &PgPool, cut: CutId, tick: Tick)
     }
 }
 
+/// After a COMMITTED world cut that settled successions (detect only — the pairing of a
+/// settle with the heir part's `adopts` is the coordinator's invariant, which the store
+/// cannot refuse without a table two parts would write): a settled succession whose
+/// predecessor still has `in_flight` rows under its ordinal was settled by a cut whose heir
+/// part did NOT adopt them. Those rows now outlive the settle; the predecessor's row is
+/// clean, so its next boot registers and restores them — each delivered a second time. One
+/// `error!` per cut; whether there was any. The check runs right after the decision (the
+/// predecessor's next boot could not register before it, so the rows are the dead boot's).
+/// Errors of the check itself are warned and ignored.
+pub(crate) async fn report_settled_unadopted(pool: &PgPool, cut: CutId) -> bool {
+    let rows = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        "SELECT s.id, s.predecessor, s.heir, COUNT(*) FROM successions s JOIN in_flight f ON f.host = s.predecessor \
+         WHERE s.settled_cut = $1 GROUP BY s.id, s.predecessor, s.heir ORDER BY s.id",
+    )
+    .bind(cut.0 as i64)
+    .fetch_all(pool)
+    .await;
+    match rows {
+        Ok(rows) if rows.is_empty() => false,
+        Ok(rows) => {
+            let list: Vec<String> = rows
+                .iter()
+                .map(|(id, pred, heir, n)| format!("succession {id}: {n} in-flight row(s) still under host {pred} (heir {heir})"))
+                .collect();
+            log::error!(
+                "[world-store] world cut {} settled a succession whose heir part did not adopt the predecessor's \
+                 in-flight rows — a conservation bug of the coordinator's settle/adopt pairing (the predecessor's next \
+                 boot restores those rows a second time): {}",
+                cut.0,
+                list.join("; ")
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!("[world-store] world cut {}: the check for settled successions not adopted failed: {e}", cut.0);
+            false
+        }
+    }
+}
+
 /// Finishes every prepared part of this world that a crash left behind: a decided
 /// cut's parts as decided; an undecided cut is aborted first (the abort row carries
 /// [`SWEEP_ABORT_TICK`]). Safe beside other processes doing the same.

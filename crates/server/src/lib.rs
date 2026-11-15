@@ -1094,6 +1094,9 @@ pub fn run() -> claims::ServerExit {
                     Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
                     Err(e) => fatal(&format!("re-claiming this host's super-regions: {e}")),
                 }
+                // The re-claim may have waited behind a row lock for a minute: the lease is
+                // beaten between the boot's long steps (the main loop's pump comes much later).
+                lease::beat_at_boot(&mut heartbeat, "re-claiming its super-regions");
             }
         }
         claimed
@@ -1126,6 +1129,7 @@ pub fn run() -> claims::ServerExit {
             .unwrap_or_else(|e| fatal(&format!("reading the ownership directory: {e}")));
         info!("[server] ownership directory: {} super-regions, live hosts {live:?}", rows.len());
         manager.directory_read(rows, live);
+        lease::beat_at_boot(&mut heartbeat, "reading the ownership directory");
         directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone(), boot));
     }
     // `claim` with several hosts: an heir's adoption reads (R4, a succession) — what it
@@ -1216,6 +1220,7 @@ pub fn run() -> claims::ServerExit {
         );
         manager.set_stored_regions(stored);
         manager.restore_in_flight(in_flight);
+        lease::beat_at_boot(&mut heartbeat, "reading the stored regions and what was in flight");
         // Several hosts: the coordinator picks every cut (a world cut, staged and decided
         // together); one host cuts on its own (the one-phase cut).
         if hosts > 1 {

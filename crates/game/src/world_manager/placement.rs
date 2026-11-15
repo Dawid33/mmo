@@ -448,7 +448,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             Reliable::SessionEnded { player_token, session_epoch } => {
                 self.login_out.push(LoginOut::SessionEnded { player_token, session_epoch });
             }
-            other => log::error!("[server] host {from}: {other:?} is not a login message"),
+            // Redacted: a transfer or move may carry a login's player token.
+            other => log::error!("[server] host {from}: {:?} is not a login message", other.redacted()),
         }
     }
 }

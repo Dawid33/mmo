@@ -43,6 +43,19 @@
 //!    retry after `CLAIM_RETRY_MS`, then refused `Fenced` once B is dead); an aborted
 //!    declaration is retried as above.
 //!
+//! **A registration's lease refresh** (`rows.rs` `register_host`, the "nobody alive" branch
+//! under `Succession`): one `UPDATE hosts SET seen_ms = <now> WHERE ordinal <> $me AND clean = 0
+//! AND state = live` — row locks on SEVERAL other hosts' rows, in no fixed order. Safe: it runs
+//! under the `world` row's `FOR NO KEY UPDATE`, which every other statement that locks more
+//! than one `hosts` row takes first (the declaration, the settle in `decide_cut`,
+//! `retire_offline`, another registration), so two of them never interleave. The one-row
+//! lockers cannot close a cycle: a heartbeat holds only its own row (and fails after its 1 s
+//! lock timeout: "no beat this time"); `vouch_host` is one guarded `UPDATE`; a claim takes its
+//! own `hosts` row `FOR SHARE` as its LAST statement and commits — the registration waits for
+//! that commit, or the claim waits for the registration's, and neither then wants anything the
+//! other holds (the registration's fence check came first, and a claim blocked on one of those
+//! `super_regions` rows has not locked its `hosts` row yet). A cut part locks no `hosts` row.
+//!
 //! **After a world rollback** (the coordinator's [`rollback_world`] or the operator's
 //! [`rollback_world_operator`], both through [`rollback_in`]): every host restarts from the
 //! last committed cut K — no cut commits between a declaration and its settle, so that is the

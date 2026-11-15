@@ -59,6 +59,29 @@ impl Heartbeat {
         self.period = period;
     }
 
+    /// One beat NOW, waited for (the boot's long steps between its registration and the main
+    /// loop's first pump — re-claiming its rows behind a lock, the directory, the stored
+    /// regions, the in-flight restore — may together take longer than the lease: a boot
+    /// declared dead before it ever ran). Never from the main loop. `Replaced`: the row is no
+    /// longer this live boot; a store error is logged (`what`: the step just done) and is
+    /// not `Replaced`.
+    pub fn beat_now(&mut self, what: &str) -> LeaseState {
+        if self.replaced {
+            return LeaseState::Replaced;
+        }
+        match self.store.heartbeat(self.ordinal, self.boot) {
+            Ok(true) => LeaseState::Held,
+            Ok(false) => {
+                self.replaced = true;
+                LeaseState::Replaced
+            }
+            Err(e) => {
+                log::warn!("[lease] host {}: the heartbeat after {what} failed ({e}); the lease lapses unless one gets through", self.ordinal);
+                LeaseState::Held
+            }
+        }
+    }
+
     /// Reads a beat's answer if it is there and sends the next beat when one is due (every
     /// [`HOST_HEARTBEAT_MS`], none while one is in flight). `Replaced` once a beat answered
     /// that the row is not this live boot (it stays so); a store error is logged (at most
@@ -112,6 +135,20 @@ pub fn pump_or_fence(heartbeat: &mut Option<Heartbeat>, fenced: &Fenced, now: In
     true
 }
 
+/// A booting host's lease step after a long start-up step (`what`): one waited beat
+/// ([`Heartbeat::beat_now`]), so the time from its registration to its main loop's first
+/// pump cannot outlast the lease. A boot replaced meanwhile exits fenced here.
+pub fn beat_at_boot(heartbeat: &mut Option<Heartbeat>, what: &str) {
+    let Some(beat) = heartbeat.as_mut() else { return };
+    if beat.beat_now(what) == LeaseState::Replaced {
+        log::error!(
+            "[server] replaced while starting (after {what}): host {}'s hosts row is no longer this live boot; stopping",
+            beat.ordinal
+        );
+        std::process::exit(crate::claims::EXIT_FENCED);
+    }
+}
+
 /// Registers `row` (the boot's ONE successful `register_host`) under `policy`, asking again
 /// every [`REGISTER_RETRY_MS`] while the verdict is `Wait` and logging (at most once per
 /// [`REGISTER_WAIT_LOG_MS`]) why. `Ok(None)`: `stop` was set while waiting — the caller exits 0.
@@ -149,5 +186,48 @@ pub fn register_or_wait(
             }
             std::thread::sleep(Duration::from_millis(STOP_POLL_MS));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(ordinal: u32, boot: u64) -> HostRow {
+        HostRow {
+            ordinal,
+            boot,
+            generation: 0,
+            clean: false,
+            state: game::HOST_LIVE,
+            seen_ms: 0,
+            reg: 0,
+            peer_addr: None,
+            peer_cert: None,
+            quic: None,
+            webtransport: None,
+            wt_cert_hash: None,
+        }
+    }
+
+    /// Final review A-M5: a boot beats its lease between its long start-up steps — a waited
+    /// beat that moves `seen_ms` for the live boot and answers `Replaced` (for good) once the
+    /// row is another boot's.
+    #[test]
+    fn a_boot_beats_between_its_start_up_steps() {
+        let store = StoreHandle::open(&world_store::StoreUrl::Memory, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+        let verdict = store.register_host(row(0, 10), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        assert!(matches!(verdict, BootVerdict::Registered(_)), "{verdict:?}");
+        let seen = || store.hosts().unwrap()[0].seen_ms;
+        let first = seen();
+        std::thread::sleep(Duration::from_millis(5));
+        let mut beat = Heartbeat::new(store.clone(), 0, 10);
+        assert_eq!(beat.beat_now("a step"), LeaseState::Held);
+        assert!(seen() > first, "the waited beat moved seen_ms");
+        // Another boot of the ordinal registered meanwhile: replaced, and it stays so.
+        store.register_host(row(0, 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        assert_eq!(beat.beat_now("a later step"), LeaseState::Replaced);
+        assert_eq!(beat.pump(Instant::now()), LeaseState::Replaced);
+        store.shutdown();
     }
 }

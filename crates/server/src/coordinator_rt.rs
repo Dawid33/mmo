@@ -611,6 +611,9 @@ pub const WORLD_CUT_DECISION_SLOW_RETRY_MS: u64 = 5_000;
 pub const WORLD_CUT_LOOKUP_RETRY_MS: u64 = 1_000;
 /// At most one warning per this many ms about failing world-cut store calls.
 pub const WORLD_CUT_RETRY_LOG_MS: u64 = 10_000;
+/// A succession's declaration that kept failing this long (lock timeouts behind a staged
+/// part are ordinary for a moment) is warned about, throttled by [`WORLD_CUT_RETRY_LOG_MS`].
+pub const DECLARE_FAILING_WARN_AFTER_MS: u64 = 3_000;
 
 /// A store answer on its way.
 type Answer<T> = Receiver<Result<T, StoreError>>;
@@ -775,6 +778,8 @@ struct SuccessionPump {
     open_retry_at: u64,
     declare_rx: Option<Answer<game::Declared>>,
     declare_retry_at: u64,
+    /// `now_ms` since which every declaration failed (`None`: the last one was answered).
+    declare_failing_since: Option<u64>,
     rollback_rx: Option<Answer<u64>>,
     rollback_retry_at: u64,
     /// The owners read for the super-regions hosts asked for (`LandWanted`), with them.
@@ -1361,6 +1366,7 @@ impl CoordinatorRuntime {
             p.declare_rx = None;
             match answer {
                 Ok(declared) => {
+                    p.declare_failing_since = None;
                     if let game::Declared::Done(list) = &declared {
                         let dead: Vec<(u32, u64)> = list.iter().map(|s| (s.predecessor, s.predecessor_boot)).collect();
                         self.close_succeeded(&dead);
@@ -1369,10 +1375,22 @@ impl CoordinatorRuntime {
                 }
                 Err(StoreError::Fenced { .. }) => return Err(()),
                 Err(e) => {
-                    // A lock timeout behind a staged part is a retry, not an error.
+                    // A lock timeout behind a staged part is a retry, not an error — but one
+                    // that keeps failing is why nothing is saved and nobody inherits (a host
+                    // frozen inside a transaction, a store that is down): said, throttled.
                     self.core.declare_failed();
                     p.declare_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
-                    log::debug!("[coordinator] a succession could not be declared yet ({e}); trying again");
+                    let since = *p.declare_failing_since.get_or_insert(now);
+                    if now.saturating_sub(since) >= DECLARE_FAILING_WARN_AFTER_MS {
+                        let what = format!(
+                            "a succession could not be declared for {} s ({e}); still trying — until it is, no world cut \
+                             begins and the dead host's land has no owner",
+                            now.saturating_sub(since) / 1000
+                        );
+                        self.warn_cuts(now, &what);
+                    } else {
+                        log::debug!("[coordinator] a succession could not be declared yet ({e}); trying again");
+                    }
                 }
             }
             return Ok(());
