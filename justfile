@@ -932,9 +932,41 @@ deploy-push:
 deploy-logs:
     ssh {{deploy_host}} docker compose -f /srv/mmo/compose.yml logs -f --tail 200 server
 
-# Forward the deploy box's k3s API to localhost:6443 (kubeconfig context `orion`).
+# `orion` itself goes over the VPN; recipes take `orion_context=orion-ssh` with this.
+# Fallback for when the VPN is down: forward the k3s API to localhost:6443 over ssh (context orion-ssh).
 tunnel:
     scripts/tunnel.sh {{deploy_host}}
+
+# ---- Operator VPN into orion (docs/superpowers/plans/2026-11-15-orion-vpn.md) --------
+# WireGuard wg0 on the box (10.99.0.1, UDP 51820); this machine is 10.99.0.2 through the
+# NetworkManager connection `orion-vpn` (autoconnects). Routes k3s's pod (10.42.0.0/16) and
+# Service (10.43.0.0/16) networks, and *.cluster.local and *.vpn.errantry.renownandruin.com
+# resolve through CoreDNS (split DNS), so a Service answers at
+# http://<svc>.<namespace>.svc.cluster.local:<port> with no port-forward, and a vpn-names name
+# (root deploy/envs/orion/vpn-names) at https://<name>.vpn.errantry.renownandruin.com.
+# The kube context `orion` is https://10.99.0.1:6443 (tls-server-name kubernetes).
+
+# Bring the VPN up / down on this machine.
+orion-vpn-up:
+    nmcli connection up orion-vpn
+orion-vpn-down:
+    nmcli connection down orion-vpn
+
+# Is the VPN usable: the box, cluster DNS, the k3s API and Grafana by its Service name.
+orion-vpn-status:
+    #!/usr/bin/env bash
+    nmcli -t -f GENERAL.STATE connection show orion-vpn 2>/dev/null | sed 's/^/orion-vpn: /' || echo "orion-vpn: no such connection"
+    ping -c1 -W2 10.99.0.1 >/dev/null && echo "box 10.99.0.1: ok" || echo "box 10.99.0.1: NO ANSWER"
+    getent hosts kube-dns.kube-system.svc.cluster.local >/dev/null && echo "cluster DNS: ok" || echo "cluster DNS: FAILS"
+    kubectl --context {{orion_context}} get --raw /livez >/dev/null 2>&1 && echo "k3s API: ok" || echo "k3s API: FAILS"
+    echo "grafana: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local/api/health) (000 = no answer)"
+    echo "keycloak admin (https, vpn-names): $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 https://keycloak.vpn.errantry.renownandruin.com/admin/master/console/) (000 = no answer)"
+    echo "garage admin: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://garage.garage.svc.cluster.local:3903/health) (000 = no answer)"
+
+# scripts/orion_vpn_peer.sh; writes the device's config, private key included, to target/orion-vpn/<name>.conf.
+# Add another device to the VPN at 10.99.0.<octet>.
+orion-vpn-peer name octet:
+    VPN_HOST={{deploy_host}} scripts/orion_vpn_peer.sh {{name}} {{octet}}
 
 # ---- Dev Postgres (deploy/dev) ---------------------------------------------
 
@@ -1836,7 +1868,7 @@ twin-kube *args:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | dns | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | registry | login | postgres | world | site) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | dns | garage | garage-buckets | monitoring | picoshare | zulip | vpn-names | keycloak | keycloak-realm | registry | login | postgres | world | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
@@ -1892,9 +1924,10 @@ orion-zulip-test-email to:
     kubectl --context {{orion_context}} -n zulip exec zulip-0 -c zulip -- \
         runuser -u zulip -- /home/zulip/deployments/current/manage.py send_test_email {{to}}
 
-# Garage's admin API is not public: this forwards it to http://127.0.0.1:3903.
-# Keep it running while planning or applying the garage-buckets root. The port
-# is fixed: that root reads the address from the garage root's state.
+# Garage's admin API is not public: over the operator VPN it is
+# http://garage.garage.svc.cluster.local:3903 (what the garage-buckets root uses).
+# VPN down: this forwards it to http://127.0.0.1:3903; then plan/apply garage-buckets
+# with `-var garage_admin_url=http://127.0.0.1:3903`.
 orion-garage-admin:
     kubectl --context {{orion_context}} -n garage port-forward svc/garage 3903:3903
 
@@ -1909,9 +1942,10 @@ orion-garage *args:
 orion-garage-import tenant:
     TOFU={{tofu}} scripts/orion_garage_import.sh {{tenant}}
 
-# Keycloak's admin console and admin API are not public: this forwards them to
-# http://127.0.0.1:8180/admin/ (user `admin`). Keep it running while planning or
-# applying the keycloak-realm root. The port is fixed: Keycloak is told this address.
+# Keycloak's admin console and admin API are not public: over the operator VPN they are
+# https://keycloak.vpn.errantry.renownandruin.com/admin/ (user `admin`; what the
+# keycloak-realm root uses). This forward (http://127.0.0.1:8180) serves the console only
+# while the keycloak root runs WITHOUT admin_host (Keycloak is told its admin address).
 orion-keycloak-admin:
     kubectl --context {{orion_context}} -n keycloak port-forward svc/keycloak 8180:8080
 

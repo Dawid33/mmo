@@ -6,7 +6,9 @@
 #
 # Public: only /realms/, /resources/ and /.well-known/ (what logins need).
 # NOT public: the admin console and admin API (/admin/), health and metrics
-# (management port 9000, never routed). Admin access is a port-forward:
+# (management port 9000, never routed). Admin access is over the operator VPN at
+# https://<admin_host>/admin/ (var.admin_host, a vpn-names name: Keycloak serves TLS
+# itself on 8443 = Service port 443), or with no admin_host a port-forward:
 # `just orion-keycloak-admin` -> http://127.0.0.1:<admin_port>/admin/.
 # The `master` realm's LOGIN pages (/realms/master/) are public and have to be:
 # the admin console, wherever it is opened, signs its user in against the public
@@ -24,7 +26,10 @@
 locals {
   ns        = kubernetes_namespace_v1.keycloak.metadata[0].name
   labels    = { "app.kubernetes.io/name" = "keycloak" }
-  admin_url = "http://127.0.0.1:${var.admin_port}"
+  admin_url = var.admin_host == null ? "http://127.0.0.1:${var.admin_port}" : "https://${var.admin_host}"
+  # The admin certificate (cert-manager writes tls.crt / tls.key; Keycloak re-reads them hourly).
+  admin_tls_secret = "keycloak-admin-tls"
+  admin_tls_dir    = "/opt/keycloak/conf/admin-tls"
 
   env = merge({
     KC_DB          = "postgres"
@@ -43,6 +48,12 @@ locals {
     ORION_SITE_URL = var.site_url
     }, length(var.features_disabled) == 0 ? {} : {
     KC_FEATURES_DISABLED = join(",", var.features_disabled)
+    }, var.admin_host == null ? {} : {
+    # HTTPS on 8443 for the VPN-only admin name; HTTP stays on for Traefik. The
+    # management port keeps plain HTTP (the probes), instead of inheriting TLS.
+    KC_HTTPS_CERTIFICATE_FILE     = "${local.admin_tls_dir}/tls.crt"
+    KC_HTTPS_CERTIFICATE_KEY_FILE = "${local.admin_tls_dir}/tls.key"
+    KC_HTTP_MANAGEMENT_SCHEME     = "http"
   })
   secret_env = {
     KC_DB_PASSWORD              = { name = kubernetes_secret_v1.db.metadata[0].name, key = "password" }
@@ -135,6 +146,15 @@ resource "kubernetes_deployment_v1" "keycloak" {
             }
           }
         }
+        dynamic "volume" {
+          for_each = var.admin_host == null ? [] : [1]
+          content {
+            name = "admin-tls"
+            secret {
+              secret_name = local.admin_tls_secret
+            }
+          }
+        }
         container {
           name  = "keycloak"
           image = var.image
@@ -166,9 +186,24 @@ resource "kubernetes_deployment_v1" "keycloak" {
               read_only  = true
             }
           }
+          dynamic "volume_mount" {
+            for_each = var.admin_host == null ? [] : [1]
+            content {
+              name       = "admin-tls"
+              mount_path = local.admin_tls_dir
+              read_only  = true
+            }
+          }
           port {
             name           = "http"
             container_port = 8080
+          }
+          dynamic "port" {
+            for_each = var.admin_host == null ? [] : [1]
+            content {
+              name           = "https"
+              container_port = 8443
+            }
           }
           port {
             name           = "management"
@@ -210,7 +245,25 @@ resource "kubernetes_deployment_v1" "keycloak" {
     create = "15m"
     update = "15m"
   }
-  depends_on = [kubernetes_stateful_set_v1.postgres]
+  depends_on = [kubernetes_stateful_set_v1.postgres, helm_release.admin_certificate]
+}
+
+# The VPN-only admin name's certificate (a custom resource: a tiny local chart). The pod
+# mounts its Secret, so on the FIRST apply with admin_host the certificate must be Ready
+# before the Deployment changes (DNS-01 takes a minute or two) — apply it alone first:
+# `-target=module.keycloak.helm_release.admin_certificate[0]` (docs/superpowers/plans/2026-11-15-orion-vpn.md).
+resource "helm_release" "admin_certificate" {
+  count     = var.admin_host == null ? 0 : 1
+  name      = "keycloak-admin-certificate"
+  namespace = local.ns
+  chart     = "${path.module}/charts/admin-certificate"
+
+  values = [yamlencode({
+    name       = local.admin_tls_secret
+    secretName = local.admin_tls_secret
+    host       = var.admin_host
+    issuer     = var.admin_issuer
+  })]
 }
 
 resource "kubernetes_service_v1" "keycloak" {
@@ -230,6 +283,15 @@ resource "kubernetes_service_v1" "keycloak" {
       name        = "management"
       port        = 9000
       target_port = "management"
+    }
+    # The VPN-only admin name: https://<admin_host> = this ClusterIP on 443.
+    dynamic "port" {
+      for_each = var.admin_host == null ? [] : [1]
+      content {
+        name        = "https"
+        port        = 443
+        target_port = "https"
+      }
     }
   }
 }

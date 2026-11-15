@@ -71,6 +71,15 @@ changed build/run/test command updates its recipe in the same change.
 
 ### Deployment
 
+**Reaching orion:** the operator VPN (WireGuard `wg0` on the box, `10.99.0.1`, UDP 51820; this machine is the
+NetworkManager connection `orion-vpn`) routes k3s's pod and Service networks with split DNS, so any Service answers
+at `<svc>.<ns>.svc.cluster.local` with no port-forward, and the kube context `orion` is `https://10.99.0.1:6443`
+(`just orion-vpn-status|up|down`, a new device `just orion-vpn-peer <name> <octet>`; VPN down → `just tunnel` +
+`orion_context=orion-ssh`). VPN-only HTTPS names `<name>.vpn.errantry.renownandruin.com` (root `vpn-names`: a CoreDNS
+rewrite to the Service + DNS-01 issuer `letsencrypt-dns`): Keycloak's admin console/API is
+`https://keycloak.vpn.errantry.renownandruin.com/admin/`; Garage's admin API is `garage.garage.svc.cluster.local:3903`.
+As built: `docs/superpowers/plans/2026-11-15-orion-vpn.md`.
+
 OpenTofu (not Terraform) in `deploy/`: the k3d twin of orion (`deploy/envs/local/`, cluster `mmo`, context `k3d-mmo`:
 `just twin-up`, `twin-images`, `twin-apply`, `twin-check`, `twin-down`; never the inner loop);
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan

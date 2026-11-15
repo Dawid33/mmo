@@ -7,7 +7,7 @@ output "namespace" {
 }
 
 output "admin_url" {
-  description = "Where the admin console / API answer while `just orion-keycloak-admin` runs."
+  description = "Where the admin console / API answer: https://<admin_host> over the operator VPN, or with no admin_host http://127.0.0.1:<admin_port> while `just orion-keycloak-admin` runs."
   value       = local.admin_url
 }
 

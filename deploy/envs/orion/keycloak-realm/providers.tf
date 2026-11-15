@@ -60,8 +60,8 @@ variable "keycloak_client_secret" {
   sensitive   = true
 }
 
-# The admin API is not public: `just orion-keycloak-admin` must be running
-# (it forwards http://127.0.0.1:8180) for every plan and apply of this root.
+# The admin API is not public: it is https://keycloak.vpn.errantry.renownandruin.com
+# (the keycloak root's admin_url), reached over the operator VPN.
 # It logs in as a service account, not as the human `admin` user: that user has
 # two-factor login, which a password grant cannot pass.
 provider "keycloak" {

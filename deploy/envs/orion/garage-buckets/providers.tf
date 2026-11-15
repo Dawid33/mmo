@@ -26,9 +26,15 @@ data "terraform_remote_state" "garage" {
   }
 }
 
-# The admin API is not public: `just orion-garage-admin` must be running (it
-# forwards http://127.0.0.1:3903) for every plan and apply of this root.
+variable "garage_admin_url" {
+  description = "Override of the admin API's address. Unset = the garage root's admin_url, its in-cluster name, reached over the operator VPN. VPN down: run `just orion-garage-admin` and pass `-var garage_admin_url=http://127.0.0.1:3903`."
+  type        = string
+  default     = null
+}
+
+# The admin API is not public: it is reached over the operator VPN
+# (docs/superpowers/plans/2026-11-15-orion-vpn.md), or a port-forward (above).
 provider "garage" {
-  endpoint = data.terraform_remote_state.garage.outputs.admin_url
+  endpoint = coalesce(var.garage_admin_url, data.terraform_remote_state.garage.outputs.admin_url)
   token    = data.terraform_remote_state.garage.outputs.admin_token
 }

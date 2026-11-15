@@ -22,8 +22,8 @@ output "website_urls" {
 }
 
 output "admin_url" {
-  description = "Where `just orion-garage-admin` forwards the admin API."
-  value       = "http://127.0.0.1:${local.ports.admin}"
+  description = "The admin API by its in-cluster name: reached over the operator VPN (docs/superpowers/plans/2026-11-15-orion-vpn.md). Without the VPN, `just orion-garage-admin` forwards it to http://127.0.0.1:3903."
+  value       = "http://garage.${local.ns}.svc.cluster.local:${local.ports.admin}"
 }
 
 output "admin_token" {

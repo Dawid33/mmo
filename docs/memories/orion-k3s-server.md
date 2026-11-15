@@ -9,7 +9,7 @@ metadata:
 ---
 
 The Hetzner box **5.9.7.138** (`hetzner-ryzen5-3600-1`: 12 CPU, 64 GiB, ~1.9 TB) runs **k3s
-v1.37.2** since 2026-11-06. Kube context **`orion`** (API reached through the user's ssh tunnel,
+v1.37.2** since 2026-11-06. Kube context **`orion`** (API over the operator VPN since 2026-11-15, `10.99.0.1:6443`; fallback ssh tunnel
 `just tunnel`). Built in: Traefik (ServiceLB 80/443), `local-path`, metrics-server.
 **Caddy is off and stays off**: the old compose web deploy and the WebTransport cert from Caddy's
 directory no longer work — the game cert must come from cert-manager (not done yet).

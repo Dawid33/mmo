@@ -60,9 +60,21 @@ variable "memory_limits" {
 }
 
 variable "admin_port" {
-  description = "Local port the admin console and admin API are reached on (`just orion-keycloak-admin` forwards it). Keycloak is told this address (KC_HOSTNAME_ADMIN), so the console only works through that forward."
+  description = "With no admin_host: the local port the admin console and admin API are reached on (`just orion-keycloak-admin` forwards it). Keycloak is told this address (KC_HOSTNAME_ADMIN), so the console only works through that forward."
   type        = number
   default     = 8180
+}
+
+variable "admin_host" {
+  description = "A VPN-only name for the admin console and admin API (the vpn-names root: it resolves to this Service only over the operator VPN), e.g. keycloak.vpn.errantry.renownandruin.com. Keycloak then serves TLS itself on 8443 (Service port 443) with a certificate from admin_issuer, and is told https://<admin_host> (KC_HOSTNAME_ADMIN). null = the admin_port forward. The browser console needs https or 127.0.0.1 (a secure context), hence the certificate."
+  type        = string
+  default     = null
+}
+
+variable "admin_issuer" {
+  description = "ClusterIssuer of admin_host's certificate: the vpn-names root's DNS-01 issuer (HTTP-01 cannot prove a name nothing public answers for)."
+  type        = string
+  default     = "letsencrypt-dns"
 }
 
 variable "metrics" {
