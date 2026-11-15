@@ -1888,6 +1888,167 @@ orion-login *args:
 orion-login-logs:
     kubectl --context {{orion_context}} -n login logs -f deploy/login --tail 200
 
+# One game world is one Kubernetes namespace. These recipes work on the world in
+# `world_ctx` / `world_ns`; the twin reuses them: `just world_ctx=k3d-mmo world_ns=world-twin world-status`.
+world_ctx := "orion"
+world_ns := "world-errantry"
+
+# worldctl inside the toolbox pod, where $VOXEL_WORLD_DB is. The URL is expanded in the pod and never
+# printed. e.g. `just world-ctl forge --preset default`, `just world-ctl rollback --yes`. forge, retile
+# and export take `--db <url>`; clock-reset, super-region, retire-host and rollback take the URL first
+# (the forms of worldctl's usage text).
+[positional-arguments]
+world-ctl *args:
+    kubectl --context {{world_ctx}} -n {{world_ns}} exec deploy/toolbox -c toolbox -- sh -c 'cmd=$1; shift; case "$cmd" in forge|retile|export) exec worldctl "$cmd" --db "$VOXEL_WORLD_DB" "$@" ;; *) exec worldctl "$cmd" "$VOXEL_WORLD_DB" "$@" ;; esac' sh "$@"
+
+# The world's pods, its Services' node ports, and each pod's /readyz body (through the API server's
+# pod proxy to the health port 9100).
+world-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
+    k get pods -o wide
+    echo
+    k get svc -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,PORT:.spec.ports[*].port,NODEPORT:.spec.ports[*].nodePort
+    echo
+    for pod in $(k get pods -o jsonpath='{.items[*].metadata.name}'); do
+        echo "== $pod /readyz"
+        k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" || echo "(no answer)"
+        echo
+    done
+
+# A pod's /metrics through the API server's pod proxy, e.g. `just world-metrics hosts-0`.
+world-metrics pod:
+    kubectl --context {{world_ctx}} -n {{world_ns}} get --raw /api/v1/namespaces/{{world_ns}}/pods/{{pod}}:9100/proxy/metrics
+
+# Follow a pod's log, e.g. `just world-logs hosts-0`.
+world-logs pod:
+    kubectl --context {{world_ctx}} -n {{world_ns}} logs -f --tail 200 {{pod}}
+
+# Stop the world: hosts to 0 (each asks for a leave cut and exits, bounded by about 90 s), wait until
+# no host pod is left, then the coordinator to 0. Waits up to WORLD_STOP_TIMEOUT s (default 150).
+world-stop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
+    timeout="${WORLD_STOP_TIMEOUT:-150}"
+    # wait_gone <pod-name-regex>: no pod matches; a failed listing is retried, never read as empty.
+    wait_gone() {
+        local deadline=$((SECONDS + timeout)) listing left
+        while :; do
+            if listing=$(k get pods -o name 2>&1); then
+                left=$(printf '%s\n' "$listing" | grep -c "^pod/$1" || true)
+                [ "$left" -eq 0 ] && return 0
+                what="$left pod(s) still there"
+            else
+                what="the pod listing failed ($(printf '%s' "$listing" | head -1))"
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "world-stop: after $timeout s: $what" >&2
+                return 1
+            fi
+            sleep 2
+        done
+    }
+    echo "world-stop: hosts to 0, waiting until no host pod is left ($timeout s)"
+    k scale statefulset/hosts --replicas=0
+    wait_gone 'hosts-[0-9]'
+    echo "world-stop: coordinator to 0"
+    k scale deploy/coordinator --replicas=0
+    wait_gone 'coordinator-'
+    echo "world-stop: the world is down (web and toolbox keep running); \`just world-start\` brings it back"
+
+# Start the world: coordinator to 1, wait until it is Ready, then the hosts to the count of
+# `hosts-<i>.env` keys in the ConfigMap host-endpoints, wait until every host is Ready.
+world-start:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
+    keys=$(k get configmap host-endpoints -o json)
+    count=$(printf '%s\n' "$keys" | grep -c '^ *"hosts-[0-9]*\.env":' || true)
+    if [ "$count" -lt 1 ]; then
+        echo "world-start: ConfigMap host-endpoints has no hosts-<i>.env key; refusing to start" >&2
+        exit 1
+    fi
+    echo "world-start: coordinator to 1"
+    k scale deploy/coordinator --replicas=1
+    k rollout status deploy/coordinator --timeout=5m
+    echo "world-start: hosts to $count"
+    k scale statefulset/hosts --replicas="$count"
+    k rollout status statefulset/hosts --timeout=300s
+    # rollout status on a freshly scaled StatefulSet can return before the new pods exist.
+    ready=$(k get statefulset/hosts -o jsonpath='{.status.readyReplicas}')
+    [ "${ready:-0}" -eq "$count" ] || { echo "world-start: ${ready:-0} of $count hosts Ready" >&2; exit 1; }
+    echo "world-start: the world is up ($count hosts)"
+
+# Print (never run) the `just orion-login world add …` command that registers this world with the login
+# service. `world add` REPLACES the world's row: run it with every option, or the omitted ones are lost.
+# The world id is the namespace without its `world-` prefix; `name=` sets the displayed name.
+# --quic / --wt are host 0's VOXEL_ADVERTISE_QUIC / _WT from the ConfigMap host-endpoints; the link pin is the
+# SHA-256 of the public certificate in Secret host-link.
+world-register name="Errantry":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
+    ns="{{world_ns}}"
+    id="${ns#world-}"
+    env0=$(k get configmap host-endpoints -o jsonpath='{.data.hosts-0\.env}')
+    # value <VAR>: the value of VAR in host 0's env file, `export ` and quotes stripped.
+    value() { printf '%s\n' "$env0" | sed -n "s/^\(export \)\{0,1\}$1=//p" | head -1 | tr -d "\"'"; }
+    quic=$(value VOXEL_ADVERTISE_QUIC)
+    wt=$(value VOXEL_ADVERTISE_WT)
+    if [ -z "$quic" ] || [ -z "$wt" ]; then
+        echo "world-register: hosts-0.env has no VOXEL_ADVERTISE_QUIC / VOXEL_ADVERTISE_WT" >&2
+        exit 1
+    fi
+    pin=$(k get secret host-link -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
+    case "$pin" in
+        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret host-link" >&2; exit 1 ;;
+    esac
+    [ "${#pin}" -eq 64 ] || { echo "world-register: link pin is not 64 hex digits" >&2; exit 1; }
+    echo "Run this (it replaces the row of world '$id'; nothing was changed by this recipe):"
+    echo
+    echo "just orion-login world add $id --name '{{name}}' --quic $quic --wt $wt --link hosts-0.hosts.$ns.svc.cluster.local:6490 --link-cert $pin"
+
+# Roll the world's four workloads back one revision, hosts stopped meanwhile: stop (world-stop), `rollout undo`
+# on coordinator, toolbox, web and hosts, start (world-start). A database migration made by the newer
+# build is NOT undone. Only the last revision of each workload is kept.
+orion-world-rollback: _world-rollback-warning world-stop _world-rollback-undo && world-start
+
+_world-rollback-warning:
+    @echo "orion-world-rollback: a schema migration made by the newer build is NOT undone by this; if the older build cannot read the database, restore it: just orion-pg-restore <world> <object>"
+
+_world-rollback-undo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "orion-world-rollback: the world is DOWN; if an undo fails, fix it and run \`just world-start\`" >&2
+    for obj in deploy/coordinator deploy/toolbox deploy/web statefulset/hosts; do
+        echo "  + kubectl --context {{world_ctx}} -n {{world_ns}} rollout undo $obj"
+        kubectl --context {{world_ctx}} -n {{world_ns}} rollout undo "$obj"
+    done
+
+# Run the nightly database dump now (a Job from the CronJob pg-dump in the postgres namespace).
+# This writes to the cluster. Watch it: `kubectl --context orion -n postgres logs -f job/<the printed name>`.
+orion-pg-backup-now:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    job="pg-dump-manual-$(date -u +%Y%m%d%H%M%S)"
+    kubectl --context {{orion_context}} -n postgres create job --from=cronjob/pg-dump "$job"
+    echo "orion-pg-backup-now: started $job"
+
+# PRINTS the commands that restore one dump into a SCRATCH database (it runs nothing: a restore
+# overwrites). world is the world id (e.g. errantry), object the dump's key under it
+# (e.g. 20261115T031500Z.dump; `aws s3 ls` lists them). Restoring over the live database is a
+# separate, deliberate step: stop the world first (`just world-stop`).
+orion-pg-restore world object:
+    @echo "# 1. fetch the dump (S3 endpoint and bucket: the pg-dump CronJob's S3_ENDPOINT / BUCKET)"
+    @echo "aws s3 cp --endpoint-url <S3_ENDPOINT> s3://<BUCKET>/{{world}}/{{object}} ./{{world}}-{{object}}"
+    @echo "# 2. a scratch database in the postgres cluster (the primary pod of its Cluster)"
+    @echo "kubectl --context {{orion_context}} -n postgres exec <primary-pod> -- createdb world_{{world}}_restore"
+    @echo "# 3. restore into it"
+    @echo "kubectl --context {{orion_context}} -n postgres exec -i <primary-pod> -- pg_restore --no-owner -d world_{{world}}_restore < ./{{world}}-{{object}}"
+    @echo "# 4. look at it (the world's own database is world_{{world}}; do not restore over it with the world running)"
+
 # Put the login root's service token on the box (/srv/mmo/secrets/service-token, mode 600) for the
 # game host. The token travels through the pipe only.
 orion-login-token-push:
