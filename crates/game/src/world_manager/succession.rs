@@ -567,6 +567,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.flush_unowned();
         // Spawn orders that waited for the predecessor's sync go on.
         self.retry_held_spawns();
+        // Clients sent to the predecessor for a region are answered again (R4 Task 16): sent
+        // to the heir, or — this host the heir — told to take it here once adopted.
+        self.reanswer_redirected_to(pred);
     }
 
     /// [`Self::apply_succession`] of a `Leave` succession whose predecessor already came back
@@ -612,6 +615,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.flush_unowned();
         self.retry_held_spawns();
+        self.reanswer_redirected_to(pred);
     }
 
     /// A survivor's report of succession `id` (`from`; this host is its heir): kept for the
@@ -1024,6 +1028,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.flush_unowned();
         self.retry_held_spawns();
+        // Subscribes that waited for the land are answered (served here, or the client told
+        // to take a region here that it took from the predecessor).
+        self.answer_asked_elsewhere();
     }
 
     /// The super-regions this host inherits and has not adopted yet, with their succession.

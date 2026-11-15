@@ -918,7 +918,10 @@ pub enum ServerPacket {
     /// sends ordinal 0 and no addresses).
     Host(crate::HostEndpoint),
     /// The answer to `RequestRegionConnection` for a region another host owns: connect to
-    /// `endpoint` with `ticket` (`Credential::Observer`) and subscribe there.
+    /// `endpoint` with `ticket` (`Credential::Observer`) and subscribe there. A home may send
+    /// it unasked for a region it sent the client elsewhere for, after that host's
+    /// succession (R4): naming the heir, or naming the home itself (the region is served on
+    /// the home connection from now on; `ticket` is then never presented).
     RegionElsewhere { region: RegionId, endpoint: crate::HostEndpoint, ticket: ObserverTicket },
     /// The player's hop on this host (its placement count across hosts,
     /// `PlayerHandoff::hop`), sent right before the `PlayerRegion` that makes this

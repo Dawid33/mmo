@@ -56,6 +56,10 @@ pub const OBSERVER_ORDER_TTL_SECS: u64 = 120;
 pub const OBSERVER_IDLE_CLOSE_MS: u64 = 30_000;
 /// What an idle observer session is told when it is closed ([`OBSERVER_IDLE_CLOSE_MS`]).
 pub const OBSERVER_IDLE_REFUSAL: &str = "observer session idle: no subscription on this server";
+/// How often [`WorldManager::maintain`] goes over the subscribes this host could not answer
+/// yet (`Session::asked_elsewhere`, R4): each is answered as soon as the owner is known and
+/// reachable, or this host owns it — at most this late.
+pub const ASKED_ELSEWHERE_ANSWER_MS: u64 = 250;
 /// Where a host draws its observer nonces ([`WorldManager::set_endpoints`]): the server's
 /// is the OS's randomness — a nonce must be unpredictable from any number of earlier ones.
 pub type NonceSource = Box<dyn FnMut() -> u64 + Send>;
@@ -668,6 +672,16 @@ struct Session {
     idle_since_ms: u64,
     subscribed: BTreeSet<RegionCoords>,
     lod_subscribed: BTreeSet<LodKey>,
+    /// Regions the client subscribed to here that this host could not answer yet (R4): no
+    /// owner known (`Free` / `Unknown`, an heir's land not adopted yet), or an owner this
+    /// host cannot reach (a link down, a host dead before its succession, a host that left).
+    /// Answered by [`WorldManager::maintain`] as soon as it can — a home sends the client to
+    /// the owner (`RegionElsewhere`, a fresh ticket) or serves the region once it owns it;
+    /// an observer session only serves it, once this host owns it (its client reads no
+    /// `RegionElsewhere` from it). Leaves on release, and with the session. Home-host state:
+    /// it never travels with a hop (a session that stops being the home forgets it, and the
+    /// client asks its new home).
+    asked_elsewhere: BTreeSet<RegionCoords>,
 }
 
 struct RegionLink {
@@ -1286,6 +1300,14 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Observer tickets handed out, per `(client, owner host)`: the nonce and the `now_ms`
     /// it was minted at (`peers.rs`, `observer_ticket`).
     observer_tickets: BTreeMap<(ClientId, u32), (u64, u64)>,
+    /// Every region a home session here was sent to another host for (`RegionElsewhere`),
+    /// with that host — as far as this host knows, the connection the client takes the
+    /// region from (R4). After a succession of that host the region is answered again
+    /// (`succession.rs`); a subscribe or release of it here, a hop of the home, and the
+    /// session's end drop the entry (bounded by the client's window).
+    redirected: BTreeMap<(ClientId, RegionCoords), u32>,
+    /// When the remembered subscribes were last gone over ([`ASKED_ELSEWHERE_ANSWER_MS`]).
+    asked_elsewhere_answered_ms: u64,
     /// Observer orders other hosts sent, for the server edge
     /// ([`Self::take_observer_orders`]): `(client, player, nonce, ttl_secs)`.
     observer_orders: Vec<(ClientId, PlayerId, u64, u64)>,
@@ -1534,6 +1556,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             departed: BTreeMap::new(),
             awaiting_session: BTreeMap::new(),
             observer_tickets: BTreeMap::new(),
+            redirected: BTreeMap::new(),
+            asked_elsewhere_answered_ms: 0,
             observer_orders: Vec::new(),
             nonces: None,
             observer_revocations: Vec::new(),
@@ -2327,6 +2351,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.close_idle_observers(now_ms);
         // A succession waiting for its base cut (a commit found by the store's poll).
         self.retry_successions();
+        // Subscribes this host could not answer when they came (`peers.rs`).
+        if now_ms.saturating_sub(self.asked_elsewhere_answered_ms) >= ASKED_ELSEWHERE_ANSWER_MS {
+            self.asked_elsewhere_answered_ms = now_ms;
+            self.answer_asked_elsewhere();
+        }
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions
             .keys()
@@ -3499,6 +3528,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|(c, s)| {
                 s.kind == SessionKind::Observer
                     && s.subscribed.is_empty()
+                    // A region it waits for here (an heir's land not adopted yet) is no idle.
+                    && s.asked_elsewhere.is_empty()
                     && !self.in_flight.values().any(|f| f.bundle.client.as_ref().is_some_and(|(b, _)| b == *c))
                     && now_ms.saturating_sub(s.idle_since_ms) >= OBSERVER_IDLE_CLOSE_MS
             })
@@ -3527,6 +3558,8 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// `id`'s session (if any) ends: its region and LOD subscriptions go.
     fn end_session(&mut self, id: ClientId, now_ms: u64) {
+        // What it was sent elsewhere for goes with it (its `asked_elsewhere` with the session).
+        self.redirected.retain(|(c, _), _| *c != id);
         let Some(session) = self.sessions.remove(&id) else { return };
         for rc in session.subscribed {
             self.unsubscribe_link(id, rc, now_ms);
@@ -4193,11 +4226,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         if !self.owns(rc) {
             // Another host runs it: the client is sent there (`peers.rs`); nobody this host
-            // knows of runs it: dropped, as for an unreachable owner.
+            // knows of runs it, or its owner is unreachable: remembered and answered later.
             self.subscribe_elsewhere(client, rc);
             return;
         }
-        self.sessions.get_mut(&client).expect("checked").subscribed.insert(rc);
+        // Asked here and served here: nothing of it is left to answer, and the client takes
+        // it from this connection.
+        self.redirected.remove(&(client, rc));
+        let session = self.sessions.get_mut(&client).expect("checked");
+        session.asked_elsewhere.remove(&rc);
+        session.subscribed.insert(rc);
         self.ensure_running(rc);
         // Unavailable (its store read failed): subscribed again at its retry.
         let Some(link) = self.regions.get_mut(&rc) else { return };
@@ -4214,7 +4252,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     fn unsubscribe(&mut self, client: ClientId, rc: RegionCoords, now_ms: u64) {
+        self.redirected.remove(&(client, rc));
         if let Some(session) = self.sessions.get_mut(&client) {
+            session.asked_elsewhere.remove(&rc);
             session.subscribed.remove(&rc);
             if session.subscribed.is_empty() {
                 session.idle_since_ms = now_ms;

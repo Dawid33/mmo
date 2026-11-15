@@ -8516,3 +8516,193 @@ fn survivor_booted_between(rig: &mut MultiRig) {
 fn a_survivor_booted_before_the_declaration_reports_nothing_of_a_released_leaver() {
     sweep("a_survivor_booted_before_the_declaration_reports_nothing_of_a_released_leaver", 3, 1, HEIR_SWEEP_SEEDS, survivor_booted_between);
 }
+
+// --- The home answers for regions whose owner changed (R4 Task 16) ---------------------
+
+/// The `RegionElsewhere`s host `h` sent the test player for `rc` since recording began:
+/// the host each names, and its ticket.
+fn elsewhere_for(rig: &MultiRig, h: u32, rc: RegionCoords) -> Vec<(u32, game::ObserverTicket)> {
+    packets_to(rig, h)
+        .into_iter()
+        .filter_map(|p| match p {
+            game::ServerPacket::RegionElsewhere { region, endpoint, ticket } if *region == rc => {
+                Some((endpoint.ordinal, ticket.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether host `h` sent the test player region traffic of `rc` since recording began (it
+/// serves the region to the client's session there; the rig keeps no snapshot packet).
+fn served_to_player(rig: &MultiRig, h: u32, rc: RegionCoords) -> bool {
+    packets_to(rig, h).into_iter().any(|p| match p {
+        game::ServerPacket::GameEvent(e) | game::ServerPacket::HashedGameEvent(e, ..) => e.region_id == rc,
+        _ => false,
+    })
+}
+
+/// Cut rounds (every host's upkeep runs) — at most `budget` — until `done`; whether it came.
+fn until_upkept(rig: &mut MultiRig, budget: usize, mut done: impl FnMut(&mut MultiRig) -> bool) -> bool {
+    for _ in 0..budget {
+        rig.cut_round();
+        if done(rig) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The test player's subscribe of `rc`, as its client sends it.
+fn subscribe_packet(rc: RegionCoords) -> game::ServerEvent {
+    game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rc), P_CLIENT)
+}
+
+/// The test player's release of `rc`, as its client sends it.
+fn release_packet(rc: RegionCoords) -> game::ServerEvent {
+    game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(rc), P_CLIENT)
+}
+
+/// Host `hb` collects observer orders (at most [`CROSS_ROUNDS`] cut rounds) until one for
+/// the test player with `nonce` came: whether it did.
+fn until_order(rig: &mut MultiRig, hb: u32, nonce: u64) -> bool {
+    let mut seen = false;
+    until_upkept(rig, CROSS_ROUNDS, |rig| {
+        let orders = rig.hosts[hb as usize].manager.take_observer_orders();
+        seen |= orders.iter().any(|(c, p, n, _)| (*c, *p, *n) == (P_CLIENT, P_PLAYER, nonce));
+        seen
+    });
+    seen
+}
+
+/// A region near the origin host `h` owns (`static` layout), other than every one of `not`.
+fn another_region_of(hosts: u32, h: u32, not: &[RegionCoords]) -> RegionCoords {
+    for r in 0..16 {
+        for x in -r..=r {
+            for z in -r..=r {
+                let rc = RegionCoords::new(x, z);
+                if (game::Static { ordinal: 0, hosts }).owner_of(rc, 1) == h && !not.contains(&rc) {
+                    return rc;
+                }
+            }
+        }
+    }
+    panic!("host {h} owns no region near the origin");
+}
+
+/// The test player's home subscribes to a region of a host it cannot reach (its link is
+/// down): nothing is said meanwhile, and the subscribe is not dropped — once that host is
+/// back, the home answers it, once, with a ticket the owner is told to expect. A region
+/// subscribed and released meanwhile is never answered.
+fn answered_when_it_returns(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let released = another_region_of(2, hb, &[b]);
+    rig.run(a);
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    rig.link_down(ha, hb);
+    assert!(until_upkept(rig, WAIT_ROUNDS, |rig| !rig.hosts[ha as usize].manager.reaches(b)), "host {hb} is unreachable");
+    rig.record_packets();
+    for rc in [b, released] {
+        rig.hosts[ha as usize].event(subscribe_packet(rc));
+    }
+    rig.hosts[ha as usize].event(release_packet(released));
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    assert!(elsewhere_for(rig, ha, b).is_empty(), "nothing is said while the owner is unreachable");
+    rig.link_up(ha, hb);
+    assert!(
+        until_upkept(rig, CROSS_ROUNDS, |rig| !elsewhere_for(rig, ha, b).is_empty()),
+        "the subscribe of {b:?} is answered once host {hb} is back (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    let answers = elsewhere_for(rig, ha, b);
+    assert_eq!(answers.iter().map(|(o, _)| *o).collect::<Vec<_>>(), vec![hb], "one RegionElsewhere, naming host {hb}");
+    assert_eq!(answers[0].1.client, P_CLIENT);
+    assert!(until_order(rig, hb, answers[0].1.nonce), "host {hb} is told to expect the ticket");
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    assert_eq!(elsewhere_for(rig, ha, b).len(), 1, "answered once");
+    assert!(elsewhere_for(rig, ha, released).is_empty(), "a region released meanwhile is never answered");
+    // The home remembers where it sent the client (for a succession of that host) and
+    // nothing else; neither travels with the body: once it is handed to host B, the old
+    // home (an observer session now) holds none of it.
+    assert_eq!(rig.hosts[ha as usize].manager.client_answers(P_CLIENT), (vec![], vec![(b, hb)]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_player_settled_in(rig, b);
+    assert_eq!(rig.hosts[ha as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
+    assert_eq!(rig.hosts[ha as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "the hop drops the old home's");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_subscribe_for_an_unreachable_owner_is_answered_when_it_returns() {
+    sweep("a_subscribe_for_an_unreachable_owner_is_answered_when_it_returns", 2, 1, SEEDS / 4, answered_when_it_returns);
+}
+
+/// The test player's home sent it to the owner of `rd` (host D) for that region; D dies and
+/// its land goes to an heir. The home answers again for `rd`, unasked: naming the heir (a
+/// ticket the heir is told to expect; the heir serves `rd` to the client's observer session
+/// once it adopted), or — the home IS the heir — naming itself once it adopted (never
+/// before), and serving `rd` on the home session when the client subscribes there.
+fn redirected_to_the_heir(rig: &mut MultiRig, home_is_heir: bool) {
+    let chain = heir_world(rig);
+    let rd = chain[1];
+    let dead = rig.owner(rd);
+    let (heir, other) = heir_and_survivor(rig, dead);
+    let home = if home_is_heir { heir } else { other.expect("three hosts") };
+    let rh = chain.iter().copied().find(|rc| rig.owner(*rc) == home).expect("the home's region");
+    rig.connect_home(home, P_CLIENT, P_PLAYER, record_at(rh, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    rig.record_packets();
+    rig.hosts[home as usize].event(subscribe_packet(rd));
+    let first: Vec<u32> = elsewhere_for(rig, home, rd).iter().map(|(o, _)| *o).collect();
+    assert_eq!(first, vec![dead], "sent to its owner first");
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    assert_eq!(succession.heir, heir);
+    let mut early = false;
+    let answered = until_upkept(rig, SUCCESSION_ROUNDS, |rig| {
+        let again = elsewhere_for(rig, home, rd).len() > 1;
+        // The heir answers for its inherited land only once it adopted it.
+        early |= again && home_is_heir && !rig.hosts[home as usize].manager.inheriting().is_empty();
+        again
+    });
+    assert!(answered, "the home answered again for {rd:?} after host {dead}'s succession (seed {}, link delay {})", rig.seed, rig.link_delay);
+    assert!(!early, "the heir named itself before it adopted");
+    let answers = elsewhere_for(rig, home, rd);
+    assert_eq!(answers.len(), 2, "answered again once: {answers:?}");
+    let (to, ticket) = answers[1].clone();
+    assert_eq!(to, heir, "the region's owner now");
+    if home_is_heir {
+        // Its client maps the region to the home and subscribes there.
+        rig.hosts[home as usize].event(subscribe_packet(rd));
+        assert!(until_upkept(rig, CROSS_ROUNDS, |rig| served_to_player(rig, home, rd)), "{rd:?} is served on the home session");
+    } else {
+        assert!(until_order(rig, heir, ticket.nonce), "the heir is told to expect the ticket");
+        rig.hosts[heir as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+        rig.hosts[heir as usize].event(subscribe_packet(rd));
+        assert!(
+            until_upkept(rig, SUCCESSION_ROUNDS, |rig| served_to_player(rig, heir, rd)),
+            "the heir serves {rd:?} to the client's observer session (seed {}, link delay {})",
+            rig.seed,
+            rig.link_delay
+        );
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn observers_of_a_dead_host_are_redirected_to_the_heir() {
+    sweep("observers_of_a_dead_host_are_redirected_to_the_heir (home survives)", 3, 1, SEEDS / 4, |rig| {
+        redirected_to_the_heir(rig, false)
+    });
+    sweep("observers_of_a_dead_host_are_redirected_to_the_heir (home is the heir)", 3, 1, SEEDS / 4, |rig| {
+        redirected_to_the_heir(rig, true)
+    });
+}

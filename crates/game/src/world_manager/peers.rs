@@ -423,6 +423,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             session.kind = SessionKind::Observer;
             session.idle_since_ms = now_ms;
         }
+        self.forget_home_answers(client);
         self.departed.insert(player, owner);
         self.locations.remove(&bundle.id);
         let handoff = crate::PlayerHandoff { client, player, claim, login, park, hop };
@@ -552,13 +553,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             session.kind = SessionKind::Observer;
             session.idle_since_ms = now_ms;
         }
+        self.forget_home_answers(client);
         self.departed.insert(player, owner);
         let handoff = crate::PlayerHandoff { client, player, claim, login, park: false, hop };
         // Parked after `m.from` answered the pending cut: its snapshot holds the body.
         let view = self.in_cut_view(m.from);
         self.send_reliable(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target }, view);
         self.refresh_keepalive(m.from, now_ms);
-        self.redirect(client, m.target);
+        let _ = self.redirect(client, m.target);
     }
 
     /// A player moved here by host `from` ([`Self::move_to_peer`]): this host's now — its
@@ -733,34 +735,158 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.client_disconnected(client, self.clock_ms);
     }
 
-    /// `client` subscribes to `rc`, which another host owns: told where to go, with a
-    /// ticket that host expects ([`Self::observer_ticket`]). Nothing while that host is
-    /// unreachable.
+    /// `client` subscribes to `rc`, which this host does not own: told where to go — the
+    /// host that owns it, with a ticket that host expects ([`Self::observer_ticket`]) — or,
+    /// while no owner is known or the owner is unreachable (a link down, a host dead and its
+    /// succession not applied, a host that left), remembered (`Session::asked_elsewhere`)
+    /// and answered by [`Self::answer_asked_elsewhere`] as soon as it can be ("wait, never
+    /// guess"). An observer session is never redirected from here (its client reads no
+    /// `RegionElsewhere` from this connection, as before); it only waits for this host to
+    /// own the region.
     pub(super) fn subscribe_elsewhere(&mut self, client: ClientId, rc: RegionCoords) {
+        let Some(kind) = self.sessions.get(&client).map(|s| s.kind) else { return };
         if !self.reaches(rc) {
-            // With no owner known it is wanted for a claim; the subscribe is dropped all the
-            // same (the client asks again; holding it is Task 16's).
+            // With no owner known it is wanted for a claim.
             self.note_unowned(rc);
-            log::debug!("client {client}: {rc:?}'s owner ({:?}) is not reachable; subscribe dropped", self.owner_of(rc));
+            log::debug!("client {client}: {rc:?}'s owner ({:?}) is not reachable; the subscribe waits", self.owner_of(rc));
+            self.remember_asked(client, rc);
             return;
         }
-        self.redirect(client, rc);
+        match self.redirect(client, rc) {
+            Redirect::Sent(owner) if kind == SessionKind::Home => self.redirected_to(client, rc, owner),
+            Redirect::Sent(_) | Redirect::Never => {}
+            Redirect::Later => self.remember_asked(client, rc),
+        }
+    }
+
+    /// `client`'s subscribe of `rc` waits here (`Session::asked_elsewhere`); the client
+    /// takes the region from this connection until it is answered.
+    fn remember_asked(&mut self, client: ClientId, rc: RegionCoords) {
+        self.redirected.remove(&(client, rc));
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.asked_elsewhere.insert(rc);
+        }
+    }
+
+    /// `client`'s home session here sent it to host `owner` for `rc`.
+    fn redirected_to(&mut self, client: ClientId, rc: RegionCoords, owner: u32) {
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.asked_elsewhere.remove(&rc);
+        }
+        self.redirected.insert((client, rc), owner);
+    }
+
+    /// `client`'s session here is not its home any more (its body went to another host): what
+    /// it remembered for the client as its home goes (`asked_elsewhere`, `redirected`) — it
+    /// does not travel with the body; the client asks its new home for what it still lacks.
+    pub(super) fn forget_home_answers(&mut self, client: ClientId) {
+        self.redirected.retain(|(c, _), _| *c != client);
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.asked_elsewhere.clear();
+        }
+    }
+
+    /// Every remembered subscribe (`Session::asked_elsewhere`) this host can answer now is
+    /// answered: one this host owns now is subscribed here — after a `RegionElsewhere`
+    /// naming this host when the client takes the region from another host's connection
+    /// (`redirected`: an heir answering for land it inherited) — and a home session's one
+    /// whose owner is known and reachable is sent there with a fresh ticket. The others
+    /// stay. Logged per batch.
+    pub(super) fn answer_asked_elsewhere(&mut self) {
+        let waiting: Vec<(ClientId, RegionCoords, SessionKind)> = self
+            .sessions
+            .iter()
+            .flat_map(|(c, s)| s.asked_elsewhere.iter().map(move |rc| (*c, *rc, s.kind)))
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let (mut served, mut named_here, mut sent) = (0usize, 0usize, 0usize);
+        for (client, rc, kind) in waiting {
+            if self.owns(rc) {
+                if kind == SessionKind::Home && self.redirected.contains_key(&(client, rc)) {
+                    // The client takes it from another host's connection: told to take it
+                    // here; its subscribe on this connection follows (`subscribe`).
+                    if let Some(session) = self.sessions.get_mut(&client) {
+                        session.asked_elsewhere.remove(&rc);
+                    }
+                    self.redirected.remove(&(client, rc));
+                    let endpoint = self.endpoint.clone();
+                    // Never presented: a client opens no connection to its home host.
+                    let ticket = crate::ObserverTicket { client, nonce: 0 };
+                    let _ = self.out.send((Some(client), ServerPacket::RegionElsewhere { region: rc, endpoint, ticket }));
+                    named_here += 1;
+                } else {
+                    self.subscribe(client, rc);
+                    served += 1;
+                }
+                continue;
+            }
+            if kind != SessionKind::Home || !self.reaches(rc) {
+                continue;
+            }
+            if self.foreign_host(rc).is_some_and(|owner| !self.peer_endpoints.contains_key(&owner)) {
+                // Its endpoint comes with its hello (`redirect` would warn every pass).
+                continue;
+            }
+            match self.redirect(client, rc) {
+                Redirect::Sent(owner) => {
+                    self.redirected_to(client, rc, owner);
+                    sent += 1;
+                }
+                Redirect::Later => {}
+                Redirect::Never => {
+                    if let Some(session) = self.sessions.get_mut(&client) {
+                        session.asked_elsewhere.remove(&rc);
+                    }
+                }
+            }
+        }
+        if served + named_here + sent > 0 {
+            log::info!(
+                "[server] remembered subscribes answered: {served} served here, {named_here} named this host (inherited), \
+                 {sent} sent to their owner"
+            );
+        }
+    }
+
+    /// Host `pred` was succeeded (its land is the heir's now): every region a home session
+    /// here was sent to it for is answered again (`redirected`, the entry kept as where the
+    /// client takes the region from until then) — now, or when it can be.
+    pub(super) fn reanswer_redirected_to(&mut self, pred: u32) {
+        let to_pred: Vec<(ClientId, RegionCoords)> =
+            self.redirected.iter().filter(|(_, o)| **o == pred).map(|(k, _)| *k).collect();
+        if to_pred.is_empty() {
+            return;
+        }
+        log::info!("[server] {} region(s) clients were sent to host {pred} for are answered again", to_pred.len());
+        for (client, rc) in to_pred {
+            match self.sessions.get_mut(&client) {
+                Some(session) if session.kind == SessionKind::Home => {
+                    session.asked_elsewhere.insert(rc);
+                }
+                _ => {
+                    self.redirected.remove(&(client, rc));
+                }
+            }
+        }
+        self.answer_asked_elsewhere();
     }
 
     /// `client` is told to go to the host that owns `rc` (its endpoint as last known, a
     /// ticket that host is told to expect — queued like everything to it).
-    fn redirect(&mut self, client: ClientId, rc: RegionCoords) {
+    fn redirect(&mut self, client: ClientId, rc: RegionCoords) -> Redirect {
         let Some(owner) = self.foreign_host(rc) else {
             log::warn!("client {client}: {rc:?} is not another host's ({:?}); subscribe dropped", self.owner_of(rc));
-            return;
+            return Redirect::Never;
         };
         let Some(endpoint) = self.peer_endpoints.get(&owner).cloned() else {
-            log::warn!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known; subscribe dropped");
-            return;
+            log::warn!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known yet; the subscribe waits");
+            return Redirect::Later;
         };
         if self.sessions.get(&client).and_then(|s| s.player).is_none() {
             log::warn!("client {client}: no player for its session; subscribe to {rc:?} dropped");
-            return;
+            return Redirect::Never;
         }
         if self.nonces.is_none() {
             // No source (`set_endpoints` not called): no ticket.
@@ -768,10 +894,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.unseeded_warned = true;
                 log::error!("[server] no nonce source (set_endpoints): subscribes to other hosts' regions are dropped");
             }
-            return;
+            return Redirect::Never;
         }
         let ticket = self.observer_ticket(client, owner, self.clock_ms);
         let _ = self.out.send((Some(client), ServerPacket::RegionElsewhere { region: rc, endpoint, ticket }));
+        Redirect::Sent(owner)
+    }
+
+    /// Test support: the regions `client`'s session here waits to answer
+    /// (`Session::asked_elsewhere`), and those it sent the client elsewhere for, with the host.
+    #[doc(hidden)]
+    pub fn client_answers(&self, client: ClientId) -> (Vec<RegionCoords>, Vec<(RegionCoords, u32)>) {
+        let asked = self.sessions.get(&client).map(|s| s.asked_elsewhere.iter().copied().collect()).unwrap_or_default();
+        let redirected = self.redirected.iter().filter(|((c, _), _)| *c == client).map(|((_, rc), o)| (*rc, *o)).collect();
+        (asked, redirected)
     }
 
     /// The ticket `client` presents to host `owner`: minted once (a fresh random nonce,
@@ -1064,6 +1200,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             let waiting = self.peer_waiting.get(&o).into_iter().flatten();
             needs.extend(session.chain(waiting).filter_map(reliable_target).map(|rc| crate::super_region_of(rc, s)));
         }
+        // A subscribe waiting for that land (`Session::asked_elsewhere`, R4 Task 16).
+        needs.extend(self.sessions.values().flat_map(|x| x.asked_elsewhere.iter()).map(|rc| crate::super_region_of(*rc, s)));
         // Only land a departed host still holds.
         needs.retain(|sr| matches!(self.owner_of_sr(*sr), crate::Owner::Host(h) if self.left_peers.contains_key(&h)));
         // Kept a second period: a need still there at the next scan is not logged again.
@@ -1786,6 +1924,16 @@ pub(super) struct CountedPart {
     pub players: Vec<(PlayerId, PlayerRecord)>,
     /// The ids of everything owed above the count (the journal keeps these `Sent`).
     pub kept_sent: BTreeSet<u64>,
+}
+
+/// What [`WorldManager::redirect`] did with a subscribe.
+enum Redirect {
+    /// The client was sent to this host (`RegionElsewhere`).
+    Sent(u32),
+    /// Not now (the owner's endpoint is not known yet): it may be later.
+    Later,
+    /// Never from here (no player for the session, no nonce source, not another host's).
+    Never,
 }
 
 /// What an unacknowledged message to another host is in a cut part that writes it (toward
