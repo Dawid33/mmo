@@ -130,7 +130,7 @@ pub fn register_or_wait(
         let why = match store.register_host(row.clone(), fence, policy)? {
             BootVerdict::Registered(boot) => return Ok(Some(boot)),
             BootVerdict::Wait(WaitFor::Succession) => {
-                "the previous process of this ordinal was declared dead and its land is being inherited; waiting for the succession"
+                "an open succession is inheriting this ordinal's land; waiting for it to settle"
             }
             BootVerdict::Wait(WaitFor::Vouched) => {
                 "the previous process of this ordinal has not been declared dead yet; waiting for the coordinator"

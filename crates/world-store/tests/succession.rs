@@ -584,7 +584,9 @@ fn malformed_declarations_are_unsupported() {
 /// Host 1 leaves clean (its leave cut committed): from then on a claim by THAT boot — of a
 /// free row, or a re-claim of its own — is refused as fenced and writes nothing, before and
 /// after its `Leave` succession is declared (the declaration does not mark the row dead).
-/// Another boot of host 1 registers normally (dirty, live) and claims normally.
+/// Another boot of host 1 first WAITS (`Wait(Succession)`: an open succession names its
+/// ordinal as predecessor) until the heir's cut settles that succession, then registers
+/// normally (dirty, live) and claims normally.
 #[test]
 fn a_cleanly_left_boot_claims_nothing() {
     let Some(w) = World::new(2) else { return };

@@ -1155,6 +1155,9 @@ coordinator hosts="1": (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3
 # delay $3 ms, secrets and pins under $4, world store $5. Host n listens for clients on
 # UDP 6466 + 10n (WebTransport 6467 + 10n) and for its peers on 127.0.0.1:6500 + n; only
 # host 0 (the entry host, VOXEL_ENTRY_HOST's default) binds the login link (127.0.0.1:6490).
+# Ownership policy $6 (default `claim`; `static` is the old fixed layout, nothing else is
+# accepted): under `claim` a killed host's land goes to an heir and does not come back by
+# itself (a restarted host waits until its succession is settled and returns owning nothing).
 # Several hosts need the login service (jwt, world `dev`); one host keeps VOXEL_AUTH as set.
 # Refuses (exit 1) what `_dev-hosts-check` refuses, also under `--dry-run`.
 host_env_sh := '''
@@ -1214,9 +1217,6 @@ _dev-hosts-check ordinal hosts delay min_hosts:
 # login service's SpawnPlayer / Kick on 127.0.0.1:6490). Several hosts (`hosts` > 1, see
 # `dev-r3`, which runs them all): jwt with the login service, pins under target/dev-r3/,
 # and only host 0 binds the login link. Play region size.
-# Ownership policy $6 (default `claim`; `static` is the old fixed layout, nothing else is
-# accepted): under `claim` a killed host's land goes to an heir and does not come back by
-# itself (a restarted host waits until its succession is settled and returns owning nothing).
 host ordinal="0" hosts="1" delay="0" ownership="claim": (_dev-hosts-check ordinal hosts delay "1") (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1301,6 +1301,9 @@ done
 # on purpose: a host ordinal that has never started is still awaited by placement, so
 # logins are refused (503) until every host of VOXEL_HOSTS has registered. World `dev` is
 # re-registered with host 0's login link once host 0 has written its pin.
+# Every host runs under `claim` ownership: a host that is killed (`kill -9`) loses its lease,
+# its land moves to an heir (a succession) and does NOT come back by itself — the restarted
+# host waits until its succession is settled and then owns nothing.
 # A host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137
 # (killed, e.g. `kill -9`) is started again after 1 s — at most 3 times within 60 s, then
 # its loop gives up. Any member ending otherwise (login, the coordinator, a host loop)
@@ -1357,9 +1360,6 @@ go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 # lost its session early or never had its state hash checked, or a group has < 20 crossings.
 # Exit code: 0 GO, 1 NO-GO, 2 INVALID, anything else: no verdict (the recipe failed).
 # A run that did not stop cleanly (e.g. a second Ctrl-C) leaves a dirty host row: the next
-# Every host runs under `claim` ownership: a host that is killed (`kill -9`) loses its lease,
-# its land moves to an heir (a succession) and does NOT come back by itself — the restarted
-# host waits until its succession is settled and then owns nothing.
 # run says so at its start and is likely INVALID (a host restarts once) — run it again.
 # Arguments are positional: `just go-nogo-r3 5`, `just adapter=6700 go-nogo-r3 2 90`.
 # Go / no-go for host seams: thread-seam vs host-seam shuttle on 2 hosts at `delay` ms.
