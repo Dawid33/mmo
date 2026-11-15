@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (git-ignored). No secrets live here: every value
+# below is the default, shown so a change is deliberate. The database passwords
+# are generated (random_password) and kept in state.
+
+# worlds = ["errantry"]   # lowercase letter + up to 30 lowercase letters/digits
+
+# k3s `local-path` volumes cannot be expanded: the size is fixed at the first
+# apply (a resize would mean dump + restore). 20Gi is sized for about a year of
+# one world, not for today.
+# storage_class = "local-path"
+# storage_size  = "20Gi"

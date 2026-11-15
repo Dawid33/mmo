@@ -5,6 +5,11 @@ module "cert_manager" {
   source = "../../../modules/cert-manager"
 }
 
+# The CloudNativePG operator and its CRDs: ../postgres needs them.
+module "cnpg" {
+  source = "../../../modules/cnpg"
+}
+
 output "issuer_name" {
   value = module.cert_manager.issuer_name
 }

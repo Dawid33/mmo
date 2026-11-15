@@ -1742,7 +1742,8 @@ kube *args:
 # (identity provider at https://auth.factoriosurvivalworld.com) and `keycloak-realm` (its realm,
 # clients and mail, through the admin API: needs `just orion-keycloak-admin` running), `registry`
 # (the ECR repository mmo/login and the cluster's pull-only IAM user), `login` (the
-# game's login service at https://login.factoriosurvivalworld.com) and `site` (the website at
+# game's login service at https://login.factoriosurvivalworld.com), `postgres` (the CloudNativePG cluster
+# `pg` and its nightly dump to Garage), `world` (one game world: errantry) and `site` (the website at
 # https://factoriosurvivalworld.com, from website/). State lives in AWS S3 (deploy/envs/orion/backend.s3.tfbackend,
 # key orion/<root>.tfstate); AWS credentials come from the default chain
 # (`AWS_PROFILE=…` to pick a profile). Every recipe pins the `orion` context,
@@ -1750,7 +1751,7 @@ kube *args:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | registry | login | site) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | registry | login | postgres | world | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
