@@ -417,6 +417,17 @@ impl Routes {
     }
 }
 
+/// `value`, after a beat of the split coordinator's loop ([`crate::health::Health::loop_beat`]).
+/// Wraps the two synchronous store reads of its pass ([`stored_registration`],
+/// [`generation_current`]), both called only for a listener (role `coordinator`): each may wait
+/// up to the pool's acquire timeout (30 s) while the database is away, and several hellos or
+/// `Attach`es drained in one pass would otherwise add up past `/livez`'s stall limit — a
+/// coordinator restarted for a database outage. A read that returned is progress, not a stall.
+fn after_store_read<T>(value: T) -> T {
+    crate::health::Health::global().loop_beat();
+    value
+}
+
 /// Host `ordinal`'s `hosts` row as stored — `(reg, state)` — for its hello's admission;
 /// `None` (refused: "wait, never guess" — the host redials) when it has no row or the store
 /// cannot be read.
@@ -1002,7 +1013,7 @@ impl CoordinatorRuntime {
                                 peer,
                                 ordinal,
                                 reg,
-                                stored_registration(&self.store, ordinal),
+                                after_store_read(stored_registration(&self.store, ordinal)),
                             ) {
                                 Admit::Admitted { replaced } => {
                                     log::info!(
@@ -1034,7 +1045,7 @@ impl CoordinatorRuntime {
                                             hello.unwrap_or_default()
                                         );
                                     }
-                                    match generation_current(&self.store, ordinal, *generation) {
+                                    match after_store_read(generation_current(&self.store, ordinal, *generation)) {
                                         Ok(()) => {}
                                         Err(stored) => {
                                             l.routes.refuse(peer);

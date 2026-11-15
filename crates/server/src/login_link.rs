@@ -707,6 +707,11 @@ impl LoginRelay {
         }
         for k in manager.take_kicks_in() {
             let applied = kick(&self.orders, &self.players, &self.events, &k.player_token, k.session_epoch, k.reason.clone());
+            // A revoking kick resolves its player with a synchronous store read (`player_of`),
+            // which may wait up to the pool's acquire timeout (30 s) while the database is away;
+            // two in one pass would pass `/livez`'s stall limit and restart a host for a database
+            // outage. The read returned: the main loop is alive (this runs on it).
+            crate::health::Health::global().loop_beat();
             manager.kick_applied(k, applied);
         }
         for out in manager.take_login_out() {
