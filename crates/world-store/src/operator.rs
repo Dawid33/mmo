@@ -8,9 +8,13 @@
 //!   (nothing written) while any dirty live row beat within the lease, read under those locks.
 //!   Against a host REGISTERING at the same moment: `register_host` takes `world` too, so the
 //!   two serialise — a registration first leaves a fresh row (refused: `Running`); a
-//!   retirement first makes the retired ordinal's next boot wait for the settle (its row is
-//!   dead) and the heir's boot find nobody alive (it raises the generation: every process of
-//!   the old one — a zombie that wakes included — is refused at its next write or hello). A
+//!   retirement first makes the retired ordinal's next boot wait (`Wait(Succession)`: an open
+//!   succession names it as predecessor — `register_host` checks that first, whatever the
+//!   generations, since this retirement made its row old-generation) until the settle (then it
+//!   registers owning nothing) or a rollback (its in-flight rows went to the heir: it registers
+//!   owning and restoring nothing); the heir's boot finds its own row of the older generation
+//!   and registers at the new one (the retirement raised it: every process of the old one — a
+//!   zombie that wakes included — is refused at its next write or hello). A
 //!   `claim` boot registers with an empty fence (its `check_fence` locks nothing); a `static`
 //!   boot's fence rows are held `FOR SHARE` while it waits for `world` — a boot of the retired
 //!   ordinal itself could then deadlock with the retirement's `super_regions` lock (`40P01`

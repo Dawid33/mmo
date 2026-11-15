@@ -869,7 +869,11 @@ impl StoreHandle {
 
     /// Registers this process's boot as host `row.ordinal` (once per boot, right after its
     /// claim): one fence-checked transaction under the world row's lock, decided by the
-    /// ordinal's prior row. `Rollback` (R3): a prior boot that never left clean at the world's
+    /// ordinal's prior row — except that FIRST, under every policy, an open succession naming
+    /// this ordinal as its predecessor → [`WaitFor::Succession`] (nothing written), whatever the
+    /// generations (an offline retirement raises the world's as it marks the row dead; only
+    /// `Succession` worlds hold succession rows, so `Rollback` meets none and keeps R3's
+    /// verdicts). `Rollback` (R3): a prior boot that never left clean at the world's
     /// generation bumps `world.generation` (see [`HostBoot`]). `Succession`: a clean, absent or
     /// older-generation prior row registers; a dirty one at the world's generation marked dead
     /// → [`WaitFor::Succession`] (nothing written); one still live while another dirty live

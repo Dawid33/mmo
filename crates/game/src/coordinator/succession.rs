@@ -245,8 +245,9 @@ pub(super) struct SuccessionRuns {
     /// declaration until a newer read (the same observation would hand out the same batch
     /// on every runtime pass).
     refused_at_read: Option<u64>,
-    /// Ids an `Attach` listed before the open successions were known: answered then.
-    listed_early: Vec<(u32, SuccessionId, bool)>,
+    /// Ids an `Attach` listed before the open successions were known, with the listing boot:
+    /// answered then — only if that boot is still the host's current one.
+    listed_early: Vec<(u32, u64, SuccessionId, bool)>,
     /// The open successions are to be read again ([`Coordinator::take_successions_reread`]).
     reread: bool,
     /// The read asked for is a RE-read (not a start's): runs it does not list are dropped.
@@ -360,7 +361,11 @@ impl super::Coordinator {
             }
         }
         let early = std::mem::take(&mut self.successions.listed_early);
-        for (host, id, adopted) in early {
+        for (host, boot, id, adopted) in early {
+            if self.attached_boot(host) != Some(boot) {
+                // Listed by a boot that is gone: its answers are not its successor's.
+                continue;
+            }
             if self.successions.open.contains_key(&id) {
                 self.succession_applied(host, id);
                 if adopted {
@@ -555,6 +560,8 @@ impl super::Coordinator {
     /// order goes to that boot and the world rolls back.
     pub(super) fn succession_attach(&mut self, host: u32, answered: Vec<(SuccessionId, bool)>) {
         let boot = self.attached_boot(host);
+        // Listings buffered from another boot of this host are that boot's: dropped.
+        self.successions.listed_early.retain(|(h, b, _, _)| *h != host || Some(*b) == boot);
         let mut lost = BTreeSet::new();
         for run in self.successions.open.values_mut().filter(|r| recipient(&r.s, host)) {
             let listed = answered.iter().any(|(id, _)| *id == run.s.id);
@@ -595,7 +602,7 @@ impl super::Coordinator {
                 if self.successions.known {
                     self.answer_closed(host, id);
                 } else {
-                    self.successions.listed_early.push((host, id, adopted));
+                    self.successions.listed_early.push((host, boot.unwrap_or_default(), id, adopted));
                 }
                 continue;
             }
@@ -709,7 +716,9 @@ impl super::Coordinator {
         let boots: BTreeMap<u32, u64> = if s.survivors.is_empty() {
             BTreeMap::new()
         } else {
-            recipients(&s).into_iter().filter_map(|h| self.attached_boot(h).map(|b| (h, b))).collect()
+            // Only an ATTACHED host's boot: a detached one's last boot may be stale (its next
+            // boot registered but has not attached); it is recorded at its first `Attach`.
+            recipients(&s).into_iter().filter(|h| self.is_attached(*h)).filter_map(|h| self.attached_boot(h).map(|b| (h, b))).collect()
         };
         let run = Run { s: s.clone(), applied: BTreeMap::new(), adopted: None, deadline_ms, beat: BTreeSet::new(), boots };
         self.successions.open.insert(run.s.id, run);

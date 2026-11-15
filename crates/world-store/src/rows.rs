@@ -506,7 +506,8 @@ macro_rules! engine_rows {
                 check_fence(&mut *tx, fence, &srs).await?;
                 // Postgres `FOR NO KEY UPDATE` (as `decide_cut`): serialises the generation
                 // with a decision and another boot, never waits for a claim's `FOR KEY SHARE`.
-                // A lock timeout here is explained as a claim's ([`claim_error_as`], as a registration).
+                // A lock timeout here gets the claims' explanation, worded for a registration
+                // ([`claim_error_as`] with [`crate::open::REGISTERING`]).
                 let no_key = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
                 let sql = format!("SELECT generation FROM world WHERE id = 1{no_key}");
                 let world_row = match sqlx::query(&sql).fetch_optional(&mut *tx).await {
@@ -514,6 +515,23 @@ macro_rules! engine_rows {
                     Err(e) => return Err(claim_error_as(pool, tx, e, lock_ms, crate::open::REGISTERING).await),
                 };
                 let world: i64 = world_row.ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?.try_get(0)?;
+                // An OPEN succession names this ordinal as its predecessor: its land and its
+                // in-flight rows of the base cut are being inherited — whatever the generations
+                // (an offline retirement raises the world's in the transaction that marks the row
+                // dead) and whatever the policy (only `Succession` worlds have such rows). Wait,
+                // nothing written. Read under the world row's lock above, which every declaration,
+                // retirement, rollback and settle takes: the answer is never stale.
+                let named: i64 = sqlx::query(
+                    "SELECT COUNT(*) FROM successions WHERE predecessor = $1 AND settled_cut IS NULL AND abandoned = 0",
+                )
+                .bind(i64::from(row.ordinal))
+                .fetch_one(&mut *tx)
+                .await?
+                .try_get(0)?;
+                if named > 0 {
+                    tx.rollback().await?;
+                    return Ok(crate::BootVerdict::Wait(crate::WaitFor::Succession));
+                }
                 let prior = sqlx::query("SELECT generation, clean, state, boot FROM hosts WHERE ordinal = $1")
                     .bind(i64::from(row.ordinal))
                     .fetch_optional(&mut *tx)

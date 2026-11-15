@@ -285,3 +285,52 @@ fn a_lone_claim_host_restarts_after_a_crash_without_waiting() {
         h.shutdown();
     });
 }
+
+/// Fix round 2: an offline retirement raises the generation in the same transaction that marks
+/// the retired row dead, so that row is of an OLDER generation from then on — its next boot must
+/// still wait for the open succession naming it (under any crash policy), writing nothing; after
+/// the heir's settle it registers owning nothing; after a rollback (the succession abandoned) it
+/// registers owning nothing and reads no in-flight row (they went to the heir).
+#[test]
+fn a_retired_ordinal_waits_for_its_succession_whatever_the_generation() {
+    use crate::succession::{World, boot_of, in_flight, part, row as host_row};
+    use game::{CutId, RegionCoords};
+    for settle in [true, false] {
+        let Some(w) = World::new(2) else { return };
+        let rows1 = vec![in_flight(RegionCoords::new(1, 5))];
+        w.hosts[0].prepare_cut(part(1, 0, vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+        w.hosts[1].prepare_cut(part(1, 1, rows1.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+        assert!(w.h.decide_cut(CutId(1), 100, true, vec![0, 1], vec![], w.c, 0, vec![]).unwrap());
+        for h in &w.hosts {
+            assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
+        }
+        crate::two_phase::exec(&w.w, &format!("UPDATE hosts SET seen_ms = seen_ms - {}", 2 * game::HOST_LEASE_MS));
+        let s = match w.h.retire_offline(1).unwrap() {
+            world_store::Retired::Opened(s) => s,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(w.h.world_generation().unwrap(), 1);
+        let before = w.h.hosts().unwrap();
+        for policy in [CrashPolicy::Succession, CrashPolicy::Rollback] {
+            let v = w.hosts[1].register_host(HostRow { boot: 900, ..host_row(1) }, &Fence::default(), policy).unwrap();
+            assert_eq!(v, BootVerdict::Wait(WaitFor::Succession), "settle {settle}, {policy:?}: the retired ordinal waits");
+        }
+        assert_eq!(w.h.hosts().unwrap(), before, "nothing written");
+        assert_eq!(w.h.world_generation().unwrap(), 1);
+        if settle {
+            let heir = w.h.owned_by(0).unwrap();
+            let adopting = game::WorldCut { adopts: vec![1], ..part(2, 0, rows1.clone()) };
+            w.hosts[0].prepare_cut(adopting, heir, 1).recv().unwrap().unwrap();
+            assert!(w.h.decide_cut(CutId(2), 200, true, vec![0], vec![], w.c, 1, vec![s.id]).unwrap());
+            assert_eq!(w.hosts[0].cut_decided(CutId(2)).unwrap(), Some(true));
+        } else {
+            w.h.rollback_world_operator().unwrap();
+        }
+        let v = w.hosts[1].register_host(HostRow { boot: 901, ..host_row(1) }, &Fence::default(), CrashPolicy::Succession).unwrap();
+        assert!(matches!(v, BootVerdict::Registered(_)), "settle {settle}: {v:?}");
+        assert!(w.h.owned_by(1).unwrap().epochs.is_empty(), "settle {settle}: it owns nothing");
+        assert!(w.h.load_in_flight(Some(1)).unwrap().is_empty(), "settle {settle}: no in-flight row to restore");
+        assert_ne!(boot_of(1), 901);
+        w.shutdown();
+    }
+}

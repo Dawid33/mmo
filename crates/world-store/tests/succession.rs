@@ -611,8 +611,19 @@ fn a_cleanly_left_boot_claims_nothing() {
     refused(&w);
     assert!(w.h.owned_by(1).unwrap().epochs.is_empty(), "every row is the heir's");
     assert_eq!(s.moved.len(), 2);
-    // Its next boot registers (dirty, live) and claims normally.
-    let next = w.hosts[1].register_host(HostRow { boot: 9001, ..row(1) }, &Fence { owner: 1, epochs: Default::default(), all_hosts: false }, CrashPolicy::Succession).unwrap();
+    // Fix round 2 of Task 14: while the `Leave` succession naming it is open its next boot
+    // waits (the heir adopts the in-flight rows its leave cut left under its ordinal); once a
+    // cut settles it, the next boot registers (dirty, live) and claims normally.
+    let none = Fence { owner: 1, epochs: Default::default(), all_hosts: false };
+    let waits = w.hosts[1].register_host(HostRow { boot: 9001, ..row(1) }, &none, CrashPolicy::Succession).unwrap();
+    assert_eq!(waits, world_store::BootVerdict::Wait(world_store::WaitFor::Succession));
+    assert_eq!(w.state_of(1), (HOST_LIVE, true), "nothing written");
+    assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
+    let heir = w.h.owned_by(0).unwrap();
+    w.hosts[0].prepare_cut(WorldCut { adopts: vec![1], ..part(2, 0, vec![]) }, heir, 0).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(2), 200, true, vec![0], vec![], w.c, 0, vec![s.id]).unwrap());
+    assert_eq!(w.hosts[0].cut_decided(CutId(2)).unwrap(), Some(true));
+    let next = w.hosts[1].register_host(HostRow { boot: 9001, ..row(1) }, &none, CrashPolicy::Succession).unwrap();
     assert!(matches!(next, world_store::BootVerdict::Registered(_)), "{next:?}");
     assert_eq!(w.state_of(1), (HOST_LIVE, false));
     let won = w.hosts[1].claim_free(1, 9001, vec![free]).unwrap();

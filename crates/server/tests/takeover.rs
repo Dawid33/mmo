@@ -1792,8 +1792,8 @@ fn a_host_leaving_without_a_cut_tells_its_clients() {
 /// next `hosts` read; host 0 boots (at the new generation), gets the order as the heir, adopts host 1's
 /// land and in-flight rows from the store alone, and its first committed cut settles it.
 /// Conservation: every slime (on either side, one that crossed before the cut) is live once
-/// and stored exactly once after the settle; every super-region is host 0's; host 1's row is
-/// dead and clean.
+/// and stored exactly once after the settle; every super-region is host 0's. Host 1's process
+/// started again before the settle waits for it, then comes back owning and restoring nothing.
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
 fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
@@ -1829,16 +1829,36 @@ fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
     assert_eq!(declared.len(), 1);
     assert_eq!(&declared[0][1..], &[1, 0, k, -1, 0], "host 1 → heir 0, based on the last cut, open");
     assert_eq!(host_row(&db, 1).2, game::HOST_DEAD);
-    // The heir boots at the generation the retirement raised; the coordinator sends it the
-    // order (it is no survivor) and it adopts.
-    t.restart(&db, &dir, 0, 5000);
-    assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "the retirement raised the generation; the heir's boot did not raise it again");
+    // Fix round 2: the RETIRED host's process starts again before the heir settled — its row
+    // is of the generation before the retirement's, yet it waits (an open succession names it)
+    // and registers only after the settle, owning and restoring nothing. Meanwhile the heir
+    // boots at the generation the retirement raised; the coordinator sends it the order (it is
+    // no survivor) and it adopts.
+    let (booted, settled_when_registered) = std::thread::scope(|scope| {
+        let (db, dir) = (&db, &dir);
+        let boot = scope.spawn(move || register(db, dir, 2, 1, 6001));
+        t.rounds(20);
+        assert!(!boot.is_finished(), "the retired host's boot waits for its succession");
+        t.restart(db, dir, 0, 5000);
+        let started = Instant::now();
+        while !boot.is_finished() {
+            assert!(started.elapsed() < LONG, "the retired host's boot never registered");
+            t.round();
+        }
+        let settled = successions(db).iter().any(|r| r[1] == 1 && r[4] >= 0);
+        (boot.join().expect("the boot thread"), settled)
+    });
+    assert!(settled_when_registered, "the retired host registered only after the settle");
+    assert!(booted.claims.fence().epochs.is_empty(), "it owns nothing");
+    assert!(t.w.store.load_in_flight(Some(1)).unwrap().is_empty(), "it has no in-flight row to restore");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "the retirement raised the generation; no boot raised it again");
     let row = t.until_settled(&db, 1);
     assert_eq!((row[0], row[2], row[3], row[5]), (declared[0][0], 0, k, 0), "the offline succession settled: {row:?}");
     let first_after = decisions(&db).into_iter().filter(|(c, _, ok)| *ok && *c > k).map(|(c, _, _)| c).min();
     assert_eq!(first_after, Some(row[4]), "its first committed cut settled it");
-    let (_, clean, state) = host_row(&db, 1);
-    assert_eq!((clean, state), (1, game::HOST_DEAD), "host 1's row: settled clean, dead");
+    let sim = build(&mut t, booted, true);
+    t.w.pair.sims.push(sim);
+    t.until("host 1's new boot attached", WAIT, |t| t.sim(1).manager.world_attached());
     let owners = t.w.store.owners().unwrap();
     assert!(!owners.is_empty() && owners.iter().all(|(_, o, _)| *o == 0), "every super-region is host 0's: {owners:?}");
     assert!(t.w.store.load_in_flight(Some(1)).unwrap().is_empty(), "no row left under host 1");

@@ -3028,3 +3028,64 @@ fn a_run_settling_is_not_dropped_as_abandoned() {
     let done = succession_done(&commit_routed(&mut c));
     assert!(done.iter().all(|(_, id, settled)| *id == s.id && *settled) && !done.is_empty(), "{done:?}");
 }
+
+// ---- R4 Task 14 fix round 2 ------------------------------------------------------------------
+
+/// A coordinator starting (open successions not read yet) buffers what an `Attach` lists. The
+/// heir's boot A lists the run adopted, dies, and its boot B attaches listing nothing; then the
+/// read comes: A's listing is not credited to B — B gets the order and no cut begins until B
+/// itself has adopted.
+#[test]
+fn an_early_listing_of_a_replaced_boot_is_not_credited() {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_world_tick(100);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.set_expected_hosts([0].into_iter().collect());
+    c.successions_unknown();
+    let s = offline_succession();
+    let mut listing = attach_as(0, 1, 7);
+    if let HostMsg::Attach { successions, .. } = &mut listing {
+        *successions = vec![(s.id, true)];
+    }
+    c.handle(0, listing, 0);
+    c.handle(0, attach_as(0, 2, 900), 10);
+    commit_routed(&mut c);
+    c.successions_open(vec![s.clone()], 20);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to boot B");
+    assert_eq!(c.succession_progress(), vec![(s.id, Vec::new(), false)], "boot A's listing is not B's answer");
+    c.maintain(2 * CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut before boot B adopted");
+    // A listing of the boot still attached when the read comes counts.
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(4);
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.successions_unknown();
+    let mut listing = attach_as(0, 1, 900);
+    if let HostMsg::Attach { successions, .. } = &mut listing {
+        *successions = vec![(s.id, true)];
+    }
+    c.handle(0, listing, 0);
+    c.successions_open(vec![s.clone()], 20);
+    commit_routed(&mut c);
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], true)], "the listing boot's answers count");
+}
+
+/// A survivor detached when the run is declared (its next boot registered, not attached yet):
+/// its stale previous boot is not recorded — its new boot's first `Attach` is recorded and
+/// ordered, no rollback.
+#[test]
+fn a_survivor_detached_at_the_declaration_is_recorded_at_its_attach() {
+    let mut c = succeeding(3);
+    c.host_detached(1);
+    commit_routed(&mut c);
+    let s = declare_one(&mut c, 3, 2, 100);
+    assert!(s.survivors.contains(&1));
+    commit_routed(&mut c);
+    c.handle(1, attach_as(1, 2, 900), 200);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(1, s.id)], "its new boot gets the order");
+    c.maintain(201);
+    assert!(!c.rollback_wanted(), "no journal was counted on from a boot that was not attached");
+}
