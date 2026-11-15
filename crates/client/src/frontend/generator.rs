@@ -349,7 +349,8 @@ impl GeneratorState {
 
     pub fn params(&self, cell_m: f64) -> ForgeParams {
         ForgeParams {
-            size_m: self.size_m(),
+            width_m: self.size_m(),
+            height_m: self.size_m(),
             cell_m,
             seed: self.seed,
             knobs: self.knobs.clone(),
@@ -487,9 +488,9 @@ pub fn stats_lines(stats: &PreviewStats) -> Vec<String> {
 // ---- preview worker ----
 
 /// What the preview of a forge depends on, bit for bit.
-fn forge_key(p: &ForgeParams) -> (u64, u64, u64, Vec<u64>) {
+fn forge_key(p: &ForgeParams) -> (u64, u64, u64, u64, Vec<u64>) {
     let knobs = SPECS.iter().map(|s| p.knobs.get(s.key).unwrap_or(0.0).to_bits()).collect();
-    (p.seed, p.size_m.to_bits(), p.cell_m.to_bits(), knobs)
+    (p.seed, p.width_m.to_bits(), p.height_m.to_bits(), p.cell_m.to_bits(), knobs)
 }
 
 struct PreviewRequest {
@@ -545,7 +546,7 @@ impl Drop for PreviewWorker {
 
 /// What the preview's last forge was keyed on (the inputs that change its
 /// terrain) and its result, reused when only the layer or view changes.
-type LastForge = ((u64, u64, u64, Vec<u64>), worldgen::forge::Forged);
+type LastForge = ((u64, u64, u64, u64, Vec<u64>), worldgen::forge::Forged);
 
 fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox: Sender<(u64, PreviewResult)>) {
     let mut last: Option<LastForge> = None;
@@ -713,7 +714,8 @@ fn forge_world(
         name: name.clone(),
         created_utc: rfc3339_utc(SystemTime::now()),
         seed: params.seed,
-        size_m: params.size_m,
+        // The world list shows square worlds until `WorldMeta` stores both sides.
+        size_m: params.width_m,
         cell_m: params.cell_m,
         preset: presets::matching(&params.knobs).map_or(CUSTOM, |p| p.name).to_string(),
         knobs: world_store::knobs_map(&params.knobs),
@@ -1047,17 +1049,17 @@ mod tests {
         assert_eq!((size_row.value, size_row.default), (3.0, 3.0));
         let label = size_row.choices.row_data(3).unwrap();
         assert!(label.starts_with("100 km (DF Medium) · ≈ ") && label.ends_with(" min"), "{label}");
-        assert_eq!(state.params(64.0).size_m, 100_352.0);
+        assert_eq!(state.params(64.0).width_m, 100_352.0);
         assert_eq!(state.preview_cell_m(), 256.0, "auto preview cell for 100 km");
         state.stale = false;
         state.apply(GeneratorAction::Knob(WORLD_SIZE_KEY.into(), 1.0), "");
         assert!(state.stale, "the preview re-forges");
         assert_eq!(state.preview_cell_m(), 64.0);
-        assert_eq!(state.params(state.world_cell_m()).size_m, 32_000.0);
+        assert_eq!(state.params(state.world_cell_m()).width_m, 32_000.0);
         state.apply(GeneratorAction::Knob(PREVIEW_CELL_KEY.into(), 1.0), "");
         assert_eq!(state.preview_cell_m(), 32.0, "the Advanced override wins");
         state.apply(GeneratorAction::Reset(WORLD_SIZE_KEY.into()), "");
-        assert_eq!(state.params(16.0).size_m, 100_352.0);
+        assert_eq!(state.params(16.0).width_m, 100_352.0);
     }
 
     #[test]
@@ -1162,7 +1164,7 @@ mod tests {
     #[ignore = "slow: >100ms — run via just test-full"]
     fn preview_worker_is_latest_wins() {
         let worker = PreviewWorker::spawn();
-        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(4_096.0, 128.0);
         p.knobs.iters = 20.0;
         for generation in 1..=3 {
             p.seed = generation;

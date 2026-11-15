@@ -94,12 +94,14 @@ impl Forged {
         let level = erosion::route(w, 0.0).filled;
         let lakes = self.lake_bodies(&level);
         let spawn = spawn::pick(w, a, p.seed);
+        // The world file is square until it stores both dimensions.
+        assert_eq!(w.nx, w.nz, "the world file holds square worlds only");
         let mut artifact = WorldArtifact {
             version: ARTIFACT_VERSION,
             seed: p.seed,
-            size_m: p.size_m,
+            size_m: p.width_m,
             cell_m: w.dx,
-            n: w.n as u32,
+            n: w.nx as u32,
             height: quantise(&w.h, HEIGHT_STEP_M),
             uplifted: quantise(&w.uplifted, GEO_STEP_M),
             bedding: quantise(&self.geology.bedding, GEO_STEP_M),
@@ -160,11 +162,11 @@ impl Forged {
     /// hydrology lake of the same level nearest the body.
     fn lake_bodies(&self, level: &[f64]) -> Vec<crate::forged::Lake> {
         let (w, a) = (&self.world, &self.analysis);
-        let n = w.n;
+        let (nx, nz) = (w.nx, w.nz);
         let is_lake = |i: usize| !w.ocean[i] && a.lake_depth[i] >= hydrology::LAKE_MIN_DEPTH_M;
-        let mut seen = vec![false; n * n];
+        let mut seen = vec![false; w.cells()];
         let mut lakes = Vec::new();
-        for start in 0..n * n {
+        for start in 0..w.cells() {
             if seen[start] || !is_lake(start) {
                 continue;
             }
@@ -173,7 +175,7 @@ impl Forged {
             seen[start] = true;
             while let Some(i) = stack.pop() {
                 cells.push(i);
-                let (x, z) = (i % n, i / n);
+                let (x, z) = w.xz(i);
                 let mut visit = |j: usize| {
                     if !seen[j] && is_lake(j) && level[j] as f32 == water {
                         seen[j] = true;
@@ -181,9 +183,9 @@ impl Forged {
                     }
                 };
                 if x > 0 { visit(i - 1); }
-                if x + 1 < n { visit(i + 1); }
-                if z > 0 { visit(i - n); }
-                if z + 1 < n { visit(i + n); }
+                if x + 1 < nx { visit(i + 1); }
+                if z > 0 { visit(i - nx); }
+                if z + 1 < nz { visit(i + nx); }
             }
             cells.sort_unstable();
             let mut runs: Vec<(u32, u32)> = Vec::new();
@@ -277,7 +279,8 @@ pub fn schedule(p: &ForgeParams) -> Vec<(f64, usize)> {
     let mut levels = vec![p.cell_m];
     for _ in 0..k.coarse_level_count() {
         let cell = levels[0] * 2.0;
-        if ((p.size_m / cell).round() as usize) < MIN_LEVEL_CELLS {
+        let (nx, nz) = ((p.width_m / cell).round() as usize, (p.height_m / cell).round() as usize);
+        if nx.min(nz) < MIN_LEVEL_CELLS {
             break;
         }
         levels.insert(0, cell);
@@ -341,15 +344,15 @@ pub fn forge_with(
         let mut scratch = erosion::StepScratch::default();
         let mut rain = climate::discharge_weight(&climate::compute(&lw, &lp), &lw);
         if !p.quiet && levels.len() > 1 {
-            let (number, n) = (level + 1, lw.n);
-            println!("  level {number}: {cell_m} m cells ({n}x{n}), {level_iters} iterations");
+            let (number, nx, nz) = (level + 1, lw.nx, lw.nz);
+            println!("  level {number}: {cell_m} m cells ({nx}x{nz}), {level_iters} iterations");
         }
         for iter in 1..=level_iters {
             if iter % RAIN_REFRESH_ITERS == 0 {
                 // Lakes from the last step's routing: no extra flood.
                 let lakes = match scratch.filled() {
                     Some(filled) => climate::lakes_from_filled(&lw, filled),
-                    None => vec![false; lw.n * lw.n],
+                    None => vec![false; lw.cells()],
                 };
                 rain = climate::discharge_weight(&climate::compute_with_lakes(&lw, &lp, &lakes), &lw);
             }
@@ -404,7 +407,7 @@ mod tests {
     use std::ops::ControlFlow;
 
     fn tiny() -> ForgeParams {
-        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(4_096.0, 128.0);
         p.knobs.iters = 20.0;
         p
     }
@@ -439,7 +442,7 @@ mod tests {
     fn schedule_levels_add_up() {
         // 4 km / 32 m: 128 cells across; the coarse levels run at 128 m
         // (32 cells) then 64 m (64 cells), none under MIN_LEVEL_CELLS.
-        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 32.0, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(4_096.0, 32.0);
         p.knobs.coarse_levels = 2.0;
         p.knobs.iters = 20.0;
         p.knobs.refine_iters = 6.0;
@@ -455,14 +458,14 @@ mod tests {
         })
         .unwrap();
         assert_eq!(eroding, (1..=29).collect::<Vec<_>>());
-        assert_eq!(forged.world.n, (p.size_m / p.cell_m) as usize);
+        assert_eq!((forged.world.nx, forged.world.nz), (p.nx(), p.nz()));
         assert_eq!(forged.world.dx, p.cell_m);
     }
 
     #[test]
     fn schedule_stops_above_min_level_cells() {
         // 4 km / 128 m = 32 cells: no coarser level fits.
-        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 128.0, ..Default::default() };
+        let mut p = ForgeParams::square(4_096.0, 128.0);
         p.knobs.coarse_levels = 3.0;
         assert_eq!(schedule(&p), vec![(128.0, p.knobs.iterations())]);
         p.knobs.coarse_levels = 0.0;
@@ -472,7 +475,7 @@ mod tests {
 
     #[test]
     fn cancel_in_a_refine_level() {
-        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 32.0, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(4_096.0, 32.0);
         (p.knobs.coarse_levels, p.knobs.iters, p.knobs.refine_iters) = (2.0, 4.0, 4.0);
         let mut last = None;
         let r = forge_with(&p, &mut |pr| {
@@ -489,12 +492,12 @@ mod tests {
     #[ignore = "slow: >100ms — run via just test-full"]
     fn erosion_below_the_column_is_granite() {
         // The 16 km island (its belts are inland), at coarse cells.
-        let mut p = ForgeParams { size_m: 16_000.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(16_000.0, 128.0);
         p.knobs.layout = knobs::LAYOUT_ONE_ISLAND as f64;
         p.knobs.iters = 600.0;
         let f = forge(&p);
         let w = &f.world;
-        let deepest = (0..w.n * w.n)
+        let deepest = (0..w.cells())
             .filter(|&i| !w.ocean[i])
             .map(|i| w.h[i] - w.uplifted[i] - f.geology.bedding[i])
             .fold(f64::MAX, f64::min);
@@ -512,12 +515,12 @@ mod tests {
 
     /// Cell index of `(row d in from edge e, position b along it)`, edges in
     /// `world::edges` order (N, E, S, W).
-    fn edge_cell(n: usize, e: usize, d: usize, b: usize) -> usize {
+    fn edge_cell(w: &World, e: usize, d: usize, b: usize) -> usize {
         match e {
-            0 => d * n + b,
-            1 => b * n + n - 1 - d,
-            2 => (n - 1 - d) * n + b,
-            _ => b * n + d,
+            0 => w.index(b, d),
+            1 => w.index(w.nx - 1 - d, b),
+            2 => w.index(b, w.nz - 1 - d),
+            _ => w.index(d, b),
         }
     }
 
@@ -527,21 +530,21 @@ mod tests {
     /// land height per row from the edge).
     fn land_edge_report(f: &Forged) -> Vec<(usize, f64, f64, Vec<f64>)> {
         let w = &f.world;
-        let n = w.n;
         let routing = erosion::route(w, erosion::FLOOD_EPSILON);
         let q = erosion::discharge(w, &routing, &f.rain);
-        let rows = ((3.0 * world::LAND_EDGE_TAPER_M / w.dx) as usize).min(n / 2);
+        let rows = ((3.0 * world::LAND_EDGE_TAPER_M / w.dx) as usize).min(w.nx.min(w.nz) / 2);
         let mut out = Vec::new();
         for e in 0..4 {
             if w.edges[e] != world::EdgeKind::Land {
                 continue;
             }
             // Away from the corners (another edge's strip).
-            let along = rows..n - rows;
+            let length = if e % 2 == 0 { w.nx } else { w.nz };
+            let along = rows..length - rows;
             let (mut lower, mut count) = (0usize, 0usize);
             let (mut across, mut total) = (0.0, 0.0);
             for b in along.clone() {
-                let (edge, inner) = (edge_cell(n, e, 0, b), edge_cell(n, e, 1, b));
+                let (edge, inner) = (edge_cell(w, e, 0, b), edge_cell(w, e, 1, b));
                 if w.ocean[edge] || w.ocean[inner] {
                     continue;
                 }
@@ -555,7 +558,7 @@ mod tests {
             let profile: Vec<f64> = (0..rows)
                 .map(|d| {
                     let cells: Vec<f64> =
-                        along.clone().map(|b| edge_cell(n, e, d, b)).filter(|&i| !w.ocean[i]).map(|i| w.h[i]).collect();
+                        along.clone().map(|b| edge_cell(w, e, d, b)).filter(|&i| !w.ocean[i]).map(|i| w.h[i]).collect();
                     cells.iter().sum::<f64>() / cells.len().max(1) as f64
                 })
                 .collect();
@@ -571,7 +574,7 @@ mod tests {
     #[ignore = "slow: >100ms — run via just test-full"]
     fn land_edges_drain_across_without_a_lip_or_ridge() {
         for (size_m, cell_m) in [(16_000.0, 32.0), (32_000.0, 64.0)] {
-            let p = ForgeParams { size_m, cell_m, quiet: true, ..Default::default() };
+            let p = ForgeParams::square(size_m, cell_m);
             let f = forge(&p);
             let report = land_edge_report(&f);
             assert!(!report.is_empty(), "the default continent has land edges");

@@ -34,7 +34,7 @@ use crate::forge::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
 use crate::forge::knobs::Knobs;
 use crate::forge::par;
 use crate::forge::plates::{self, PlateField};
-use crate::forge::world::{hash01, smoothstep, ForgeParams, World, REFERENCE_SIZE_M};
+use crate::forge::world::{hash01, smoothstep, span_m, ForgeParams, World, REFERENCE_SIZE_M};
 use crate::noise::OctaveNoise;
 
 /// Flat ground at most this high above the nearest lake surface, or a big
@@ -122,9 +122,9 @@ pub struct Fields {
 pub fn compute(p: &ForgeParams, w: &World, a: &Analysis, geo: &Geology) -> Fields {
     let k = &p.knobs;
     let plates = if k.is_continental() {
-        plates::plate_field(p.seed, p.size_m, w.n, k)
+        plates::plate_field(p.seed, p.width_m, p.height_m, w.nx, w.nz, k)
     } else {
-        PlateField { plate: vec![0; w.n * w.n], convergence: vec![0.0; w.n * w.n] }
+        PlateField { plate: vec![0; w.cells()], convergence: vec![0.0; w.cells()] }
     };
     Fields {
         drainage: drainage(w, a, geo),
@@ -178,8 +178,8 @@ pub fn drainage_at(slope: f64, permeability: f64, above_water: f64, water_dist: 
 /// or lake) is skipped for a one-sided difference, so a channel's own banks
 /// do not count as a slope.
 pub fn ground_slope(w: &World, is_water: &dyn Fn(usize) -> bool, i: usize) -> f64 {
-    let n = w.n;
-    let (x, z) = (i % n, i / n);
+    let (nx, nz) = (w.nx, w.nz);
+    let (x, z) = w.xz(i);
     let h = |j: usize| w.h[j].max(0.0);
     let axis = |lo: Option<usize>, hi: Option<usize>| {
         let ok = |j: &usize| !is_water(*j);
@@ -190,8 +190,8 @@ pub fn ground_slope(w: &World, is_water: &dyn Fn(usize) -> bool, i: usize) -> f6
             (None, None) => 0.0,
         }
     };
-    let gx = axis((x > 0).then(|| i - 1), (x + 1 < n).then(|| i + 1));
-    let gz = axis((z > 0).then(|| i - n), (z + 1 < n).then(|| i + n));
+    let gx = axis((x > 0).then(|| i - 1), (x + 1 < nx).then(|| i + 1));
+    let gz = axis((z > 0).then(|| i - nx), (z + 1 < nz).then(|| i + nx));
     gx.hypot(gz)
 }
 
@@ -200,7 +200,7 @@ pub fn ground_slope(w: &World, is_water: &dyn Fn(usize) -> bool, i: usize) -> f6
 /// elsewhere (the sea included).
 pub fn water_levels(w: &World, a: &Analysis) -> Vec<f64> {
     let river = a.stats.river_min_discharge_m2;
-    (0..w.n * w.n)
+    (0..w.cells())
         .map(|i| {
             if w.ocean[i] {
                 f64::NAN
@@ -217,7 +217,7 @@ pub fn water_levels(w: &World, a: &Analysis) -> Vec<f64> {
 
 /// Drainage 0..100 per cell (sea and lakes: 0).
 pub fn drainage(w: &World, a: &Analysis, geo: &Geology) -> Vec<u8> {
-    let rock: Vec<u8> = (0..w.n * w.n).map(|i| if w.ocean[i] { 0 } else { geo.surface_rock(w, i) }).collect();
+    let rock: Vec<u8> = (0..w.cells()).map(|i| if w.ocean[i] { 0 } else { geo.surface_rock(w, i) }).collect();
     drainage_from(w, &water_levels(w, a), &water_discharge(w, a), &rock)
 }
 
@@ -225,7 +225,7 @@ pub fn drainage(w: &World, a: &Analysis, geo: &Geology) -> Vec<u8> {
 /// INFINITY for a lake, NaN elsewhere.
 pub fn water_discharge(w: &World, a: &Analysis) -> Vec<f64> {
     let river = a.stats.river_min_discharge_m2;
-    (0..w.n * w.n)
+    (0..w.cells())
         .map(|i| {
             if w.ocean[i] {
                 f64::NAN
@@ -244,31 +244,31 @@ pub fn water_discharge(w: &World, a: &Analysis) -> Vec<f64> {
 /// (not NaN), that level and that water's discharge: a two-pass chamfer
 /// carrying the source's (level, q). (INFINITY, NaN, NaN) when there is no
 /// water at all.
-fn nearest_water(n: usize, dx: f64, level: &[f64], q: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>) {
+fn nearest_water(nx: usize, nz: usize, dx: f64, level: &[f64], q: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>) {
     let mut dist: Vec<f64> = level.iter().map(|l| if l.is_nan() { f64::INFINITY } else { 0.0 }).collect();
     let mut at: Vec<(f64, f64)> = level.iter().zip(q).map(|(&l, &q)| (l, q)).collect();
     let diag = dx * std::f64::consts::SQRT_2;
     let relax = |dist: &mut Vec<f64>, at: &mut Vec<(f64, f64)>, x: usize, z: usize, ox: isize, oz: isize, step: f64| {
-        let (nx, nz) = (x as isize + ox, z as isize + oz);
-        if nx >= 0 && nz >= 0 && (nx as usize) < n && (nz as usize) < n {
-            let j = nz as usize * n + nx as usize;
-            let i = z * n + x;
+        let (jx, jz) = (x as isize + ox, z as isize + oz);
+        if jx >= 0 && jz >= 0 && (jx as usize) < nx && (jz as usize) < nz {
+            let j = jz as usize * nx + jx as usize;
+            let i = z * nx + x;
             if dist[j] + step < dist[i] {
                 dist[i] = dist[j] + step;
                 at[i] = at[j];
             }
         }
     };
-    for z in 0..n {
-        for x in 0..n {
+    for z in 0..nz {
+        for x in 0..nx {
             relax(&mut dist, &mut at, x, z, -1, 0, dx);
             relax(&mut dist, &mut at, x, z, 0, -1, dx);
             relax(&mut dist, &mut at, x, z, -1, -1, diag);
             relax(&mut dist, &mut at, x, z, 1, -1, diag);
         }
     }
-    for z in (0..n).rev() {
-        for x in (0..n).rev() {
+    for z in (0..nz).rev() {
+        for x in (0..nx).rev() {
             relax(&mut dist, &mut at, x, z, 1, 0, dx);
             relax(&mut dist, &mut at, x, z, 0, 1, dx);
             relax(&mut dist, &mut at, x, z, 1, 1, diag);
@@ -284,8 +284,7 @@ fn nearest_water(n: usize, dx: f64, level: &[f64], q: &[f64]) -> (Vec<f64>, Vec<
 /// are 0; a river channel cell takes the mean of its land neighbours (its
 /// banks), so a creek is not a line of marsh.
 pub fn drainage_from(w: &World, water_level: &[f64], water_q: &[f64], rock: &[u8]) -> Vec<u8> {
-    let n = w.n;
-    let (dist, nearest) = nearest_water(n, w.dx, water_level, water_q);
+    let (dist, nearest) = nearest_water(w.nx, w.nz, w.dx, water_level, water_q);
     let is_water = |j: usize| !water_level[j].is_nan();
     let land_value = |i: usize| {
         let (level, q) = nearest[i];
@@ -293,8 +292,8 @@ pub fn drainage_from(w: &World, water_level: &[f64], water_q: &[f64], rock: &[u8
         let flood_m = if q.is_nan() { 0.0 } else { flood_height_m(q) };
         to_u8(drainage_at(ground_slope(w, &is_water, i), permeability(rock[i]), above, dist[i], flood_m))
     };
-    let land = par::map_range(n * n, |i| if w.ocean[i] || is_water(i) { 0 } else { land_value(i) });
-    par::map_range(n * n, |i| {
+    let land = par::map_range(w.cells(), |i| if w.ocean[i] || is_water(i) { 0 } else { land_value(i) });
+    par::map_range(w.cells(), |i| {
         let river = is_water(i) && water_q[i].is_finite();
         if !river || w.ocean[i] {
             return land[i];
@@ -320,11 +319,11 @@ struct VolcanismNoise {
 }
 
 impl VolcanismNoise {
-    fn new(seed: u64, size_m: f64) -> VolcanismNoise {
+    fn new(seed: u64, span_m: f64) -> VolcanismNoise {
         VolcanismNoise {
             base: OctaveNoise::new(seed ^ 0xF201, -14, vec![1.0, 0.5]), // 16 km at the reference size
             spots: OctaveNoise::new(seed ^ 0xF202, -11, vec![1.0, 0.5]), // 2 km
-            scale: size_m / REFERENCE_SIZE_M,
+            scale: span_m / REFERENCE_SIZE_M,
         }
     }
 
@@ -340,12 +339,19 @@ impl VolcanismNoise {
     }
 }
 
-/// Volcanism 0..100 on an `n` x `n` grid over a `size_m` world.
-pub fn volcanism_grid(seed: u64, size_m: f64, n: usize, plates: &PlateField, k: &Knobs) -> Vec<u8> {
-    let noise = VolcanismNoise::new(seed, size_m);
-    let cell = size_m / n as f64;
-    par::map_range(n * n, |i| {
-        let (mx, mz) = (((i % n) as f64 + 0.5) * cell, ((i / n) as f64 + 0.5) * cell);
+/// Volcanism 0..100 on an `nx` x `nz` grid over a `width_m` x `height_m`
+/// world.
+pub fn volcanism_grid(
+    seed: u64,
+    (width_m, height_m): (f64, f64),
+    (nx, nz): (usize, usize),
+    plates: &PlateField,
+    k: &Knobs,
+) -> Vec<u8> {
+    let noise = VolcanismNoise::new(seed, span_m(width_m, height_m));
+    let (cell_x, cell_z) = (width_m / nx as f64, height_m / nz as f64);
+    par::map_range(nx * nz, |i| {
+        let (mx, mz) = (((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z);
         to_u8(noise.at(mx, mz, plates.convergence[i] as f64, k))
     })
 }
@@ -354,15 +360,22 @@ pub fn volcanism_grid(seed: u64, size_m: f64, n: usize, plates: &PlateField, k: 
 /// along the convergent boundaries of `plates` (all-zero convergence for the
 /// island layouts: base only, never 100).
 pub fn volcanism(seed: u64, w: &World, plates: &PlateField, k: &Knobs) -> Vec<u8> {
-    volcanism_grid(seed, w.n as f64 * w.dx, w.n, plates, k)
+    volcanism_grid(seed, (w.nx as f64 * w.dx, w.nz as f64 * w.dx), (w.nx, w.nz), plates, k)
 }
 
-/// Volcano sites: cells of `volcanism` (a square grid of `cell_m` cells) at
-/// 100 that are `eligible`, taken in a seeded random order, each kept only if
-/// `VOLCANO_SPACING_M` from every earlier one, at most
-/// `Knobs::volcano_count_max`. Cell centres, world metres.
-pub fn volcanoes(seed: u64, volcanism: &[u8], eligible: &[bool], cell_m: f64, k: &Knobs) -> Vec<[f32; 2]> {
-    let n = (volcanism.len() as f64).sqrt().round() as usize;
+/// Volcano sites: cells of `volcanism` (an `nx` x `nz` grid of `cell_x` x
+/// `cell_z` m cells) at 100 that are `eligible`, taken in a seeded random
+/// order, each kept only if `VOLCANO_SPACING_M` from every earlier one, at
+/// most `Knobs::volcano_count_max`. Cell centres, world metres.
+pub fn volcanoes(
+    seed: u64,
+    volcanism: &[u8],
+    eligible: &[bool],
+    (nx, nz): (usize, usize),
+    (cell_x, cell_z): (f64, f64),
+    k: &Knobs,
+) -> Vec<[f32; 2]> {
+    assert_eq!(volcanism.len(), nx * nz, "volcanism raster vs its {nx} x {nz} grid");
     let max = k.volcano_count_max.round().max(0.0) as usize;
     let mut candidates: Vec<usize> = (0..volcanism.len()).filter(|&i| volcanism[i] >= 100 && eligible[i]).collect();
     candidates.sort_by(|&a, &b| hash01(seed, 0x701C, a as u64).total_cmp(&hash01(seed, 0x701C, b as u64)).then(a.cmp(&b)));
@@ -371,7 +384,7 @@ pub fn volcanoes(seed: u64, volcanism: &[u8], eligible: &[bool], cell_m: f64, k:
         if sites.len() >= max {
             break;
         }
-        let p = [((i % n) as f64 + 0.5) * cell_m, ((i / n) as f64 + 0.5) * cell_m];
+        let p = [((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z];
         if sites.iter().all(|s| (s[0] - p[0]).hypot(s[1] - p[1]) >= VOLCANO_SPACING_M) {
             sites.push(p);
         }
@@ -388,13 +401,15 @@ pub fn volcano_sites_on(p: &ForgeParams, eligible: &dyn Fn(f64, f64) -> bool) ->
     if k.volcano_count_max.round() < 1.0 {
         return Vec::new();
     }
-    let n = ((p.size_m / VOLCANO_GRID_M).round() as usize).max(8);
-    let cell = p.size_m / n as f64;
-    let field = plates::plate_field(p.seed, p.size_m, n, k);
-    let v = volcanism_grid(p.seed, p.size_m, n, &field, k);
-    let ok: Vec<bool> =
-        (0..n * n).map(|i| eligible(((i % n) as f64 + 0.5) * cell, ((i / n) as f64 + 0.5) * cell)).collect();
-    volcanoes(p.seed, &v, &ok, cell, k)
+    let grid = |size_m: f64| ((size_m / VOLCANO_GRID_M).round() as usize).max(8);
+    let (nx, nz) = (grid(p.width_m), grid(p.height_m));
+    let (cell_x, cell_z) = (p.width_m / nx as f64, p.height_m / nz as f64);
+    let field = plates::plate_field(p.seed, p.width_m, p.height_m, nx, nz, k);
+    let v = volcanism_grid(p.seed, (p.width_m, p.height_m), (nx, nz), &field, k);
+    let ok: Vec<bool> = (0..nx * nz)
+        .map(|i| eligible(((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z))
+        .collect();
+    volcanoes(p.seed, &v, &ok, (nx, nz), (cell_x, cell_z), k)
 }
 
 /// Cone of uplift at (mx, mz): 1 on a site, falling linearly to 0 at
@@ -413,11 +428,11 @@ pub fn cone(sites: &[[f32; 2]], mx: f64, mz: f64) -> f64 {
 /// `q` (m^2, rain-weighted area) in the body, i.e. what leaves through its
 /// outlet — is under `ENDORHEIC_INFLOW_RATIO` times the body's surface.
 pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
-    let n = w.n;
+    let (nx, nz) = (w.nx, w.nz);
     let is_lake = |i: usize| !w.ocean[i] && lake_depth[i] >= LAKE_MIN_DEPTH_M;
-    let mut seen = vec![false; n * n];
-    let mut closed = vec![false; n * n];
-    for start in 0..n * n {
+    let mut seen = vec![false; w.cells()];
+    let mut closed = vec![false; w.cells()];
+    for start in 0..w.cells() {
         if seen[start] || !is_lake(start) {
             continue;
         }
@@ -425,7 +440,7 @@ pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
         seen[start] = true;
         while let Some(i) = stack.pop() {
             cells.push(i);
-            let (x, z) = (i % n, i / n);
+            let (x, z) = w.xz(i);
             let mut visit = |j: usize| {
                 if !seen[j] && is_lake(j) {
                     seen[j] = true;
@@ -433,9 +448,9 @@ pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
                 }
             };
             if x > 0 { visit(i - 1); }
-            if x + 1 < n { visit(i + 1); }
-            if z > 0 { visit(i - n); }
-            if z + 1 < n { visit(i + n); }
+            if x + 1 < nx { visit(i + 1); }
+            if z > 0 { visit(i - nx); }
+            if z + 1 < nz { visit(i + nx); }
         }
         let inflow = cells.iter().map(|&i| q[i]).fold(0.0, f64::max);
         let area = cells.len() as f64 * w.dx * w.dx;
@@ -453,8 +468,8 @@ pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
 /// The shore lies half a cell from a shore cell's centre, so the taper reads
 /// the same at any cell size.
 pub fn salinity_from(w: &World, closed: &[bool]) -> Vec<u8> {
-    let salt: Vec<f32> = (0..w.n * w.n).map(|i| if w.ocean[i] || closed[i] { -1.0 } else { 1.0 }).collect();
-    let dist = crate::habitat::coast_distance_m(&salt, w.n, w.dx);
+    let salt: Vec<f32> = (0..w.cells()).map(|i| if w.ocean[i] || closed[i] { -1.0 } else { 1.0 }).collect();
+    let dist = crate::habitat::coast_distance_m(&salt, w.nx, w.nz, w.dx);
     dist.iter()
         .map(|&d| if d <= 0.0 { 100 } else { to_u8(1.0 - (d as f64 - 0.5 * w.dx) / SALT_REACH_M as f64) })
         .collect()
@@ -519,7 +534,8 @@ mod tests {
     fn world(n: usize, dx: f64, h: impl Fn(usize, usize) -> f64) -> World {
         let h: Vec<f64> = (0..n * n).map(|i| h(i % n, i / n)).collect();
         World {
-            n,
+            nx: n,
+            nz: n,
             dx,
             h,
             ocean: vec![false; n * n],
@@ -558,7 +574,7 @@ mod tests {
     #[test]
     fn small_creeks_do_not_make_floodplains() {
         let (w, water, q) = plain_beside(CREEK_M2);
-        let n = w.n;
+        let n = w.nx;
         for r in ["shale", "granite", "sandstone"] {
             let d = drainage_from(&w, &water, &q, &vec![rock(r); n * n]);
             for x in [8, 12, 15] {
@@ -570,7 +586,7 @@ mod tests {
     #[test]
     fn big_river_floodplain_is_poorly_drained() {
         let (w, water, q) = plain_beside(BIG_RIVER_M2);
-        let n = w.n;
+        let n = w.nx;
         for r in ["shale", "granite", "sandstone"] {
             let d = drainage_from(&w, &water, &q, &vec![rock(r); n * n]);
             for x in [9, 11, 14] {
@@ -601,7 +617,7 @@ mod tests {
     #[test]
     fn creek_cell_takes_its_banks() {
         let (w, water, q) = plain_beside(CREEK_M2);
-        let n = w.n;
+        let n = w.nx;
         let d = drainage_from(&w, &water, &q, &vec![rock("granite"); n * n]);
         let (creek, bank) = (d[10 * n + 10], d[10 * n + 11]);
         assert!(bank >= 33, "bank {bank}");
@@ -684,7 +700,7 @@ mod tests {
         let (n, cell) = (192, 250.0);
         let k = Knobs::default();
         let v = vec![100u8; n * n];
-        let sites = volcanoes(7, &v, &vec![true; n * n], cell, &k);
+        let sites = volcanoes(7, &v, &vec![true; n * n], (n, n), (cell, cell), &k);
         assert_eq!(sites.len(), k.volcano_count_max.round() as usize);
         for (a, p) in sites.iter().enumerate() {
             for q in &sites[a + 1..] {
@@ -698,7 +714,7 @@ mod tests {
         v[150 * n + 150] = 100;
         let mut eligible = vec![true; n * n];
         eligible[150 * n + 150] = false;
-        let sites = volcanoes(7, &v, &eligible, cell, &k);
+        let sites = volcanoes(7, &v, &eligible, (n, n), (cell, cell), &k);
         assert_eq!(sites, vec![[50.5 * 250.0, 50.5 * 250.0]]);
     }
 
@@ -738,7 +754,7 @@ mod tests {
     /// some; the island layouts none.
     #[test]
     fn volcano_sites_ignore_the_cell_size() {
-        let p = ForgeParams { size_m: 32_000.0, cell_m: 64.0, ..Default::default() };
+        let p = ForgeParams::square(32_000.0, 64.0);
         let sites = crate::forge::world::volcano_sites(&p);
         assert!(!sites.is_empty(), "the default continent has volcanoes");
         for cell_m in [32.0, 128.0, 256.0] {
@@ -755,11 +771,11 @@ mod tests {
     /// A cone of full belt uplift stands at each site, inside the land.
     #[test]
     fn world_new_raises_a_cone_at_each_volcano() {
-        let p = ForgeParams { size_m: 32_000.0, cell_m: 128.0, ..Default::default() };
+        let p = ForgeParams::square(32_000.0, 128.0);
         let w = World::new(&p);
         let k = &p.knobs;
         for s in crate::forge::world::volcano_sites(&p) {
-            let i = (s[1] as f64 / w.dx) as usize * w.n + (s[0] as f64 / w.dx) as usize;
+            let i = w.index((s[0] as f64 / w.dx) as usize, (s[1] as f64 / w.dx) as usize);
             assert!(!w.ocean[i], "{s:?} at sea");
             let full = k.uplift * k.belt_uplift;
             assert!(w.uplift[i] > 0.9 * full, "{s:?}: uplift {} vs {full}", w.uplift[i]);

@@ -541,7 +541,7 @@
   (async () => {
     try {
       const table = await (await fetch("/knobs")).json();
-      state.knobs = table.knobs; state.rocks = table.rocks; state.sizeM = table.size_m;
+      state.knobs = table.knobs; state.rocks = table.rocks; state.sizeM = table.width_m;
       const kept = restore();
       for (const k of state.knobs) {
         const v = kept && kept.values ? kept.values[k.key] : undefined;

@@ -16,9 +16,17 @@ pub const DEFAULT_CELL_M: f64 = 32.0;
 pub const DEFAULT_SEED: u64 = 0x00D5_C0DE_0206;
 
 /// World size the continental layouts' noise wavelengths are written for:
-/// they are sampled at `size_m / REFERENCE_SIZE_M`, so a bigger world is the
-/// same shape scaled up. The island layouts keep their metres exactly.
+/// they are sampled at `span_m / REFERENCE_SIZE_M` (`span_m`), so a bigger
+/// world is the same shape scaled up. The island layouts keep their metres
+/// exactly.
 pub const REFERENCE_SIZE_M: f64 = 16_000.0;
+
+/// The one length a `width_m` x `height_m` world's size-relative lengths
+/// (noise scale, belt widths, plate spacing, tapers) are shares of: its
+/// shorter side, so a share fits either way. A square world's side.
+pub fn span_m(width_m: f64, height_m: f64) -> f64 {
+    width_m.min(height_m)
+}
 
 /// Belt uplift ramps from 0 at a land edge to full over about this distance
 /// (the lowland share stays), so a range does not stand cut off at the edge.
@@ -177,8 +185,10 @@ struct ContinentalShape {
     mass: ContinentalMass,
     shape_lo: OctaveNoise,
     shape_hi: OctaveNoise,
-    half: f64,
-    size_m: f64,
+    half_x: f64,
+    half_z: f64,
+    width_m: f64,
+    height_m: f64,
     scale: f64,
     coast_noise: (f64, f64),
     margin: (f64, f64),
@@ -194,9 +204,11 @@ impl ContinentalShape {
             // Same noises as the island layouts, sampled at the world's scale.
             shape_lo: OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]), // 8 km at the reference size
             shape_hi: OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]), // 1 km
-            half: p.size_m * 0.5,
-            size_m: p.size_m,
-            scale: p.size_m / REFERENCE_SIZE_M,
+            half_x: p.width_m * 0.5,
+            half_z: p.height_m * 0.5,
+            width_m: p.width_m,
+            height_m: p.height_m,
+            scale: p.span_m() / REFERENCE_SIZE_M,
             coast_noise: (k.coast_noise_lo, k.coast_noise_hi),
             margin: (k.ocean_margin_start, (k.ocean_margin_start + OCEAN_MARGIN_RAMP).min(0.99)),
         }
@@ -205,7 +217,7 @@ impl ContinentalShape {
     /// (shape, landness) at (mx, mz) m: landness > 0 is land; shape < 0 is
     /// the sea's own (not the margin's) — shelf and abyss.
     fn at(&self, mx: f64, mz: f64) -> (f64, f64) {
-        let (rx, rz) = ((mx - self.half) / self.half, (mz - self.half) / self.half);
+        let (rx, rz) = ((mx - self.half_x) / self.half_x, (mz - self.half_z) / self.half_z);
         let (sx, sz) = (mx / self.scale, mz / self.scale);
         let shape = self.mass.at(rx, rz)
             + self.coast_noise.0 * self.shape_lo.sample2(sx, sz)
@@ -218,7 +230,7 @@ impl ContinentalShape {
     /// Distance (m) to the nearest land edge; infinite without one.
     fn to_land_edge(&self, mx: f64, mz: f64) -> f64 {
         // In `edges` order.
-        let to_edge = [mz, self.size_m - mx, self.size_m - mz, mx];
+        let to_edge = [mz, self.width_m - mx, self.height_m - mz, mx];
         (0..4).filter(|&e| self.edges[e] == EdgeKind::Land).map(|e| to_edge[e]).fold(f64::INFINITY, f64::min)
     }
 }
@@ -235,7 +247,7 @@ pub fn volcano_sites(p: &ForgeParams) -> Vec<[f32; 2]> {
         return Vec::new();
     }
     let shape = ContinentalShape::new(p);
-    let clearance = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.size_m) * (1.0 + LAND_EDGE_TAPER_VARIATION)
+    let clearance = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.span_m()) * (1.0 + LAND_EDGE_TAPER_VARIATION)
         + fields::VOLCANO_CONE_RADIUS_M;
     fields::volcano_sites_on(p, &|mx, mz| {
         shape.at(mx, mz).1 > fields::VOLCANO_MIN_LANDNESS && shape.to_land_edge(mx, mz) >= clearance
@@ -384,10 +396,12 @@ pub const LAND_FLOOR_M: f64 = 0.05;
 const NEIGHBORS: [(i32, i32); 8] =
     [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
 
-/// What a forge run needs: world size, grid, seed and every knob.
+/// What a forge run needs: world size (x across `width_m`, z down
+/// `height_m`), grid, seed and every knob.
 #[derive(Clone)]
 pub struct ForgeParams {
-    pub size_m: f64,
+    pub width_m: f64,
+    pub height_m: f64,
     pub cell_m: f64,
     pub seed: u64,
     /// Every tunable of the simulation (knobs.rs).
@@ -398,13 +412,36 @@ pub struct ForgeParams {
 
 impl Default for ForgeParams {
     fn default() -> Self {
+        ForgeParams::square(DEFAULT_SIZE_M, DEFAULT_CELL_M)
+    }
+}
+
+impl ForgeParams {
+    /// A `size_m` x `size_m` world at `cell_m`, default seed and knobs, quiet.
+    pub fn square(size_m: f64, cell_m: f64) -> Self {
         ForgeParams {
-            size_m: DEFAULT_SIZE_M,
-            cell_m: DEFAULT_CELL_M,
+            width_m: size_m,
+            height_m: size_m,
+            cell_m,
             seed: DEFAULT_SEED,
             knobs: Knobs::default(),
             quiet: true,
         }
+    }
+
+    /// Grid columns (x).
+    pub fn nx(&self) -> usize {
+        (self.width_m / self.cell_m).round() as usize
+    }
+
+    /// Grid rows (z).
+    pub fn nz(&self) -> usize {
+        (self.height_m / self.cell_m).round() as usize
+    }
+
+    /// `span_m` of this world.
+    pub fn span_m(&self) -> f64 {
+        span_m(self.width_m, self.height_m)
     }
 }
 
@@ -421,10 +458,14 @@ pub fn hash01(seed: u64, a: u64, b: u64) -> f64 {
     ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// The simulated world: square grid, row-major (z rows, x columns). Heights
-/// are meters relative to sea level (engine y = SEA_LEVEL + h).
+/// The simulated world: an `nx` x `nz` grid, row-major (`nz` rows of `nx`
+/// columns, `i = z * nx + x`). Heights are meters relative to sea level
+/// (engine y = SEA_LEVEL + h).
 pub struct World {
-    pub n: usize,
+    /// Columns (x, west to east).
+    pub nx: usize,
+    /// Rows (z, north to south).
+    pub nz: usize,
     pub dx: f64,
     /// Ground height.
     pub h: Vec<f64>,
@@ -454,8 +495,8 @@ impl World {
         if p.knobs.is_continental() {
             return World::new_continental(p);
         }
-        let n = (p.size_m / p.cell_m).round() as usize;
-        let half = p.size_m * 0.5;
+        let (nx, nz) = (p.nx(), p.nz());
+        let (half_x, half_z) = (p.width_m * 0.5, p.height_m * 0.5);
         let shape_lo = OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]); // 8 km
         let shape_hi = OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]); // 1 km
         let belts = OctaveNoise::new(p.seed ^ 0xF003, -12, vec![1.0, 0.5]); // 4 km
@@ -466,20 +507,21 @@ impl World {
         let rough = OctaveNoise::new(p.seed ^ 0xF004, -8, vec![1.0, 1.0, 1.0]); // 256 m
 
         let mut w = World {
-            n,
+            nx,
+            nz,
             dx: p.cell_m,
-            h: vec![0.0; n * n],
-            ocean: vec![false; n * n],
-            uplift: vec![0.0; n * n],
-            uplifted: vec![0.0; n * n],
+            h: vec![0.0; nx * nz],
+            ocean: vec![false; nx * nz],
+            uplift: vec![0.0; nx * nz],
+            uplifted: vec![0.0; nx * nz],
             margin_drowned: 0,
             edges: [EdgeKind::Sea; 4],
             outlet: Vec::new(),
         };
-        for z in 0..n {
-            for x in 0..n {
+        for z in 0..nz {
+            for x in 0..nx {
                 let (mx, mz) = ((x as f64 + 0.5) * p.cell_m, (z as f64 + 0.5) * p.cell_m);
-                let (rx, rz) = ((mx - half) / half, (mz - half) / half);
+                let (rx, rz) = ((mx - half_x) / half_x, (mz - half_z) / half_z);
                 // Superellipse (p = 4) distance to the rim: 1 on the world edge,
                 // rounder than max(|x|, |z|) so the margin is not a visible frame.
                 let edge = (rx.powi(4) + rz.powi(4)).sqrt().sqrt();
@@ -505,7 +547,7 @@ impl World {
                 let margin_end = (k.ocean_margin_start + OCEAN_MARGIN_RAMP).min(0.99);
                 let land = shape - 2.0 * smoothstep(k.ocean_margin_start, margin_end, edge);
 
-                let i = z * n + x;
+                let i = z * nx + x;
                 if land <= 0.0 {
                     w.ocean[i] = true;
                     w.h[i] = if shape < 0.0 {
@@ -539,10 +581,8 @@ impl World {
                             .max((1.0 - k.lowland_uplift_share) * volcanic));
             }
         }
-        for k in 0..n {
-            for i in [k, (n - 1) * n + k, k * n, k * n + n - 1] {
-                assert!(w.ocean[i], "ocean margin must reach the world edge");
-            }
+        for i in w.border_cells() {
+            assert!(w.ocean[i], "ocean margin must reach the world edge");
         }
         w.outlet = w.ocean.clone();
         w
@@ -554,36 +594,37 @@ impl World {
     /// (`plates`) tapering to 0 toward the land edges, plus a cone of uplift
     /// at each volcano (`volcano_sites`).
     fn new_continental(p: &ForgeParams) -> World {
-        let n = (p.size_m / p.cell_m).round() as usize;
+        let (nx, nz) = (p.nx(), p.nz());
         let k = &p.knobs;
-        let scale = p.size_m / REFERENCE_SIZE_M;
+        let scale = p.span_m() / REFERENCE_SIZE_M;
         let rough = OctaveNoise::new(p.seed ^ 0xF004, -8, vec![1.0, 1.0, 1.0]); // 256 m
         let taper_noise = OctaveNoise::new(p.seed ^ 0xF005, -12, vec![1.0, 0.5]); // 4 km
         let shape_of = ContinentalShape::new(p);
         let edges = shape_of.edges;
-        let field = plates::plate_field(p.seed, p.size_m, n, k);
-        let ranges = plates::interior_ranges(p.seed, p.size_m, k);
-        let taper_m = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.size_m);
+        let field = plates::plate_field(p.seed, p.width_m, p.height_m, nx, nz, k);
+        let ranges = plates::interior_ranges(p.seed, p.width_m, p.height_m, k);
+        let taper_m = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.span_m());
         let volcanoes = volcano_sites(p);
 
         let mut w = World {
-            n,
+            nx,
+            nz,
             dx: p.cell_m,
-            h: vec![0.0; n * n],
-            ocean: vec![false; n * n],
-            uplift: vec![0.0; n * n],
-            uplifted: vec![0.0; n * n],
+            h: vec![0.0; nx * nz],
+            ocean: vec![false; nx * nz],
+            uplift: vec![0.0; nx * nz],
+            uplifted: vec![0.0; nx * nz],
             margin_drowned: 0,
             edges,
-            outlet: vec![false; n * n],
+            outlet: vec![false; nx * nz],
         };
-        for z in 0..n {
-            for x in 0..n {
+        for z in 0..nz {
+            for x in 0..nx {
                 let (mx, mz) = ((x as f64 + 0.5) * p.cell_m, (z as f64 + 0.5) * p.cell_m);
                 let (sx, sz) = (mx / scale, mz / scale);
                 let (shape, land) = shape_of.at(mx, mz);
 
-                let i = z * n + x;
+                let i = z * nx + x;
                 if land <= 0.0 {
                     w.ocean[i] = true;
                     w.h[i] = if shape < 0.0 {
@@ -595,7 +636,8 @@ impl World {
                     continue;
                 }
                 w.h[i] = (1.0 + 45.0 * smoothstep(0.0, 0.5, land) + 3.0 * rough.sample2(sx, sz)).max(0.5);
-                let belt = (field.convergence[i] as f64).max(plates::interior_strength(&ranges, mx, mz, p.size_m, k));
+                let interior = plates::interior_strength(&ranges, mx, mz, p.width_m, p.height_m, k);
+                let belt = (field.convergence[i] as f64).max(interior);
                 let to_land_edge = shape_of.to_land_edge(mx, mz);
                 // Only the belts taper: the lowland share runs on to the edge,
                 // so the land near it neither sinks below the edge nor rises
@@ -611,18 +653,23 @@ impl World {
             }
         }
         w.outlet.clone_from(&w.ocean);
-        for b in 0..n {
-            // (cell, its edge) for the four border runs; corners are on two.
-            for (i, e) in [(b, 0), (b * n + n - 1, 1), ((n - 1) * n + b, 2), (b * n, 3)] {
+        // (cell, its edge) for the four border runs; corners are on two.
+        for x in 0..nx {
+            for (i, e) in [(x, 0), ((nz - 1) * nx + x, 2)] {
                 if edges[e] == EdgeKind::Land {
                     w.outlet[i] = true;
                 }
             }
         }
-        for b in 0..n {
-            for i in [b, (n - 1) * n + b, b * n, b * n + n - 1] {
-                assert!(w.outlet[i], "every border cell must be sea or on a land edge (cell {i})");
+        for z in 0..nz {
+            for (i, e) in [(z * nx + nx - 1, 1), (z * nx, 3)] {
+                if edges[e] == EdgeKind::Land {
+                    w.outlet[i] = true;
+                }
             }
+        }
+        for i in w.border_cells() {
+            assert!(w.outlet[i], "every border cell must be sea or on a land edge (cell {i})");
         }
         w.follow_land_edges(EdgeFollow::Set);
         w
@@ -639,38 +686,55 @@ impl World {
     /// edges (islands). Called on every initial condition (`Set`), after
     /// every erosion step and after the post-erosion shaping (`Lower`).
     pub fn follow_land_edges(&mut self, mode: EdgeFollow) {
-        if !self.edges.contains(&EdgeKind::Land) || self.n < 3 {
+        if !self.edges.contains(&EdgeKind::Land) || self.nx < 3 || self.nz < 3 {
             return;
         }
-        let n = self.n;
-        let last = n - 1;
-        let inward = |c: usize| if c == 0 { 1 } else if c == last { last - 1 } else { c };
-        for b in 0..n {
-            for i in [b, b * n + last, last * n + b, b * n] {
-                if self.ocean[i] || !self.outlet[i] {
-                    continue;
-                }
-                let (x, z) = (i % n, i / n);
-                let (ix, iz) = (inward(x), inward(z));
-                let inner = iz * n + ix;
-                let dist = if ix != x && iz != z { std::f64::consts::SQRT_2 * self.dx } else { self.dx };
-                let target = if self.ocean[inner] {
-                    LAND_FLOOR_M
-                } else {
-                    (self.h[inner] - LAND_EDGE_OUTLET_SLOPE * dist).max(LAND_FLOOR_M)
-                };
-                self.h[i] = match mode {
-                    EdgeFollow::Set => target,
-                    EdgeFollow::Lower => self.h[i].min(target),
-                };
+        let inward = |c: usize, last: usize| if c == 0 { 1 } else if c == last { last - 1 } else { c };
+        for i in self.border_cells() {
+            if self.ocean[i] || !self.outlet[i] {
+                continue;
             }
+            let (x, z) = self.xz(i);
+            let (ix, iz) = (inward(x, self.nx - 1), inward(z, self.nz - 1));
+            let inner = self.index(ix, iz);
+            let dist = if ix != x && iz != z { std::f64::consts::SQRT_2 * self.dx } else { self.dx };
+            let target = if self.ocean[inner] {
+                LAND_FLOOR_M
+            } else {
+                (self.h[inner] - LAND_EDGE_OUTLET_SLOPE * dist).max(LAND_FLOOR_M)
+            };
+            self.h[i] = match mode {
+                EdgeFollow::Set => target,
+                EdgeFollow::Lower => self.h[i].min(target),
+            };
         }
+    }
+
+    /// Cells in the grid (`nx * nz`).
+    pub fn cells(&self) -> usize {
+        self.nx * self.nz
+    }
+
+    /// (x, z) of cell `i`.
+    pub fn xz(&self, i: usize) -> (usize, usize) {
+        (i % self.nx, i / self.nx)
+    }
+
+    /// Cell index of column `x`, row `z`.
+    pub fn index(&self, x: usize, z: usize) -> usize {
+        z * self.nx + x
     }
 
     /// True for a cell on the outermost ring of the grid.
     pub fn on_border(&self, i: usize) -> bool {
-        let (x, z) = (i % self.n, i / self.n);
-        x == 0 || z == 0 || x + 1 == self.n || z + 1 == self.n
+        let (x, z) = self.xz(i);
+        x == 0 || z == 0 || x + 1 == self.nx || z + 1 == self.nz
+    }
+
+    /// Every cell of the outermost ring (corners more than once).
+    pub fn border_cells(&self) -> impl Iterator<Item = usize> + use<> {
+        let (nx, nz) = (self.nx, self.nz);
+        (0..nx).flat_map(move |x| [x, (nz - 1) * nx + x]).chain((0..nz).flat_map(move |z| [z * nx, z * nx + nx - 1]))
     }
 
     /// This world's evolved state carried onto the finer grid of `p_fine`
@@ -688,7 +752,7 @@ impl World {
     /// cells take this world's state. Per cell and in
     /// fixed order: the result does not depend on the thread count.
     pub fn upsample_onto(&self, mut fine: World) -> World {
-        let (nc, nf) = (self.n, fine.n);
+        let (ncx, ncz, nfx) = (self.nx, self.nz, fine.nx);
         // Coarse sea cells read as sea level for land, as diffusion's shore
         // does: a coast cell must not inherit the shelf's depth.
         let coarse_h: Vec<f64> =
@@ -699,21 +763,22 @@ impl World {
         // share mapping would stretch it over the fine one. Fine cells past
         // the coarse grid's centers clamp to its edge.
         let ratio = fine.dx / self.dx;
-        let axis = |j: usize| {
+        let axis = |j: usize, nc: usize| {
             let u = ((j as f64 + 0.5) * ratio - 0.5).clamp(0.0, (nc - 1) as f64);
             let i0 = (u.floor() as usize).min(nc.saturating_sub(2));
             (i0, (i0 + 1).min(nc - 1), u - i0 as f64)
         };
         let sample = |grid: &[f64], i: usize| {
-            let ((x0, x1, tx), (z0, z1, tz)) = (axis(i % nf), axis(i / nf));
-            let row = |z: usize| grid[z * nc + x0] * (1.0 - tx) + grid[z * nc + x1] * tx;
+            let ((x0, x1, tx), (z0, z1, tz)) = (axis(i % nfx, ncx), axis(i / nfx, ncz));
+            let row = |z: usize| grid[z * ncx + x0] * (1.0 - tx) + grid[z * ncx + x1] * tx;
             row(z0) * (1.0 - tz) + row(z1) * tz
         };
         // Outlets (the sea, land-edge border cells) keep the fine initial
         // condition: a land edge's base level is its own height.
         let outlet = &fine.outlet;
-        let h = par::map_range(nf * nf, |i| if outlet[i] { fine.h[i] } else { sample(&coarse_h, i).max(LAND_FLOOR_M) });
-        let uplifted = par::map_range(nf * nf, |i| if outlet[i] { 0.0 } else { sample(&self.uplifted, i) });
+        let cells = fine.cells();
+        let h = par::map_range(cells, |i| if outlet[i] { fine.h[i] } else { sample(&coarse_h, i).max(LAND_FLOOR_M) });
+        let uplifted = par::map_range(cells, |i| if outlet[i] { 0.0 } else { sample(&self.uplifted, i) });
         fine.h = h;
         fine.uplifted = uplifted;
         fine.follow_land_edges(EdgeFollow::Set);
@@ -722,20 +787,20 @@ impl World {
 
     /// 8-neighbors of cell `i` with their distance in meters.
     pub fn neighbors(&self, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
-        let (x, z) = ((i % self.n) as i32, (i / self.n) as i32);
-        let n = self.n as i32;
+        let (x, z) = ((i % self.nx) as i32, (i / self.nx) as i32);
+        let (w, h) = (self.nx as i32, self.nz as i32);
         NEIGHBORS.iter().filter_map(move |&(ox, oz)| {
-            let (nx, nz) = (x + ox, z + oz);
-            (nx >= 0 && nz >= 0 && nx < n && nz < n).then(|| {
+            let (jx, jz) = (x + ox, z + oz);
+            (jx >= 0 && jz >= 0 && jx < w && jz < h).then(|| {
                 let dist = if ox != 0 && oz != 0 { std::f64::consts::SQRT_2 } else { 1.0 };
-                ((nz * n + nx) as usize, dist * self.dx)
+                ((jz * w + jx) as usize, dist * self.dx)
             })
         })
     }
 
     /// Cell center in world meters.
     pub fn center(&self, i: usize) -> (f64, f64) {
-        (((i % self.n) as f64 + 0.5) * self.dx, ((i / self.n) as f64 + 0.5) * self.dx)
+        (((i % self.nx) as f64 + 0.5) * self.dx, ((i / self.nx) as f64 + 0.5) * self.dx)
     }
 }
 
@@ -745,22 +810,22 @@ mod tests {
 
     #[test]
     fn upsample_keeps_fine_mask_and_interpolates_land() {
-        let fine_p = ForgeParams { size_m: 4_096.0, cell_m: 64.0, ..Default::default() };
+        let fine_p = ForgeParams::square(4_096.0, 64.0);
         let coarse_p = ForgeParams { cell_m: 128.0, ..fine_p.clone() };
         let mut coarse = World::new(&coarse_p);
         // A recognisable evolved state: land raised by a ramp, some uplift spent.
-        for i in 0..coarse.n * coarse.n {
+        for i in 0..coarse.cells() {
             if !coarse.ocean[i] {
-                coarse.h[i] += (i % coarse.n) as f64;
+                coarse.h[i] += coarse.xz(i).0 as f64;
                 coarse.uplifted[i] = 7.0;
             }
         }
         let up = coarse.upsample(&fine_p);
         let fresh = World::new(&fine_p);
-        assert_eq!((up.n, up.dx), (fresh.n, fresh.dx));
+        assert_eq!((up.nx, up.nz, up.dx), (fresh.nx, fresh.nz, fresh.dx));
         assert_eq!(up.ocean, fresh.ocean);
         assert_eq!(up.uplift, fresh.uplift);
-        for i in 0..up.n * up.n {
+        for i in 0..up.cells() {
             if up.ocean[i] {
                 assert_eq!((up.h[i], up.uplifted[i]), (fresh.h[i], 0.0));
             } else {
@@ -769,11 +834,11 @@ mod tests {
             }
         }
         // Away from the coast, the interpolated land carries the coarse ramp.
-        let (x, z) = (up.n / 2, up.n / 2);
-        let (cx, cz) = (x / 2, z / 2);
-        if !coarse.ocean[cz * coarse.n + cx] && !up.ocean[z * up.n + x] {
-            assert!((up.h[z * up.n + x] - coarse.h[cz * coarse.n + cx]).abs() < 30.0);
-            assert_eq!(up.uplifted[z * up.n + x], 7.0);
+        let (x, z) = (up.nx / 2, up.nz / 2);
+        let (fine_i, coarse_i) = (up.index(x, z), coarse.index(x / 2, z / 2));
+        if !coarse.ocean[coarse_i] && !up.ocean[fine_i] {
+            assert!((up.h[fine_i] - coarse.h[coarse_i]).abs() < 30.0);
+            assert_eq!(up.uplifted[fine_i], 7.0);
         }
         // Same input, same bytes (parallel map, fixed order).
         assert_eq!(coarse.upsample(&fine_p).h, up.h);
@@ -785,21 +850,21 @@ mod tests {
     /// the fine cell centers, not stretched by the grids' share.
     #[test]
     fn upsample_aligns_by_position_when_size_does_not_divide() {
-        let fine_p = ForgeParams { size_m: 16_000.0, cell_m: 128.0, ..Default::default() };
+        let fine_p = ForgeParams::square(16_000.0, 128.0);
         let coarse_p = ForgeParams { cell_m: 256.0, ..fine_p.clone() };
         let mut coarse = World::new(&coarse_p);
-        assert_eq!((coarse.n, World::new(&fine_p).n), (63, 125), "the sizes must not divide");
-        for i in 0..coarse.n * coarse.n {
+        assert_eq!((coarse.nx, World::new(&fine_p).nx), (63, 125), "the sizes must not divide");
+        for i in 0..coarse.cells() {
             coarse.ocean[i] = false;
             coarse.h[i] = 1_000.0 + coarse.center(i).0;
         }
         let up = coarse.upsample(&fine_p);
         let first_center = coarse.dx * 0.5;
         let mut checked = 0;
-        for i in 0..up.n * up.n {
-            let (x, z) = (i % up.n, i / up.n);
+        for i in 0..up.cells() {
+            let (x, z) = up.xz(i);
             let (cx, _) = up.center(i);
-            if up.outlet[i] || x < 4 || z < 4 || x + 4 >= up.n || z + 4 >= up.n || cx < first_center {
+            if up.outlet[i] || x < 4 || z < 4 || x + 4 >= up.nx || z + 4 >= up.nz || cx < first_center {
                 continue;
             }
             assert!((up.h[i] - (1_000.0 + cx)).abs() < 1e-6, "cell {i}: {} vs {}", up.h[i], 1_000.0 + cx);
@@ -808,22 +873,47 @@ mod tests {
         assert!(checked > 1_000, "checked {checked} cells");
     }
 
+    fn rectangular() -> World {
+        World::new(&ForgeParams { width_m: 8_192.0, height_m: 4_096.0, cell_m: 64.0, ..ForgeParams::default() })
+    }
+
+    #[test]
+    fn rectangular_world_has_its_own_dimensions() {
+        let w = rectangular();
+        assert_eq!((w.nx, w.nz), (128, 64));
+        assert_eq!((w.h.len(), w.cells()), (128 * 64, 128 * 64));
+        assert_eq!(w.xz(w.index(100, 50)), (100, 50));
+        assert!(w.center(w.index(127, 0)).0 > 8_000.0);
+    }
+
+    #[test]
+    fn neighbors_respect_both_bounds() {
+        let w = rectangular();
+        let mut got: Vec<usize> = w.neighbors(w.index(127, 63)).map(|(j, _)| j).collect();
+        got.sort_unstable();
+        let mut want = vec![w.index(126, 63), w.index(127, 62), w.index(126, 62)];
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
     fn continental(layout: u32, seed: u64, size_m: f64, cell_m: f64) -> ForgeParams {
-        let mut p = ForgeParams { size_m, cell_m, seed, ..Default::default() };
+        let mut p = ForgeParams { seed, ..ForgeParams::square(size_m, cell_m) };
         p.knobs.layout = layout as f64;
         p
     }
 
     /// Share of the cells in edge `e`'s outer 5% band that `pick` holds.
     fn band_share(w: &World, e: usize, pick: impl Fn(usize) -> bool) -> f64 {
-        let (n, depth) = (w.n, ((w.n as f64 * 0.05).ceil() as usize).max(1));
+        // Depth into the map and length along edge `e`.
+        let (across, along) = if e % 2 == 0 { (w.nz, w.nx) } else { (w.nx, w.nz) };
+        let depth = ((across as f64 * 0.05).ceil() as usize).max(1);
         let cells: Vec<usize> = (0..depth)
             .flat_map(|d| {
-                (0..n).map(move |b| match e {
-                    0 => d * n + b,
-                    1 => b * n + n - 1 - d,
-                    2 => (n - 1 - d) * n + b,
-                    _ => b * n + d,
+                (0..along).map(move |b| match e {
+                    0 => w.index(b, d),
+                    1 => w.index(w.nx - 1 - d, b),
+                    2 => w.index(b, w.nz - 1 - d),
+                    _ => w.index(d, b),
                 })
             })
             .collect();
@@ -864,13 +954,13 @@ mod tests {
             let land = band_share(&w, e, |i| !w.ocean[i]);
             assert!(land >= 0.9, "inland edge {} is only {land:.2} land", EDGE_NAMES[e]);
         }
-        let n = w.n;
-        let inner_sea = (0..n * n).filter(|&i| w.ocean[i] && !w.on_border(i)).count();
-        assert!(inner_sea > n * n / 50, "an inland sea: {inner_sea} cells");
+        let cells = w.cells();
+        let inner_sea = (0..cells).filter(|&i| w.ocean[i] && !w.on_border(i)).count();
+        assert!(inner_sea > cells / 50, "an inland sea: {inner_sea} cells");
         // Continents: several landmasses, seas between them.
         let w = World::new(&continental(LAYOUT_CONTINENTS, 7, 16_000.0, 128.0));
-        let land = (0..n * n).filter(|&i| !w.ocean[i]).count();
-        assert!(land > n * n / 4 && land < n * n * 9 / 10, "continents: {land} land cells");
+        let land = (0..cells).filter(|&i| !w.ocean[i]).count();
+        assert!(land > cells / 4 && land < cells * 9 / 10, "continents: {land} land cells");
     }
 
     /// Every land cell drains to the sea or off a land edge: following
@@ -882,8 +972,8 @@ mod tests {
         let p = continental(LAYOUT_CONTINENT, DEFAULT_SEED, 8_192.0, 64.0);
         let mut w = World::new(&p);
         assert!(w.edges.contains(&EdgeKind::Land));
-        let land_outlets = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).count();
-        assert!(land_outlets > w.n, "land edges give outlets: {land_outlets}");
+        let land_outlets = (0..w.cells()).filter(|&i| w.outlet[i] && !w.ocean[i]).count();
+        assert!(land_outlets > w.nx.min(w.nz), "land edges give outlets: {land_outlets}");
         let geo = crate::forge::geology::Geology::new(&p, &w);
         let rain = crate::forge::climate::discharge_weight(&crate::forge::climate::compute(&w, &p), &w);
         let mut scratch = StepScratch::default();
@@ -898,7 +988,7 @@ mod tests {
         crate::forge::routing_fast::route_fast(&w, FLOOD_EPSILON, &mut StepScratch::default(), &mut fast);
         for (name, r) in [("priority-flood", route(&w, FLOOD_EPSILON)), ("route_fast", fast)] {
             let mut off_edge = 0;
-            for i in 0..w.n * w.n {
+            for i in 0..w.cells() {
                 assert_eq!(r.receiver[i] == NO_RECEIVER, w.outlet[i], "{name}: cell {i}");
                 if w.outlet[i] {
                     continue;
@@ -907,7 +997,7 @@ mod tests {
                 while r.receiver[c] != NO_RECEIVER {
                     c = r.receiver[c] as usize;
                     steps += 1;
-                    assert!(steps <= w.n * w.n, "{name}: cell {i} loops");
+                    assert!(steps <= w.cells(), "{name}: cell {i} loops");
                 }
                 off_edge += !w.ocean[c] as usize;
             }
@@ -922,12 +1012,11 @@ mod tests {
         for seed in [DEFAULT_SEED, 3] {
             let p = continental(LAYOUT_CONTINENT, seed, 16_000.0, 64.0);
             let w = World::new(&p);
-            let n = w.n;
-            let field = plates::plate_field(p.seed, p.size_m, n, &p.knobs);
+            let field = plates::plate_field(p.seed, p.width_m, p.height_m, w.nx, w.nz, &p.knobs);
             // Convergent boundary cells, then the distance to them (BFS, m).
-            let mut dist = vec![f64::INFINITY; n * n];
+            let mut dist = vec![f64::INFINITY; w.cells()];
             let mut queue = std::collections::VecDeque::new();
-            for i in 0..n * n {
+            for i in 0..w.cells() {
                 let convergent = field.convergence[i] > 0.0
                     && w.neighbors(i).any(|(j, _)| field.plate[j] != field.plate[i]);
                 if convergent {
@@ -944,7 +1033,7 @@ mod tests {
                 }
             }
             let max = w.uplift.iter().copied().fold(0.0, f64::max);
-            let high: Vec<usize> = (0..n * n).filter(|&i| w.uplift[i] > 0.5 * max).collect();
+            let high: Vec<usize> = (0..w.cells()).filter(|&i| w.uplift[i] > 0.5 * max).collect();
             assert!(high.len() > 100, "seed {seed}: {} high-uplift cells", high.len());
             let near = high.iter().filter(|&&i| dist[i] <= 3_000.0).count();
             let share = near as f64 / high.len() as f64;

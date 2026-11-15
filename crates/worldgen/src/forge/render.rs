@@ -162,11 +162,10 @@ const HILLSHADE_RELIEF: f64 = 1.0;
 
 /// Hillshade factor for a land cell: lit from the north-west, relief x`HILLSHADE_RELIEF`.
 fn shade(w: &World, x: usize, z: usize) -> f64 {
-    let n = w.n;
     let sun = [-0.5f64, std::f64::consts::FRAC_1_SQRT_2, -0.5];
-    let at = |x: usize, z: usize| w.h[z * n + x].max(0.0);
-    let (xl, xr) = (x.saturating_sub(1), (x + 1).min(n - 1));
-    let (zu, zd) = (z.saturating_sub(1), (z + 1).min(n - 1));
+    let at = |x: usize, z: usize| w.h[w.index(x, z)].max(0.0);
+    let (xl, xr) = (x.saturating_sub(1), (x + 1).min(w.nx - 1));
+    let (zu, zd) = (z.saturating_sub(1), (z + 1).min(w.nz - 1));
     let dhdx = (at(xr, z) - at(xl, z)) / ((xr - xl) as f64 * w.dx);
     let dhdz = (at(x, zd) - at(x, zu)) / ((zd - zu) as f64 * w.dx);
     let nrm = [-dhdx * HILLSHADE_RELIEF, 1.0, -dhdz * HILLSHADE_RELIEF];
@@ -177,11 +176,10 @@ fn shade(w: &World, x: usize, z: usize) -> f64 {
 
 /// Shaded map from a per-land-cell base colour.
 fn shaded(w: &World, land_color: impl Fn(usize) -> [f64; 3]) -> Image {
-    let n = w.n;
-    let mut img = Image::new(n as u32, n as u32);
-    for z in 0..n {
-        for x in 0..n {
-            let i = z * n + x;
+    let mut img = Image::new(w.nx as u32, w.nz as u32);
+    for z in 0..w.nz {
+        for x in 0..w.nx {
+            let i = w.index(x, z);
             let (c, s) = if w.ocean[i] { (sea_color(-w.h[i]), 1.0) } else { (land_color(i), shade(w, x, z)) };
             let px = |v: f64| (v * s).clamp(0.0, 255.0) as u8;
             img.put_pixel(x as u32, z as u32, Rgb([px(c[0]), px(c[1]), px(c[2])]));
@@ -202,10 +200,10 @@ fn relief_color(h: f64) -> [f64; 3] {
 
 /// Lakes as cells, rivers as anti-aliased polylines sized by Strahler order.
 fn draw_water(img: &mut Image, w: &World, a: &Analysis) {
-    let n = w.n;
-    for i in 0..n * n {
+    for i in 0..w.cells() {
         if !w.ocean[i] && a.lake_depth[i] >= LAKE_MIN_DEPTH_M {
-            img.put_pixel((i % n) as u32, (i / n) as u32, Rgb(LAKE_RGB));
+            let (x, z) = w.xz(i);
+            img.put_pixel(x as u32, z as u32, Rgb(LAKE_RGB));
         }
     }
     let mut rivers: Vec<_> = a.rivers.iter().collect();
@@ -228,12 +226,12 @@ fn draw_water(img: &mut Image, w: &World, a: &Analysis) {
                 for oz in -r..=r {
                     for ox in -r..=r {
                         let (x, z) = (cx.floor() as i64 + ox, cz.floor() as i64 + oz);
-                        if x < 0 || z < 0 || x >= n as i64 || z >= n as i64 {
+                        if x < 0 || z < 0 || x >= w.nx as i64 || z >= w.nz as i64 {
                             continue;
                         }
                         let d = ((x as f64 + 0.5 - cx).powi(2) + (z as f64 + 0.5 - cz).powi(2)).sqrt();
                         let alpha = (radius + 0.5 - d).clamp(0.0, 1.0);
-                        if alpha <= 0.0 || w.ocean[z as usize * n + x as usize] {
+                        if alpha <= 0.0 || w.ocean[w.index(x as usize, z as usize)] {
                             continue;
                         }
                         let old = img.get_pixel(x as u32, z as u32).0;
@@ -277,18 +275,23 @@ fn rainfall_image(w: &World, a: &Analysis, precip_mm: &[f32]) -> Image {
 /// parameters are the defaults at the world's own size and cell.
 fn preview_artifact(forged: &Forged) -> crate::forged::WorldArtifact {
     let w = &forged.world;
-    let p = ForgeParams { size_m: w.dx * w.n as f64, cell_m: w.dx, quiet: true, ..Default::default() };
+    let p = ForgeParams {
+        width_m: w.dx * w.nx as f64,
+        height_m: w.dx * w.nz as f64,
+        cell_m: w.dx,
+        quiet: true,
+        ..Default::default()
+    };
     forged.artifact(&p)
 }
 
 /// Biome palette (`Biome::map_rgb`) or region colours (`tile_map::region_color`),
 /// one flat colour per cell, land lightly hillshaded.
 fn artifact_image(w: &World, art: &crate::forged::WorldArtifact, layer: PreviewLayer) -> Image {
-    let n = w.n;
-    let mut img = Image::new(n as u32, n as u32);
-    for z in 0..n {
-        for x in 0..n {
-            let i = z * n + x;
+    let mut img = Image::new(w.nx as u32, w.nz as u32);
+    for z in 0..w.nz {
+        for x in 0..w.nx {
+            let i = w.index(x, z);
             let rgb = match layer {
                 PreviewLayer::Regions => {
                     let id = art.region[i];
@@ -314,28 +317,27 @@ mod tests {
     use crate::forge::{forge, ForgeParams};
 
     fn tiny() -> crate::forge::Forged {
-        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(4_096.0, 128.0);
         p.knobs.iters = 20.0;
         forge(&p)
     }
 
     #[test]
-    fn render_is_n_by_n_rgba() {
+    fn render_is_nx_by_nz_rgba() {
         let f = tiny();
-        let n = f.world.n;
+        let (nx, nz) = (f.world.nx, f.world.nz);
         for layer in PreviewLayer::ALL {
             let img = render(&f, layer);
-            assert_eq!((img.width as usize, img.height as usize), (n, n), "{}", layer.label());
-            assert_eq!(img.pixels.len(), n * n * 4);
+            assert_eq!((img.width as usize, img.height as usize), (nx, nz), "{}", layer.label());
+            assert_eq!(img.pixels.len(), nx * nz * 4);
         }
     }
 
     #[test]
     fn relief_sea_and_land_differ() {
         let f = tiny();
-        let n = f.world.n;
         let img = render(&f, PreviewLayer::Relief);
-        let land = (0..n * n).filter(|&i| !f.world.ocean[i]).max_by(|&a, &b| f.world.h[a].total_cmp(&f.world.h[b])).unwrap();
+        let land = (0..f.world.cells()).filter(|&i| !f.world.ocean[i]).max_by(|&a, &b| f.world.h[a].total_cmp(&f.world.h[b])).unwrap();
         let px = |i: usize| img.pixels[i * 4..i * 4 + 4].to_vec();
         assert_ne!(px(0), px(land));
     }

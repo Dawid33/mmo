@@ -398,7 +398,7 @@ fn row_delta_inverts() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn artifact_v3_round_trip_preserves_samples() {
     // Seed 4: a small world with dry land for a spawn site.
-    let p = worldgen::forge::ForgeParams { size_m: 4096.0, cell_m: 64.0, seed: 4, ..Default::default() };
+    let p = worldgen::forge::ForgeParams { seed: 4, ..worldgen::forge::ForgeParams::square(4096.0, 64.0) };
     let artifact = worldgen::forge::forge(&p).artifact(&p);
     let before = ForgedWorld::new(artifact.clone());
     let path = std::env::temp_dir().join(format!("mmo-v3-{}.world", std::process::id()));
@@ -1069,7 +1069,7 @@ const WHOLE_RASTERS_GUARD_CRC: u32 = 0x5AD6_2E91;
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn whole_rasters_refactor_is_bit_exact() {
-    let p = worldgen::forge::ForgeParams { size_m: 4096.0, cell_m: 16.0, seed: 4, ..Default::default() };
+    let p = worldgen::forge::ForgeParams { seed: 4, ..worldgen::forge::ForgeParams::square(4096.0, 16.0) };
     let world = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
     let mut h = crc32fast::Hasher::new();
     let f64b = |h: &mut crc32fast::Hasher, v: f64| h.update(&v.to_bits().to_le_bytes());

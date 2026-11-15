@@ -386,7 +386,7 @@ fn stale_world_map_is_retileable() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn unsupported_cell_size_refused_before_writing() {
-    let p = worldgen::forge::ForgeParams { size_m: 512.0, cell_m: 4.0, seed: 4, ..Default::default() };
+    let p = worldgen::forge::ForgeParams { seed: 4, ..worldgen::forge::ForgeParams::square(512.0, 4.0) };
     let bytes = worldgen::forge::forge(&p).artifact(&p).to_bytes();
     each_backend("forged_unsupported", false, |url| {
         let h = open(url);

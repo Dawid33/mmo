@@ -72,7 +72,10 @@ pub fn run(args: &[String]) -> Result<String, String> {
         Some("forge") => {
             let (db, params) = parse_forge(&args[1..])?;
             let crc = forge_into(&db, &params)?;
-            Ok(format!("worldctl: forged a {} m world at {} m cells into {db} (content crc {crc:#010x})", params.size_m, params.cell_m))
+            Ok(format!(
+                "worldctl: forged a {} x {} m world at {} m cells into {db} (content crc {crc:#010x})",
+                params.width_m, params.height_m, params.cell_m
+            ))
         }
         Some("retile") => {
             let db = parse_retile(&args[1..])?;
@@ -123,7 +126,10 @@ pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value\n{USAGE}"));
         match flag.as_str() {
             "--db" => db = Some(parse_db(value()?)?),
-            "--size" => p.size_m = value()?.parse().map_err(|_| "--size <metres>".to_string())?,
+            "--size" => {
+                let size: f64 = value()?.parse().map_err(|_| "--size <metres>".to_string())?;
+                (p.width_m, p.height_m) = (size, size);
+            }
             "--cell" => p.cell_m = value()?.parse().map_err(|_| "--cell <metres>".to_string())?,
             "--seed" => {
                 let v = value()?;

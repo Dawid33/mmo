@@ -527,7 +527,7 @@ mod tests {
     #[ignore = "slow: >100ms — run via just test-full"]
     fn ensure_world_forges_into_the_store_once() {
         let store = memory_store();
-        let params = ForgeParams { size_m: 2048.0, cell_m: 64.0, seed: 4, ..ForgeParams::default() };
+        let params = ForgeParams { seed: 4, ..ForgeParams::square(2048.0, 64.0) };
         let (first, map) = ensure_world(&store, None, &params).unwrap();
         assert!(first.tile_cache().is_some(), "written as tiles");
         let info = store.world_info().unwrap();

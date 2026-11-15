@@ -230,7 +230,8 @@ impl BiomeSummary {
 /// Biome and region numbers of `a`; `polar` = the forge had a pole on, `layout` = `Knobs::layout()`.
 pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> BiomeSummary {
     use super::regions::{biome_shares, region_counts};
-    let n = a.n as usize;
+    // The world file is square until it stores both dimensions.
+    let (nx, nz) = (a.n as usize, a.n as usize);
     let kind_of = |id: u16| a.regions.get(usize::from(id)).map(|r| r.kind);
 
     // Mountain regions with a 4-neighbour of a different land region.
@@ -244,16 +245,16 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
             bordering[usize::from(me)] = true;
         }
     };
-    for z in 0..n {
-        for x in 0..n {
-            let i = z * n + x;
-            if x + 1 < n {
+    for z in 0..nz {
+        for x in 0..nx {
+            let i = z * nx + x;
+            if x + 1 < nx {
                 touch(a.region[i], a.region[i + 1], &mut bordering);
                 touch(a.region[i + 1], a.region[i], &mut bordering);
             }
-            if z + 1 < n {
-                touch(a.region[i], a.region[i + n], &mut bordering);
-                touch(a.region[i + n], a.region[i], &mut bordering);
+            if z + 1 < nz {
+                touch(a.region[i], a.region[i + nx], &mut bordering);
+                touch(a.region[i + nx], a.region[i], &mut bordering);
             }
         }
     }
@@ -261,25 +262,27 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
     // Peaks: land cells equal to the maximum of their square window
     // (separable running maxima), colder than the snow line.
     let r = ((PEAK_SEPARATION_M / a.cell_m).round() as usize).max(1);
-    let h: Vec<f32> = (0..n * n).map(|i| a.height.get(i)).collect();
+    let h: Vec<f32> = (0..nx * nz).map(|i| a.height.get(i)).collect();
     let window_max = |src: &[f32], horizontal: bool| -> Vec<f32> {
-        let mut out = vec![f32::MIN; n * n];
-        for line in 0..n {
-            for k in 0..n {
-                let (lo, hi) = (k.saturating_sub(r), (k + r).min(n - 1));
-                let at = |j: usize| if horizontal { src[line * n + j] } else { src[j * n + line] };
+        let mut out = vec![f32::MIN; nx * nz];
+        // `lines` rows (or columns) of `len` cells each.
+        let (lines, len) = if horizontal { (nz, nx) } else { (nx, nz) };
+        for line in 0..lines {
+            for k in 0..len {
+                let (lo, hi) = (k.saturating_sub(r), (k + r).min(len - 1));
+                let at = |j: usize| if horizontal { src[line * nx + j] } else { src[j * nx + line] };
                 let m = (lo..=hi).map(at).fold(f32::MIN, f32::max);
                 if horizontal {
-                    out[line * n + k] = m;
+                    out[line * nx + k] = m;
                 } else {
-                    out[k * n + line] = m;
+                    out[k * nx + line] = m;
                 }
             }
         }
         out
     };
     let wmax = window_max(&window_max(&h, true), false);
-    let peaks_above_snow = count_peaks(&h, &wmax, n, |i| a.temperature_c.get(i) < crate::forged::SNOW_LINE_C);
+    let peaks_above_snow = count_peaks(&h, &wmax, nx, nz, |i| a.temperature_c.get(i) < crate::forged::SNOW_LINE_C);
 
     BiomeSummary {
         shares: biome_shares(&a.biome),
@@ -294,24 +297,24 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
 /// Summits: 8-connected groups of land cells equal to their window maximum
 /// (a flat, quantised summit is one peak, not one per cell), counted when
 /// `cold` holds for the group's first cell.
-fn count_peaks(h: &[f32], wmax: &[f32], n: usize, cold: impl Fn(usize) -> bool) -> u32 {
+fn count_peaks(h: &[f32], wmax: &[f32], nx: usize, nz: usize, cold: impl Fn(usize) -> bool) -> u32 {
     let is_max = |i: usize| h[i] > 0.0 && h[i] >= wmax[i];
-    let mut seen = vec![false; n * n];
+    let mut seen = vec![false; nx * nz];
     let mut peaks = 0;
-    for start in 0..n * n {
+    for start in 0..nx * nz {
         if seen[start] || !is_max(start) {
             continue;
         }
         let mut stack = vec![start];
         seen[start] = true;
         while let Some(i) = stack.pop() {
-            let (x, z) = ((i % n) as i64, (i / n) as i64);
+            let (x, z) = ((i % nx) as i64, (i / nx) as i64);
             for (dx, dz) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
-                let (nx, nz) = (x + dx, z + dz);
-                if nx < 0 || nz < 0 || nx >= n as i64 || nz >= n as i64 {
+                let (jx, jz) = (x + dx, z + dz);
+                if jx < 0 || jz < 0 || jx >= nx as i64 || jz >= nz as i64 {
                     continue;
                 }
-                let j = nz as usize * n + nx as usize;
+                let j = jz as usize * nx + jx as usize;
                 if !seen[j] && is_max(j) {
                     seen[j] = true;
                     stack.push(j);
@@ -420,7 +423,7 @@ mod tests {
         }
         h[9 * n + 9] = 100.0; // a second, separate summit
         let wmax: Vec<f32> = (0..n * n).map(|_| 100.0).collect();
-        assert_eq!(count_peaks(&h, &wmax, n, |_| true), 2);
+        assert_eq!(count_peaks(&h, &wmax, n, n, |_| true), 2);
     }
 
     #[test]

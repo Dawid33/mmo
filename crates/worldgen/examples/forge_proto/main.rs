@@ -93,7 +93,10 @@ impl Params {
         while let Some(flag) = it.next() {
             let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
             match flag.as_str() {
-                "--size" => p.size_m = value().parse().expect("--size <meters>"),
+                "--size" => {
+                    let size: f64 = value().parse().expect("--size <meters>");
+                    (p.width_m, p.height_m) = (size, size);
+                }
                 "--cell" => p.cell_m = value().parse().expect("--cell <meters>"),
                 "--iters" => p.knobs.iters = value().parse().expect("--iters <count>"),
                 "--seed" => {
@@ -157,10 +160,10 @@ fn main() {
         search::run(&p);
         return;
     }
-    let n = (p.size_m / p.cell_m).round() as usize;
+    let (nx, nz) = (p.nx(), p.nz());
     println!(
-        "forge: seed {:#018X}, {} m world, {} m cells ({n}x{n}), {} iterations x {} yr over {} level(s), rock contrast {}, rain shadow {}",
-        p.seed, p.size_m, p.cell_m,
+        "forge: seed {:#018X}, {} x {} m world, {} m cells ({nx}x{nz}), {} iterations x {} yr over {} level(s), rock contrast {}, rain shadow {}",
+        p.seed, p.width_m, p.height_m, p.cell_m,
         worldgen::forge::schedule(&p).iter().map(|&(_, i)| i).sum::<usize>(), p.knobs.dt_years,
         worldgen::forge::schedule(&p).len(),
         p.knobs.geology_strength, p.knobs.climate_strength,
@@ -180,7 +183,7 @@ fn main() {
     hydrology::print_report("forged world", w.dx, &a.stats);
     // The deepest stratigraphic level the surface cuts: what the geology
     // column must reach (geology::COLUMN_BOTTOM_S).
-    let deepest_s = (0..w.n * w.n)
+    let deepest_s = (0..w.cells())
         .filter(|&i| !w.ocean[i])
         .map(|i| w.h[i] - w.uplifted[i] - forged.geology.bedding[i])
         .fold(f64::MAX, f64::min);
@@ -237,8 +240,8 @@ fn main() {
 fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgeParams) {
     use worldgen::forge::climate::{wind, Wind};
     let (w, c) = (&forged.world, &forged.climate);
-    let n = w.n;
-    let land: Vec<usize> = (0..n * n).filter(|&i| !w.ocean[i]).collect();
+    let (nx, nz) = (w.nx, w.nz);
+    let land: Vec<usize> = (0..w.cells()).filter(|&i| !w.ocean[i]).collect();
     let range = |v: &[f32], cells: &[usize]| {
         cells.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(v[i]), hi.max(v[i])))
     };
@@ -249,9 +252,9 @@ fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgePar
     );
     const BANDS: usize = 8;
     for b in 0..BANDS {
-        let rows = b * n / BANDS..(b + 1) * n / BANDS;
+        let rows = b * nz / BANDS..(b + 1) * nz / BANDS;
         let lat = c.latitude_deg[(rows.start + rows.end) / 2];
-        let cells: Vec<usize> = land.iter().copied().filter(|i| rows.contains(&(i / n))).collect();
+        let cells: Vec<usize> = land.iter().copied().filter(|i| rows.contains(&(i / nx))).collect();
         let dir = if wind(lat as f64, p) == Wind::FromWest { "W" } else { "E" };
         if cells.is_empty() {
             println!("  lat {lat:5.1}  wind from {dir}  (sea)");

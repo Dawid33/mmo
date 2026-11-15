@@ -142,11 +142,11 @@ struct Steps {
 
 impl Steps {
     fn new(w: &World) -> Steps {
-        let n = w.n as isize;
+        let nx = w.nx as isize;
         let (o, d) = (w.dx, std::f64::consts::SQRT_2 * w.dx);
         let dist = [o, o, o, o, d, d, d, d];
         Steps {
-            off: [1, -1, n, -n, n + 1, -n + 1, n - 1, -n - 1],
+            off: [1, -1, nx, -nx, nx + 1, -nx + 1, nx - 1, -nx - 1],
             dist,
             inv_dist: dist.map(|d| 1.0 / d),
         }
@@ -171,12 +171,10 @@ fn find(parent: &mut [u32], mut x: usize) -> usize {
 /// `erosion::route_into` (filled surface with the epsilon gradient, receivers
 /// strictly downhill on it, downstream-first order) in linear time.
 pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut Routing) {
-    let (n, cells) = (w.n, w.n * w.n);
+    let (nx, nz, cells) = (w.nx, w.nz, w.cells());
     let (g, s) = (Grid::new(w), Steps::new(w));
-    for k in 0..n {
-        for i in [k, (n - 1) * n + k, k * n, k * n + n - 1] {
-            assert!(g.is_outlet(i), "route_fast: the map edge must be outlets (cell {i} is not)");
-        }
+    for i in w.border_cells() {
+        assert!(g.is_outlet(i), "route_fast: the map edge must be outlets (cell {i} is not)");
     }
     let FastScratch {
         down,
@@ -205,22 +203,22 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     filled.resize(cells, 0.0);
     down.resize(cells, NO_DIR);
     basin.resize(cells, NO_BASIN);
-    par::for_rows3(filled, down, basin, n, roots, |z0, filled, down, basin, tops| {
+    par::for_rows3(filled, down, basin, nx, roots, |z0, filled, down, basin, tops| {
         let (g, s) = (g, s);
         // Column x of this row has land in the row above, below or itself.
-        let mut land_near = vec![false; n];
-        for (dz, ((filled, down), basin)) in filled.chunks_mut(n).zip(down.chunks_mut(n)).zip(basin.chunks_mut(n)).enumerate() {
+        let mut land_near = vec![false; nx];
+        for (dz, ((filled, down), basin)) in filled.chunks_mut(nx).zip(down.chunks_mut(nx)).zip(basin.chunks_mut(nx)).enumerate() {
             let z = z0 + dz;
-            let (above, below) = (z.saturating_sub(1), (z + 1).min(n - 1));
+            let (above, below) = (z.saturating_sub(1), (z + 1).min(nz - 1));
             for (x, near) in land_near.iter_mut().enumerate() {
-                *near = !(g.is_outlet(above * n + x) && g.is_outlet(z * n + x) && g.is_outlet(below * n + x));
+                *near = !(g.is_outlet(above * nx + x) && g.is_outlet(z * nx + x) && g.is_outlet(below * nx + x));
             }
-            for x in 0..n {
-                let i = z * n + x;
+            for x in 0..nx {
+                let i = z * nx + x;
                 if g.is_outlet(i) {
                     // A shore outlet: land among its (on-map) neighbours. A
                     // land-edge outlet stays at its own height.
-                    let shore = land_near[x.saturating_sub(1)..=(x + 1).min(n - 1)].iter().any(|&l| l);
+                    let shore = land_near[x.saturating_sub(1)..=(x + 1).min(nx - 1)].iter().any(|&l| l);
                     filled[x] = if shore && g.ocean[i] { OUTLET_LEVEL_M } else { g.h[i] };
                     (down[x], basin[x]) = (NO_DIR, SEA);
                     continue;
@@ -250,10 +248,10 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     // only names: the spill levels below don't depend on them.
     {
         let down: &[u8] = down;
-        par::for_rows(donors, n, &mut Vec::new(), |z0, rows, _| {
+        par::for_rows(donors, nx, &mut Vec::new(), |z0, rows, _| {
             let (g, s, down) = (g, s, down);
             for (j, m) in rows.iter_mut().enumerate() {
-                let i = z0 * n + j;
+                let i = z0 * nx + j;
                 *m = 0;
                 if !g.is_outlet(i) {
                     for (k, &back) in OPPOSITE.iter().enumerate() {
@@ -380,10 +378,10 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     dir.resize(cells, NO_DIR);
     {
         let (filled, down): (&[f64], &[u8]) = (filled, down);
-        par::for_rows(dir, n, flats, |z0, rows, flats| {
+        par::for_rows(dir, nx, flats, |z0, rows, flats| {
             let (g, s, filled, down) = (g, s, filled, down);
             for (j, d) in rows.iter_mut().enumerate() {
-                let i = z0 * n + j;
+                let i = z0 * nx + j;
                 if g.is_outlet(i) {
                     continue;
                 }
@@ -452,10 +450,10 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     donors.resize(cells, 0);
     {
         let dir: &[u8] = dir;
-        par::for_rows3(receiver, receiver_dist, donors, n, roots, |z0, receiver, receiver_dist, donors, roots| {
+        par::for_rows3(receiver, receiver_dist, donors, nx, roots, |z0, receiver, receiver_dist, donors, roots| {
             let (g, s, dir) = (g, s, dir);
             for (j, ((r, rd), m)) in receiver.iter_mut().zip(receiver_dist.iter_mut()).zip(donors.iter_mut()).enumerate() {
-                let i = z0 * n + j;
+                let i = z0 * nx + j;
                 (*r, *rd, *m) = (NO_RECEIVER, 0.0, 0);
                 if g.is_outlet(i) {
                     continue;
@@ -532,7 +530,8 @@ mod tests {
     /// An N x N world, ocean on the border ring, land heights from `f(x, z)`.
     fn world(f: impl Fn(usize, usize) -> f64) -> World {
         let mut w = World {
-            n: N,
+            nx: N,
+            nz: N,
             dx: CELL_M,
             h: vec![0.0; N * N],
             ocean: vec![false; N * N],

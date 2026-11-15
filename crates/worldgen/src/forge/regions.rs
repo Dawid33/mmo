@@ -81,39 +81,39 @@ pub fn min_region_cells(cell_m: f64) -> u32 {
     (MIN_REGION_AREA_M2 / (cell_m * cell_m)).ceil().max(1.0) as u32
 }
 
-/// Regions of an `n` × `n` world from its biome (`Biome` as `u8`) and
+/// Regions of an `nx` × `nz` world from its biome (`Biome` as `u8`) and
 /// drainage rasters: per-cell region ids and the regions, ids dense from 0
 /// in raster order of each region's first cell.
-pub fn flood(biome: &[u8], drainage: &[u8], n: usize, cell_m: f64) -> (Vec<u16>, Vec<RegionRecord>) {
-    flood_with(biome, drainage, n, min_region_cells(cell_m), MAX_REGIONS)
+pub fn flood(biome: &[u8], drainage: &[u8], nx: usize, nz: usize, cell_m: f64) -> (Vec<u16>, Vec<RegionRecord>) {
+    flood_with(biome, drainage, (nx, nz), min_region_cells(cell_m), MAX_REGIONS)
 }
 
 /// `flood` with the merge size (cells) and the region cap as arguments.
 pub fn flood_with(
     biome: &[u8],
     drainage: &[u8],
-    n: usize,
+    (nx, nz): (usize, usize),
     min_cells: u32,
     max_regions: usize,
 ) -> (Vec<u16>, Vec<RegionRecord>) {
-    assert_eq!(biome.len(), n * n);
-    assert_eq!(drainage.len(), n * n);
+    assert_eq!(biome.len(), nx * nz);
+    assert_eq!(drainage.len(), nx * nz);
     assert!(max_regions >= 1 && max_regions <= MAX_REGIONS);
-    let kind: Vec<RegionType> = par::map_range(n * n, |i| {
+    let kind: Vec<RegionType> = par::map_range(nx * nz, |i| {
         region_type(Biome::from_u8(biome[i]).unwrap_or(Biome::Ocean), drainage[i])
     });
-    let mut f = Flood::components(&kind, n);
-    let mut count = f.merge(n, min_cells, false);
+    let mut f = Flood::components(&kind, nx, nz);
+    let mut count = f.merge(nx, nz, min_cells, false);
     let mut threshold = min_cells.max(1);
     while count > max_regions {
-        count = f.merge(n, threshold, true);
+        count = f.merge(nx, nz, threshold, true);
         if count <= max_regions {
             break;
         }
         threshold = threshold.saturating_mul(2);
-        count = f.merge(n, threshold, false);
+        count = f.merge(nx, nz, threshold, false);
     }
-    f.finish(n)
+    f.finish()
 }
 
 /// Union-find over the 4-connected components of one region type.
@@ -126,11 +126,11 @@ struct Flood {
 }
 
 impl Flood {
-    fn components(kind: &[RegionType], n: usize) -> Flood {
-        let mut label = vec![u32::MAX; n * n];
+    fn components(kind: &[RegionType], nx: usize, nz: usize) -> Flood {
+        let mut label = vec![u32::MAX; nx * nz];
         let (mut size, mut kinds) = (Vec::new(), Vec::new());
         let mut stack = Vec::new();
-        for start in 0..n * n {
+        for start in 0..nx * nz {
             if label[start] != u32::MAX {
                 continue;
             }
@@ -141,7 +141,7 @@ impl Flood {
             stack.push(start);
             while let Some(i) = stack.pop() {
                 cells += 1;
-                let (x, z) = (i % n, i / n);
+                let (x, z) = (i % nx, i / nx);
                 let mut visit = |j: usize| {
                     if label[j] == u32::MAX && kind[j] == k {
                         label[j] = id;
@@ -151,14 +151,14 @@ impl Flood {
                 if x > 0 {
                     visit(i - 1);
                 }
-                if x + 1 < n {
+                if x + 1 < nx {
                     visit(i + 1);
                 }
                 if z > 0 {
-                    visit(i - n);
+                    visit(i - nx);
                 }
-                if z + 1 < n {
-                    visit(i + n);
+                if z + 1 < nz {
+                    visit(i + nx);
                 }
             }
             size.push(cells);
@@ -185,15 +185,15 @@ impl Flood {
     /// (same merge class unless `cross_class`), pass after pass until none
     /// can merge. Single-threaded and ordered by id: the result depends only
     /// on the rasters. Returns the region count.
-    fn merge(&mut self, n: usize, min_cells: u32, cross_class: bool) -> usize {
+    fn merge(&mut self, nx: usize, nz: usize, min_cells: u32, cross_class: bool) -> usize {
         loop {
             // Root of every cell, then the (small root, neighbour root) pairs.
-            let roots: Vec<u32> = (0..n * n).map(|i| self.find(self.label[i])).collect();
+            let roots: Vec<u32> = (0..nx * nz).map(|i| self.find(self.label[i])).collect();
             let small = |f: &Flood, r: u32| f.size[r as usize] < min_cells;
             let mut pairs: Vec<(u32, u32)> = Vec::new();
-            for i in 0..n * n {
+            for i in 0..nx * nz {
                 let a = roots[i];
-                let (x, z) = (i % n, i / n);
+                let (x, z) = (i % nx, i / nx);
                 let mut edge = |b: u32| {
                     if a != b {
                         if small(self, a) {
@@ -204,11 +204,11 @@ impl Flood {
                         }
                     }
                 };
-                if x + 1 < n {
+                if x + 1 < nx {
                     edge(roots[i + 1]);
                 }
-                if z + 1 < n {
-                    edge(roots[i + n]);
+                if z + 1 < nz {
+                    edge(roots[i + nx]);
                 }
             }
             pairs.sort_unstable();
@@ -253,11 +253,11 @@ impl Flood {
     }
 
     /// Dense `u16` ids in raster order of each region's first cell.
-    fn finish(mut self, n: usize) -> (Vec<u16>, Vec<RegionRecord>) {
+    fn finish(mut self) -> (Vec<u16>, Vec<RegionRecord>) {
         let mut id_of = vec![u32::MAX; self.parent.len()];
         let mut records: Vec<RegionRecord> = Vec::new();
-        let mut out = vec![0u16; n * n];
-        for i in 0..n * n {
+        let mut out = vec![0u16; self.label.len()];
+        for i in 0..self.label.len() {
             let r = self.find(self.label[i]) as usize;
             if id_of[r] == u32::MAX {
                 id_of[r] = records.len() as u32;
@@ -328,14 +328,14 @@ pub fn assign_alignment(regions: &mut [RegionRecord], seed: u64, good_share: f64
     }
 }
 
-/// Savagery 0..100 per cell of an `n` × `n` grid of `cell_m` cells: fractal
-/// noise, first octave `SAVAGERY_WAVELENGTH_M`.
-pub fn savagery(seed: u64, n: usize, cell_m: f64) -> Vec<u8> {
+/// Savagery 0..100 per cell of an `nx` × `nz` grid of `cell_m` cells:
+/// fractal noise, first octave `SAVAGERY_WAVELENGTH_M`.
+pub fn savagery(seed: u64, nx: usize, nz: usize, cell_m: f64) -> Vec<u8> {
     let noise = OctaveNoise::new(seed ^ 0x5A7A_6E27, -13, vec![1.0; SAVAGERY_OCTAVES]);
     // Octave -13 is 8,192 m; stretch the coordinates onto the wavelength.
     let scale = 8_192.0 / SAVAGERY_WAVELENGTH_M;
-    par::map_range(n * n, |i| {
-        let (x, z) = (((i % n) as f64 + 0.5) * cell_m * scale, ((i / n) as f64 + 0.5) * cell_m * scale);
+    par::map_range(nx * nz, |i| {
+        let (x, z) = (((i % nx) as f64 + 0.5) * cell_m * scale, ((i / nx) as f64 + 0.5) * cell_m * scale);
         (50.0 + 50.0 * SAVAGERY_GAIN * noise.sample2(x, z)).round().clamp(0.0, 100.0) as u8
     })
 }
@@ -343,8 +343,9 @@ pub fn savagery(seed: u64, n: usize, cell_m: f64) -> Vec<u8> {
 /// Fills `a`'s biome, region, regions and savagery from its own stored
 /// fields, so the biome raster is exactly `classify` of what a reader sees.
 pub fn derive(a: &mut WorldArtifact, good_share: f64, evil_share: f64) {
-    let n = a.n as usize;
-    let mut lake = vec![false; n * n];
+    // The world file is square until it stores both dimensions.
+    let (nx, nz) = (a.n as usize, a.n as usize);
+    let mut lake = vec![false; nx * nz];
     for l in &a.lakes {
         for &(start, len) in &l.cells {
             for c in &mut lake[start as usize..(start + len) as usize] {
@@ -352,10 +353,10 @@ pub fn derive(a: &mut WorldArtifact, good_share: f64, evil_share: f64) {
             }
         }
     }
-    let biome = par::map_range(n * n, |i| classify(&a.cell_climate_at(i, lake[i])) as u8);
-    let (region, mut regions) = flood(&biome, &a.drainage, n, a.cell_m);
+    let biome = par::map_range(nx * nz, |i| classify(&a.cell_climate_at(i, lake[i])) as u8);
+    let (region, mut regions) = flood(&biome, &a.drainage, nx, nz, a.cell_m);
     assign_alignment(&mut regions, a.seed, good_share, evil_share, a.cell_m);
-    a.savagery = savagery(a.seed, n, a.cell_m);
+    a.savagery = savagery(a.seed, nx, nz, a.cell_m);
     a.biome = biome;
     a.region = region;
     a.regions = regions;
@@ -419,7 +420,7 @@ mod tests {
     #[test]
     fn flood_splits_frozen_but_joins_forests() {
         let (b, n) = raster(&["TTJJ", "TTJB", "UUGG", "UUGG"]);
-        let (region, regions) = flood_with(&b, &vec![FOREST_DRAINAGE; n * n], n, 1, MAX_REGIONS);
+        let (region, regions) = flood_with(&b, &vec![FOREST_DRAINAGE; n * n], (n, n), 1, MAX_REGIONS);
         // Taiga, jungle and broadleaf: one forest; tundra and glacier apart.
         assert_eq!(regions.len(), 3, "{regions:?}");
         assert_eq!(region[0], region[3]);
@@ -448,8 +449,8 @@ mod tests {
             "~~~~~~",
         ]);
         let d = vec![FOREST_DRAINAGE; n * n];
-        let (unmerged, _) = flood_with(&b, &d, n, 1, MAX_REGIONS);
-        let (region, regions) = flood_with(&b, &d, n, 3, MAX_REGIONS);
+        let (unmerged, _) = flood_with(&b, &d, (n, n), 1, MAX_REGIONS);
+        let (region, regions) = flood_with(&b, &d, (n, n), 3, MAX_REGIONS);
         assert!(regions.len() < unmerged.iter().max().map_or(0, |&m| m as usize + 1));
         assert_eq!(kind_at(&region, &regions, n, 1, 1), RegionType::Forest, "lone grass cell joins the forest");
         assert_eq!(region[n + 1], region[0]);
@@ -472,12 +473,12 @@ mod tests {
         let b: Vec<u8> = (0..n * n)
             .map(|i| if (i % n + i / n) % 2 == 0 { Biome::Grassland } else { Biome::Ocean } as u8)
             .collect();
-        let (region, regions) = flood(&b, &vec![20; n * n], n, 4_000.0);
+        let (region, regions) = flood(&b, &vec![20; n * n], n, n, 4_000.0);
         assert!(regions.len() <= MAX_REGIONS, "{}", regions.len());
         assert_eq!(regions.iter().map(|r| r.cells as usize).sum::<usize>(), n * n);
         assert!(region.iter().all(|&id| (id as usize) < regions.len()));
         // A smaller cap is honoured the same way.
-        let (_, capped) = flood_with(&b, &vec![20; n * n], n, 1, 1_000);
+        let (_, capped) = flood_with(&b, &vec![20; n * n], (n, n), 1, 1_000);
         assert!(capped.len() <= 1_000, "{}", capped.len());
     }
 
@@ -544,14 +545,14 @@ mod tests {
     #[test]
     fn savagery_covers_the_thirds() {
         let (n, cell_m) = (256, 256.0); // 65 km
-        let s = savagery(3, n, cell_m);
+        let s = savagery(3, n, n, cell_m);
         let third = |lo: u8, hi: u8| s.iter().filter(|&&v| v >= lo && v <= hi).count() as f64 / s.len() as f64;
         let (calm, mid, savage) = (third(0, 32), third(33, 66), third(67, 100));
         eprintln!("savagery thirds: calm {calm:.2} neutral {mid:.2} savage {savage:.2}");
         for share in [calm, mid, savage] {
             assert!((0.2..=0.47).contains(&share), "{calm:.2} {mid:.2} {savage:.2}");
         }
-        assert_eq!(savagery(3, n, cell_m), s);
-        assert_ne!(savagery(4, n, cell_m), s);
+        assert_eq!(savagery(3, n, n, cell_m), s);
+        assert_ne!(savagery(4, n, n, cell_m), s);
     }
 }

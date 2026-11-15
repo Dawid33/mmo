@@ -70,10 +70,10 @@ impl Geology {
         let (dip_x, dip_z) = (k.regional_dip * angle.cos(), k.regional_dip * angle.sin());
         let basement_top = k.basement_top_s;
         let (thin, thick) = (k.formation_min_m, k.formation_max_m.max(k.formation_min_m));
-        let half = p.size_m * 0.5;
-        let bedding = par::map_range(w.n * w.n, |i| {
+        let (half_x, half_z) = (p.width_m * 0.5, p.height_m * 0.5);
+        let bedding = par::map_range(w.cells(), |i| {
             let (x, z) = w.center(i);
-            dip_x * (x - half) + dip_z * (z - half) + k.fold_amplitude_m * 2.0 * folds.sample2(x, z)
+            dip_x * (x - half_x) + dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * folds.sample2(x, z)
         });
 
         let mut column = Vec::new();

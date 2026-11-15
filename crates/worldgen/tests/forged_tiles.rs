@@ -37,7 +37,7 @@ struct Fixture {
 fn fixture() -> &'static Fixture {
     static FIXTURE: OnceLock<Fixture> = OnceLock::new();
     FIXTURE.get_or_init(|| {
-        let p = worldgen::forge::ForgeParams { size_m: 4096.0, cell_m: 16.0, seed: 4, ..Default::default() };
+        let p = worldgen::forge::ForgeParams { seed: 4, ..worldgen::forge::ForgeParams::square(4096.0, 16.0) };
         let whole = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
         let (meta, tiles) = split(&whole, FIXTURE_TILE_CELLS).expect("the fixture splits");
         let mem = MemTiles(tiles.iter().map(|t| (t.origin, encode_tile(t))).collect());
@@ -702,11 +702,11 @@ fn loader_may_sample_on_the_same_thread() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn split_refuses_unloadable_worlds() {
-    let p = worldgen::forge::ForgeParams { size_m: 512.0, cell_m: 4.0, seed: 4, ..Default::default() };
+    let p = worldgen::forge::ForgeParams { seed: 4, ..worldgen::forge::ForgeParams::square(512.0, 4.0) };
     let fine = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
     let err = split(&fine, worldgen::forged_tiles::TILE_CELLS).err().expect("4 m cells are refused");
     assert!(err.to_string().contains("MAX_READ_RADIUS_CELLS"), "{err}");
-    let p = worldgen::forge::ForgeParams { size_m: 1024.0, cell_m: 16.0, seed: 4, ..Default::default() };
+    let p = worldgen::forge::ForgeParams { seed: 4, ..worldgen::forge::ForgeParams::square(1024.0, 16.0) };
     let coarse = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
     let err = split(&coarse, 3).err().expect("a tile of 3 x 16 m is not whole buckets");
     assert!(err.to_string().contains("river buckets"), "{err}");

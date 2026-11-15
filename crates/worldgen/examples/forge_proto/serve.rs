@@ -208,7 +208,7 @@ fn num(v: f64) -> String {
 }
 
 fn knobs_json(base: &Params) -> String {
-    let mut s = format!("{{\"seed\": \"{:X}\", \"size_m\": {}, \"knobs\": [", base.seed, base.size_m);
+    let mut s = format!("{{\"seed\": \"{:X}\", \"width_m\": {}, \"knobs\": [", base.seed, base.width_m);
     for (i, spec) in SPECS.iter().enumerate() {
         let _ = write!(
             s,
@@ -248,7 +248,7 @@ fn knobs_json(base: &Params) -> String {
 
 fn stats_json(f: &Forged, p: &Params) -> String {
     let st = &f.analysis.stats;
-    let cells = f.world.n * f.world.n;
+    let cells = f.world.cells();
     let list = |values: &[f64]| values.iter().map(|&v| num(v)).collect::<Vec<_>>().join(", ");
     let artifact = f.artifact(&p.forge);
     let (score, terms) = search::score(f, &artifact, &p.forge);

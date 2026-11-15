@@ -111,11 +111,11 @@ fn regress(points: &[(f64, f64)]) -> f64 {
 }
 
 fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level: &[f64]) -> Vec<Lake> {
-    let n = w.n;
+    let (nx, nz) = (w.nx, w.nz);
     let is_lake = |i: usize| !w.ocean[i] && lake_depth[i] >= LAKE_MIN_DEPTH_M;
-    let mut body = vec![u32::MAX; n * n];
+    let mut body = vec![u32::MAX; w.cells()];
     let mut lakes = Vec::new();
-    for start in 0..n * n {
+    for start in 0..w.cells() {
         if body[start] != u32::MAX || !is_lake(start) {
             continue;
         }
@@ -124,7 +124,7 @@ fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level
         body[start] = id;
         while let Some(i) = stack.pop() {
             cells.push(i);
-            let (x, z) = (i % n, i / n);
+            let (x, z) = w.xz(i);
             let mut visit = |j: usize| {
                 if body[j] == u32::MAX && is_lake(j) {
                     body[j] = id;
@@ -132,9 +132,9 @@ fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level
                 }
             };
             if x > 0 { visit(i - 1); }
-            if x + 1 < n { visit(i + 1); }
-            if z > 0 { visit(i - n); }
-            if z + 1 < n { visit(i + n); }
+            if x + 1 < nx { visit(i + 1); }
+            if z > 0 { visit(i - nx); }
+            if z + 1 < nz { visit(i + nx); }
         }
         if cells.len() < LAKE_MIN_CELLS {
             for &i in &cells {
@@ -161,11 +161,11 @@ fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level
 
 /// Separate landmasses (4-connected) of at least MIN_ISLAND_KM2: (count, largest km^2).
 fn find_islands(w: &World) -> (usize, f64) {
-    let n = w.n;
+    let (nx, nz) = (w.nx, w.nz);
     let mut seen = w.ocean.clone();
     let (mut count, mut largest) = (0usize, 0usize);
     let min_cells = (MIN_ISLAND_KM2 * 1.0e6 / (w.dx * w.dx)).ceil() as usize;
-    for start in 0..n * n {
+    for start in 0..w.cells() {
         if seen[start] {
             continue;
         }
@@ -173,7 +173,7 @@ fn find_islands(w: &World) -> (usize, f64) {
         seen[start] = true;
         while let Some(i) = stack.pop() {
             size += 1;
-            let (x, z) = (i % n, i / n);
+            let (x, z) = w.xz(i);
             let mut visit = |j: usize| {
                 if !seen[j] {
                     seen[j] = true;
@@ -181,9 +181,9 @@ fn find_islands(w: &World) -> (usize, f64) {
                 }
             };
             if x > 0 { visit(i - 1); }
-            if x + 1 < n { visit(i + 1); }
-            if z > 0 { visit(i - n); }
-            if z + 1 < n { visit(i + n); }
+            if x + 1 < nx { visit(i + 1); }
+            if z > 0 { visit(i - nx); }
+            if z + 1 < nz { visit(i + nx); }
         }
         if size >= min_cells {
             count += 1;
@@ -215,7 +215,7 @@ fn chaikin(points: &[RiverPoint]) -> Vec<RiverPoint> {
 
 /// Reaches between network nodes, with Strahler order. Returns (rivers, max order).
 fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &Knobs) -> (Vec<River>, u32) {
-    let cells = w.n * w.n;
+    let cells = w.cells();
     // Outlets (sea, land-edge border) end a river: they have no receiver.
     let channel = |i: usize| !w.outlet[i] && q[i] >= k.river_min_discharge_m2;
     let mut donors = vec![0u8; cells];
@@ -293,10 +293,10 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
     let q = discharge(w, &routing, rain);
     // Lakes: a flood WITHOUT epsilon fills exactly the closed depressions.
     let level = route(w, 0.0).filled;
-    let lake_depth: Vec<f64> = (0..w.n * w.n).map(|i| level[i] - w.h[i]).collect();
+    let lake_depth: Vec<f64> = (0..w.cells()).map(|i| level[i] - w.h[i]).collect();
     let land: Vec<usize> = routing.order.iter().map(|&i| i as usize).collect();
     let surface_rock: Vec<u8> =
-        (0..w.n * w.n).map(|i| if w.ocean[i] { 0 } else { geo.surface_rock(w, i) }).collect();
+        (0..w.cells()).map(|i| if w.ocean[i] { 0 } else { geo.surface_rock(w, i) }).collect();
 
     let slope_of = |i: usize| {
         let rc = routing.receiver[i] as usize;
@@ -311,7 +311,7 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
     let (rivers, max_order) = find_rivers(w, &routing, &q, &lake_depth, k);
 
     // Flow-path length to the divide, for Hack's law and the longest river.
-    let mut length = vec![0.0f64; w.n * w.n];
+    let mut length = vec![0.0f64; w.cells()];
     for &i in routing.order.iter().rev() {
         let (i, rc) = (i as usize, routing.receiver[i as usize] as usize);
         length[rc] = length[rc].max(length[i] + routing.receiver_dist[i]);
@@ -366,7 +366,7 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
         islands,
         largest_island_km2,
         layout: k.layout(),
-        land_share: land.len() as f64 / (w.n * w.n) as f64,
+        land_share: land.len() as f64 / w.cells() as f64,
         land_km2: land.len() as f64 * cell_km2,
         heights: [0.1, 0.5, 0.9, 0.99, 1.0].map(|p| percentile(&heights, p)),
         slopes: [0.5, 0.9, 0.99, 1.0].map(|p| percentile(&slopes, p)),
@@ -438,7 +438,13 @@ pub fn print_report(label: &str, dx: f64, s: &Stats) {
 /// artifact. Hand-written so the prototype needs no extra dependency.
 pub fn objects_json(w: &World, a: &Analysis) -> String {
     let mut s = String::new();
-    let _ = write!(s, "{{\n  \"cell_m\": {}, \"size_m\": {},\n  \"lakes\": [", w.dx, w.dx * w.n as f64);
+    let _ = write!(
+        s,
+        "{{\n  \"cell_m\": {}, \"width_m\": {}, \"height_m\": {},\n  \"lakes\": [",
+        w.dx,
+        w.dx * w.nx as f64,
+        w.dx * w.nz as f64
+    );
     for (k, l) in a.lakes.iter().enumerate() {
         let _ = write!(
             s,

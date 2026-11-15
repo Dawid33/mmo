@@ -26,10 +26,9 @@ const EDGE_CLEARANCE_MAX_SHARE: f64 = 0.125;
 /// Grid distance (m, 8-connected steps approximated as 1 cell) to the nearest
 /// cell where `source` holds.
 fn distance_field(w: &World, source: impl Fn(usize) -> bool) -> Vec<f64> {
-    let n = w.n;
-    let mut dist = vec![f64::INFINITY; n * n];
+    let mut dist = vec![f64::INFINITY; w.cells()];
     let mut queue = VecDeque::new();
-    for i in 0..n * n {
+    for i in 0..w.cells() {
         if source(i) {
             dist[i] = 0.0;
             queue.push_back(i);
@@ -50,30 +49,30 @@ fn distance_field(w: &World, source: impl Fn(usize) -> bool) -> Vec<f64> {
 /// rugged world: no patch flat enough in the height band), the flattest dry
 /// patch of land at least `SPAWN_HEIGHT_M.0` above the sea instead.
 pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
-    let n = w.n as i64;
+    let (nx, nz) = (w.nx as i64, w.nz as i64);
     let peak = w.h.iter().copied().fold(f64::MIN, f64::max);
     let to_river = distance_field(w, |i| !w.ocean[i] && a.q[i] >= RIVER_DISCHARGE_M2);
     let to_sea = distance_field(w, |i| w.ocean[i]);
     let to_mountain = distance_field(w, |i| w.h[i] >= MOUNTAIN_SHARE_OF_PEAK * peak);
 
-    let clearance = EDGE_CLEARANCE_M.min(EDGE_CLEARANCE_MAX_SHARE * w.n as f64 * w.dx);
+    let clearance = EDGE_CLEARANCE_M.min(EDGE_CLEARANCE_MAX_SHARE * w.nx.min(w.nz) as f64 * w.dx);
     let mut best = (f64::MIN, 0usize);
     // Flattest dry patch (its relief, cell) for when no site qualifies.
     // ... preferring one clear of the map edge (the plain along a land edge
     // is flat because it is not uplifted, and it is where the world ends).
     let mut flattest = (f64::MAX, None);
     let mut flattest_clear = (f64::MAX, None);
-    let size = w.n as f64 * w.dx;
-    for z in FLAT_RADIUS_CELLS..n - FLAT_RADIUS_CELLS {
-        for x in FLAT_RADIUS_CELLS..n - FLAT_RADIUS_CELLS {
-            let i = (z * n + x) as usize;
+    let (width, height) = (w.nx as f64 * w.dx, w.nz as f64 * w.dx);
+    for z in FLAT_RADIUS_CELLS..nz - FLAT_RADIUS_CELLS {
+        for x in FLAT_RADIUS_CELLS..nx - FLAT_RADIUS_CELLS {
+            let i = (z * nx + x) as usize;
             if w.ocean[i] || w.h[i] < SPAWN_HEIGHT_M.0 {
                 continue;
             }
             let (mut lo, mut hi, mut dry) = (f64::MAX, f64::MIN, true);
             for oz in -FLAT_RADIUS_CELLS..=FLAT_RADIUS_CELLS {
                 for ox in -FLAT_RADIUS_CELLS..=FLAT_RADIUS_CELLS {
-                    let j = ((z + oz) * n + x + ox) as usize;
+                    let j = ((z + oz) * nx + x + ox) as usize;
                     lo = lo.min(w.h[j]);
                     hi = hi.max(w.h[j]);
                     dry &= !w.ocean[j] && a.lake_depth[j] < LAKE_MIN_DEPTH_M && a.q[j] < RIVER_DISCHARGE_M2;
@@ -83,7 +82,7 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
                 continue;
             }
             let (cx, cz) = w.center(i);
-            let clear = cx.min(cz).min(size - cx).min(size - cz) >= clearance;
+            let clear = cx.min(cz).min(width - cx).min(height - cz) >= clearance;
             if hi - lo < flattest.0 {
                 flattest = (hi - lo, Some(i));
             }

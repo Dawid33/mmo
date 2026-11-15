@@ -31,7 +31,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// A small forged world: seconds to forge, still a real world file.
 fn small_params() -> ForgeParams {
-    ForgeParams { size_m: 2048.0, cell_m: 64.0, seed: 4, ..ForgeParams::default() }
+    ForgeParams { seed: 4, ..ForgeParams::square(2048.0, 64.0) }
 }
 
 fn forge_file(path: &Path) -> Vec<u8> {
@@ -414,7 +414,7 @@ fn stale_world_map_is_rebuilt_at_start() {
 fn unsupported_world_file_is_kept() {
     let dir = scratch("unsupported");
     let world_path = dir.join("terrain.world");
-    let params = ForgeParams { size_m: 512.0, cell_m: 4.0, seed: 4, ..ForgeParams::default() };
+    let params = ForgeParams { seed: 4, ..ForgeParams::square(512.0, 4.0) };
     worldgen::forge::forge(&params).artifact(&params).save(&world_path).unwrap();
     let bytes = std::fs::read(&world_path).unwrap();
     let err = open_world(&source_for(&world_path), &small_params()).err().expect("refused");

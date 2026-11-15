@@ -105,7 +105,7 @@ pub struct Climate {
     pub temperature_c: Vec<f32>,
     /// Annual precipitation, mm/yr.
     pub precip_mm: Vec<f32>,
-    /// Latitude of each ROW (`n` values, deg; south negative).
+    /// Latitude of each ROW (`nz` values, deg; south negative).
     pub latitude_deg: Vec<f32>,
 }
 
@@ -118,13 +118,13 @@ pub enum Wind {
     FromEast,
 }
 
-/// Latitude (deg) of each of `n` rows.
-pub fn latitudes(n: usize, p: &ForgeParams) -> Vec<f32> {
+/// Latitude (deg) of each of `nz` rows.
+pub fn latitudes(nz: usize, p: &ForgeParams) -> Vec<f32> {
     let k = &p.knobs;
     let span = k.latitude_span_deg.clamp(0.0, 180.0);
-    (0..n)
+    (0..nz)
         .map(|z| {
-            let t = (z as f64 + 0.5) / n as f64; // 0 at the north edge, 1 at the south
+            let t = (z as f64 + 0.5) / nz as f64; // 0 at the north edge, 1 at the south
             let lat = match k.pole_choice() {
                 POLE_NONE => k.latitude_center_deg,
                 POLE_NORTH => 90.0 - span * t,
@@ -144,7 +144,7 @@ pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
     if k.meander_amplitude_deg <= 0.0 {
         return 0.0;
     }
-    let wavelength = (k.meander_wavelength_km * 1000.0).min(p.size_m / MEANDER_MIN_WAVES).max(1.0);
+    let wavelength = (k.meander_wavelength_km * 1000.0).min(p.span_m() / MEANDER_MIN_WAVES).max(1.0);
     let mut d = 0.0;
     for (wave, &(share, weight, spread)) in MEANDER_WAVES.iter().enumerate() {
         let angle = (hash01(p.seed, MEANDER_SALT, 2 * wave as u64) - 0.5) * 2.0 * spread;
@@ -155,18 +155,18 @@ pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
     k.meander_amplitude_deg * d
 }
 
-/// `meander_deg` at every cell centre of an `n * n` grid of `dx` cells.
-pub fn meander_field(n: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
-    (0..n * n)
-        .map(|i| meander_deg(((i % n) as f64 + 0.5) * dx, ((i / n) as f64 + 0.5) * dx, p) as f32)
+/// `meander_deg` at every cell centre of an `nx` x `nz` grid of `dx` cells.
+pub fn meander_field(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
+    (0..nx * nz)
+        .map(|i| meander_deg(((i % nx) as f64 + 0.5) * dx, ((i / nx) as f64 + 0.5) * dx, p) as f32)
         .collect()
 }
 
 /// Effective latitude of every cell: its row's latitude plus the meander.
-pub fn effective_latitudes(n: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
-    let rows = latitudes(n, p);
-    let meander = meander_field(n, dx, p);
-    (0..n * n).map(|i| (rows[i / n] + meander[i]).clamp(-90.0, 90.0)).collect()
+pub fn effective_latitudes(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
+    let rows = latitudes(nz, p);
+    let meander = meander_field(nx, nz, dx, p);
+    (0..nx * nz).map(|i| (rows[i / nx] + meander[i]).clamp(-90.0, 90.0)).collect()
 }
 
 /// Sea-level temperature (deg C) at latitude `lat_deg`.
@@ -202,16 +202,20 @@ pub fn base_precip_mm(lat_deg: f32) -> f32 {
     LATITUDE_PRECIP_MM[LATITUDE_PRECIP_MM.len() - 1].1
 }
 
-fn box_blur_rows(src: &[f64], n: usize, radius: usize, along_x: bool) -> Vec<f64> {
-    let mut out = vec![0.0; n * n];
-    for a in 0..n {
-        let at = |b: usize| if along_x { src[a * n + b] } else { src[b * n + a] };
-        let mut sum: f64 = (0..=radius.min(n - 1)).map(at).sum();
-        let mut count = radius.min(n - 1) + 1;
-        for b in 0..n {
+/// Box blur of an `nx` x `nz` raster along x (each row) or along z (each
+/// column).
+fn box_blur_rows(src: &[f64], nx: usize, nz: usize, radius: usize, along_x: bool) -> Vec<f64> {
+    let mut out = vec![0.0; nx * nz];
+    // `lines` rows (or columns) of `len` cells each.
+    let (lines, len) = if along_x { (nz, nx) } else { (nx, nz) };
+    for a in 0..lines {
+        let at = |b: usize| if along_x { src[a * nx + b] } else { src[b * nx + a] };
+        let mut sum: f64 = (0..=radius.min(len - 1)).map(at).sum();
+        let mut count = radius.min(len - 1) + 1;
+        for b in 0..len {
             let v = sum / count as f64;
-            if along_x { out[a * n + b] = v } else { out[b * n + a] = v }
-            if b + radius + 1 < n {
+            if along_x { out[a * nx + b] = v } else { out[b * nx + a] = v }
+            if b + radius + 1 < len {
                 sum += at(b + radius + 1);
                 count += 1;
             }
@@ -227,7 +231,7 @@ fn box_blur_rows(src: &[f64], n: usize, radius: usize, along_x: bool) -> Vec<f64
 /// Lakes as the climate sees them: land cells at least `LAKE_MIN_DEPTH_M`
 /// under the water surface `filled` (a flooded routing surface).
 pub fn lakes_from_filled(w: &World, filled: &[f64]) -> Vec<bool> {
-    (0..w.n * w.n).map(|i| !w.ocean[i] && filled[i] - w.h[i] >= LAKE_MIN_DEPTH_M).collect()
+    (0..w.cells()).map(|i| !w.ocean[i] && filled[i] - w.h[i] >= LAKE_MIN_DEPTH_M).collect()
 }
 
 /// The climate of `w`, its lakes found with a Priority-Flood of the surface.
@@ -240,19 +244,19 @@ pub fn compute(w: &World, p: &ForgeParams) -> Climate {
 /// are swept in parallel and each row's sweep is serial, so the result does
 /// not depend on the thread count.
 pub fn compute_with_lakes(w: &World, p: &ForgeParams, lakes: &[bool]) -> Climate {
-    let (n, k) = (w.n, &p.knobs);
-    let latitude_deg = latitudes(n, p);
-    let lat = effective_latitudes(n, w.dx, p);
+    let (cells, k) = (w.cells(), &p.knobs);
+    let latitude_deg = latitudes(w.nz, p);
+    let lat = effective_latitudes(w.nx, w.nz, w.dx, p);
     let lapse_c_per_m = k.lapse_c_per_km / 1000.0;
-    let temperature_c = (0..n * n)
+    let temperature_c = (0..cells)
         .map(|i| {
             let ground = if w.ocean[i] { 0.0 } else { w.h[i].max(0.0) };
             (sea_level_temperature_c(lat[i] as f64, p) - lapse_c_per_m * ground) as f32
         })
         .collect();
 
-    let relative = if k.climate_strength <= 0.0 { vec![1.0; n * n] } else { orographic(w, p, &lat, lakes) };
-    let precip_mm = (0..n * n).map(|i| base_precip_mm(lat[i]) * relative[i] as f32).collect();
+    let relative = if k.climate_strength <= 0.0 { vec![1.0; cells] } else { orographic(w, p, &lat, lakes) };
+    let precip_mm = (0..cells).map(|i| base_precip_mm(lat[i]) * relative[i] as f32).collect();
     Climate { temperature_c, precip_mm, latitude_deg }
 }
 
@@ -265,10 +269,10 @@ fn radius_cells(metres: f64, dx: f64) -> usize {
 /// by the climate strength (1.0 at sea). `lat` is the effective latitude per
 /// cell; it sets each cell's mix of the westerly and easterly sweeps.
 fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f64> {
-    let (n, k, dx) = (w.n, &p.knobs, w.dx);
+    let (nx, nz, k, dx) = (w.nx, w.nz, &p.knobs, w.dx);
     let ground: Vec<f64> = w.h.iter().map(|h| h.max(0.0)).collect();
     let terrain = radius_cells(TERRAIN_BLUR_M, dx);
-    let ground = box_blur_rows(&box_blur_rows(&ground, n, terrain, true), n, terrain, false);
+    let ground = box_blur_rows(&box_blur_rows(&ground, nx, nz, terrain, true), nx, nz, terrain, false);
     // `World::edges` order: N, E, S, W.
     let inflow = |edge: usize| if w.edges[edge] == EdgeKind::Sea { 1.0 } else { CONTINENTAL_MOISTURE };
     let recharge = (dx / k.sea_recharge_m).min(1.0);
@@ -279,9 +283,9 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
     let sweep = |z: usize, from_west: bool, row: &mut [f64]| {
         let mut moisture: f64 = if from_west { inflow(3) } else { inflow(1) };
         let mut prev: Option<usize> = None;
-        for step in 0..n {
-            let x = if from_west { step } else { n - 1 - step };
-            let i = z * n + x;
+        for step in 0..nx {
+            let x = if from_west { step } else { nx - 1 - step };
+            let i = z * nx + x;
             if w.ocean[i] {
                 moisture += (1.0 - moisture) * recharge;
             } else {
@@ -300,24 +304,24 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
             prev = Some(i);
         }
     };
-    let rows: Vec<Vec<f64>> = par::map_range(n, |z| {
-        let west: Vec<f64> = (0..n).map(|x| westerly_weight(lat[z * n + x] as f64, p)).collect();
-        let (mut from_west, mut from_east) = (vec![0.0; n], vec![0.0; n]);
+    let rows: Vec<Vec<f64>> = par::map_range(nz, |z| {
+        let west: Vec<f64> = (0..nx).map(|x| westerly_weight(lat[z * nx + x] as f64, p)).collect();
+        let (mut from_west, mut from_east) = (vec![0.0; nx], vec![0.0; nx]);
         if west.iter().any(|&v| v > 0.0) {
             sweep(z, true, &mut from_west);
         }
         if west.iter().any(|&v| v < 1.0) {
             sweep(z, false, &mut from_east);
         }
-        (0..n).map(|x| west[x] * from_west[x] + (1.0 - west[x]) * from_east[x]).collect()
+        (0..nx).map(|x| west[x] * from_west[x] + (1.0 - west[x]) * from_east[x]).collect()
     });
     // Blur over the land only (the sea's zero would dry the coasts).
     let rain: Vec<f64> = rows.concat();
     let land: Vec<f64> = w.ocean.iter().map(|&o| if o { 0.0 } else { 1.0 }).collect();
     let (cross, along) = (radius_cells(RAIN_CROSS_BLUR_M, dx), radius_cells(RAIN_ALONG_BLUR_M, dx));
-    let blur = |v: &[f64]| box_blur_rows(&box_blur_rows(v, n, cross, false), n, along, true);
+    let blur = |v: &[f64]| box_blur_rows(&box_blur_rows(v, nx, nz, cross, false), nx, nz, along, true);
     let (rain_sum, land_share) = (blur(&rain), blur(&land));
-    (0..n * n)
+    (0..w.cells())
         .map(|i| {
             if w.ocean[i] || land_share[i] <= 0.0 {
                 1.0
@@ -356,7 +360,7 @@ mod tests {
     /// Params for an `N`-cell world at `CELL_M`, one latitude everywhere
     /// (`pole` none, no meander: straight rows) unless the caller changes it.
     fn params(latitude: f64) -> ForgeParams {
-        let mut p = ForgeParams { size_m: N as f64 * CELL_M, cell_m: CELL_M, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(N as f64 * CELL_M, CELL_M);
         p.knobs.pole = POLE_NONE as f64;
         p.knobs.latitude_center_deg = latitude;
         p.knobs.meander_amplitude_deg = 0.0;
@@ -369,7 +373,7 @@ mod tests {
     fn isotherms_meander() {
         let (n, dx) = (256, 128.0);
         let isotherm_spread_m = |amplitude: f64| {
-            let mut p = ForgeParams { size_m: n as f64 * dx, cell_m: dx, quiet: true, ..Default::default() };
+            let mut p = ForgeParams::square(n as f64 * dx, dx);
             p.knobs.pole = POLE_NORTH as f64;
             p.knobs.meander_amplitude_deg = amplitude;
             let w = world_sized(n, dx, |_, _| -10.0);
@@ -390,9 +394,9 @@ mod tests {
     #[test]
     fn meander_field_is_resolution_independent() {
         let size = 16_000.0;
-        let p = ForgeParams { size_m: size, quiet: true, ..Default::default() };
-        let (fine, coarse) = (meander_field(500, 32.0, &p), meander_field(250, 64.0, &p));
-        assert_eq!(fine, meander_field(500, 32.0, &p));
+        let p = ForgeParams::square(size, crate::forge::world::DEFAULT_CELL_M);
+        let (fine, coarse) = (meander_field(500, 500, 32.0, &p), meander_field(250, 250, 64.0, &p));
+        assert_eq!(fine, meander_field(500, 500, 32.0, &p));
         let mut worst = 0.0f32;
         for z in 0..250 {
             for x in 0..250 {
@@ -416,7 +420,8 @@ mod tests {
         let h: Vec<f64> = (0..n * n).map(|i| height(i % n, i / n)).collect();
         let ocean: Vec<bool> = h.iter().map(|&h| h <= 0.0).collect();
         World {
-            n,
+            nx: n,
+            nz: n,
             dx,
             outlet: ocean.clone(),
             ocean,
@@ -505,7 +510,7 @@ mod tests {
         // 32 km of plain with the sea upwind (the trades blow from the east).
         let wide = 512.0;
         let w = world_sized(N, wide, |x, _| if x >= N - 4 { -50.0 } else { 2.0 });
-        let p = ForgeParams { size_m: N as f64 * wide, cell_m: wide, ..p };
+        let p = ForgeParams { width_m: N as f64 * wide, height_m: N as f64 * wide, cell_m: wide, ..p };
         let c = compute(&w, &p);
         let inland = p.knobs.land_depletion_m * 3.0;
         for i in (0..N * N).filter(|&i| i % N < N - 4 && ((N - 4 - i % N) as f64) * wide > inland) {
@@ -525,7 +530,7 @@ mod tests {
     #[test]
     fn band_edges_have_no_step() {
         let (n, dx) = (250, 64.0);
-        let mut p = ForgeParams { size_m: n as f64 * dx, cell_m: dx, ..params(45.0) };
+        let mut p = ForgeParams { width_m: n as f64 * dx, height_m: n as f64 * dx, cell_m: dx, ..params(45.0) };
         p.knobs.pole = POLE_NORTH as f64;
         // Sea strips on both sides, so each wind direction has its own wet coast.
         let w = world_sized(n, dx, |x, _| if x < 8 || x >= n - 8 { -50.0 } else { 2.0 });
@@ -559,7 +564,7 @@ mod tests {
         let stripe = |dx: f64| {
             let n = (size / dx) as usize;
             let centre = size / 2.0;
-            let p = ForgeParams { size_m: size, cell_m: dx, quiet: true, ..params(45.0) };
+            let p = ForgeParams { width_m: size, height_m: size, cell_m: dx, quiet: true, ..params(45.0) };
             // All land under continental air, so the lake's moisture shows.
             let mut w = world_sized(n, dx, |_, _| 20.0);
             w.edges = [EdgeKind::Land; 4];

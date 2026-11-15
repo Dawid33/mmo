@@ -21,11 +21,12 @@ pub fn layer(forged: &Forged, layer: PreviewLayer, path: &str) {
 }
 
 pub fn heightmap(w: &World, path: &str) {
-    let mut gray = ImageBuffer::<Luma<u16>, Vec<u16>>::new(w.n as u32, w.n as u32);
-    for i in 0..w.n * w.n {
+    let mut gray = ImageBuffer::<Luma<u16>, Vec<u16>>::new(w.nx as u32, w.nz as u32);
+    for i in 0..w.cells() {
         let t = (SEA_LEVEL_Y + w.h[i] - HEIGHT_MIN_Y) / (HEIGHT_MAX_Y - HEIGHT_MIN_Y);
         let v = (t.clamp(0.0, 1.0) * 65535.0) as u16;
-        gray.put_pixel((i % w.n) as u32, (i / w.n) as u32, Luma([v]));
+        let (x, z) = w.xz(i);
+        gray.put_pixel(x as u32, z as u32, Luma([v]));
     }
     gray.save(path).expect("write heightmap");
     println!("wrote {path}");

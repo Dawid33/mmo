@@ -143,41 +143,41 @@ impl HabitatSource for ProceduralHabitat {
     }
 }
 
-/// Distance in metres from each cell of an `n * n` height raster (`cell_m`
+/// Distance in metres from each cell of an `nx * nz` height raster (`cell_m`
 /// cells, row-major) to the nearest sea cell (height <= 0): 0 at sea. A
 /// two-pass chamfer (axis step 1, diagonal sqrt 2 cells). A raster with no sea
-/// reports the raster's full width everywhere.
-pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], n: usize, cell_m: f64) -> Vec<f32> {
-    coast_distance_by(n, cell_m, |i| height[i].into() <= 0.0)
+/// reports the raster's longer side everywhere.
+pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], nx: usize, nz: usize, cell_m: f64) -> Vec<f32> {
+    coast_distance_by(nx, nz, cell_m, |i| height[i].into() <= 0.0)
 }
 
 /// [`coast_distance_m`] with the sea test as a closure over the raster index
 /// (`ForgedWorld` reads its quantised height without decoding a copy).
-pub fn coast_distance_by(n: usize, cell_m: f64, is_sea: impl Fn(usize) -> bool) -> Vec<f32> {
+pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, is_sea: impl Fn(usize) -> bool) -> Vec<f32> {
     const DIAGONAL: f32 = 1.414_213_5;
-    let far = (n as f64 * cell_m) as f32;
+    let far = (nx.max(nz) as f64 * cell_m) as f32;
     let (axis, diag) = (cell_m as f32, cell_m as f32 * DIAGONAL);
-    let mut d: Vec<f32> = (0..n * n).map(|i| if is_sea(i) { 0.0 } else { far }).collect();
+    let mut d: Vec<f32> = (0..nx * nz).map(|i| if is_sea(i) { 0.0 } else { far }).collect();
     let relax = |d: &mut Vec<f32>, x: usize, z: usize, dx: isize, dz: isize, step: f32| {
-        let (nx, nz) = (x as isize + dx, z as isize + dz);
-        if nx >= 0 && nz >= 0 && (nx as usize) < n && (nz as usize) < n {
-            let via = d[nz as usize * n + nx as usize] + step;
-            let i = z * n + x;
+        let (jx, jz) = (x as isize + dx, z as isize + dz);
+        if jx >= 0 && jz >= 0 && (jx as usize) < nx && (jz as usize) < nz {
+            let via = d[jz as usize * nx + jx as usize] + step;
+            let i = z * nx + x;
             if via < d[i] {
                 d[i] = via;
             }
         }
     };
-    for z in 0..n {
-        for x in 0..n {
+    for z in 0..nz {
+        for x in 0..nx {
             relax(&mut d, x, z, -1, 0, axis);
             relax(&mut d, x, z, 0, -1, axis);
             relax(&mut d, x, z, -1, -1, diag);
             relax(&mut d, x, z, 1, -1, diag);
         }
     }
-    for z in (0..n).rev() {
-        for x in (0..n).rev() {
+    for z in (0..nz).rev() {
+        for x in (0..nx).rev() {
             relax(&mut d, x, z, 1, 0, axis);
             relax(&mut d, x, z, 0, 1, axis);
             relax(&mut d, x, z, 1, 1, diag);
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn coast_distance_is_zero_at_sea_and_grows_inland() {
         let height: Vec<f32> = (0..N * N).map(|i| if i % N < SEA_CELLS { -1.0 } else { 1.0 }).collect();
-        let d = coast_distance_m(&height, N, CELL_M);
+        let d = coast_distance_m(&height, N, N, CELL_M);
         assert_eq!(d[0], 0.0);
         assert_eq!(d[SEA_CELLS], CELL_M as f32);
         assert_eq!(d[SEA_CELLS + 10], 11.0 * CELL_M as f32);

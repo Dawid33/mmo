@@ -84,7 +84,7 @@ pub fn route(w: &World, epsilon: f64) -> Routing {
 /// Outlets (`World::outlet`) are where drainage ends: the sea at sea level,
 /// a land edge's border cells at their own height.
 pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
-    let cells = w.n * w.n;
+    let cells = w.cells();
     let Routing { filled, receiver, receiver_dist, order, tree_starts, closed, heap } = out;
     tree_starts.clear();
     filled.clear();
@@ -153,7 +153,7 @@ pub fn discharge(w: &World, r: &Routing, rain: &[f64]) -> Vec<f64> {
 /// `discharge` into a reusable buffer.
 pub fn discharge_into(w: &World, r: &Routing, rain: &[f64], q: &mut Vec<f64>) {
     q.clear();
-    q.resize(w.n * w.n, 0.0);
+    q.resize(w.cells(), 0.0);
     for &i in &r.order {
         q[i as usize] = w.dx * w.dx * rain[i as usize];
     }
@@ -195,7 +195,7 @@ pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch
 fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: &Routing, scratch: &mut StepScratch) -> usize {
     let StepScratch { q, diffuse, groups, .. } = scratch;
     let (k, dt) = (&p.knobs, p.knobs.dt_years);
-    let (n, cell_area) = (w.n, w.dx * w.dx);
+    let (nx, nz, cell_area) = (w.nx, w.nz, w.dx * w.dx);
     if routing.tree_starts.is_empty() {
         groups.clear();
         groups.push(0..routing.order.len());
@@ -205,10 +205,10 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
 
     // Discharge (`discharge_into`, tree by tree): m^2 of average rain.
     q.clear();
-    q.resize(n * n, 0.0);
-    par::for_rows(q, n, &mut Vec::new(), |z0, rows, _| {
+    q.resize(nx * nz, 0.0);
+    par::for_rows(q, nx, &mut Vec::new(), |z0, rows, _| {
         for (j, qi) in rows.iter_mut().enumerate() {
-            let i = z0 * n + j;
+            let i = z0 * nx + j;
             if !w.outlet[i] {
                 *qi = cell_area * rain[i];
             }
@@ -277,20 +277,20 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
     for _ in 0..substeps {
         diffuse.clone_from(h);
         let diffuse = &*diffuse;
-        par::for_rows(h, n, &mut Vec::new(), |z0, rows, _| {
-            for (dz, row) in rows.chunks_mut(n).enumerate() {
+        par::for_rows(h, nx, &mut Vec::new(), |z0, rows, _| {
+            for (dz, row) in rows.chunks_mut(nx).enumerate() {
                 let z = z0 + dz;
-                if z == 0 || z == n - 1 {
+                if z == 0 || z == nz - 1 {
                     continue;
                 }
-                for x in 1..n - 1 {
-                    let i = z * n + x;
+                for x in 1..nx - 1 {
+                    let i = z * nx + x;
                     if ocean[i] {
                         continue;
                     }
                     // The sea holds sea level at the shore, not its floor depth.
                     let s = |j: usize| if ocean[j] { 0.0 } else { diffuse[j] };
-                    let lap = s(i - 1) + s(i + 1) + s(i - n) + s(i + n) - 4.0 * diffuse[i];
+                    let lap = s(i - 1) + s(i + 1) + s(i - nx) + s(i + nx) - 4.0 * diffuse[i];
                     row[x] = (diffuse[i] + c * lap).max(LAND_FLOOR_M);
                 }
             }
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn step_with_reused_scratch_matches_fresh() {
-        let p = ForgeParams { size_m: 4096.0, cell_m: 64.0, ..Default::default() };
+        let p = ForgeParams::square(4096.0, 64.0);
         let mut a = World::new(&p);
         let mut b = World {
             h: a.h.clone(),
@@ -316,7 +316,7 @@ mod tests {
             ..a
         };
         let geo = Geology::new(&p, &a);
-        let rain = vec![1.0; a.n * a.n];
+        let rain = vec![1.0; a.cells()];
         let mut reused = StepScratch::default();
         for iter in 0..20 {
             step(&mut a, &p, &geo, &rain, &mut reused);
@@ -333,7 +333,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn parallel_step_matches_serial() {
-        let p = ForgeParams { size_m: 4096.0, cell_m: 32.0, ..Default::default() };
+        let p = ForgeParams::square(4096.0, 32.0);
         let run = |threads: usize| {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("thread pool");
             pool.install(|| {

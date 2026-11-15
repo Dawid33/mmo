@@ -258,7 +258,7 @@ mod tests {
     }
 
     fn tiny() -> ForgeParams {
-        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        let mut p = ForgeParams::square(4_096.0, 128.0);
         p.knobs.iters = 20.0;
         p
     }
@@ -317,7 +317,7 @@ mod tests {
         assert!(path.is_file());
         assert!(!crate::forged::save_temp_path(&path).exists(), "the temp file is renamed away");
         let loaded = crate::forged::ForgedWorld::load(&path).expect("the written world loads");
-        let _ = (loaded, forged.world.n);
+        let _ = (loaded, forged.world.nx);
     }
 
     #[test]

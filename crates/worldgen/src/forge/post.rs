@@ -42,7 +42,7 @@ pub fn fit_height_band(w: &mut World, k: &Knobs) -> f64 {
         return 1.0;
     }
     let factor = k.max_peak_m / max;
-    for i in 0..w.n * w.n {
+    for i in 0..w.cells() {
         if !w.ocean[i] {
             // `uplifted` scales with it, so the rock column stays attached to
             // the surface it was exhumed at.
@@ -60,7 +60,7 @@ pub fn carve_floodplains(w: &mut World, rain: &[f64], k: &Knobs) {
     }
     let routing = route(w, FLOOD_EPSILON);
     let q = discharge(w, &routing, rain);
-    let n = w.n;
+    let (nx, nz) = (w.nx, w.nz);
     let mut floor = w.h.clone();
     for &c in &routing.order {
         let c = c as usize;
@@ -69,14 +69,14 @@ pub fn carve_floodplains(w: &mut World, rain: &[f64], k: &Knobs) {
         }
         let reach = (k.floodplain_m_per_sqrt_km2 * (q[c] / 1.0e6).sqrt()).min(k.floodplain_max_m);
         let r_cells = (reach / w.dx).ceil() as i64;
-        let (cx, cz) = ((c % n) as i64, (c / n) as i64);
+        let (cx, cz) = ((c % nx) as i64, (c / nx) as i64);
         for oz in -r_cells..=r_cells {
             for ox in -r_cells..=r_cells {
                 let (x, z) = (cx + ox, cz + oz);
-                if x < 0 || z < 0 || x >= n as i64 || z >= n as i64 {
+                if x < 0 || z < 0 || x >= nx as i64 || z >= nz as i64 {
                     continue;
                 }
-                let j = z as usize * n + x as usize;
+                let j = z as usize * nx + x as usize;
                 let d = ((ox * ox + oz * oz) as f64).sqrt() * w.dx;
                 if d > reach || w.ocean[j] {
                     continue;
@@ -118,7 +118,7 @@ pub fn carve_lake_basins(w: &mut World, rain: &[f64], seed: u64, k: &Knobs) -> u
         .collect();
     candidates.sort_unstable();
 
-    let n = w.n;
+    let (nx, nz) = (w.nx, w.nz);
     let mut sites: Vec<usize> = Vec::new();
     for (_, i) in candidates {
         let (x, z) = w.center(i);
@@ -138,15 +138,15 @@ pub fn carve_lake_basins(w: &mut World, rain: &[f64], seed: u64, k: &Knobs) -> u
         let radius = LAKE_BASIN_MIN_RADIUS_M + t * (k.lake_radius_max_m - LAKE_BASIN_MIN_RADIUS_M).max(0.0);
         let depth = LAKE_BASIN_MIN_DEPTH_M
             + hash01(seed, n_site as u64, 0x1A4F) * (k.lake_depth_max_m - LAKE_BASIN_MIN_DEPTH_M).max(0.0);
-        let (cx, cz) = ((site % n) as i64, (site / n) as i64);
+        let (cx, cz) = ((site % nx) as i64, (site / nx) as i64);
         let r_cells = (radius / w.dx).ceil() as i64;
         for oz in -r_cells..=r_cells {
             for ox in -r_cells..=r_cells {
                 let (x, z) = (cx + ox, cz + oz);
-                if x < 1 || z < 1 || x >= n as i64 - 1 || z >= n as i64 - 1 {
+                if x < 1 || z < 1 || x >= nx as i64 - 1 || z >= nz as i64 - 1 {
                     continue;
                 }
-                let j = z as usize * n + x as usize;
+                let j = z as usize * nx + x as usize;
                 let d = ((ox * ox + oz * oz) as f64).sqrt() * w.dx / radius;
                 if d >= 1.0 || w.ocean[j] {
                     continue;

@@ -10,9 +10,9 @@ use worldgen::forged::WorldArtifact;
 fn forge_small_world_round_trips() {
     // Seed 4: a 2 km world with dry land for a spawn site (kilometre relief
     // leaves no flat one: spawn::pick falls back to the flattest dry patch).
-    let p = ForgeParams { size_m: 2048.0, cell_m: 64.0, seed: 4, ..ForgeParams::default() };
+    let p = ForgeParams { seed: 4, ..ForgeParams::square(2048.0, 64.0) };
     let artifact = forge(&p).artifact(&p);
-    let n = (p.size_m / p.cell_m).round() as usize;
+    let n = p.nx();
     assert_eq!(artifact.height.len(), n * n);
     let names: Vec<String> = ROCKS.iter().map(|r| r.name.to_string()).collect();
     assert_eq!(artifact.rock_names, names);
@@ -33,6 +33,38 @@ fn forge_small_world_round_trips() {
     assert_eq!(rock_index("marble"), None);
 }
 
+/// A world twice as wide as it is tall forges end to end at the default
+/// knobs: every raster of the result has one entry per cell, and the world
+/// has both sea and land. (The world file stays square until it learns two
+/// dimensions, so this inspects the forged state, not `artifact()`.)
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn rectangular_forge_runs() {
+    let p = ForgeParams { width_m: 8_192.0, height_m: 4_096.0, cell_m: 64.0, ..ForgeParams::default() };
+    let f = forge(&p);
+    let w = &f.world;
+    let cells = w.nx * w.nz;
+    assert_eq!((w.nx, w.nz), (128, 64));
+    for (name, len) in [
+        ("h", w.h.len()),
+        ("ocean", w.ocean.len()),
+        ("outlet", w.outlet.len()),
+        ("uplifted", w.uplifted.len()),
+        ("bedding", f.geology.bedding.len()),
+        ("temperature", f.climate.temperature_c.len()),
+        ("precip", f.climate.precip_mm.len()),
+        ("rain", f.rain.len()),
+        ("lake depth", f.analysis.lake_depth.len()),
+        ("drainage", f.fields.drainage.len()),
+        ("volcanism", f.fields.volcanism.len()),
+        ("salinity", f.fields.salinity.len()),
+    ] {
+        assert_eq!(len, cells, "{name}");
+    }
+    assert!(w.ocean.iter().any(|&o| o), "some sea");
+    assert!(w.ocean.iter().any(|&o| !o), "some land");
+}
+
 /// Quality gate: a 16 km / 32 m forge must stay within tolerance of the
 /// recorded baseline (`tests/fixtures/forge_quality_16k_32m.ron`). Output-
 /// changing forge speed-ups must pass it. The layout is pinned to the
@@ -49,7 +81,7 @@ fn forge_quality_matches_baseline() {
     use worldgen::forge::quality::{quality, within, Quality, QualityTolerance};
     use worldgen::forge::world::DEFAULT_SEED;
 
-    let mut p = ForgeParams { size_m: 16_000.0, cell_m: 32.0, seed: DEFAULT_SEED, ..ForgeParams::default() };
+    let mut p = ForgeParams { seed: DEFAULT_SEED, ..ForgeParams::square(16_000.0, 32.0) };
     p.knobs.layout = LAYOUT_ONE_ISLAND as f64;
     p.knobs.pole = worldgen::forge::climate::POLE_NONE as f64;
     p.knobs.latitude_center_deg = 45.0;
@@ -76,13 +108,13 @@ fn forge_quality_matches_baseline() {
 fn default_forge_reaches_kilometre_peaks() {
     use worldgen::forge::quality::quality;
 
-    let p = ForgeParams { size_m: 16_000.0, cell_m: 32.0, ..ForgeParams::default() };
+    let p = ForgeParams::square(16_000.0, 32.0);
     let forged = forge(&p);
     let q = quality(&forged);
     assert!(q.max_peak_m >= 1_500.0, "tallest peak {:.0} m, want >= 1,500 m", q.max_peak_m);
     assert!(q.max_peak_m <= p.knobs.max_peak_m + 1.0e-6, "peak {:.0} m over the cap", q.max_peak_m);
     let w = &forged.world;
-    let deepest = (0..w.n * w.n)
+    let deepest = (0..w.cells())
         .filter(|&i| !w.ocean[i])
         .map(|i| w.h[i] - w.uplifted[i] - forged.geology.bedding[i])
         .fold(f64::MAX, f64::min);
@@ -102,14 +134,14 @@ fn forged_fields_follow_the_terrain() {
     use worldgen::forge::fields::{ground_slope, DRAINAGE_FLOOD_REACH_M, DRAINAGE_FLOOD_SLOPE_MAX};
     use worldgen::forge::hydrology::LAKE_MIN_DEPTH_M;
 
-    let p = ForgeParams { size_m: 32_000.0, cell_m: 64.0, ..ForgeParams::default() };
+    let p = ForgeParams::square(32_000.0, 64.0);
     let f = forge(&p);
     let (w, a, fields) = (&f.world, &f.analysis, &f.fields);
-    let n = w.n;
+    let cells = w.cells();
     let water = |i: usize| a.lake_depth[i] >= LAKE_MIN_DEPTH_M || a.q[i] >= a.stats.river_min_discharge_m2;
     let slope = |i: usize| ground_slope(w, &|j| !w.ocean[j] && water(j), i);
-    let water_cells: Vec<(f64, f64)> = (0..n * n).filter(|&i| !w.ocean[i] && water(i)).map(|i| w.center(i)).collect();
-    let land: Vec<usize> = (0..n * n).filter(|&i| !w.ocean[i] && !water(i)).collect();
+    let water_cells: Vec<(f64, f64)> = (0..cells).filter(|&i| !w.ocean[i] && water(i)).map(|i| w.center(i)).collect();
+    let land: Vec<usize> = (0..cells).filter(|&i| !w.ocean[i] && !water(i)).collect();
     let poor: Vec<usize> = land.iter().copied().filter(|&i| fields.drainage[i] < 33).collect();
     let good = land.iter().filter(|&&i| fields.drainage[i] > 66).count();
     eprintln!(
@@ -127,13 +159,13 @@ fn forged_fields_follow_the_terrain() {
         let near = water_cells.iter().any(|&(wx, wz)| (wx - x).hypot(wz - z) <= 2.0 * DRAINAGE_FLOOD_REACH_M);
         assert!(near, "cell {i}: poorly drained {:.0} m from any river or lake", 2.0 * DRAINAGE_FLOOD_REACH_M);
     }
-    assert!((0..n * n).filter(|&i| w.ocean[i]).all(|i| fields.salinity[i] == 100));
+    assert!((0..cells).filter(|&i| w.ocean[i]).all(|i| fields.salinity[i] == 100));
     assert!(!fields.volcanoes.is_empty(), "the default continent has volcanoes");
     let mut heights: Vec<f64> = land.iter().map(|&i| w.h[i]).collect();
     heights.sort_by(f64::total_cmp);
     let median = heights[heights.len() / 2];
     for s in &fields.volcanoes {
-        let i = (s[1] as f64 / w.dx) as usize * n + (s[0] as f64 / w.dx) as usize;
+        let i = w.index((s[0] as f64 / w.dx) as usize, (s[1] as f64 / w.dx) as usize);
         assert!(fields.volcanism[i] >= 90, "{s:?}: volcanism {}", fields.volcanism[i]);
         assert!(w.h[i] > median, "{s:?}: volcano at {:.0} m, land median {median:.0} m", w.h[i]);
     }

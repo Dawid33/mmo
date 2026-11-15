@@ -11,25 +11,26 @@
 //! `belt_length_km`, about a third of a boundary belt's strength) stand for old
 //! belts inside a plate, so not every range sits on a boundary.
 //!
-//! Everything is laid out in shares of the world's size (and the warp noise
-//! is sampled at `size_m / REFERENCE_SIZE_M`), so a coarse level of the
+//! Everything is laid out in shares of the world's size — positions of its
+//! width and height, lengths of its `span_m` (and the warp noise is sampled
+//! at `span_m / REFERENCE_SIZE_M`) — so a coarse level of the
 //! erosion schedule and the final grid see the same plates, and a 100 km
 //! world is the 16 km one scaled up — except the interior range length,
 //! which is in km.
 
 use crate::forge::knobs::Knobs;
 use crate::forge::par;
-use crate::forge::world::{edges, hash01, smoothstep, EdgeKind, LAND_EDGE_TAPER_M, REFERENCE_SIZE_M};
+use crate::forge::world::{edges, hash01, smoothstep, span_m, EdgeKind, LAND_EDGE_TAPER_M, REFERENCE_SIZE_M};
 use crate::noise::OctaveNoise;
 
 /// Plate sites are scattered over the world grown by this share of its size
 /// on every side, so plates along the edge are cut by it like any other.
 const PLATE_SITE_REACH: f64 = 0.15;
-/// Sites keep at least this share of `size / sqrt(count)` apart: plates of
+/// Sites keep at least this share of `span / sqrt(count)` apart: plates of
 /// comparable size, not slivers.
 const PLATE_SPACING_SHARE: f64 = 0.55;
 const PLATE_PLACEMENT_ATTEMPTS: u64 = 4_000;
-/// Domain warp of the plate boundaries, as a share of the world's size.
+/// Domain warp of the plate boundaries, as a share of the world's span.
 const PLATE_WARP_SHARE: f64 = 0.05;
 /// A boundary running along a land edge (within its belt half-width, the
 /// edge taper and the warp of the edge) would build a range parallel to the
@@ -52,7 +53,8 @@ const BELT_CORE_SHARE: f64 = 0.35;
 /// half-width relative to a boundary belt's.
 pub const INTERIOR_RANGE_STRENGTH: f64 = 0.35;
 const INTERIOR_RANGE_WIDTH_SHARE: f64 = 0.8;
-/// Interior range length cap and placement box, as shares of the world size.
+/// Interior range length cap (share of the world's span) and placement box
+/// (shares of its width and height).
 const INTERIOR_RANGE_MAX_SHARE: f64 = 0.6;
 const INTERIOR_RANGE_BOX: (f64, f64) = (0.2, 0.8);
 
@@ -66,16 +68,16 @@ pub struct Plate {
 }
 
 /// The plates of a world, from the seed and knobs only.
-pub fn plates(seed: u64, size_m: f64, k: &Knobs) -> Vec<Plate> {
+pub fn plates(seed: u64, width_m: f64, height_m: f64, k: &Knobs) -> Vec<Plate> {
     let count = k.plate_total();
-    let min_gap = PLATE_SPACING_SHARE * size_m / (count as f64).sqrt();
-    let span = size_m * (1.0 + 2.0 * PLATE_SITE_REACH);
+    let min_gap = PLATE_SPACING_SHARE * span_m(width_m, height_m) / (count as f64).sqrt();
+    let (span_x, span_z) = (width_m * (1.0 + 2.0 * PLATE_SITE_REACH), height_m * (1.0 + 2.0 * PLATE_SITE_REACH));
     let mut sites: Vec<(f64, f64)> = Vec::with_capacity(count);
     let mut attempt = 0u64;
     while sites.len() < count {
         attempt += 1;
-        let x = hash01(seed, 0x91A7, attempt) * span - PLATE_SITE_REACH * size_m;
-        let z = hash01(seed, 0x91A8, attempt) * span - PLATE_SITE_REACH * size_m;
+        let x = hash01(seed, 0x91A7, attempt) * span_x - PLATE_SITE_REACH * width_m;
+        let z = hash01(seed, 0x91A8, attempt) * span_z - PLATE_SITE_REACH * height_m;
         // After the attempt budget, accept anything (never loops forever).
         let clear = attempt > PLATE_PLACEMENT_ATTEMPTS
             || sites.iter().all(|&(sx, sz)| (sx - x).hypot(sz - z) >= min_gap);
@@ -93,7 +95,7 @@ pub fn plates(seed: u64, size_m: f64, k: &Knobs) -> Vec<Plate> {
         .collect()
 }
 
-/// Per cell (row-major, `n` x `n` over `size_m`): the plate it belongs to and
+/// Per cell (row-major, `nx` x `nz` over `width_m` x `height_m`): the plate it belongs to and
 /// the belt strength there, 0..1 — 1 on a fully convergent boundary, falling
 /// to 0 a `Knobs::plate_belt_width` share of the world away from it, and 0
 /// along divergent and transform boundaries.
@@ -112,13 +114,13 @@ struct Warp {
 }
 
 impl Warp {
-    fn new(seed: u64, size_m: f64) -> Warp {
+    fn new(seed: u64, span_m: f64) -> Warp {
         Warp {
             x: OctaveNoise::new(seed ^ 0xF101, -13, vec![1.0, 0.5]), // 8 km at the reference size
             z: OctaveNoise::new(seed ^ 0xF102, -13, vec![1.0, 0.5]),
             along: OctaveNoise::new(seed ^ 0xF103, -12, vec![1.0, 0.5]), // 4 km
-            scale: size_m / REFERENCE_SIZE_M,
-            amplitude: PLATE_WARP_SHARE * size_m,
+            scale: span_m / REFERENCE_SIZE_M,
+            amplitude: PLATE_WARP_SHARE * span_m,
         }
     }
 
@@ -144,8 +146,8 @@ pub struct Boundary {
 /// clipped by every other site's half-plane, so a boundary ends at its triple
 /// junctions — the belt rounds off there instead of running on as a phantom
 /// bisector (which left straight seams across the uplift).
-pub fn convergent_boundaries(plates: &[Plate], size_m: f64) -> Vec<Boundary> {
-    let reach = 4.0 * size_m; // unbounded hull edges are cut here
+pub fn convergent_boundaries(plates: &[Plate], width_m: f64, height_m: f64) -> Vec<Boundary> {
+    let reach = 4.0 * width_m.max(height_m); // unbounded hull edges are cut here
     let mut out = Vec::new();
     for a in 0..plates.len() {
         for j in a + 1..plates.len() {
@@ -189,11 +191,17 @@ pub fn convergent_boundaries(plates: &[Plate], size_m: f64) -> Vec<Boundary> {
 /// (`LAND_EDGE_PARALLEL_POWER`): each boundary is split where it enters the
 /// band of width `band` m inside a land edge, and the part inside keeps the
 /// share of its strength its angle to the edge allows.
-fn soften_along_land_edges(boundaries: Vec<Boundary>, land: [bool; 4], size_m: f64, band: f64) -> Vec<Boundary> {
+fn soften_along_land_edges(
+    boundaries: Vec<Boundary>,
+    land: [bool; 4],
+    width_m: f64,
+    height_m: f64,
+    band: f64,
+) -> Vec<Boundary> {
     let mut out = boundaries;
     for e in (0..4).filter(|&e| land[e]) {
         // Distance in from edge e (N, E, S, W) of a point.
-        let inward = |x: f64, z: f64| [z, size_m - x, size_m - z, x][e];
+        let inward = |x: f64, z: f64| [z, width_m - x, height_m - z, x][e];
         let mut next = Vec::with_capacity(out.len());
         for b in out {
             let (d0, d1) = (inward(b.x0, b.z0), inward(b.x1, b.z1));
@@ -241,17 +249,20 @@ fn belt_profile(d: f64, half_width: f64) -> f64 {
     1.0 - smoothstep(BELT_CORE_SHARE * half_width, half_width, d)
 }
 
-/// The plate structure on an `n` x `n` grid over a `size_m` world.
-pub fn plate_field(seed: u64, size_m: f64, n: usize, k: &Knobs) -> PlateField {
-    let plates = plates(seed, size_m, k);
-    let warp = Warp::new(seed, size_m);
-    let cell = size_m / n as f64;
-    let half_width = (k.plate_belt_width * size_m).max(cell);
+/// The plate structure on an `nx` x `nz` grid over a `width_m` x `height_m`
+/// world.
+pub fn plate_field(seed: u64, width_m: f64, height_m: f64, nx: usize, nz: usize, k: &Knobs) -> PlateField {
+    let span = span_m(width_m, height_m);
+    let plates = plates(seed, width_m, height_m, k);
+    let warp = Warp::new(seed, span);
+    let (cell_x, cell_z) = (width_m / nx as f64, height_m / nz as f64);
+    let half_width = (k.plate_belt_width * span).max(cell_x.max(cell_z));
     let land = edges(seed, k).map(|e| e == EdgeKind::Land);
-    let band = half_width + LAND_EDGE_TAPER_M.min(0.25 * size_m) + warp.amplitude;
-    let boundaries = soften_along_land_edges(convergent_boundaries(&plates, size_m), land, size_m, band);
-    let per_cell = par::map_range(n * n, |i| {
-        let (mx, mz) = (((i % n) as f64 + 0.5) * cell, ((i / n) as f64 + 0.5) * cell);
+    let band = half_width + LAND_EDGE_TAPER_M.min(0.25 * span) + warp.amplitude;
+    let boundaries =
+        soften_along_land_edges(convergent_boundaries(&plates, width_m, height_m), land, width_m, height_m, band);
+    let per_cell = par::map_range(nx * nz, |i| {
+        let (mx, mz) = (((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z);
         let (px, pz) = warp.at(mx, mz);
         // Nearest site (ties to the lower index): the cell's plate.
         let d2 = |s: &Plate| (px - s.x).powi(2) + (pz - s.z).powi(2);
@@ -280,14 +291,14 @@ pub struct InteriorRange {
 }
 
 /// The interior ranges of a world (`Knobs::interior_ranges` of them).
-pub fn interior_ranges(seed: u64, size_m: f64, k: &Knobs) -> Vec<InteriorRange> {
+pub fn interior_ranges(seed: u64, width_m: f64, height_m: f64, k: &Knobs) -> Vec<InteriorRange> {
     let count = k.interior_ranges.round().max(0.0) as u64;
-    let length = (k.belt_length_km * 1_000.0).min(INTERIOR_RANGE_MAX_SHARE * size_m);
+    let length = (k.belt_length_km * 1_000.0).min(INTERIOR_RANGE_MAX_SHARE * span_m(width_m, height_m));
     let (lo, hi) = INTERIOR_RANGE_BOX;
     (0..count)
         .map(|r| {
-            let cx = (lo + (hi - lo) * hash01(seed, 0x1A7E, r)) * size_m;
-            let cz = (lo + (hi - lo) * hash01(seed, 0x1A7F, r)) * size_m;
+            let cx = (lo + (hi - lo) * hash01(seed, 0x1A7E, r)) * width_m;
+            let cz = (lo + (hi - lo) * hash01(seed, 0x1A7F, r)) * height_m;
             let a = hash01(seed, 0x1A80, r) * std::f64::consts::PI;
             let (dx, dz) = (0.5 * length * a.cos(), 0.5 * length * a.sin());
             InteriorRange { x0: cx - dx, z0: cz - dz, x1: cx + dx, z1: cz + dz }
@@ -297,8 +308,8 @@ pub fn interior_ranges(seed: u64, size_m: f64, k: &Knobs) -> Vec<InteriorRange> 
 
 /// Interior-range belt strength at (x, z) in m: `INTERIOR_RANGE_STRENGTH` on
 /// a range's axis, 0 a (narrowed) belt half-width away.
-pub fn interior_strength(ranges: &[InteriorRange], x: f64, z: f64, size_m: f64, k: &Knobs) -> f64 {
-    let half_width = INTERIOR_RANGE_WIDTH_SHARE * k.plate_belt_width * size_m;
+pub fn interior_strength(ranges: &[InteriorRange], x: f64, z: f64, width_m: f64, height_m: f64, k: &Knobs) -> f64 {
+    let half_width = INTERIOR_RANGE_WIDTH_SHARE * k.plate_belt_width * span_m(width_m, height_m);
     ranges
         .iter()
         .map(|r| INTERIOR_RANGE_STRENGTH * belt_profile(segment_distance(x, z, r.x0, r.z0, r.x1, r.z1), half_width))
@@ -312,8 +323,8 @@ mod tests {
     #[test]
     fn plate_field_is_deterministic_and_uses_every_plate() {
         let k = Knobs::default();
-        let a = plate_field(11, 16_000.0, 125, &k);
-        let b = plate_field(11, 16_000.0, 125, &k);
+        let a = plate_field(11, 16_000.0, 16_000.0, 125, 125, &k);
+        let b = plate_field(11, 16_000.0, 16_000.0, 125, 125, &k);
         assert_eq!(a.plate, b.plate);
         assert_eq!(a.convergence, b.convergence);
         assert!(a.convergence.iter().all(|&c| (0.0..=1.0).contains(&c)));
@@ -331,7 +342,8 @@ mod tests {
     #[test]
     fn plates_agree_across_resolutions() {
         let k = Knobs::default();
-        let (coarse, fine) = (plate_field(5, 16_000.0, 100, &k), plate_field(5, 16_000.0, 200, &k));
+        let coarse = plate_field(5, 16_000.0, 16_000.0, 100, 100, &k);
+        let fine = plate_field(5, 16_000.0, 16_000.0, 200, 200, &k);
         let mut same = 0;
         for z in 0..200 {
             for x in 0..200 {
@@ -348,7 +360,7 @@ mod tests {
         let k = Knobs::default();
         for seed in [3, 0x00D5_C0DE_0206] {
             let n = 250;
-            let f = plate_field(seed, 16_000.0, n, &k);
+            let f = plate_field(seed, 16_000.0, 16_000.0, n, n, &k);
             let mut worst: f32 = 0.0;
             for z in 0..n - 1 {
                 for x in 0..n - 1 {
