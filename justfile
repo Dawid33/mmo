@@ -1751,7 +1751,7 @@ kube *args:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | registry | login | postgres | world | site) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | dns | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | registry | login | postgres | world | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
