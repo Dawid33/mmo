@@ -16,7 +16,7 @@ use std::time::Duration;
 use crossbeam::channel::Sender;
 use dashmap::DashMap;
 use game::{ClientId, ClientPacket, ServerEvent};
-use log::{info, warn};
+use log::{debug, info, warn};
 use quinn::rustls;
 use wtransport::{Endpoint, ServerConfig};
 
@@ -66,8 +66,12 @@ pub async fn serve(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(hex) = cert.sha256_hex() {
         // Dev nicety, not load-bearing: never fail the ingress over it.
-        if let Err(e) = write_cert_hash_file(&hex, bind.port(), ordinal) {
-            warn!("could not write cert-hash file (browser clients need it): {e:?}");
+        match write_cert_hash_file(&hex, bind.port(), ordinal) {
+            Ok(true) => {}
+            // A deployed binary (a container image) has no source tree; its clients pin the
+            // hash each `HostEndpoint` carries.
+            Ok(false) => debug!("no assets/ directory of the build's source tree: the dev cert-hash files are not written"),
+            Err(e) => warn!("could not write cert-hash file (browser clients need it): {e:?}"),
         }
     }
     let endpoint = Arc::new(Endpoint::server(server_config(bind, &cert))?);
@@ -214,17 +218,33 @@ pub fn cert_hash_file_names(ordinal: u32) -> Vec<String> {
 }
 
 /// Dev-mode CA substitute: the page fetches this (wasm-server-runner serves
-/// assets/ over HTTP) and passes the hash to serverCertificateHashes.
-fn write_cert_hash_file(hex: &str, port: u16, ordinal: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let json = format!(r#"{{"sha256_hex":"{hex}","port":{port}}}"#);
+/// assets/ over HTTP) and passes the hash to serverCertificateHashes. `Ok(false)`: no
+/// source tree here, nothing written (see [`write_cert_hash_files_into`]).
+fn write_cert_hash_file(hex: &str, port: u16, ordinal: u32) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Resolve the repo-root assets dir from the crate location, not the CWD:
     // the binary is run from the repo root but tests run from crates/server.
     // (env! bakes a build-machine path; acceptable for this localhost-dev file.)
-    let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
-    for name in cert_hash_file_names(ordinal) {
-        std::fs::write(format!("{assets}/{name}"), &json)?;
+    let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+    write_cert_hash_files_into(assets, hex, port, ordinal)
+}
+
+/// Writes host `ordinal`'s dev hash files into `assets`, if that directory exists: a
+/// binary running away from the source tree it was built in (a container image) has none,
+/// and writes nothing (`Ok(false)`) instead of failing on every start.
+fn write_cert_hash_files_into(
+    assets: &std::path::Path,
+    hex: &str,
+    port: u16,
+    ordinal: u32,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if !assets.is_dir() {
+        return Ok(false);
     }
-    Ok(())
+    let json = format!(r#"{{"sha256_hex":"{hex}","port":{port}}}"#);
+    for name in cert_hash_file_names(ordinal) {
+        std::fs::write(assets.join(name), &json)?;
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -238,5 +258,26 @@ mod cert_tests {
         assert_eq!(cert_hash_file_names(0), ["webtransport-cert-hash.json", "webtransport-cert-hash-0.json"]);
         assert_eq!(cert_hash_file_names(1), ["webtransport-cert-hash-1.json"]);
         assert_eq!(cert_hash_file_names(7), ["webtransport-cert-hash-7.json"]);
+    }
+
+    /// A deployed binary has no `assets/` of its build's source tree: it writes nothing and
+    /// that is not an error (the k3d twin logged a NotFound WARN on every host start).
+    #[test]
+    fn no_assets_directory_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("cert-hash-missing-{}", std::process::id()));
+        assert!(!dir.exists());
+        assert!(!write_cert_hash_files_into(&dir, "ab", 6467, 0).expect("a missing directory is not an error"));
+        assert!(!dir.exists(), "nothing created");
+    }
+
+    #[test]
+    fn an_assets_directory_gets_the_hash_files() {
+        let dir = std::env::temp_dir().join(format!("cert-hash-present-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(write_cert_hash_files_into(&dir, "ab", 6467, 0).unwrap());
+        for name in cert_hash_file_names(0) {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), r#"{"sha256_hex":"ab","port":6467}"#);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
