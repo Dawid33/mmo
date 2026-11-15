@@ -3434,6 +3434,9 @@ fn every_host_draining_means_no_gate() {
     assert_eq!(c.gate_host(), None);
     assert_eq!(c.login_order(spawn_order(1)), None);
     assert!(commit_routed(&mut c).is_empty(), "nothing queued");
+    // A failed hosts read keeps the marks: still no gate.
+    c.leases_unread();
+    assert_eq!(c.gate_host(), None, "the marks outlive a failed read");
     // A new host attaches (not draining): it takes the orders.
     c.handle(h(3), attach(h(3), 1, Vec::new(), Vec::new()), 150);
     commit_routed(&mut c);

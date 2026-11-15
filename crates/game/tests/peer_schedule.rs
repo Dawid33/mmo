@@ -5971,6 +5971,125 @@ fn claim_wanted_reaches_the_preferred_host() {
     sweep("claim_wanted_reaches_the_preferred_host", 2, 1, SEEDS / 2, claim_wanted_reaches_preferred);
 }
 
+// --- Elastic 1 Task 7: a draining host wins no land ----------------------------------------
+
+/// Two hosts; `b`'s free super-region is preferred (among both) to host `drainer`, which is
+/// marked draining. The other host's id.
+fn drain_the_preferred(sr: game::SuperRegion) -> (HostId, HostId) {
+    let drainer = crate::common::rendezvous_owner(sr, 2);
+    let other = host_ids(2).find(|h| *h != drainer).expect("two hosts");
+    (drainer, other)
+}
+
+/// Host A (draining) is the rendezvous choice for `b`'s free super-region among {A, B}: both
+/// directories prefer B instead, A never asks the store, B claims it, and a player walking
+/// into `b` lands there on B, once.
+fn draining_share_goes_to_another(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let sr = sr_of(rig, b);
+    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
+    let (drainer, other) = drain_the_preferred(sr);
+    rig.draining.insert(drainer);
+    rig.with_claims();
+    for h in host_ids(2) {
+        assert_eq!(rig.hosts[h.0 as usize].manager.preferred_claimer(sr), Some(other), "host {h} prefers host {other}");
+    }
+    let ha = rig.owner(a);
+    rig.run(a);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    assert!(push_player_into(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?}: {:?}", rig.player_body(P_CLIENT));
+    assert_eq!(rig.stored_owner(sr), Some(other), "the host that is not draining claimed it");
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(other))),
+        "every directory names host {other}: {:?}",
+        owners_seen(rig, b)
+    );
+    assert_eq!(rig.player_owners(P_CLIENT), [(other, b)], "the player is in {b:?} once, on host {other}");
+    assert_eq!(rig.claims_asked.get(&drainer).copied().unwrap_or(0), 0, "the draining host asked the store for nothing");
+    assert!(nothing_unowned(rig), "nothing waits for an owner");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_draining_hosts_share_of_free_land_is_claimed_by_another() {
+    sweep("a_draining_hosts_share_of_free_land_is_claimed_by_another", 2, 1, SEEDS / 4, draining_share_goes_to_another);
+}
+
+/// The needing host's directory is one read behind: it still prefers the draining host and
+/// asks it (`ClaimWanted`). The draining host claims nothing; the land stays free and the
+/// slime waits. At the needing host's next read it prefers itself, claims, and the slime
+/// ends in `b` there, once.
+fn a_stale_ask_of_a_draining_host(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let sr = sr_of(rig, b);
+    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
+    rig.with_claims();
+    let ha = rig.owner(a);
+    let (drainer, other) = drain_the_preferred(sr);
+    assert_eq!(other, ha, "the needing host is not the preferred one");
+    // Only the draining host has read its mark so far.
+    rig.draining.insert(drainer);
+    rig.read_directory(drainer);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.preferred_claimer(sr), Some(drainer), "a stale directory");
+    rig.run(a);
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
+        "the slime never waited for an owner"
+    );
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.claims_asked.get(&drainer).copied().unwrap_or(0), 0, "asked, the draining host claimed nothing");
+    assert_eq!(rig.stored_owner(sr), None, "the land stays free");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.unowned_waiting_ids(), [(sr, id)], "the slime still waits");
+    rig.read_directory(ha);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.stored_owner(sr) == Some(ha)), "host {ha} never claimed it");
+    rig.run(b);
+    until_settled_in(rig, id, b);
+    assert!(nothing_unowned(rig), "nothing waits for an owner");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_draining_host_asked_to_claim_claims_nothing() {
+    sweep("a_draining_host_asked_to_claim_claims_nothing", 2, 1, SEEDS / 4, a_stale_ask_of_a_draining_host);
+}
+
+/// Every host draining: nobody is preferred, nobody claims, nothing panics or spins (no
+/// directory read asked round after round); the slime waits for an owner all along.
+fn every_host_draining(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let sr = sr_of(rig, b);
+    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
+    rig.draining.extend(host_ids(2));
+    rig.with_claims();
+    let ha = rig.owner(a);
+    rig.run(a);
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
+        "the slime never waited for an owner"
+    );
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+    }
+    for h in host_ids(2) {
+        assert_eq!(rig.hosts[h.0 as usize].manager.preferred_claimer(sr), None, "host {h}: nobody to prefer");
+    }
+    assert!(rig.claims_asked.is_empty(), "nobody asked the store: {:?}", rig.claims_asked);
+    assert!(rig.reads_asked.values().all(|n| *n <= 2), "no read loop: {:?}", rig.reads_asked);
+    assert_eq!(rig.stored_owner(sr), None, "the land stays free");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.unowned_waiting_ids(), [(sr, id)], "the need is still pending");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn every_host_draining_claims_nothing_and_waits() {
+    sweep("every_host_draining_claims_nothing_and_waits", 2, 1, SEEDS / 4, every_host_draining);
+}
+
 /// A slime waits on `a`'s host for free `b`; then the other host claims `b`'s super-region
 /// (its server's `claimed`, no claim loop): its `Owns` tells `a`'s host, which sends the
 /// slime on — it ends in `b` once, and a committed world cut afterwards holds it once.

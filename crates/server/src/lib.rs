@@ -1141,9 +1141,10 @@ pub fn run() -> claims::ServerExit {
     // every owner is `Unknown`), and the loop's claim keeper.
     let mut directory_keeper = None;
     if let Some(claims) = claims.as_ref().filter(|_| claim_on_demand) {
-        let (rows, live) = claims::read_directory(claims.store(), host_id)
+        let (rows, live, draining) = claims::read_directory(claims.store(), host_id)
             .unwrap_or_else(|e| fatal(&format!("reading the ownership directory: {e}")));
-        info!("[server] ownership directory: {} super-regions, live hosts {live:?}", rows.len());
+        info!("[server] ownership directory: {} super-regions, live hosts {live:?}, draining {draining:?}", rows.len());
+        manager.set_draining(draining);
         manager.directory_read(rows, live);
         lease::beat_at_boot(&mut heartbeat, "reading the ownership directory");
         directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone(), boot));

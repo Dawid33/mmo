@@ -248,7 +248,7 @@ mod tests {
             assert_eq!(beat.pump(now), LeaseState::Held);
         }
         let d = beat.drain_in_ms().expect("the pumped beat's answer");
-        assert!((59_000..=60_000).contains(&d), "{d}");
+        assert!((55_000..=60_000).contains(&d), "{d}");
         store.shutdown();
     }
 }

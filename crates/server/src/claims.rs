@@ -378,28 +378,44 @@ impl HostClaims {
 
 // --- the directory and claiming on demand (R4, `claim`) -----------------------------------
 
-/// The hosts holding their lease by `rows` at the database clock `now_ms`: live, not left
-/// clean, and beaten within [`game::HOST_LEASE_MS`] (what a booting host counts as alive).
+/// The hosts a claim preference counts by `rows` at the database clock `now_ms`: live, not
+/// left clean, beaten within [`game::HOST_LEASE_MS`] (what a booting host counts as alive),
+/// and NOT marked draining (`worldctl drain`: a draining host wins no land, Elastic 1).
 pub fn live_hosts(rows: &[HostRow], now_ms: u64) -> BTreeSet<HostId> {
     rows.iter()
         .filter(|r| r.state == game::HOST_LIVE && !r.clean && now_ms.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS)
+        .filter(|r| r.drain_in_ms.is_none())
         .map(|r| r.id)
         .collect()
 }
 
+/// The hosts whose `hosts` row carries a drain mark ([`game::WorldManager::set_draining`]).
+pub fn draining_hosts(rows: &[HostRow]) -> BTreeSet<HostId> {
+    rows.iter().filter(|r| r.drain_in_ms.is_some()).map(|r| r.id).collect()
+}
+
 /// The directory read whole, blocking (a boot, before the main loop): every `super_regions`
-/// row (`(super-region, owner or NO_OWNER, epoch)`) and the live hosts ([`live_hosts`]).
-/// Plain reads, no locks.
-pub fn read_directory(store: &StoreHandle, me: HostId) -> Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>), StoreError> {
+/// row (`(super-region, owner or NO_OWNER, epoch)`), the live hosts ([`live_hosts`], `me`
+/// among them) and the draining ones ([`draining_hosts`]). Plain reads, no locks. The caller
+/// hands them to the manager: `set_draining`, then `directory_read`.
+#[allow(clippy::type_complexity)]
+pub fn read_directory(
+    store: &StoreHandle,
+    me: HostId,
+) -> Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, BTreeSet<HostId>), StoreError> {
     let rows = store.owners()?;
     let hosts = store.hosts()?;
     let mut live = live_hosts(&hosts, store.db_now_ms()?);
     live.insert(me);
-    Ok((rows, live))
+    Ok((rows, live, draining_hosts(&hosts)))
 }
 
 /// After a failed claim, no new one for this long.
 pub const CLAIM_RETRY_MS: u64 = 1_000;
+/// After a claim that won NOTHING of what it asked (another host was faster, or this host is
+/// draining and the store gave it nothing), no new claim for this long: whatever the reason
+/// for an empty answer, claiming never spins against the store.
+pub const CLAIM_NOTHING_WON_RETRY_MS: u64 = 1_000;
 /// At most one warning per this long about failed claims or directory reads.
 pub const DIRECTORY_WARN_MS: u64 = 10_000;
 
@@ -449,7 +465,9 @@ impl DirectoryRead {
 /// directory says are free), this claims it on the store thread (`claim_free_later`, one
 /// claim in flight), grows the fence ([`HostClaims::add`]) and answers the manager
 /// ([`game::WorldManager::claimed`]). A claim that won less than it asked (another host was
-/// faster), or that failed (a lock timeout among them: retried after [`CLAIM_RETRY_MS`],
+/// faster; one that won NOTHING also paces the next claim by [`CLAIM_NOTHING_WON_RETRY_MS`] —
+/// a draining host's claim wins nothing, so its rows stay free), or that failed (a lock
+/// timeout among them: retried after [`CLAIM_RETRY_MS`],
 /// never fatal), triggers a directory read — except a claim refused as `Fenced` (this boot
 /// was declared dead or replaced, R4): that sets the [`Fenced`] flag and claims nothing more; so does the manager's
 /// [`game::WorldManager::take_directory_wanted`], and every [`world_store::TERRAIN_POLL_SECS`]
@@ -470,6 +488,8 @@ pub struct DirectoryKeeper {
     /// be claimed again against another host's rows (finding 1: a claim must never lock
     /// rows it cannot win).
     claims_wait_for_read: Option<u64>,
+    /// An empty claim answer was logged (once until a claim wins something again).
+    nothing_won_told: bool,
     read_wanted: bool,
     next_read: Instant,
     warned: Option<Instant>,
@@ -483,6 +503,7 @@ pub trait ClaimingManager {
     fn take_claims_wanted(&mut self) -> Vec<SuperRegion>;
     fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>);
     fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<HostId>);
+    fn set_draining(&mut self, draining: BTreeSet<HostId>);
     fn take_directory_wanted(&mut self) -> bool;
 }
 
@@ -495,6 +516,9 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
     }
     fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<HostId>) {
         WorldManager::directory_read(self, rows, live)
+    }
+    fn set_draining(&mut self, draining: BTreeSet<HostId>) {
+        WorldManager::set_draining(self, draining)
     }
     fn take_directory_wanted(&mut self) -> bool {
         WorldManager::take_directory_wanted(self)
@@ -514,6 +538,7 @@ impl DirectoryKeeper {
             reading: None,
             reads_started: 0,
             claims_wait_for_read: None,
+            nothing_won_told: false,
             read_wanted: false,
             next_read,
             warned: None,
@@ -562,6 +587,20 @@ impl DirectoryKeeper {
                         if rows.len() < asked {
                             self.wait_for_a_fresh_read();
                         }
+                        if rows.is_empty() && asked > 0 {
+                            // Paced: an empty answer whose rows the next read still shows
+                            // free would otherwise be claimed again at once.
+                            if !self.nothing_won_told {
+                                self.nothing_won_told = true;
+                                log::info!(
+                                    "[server] a claim of {asked} free super-region(s) won nothing (taken first, or this host \
+                                     is draining); claims paced to one per {CLAIM_NOTHING_WON_RETRY_MS} ms"
+                                );
+                            }
+                            self.no_claim_before = Some(Instant::now() + Duration::from_millis(CLAIM_NOTHING_WON_RETRY_MS));
+                        } else {
+                            self.nothing_won_told = false;
+                        }
                         if !rows.is_empty() {
                             // The fence first: a load or cut in a won super-region is checked
                             // against it from the moment the manager knows it owns it.
@@ -588,6 +627,7 @@ impl DirectoryKeeper {
                 self.reading = None;
                 match answer {
                     Ok((rows, live, hosts)) => {
+                        manager.set_draining(draining_hosts(&hosts));
                         manager.directory_read(rows, live);
                         self.hosts_read = Some(hosts);
                         if self.claims_wait_for_read.is_some_and(|after| n > after) {
@@ -982,6 +1022,7 @@ mod tests {
             self.events.push("read");
             self.read = true;
         }
+        fn set_draining(&mut self, _draining: BTreeSet<HostId>) {}
         fn take_directory_wanted(&mut self) -> bool {
             false
         }
@@ -1043,6 +1084,33 @@ mod tests {
         store.shutdown();
     }
 
+    /// Elastic 1 Task 7: a claim answered with NOTHING won while the rows stay free (here:
+    /// this host is draining, so the store gives it nothing) is not asked again before
+    /// [`CLAIM_NOTHING_WON_RETRY_MS`] — never a hot loop against the store, whatever the
+    /// manager keeps wanting.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn a_claim_that_won_nothing_is_paced() {
+        let store = memory_store();
+        let me = register(&store, 10);
+        store.drain_host(me, 60_000).unwrap();
+        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), me), 10);
+        let mut m = Free { sr: (0, 3), asked: 0 };
+        let start = Instant::now();
+        let pump_until = |keeper: &mut DirectoryKeeper, m: &mut Free, ms: u64| {
+            while start.elapsed() < Duration::from_millis(ms) {
+                keeper.pump(m);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        pump_until(&mut keeper, &mut m, CLAIM_NOTHING_WON_RETRY_MS / 2);
+        assert_eq!(m.asked, 1, "one claim, then paced");
+        pump_until(&mut keeper, &mut m, CLAIM_NOTHING_WON_RETRY_MS * 5 / 2);
+        assert!((2..=3).contains(&m.asked), "one claim per {CLAIM_NOTHING_WON_RETRY_MS} ms: {}", m.asked);
+        assert!(store.owners().unwrap().is_empty(), "nothing won");
+        store.shutdown();
+    }
+
     /// A manager that always wants one free super-region.
     struct Free {
         sr: SuperRegion,
@@ -1058,6 +1126,7 @@ mod tests {
             panic!("won {rows:?} as a replaced boot");
         }
         fn directory_read(&mut self, _rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<HostId>) {}
+        fn set_draining(&mut self, _draining: BTreeSet<HostId>) {}
         fn take_directory_wanted(&mut self) -> bool {
             false
         }

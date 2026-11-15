@@ -127,7 +127,8 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     let mut sim = Sim::with_spawner(ordinal, s, boot, generation, &mut links, spawner);
     sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal)), s);
     sim.manager.start_peer_journal(store.last_committed_cut().unwrap());
-    let (rows, live) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
+    let (rows, live, draining) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
+    sim.manager.set_draining(draining);
     sim.manager.directory_read(rows, live);
     sim.manager.set_stored_regions(store.stored_regions().unwrap());
     sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());

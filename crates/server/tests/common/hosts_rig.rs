@@ -1149,7 +1149,8 @@ fn claim_host(db: &PgDb, dir: &std::path::Path, boot: u64) -> (Sim, PeerLinks, H
     claims.reclaim_own(boot).expect("what the registration gave it taken");
     let mut sim = Sim::with_spawner(ordinal, s, boot, registered.generation, &mut links, InlineSpawner::default());
     sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal)), s);
-    let (rows, live) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
+    let (rows, live, draining) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
+    sim.manager.set_draining(draining);
     sim.manager.directory_read(rows, live);
     sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone(), boot));
     (sim, links, claims)

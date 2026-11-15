@@ -419,6 +419,22 @@ macro_rules! engine_rows {
                 let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
                 let tx = begin_claim(pool, lock_ms).await?;
                 let mut tx = check_side(pool, tx, opened, lock_ms).await?;
+                // A plain read of the drain mark first (no lock): a host already marked
+                // draining locks no free row for nothing. The locked re-check stays last.
+                let marked = sqlx::query("SELECT drain_at_ms FROM hosts WHERE id = $1 AND boot = $2")
+                    .bind(i(owner.0))
+                    .bind(i(boot))
+                    .fetch_optional(&mut *tx)
+                    .await;
+                match marked {
+                    Ok(Some(r)) if r.try_get::<Option<i64>, _>(0)?.is_some() => {
+                        tx.rollback().await?;
+                        log::debug!("[world-store] host {owner} is draining: its claim of free land wins nothing");
+                        return Ok(Fence { owner, epochs: BTreeMap::new(), all_hosts: false });
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
+                }
                 let insert = "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
                               ON CONFLICT (sx, sz) DO NOTHING RETURNING epoch";
                 let take_free = format!(
@@ -452,12 +468,11 @@ macro_rules! engine_rows {
                 let (tx, draining) = check_live(pool, tx, owner, boot, lock_ms).await?;
                 if draining {
                     tx.rollback().await?;
-                    if !epochs.is_empty() {
-                        log::info!(
-                            "[world-store] host {owner} is draining: it wins no new land ({} free super-region(s) left free)",
-                            epochs.len()
-                        );
-                    }
+                    // Debug only: the server paces such claims and says so once.
+                    log::debug!(
+                        "[world-store] host {owner} is draining: it wins no new land ({} free super-region(s) left free)",
+                        epochs.len()
+                    );
                     return Ok(Fence { owner, epochs: BTreeMap::new(), all_hosts: false });
                 }
                 tx.commit().await?;
@@ -875,7 +890,13 @@ macro_rules! engine_rows {
                     "UPDATE hosts SET drain_at_ms = {deadline} WHERE id = $1 AND clean = 0 AND state = {}",
                     crate::HOST_LIVE
                 );
-                let in_ms = i64::try_from(in_ms).map_err(|_| StoreError::Unsupported(format!("a drain in {in_ms} ms")))?;
+                if in_ms > crate::DRAIN_MAX_SECS * 1000 {
+                    return Err(StoreError::Unsupported(format!(
+                        "a drain notice of {in_ms} ms is longer than the longest, {} s (DRAIN_MAX_SECS)",
+                        crate::DRAIN_MAX_SECS
+                    )));
+                }
+                let in_ms = i(in_ms);
                 let mut tx = pool.begin().await?;
                 cut_lock_timeout(&mut *tx, lock_ms).await?;
                 let done = sqlx::query(&sql).bind(i(id.0)).bind(in_ms).execute(&mut *tx).await?;

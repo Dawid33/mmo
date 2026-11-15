@@ -480,11 +480,11 @@ impl Coordinator {
     }
 
     /// Whether attached live host `host` may be the gate host: not leaving (its leave asked
-    /// for: it refuses every spawn order) and not draining (the latest hosts read shows its row
-    /// marked, `worldctl drain` — no read of its own; after a failed read nothing is known and
-    /// a draining host may be the gate again until the next good one).
+    /// for: it refuses every spawn order) and not draining (the latest successful hosts read
+    /// showed its row marked, `worldctl drain` — no read of its own; a failed read keeps the
+    /// marks, [`LeaseWatch::draining`]).
     fn takes_logins(&self, host: HostId) -> bool {
-        !self.leave_asked(host) && !self.leases.row(host).is_some_and(|r| r.draining)
+        !self.leave_asked(host) && !self.leases.draining(host)
     }
 
     /// An order of the login service: for the gate host of this moment ([`Self::gate_host`]),

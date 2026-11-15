@@ -117,6 +117,10 @@ pub struct LeaseWatch {
     /// Successful reads observed so far: a declaration the store refused waits for a newer
     /// one ([`Coordinator::declared`]).
     reads: u64,
+    /// The hosts the latest successful read showed marked draining — KEPT across a failed
+    /// read (a mark is never lifted, so it is no evidence that goes stale as a beat does):
+    /// [`Self::draining`].
+    draining: BTreeSet<HostId>,
 }
 
 impl LeaseWatch {
@@ -134,6 +138,13 @@ impl LeaseWatch {
         }
         self.rows = next;
         self.reads += 1;
+        self.draining = rows.iter().filter(|r| r.draining).map(|r| r.ordinal).collect();
+    }
+
+    /// Host `host` was marked draining by the latest successful read (also after a failed
+    /// one). Before the first successful read nothing is known: `false`.
+    pub fn draining(&self, host: HostId) -> bool {
+        self.draining.contains(&host)
     }
 
     /// Host `ordinal`'s row as the latest successful read showed it.
@@ -147,7 +158,8 @@ impl LeaseWatch {
     }
 
     /// A read that failed: every observation is forgotten, so a lapse needs a whole lease
-    /// of successful reads again (an outage is no evidence of anyone's death).
+    /// of successful reads again (an outage is no evidence of anyone's death). The drain
+    /// marks are kept ([`Self::draining`]).
     pub fn observe_failed(&mut self) {
         self.rows.clear();
     }

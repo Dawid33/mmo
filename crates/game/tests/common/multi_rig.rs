@@ -318,6 +318,14 @@ pub struct MultiRig {
     /// Claims asked of the store and not answered yet: `(rounds left, host, super-regions)`
     /// (at most one per host, as a server keeps one `claim_free` in flight).
     pub claims_pending: Vec<(u32, HostId, Vec<game::SuperRegion>)>,
+    /// Hosts marked draining (`worldctl drain`): out of every directory read's live set, told
+    /// to every reader ([`game::WorldManager::set_draining`]), and their claims win nothing
+    /// (the store's guard).
+    pub draining: BTreeSet<HostId>,
+    /// Claims asked of the store, per host (counted when asked).
+    pub claims_asked: BTreeMap<HostId, u64>,
+    /// Directory reads a host asked for (`take_directory_wanted`), per host.
+    pub reads_asked: BTreeMap<HostId, u64>,
     /// Rounds played (the seed of each claim's answer delay).
     pub rounds: u64,
     /// Each host's current boot ([`Self::start`] makes a new one).
@@ -470,6 +478,9 @@ impl MultiRig {
                 directory: None,
                 claim_store: None,
                 claims_pending: Vec::new(),
+                draining: BTreeSet::new(),
+                claims_asked: BTreeMap::new(),
+                reads_asked: BTreeMap::new(),
                 rounds: 0,
                 boots: host_ids(hosts).map(rig_boot).collect(),
                 founders: keepers,
@@ -1068,8 +1079,11 @@ impl MultiRig {
         let store = self.claim_store.as_ref().expect("with_claims");
         let rows: Vec<(game::SuperRegion, i64, u64)> =
             store.iter().map(|(sr, (owner, epoch))| (*sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), *epoch)).collect();
-        let live: BTreeSet<HostId> = host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h)).collect();
-        self.hosts[h.0 as usize].manager.directory_read(rows, live);
+        let live: BTreeSet<HostId> =
+            host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h) && !self.draining.contains(h)).collect();
+        let m = &mut self.hosts[h.0 as usize].manager;
+        m.set_draining(self.draining.clone());
+        m.directory_read(rows, live);
     }
 
     /// One round of every host's claim loop (as the server's): directory reads asked for,
@@ -1081,6 +1095,7 @@ impl MultiRig {
         self.rounds += 1;
         for h in host_ids(self.hosts.len() as u32) {
             if self.hosts[h.0 as usize].manager.take_directory_wanted() {
+                *self.reads_asked.entry(h).or_default() += 1;
                 self.read_directory(h);
             }
             if self.claims_pending.iter().any(|(_, p, _)| *p == h) {
@@ -1088,6 +1103,7 @@ impl MultiRig {
             }
             let wanted = self.hosts[h.0 as usize].manager.take_claims_wanted();
             if !wanted.is_empty() {
+                *self.claims_asked.entry(h).or_default() += 1;
                 let delay = (mix(self.seed, self.rounds * 64 + h.0) % u64::from(self.link_delay + 1)) as u32;
                 self.claims_pending.push((delay, h, wanted));
             }
@@ -1097,7 +1113,8 @@ impl MultiRig {
         for (_, h, srs) in due {
             let store = self.claim_store.as_mut().expect("with_claims");
             let mut won = Vec::new();
-            for sr in &srs {
+            // A draining host's claim wins nothing (the store's guard).
+            for sr in srs.iter().filter(|_| !self.draining.contains(&h)) {
                 match store.get(sr).copied() {
                     None => {
                         store.insert(*sr, (Some(h), 1));

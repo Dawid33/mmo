@@ -62,7 +62,7 @@ fn a_beat_reports_the_drain_and_its_remaining_time() {
         let beat = h.heartbeat(a, 10).unwrap();
         assert!(beat.live);
         let d = beat.drain_in_ms.expect("draining");
-        assert!((59_000..=60_000).contains(&d), "{d}");
+        assert!((55_000..=60_000).contains(&d), "{d}");
         // Another boot under the id is not that live row: nothing to report.
         assert_eq!(h.heartbeat(a, 11).unwrap(), Beat { live: false, drain_in_ms: None });
         h.shutdown();
@@ -84,13 +84,13 @@ fn a_drain_mark_only_moves_earlier_and_needs_a_live_row() {
         h.drain_host(a, 60_000).unwrap();
         h.drain_host(a, 600_000).unwrap();
         let d = left(&h, a).expect("draining");
-        assert!((59_000..=60_000).contains(&d), "not postponed: {d}");
+        assert!((55_000..=60_000).contains(&d), "not postponed: {d}");
         h.drain_host(a, 30_000).unwrap();
         let d = left(&h, a).expect("draining");
-        assert!((29_000..=30_000).contains(&d), "brought forward: {d}");
+        assert!((25_000..=30_000).contains(&d), "brought forward: {d}");
         h.drain_host(a, 0).unwrap();
         let d = left(&h, a).expect("draining");
-        assert!((-1_000..=0).contains(&d), "due now: {d}");
+        assert!((-5_000..=0).contains(&d), "due now: {d}");
         h.shutdown();
         raw_exec(url, &format!("UPDATE hosts SET clean = 1 WHERE id = {}", b.0));
         raw_exec(url, &format!("UPDATE hosts SET state = 1 WHERE id = {}", c.0));

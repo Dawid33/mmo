@@ -34,7 +34,8 @@
 //!   `hosts` line. One statement over that one row ([`StoreHandle::drain_host`]); a mark only
 //!   moves earlier (a second drain with more time leaves it, with less brings it forward; there
 //!   is no un-drain). A draining host wins no new land and is not the gate host for logins; it
-//!   learns the mark at its next heartbeat. Refused for an absent, dead or clean row.
+//!   learns the mark at its next heartbeat. Refused for an absent, dead or clean row, and for
+//!   a notice above [`crate::DRAIN_MAX_SECS`].
 //! - `retire-host <url> <host id>` (R4, `claim` ownership, Postgres): retires a host that will
 //!   never come back, so its dirty `hosts` row stops blocking every world cut (the id as
 //!   `worldctl hosts` lists it: issued at registration, never reused). Refused while
@@ -240,7 +241,13 @@ fn parse_drain(args: &[String]) -> Result<(StoreUrl, HostId, u64), String> {
         None => game::DRAIN_WARNING_SECS,
         Some(s) => s.trim().parse::<u64>().map_err(|_| format!("drain: --in {s:?} is not a number of seconds"))?,
     };
-    let in_ms = secs.checked_mul(1000).filter(|ms| i64::try_from(*ms).is_ok()).ok_or_else(|| format!("drain: --in {secs}: too long"))?;
+    if secs > crate::DRAIN_MAX_SECS {
+        return Err(format!(
+            "drain: --in {secs} is longer than the longest notice, {} s (7 days, DRAIN_MAX_SECS)",
+            crate::DRAIN_MAX_SECS
+        ));
+    }
+    let in_ms = secs * 1000;
     let db = StoreUrl::parse(url).map_err(|e| format!("drain: the world store URL: {e}"))?;
     Ok((db, id, in_ms))
 }

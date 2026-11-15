@@ -52,7 +52,10 @@
 //! in `check_live`'s own statement (the same `FOR SHARE` of the claimer's row, its last; no new
 //! lock): a mark that commits first is seen (the claim wins nothing and rolls back), one that
 //! comes after waits for the claim's commit (the land won just before is kept and leaves with
-//! the host). A re-claim of a host's OWN rows (`claim_super_regions_live`) ignores the mark.
+//! the host). Before its upserts `claim_free` also reads the mark PLAINLY (no lock, so it
+//! changes no lock order): a host already marked locks no free row for nothing; the locked
+//! re-check stays the last statement. A re-claim of a host's OWN rows
+//! (`claim_super_regions_live`) ignores the mark.
 //!
 //! **A cut's begin** (`two_phase::record_cut_begin`, Elastic 1 Task 4): `coordinator` `FOR
 //! SHARE` (the fence, as `decide_cut` takes it first), a PLAIN read of `world.next_host_id`

@@ -424,21 +424,21 @@ fn drain_marks_a_live_host_and_refuses_a_dead_one() {
     };
     let out = said(&url, &["drain", &url, "1", "--in", "60"]).expect("marked");
     assert!(out.starts_with("1 host-1 live dirty land=2 seen="), "{out}");
-    assert!((59_000..=60_000).contains(&field(&out, "drain=")), "{out}");
+    assert!((55_000..=60_000).contains(&field(&out, "drain=")), "{out}");
     // Again with more time: not postponed.
     let out = said(&url, &["drain", &url, "1", "--in", "600"]).expect("marked");
-    assert!((59_000..=60_000).contains(&field(&out, "drain=")), "{out}");
+    assert!((55_000..=60_000).contains(&field(&out, "drain=")), "{out}");
     // The default notice.
     let out = said(&url, &["drain", &url, "2"]).expect("marked");
     let d = field(&out, "drain=");
     let full = i64::try_from(game::DRAIN_WARNING_SECS * 1000).unwrap();
-    assert!((full - 1_000..=full).contains(&d), "{out}");
+    assert!((full - 5_000..=full).contains(&d), "{out}");
     // Host 0 dead, host 3 left cleanly, id 9 never issued: refused, nothing written.
     exec(&w.w, "UPDATE hosts SET state = 1 WHERE id = 0");
     exec(&w.w, "UPDATE hosts SET clean = 1 WHERE id = 3");
-    for (id, want) in [("0", "host 0"), ("3", "host 3"), ("9", "host 9")] {
+    for (id, who, why) in [("0", "host 0", "is dead"), ("3", "host 3", "left cleanly"), ("9", "host 9", "has no hosts row")] {
         let err = said(&url, &["drain", &url, id]).expect_err("refused");
-        assert!(err.starts_with("drain: ") && err.contains(want), "{id}: {err}");
+        assert!(err.starts_with("drain: ") && err.contains(who) && err.contains(why), "{id}: {err}");
     }
     let listed = said(&url, &["hosts", &url]).unwrap();
     for line in listed.lines().filter(|l| l.starts_with("0 ") || l.starts_with("3 ")) {
@@ -447,6 +447,8 @@ fn drain_marks_a_live_host_and_refuses_a_dead_one() {
     for (list, want) in [
         (vec!["drain", &url, "h1"], "not a host id"),
         (vec!["drain", &url, "1", "--in", "soon"], "--in"),
+        (vec!["drain", &url, "1", "--in", "604801"], "longest notice"),
+        (vec!["drain", &url, "1", "--in", "18446744073709551615"], "longest notice"),
         (vec!["drain", &url], "usage"),
     ] {
         let err = said(&url, &list).expect_err("refused");

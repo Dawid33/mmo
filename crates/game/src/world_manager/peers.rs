@@ -1232,25 +1232,51 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// answers with [`Self::claimed`] (what it won); a need stays until an owner is known,
     /// so an unanswered or lost claim is asked again. An `Unknown` one (or one with no live
     /// claimer known) asks for a directory read instead.
+    ///
+    /// A host marked draining ([`crate::Directory::is_draining`]) claims nothing: it is never
+    /// its own preferred claimer, and a peer's ask is dropped (that peer prefers another host
+    /// once its directory shows the mark). With live hosts known but none preferred (every one
+    /// draining) nothing is claimed and no read is asked for: free land stays free, and what
+    /// needs it waits (the periodic read finds a host that joins).
     pub fn take_claims_wanted(&mut self) -> Vec<crate::SuperRegion> {
         let me = self.ordinal();
+        let draining = self.ownership.0.directory().is_some_and(|d| d.is_draining(me));
+        if draining {
+            self.claim_asks.clear();
+        }
         let mut out = Vec::new();
         for sr in self.unowned_needs() {
             match self.ownership.0.owner_of(sr) {
                 crate::Owner::Me | crate::Owner::Host(_) => self.forget_claim_need(sr),
                 crate::Owner::Unknown => self.directory_wanted = true,
                 crate::Owner::Free => {
-                    let preferred = self.ownership.0.directory().and_then(|d| d.preferred(sr));
-                    if preferred.is_none() {
+                    let directory = self.ownership.0.directory();
+                    let preferred = directory.and_then(|d| d.preferred(sr));
+                    if preferred.is_none() && !directory.is_some_and(crate::Directory::knows_live) {
                         self.directory_wanted = true;
                     }
-                    if preferred == Some(me) || self.claim_asks.contains(&sr) {
+                    if !draining && (preferred == Some(me) || self.claim_asks.contains(&sr)) {
                         out.push(sr);
                     }
                 }
             }
         }
         out
+    }
+
+    /// Who this host's directory prefers to claim `sr` when it is free
+    /// ([`crate::Directory::preferred`]); `None` with no directory or no such host.
+    pub fn preferred_claimer(&self, sr: crate::SuperRegion) -> Option<HostId> {
+        self.ownership.0.directory().and_then(|d| d.preferred(sr))
+    }
+
+    /// The hosts marked draining, from the `hosts` rows of a directory read (the server calls
+    /// it right before [`Self::directory_read`]): none of them is preferred for free land
+    /// ([`crate::Directory::preferred`]), and this host, if among them, claims nothing
+    /// ([`Self::take_claims_wanted`]).
+    pub fn set_draining(&mut self, draining: BTreeSet<HostId>) {
+        let Some(directory) = self.ownership.0.directory_mut() else { return };
+        directory.set_draining(draining);
     }
 
     /// `sr` has an owner now: nothing here wants it claimed any more.
@@ -1682,6 +1708,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             // A peer needs a region of `sr` and takes this host for its preferred claimer.
+            // A draining host claims no land: the asker prefers another host once its
+            // directory shows the mark (its next read).
+            Volatile::ClaimWanted(sr) if self.ownership.0.directory().is_some_and(|d| d.is_draining(self.ordinal())) => {
+                log::debug!("[server] host {from} asked this draining host to claim {sr:?}: not claimed");
+            }
             Volatile::ClaimWanted(sr) => match self.ownership.0.owner_of(sr) {
                 crate::Owner::Free => {
                     self.claim_asks.insert(sr);

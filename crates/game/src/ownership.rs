@@ -337,6 +337,10 @@ pub struct Directory {
     /// Read whole at least once.
     read: bool,
     live: BTreeSet<HostId>,
+    /// Hosts marked draining (`worldctl drain`, from the `hosts` rows of the latest read): in
+    /// no claim preference, this host's own included — a draining host wins no land, so free
+    /// land is preferred to the live hosts that are not draining ([`Self::preferred`]).
+    draining: BTreeSet<HostId>,
 }
 
 impl Directory {
@@ -404,11 +408,31 @@ impl Directory {
         self.live.remove(&ordinal);
     }
 
+    /// The hosts marked draining (the `hosts` rows' drain marks, read with the directory): a
+    /// mark is never lifted from a host id, so a later hello ([`Self::note_live`]) does not
+    /// make a draining host a claimer again.
+    pub fn set_draining(&mut self, draining: BTreeSet<HostId>) {
+        self.draining = draining;
+    }
+
+    /// Host `host` is marked draining ([`Self::set_draining`]).
+    pub fn is_draining(&self, host: HostId) -> bool {
+        self.draining.contains(&host)
+    }
+
+    /// Whether any host is known live (draining or not): with live hosts and no
+    /// [`Self::preferred`] claimer, every live host is draining — free land stays free, and a
+    /// directory read would change nothing until a host joins (the periodic read finds it).
+    pub fn knows_live(&self) -> bool {
+        !self.live.is_empty()
+    }
+
     /// The live host that should claim `sr` when it is free: [`rendezvous_among`] the live
-    /// hosts (a fixed live set lays out like a `Static` table of it; a dead host's share
-    /// moves, nobody else's). `None` while no host is known live.
+    /// hosts that are not draining (a fixed live set lays out like a `Static` table of it; a
+    /// dead or draining host's share moves, nobody else's). `None` while no such host is known
+    /// (none live, or every live one draining).
     pub fn preferred(&self, sr: SuperRegion) -> Option<HostId> {
-        rendezvous_among(sr, self.live.iter().copied())
+        rendezvous_among(sr, self.live.iter().copied().filter(|h| !self.draining.contains(h)))
     }
 }
 
