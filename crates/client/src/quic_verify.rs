@@ -102,6 +102,47 @@ fn leaf_hash(cert: &CertificateDer<'_>) -> String {
     })
 }
 
+/// The host's certificate is not the one its endpoint pinned. `Debug` is the sentence too:
+/// rustls prints a [`rustls::CertificateError::Other`] through it.
+struct NotPinned;
+
+impl std::fmt::Display for NotPinned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the host's certificate is not the pinned one")
+    }
+}
+
+impl std::fmt::Debug for NotPinned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for NotPinned {}
+
+/// Whether a connect ended because this client refused the host's certificate: the local
+/// connection error's code is a TLS alert about a certificate (a wrong pin, an expired,
+/// unissued or self-signed certificate on a public name). Retrying cannot help — the host
+/// presents the same certificate — so the connect fails at once with the reason.
+pub fn refused_certificate(code: quinn::TransportErrorCode) -> bool {
+    use rustls::AlertDescription as A;
+    let code = u64::from(code);
+    // QUIC carries a TLS alert as the transport error 0x100 + alert (RFC 9001 §4.8).
+    if code & !0xff != 0x100 {
+        return false;
+    }
+    matches!(
+        A::from((code & 0xff) as u8),
+        A::BadCertificate
+            | A::UnsupportedCertificate
+            | A::CertificateRevoked
+            | A::CertificateExpired
+            | A::CertificateUnknown
+            | A::UnknownCA
+            | A::AccessDenied
+    )
+}
+
 /// Accepts the one leaf whose SHA-256 is `hash`; names and dates are not
 /// checked (as the service links), the handshake signatures are.
 #[derive(Debug)]
@@ -122,7 +163,12 @@ impl ServerCertVerifier for PinVerifier {
         if leaf_hash(end_entity).eq_ignore_ascii_case(&self.hash) {
             Ok(ServerCertVerified::assertion())
         } else {
-            Err(rustls::Error::General("the host's certificate is not the pinned one".into()))
+            // A certificate error (alert certificate_unknown), not `General` (handshake_failure):
+            // [`refused_certificate`] tells it from other handshake failures and the connect
+            // fails at once instead of retrying.
+            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+                NotPinned,
+            )))))
         }
     }
 
@@ -253,6 +299,29 @@ mod tests {
     #[test]
     fn web_pki_refuses_a_self_signed_cert() {
         assert!(verify(web_pki_verifier().as_ref(), &cert("localhost")).is_err());
+    }
+
+    #[test]
+    fn only_a_certificate_alert_is_a_refused_certificate() {
+        use quinn::TransportErrorCode as C;
+        use rustls::AlertDescription as A;
+        let alert = |a: A| C::crypto(u8::from(a));
+        for refused in [A::BadCertificate, A::CertificateExpired, A::CertificateUnknown, A::UnknownCA, A::AccessDenied] {
+            assert!(refused_certificate(alert(refused)), "{refused:?}");
+        }
+        for other in [A::HandshakeFailure, A::NoApplicationProtocol, A::InternalError] {
+            assert!(!refused_certificate(alert(other)), "{other:?}");
+        }
+        assert!(!refused_certificate(C::PROTOCOL_VIOLATION));
+        assert!(!refused_certificate(C::CONNECTION_REFUSED));
+    }
+
+    #[test]
+    fn a_wrong_pin_is_a_certificate_error() {
+        let (a, b) = (cert("localhost"), cert("localhost"));
+        let error = verify(&pin(leaf_hash(&b)), &a).expect_err("refused");
+        assert!(matches!(error, rustls::Error::InvalidCertificate(_)), "{error:?}");
+        assert!(error.to_string().contains("not the pinned one"), "{error}");
     }
 
     #[test]

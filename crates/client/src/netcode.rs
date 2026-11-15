@@ -345,6 +345,17 @@ impl ServerConnection {
                     );
                     return Ok(Some(connection));
                 }
+                Raced::Done(Err(quinn::ConnectionError::TransportError(error)))
+                    if crate::quic_verify::refused_certificate(error.code) =>
+                {
+                    // The same certificate comes back on every attempt: fail now, with the reason
+                    // (not a timeout two minutes later).
+                    error!("[client] {} presented a certificate this client refuses: {error}", self.server);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("the server {} presented a certificate this client refuses: {}", self.server, error.reason),
+                    ));
+                }
                 Raced::Done(Err(error)) => error.to_string(),
                 Raced::TimedOut => format!("no answer within {:?}", policy.attempt_timeout),
             };
