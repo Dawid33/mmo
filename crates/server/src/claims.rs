@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn claims_the_owned_share_as_the_host_ordinal() {
+    fn claims_the_owned_share_as_the_host_id() {
         let store = memory_store();
         let s = store.super_region_regions();
         let extent = game::MapExtent { origin: RegionCoords::new(-20, -5), width: 40, height: 10 };
@@ -857,11 +857,13 @@ mod tests {
         assert_eq!(all.fence().epochs.len(), 8, "every super-region of the extent");
         let none = HostClaims::claim(store.clone(), &game::AllInOne, None, s).unwrap();
         assert!(none.fence().epochs.is_empty(), "a world with no map claims nothing");
-        let hosts = 3;
-        let mine = game::Static { id: h(2), hosts };
+        let layout = vec![h(2), h(5), h(9)];
+        let mine = game::Static { me: h(5), layout: layout.clone() };
         let share = HostClaims::claim(store.clone(), &mine, Some(extent), s).unwrap();
-        assert_eq!(share.fence().owner, h(2));
-        assert!(share.fence().epochs.keys().all(|sr| game::rendezvous_owner(*sr, hosts) == h(2)));
+        assert_eq!(share.fence().owner, h(5));
+        assert!(share.fence().epochs.keys().all(|sr| game::rendezvous_among(*sr, layout.iter().copied()) == Some(h(5))));
+        let alone = HostClaims::claim(store.clone(), &game::Static { me: h(7), layout: vec![h(7)] }, Some(extent), s).unwrap();
+        assert_eq!((alone.fence().owner, alone.fence().epochs.len()), (h(7), 8), "a static host alone claims the extent");
         store.shutdown();
     }
 

@@ -1390,8 +1390,8 @@ fn off_map_record_refused_at_an_unavailable_spawn_is_not_parked() {
 fn non_owned_region_is_unavailable() {
     crate::common::install_real_block_props();
     let s = 1; // every region its own super-region
-    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { id: mine, hosts: 2 };
+    let mine = crate::common::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let ownership = crate::common::fixed(mine, 2);
     let target = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
         .find(|rc| !ownership.owns(*rc, s))
@@ -1433,9 +1433,9 @@ fn foreign_region_play_moves_and_login_is_still_refused() {
     use game::{HostEndpoint, InlinePeerLink, PeerHello, PeerSession};
     crate::common::install_real_block_props();
     let s = 1; // every region its own super-region
-    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let mine = crate::common::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
     let other = game::HostId(1 - mine.0);
-    let ownership = game::Static { id: mine, hosts: 2 };
+    let ownership = crate::common::fixed(mine, 2);
     let target = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
         .find(|rc| !ownership.owns(*rc, s))

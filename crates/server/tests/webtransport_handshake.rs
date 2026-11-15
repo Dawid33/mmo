@@ -87,7 +87,7 @@ async fn webtransport_client_full_handshake() {
     let bind = "127.0.0.1:16467".parse().unwrap();
     let ingress_sinks = sinks.clone();
     tokio::spawn(async move {
-        webtransport::serve(bind, self_signed(), h(0), event_send, ingress_sinks, next_id, memory_store(), local_auth())
+        webtransport::serve(bind, self_signed(), String::new(), event_send, ingress_sinks, next_id, memory_store(), local_auth())
             .await
             .unwrap();
     });
@@ -220,7 +220,7 @@ async fn first_packet_not_hello_closes() {
         webtransport::serve(
             bind,
             self_signed(),
-            h(0),
+            String::new(),
             event_send,
             ingress_sinks,
             Arc::new(AtomicU64::new(0)),

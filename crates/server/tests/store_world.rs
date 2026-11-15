@@ -914,8 +914,9 @@ fn foreign_record_does_not_fence_a_healthy_host() {
     let dir = scratch("foreign-record");
     let (store, token, player) = bare_store(&dir);
     let s = store.super_region_regions();
-    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { id: mine, hosts: 2 };
+    let layout = vec![game::HostId(0), game::HostId(1)];
+    let mine = game::rendezvous_among(game::super_region_of(SPAWN_REGION, s), layout.iter().copied()).expect("an owner");
+    let ownership = game::Static { me: mine, layout };
     let foreign = (2..64)
         .map(|k| RegionCoords::new(k * s as i32, 0))
         .find(|rc| !ownership.owns(*rc, s))

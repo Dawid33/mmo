@@ -39,7 +39,7 @@
 //! out, and the supersede shares the manager's event channel with the connects: the new
 //! session's `ClientConnected` always comes after the old one's park was asked for.
 //!
-//! **Several hosts** (R3): only the entry host ([`ENTRY_HOST_ENV`]) listens for the login
+//! **Several hosts** (R3): only the entry host ([`entry_host_of`]) listens for the login
 //! service; its link RELAYS ([`start_relaying`]): a `SpawnPlayer` becomes a
 //! [`ServerEvent::SpawnOrder`] the manager places — here, or on the host that holds the
 //! player, over the peer stream (`game`'s `placement.rs`) — and a `Kick`, applied here first,
@@ -73,19 +73,20 @@ pub const DEFAULT_HOST_LINK_BIND: &str = "127.0.0.1:6490";
 pub const HOST_LINK_CERT_HASH_FILE_ENV: &str = "VOXEL_HOST_LINK_CERT_HASH_FILE";
 pub const DEFAULT_HOST_LINK_CERT_HASH_FILE: &str = "target/dev-r2/host-0.cert-sha256";
 
-/// The host of several whose login link the login service dials (`VOXEL_HOST_LINK_BIND`):
-/// the others take spawn orders and kicks relayed by it.
-pub const ENTRY_HOST_ENV: &str = "VOXEL_ENTRY_HOST";
+/// The entry host of a `claim` world as host `me` finds it at its start: the lowest id with a
+/// live, dirty `hosts` row (`me` when there is none lower). The entry host listens for the
+/// login service; the others relay to it. Elastic 1 interim: ids are issued, so no setting can
+/// name the entry in advance (`VOXEL_ENTRY_HOST` is ignored); a restarted entry host is a new,
+/// higher id — until the coordinator relays logins (Elastic 1 Task 6) the first host started
+/// is the entry for good.
+pub fn entry_host_of(store: &world_store::StoreHandle, me: HostId) -> Result<HostId, String> {
+    let rows = store.hosts().map_err(|e| format!("reading the hosts rows for the entry host: {e}"))?;
+    Ok(entry_host_among(rows.iter().filter(|r| !r.clean && r.state == game::HOST_LIVE).map(|r| r.id), me))
+}
 
-/// The entry host's ordinal from an env value (unset or empty: 0); it must be one of the
-/// world's `hosts`.
-pub fn entry_host_from(value: Option<&str>, hosts: u32) -> Result<HostId, String> {
-    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or("0");
-    let entry: HostId = value.parse::<u64>().map(HostId).map_err(|_| format!("{ENTRY_HOST_ENV}={value:?} is not a host ordinal"))?;
-    if entry.0 >= u64::from(hosts) {
-        return Err(format!("{ENTRY_HOST_ENV}={entry} is not a host of this world (VOXEL_HOSTS={hosts})"));
-    }
-    Ok(entry)
+/// [`entry_host_of`] over the live dirty ids `live`.
+pub fn entry_host_among(live: impl IntoIterator<Item = HostId>, me: HostId) -> HostId {
+    live.into_iter().chain([me]).min().unwrap_or(me)
 }
 
 /// The refusal of a ticket no pending spawn order matches.
@@ -851,11 +852,10 @@ mod tests {
     }
 
     #[test]
-    fn entry_host_env() {
-        assert_eq!(entry_host_from(None, 2), Ok(h(0)));
-        assert_eq!(entry_host_from(Some(" 1 "), 2), Ok(h(1)));
-        assert!(entry_host_from(Some("2"), 2).is_err());
-        assert!(entry_host_from(Some("x"), 2).is_err());
+    fn the_entry_host_is_the_lowest_live_id() {
+        assert_eq!(entry_host_among([h(7), h(3)], h(9)), h(3));
+        assert_eq!(entry_host_among([], h(9)), h(9), "alone: itself");
+        assert_eq!(entry_host_among([h(12)], h(9)), h(9));
     }
 
     #[test]

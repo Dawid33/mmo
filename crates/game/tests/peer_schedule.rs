@@ -835,7 +835,7 @@ fn one_phase_cut_holds_unreceived_intent_and_restore_requeues_it() {
 /// (`same`) or differ, among `hosts` hosts (`s` regions per super-region side),
 /// avoiding `taken`.
 fn x_pair(hosts: u32, s: u32, same: bool, taken: &[RegionCoords]) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| crate::common::fixed(HostId::SOLO, hosts).owner_of(rc, s);
     let mut all: Vec<RegionCoords> = (-8..=8).flat_map(|x| (-8..=8).map(move |z| RegionCoords::new(x, z))).collect();
     all.sort_by_key(|rc| (rc.x.abs() + rc.z.abs(), rc.x, rc.z));
     for a in all {
@@ -1194,7 +1194,7 @@ fn packets_to(rig: &MultiRig, h: HostId) -> Vec<&game::ServerPacket> {
 /// The pair of regions nearest the origin whose owners differ, `b` one step -z of `a`
 /// (W walks a body toward -z).
 fn north_host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| crate::common::fixed(HostId::SOLO, hosts).owner_of(rc, s);
     for r in 0..64 {
         for x in -r..=r {
             for z in -r..=r {
@@ -5748,7 +5748,7 @@ fn rendezvous_rows(
             if unknown.contains(&sr) {
                 continue;
             }
-            let owner = (!free.contains(&sr)).then(|| game::rendezvous_owner(sr, hosts));
+            let owner = (!free.contains(&sr)).then(|| crate::common::rendezvous_owner(sr, hosts));
             rows.push((sr, owner, 1));
         }
     }
@@ -5885,7 +5885,7 @@ fn claimed_when_a_player_walks_to_it(rig: &mut MultiRig) {
     rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
     rig.with_claims();
     let ha = rig.owner(a);
-    let preferred = game::rendezvous_owner(sr, hosts);
+    let preferred = crate::common::rendezvous_owner(sr, hosts);
     assert_eq!(rig.hosts[ha.0 as usize].manager.owner_of(b), game::Owner::Free);
     rig.run(a);
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
@@ -5913,7 +5913,7 @@ fn told_where_its_body_went(rig: &mut MultiRig) {
     rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
     rig.with_claims();
     let ha = rig.owner(a);
-    let preferred = game::rendezvous_owner(sr, hosts);
+    let preferred = crate::common::rendezvous_owner(sr, hosts);
     if preferred == ha {
         // Its own host claims it: a thread seam, nobody to name.
         return;
@@ -5964,7 +5964,7 @@ fn claim_wanted_reaches_preferred(rig: &mut MultiRig) {
     rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
     rig.with_claims();
     let ha = rig.owner(a);
-    let preferred = game::rendezvous_owner(sr, 2);
+    let preferred = crate::common::rendezvous_owner(sr, 2);
     assert_ne!(ha, preferred, "the needing host is not the preferred one");
     rig.run(a);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
@@ -6078,7 +6078,7 @@ fn host_chain(hosts: u32) -> Vec<RegionCoords> {
     if hosts == 2 {
         return vec![a, b];
     }
-    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, 1);
+    let owner = |rc: RegionCoords| crate::common::fixed(HostId::SOLO, hosts).owner_of(rc, 1);
     for (x, y) in [(a, b), (b, a)] {
         for c in [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| RegionCoords::new(y.x + dx, y.z + dz)) {
             if owner(c) != owner(x) && owner(c) != owner(y) {
@@ -7145,11 +7145,11 @@ fn row_delivered_out(rig: &mut MultiRig) -> bool {
         .flat_map(|x| (-8..8).map(move |z| RegionCoords::new(x, z)))
         .filter(|rd| !chain.contains(rd))
         .flat_map(|rd| [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| (rd, RegionCoords::new(rd.x + dx, rd.z + dz))))
-        .find(|(rd, b)| !chain.contains(b) && game::rendezvous_owner(sr_of(rig, *b), hosts) != rig.owner(*rd))
+        .find(|(rd, b)| !chain.contains(b) && crate::common::rendezvous_owner(sr_of(rig, *b), hosts) != rig.owner(*rd))
         .expect("a region next to one another host would claim");
     let dead = rig.owner(rd);
     let sr = sr_of(rig, b);
-    let p = game::rendezvous_owner(sr, hosts);
+    let p = crate::common::rendezvous_owner(sr, hosts);
     rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
     for rc in chain.iter().chain([&rd]) {
         rig.run(*rc);
@@ -8858,7 +8858,7 @@ fn another_region_of(hosts: u32, h: HostId, not: &[RegionCoords]) -> RegionCoord
         for x in -r..=r {
             for z in -r..=r {
                 let rc = RegionCoords::new(x, z);
-                if (game::Static { id: HostId::SOLO, hosts }).owner_of(rc, 1) == h && !not.contains(&rc) {
+                if crate::common::fixed(HostId::SOLO, hosts).owner_of(rc, 1) == h && !not.contains(&rc) {
                     return rc;
                 }
             }

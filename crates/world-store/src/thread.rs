@@ -129,6 +129,7 @@ pub(crate) enum Request {
     DecideCut(Box<Decision>, Reply<bool>),
     AbortCut(CutId, Tick, Reply<bool>),
     ResolvePrepared(Reply<Vec<(CutId, bool)>>),
+    StagedCutParts(Reply<Vec<(CutId, HostId)>>),
     CutDecision(CutId, Reply<Option<bool>>),
     CutDecided(CutId, Reply<Option<bool>>),
     LastCommittedCut(Reply<CutId>),
@@ -445,6 +446,13 @@ async fn serve(
                     r.send(d)
                 })
             }
+            // A read of the prepared transactions' names; SQLite stages nothing.
+            Request::StagedCutParts(r) => tokio::spawn(async move {
+                r.send(match (&pool, world_tag) {
+                    (Pool::Pg(p), Some(tag)) => two_phase::staged_cut_parts(p, tag).await,
+                    _ => Ok(Vec::new()),
+                })
+            }),
             Request::ResolvePrepared(r) => tokio::spawn(async move {
                 r.send(match (&pool, world_tag) {
                     (Pool::Pg(p), Some(tag)) => two_phase::resolve_prepared(p, tag).await,

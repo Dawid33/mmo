@@ -1,4 +1,4 @@
-//! A host's lease on its `hosts` row (R4): the process's registration ([`register_or_wait`]),
+//! A host's lease on its `hosts` row (R4): the process's registration ([`register`]),
 //! and the heartbeat its MAIN loop pumps ([`Heartbeat`]). The
 //! coordinator declares a host dead from the beats it stops reading (`game::LeaseWatch`).
 
@@ -30,7 +30,7 @@ pub enum LeaseState {
 /// when it is there.
 pub struct Heartbeat {
     store: StoreHandle,
-    ordinal: HostId,
+    id: HostId,
     boot: u64,
     /// When the next beat is due (`None`: at the first pump).
     next_at: Option<Instant>,
@@ -42,9 +42,9 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    pub fn new(store: StoreHandle, ordinal: HostId, boot: u64) -> Self {
+    pub fn new(store: StoreHandle, id: HostId, boot: u64) -> Self {
         let period = Duration::from_millis(HOST_HEARTBEAT_MS);
-        Heartbeat { store, ordinal, boot, next_at: None, pending: None, warned_at: None, replaced: false, period }
+        Heartbeat { store, id, boot, next_at: None, pending: None, warned_at: None, replaced: false, period }
     }
 
     /// Test hook: a beat every `period` instead of [`HOST_HEARTBEAT_MS`] (with a lease the test
@@ -64,14 +64,14 @@ impl Heartbeat {
         if self.replaced {
             return LeaseState::Replaced;
         }
-        match self.store.heartbeat(self.ordinal, self.boot) {
+        match self.store.heartbeat(self.id, self.boot) {
             Ok(true) => LeaseState::Held,
             Ok(false) => {
                 self.replaced = true;
                 LeaseState::Replaced
             }
             Err(e) => {
-                log::warn!("[lease] host {}: the heartbeat after {what} failed ({e}); the lease lapses unless one gets through", self.ordinal);
+                log::warn!("[lease] host {}: the heartbeat after {what} failed ({e}); the lease lapses unless one gets through", self.id);
                 LeaseState::Held
             }
         }
@@ -101,13 +101,13 @@ impl Heartbeat {
             if let Some(why) = failed {
                 if self.warned_at.is_none_or(|at| now >= at + Duration::from_millis(HEARTBEAT_WARN_MS)) {
                     self.warned_at = Some(now);
-                    log::warn!("[lease] host {}: a heartbeat failed ({why}); the lease lapses unless one gets through", self.ordinal);
+                    log::warn!("[lease] host {}: a heartbeat failed ({why}); the lease lapses unless one gets through", self.id);
                 }
             }
         }
         if self.next_at.is_none_or(|at| now >= at) {
             self.next_at = Some(now + self.period);
-            self.pending = Some(self.store.heartbeat_later(self.ordinal, self.boot));
+            self.pending = Some(self.store.heartbeat_later(self.id, self.boot));
         }
         LeaseState::Held
     }
@@ -124,7 +124,7 @@ pub fn pump_or_fence(heartbeat: &mut Option<Heartbeat>, fenced: &Fenced, now: In
     log::error!(
         "[server] replaced: host {}'s hosts row is no longer this live boot (declared dead, or another boot \
          of its ordinal registered); stopping",
-        beat.ordinal
+        beat.id
     );
     fenced.set();
     true
@@ -138,16 +138,18 @@ pub fn beat_at_boot(heartbeat: &mut Option<Heartbeat>, what: &str) {
     if beat.beat_now(what) == LeaseState::Replaced {
         log::error!(
             "[server] replaced while starting (after {what}): host {}'s hosts row is no longer this live boot; stopping",
-            beat.ordinal
+            beat.id
         );
         std::process::exit(crate::claims::EXIT_FENCED);
     }
 }
 
-/// Registers `host` (the process's ONE `register_host`) under `policy`. Elastic 1 task 2: the
-/// store issues a new id and never makes a boot wait, so this is one call; `stop` is looked at
-/// once before it (`Ok(None)`: the caller exits 0). Task 3 replaces this adapter.
-pub fn register_or_wait(
+/// Registers `host` (the process's ONE `register_host`) under `policy`: the store issues a
+/// new id, never one a process had before, and a boot never waits (Elastic 1). Everything
+/// keyed by a host — the fence, the ownership, the heartbeat, the hellos, the cut parts — is
+/// built from the returned id. `stop` is looked at once before it (`Ok(None)`: the caller
+/// exits 0).
+pub fn register(
     store: &StoreHandle,
     host: NewHost,
     policy: CrashPolicy,

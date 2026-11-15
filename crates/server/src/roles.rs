@@ -81,42 +81,46 @@ impl Role {
     }
 }
 
-/// Why several hosts (`VOXEL_HOSTS` > 1) refuse to start without the login link.
-pub const SEVERAL_HOSTS_NEED_LOGIN: &str = "several hosts need the login link: ids and placement come from it";
-/// Why several hosts refuse any role but `host`.
-pub const SEVERAL_HOSTS_NEED_ROLE_HOST: &str = "several hosts (VOXEL_HOSTS > 1) need VOXEL_ROLE=host";
-
-/// The start-up refusals of a world of `hosts` region hosts (R3): with more than one,
-/// the role must be `host`, the store Postgres ([`SPLIT_ROLES_NEED_POSTGRES`]) and the
-/// auth `jwt` with a service token (`login_link`: the login service's push), since
-/// player ids and placement come from the login service. One host changes nothing.
-pub fn check_several_hosts(role: Role, hosts: u32, postgres: bool, login_link: bool) -> Result<(), String> {
-    if hosts <= 1 {
-        return Ok(());
-    }
-    if role != Role::Host {
-        return Err(SEVERAL_HOSTS_NEED_ROLE_HOST.to_string());
-    }
-    if !postgres {
-        return Err(SPLIT_ROLES_NEED_POSTGRES.to_string());
-    }
-    if !login_link {
-        return Err(SEVERAL_HOSTS_NEED_LOGIN.to_string());
-    }
-    Ok(())
-}
+/// Why a `claim` host refuses to start without the login link.
+pub const CLAIM_NEEDS_LOGIN: &str =
+    "VOXEL_OWNERSHIP=claim (any number of hosts) needs the login link (VOXEL_AUTH=jwt with a service token): ids and placement come from it";
 
 /// What `VOXEL_OWNERSHIP=claim` refuses outside a host role.
 pub const CLAIM_NEEDS_ROLE_HOST: &str =
     "VOXEL_OWNERSHIP=claim claims super-regions on demand and registers a lease: it needs VOXEL_ROLE=host";
 
-/// The start-up refusal of `claim` ownership (R4): only a `host` process claims on demand
-/// (it registers, beats a lease and reads the directory; a host role needs Postgres). Any
-/// number of hosts, one included (one-phase cuts, everything claimed on demand); several
-/// hosts still need what [`check_several_hosts`] asks.
-pub fn check_claim(role: Role, claim: bool) -> Result<(), String> {
-    if claim && role != Role::Host {
+/// What a host refuses without an ownership of its own.
+pub const HOST_NEEDS_OWNERSHIP: &str =
+    "VOXEL_ROLE=host needs VOXEL_OWNERSHIP=static (one host alone) or claim (any number of hosts)";
+
+/// The start-up refusals of ownership `policy` (Elastic 1: a host reads no host count). `claim`
+/// (`Succession`) means "any number of hosts": the role must be `host`, the store Postgres
+/// ([`SPLIT_ROLES_NEED_POSTGRES`]) and the auth `jwt` with a service token (`login_link`: the
+/// login service's push), since player ids and placement come from the login service. `static`
+/// and `allinone` (`Rollback`) need nothing here (a second `static` host is refused by the store
+/// at its registration).
+pub fn check_claim_needs(role: Role, policy: game::CrashPolicy, postgres: bool, login_link: bool) -> Result<(), String> {
+    if policy != game::CrashPolicy::Succession {
+        return Ok(());
+    }
+    if role != Role::Host {
         return Err(CLAIM_NEEDS_ROLE_HOST.to_string());
+    }
+    if !postgres {
+        return Err(SPLIT_ROLES_NEED_POSTGRES.to_string());
+    }
+    if !login_link {
+        return Err(CLAIM_NEEDS_LOGIN.to_string());
+    }
+    Ok(())
+}
+
+/// A host (`role`) under `VOXEL_OWNERSHIP` = `word` (unset: `allinone`): `allinone` is refused
+/// ([`HOST_NEEDS_OWNERSHIP`]) — a host's claims, lease and parts are its issued id's, never
+/// `HostId::SOLO`'s.
+pub fn check_host_ownership(role: Role, word: &str) -> Result<(), String> {
+    if role == Role::Host && matches!(word.trim(), "" | "allinone") {
+        return Err(HOST_NEEDS_OWNERSHIP.to_string());
     }
     Ok(())
 }
@@ -381,7 +385,7 @@ impl WorldLink for QuicWorldLink {
 
 /// Why several hosts refuse a Postgres without two-phase commit.
 pub const SEVERAL_HOSTS_NEED_TWO_PHASE: &str =
-    "several hosts (VOXEL_HOSTS > 1) need Postgres with max_prepared_transactions > 0 (their world cuts are staged in two phases)";
+    "several hosts (VOXEL_OWNERSHIP=claim, or a coordinator's VOXEL_HOSTS > 1) need Postgres with max_prepared_transactions > 0 (their world cuts are staged in two phases)";
 
 /// Start-up of a split-role process on Postgres, before any claim, registration or region
 /// load: every world cut part a crash left staged is finished
@@ -400,12 +404,31 @@ pub fn recover_staged_cuts(store: &world_store::StoreHandle, hosts: u32) -> Resu
 }
 
 /// Start-up of a `server::run` process, before it claims, registers or loads anything: on
-/// Postgres the world cut parts a crash left staged are finished ([`recover_staged_cuts`]),
-/// in EVERY role — a part left by a multi-host stack holds its `super_regions` rows, and a
-/// later `all` process's claim would wait on it for ever.
-pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, hosts: u32) -> Result<(), String> {
-    if postgres {
-        recover_staged_cuts(store, hosts)?;
+/// Postgres the world cut parts a crash left staged are finished, in EVERY role — a part left
+/// by a multi-host stack holds its `super_regions` rows, and a later `all` process's claim (or
+/// a total crash's registration) would wait on it. Count-free (Elastic 1): the staged parts are
+/// found by their prepared transactions' names, whatever hosts wrote them
+/// ([`world_store::StoreHandle::staged_cut_parts`]); none staged is nothing to do (a server
+/// without prepared transactions has none).
+pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle) -> Result<(), String> {
+    if !postgres {
+        return Ok(());
+    }
+    let staged = store.staged_cut_parts().map_err(|e| format!("the world cut parts left staged could not be read: {e}"))?;
+    if staged.is_empty() {
+        return Ok(());
+    }
+    log::warn!("[server] {} world cut part(s) left staged by a crash: {staged:?} (cut, host); finishing them", staged.len());
+    crate::cuts::resolve_staged_cuts(store)
+        .map(|_| ())
+        .map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))
+}
+
+/// A `claim` host (`policy` `Succession`: any number of hosts, its saves world cuts in two
+/// phases) needs two-phase commit ([`SEVERAL_HOSTS_NEED_TWO_PHASE`]); any other: nothing.
+pub fn check_two_phase(policy: game::CrashPolicy, store: &world_store::StoreHandle) -> Result<(), String> {
+    if policy == game::CrashPolicy::Succession {
+        store.two_phase_ready().map_err(|e| format!("{SEVERAL_HOSTS_NEED_TWO_PHASE}: {e}"))?;
     }
     Ok(())
 }
@@ -518,12 +541,16 @@ pub fn run_coordinator() -> ServerExit {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| fatal(format!("{}: {e}", dir.display())));
     }
     let fenced = Fenced::default();
-    let cuts = (hosts > 1).then(|| crate::coordinator_rt::WorldCuts {
+    // Elastic 1: `claim` hosts are any number of hosts (each with an issued id) and always save
+    // in world cuts, so a `claim` coordinator runs them whatever `VOXEL_HOSTS` says.
+    let claim_world = game::crash_policy_from_value(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref())
+        .is_ok_and(|p| p == game::CrashPolicy::Succession);
+    let cuts = (hosts > 1 || claim_world).then(|| crate::coordinator_rt::WorldCuts {
         every: Duration::from_secs(crate::world_save_secs(std::env::var(crate::WORLD_SAVE_SECS_ENV).ok().as_deref())),
         tick: Box::new(move || clock.world_tick_now()),
     });
-    if hosts > 1 {
-        log::info!("[coordinator] world cuts of {hosts} hosts");
+    if hosts > 1 || claim_world {
+        log::info!("[coordinator] world cuts (VOXEL_HOSTS={hosts}, claim: {claim_world})");
     }
     // `claim` (R4): a crashed host's land is inherited by one heir — the coordinator declares
     // and runs the successions. `static`: a crash rolls the world back (R3), never declared.
@@ -604,17 +631,24 @@ mod tests {
         assert!(coordinator_crash_policy(Some("dynamic"), 2).is_err());
     }
 
-    /// `claim` ownership is a host's only: refused for `all` and `coordinator`, accepted for
-    /// `host` (one host included); other ownerships are not this check's business.
+    /// `claim` ownership is a host's only, on Postgres with the login link (any number of
+    /// hosts, one included); other ownerships are not this check's business — except that a
+    /// host needs `static` or `claim`.
     #[test]
-    fn claim_needs_role_host() {
-        assert_eq!(check_claim(Role::All, true), Err(CLAIM_NEEDS_ROLE_HOST.to_string()));
-        assert_eq!(check_claim(Role::Coordinator, true), Err(CLAIM_NEEDS_ROLE_HOST.to_string()));
-        assert_eq!(check_claim(Role::Host, true), Ok(()));
-        assert_eq!(check_several_hosts(Role::Host, 1, true, false), Ok(()), "one host under claim needs nothing more");
+    fn claim_needs_role_host_postgres_and_the_login_link() {
+        use game::CrashPolicy::{Rollback, Succession};
+        assert_eq!(check_claim_needs(Role::All, Succession, true, true), Err(CLAIM_NEEDS_ROLE_HOST.to_string()));
+        assert_eq!(check_claim_needs(Role::Coordinator, Succession, true, true), Err(CLAIM_NEEDS_ROLE_HOST.to_string()));
+        assert_eq!(check_claim_needs(Role::Host, Succession, true, true), Ok(()));
+        assert_eq!(check_claim_needs(Role::Host, Succession, false, true), Err(SPLIT_ROLES_NEED_POSTGRES.to_string()));
+        assert_eq!(check_claim_needs(Role::Host, Succession, true, false), Err(CLAIM_NEEDS_LOGIN.to_string()));
         for role in [Role::All, Role::Coordinator, Role::Host] {
-            assert_eq!(check_claim(role, false), Ok(()), "{role:?} without claim");
+            assert_eq!(check_claim_needs(role, Rollback, false, false), Ok(()), "{role:?} without claim");
         }
+        assert_eq!(check_host_ownership(Role::Host, ""), Err(HOST_NEEDS_OWNERSHIP.to_string()));
+        assert_eq!(check_host_ownership(Role::Host, "allinone"), Err(HOST_NEEDS_OWNERSHIP.to_string()));
+        assert_eq!(check_host_ownership(Role::Host, "static"), Ok(()));
+        assert_eq!(check_host_ownership(Role::All, ""), Ok(()));
     }
 
     #[test]

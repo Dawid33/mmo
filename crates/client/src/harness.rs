@@ -300,7 +300,7 @@ impl SimHarness {
         assert!(hosts >= 1);
         let s = HARNESS_SUPER_REGION_REGIONS;
         let mut h = Self::with_config(&[], 1);
-        let home = game::Static { id: HostId::SOLO, hosts }.owner_of(game::SPAWN_REGION, s).0 as usize;
+        let home = harness_table(HostId::SOLO, hosts).owner_of(game::SPAWN_REGION, s).0 as usize;
         // Rebuild the servers as `hosts` unconnected hosts: the one-host server
         // `build` made has the local client's session and no peers.
         let mut servers = Vec::new();
@@ -316,7 +316,7 @@ impl SimHarness {
             if claimed {
                 manager.set_ownership(Box::new(claimed_layout(ordinal, hosts, s)), s);
             } else {
-                manager.set_ownership(Box::new(game::Static { id: ordinal, hosts }), s);
+                manager.set_ownership(Box::new(harness_table(ordinal, hosts)), s);
             }
             manager.set_endpoints(harness_endpoint(ordinal), game::seeded_nonces(0x5eed + ordinal.0));
             server.record_slot_start_hashes();
@@ -1212,13 +1212,18 @@ fn harness_endpoint(ordinal: HostId) -> game::HostEndpoint {
 /// The directory rows of [`SimHarness::with_claimed_hosts`]: every super-region of the
 /// regions within [`CLAIMED_LAYOUT_RADIUS`] of the origin, owned as `game::Static` lays them
 /// out, at [`CLAIMED_LAYOUT_EPOCH`].
+/// Host `me` of the fixed table of the harness's hosts `0..hosts` (`game::Static`).
+fn harness_table(me: HostId, hosts: u32) -> game::Static {
+    game::Static { me, layout: (0..u64::from(hosts)).map(HostId).collect() }
+}
+
 fn claimed_rows(hosts: u32, s: u32) -> Vec<(game::SuperRegion, Option<HostId>, u64)> {
     let r = CLAIMED_LAYOUT_RADIUS;
     let mut rows = std::collections::BTreeMap::new();
     for x in -r..=r {
         for z in -r..=r {
             let rc = RegionCoords::new(x, z);
-            let owner = game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
+            let owner = harness_table(HostId::SOLO, hosts).owner_of(rc, s);
             rows.insert(game::super_region_of(rc, s), owner);
         }
     }
@@ -1228,7 +1233,7 @@ fn claimed_rows(hosts: u32, s: u32) -> Vec<(game::SuperRegion, Option<HostId>, u
 /// Host `ordinal`'s ownership in [`SimHarness::with_claimed_hosts`]: its directory read
 /// whole ([`claimed_rows`]), every host live.
 fn claimed_layout(ordinal: HostId, hosts: u32, s: u32) -> game::PgClaim {
-    let mut claim = game::PgClaim::new(ordinal, hosts);
+    let mut claim = game::PgClaim::new(ordinal);
     claim.directory.replace(claimed_rows(hosts, s));
     claim.directory.set_live((0..u64::from(hosts)).map(HostId).collect());
     claim

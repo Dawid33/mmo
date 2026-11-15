@@ -260,46 +260,91 @@ fn a_block_broken_across_a_host_seam_changes_the_owner_and_the_halo() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Elastic 1: two host processes started with the SAME environment — no ordinal, no host
+/// count, no name (`VOXEL_HOST_NAME` empty), the same advertised addresses; only each one's
+/// peer bind and pin file are its own — get two ids from the store, both rows live (an empty
+/// name lapses nobody), and their peer link comes up (the newer dials the older, which admits
+/// it by its live row). Ready (`/readyz`) follows the registration in `server::run`; a
+/// process-wide health state cannot be shown twice in one test process.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn two_hosts_started_with_the_same_environment_get_two_ids() {
+    let Some(db) = PgDb::create("sameenv") else { return };
+    let dir = scratch("sameenv");
+    let register = |boot: u64, dir: &std::path::Path| {
+        let store = db.open();
+        let config = PeerLinkConfig { bind: "127.0.0.1:0".parse().unwrap(), cert_hash_file: dir.join(format!("{boot}.pin")), delay: Duration::ZERO };
+        let listener = PeerListener::bind(config, TOKEN.into()).unwrap();
+        let (peer_addr, peer_cert) = listener.row_fields();
+        let host = world_store::NewHost {
+            name: String::new(),
+            boot,
+            peer_addr: Some(peer_addr),
+            peer_cert: Some(peer_cert),
+            quic: Some("127.0.0.1:6466".into()),
+            webtransport: None,
+            wt_cert_hash: None,
+        };
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let registered = server::lease::register(&store, host, CrashPolicy::Succession, &stop).unwrap().expect("registered");
+        let links = PeerLinks::start(listener, registered.id, boot, store.clone()).unwrap();
+        (store, links, registered)
+    };
+    let (s1, mut l1, r1) = register(11, &dir);
+    let (s2, mut l2, r2) = register(12, &dir);
+    assert_ne!(r1.id, r2.id, "two ids");
+    assert!(!r1.bumped && !r2.bumped && r1.generation == r2.generation);
+    let rows = s1.hosts().unwrap();
+    for id in [r1.id, r2.id] {
+        let row = rows.iter().find(|r| r.id == id).expect("a row");
+        assert!(row.state == game::HOST_LIVE && !row.clean && row.seen_ms != 0, "{row:?} live, not lapsed");
+    }
+    let (o2, mut to1) = only_link(&mut l2);
+    let (o1, mut to2) = only_link(&mut l1);
+    assert_eq!((o1, o2), (r2.id, r1.id));
+    pump_until("the link up", WAIT, &mut [&mut to1, &mut to2], |l| l.iter().all(|l| l.is_up()));
+    drop((to1, to2, l1, l2));
+    s1.shutdown();
+    s2.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A host dialing with another service token never comes up on either side.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn peer_with_a_wrong_token_is_refused() {
     let Some(db) = PgDb::create("token") else { return };
     let dir = scratch("token");
-    let (_s0, c0) = claim(&db, h(0));
-    let (_s1, c1) = claim(&db, h(1));
-    let mut l0 = start_links(&c0, h(0), 1, TOKEN, &dir, "127.0.0.1:0");
-    let mut l1 = start_links(&c1, h(1), 2, "not-the-token", &dir, "127.0.0.1:0");
-    let (o0, mut to1) = only_link(&mut l0);
+    let (s0, l0, _c0) = fixed_host(&db, &dir, 1, TOKEN, "127.0.0.1:0");
+    let (s1, mut l1, _c1) = fixed_host(&db, &dir, 2, "not-the-token", "127.0.0.1:0");
+    // The newer host dials the older one; the older makes a link only for a host it admits.
     let (o1, mut to0) = only_link(&mut l1);
-    assert_eq!((o0, o1), (h(1), h(0)));
+    assert_eq!(o1, h(0));
     // Long enough for the dialer to find the row and try a few times.
     let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline {
-        to1.pump(0);
         to0.pump(0);
-        assert!(!to1.is_up() && !to0.is_up(), "a peer with a wrong token came up");
+        assert!(!to0.is_up(), "a peer with a wrong token came up");
+        assert!(l0.take_arrived().is_empty(), "the older host admitted a peer with a wrong token");
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!((to1.connection(), to0.connection()), (0, 0));
-    drop((to1, to0, l0, l1));
-    c0.store().clone().shutdown();
-    c1.store().clone().shutdown();
+    assert_eq!(to0.connection(), 0);
+    drop((to0, l0, l1));
+    s0.shutdown();
+    s1.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The lower host restarts on another port (same pin file, a new boot, a new row): the
-/// higher one's dialer picks the new row up and is connected again within 5 s, as a new
-/// connection, and frames flow.
+/// The lower host restarts on another port (a new boot): Elastic 1 — the restart is a NEW host
+/// with a higher id, so it dials the host that was higher before (admitted by its live row)
+/// and is connected within 5 s, and frames flow; the old id is never dialed again.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn restarted_listener_is_found_again() {
     let Some(db) = PgDb::create("restart") else { return };
     let dir = scratch("restart");
-    let (_s0, c0) = claim(&db, h(0));
-    let (_s1, c1) = claim(&db, h(1));
-    let mut l0 = start_links(&c0, h(0), 1, TOKEN, &dir, "127.0.0.1:0");
-    let mut l1 = start_links(&c1, h(1), 2, TOKEN, &dir, "127.0.0.1:0");
+    let (s0, mut l0, _c0) = fixed_host(&db, &dir, 1, TOKEN, "127.0.0.1:0");
+    let (s1, mut l1, _c1) = fixed_host(&db, &dir, 2, TOKEN, "127.0.0.1:0");
     let old_addr = l0.local_addr();
     let (_, mut to1) = only_link(&mut l0);
     let (_, mut to0) = only_link(&mut l1);
@@ -313,7 +358,7 @@ fn restarted_listener_is_found_again() {
     // Host 0 stops: its listener goes, its port is freed.
     drop(to1);
     drop(l0);
-    c0.store().clone().shutdown();
+    s0.shutdown();
     pump_until("host 1 sees the link down", WAIT, &mut [&mut to0], |l| !l[0].is_up());
 
     // Host 0 starts again: a new claim, a new boot, another port.
@@ -323,32 +368,26 @@ fn restarted_listener_is_found_again() {
             break addr;
         }
     };
-    let (_s0, c0) = claim(&db, h(0));
-    let mut l0 = start_links(&c0, h(0), 3, TOKEN, &dir, &new_bind.to_string());
-    assert_eq!(l0.local_addr(), new_bind);
-    let (_, mut to1) = only_link(&mut l0);
-    pump_until("found again within 5 s", Duration::from_secs(5), &mut [&mut to1, &mut to0], |l| l.iter().all(|l| l.is_up()));
-    assert_eq!(to0.connection(), 2, "a new connection");
-    to0.send(PeerMsg::Ack { through: 7 });
-    pump_until("a frame over the new connection", WAIT, &mut [&mut to1], |l| l[0].recv() == Some(PeerMsg::Ack { through: 7 }));
-    drop((to1, to0, l0, l1));
-    c0.store().clone().shutdown();
-    c1.store().clone().shutdown();
+    // Host 1 runs on (its lease beaten): the restart is not a total crash.
+    assert!(s1.heartbeat(h(1), 2).unwrap(), "host 1's row is its live boot");
+    let store2 = db.open();
+    let (mut l2, again) = boot_links(&store2, next_id(&db), "host-0", 3, TOKEN, &dir, &new_bind.to_string());
+    assert_eq!((again.id, l2.local_addr()), (h(2), new_bind), "a new id: the next one");
+    // It dials every older live row: host 1, and host 0's lapsed one (dead once declared).
+    let mut dialed = l2.take();
+    assert_eq!(dialed.iter().map(|(o, _)| *o).collect::<Vec<_>>(), vec![h(0), h(1)], "the older live rows");
+    let (to, mut to1) = dialed.pop().unwrap();
+    assert_eq!(to, h(1), "the new host dials the older one");
+    let (from, mut to2) = only_link(&mut l1);
+    assert_eq!(from, h(2), "the older one admits it by its live row");
+    pump_until("connected within 5 s", Duration::from_secs(5), &mut [&mut to1, &mut to2], |l| l.iter().all(|l| l.is_up()));
+    to2.send(PeerMsg::Ack { through: 7 });
+    pump_until("a frame over the new link", WAIT, &mut [&mut to1], |l| l[0].recv() == Some(PeerMsg::Ack { through: 7 }));
+    assert_eq!(query_i64s(&db, "SELECT seen_ms FROM hosts WHERE id = 0"), [0], "its old row lapsed by its name");
+    drop((to1, to0, to2, l2, l1));
+    store2.shutdown();
+    s1.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Several hosts start only as `host`, on Postgres, with the login link (`jwt` with a
-/// service token); one host (or `all`) as before.
-#[test]
-fn several_hosts_refuse_local_auth() {
-    assert_eq!(check_several_hosts(Role::Host, 2, true, false), Err(SEVERAL_HOSTS_NEED_LOGIN.to_string()));
-    assert_eq!(SEVERAL_HOSTS_NEED_LOGIN, "several hosts need the login link: ids and placement come from it");
-    assert_eq!(check_several_hosts(Role::Host, 2, true, true), Ok(()));
-    assert_eq!(check_several_hosts(Role::All, 2, true, true), Err(SEVERAL_HOSTS_NEED_ROLE_HOST.to_string()));
-    assert_eq!(check_several_hosts(Role::Host, 3, false, true), Err(SPLIT_ROLES_NEED_POSTGRES.to_string()));
-    for role in [Role::All, Role::Host] {
-        assert_eq!(check_several_hosts(role, 1, false, false), Ok(()), "{role:?}: one host as before");
-    }
 }
 
 // ---- world cuts (Task 13) ----------------------------------------------------------------
@@ -672,8 +711,8 @@ fn host_hearing_nothing_past_the_deadline_aborts_the_cut_itself() {
 
 
 /// Crash table: host 1 dies after its part is staged and the coordinator holds every
-/// `CutPrepared` (before the decision): the cut commits whole; host 1 reboots dirty (the
-/// generation + 1), host 0 rolls back, and both restart from that cut.
+/// `CutPrepared` (before the decision): the cut commits whole; the static world restarts as
+/// one new host (a total crash: the generation + 1) from that cut.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn host_killed_after_prepare_cut_commits_and_world_restarts_from_it() {
@@ -705,9 +744,11 @@ fn host_killed_after_prepare_cut_commits_and_world_restarts_from_it() {
     let (_, tick) = last_committed(&db);
     w.pair.until("host 0 settled it", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
-    assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
+    // Elastic 1: a static world is one host — it recovers as a total crash: the whole world
+    // restarts as ONE new host (a new id), the generation raised exactly once.
+    let again = restart_alone(&mut w, &db, &dir, 3001);
+    assert_eq!((again.generation, again.bumped), (generation + 1, true), "a total crash: + 1");
+    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation + 1, "raised exactly once");
     let (a, b) = w.seam;
     let (last, _) = last_committed(&db);
     if last as u64 == cut.0 {
@@ -721,8 +762,8 @@ fn host_killed_after_prepare_cut_commits_and_world_restarts_from_it() {
 }
 
 /// Crash table: host 1 dies before its part is staged (host 0's may be): the cut is
-/// aborted (host 1's detach), nothing stays prepared; host 1 reboots dirty and every host
-/// rolls back to the previous cut.
+/// aborted (host 1's detach), nothing stays prepared; the static world restarts as one new
+/// host (a total crash) from the previous cut.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn host_killed_before_prepare_cut_is_absent_and_the_world_rolls_back() {
@@ -739,9 +780,11 @@ fn host_killed_before_prepare_cut_is_absent_and_the_world_rolls_back() {
     w.pair.until("host 0 settled it", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     let (last, tick) = last_committed(&db);
-    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
-    assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
+    // Elastic 1: a static world is one host — it recovers as a total crash: the whole world
+    // restarts as ONE new host (a new id), the generation raised exactly once.
+    let again = restart_alone(&mut w, &db, &dir, 3001);
+    assert_eq!((again.generation, again.bumped), (generation + 1, true), "a total crash: + 1");
+    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation + 1, "raised exactly once");
     if last_committed(&db).0 == last {
         let (a, b) = w.seam;
         for rc in [a, b] {
@@ -834,9 +877,9 @@ fn coordinator_killed_between_commit_prepareds_cut_is_whole() {
 }
 
 /// Crash table: host 1 dies between cuts (nothing staged) with a slime it took over since
-/// the last cut, and restarts: the generation is raised exactly once, host 0 exits
-/// `WorldRolledBack` once and restarts, both stay up, and the slime is in the world
-/// exactly once (where the last cut has it).
+/// the last cut; the static world restarts as one new host (Elastic 1: a total crash — the
+/// generation raised exactly once), and the slime is in the world exactly once (where the
+/// last cut has it).
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn dirty_restart_rolls_every_host_back_once() {
@@ -870,9 +913,11 @@ fn dirty_restart_rolls_every_host_back_once() {
         on_1 && p.sims.iter().all(|s| s.manager.world_cut().is_none() && s.manager.peer_unreceived() == 0)
     });
     kill_host(&mut w, h(1));
-    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
-    assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty: + 1");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
+    // Elastic 1: a static world is one host — it recovers as a total crash: the whole world
+    // restarts as ONE new host (a new id), the generation raised exactly once.
+    let again = restart_alone(&mut w, &db, &dir, 3001);
+    assert_eq!((again.generation, again.bumped), (generation + 1, true), "a total crash: + 1");
+    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation + 1, "raised exactly once");
     w.pair.until("the slime back in a running region", |p| {
         p.sims.iter_mut().map(|s| s.holders(id).len()).sum::<usize>() > 0
     });
@@ -940,7 +985,7 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     let s = w.claims[0].store().super_region_regions();
     let owner = |rx: i64, rz: i64| {
         let rc = RegionCoords::new(rx as i32, rz as i32);
-        (0..u64::from(HOSTS)).map(HostId).find(|&h| game::Static { id: h, hosts: HOSTS }.owns(rc, s)).expect("an owned region")
+        fixed_owner(rc, s)
     };
     let host1_last = before.iter().copied().max().expect("host 1's region was saved");
     let twice = entity_rows_stored_twice(&db);
@@ -1078,7 +1123,7 @@ fn role_all_on_postgres_resolves_an_orphan_part_before_its_claim() {
     assert_eq!(prepared(&db), 1);
     // Role `all` on the same world.
     let all = db.open();
-    server::roles::resolve_before_claim(true, &all, 1).expect("the start-up resolves staged parts");
+    server::roles::resolve_before_claim(true, &all).expect("the start-up resolves staged parts");
     let (tx, rx) = crossbeam::channel::bounded(1);
     let claimer = {
         let all = all.clone();
@@ -1107,7 +1152,7 @@ fn leave_without_a_coordinator_exits_dirty() {
     let dir = scratch("nocoord");
     let (mut pair, _seam, mut links, claims) = two_hosts(&db, &dir);
     let generation = claims[1].store().world_generation().unwrap();
-    let g1 = server::claims::WorldGeneration::new(links[1].registered().generation);
+    let g1 = server::claims::WorldGeneration::new(generation);
     let mut cuts = server::cuts::CutWriter::with_world_cuts(claims[1].clone(), g1.clone());
     cuts.set_leave_timeout(Duration::from_secs(2));
     let mut host1 = pair.sims.remove(1);
@@ -1139,14 +1184,18 @@ fn leave_without_a_coordinator_exits_dirty() {
     assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [0], "its row stays dirty");
     drop(host1);
     links.remove(1);
-    // Its return raises the generation.
-    let (_, c1) = claim(&db, h(1));
-    let back = start_links(&c1, h(1), 4001, TOKEN, &dir, "127.0.0.1:0");
-    assert_eq!((back.registered().generation, back.registered().bumped), (generation + 1, true));
+    // Elastic 1: its return under its name is a NEW host at once (host 0 runs: no total crash,
+    // no rollback) owning nothing; its old row is lapsed by the name (declared at the
+    // coordinator's next read, its land then inherited).
+    let store1 = db.open();
+    let (back, again) = boot_links(&store1, next_id(&db), "host-1", 4001, TOKEN, &dir, "127.0.0.1:0");
+    assert_eq!((again.id, again.generation, again.bumped), (h(2), generation, false), "a new host, nothing raised");
+    assert!(store1.owned_by(again.id).unwrap().epochs.is_empty(), "it owns nothing");
+    assert_eq!(query_i64s(&db, "SELECT seen_ms FROM hosts WHERE id = 1"), [0], "its old row lapsed by its name");
     drop(back);
     drop(pair);
     drop(links);
-    c1.store().clone().shutdown();
+    store1.shutdown();
     for c in claims {
         c.store().clone().shutdown();
     }
@@ -2029,7 +2078,7 @@ fn fresh_world_under_claim_lays_out_like_static() {
     let mut links = Vec::new();
     let mut claims = Vec::new();
     for ordinal in (0..u64::from(HOSTS)).map(HostId) {
-        let (sim, l, c) = claim_host(&db, &dir, ordinal, 2000 + ordinal.0);
+        let (sim, l, c) = claim_host(&db, &dir, 2000 + ordinal.0);
         sims.push(sim);
         links.push(l);
         claims.push(c);
@@ -2055,10 +2104,9 @@ fn fresh_world_under_claim_lays_out_like_static() {
     let owners = store.owners().unwrap();
     for (sr, rc) in &visits {
         let row = owners.iter().find(|(o, _, _)| o == sr).expect("a row");
-        assert_eq!(row.1, (game::rendezvous_owner(*sr, HOSTS).0 as i64), "{sr:?} is claimed as static lays it out");
-        pair.until("both directories know it", |p| {
-            p.sims.iter().all(|sim| sim.manager.owner_host(*rc) == Some(game::rendezvous_owner(*sr, HOSTS)))
-        });
+        let preferred = game::rendezvous_among(*sr, (0..u64::from(HOSTS)).map(HostId)).expect("an owner");
+        assert_eq!(row.1, (preferred.0 as i64), "{sr:?} is claimed as a fixed table of the live ids lays it out");
+        pair.until("both directories know it", |p| p.sims.iter().all(|sim| sim.manager.owner_host(*rc) == Some(preferred)));
     }
     // Each host's fence holds exactly what it claimed.
     for (h, c) in claims.iter().enumerate() {
@@ -2075,39 +2123,38 @@ fn fresh_world_under_claim_lays_out_like_static() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A host under `claim` that left cleanly (its `hosts` row clean, as a committed leave cut
-/// leaves it) boots again: it registers (no wait: its predecessor left clean), re-claims the
-/// rows the store says are its own at a higher epoch — the old boot's fence is refused from
-/// then on — and its directory answers `Me` for them.
+/// Elastic 1 (was: a host restarted cleanly re-claims its own rows): a host under `claim`
+/// that left cleanly (its `hosts` row clean, as a committed leave cut leaves it) and starts
+/// again is a NEW host: a new id at once, owning nothing — the land stays the clean row's,
+/// at the same epoch (a `Leave` succession gives it away when a host needs it) — and its
+/// directory says so.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_host_restarted_cleanly_reclaims_its_own_rows() {
+fn a_host_restarted_cleanly_is_a_new_host_owning_nothing() {
     install_props();
     let Some(db) = PgDb::create("claimrestart") else { return };
     let dir = scratch("claimrestart");
-    let (first, first_links, first_claims) = claim_host(&db, &dir, h(1), 3001);
+    let (first, first_links, first_claims) = claim_host(&db, &dir, 3001);
+    let old = first.ordinal;
     let store = first_claims.store().clone();
     let mine = vec![(0, 1), (2, 2)];
-    first_claims.add(store.claim_free(h(1), 3001, mine.clone()).unwrap());
+    first_claims.add(store.claim_free(old, 3001, mine.clone()).unwrap());
     let before = store.owners().unwrap();
     drop(first);
     drop(first_links);
     // Its leave cut committed (as `two_phase` marks it).
-    exec(&db, "UPDATE hosts SET clean = 1 WHERE id = 1");
-    let (second, second_links, second_claims) = claim_host(&db, &dir, h(1), 3002);
+    exec(&db, &format!("UPDATE hosts SET clean = 1 WHERE id = {}", old.0));
+    let (second, second_links, second_claims) = claim_host(&db, &dir, 3002);
+    assert!(second.ordinal > old, "a new id: {} after {old}", second.ordinal);
+    assert!(second_claims.fence().epochs.is_empty(), "it owns nothing");
     let after = store.owners().unwrap();
     for sr in &mine {
-        let old = before.iter().find(|(o, _, _)| o == sr).expect("claimed before");
-        let new = after.iter().find(|(o, _, _)| o == sr).expect("still a row");
-        assert_eq!(new.1, 1, "{sr:?} is still host 1's");
-        assert!(new.2 > old.2, "{sr:?} re-claimed at a higher epoch: {} then {}", old.2, new.2);
-        assert_eq!(second_claims.fence().epochs.get(sr), Some(&new.2), "{sr:?} in the new boot's fence");
+        let was = before.iter().find(|(o, _, _)| o == sr).expect("claimed before");
+        let now = after.iter().find(|(o, _, _)| o == sr).expect("still a row");
+        assert_eq!(now, was, "{sr:?} is still the clean row's, at the same epoch");
         let rc = RegionCoords::new(sr.0 * store.super_region_regions() as i32, sr.1 * store.super_region_regions() as i32);
-        assert_eq!(second.manager.owner_of(rc), game::Owner::Me, "{sr:?}: the new boot's directory says Me");
+        assert_eq!(second.manager.owner_of(rc), game::Owner::Host(old), "{sr:?}: the new host's directory names the old id");
     }
-    let cut = game::WorldCut { id: game::CutId(1), host: h(1), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
-    let refused = first_claims.commit_cut(cut).recv().unwrap();
-    assert!(matches!(refused, Err(world_store::StoreError::Fenced { .. })), "the old boot is fenced: {refused:?}");
     drop(second);
     drop(second_links);
     first_claims.store().clone().shutdown();

@@ -460,7 +460,7 @@ fn seam_shuttle(
             };
             // Cross toward the far side of the seam first.
             let heading = if [at.x, at.y][axis] < seam { 1.0 } else { -1.0 };
-            let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
+            let owner = |rc: RegionCoords| rendezvous_owner(game::super_region_of(rc, s), hosts);
             game::perf_event!(
                 "autopilot_seam",
                 "boundary={} home={},{} a={},{} b={},{} owner_a={} owner_b={} hosts={} s={}",
@@ -547,7 +547,7 @@ fn seam_shuttle(
 /// The nearest region seam to `home` whose two sides have different owners
 /// (`want_host_seam`: a host seam) or the same owner (a thread seam), with
 /// `hosts` hosts and `s` regions per super-region side
-/// ([`game::rendezvous_owner`] of [`game::super_region_of`]). Returns `(a, b)`
+/// ([`rendezvous_owner`] of [`game::super_region_of`]). Returns `(a, b)`
 /// with `b` one region past `a` in +x or +z. "Nearest": by the distance from the
 /// middle of `home` to the middle of the seam, ties to the lower `a` (x, then z),
 /// then x before z — the same answer every time. Looks [`PICK_SEAM_RADIUS`]
@@ -569,7 +569,7 @@ pub fn pick_loaded_seam(
     s: u32,
     want_host_seam: bool,
 ) -> Option<(RegionCoords, RegionCoords)> {
-    let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
+    let owner = |rc: RegionCoords| rendezvous_owner(game::super_region_of(rc, s), hosts);
     let mut best: Option<(i64, (i32, i32, u8), (RegionCoords, RegionCoords))> = None;
     for &a in loaded {
         for (axis, b) in [(0u8, RegionCoords::new(a.x + 1, a.z)), (1u8, RegionCoords::new(a.x, a.z + 1))] {
@@ -591,7 +591,7 @@ pub fn pick_loaded_seam(
 // hosts, so under `claim` ownership the claims lay out exactly like `rendezvous_owner` (a succession
 // during the run moves the seam; `crossing_summary.py --go-nogo` marks such a run INVALID).
 pub fn pick_seam(home: RegionCoords, hosts: u32, s: u32, want_host_seam: bool) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
+    let owner = |rc: RegionCoords| rendezvous_owner(game::super_region_of(rc, s), hosts);
     let mut radius = PICK_SEAM_RADIUS;
     loop {
         let mut best: Option<(i64, (i32, i32, u8), (RegionCoords, RegionCoords))> = None;
@@ -634,7 +634,7 @@ mod tests {
     use super::*;
 
     fn owner(rc: RegionCoords, hosts: u32, s: u32) -> u64 {
-        game::rendezvous_owner(game::super_region_of(rc, s), hosts).0
+        rendezvous_owner(game::super_region_of(rc, s), hosts).0
     }
 
     fn adjacent(a: RegionCoords, b: RegionCoords) -> bool {
@@ -678,4 +678,10 @@ mod tests {
         assert_eq!(yaw_error(forward, forward), 0.0);
         assert_eq!(yaw_error(forward, Vec2::ZERO), 0.0);
     }
+}
+
+/// The rendezvous owner of `sr` among the dev hosts `0..hosts` (`n` 0 counts as 1): the
+/// layout a dev world of `hosts` hosts claims while every host lives.
+fn rendezvous_owner(sr: game::SuperRegion, hosts: u32) -> game::HostId {
+    game::rendezvous_among(sr, (0..u64::from(hosts.max(1))).map(game::HostId)).unwrap_or(game::HostId::SOLO)
 }

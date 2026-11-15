@@ -45,8 +45,8 @@ pub const HOST_DEAD: i64 = 1;
 pub const NO_OWNER: i64 = -1;
 
 /// A region host's identity: what the store's `hosts` / `super_regions` rows, the peer links
-/// and the coordinator name a host by. Today the number is the configured ordinal
-/// (`VOXEL_HOST_ORDINAL`); it prints as `h7`.
+/// and the coordinator name a host by: the number the store issued at its registration
+/// (`register_host`, from 1, never reused; [`HostId::SOLO`] for role `all`); it prints as `h7`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HostId(pub u64);
 
@@ -142,9 +142,9 @@ pub enum Declared {
 
 /// Environment: `allinone` (default), `static` or `claim`.
 pub const OWNERSHIP_ENV: &str = "VOXEL_OWNERSHIP";
-/// Environment: this host's ordinal (`static` / `claim` only), `0..hosts`.
-pub const HOST_ORDINAL_ENV: &str = "VOXEL_HOST_ORDINAL";
-/// Environment: how many hosts share the world (`static` / `claim` only).
+/// Environment: how many hosts the COORDINATOR serves (its world cuts and its crash policy;
+/// Elastic 1 Task 5 removes it). A host reads no host count: it is one host of any number
+/// (`claim`) or alone (`static`).
 pub const HOSTS_ENV: &str = "VOXEL_HOSTS";
 
 /// splitmix64's finaliser (a stateless mix; the rendezvous weights).
@@ -155,21 +155,15 @@ fn splitmix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The host (`0..hosts`) that owns super-region `sr`: rendezvous hashing — the
-/// host with the highest weight for it, ties to the lower ordinal. Growing
-/// the host count moves only the super-regions the new host wins.
-pub fn rendezvous_owner(sr: (i32, i32), hosts: u32) -> HostId {
-    rendezvous_among(sr, (0..hosts.max(1)).map(|n| HostId(u64::from(n)))).unwrap_or(HostId::SOLO)
-}
-
-/// [`rendezvous_owner`] over `ordinals` (ascending): the one with the highest weight for
-/// `sr`, ties to the lower ordinal; `None` for no ordinal.
-fn rendezvous_among(sr: SuperRegion, ordinals: impl IntoIterator<Item = HostId>) -> Option<HostId> {
+/// The one of `ids` (ascending) with the highest rendezvous weight for super-region `sr`,
+/// ties to the lower id; `None` for no id. Adding an id moves only the super-regions the new
+/// id wins; removing one moves only its own.
+pub fn rendezvous_among(sr: SuperRegion, ids: impl IntoIterator<Item = HostId>) -> Option<HostId> {
     // Each coordinate in its own 32 bits (no sign extension: `(-1, 0)` and `(0, -1)`
-    // must not share a key), mixed, then mixed again with the ordinal.
+    // must not share a key), mixed, then mixed again with the id.
     let (sx, sz) = sr;
     let key = splitmix64(u64::from(sx as u32) | u64::from(sz as u32) << 32);
-    highest_weight(key, ordinals)
+    highest_weight(key, ids)
 }
 
 /// The ordinal of `ordinals` (ascending) with the highest `splitmix64(key ^ ordinal)`,
@@ -185,7 +179,7 @@ fn highest_weight(key: u64, ordinals: impl IntoIterator<Item = HostId>) -> Optio
     best.map(|(ordinal, _)| ordinal)
 }
 
-/// Keys [`heir_of`]'s weights apart from the super-regions' ([`rendezvous_owner`]).
+/// Keys [`heir_of`]'s weights apart from the super-regions' ([`rendezvous_among`]).
 const HEIR_KEY_SALT: u64 = 0x4845_4952_0000_0000;
 
 /// The one live host that inherits all of `predecessor`'s super-regions (R4 decision 2):
@@ -229,8 +223,6 @@ pub trait Ownership: Send + std::fmt::Debug {
     fn directory(&self) -> Option<&Directory> {
         None
     }
-    /// How many hosts share the world (`VOXEL_HOSTS`; `AllInOne`: 1).
-    fn hosts(&self) -> u32;
     /// Whether this process runs every host's regions (`AllInOne`): it adopts every
     /// host's in-flight rows and its cuts replace them all.
     fn runs_every_host(&self) -> bool {
@@ -281,43 +273,48 @@ impl Ownership for AllInOne {
     fn directory_mut(&mut self) -> Option<&mut Directory> {
         None
     }
-    fn hosts(&self) -> u32 {
-        1
-    }
     fn runs_every_host(&self) -> bool {
         true
     }
 }
 
-/// A fixed set of `hosts` processes share the world by rendezvous hashing of its
-/// super-regions; this one is `id` (R3 as built: never `Free` / `Unknown`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A fixed table: the hosts of `layout` share the world by rendezvous hashing of its
+/// super-regions ([`rendezvous_among`]); this one is `me` (R3's layout: never `Free` /
+/// `Unknown`). Outside the seeded tests a `static` host is alone (`layout == [me]`: the store
+/// refuses a second `static` registration beside a live row).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Static {
-    pub id: HostId,
-    pub hosts: u32,
+    pub me: HostId,
+    /// Every host of the table, ascending.
+    pub layout: Vec<HostId>,
 }
 
 impl Static {
+    /// The host of the table that owns super-region `sr` (`me` for an empty table).
+    fn owner_at(&self, sr: SuperRegion) -> HostId {
+        rendezvous_among(sr, self.layout.iter().copied()).unwrap_or(self.me)
+    }
+
     /// Whether this process owns (simulates) region `rc`, with `s` regions per
     /// super-region side.
     pub fn owns(&self, rc: RegionCoords, s: u32) -> bool {
-        rendezvous_owner(super_region_of(rc, s), self.hosts) == self.id
+        self.owner_at(super_region_of(rc, s)) == self.me
     }
 
     /// The host that owns region `rc`, with `s` regions per super-region side, as a
     /// number (the trait's [`Ownership::owner_of`] answers per super-region).
     pub fn owner_of(&self, rc: RegionCoords, s: u32) -> HostId {
-        rendezvous_owner(super_region_of(rc, s), self.hosts)
+        self.owner_at(super_region_of(rc, s))
     }
 }
 
 impl Ownership for Static {
     fn me(&self) -> HostId {
-        self.id
+        self.me
     }
     fn owner_of(&self, sr: SuperRegion) -> Owner {
-        match rendezvous_owner(sr, self.hosts) {
-            o if o == self.id => Owner::Me,
+        match self.owner_at(sr) {
+            o if o == self.me => Owner::Me,
             o => Owner::Host(o),
         }
     }
@@ -326,9 +323,6 @@ impl Ownership for Static {
     }
     fn directory_mut(&mut self) -> Option<&mut Directory> {
         None
-    }
-    fn hosts(&self) -> u32 {
-        self.hosts
     }
 }
 
@@ -409,10 +403,9 @@ impl Directory {
         self.live.remove(&ordinal);
     }
 
-    /// The live host that should claim `sr` when it is free: [`rendezvous_owner`]
-    /// restricted to the live hosts (with every host of `VOXEL_HOSTS` live, exactly
-    /// `rendezvous_owner(sr, hosts)`; a dead host's share moves, nobody else's). `None`
-    /// while no host is known live.
+    /// The live host that should claim `sr` when it is free: [`rendezvous_among`] the live
+    /// hosts (a fixed live set lays out like a `Static` table of it; a dead host's share
+    /// moves, nobody else's). `None` while no host is known live.
     pub fn preferred(&self, sr: SuperRegion) -> Option<HostId> {
         rendezvous_among(sr, self.live.iter().copied())
     }
@@ -420,18 +413,19 @@ impl Directory {
 
 /// Ownership is a claim in Postgres (R4): super-regions are claimed on demand, and this
 /// host answers from its mirror of the directory ("wait, never guess": `Free` / `Unknown`
-/// are never assumed to be anyone's). A crash is inherited by one heir (`Succession`).
+/// are never assumed to be anyone's). A crash is inherited by one heir (`Succession`). Any
+/// number of hosts: no count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PgClaim {
     pub id: HostId,
-    pub hosts: u32,
     pub directory: Directory,
 }
 
 impl PgClaim {
-    /// Host `ordinal` of `hosts`, its directory not read yet (everything `Unknown`).
-    pub fn new(id: HostId, hosts: u32) -> PgClaim {
-        PgClaim { id, hosts, directory: Directory::default() }
+    /// Host `me` (its id issued at registration), its directory not read yet (everything
+    /// `Unknown`).
+    pub fn new(me: HostId) -> PgClaim {
+        PgClaim { id: me, directory: Directory::default() }
     }
 }
 
@@ -451,9 +445,6 @@ impl Ownership for PgClaim {
     fn directory(&self) -> Option<&Directory> {
         Some(&self.directory)
     }
-    fn hosts(&self) -> u32 {
-        self.hosts
-    }
 }
 
 /// What a host crash costs a world run with `VOXEL_OWNERSHIP` = `ownership` (unset / empty:
@@ -467,48 +458,18 @@ pub fn crash_policy_from_value(ownership: Option<&str>) -> Result<CrashPolicy, S
     }
 }
 
-/// The policy from the three environment values (unset / empty = absent).
-pub fn ownership_from_values(
-    ownership: Option<&str>,
-    ordinal: Option<&str>,
-    hosts: Option<&str>,
-) -> Result<Box<dyn Ownership>, String> {
-    fn blank(v: Option<&str>) -> Option<&str> {
-        v.map(str::trim).filter(|v| !v.is_empty())
-    }
-    let number = |name: &str, v: Option<&str>| -> Result<Option<u32>, String> {
-        blank(v).map(|v| v.parse::<u32>().map_err(|_| format!("{name}={v:?} is not a whole number"))).transpose()
-    };
-    let kind = blank(ownership).unwrap_or("allinone");
-    match kind {
-        "allinone" => {
-            if blank(ordinal).is_some() || blank(hosts).is_some() {
-                return Err(format!(
-                    "{HOST_ORDINAL_ENV} / {HOSTS_ENV} are set but {OWNERSHIP_ENV} is allinone; set {OWNERSHIP_ENV}=static"
-                ));
-            }
-            Ok(Box::new(AllInOne))
-        }
-        "static" | "claim" => {
-            let ordinal =
-                number(HOST_ORDINAL_ENV, ordinal)?.ok_or_else(|| format!("{OWNERSHIP_ENV}={kind} needs {HOST_ORDINAL_ENV}"))?;
-            let hosts = number(HOSTS_ENV, hosts)?.ok_or_else(|| format!("{OWNERSHIP_ENV}={kind} needs {HOSTS_ENV}"))?;
-            if hosts == 0 || ordinal >= hosts {
-                return Err(format!("{HOST_ORDINAL_ENV}={ordinal} must be below {HOSTS_ENV}={hosts} (at least 1)"));
-            }
-            if kind == "claim" {
-                return Ok(Box::new(PgClaim::new(HostId(u64::from(ordinal)), hosts)));
-            }
-            Ok(Box::new(Static { id: HostId(u64::from(ordinal)), hosts }))
-        }
+/// The ownership of host `me` under `policy` (`VOXEL_OWNERSHIP`'s value; empty: `allinone`):
+/// `allinone` → [`AllInOne`] (`me` unused: it is [`HostId::SOLO`]), `static` → a table of
+/// `me` alone (it claims every super-region), `claim` → [`PgClaim`] over a directory not read
+/// yet. A host builds it once its id was issued (`register_host`): nothing is claimed, fenced
+/// or sent under a guessed id. Anything else is refused, naming the variable.
+pub fn ownership_for(policy: &str, me: HostId) -> Result<Box<dyn Ownership>, String> {
+    match policy.trim() {
+        "" | "allinone" => Ok(Box::new(AllInOne)),
+        "static" => Ok(Box::new(Static { me, layout: vec![me] })),
+        "claim" => Ok(Box::new(PgClaim::new(me))),
         other => Err(format!("{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim")),
     }
-}
-
-/// The policy from `VOXEL_OWNERSHIP`, `VOXEL_HOST_ORDINAL`, `VOXEL_HOSTS`.
-pub fn ownership_from_env() -> Result<Box<dyn Ownership>, String> {
-    let get = |name: &str| std::env::var(name).ok();
-    ownership_from_values(get(OWNERSHIP_ENV).as_deref(), get(HOST_ORDINAL_ENV).as_deref(), get(HOSTS_ENV).as_deref())
 }
 
 #[cfg(test)]

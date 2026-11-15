@@ -841,7 +841,7 @@ fn manager_closes_a_link_whose_session_broke() {
     let mut rig = crate::common::rig::Rig::with_ownership(
         game::InlineSpawner::default(),
         crate::common::seam_translate::uniform_floor,
-        Box::new(game::Static { id: h(0), hosts: 2 }),
+        Box::new(crate::common::fixed(h(0), 2)),
         1,
     );
     let (mine, mut theirs) = InlinePeerLink::pair(7, 0);

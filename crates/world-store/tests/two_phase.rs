@@ -333,6 +333,34 @@ fn resolve_aborts_an_undecided_cut() {
     h.shutdown();
 }
 
+/// Elastic 1: the staged parts are found by their prepared transactions' names alone, for
+/// any host id — no host count says which hosts to look for. SQLite stages nothing.
+#[test]
+fn staged_parts_of_unknown_hosts_are_found() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let h41 = open(&w.url);
+    let s = h.super_region_regions();
+    let f3 = h.claim_super_regions(hid(3), vec![game::super_region_of(A, s)]).unwrap();
+    let f41 = h.claim_super_regions(hid(41), vec![game::super_region_of(B, s)]).unwrap();
+    let mut p3 = part(5, hid(3));
+    p3.regions = vec![(A, region())];
+    p3.in_flight = vec![InFlightRow::Intent { target: A, msg: intent() }];
+    h.prepare_cut(p3, f3, 0).recv().unwrap().unwrap();
+    h41.prepare_cut(part(5, hid(41)), f41, 0).recv().unwrap().unwrap();
+    let mut found = h.staged_cut_parts().unwrap();
+    found.sort();
+    assert_eq!(found, vec![(CutId(5), hid(3)), (CutId(5), hid(41))]);
+    assert_eq!(h.resolve_prepared().unwrap(), vec![(CutId(5), false)], "both resolved");
+    assert!(h.staged_cut_parts().unwrap().is_empty());
+    assert_eq!(prepared(&w), 0);
+    h41.shutdown();
+    h.shutdown();
+    let sqlite = open(&StoreUrl::Memory);
+    assert_eq!(sqlite.staged_cut_parts().unwrap(), vec![], "SQLite stages nothing");
+    sqlite.shutdown();
+}
+
 /// Only this database's prepared cuts are touched: another world's stay prepared.
 #[test]
 fn resolve_touches_only_its_own_world() {

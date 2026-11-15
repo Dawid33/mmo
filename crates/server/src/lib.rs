@@ -63,6 +63,28 @@ fn server_port_from(value: Option<&str>) -> Result<u16, String> {
 /// on one machine (`just dev-r3`) each need their own.
 pub const WT_PORT_ENV: &str = "VOXEL_WT_PORT";
 
+/// Environment: this host's name (free text, default empty): log lines, default file names
+/// (`target/dev-r3/<name>.peer.cert-sha256`, `webtransport-cert-hash-<name>.json`) and its
+/// `hosts.name`. Never a key: the host's id is issued at registration. A registration lapses
+/// the other dirty live rows of the same NON-EMPTY name (a restarted process's old id is then
+/// declared at once instead of a lease later); two unnamed hosts never touch each other.
+pub const HOST_NAME_ENV: &str = "VOXEL_HOST_NAME";
+
+/// `name` as one word for a file name: `host` when empty; every character but ASCII letters,
+/// digits, `-`, `_` and `.` becomes `_`.
+pub fn file_word(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return "host".to_string();
+    }
+    name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect()
+}
+
+/// How a host is named in log lines: `h7`, and its name when it has one (`h7 "host-b"`).
+pub fn host_label(id: HostId, name: &str) -> String {
+    if name.trim().is_empty() { id.to_string() } else { format!("{id} {:?}", name.trim()) }
+}
+
 /// The WebTransport port from the value of [`WT_PORT_ENV`].
 fn wt_port_from(value: Option<&str>) -> Result<u16, String> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
@@ -366,9 +388,9 @@ pub struct WorldIngress {
     /// hash is in this host's endpoint); `None`: [`Self::listen`] reads its source itself
     /// ([`client_cert::ClientCert::from_env`]).
     client_cert: Option<client_cert::ClientCert>,
-    /// This host's ordinal: which dev cert-hash files the ingress writes
+    /// This host's name (`VOXEL_HOST_NAME`): which dev cert-hash files the ingress writes
     /// (`webtransport::cert_hash_file_names`).
-    host_ordinal: HostId,
+    host_name: String,
     /// Each live session's connection, by id (shared with the main loop: [`Self::sinks`]).
     sinks: Arc<DashMap<ClientId, ClientSink>>,
 }
@@ -389,7 +411,7 @@ impl WorldIngress {
             players,
             auth,
             client_cert: None,
-            host_ordinal: HostId::SOLO,
+            host_name: String::new(),
             sinks: Arc::new(DashMap::new()),
         }
     }
@@ -412,9 +434,9 @@ impl WorldIngress {
         self
     }
 
-    /// Serve as host `ordinal` of the world (0 unless several hosts).
-    pub fn with_host_ordinal(mut self, ordinal: HostId) -> Self {
-        self.host_ordinal = ordinal;
+    /// Serve as the host named `name` (`VOXEL_HOST_NAME`; empty: unnamed).
+    pub fn with_host_name(mut self, name: &str) -> Self {
+        self.host_name = name.to_string();
         self
     }
 
@@ -548,11 +570,11 @@ impl WorldIngress {
             let wt_players = self.players.clone();
             let wt_auth = self.auth.clone();
             let wt_addr = std::net::SocketAddr::new(self.ip, self.wt_port);
-            let ordinal = self.host_ordinal;
+            let host_name = self.host_name.clone();
             let wt_cert = client_cert.clone();
             tokio::spawn(async move {
                 let served =
-                    crate::webtransport::serve(wt_addr, wt_cert, ordinal, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await;
+                    crate::webtransport::serve(wt_addr, wt_cert, host_name, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await;
                 if let Err(e) = served {
                     log::error!("webtransport ingress died: {e:?}");
                 }
@@ -727,23 +749,30 @@ pub fn run() -> claims::ServerExit {
         return claims::ServerExit::Clean;
     };
     let store = opened.store.clone();
-    // Which regions this process simulates, and the super-region side that
-    // decides it: a bad setting stops the start, naming the variable.
-    let ownership = game::ownership_from_env().unwrap_or_else(|e| fatal(&e));
+    // Which regions this process simulates (`VOXEL_OWNERSHIP`), and the super-region side that
+    // decides it: a bad setting stops the start, naming the variable. A host's ownership is
+    // built from the id the store issues it at registration (below): no host number and no
+    // host count is read (`VOXEL_HOST_ORDINAL` / `VOXEL_HOSTS` are ignored if set).
+    let ownership_word = std::env::var(game::ownership::OWNERSHIP_ENV).unwrap_or_default();
+    let crash_policy = game::crash_policy_from_value(Some(&ownership_word)).unwrap_or_else(|e| fatal(&e));
+    roles::check_host_ownership(role, &ownership_word).unwrap_or_else(|e| fatal(&e));
     let super_region_regions = claims::super_region_regions_from(std::env::var(claims::SUPER_REGION_REGIONS_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(&e));
-    info!("[server] ownership: {ownership:?}, {super_region_regions} regions per super-region side");
+    info!(
+        "[server] ownership: {}, {super_region_regions} regions per super-region side",
+        if ownership_word.trim().is_empty() { "allinone" } else { ownership_word.trim() }
+    );
     // `claim` (R4): super-regions are claimed on demand by the preferred live host, the
-    // directory read from the store — a host role only.
-    let claim_on_demand = ownership.policy() == game::CrashPolicy::Succession;
-    roles::check_claim(role, claim_on_demand).unwrap_or_else(|e| fatal(&e));
-    if role == roles::Role::Host && ownership.runs_every_host() {
-        log::warn!(
-            "[server] role host with {} unset (all): this host claims every super-region — right for R2's one \
-             host per world (`just host` sets static 0 of 1)",
-            game::ownership::OWNERSHIP_ENV
-        );
-    }
+    // directory read from the store — a host role only, and any number of hosts: peer links,
+    // world cuts, the login relay and observer sessions. A `static` host is alone (the store
+    // refuses a second one beside a live row).
+    let claim_on_demand = crash_policy == game::CrashPolicy::Succession;
+    let several = claim_on_demand;
+    // This host's name (`VOXEL_HOST_NAME`, default empty): labels, file names, `hosts.name`.
+    let host_name = match role {
+        roles::Role::Host => std::env::var(HOST_NAME_ENV).unwrap_or_default().trim().to_string(),
+        _ => String::new(),
+    };
     let players: player_store::SharedPlayerStore = match &store {
         None => player_store::shared(player_store::MemoryPlayerStore::default()),
         Some(store) => player_store::shared(player_store::StorePlayers(store.clone())),
@@ -789,18 +818,86 @@ pub fn run() -> claims::ServerExit {
         }
         auth_edge::AuthMode::Local => None,
     };
-    // Several hosts of one world (`VOXEL_HOSTS` > 1): only as `host`, on Postgres, with the
-    // login link (ids and placement come from it).
-    let hosts = ownership.hosts();
+    // `claim` (any number of hosts): only as `host`, on Postgres, with the login link (ids and
+    // placement come from it).
     let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
-    roles::check_several_hosts(role, hosts, postgres, spawn_orders.is_some()).unwrap_or_else(|e| fatal(&e));
-    // Several hosts: the login service is linked to one of them (the entry host); every host
-    // relays its spawn orders and kicks to the host holding the player (`login_link`). Set
-    // before anything connects (sessions are announced with their login).
-    let entry_host = (hosts > 1)
-        .then(|| login_link::entry_host_from(std::env::var(login_link::ENTRY_HOST_ENV).ok().as_deref(), hosts))
-        .transpose()
-        .unwrap_or_else(|e| fatal(&e));
+    roles::check_claim_needs(role, crash_policy, postgres, spawn_orders.is_some()).unwrap_or_else(|e| fatal(&e));
+    // Role `all` claims every super-region: refused (before it resolves, aborts or fences
+    // anything) on a world whose other hosts ran in a split role and did not leave cleanly.
+    if let Some(store) = &store {
+        roles::check_all_role_beside_hosts(role, store, HostId::SOLO).unwrap_or_else(|e| fatal(&e));
+    }
+    // On Postgres, before it claims, registers or loads anything: the world cut parts a
+    // crash left staged are finished first, whatever hosts staged them (a `claim` host: and
+    // two-phase commit must be available).
+    if let Some(store) = &store {
+        roles::resolve_before_claim(postgres, store).unwrap_or_else(|e| fatal(&e));
+        roles::check_two_phase(crash_policy, store).unwrap_or_else(|e| fatal(&e));
+    }
+    // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main loop like a last
+    // client leaving does, so the world is saved on the way out; a stop before a host
+    // registered exits at once.
+    let stop_signal = early_stop.unwrap_or_else(watch_stop_signals_on_thread);
+    let boot = host_boot();
+    // A host REGISTERS FIRST (Elastic 1): its peer listener bound (`claim`: the row names its
+    // address and pin) and where players reach it, then the store issues its id — a new one at
+    // every start, never one a process had before. Everything keyed by a host is built from that
+    // id afterwards: its ownership, its fence and claims, its heartbeat, its hellos and links, its
+    // cut parts. Nothing is claimed, sent or written under an id before it was issued.
+    let mut heartbeat: Option<lease::Heartbeat> = None;
+    let mut world_generation = claims::WorldGeneration::default();
+    let mut peer_listener: Option<peer_link::PeerListener> = None;
+    let host_id = match (&store, role) {
+        (Some(store), roles::Role::Host) => {
+            if several {
+                let config = peer_link::PeerLinkConfig::from_env(&host_name).unwrap_or_else(|e| fatal(&e));
+                let token =
+                    svc_link::service_token_from_env().unwrap_or_else(|e| fatal(&format!("the service link's token: {e}")));
+                let bind = config.bind;
+                let listener = peer_link::PeerListener::bind(config, token)
+                    .unwrap_or_else(|e| fatal(&format!("the peer listener on {bind}: {e}")));
+                peer_listener = Some(listener);
+            }
+            let (peer_addr, peer_cert) = peer_listener.as_ref().map(peer_link::PeerListener::row_fields).unzip();
+            let lookup = |name: &str| std::env::var(name).ok();
+            let new_host = world_store::NewHost {
+                name: host_name.clone(),
+                boot,
+                peer_addr,
+                peer_cert,
+                quic: Some(peer_link::advertise_quic_from(lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(), port)),
+                webtransport: peer_link::advertise_wt_from(lookup(peer_link::ADVERTISE_WT_ENV).as_deref()),
+                wt_cert_hash: client_cert.sha256_hex(),
+            };
+            // A `static` registration beside a live row (`NotAlone`) is refused here (exit 1): its
+            // message names `VOXEL_OWNERSHIP=claim`.
+            let registered = match lease::register(store, new_host, crash_policy, &stop_signal) {
+                Ok(Some(registered)) => registered,
+                Ok(None) => return claims::ServerExit::Clean,
+                Err(e) => fatal(&format!("registering this host: {e}")),
+            };
+            heartbeat = Some(lease::Heartbeat::new(store.clone(), registered.id, boot));
+            info!(
+                "[server] registered as host {} at world generation {}{}",
+                host_label(registered.id, &host_name),
+                registered.generation,
+                if registered.bumped { " (raised: a total crash, this host took every dirty host's land)" } else { "" }
+            );
+            world_generation = claims::WorldGeneration::new(registered.generation);
+            health::Health::global().world_generation(registered.generation);
+            health::Health::global().set_registered(true);
+            registered.id
+        }
+        _ => HostId::SOLO,
+    };
+    let ownership = game::ownership_for(&ownership_word, host_id).unwrap_or_else(|e| fatal(&e));
+    // `claim`: the login service is linked to one host, the entry host (Elastic 1 interim,
+    // until the coordinator relays logins: the lowest live id at this host's start); every
+    // host relays its spawn orders and kicks to the host holding the player (`login_link`).
+    let entry_host = match (&store, several) {
+        (Some(store), true) => Some(login_link::entry_host_of(store, host_id).unwrap_or_else(|e| fatal(&e))),
+        _ => None,
+    };
     let login_relay = match (&spawn_orders, entry_host) {
         (Some((orders, _)), Some(entry)) => {
             info!("[server] login relay: the login service is linked to host {entry}");
@@ -808,26 +905,15 @@ pub fn run() -> claims::ServerExit {
         }
         _ => None,
     };
-    // Role `all` claims every super-region: refused (before it resolves, aborts or fences
-    // anything) on a world whose other hosts ran in a split role and did not leave cleanly.
-    if let Some(store) = &store {
-        roles::check_all_role_beside_hosts(role, store, ownership.me()).unwrap_or_else(|e| fatal(&e));
-    }
-    // On Postgres, before it claims, registers or loads anything: the world cut parts a
-    // crash left staged are finished first (several hosts: and two-phase commit must be
-    // available).
-    if let Some(store) = &store {
-        roles::resolve_before_claim(postgres, store, hosts).unwrap_or_else(|e| fatal(&e));
-    }
     // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
-    let endpoint = host_endpoint(ownership.me(), port, |name| std::env::var(name).ok(), client_cert.sha256_hex());
+    let endpoint = host_endpoint(host_id, port, |name| std::env::var(name).ok(), client_cert.sha256_hex());
     let mut authenticator = auth_edge::Authenticator::for_mode(auth_mode);
     if let Some((orders, _)) = &spawn_orders {
         authenticator = authenticator.with_spawn_orders(orders.clone());
     }
     // Several hosts: a client another host sends here (`RegionElsewhere`) connects with the
     // ticket that host vouched for; the main loop records its orders.
-    let observer_orders = (hosts > 1).then(|| Arc::new(auth_edge::ObserverOrders::new(auth_edge::system_clock())));
+    let observer_orders = several.then(|| Arc::new(auth_edge::ObserverOrders::new(auth_edge::system_clock())));
     if let Some(orders) = &observer_orders {
         authenticator = authenticator.with_observer_orders(orders.clone());
     }
@@ -835,7 +921,7 @@ pub fn run() -> claims::ServerExit {
     let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone())
         .with_client_cert(client_cert)
         .with_webtransport_port(wt_port)
-        .with_host_ordinal(ownership.me());
+        .with_host_name(&host_name);
     let sinks = rgi.sinks();
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
@@ -844,7 +930,7 @@ pub fn run() -> claims::ServerExit {
     let cps = client_packet_send.clone();
     // The login service's push: a listener (dropped at the end of `run`, sync code).
     // Several hosts: only the entry host listens (the others take what it relays).
-    let listens = entry_host.is_none_or(|entry| entry == ownership.me());
+    let listens = entry_host.is_none_or(|entry| entry == host_id);
     let _login_link = spawn_orders.filter(|_| listens).map(|(orders, token)| {
         let bind = login_link::bind_from(std::env::var(login_link::HOST_LINK_BIND_ENV).ok().as_deref())
             .unwrap_or_else(|e| fatal(&e));
@@ -852,7 +938,7 @@ pub fn run() -> claims::ServerExit {
             login_link::cert_hash_file_from(std::env::var(login_link::HOST_LINK_CERT_HASH_FILE_ENV).ok().as_deref());
         let (pin, events) = (Some(pin_file.clone()), client_packet_send.clone());
         let link = match entry_host {
-            Some(_) => login_link::start_relaying(bind, token, pin, orders, players.clone(), events, ownership.me()),
+            Some(_) => login_link::start_relaying(bind, token, pin, orders, players.clone(), events, host_id),
             None => login_link::start(bind, token, pin, orders, players.clone(), events),
         }
         .unwrap_or_else(|e| fatal(&format!("the login link on {bind}: {e}")));
@@ -869,9 +955,6 @@ pub fn run() -> claims::ServerExit {
     rt.spawn(async move { auth.prefetch().await });
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
-    // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main
-    // loop like a last client leaving does, so the world is saved on the way out.
-    let stop_signal = early_stop.unwrap_or_else(watch_stop_signals_on_thread);
     let (region_out_send, region_out_recv) = crossbeam::channel::unbounded();
     // Block registry: prefer the runtime manifest, fall back to the copy
     // embedded at build time (same repo file) so headless runs never fail.
@@ -993,28 +1076,16 @@ pub fn run() -> claims::ServerExit {
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
         .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
         .with_clock(world_clock, start);
-    // Region loads and cut commits are fenced: the super-regions this process
-    // owns are claimed now, once (procedural worlds keep nothing: no claims).
-    // One claim is shared by the region threads and the cut writer.
-    let boot = host_boot();
-    let mut world_generation = claims::WorldGeneration::default();
-    // Several hosts: the peer listener and a link to every other host (dropped at the end
-    // of `run`, sync code).
-    let mut peer_links: Option<peer_link::PeerLinks> = None;
-    // A registered host's lease, beaten by the main loop.
-    let mut heartbeat: Option<lease::Heartbeat> = None;
-    // This boot's registration number (its issued id): its coordinator hello carries it.
-    let mut host_reg = 0u64;
-    // The id the store issued at registration (role `host`; the configured ordinal otherwise).
-    let mut host_id = ownership.me();
+    // Region loads and cut commits are fenced: the super-regions this process owns are
+    // claimed now, once, as the id the store issued (procedural worlds keep nothing: no
+    // claims). One claim is shared by the region threads and the cut writer.
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
         let claimed = if claim_on_demand {
-            // `claim`: REGISTER FIRST, holding nothing — a boot told to wait for its
-            // predecessor's succession must not have touched that boot's rows — then re-claim
-            // what the store says is this ordinal's (below).
+            // `claim` claims nothing at start: free land is claimed on demand (the directory
+            // keeper below).
             claims::HostClaims::check_side(&store, super_region_regions).unwrap_or_else(|e| fatal(&e));
-            claims::HostClaims::none(store, ownership.me())
+            claims::HostClaims::none(store, host_id)
         } else {
             claims::HostClaims::claim(store, ownership.as_ref(), extent, super_region_regions).unwrap_or_else(|e| fatal(&e))
         };
@@ -1024,88 +1095,34 @@ pub fn run() -> claims::ServerExit {
             info!(
                 "[server] claimed {} super-regions as host {}",
                 claimed.fence().epochs.len(),
-                claimed.fence().owner
+                host_label(claimed.fence().owner, &host_name)
             );
-        }
-        // A host registers once per boot, after its claim (and, with several hosts, once its
-        // peer listener is bound: the row names its address and pin): a boot after one that
-        // never left clean raises the world's generation, which every other host then adopts
-        // (`static`), or waits for its predecessor's succession (`claim`).
-        if role == roles::Role::Host {
-            let crash_policy = ownership.policy();
+        } else {
+            // What the registration gave this new id: nothing — or, a total crash (no other
+            // host live), every dirty host's land at `epoch + 1`. Taken into the fence (its
+            // epochs bumped again, so the processes before are fenced).
             let fenced_exit = |e: &dyn std::fmt::Display| -> ! {
-                // Replaced between the claim and the registration: fenced, not a start-up error.
-                log::error!("[server] fenced while registering as host {}: {e}", ownership.me());
+                log::error!("[server] fenced while starting as host {}: {e}", host_label(host_id, &host_name));
                 std::process::exit(claims::EXIT_FENCED)
             };
-            let registered = if hosts > 1 {
-                let config = peer_link::PeerLinkConfig::from_env(ownership.me()).unwrap_or_else(|e| fatal(&e));
-                let token =
-                    svc_link::service_token_from_env().unwrap_or_else(|e| fatal(&format!("the service link's token: {e}")));
-                let bind = config.bind;
-                let links = peer_link::PeerLinks::start(
-                    ownership.me(),
-                    hosts,
-                    boot,
-                    endpoint.clone(),
-                    token,
-                    claimed.store().clone(),
-                    &claimed.fence(),
-                    config,
-                    crash_policy,
-                    &stop_signal,
-                )
-                .unwrap_or_else(|e| {
-                    if peer_link::is_fenced(&e) {
-                        fenced_exit(&e)
-                    }
-                    if peer_link::is_stopped(&e) {
-                        std::process::exit(0)
-                    }
-                    fatal(&format!("the peer links on {bind}: {e}"))
-                });
-                let registered = links.registered();
-                peer_links = Some(links);
-                registered
-            } else {
-                let fence = claimed.fence();
-                match peer_link::register(claimed.store(), &fence, ownership.me(), boot, &endpoint, None, crash_policy, &stop_signal) {
-                    Ok(Some(registered)) => registered,
-                    Ok(None) => std::process::exit(0),
-                    Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
-                    Err(e) => fatal(&e.to_string()),
-                }
-            };
-            // Elastic 1 task 2 adapter (Task 3 reorders the start so that everything is keyed by
-            // the issued id): the lease beats the issued id's row, the hellos carry it; the
-            // claims made above and the peer links still use the configured ordinal.
-            heartbeat = Some(lease::Heartbeat::new(claimed.store().clone(), registered.id, boot));
-            info!(
-                "[server] registered as host {} (configured ordinal {}) at world generation {}{}",
-                registered.id,
-                ownership.me(),
-                registered.generation,
-                if registered.bumped { " (raised: a total crash, this host took every dirty host's land)" } else { "" }
-            );
-            host_reg = registered.id.0;
-            host_id = registered.id;
-            world_generation = claims::WorldGeneration::new(registered.generation);
-            health::Health::global().world_generation(registered.generation);
-            health::Health::global().set_registered(true);
-            if claim_on_demand {
-                // Registered: this ordinal's rows are this boot's now. Re-claimed with their
-                // epochs bumped, so the boot before is fenced at its next write.
-                match claimed.reclaim_own(boot) {
-                    Ok(n) => info!("[server] re-claimed {n} super-regions as host {} (claim on demand)", ownership.me()),
-                    Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
-                    Err(e) => fatal(&format!("re-claiming this host's super-regions: {e}")),
-                }
-                // The re-claim may have waited behind a row lock for a minute: the lease is
-                // beaten between the boot's long steps (the main loop's pump comes much later).
-                lease::beat_at_boot(&mut heartbeat, "re-claiming its super-regions");
+            match claimed.reclaim_own(boot) {
+                Ok(0) => {}
+                Ok(n) => info!("[server] took {n} super-regions the registration gave host {host_id} (a total crash)"),
+                Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
+                Err(e) => fatal(&format!("taking the super-regions the registration gave this host: {e}")),
             }
+            // The claim may have waited behind a row lock: the lease is beaten between the
+            // boot's long steps (the main loop's pump comes much later).
+            lease::beat_at_boot(&mut heartbeat, "taking its super-regions");
         }
         claimed
+    });
+    // `claim`: a link to every older live host, and the admission of newer ones (each one's
+    // link made when it dials in). Dropped at the end of `run` (sync code).
+    let mut peer_links: Option<peer_link::PeerLinks> = peer_listener.map(|listener| {
+        let store = store.clone().expect("a host has a store");
+        peer_link::PeerLinks::start(listener, host_id, boot, store)
+            .unwrap_or_else(|e| fatal(&format!("starting the peer links: {e}")))
     });
     let fenced = claims.as_ref().map(|c| c.fenced().clone()).unwrap_or_default();
     if let Some(claims) = &claims {
@@ -1125,7 +1142,7 @@ pub fn run() -> claims::ServerExit {
         lod_builder,
         lod_result_recv,
     );
-    let host_ordinal = ownership.me();
+    let host_ordinal = host_id;
     manager.set_ownership(ownership, super_region_regions);
     // `claim`: the directory read whole before anything is placed or restored (until then
     // every owner is `Unknown`), and the loop's claim keeper.
@@ -1141,7 +1158,7 @@ pub fn run() -> claims::ServerExit {
     // `claim` with several hosts: an heir's adoption reads (R4, a succession) — what it
     // inherits, read on the store thread while this loop (and its heartbeat) runs on.
     let mut adoption_reader =
-        claims.as_ref().filter(|_| claim_on_demand && hosts > 1).map(|claims| claims::AdoptionReader::new(claims.clone()));
+        claims.as_ref().filter(|_| several).map(|claims| claims::AdoptionReader::new(claims.clone()));
     manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {
         manager.set_entry_host(entry);
@@ -1149,19 +1166,19 @@ pub fn run() -> claims::ServerExit {
     // The coordinator refuses an `Attach` of an older world generation than the store's.
     manager.set_host_generation(world_generation.mine());
     // A session per other host, over its link; the links' wake-up (none with one host).
+    let peer_hello = || game::PeerHello {
+        id: host_id,
+        boot,
+        generation: world_generation.mine(),
+        endpoint: endpoint.clone(),
+        received_through: 0,
+        received_from_boot: None,
+    };
     let mut peer_wake = crossbeam::channel::never::<()>();
     if let Some(links) = peer_links.as_mut() {
         peer_wake = links.wake();
         for (other, link) in links.take() {
-            let hello = game::PeerHello {
-                id: host_ordinal,
-                boot,
-                generation: world_generation.mine(),
-                endpoint: endpoint.clone(),
-                received_through: 0,
-                received_from_boot: None,
-            };
-            manager.set_peer(other, game::PeerSession::new(hello, other), link);
+            manager.set_peer(other, game::PeerSession::new(peer_hello(), other), link);
         }
         // Before any placement: the hosts that left cleanly hold nobody (a spawn order does
         // not wait for them). A read that fails leaves every host expected (orders wait).
@@ -1185,7 +1202,7 @@ pub fn run() -> claims::ServerExit {
         // `coordinator` thread joined by a channel link (`all`), or is its own
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
-            let link = host_world_link(host_id, boot, host_reg).unwrap_or_else(|e| fatal(&e));
+            let link = host_world_link(host_id, boot, host_id.0).unwrap_or_else(|e| fatal(&e));
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {
@@ -1229,7 +1246,7 @@ pub fn run() -> claims::ServerExit {
         lease::beat_at_boot(&mut heartbeat, "reading the stored regions and what was in flight");
         // Several hosts: the coordinator picks every cut (a world cut, staged and decided
         // together); one host cuts on its own (the one-phase cut).
-        if hosts > 1 {
+        if several {
             cuts::CutWriter::with_world_cuts(claims, world_generation.clone())
         } else {
             cuts::CutWriter::new(claims)
@@ -1238,7 +1255,7 @@ pub fn run() -> claims::ServerExit {
 
     // Several hosts: other hosts' saves re-seed the halos of their parked regions next to
     // this host's (`VOXEL_TERRAIN_NOTIFY`, `VOXEL_WORLD_DB_DIRECT`; one host: nothing to learn).
-    let mut terrain_watch = match (&cuts, hosts > 1) {
+    let mut terrain_watch = match (&cuts, several) {
         (Some(cuts), true) => {
             let mode = world_store::NotifyMode::from_env().unwrap_or_else(|e| fatal(&e));
             info!("[server] stored terrain of other hosts: {mode:?} (a resync every {} s)", world_store::TERRAIN_POLL_SECS);
@@ -1314,6 +1331,14 @@ pub fn run() -> claims::ServerExit {
         // thread would keep beating for a host that no longer runs.
         if lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now()) {
             break 'main;
+        }
+        // A newer host dialed in: its session, over the link made for it (Elastic 1 Task 4
+        // replaces this with discovery from the `hosts` rows).
+        if let Some(links) = &peer_links {
+            for (other, link) in links.take_arrived() {
+                info!("[server] host {other} joined: a peer session with it");
+                manager.set_peer(other, game::PeerSession::new(peer_hello(), other), link);
+            }
         }
         manager.maintain(now_ms);
         // `claim`: claims the manager wants, directory reads (never blocks).

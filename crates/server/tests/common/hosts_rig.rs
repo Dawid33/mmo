@@ -17,8 +17,7 @@ use login_api::{HostToLogin, LoginToHost};
 use server::claims::HostClaims;
 use server::login_link::{LoginLink, LoginRelay, SpawnOrders};
 use server::player_store::{PlayerKey, PlayerStore};
-use server::peer_link::{PeerLinkConfig, PeerLinks};
-use server::roles::{check_several_hosts, Role, SEVERAL_HOSTS_NEED_LOGIN, SEVERAL_HOSTS_NEED_ROLE_HOST, SPLIT_ROLES_NEED_POSTGRES};
+use server::peer_link::{PeerLinkConfig, PeerLinks, PeerListener};
 use world_store::{StoreHandle, StoreUrl};
 
 /// Wall time any wait below may take before the test fails.
@@ -38,12 +37,20 @@ const KEEPER: ClientId = 0;
 struct PgDb(pg_test_support::PgTestDb);
 
 impl PgDb {
+    /// A throwaway world database whose ids are issued from 0 (`world.next_host_id` set to 0
+    /// before anyone registers, as a world migrated from fixed ordinals continues): the first
+    /// two hosts registered are `h(0)` and `h(1)`, as these tests' fixed layout names them; a
+    /// restarted process gets the next id (2, 3, …).
     fn create(tag: &str) -> Option<PgDb> {
         let db = pg_test_support::PgTestDb::create(&format!("mmo_hosts_{tag}"));
         if db.is_none() {
             eprintln!("{} (MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres)", pg_test_support::SKIP_MSG);
         }
-        db.map(PgDb)
+        let db = db.map(PgDb)?;
+        let store = db.open();
+        exec(&db, "UPDATE world SET next_host_id = 0");
+        store.shutdown();
+        Some(db)
     }
 
     /// A handle as one process opens it.
@@ -137,39 +144,85 @@ fn endpoint(ordinal: HostId) -> HostEndpoint {
     }
 }
 
-/// One host process's store handle and claims (as `server::run` makes them).
+/// Host `me` of the rig's fixed table `h(0)..h(HOSTS)` (R3's layout; several hosts under a
+/// fixed table exist only in tests since Elastic 1).
+fn fixed(me: HostId) -> game::Static {
+    game::Static { me, layout: (0..u64::from(HOSTS)).map(HostId).collect() }
+}
+
+/// The owner of region `rc` in the rig's fixed table.
+fn fixed_owner(rc: RegionCoords, s: u32) -> HostId {
+    fixed(h(0)).owner_of(rc, s)
+}
+
+/// One host process's store handle and claims of its share of the fixed table, claimed as
+/// `ordinal` without a registration (a part staged and orphaned by a crash, no peers).
 fn claim(db: &PgDb, ordinal: HostId) -> (StoreHandle, HostClaims) {
     let store = db.open();
     let s = store.super_region_regions();
-    let claims = HostClaims::claim(store.clone(), &game::Static { id: ordinal, hosts: HOSTS }, Some(extent()), s).unwrap();
+    let claims = HostClaims::claim(store.clone(), &fixed(ordinal), Some(extent()), s).unwrap();
     (store, claims)
 }
 
-/// Host `ordinal`'s peer links on `bind`, its pin in `dir`, with `token`.
-fn start_links(
-    claims: &HostClaims,
-    ordinal: HostId,
-    boot: u64,
-    token: &str,
-    dir: &std::path::Path,
-    bind: &str,
-) -> PeerLinks {
-    let config = PeerLinkConfig {
-        bind: bind.parse().unwrap(),
-        cert_hash_file: dir.join(format!("host-{ordinal}.peer.cert-sha256")),
-        delay: Duration::ZERO,
-    };
-    let store = claims.store().clone();
-    let stop = std::sync::atomic::AtomicBool::new(false);
-    PeerLinks::start(ordinal, HOSTS, boot, endpoint(ordinal), token.into(), store, &claims.fence(), config, CrashPolicy::Rollback, &stop)
-        .expect("the peer links start")
+/// The id the store issues to the next registration (`world.next_host_id`).
+fn next_id(db: &PgDb) -> HostId {
+    HostId(query_i64s(db, "SELECT next_host_id FROM world")[0] as u64)
 }
 
-/// The one link `links` hands out (two hosts: the other one).
+/// A host process's start as `server::run` makes it, up to its peer links: its peer listener
+/// bound on `bind` (its pin in `dir`, named `name`), then REGISTERED — the store issues its id
+/// (`want`: the id it must be) — then its links started under that id. Registered as `claim`
+/// does (any number of hosts), so several rig hosts run beside each other whatever ownership
+/// their managers use. Its links and registration.
+fn boot_links(store: &StoreHandle, want: HostId, name: &str, boot: u64, token: &str, dir: &std::path::Path, bind: &str) -> (PeerLinks, world_store::Registered) {
+    let config = PeerLinkConfig {
+        bind: bind.parse().unwrap(),
+        cert_hash_file: dir.join(format!("{name}-{boot}.peer.cert-sha256")),
+        delay: Duration::ZERO,
+    };
+    let listener = PeerListener::bind(config, token.into()).expect("the peer listener binds");
+    let (peer_addr, peer_cert) = listener.row_fields();
+    let addresses = endpoint(want);
+    let host = world_store::NewHost {
+        name: name.into(),
+        boot,
+        peer_addr: Some(peer_addr),
+        peer_cert: Some(peer_cert),
+        quic: addresses.quic,
+        webtransport: addresses.webtransport,
+        wt_cert_hash: None,
+    };
+    let registered = store.register_host(host, CrashPolicy::Succession).expect("registered");
+    assert_eq!(registered.id, want, "ids are issued in order");
+    let links = PeerLinks::start(listener, registered.id, boot, store.clone()).expect("the peer links start");
+    (links, registered)
+}
+
+/// One host process of the fixed table: its store handle, links and claims, in `server::run`'s
+/// order — registered as the next id, then its share of the table claimed under that id.
+fn fixed_host(db: &PgDb, dir: &std::path::Path, boot: u64, token: &str, bind: &str) -> (StoreHandle, PeerLinks, HostClaims) {
+    let store = db.open();
+    let want = next_id(db);
+    let (links, _) = boot_links(&store, want, &format!("host-{}", want.0), boot, token, dir, bind);
+    let s = store.super_region_regions();
+    let claims = HostClaims::claim(store.clone(), &fixed(want), Some(extent()), s).unwrap();
+    (store, links, claims)
+}
+
+/// The one link `links` hands out (two hosts: the other one) — made at its start (a lower
+/// host it dials) or when the other host dialed in (a higher one), waited for.
 fn only_link(links: &mut PeerLinks) -> (HostId, Box<dyn PeerLink + Send>) {
-    let mut all = links.take();
-    assert_eq!(all.len(), 1, "one link per other host");
-    all.pop().unwrap()
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let mut all = links.take();
+        all.extend(links.take_arrived());
+        if let Some(link) = all.pop() {
+            assert!(all.is_empty(), "one link per other host");
+            return link;
+        }
+        assert!(Instant::now() < deadline, "no link to the other host");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Pump `links` until `done` holds of them, or fail after `within`.
@@ -202,6 +255,11 @@ struct Sim {
     /// Its registration number (`hosts.reg`): what its coordinator hello carries.
     reg: u64,
     manager: WorldManager<InlineSpawner>,
+    /// The links of newer hosts that dial in (`PeerLinks::take_arrived`), set as peers when
+    /// they come.
+    arrivals: Receiver<(HostId, Box<dyn PeerLink + Send>)>,
+    /// Its world generation (the hello of a peer arriving later).
+    generation: u64,
     region_out: Receiver<(RegionCoords, RegionOutput)>,
     packets: Receiver<(Option<ClientId>, ServerPacket)>,
     cuts: Option<server::cuts::CutWriter>,
@@ -293,7 +351,7 @@ impl Sim {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let mut manager = flat_manager(spawner, out_send, region_out_send);
-        manager.set_ownership(Box::new(game::Static { id: ordinal, hosts: HOSTS }), s);
+        manager.set_ownership(Box::new(fixed(ordinal)), s);
         manager.set_endpoints(endpoint(ordinal), game::seeded_nonces(0x5EED + ordinal.0));
         let gate = PeerGate::default();
         for (other, link) in links.take() {
@@ -309,12 +367,18 @@ impl Sim {
             manager.set_peer(other, PeerSession::new(hello, other), link);
         }
         manager.set_host_generation(generation);
-        let reg = links.registered().id.0;
-        Sim { ordinal, boot, reg, manager, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None, keeper: None, heartbeat: None, fenced: Default::default(), adopter: None, frozen_until: None }
+        let reg = ordinal.0;
+        let arrivals = links.arrivals();
+        Sim { ordinal, boot, reg, manager, arrivals, generation, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None, keeper: None, heartbeat: None, fenced: Default::default(), adopter: None, frozen_until: None }
     }
 
     /// A keeper client whose body stands in the middle of `rc` (this host's): `rc` runs.
     fn keep(&mut self, player: PlayerId, rc: RegionCoords, now: u64) {
+        self.keep_as(KEEPER, player, rc, now);
+    }
+
+    /// [`Sim::keep`] as session `client` (a host keeping several regions).
+    fn keep_as(&mut self, client: ClientId, player: PlayerId, rc: RegionCoords, now: u64) {
         let y = above_ground_y();
         let record = PlayerRecord {
             client: game::Client::default(),
@@ -323,11 +387,28 @@ impl Sim {
             fortress: None,
             adventure: None,
         };
-        let ev = ServerEvent::ClientConnected { client: KEEPER, player, record: Some(record) };
+        let ev = ServerEvent::ClientConnected { client, player, record: Some(record) };
         assert!(self.manager.handle_server_event(ev, now));
     }
 
+    /// A newer host dialed in: its session, over its link behind this host's gate.
+    fn take_arrivals(&mut self) {
+        for (other, link) in self.arrivals.try_iter().collect::<Vec<_>>() {
+            let link: Box<dyn PeerLink + Send> = Box::new(GatedLink { inner: link, gate: self.gate.clone() });
+            let hello = PeerHello {
+                id: self.ordinal,
+                boot: self.boot,
+                generation: self.generation,
+                endpoint: endpoint(self.ordinal),
+                received_through: 0,
+                received_from_boot: None,
+            };
+            self.manager.set_peer(other, PeerSession::new(hello, other), link);
+        }
+    }
+
     fn settle(&mut self, now: u64) {
+        self.take_arrivals();
         if let Some(login) = &self.login {
             for ev in login.events.try_iter() {
                 assert!(self.manager.handle_server_event(ev, now));
@@ -427,7 +508,7 @@ impl Pair {
 /// The adjacent pair of claimed regions nearest the origin whose owners differ: `(a, b)`,
 /// `b` one step +x of `a`.
 fn host_seam(s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { id: h(0), hosts: HOSTS }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| fixed_owner(rc, s);
     for z in 1..47 {
         for x in 1..46 {
             let (a, b) = (RegionCoords::new(x, z), RegionCoords::new(x + 1, z));
@@ -447,11 +528,10 @@ fn two_hosts(db: &PgDb, dir: &std::path::Path) -> (Pair, (RegionCoords, RegionCo
     let mut sims = Vec::new();
     let mut s = 0;
     for ordinal in (0..u64::from(HOSTS)).map(HostId) {
-        let (store, claims) = claim(db, ordinal);
-        s = store.super_region_regions();
         let boot = 1000 + ordinal.0;
-        let mut links = start_links(&claims, ordinal, boot, TOKEN, dir, "127.0.0.1:0");
-        let generation = links.registered().generation;
+        let (store, mut links, claims) = fixed_host(db, dir, boot, TOKEN, "127.0.0.1:0");
+        s = store.super_region_regions();
+        let generation = store.world_generation().unwrap();
         // Its regions' halo re-seeds read the store (Task 19), as a region thread's do.
         let spawner = InlineSpawner::default().with_stored_terrain(Arc::new(world_store::TerrainFromStore(store.clone())));
         sims.push(Sim::with_spawner(ordinal, s, boot, generation, &mut links, spawner));
@@ -584,7 +664,7 @@ fn quic_world_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: Host
 
 /// A host's coordinator link a test can drop and make again (a manager installs its link
 /// once): `None` = down, its connection closed; each new link is a new generation.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct SwitchLink(Arc<std::sync::Mutex<(Option<server::roles::QuicWorldLink>, u64)>>);
 
 impl SwitchLink {
@@ -700,13 +780,23 @@ fn world(db: &PgDb, dir: &std::path::Path) -> World {
         switches.push(switch.clone());
         sim.manager.set_world_link(Box::new(switch), 1000 + ordinal as u64, 0);
         sim.manager.set_world_map(land_map());
-        let generation = server::claims::WorldGeneration::new(links[ordinal].registered().generation);
+        let generation = server::claims::WorldGeneration::new(c.store().world_generation().unwrap());
         generations.push(generation.clone());
         sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(c.clone(), generation));
     }
     pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
     let links = links.into_iter().map(Some).collect();
     World { pair, seam, coordinator: Some(coordinator), cert, links, claims, store, switches, generations }
+}
+
+/// Slot `i` of a per-host table (`World`'s, by host id): grown with `fill` up to it. Ids are
+/// issued in order, so a new host's slot is the next one.
+fn slot<T: Clone>(v: &mut Vec<T>, id: HostId, fill: T) -> &mut T {
+    let i = id.0 as usize;
+    while v.len() <= i {
+        v.push(fill.clone());
+    }
+    &mut v[i]
 }
 
 /// Runs `sql` on its own connection.
@@ -748,8 +838,7 @@ fn live_tick(w: &mut World) -> u64 {
 /// The seam region host `h` owns.
 fn seam_of(w: &World, h: HostId) -> RegionCoords {
     let (a, b) = w.seam;
-    let owner = game::Static { id: h, hosts: HOSTS };
-    if owner.owns(a, w.claims[h.0 as usize].store().super_region_regions()) {
+    if fixed(h).owns(a, w.claims[0].store().super_region_regions()) {
         a
     } else {
         b
@@ -808,24 +897,29 @@ fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
     w.coordinator = Some(coordinator);
 }
 
-/// Host `h` starts again as boot `boot`, in `server::run`'s order: the parts a crash left
-/// staged resolved, its super-regions claimed, its row registered (with its peer
-/// listener), its regions and in-flight rows from the store, its clock joining the live
-/// hosts', a link to the coordinator (if one is up), its cut writer, its keeper. Its
-/// registration. With no host up its clock starts where the world's stopped.
-fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: HostId, boot: u64) -> world_store::Registered {
+/// A host process starts again as boot `boot`, in `server::run`'s order: the parts a crash
+/// left staged resolved, REGISTERED (a new id: the next one — never the id of a host before),
+/// its share of the fixed table claimed under it as host `as_slot`'s (R3's layout: the
+/// replacement takes the dead host's place in the table; the store moved nothing to it), its
+/// regions and in-flight rows from the store, its clock joining the live hosts', a link to the
+/// coordinator (if one is up), its cut writer, its keeper. Its registration. With no host up
+/// its clock starts where the world's stopped.
+fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, as_slot: HostId, boot: u64) -> world_store::Registered {
     let first = db.open();
-    server::roles::recover_staged_cuts(&first, HOSTS).expect("the staged parts are resolved");
+    server::roles::resolve_before_claim(true, &first).expect("the staged parts are resolved");
     first.shutdown();
-    let (store, claims) = claim(db, h);
-    let mut links = start_links(&claims, h, boot, TOKEN, dir, "127.0.0.1:0");
-    let registered = links.registered();
+    let store = db.open();
+    let want = next_id(db);
+    let (mut links, registered) = boot_links(&store, want, &format!("host-{}", as_slot.0), boot, TOKEN, dir, "127.0.0.1:0");
+    let h = registered.id;
     let s = store.super_region_regions();
-    let owner = game::Static { id: h, hosts: HOSTS };
+    let share = fixed(as_slot);
+    let srs: Vec<game::SuperRegion> = game::Ownership::claim_set(&share, Some(extent()), s).into_iter().collect();
+    let claims = HostClaims::claim_srs(store.clone(), h, srs).unwrap();
     let stored = store.stored_regions().unwrap();
     let regions: std::collections::BTreeMap<RegionCoords, game::StoredRegion> = stored
         .keys()
-        .filter(|rc| owner.owns(**rc, s))
+        .filter(|rc| share.owns(**rc, s))
         .filter_map(|rc| claims.load_region(*rc).unwrap().map(|r| (*rc, r)))
         .collect();
     let mut spawner = InlineSpawner::with_portable(regions);
@@ -835,27 +929,97 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: HostId, boot
         spawner.tick_all();
     }
     let mut sim = Sim::with_spawner(h, s, boot, registered.generation, &mut links, spawner);
+    // A new id is in no fixed table: it answers from the directory (what it claimed above,
+    // the other hosts' rows as stored).
+    sim.manager.set_ownership(Box::new(game::PgClaim::new(h)), s);
+    let (rows, live) = server::claims::read_directory(&store, h).expect("the directory is read");
+    sim.manager.directory_read(rows, live);
     sim.manager.set_stored_regions(stored);
     sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
     let switch = SwitchLink(Arc::new(std::sync::Mutex::new((None, 0))));
     if let Some(c) = &w.coordinator {
         switch.replace(quic_world_link(c.addr, w.cert.clone(), h, boot, registered.id.0));
     }
-    w.switches[h.0 as usize] = switch.clone();
+    *slot(&mut w.switches, h, SwitchLink::default()) = switch.clone();
     sim.manager.set_world_link(Box::new(switch), boot, 0);
     sim.manager.set_world_map(land_map());
     let generation = server::claims::WorldGeneration::new(registered.generation);
-    w.generations[h.0 as usize] = generation.clone();
+    *slot(&mut w.generations, h, Default::default()) = generation.clone();
     sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(claims.clone(), generation));
-    let rc = seam_of(w, h);
-    let (player, _) = store.resolve_player(&format!("hosts-test-keeper-{h}")).unwrap();
+    let rc = seam_of(w, as_slot);
+    let (player, _) = store.resolve_player(&format!("hosts-test-keeper-{as_slot}")).unwrap();
     let now = w.pair.now();
     sim.keep(player, rc, now);
     let i = w.pair.sims.iter().position(|s| s.ordinal > h).unwrap_or(w.pair.sims.len());
     w.pair.sims.insert(i, sim);
+    while w.links.len() <= h.0 as usize {
+        w.links.push(None);
+    }
     w.links[h.0 as usize] = Some(links);
-    let old = std::mem::replace(&mut w.claims[h.0 as usize], claims);
-    old.store().clone().shutdown();
+    let fill = claims.clone();
+    *slot(&mut w.claims, h, fill) = claims;
+    registered
+}
+
+/// A fixed-table world after a host crash, Elastic 1's way: a `static` world is ONE host,
+/// so it recovers as a total crash. Every host still up dies too (the crash of a static world
+/// is the whole world's), then ONE process starts as boot `boot`: the parts left staged
+/// resolved, registered with nobody else live (its handle's lease 0: every other row is
+/// lapsed — they are dead) — the total-crash rule gives the new id every dirty row's land at
+/// `epoch + 1` and raises the generation once — and it runs the whole map alone (`static`
+/// with a table of itself) from the store, the keepers of both seam regions back. Its
+/// registration.
+fn restart_alone(w: &mut World, db: &PgDb, dir: &std::path::Path, boot: u64) -> world_store::Registered {
+    for h in w.pair.sims.iter().map(|s| s.ordinal).collect::<Vec<_>>() {
+        kill_host(w, h);
+    }
+    let first = db.open();
+    server::roles::resolve_before_claim(true, &first).expect("the staged parts are resolved");
+    first.shutdown();
+    let store = db.open();
+    store.set_host_lease_ms(0);
+    let want = next_id(db);
+    let (mut links, registered) = boot_links(&store, want, "host-alone", boot, TOKEN, dir, "127.0.0.1:0");
+    store.set_host_lease_ms(game::HOST_LEASE_MS);
+    let me = registered.id;
+    let s = store.super_region_regions();
+    let alone = game::Static { me, layout: vec![me] };
+    let claims = HostClaims::claim(store.clone(), &alone, Some(extent()), s).unwrap();
+    let stored = store.stored_regions().unwrap();
+    let regions: std::collections::BTreeMap<RegionCoords, game::StoredRegion> =
+        stored.keys().filter_map(|rc| claims.load_region(*rc).unwrap().map(|r| (*rc, r))).collect();
+    let mut spawner = InlineSpawner::with_portable(regions);
+    let target = w.pair.tick.load(std::sync::atomic::Ordering::SeqCst);
+    while spawner.world_tick() < target {
+        spawner.tick_all();
+    }
+    let mut sim = Sim::with_spawner(me, s, boot, registered.generation, &mut links, spawner);
+    sim.manager.set_ownership(Box::new(alone), s);
+    sim.manager.set_stored_regions(stored);
+    sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
+    let switch = SwitchLink(Arc::new(std::sync::Mutex::new((None, 0))));
+    if let Some(c) = &w.coordinator {
+        switch.replace(quic_world_link(c.addr, w.cert.clone(), me, boot, me.0));
+    }
+    *slot(&mut w.switches, me, SwitchLink::default()) = switch.clone();
+    sim.manager.set_world_link(Box::new(switch), boot, 0);
+    sim.manager.set_world_map(land_map());
+    let generation = server::claims::WorldGeneration::new(registered.generation);
+    *slot(&mut w.generations, me, Default::default()) = generation.clone();
+    sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(claims.clone(), generation));
+    let now = w.pair.now();
+    for rc in [w.seam.0, w.seam.1] {
+        let owner = fixed_owner(rc, s);
+        let (player, _) = store.resolve_player(&format!("hosts-test-keeper-{}", owner.0)).unwrap();
+        sim.keep_as(KEEPER + owner.0 as ClientId, player, rc, now);
+    }
+    w.pair.sims.push(sim);
+    while w.links.len() <= me.0 as usize {
+        w.links.push(None);
+    }
+    w.links[me.0 as usize] = Some(links);
+    let fill = claims.clone();
+    *slot(&mut w.claims, me, fill) = claims;
     registered
 }
 
@@ -966,57 +1130,20 @@ fn other(h: HostId) -> HostId {
     HostId(1 - h.0)
 }
 
-/// After host `dead` came back dirty (its generation one higher): the other host sees the
-/// newer generation, exits `WorldRolledBack` (once), and starts again; both run from the
-/// last committed cut and stay up for 5 s with the world's generation unchanged since.
-fn roll_back_and_restart_the_other(w: &mut World, db: &PgDb, dir: &std::path::Path, dead: HostId, generation: u64) {
-    let live = other(dead);
-    until_rolled_back(w, live);
-    assert_eq!(exit_host(w, live), server::claims::ServerExit::WorldRolledBack, "host {live} rolls back");
-    let again = restart_host(w, db, dir, live, 3000 + live.0);
-    assert_eq!((again.generation, again.bumped), (generation, false), "host {live} joins the new generation");
-    w.pair.until("both hosts attached again", |p| p.sims.len() == 2 && p.sims.iter().all(|s| s.manager.world_attached()));
-    let up = Instant::now();
-    while up.elapsed() < Duration::from_secs(5) {
-        w.pair.round();
-        for h in (0..u64::from(HOSTS)).map(HostId) {
-            assert_eq!(sim(w, h).manager.take_higher_generation(), None, "host {h} sees no newer generation");
-            assert!(!w.generations[h.0 as usize].is_set(), "host {h} stays up");
-        }
-    }
-    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation, "raised exactly once");
-}
-
-/// Host `ordinal` booted as `server::run` boots it under `claim`: registered FIRST with an
-/// empty fence, then its own rows re-claimed (epochs bumped), its manager on a `PgClaim`
-/// directory read from the store, its claim loop ([`server::claims::DirectoryKeeper`]).
-fn claim_host(db: &PgDb, dir: &std::path::Path, ordinal: HostId, boot: u64) -> (Sim, PeerLinks, HostClaims) {
+/// A host booted as `server::run` boots it under `claim`: registered FIRST (the next id),
+/// holding nothing but what the registration gave it (a total crash's land, taken into its
+/// fence), its manager on a `PgClaim` directory read from the store, its claim loop
+/// ([`server::claims::DirectoryKeeper`]).
+fn claim_host(db: &PgDb, dir: &std::path::Path, boot: u64) -> (Sim, PeerLinks, HostClaims) {
     let store = db.open();
     let s = store.super_region_regions();
+    let want = next_id(db);
+    let (mut links, registered) = boot_links(&store, want, &format!("host-{}", want.0), boot, TOKEN, dir, "127.0.0.1:0");
+    let ordinal = registered.id;
     let claims = HostClaims::none(store.clone(), ordinal);
-    let config = PeerLinkConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        cert_hash_file: dir.join(format!("host-{ordinal}.peer.cert-sha256")),
-        delay: Duration::ZERO,
-    };
-    let stop = std::sync::atomic::AtomicBool::new(false);
-    let mut links = PeerLinks::start(
-        ordinal,
-        HOSTS,
-        boot,
-        endpoint(ordinal),
-        TOKEN.into(),
-        store.clone(),
-        &claims.fence(),
-        config,
-        CrashPolicy::Succession,
-        &stop,
-    )
-    .expect("the peer links start");
-    claims.reclaim_own(boot).expect("its own rows re-claimed");
-    let generation = links.registered().generation;
-    let mut sim = Sim::with_spawner(ordinal, s, boot, generation, &mut links, InlineSpawner::default());
-    sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal, HOSTS)), s);
+    claims.reclaim_own(boot).expect("what the registration gave it taken");
+    let mut sim = Sim::with_spawner(ordinal, s, boot, registered.generation, &mut links, InlineSpawner::default());
+    sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal)), s);
     let (rows, live) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
     sim.manager.directory_read(rows, live);
     sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone(), boot));

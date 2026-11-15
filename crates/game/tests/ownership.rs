@@ -14,7 +14,8 @@ fn super_region_floor_div() {
     assert_eq!(super_region_of(RegionCoords::new(16, -16), s), (1, -1));
 }
 
-use game::{heir_of, ownership_from_values, rendezvous_owner, AllInOne, CrashPolicy, Directory, Owner, Ownership, PgClaim, Static};
+use crate::common::{fixed, rendezvous_owner};
+use game::{heir_of, ownership_for, AllInOne, CrashPolicy, Directory, Owner, Ownership, PgClaim, Static};
 use std::collections::BTreeSet;
 
 fn owner_counts(hosts: u32) -> Vec<u32> {
@@ -47,9 +48,33 @@ fn rendezvous_is_stable_and_balanced() {
     assert_eq!(rendezvous_owner((3, -4), 1), h(0));
 }
 
+/// Elastic 1: `Static` is a fixed table over its hosts' ids (no count): every super-region's
+/// owner is one of the table, the same in every host's instance, and both hosts own some of
+/// an 8 × 8 range — whatever the ids' numbers.
+#[test]
+fn a_static_layout_is_a_fixed_table() {
+    let a = Static { me: h(1), layout: vec![h(1), h(2)] };
+    let b = Static { me: h(2), layout: vec![h(1), h(2)] };
+    let mut seen = BTreeSet::new();
+    for sx in 0..8 {
+        for sz in 0..8 {
+            let owner = match Ownership::owner_of(&a, (sx, sz)) {
+                Owner::Me => h(1),
+                Owner::Host(o) => o,
+                other => panic!("({sx}, {sz}) is {other:?} in a fixed table"),
+            };
+            assert!(owner == h(1) || owner == h(2), "({sx}, {sz}) owned by {owner}, not one of the table");
+            let theirs = Ownership::owner_of(&b, (sx, sz));
+            assert_eq!(theirs, if owner == h(2) { Owner::Me } else { Owner::Host(h(1)) }, "both instances agree on ({sx}, {sz})");
+            seen.insert(owner);
+        }
+    }
+    assert_eq!(seen, [h(1), h(2)].into_iter().collect(), "both hosts appear over 8 x 8");
+}
+
 /// The two static policies answer through the trait as the enum they replaced did: every
-/// region has exactly one owner, the claim sets partition the map, and the environment
-/// parses to the same policies (with the same refusals).
+/// region has exactly one owner, the claim sets partition the map, and a policy word builds
+/// the same policies for an issued id (with the same refusals).
 #[test]
 fn static_and_all_in_one_answer_as_before() {
     let s = DEFAULT_SUPER_REGION_REGIONS;
@@ -59,11 +84,11 @@ fn static_and_all_in_one_answer_as_before() {
     let hosts = 3;
     for x in -40..40 {
         let rc = RegionCoords::new(x, 7);
-        let owners = (0..hosts).filter(|&ordinal| Static { id: h(u64::from(ordinal)), hosts }.owns(rc, s)).count();
+        let owners = (0..hosts).filter(|&ordinal| fixed(h(u64::from(ordinal)), hosts).owns(rc, s)).count();
         assert_eq!(owners, 1, "{rc:?} has exactly one owner");
         let sr = super_region_of(rc, s);
         for ordinal in 0..hosts {
-            let answer = Ownership::owner_of(&Static { id: h(u64::from(ordinal)), hosts }, sr);
+            let answer = Ownership::owner_of(&fixed(h(u64::from(ordinal)), hosts), sr);
             let owner = rendezvous_owner(sr, hosts);
             assert_eq!(answer, if owner == h(u64::from(ordinal)) { Owner::Me } else { Owner::Host(owner) }, "{rc:?} on host {ordinal}");
         }
@@ -72,27 +97,20 @@ fn static_and_all_in_one_answer_as_before() {
     // x -20..20 -> super-regions -2..=1, z -5..5 -> -1..=0: 8 of them.
     assert_eq!(all.claim_set(Some(extent), s).len(), 8);
     assert!(all.claim_set(None, s).is_empty(), "a procedural world claims nothing");
-    let shares: usize = (0..hosts).map(|ordinal| Static { id: h(u64::from(ordinal)), hosts }.claim_set(Some(extent), s).len()).sum();
+    let shares: usize = (0..hosts).map(|ordinal| fixed(h(u64::from(ordinal)), hosts).claim_set(Some(extent), s).len()).sum();
     assert_eq!(shares, 8, "the shares partition the extent");
 
-    let parsed = |o, n, h| ownership_from_values(o, n, h).map(|p| (p.me(), p.hosts(), p.runs_every_host()));
-    assert_eq!(parsed(None, None, None), Ok((h(0), 1, true)), "allinone by default");
-    assert_eq!(parsed(Some("allinone"), Some(""), None), Ok((h(0), 1, true)));
-    assert_eq!(parsed(Some("static"), Some("1"), Some("3")), Ok((h(1), 3, false)));
-    let one_of_three = ownership_from_values(Some("static"), Some("1"), Some("3")).unwrap();
+    let built = |o: &str| ownership_for(o, h(7)).map(|p| (p.me(), p.runs_every_host(), p.policy()));
+    assert_eq!(built(""), Ok((h(0), true, CrashPolicy::Rollback)), "allinone by default: SOLO, every host");
+    assert_eq!(built(" allinone "), Ok((h(0), true, CrashPolicy::Rollback)));
+    assert_eq!(built("static"), Ok((h(7), false, CrashPolicy::Rollback)));
+    let alone = ownership_for("static", h(7)).unwrap();
     for sx in -8..8 {
-        let owner = rendezvous_owner((sx, 2), 3);
-        assert_eq!(one_of_three.owner_of((sx, 2)), if owner == h(1) { Owner::Me } else { Owner::Host(owner) });
+        assert_eq!(alone.owner_of((sx, 2)), Owner::Me, "a static host is alone: it owns everything");
     }
-    for bad in [
-        (Some("static"), None, Some("3")),
-        (Some("static"), Some("3"), Some("3")),
-        (Some("static"), Some("0"), Some("0")),
-        (Some("static"), Some("x"), Some("3")),
-        (Some("allinone"), Some("1"), Some("3")),
-        (Some("sharded"), None, None),
-    ] {
-        assert!(ownership_from_values(bad.0, bad.1, bad.2).is_err(), "{bad:?}");
+    for bad in ["sharded", "dynamic"] {
+        let err = ownership_for(bad, h(7)).unwrap_err();
+        assert!(err.contains("VOXEL_OWNERSHIP"), "{err}");
     }
 }
 
@@ -127,7 +145,7 @@ fn directory_answers_me_host_free_unknown() {
     assert!(d.owned_by(h(3)).is_empty());
 
     // The policy over it.
-    let mut claim = PgClaim::new(h(1), 3);
+    let mut claim = PgClaim::new(h(1));
     assert_eq!(claim.policy(), CrashPolicy::Succession);
     assert_eq!(Ownership::owner_of(&claim, (0, 0)), Owner::Unknown);
     claim.directory_mut().expect("a directory").replace(vec![((0, 0), Some(h(1)), 1), ((0, 1), Some(h(0)), 1)]);
@@ -136,14 +154,11 @@ fn directory_answers_me_host_free_unknown() {
         [Owner::Me, Owner::Host(h(0)), Owner::Free]
     );
     assert_eq!(claim.claim_set(Some(game::MapExtent { origin: RegionCoords::new(0, 0), width: 1, height: 3 }), 1).len(), 1);
-    assert!(AllInOne.directory_mut().is_none() && Static { id: h(0), hosts: 2 }.directory_mut().is_none());
-    assert_eq!((AllInOne.policy(), Static { id: h(0), hosts: 2 }.policy()), (CrashPolicy::Rollback, CrashPolicy::Rollback));
-    let parsed = ownership_from_values(Some("claim"), Some("2"), Some("3")).expect("claim parses");
-    assert_eq!((parsed.me(), parsed.hosts(), parsed.policy()), (h(2), 3, CrashPolicy::Succession));
-    assert_eq!(parsed.owner_of((0, 0)), Owner::Unknown, "nothing read yet");
-    for bad in [(Some("claim"), None, Some("3")), (Some("claim"), Some("3"), Some("3"))] {
-        assert!(ownership_from_values(bad.0, bad.1, bad.2).is_err(), "{bad:?}");
-    }
+    assert!(AllInOne.directory_mut().is_none() && fixed(h(0), 2).directory_mut().is_none());
+    assert_eq!((AllInOne.policy(), fixed(h(0), 2).policy()), (CrashPolicy::Rollback, CrashPolicy::Rollback));
+    let built = ownership_for("claim", h(42)).expect("claim builds");
+    assert_eq!((built.me(), built.policy()), (h(42), CrashPolicy::Succession), "any issued id, no count");
+    assert_eq!(built.owner_of((0, 0)), Owner::Unknown, "nothing read yet");
 }
 
 /// A row is only ever replaced by a newer epoch: a stale read (or a late `Owns`) never

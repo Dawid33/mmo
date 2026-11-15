@@ -192,7 +192,7 @@ pub const SUCCESSION_DECLARE_ROUNDS: usize = 400;
 /// The adjacent pair of regions nearest the origin whose owners differ (`hosts` hosts,
 /// `s` regions per super-region side): `(a, b)`, `b` one step +x or +z of `a`.
 pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| super::fixed(HostId::SOLO, hosts).owner_of(rc, s);
     for a in nearest_first(64) {
         for b in [RegionCoords::new(a.x + 1, a.z), RegionCoords::new(a.x, a.z + 1)] {
             if owner(a) != owner(b) {
@@ -207,7 +207,7 @@ pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
 /// regions per super-region side, 4 hosts), as `[a, a+x, a+x+z, a+z]` — a loop round
 /// its corner.
 pub fn four_host_corner(s: u32) -> [RegionCoords; 4] {
-    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts: 4 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| super::fixed(HostId::SOLO, 4).owner_of(rc, s);
     for a in nearest_first(64) {
         let block = [
             a,
@@ -396,7 +396,7 @@ impl MultiRig {
         let mut rigs = Vec::new();
         let mut homes = Vec::new();
         for h in host_ids(hosts) {
-            let ownership = game::Static { id: h, hosts };
+            let ownership = super::fixed(h, hosts);
             let mut spawner = match &stored {
                 Some(regions) => InlineSpawner::with_portable(regions.clone()),
                 None => InlineSpawner::default(),
@@ -404,7 +404,7 @@ impl MultiRig {
             if let Some(f) = schedule {
                 spawner.set_schedule(Some(f(mix(seed, h.0))));
             }
-            let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, Box::new(ownership), s);
+            let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, Box::new(ownership.clone()), s);
             rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(seed, 2000 + h.0)));
             rigs.push(rig);
             let home = nearest_first(64)
@@ -1010,7 +1010,7 @@ impl MultiRig {
     pub fn with_directory(&mut self, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
         let hosts = self.hosts.len() as u32;
         for (h, rig) in self.hosts.iter_mut().enumerate() {
-            let mut claim = game::PgClaim::new(HostId(h as u64), hosts);
+            let mut claim = game::PgClaim::new(HostId(h as u64));
             let directory = game::Ownership::directory_mut(&mut claim).expect("a directory");
             for (sr, owner, epoch) in &rows {
                 directory.set(*sr, *owner, *epoch);
@@ -1123,7 +1123,7 @@ impl MultiRig {
     pub fn set_directory(&mut self, h: HostId, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
         let hosts = self.hosts.len() as u32;
         let m = &mut self.hosts[h.0 as usize].manager;
-        m.set_ownership(Box::new(game::PgClaim::new(h, hosts)), self.s);
+        m.set_ownership(Box::new(game::PgClaim::new(h)), self.s);
         let rows = rows.into_iter().map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch)).collect();
         m.directory_read(rows, host_ids(hosts).collect());
         assert!(m.owns(self.homes[h.0 as usize]), "the rows give host {h} its keeper's home");
@@ -1238,7 +1238,7 @@ impl MultiRig {
             (None, Some(rows)) => rows.clone(),
             (None, None) => panic!("a host starts again only under `claim` (with_directory)"),
         };
-        let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, Box::new(game::PgClaim::new(h, n)), self.s);
+        let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, Box::new(game::PgClaim::new(h)), self.s);
         rig.now_ms = now;
         rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(self.seed, 2000 + h.0 + boot)));
         let base = self.last_cut.as_ref().map_or(CutId(0), |(c, _)| *c);

@@ -1,12 +1,16 @@
 //! Host ↔ host over the service link (R3): one [`QuicPeerLink`] per other host, the
 //! [`game::PeerLink`] the manager's [`game::PeerSession`]s run over.
 //!
-//! **One link per pair**: the HIGHER ordinal dials the LOWER. Every host binds one
-//! `svc-link` listener ([`PEER_BIND_ENV`]) that admits `PeerRole::Host` peers of a higher
-//! ordinal below `hosts` with the shared service token, writes its address and pin into
-//! its `hosts` row (its one `register_host` of the boot), and finds each lower ordinal's
-//! address and pin in [`StoreHandle::hosts`] — re-read every [`PEER_DISCOVERY_SECS`] while
-//! that peer is down (a restarted peer may listen elsewhere).
+//! **One link per pair**: the HIGHER id dials the LOWER (ids are issued at registration, so
+//! a newer host dials every older one). Every host binds one `svc-link` listener
+//! ([`PEER_BIND_ENV`], [`PeerListener`]) BEFORE it registers — its `hosts` row names the
+//! listener's address and pin — and starts its links once the store issued its id
+//! ([`PeerLinks::start`]): a dialing link to every lower live row it reads then, each one
+//! re-reading that row every [`PEER_DISCOVERY_SECS`] while the peer is down. A higher host
+//! is admitted when it dials in, by its live `hosts` row (id and boot), and its link is made
+//! then ([`PeerLinks::take_arrived`]): a host that registers later reaches this one without
+//! a link object made in advance. Elastic 1 Task 4 replaces the one read at start with a
+//! periodic refresh (a lower host is never new: ids only grow).
 //!
 //! **One ordered stream** per connection carries every frame (hello, reliable, ack,
 //! volatile) in send order. Every inbound frame is tagged with its connection (the
@@ -26,21 +30,21 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, Sender};
-use game::{HostEndpoint, PeerLink, PeerMsg};
+use game::{PeerLink, PeerMsg};
 use svc_link::{LinkDialer, LinkEvent, LinkHello, LinkListener, PeerId, PeerRole, PeerSenders};
-use world_store::{Fence, NewHost, Registered, StoreError, StoreHandle};
+use world_store::StoreHandle;
 
-/// Environment: where a host's peer listener binds (default `127.0.0.1:{6500 + ordinal}`).
+/// Environment: where a host's peer listener binds (default [`DEFAULT_PEER_BIND`]; several
+/// hosts on one machine each set their own).
 pub const PEER_BIND_ENV: &str = "VOXEL_PEER_BIND";
-/// The default peer listener port of host 0; host `n` listens on this plus `n`.
-pub const PEER_PORT_BASE: u16 = 6500;
+/// The peer listener's address when [`PEER_BIND_ENV`] is unset.
+pub const DEFAULT_PEER_BIND: &str = "127.0.0.1:6500";
 /// Environment: the file a host writes its peer listener's certificate pin to (the
 /// certificate and key are kept beside it, so a restart keeps the pin). Default
-/// `target/dev-r3/host-{ordinal}.peer.cert-sha256`.
+/// `target/dev-r3/<name>.peer.cert-sha256` (`<name>`: `VOXEL_HOST_NAME`, `host` when empty).
 pub const PEER_CERT_HASH_FILE_ENV: &str = "VOXEL_PEER_CERT_HASH_FILE";
 /// Environment: the QUIC address players reach this host at (`ServerPacket::Host`, the
 /// `hosts` row). Default `127.0.0.1:{VOXEL_SERVER_PORT}`.
@@ -58,24 +62,18 @@ pub const PEER_LINK_DELAY_WARNING: &str = "peer link delay injected — measurem
 pub const PEER_DISCOVERY_SECS: u64 = 2;
 
 /// The peer listener's address from [`PEER_BIND_ENV`]'s value; unset or empty is
-/// `127.0.0.1:{PEER_PORT_BASE + ordinal}`.
-pub fn peer_bind_from(ordinal: HostId, value: Option<&str>) -> Result<SocketAddr, String> {
-    match value.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(v) => v.parse().map_err(|_| format!("{PEER_BIND_ENV}={v:?} is not an address (ip:port)")),
-        None => u16::try_from(ordinal.0)
-            .ok()
-            .and_then(|o| PEER_PORT_BASE.checked_add(o))
-            .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
-            .ok_or_else(|| format!("host {ordinal} has no default peer port: set {PEER_BIND_ENV}")),
-    }
+/// [`DEFAULT_PEER_BIND`] (nothing is derived from a host number any more).
+pub fn peer_bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
+    let v = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_PEER_BIND);
+    v.parse().map_err(|_| format!("{PEER_BIND_ENV}={v:?} is not an address (ip:port)"))
 }
 
 /// The peer pin file from [`PEER_CERT_HASH_FILE_ENV`]'s value; unset or empty is
-/// `target/dev-r3/host-{ordinal}.peer.cert-sha256`.
-pub fn peer_cert_hash_file_from(ordinal: HostId, value: Option<&str>) -> PathBuf {
+/// `target/dev-r3/<name>.peer.cert-sha256` for host name `name` (`host` when it is empty).
+pub fn peer_cert_hash_file_from(name: &str, value: Option<&str>) -> PathBuf {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         Some(v) => PathBuf::from(v),
-        None => PathBuf::from(format!("target/dev-r3/host-{}.peer.cert-sha256", ordinal.0)),
+        None => PathBuf::from(format!("target/dev-r3/{}.peer.cert-sha256", crate::file_word(name))),
     }
 }
 
@@ -132,11 +130,11 @@ pub struct PeerLinkConfig {
 impl PeerLinkConfig {
     /// From [`PEER_BIND_ENV`], [`PEER_CERT_HASH_FILE_ENV`] and [`PEER_LINK_DELAY_MS_ENV`]
     /// (a non-zero delay logs [`PEER_LINK_DELAY_WARNING`]).
-    pub fn from_env(ordinal: HostId) -> Result<PeerLinkConfig, String> {
+    pub fn from_env(host_name: &str) -> Result<PeerLinkConfig, String> {
         let var = |name: &str| std::env::var(name).ok();
         let config = PeerLinkConfig {
-            bind: peer_bind_from(ordinal, var(PEER_BIND_ENV).as_deref())?,
-            cert_hash_file: peer_cert_hash_file_from(ordinal, var(PEER_CERT_HASH_FILE_ENV).as_deref()),
+            bind: peer_bind_from(var(PEER_BIND_ENV).as_deref())?,
+            cert_hash_file: peer_cert_hash_file_from(host_name, var(PEER_CERT_HASH_FILE_ENV).as_deref()),
             delay: peer_link_delay_from(var(PEER_LINK_DELAY_MS_ENV).as_deref())?,
         };
         if !config.delay.is_zero() {
@@ -144,36 +142,6 @@ impl PeerLinkConfig {
         }
         Ok(config)
     }
-}
-
-/// Registers this process — the boot's ONE `register_host` — with where players reach it
-/// (`endpoint`) and, with `peer`, its peer listener's address and pin. Elastic 1 task 2 adapter
-/// (Task 3 deletes it): the store issues the id; the process is named `host-<ordinal>` after
-/// its configured `ordinal` (so a restart lapses its old row by name), and the caller uses the
-/// returned id only where it is cheap (the heartbeat, its hellos). `fence` is no longer part of
-/// a registration. `Ok(None)`: `stop` was set before it.
-#[allow(clippy::too_many_arguments)]
-pub fn register(
-    store: &StoreHandle,
-    _fence: &Fence,
-    ordinal: HostId,
-    boot: u64,
-    endpoint: &HostEndpoint,
-    peer: Option<(String, String)>,
-    policy: game::CrashPolicy,
-    stop: &AtomicBool,
-) -> Result<Option<Registered>, StoreError> {
-    let (peer_addr, peer_cert) = peer.unzip();
-    let host = NewHost {
-        name: format!("host-{}", ordinal.0),
-        boot,
-        peer_addr,
-        peer_cert,
-        quic: endpoint.quic.clone(),
-        webtransport: endpoint.webtransport.clone(),
-        wt_cert_hash: endpoint.cert_hash.clone(),
-    };
-    crate::lease::register_or_wait(store, host, policy, stop)
 }
 
 /// The other hosts that left the world cleanly in a committed leave cut, each with the boot
@@ -184,31 +152,6 @@ pub fn register(
 /// [`game::WorldManager::note_left_peers`]; a later boot is expected again from its hello.
 pub fn left_cleanly(store: &world_store::StoreHandle, me: HostId) -> Result<Vec<(HostId, u64)>, world_store::StoreError> {
     Ok(store.hosts()?.into_iter().filter(|r| r.clean && r.id != me).map(|r| (r.id, r.boot)).collect())
-}
-
-/// The payload of a [`PeerLinks::start`] error when the stop signal came while the boot
-/// waited to register ([`is_stopped`]).
-#[derive(Debug)]
-struct StoppedWhileRegistering;
-
-impl std::fmt::Display for StoppedWhileRegistering {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("stopped while waiting to register")
-    }
-}
-
-impl std::error::Error for StoppedWhileRegistering {}
-
-/// Whether a [`PeerLinks::start`] error is the stop signal, set while the boot waited to
-/// register: exit 0. (Only that error: any other, an EINTR among them, is not.)
-pub fn is_stopped(e: &io::Error) -> bool {
-    e.get_ref().is_some_and(|e| e.is::<StoppedWhileRegistering>())
-}
-
-/// Whether a [`PeerLinks::start`] error is the store's fence (this boot was replaced
-/// between its claim and its registration): exit fenced, not a start-up error.
-pub fn is_fenced(e: &io::Error) -> bool {
-    e.get_ref().and_then(|e| e.downcast_ref::<StoreError>()).is_some_and(|e| matches!(e, StoreError::Fenced { .. }))
 }
 
 // --- the link --------------------------------------------------------------------------
@@ -425,43 +368,49 @@ impl PeerLink for QuicPeerLink {
 
 // --- the listener's admission ----------------------------------------------------------
 
-/// Which host peers the listener of host `mine` (of `hosts`) serves: a higher ordinal
-/// below `hosts` (the higher dials the lower), one live connection per ordinal — the
-/// highest registration number's (`hosts.reg`: a later boot of the ordinal registered
-/// later), ties to the newer connection.
+/// Whether host `id`'s boot `boot` has a live `hosts` row now (`Err`: the row could not be
+/// read). The listener's admission asks it of every host that dials in.
+pub type LiveRow = Box<dyn Fn(HostId, u64) -> Result<bool, String> + Send>;
+
+/// Which host peers the listener of host `mine` serves: a HIGHER id (the higher dials the
+/// lower) whose `hosts` row is live with the boot its hello names ([`LiveRow`]: no host count,
+/// no id known in advance), one live connection per id — the newest, unless its registration
+/// number is lower than one seen (a stale process).
 struct Admission {
     mine: HostId,
-    hosts: u32,
+    live_row: LiveRow,
     best_reg: BTreeMap<HostId, u64>,
     live: BTreeMap<HostId, PeerId>,
 }
 
 impl Admission {
-    fn new(mine: HostId, hosts: u32) -> Self {
-        Admission { mine, hosts, best_reg: BTreeMap::new(), live: BTreeMap::new() }
+    fn new(mine: HostId, live_row: LiveRow) -> Self {
+        Admission { mine, live_row, best_reg: BTreeMap::new(), live: BTreeMap::new() }
     }
 
-    /// `peer` said hello as `role`: its ordinal and the connection it replaces, or why
-    /// it is refused.
+    /// `peer` said hello as `role`: its id and the connection it replaces, or why it is
+    /// refused.
     fn admit(&mut self, peer: PeerId, role: &PeerRole) -> Result<(HostId, Option<PeerId>), String> {
-        let PeerRole::Host { id: ordinal, reg, .. } = *role else {
+        let PeerRole::Host { id, boot, reg } = *role else {
             return Err(format!("{role:?} is not a host"));
         };
-        if ordinal.0 >= u64::from(self.hosts) {
-            return Err(format!("host {ordinal} is not below {} hosts", self.hosts));
+        if id == self.mine {
+            return Err(format!("host {id} is this host"));
         }
-        if ordinal == self.mine {
-            return Err(format!("host {ordinal} is this host"));
+        if id < self.mine {
+            return Err(format!("host {id} is lower: this host dials it"));
         }
-        if ordinal < self.mine {
-            return Err(format!("host {ordinal} is lower: this host dials it"));
-        }
-        let best = self.best_reg.get(&ordinal).copied().unwrap_or(0);
+        let best = self.best_reg.get(&id).copied().unwrap_or(0);
         if reg < best {
-            return Err(format!("host {ordinal} with registration {reg}: registration {best} has it (a stale process)"));
+            return Err(format!("host {id} with registration {reg}: registration {best} has it (a stale process)"));
         }
-        self.best_reg.insert(ordinal, reg);
-        Ok((ordinal, self.live.insert(ordinal, peer)))
+        match (self.live_row)(id, boot) {
+            Ok(true) => {}
+            Ok(false) => return Err(format!("host {id} (boot {boot:#x}) has no live hosts row")),
+            Err(e) => return Err(format!("host {id}'s hosts row could not be read: {e}")),
+        }
+        self.best_reg.insert(id, reg);
+        Ok((id, self.live.insert(id, peer)))
     }
 
     /// `peer`'s connection ended.
@@ -472,14 +421,18 @@ impl Admission {
     }
 }
 
-/// The listener's events, routed to each higher ordinal's link.
+/// The listener's events, routed to each higher host's link; the first admitted connection of
+/// a host makes its link ([`QuicPeerLink`] over the listener), handed to the main loop on
+/// `arrivals` ([`PeerLinks::take_arrived`]).
 fn route_listener(
     mut admission: Admission,
     events: Receiver<(PeerId, LinkEvent<PeerMsg>)>,
     senders: PeerSenders<PeerMsg>,
-    links: BTreeMap<HostId, Sender<Inbound>>,
+    arrivals: Sender<(HostId, Box<dyn PeerLink + Send>)>,
+    delay: Duration,
     wake: Sender<()>,
 ) {
+    let mut links: BTreeMap<HostId, Sender<Inbound>> = BTreeMap::new();
     let mut of_peer: BTreeMap<PeerId, HostId> = BTreeMap::new();
     for (peer, ev) in events {
         let routed = match ev {
@@ -491,6 +444,16 @@ fn route_listener(
                         senders.close(old);
                     }
                     of_peer.insert(peer, ordinal);
+                    if !links.contains_key(&ordinal) {
+                        let (inbound, link_events) = crossbeam::channel::unbounded();
+                        let wire = Box::new(ListenerWire(senders.clone()));
+                        let link = QuicPeerLink::new(ordinal, wire, link_events, delay, wake.clone());
+                        log::info!("[peers] host {ordinal} dialed in: a link to it");
+                        if arrivals.send((ordinal, Box::new(link))).is_err() {
+                            return;
+                        }
+                        links.insert(ordinal, inbound);
+                    }
                     Some((ordinal, Inbound::Up(peer.0)))
                 }
                 Err(why) => {
@@ -687,97 +650,114 @@ fn dial_peer(
 
 // --- the set of links --------------------------------------------------------------------
 
-/// A host's peer listener and its links to every other host of the world.
-pub struct PeerLinks {
+/// A host's peer listener, bound before the host registers (its `hosts` row names the
+/// listener's address and pin); its connections wait until [`PeerLinks::start`] routes them.
+pub struct PeerListener {
     listener: LinkListener,
-    links: Vec<(HostId, Box<dyn PeerLink + Send>)>,
-    registered: Registered,
-    wake: Receiver<()>,
-    /// Per lower ordinal: whether its dialing thread holds a dialer now.
-    dialing: BTreeMap<HostId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    events: Receiver<(PeerId, LinkEvent<PeerMsg>)>,
+    senders: PeerSenders<PeerMsg>,
+    advertised: SocketAddr,
+    token: String,
+    config: PeerLinkConfig,
 }
 
-impl PeerLinks {
-    /// Binds this host's peer listener (`config.bind`, its pin written to
-    /// `config.cert_hash_file`), registers the boot — the boot's one `register_host`, with
-    /// the listener's address and pin and `endpoint`'s addresses — and starts a link to
-    /// every other of `hosts` hosts: a higher ordinal dials this listener, a lower one is
-    /// dialed at the address its `hosts` row names. `token` is the shared service token;
-    /// `fence` this boot's claim; `policy` and `stop` as [`register`]'s. A fenced registration
-    /// is an error [`is_fenced`] knows, a stop while it waited one [`is_stopped`] knows.
-    #[allow(clippy::too_many_arguments)]
-    pub fn start(
-        ordinal: HostId,
-        hosts: u32,
-        boot: u64,
-        endpoint: HostEndpoint,
-        token: String,
-        store: StoreHandle,
-        fence: &Fence,
-        config: PeerLinkConfig,
-        policy: game::CrashPolicy,
-        stop: &AtomicBool,
-    ) -> io::Result<PeerLinks> {
+impl PeerListener {
+    /// Binds `config.bind` (its pin written to `config.cert_hash_file`) with the shared service
+    /// `token`; what peers dial is [`ADVERTISE_PEER_ENV`], else the bound address.
+    pub fn bind(config: PeerLinkConfig, token: String) -> io::Result<PeerListener> {
         if let Some(dir) = config.cert_hash_file.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
         let (listener, events, senders) =
             LinkListener::bind::<PeerMsg, PeerMsg>(config.bind, token.clone(), Some(config.cert_hash_file.clone()))?;
-        let bound = listener.local_addr();
-        let advertised = advertise_peer_from(std::env::var(ADVERTISE_PEER_ENV).ok().as_deref(), bound)
+        let advertised = advertise_peer_from(std::env::var(ADVERTISE_PEER_ENV).ok().as_deref(), listener.local_addr())
             .map_err(io::Error::other)?;
-        let peer = Some((advertised.to_string(), listener.cert_sha256().to_string()));
-        let registered = register(&store, fence, ordinal, boot, &endpoint, peer, policy, stop)
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::other(StoppedWhileRegistering))?;
-        log::info!(
-            "[peers] host {ordinal} of {hosts} (registered as {}): peers dial {advertised} (bound {bound}, pin {})",
-            registered.id,
-            listener.cert_sha256()
-        );
-        // Task 2 adapter: the hello names the issued id (the registration number too), the
-        // links below still the configured ordinals (Task 3 makes them one).
-        let hello = LinkHello::new(token, PeerRole::Host { id: registered.id, boot, reg: registered.id.0 });
-        let (wake_tx, wake) = crossbeam::channel::bounded(1);
-        let mut links: Vec<(HostId, Box<dyn PeerLink + Send>)> = Vec::new();
-        let mut routes = BTreeMap::new();
-        let mut dialing = BTreeMap::new();
-        for other in (0..u64::from(hosts)).map(HostId).filter(|&o| o != ordinal) {
-            let (inbound, events) = crossbeam::channel::unbounded();
-            let wire: Box<dyn PeerWire + Send> = if other > ordinal {
-                routes.insert(other, inbound);
-                Box::new(ListenerWire(senders.clone()))
-            } else {
-                let (cmds_tx, cmds) = crossbeam::channel::unbounded();
-                let (hello, store, wake) = (hello.clone(), store.clone(), wake_tx.clone());
-                let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                dialing.insert(other, flag.clone());
-                std::thread::Builder::new()
-                    .name(format!("peer-dial-{other}"))
-                    .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake, flag))?;
-                Box::new(DialerWire(cmds_tx))
-            };
-            links.push((other, Box::new(QuicPeerLink::new(other, wire, events, config.delay, wake_tx.clone()))));
-        }
-        std::thread::Builder::new()
-            .name("peer-listener".into())
-            .spawn(move || route_listener(Admission::new(ordinal, hosts), events, senders, routes, wake_tx))?;
-        Ok(PeerLinks { listener, links, registered, wake, dialing })
+        Ok(PeerListener { listener, events, senders, advertised, token, config })
     }
 
-    /// The links, one per other host (by ordinal), for [`game::WorldManager::set_peer`];
+    /// What the `hosts` row names: the address peers dial and the listener's pin.
+    pub fn row_fields(&self) -> (String, String) {
+        (self.advertised.to_string(), self.listener.cert_sha256().to_string())
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.listener.local_addr()
+    }
+}
+
+/// A host's peer listener and its links to the other hosts of the world.
+pub struct PeerLinks {
+    listener: LinkListener,
+    links: Vec<(HostId, Box<dyn PeerLink + Send>)>,
+    arrivals: Receiver<(HostId, Box<dyn PeerLink + Send>)>,
+    wake: Receiver<()>,
+    /// Per lower host: whether its dialing thread holds a dialer now.
+    dialing: BTreeMap<HostId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl PeerLinks {
+    /// Starts the links of host `me` (the id the store issued it), boot `boot`, over its bound
+    /// `listener`: a dialing link to every LOWER id whose `hosts` row `store` shows live now
+    /// (read once; each link re-reads its row while its peer is down), and an admission of
+    /// higher hosts by their live rows — each one's link is made when it first dials in
+    /// ([`Self::take_arrived`]).
+    pub fn start(listener: PeerListener, me: HostId, boot: u64, store: StoreHandle) -> io::Result<PeerLinks> {
+        let PeerListener { listener, events, senders, advertised, token, config } = listener;
+        let rows = store.hosts().map_err(io::Error::other)?;
+        let lower: Vec<HostId> =
+            rows.iter().filter(|r| r.id < me && r.state == game::HOST_LIVE && !r.clean).map(|r| r.id).collect();
+        log::info!(
+            "[peers] host {me}: peers dial {advertised} (bound {}, pin {}); dialing the older live hosts {lower:?}",
+            listener.local_addr(),
+            listener.cert_sha256()
+        );
+        let hello = LinkHello::new(token, PeerRole::Host { id: me, boot, reg: me.0 });
+        let (wake_tx, wake) = crossbeam::channel::bounded(1);
+        let mut links: Vec<(HostId, Box<dyn PeerLink + Send>)> = Vec::new();
+        let mut dialing = BTreeMap::new();
+        for other in lower {
+            let (inbound, link_events) = crossbeam::channel::unbounded();
+            let (cmds_tx, cmds) = crossbeam::channel::unbounded();
+            let (hello, store, wake) = (hello.clone(), store.clone(), wake_tx.clone());
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            dialing.insert(other, flag.clone());
+            std::thread::Builder::new()
+                .name(format!("peer-dial-{other}"))
+                .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake, flag))?;
+            let wire: Box<dyn PeerWire + Send> = Box::new(DialerWire(cmds_tx));
+            links.push((other, Box::new(QuicPeerLink::new(other, wire, link_events, config.delay, wake_tx.clone()))));
+        }
+        let live_row: LiveRow = Box::new(move |id, boot| {
+            let rows = store.hosts().map_err(|e| e.to_string())?;
+            Ok(rows.iter().any(|r| r.id == id && r.boot == boot && r.state == game::HOST_LIVE))
+        });
+        let (arrivals_tx, arrivals) = crossbeam::channel::unbounded();
+        let delay = config.delay;
+        std::thread::Builder::new()
+            .name("peer-listener".into())
+            .spawn(move || route_listener(Admission::new(me, live_row), events, senders, arrivals_tx, delay, wake_tx))?;
+        Ok(PeerLinks { listener, links, arrivals, wake, dialing })
+    }
+
+    /// The links made at start (one per lower live host), for [`game::WorldManager::set_peer`];
     /// empty after the first call.
     pub fn take(&mut self) -> Vec<(HostId, Box<dyn PeerLink + Send>)> {
         std::mem::take(&mut self.links)
     }
 
-    /// What this boot's registration decided (its world generation).
-    pub fn registered(&self) -> Registered {
-        self.registered
+    /// The links of higher hosts that dialed in since the last call (each once), for
+    /// [`game::WorldManager::set_peer`]. Never blocks.
+    pub fn take_arrived(&self) -> Vec<(HostId, Box<dyn PeerLink + Send>)> {
+        self.arrivals.try_iter().collect()
     }
 
-    /// Ready when a link has something (a frame, up or down): the host loop selects on
-    /// it; the manager pumps the links.
+    /// [`Self::take_arrived`]'s source, for a holder that does not keep the links.
+    pub fn arrivals(&self) -> Receiver<(HostId, Box<dyn PeerLink + Send>)> {
+        self.arrivals.clone()
+    }
+
+    /// Ready when a link has something (a frame, up or down) or a host dialed in: the host
+    /// loop selects on it; the manager pumps the links.
     pub fn wake(&self) -> Receiver<()> {
         self.wake.clone()
     }
@@ -845,13 +825,6 @@ mod tests {
     #[test]
     fn a_name_is_refused() {
         assert!(advertise_peer_from(Some("host-0.hosts:6500"), addr("127.0.0.1:6500")).is_err());
-    }
-
-    #[test]
-    fn only_the_registration_stop_is_a_stop() {
-        assert!(is_stopped(&io::Error::other(StoppedWhileRegistering)));
-        assert!(!is_stopped(&io::Error::from(io::ErrorKind::Interrupted)));
-        assert!(!is_stopped(&io::Error::new(io::ErrorKind::Interrupted, "EINTR")));
     }
 
     /// Frames written, by connection tag; and closes.
@@ -980,16 +953,20 @@ mod tests {
         assert_eq!((link.is_up(), link.connection(), link.recv()), (true, 3, None));
     }
 
-    /// The listener admits higher ordinals below `hosts` only; of two connections of one
-    /// ordinal the newer replaces the older unless its registration number is lower.
+    /// The listener admits higher ids with a live row of the hello's boot only (no host
+    /// count: any id); of two connections of one id the newer replaces the older unless its
+    /// registration number is lower.
     #[test]
-    fn admission_takes_higher_ordinals_and_the_newest_connection() {
-        let host = |ordinal, reg| PeerRole::Host { id: ordinal, boot: 1, reg };
-        let mut a = Admission::new(h(1), 3);
-        assert!(a.admit(PeerId(1), &host(h(3), 1)).is_err(), "not below hosts");
+    fn admission_takes_higher_live_ids_and_the_newest_connection() {
+        let host = |id, reg| PeerRole::Host { id, boot: 1, reg };
+        let live: LiveRow = Box::new(|id: HostId, boot| Ok(boot == 1 && (id == h(2) || id == h(41))));
+        let mut a = Admission::new(h(1), live);
+        assert!(a.admit(PeerId(1), &host(h(3), 1)).is_err(), "no live row");
         assert!(a.admit(PeerId(2), &host(h(1), 1)).is_err(), "itself");
         assert!(a.admit(PeerId(3), &host(h(0), 1)).is_err(), "a lower host is dialed, not admitted");
         assert!(a.admit(PeerId(4), &PeerRole::Login).is_err(), "hosts only");
+        assert!(a.admit(PeerId(9), &PeerRole::Host { id: h(2), boot: 2, reg: 4 }).is_err(), "another boot of its id");
+        assert_eq!(a.admit(PeerId(10), &host(h(41), 41)), Ok((h(41), None)), "any id, no count");
         assert_eq!(a.admit(PeerId(5), &host(h(2), 4)), Ok((h(2), None)));
         assert_eq!(a.admit(PeerId(6), &host(h(2), 4)), Ok((h(2), Some(PeerId(5)))), "the newer replaces the older");
         assert!(a.admit(PeerId(7), &host(h(2), 3)).is_err(), "a stale process");
@@ -997,6 +974,8 @@ mod tests {
         assert_eq!(a.live.get(&h(2)), Some(&PeerId(6)), "a replaced connection's end changes nothing");
         a.gone(h(2), PeerId(6));
         assert_eq!(a.admit(PeerId(8), &host(h(2), 4)), Ok((h(2), None)));
+        let unreadable: LiveRow = Box::new(|_, _| Err("down".into()));
+        assert!(Admission::new(h(1), unreadable).admit(PeerId(1), &host(h(2), 1)).is_err(), "an unreadable row admits nobody");
     }
 
     /// The peer link's frame limit the manager checks a succession report against (game) is
@@ -1008,10 +987,12 @@ mod tests {
 
     #[test]
     fn env_defaults() {
-        assert_eq!(peer_bind_from(h(2), None), Ok("127.0.0.1:6502".parse().unwrap()));
-        assert_eq!(peer_bind_from(h(0), Some("10.0.0.1:7000")), Ok("10.0.0.1:7000".parse().unwrap()));
-        assert!(peer_bind_from(h(0), Some("x")).unwrap_err().contains(PEER_BIND_ENV));
-        assert_eq!(peer_cert_hash_file_from(h(1), None), PathBuf::from("target/dev-r3/host-1.peer.cert-sha256"));
+        assert_eq!(peer_bind_from(None), Ok("127.0.0.1:6500".parse().unwrap()), "no number in the default");
+        assert_eq!(peer_bind_from(Some("10.0.0.1:7000")), Ok("10.0.0.1:7000".parse().unwrap()));
+        assert!(peer_bind_from(Some("x")).unwrap_err().contains(PEER_BIND_ENV));
+        assert_eq!(peer_cert_hash_file_from("", None), PathBuf::from("target/dev-r3/host.peer.cert-sha256"));
+        assert_eq!(peer_cert_hash_file_from("host-b", None), PathBuf::from("target/dev-r3/host-b.peer.cert-sha256"));
+        assert_eq!(peer_cert_hash_file_from("x", Some("/p/pin")), PathBuf::from("/p/pin"));
         assert_eq!(advertise_quic_from(None, 6466), "127.0.0.1:6466");
         assert_eq!(advertise_quic_from(Some("h:1"), 6466), "h:1");
         assert_eq!(advertise_wt_from(Some(" ")), None);

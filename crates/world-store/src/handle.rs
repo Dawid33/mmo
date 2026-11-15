@@ -607,6 +607,13 @@ impl StoreHandle {
         self.ask(Request::ResolvePrepared)
     }
 
+    /// Every cut part staged in this world now, as `(cut, host)` in order, found by the
+    /// prepared transactions' names whatever the host ids (no host count). A read: nothing
+    /// is finished ([`Self::resolve_prepared`] finishes them). SQLite: none, ever.
+    pub fn staged_cut_parts(&self) -> Result<Vec<(CutId, HostId)>, StoreError> {
+        self.ask(Request::StagedCutParts)
+    }
+
     /// The newest committed world cut (`CutId(0)` before any, and on a store whose cuts are
     /// one-phase — a single host, SQLite — which records no decisions): a host's peer journal
     /// counts from it at boot (`WorldManager::start_peer_journal`).

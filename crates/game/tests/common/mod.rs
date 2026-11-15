@@ -258,6 +258,17 @@ pub fn h(n: u64) -> game::HostId {
     game::HostId(n)
 }
 
+/// The rendezvous owner of `sr` among the hosts `h(0)..h(n)` (the seeded rig's fixed table;
+/// `n` 0 counts as 1).
+pub fn rendezvous_owner(sr: game::SuperRegion, n: u32) -> game::HostId {
+    game::rendezvous_among(sr, (0..u64::from(n.max(1))).map(game::HostId)).expect("at least one host")
+}
+
+/// Host `me` of the fixed table of the hosts `h(0)..h(n)` (`game::Static`).
+pub fn fixed(me: game::HostId, n: u32) -> game::Static {
+    game::Static { me, layout: (0..u64::from(n)).map(game::HostId).collect() }
+}
+
 pub mod cut_store;
 pub mod multi_rig;
 pub mod rig;

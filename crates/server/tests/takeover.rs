@@ -85,9 +85,9 @@ fn host_row(db: &PgDb, h: HostId) -> (i64, i64, i64) {
 
 // ---- hosts under `claim` ----------------------------------------------------------------
 
-/// A host process's boot under `claim`, up to its registration (which may wait for its
-/// predecessor's succession: run it on its own thread then): registered with an empty
-/// fence, then its own rows re-claimed — `server::run`'s order.
+/// A host process's boot under `claim`, up to its registration — `server::run`'s order: its
+/// peer listener bound, REGISTERED (the store issues a new id: a boot never waits), then what
+/// the registration gave it (nothing, or a total crash's land) taken into its fence.
 struct Booted {
     ordinal: HostId,
     boot: u64,
@@ -95,18 +95,13 @@ struct Booted {
     claims: HostClaims,
 }
 
-fn register(db: &PgDb, dir: &std::path::Path, n: u32, ordinal: HostId, boot: u64) -> Booted {
+fn register(db: &PgDb, dir: &std::path::Path, named: HostId, boot: u64) -> Booted {
     let store = open(db);
+    let want = next_id(db);
+    let (links, registered) = boot_links(&store, want, &format!("host-{}", named.0), boot, TOKEN, dir, "127.0.0.1:0");
+    let ordinal = registered.id;
     let claims = HostClaims::none(store.clone(), ordinal);
-    let config = PeerLinkConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        cert_hash_file: dir.join(format!("host-{ordinal}-{boot}.peer.cert-sha256")),
-        delay: Duration::ZERO,
-    };
-    let stop = AtomicBool::new(false);
-    let links = PeerLinks::start(ordinal, n, boot, endpoint(ordinal), TOKEN.into(), store, &claims.fence(), config, CrashPolicy::Succession, &stop)
-        .expect("the peer links start");
-    claims.reclaim_own(boot).expect("its own rows re-claimed");
+    claims.reclaim_own(boot).expect("what the registration gave it taken");
     Booted { ordinal, boot, links, claims }
 }
 
@@ -117,8 +112,8 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     let Booted { ordinal, boot, mut links, claims } = b;
     let store = claims.store().clone();
     let s = store.super_region_regions();
-    let generation = links.registered().generation;
-    let reg = links.registered().id.0;
+    let generation = store.world_generation().unwrap();
+    let reg = ordinal.0;
     let c = claims.clone();
     let read: game::RegionStoreRead = Arc::new(move |rc| c.load_region(rc).map_err(|e| e.to_string()));
     // The drop set reaches the claims, whose `load_region` filters it: the server's filter.
@@ -130,7 +125,7 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
         .with_region_store_forget(forget);
     spawner.set_world_tick(t.w.pair.tick.load(Ordering::SeqCst));
     let mut sim = Sim::with_spawner(ordinal, s, boot, generation, &mut links, spawner);
-    sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal, t.n)), s);
+    sim.manager.set_ownership(Box::new(game::PgClaim::new(ordinal)), s);
     sim.manager.start_peer_journal(store.last_committed_cut().unwrap());
     let (rows, live) = server::claims::read_directory(&store, ordinal).expect("the directory is read");
     sim.manager.directory_read(rows, live);
@@ -155,12 +150,16 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
         sim.login = Some(login.host_side(ordinal));
     }
     let i = ordinal.0 as usize;
-    t.w.switches[i] = switch;
-    t.w.generations[i] = generation;
+    *slot(&mut t.w.switches, ordinal, SwitchLink::default()) = switch;
+    *slot(&mut t.w.generations, ordinal, Default::default()) = generation;
+    while t.w.links.len() <= i {
+        t.w.links.push(None);
+    }
     if let Some(old) = t.w.links[i].replace(links) {
         drop(old);
     }
-    let old = std::mem::replace(&mut t.w.claims[i], claims);
+    let fill = claims.clone();
+    let old = std::mem::replace(slot(&mut t.w.claims, ordinal, fill), claims);
     if replaces {
         // The previous process's connections close with it.
         old.store().clone().shutdown();
@@ -269,7 +268,7 @@ struct Takeover {
 /// Seams of `n` hosts under the rendezvous layout (every host live, as a fresh world lays
 /// out): for each host the first region of its own (by z, then x) next to another host's.
 fn seam_regions(s: u32, n: u32) -> Vec<RegionCoords> {
-    let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), n);
+    let owner = |rc: RegionCoords| game::rendezvous_among(game::super_region_of(rc, s), (0..u64::from(n)).map(HostId)).expect("an owner");
     (0..u64::from(n))
         .map(HostId)
         .map(|h| {
@@ -293,7 +292,9 @@ impl Takeover {
 
     /// [`Takeover::start`] with world cuts every `every`.
     fn start_every(db: &PgDb, dir: &std::path::Path, n: u32, policy: CrashPolicy, login: bool, every: Duration) -> Takeover {
-        let booted: Vec<Booted> = (0..u64::from(n)).map(HostId).map(|h| register(db, dir, n, h, 2000 + h.0)).collect();
+        // Ids issued from 0 in order (the rig's database): the first `n` hosts are h(0)..h(n).
+        let booted: Vec<Booted> = (0..u64::from(n)).map(HostId).map(|h| register(db, dir, h, 2000 + h.0)).collect();
+        assert!(booted.iter().enumerate().all(|(i, b)| b.ordinal == HostId(i as u64)), "ids issued in order");
         let store = open(db);
         let tick = Arc::new(AtomicU64::new(0));
         let cert = dir.join("coordinator.cert-sha256");
@@ -313,7 +314,7 @@ impl Takeover {
         };
         let seams = if n == 2 {
             let (a, b) = host_seam(s);
-            let first = game::rendezvous_owner(game::super_region_of(a, s), n);
+            let first = game::rendezvous_among(game::super_region_of(a, s), (0..u64::from(n)).map(HostId)).expect("an owner");
             if first == h(0) { vec![a, b] } else { vec![b, a] }
         } else {
             seam_regions(s, n)
@@ -431,12 +432,15 @@ impl Takeover {
         row
     }
 
-    /// Host `h` boots again as `boot` (its registration on this thread: it may wait).
-    fn restart(&mut self, db: &PgDb, dir: &std::path::Path, h: HostId, boot: u64) {
-        let b = register(db, dir, self.n, h, boot);
-        let sim = build(self, b, true);
-        let i = self.w.pair.sims.iter().position(|s| s.ordinal > h).unwrap_or(self.w.pair.sims.len());
+    /// The process of host `h` starts again as `boot`, under `h`'s name: a NEW host (the
+    /// returned id), never `h` again — `h`'s old row is lapsed by the name.
+    fn restart(&mut self, db: &PgDb, dir: &std::path::Path, h: HostId, boot: u64) -> HostId {
+        let b = register(db, dir, h, boot);
+        let id = b.ordinal;
+        let sim = build(self, b, false);
+        let i = self.w.pair.sims.iter().position(|s| s.ordinal > id).unwrap_or(self.w.pair.sims.len());
         self.w.pair.sims.insert(i, sim);
+        id
     }
 
     /// `rc` runs on its owner `h` (an observer client of host `h` subscribes to it).
@@ -1089,24 +1093,25 @@ fn coordinator_killed_before_declaring_observes_a_whole_lease_again() {
     t.stop(&db, &dir);
 }
 
-/// Row 8: host 1's process restarts before its old boot was declared: the new boot finds a
-/// live host and vouches for its predecessor (`seen_ms = 0`) and waits; the coordinator
-/// declares at its next read (no whole lease), the succession settles, and only then does
-/// the new boot register — owning nothing; nobody restarts.
+/// Elastic 1 (was row 8, "a restarted process of a dead ordinal waits, then returns owning
+/// nothing"): host 1 is killed -9 after it claimed land and a process starts again under its
+/// name. It registers AT ONCE as a NEW host (a new id; the generation unchanged), owning
+/// nothing; its name lapses the old row, so the coordinator declares the old id's death well
+/// within a lease, the heir (a live id — the new host may be it) adopts, and the succession
+/// settles. The land is then the heir's, the old id holds nothing, and every entity exists
+/// once, live and stored.
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
-fn restarted_process_of_a_dead_ordinal_waits_then_returns_owning_nothing() {
+fn a_restarted_host_comes_back_as_a_new_host_owning_nothing() {
     reboot_of_a_dead_ordinal(h(1), "tk_reboot");
 }
 
-/// Row 8 with the LOWER ordinal dead: host 0 dies and host 1 inherits. Host 1 dials host 0
-/// (the higher dials the lower), so this is the run in which a survivor's dialer meets a dead
-/// boot: once the row is declared dead it holds no dialer for it (a zombie listening there is
-/// never redialed); host 0's next boot registers after the settle at a new address, is
-/// dialed there and is reachable, owning nothing.
+/// [`a_restarted_host_comes_back_as_a_new_host_owning_nothing`] with the LOWER id dead: host 1
+/// dialed host 0; once its row is declared dead it is never dialed again, and the new host
+/// (a higher id) dials host 1 and is admitted by its live row.
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
-fn restarted_process_of_dead_host_0_waits_then_returns_owning_nothing() {
+fn a_restarted_host_0_comes_back_as_a_new_host_owning_nothing() {
     reboot_of_a_dead_ordinal(h(0), "tk_reboot0");
 }
 
@@ -1115,79 +1120,46 @@ fn reboot_of_a_dead_ordinal(dead: HostId, tag: &str) {
     let Some(db) = PgDb::create(tag) else { return };
     let dir = scratch(tag);
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
-    let heir = HostId(1 - dead.0);
+    let other = HostId(1 - dead.0);
     let generation = t.w.store.world_generation().unwrap();
-    let heir_boot = host_row(&db, heir).0;
+    let other_boot = host_row(&db, other).0;
     let (s0, s1) = (t.seams[0], t.seams[1]);
     let ids = [slime(&mut t, h(0), s0, 0.0), slime(&mut t, h(1), s1, 0.0)];
     let _ = t.until_committed_after(&db, 0);
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
-    // The heir adopts only once the test has seen its dialer let go of a dead lower host.
-    let adopter = t.sim(heir).adopter.take();
+    assert!(!t.w.store.owned_by(dead).unwrap().epochs.is_empty(), "host {dead} claimed land");
     t.kill(dead);
     let killed = Instant::now();
-    let (booted, declared_after, settled_when_registered) = std::thread::scope(|scope| {
-        let (db, dir) = (&db, &dir);
-        let boot = scope.spawn(move || register(db, dir, 2, dead, 3000 + dead.0));
-        let mut declared_after = None;
-        let mut adopter = adopter;
-        let mut idle_since: Option<Instant> = None;
-        while !boot.is_finished() {
-            assert!(killed.elapsed() < LONG, "the new boot of host {dead} never registered");
-            t.round();
-            if declared_after.is_none() && !successions(db).is_empty() {
-                declared_after = Some(killed.elapsed());
-            }
-            if declared_after.is_some() && adopter.is_some() {
-                // Host 0 dead: host 1's dialer must drop the dead boot (and stay idle) before
-                // the adoption lets the new boot register. Host 1 dead: nothing dials it.
-                let dialing = t.w.links[heir.0 as usize].as_ref().unwrap().dialing(dead);
-                match dialing {
-                    Some(true) => idle_since = None,
-                    Some(false) => {
-                        idle_since.get_or_insert_with(Instant::now);
-                    }
-                    None => idle_since = Some(Instant::now() - Duration::from_secs(10)),
-                }
-                let idle_long = idle_since.is_some_and(|at| at.elapsed() > Duration::from_secs(server::peer_link::PEER_DISCOVERY_SECS + 1));
-                assert!(
-                    killed.elapsed() < Duration::from_secs(20),
-                    "host {heir} still dials the dead boot of host {dead} ({dialing:?}) 20 s after the kill"
-                );
-                if idle_long {
-                    t.sim(heir).adopter = adopter.take();
-                }
-            }
+    let new = t.restart(&db, &dir, dead, 3000 + dead.0);
+    let registered_after = killed.elapsed();
+    assert!(new > h(1), "a new id: {new}");
+    assert!(registered_after < Duration::from_millis(LEASE_MS), "registered at once ({} ms), no wait", registered_after.as_millis());
+    assert_eq!(host_row(&db, new).2, 0, "{new} is live");
+    assert!(t.w.claims[new.0 as usize].fence().epochs.is_empty(), "the new host owns nothing at its start");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "nothing raised");
+    let mut declared_after = None;
+    t.until("the old id's succession settled", LONG, |_t| {
+        let rows = successions(&db);
+        if declared_after.is_none() && !rows.is_empty() {
+            declared_after = Some(killed.elapsed());
         }
-        let settled = successions(db).iter().any(|r| r[1] == (dead.0 as i64) && r[4] >= 0);
-        (boot.join().expect("the boot thread"), declared_after, settled)
+        rows.iter().any(|r| r[1] == (dead.0 as i64) && r[4] >= 0)
     });
-    let declared_after = declared_after.expect("declared before the boot registered");
-    eprintln!("[takeover] the vouched death of host {dead} was declared {} ms after the kill (lease {LEASE_MS} ms)", declared_after.as_millis());
-    assert!(declared_after < Duration::from_millis(LEASE_MS), "a vouched death is declared before a lease could lapse");
-    assert!(settled_when_registered, "the new boot registered only after the succession settled");
-    assert_eq!(booted.links.registered().generation, generation, "registered without raising the generation");
-    assert!(!booted.links.registered().bumped);
-    assert!(booted.claims.fence().epochs.is_empty(), "the new boot owns nothing");
-    let sim = build(&mut t, booted, true);
-    let i = t.w.pair.sims.iter().position(|s| s.ordinal > dead).unwrap_or(t.w.pair.sims.len());
-    t.w.pair.sims.insert(i, sim);
-    t.until("the new boot attached and the peers reach each other", WAIT, |t| {
-        t.up(dead)
-            && t.sim(dead).manager.world_attached()
-            && t.sim(dead).manager.peer_is_reachable(heir)
-            && t.sim(heir).manager.peer_is_reachable(dead)
-    });
-    if dead == h(0) {
-        assert_eq!(t.w.links[1].as_ref().unwrap().dialing(h(0)), Some(true), "host 1 dials host 0's new boot");
-    }
-    let owners = t.w.store.owners().unwrap();
-    assert!(owners.iter().all(|(_, o, _)| *o == (heir.0 as i64)), "every super-region is host {heir}'s: {owners:?}");
-    assert_eq!(host_row(&db, heir).0, heir_boot, "host {heir} never restarted");
-    assert!(!t.w.generations[heir.0 as usize].is_set());
-    t.watch(heir, t.seams[dead.0 as usize]);
+    let declared_after = declared_after.expect("declared");
+    eprintln!("[takeover] the death of host {dead} (vouched by its name) was declared {} ms after the kill", declared_after.as_millis());
+    assert!(declared_after < Duration::from_millis(2 * LEASE_MS), "the name's vouch declares it before a lease could lapse twice");
     let row = successions(&db)[0];
-    assert_eq!((row[1], row[2]), (dead.0 as i64, heir.0 as i64), "{row:?}");
+    let heir = HostId(row[2] as u64);
+    assert_eq!(row[1], dead.0 as i64, "{row:?}");
+    assert!(heir == other || heir == new, "the heir is a live id: {heir}");
+    t.until("the peers reach each other", WAIT, |t| {
+        t.sim(new).manager.world_attached() && t.sim(new).manager.peer_is_reachable(other) && t.sim(other).manager.peer_is_reachable(new)
+    });
+    let owners = t.w.store.owners().unwrap();
+    assert!(owners.iter().all(|(_, o, _)| *o != dead.0 as i64), "the old id holds nothing: {owners:?}");
+    assert!(owners.iter().all(|(_, o, _)| *o == other.0 as i64 || *o == new.0 as i64), "only live ids hold land: {owners:?}");
+    assert_eq!(host_row(&db, other).0, other_boot, "host {other} never restarted");
+    t.watch(heir, t.seams[dead.0 as usize]);
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
     for id in ids {
@@ -1382,7 +1354,7 @@ fn static_world(db: &PgDb, dir: &std::path::Path, policy: CrashPolicy) -> World 
         switches.push(switch.clone());
         sim.manager.set_world_link(Box::new(switch), sim.boot, 0);
         sim.manager.set_world_map(land_map());
-        let generation = server::claims::WorldGeneration::new(links[ordinal].registered().generation);
+        let generation = server::claims::WorldGeneration::new(claims[ordinal].store().world_generation().unwrap());
         generations.push(generation.clone());
         sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(claims[ordinal].clone(), generation));
     }
@@ -1395,8 +1367,9 @@ fn static_world(db: &PgDb, dir: &std::path::Path, policy: CrashPolicy) -> World 
 /// derives for `VOXEL_OWNERSHIP=static` with two hosts ([`server::roles::coordinator_crash_policy`]),
 /// the hosts beat their leases, and host 1 dies: its row lapses with host 0 beating — exactly
 /// what a `Succession` coordinator declares — yet no `successions` row is ever written. Host
-/// 1 restarts dirty and the world rolls back once (R3's `dirty_restart_rolls_every_host_back_once`
-/// in `hosts.rs` is the R3 test).
+/// Elastic 1: a static world is one host, so it recovers as a total crash — the whole world
+/// restarts as ONE new host, the generation raised exactly once (R3's
+/// `dirty_restart_rolls_every_host_back_once` in `hosts.rs` is the R3 test).
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
 fn static_ownership_still_rolls_the_world_back() {
@@ -1419,9 +1392,9 @@ fn static_ownership_still_rolls_the_world_back() {
         w.pair.round();
     }
     assert_eq!(count(&db, "SELECT COUNT(*) FROM successions"), 0, "static never declares a succession");
-    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
-    assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty: + 1");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
+    let again = restart_alone(&mut w, &db, &dir, 3001);
+    assert_eq!((again.generation, again.bumped), (generation + 1, true), "a total crash: + 1");
+    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation + 1, "raised exactly once");
     w.pair.until("the slime back in a running region", |p| p.sims.iter_mut().map(|s| s.holders(id).len()).sum::<usize>() > 0);
     for _ in 0..40 {
         w.pair.round();
@@ -1837,7 +1810,7 @@ fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
     // no survivor) and it adopts.
     let (booted, settled_when_registered) = std::thread::scope(|scope| {
         let (db, dir) = (&db, &dir);
-        let boot = scope.spawn(move || register(db, dir, 2, h(1), 6001));
+        let boot = scope.spawn(move || register(db, dir, h(1), 6001));
         t.rounds(20);
         assert!(!boot.is_finished(), "the retired host's boot waits for its succession");
         t.restart(db, dir, h(0), 5000);

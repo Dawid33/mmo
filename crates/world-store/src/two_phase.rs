@@ -131,6 +131,14 @@ async fn staged_parts<'c>(
     Ok(out)
 }
 
+/// Every staged part of this world as `(cut, host)`, in order — found by the prepared
+/// transactions' names alone ([`parse_gid`]), whatever the host ids (Elastic 1: no host
+/// count says which to look for). A read: nothing is finished.
+pub(crate) async fn staged_cut_parts(pool: &PgPool, world_tag: u32) -> Result<Vec<(CutId, HostId)>, StoreError> {
+    let parts = staged_parts(pool, world_tag, None).await?;
+    Ok(parts.into_iter().flat_map(|(cut, hosts)| hosts.into_keys().map(move |h| (cut, h))).collect())
+}
+
 /// This database's OID: the world tag of its gids.
 pub(crate) async fn world_tag(pool: &PgPool) -> Result<u32, StoreError> {
     let oid: i64 = sqlx::query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")

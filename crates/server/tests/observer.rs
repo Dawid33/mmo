@@ -107,7 +107,7 @@ fn land_map() -> game::WorldMap {
 /// The adjacent pair of regions nearest the origin whose owners differ: `(a, b)`, `a` host
 /// 0's (A), `b` host 1's (B).
 fn host_seam() -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { id: h(0), hosts: HOSTS }.owner_of(rc, S);
+    let owner = |rc: RegionCoords| game::Static { me: h(0), layout: (0..u64::from(HOSTS)).map(HostId).collect() }.owner_of(rc, S);
     for z in 1..15 {
         for x in 1..14 {
             let (p, q) = (RegionCoords::new(x, z), RegionCoords::new(x + 1, z));
@@ -169,7 +169,7 @@ impl Host {
             lod_builder,
             lod_result_recv,
         );
-        manager.set_ownership(Box::new(game::Static { id: ordinal, hosts: HOSTS }), S);
+        manager.set_ownership(Box::new(game::Static { me: ordinal, layout: (0..u64::from(HOSTS)).map(HostId).collect() }), S);
         manager.set_endpoints(endpoint(ordinal, port), game::seeded_nonces(0x5EED + ordinal.0));
         manager.set_world_map(land_map());
         Host { manager, region_out, packets, log: Vec::new() }

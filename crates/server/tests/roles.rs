@@ -49,7 +49,23 @@ impl PgDb {
         if db.is_none() {
             eprintln!("{} (run `just test-r2`)", pg_test_support::SKIP_MSG);
         }
-        db.map(PgDb)
+        // Ids issued from 0 (`world.next_host_id` set to 0 before anyone registers, as a world
+        // migrated from fixed ordinals continues): the first host registered is `h(0)`.
+        let db = db.map(PgDb)?;
+        let store = db.open();
+        let url = db.0.url.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                use sqlx::Connection;
+                let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+                sqlx::query("UPDATE world SET next_host_id = 0").execute(&mut c).await.unwrap();
+                c.close().await.unwrap();
+            })
+        })
+        .join()
+        .unwrap();
+        store.shutdown();
+        Some(db)
     }
 
     /// A handle as one process opens it.
@@ -180,7 +196,14 @@ fn quic_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, bo
 /// Registers boot `boot` as a host named after `ordinal` (as a `host` process does once per
 /// boot): its registration. Elastic 1 task 2: the store issues the id (Task 3 keys the rest of
 /// these tests by it).
+/// Registers a host process named `host-<n>` (`ordinal`: its name's number, not its id —
+/// the store issues the id) as `static`.
 fn register_host(store: &StoreHandle, ordinal: HostId, boot: u64) -> world_store::Registered {
+    register_as(store, ordinal, boot, game::CrashPolicy::Rollback)
+}
+
+/// [`register_host`] under `policy`.
+fn register_as(store: &StoreHandle, ordinal: HostId, boot: u64, policy: game::CrashPolicy) -> world_store::Registered {
     let host = world_store::NewHost {
         name: format!("host-{}", ordinal.0),
         boot,
@@ -190,7 +213,18 @@ fn register_host(store: &StoreHandle, ordinal: HostId, boot: u64) -> world_store
         webtransport: None,
         wt_cert_hash: None,
     };
-    store.register_host(host, game::CrashPolicy::Rollback).unwrap_or_else(|e| panic!("host {ordinal} not registered: {e}"))
+    store.register_host(host, policy).unwrap_or_else(|e| panic!("host {ordinal} not registered: {e}"))
+}
+
+/// A `static` host alone (its table is itself).
+fn alone(me: HostId) -> game::Static {
+    game::Static { me, layout: vec![me] }
+}
+
+/// Host `me` of the fixed table `h(0)..h(n)` (several hosts of a fixed table exist only in
+/// tests since Elastic 1).
+fn table(me: HostId, n: u64) -> game::Static {
+    game::Static { me, layout: (0..n).map(HostId).collect() }
 }
 
 /// A localhost UDP port nobody holds right now.
@@ -218,12 +252,18 @@ impl Host {
     fn start(
         store: &StoreHandle,
         map: &WorldMap,
-        ownership: impl Ownership + Copy + 'static,
+        ownership: impl FnOnce(HostId) -> Box<dyn Ownership>,
         link: impl FnOnce(u64) -> Box<dyn WorldLink + Send>,
         coordinator: Option<CoordinatorThread>,
         boot: u64,
     ) -> Host {
-        let claims = HostClaims::claim(store.clone(), &ownership, Some(map.extent()), store.super_region_regions()).unwrap();
+        // Registered FIRST, once per boot, as a `host` process is (`server::run`'s order: the
+        // coordinator admits its hello by the issued id); the ownership and claims are the
+        // issued id's; it runs the generation it registered at. Registered as `claim` does, so
+        // two hosts of a fixed table run beside each other here.
+        let registered = register_as(store, h(boot), boot, game::CrashPolicy::Succession);
+        let ownership = ownership(registered.id);
+        let claims = HostClaims::claim(store.clone(), ownership.as_ref(), Some(map.extent()), store.super_region_regions()).unwrap();
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
@@ -240,12 +280,9 @@ impl Host {
             lod_builder,
             lod_result_recv,
         );
-        manager.set_ownership(Box::new(ownership), store.super_region_regions());
+        manager.set_ownership(ownership, store.super_region_regions());
         manager.set_stored_regions(store.stored_regions().unwrap());
         manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
-        // Registered once per boot, as a `host` process is (the coordinator admits its
-        // hello by the registration number); it runs the generation it registered at.
-        let registered = register_host(store, ownership.me(), boot);
         manager.set_host_generation(registered.generation);
         manager.set_world_link(link(registered.id.0), boot, 0);
         manager.set_world_map(map.clone());
@@ -392,7 +429,7 @@ fn split_world_plays_like_all_in_one() {
     let req = embark_request(start.coordinator.history());
     let claims_fenced = Fenced::default();
     let (link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, claims_fenced).unwrap();
-    let mut host = Host::start(&store, &map, game::AllInOne, |_| Box::new(link), Some(thread), 1);
+    let mut host = Host::start(&store, &map, |_| Box::new(game::AllInOne), |_| Box::new(link), Some(thread), 1);
     let all_packets = play_script(&mut host, a, &req);
     assert_eq!(host.exit(), ServerExit::Clean);
     let store = all_db.open();
@@ -408,7 +445,7 @@ fn split_world_plays_like_all_in_one() {
     let (a_split, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     assert_eq!(a_split, a, "the same player id in both worlds");
     let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, h(0), 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 1);
     let split_packets = play_script(&mut host, a, &req);
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
@@ -423,6 +460,50 @@ fn split_world_plays_like_all_in_one() {
     assert_eq!(all_sites.len(), 1, "one site founded: {all_sites:?}");
     assert_eq!(split_sites, all_sites, "the coordinator process saved the same site");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Elastic 1 (was `hosts::several_hosts_refuse_local_auth`): `claim` means any number of
+/// hosts, so a `claim` host starts only as `host`, on Postgres, with the login link (`jwt`
+/// with a service token) — one host included; `static` / `allinone` need none of it here.
+#[test]
+fn a_claim_host_without_postgres_or_jwt_is_refused() {
+    use game::CrashPolicy::{Rollback, Succession};
+    use server::roles::{check_claim_needs, CLAIM_NEEDS_LOGIN, CLAIM_NEEDS_ROLE_HOST};
+    assert_eq!(check_claim_needs(Role::Host, Succession, true, false), Err(CLAIM_NEEDS_LOGIN.to_string()));
+    assert!(CLAIM_NEEDS_LOGIN.contains("VOXEL_AUTH=jwt"), "{CLAIM_NEEDS_LOGIN}");
+    assert_eq!(check_claim_needs(Role::Host, Succession, false, true), Err(SPLIT_ROLES_NEED_POSTGRES.to_string()));
+    assert_eq!(check_claim_needs(Role::All, Succession, true, true), Err(CLAIM_NEEDS_ROLE_HOST.to_string()));
+    assert_eq!(check_claim_needs(Role::Host, Succession, true, true), Ok(()));
+    for role in [Role::All, Role::Host] {
+        assert_eq!(check_claim_needs(role, Rollback, false, false), Ok(()), "{role:?} without claim");
+    }
+}
+
+/// Elastic 1: a `static` host is alone. A second `static` host started beside a live one is
+/// refused at its registration — what `server::run` turns into its start-up error (exit 1) —
+/// with a message naming `VOXEL_OWNERSHIP=claim`; nothing is issued or written for it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_second_static_host_is_refused_at_registration() {
+    let Some(db) = PgDb::create("secondstatic") else { return };
+    let store = db.open();
+    let first = register_host(&store, h(1), 1);
+    let host = world_store::NewHost {
+        name: "another".into(),
+        boot: 2,
+        peer_addr: None,
+        peer_cert: None,
+        quic: None,
+        webtransport: None,
+        wt_cert_hash: None,
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let err = server::lease::register(&store, host, game::CrashPolicy::Rollback, &stop).expect_err("refused");
+    assert!(matches!(&err, world_store::StoreError::NotAlone { live } if *live == vec![first.id]), "{err:?}");
+    let message = format!("registering this host: {err}");
+    assert!(message.contains("VOXEL_OWNERSHIP=claim"), "{message}");
+    assert_eq!(store.hosts().unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![first.id], "nothing written");
+    store.shutdown();
 }
 
 /// `host` and `coordinator` refuse a world that is not in Postgres (SQLite, in-memory,
@@ -468,7 +549,7 @@ fn host_survives_coordinator_absence_at_start() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 7, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 7);
+    let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 7);
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     let tick_before = host.manager.spawner_mut().world_tick();
     for _ in 0..20 {
@@ -533,7 +614,7 @@ fn standing_in(region: RegionCoords) -> game::PlayerRecord {
 /// where a player may found one and host `ordinal` (of two) owns.
 fn embark_request_on(h: &History, s: u32, ordinal: HostId, taken: &[PersonId]) -> EmbarkRequest {
     let site = h.sites().next().expect("a site");
-    let owner = |rc: RegionCoords| game::Static { id: HostId(0), hosts: 2 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| table(HostId(0), 2).owner_of(rc, s);
     let region = (2..46)
         .flat_map(|z| (2..46).map(move |x| RegionCoords::new(x, z)))
         .find(|r| owner(*r) == ordinal && h.player_embark_allowed(*r).is_ok())
@@ -568,12 +649,12 @@ fn two_hosts_attach_and_both_get_their_people() {
         let cert_file = cert_file.clone();
         move |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, ordinal, 10 + ordinal.0, reg)) }
     };
-    let mut h0 = Host::start(&store0, &map, game::Static { id: h(0), hosts: 2 }, link(h(0)), None, 10);
+    let mut h0 = Host::start(&store0, &map, |me| Box::new(table(me, 2)), link(h(0)), None, 10);
     h0.until("host 0 attached", |h| h.manager.world_attached());
 
     // Host 0's player embarks into a region of host 0.
     let req0 = embark_request_on(&stored_history(&coordinator.store, &map), s, h(0), &[]);
-    let owner = |rc: RegionCoords| game::Static { id: h(0), hosts: 2 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| table(h(0), 2).owner_of(rc, s);
     let spawn0 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == h(0)).expect("a region of host 0");
     h0.send(ServerEvent::ClientConnected { client: A, player: a, record: Some(standing_in(spawn0)) });
     h0.send(ServerEvent::ClientPacket(ClientPacket::Embark(req0.clone()), A));
@@ -586,7 +667,7 @@ fn two_hosts_attach_and_both_get_their_people() {
     });
 
     // Host 1 attaches: nothing of host 0's parks.
-    let mut h1 = Host::start(&store1, &map, game::Static { id: h(1), hosts: 2 }, link(h(1)), None, 11);
+    let mut h1 = Host::start(&store1, &map, |me| Box::new(table(me, 2)), link(h(1)), None, 11);
     until_both(&mut h0, &mut h1, "host 1 attached", |_, h1| h1.manager.world_attached());
     let req1 = {
         let taken = req0.people.clone();
@@ -643,8 +724,10 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
     let cert_file = dir.join("coordinator.cert-sha256");
     let store = db.open();
     let (first, second) = (register_host(&store, h(0), 1), register_host(&store, h(0), 2));
-    // Both Attach at the world's generation now (the second registration raised it: R3's
-    // rule for a dirty predecessor): only the registration tells them apart.
+    // The process restarted under its name: a new id at once (Elastic 1); its old row was
+    // lapsed by the name and, nobody else live, the restart took it (a total crash: the
+    // generation raised, the old row gone). Both Attach at the world's generation now: only
+    // the id tells them apart — the old one has no row.
     let generation = second.generation;
     let (first, second) = (first.id.0, second.id.0);
     assert!(second > first, "a second registration has the higher number: {first} then {second}");
@@ -654,7 +737,8 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
     let (coordinator, _) = Coordinator::start(&db, &map, addr, cert_file.clone());
     let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file).unwrap();
     let dial = |boot: u64, reg: u64| {
-        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: h(0), boot, reg });
+        // A host's hello names the id the store issued it (its registration number too).
+        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: HostId(reg), boot, reg });
         let (link, events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin.clone(), hello);
         let deadline = Instant::now() + WAIT;
         loop {
@@ -663,7 +747,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
                 _ => assert!(Instant::now() < deadline, "the link never came up"),
             }
         }
-        link.send(game::HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }).unwrap();
+        link.send(game::HostMsg::Attach { host: HostId(reg), epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }).unwrap();
         (link, events)
     };
     let (stale, stale_events) = dial(1, first);
@@ -694,7 +778,7 @@ fn raw_host_link(
     reg: u64,
 ) -> (crossbeam::channel::Sender<game::HostMsg>, Receiver<svc_link::LinkEvent<game::CoordMsg>>) {
     let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", cert_file).unwrap();
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: h(0), boot, reg });
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: HostId(reg), boot, reg });
     let (link, events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin, hello);
     let deadline = Instant::now() + WAIT;
     loop {
@@ -706,10 +790,10 @@ fn raw_host_link(
     (link, events)
 }
 
-/// An empty `Attach` of host 0 at `generation` under `policy`.
-fn bare_attach(generation: u64, boot: u64, policy: game::CrashPolicy) -> game::HostMsg {
+/// An empty `Attach` of host `host` at `generation` under `policy`.
+fn bare_attach(host: HostId, generation: u64, boot: u64, policy: game::CrashPolicy) -> game::HostMsg {
     game::HostMsg::Attach {
-        host: h(0),
+        host,
         epoch: 1,
         running: Vec::new(),
         online: Vec::new(),
@@ -752,7 +836,7 @@ fn a_host_under_another_crash_policy_is_refused_by_the_coordinator() {
     )
     .expect("the coordinator listens");
     let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.id.0);
-    link.send(bare_attach(registered.generation, 1, game::CrashPolicy::Succession)).unwrap();
+    link.send(bare_attach(registered.id, registered.generation, 1, game::CrashPolicy::Succession)).unwrap();
     let deadline = Instant::now() + WAIT;
     loop {
         match events.recv_timeout(Duration::from_millis(50)) {
@@ -766,7 +850,7 @@ fn a_host_under_another_crash_policy_is_refused_by_the_coordinator() {
     drop(link);
     // The coordinator's own policy attaches.
     let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.id.0);
-    link.send(bare_attach(registered.generation, 1, game::CrashPolicy::Rollback)).unwrap();
+    link.send(bare_attach(registered.id, registered.generation, 1, game::CrashPolicy::Rollback)).unwrap();
     let deadline = Instant::now() + WAIT;
     loop {
         match events.recv_timeout(Duration::from_millis(50)) {
@@ -792,12 +876,13 @@ fn a_host_of_an_older_generation_is_told_the_generation() {
     let dir = scratch("oldgen");
     let cert_file = dir.join("coordinator.cert-sha256");
     let store = db.open();
-    // The second registration of a dirty ordinal raises the generation (R3's rule).
+    // A process restarted under its name, nobody else live: a total crash raises the
+    // generation (a new id takes the old row's land).
     let (first, second) = (register_host(&store, h(0), 1), register_host(&store, h(0), 2));
     assert!(second.generation > first.generation);
     let (coordinator, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
     let (link, events) = raw_host_link(addr, &cert_file, 2, second.id.0);
-    link.send(bare_attach(first.generation, 2, game::CrashPolicy::Rollback)).unwrap();
+    link.send(bare_attach(second.id, first.generation, 2, game::CrashPolicy::Rollback)).unwrap();
     let deadline = Instant::now() + WAIT;
     loop {
         match events.recv_timeout(Duration::from_millis(50)) {
@@ -989,7 +1074,7 @@ fn crash_mid_play(seed: u64) {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
@@ -1091,7 +1176,7 @@ fn embark_during_downtime_completes_once() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
 
     c1.kill();
@@ -1150,7 +1235,7 @@ fn embark_answered_then_crash_is_not_refounded() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     for _ in 0..10 {
@@ -1208,7 +1293,7 @@ fn request_timeout_answers_world_unavailable() {
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
+    let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 1);
     host.manager.set_world_request_timeout_ms(TIMEOUT_MS);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });

@@ -733,8 +733,8 @@ struct TwoHostManager {
 
 fn two_host_manager() -> TwoHostManager {
     let s = 1;
-    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { id: mine, hosts: 2 };
+    let mine = crate::common::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let ownership = crate::common::fixed(mine, 2);
     let f = game::halo::neighbours(SPAWN_REGION).find(|rc| !ownership.owns(*rc, s)).expect("a neighbour of the other host");
     let l = game::halo::neighbours(SPAWN_REGION).find(|rc| ownership.owns(*rc, s)).expect("a neighbour of this host");
     let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -880,7 +880,7 @@ fn stored_terrain_change_drops_the_stale_mark_of_a_region_now_owned_here() {
     m.set_ownership(Box::new(game::AllInOne), 1);
     m.stored_terrain_changed([(f, 1)].into());
     assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "this host's own region: nothing");
-    m.set_ownership(Box::new(game::Static { id: mine, hosts: 2 }), 1);
+    m.set_ownership(Box::new(crate::common::fixed(mine, 2)), 1);
     m.stored_terrain_changed([(f, 1)].into());
     assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "the stale mark went with the ownership");
 }
@@ -894,8 +894,8 @@ fn stored_terrain_change_of_a_foreign_region_rebuilds_its_lod() {
     use game::lod::LodKey;
     use game::{ClientPacket, ServerEvent, ServerPacket};
     let s = 1;
-    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { id: mine, hosts: 2 };
+    let mine = crate::common::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let ownership = crate::common::fixed(mine, 2);
     let f = (3..64).map(|x| RegionCoords::new(x, 3)).find(|rc| !ownership.owns(*rc, s)).expect("a far region of the other host");
     let (out_send, out) = crossbeam::channel::unbounded();
     let (region_out_send, region_out) = crossbeam::channel::unbounded();
