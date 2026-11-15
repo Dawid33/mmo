@@ -11,6 +11,7 @@
 //! *Known limit:* a self-signed host running longer than 14 days is refused by browsers.
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -32,6 +33,14 @@ pub const WT_KEY_ENV: &str = "VOXEL_WT_KEY";
 
 /// How often certificate files are checked for a renewal ([`ClientCert::reload_if_changed`]).
 pub const CERT_POLL: Duration = Duration::from_secs(60);
+
+/// How often a host waiting for its certificate files at start looks again
+/// ([`ClientCert::wait_from_env`]); it warns at most every [`CERT_POLL`].
+pub const CERT_WAIT_RETRY: Duration = Duration::from_secs(2);
+
+/// How long a reload that found a pair it could not load pauses before its one re-read
+/// ([`ClientCert::reload_with_retry`]): a read that straddled a Secret's symlink swap.
+pub const RELOAD_RETRY: Duration = Duration::from_secs(1);
 
 /// The names a self-signed certificate is minted for.
 const SELF_SIGNED_NAMES: [&str; 2] = ["localhost", "127.0.0.1"];
@@ -61,12 +70,9 @@ impl ClientCert {
     /// old aliases) or neither (empty counts as unset); neither = a self-signed certificate,
     /// minted here. Files that do not load are an error.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let cert = named(&lookup, CLIENT_CERT_ENV, WT_CERT_ENV)?;
-        let key = named(&lookup, CLIENT_KEY_ENV, WT_KEY_ENV)?;
-        match (cert, key) {
-            (None, None) => Self::self_signed(),
-            (Some(cert), Some(key)) => Self::from_files(cert.into(), key.into()),
-            _ => Err(format!("set both {CLIENT_CERT_ENV} and {CLIENT_KEY_ENV} (or {WT_CERT_ENV} and {WT_KEY_ENV}), or neither")),
+        match files_from_env(&lookup)? {
+            None => Self::self_signed(),
+            Some((cert, key)) => Self::load_files(cert, key).map_err(|e| e.to_string()),
         }
     }
 
@@ -84,9 +90,10 @@ impl ClientCert {
         Ok(Self::new(pair, Source::SelfSigned { sha256_hex }))
     }
 
-    fn from_files(cert: PathBuf, key: PathBuf) -> Result<Self, String> {
-        let bytes = read_pair(&cert, &key).map_err(|e| files_error(&cert, &key, &e).to_string())?;
-        let pair = parse_pair(&bytes).map_err(|e| files_error(&cert, &key, &e).to_string())?;
+    /// The pair in files `cert` / `key`, loaded and checked now.
+    fn load_files(cert: PathBuf, key: PathBuf) -> io::Result<Self> {
+        let bytes = read_pair(&cert, &key).map_err(|e| files_error(&cert, &key, &e))?;
+        let pair = parse_pair(&bytes).map_err(|e| files_error(&cert, &key, &e))?;
         Ok(Self::new(pair, Source::Files { cert, key, loaded: Mutex::new(bytes) }))
     }
 
@@ -136,6 +143,30 @@ impl ClientCert {
         Ok(true)
     }
 
+    /// [`Self::from_env`], but files that are not there yet (or do not load as a matching
+    /// pair) are waited for; `Ok(None)` = `stop` was set while waiting. A configuration error
+    /// (one variable alone, the new and old name disagreeing) is an `Err` at once.
+    pub fn wait_from_env(
+        lookup: impl Fn(&str) -> Option<String>,
+        stop: Option<&AtomicBool>,
+    ) -> Result<Option<Self>, String> {
+        let Some((cert, key)) = files_from_env(&lookup)? else {
+            return Self::self_signed().map(Some);
+        };
+        Ok(wait_for_files(&cert, &key, stop, CERT_WAIT_RETRY, || Self::load_files(cert.clone(), key.clone())))
+    }
+
+    /// [`Self::reload_if_changed`]; an `Err` is re-read once after `pause`.
+    pub async fn reload_with_retry(&self, pause: Duration) -> io::Result<bool> {
+        match self.reload_if_changed() {
+            Err(_) => {
+                tokio::time::sleep(pause).await;
+                self.reload_if_changed()
+            }
+            done => done,
+        }
+    }
+
     /// The pair being served now.
     fn current(&self) -> Arc<CertifiedKey> {
         self.shared.current()
@@ -165,6 +196,54 @@ impl std::fmt::Debug for Shared {
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.0.current())
+    }
+}
+
+/// Calls `try_load` until it loads (`Some`) or `stop` is set (`None`), every `retry`; warns
+/// at start and then at most every [`CERT_POLL`].
+fn wait_for_files(
+    cert: &Path,
+    key: &Path,
+    stop: Option<&AtomicBool>,
+    retry: Duration,
+    try_load: impl FnMut() -> io::Result<ClientCert>,
+) -> Option<ClientCert> {
+    let stopped = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
+    let mut warned: Option<std::time::Instant> = None;
+    let mut try_load = try_load;
+    while !stopped() {
+        match try_load() {
+            Ok(loaded) => {
+                if warned.is_some() {
+                    log::info!("the client certificate files are there: {} / {}", cert.display(), key.display());
+                }
+                return Some(loaded);
+            }
+            Err(e) => {
+                if warned.is_none_or(|at| at.elapsed() >= CERT_POLL) {
+                    log::warn!(
+                        "the client certificate files are not there yet: waiting ({} / {}: {e})",
+                        cert.display(),
+                        key.display()
+                    );
+                    warned = Some(std::time::Instant::now());
+                }
+            }
+        }
+        std::thread::sleep(retry);
+    }
+    None
+}
+
+/// The certificate files the environment names (`None`: neither, a self-signed certificate):
+/// both or neither, by the new names or their old aliases (empty counts as unset).
+fn files_from_env(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let cert = named(lookup, CLIENT_CERT_ENV, WT_CERT_ENV)?;
+    let key = named(lookup, CLIENT_KEY_ENV, WT_KEY_ENV)?;
+    match (cert, key) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => Ok(Some((cert.into(), key.into()))),
+        _ => Err(format!("set both {CLIENT_CERT_ENV} and {CLIENT_KEY_ENV} (or {WT_CERT_ENV} and {WT_KEY_ENV}), or neither")),
     }
 }
 
@@ -332,6 +411,99 @@ mod tests {
         // A missing file: an error, B kept.
         std::fs::remove_file(&k).unwrap();
         assert!(cert.reload_if_changed().is_err());
+        assert_eq!(cert.leaf_der(), b.2);
+    }
+
+    #[test]
+    fn the_wait_returns_once_the_files_load() {
+        let (dir, a) = (scratch("wait-loads"), pair("a.example"));
+        let (c, k) = write(&dir, &a);
+        let mut attempts = 0;
+        let loaded = wait_for_files(Path::new(&c), Path::new(&k), None, Duration::from_millis(1), || {
+            attempts += 1;
+            match attempts {
+                1 | 2 => Err(io::Error::new(io::ErrorKind::NotFound, "not there yet")),
+                _ => ClientCert::load_files(c.clone().into(), k.clone().into()),
+            }
+        });
+        assert_eq!(loaded.expect("loaded").leaf_der(), a.2);
+        assert_eq!(attempts, 3, "it stops trying once the pair loads");
+    }
+
+    #[test]
+    fn a_stop_ends_the_wait() {
+        let stop = AtomicBool::new(true);
+        let mut attempts = 0;
+        let loaded = wait_for_files(Path::new("/nonexistent/c"), Path::new("/nonexistent/k"), Some(&stop), Duration::from_millis(1), || {
+            attempts += 1;
+            Err(io::Error::new(io::ErrorKind::NotFound, "never"))
+        });
+        assert!(loaded.is_none(), "stopped");
+        assert!(attempts <= 1, "{attempts}");
+    }
+
+    /// A first issue caught half-written (a chain whose key is not there yet) is waited for, not fatal.
+    #[test]
+    fn an_invalid_pair_at_start_is_waited_for() {
+        let dir = scratch("wait-invalid");
+        let (a, b) = (pair("a.example"), pair("b.example"));
+        let (c, k) = write(&dir, &a);
+        std::fs::write(&c, &b.0).unwrap(); // B's chain beside A's key
+        let fix = {
+            let (k, key) = (k.clone(), b.1.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                std::fs::write(k, key).unwrap();
+            })
+        };
+        let loaded = wait_for_files(Path::new(&c), Path::new(&k), None, Duration::from_millis(2), || {
+            ClientCert::load_files(c.clone().into(), k.clone().into())
+        });
+        fix.join().unwrap();
+        assert_eq!(loaded.expect("loaded").leaf_der(), b.2);
+    }
+
+    #[test]
+    fn configuration_errors_are_not_waited_for() {
+        let err = ClientCert::wait_from_env(env(&[(CLIENT_CERT_ENV, "/c.crt")]), None).err().expect("refused");
+        assert!(err.contains(CLIENT_KEY_ENV), "{err}");
+        let conflict = env(&[(CLIENT_CERT_ENV, "/c.crt"), (WT_CERT_ENV, "/d.crt"), (CLIENT_KEY_ENV, "/c.key")]);
+        assert!(ClientCert::wait_from_env(conflict, None).is_err());
+        let self_signed = ClientCert::wait_from_env(env(&[]), None).unwrap().expect("no files: no wait");
+        assert!(self_signed.sha256_hex().is_some());
+        let dir = scratch("wait-env");
+        let a = pair("a.example");
+        let (c, k) = write(&dir, &a);
+        let files = ClientCert::wait_from_env(env(&[(WT_CERT_ENV, &c), (WT_KEY_ENV, &k)]), None).unwrap().expect("loads");
+        assert_eq!(files.leaf_der(), a.2);
+    }
+
+    /// A reload whose read straddled a symlink swap (new chain, old key) reads again after a
+    /// short pause instead of waiting a whole poll.
+    #[test]
+    fn a_mismatched_reload_is_read_again_once() {
+        let dir = scratch("reload-retry");
+        let (a, b) = (pair("a.example"), pair("b.example"));
+        let (c, k) = write(&dir, &a);
+        let cert = ClientCert::from_env(env(&[(CLIENT_CERT_ENV, &c), (CLIENT_KEY_ENV, &k)])).unwrap();
+        std::fs::write(&c, &b.0).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let reloaded = rt.block_on(async {
+            let (k, key) = (k.clone(), b.1.clone());
+            let swap = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                std::fs::write(k, key).unwrap();
+            });
+            let reloaded = cert.reload_with_retry(Duration::from_millis(50)).await;
+            swap.await.unwrap();
+            reloaded
+        });
+        assert_eq!(reloaded.unwrap(), true);
+        assert_eq!(cert.leaf_der(), b.2);
+        // Still mismatched after the re-read: an error, the old pair kept.
+        std::fs::write(&c, &a.0).unwrap();
+        let again = rt.block_on(cert.reload_with_retry(Duration::from_millis(1)));
+        assert!(again.is_err());
         assert_eq!(cert.leaf_der(), b.2);
     }
 }

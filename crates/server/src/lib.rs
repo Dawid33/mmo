@@ -708,6 +708,16 @@ pub fn run() -> claims::ServerExit {
     // during a long forge or open acts as it always did (default action), and the watcher starts
     // below, where it always did.
     let early_stop = (empty == world_file::EmptyStore::Wait).then(watch_stop_signals_on_thread);
+    // The players' certificate (QUIC and WebTransport), before any store work: a client pins
+    // a self-signed one's hash to open a connection here (a certificate from files is a CA's:
+    // no hash). Files another process has not written yet (a proxy obtaining them after this
+    // start) are waited for; only the early watcher's stop (`EmptyStore::Wait`) ends the wait.
+    let Some(client_cert) = client_cert::ClientCert::wait_from_env(|name| std::env::var(name).ok(), early_stop.as_deref())
+        .unwrap_or_else(|e| fatal(&e))
+    else {
+        info!("[server] stop signal while waiting for the client certificate files: exiting");
+        return claims::ServerExit::Clean;
+    };
     let Some(mut opened) =
         world_file::open_world_with(&world_source, &worldgen::forge::ForgeParams::default(), empty, early_stop.as_deref())
             .unwrap_or_else(|e| fatal(&e))
@@ -808,10 +818,6 @@ pub fn run() -> claims::ServerExit {
     if let Some(store) = &store {
         roles::resolve_before_claim(postgres, store, hosts).unwrap_or_else(|e| fatal(&e));
     }
-    // The players' certificate (QUIC and WebTransport) is made now, before this host's
-    // endpoint is known to anyone: a client pins a self-signed one's hash to open a connection
-    // here (a certificate from files is a CA's: no hash).
-    let client_cert = client_cert::ClientCert::from_env(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e));
     // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
     let endpoint = host_endpoint(ownership.ordinal(), port, |name| std::env::var(name).ok(), client_cert.sha256_hex());
     let mut authenticator = auth_edge::Authenticator::for_mode(auth_mode);
@@ -1394,11 +1400,12 @@ pub fn run() -> claims::ServerExit {
 }
 
 /// Re-reads the players' certificate files every [`client_cert::CERT_POLL`]: a renewal is
-/// served to the next handshake on both listeners; one that does not load keeps the old pair.
+/// served to the next handshake on both listeners; one that does not load is read again once
+/// after [`client_cert::RELOAD_RETRY`], then keeps the old pair until the next poll.
 async fn reload_client_cert(cert: client_cert::ClientCert) {
     loop {
         tokio::time::sleep(client_cert::CERT_POLL).await;
-        match cert.reload_if_changed() {
+        match cert.reload_with_retry(client_cert::RELOAD_RETRY).await {
             Ok(true) => info!("client certificate reloaded (QUIC and WebTransport)"),
             Ok(false) => {}
             Err(e) => log::warn!("{e}; still serving the previous certificate"),
