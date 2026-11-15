@@ -474,9 +474,9 @@ pub fn run_coordinator() -> ServerExit {
     .unwrap_or_else(|e| fatal(e));
     Role::Coordinator.check_store(&source).unwrap_or_else(|e| fatal(e));
     let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(e));
-    // Watched from before the store opens: a coordinator waiting for its world stops on a signal.
-    let stop = crate::watch_stop_signals_on_thread();
-    let Some(opened) = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, Some(&stop))
+    // Watched before the store opens only when waiting for a world; otherwise where it always was.
+    let early_stop = (empty == world_file::EmptyStore::Wait).then(crate::watch_stop_signals_on_thread);
+    let Some(opened) = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, early_stop.as_deref())
         .unwrap_or_else(|e| fatal(e))
     else {
         log::info!("[coordinator] stop signal while waiting for a world: exiting");
@@ -543,6 +543,7 @@ pub fn run_coordinator() -> ServerExit {
     )
     .unwrap_or_else(|e| fatal(e));
 
+    let stop = early_stop.unwrap_or_else(crate::watch_stop_signals_on_thread);
     while !coordinator.thread.is_finished() && !stop.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(COORDINATOR_PROCESS_POLL);
     }

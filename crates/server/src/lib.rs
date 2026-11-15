@@ -708,13 +708,13 @@ pub fn run() -> claims::ServerExit {
     .unwrap_or_else(|e| fatal(&e));
     role.check_store(&world_source).unwrap_or_else(|e| fatal(&e));
     let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(&e));
-    // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main loop like a
-    // last client leaving does, so the world is saved on the way out. Watched from before the
-    // store opens: a process waiting for its world (`VOXEL_EMPTY_STORE=wait`, PID 1 in a pod,
-    // where an unhandled SIGTERM is ignored) stops on it too.
-    let stop_signal = watch_stop_signals_on_thread();
+    // Only a process waiting for its world (`VOXEL_EMPTY_STORE=wait`, PID 1 in a pod, where an
+    // unhandled SIGTERM is ignored) watches signals before the store opens; otherwise a signal
+    // during a long forge or open acts as it always did (default action), and the watcher starts
+    // below, where it always did.
+    let early_stop = (empty == world_file::EmptyStore::Wait).then(watch_stop_signals_on_thread);
     let Some(mut opened) =
-        world_file::open_world_with(&world_source, &worldgen::forge::ForgeParams::default(), empty, Some(&stop_signal))
+        world_file::open_world_with(&world_source, &worldgen::forge::ForgeParams::default(), empty, early_stop.as_deref())
             .unwrap_or_else(|e| fatal(&e))
     else {
         info!("[server] stop signal while waiting for a world: exiting");
@@ -881,6 +881,9 @@ pub fn run() -> claims::ServerExit {
     rt.spawn(async move { auth.prefetch().await });
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
+    // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main
+    // loop like a last client leaving does, so the world is saved on the way out.
+    let stop_signal = early_stop.unwrap_or_else(watch_stop_signals_on_thread);
     let (region_out_send, region_out_recv) = crossbeam::channel::unbounded();
     // Block registry: prefer the runtime manifest, fall back to the copy
     // embedded at build time (same repo file) so headless runs never fail.
