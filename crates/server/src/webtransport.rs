@@ -3,24 +3,24 @@
 //! are routed into the same ServerEvent channel and ClientSink map as quinn
 //! clients. Wire format is identical: one uni-stream per bincode packet.
 //!
-//! Two certificate sources ([`CertSource`]): in dev a self-signed cert the page
-//! pins by hash (`assets/webtransport-cert-hash.json`, written by host 0 only —
-//! [`cert_hash_file_names`]); when deployed
-//! (`just deploy`) a real certificate for the page's hostname — the Let's
-//! Encrypt one the reverse proxy obtains — read from `VOXEL_WT_CERT` /
-//! `VOXEL_WT_KEY` and reloaded whenever the files change (renewals).
+//! It serves the host's one client-facing certificate ([`ClientCert`], shared with the QUIC
+//! listener): in dev a self-signed one the page pins by hash
+//! (`assets/webtransport-cert-hash.json`, written by host 0 only — [`cert_hash_file_names`]);
+//! when deployed a real certificate for the page's hostname read from files and reloaded
+//! when they change (renewals; `client_cert`).
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crossbeam::channel::Sender;
 use dashmap::DashMap;
 use game::{ClientId, ClientPacket, ServerEvent};
 use log::{info, warn};
-use wtransport::{Endpoint, Identity, ServerConfig};
+use quinn::rustls;
+use wtransport::{Endpoint, ServerConfig};
 
+use crate::client_cert::ClientCert;
 use crate::player_store::{HELLO_MAX_BYTES, HELLO_TIMEOUT};
 use crate::ClientSink;
 
@@ -28,41 +28,19 @@ use crate::ClientSink;
 /// payloads and stay well under this.
 const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 
-/// PEM certificate chain for the ingress (set together with [`WT_KEY_ENV`]).
-pub const WT_CERT_ENV: &str = "VOXEL_WT_CERT";
-/// PEM private key for the ingress (set together with [`WT_CERT_ENV`]).
-pub const WT_KEY_ENV: &str = "VOXEL_WT_KEY";
-
-/// How often the certificate files are checked for a renewal, and how often
-/// the ingress retries while they don't exist yet (the proxy obtains the
-/// certificate only once DNS points at the box).
-const CERT_POLL: Duration = Duration::from_secs(60);
-
-/// Where the ingress's certificate comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CertSource {
-    /// Minted at start, pinned by the page through the hash file (dev).
-    SelfSigned,
-    /// A real certificate on disk, reloaded when its files change.
-    Files { cert: PathBuf, key: PathBuf },
-}
-
-/// The certificate source from the values of [`WT_CERT_ENV`] / [`WT_KEY_ENV`]:
-/// both or neither (empty counts as unset).
-pub fn cert_source_from(cert: Option<&str>, key: Option<&str>) -> Result<CertSource, String> {
-    let cert = cert.map(str::trim).filter(|v| !v.is_empty());
-    let key = key.map(str::trim).filter(|v| !v.is_empty());
-    match (cert, key) {
-        (None, None) => Ok(CertSource::SelfSigned),
-        (Some(cert), Some(key)) => Ok(CertSource::Files { cert: cert.into(), key: key.into() }),
-        _ => Err(format!("set both {WT_CERT_ENV} and {WT_KEY_ENV}, or neither")),
-    }
-}
-
-fn server_config(bind: SocketAddr, identity: Identity) -> ServerConfig {
+/// The ingress's configuration: `cert`'s current pair on every handshake (a renewal is
+/// served without touching the endpoint), TLS 1.3 and the WebTransport ALPN only — what
+/// `wtransport::Identity`'s default TLS configuration sets, with ring named.
+fn server_config(bind: SocketAddr, cert: &ClientCert) -> ServerConfig {
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("ring supports TLS 1.3")
+        .with_no_client_auth()
+        .with_cert_resolver(cert.rustls_resolver());
+    tls.alpn_protocols = vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()];
     ServerConfig::builder()
         .with_bind_address(bind)
-        .with_identity(identity)
+        .with_custom_tls(tls)
         // A browser that vanishes without a close frame (tab killed, laptop
         // lid, frozen headless run) must be DETECTED, or its sink wedges the
         // shared writer task once the dead peer's stream credit runs out —
@@ -73,114 +51,12 @@ fn server_config(bind: SocketAddr, identity: Identity) -> ServerConfig {
         .build()
 }
 
-/// The pair of modification times that identifies one version of the files.
-fn cert_version(cert: &Path, key: &Path) -> Option<(SystemTime, SystemTime)> {
-    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    Some((modified(cert)?, modified(key)?))
-}
-
-/// Loads the files, waiting (and logging) until they exist and parse.
-async fn load_identity_waiting(cert: &Path, key: &Path) -> (Identity, Option<(SystemTime, SystemTime)>) {
-    loop {
-        let version = cert_version(cert, key);
-        match Identity::load_pemfiles(cert, key).await {
-            Ok(identity) => return (identity, version),
-            Err(e) => warn!(
-                "webtransport certificate {} / {} not loadable yet ({e}); retrying in {}s",
-                cert.display(),
-                key.display(),
-                CERT_POLL.as_secs()
-            ),
-        }
-        tokio::time::sleep(CERT_POLL).await;
-    }
-}
-
-/// Reloads the endpoint's certificate whenever the files change. A change is
-/// applied once the files have stayed the same for a whole poll, so a renewal
-/// caught between writing the chain and the key is not loaded half-done.
-async fn watch_cert_files(
-    endpoint: Arc<Endpoint<wtransport::endpoint::endpoint_side::Server>>,
-    bind: SocketAddr,
-    cert: PathBuf,
-    key: PathBuf,
-    mut loaded: Option<(SystemTime, SystemTime)>,
-) {
-    let mut seen = loaded;
-    loop {
-        tokio::time::sleep(CERT_POLL).await;
-        let now = cert_version(&cert, &key);
-        let settled = now.is_some() && now == seen && now != loaded;
-        seen = now;
-        if !settled {
-            continue;
-        }
-        match Identity::load_pemfiles(&cert, &key).await {
-            Ok(identity) => match endpoint.reload_config(server_config(bind, identity), false) {
-                Ok(()) => {
-                    info!("webtransport certificate reloaded from {}", cert.display());
-                    loaded = now;
-                }
-                Err(e) => warn!("webtransport certificate reload failed: {e:?}"),
-            },
-            Err(e) => warn!("webtransport certificate changed but does not load: {e}"),
-        }
-    }
-}
-
-/// A self-signed identity ([`CertSource::SelfSigned`]) minted before the ingress starts:
-/// its hash is part of this host's endpoint (`ServerPacket::Host`, its `hosts` row) — a
-/// browser pins it to open a connection here.
-pub struct SelfSignedCert {
-    identity: Identity,
-    sha256_hex: String,
-}
-
-impl SelfSignedCert {
-    /// serverCertificateHashes requires an ECDSA cert valid <= 14 days; wtransport's
-    /// self-signed identity satisfies both.
-    pub fn mint() -> Result<SelfSignedCert, Box<dyn std::error::Error + Send + Sync>> {
-        let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
-        let sha256_hex = cert_sha256_hex(&identity);
-        Ok(SelfSignedCert { identity, sha256_hex })
-    }
-
-    /// The certificate's SHA-256, lowercase hex (what the page passes to
-    /// serverCertificateHashes).
-    pub fn sha256_hex(&self) -> &str {
-        &self.sha256_hex
-    }
-}
-
+/// Serves WebTransport on `bind` with `cert` as host `ordinal`: a self-signed `cert`'s hash
+/// goes to the dev hash files ([`cert_hash_file_names`]) the page pins it by.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     bind: SocketAddr,
-    certs: CertSource,
-    send: Sender<ServerEvent>,
-    sinks: Arc<DashMap<ClientId, ClientSink>>,
-    next_client_id: Arc<AtomicU64>,
-    players: crate::player_store::SharedPlayerStore,
-    auth: Arc<crate::auth_edge::Authenticator>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let endpoint = match &certs {
-        CertSource::SelfSigned => return serve_minted(bind, SelfSignedCert::mint()?, 0, send, sinks, next_client_id, players, auth).await,
-        CertSource::Files { cert, key } => {
-            let (identity, version) = load_identity_waiting(cert, key).await;
-            info!("webtransport certificate loaded from {}", cert.display());
-            let endpoint = Arc::new(Endpoint::server(server_config(bind, identity))?);
-            tokio::spawn(watch_cert_files(endpoint.clone(), bind, cert.clone(), key.clone(), version));
-            endpoint
-        }
-    };
-    accept_loop(endpoint, bind, send, sinks, next_client_id, players, auth).await
-}
-
-/// [`serve`] with the self-signed identity `cert` minted already (its hash known to this
-/// host's endpoint), on host `ordinal` (which dev hash files it writes:
-/// [`cert_hash_file_names`]).
-#[allow(clippy::too_many_arguments)]
-pub async fn serve_minted(
-    bind: SocketAddr,
-    cert: SelfSignedCert,
+    cert: ClientCert,
     ordinal: u32,
     send: Sender<ServerEvent>,
     sinks: Arc<DashMap<ClientId, ClientSink>>,
@@ -188,11 +64,13 @@ pub async fn serve_minted(
     players: crate::player_store::SharedPlayerStore,
     auth: Arc<crate::auth_edge::Authenticator>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Dev nicety, not load-bearing: never fail the ingress over it.
-    if let Err(e) = write_cert_hash_file(cert.sha256_hex(), bind.port(), ordinal) {
-        warn!("could not write cert-hash file (browser clients need it): {e:?}");
+    if let Some(hex) = cert.sha256_hex() {
+        // Dev nicety, not load-bearing: never fail the ingress over it.
+        if let Err(e) = write_cert_hash_file(&hex, bind.port(), ordinal) {
+            warn!("could not write cert-hash file (browser clients need it): {e:?}");
+        }
     }
-    let endpoint = Arc::new(Endpoint::server(server_config(bind, cert.identity))?);
+    let endpoint = Arc::new(Endpoint::server(server_config(bind, &cert))?);
     accept_loop(endpoint, bind, send, sinks, next_client_id, players, auth).await
 }
 
@@ -349,27 +227,9 @@ fn write_cert_hash_file(hex: &str, port: u16, ordinal: u32) -> Result<(), Box<dy
     Ok(())
 }
 
-/// The SHA-256 of `identity`'s (one) certificate, lowercase hex.
-fn cert_sha256_hex(identity: &Identity) -> String {
-    let hash = identity.certificate_chain().as_slice().first().expect("self-signed identity has one cert").hash();
-    hash.as_ref().iter().map(|b| format!("{b:02x}")).collect::<String>()
-}
-
 #[cfg(test)]
 mod cert_tests {
     use super::*;
-
-    #[test]
-    fn cert_source_is_both_files_or_self_signed() {
-        assert_eq!(cert_source_from(None, None), Ok(CertSource::SelfSigned));
-        assert_eq!(cert_source_from(Some(""), Some(" ")), Ok(CertSource::SelfSigned));
-        assert_eq!(
-            cert_source_from(Some("/c.crt"), Some("/c.key")),
-            Ok(CertSource::Files { cert: "/c.crt".into(), key: "/c.key".into() })
-        );
-        assert!(cert_source_from(Some("/c.crt"), None).is_err());
-        assert!(cert_source_from(None, Some("/c.key")).is_err());
-    }
 
     /// Several dev hosts each mint a certificate: only host 0 writes the file the page
     /// pins a typed local address by, so the last host to start no longer wins it.

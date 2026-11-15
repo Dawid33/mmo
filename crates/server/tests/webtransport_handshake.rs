@@ -17,6 +17,10 @@ fn local_auth() -> Arc<server::auth_edge::Authenticator> {
     Arc::new(server::auth_edge::Authenticator::local())
 }
 
+fn self_signed() -> server::client_cert::ClientCert {
+    server::client_cert::ClientCert::from_env(|_| None).unwrap()
+}
+
 fn hello(name: &str) -> ClientPacket {
     ClientPacket::Hello { credential: game::Credential::Local(PlayerName(name.into())) }
 }
@@ -83,7 +87,7 @@ async fn webtransport_client_full_handshake() {
     let bind = "127.0.0.1:16467".parse().unwrap();
     let ingress_sinks = sinks.clone();
     tokio::spawn(async move {
-        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id, memory_store(), local_auth())
+        webtransport::serve(bind, self_signed(), 0, event_send, ingress_sinks, next_id, memory_store(), local_auth())
             .await
             .unwrap();
     });
@@ -215,7 +219,8 @@ async fn first_packet_not_hello_closes() {
         let bind = format!("127.0.0.1:{PORT}").parse().unwrap();
         webtransport::serve(
             bind,
-            webtransport::CertSource::SelfSigned,
+            self_signed(),
+            0,
             event_send,
             ingress_sinks,
             Arc::new(AtomicU64::new(0)),
@@ -267,4 +272,130 @@ async fn first_packet_not_hello_closes() {
         drop(conn);
     }
     assert_eq!(players[0], players[1], "one name, one player");
+}
+
+/// One certificate for both listeners: a native client (QUIC) and a browser (WebTransport)
+/// are shown the same leaf, whose SHA-256 is the hash the host advertises — and a client
+/// that pins that hash, as a browser does, connects.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "slow: >100ms — run via just test-full"]
+async fn quic_and_webtransport_show_the_same_leaf() {
+    let free = || std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (quic_port, wt_port) = (free(), free());
+    let cert = self_signed();
+    let cert_hash = cert.sha256_hex().expect("self-signed: pinned by hash");
+    let (event_send, _event_recv) = crossbeam::channel::unbounded();
+    let (_server_send, server_recv) = crossbeam::channel::unbounded();
+    let mut ingress = server::WorldIngress::new("127.0.0.1".parse().unwrap(), quic_port, true, memory_store(), local_auth())
+        .with_webtransport_port(wt_port)
+        .with_client_cert(cert);
+    tokio::spawn(async move { ingress.listen(event_send, server_recv).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let quic_leaf = leaf::over_quic(quic_port).await;
+    let wt_leaf = leaf::over_webtransport(wt_port).await;
+    assert_eq!(quic_leaf, wt_leaf, "one certificate for both listeners");
+    let hash = wtransport::tls::Certificate::from_der(quic_leaf).unwrap().hash();
+    let hex: String = hash.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(hex, cert_hash, "the advertised hash is the served leaf's");
+
+    // The browser's way: pin the advertised hash (ECDSA, valid <= 14 days, or it is refused).
+    let pinned = wtransport::ClientConfig::builder().with_bind_default().with_server_certificate_hashes([hash]).build();
+    wtransport::Endpoint::client(pinned)
+        .unwrap()
+        .connect(format!("https://127.0.0.1:{wt_port}"))
+        .await
+        .expect("a client pinning the advertised hash connects");
+}
+
+/// Test clients that accept any certificate and record the leaf they were shown.
+mod leaf {
+    use std::sync::{Arc, Mutex};
+
+    use quinn::crypto::rustls::QuicClientConfig;
+    use quinn::rustls::{
+        self,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, ServerName, UnixTime},
+        DigitallySignedStruct, SignatureScheme,
+    };
+
+    #[derive(Debug)]
+    struct Recording {
+        provider: Arc<rustls::crypto::CryptoProvider>,
+        leaf: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl ServerCertVerifier for Recording {
+        fn verify_server_cert(
+            &self,
+            leaf: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            *self.leaf.lock().unwrap() = Some(leaf.to_vec());
+            Ok(ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        }
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        }
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.provider.signature_verification_algorithms.supported_schemes()
+        }
+    }
+
+    fn recording_tls(alpn: Option<&[u8]>) -> (rustls::ClientConfig, Arc<Recording>) {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = Arc::new(Recording { provider: provider.clone(), leaf: Mutex::new(None) });
+        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
+            .with_no_client_auth();
+        tls.alpn_protocols = alpn.into_iter().map(<[u8]>::to_vec).collect();
+        (tls, verifier)
+    }
+
+    fn recorded(verifier: &Recording) -> Vec<u8> {
+        verifier.leaf.lock().unwrap().clone().expect("the handshake showed a certificate")
+    }
+
+    pub async fn over_quic(port: u16) -> Vec<u8> {
+        let (tls, verifier) = recording_tls(None);
+        let config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).unwrap()));
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(config);
+        let connection =
+            endpoint.connect(format!("127.0.0.1:{port}").parse().unwrap(), "localhost").unwrap().await.expect("QUIC connects");
+        connection.close(0u32.into(), b"done");
+        recorded(&verifier)
+    }
+
+    pub async fn over_webtransport(port: u16) -> Vec<u8> {
+        let (tls, verifier) = recording_tls(Some(wtransport::tls::WEBTRANSPORT_ALPN));
+        let config = wtransport::ClientConfig::builder().with_bind_default().with_custom_tls(tls).build();
+        let connection = wtransport::Endpoint::client(config)
+            .unwrap()
+            .connect(format!("https://127.0.0.1:{port}"))
+            .await
+            .expect("WebTransport connects");
+        connection.close(wtransport::VarInt::from_u32(0), b"done");
+        recorded(&verifier)
+    }
 }

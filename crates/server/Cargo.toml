@@ -23,7 +23,6 @@ log = { workspace = true }
 quinn = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time", "signal"] }
 lz4_flex = { workspace = true }
-rcgen = { workspace = true }
 dashmap = { workspace = true }
 wtransport = { workspace = true }
 # The world store (regions, players, history, world tick): SQLite or Postgres.
@@ -49,6 +48,8 @@ pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 test-hooks = []
 
 [dev-dependencies]
+# Certificate pairs for the client certificate's reload tests (`client_cert`).
+rcgen = { workspace = true }
 game = { workspace = true }
 worldgen = { workspace = true }
 crossbeam = { workspace = true }

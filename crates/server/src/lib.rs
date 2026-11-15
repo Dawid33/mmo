@@ -8,10 +8,7 @@ use game::{ClientId, ClientPacket, ServerEvent, ServerPacket};
 use log::{error, info};
 use quinn::{
     crypto::rustls::QuicServerConfig,
-    rustls::{
-        self,
-        pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-    },
+    rustls,
     ConnectionError, Endpoint, TransportConfig,
 };
 
@@ -143,6 +140,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 }
 
 pub mod auth_edge;
+pub mod client_cert;
 pub mod claims;
 pub mod coordinator_rt;
 pub mod cuts;
@@ -363,9 +361,10 @@ pub struct WorldIngress {
     players: player_store::SharedPlayerStore,
     /// Checks each `Hello`'s credential first (`VOXEL_AUTH`).
     auth: Arc<auth_edge::Authenticator>,
-    /// The WebTransport ingress's self-signed certificate, minted before the ingress starts
-    /// (its hash is in this host's endpoint); `None`: the ingress reads its source itself.
-    wt_cert: Option<webtransport::SelfSignedCert>,
+    /// The certificate both listeners serve, made before they start (a self-signed one's
+    /// hash is in this host's endpoint); `None`: [`Self::listen`] reads its source itself
+    /// ([`client_cert::ClientCert::from_env`]).
+    client_cert: Option<client_cert::ClientCert>,
     /// This host's ordinal: which dev cert-hash files the ingress writes
     /// (`webtransport::cert_hash_file_names`).
     host_ordinal: u32,
@@ -388,7 +387,7 @@ impl WorldIngress {
             wt_port: WEBTRANSPORT_PORT,
             players,
             auth,
-            wt_cert: None,
+            client_cert: None,
             host_ordinal: 0,
             sinks: Arc::new(DashMap::new()),
         }
@@ -406,9 +405,9 @@ impl WorldIngress {
         self
     }
 
-    /// Serve WebTransport with `cert` (minted ahead, so its hash could be advertised).
-    pub fn with_webtransport_cert(mut self, cert: Option<webtransport::SelfSignedCert>) -> Self {
-        self.wt_cert = cert;
+    /// Serve QUIC and WebTransport with `cert` (made ahead, so its hash could be advertised).
+    pub fn with_client_cert(mut self, cert: client_cert::ClientCert) -> Self {
+        self.client_cert = Some(cert);
         self
     }
 
@@ -430,9 +429,13 @@ impl WorldIngress {
         send: Sender<ServerEvent>,
         server_recv: Receiver<(Option<ClientId>, ServerPacket)>,
     ) {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert_der = CertificateDer::from(cert.cert);
-        let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+        let client_cert = match self.client_cert.take() {
+            Some(cert) => cert,
+            None => client_cert::ClientCert::from_env(|name| std::env::var(name).ok()).unwrap_or_else(|e| panic!("{e}")),
+        };
+        if client_cert.is_from_files() {
+            tokio::spawn(reload_client_cert(client_cert.clone()));
+        }
         // The provider is named, not left to rustls's process default: the
         // workspace's unified features enable both `ring` and `aws-lc-rs`
         // (the login service's AWS SDK), and then `builder()` panics.
@@ -440,8 +443,7 @@ impl WorldIngress {
             .with_safe_default_protocol_versions()
             .expect("ring supports the default TLS versions")
             .with_no_client_auth()
-            .with_single_cert(vec![cert_der], priv_key.into())
-            .unwrap();
+            .with_cert_resolver(client_cert.rustls_resolver());
 
         let mut config =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap()));
@@ -545,20 +547,11 @@ impl WorldIngress {
             let wt_players = self.players.clone();
             let wt_auth = self.auth.clone();
             let wt_addr = std::net::SocketAddr::new(self.ip, self.wt_port);
-            let minted = self.wt_cert.take();
             let ordinal = self.host_ordinal;
-            let certs = crate::webtransport::cert_source_from(
-                std::env::var(crate::webtransport::WT_CERT_ENV).ok().as_deref(),
-                std::env::var(crate::webtransport::WT_KEY_ENV).ok().as_deref(),
-            )
-            .unwrap_or_else(|message| panic!("{message}"));
+            let wt_cert = client_cert.clone();
             tokio::spawn(async move {
-                let served = match minted {
-                    Some(cert) => {
-                        crate::webtransport::serve_minted(wt_addr, cert, ordinal, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await
-                    }
-                    None => crate::webtransport::serve(wt_addr, certs, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await,
-                };
+                let served =
+                    crate::webtransport::serve(wt_addr, wt_cert, ordinal, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await;
                 if let Err(e) = served {
                     log::error!("webtransport ingress died: {e:?}");
                 }
@@ -815,26 +808,12 @@ pub fn run() -> claims::ServerExit {
     if let Some(store) = &store {
         roles::resolve_before_claim(postgres, store, hosts).unwrap_or_else(|e| fatal(&e));
     }
-    // The WebTransport ingress's self-signed certificate is minted now, before this host's
-    // endpoint is known to anyone: a browser pins its hash to open a connection here (a
-    // certificate from files is a CA's: no hash).
-    let wt_cert = match webtransport_enabled(single_player) {
-        true => match webtransport::cert_source_from(
-            std::env::var(webtransport::WT_CERT_ENV).ok().as_deref(),
-            std::env::var(webtransport::WT_KEY_ENV).ok().as_deref(),
-        )
-        .unwrap_or_else(|e| fatal(&e))
-        {
-            webtransport::CertSource::SelfSigned => Some(
-                webtransport::SelfSignedCert::mint()
-                    .unwrap_or_else(|e| fatal(&format!("minting the webtransport certificate: {e}"))),
-            ),
-            webtransport::CertSource::Files { .. } => None,
-        },
-        false => None,
-    };
+    // The players' certificate (QUIC and WebTransport) is made now, before this host's
+    // endpoint is known to anyone: a client pins a self-signed one's hash to open a connection
+    // here (a certificate from files is a CA's: no hash).
+    let client_cert = client_cert::ClientCert::from_env(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e));
     // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
-    let endpoint = host_endpoint(ownership.ordinal(), port, |name| std::env::var(name).ok(), wt_cert.as_ref());
+    let endpoint = host_endpoint(ownership.ordinal(), port, |name| std::env::var(name).ok(), client_cert.sha256_hex());
     let mut authenticator = auth_edge::Authenticator::for_mode(auth_mode);
     if let Some((orders, _)) = &spawn_orders {
         authenticator = authenticator.with_spawn_orders(orders.clone());
@@ -847,7 +826,7 @@ pub fn run() -> claims::ServerExit {
     }
     let auth = Arc::new(authenticator);
     let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone())
-        .with_webtransport_cert(wt_cert)
+        .with_client_cert(client_cert)
         .with_webtransport_port(wt_port)
         .with_host_ordinal(ownership.ordinal());
     let sinks = rgi.sinks();
@@ -1414,21 +1393,34 @@ pub fn run() -> claims::ServerExit {
     outcome
 }
 
+/// Re-reads the players' certificate files every [`client_cert::CERT_POLL`]: a renewal is
+/// served to the next handshake on both listeners; one that does not load keeps the old pair.
+async fn reload_client_cert(cert: client_cert::ClientCert) {
+    loop {
+        tokio::time::sleep(client_cert::CERT_POLL).await;
+        match cert.reload_if_changed() {
+            Ok(true) => info!("client certificate reloaded (QUIC and WebTransport)"),
+            Ok(false) => {}
+            Err(e) => log::warn!("{e}; still serving the previous certificate"),
+        }
+    }
+}
+
 /// Where players reach host `ordinal` (`ServerPacket::Host`, its `hosts` row): the
 /// advertised addresses ([`peer_link::ADVERTISE_QUIC_ENV`], [`peer_link::ADVERTISE_WT_ENV`]
-/// through `lookup`) and the hash of the WebTransport ingress's self-signed certificate
-/// (`wt_cert`, minted before this is called), which a browser pins.
+/// through `lookup`) and the hash of the players' self-signed certificate (`cert_hash`,
+/// `client_cert::ClientCert::sha256_hex`; QUIC and WebTransport serve it), which a client pins.
 fn host_endpoint(
     ordinal: u32,
     port: u16,
     lookup: impl Fn(&str) -> Option<String>,
-    wt_cert: Option<&webtransport::SelfSignedCert>,
+    cert_hash: Option<String>,
 ) -> game::HostEndpoint {
     game::HostEndpoint {
         ordinal,
         quic: Some(peer_link::advertise_quic_from(lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(), port)),
         webtransport: peer_link::advertise_wt_from(lookup(peer_link::ADVERTISE_WT_ENV).as_deref()),
-        cert_hash: wt_cert.map(|c| c.sha256_hex().to_string()),
+        cert_hash,
     }
 }
 
@@ -1654,13 +1646,11 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_carries_the_minted_webtransport_cert_hash() {
-        let cert = webtransport::SelfSignedCert::mint().unwrap();
-        let hex = cert.sha256_hex().to_string();
-        assert_eq!(hex.len(), 64, "{hex}");
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{hex}");
+    fn endpoint_carries_the_self_signed_client_cert_hash() {
+        let cert = client_cert::ClientCert::from_env(|_| None).unwrap();
+        let hex = cert.sha256_hex().expect("self-signed");
         let wt = |name: &str| (name == peer_link::ADVERTISE_WT_ENV).then(|| "https://h.example:6467".to_string());
-        let endpoint = host_endpoint(3, 7000, wt, Some(&cert));
+        let endpoint = host_endpoint(3, 7000, wt, cert.sha256_hex());
         assert_eq!(endpoint.ordinal, 3);
         assert_eq!(endpoint.cert_hash.as_deref(), Some(hex.as_str()));
         assert_eq!(endpoint.webtransport.as_deref(), Some("https://h.example:6467"));
