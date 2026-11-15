@@ -1914,9 +1914,16 @@ world-status:
     echo
     k get svc -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,PORT:.spec.ports[*].port,NODEPORT:.spec.ports[*].nodePort
     echo
-    for pod in $(k get pods -o jsonpath='{.items[*].metadata.name}'); do
+    # Only the coordinator and the hosts have the health port.
+    for pod in $(k get pods -l 'app.kubernetes.io/component in (coordinator,host)' -o jsonpath='{.items[*].metadata.name}'); do
         echo "== $pod /readyz"
-        k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" || echo "(no answer)"
+        # kubectl replaces a 503's body ("forge", "succession", ...) with a generic error, but logs
+        # the body itself at -v=8. A pod that does not answer gets the API server's Status object.
+        body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
+        case "$body" in
+            ''|'{"kind":"Status"'*) echo "(no answer)" ;;
+            *) echo "$body" ;;
+        esac
         echo
     done
 
