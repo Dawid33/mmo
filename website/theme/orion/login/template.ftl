@@ -107,7 +107,7 @@
 <header class="${properties.kcHeaderClass!}">
     <a class="${properties.kcHeaderWrapperClass!}" href="${properties.siteUrl}/">
         <img src="${url.resourcesPath}/img/logo.svg" alt="" width="36" height="38" />
-        <span>${realm.displayName!'Orion'}</span>
+        <span>${realm.displayName!'Errantry'}</span>
     </a>
 </header>
 
