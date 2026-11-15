@@ -27,6 +27,8 @@ pub const LOGIN_URL_ENV: &str = "VOXEL_LOGIN_URL";
 /// The browser's query parameter (`?login=<url>`) that overrides it — honoured
 /// only on a page served from the local machine ([`login_override_allowed`]).
 pub const LOGIN_URL_QUERY: &str = "login";
+/// Where the login service sits behind the page's own origin.
+pub const LOGIN_PATH_ON_PAGE_ORIGIN: &str = "/login";
 /// Page hostnames on which the browser honours `?login=`: the local machine
 /// only (as `Location.hostname` spells them; IPv6 comes bracketed).
 pub const LOGIN_OVERRIDE_HOSTS: [&str; 4] = ["localhost", "127.0.0.1", "[::1]", "::1"];
@@ -270,16 +272,32 @@ fn network(e: reqwest::Error) -> LoginFailure {
 /// Where the client finds the login service, as a pure function: `explicit`
 /// is the runtime override (native `VOXEL_LOGIN_URL` env, browser `?login=` on
 /// a local page only — see [`login_override_allowed`]), else `built`, the
-/// build-time `VOXEL_LOGIN_URL`, else none (no Play online: the menu stays as
-/// it was). Empty strings count as unset; a trailing `/` is
-/// dropped.
+/// build-time `VOXEL_LOGIN_URL`, else `{page_origin}/login` when `page_origin`
+/// (the browser's `location.origin`; `None` on native) is an `https://` origin
+/// whose host is not loopback, else none (no Play online: the menu stays as it
+/// was). Empty strings count as unset; a trailing `/` is dropped.
 ///
-/// There is deliberately no `{page origin}/login` fallback: nothing serves
-/// `/login` on the public site yet, so a deployed page would open on a dead
-/// login screen. R5 restores it once the service sits behind `/login`.
-pub fn resolve_login_url(explicit: Option<&str>, built: Option<&str>) -> Option<String> {
+/// The fallback was dropped once (nothing served `/login`, so a deployed page
+/// opened on a dead login screen). It is back for pages whose own origin
+/// proxies `/login/` to the login service (the web image); `https` plus a
+/// non-loopback host keeps a dev page (`http://127.0.0.1:…`, `localhost`) on
+/// its join-only menu.
+pub fn resolve_login_url(override_: Option<&str>, build_time: Option<&str>, page_origin: Option<&str>) -> Option<String> {
     let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(|v| v.trim_end_matches('/').to_string());
-    set(explicit).or_else(|| set(built))
+    set(override_).or_else(|| set(build_time)).or_else(|| {
+        let origin = set(page_origin)?;
+        let authority = origin.strip_prefix("https://")?;
+        (!authority.is_empty() && !authority.contains('/') && !crate::web_endpoint::is_local_host(origin_host(authority)))
+            .then(|| format!("{origin}{LOGIN_PATH_ON_PAGE_ORIGIN}"))
+    })
+}
+
+/// The host of an origin's `host[:port]` (an IPv6 literal keeps its brackets).
+fn origin_host(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        return authority.find(']').map_or(authority, |end| &authority[..=end]);
+    }
+    authority.split(':').next().unwrap_or(authority)
 }
 
 /// Whether the browser may take the login service's address from `?login=`
@@ -297,7 +315,7 @@ pub fn login_url() -> Option<String> {
     let built = option_env!("VOXEL_LOGIN_URL");
     #[cfg(not(target_arch = "wasm32"))]
     {
-        resolve_login_url(std::env::var(LOGIN_URL_ENV).ok().as_deref(), built)
+        resolve_login_url(std::env::var(LOGIN_URL_ENV).ok().as_deref(), built, None)
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -315,7 +333,8 @@ pub fn login_url() -> Option<String> {
             }
             explicit = None;
         }
-        resolve_login_url(explicit.as_deref(), built)
+        let origin = location.as_ref().and_then(|l| l.origin().ok());
+        resolve_login_url(explicit.as_deref(), built, origin.as_deref())
     }
 }
 
@@ -372,16 +391,54 @@ mod tests {
     }
 
     #[test]
-    fn login_url_resolution() {
-        // The runtime override wins, then the build-time value.
-        assert_eq!(resolve_login_url(Some("http://l:1/"), Some("http://b")).as_deref(), Some("http://l:1"));
-        assert_eq!(resolve_login_url(None, Some("http://b/")).as_deref(), Some("http://b"));
+    fn the_override_wins() {
+        assert_eq!(
+            resolve_login_url(Some("http://l:1/"), Some("http://b"), Some("https://game.example.com")).as_deref(),
+            Some("http://l:1")
+        );
         // Empty = unset.
-        assert_eq!(resolve_login_url(Some(""), Some("  ")), None);
-        assert_eq!(resolve_login_url(Some(""), Some("http://b")).as_deref(), Some("http://b"));
-        // Nothing configured: no login (no page-origin fallback until R5,
-        // so a deployed page keeps its join-only menu).
-        assert_eq!(resolve_login_url(None, None), None);
+        assert_eq!(resolve_login_url(Some(""), Some("  "), None), None);
+        assert_eq!(resolve_login_url(Some(""), Some("http://b"), None).as_deref(), Some("http://b"));
+    }
+
+    #[test]
+    fn the_build_time_value_beats_the_origin() {
+        assert_eq!(
+            resolve_login_url(None, Some("http://b/"), Some("https://game.example.com")).as_deref(),
+            Some("http://b")
+        );
+    }
+
+    #[test]
+    fn an_https_page_falls_back_to_its_own_login() {
+        assert_eq!(
+            resolve_login_url(None, None, Some("https://game.errantry.renownandruin.com")).as_deref(),
+            Some("https://game.errantry.renownandruin.com/login")
+        );
+        assert_eq!(
+            resolve_login_url(None, None, Some("https://game.example.com:8443")).as_deref(),
+            Some("https://game.example.com:8443/login")
+        );
+    }
+
+    #[test]
+    fn a_local_page_has_no_fallback() {
+        for origin in [
+            "http://127.0.0.1:1334",
+            "https://localhost:8443",
+            "https://127.0.0.1",
+            "https://[::1]:8443",
+            "http://game.example.com",
+            "null",
+            "",
+        ] {
+            assert_eq!(resolve_login_url(None, None, Some(origin)), None, "{origin:?}");
+        }
+    }
+
+    #[test]
+    fn native_has_no_fallback() {
+        assert_eq!(resolve_login_url(None, None, None), None);
     }
 
     #[test]
@@ -395,7 +452,7 @@ mod tests {
         // As the browser composes it: off localhost only the build-time address counts.
         let page = |host: Option<&str>| {
             let explicit = Some("https://evil.example").filter(|_| login_override_allowed(host));
-            resolve_login_url(explicit, Some("https://login.example"))
+            resolve_login_url(explicit, Some("https://login.example"), None)
         };
         assert_eq!(page(Some("game.example.com")).as_deref(), Some("https://login.example"));
         assert_eq!(page(Some("localhost")).as_deref(), Some("https://evil.example"));
