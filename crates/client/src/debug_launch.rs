@@ -50,7 +50,7 @@ use worldgen::{forged, world_store};
 
 use crate::frontend::generator::{progress_text, ForgeEvent, ForgeJob};
 use crate::instance::ClientRequest;
-use crate::login::flow::{LoginIntent, LoginSession};
+use crate::login::flow::{LoginIntent, LoginSession, RejoinEnd};
 use crate::renderer::commander::CommanderCamera;
 use crate::renderer::history_view::{embark_tile_check, HistoryView};
 use crate::renderer::world_map::WorldMapState;
@@ -369,9 +369,10 @@ fn abandon(mut launch: ResMut<DebugLaunch>, mut commands: Commands, forge: Optio
 }
 
 /// `online`: a session that ended where a screen session leaves the game
-/// (the world list with a reason, the sign-in screen) ends the launch: why is
-/// printed, and the app exits non-zero. A session the player left (no
-/// reason) does not.
+/// ends the launch: why is printed, and the app exits non-zero. Keyed on the
+/// outcome, never on a screen line: a rejoin that gave up or was signed out
+/// ([`RejoinEnd`]), or a session lost for a reason it does not rejoin on
+/// ([`LastSessionError`]). A session the player left (no reason) does not.
 fn exit_when_lost(
     launch: Res<DebugLaunch>,
     login: Option<Res<LoginSession>>,
@@ -382,11 +383,11 @@ fn exit_when_lost(
         return;
     }
     let Some(login) = login else { return };
-    let why = match (&last.0, login.error.as_str()) {
-        (_, line) if !line.is_empty() => line.to_string(),
-        (Some(reason), _) => reason.clone(),
-        (None, _) if !login.logged_in() => "the login was revoked".to_string(),
-        (None, _) => return,
+    let why = match (&login.rejoin_ended, &last.0) {
+        (Some(RejoinEnd::GaveUp(why)), _) => format!("the rejoin gave up: {why}"),
+        (Some(RejoinEnd::SignedOut), _) => "the login was revoked during a rejoin".to_string(),
+        (None, Some(reason)) => reason.clone(),
+        (None, None) => return,
     };
     // A session's end reason or the screens' line: never a secret.
     error!("[debug] online: the session is over: {why}");

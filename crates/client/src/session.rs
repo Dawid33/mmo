@@ -376,7 +376,7 @@ fn rejoining(world: &World) -> bool {
 /// Tear the lost session down for a rejoin (a new session, built the usual
 /// way once the ticket comes) and put [`REJOIN_STATUS`](crate::login::flow::REJOIN_STATUS)
 /// on the starting screen.
-fn leave_for_rejoin(world: &mut World) {
+pub(crate) fn leave_for_rejoin(world: &mut World) {
     leave_session(world);
     world.get_resource_or_init::<StartingStatus>().0 = crate::login::flow::REJOIN_STATUS.into();
 }

@@ -9,8 +9,12 @@
 //! loads: home region only, no LOD rings (a production-sized world in a
 //! headless test runs out of memory).
 //!
-//! Both tests are slow (a full app, two joins): run them with
-//! `just test-one client "--test session_reset -- --include-ignored"`.
+//! `rejoin_starts_clean` runs the same check across a rejoin: the session
+//! flow (`SessionFlowPlugin`) and an online login, a session that ends with a
+//! rejoinable reason (`login::flow`), then a second session.
+//!
+//! The tests are slow (a full app, two joins): run them with
+//! `just test-one client "--test it -- session_reset:: --include-ignored"`.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -107,6 +111,12 @@ impl Session {
 
 /// The client app with no window backend and no GPU.
 fn app() -> App {
+    app_with(false)
+}
+
+/// [`app`], with the native session flow (`flow`: leaving and rejoining go
+/// through `SessionFlowPlugin` instead of the test's own `leave`).
+fn app_with(flow: bool) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -143,6 +153,9 @@ fn app() -> App {
         debug_flags: game::DebugFlags::default(),
         camera_mode: CameraMode::Commander,
     });
+    if flow {
+        app.add_plugins(client::session::SessionFlowPlugin);
+    }
     app.finish();
     app.cleanup();
     app
@@ -346,5 +359,55 @@ fn leave_during_join_then_rejoin() {
     enter_world(&mut app);
     second.join(&mut app);
     assert_eq!(app.world().resource::<RegionRoots>().0.len(), 1);
+    assert_entities_belong_to_session(&mut app);
+}
+
+/// A session whose home host was replaced (a fence) is left through the
+/// session flow for a rejoin: on the starting screen, with the rejoin waiting
+/// for its ticket, every piece of per-world state is back at its fresh value;
+/// the next session (the rejoin's) loads as the first did.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn rejoin_starts_clean() {
+    use client::login::flow::{LoginSession, REJOIN_STATUS};
+    let mut app = app_with(true);
+    let mut login = LoginSession::new(client::login::LoginApi::new("http://127.0.0.1:1"));
+    login.account = Some("a@b.c".into());
+    login.refresh = Some("r1".into());
+    login.playing_online = true;
+    login.joined_world = Some("alpha".into());
+    app.insert_resource(login);
+    app.update();
+    let fresh_ui = game_ui_props(slint_ui::Overlay::with(slint_ui::GameUi::new).expect("game UI").ui());
+    let fresh_hud = hud_props(slint_ui::Overlay::with(slint_ui::HudUi::new).expect("HUD").ui());
+
+    let mut first = Session::start(&mut app);
+    first.join(&mut app);
+    assert!(count::<With<SessionScoped>>(&mut app) > 0, "the first session spawned its region");
+    {
+        let mut hv = app.world_mut().resource_mut::<HistoryView>();
+        hv.fortress = Some(game::history::SiteId(3));
+        hv.options_requested = true;
+    }
+
+    let fenced = format!("{}{}", client::instance::REFUSED_PREFIX, game::FENCED_REFUSAL);
+    app.world_mut().write_message(client::session::SessionEnded { reason: Some(fenced) });
+    // The flow told the old session to quit: it is not stepped any more.
+    drop(first);
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting);
+    assert!(app.world().resource::<LoginSession>().rejoining(), "the rejoin waits for its ticket");
+    assert_eq!(app.world().resource::<client::session::StartingStatus>().0, REJOIN_STATUS);
+    assert_no_world_state(&mut app, &fresh_ui, &fresh_hud);
+    assert_eq!(active_ui_cameras(&mut app), vec![(true, false)], "the starting screen has the UI");
+
+    // The rejoin's session (the flow would connect its ticket's address).
+    let mut second = Session::start(&mut app);
+    enter_world(&mut app);
+    second.join(&mut app);
+    assert!(!app.world().resource::<LoginSession>().rejoining(), "arriving ends the rejoin");
+    assert_eq!(app.world().resource::<RegionRoots>().0.len(), 1, "one region, the second session's");
     assert_entities_belong_to_session(&mut app);
 }
