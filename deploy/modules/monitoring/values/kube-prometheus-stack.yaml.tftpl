@@ -27,6 +27,125 @@ alertmanager:
             requests:
               storage: ${alertmanager_size}
 
+# Our own alert rules (Prometheus evaluates them, Alertmanager routes them).
+additionalPrometheusRulesMap:
+  world:
+    groups:
+      - name: world
+        rules:
+          - alert: WorldNoCommittedCut
+            # Needs a first commit (> 0): the series is 0 until then, see WorldNoFirstCut.
+            expr: |
+              mmo_cut_last_committed_timestamp_seconds{role="coordinator"} > 0
+              and
+              time() - mmo_cut_last_committed_timestamp_seconds{role="coordinator"} > 300
+            for: 2m
+            labels:
+              severity: critical
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} has committed no cut for 5 minutes"
+              description: "The last committed world cut of {{ $labels.namespace }} is {{ $value | humanizeDuration }} old (a save period is 1 minute)."
+
+          - alert: WorldNoFirstCut
+            # mmo_hosts_live is set only while the coordinator runs world cuts (several hosts),
+            # so a one-host world, which never cuts, does not fire.
+            expr: |
+              mmo_hosts_live{role="coordinator"} > 0
+              and
+              mmo_cut_last_committed_timestamp_seconds{role="coordinator"} == 0
+            for: 10m
+            labels:
+              severity: critical
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} never committed a cut"
+              description: "The coordinator of {{ $labels.namespace }} has run world cuts (hosts live) for 10 minutes and has committed none yet."
+
+          - alert: WorldCoordinatorDown
+            # Only while the namespace's coordinator Deployment has replicas > 0 (a stopped world is silent).
+            expr: |
+              (kube_deployment_spec_replicas{namespace=~"world-.*", deployment="coordinator"} > 0)
+              unless on (namespace)
+              (mmo_registered{role="coordinator"} == 1)
+            for: 2m
+            labels:
+              severity: critical
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} has no registered coordinator"
+              description: "The coordinator Deployment of {{ $labels.namespace }} wants replicas but no coordinator reports itself registered (down, not scraped, or not listening)."
+
+          - alert: WorldSuccessionDeclared
+            expr: |
+              increase(mmo_successions_declared_total{role="coordinator"}[10m]) > 0
+            for: 0m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "A host of {{ $labels.namespace }} was declared dead"
+              description: "The coordinator of {{ $labels.namespace }} declared a succession in the last 10 minutes."
+
+          - alert: WorldSuccessionStuck
+            expr: |
+              mmo_successions_open{role="coordinator"} > 0
+            for: 2m
+            labels:
+              severity: critical
+              cluster: ${cluster}
+            annotations:
+              summary: "A succession of {{ $labels.namespace }} is open"
+              description: "{{ $value }} succession(s) of {{ $labels.namespace }} have stayed open for 2 minutes (normally settled by the next committed cut)."
+
+          - alert: WorldRollback
+            # The inner `> 0` drops the 0 of a coordinator that had not seen a host yet, so the
+            # 0 -> N step at start is no rollback; a coordinator restart (back to the same N) is none either.
+            expr: |
+              mmo_world_generation{role="coordinator"}
+              >
+              (mmo_world_generation{role="coordinator"} offset 10m > 0)
+            for: 0m
+            labels:
+              severity: critical
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} rolled back"
+              description: "The world generation of {{ $labels.namespace }} rose in the last 10 minutes: every host restarted from the last cut."
+
+          - alert: WorldHostNotReady
+            expr: |
+              mmo_registered{role="host"} == 0
+            for: 5m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "A host of {{ $labels.namespace }} is not registered"
+              description: "Pod {{ $labels.pod }} of {{ $labels.namespace }} has not registered for 5 minutes (see mmo_waiting for why)."
+
+          - alert: WorldPodRestartLoop
+            expr: |
+              increase(kube_pod_container_status_restarts_total{namespace=~"world-.*"}[15m]) > 3
+            for: 0m
+            labels:
+              severity: critical
+              cluster: ${cluster}
+            annotations:
+              summary: "{{ $labels.pod }} restarts repeatedly"
+              description: "Container {{ $labels.container }} of {{ $labels.namespace }}/{{ $labels.pod }} restarted more than 3 times in 15 minutes."
+
+          - alert: WorldBackupFailed
+            expr: |
+              kube_job_status_failed{namespace="postgres", job_name=~"pg-dump.*"} > 0
+            for: 0m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "A Postgres backup job failed"
+              description: "Job {{ $labels.job_name }} in namespace postgres has failed pods."
+
 prometheusOperator:
   resources:
     requests: { cpu: 20m, memory: 64Mi }
