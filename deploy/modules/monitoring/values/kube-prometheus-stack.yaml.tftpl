@@ -101,10 +101,12 @@ additionalPrometheusRulesMap:
           - alert: WorldRollback
             # The inner `> 0` drops the 0 of a coordinator that had not seen a host yet, so the
             # 0 -> N step at start is no rollback; a coordinator restart (back to the same N) is none either.
+            # `max by (namespace)` on both sides: a coordinator pod replaced within the 10 minutes has
+            # another `pod` label, and a per-pod comparison would find no pair and hide the rollback.
             expr: |
-              mmo_world_generation{role="coordinator"}
+              max by (namespace) (mmo_world_generation{role="coordinator"})
               >
-              (mmo_world_generation{role="coordinator"} offset 10m > 0)
+              (max by (namespace) (mmo_world_generation{role="coordinator"} offset 10m) > 0)
             for: 0m
             labels:
               severity: critical
@@ -112,6 +114,23 @@ additionalPrometheusRulesMap:
             annotations:
               summary: "World {{ $labels.namespace }} rolled back"
               description: "The world generation of {{ $labels.namespace }} rose in the last 10 minutes: every host restarted from the last cut."
+
+          - alert: WorldHostsBelowReplicas
+            # A host that hangs between its registration and its first loop pass stays live and Ready
+            # for Kubernetes (/livez judges only from the first pass): the coordinator's count of live
+            # hosts is what shows it. Silent with one host (mmo_hosts_live is set only while world cuts
+            # run, never with one host: hence `> 1`) and while the world is stopped (0 replicas).
+            expr: |
+              max by (namespace) (mmo_hosts_live{role="coordinator"})
+              < on (namespace)
+              max by (namespace) (kube_statefulset_replicas{namespace=~"world-.*", statefulset="hosts"} > 1)
+            for: 5m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} has fewer live hosts than its StatefulSet wants"
+              description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than the hosts StatefulSet's replicas (a host down, hung at its start, or not yet forged; one-host worlds never fire)."
 
           - alert: WorldHostNotReady
             expr: |
@@ -136,15 +155,19 @@ additionalPrometheusRulesMap:
               description: "Container {{ $labels.container }} of {{ $labels.namespace }}/{{ $labels.pod }} restarted more than 3 times in 15 minutes."
 
           - alert: WorldBackupFailed
+            # Only Jobs started in the last day: a failed Job is retained (history limit) after a later
+            # success, and must not keep the alert firing; the next nightly run decides again.
             expr: |
               kube_job_status_failed{namespace="postgres", job_name=~"pg-dump.*"} > 0
+              and on (namespace, job_name)
+              (time() - kube_job_status_start_time{namespace="postgres", job_name=~"pg-dump.*"} < 86400)
             for: 0m
             labels:
               severity: warning
               cluster: ${cluster}
             annotations:
               summary: "A Postgres backup job failed"
-              description: "Job {{ $labels.job_name }} in namespace postgres has failed pods."
+              description: "Job {{ $labels.job_name }} in namespace postgres, started in the last day, has failed pods."
 
 prometheusOperator:
   resources:
