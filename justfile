@@ -2179,7 +2179,8 @@ orion-pg-restore world object:
     $k exec -i <primary-pod> -c postgres -- pg_restore --no-owner --role=$db -d $db < ./{{world}}-{{object}}
     # 5. check: every table is owned by $db (one line: "$db|<count>")
     $k exec <primary-pod> -c postgres -- psql -d $db -Atc "select tableowner, count(*) from pg_tables where schemaname = 'public' group by 1"
-    # 6. start the world
+    # 6. start the world. A dump taken while the world ran (every nightly one) holds its hosts' rows as
+    #    running: this first start raises the world generation once (WorldRollback fires) — expected.
     just world_ctx={{orion_context}} world_ns=world-{{world}} world-start
     # 7. later, once the world plays: drop the old one
     $k exec <primary-pod> -c postgres -- dropdb ${db}_before_restore
