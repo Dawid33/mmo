@@ -36,9 +36,13 @@
 //! hands the versions the store then holds to `WorldManager::stored_terrain_changed`, which
 //! re-seeds the halos of other hosts' parked regions from the store.
 //!
-//! **Start-up** ([`resolve_staged_cuts`]): every process on Postgres (any role) finishes the
-//! parts a crash left staged (as their cut's decision says; an undecided cut is aborted) before it
-//! claims, registers or loads anything.
+//! **Start-up** (`roles::resolve_before_claim`): every process on Postgres (any role) finishes,
+//! before it claims, registers or loads anything, the parts a crash left staged (as their cut's
+//! decision says; an undecided cut is aborted) — only cuts none of whose staged parts belongs
+//! to a host alive by its lease (Elastic 1 Task 4: such a cut is under way, its coordinator's;
+//! a host starting beside it must not abort it). With nobody alive (a total crash) every
+//! staged part. A coordinator's start ([`resolve_staged_cuts`], `roles::recover_staged_cuts`)
+//! finishes every staged part: a cut of the coordinator before it is over.
 
 use game::HostId;
 use std::collections::BTreeMap;
@@ -85,10 +89,11 @@ pub const WORLD_PART_WARN: Duration = Duration::from_secs(10);
 /// What an exiting host of several logs when it leaves with no committed cut.
 pub const LEFT_WITHOUT_A_CUT: &str = "left without a cut: the world rolls back to the last cut when this host returns";
 
-/// Start-up recovery of a split-role process on Postgres, before it claims, registers or
-/// loads anything: every world cut part a crash left staged is finished as its cut's
-/// decision says, an undecided cut aborted (`StoreHandle::resolve_prepared`). Logged per
-/// cut.
+/// Start-up recovery of a coordinator process on Postgres (`roles::recover_staged_cuts`):
+/// EVERY world cut part left staged is finished as its cut's decision says, an undecided cut
+/// aborted (`StoreHandle::resolve_prepared`) — the cuts of a coordinator before this one are
+/// over. A host or `all` process finishes only crash leftovers (`roles::resolve_before_claim`:
+/// not a cut with a part of a live host). Logged per cut.
 pub fn resolve_staged_cuts(store: &StoreHandle) -> Result<Vec<(CutId, bool)>, StoreError> {
     let resolved = store.resolve_prepared()?;
     for (cut, committed) in &resolved {

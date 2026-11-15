@@ -995,26 +995,66 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// accounts for it (`world_cut.rs`, [`Self::world_cut_wrap`]); `view` keeps it out of
     /// a one-phase cut's rows.
     pub(super) fn send_reliable(&mut self, ordinal: HostId, msg: Reliable, view: bool) {
+        if self.forgotten_hosts.contains(&ordinal) {
+            return self.to_forgotten(ordinal, msg, view);
+        }
         let msg = match self.world_cut_wrap(ordinal, msg, view) {
             (msg, Some(cut)) => Reliable::InCut { cut, body: Box::new(msg) },
             (msg, None) => msg,
         };
         // Joined by a leave of the pending world cut: held back until it is decided.
         let Some(msg) = self.hold_for_leave(ordinal, msg) else { return };
-        let id = self.queue_now(ordinal, msg);
-        if view && !self.forgotten_hosts.contains(&ordinal) {
-            self.peer_in_source_view.insert((ordinal, id));
+        if let Some(id) = self.queue_now(ordinal, msg) {
+            if view {
+                self.peer_in_source_view.insert((ordinal, id));
+            }
+        }
+    }
+
+    /// `msg` for host `ordinal`, which is forgotten (`forget_host`: dead or departed for good;
+    /// its land is another host's in the directory). Never queued. A state message never
+    /// vanishes silently:
+    /// - a transfer without a player waits for an owner like any transfer whose owner is not
+    ///   reachable ([`Self::wait_for_owner`]: this host's cut row meanwhile, delivered to the
+    ///   super-region's owner at the next `flush_unowned` — the heir, once the directory says so);
+    /// - a hand-off (a transfer with a player), a player move, an intent or a reply has no such
+    ///   path (a player is not parked from here, an intent's refusal is its sender region's): it
+    ///   is a bug — `log::error!`, counted (`peer_state_to_forgotten=`), `debug_assert!`;
+    /// - anything else (orders, acks, notices, marks: no state) is dropped and counted
+    ///   (`peer_dropped_for_dead=`).
+    pub(super) fn to_forgotten(&mut self, ordinal: HostId, msg: Reliable, view: bool) {
+        let (body, accounted) = match msg {
+            Reliable::InCut { cut, body } => (*body, Some(cut)),
+            other => (other, self.inbound_accounted),
+        };
+        match body {
+            Reliable::Transfer { target, stamp, bundle, player: None } => {
+                log::warn!("[server] a transfer of {:?} into {target:?} for host {ordinal}, which is forgotten: it waits for the owner", bundle.id);
+                self.wait_for_owner(target, Reliable::Transfer { target, stamp, bundle, player: None }, view, accounted);
+            }
+            msg if msg.is_state() => {
+                log::error!(
+                    "[server] a {} for host {ordinal}, which is forgotten: no path takes it (a conservation bug: nothing \
+                     should address a forgotten host)",
+                    reliable_name(&msg)
+                );
+                self.peer_state_to_forgotten += 1;
+                debug_assert!(false, "a {} for forgotten host {ordinal}", reliable_name(&msg));
+            }
+            msg => {
+                log::debug!("[server] a {} for host {ordinal}, which is forgotten: dropped", reliable_name(&msg));
+                self.peer_dropped_for_dead += 1;
+            }
         }
     }
 
     /// `msg` to host `ordinal` now: on its session, or kept until it has one. Its id among
-    /// everything queued to that host (`peer_entries`).
-    pub(super) fn queue_now(&mut self, ordinal: HostId, msg: Reliable) -> u64 {
+    /// everything queued to that host (`peer_entries`); `None` for a forgotten host — the
+    /// message is not queued at all ([`Self::to_forgotten`]).
+    pub(super) fn queue_now(&mut self, ordinal: HostId, msg: Reliable) -> Option<u64> {
         if self.forgotten_hosts.contains(&ordinal) {
-            // Gone for good (`forget_host`): nothing is kept for it (counted).
-            log::debug!("[server] a {} for host {ordinal}, which is forgotten: dropped", reliable_name(&msg));
-            self.peer_dropped_for_dead += 1;
-            return 0;
+            self.to_forgotten(ordinal, msg, false);
+            return None;
         }
         let count = self.peer_queued.entry(ordinal).or_default();
         let id = *count;
@@ -1041,7 +1081,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 waiting.push(msg);
             }
         }
-        id
+        Some(id)
     }
 
     /// The state messages exchanged with each peer host since the last committed world

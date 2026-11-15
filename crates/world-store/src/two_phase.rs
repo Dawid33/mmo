@@ -48,8 +48,9 @@ const GID_MAX_BYTES: usize = 200;
 const PREPARED_BUSY_RETRY: Duration = Duration::from_millis(20);
 /// How many times it looks before giving up (10 s in all).
 const PREPARED_BUSY_TRIES: u32 = 500;
-/// The tick an abort recorded by the sweep carries: it does not know the cut's.
-const SWEEP_ABORT_TICK: Tick = 0;
+/// The tick an abort recorded by the sweep carries: it does not know the cut's (also a host's
+/// start-up resolve of a crash's leftovers, `server::roles::resolve_before_claim`).
+pub const SWEEP_ABORT_TICK: Tick = 0;
 
 /// The gid of host `host`'s prepared part of `cut`. `world_tag` tells the worlds of
 /// one Postgres cluster apart (gids are cluster-wide): the database's OID.

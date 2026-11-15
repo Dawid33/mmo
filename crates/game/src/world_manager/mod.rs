@@ -748,6 +748,9 @@ pub struct ManagerDepths {
     /// Messages to forgotten (dead or departed) hosts dropped unsent, since the manager
     /// started ([`WorldManager::peer_dropped_for_dead`]).
     pub peer_dropped_for_dead: u64,
+    /// State messages addressed to a forgotten host that no path could take, since start
+    /// ([`WorldManager::peer_state_to_forgotten`]: a bug, each logged as an error).
+    pub peer_state_to_forgotten: u64,
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// since the manager started ([`WorldManager::arrivals_despawned`]).
     pub arrivals_despawned: u64,
@@ -1285,9 +1288,16 @@ pub struct WorldManager<S: RegionSpawner> {
     /// of them has saved since (`world_cut.rs`, "Hosts outside the cut"): a world cut that
     /// begins without such a peer cannot commit — this host refuses its part.
     unsaved_traffic: BTreeSet<HostId>,
+    /// The latest world cut this host refused its part of for `unsaved_traffic` with hosts
+    /// outside it, with those hosts (test support: [`Self::world_cut_refused_for`]).
+    cut_refused_for: Option<(CutId, Vec<HostId>)>,
     /// Messages to forgotten hosts dropped unsent ([`Self::forget_host`], `succession.rs`),
     /// since start (the `[server]` line's `peer_dropped_for_dead=`).
     peer_dropped_for_dead: u64,
+    /// State messages (a hand-off, a player move, an intent or a reply) addressed to a
+    /// forgotten host, which no path could take (`peers.rs` `to_forgotten`: a bug, logged as
+    /// an error), since start (`peer_state_to_forgotten=`).
+    peer_state_to_forgotten: u64,
     /// Hosts forgotten for good ([`Self::forget_host`]): never linked or written to again
     /// (an id is never issued twice). The tombstone itself, not a mention.
     forgotten_hosts: BTreeSet<HostId>,
@@ -1580,7 +1590,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             journal_always: false,
             peer_queued: BTreeMap::new(),
             unsaved_traffic: BTreeSet::new(),
+            cut_refused_for: None,
             peer_dropped_for_dead: 0,
+            peer_state_to_forgotten: 0,
             forgotten_hosts: BTreeSet::new(),
             peer_in_source_view: BTreeSet::new(),
             foreign_running: BTreeMap::new(),
@@ -3915,6 +3927,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             journal_entries: self.journal.len(),
             succession_seam_events: self.succession_seam_events(),
             peer_dropped_for_dead: self.peer_dropped_for_dead,
+            peer_state_to_forgotten: self.peer_state_to_forgotten,
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),

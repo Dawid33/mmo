@@ -37,7 +37,7 @@ pub use open::{LockGuard, MIGRATE_LOCK_TIMEOUT_MS, OpenMode, Pool, newest_migrat
 pub use operator::{Retired, Vouched};
 pub use succession::{Declared, Succession, SuccessionId, SuccessionKind};
 pub use terrain::TerrainFromStore;
-pub use two_phase::cut_gid;
+pub use two_phase::{cut_gid, SWEEP_ABORT_TICK};
 pub use url::{StoreUrl, redact_url};
 
 /// The schema/format generation this build writes and reads.

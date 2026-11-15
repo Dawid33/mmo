@@ -9222,3 +9222,250 @@ fn forgotten_leaves_no_trace(rig: &mut MultiRig) {
 fn a_forgotten_host_leaves_no_trace() {
     sweep_hosts("a_forgotten_host_leaves_no_trace", forgotten_leaves_no_trace);
 }
+
+/// A message for a forgotten host is never queued, and a state message never vanishes
+/// silently (Task 4 fix round 1): a transfer waits for its super-region's owner like any
+/// transfer whose owner is unreachable; a non-state message is dropped and counted; a
+/// hand-off, a move, an intent or a reply has no path — an error, counted, and a
+/// `debug_assert` (it is a bug). Nothing of the forgotten host comes back into the manager.
+#[test]
+fn a_message_for_a_forgotten_host_is_never_lost_silently() {
+    let mut rig = MultiRig::new(2, 1, None, 0, 0);
+    let target = rig.homes[0];
+    let b = h(1);
+    let m = &mut rig.hosts[0].manager;
+    m.forget_host(b).expect("nothing of host 1 is needed (no journal under `static`, no cut)");
+    assert!(m.is_forgotten(b));
+    // Not state: dropped, counted.
+    let dropped = m.peer_dropped_for_dead();
+    m.send_reliable_for_test(b, game::Reliable::Owns { rows: Vec::new() }, false);
+    assert_eq!(m.peer_dropped_for_dead(), dropped + 1, "counted");
+    // A transfer: it waits for the owner of its super-region (a cut row meanwhile).
+    let pose = game::Pose::from_translation(game::rapier3d::math::Vector::new(1.0, 2.0, 3.0));
+    let collider = game::ColliderSpec::Ball { radius: 0.5 };
+    let zero = game::rapier3d::math::Vector::ZERO;
+    let id = game::EntityId { birth_region: target, serial: 4242 };
+    let bundle = game::EntityBundle {
+        id,
+        kind: game::EntityKind::Slime { size: 1 },
+        body: game::body::body_state(pose, &collider, zero, zero),
+        collider,
+        carried: Default::default(),
+        client: None,
+        pending_inputs: Vec::new(),
+    };
+    let transfer = game::Reliable::Transfer { target, stamp: 10, bundle: Box::new(bundle), player: None };
+    m.send_reliable_for_test(b, transfer, false);
+    assert!(m.unowned_waiting_ids().iter().any(|(_, i)| *i == id), "the transfer waits for an owner, not lost");
+    assert_eq!(m.peer_dropped_for_dead(), dropped + 1, "the transfer is not dropped");
+    // A player move: no path — the error, counted; a debug_assert in debug builds.
+    let record = game::PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(zero),
+        region: target,
+        fortress: None,
+        adventure: None,
+    };
+    let handoff = game::PlayerHandoff { client: 7, player: game::PlayerId(9), claim: None, login: None, park: false, hop: 1 };
+    let mv = game::Reliable::PlayerMove { handoff, record: Box::new(record), target };
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.send_reliable_for_test(b, mv, false))).is_err();
+    assert_eq!(panicked, cfg!(debug_assertions), "a debug_assert in debug builds");
+    assert_eq!(m.peer_state_to_forgotten(), 1, "counted (an error)");
+    assert_eq!(m.mentions(b), Vec::<&str>::new(), "nothing of the forgotten host came back");
+}
+
+/// [`third_host_joins`] at fixed instants (no cut, no wait that ends on the schedule): two
+/// hosts claim on demand, a slime stands in A's region; after a fixed number of rounds a third
+/// host starts (a new id, owning nothing), the rig's store gives it the region beside A's and
+/// its keeper stands there; the slime is pushed over that seam. Every host's state is then a
+/// function of the rounds played, whatever order the regions tick in within a slot.
+fn third_host_joins_at_a_fixed_tick(rig: &mut MultiRig) {
+    let chain = host_chain(rig.hosts.len() as u32);
+    let rows = rendezvous_rows(rig, &[], &[]);
+    rig.with_directory(rows);
+    rig.with_claims();
+    for rc in &chain {
+        rig.run(*rc);
+    }
+    let ra = chain[0];
+    let id = slime_in(rig, ra, 0);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    let c = rig.start("c");
+    // Recorded like the others (`two_host_record`), from its start.
+    if rig.hosts[0].event_streams.is_some() {
+        rig.hosts[c.0 as usize].event_streams = Some(Default::default());
+    }
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+    }
+    let n = beside_chain(ra, &chain);
+    give_land(rig, n, c);
+    rig.homes[c.0 as usize] = n;
+    rig.keep(c);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert!(rig.teleport(ra, id, past_seam(ra, n, REGION_SIZE / 2.0)), "the slime is still in {ra:?}");
+    let mut visited = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        visited |= rig.owners_of(id) == [(c, n)];
+    }
+    assert!(visited, "the slime crossed into the new host's land");
+    assert_eq!(rig.owners_of(id).len(), 1, "the slime lives once: {:?}", rig.owners_of(id));
+}
+
+/// The brief's clause of `a_third_host_joins_two_running_hosts`: with the join at a fixed
+/// tick, the shuffled schedule ends every host — the new one included — bit-identical to
+/// lockstep, with the same event streams.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_third_host_joining_ends_shuffled_like_lockstep() {
+    for seed in 0..SEEDS / 4 {
+        let lockstep = two_host_record(None, seed, third_host_joins_at_a_fixed_tick);
+        let shuffled = std::panic::catch_unwind(|| two_host_record(Some(InlineSchedule::shuffled), seed, third_host_joins_at_a_fixed_tick))
+            .unwrap_or_else(|_| panic!("third_host_joins_at_a_fixed_tick broke under `shuffled`, seed {seed}"));
+        assert_eq!(lockstep.len(), 3, "three hosts recorded");
+        for (h, ((lf, ls), (sf, ss))) in lockstep.iter().zip(&shuffled).enumerate() {
+            let what = format!("a third host joining: host {h}, shuffled seed {seed} vs lockstep");
+            assert_same_streams(&what, ls, ss);
+            assert_eq!(lf, sf, "{what}: fingerprints differ");
+        }
+    }
+}
+
+// --- Task 4 fix round 1: what makes a cut without the newcomer safe ------------------------
+
+/// The newcomer `c` holds the region beside `ra` (the rig's store gives it, its keeper stands
+/// there so the region runs). Returns that region.
+fn newcomer_land(rig: &mut MultiRig, chain: &[RegionCoords], c: HostId) -> RegionCoords {
+    let n = beside_chain(chain[0], chain);
+    give_land(rig, n, c);
+    rig.homes[c.0 as usize] = n;
+    rig.keep(c);
+    n
+}
+
+/// (a) A slime of A's crosses into the newcomer's land WHILE a cut K of A and B (begun before
+/// the newcomer registered) is pending: A's session with the newcomer is frozen, so the
+/// transfer stays A's — its row in K — and never reaches the newcomer before K is decided. K
+/// commits without the newcomer; the world restarted from K holds the slime once; after the
+/// thaw it lands on the newcomer, the next cut has three parts, and the slime is live once,
+/// stored once and once in the world restarted from that cut.
+fn crossing_to_a_frozen_newcomer(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let ra = chain[0];
+    let (a, b) = (rig.owner(ra), rig.owner(chain[1]));
+    let id = slime_in(rig, ra, 0);
+    until_committed(rig, 1);
+    let (cut, _) = until_world_cut_on(rig, a);
+    let c = rig.start("c");
+    let n = newcomer_land(rig, &chain, c);
+    assert!(rig.teleport(ra, id, past_seam(ra, n, REGION_SIZE / 2.0)), "the slime is still in {ra:?}");
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if rig.decided.contains_key(&cut) {
+            break;
+        }
+        assert!(
+            !rig.owners_of(id).iter().any(|(h, _)| *h == c),
+            "the slime reached the newcomer before cut {} was decided (seed {}, link delay {})",
+            cut.0,
+            rig.seed,
+            rig.link_delay
+        );
+        rig.cut_round();
+    }
+    assert_eq!(rig.decided.get(&cut), Some(&true), "cut {} of A and B commits", cut.0);
+    let (_, parts) = rig.last_committed();
+    assert_eq!(parts.keys().copied().collect::<Vec<_>>(), [a, b], "parts of A and B only");
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once by cut {}: {:?}", cut.0, rig.stored_places(id));
+    assert_restored_once(rig, &[id]);
+    expect_live(rig);
+    let mut all = vec![a, b, c];
+    all.sort();
+    let next = until_cut_of(rig, cut, &all);
+    assert!(next > cut);
+    assert!(until_landed(rig, id), "the slime landed: {:?}", rig.owners_of(id));
+    assert_eq!(live_count(rig, id), 1, "live once");
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+    assert_restored_once(rig, &[id]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_crossing_to_a_newcomer_during_a_cut_is_the_senders_row() {
+    sweep("a_crossing_to_a_newcomer_during_a_cut_is_the_senders_row", 2, 1, SEEDS / 4, crossing_to_a_frozen_newcomer);
+}
+
+/// (b) A's coordinator link is held while cut K of A and B begins (B begins it, A does not
+/// know yet); the newcomer registers, is given land, and A — not in a cut — sends it a slime,
+/// which lands there. When A then reads K's `BeginCut` it has unsaved state traffic with a
+/// host outside K: it REFUSES its part (that rule, not another abort), and K aborts. Nothing is
+/// lost or doubled: the slime is live once, and the next cut — three parts — stores it once
+/// and restores it once.
+fn traffic_before_the_begin_refuses(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let ra = chain[0];
+    let (a, b) = (rig.owner(ra), rig.owner(chain[1]));
+    let id = slime_in(rig, ra, 0);
+    until_committed(rig, 1);
+    assert!(until_cut_rounds(rig, WORLD_CUT_ROUNDS, |r| r.hosts[a.0 as usize].manager.world_cut().is_none()), "A between cuts");
+    rig.hold_world(a, true);
+    let (cut, _) = until_world_cut_on(rig, b);
+    assert_eq!(rig.hosts[a.0 as usize].manager.world_cut(), None, "A has not read the BeginCut");
+    let c = rig.start("c");
+    let n = newcomer_land(rig, &chain, c);
+    assert!(rig.teleport(ra, id, past_seam(ra, n, REGION_SIZE / 2.0)), "the slime is still in {ra:?}");
+    assert!(until(rig, CROSS_ROUNDS, |r| r.owners_of(id) == [(c, n)]), "the slime reached the newcomer: {:?}", rig.owners_of(id));
+    rig.hold_world(a, false);
+    assert!(!until_decided(rig, cut), "cut {} aborts (seed {}, link delay {})", cut.0, rig.seed, rig.link_delay);
+    assert_eq!(
+        rig.hosts[a.0 as usize].manager.world_cut_refused_for(),
+        Some((cut, vec![c])),
+        "A refused its part for its unsaved traffic with the newcomer"
+    );
+    assert_eq!(live_count(rig, id), 1, "live once after the abort");
+    expect_live(rig);
+    let mut all = vec![a, b, c];
+    all.sort();
+    until_cut_of(rig, cut, &all);
+    assert_eq!(live_count(rig, id), 1, "live once");
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+    assert_restored_once(rig, &[id]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn traffic_with_a_newcomer_before_the_begin_refuses_the_part() {
+    sweep("traffic_with_a_newcomer_before_the_begin_refuses_the_part", 2, 1, SEEDS / 4, traffic_before_the_begin_refuses);
+}
+
+/// (c) Case (a), then the newcomer dies before the next cut: the slime A's row of cut K
+/// carried to it — delivered after the thaw — is A's journalled `Sent` entry; the succession
+/// of the newcomer settles with the slime exactly once (live, stored, restored).
+fn frozen_newcomer_dies_before_the_next_cut(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let ra = chain[0];
+    let a = rig.owner(ra);
+    let id = slime_in(rig, ra, 0);
+    until_committed(rig, 1);
+    let (cut, _) = until_world_cut_on(rig, a);
+    let c = rig.start("c");
+    let n = newcomer_land(rig, &chain, c);
+    assert!(rig.teleport(ra, id, past_seam(ra, n, REGION_SIZE / 2.0)), "the slime is still in {ra:?}");
+    assert!(until_decided(rig, cut), "cut {} commits", cut.0);
+    // The newcomer is reachable again and gets the slime; no cut with it commits before it dies.
+    assert!(until(rig, CROSS_ROUNDS, |r| r.owners_of(id) == [(c, n)]), "the slime reached the newcomer: {:?}", rig.owners_of(id));
+    assert_eq!(rig.last_committed().0, cut, "no cut after K yet");
+    rig.kill(c);
+    let succession = rig.run_succession(c).remove(0);
+    assert_settled_whole(rig, &succession, &[id]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_frozen_newcomer_that_dies_before_the_next_cut_leaves_its_slime_once() {
+    sweep("a_frozen_newcomer_that_dies_before_the_next_cut_leaves_its_slime_once", 2, 1, SEEDS / 4, frozen_newcomer_dies_before_the_next_cut);
+}

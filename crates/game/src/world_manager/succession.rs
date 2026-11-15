@@ -305,7 +305,7 @@ fn resolve(reports: &BTreeMap<HostId, SuccessionReportIn>) -> Resolved {
 /// `other` (holds no host, or holds one only for a moment that a forgotten host never reaches:
 /// `world_cut` names participants of a cut that is decided before any host is forgotten;
 /// `spawn_held` / `spawn_here` / `kicks_in` are answered within `SPAWN_SYNC_WAIT_MS`;
-/// `entry_host` is the login link's; `successions`, `succession_reports`, `adoptions` end at
+/// `entry_host` is the login link's; `cut_refused_for` is a test-support record of a refusal; `successions`, `succession_reports`, `adoptions` end at
 /// `SuccessionDone`, where the predecessor is forgotten; `forgotten_hosts` is the tombstone).
 /// Kinds: `key_map` / `key_set` keyed by the host; `pair_set` of `(host, _)`; `value_map`
 /// whose values are hosts; `value_first` / `value_second` whose value tuples hold the host
@@ -343,7 +343,7 @@ macro_rules! host_fields {
             recently_despawned, despawn_warned, intent_replies_lost, parked_bodies, items_destroyed,
             incarnation, incarnation_seen, next_incarnation, unowned_waiting, claims_wanted, claim_asks,
             land_wanted, land_wanted_sent, land_scanned_ms, directory_wanted, journal_always,
-            peer_dropped_for_dead, forgotten_hosts, foreign_halo_stale, higher_generation, endpoint,
+            peer_dropped_for_dead, peer_state_to_forgotten, cut_refused_for, forgotten_hosts, foreign_halo_stale, higher_generation, endpoint,
             asked_elsewhere_answered_ms, observer_orders, nonces, observer_revocations,
             foreign_input_warned_ms, unseeded_warned, world_cut, world_cut_seen, wrapper_seen, marks_queued,
             leave_requested, leaving_cut, leave_outcome, leave_decided, leave_parked, world_cut_done,
@@ -483,6 +483,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Messages to forgotten hosts dropped unsent, since start (`peer_dropped_for_dead=`).
     pub fn peer_dropped_for_dead(&self) -> u64 {
         self.peer_dropped_for_dead
+    }
+
+    /// State messages addressed to a forgotten host that no path could take, since start
+    /// (`peer_state_to_forgotten=`; each one a bug, logged as an error).
+    pub fn peer_state_to_forgotten(&self) -> u64 {
+        self.peer_state_to_forgotten
     }
 }
 

@@ -1027,6 +1027,15 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     }
     assert!(!decisions(&db).iter().any(|(c, _, k)| *k && *c > last), "no cut of host 0 alone commits beside unsaved traffic with host 1");
     assert!(decisions(&db).iter().any(|(c, _, k)| !*k && *c > last), "host 0 refused its parts: the cuts were aborted");
+    // The cause is that rule, not another abort: host 0 refused for its unsaved traffic with host 1.
+    let refused = w.pair.sims.iter().find(|s| s.ordinal == h(0)).and_then(|s| s.manager.world_cut_refused_for());
+    assert!(
+        refused.as_ref().is_some_and(|(c, with)| c.0 as i64 > last && with == &[h(1)]),
+        "host 0 refused a cut after {last} for its unsaved traffic with host 1: {refused:?}"
+    );
+    // This hand-made state's outage is PERMANENT: no succession ever settles host 1 here (the
+    // `Rollback` coordinator declares none), so host 0's cuts stay refused — in the product a
+    // declaration's succession makes host 1 a succeeded peer and the cuts resume after its settle.
     assert_eq!(saved(&db), before, "nothing of host 1's region saved after it was replaced");
     assert!(entity_rows_stored_twice(&db).is_empty(), "no entity stored twice");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");

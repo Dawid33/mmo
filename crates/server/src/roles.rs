@@ -450,7 +450,7 @@ pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, na
             continue;
         }
         log::warn!("[server] world cut {} part(s) left staged by a crash (hosts {hosts:?}): finishing them", cut.0);
-        store.abort_cut(cut, 0).map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))?;
+        store.abort_cut(cut, world_store::SWEEP_ABORT_TICK).map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))?;
     }
     Ok(())
 }

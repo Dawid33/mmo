@@ -716,8 +716,11 @@ impl MultiRig {
             };
             // A region nobody owns (or whose owner is unknown) waits on its sender: its row.
             let Some(owner) = self.hosts[h.0 as usize].manager.owner_host(target) else { continue };
-            // A host that left (Task 14) takes no part: what waits for it is the sender's row.
-            let absent = self.hosts[h.0 as usize].manager.peer_left(owner);
+            // A host that left (Task 14) takes no part: what waits for it is the sender's row;
+            // so is a host outside the cut (Elastic 1 Task 4: it joined while the cut ran, its
+            // session frozen until the decision).
+            let m = &self.hosts[h.0 as usize].manager;
+            let absent = m.peer_left(owner) || m.world_cut_outsiders().contains(&owner);
             assert!(
                 owner == h || at >= cut.tick || absent,
                 "cut {}: host {h}'s part has a row for {target:?} (host {owner}'s) due at {at}, before the cut tick {}",

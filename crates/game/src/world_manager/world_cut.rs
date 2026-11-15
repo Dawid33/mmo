@@ -286,6 +286,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                  no cut has saved since: refused (the next cut takes them in)",
                 cut.0
             );
+            self.cut_refused_for = Some((cut, unsaved));
             return Err(CutFailure::Aborted);
         }
         let outsiders: BTreeSet<HostId> = self.peers.keys().copied().filter(|h| outside(h)).collect();
@@ -933,6 +934,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::info!("[server] world cut {}: host {o} joined during it: nothing goes to or comes from it until it is decided", run.cut.0);
         }
         true
+    }
+
+    /// Test support: the latest world cut this host refused its part of because it exchanged
+    /// state with hosts outside it that no cut has saved (the module docs, "Hosts outside the
+    /// cut"), with those hosts.
+    #[doc(hidden)]
+    pub fn world_cut_refused_for(&self) -> Option<(CutId, Vec<HostId>)> {
+        self.cut_refused_for.clone()
     }
 
     /// Test support: the hosts outside the pending world cut this host froze for it.
