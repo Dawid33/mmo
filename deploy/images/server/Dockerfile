@@ -6,6 +6,9 @@
 # No ENTRYPOINT: a pod picks its command (`server`, or `worldctl <command>` in the
 # toolbox); the default is the server.
 FROM debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 COPY server worldctl /usr/local/bin/
 USER 10001:10001
 CMD ["server"]

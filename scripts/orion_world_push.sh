@@ -7,8 +7,8 @@
 # printed with its digest. It pushes only: it never touches the cluster; the
 # release is `just orion-world-update <server-digest> <web-digest>`
 # (scripts/world_update.sh).
-# The build's git revision (short sha, `-dirty` if crates/ or Cargo.lock have
-# uncommitted changes) is kept as the label org.opencontainers.image.revision.
+# The build's git revision (short sha, `-dirty` if crates/, Cargo.lock or assets/
+# had uncommitted changes; read from the file the build wrote) is kept as the label org.opencontainers.image.revision.
 # Env: AWS_REGION (eu-central-1), WORLD_BIN_DIR (target/release), WEB_DIR
 # (target/web), SERVER_REPOSITORY / WEB_REPOSITORY (default: the registry root's
 # `repository_urls` output, read with $TOFU, default tofu).
@@ -42,11 +42,10 @@ if [ -z "$server_repo" ] || [ -z "$web_repo" ]; then
 fi
 registry="${server_repo%%/*}"
 
-rev=$(git rev-parse --short HEAD)
-if [ -n "$(git status --porcelain -- crates Cargo.lock)" ]; then
-    rev="$rev-dirty"
-    echo "orion-world-push: uncommitted changes under crates/ or Cargo.lock: revision $rev" >&2
-fi
+# The revision the build compiled in (`just world-images-build` writes it).
+revfile="${WORLD_REVISION_FILE:-target/world-images/revision}"
+[ -s "$revfile" ] || { echo "orion-world-push: no $revfile (run just world-images-build); refusing to push images with no known revision" >&2; exit 1; }
+rev=$(cat "$revfile")
 
 stage_server=$(mktemp -d)
 stage_web=$(mktemp -d)

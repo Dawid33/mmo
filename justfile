@@ -1855,8 +1855,17 @@ orion-login-push: orion-login-build
 # built with no VOXEL_WEB_SERVER / VOXEL_LOGIN_URL: the web image's nginx serves it beside the
 # login proxy, so the page needs neither.
 world-images-build:
-    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_BUILD_REVISION="$(git rev-parse --short HEAD)$([ -n "$(git status --porcelain -- crates Cargo.lock)" ] && echo -dirty || true)" {{cap}} {{cargo}} build --release -p server --bin server -p world-store --bin worldctl
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # One revision for the binaries and the image labels: computed once, written beside the
+    # build for scripts/orion_world_push.sh. assets/ counts (the shaders are compiled into the bundle).
+    rev=$(git rev-parse --short HEAD)
+    [ -z "$(git status --porcelain -- crates Cargo.lock assets)" ] || rev="$rev-dirty"
+    mkdir -p target/world-images
+    rm -f target/world-images/revision
+    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_BUILD_REVISION="$rev" {{cap}} {{cargo}} build --release -p server --bin server -p world-store --bin worldctl
     env -u VOXEL_WEB_SERVER -u VOXEL_LOGIN_URL VOXEL_REGION_BLOCKS={{play_blocks}} CAP="{{cap}}" scripts/web_release.sh
+    printf '%s' "$rev" > target/world-images/revision
 
 # Build both images, push them to ECR as mmo/server:latest and mmo/web:latest and print their digests
 # (scripts/orion_world_push.sh). Pushes only: it never touches the cluster.
