@@ -708,9 +708,18 @@ pub fn run() -> claims::ServerExit {
     .unwrap_or_else(|e| fatal(&e));
     role.check_store(&world_source).unwrap_or_else(|e| fatal(&e));
     let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(&e));
-    // No stop flag yet (it is made after the store opens): a wait here ends by the signal's default.
-    let mut opened = world_file::open_world_with(&world_source, &worldgen::forge::ForgeParams::default(), empty, None)
-        .unwrap_or_else(|e| fatal(&e));
+    // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main loop like a
+    // last client leaving does, so the world is saved on the way out. Watched from before the
+    // store opens: a process waiting for its world (`VOXEL_EMPTY_STORE=wait`, PID 1 in a pod,
+    // where an unhandled SIGTERM is ignored) stops on it too.
+    let stop_signal = watch_stop_signals_on_thread();
+    let Some(mut opened) =
+        world_file::open_world_with(&world_source, &worldgen::forge::ForgeParams::default(), empty, Some(&stop_signal))
+            .unwrap_or_else(|e| fatal(&e))
+    else {
+        info!("[server] stop signal while waiting for a world: exiting");
+        return claims::ServerExit::Clean;
+    };
     let store = opened.store.clone();
     // Which regions this process simulates, and the super-region side that
     // decides it: a bad setting stops the start, naming the variable.
@@ -867,10 +876,6 @@ pub fn run() -> claims::ServerExit {
         );
         link
     });
-    // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main
-    // loop like a last client leaving does, so the world is saved on the way out.
-    let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    rt.spawn(watch_stop_signals(stop_signal.clone()));
     // The startup JWKS fetch, in the background: a login service that is
     // down does not hold the start up (the first connect fetches again).
     rt.spawn(async move { auth.prefetch().await });
@@ -1475,6 +1480,20 @@ pub fn world_save_secs(env_value: Option<&str>) -> u64 {
             }
         },
     }
+}
+
+/// Starts [`watch_stop_signals`] on a thread of its own and returns its flag.
+pub(crate) fn watch_stop_signals_on_thread() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    std::thread::Builder::new()
+        .name("stop-signals".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("signal runtime");
+            rt.block_on(watch_stop_signals(flag));
+        })
+        .expect("spawn the stop-signal thread");
+    stop
 }
 
 /// Sets `stop` on the first SIGINT / SIGTERM; a second one exits at once

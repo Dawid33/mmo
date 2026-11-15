@@ -38,9 +38,6 @@ pub const EMPTY_STORE_POLL: Duration = Duration::from_secs(5);
 /// How often a waiting process says why (at most).
 const EMPTY_STORE_LOG: Duration = Duration::from_secs(30);
 
-/// What [`ensure_world`] returns as its error when the stop flag ended a wait.
-pub const STOPPED_WAITING: &str = "stopped while waiting for a world";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EmptyStore {
     #[default]
@@ -162,7 +159,7 @@ pub fn check_legacy_saves(store: &StoreHandle, world_file: Option<&Path>) -> Res
 ///
 /// An empty store (no archive, no import file) is forged into with `params` under
 /// `EmptyStore::Forge`; under `Wait` this polls ([`wait_for_forge`]) until another
-/// process wrote a world, and returns [`STOPPED_WAITING`] as the error when `stop` is set.
+/// process wrote a world, and returns `Ok(None)` when `stop` is set first (the caller exits 0).
 ///
 /// Split roles on one Postgres world: the coordinator and every host run this at start.
 /// After a build that changes the tile format two of them may re-tile at once; the
@@ -175,12 +172,12 @@ pub fn ensure_world(
     params: &ForgeParams,
     empty: EmptyStore,
     stop: Option<&AtomicBool>,
-) -> Result<(ForgedWorld, game::WorldMap), String> {
+) -> Result<Option<(ForgedWorld, game::WorldMap)>, String> {
     let started = Instant::now();
     match world_store::load_forged(store) {
         Ok(Some(loaded)) => {
             forget_imported_file(store, import);
-            return Ok(loaded);
+            return Ok(Some(loaded));
         }
         Ok(None) => {}
         Err(e @ world_store::StoreError::OtherFormat { kind, .. }) if kind.retileable() => {
@@ -189,7 +186,7 @@ pub fn ensure_world(
             tile_from_archive(store)?;
             game::perf_event!("world_retiled", "ms={} kind={kind:?}", game::perf::ms(started.elapsed()));
             forget_imported_file(store, import);
-            return load_written(store);
+            return load_written(store).map(Some);
         }
         Err(e) => return Err(e.to_string()),
     }
@@ -231,7 +228,9 @@ pub fn ensure_world(
             path.display()
         );
     } else if empty == EmptyStore::Wait {
-        wait_for_forge(store, import, stop)?;
+        if !wait_for_forge(store, import, stop) {
+            return Ok(None);
+        }
         // Something is there now: read it the usual way (tiled or not, imported or not).
         return ensure_world(store, import, params, empty, stop);
     } else {
@@ -240,26 +239,31 @@ pub fn ensure_world(
         world_store::write_tiled(store, bytes).map_err(|e| format!("the forged world: {e}"))?;
         game::perf_event!("world_forged", "ms={} into=store", game::perf::ms(started.elapsed()));
     }
-    load_written(store)
+    load_written(store).map(Some)
 }
 
 /// Waits until the store holds a world (or an archive) or `import` exists, looking every
-/// [`EMPTY_STORE_POLL`]; `Err(STOPPED_WAITING)` when `stop` is set first. Forges nothing.
-fn wait_for_forge(store: &StoreHandle, import: Option<&Path>, stop: Option<&AtomicBool>) -> Result<(), String> {
+/// [`EMPTY_STORE_POLL`]; `false` when `stop` is set first. Forges nothing. A store error while
+/// polling is logged (throttled like the wait) and the wait goes on.
+fn wait_for_forge(store: &StoreHandle, import: Option<&Path>, stop: Option<&AtomicBool>) -> bool {
     let mut logged_at: Option<Instant> = None;
     loop {
-        if store.world_info().map_err(|e| e.to_string())?.has_artifact || import.is_some_and(Path::exists) {
-            return Ok(());
+        let looked = store.world_info().map(|info| info.has_artifact);
+        if looked.as_ref().is_ok_and(|has| *has) || import.is_some_and(Path::exists) {
+            return true;
         }
         let now = Instant::now();
         if logged_at.is_none_or(|at| now >= at + EMPTY_STORE_LOG) {
             logged_at = Some(now);
-            log::warn!("[server] the world store has no world: waiting for 'worldctl forge'");
+            match looked {
+                Err(e) => log::warn!("[server] the world store cannot be read ({e}): still waiting for 'worldctl forge'"),
+                Ok(_) => log::warn!("[server] the world store has no world: waiting for 'worldctl forge'"),
+            }
         }
         let until = now + EMPTY_STORE_POLL;
         while Instant::now() < until {
             if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
-                return Err(STOPPED_WAITING.to_string());
+                return false;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -494,30 +498,37 @@ pub struct OpenedWorld {
 /// ([`check_legacy_saves`]), and its world taken from the store, imported or
 /// forged ([`ensure_world`]). The store is shut down again on an error.
 pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWorld, String> {
-    open_world_with(source, params, EmptyStore::Forge, None)
+    open_world_with(source, params, EmptyStore::Forge, None).map(|opened| opened.expect("no stop flag, no stop"))
 }
 
-/// [`open_world`] with what an empty store does and the flag that ends a wait.
+/// [`open_world`] with what an empty store does and the flag that ends a wait
+/// (`Ok(None)`: the flag was set while waiting for a world; the store is shut down).
 pub fn open_world_with(
     source: &WorldSource,
     params: &ForgeParams,
     empty: EmptyStore,
     stop: Option<&AtomicBool>,
-) -> Result<OpenedWorld, String> {
+) -> Result<Option<OpenedWorld>, String> {
     let (url, import) = match source {
-        WorldSource::Procedural => return Ok(OpenedWorld { store: None, world: None, map: None, world_tick: 0 }),
+        WorldSource::Procedural => return Ok(Some(OpenedWorld { store: None, world: None, map: None, world_tick: 0 })),
         WorldSource::Store { url, import } => (url, import.as_deref()),
     };
     let store = StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer)
         .map_err(|e| format!("world store {url}: {e}"))?;
     let opened = check_legacy_saves(&store, import).and_then(|()| {
-        let (world, map) = ensure_world(&store, import, params, empty, stop)?;
+        let Some((world, map)) = ensure_world(&store, import, params, empty, stop)? else {
+            return Ok(None);
+        };
         let world_tick = store.world_info().map_err(|e| e.to_string())?.world_tick;
-        Ok((world, map, world_tick))
+        Ok(Some((world, map, world_tick)))
     });
     match opened {
-        Ok((world, map, world_tick)) => {
-            Ok(OpenedWorld { store: Some(store), world: Some(world), map: Some(map), world_tick })
+        Ok(Some((world, map, world_tick))) => {
+            Ok(Some(OpenedWorld { store: Some(store), world: Some(world), map: Some(map), world_tick }))
+        }
+        Ok(None) => {
+            store.shutdown();
+            Ok(None)
         }
         Err(e) => {
             store.shutdown();
@@ -630,7 +641,7 @@ mod tests {
             })
         };
         // Default params: had the waiter forged, the world would not be the writer's.
-        let (world, _map) = ensure_world(&store, None, &ForgeParams::default(), EmptyStore::Wait, None).unwrap();
+        let (world, _map) = ensure_world(&store, None, &ForgeParams::default(), EmptyStore::Wait, None).unwrap().unwrap();
         writer.join().unwrap();
         assert_eq!(world.content_crc(), store.world_info().unwrap().content_crc.unwrap());
         assert_eq!(world.seed(), 9, "the writer's world, not a forge of the waiter's");
@@ -639,11 +650,19 @@ mod tests {
     }
 
     #[test]
+    fn open_world_with_reports_a_stop_while_waiting() {
+        let source = WorldSource::Store { url: StoreUrl::Memory, import: None };
+        let stop = AtomicBool::new(true);
+        let opened = open_world_with(&source, &ForgeParams::default(), EmptyStore::Wait, Some(&stop)).unwrap();
+        assert!(opened.is_none(), "stopped: the callers exit 0");
+    }
+
+    #[test]
     fn a_waiting_empty_store_honours_the_stop_flag() {
         let store = memory_store();
         let stop = AtomicBool::new(true);
-        let err = ensure_world(&store, None, &ForgeParams::default(), EmptyStore::Wait, Some(&stop)).err().unwrap();
-        assert_eq!(err, STOPPED_WAITING);
+        let stopped = ensure_world(&store, None, &ForgeParams::default(), EmptyStore::Wait, Some(&stop)).unwrap();
+        assert!(stopped.is_none());
         store.shutdown();
     }
 
@@ -652,12 +671,12 @@ mod tests {
     fn ensure_world_forges_into_the_store_once() {
         let store = memory_store();
         let params = ForgeParams { seed: 4, ..ForgeParams::square(2048.0, 64.0) };
-        let (first, map) = ensure_world(&store, None, &params, EmptyStore::Forge, None).unwrap();
+        let (first, map) = ensure_world(&store, None, &params, EmptyStore::Forge, None).unwrap().unwrap();
         assert!(first.tile_cache().is_some(), "written as tiles");
         let info = store.world_info().unwrap();
         assert!(info.has_artifact);
         assert_eq!(info.content_crc, Some(first.content_crc()));
-        let (again, again_map) = ensure_world(&store, None, &params, EmptyStore::Forge, None).unwrap();
+        let (again, again_map) = ensure_world(&store, None, &params, EmptyStore::Forge, None).unwrap().unwrap();
         assert_eq!(again.content_crc(), first.content_crc(), "read back, not forged again");
         assert_eq!(again_map, map);
         drop((first, again));

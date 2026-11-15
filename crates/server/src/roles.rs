@@ -474,9 +474,14 @@ pub fn run_coordinator() -> ServerExit {
     .unwrap_or_else(|e| fatal(e));
     Role::Coordinator.check_store(&source).unwrap_or_else(|e| fatal(e));
     let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(e));
-    // No stop flag yet (it is made after the store opens): a wait here ends by the signal's default.
-    let opened = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, None)
-        .unwrap_or_else(|e| fatal(e));
+    // Watched from before the store opens: a coordinator waiting for its world stops on a signal.
+    let stop = crate::watch_stop_signals_on_thread();
+    let Some(opened) = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, Some(&stop))
+        .unwrap_or_else(|e| fatal(e))
+    else {
+        log::info!("[coordinator] stop signal while waiting for a world: exiting");
+        return ServerExit::Clean;
+    };
     let store = opened.store.clone().expect("a Postgres world has a store");
     let map = opened.map.clone().expect("a stored world has a map");
     // Several hosts (`VOXEL_HOSTS` > 1): this coordinator runs their world cuts, every save
@@ -538,17 +543,6 @@ pub fn run_coordinator() -> ServerExit {
     )
     .unwrap_or_else(|e| fatal(e));
 
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let stop = stop.clone();
-        std::thread::Builder::new()
-            .name("stop-signals".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("signal runtime");
-                rt.block_on(crate::watch_stop_signals(stop));
-            })
-            .expect("spawn the stop-signal thread");
-    }
     while !coordinator.thread.is_finished() && !stop.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(COORDINATOR_PROCESS_POLL);
     }
