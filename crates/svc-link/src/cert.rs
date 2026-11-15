@@ -29,11 +29,33 @@ fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-/// The pin to dial with: `env_var` if set and non-empty, else the contents of `file`.
+/// The pin stored beside `hash_file`: its content if it exists, else the SHA-256 (hex) of
+/// `<hash_file>.cert` if that exists (a dialer given only the listener's read-only certificate,
+/// e.g. mounted from a Secret), else `None`.
+pub fn pin_beside(hash_file: &Path) -> io::Result<Option<String>> {
+    match std::fs::read_to_string(hash_file) {
+        Ok(raw) => return Ok(Some(raw)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    match std::fs::read(sibling(hash_file, ".cert")) {
+        Ok(der) => Ok(Some(cert_sha256_hex(&der))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The pin to dial with: `env_var` if set and non-empty, else [`pin_beside`] `file`
+/// (`NotFound` when neither the pin file nor the certificate is there).
 pub fn read_cert_hash(env_var: &str, file: &Path) -> io::Result<String> {
     let raw = match std::env::var(env_var) {
         Ok(v) if !v.trim().is_empty() => v,
-        _ => std::fs::read_to_string(file)?,
+        _ => pin_beside(file)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no pin {} and no certificate {}.cert", file.display(), file.display()),
+            )
+        })?,
     };
     normalize_hash(&raw).map_err(invalid)
 }
@@ -117,13 +139,21 @@ fn stored_pair_valid(cert_der: &[u8], key_der: &[u8]) -> bool {
 /// The listener's identity. With a `hash_file` the cert and key persist beside it
 /// (`<file>.cert`, `<file>.key`, key mode 0600) so a restarted listener keeps the pin its
 /// dialers hold; without one the identity is ephemeral. A stored pair that fails to load or
-/// does not match is regenerated.
+/// does not match is regenerated. The pin file is rewritten only if missing or different, and
+/// failing to write it is a warning (the directory may be a read-only mount); a stored pair that
+/// is invalid is regenerated, which on a read-only directory fails with an error — an identity
+/// is never silently ephemeral when a file was asked for.
 pub(crate) fn load_or_generate(hash_file: Option<&Path>) -> io::Result<LinkIdentity> {
     if let Some(file) = hash_file {
         let (cert_path, key_path) = (sibling(file, ".cert"), sibling(file, ".key"));
         if let (Ok(cert_der), Ok(key_der)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
             if stored_pair_valid(&cert_der, &key_der) {
-                write_atomic(file, cert_sha256_hex(&cert_der).as_bytes(), false)?;
+                let pin = cert_sha256_hex(&cert_der);
+                if std::fs::read_to_string(file).ok().as_deref() != Some(pin.as_str()) {
+                    if let Err(e) = write_atomic(file, pin.as_bytes(), false) {
+                        log::warn!("[svc-link] cannot write the pin file {}: {e}", file.display());
+                    }
+                }
                 return Ok(LinkIdentity { cert_der, key_der });
             }
             log::warn!("[svc-link] stored link cert/key under {} do not match; regenerating", file.display());
@@ -138,4 +168,108 @@ pub(crate) fn load_or_generate(hash_file: Option<&Path>) -> io::Result<LinkIdent
         write_atomic(file, cert_sha256_hex(&id.cert_der).as_bytes(), false)?;
     }
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test-only P-256 key (PKCS#8 DER) and its self-signed certificate (DER), made once with
+    /// openssl the way OpenTofu's tls provider makes them. Not a secret: it protects nothing.
+    const TOFU_CERT: &[u8] = include_bytes!("../tests/fixtures/tofu-link.cert");
+    const TOFU_KEY: &[u8] = include_bytes!("../tests/fixtures/tofu-link.key");
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("svc-link-cert-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn set_mode(dir: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Whether the directory refuses a new file (root ignores the mode bits).
+    #[cfg(unix)]
+    fn dir_is_read_only(dir: &Path) -> bool {
+        let probe = dir.join("probe");
+        let writable = std::fs::write(&probe, b"x").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        !writable
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_identity_is_used_as_is() {
+        let dir = temp_dir("ro");
+        let file = dir.join("link.pin");
+        let first = load_or_generate(Some(&file)).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        set_mode(&dir, 0o555);
+        let skip = !dir_is_read_only(&dir);
+        let second = if skip { None } else { Some(load_or_generate(Some(&file))) };
+        set_mode(&dir, 0o755);
+        let Some(second) = second else {
+            eprintln!("skipped: running as a user the directory mode does not bind (root)");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let second = second.unwrap();
+        assert_eq!(second.cert_der, first.cert_der);
+        assert_eq!(second.key_der, first.key_der);
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_invalid_identity_on_a_read_only_directory_is_an_error() {
+        let dir = temp_dir("ro-bad");
+        let file = dir.join("link.pin");
+        std::fs::write(sibling(&file, ".cert"), b"junk").unwrap();
+        std::fs::write(sibling(&file, ".key"), b"junk").unwrap();
+        set_mode(&dir, 0o555);
+        let skip = !dir_is_read_only(&dir);
+        let result = if skip { None } else { Some(load_or_generate(Some(&file))) };
+        set_mode(&dir, 0o755);
+        match result {
+            None => eprintln!("skipped: running as a user the directory mode does not bind (root)"),
+            Some(r) => assert!(r.is_err(), "never silently ephemeral"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pin_is_derived_from_the_cert_file() {
+        let dir = temp_dir("derive");
+        let file = dir.join("link.pin");
+        std::fs::write(sibling(&file, ".cert"), TOFU_CERT).unwrap();
+        assert_eq!(pin_beside(&file).unwrap().as_deref(), Some(cert_sha256_hex(TOFU_CERT).as_str()));
+        std::fs::write(&file, "abc").unwrap();
+        assert_eq!(pin_beside(&file).unwrap().as_deref(), Some("abc"), "the pin file wins");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_files_means_no_pin() {
+        let dir = temp_dir("none");
+        assert_eq!(pin_beside(&dir.join("link.pin")).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ec_p256_pkcs8_pair_made_elsewhere_loads() {
+        let dir = temp_dir("tofu");
+        let file = dir.join("link.pin");
+        std::fs::write(sibling(&file, ".cert"), TOFU_CERT).unwrap();
+        std::fs::write(sibling(&file, ".key"), TOFU_KEY).unwrap();
+        let id = load_or_generate(Some(&file)).unwrap();
+        assert_eq!(id.cert_der, TOFU_CERT, "kept, not regenerated");
+        assert_eq!(id.key_der, TOFU_KEY);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), cert_sha256_hex(TOFU_CERT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

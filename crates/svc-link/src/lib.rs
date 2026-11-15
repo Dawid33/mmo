@@ -34,7 +34,7 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream, TransportConfig};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, read_cert_hash, service_token_from_env};
+pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, pin_beside, read_cert_hash, service_token_from_env};
 pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 pub use target::LinkTarget;
 
