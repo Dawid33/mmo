@@ -318,8 +318,12 @@ pub enum CoordMsg {
         moved: Vec<(SuperRegion, u64)>,
         survivors: Vec<u32>,
     },
-    /// Succession `id` is over: `settled` by a committed world cut, or abandoned (a world
-    /// rollback, followed by [`CoordMsg::Generation`]).
+    /// Succession `id` is over: `settled` by a committed world cut, or abandoned by a world
+    /// rollback. The coordinator's OWN rollback is followed by [`CoordMsg::Generation`]; one
+    /// it only found in the store (a re-read that no longer lists the run: `worldctl
+    /// rollback`, a generation-raising registration) is NOT — a host of the older generation
+    /// then learns it from its next cut part (`StaleGeneration`), a peer of the newer
+    /// generation, or its next `Attach` (refused, answered with the generation).
     SuccessionDone { id: SuccessionId, settled: bool },
     /// The coordinator rolled the world back to its last committed cut (R4: a second host
     /// lost before a succession settled, or a succession's deadline): the world generation

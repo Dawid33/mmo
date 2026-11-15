@@ -327,7 +327,16 @@ impl Coordinator {
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
                 if let Some(other) = self.region_host.insert(rc, host).filter(|h| *h != host) {
-                    log::warn!("coordinator: {rc:?} started on host {host}; host {other} had announced it");
+                    // A region runs on one host: `other`'s incarnation is gone without its
+                    // park (R4: its land moved — the heir may start a moved region before this
+                    // coordinator has heard its own declaration's answer and parked the dead
+                    // host's regions, `host_succeeded`). Lost, as that park would say: the
+                    // history takes back everyone it had there, and this start embodies them
+                    // again — never left embodied in a region whose host holds no body of theirs.
+                    log::warn!(
+                        "coordinator: {rc:?} started on host {host}; host {other} had announced it: that incarnation is lost"
+                    );
+                    self.history.region_parked(rc, Vec::new());
                 }
                 self.incarnations.insert(rc, incarnation);
                 let events = self.history.region_started(rc);

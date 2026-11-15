@@ -53,7 +53,8 @@ pub enum JournalEvent {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct JournalEntry {
     pub subject: Subject,
-    /// A transfer's stamp; for a player move, the world tick it was queued or applied at.
+    /// What orders a subject's events: an entity's transfer stamp; for a player, the
+    /// hand-off's hop (its placement count — never a host's own world tick).
     pub stamp: Tick,
     pub event: JournalEvent,
 }
@@ -143,21 +144,22 @@ impl PeerJournal {
     }
 
     /// This host queued `msg` (id `queue_id` among everything queued to `peer`) at world
-    /// tick `now`; `accounted`: the cut it travels wrapped in. Only a transfer or a player
-    /// move is journalled (an `InCut` is unwrapped).
-    pub fn sent(&mut self, peer: u32, queue_id: u64, msg: &Reliable, accounted: Option<CutId>, now: Tick) {
+    /// tick `_now` (no entry is stamped with it: see `subjects`); `accounted`: the cut it
+    /// travels wrapped in. Only a transfer or a player move is journalled (an `InCut` is
+    /// unwrapped).
+    pub fn sent(&mut self, peer: u32, queue_id: u64, msg: &Reliable, accounted: Option<CutId>, _now: Tick) {
         let (msg, accounted) = unwrap(msg, accounted);
-        for (subject, stamp) in subjects(msg, now) {
+        for (subject, stamp) in subjects(msg) {
             let event = JournalEvent::Sent(Box::new(msg.clone()));
             self.peers.entry(peer).or_default().push(accounted, Some(queue_id), JournalEntry { subject, stamp, event });
         }
     }
 
-    /// `msg` came from `peer` at world tick `now`; `accounted`: the cut it came wrapped
-    /// in. Only a transfer or a player move is journalled.
-    pub fn received(&mut self, peer: u32, msg: &Reliable, accounted: Option<CutId>, now: Tick) {
+    /// `msg` came from `peer` at world tick `_now` (stamps nothing, as in [`Self::sent`]);
+    /// `accounted`: the cut it came wrapped in. Only a transfer or a player move is journalled.
+    pub fn received(&mut self, peer: u32, msg: &Reliable, accounted: Option<CutId>, _now: Tick) {
         let (msg, accounted) = unwrap(msg, accounted);
-        for (subject, stamp) in subjects(msg, now) {
+        for (subject, stamp) in subjects(msg) {
             let entry = JournalEntry { subject, stamp, event: JournalEvent::Received };
             self.peers.entry(peer).or_default().push(accounted, None, entry);
         }
@@ -305,17 +307,21 @@ fn unwrap(msg: &Reliable, accounted: Option<CutId>) -> (&Reliable, Option<CutId>
     }
 }
 
-/// The subjects a state message is about, each with its stamp: a transfer's entity (and
-/// its player, if it hands one over) at the transfer's stamp, a move's player at `now`.
-/// Nothing for any other message.
-fn subjects(msg: &Reliable, now: Tick) -> Vec<(Subject, Tick)> {
+/// The subjects a state message is about, each with its stamp: a transfer's entity at the
+/// transfer's stamp (causal: applied at stamp + 1 on the receiver, one tick numbering for
+/// every host); a PLAYER — handed over with a body or moved without one — at the hand-off's
+/// hop ([`crate::PlayerHandoff::hop`]: the sender's + 1, so every later placement of the
+/// player counts higher on whichever host it happens). Never a host's own world tick: two
+/// machines' clocks may differ by a few ticks, and a fast S1 → D → S2 chain stamped by tick
+/// could resolve to the older `Sent`. Nothing for any other message.
+fn subjects(msg: &Reliable) -> Vec<(Subject, Tick)> {
     match msg {
         Reliable::Transfer { stamp, bundle, player, .. } => {
             let mut out = vec![(Subject::Entity(bundle.id), *stamp)];
-            out.extend(player.as_ref().map(|h| (Subject::Player(h.player), *stamp)));
+            out.extend(player.as_ref().map(|h| (Subject::Player(h.player), h.hop)));
             out
         }
-        Reliable::PlayerMove { handoff, .. } => vec![(Subject::Player(handoff.player), now)],
+        Reliable::PlayerMove { handoff, .. } => vec![(Subject::Player(handoff.player), handoff.hop)],
         _ => Vec::new(),
     }
 }

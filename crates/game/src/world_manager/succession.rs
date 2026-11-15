@@ -64,7 +64,8 @@
 //! it as answered (a restarted coordinator counts it again), and the heir's as adopted once
 //! it is.
 //!
-//! **The heir's half.** The heir holds what it inherits masked from step 4 on
+//! **The heir's half.** The heir holds what it inherits masked from the order on — before
+//! step 1's wait, so a directory read that already shows the moved rows starts nothing —
 //! ([`WorldManager::inheriting`]: `owner_of` answers `Unknown` for it, so nothing of it
 //! starts, arrivals and placements wait). Once a report of EVERY survivor is in (its own
 //! included; "wait, never guess": a missing one blocks — the coordinator's deadline turns
@@ -73,7 +74,9 @@
 //! ([`WorldManager::take_adoption_wanted`]); the server's answer
 //! ([`WorldManager::adopted_rows`]) runs, in this order:
 //!
-//! 1. **Resolve.** Every entry grouped by subject; the highest stamp decides (two events of
+//! 1. **Resolve.** Every entry grouped by subject; the highest stamp decides — an entity's
+//!    transfer stamp, a player's hop (`peer/journal.rs` `subjects`: the one order over every
+//!    host, whatever their clocks) — (two events of
 //!    one subject never share a stamp; if they do, a `Received` one wins — delivering too
 //!    could make two). `Received` latest: a survivor's copy lives on — nothing delivered.
 //!    `Sent` latest: the predecessor held it — its journalled message is delivered. The
@@ -91,8 +94,14 @@
 //!    crossing absorbed (`PersonCrossed { delivered: false }`), before any region of the
 //!    land starts, so a person whose crossing died with the predecessor is abstract, not
 //!    lost in a region that no longer holds their body. A player handed or moved to the
-//!    predecessor is parked here from the hand-off's record (no session will come: the
-//!    client was on the dead host), at its hop, never `departed`. Then the `owed` intents
+//!    predecessor is parked here from the hand-off's record, at its hop, never `departed`;
+//!    no session will come (the client's home was the dead host, or still the handing
+//!    survivor), so the client is told: its session here is refused
+//!    (`PLAYER_PARKED_ELSEWHERE`), the reporting survivor ends its own
+//!    (`Reliable::PlayerParked`), the login session is reported over. A player whose latest
+//!    event is another survivor's `Received` lives on there: this host points at that
+//!    survivor (`departed`) in the predecessor's stead, so a login is sent on, never placed
+//!    from the store's older record in the inherited land. Then the `owed` intents
 //!    and replies, in each sender's order, as if that sender's session had brought them.
 //! 4. **Load.** Every inherited region the store holds a dropped entity in (`located`), and
 //!    every one an owed intent or reply goes to, starts now — the drop set left out of its
@@ -210,8 +219,12 @@ struct Resolved {
     bundles: Vec<(RegionCoords, crate::Tick, crate::EntityBundle)>,
     /// People's bundles (never delivered): `(target, bundle)`.
     people: Vec<(RegionCoords, crate::EntityBundle)>,
-    /// Players to park: the hand-off and the record, oldest first.
-    players: Vec<(crate::PlayerHandoff, PlayerRecord)>,
+    /// Players to park: the survivor that reported the entry, the hand-off and the record,
+    /// oldest first.
+    players: Vec<(u32, crate::PlayerHandoff, PlayerRecord)>,
+    /// Players a survivor holds (their latest event is that survivor's `Received`): the
+    /// player and the survivor.
+    held_by: Vec<(PlayerId, u32)>,
 }
 
 /// Step 1 of the heir's half: every entry of every report grouped by subject; the entry
@@ -247,6 +260,9 @@ fn resolve(reports: &BTreeMap<u32, SuccessionReportIn>) -> Resolved {
     let mut players = Vec::new();
     for (subject, (stamp, sent, from, i)) in latest {
         if !sent {
+            if let Subject::Player(player) = subject {
+                out.held_by.push((player, from));
+            }
             continue;
         }
         let JournalEvent::Sent(msg) = &reports[&from].entries[i].event else { continue };
@@ -262,19 +278,19 @@ fn resolve(reports: &BTreeMap<u32, SuccessionReportIn>) -> Resolved {
             }
             (Subject::Player(_), Reliable::Transfer { target, bundle, player: Some(h), .. }) => {
                 match peers::handoff_record(*target, bundle, h) {
-                    Some(record) => players.push((stamp, h.clone(), record)),
+                    Some(record) => players.push((stamp, from, h.clone(), record)),
                     None => log::error!("[server] a journalled hand-off of player {} carries no player", h.player.0),
                 }
             }
             (Subject::Player(_), Reliable::PlayerMove { handoff, record, .. }) => {
-                players.push((stamp, handoff.clone(), (**record).clone()));
+                players.push((stamp, from, handoff.clone(), (**record).clone()));
             }
             (subject, _) => log::error!("[server] a journal entry about {subject:?} that is not its message; skipped"),
         }
     }
     out.bundles.sort_by_key(|(_, stamp, b)| (*stamp, b.id));
-    players.sort_by_key(|(stamp, h, _)| (*stamp, h.player));
-    out.players = players.into_iter().map(|(_, h, r)| (h, r)).collect();
+    players.sort_by_key(|(stamp, _, h, _)| (*stamp, h.player));
+    out.players = players.into_iter().map(|(_, from, h, r)| (from, h, r)).collect();
     out
 }
 
@@ -339,6 +355,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             s.base_cut.0
         );
         let id = s.id;
+        // The heir's mask goes up with the ORDER, not only when it is applied: a directory
+        // read landing while this host still waits for its base cut already shows the moved
+        // rows as its own, and nothing of them may start from the store before the
+        // survivors' journals are resolved. (An heir that is no survivor has no journal to
+        // wait for and owns the land from its boot: nothing is masked.)
+        if s.heir == me && !s.survivors.is_empty() {
+            for &(sr, _) in &s.moved {
+                self.inheriting.insert(sr, id);
+            }
+        }
         self.successions.insert(id, SurvivorRun { order: s, applied: false });
         self.try_apply_succession(id);
     }
@@ -419,7 +445,20 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         // What a leave held back was never queued (nor journalled): journalled now, so its
         // transfers and moves are `Sent` entries of the report like every other.
-        let leave_held = self.leave_pairs.remove(&pred).map(|p| p.held).unwrap_or_default();
+        // The pair ends here without its `CutDone` (an order applied before the decision of an
+        // aborted leave cut came): undone as `end_leaves` undoes it — the session no longer
+        // holds a next boot's hello for a leave that is over (nothing would release it), and
+        // an `Owns` seen for the pair is forgotten.
+        let leave_held = match self.leave_pairs.remove(&pred) {
+            Some(pair) => {
+                if let Some(peer) = self.peers.get_mut(&pred) {
+                    peer.session.hold_on_new_boot(false);
+                }
+                self.pair_owns_seen.remove(&pred);
+                pair.held
+            }
+            None => Vec::new(),
+        };
         if !leave_held.is_empty() || !counted_held.is_empty() {
             let tick = self.spawner.world_tick();
             for msg in leave_held.into_iter().chain(counted_held) {
@@ -820,6 +859,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         // finds the journal's record once the mask lifts).
         let people = self.absorb_people(&resolved.people);
         let parked = self.park_players(id, &resolved.players);
+        // A player that walked from the predecessor to another survivor: the store's record
+        // of it (the base cut's) may stand in land this host owns now, and the predecessor's
+        // pointer to that survivor died with it — this host stands in for it, before any
+        // held spawn order is retried (a login would be placed a second time from the store).
+        let pointed = self.point_at_holders(&resolved.held_by);
         // The land is this host's from here: what waited for it goes on.
         self.adopt_inherited(id);
         self.restore_in_flight(rows.clone());
@@ -838,7 +882,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.succession_seam_events += resolved.entries as u64;
         log::info!(
             "[server] succession {}: adopted host {pred}'s land — {} journal entries resolved, {} bundle(s) delivered, \
-             {parked} player(s) parked, {people} person(s) absorbed, {owed} owed intent(s)/repl(ies) applied, \
+             {parked} player(s) parked, {pointed} player(s) pointed at the survivor holding them, {people} person(s) \
+             absorbed, {owed} owed intent(s)/repl(ies) applied, \
              {} of {all_rows} in-flight row(s) kept, {} region(s) loaded and pinned",
             id.0,
             resolved.entries,
@@ -874,8 +919,27 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Step 3 for players: each parked here from its journalled record. How many.
-    fn park_players(&mut self, id: SuccessionId, players: &[(crate::PlayerHandoff, PlayerRecord)]) -> usize {
-        players.iter().cloned().filter(|(h, record)| self.park_from_journal(id, h.clone(), record.clone())).count()
+    fn park_players(&mut self, id: SuccessionId, players: &[(u32, crate::PlayerHandoff, PlayerRecord)]) -> usize {
+        players.iter().cloned().filter(|(from, h, record)| self.park_from_journal(id, *from, h.clone(), record.clone())).count()
+    }
+
+    /// Step 3 for players another survivor holds (`held_by`: its `Received` entry is the
+    /// player's latest event): this host — the owner of the land the predecessor's record of
+    /// the player may stand in until the settle cut rewrites it — points at that survivor
+    /// (`departed`), as the predecessor did, so a login of the player is sent on there and
+    /// never placed here from the store's older record. Not for one this host holds itself.
+    /// How many pointers were set.
+    fn point_at_holders(&mut self, held_by: &[(PlayerId, u32)]) -> usize {
+        let me = self.ordinal();
+        let mut pointed = 0;
+        for &(player, holder) in held_by {
+            if holder == me || self.holds_player(player) {
+                continue;
+            }
+            self.departed.insert(player, holder);
+            pointed += 1;
+        }
+        pointed
     }
 
     /// Step 3 for entities: each bundle arrives as any crossing from another host does
@@ -931,11 +995,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.succession_pinned.iter().copied().find(|rc| !held(rc))
     }
 
-    /// A player a survivor handed (or moved) to the predecessor, its journal's latest:
-    /// parked here from what was sent — no session will come, the client was on the dead
-    /// host — at the hand-off's hop (never `departed`). `false` if this host holds the
-    /// player already (a login placed it meanwhile: that copy is the newer truth).
-    fn park_from_journal(&mut self, id: SuccessionId, h: crate::PlayerHandoff, record: PlayerRecord) -> bool {
+    /// A player survivor `from` handed (or moved) to the predecessor, its journal's latest:
+    /// parked here from what was sent, at the hand-off's hop (never `departed`). No session
+    /// comes for it — the client's home was the dead host, or still `from` while the hand-off
+    /// was on the wire — so the client is told, as [`Self::park_handed`] tells it: a session
+    /// of the client here is refused ([`PLAYER_PARKED_ELSEWHERE`], which a client rejoins on),
+    /// `from` ends the one it may still hold ([`Reliable::PlayerParked`] — a notice, no state:
+    /// not journalled, like R3's), and the login service hears that the login session is
+    /// over. `false` if this host holds the player already (a login placed it meanwhile: that
+    /// copy is the newer truth).
+    fn park_from_journal(&mut self, id: SuccessionId, from: u32, h: crate::PlayerHandoff, record: PlayerRecord) -> bool {
         if self.holds_player(h.player) {
             log::warn!("[server] succession {}: player {} is here already; the journal's copy is dropped", id.0, h.player.0);
             return false;
@@ -944,6 +1013,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         let hop = self.hop_here(h.player);
         self.world_send(HostMsg::PlayerOffline { player: h.player, hop });
         self.parked_players.insert(h.player, record);
+        let here = self.sessions.get(&h.client).is_some_and(|s| s.player == Some(h.player));
+        if here {
+            log::info!("[server] succession {}: player {} (client {}) parked from the journal: its session here ends", id.0, h.player.0, h.client);
+            let _ = self.out.send((Some(h.client), ServerPacket::Refused(PLAYER_PARKED_ELSEWHERE.to_string())));
+            self.client_disconnected(h.client, self.clock_ms);
+        }
+        if from != self.ordinal() {
+            log::info!("[server] succession {}: player {} (client {}) parked from host {from}'s journal: host {from} told", id.0, h.player.0, h.client);
+            self.queue_to_peer(from, Reliable::PlayerParked { client: h.client, player: h.player });
+        }
+        self.login_parked_on_arrival(h.login);
         true
     }
 

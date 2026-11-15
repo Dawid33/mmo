@@ -6238,6 +6238,38 @@ fn journal_truncates_on_a_commit_found_by_polling() {
     sweep_hits("journal_truncates_on_a_commit_found_by_polling", 2, 1, SEEDS / 4, polled_commit);
 }
 
+/// Hosts whose crash rolls the world back (`static`, R3) journal nothing: no succession
+/// ever reads a report, and a `Sent` entry keeps a whole bundle for as long as cuts are
+/// blocked. (The rig turns the journal on under every policy for its other tests:
+/// `Rig::with_spawner`; here the product's rule is back.) Under `claim` the journal runs.
+fn rollback_hosts_journal_nothing(rig: &mut MultiRig) {
+    for h in 0..rig.hosts.len() {
+        rig.hosts[h].manager.journal_under_any_policy(false);
+    }
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    until_settled_in(rig, id, b);
+    for h in [ha, hb] {
+        assert!(rig.hosts[h as usize].manager.peer_journal().is_empty(), "host {h} journals under `static`");
+    }
+    // The same hosts under `claim` (a directory laid out as `static` lays it out): journalled.
+    let rows = rendezvous_rows(rig, &[], &[]);
+    rig.with_directory(rows);
+    let back = rig.spawn_slime(b, past_seam(b, a, REGION_SIZE / 2.0));
+    until_settled_in(rig, back, a);
+    assert!(journalled(rig, hb, ha, game::Subject::Entity(back), true), "host {hb} journals what it sent under `claim`");
+    assert!(journalled(rig, ha, hb, game::Subject::Entity(back), false), "host {ha} journals what it received under `claim`");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn hosts_under_the_rollback_policy_journal_nothing() {
+    sweep("hosts_under_the_rollback_policy_journal_nothing", 2, 1, 2, rollback_hosts_journal_nothing);
+}
+
 // --- Successions: the survivor's half (R4 Task 8) -------------------------------------
 
 /// Round budget for a succession's orders to be answered.
@@ -6653,6 +6685,114 @@ fn an_heir_holds_inherited_land_until_it_adopts() {
     sweep("an_heir_holds_inherited_land_until_it_adopts", 3, 1, SEEDS / 4, heir_holds_inherited_land);
 }
 
+/// The heir's mask goes up with the ORDER, not only once it is applied: while the heir still
+/// waits for its base cut (step 1) a directory read already shows the moved rows as its own
+/// — and nothing of them may be owned (start from the store, take a placement) before the
+/// survivors' journals are resolved.
+fn heir_masks_from_the_order(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let rd = chain[1];
+    let dead = rig.owner(rd);
+    let (heir, _) = heir_and_survivor(rig, dead);
+    until_committed(rig, 1);
+    rig.kill(dead);
+    let sr = game::super_region_of(rd, rig.s);
+    let survivors: Vec<u32> = (0..rig.hosts.len() as u32).filter(|h| *h != dead).collect();
+    let dead_boot = rig.boots[dead as usize];
+    let m = &mut rig.hosts[heir as usize].manager;
+    // An order whose base cut this host's journal does not count from yet: it waits.
+    let order = game::Succession {
+        id: game::SuccessionId(77),
+        predecessor: dead,
+        predecessor_boot: dead_boot,
+        heir,
+        kind: game::SuccessionKind::Crash,
+        base_cut: game::CutId(m.peer_journal().base().0 + 1),
+        moved: vec![(sr, 2)],
+        survivors,
+    };
+    m.apply_coordinator_message(order_of(&order));
+    assert_eq!(m.successions(), [(order.id, false)], "the order waits for its base cut");
+    // The directory read lands meanwhile: the store gives the moved row to the heir.
+    let rows: Vec<(game::SuperRegion, i64, u64)> = rendezvous_rows(rig, &[], &[])
+        .into_iter()
+        .map(|(s, owner, epoch)| if s == sr { (s, i64::from(heir), 2) } else { (s, owner.map_or(game::NO_OWNER, i64::from), epoch) })
+        .collect();
+    let live = (0..rig.hosts.len() as u32).filter(|h| *h != dead).collect();
+    let m = &mut rig.hosts[heir as usize].manager;
+    m.directory_read(rows, live);
+    assert!(!m.owns(rd), "the heir owns inherited land before it resolved the journals");
+    assert_eq!(m.place_spawn(FRESH_PLAYER, Some(rd)), game::Placement::Wait, "a placement waits");
+    assert!(m.inheriting().contains_key(&sr));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_heir_masks_inherited_land_from_the_order_on() {
+    sweep("an_heir_masks_inherited_land_from_the_order_on", 3, 1, 2, heir_masks_from_the_order);
+}
+
+/// A host crashes inside its own leave cut and its succession's order is applied on the
+/// survivor BEFORE that cut's (abort) decision arrives: the leave pair ends with the order —
+/// the session no longer holds a next boot's hello for the leave (nothing would ever
+/// release it), so the host's next boot is reachable again.
+fn order_before_the_leave_cuts_decision(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let (ha, hb) = (rig.owner(chain[0]), rig.owner(chain[1]));
+    until_committed(rig, 1);
+    // B's keeper body parks with B's leave (the keeper's player is the host's ordinal).
+    let home_b = rig.homes[hb as usize];
+    let mut keeper = None;
+    rig.hosts[hb as usize].manager.spawner_mut().with_region(home_b, |r| {
+        let d = r.data();
+        keeper = d.player_entites.get(&crate::common::rig::CLIENT).and_then(|k| *d.ecs.id.try_get(*k));
+    });
+    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(u64::from(hb)));
+    rig.hosts[hb as usize].manager.request_leave();
+    let mut began = false;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let leaving = rig.hosts[hb as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[ha as usize].manager.world_cut() == leaving {
+            began = true;
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(began, "the leave cut began on both hosts");
+    rig.kill(hb);
+    let dead_boot = rig.boots[hb as usize];
+    let m = &mut rig.hosts[ha as usize].manager;
+    let order = game::Succession {
+        id: game::SuccessionId(78),
+        predecessor: hb,
+        predecessor_boot: dead_boot,
+        heir: ha,
+        kind: game::SuccessionKind::Crash,
+        base_cut: m.peer_journal().base(),
+        moved: Vec::new(),
+        survivors: vec![ha],
+    };
+    m.apply_coordinator_message(order_of(&order));
+    assert_eq!(m.successions(), [(order.id, true)], "applied before the leave cut's decision");
+    rig.start(hb);
+    let mut reachable = false;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        // The next boot hears host A's first sync only if A's session to it is not held.
+        if rig.hosts[ha as usize].manager.peer_is_reachable(hb) && rig.hosts[hb as usize].manager.peers_synced() {
+            reachable = true;
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(reachable, "host {hb}'s next boot is held at its hello for a leave that is over (seed {})", rig.seed);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_order_applied_before_an_aborted_leave_cuts_decision_ends_the_leave_pair() {
+    sweep("an_order_applied_before_an_aborted_leave_cuts_decision_ends_the_leave_pair", 2, 1, SEEDS / 4, order_before_the_leave_cuts_decision);
+}
+
 // --- Successions: the heir's half (R4 Task 9) ----------------------------------------
 
 /// Seeds swept per schedule mode by the heir's tests that must hit their case.
@@ -7024,10 +7164,21 @@ fn player_handed_to_the_dead(rig: &mut MultiRig, on_the_wire: bool) -> bool {
         assert!(acked, "the player never reached {rd:?}");
         true
     } && journalled(rig, s, dead, game::Subject::Player(P_PLAYER), true);
+    rig.record_packets();
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     assert_settled_whole(rig, &succession, &[]);
     assert_eq!(rig.parked_on(P_PLAYER), [succession.heir], "parked once, on the heir");
+    // The client is told (it rejoins on this refusal): the session the handing host still
+    // holds for it — its home while the hand-off was on the wire — is refused, by the heir
+    // itself or on the heir's word (`PlayerParked`); nobody else would ever end it.
+    let seen = rig.hosts[s as usize].packets_seen.as_ref().expect("recording packets");
+    let refusals = seen
+        .iter()
+        .filter(|(to, p)| *to == Some(P_CLIENT) && matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_PARKED_ELSEWHERE))
+        .count();
+    assert_eq!(refusals, 1, "the handing host {s} refuses its session of the client once (heir {})", succession.heir);
+    assert!(rig.hosts[s as usize].manager.player_of(P_CLIENT).is_none(), "no session of the client is left on host {s}");
     assert!(rig.player_owners(P_CLIENT).is_empty(), "no body");
     until_committed(rig, 1);
     assert_eq!(rig.committed_players[&P_PLAYER].region, rd, "its record stands where the hand-off took it");
@@ -7078,6 +7229,61 @@ fn player_left_the_dead(rig: &mut MultiRig) -> bool {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn player_who_left_the_dead_host_keeps_playing_on_the_survivor() {
     sweep_hosts_hits("player_who_left_the_dead_host_keeps_playing_on_the_survivor", player_left_the_dead);
+}
+
+/// 3 hosts: the test player walks from the dead host's region into the region of a survivor
+/// that is NOT the heir, after the last committed cut; the host dies. The store's record of
+/// the player (the cut's) is in land the heir owns now, and the dead host's pointer to the
+/// survivor died with it: the heir stands in for it (`departed`, from the survivor's
+/// `Received` entry). A login at the heir after its adoption — before the settle cut rewrote
+/// the record — is sent on to the survivor: the player is placed once, there, never a second
+/// time from the store's record. `false` when the seed missed the case.
+fn player_left_the_dead_for_a_third_host(rig: &mut MultiRig) -> bool {
+    let chain = heir_world(rig);
+    let rd = chain[1];
+    let dead = rig.owner(rd);
+    let (heir, other) = heir_and_survivor(rig, dead);
+    let s = other.expect("3 hosts: a survivor that is not the heir");
+    let rs = if rig.owner(chain[0]) == s { chain[0] } else { chain[2] };
+    assert_eq!(rig.owner(rs), s);
+    rig.connect_everywhere(dead, P_CLIENT, P_PLAYER, centre_of(rd));
+    let (_, _, body) = until_body(rig);
+    until_committed(rig, 1);
+    assert_eq!(rig.committed_players[&P_PLAYER].region, rd, "the cut's record stands in the dead host's land");
+    assert!(rig.teleport(rd, body, past_seam(rd, rs, REGION_SIZE / 2.0)));
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(P_CLIENT) == [(s, rs)]), "the player never reached {rs:?}");
+    let hit = journalled(rig, s, dead, game::Subject::Player(P_PLAYER), false)
+        && rig.committed_players[&P_PLAYER].region == rd
+        && rig.last_cut_writers(P_PLAYER) == [dead];
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    assert_eq!(succession.heir, heir);
+    // Until the heir adopted; no cut is driven meanwhile, so the store's record is the old one.
+    let adopted = until(rig, SUCCESSION_ROUNDS, |rig| rig.adopted.contains(&(succession.id, heir)));
+    assert!(adopted, "heir {heir} never adopted succession {}", succession.id.0);
+    assert_eq!(rig.committed_players[&P_PLAYER].region, rd, "the settle cut has not rewritten the record");
+    assert_eq!(
+        rig.hosts[heir as usize].manager.place_spawn(P_PLAYER, Some(rd)),
+        game::Placement::Host(s),
+        "the heir sends a login of the player on to the survivor that holds it"
+    );
+    // A login through the heir: one host takes the order — the survivor.
+    let mut out = Vec::new();
+    let (placed, refused, _) = login_through_entry(rig, heir, (LOGIN_CLIENT, 2), rd, 1, &mut out, |_, _| {});
+    assert_eq!((placed, refused), (s, false), "placed once, on the survivor");
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(LOGIN_CLIENT) == [(s, rs)]), "its body on the survivor");
+    assert!(rig.parked_on(P_PLAYER).is_empty() && rig.player_owners(P_CLIENT).is_empty(), "nowhere else");
+    assert_settled_whole(rig, &succession, &[]);
+    assert_eq!(rig.player_owners(LOGIN_CLIENT), [(s, rs)], "once");
+    until_committed(rig, 1);
+    assert_player_once(rig, P_PLAYER);
+    hit
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_who_left_the_dead_host_for_a_third_host_logs_in_once_on_it() {
+    sweep_hits("player_who_left_the_dead_host_for_a_third_host_logs_in_once_on_it", 3, 1, HEIR_SEEDS, player_left_the_dead_for_a_third_host);
 }
 
 /// The test player plays on the dead host since before the last committed cut, then that

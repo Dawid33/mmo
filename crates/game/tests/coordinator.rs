@@ -502,6 +502,35 @@ fn stale_bounce_is_dropped() {
     assert_eq!(bodies, 1, "P keeps exactly one body: {out:?}");
 }
 
+/// A region one host announced is announced by ANOTHER host (R4: the heir of a host
+/// declared dead in the store may start a moved region before the coordinator has heard
+/// the declaration's answer and parked the dead host's regions): a region runs on one host,
+/// so the first host's incarnation is lost — the history takes back everyone it had there
+/// and the new start embodies them again, once each. Without that they would stay embodied
+/// in a region whose new host holds no body of theirs.
+#[test]
+fn a_region_started_on_another_host_takes_its_people_over() {
+    let (mut c, _, people) = coordinator();
+    let r = rc(0, 0);
+    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    let out = commit(&mut c);
+    for p in &people {
+        assert_eq!(body_delta(&out, *p), 1, "{p:?} spawned on host 0: {out:?}");
+    }
+    c.handle(1, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    let out = commit_routed(&mut c);
+    let for_host_1: Vec<CoordMsg> = out.iter().filter(|(to, _)| *to == Target::Host(1)).map(|(_, m)| m.clone()).collect();
+    for p in &people {
+        assert_eq!(body_delta(&for_host_1, *p), 1, "{p:?} spawned again for host 1's start: {out:?}");
+        assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r));
+    }
+    // Host 0's late park of its dead incarnation changes nothing (the region runs elsewhere).
+    c.handle(0, HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    for p in &people {
+        assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r), "{p:?} stays embodied on host 1");
+    }
+}
+
 /// A region that started while the link was down (its `RegionStarted` lost) is listed
 /// by the next `Attach` with its exact bodies — none: its residents get the start's
 /// catch-up then (spawned once each, after the echo), not at the region's next start; a

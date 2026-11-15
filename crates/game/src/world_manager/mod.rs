@@ -1268,7 +1268,10 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The state messages exchanged with each peer since the last committed world cut
     /// (R4, `peer/journal.rs`): never saved, never hashed. Fed where messages are queued
     /// (`queue_now`) and received (`peer_reliable`), truncated when a cut is decided.
+    /// Only under `CrashPolicy::Succession` (`Self::journals`): `static` hosts record nothing.
     journal: crate::PeerJournal,
+    /// Test support ([`Self::journal_under_any_policy`]): journal whatever the crash policy.
+    journal_always: bool,
     /// Reliable messages queued to each host so far (`queue_to_peer`): the ids of what a
     /// session (or `peer_waiting`) still holds are the last of these, in order — entries
     /// leave only from the front (`peers.rs`, `peer_entries`).
@@ -1559,6 +1562,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
             journal: crate::PeerJournal::new(CutId(0)),
+            journal_always: false,
             peer_queued: BTreeMap::new(),
             peer_in_source_view: BTreeSet::new(),
             foreign_running: BTreeMap::new(),

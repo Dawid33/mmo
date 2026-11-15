@@ -188,15 +188,13 @@ impl Rig {
             water: Box::new(game::lod::LodWater::dry),
             out: lod_result_send,
         });
+        let mut manager = WorldManager::new(spawner, Box::new(floor), out_send, region_out_send, lod_builder, lod_result_recv);
+        // The peer journal's seeded tests run on `static` hosts too (the mechanism does not
+        // depend on the policy); the product journals only under `claim`
+        // (`peer_schedule::hosts_under_the_rollback_policy_journal_nothing`).
+        manager.journal_under_any_policy(true);
         Rig {
-            manager: WorldManager::new(
-                spawner,
-                Box::new(floor),
-                out_send,
-                region_out_send,
-                lod_builder,
-                lod_result_recv,
-            ),
+            manager,
             region_out,
             packets,
             now_ms: 0,

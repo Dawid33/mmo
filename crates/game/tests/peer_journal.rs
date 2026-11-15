@@ -120,9 +120,41 @@ fn wrapped_in_the_cut_survives_its_commit() {
         matches!(&entry.event, JournalEvent::Sent(m) if !matches!(**m, Reliable::InCut { .. })),
         "a sent entry holds the message, never its wrapper"
     );
-    // A player move is stamped with the world tick it was journalled at.
+    // A player move is stamped with its hand-off's hop (see `a_players_events_are_ordered_by_hop`).
     let (mv, _) = j.entries(A).find(|(e, _)| e.subject == Subject::Player(PlayerId(9))).expect("the move");
-    assert_eq!(mv.stamp, NOW);
+    assert_eq!(mv.stamp, handoff(9).hop);
+}
+
+/// A player's journal entries are stamped with the hand-off's HOP — the player's placement
+/// count, one order over every host — never with the journalling host's own world tick: two
+/// hosts' clocks may differ by a few ticks, and a fast S1 → D → S2 chain stamped by tick
+/// could put the older `Sent` after the newer `Received` (the heir would park a second
+/// copy). An entity's entry keeps its transfer's stamp, also when it hands a player over.
+#[test]
+fn a_players_events_are_ordered_by_hop() {
+    let at_hop = |hop: u64| {
+        let Reliable::PlayerMove { mut handoff, record, target } = player_move(9) else { unreachable!() };
+        handoff.hop = hop;
+        Reliable::PlayerMove { handoff, record, target }
+    };
+    // Host S1 sent the player to D at hop 4, by its clock at tick 905.
+    let mut s1 = PeerJournal::new(CutId(4));
+    s1.sent(A, 0, &at_hop(4), None, 905);
+    // Host S2 received it from D at hop 5 — its clock a few ticks behind: tick 903.
+    let mut s2 = PeerJournal::new(CutId(4));
+    s2.received(A, &at_hop(5), None, 903);
+    let sent = s1.entries(A).next().expect("the sent entry").0.stamp;
+    let received = s2.entries(A).next().expect("the received entry").0.stamp;
+    assert_eq!((sent, received), (4, 5));
+    assert!(received > sent, "the later placement decides, whatever the clocks say");
+    // A body handing the player over: the entity at the transfer's stamp, the player at the hop.
+    let Reliable::Transfer { target, stamp, bundle, .. } = transfer(1, 10) else { unreachable!() };
+    let mut h = handoff(9);
+    h.hop = 6;
+    let mut j = PeerJournal::new(CutId(4));
+    j.sent(A, 0, &Reliable::Transfer { target, stamp, bundle, player: Some(h) }, None, NOW);
+    let stamps: Vec<(Subject, u64)> = j.entries(A).map(|(e, _)| (e.subject, e.stamp)).collect();
+    assert_eq!(stamps, vec![(Subject::Entity(id(1)), 10), (Subject::Player(PlayerId(9)), 6)]);
 }
 
 /// An aborted cut forgets its marks and nothing else: the next committed cut truncates
