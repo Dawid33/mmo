@@ -419,6 +419,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.homes.remove(&client);
         // Handed here without a session and on again before it came: not awaited here.
         self.awaiting_session.remove(&client);
+        self.name_new_home(client, target, owner);
         if let Some(session) = self.sessions.get_mut(&client) {
             session.kind = SessionKind::Observer;
             session.idle_since_ms = now_ms;
@@ -549,6 +550,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         );
         self.homes.remove(&client);
         self.awaiting_session.remove(&client);
+        self.name_new_home(client, m.target, owner);
         if let Some(session) = self.sessions.get_mut(&client) {
             session.kind = SessionKind::Observer;
             session.idle_since_ms = now_ms;
@@ -767,6 +769,25 @@ impl<S: RegionSpawner> WorldManager<S> {
             Redirect::Sent(owner) => self.redirected_to(client, rc, owner),
             Redirect::Never => {}
             Redirect::Later => self.remember_asked(client, rc),
+        }
+    }
+
+    /// `client`'s body is about to be handed to host `owner`, into `target`: unless this
+    /// home session already sent the client there for `target`, it does now — the last
+    /// thing it says as the home. Land claimed a moment ago is the case: the client's
+    /// subscribe waited here while nobody owned it (`asked_elsewhere`), and the hand-off
+    /// that follows the claim forgets what waited ([`Self::forget_home_answers`]); a client
+    /// never told has no connection to `owner`, where its player would park for want of a
+    /// session (`HANDOFF_SESSION_GRACE_MS`).
+    fn name_new_home(&mut self, client: ClientId, target: RegionCoords, owner: u32) {
+        if self.sessions.get(&client).map(|s| s.kind) != Some(SessionKind::Home) {
+            return;
+        }
+        if self.redirected.get(&(client, target)) == Some(&owner) {
+            return;
+        }
+        if let Redirect::Sent(owner) = self.redirect(client, target) {
+            self.redirected_to(client, target, owner);
         }
     }
 

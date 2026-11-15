@@ -5900,6 +5900,46 @@ fn claimed_when_a_player_walks_to_it(rig: &mut MultiRig) {
     assert!(nothing_unowned(rig), "nothing waits for an owner");
 }
 
+/// A client whose only connection is its home walks from `a` into `b`, whose super-region
+/// is free, having asked its home for `b` while nobody owned it (the subscribe waits).
+/// Another host claims `b` and the body is handed there: the home must have named that
+/// host for `b` (`RegionElsewhere`) by then — the client has no other way to find the host
+/// its player is on now, and would be parked there for want of a session.
+fn told_where_its_body_went(rig: &mut MultiRig) {
+    let hosts = rig.hosts.len() as u32;
+    let (a, b) = host_seam(hosts, 1);
+    let sr = sr_of(rig, b);
+    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
+    rig.with_claims();
+    let ha = rig.owner(a);
+    let preferred = game::rendezvous_owner(sr, hosts);
+    if preferred == ha {
+        // Its own host claims it: a thread seam, nobody to name.
+        return;
+    }
+    rig.run(a);
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    rig.record_packets();
+    rig.hosts[ha as usize].event(subscribe_packet(b));
+    assert!(push_player_into(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?}: {:?}", rig.player_body(P_CLIENT));
+    let named: Vec<u32> = elsewhere_for(rig, ha, b).into_iter().map(|(o, _)| o).collect();
+    assert!(
+        named.contains(&preferred),
+        "host {ha} handed the body to host {preferred} and never named it for {b:?} (named: {named:?}; seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_client_whose_body_is_handed_into_just_claimed_land_is_told_the_host() {
+    for hosts in [2, 3] {
+        sweep("a_client_whose_body_is_handed_into_just_claimed_land_is_told_the_host", hosts, 1, SEEDS / 4, told_where_its_body_went);
+    }
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_free_super_region_is_claimed_by_its_preferred_host_when_a_player_walks_to_it() {
