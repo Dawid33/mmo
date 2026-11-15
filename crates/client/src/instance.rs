@@ -360,6 +360,14 @@ pub const LOD_REQUESTS_PER_TICK: usize = 32;
 pub const HOME_UNCONFIRMED_WARN_MS: u64 = 15_000;
 const _: () = assert!(HOME_UNCONFIRMED_WARN_MS > game::HANDOFF_SESSION_GRACE_MS);
 
+/// How a session that a server refused ends: this, then the server's reason
+/// (`GameError::Disconnected`). `login::flow::rejoinable` reads it back.
+pub const REFUSED_PREFIX: &str = "The server refused the connection: ";
+/// How a session whose home connection closed without a refusal ends (the
+/// host crashed or went silent, or the connect gave up): this, then the
+/// netcode's reason. `login::flow::rejoinable` reads it back.
+pub const HOME_CLOSED_PREFIX: &str = "The connection to the server ended: ";
+
 /// How long a subscribe sent through the home is remembered unanswered
 /// (`GameInstanceManager::asked_home`) once its region is held or left the window. One
 /// still wanted and not held is never forgotten: it is asked again every
@@ -1845,7 +1853,7 @@ impl GameInstanceManager {
             ConnEvent::Packet(packet) => self.handle_packet(conn, packet),
             ConnEvent::Closed(reason) if conn == self.conns.home() => {
                 self.conns.on_closed(conn);
-                Err(GameError::Disconnected(reason))
+                Err(GameError::Disconnected(format!("{HOME_CLOSED_PREFIX}{reason}")))
             }
             ConnEvent::Closed(reason) => {
                 self.close_observer(conn, &reason, false);
@@ -1968,7 +1976,7 @@ impl GameInstanceManager {
     fn observer_refused(&mut self, conn: u32, why: String) -> Result<(), GameError> {
         if why == game::PLAYER_PARKED_ELSEWHERE || why == game::PLAYER_ELSEWHERE_REFUSAL {
             error!("[client] host {:?} refused the connection: {why}", self.conns.ordinal_of(conn));
-            return Err(GameError::Disconnected(format!("The server refused the connection: {why}")));
+            return Err(GameError::Disconnected(format!("{REFUSED_PREFIX}{why}")));
         }
         // An observer session with no region subscription is closed by its host:
         // routine (the window left that host's regions).
@@ -2311,7 +2319,7 @@ impl GameInstanceManager {
                 // The server closes the connection after this: end the session
                 // with its reason.
                 error!("[client] the server refused the connection: {why}");
-                return Err(GameError::Disconnected(format!("The server refused the connection: {why}")));
+                return Err(GameError::Disconnected(format!("{REFUSED_PREFIX}{why}")));
             }
             game::ServerPacket::PlayRefused(rc, why) => {
                 warn!("[client] Play in region {rc:?} refused: {why:?}");

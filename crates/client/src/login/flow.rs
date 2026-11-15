@@ -46,6 +46,21 @@
 //! both with `Credential::Jwt`. When an online session ends the player is
 //! back on the world list ([`LoginSession::home`]).
 //!
+//! A session whose home host was replaced rejoins by itself
+//! ([`LoginSession::session_lost`]): when it ends for a [`rejoinable`] reason
+//! (the home connection closed without a refusal, or a refusal that says
+//! "reconnect"), it is torn down as any other and the starting screen shows
+//! [`REJOIN_STATUS`] while [`LoginSession::tick_rejoin`] asks the service for a
+//! new join with the kept refresh token — one call at a time, the next
+//! [`REJOIN_RETRY_MS`] after the previous answer, for up to [`REJOIN_MAX_MS`]
+//! ([`LoginSession::rejoin_answer`] says what each answer does). Its ticket
+//! starts a new session the usual way (the rotated token kept first). The
+//! [`Rejoin`] lives in the login, which outlives sessions; it ends when the new
+//! session is in the world ([`rejoin_arrived`]), when it gives up (the world
+//! list, with why), on a revoked token (the sign-in screen; it never starts a
+//! sign-in or opens a browser itself) and on Back from the starting screen
+//! ([`refresh_worlds`]).
+//!
 //! Never log a refresh token, an access token, a device code, the PKCE
 //! verifier, a ticket or a JWT: nothing here derives `Debug` over them.
 
@@ -77,6 +92,74 @@ pub const DEVICE_POLL_MARGIN_SECS: f64 = 1.0;
 pub const OPENS_BROWSER: bool = cfg!(not(target_arch = "wasm32"));
 /// The world list's line when a ticket has no address this client can use.
 pub const NO_ADDRESS_ERROR: &str = "That world cannot be reached from this client";
+/// Longest a session whose home host was replaced keeps asking for a new
+/// join before it gives up on the world list. Covers a takeover's resolution
+/// (joins answered 503 until the heir has adopted) and a cleanly departed
+/// host's land waiting `HEIR_WAIT_MS` (30 s) for its heir.
+pub const REJOIN_MAX_MS: u64 = 60_000;
+/// The wait between a rejoin's join answer and its next join call (one call
+/// at a time: a 503 itself may take the service's spawn-ack timeout).
+pub const REJOIN_RETRY_MS: u64 = 1_000;
+/// The starting screen's line while a session rejoins.
+pub const REJOIN_STATUS: &str = "The server was replaced \u{2014} reconnecting\u{2026}";
+
+/// A join call must wait longer than the service waits for the host's spawn
+/// ack: a slow 503 (the token not spent) must not look like a lost answer.
+#[cfg(not(target_arch = "wasm32"))]
+const _: () = assert!(super::api::REQUEST_TIMEOUT.as_millis() > login_api::SPAWN_ACK_TIMEOUT_MS as u128 * 2);
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(super::api::WASM_REQUEST_TIMEOUT_SECS as u64 * 1000 > login_api::SPAWN_ACK_TIMEOUT_MS * 2);
+
+/// Whether a session that ended with `reason` (`None`: the player left) is
+/// rejoined: its home connection closed without a refusal (a crash, a silent
+/// host, a give-up connect), or the server refused it with one of the
+/// refusals that mean "your land is elsewhere now, reconnect". Anything else
+/// (logged in elsewhere, a kick, an auth refusal, a crash of the client's own
+/// sim) ends on the world list as before.
+pub fn rejoinable(reason: Option<&str>) -> bool {
+    use crate::instance::{HOME_CLOSED_PREFIX, REFUSED_PREFIX};
+    let Some(reason) = reason else { return false };
+    if reason.starts_with(HOME_CLOSED_PREFIX) {
+        return true;
+    }
+    reason.strip_prefix(REFUSED_PREFIX).is_some_and(|why| {
+        [game::FENCED_REFUSAL, game::ROLLBACK_REFUSAL, game::LEAVING_REFUSAL, game::PLAYER_PARKED_ELSEWHERE]
+            .contains(&why)
+    })
+}
+
+/// A rejoin in progress ([`LoginSession::rejoin`]). Holds no secret.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rejoin {
+    /// The world the lost session played.
+    pub world: String,
+    /// When it started ([`LoginSession::tick`]'s clock, seconds): it gives up
+    /// [`REJOIN_MAX_MS`] later.
+    pub started: f64,
+    /// The earliest time of the next join call.
+    pub next_call: f64,
+    /// A join call is on its way: no second one until it answers.
+    pub calling: bool,
+    /// The last call's answer may have been lost after the service rotated
+    /// the token: the next call adopts the kept one first.
+    pub adopt_first: bool,
+    /// A ticket came: its session is connecting (no more calls unless it is
+    /// lost again).
+    pub connecting: bool,
+    /// The world list's line if it gives up: the last thing that went wrong.
+    pub why: String,
+}
+
+/// What [`LoginSession::session_lost`] decided for a session that ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterSession {
+    /// Rejoin: tear the session down and show the starting screen.
+    Rejoin,
+    /// A rejoin gave up: the world list, with why.
+    GaveUp,
+    /// No rejoin: as before.
+    AsBefore,
+}
 
 /// What a frontend button asked of the login service.
 #[derive(Message, Clone)]
@@ -364,6 +447,13 @@ pub struct LoginSession {
     pub playing_online: bool,
     /// The device sign-in the player is confirming at the provider, if any.
     pub pending_device: Option<PendingDevice>,
+    /// The world the running online session joined (set with
+    /// [`Self::playing_online`]): what a rejoin joins again.
+    pub joined_world: Option<String>,
+    /// A session whose home host was replaced, joining again (see the module
+    /// docs). Lives here, not in the session: it outlives the session it
+    /// replaces.
+    pub rejoin: Option<Rejoin>,
     /// The frame clock (seconds) as of the last [`Self::tick`]: device
     /// sign-in deadlines and poll times count on it.
     clock: f64,
@@ -394,6 +484,8 @@ impl LoginSession {
             error: String::new(),
             playing_online: false,
             pending_device: None,
+            joined_world: None,
+            rejoin: None,
             clock: 0.0,
             in_flight: 0,
             generation: 0,
@@ -466,6 +558,8 @@ impl LoginSession {
         self.worlds.clear();
         self.playing_online = false;
         self.pending_device = None;
+        self.joined_world = None;
+        self.rejoin = None;
     }
 
     /// The browser's startup step ([`REFRESH_AT_STARTUP`]): a kept refresh
@@ -578,6 +672,14 @@ impl LoginSession {
     /// they left (Back, then a single-player start) records what it says — the
     /// account, a sign-out — but never pulls them out of a session.
     pub fn apply(&mut self, reply: LoginReply, state: AppState) -> Step {
+        // A rejoin's answer, on the starting screen it shows (an abandoned
+        // rejoin's late answer comes as an older generation: `receive`).
+        let reply = match reply {
+            LoginReply::Joined(result) if self.rejoin.is_some() && state == AppState::Starting => {
+                return self.rejoin_answer(result);
+            }
+            reply => reply,
+        };
         let mut step = self.apply_reply(reply, state);
         if !matches!(state, AppState::Login | AppState::Worlds) {
             step.goto = None;
@@ -750,26 +852,190 @@ impl LoginSession {
     fn joined(&mut self, joined: Joined, state: AppState) -> Step {
         self.refresh = Some(joined.refresh_token.clone());
         let mut step = Step::none();
-        step.store = StoreOp::Save(joined.refresh_token);
+        step.store = StoreOp::Save(joined.refresh_token.clone());
         if state != AppState::Worlds {
             return step; // the player left the list meanwhile
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let pending = joined.quic.map(|addr| PendingJoin { ticket: joined.ticket, addr });
-        #[cfg(target_arch = "wasm32")]
-        let pending = match joined.ticket.webtransport.as_deref().map(str::trim) {
-            Some(url) if !url.is_empty() => Ok(PendingJoin { ticket: joined.ticket }),
-            _ => Err(NO_ADDRESS_ERROR.to_string()),
-        };
-        match pending {
+        match pending_join(joined) {
             Ok(pending) => {
                 self.playing_online = true;
+                self.joined_world = Some(pending.ticket.world.clone());
                 step.join = Some(pending);
                 step.goto = Some(AppState::Starting);
             }
             Err(why) => self.error = why,
         }
         step
+    }
+
+    /// Whether a rejoin is in progress.
+    pub fn rejoining(&self) -> bool {
+        self.rejoin.is_some()
+    }
+
+    /// An online session ended (`reason`: why, `None` = the player left) on
+    /// screen `state` at `now` (seconds). A session in the world that ended
+    /// for a [`rejoinable`] reason starts a rejoin; one lost again while a
+    /// rejoin connects (still `Starting`) goes on with the same rejoin, until
+    /// its deadline. Anything else: as before, the world list (with the
+    /// reason on it). Not online (a local or single-player session): never a
+    /// rejoin.
+    pub fn session_lost(&mut self, reason: Option<&str>, state: AppState, now: f64) -> AfterSession {
+        self.clock = now;
+        let online = self.playing_online && self.logged_in();
+        if let Some(rejoin) = self.rejoin.as_mut() {
+            if online && rejoinable(reason) && now < rejoin.started + REJOIN_MAX_MS as f64 / 1000.0 {
+                info!("[login] the rejoined session was lost before it was in the world; joining again");
+                rejoin.connecting = false;
+                rejoin.calling = false;
+                rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
+                rejoin.why = reason.unwrap_or_default().to_string();
+                return AfterSession::Rejoin;
+            }
+            let why = reason.map_or_else(|| rejoin.why.clone(), str::to_string);
+            self.give_up_rejoin(why);
+            return AfterSession::GaveUp;
+        }
+        let world = self.joined_world.clone().filter(|_| online);
+        match world {
+            Some(world) if state == AppState::InWorld && rejoinable(reason) => {
+                info!("[login] the home server of world {world:?} was replaced: rejoining");
+                self.rejoin = Some(Rejoin {
+                    world,
+                    started: now,
+                    next_call: now,
+                    calling: false,
+                    adopt_first: false,
+                    connecting: false,
+                    why: reason.unwrap_or_default().to_string(),
+                });
+                AfterSession::Rejoin
+            }
+            _ => {
+                if let (true, Some(reason)) = (online, reason) {
+                    self.error = reason.to_string(); // the world list's line
+                }
+                AfterSession::AsBefore
+            }
+        }
+    }
+
+    /// The rejoin is over without a session: the calls in flight are
+    /// abandoned (a late ticket only keeps its token) and the world list
+    /// shows `why`.
+    fn give_up_rejoin(&mut self, why: String) {
+        warn!("[login] rejoin given up: {why}");
+        self.rejoin = None;
+        self.back();
+        self.error = why;
+    }
+
+    /// Every frame, with the clock `now` on screen `state`: the rejoin's next
+    /// join call when it is due and none is on its way (`kept`: what the
+    /// store keeps, read only when the last answer may have been lost), or
+    /// the world list once [`REJOIN_MAX_MS`] have passed. Off the starting
+    /// screen (and out of the world it is leaving) the rejoin is dropped.
+    pub fn tick_rejoin(&mut self, now: f64, state: AppState, kept: impl FnOnce() -> Option<String>) -> Step {
+        self.clock = now;
+        let Some(rejoin) = self.rejoin.as_mut() else { return Step::none() };
+        match state {
+            AppState::Starting => {}
+            // The frame the lost session's world is left.
+            AppState::InWorld => return Step::none(),
+            _ => {
+                self.rejoin = None;
+                return Step::none();
+            }
+        }
+        if rejoin.connecting {
+            return Step::none();
+        }
+        if now >= rejoin.started + REJOIN_MAX_MS as f64 / 1000.0 {
+            let why = std::mem::take(&mut rejoin.why);
+            self.give_up_rejoin(why);
+            return Step::goto(AppState::Worlds);
+        }
+        if rejoin.calling || now < rejoin.next_call {
+            return Step::none();
+        }
+        let world = rejoin.world.clone();
+        if std::mem::take(&mut rejoin.adopt_first) {
+            self.adopt_kept(kept());
+        }
+        let Some(token) = self.refresh.clone() else {
+            // Nothing to present: sign in again.
+            self.sign_out();
+            return Step::goto(AppState::Login);
+        };
+        if let Some(rejoin) = self.rejoin.as_mut() {
+            rejoin.calling = true;
+        }
+        Step::call(LoginCall::Join { token, world })
+    }
+
+    /// A rejoin's join answer:
+    /// - a ticket: the rotated token is kept, then the new session connects;
+    /// - 503 `WorldUnavailable` (the host did not take the join yet; the
+    ///   service did not spend the token): again, with the same token;
+    /// - a transport error, a timeout, an answer we cannot read, or the
+    ///   service's own failure: the answer may have been lost after the
+    ///   rotation, so again, adopting the kept token first;
+    /// - revoked: signed out, the sign-in screen (nothing opened);
+    /// - anything else (the world closed or unknown): the world list.
+    pub fn rejoin_answer(&mut self, result: Result<Joined, LoginFailure>) -> Step {
+        let now = self.clock;
+        let Some(rejoin) = self.rejoin.as_mut() else { return Step::none() };
+        rejoin.calling = false;
+        let failure = match result {
+            Ok(joined) => {
+                self.refresh = Some(joined.refresh_token.clone());
+                let mut step = Step::none();
+                step.store = StoreOp::Save(joined.refresh_token.clone());
+                match pending_join(joined) {
+                    Ok(pending) => {
+                        info!("[login] rejoin: a new ticket for world {:?}; connecting", pending.ticket.world);
+                        rejoin.connecting = true;
+                        step.join = Some(pending);
+                    }
+                    Err(why) => {
+                        self.give_up_rejoin(why);
+                        step.goto = Some(AppState::Worlds);
+                    }
+                }
+                return step;
+            }
+            Err(failure) => failure,
+        };
+        rejoin.why = failure.to_string();
+        match &failure {
+            LoginFailure::Api(e) if e.code == ApiErrorCode::WorldUnavailable => {
+                rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
+                Step::none()
+            }
+            LoginFailure::Network(_) | LoginFailure::Protocol(_) => {
+                warn!("[login] rejoin: a join got no answer ({failure:?}); adopting the kept login before the next");
+                rejoin.adopt_first = true;
+                rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
+                Step::none()
+            }
+            LoginFailure::Api(e) if e.code == ApiErrorCode::Internal => {
+                warn!("[login] rejoin: the login service failed; adopting the kept login before the next");
+                rejoin.adopt_first = true;
+                rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
+                Step::none()
+            }
+            LoginFailure::Api(e) if e.code == ApiErrorCode::Revoked => {
+                warn!("[login] rejoin: the login was revoked; sign in again");
+                self.sign_out();
+                self.error = failure.to_string();
+                Step { goto: Some(AppState::Login), store: StoreOp::Clear, ..Step::none() }
+            }
+            _ => {
+                let why = failure.to_string();
+                self.give_up_rejoin(why);
+                Step::goto(AppState::Worlds)
+            }
+        }
     }
 
     /// Sends `calls` (starting the worker on first use).
@@ -786,6 +1052,19 @@ impl LoginSession {
                 self.pending_device = None;
             }
         }
+    }
+}
+
+/// A ticket's [`PendingJoin`], if this platform has an address for it.
+fn pending_join(joined: Joined) -> Result<PendingJoin, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        joined.quic.map(|addr| PendingJoin { ticket: joined.ticket, addr })
+    }
+    #[cfg(target_arch = "wasm32")]
+    match joined.ticket.webtransport.as_deref().map(str::trim) {
+        Some(url) if !url.is_empty() => Ok(PendingJoin { ticket: joined.ticket }),
+        _ => Err(NO_ADDRESS_ERROR.to_string()),
     }
 }
 
@@ -895,13 +1174,31 @@ pub fn poll_login(
     }
     let step = login.tick(now, *state.get());
     perform_step(step, &mut login, &mut commands, &mut next);
+    let step = login.tick_rejoin(now, *state.get(), store::load_refresh);
+    perform_step(step, &mut login, &mut commands, &mut next);
+}
+
+/// `OnEnter(InWorld)`: a rejoined session is in the world: the rejoin is
+/// over (a later loss starts a new one, with a new deadline).
+pub fn rejoin_arrived(login: Option<ResMut<LoginSession>>) {
+    let Some(mut login) = login else { return };
+    if let Some(rejoin) = login.rejoin.take() {
+        info!("[login] rejoined world {:?}", rejoin.world);
+    }
 }
 
 /// `OnEnter(Worlds)`: back on the list (an online session over, or from the
 /// menu): fetch the list again.
 pub fn refresh_worlds(login: Option<ResMut<LoginSession>>) {
     let Some(mut login) = login else { return };
+    // Back from a rejoin's starting screen: it stops (a join on its way only
+    // keeps its token when it answers).
+    if login.rejoin.take().is_some() {
+        info!("[login] rejoin abandoned");
+        login.back();
+    }
     login.playing_online = false;
+    login.joined_world = None;
     if login.logged_in() && !login.busy() {
         login.send(vec![LoginCall::Worlds]);
     }
@@ -1419,6 +1716,233 @@ mod tests {
         assert!(matches!(step.calls.as_slice(), [LoginCall::Logout { token }] if token == "r1"));
         assert!(!awaited(&step.calls[0]), "nothing waits for a logout");
         assert!(!login.logged_in() && login.refresh.is_none() && login.worlds.is_empty());
+    }
+
+    /// An online session in world "alpha": signed in, joined (the kept token
+    /// is "rotated"), in the world.
+    fn online() -> LoginSession {
+        let mut login = session();
+        let _ = login.apply(logged_in("a@b.c", "r1"), AppState::Login);
+        let step = login.apply(
+            LoginReply::Joined(Ok(joined(ticket(Some("127.0.0.1:6466"), Some("https://127.0.0.1:6467/"))))),
+            AppState::Worlds,
+        );
+        assert!(step.join.is_some() && login.playing_online);
+        assert_eq!(login.joined_world.as_deref(), Some("alpha"));
+        login
+    }
+
+    fn refused(why: &str) -> String {
+        format!("{}{why}", crate::instance::REFUSED_PREFIX)
+    }
+
+    /// The store is read only after an answer that may have been lost.
+    fn store_untouched() -> Option<String> {
+        panic!("the kept token was read without a lost answer")
+    }
+
+    /// The join a step sends: (token, world).
+    fn join_call(step: &Step) -> Option<(String, String)> {
+        match step.calls.as_slice() {
+            [] => None,
+            [LoginCall::Join { token, world }] => Some((token.clone(), world.clone())),
+            _ => panic!("a rejoin sends one join at a time and nothing else"),
+        }
+    }
+
+    #[test]
+    fn rejoinable_reasons() {
+        let closed = format!("{}connection to server lost: timed out", crate::instance::HOME_CLOSED_PREFIX);
+        let gave_up = format!("{}could not connect to server 127.0.0.1:6466: no answer", crate::instance::HOME_CLOSED_PREFIX);
+        let table: Vec<(Option<String>, bool)> = vec![
+            (None, false), // the player left
+            (Some(closed), true),
+            (Some(gave_up), true),
+            (Some(refused(game::FENCED_REFUSAL)), true),
+            (Some(refused(game::ROLLBACK_REFUSAL)), true),
+            (Some(refused(game::LEAVING_REFUSAL)), true),
+            (Some(refused(game::PLAYER_PARKED_ELSEWHERE)), true),
+            (Some(refused(game::LOGGED_IN_ELSEWHERE)), false),
+            (Some(refused(game::DUPLICATE_SESSION_REFUSAL)), false),
+            (Some(refused(game::PLAYER_ELSEWHERE_REFUSAL)), false),
+            (Some(refused(game::REGION_UNAVAILABLE_REFUSAL)), false),
+            (Some(refused("kicked by an operator")), false),
+            (Some(refused("invalid join ticket")), false),
+            (Some("the game crashed on a server event".into()), false),
+            // The refusal's text alone, or with something after it, is not the refusal.
+            (Some(game::FENCED_REFUSAL.into()), false),
+            (Some(refused(&format!("{} (again)", game::FENCED_REFUSAL))), false),
+        ];
+        for (reason, rejoins) in &table {
+            assert_eq!(rejoinable(reason.as_deref()), *rejoins, "{reason:?}");
+        }
+        // Each reason, as the end of an online session in the world: a rejoin,
+        // or the world list with the reason on it.
+        for (reason, rejoins) in table {
+            let mut login = online();
+            let after = login.session_lost(reason.as_deref(), AppState::InWorld, 10.0);
+            if rejoins {
+                assert_eq!(after, AfterSession::Rejoin, "{reason:?}");
+                assert_eq!(login.rejoin.as_ref().map(|r| r.world.as_str()), Some("alpha"));
+            } else {
+                assert_eq!(after, AfterSession::AsBefore, "{reason:?}");
+                assert!(!login.rejoining());
+                assert_eq!(login.error, reason.unwrap_or_default(), "the world list shows why");
+                assert_eq!(LoginSession::home(Some(&login)), AppState::Worlds);
+            }
+        }
+        // A local or single-player session never rejoins (no ticket join).
+        let fenced = refused(game::FENCED_REFUSAL);
+        let mut local = session();
+        let _ = local.apply(logged_in("a@b.c", "r1"), AppState::Login);
+        assert_eq!(local.session_lost(Some(&fenced), AppState::InWorld, 10.0), AfterSession::AsBefore);
+        assert!(!local.rejoining());
+        // Nor does a first start that never reached the world (its starting
+        // screen shows why, as before).
+        let mut login = online();
+        assert_eq!(login.session_lost(Some(&fenced), AppState::Starting, 10.0), AfterSession::AsBefore);
+        assert!(!login.rejoining());
+    }
+
+    #[test]
+    fn rejoin_retries_through_503_with_the_same_token_and_gives_up_after_rejoin_max_ms() {
+        let unavailable = || LoginReply::Joined(Err(api(ApiErrorCode::WorldUnavailable)));
+        let mut login = online();
+        let start = 100.0;
+        assert_eq!(login.session_lost(Some(&refused(game::FENCED_REFUSAL)), AppState::InWorld, start), AfterSession::Rejoin);
+        // The frame the lost world is left: nothing yet.
+        assert!(join_call(&login.tick_rejoin(start, AppState::InWorld, store_untouched)).is_none());
+        assert!(login.rejoining());
+
+        let (retry, max) = (REJOIN_RETRY_MS as f64 / 1000.0, REJOIN_MAX_MS as f64 / 1000.0);
+        let mut now = start;
+        let mut calls = 0;
+        let gave_up = loop {
+            assert!(now < start + max + 10.0, "never gave up");
+            let step = login.tick_rejoin(now, AppState::Starting, store_untouched);
+            if step.goto.is_some() {
+                break step;
+            }
+            let (token, world) = join_call(&step).expect("a join is due");
+            assert_eq!((token.as_str(), world.as_str()), ("rotated", "alpha"), "the unchanged token, the same world");
+            assert_eq!(step.store, StoreOp::Keep);
+            calls += 1;
+            // A 503 can take the service's spawn-ack timeout: nothing more meanwhile.
+            for wait in [0.5, 1.5, 2.9] {
+                assert!(join_call(&login.tick_rejoin(now + wait, AppState::Starting, store_untouched)).is_none(), "one at a time");
+            }
+            now += 3.0;
+            let _ = login.tick_rejoin(now, AppState::Starting, store_untouched);
+            let step = login.receive(login.generation, unavailable(), AppState::Starting);
+            assert!(step.goto.is_none() && step.join.is_none() && step.calls.is_empty());
+            assert_eq!(step.store, StoreOp::Keep, "a 503 spent nothing");
+            assert_eq!(login.refresh.as_deref(), Some("rotated"));
+            // The next one REJOIN_RETRY_MS after the answer, not before.
+            assert!(join_call(&login.tick_rejoin(now + retry * 0.5, AppState::Starting, store_untouched)).is_none());
+            now += retry;
+        };
+        // Every 4 s (3 s answer + 1 s) over 60 s.
+        assert_eq!(calls, 15);
+        assert!(now >= start + max);
+        assert_eq!(gave_up.goto, Some(AppState::Worlds), "it gives up on the world list");
+        assert!(gave_up.join.is_none() && gave_up.calls.is_empty() && gave_up.open.is_none());
+        assert_eq!(gave_up.store, StoreOp::Keep);
+        assert!(!login.rejoining());
+        assert_eq!(login.error, api(ApiErrorCode::WorldUnavailable).to_string(), "with why");
+        assert!(login.logged_in(), "still signed in");
+        assert!(join_call(&login.tick_rejoin(now + 10.0, AppState::Worlds, store_untouched)).is_none());
+
+        // Given up with a call on its way: its late ticket only keeps its token.
+        let mut login = online();
+        let _ = login.session_lost(Some(&refused(game::LEAVING_REFUSAL)), AppState::InWorld, 0.0);
+        assert!(join_call(&login.tick_rejoin(0.0, AppState::Starting, store_untouched)).is_some());
+        let old = login.generation;
+        let step = login.tick_rejoin(max, AppState::Starting, store_untouched);
+        assert_eq!(step.goto, Some(AppState::Worlds));
+        let late = LoginReply::Joined(Ok(joined(ticket(Some("127.0.0.1:6466"), None))));
+        let step = login.receive(old, late, AppState::Worlds);
+        assert!(step.join.is_none() && step.goto.is_none(), "an abandoned rejoin starts nothing");
+        assert_eq!(step.store, StoreOp::Save("rotated".into()), "but its token is kept");
+    }
+
+    #[test]
+    fn rejoin_after_a_lost_answer_adopts_the_kept_token_first() {
+        let mut login = online();
+        let _ = login.session_lost(Some(&format!("{}connection to server lost: timed out", crate::instance::HOME_CLOSED_PREFIX)), AppState::InWorld, 0.0);
+        let first = join_call(&login.tick_rejoin(0.0, AppState::Starting, store_untouched)).unwrap();
+        assert_eq!(first.0, "rotated");
+        // The answer never came (the service may have rotated the token):
+        // the call timed out at 15 s.
+        let _ = login.tick_rejoin(15.0, AppState::Starting, store_untouched);
+        let lost = LoginReply::Joined(Err(LoginFailure::Network("no answer within 15 s".into())));
+        let step = login.receive(login.generation, lost, AppState::Starting);
+        assert!(step.goto.is_none() && step.calls.is_empty());
+        assert_eq!(step.store, StoreOp::Keep);
+        assert!(join_call(&login.tick_rejoin(15.5, AppState::Starting, store_untouched)).is_none(), "the retry wait first");
+        // The next call re-reads the store and presents what is kept there.
+        let mut read = false;
+        let step = login.tick_rejoin(16.0, AppState::Starting, || {
+            read = true;
+            Some("kept-elsewhere".into())
+        });
+        assert!(read, "the store was read before the next call");
+        assert_eq!(join_call(&step).map(|c| c.0).as_deref(), Some("kept-elsewhere"));
+        // That one is answered 503: the one after presents it unchanged, without a read.
+        let step = login.receive(login.generation, LoginReply::Joined(Err(api(ApiErrorCode::WorldUnavailable))), AppState::Starting);
+        assert_eq!(step.store, StoreOp::Keep);
+        let step = login.tick_rejoin(17.0, AppState::Starting, store_untouched);
+        assert_eq!(join_call(&step).map(|c| c.0).as_deref(), Some("kept-elsewhere"));
+        // An unreadable answer (a proxy's 502) counts as lost too; nothing kept: ours.
+        let _ = login.receive(login.generation, LoginReply::Joined(Err(LoginFailure::Protocol("502".into()))), AppState::Starting);
+        let step = login.tick_rejoin(18.0, AppState::Starting, || None);
+        assert_eq!(join_call(&step).map(|c| c.0).as_deref(), Some("kept-elsewhere"));
+
+        // The ticket: the rotated token is kept BEFORE the session connects.
+        let rotated = LoginReply::Joined(Ok(joined(ticket(Some("127.0.0.1:6470"), Some("https://127.0.0.1:6471/")))));
+        let step = login.receive(login.generation, rotated, AppState::Starting);
+        assert_eq!(step.store, StoreOp::Save("rotated".into()));
+        assert_eq!(step.goto, None, "already on the starting screen");
+        let join = step.join.expect("the new session's ticket");
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(join.addr, "127.0.0.1:6470".parse().unwrap());
+        assert!(login.rejoin.as_ref().is_some_and(|r| r.connecting));
+        assert!(join_call(&login.tick_rejoin(30.0, AppState::Starting, store_untouched)).is_none(), "no call while it connects");
+        // Its connect is lost before it is in the world: the same rejoin goes on.
+        let closed = format!("{}could not connect", crate::instance::HOME_CLOSED_PREFIX);
+        assert_eq!(login.session_lost(Some(&closed), AppState::Starting, 31.0), AfterSession::Rejoin);
+        assert_eq!(join_call(&login.tick_rejoin(32.0, AppState::Starting, store_untouched)).map(|c| c.0).as_deref(), Some("rotated"));
+        // Lost again past the deadline: the world list.
+        let _ = login.receive(login.generation, LoginReply::Joined(Err(api(ApiErrorCode::WorldUnavailable))), AppState::Starting);
+        assert_eq!(login.session_lost(Some(&closed), AppState::Starting, 61.0), AfterSession::GaveUp);
+        assert!(!login.rejoining() && login.error == closed);
+    }
+
+    #[test]
+    fn a_revoked_rejoin_ends_on_the_sign_in_screen_and_opens_nothing() {
+        let mut login = online();
+        let _ = login.session_lost(Some(&refused(game::ROLLBACK_REFUSAL)), AppState::InWorld, 0.0);
+        assert!(join_call(&login.tick_rejoin(0.0, AppState::Starting, store_untouched)).is_some());
+        let step = login.receive(login.generation, LoginReply::Joined(Err(api(ApiErrorCode::Revoked))), AppState::Starting);
+        assert_eq!(step.goto, Some(AppState::Login), "the sign-in screen");
+        assert_eq!(step.open, None, "no browser");
+        assert!(step.calls.is_empty(), "no device sign-in");
+        assert!(step.join.is_none());
+        assert_eq!(step.store, StoreOp::Clear, "the token is forgotten");
+        assert!(!login.logged_in() && login.refresh.is_none() && !login.waiting_for_sign_in());
+        assert!(!login.rejoining() && !login.playing_online);
+        assert_eq!(login.error, api(ApiErrorCode::Revoked).to_string());
+        let step = login.tick_rejoin(5.0, AppState::Login, store_untouched);
+        assert!(step.calls.is_empty() && step.open.is_none() && step.goto.is_none());
+        assert!(login.tick(5.0, AppState::Login).calls.is_empty(), "nothing polls");
+
+        // A world that closed meanwhile: the world list with why.
+        let mut login = online();
+        let _ = login.session_lost(Some(&refused(game::FENCED_REFUSAL)), AppState::InWorld, 0.0);
+        let _ = login.tick_rejoin(0.0, AppState::Starting, store_untouched);
+        let step = login.receive(login.generation, LoginReply::Joined(Err(api(ApiErrorCode::WorldClosed))), AppState::Starting);
+        assert_eq!(step.goto, Some(AppState::Worlds));
+        assert!(login.logged_in() && !login.rejoining());
+        assert_eq!(login.error, api(ApiErrorCode::WorldClosed).to_string());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

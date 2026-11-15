@@ -367,6 +367,49 @@ fn home_after_session(login: Option<&crate::login::flow::LoginSession>) -> AppSt
     crate::login::flow::LoginSession::home(login)
 }
 
+/// Whether a start may wait without a chosen world: a rejoin is asking the
+/// login service for its ticket (`login::flow`).
+fn rejoining(world: &World) -> bool {
+    world.get_resource::<crate::login::flow::LoginSession>().is_some_and(|l| l.rejoining())
+}
+
+/// Tear the lost session down for a rejoin (a new session, built the usual
+/// way once the ticket comes) and put [`REJOIN_STATUS`](crate::login::flow::REJOIN_STATUS)
+/// on the starting screen.
+fn leave_for_rejoin(world: &mut World) {
+    leave_session(world);
+    world.get_resource_or_init::<StartingStatus>().0 = crate::login::flow::REJOIN_STATUS.into();
+}
+
+/// What a [`SessionEnded`] (`reason`) on screen `state` leads to (the
+/// login's say first: [`LoginSession::session_lost`](crate::login::flow::LoginSession::session_lost)).
+fn after_session_end(
+    reason: Option<&str>,
+    state: AppState,
+    login: Option<&mut crate::login::flow::LoginSession>,
+    now: f64,
+) -> SessionOutcome {
+    use crate::login::flow::AfterSession;
+    let after = login.map_or(AfterSession::AsBefore, |login| login.session_lost(reason, state, now));
+    match (after, state, reason) {
+        (AfterSession::Rejoin, ..) => SessionOutcome::Rejoin,
+        (AfterSession::GaveUp, ..) => SessionOutcome::Home,
+        (AfterSession::AsBefore, AppState::Starting, Some(_)) => SessionOutcome::FailStart,
+        (AfterSession::AsBefore, ..) => SessionOutcome::Home,
+    }
+}
+
+/// See [`after_session_end`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionOutcome {
+    /// Tear down, rejoin on the starting screen.
+    Rejoin,
+    /// The menu, or the online world list (with the reason recorded).
+    Home,
+    /// A lost start: stays on the starting screen to show why.
+    FailStart,
+}
+
 /// States, the reset registry, [`SessionEnded`] and the frontend camera.
 /// Needs `StatesPlugin` (in `DefaultPlugins` with Bevy's `bevy_state` feature).
 pub struct SessionPlugin {
@@ -508,9 +551,9 @@ mod flow {
     use game::GameEventKind;
 
     use super::{
-        end_session, home_after_session, install_dead_channels, AppState, HostPort, JoinServer, LastSessionError,
-        PendingJoin, PendingWorld, PreparingWorld, SessionChannels,
-        SessionEnded, StartingLog, StartingStatus,
+        after_session_end, end_session, home_after_session, install_dead_channels, leave_for_rejoin, rejoining,
+        AppState, HostPort, JoinServer, LastSessionError, PendingJoin, PendingWorld, PreparingWorld, SessionChannels,
+        SessionEnded, SessionOutcome, StartingLog, StartingStatus,
     };
     use crate::instance::{ClientRequest, Command};
     use crate::local_host::{server_log_path, LocalHost, STOP_GRACE};
@@ -621,6 +664,7 @@ mod flow {
             && !world.contains_resource::<PreparingWorld>()
             && !world.contains_resource::<JoinServer>()
             && !world.contains_resource::<PendingJoin>()
+            && !rejoining(world)
         {
             fail_start(world, "no world was chosen to play".into());
         }
@@ -734,12 +778,14 @@ mod flow {
     /// runs [`leave_session`]) — except a start that was lost (`Starting` with
     /// a reason), which stays on the starting screen to show why
     /// ([`fail_start`]).
+    #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
     fn end_on_session_ended(
         mut ended: MessageReader<SessionEnded>,
         state: Res<State<AppState>>,
         mut next: ResMut<NextState<AppState>>,
         mut error: ResMut<LastSessionError>,
-        login: Option<Res<crate::login::flow::LoginSession>>,
+        mut login: Option<ResMut<crate::login::flow::LoginSession>>,
+        time: Option<Res<Time<Real>>>,
         mut commands: Commands,
     ) {
         let Some(last) = ended.read().last() else { return };
@@ -747,11 +793,23 @@ mod flow {
             return;
         }
         info!("[session] session ended: {}", last.reason.as_deref().unwrap_or("left by the player"));
-        match (state.get(), last.reason.clone()) {
-            (AppState::Starting, Some(reason)) => {
+        let now = time.map_or(0.0, |t| t.elapsed_secs_f64());
+        let reason = last.reason.clone();
+        match after_session_end(reason.as_deref(), *state.get(), login.as_deref_mut(), now) {
+            // A new session, built the usual way: this one is torn down now
+            // (InWorld → Starting has no transition that would).
+            SessionOutcome::Rejoin => {
+                commands.queue(leave_for_rejoin);
+                // Lost again while the rejoin connected: stay (no re-entry).
+                if *state.get() != AppState::Starting {
+                    next.set(AppState::Starting);
+                }
+            }
+            SessionOutcome::FailStart => {
+                let reason = reason.unwrap_or_default();
                 commands.queue(move |world: &mut World| fail_start(world, reason));
             }
-            (_, reason) => {
+            SessionOutcome::Home => {
                 error.0 = reason;
                 next.set(home_after_session(login.as_deref()));
             }
@@ -783,6 +841,9 @@ mod flow {
                 // An online session ends on the world list.
                 .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Worlds }, leave_session)
                 .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Worlds }, leave_session)
+                // A rejoin whose login was revoked ends on the sign-in screen.
+                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Login }, leave_session)
+                .add_systems(OnEnter(AppState::InWorld), crate::login::flow::rejoin_arrived)
                 .add_systems(
                     Update,
                     (
@@ -816,8 +877,9 @@ mod web_flow {
     use bevy::prelude::*;
 
     use super::{
-        end_session, home_after_session, install_dead_channels, AppState, LastSessionError, PendingJoin, PendingServer,
-        SessionChannels, SessionEnded, StartingLog, StartingStatus,
+        after_session_end, end_session, home_after_session, install_dead_channels, leave_for_rejoin, rejoining,
+        AppState, LastSessionError, PendingJoin, PendingServer, SessionChannels, SessionEnded, SessionOutcome,
+        StartingLog, StartingStatus,
     };
     use crate::renderer::collider_debug::DebugFlagsRes;
     use crate::renderer::LocalPlayer;
@@ -862,6 +924,9 @@ mod web_flow {
     fn begin_join(world: &mut World) {
         world.resource_mut::<LastSessionError>().0 = None;
         world.get_resource_or_init::<StartingLog>().0.clear();
+        if rejoining(world) && !world.contains_resource::<PendingJoin>() {
+            return; // the rejoin's ticket comes later (`join_when_ticketed`)
+        }
         let (address, server, credential) = if let Some(join) = world.remove_resource::<PendingJoin>() {
             let url = join.ticket.webtransport.clone().unwrap_or_default();
             match crate::web_endpoint::web_server_for_ticket(&url, join.ticket.cert_hash.as_deref()) {
@@ -885,7 +950,12 @@ mod web_flow {
             }
         };
         info!("[session] joining {address} ({server:?})");
-        set_status(world, format!("Connecting to {address}\u{2026}"));
+        let line = if rejoining(world) {
+            crate::login::flow::REJOIN_STATUS.to_string()
+        } else {
+            format!("Connecting to {address}\u{2026}")
+        };
+        set_status(world, line);
         let channels = SessionChannels::new();
         channels.install(world);
         let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
@@ -902,6 +972,14 @@ mod web_flow {
         }
     }
 
+    /// In `Starting`, a rejoin's ticket that came after the screen was
+    /// entered: connect to it (as [`begin_join`] does on entry).
+    fn join_when_ticketed(world: &mut World) {
+        if world.contains_resource::<PendingJoin>() {
+            begin_join(world);
+        }
+    }
+
     /// In the world, waiting for the map: say so on the starting screen.
     fn receiving_map(mut status: ResMut<StartingStatus>) {
         status.0 = crate::frontend::RECEIVING_MAP.into();
@@ -911,12 +989,14 @@ mod web_flow {
     /// — or the online world list after an online session — (the transition
     /// runs [`leave_session`]) — except a start that was lost, which stays on
     /// the starting screen to show why.
+    #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
     fn end_on_session_ended(
         mut ended: MessageReader<SessionEnded>,
         state: Res<State<AppState>>,
         mut next: ResMut<NextState<AppState>>,
         mut error: ResMut<LastSessionError>,
-        login: Option<Res<crate::login::flow::LoginSession>>,
+        mut login: Option<ResMut<crate::login::flow::LoginSession>>,
+        time: Option<Res<Time<Real>>>,
         mut commands: Commands,
     ) {
         let Some(last) = ended.read().last() else { return };
@@ -924,11 +1004,24 @@ mod web_flow {
             return;
         }
         info!("[session] session ended: {}", last.reason.as_deref().unwrap_or("left by the player"));
-        match (state.get(), last.reason.clone()) {
-            (AppState::Starting, Some(reason)) => {
+        let now = time.map_or(0.0, |t| t.elapsed_secs_f64());
+        let reason = last.reason.clone();
+        match after_session_end(reason.as_deref(), *state.get(), login.as_deref_mut(), now) {
+            // A new session, built the usual way: this one is torn down now
+            // (its sim driver dropped; InWorld → Starting has no transition
+            // that would).
+            SessionOutcome::Rejoin => {
+                commands.queue(leave_for_rejoin);
+                // Lost again while the rejoin connected: stay (no re-entry).
+                if *state.get() != AppState::Starting {
+                    next.set(AppState::Starting);
+                }
+            }
+            SessionOutcome::FailStart => {
+                let reason = reason.unwrap_or_default();
                 commands.queue(move |world: &mut World| fail_start(world, reason));
             }
-            (_, reason) => {
+            SessionOutcome::Home => {
                 error.0 = reason;
                 next.set(home_after_session(login.as_deref()));
             }
@@ -948,9 +1041,13 @@ mod web_flow {
                 // An online session ends on the world list.
                 .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Worlds }, leave_session)
                 .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Worlds }, leave_session)
+                // A rejoin whose login was revoked ends on the sign-in screen.
+                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Login }, leave_session)
+                .add_systems(OnEnter(AppState::InWorld), crate::login::flow::rejoin_arrived)
                 .add_systems(
                     Update,
                     (
+                        join_when_ticketed.run_if(in_state(AppState::Starting)),
                         crate::sim_driver::drive_sim,
                         enter_world_on_player.run_if(in_state(AppState::Starting)),
                         end_on_session_ended,
@@ -1307,6 +1404,101 @@ mod tests {
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Worlds);
         assert_eq!(*app.world().resource::<Embarked>(), Embarked(false), "the session was left");
         assert!(app.world().resource::<LoginSession>().logged_in(), "still signed in");
+    }
+
+    /// A session whose home host was replaced (a fence) is torn down like any
+    /// other — every scoped tree despawned, every registered resource reset,
+    /// the old channels told to leave — and a rejoin, kept by the login across
+    /// the teardown, waits on the starting screen; its ticket builds a new
+    /// session the usual way, and arriving in the world ends the rejoin. Back
+    /// from the starting screen stops a rejoin.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_rejoin_resets_every_session_resource() {
+        use crate::instance::{ClientRequest, Command};
+        use crate::login::flow::{LoginSession, REJOIN_STATUS};
+        let mut app = app(false);
+        let (command_send, command_recv) = crossbeam::channel::unbounded();
+        app.add_session_reset::<crate::renderer::LocalPlayer>()
+            .insert_resource(crate::renderer::collider_debug::DebugFlagsRes(game::DebugFlags::default()))
+            .insert_resource(crate::world_scale::WorldScale::TINY)
+            .insert_resource(GameThread(command_send))
+            .add_session_reset::<Counter>()
+            .add_plugins(SessionFlowPlugin)
+            .add_systems(OnEnter(AppState::Worlds), crate::login::flow::refresh_worlds);
+        let mut login = LoginSession::new(crate::login::LoginApi::new("http://127.0.0.1:1"));
+        login.account = Some("a@b.c".into());
+        login.refresh = Some("r1".into());
+        login.playing_online = true;
+        login.joined_world = Some("alpha".into());
+        app.insert_resource(login);
+        let old = SessionChannels::new();
+        old.install(app.world_mut());
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InWorld);
+        app.update();
+        // The session's world.
+        app.world_mut().spawn(SessionScoped);
+        app.world_mut().resource_mut::<Counter>().0 = 5;
+        app.world_mut().resource_mut::<Embarked>().0 = true;
+        app.world_mut().resource_mut::<crate::renderer::LocalPlayer>().0 = Some(1);
+        let generation = app.world().resource::<SessionGeneration>().0;
+
+        let fenced = format!("{}{}", crate::instance::REFUSED_PREFIX, game::FENCED_REFUSAL);
+        app.world_mut().write_message(SessionEnded { reason: Some(fenced) });
+        app.update(); // Update: the rejoin starts, the teardown is queued
+        app.update(); // StateTransition: the starting screen
+
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting);
+        assert_eq!(scoped(&mut app), 0, "the old session's trees survived the rejoin");
+        assert_eq!(app.world().resource::<Counter>().0, 0, "a registered resource survived the rejoin");
+        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false));
+        assert_eq!(app.world().resource::<crate::renderer::LocalPlayer>().0, None);
+        assert!(app.world().resource::<SessionGeneration>().0 > generation, "no end_session ran");
+        assert!(matches!(old.request_recv.try_recv(), Ok(ClientRequest::Leave)), "no Leave sent");
+        assert_eq!(app.world().resource::<LastSessionError>().0, None, "not a failed start");
+        assert_eq!(app.world().resource::<StartingStatus>().0, REJOIN_STATUS);
+        assert!(app.world().resource::<LoginSession>().rejoining(), "the rejoin outlived the session");
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting, "it waits for the ticket");
+        assert_eq!(app.world().resource::<LastSessionError>().0, None);
+
+        // The ticket: a new session through the usual connect.
+        app.insert_resource(PendingJoin {
+            ticket: login_api::JoinTicket {
+                world: "alpha".into(),
+                jwt: "header.claims.sig".into(),
+                quic: Some("127.0.0.1:6470".into()),
+                webtransport: None,
+                cert_hash: None,
+                expires_in_secs: 300,
+            },
+            addr: "127.0.0.1:6470".parse().unwrap(),
+        });
+        app.world_mut().resource_mut::<LoginSession>().rejoin.as_mut().unwrap().connecting = true;
+        app.update();
+        let connect = command_recv.try_iter().last();
+        assert!(matches!(connect, Some(Command::ConnectToServerAndScene(..))), "the new session was not started");
+        assert_eq!(app.world().resource::<StartingStatus>().0, REJOIN_STATUS, "the screen says why");
+        // Its first SetPlayer: in the world, the rejoin over.
+        app.world_mut().resource_mut::<crate::renderer::LocalPlayer>().0 = Some(2);
+        app.update();
+        app.update();
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::InWorld);
+        assert!(!app.world().resource::<LoginSession>().rejoining(), "arriving ends the rejoin");
+
+        // Lost again; then Back from the starting screen: the world list, no rejoin.
+        let left = format!("{}{}", crate::instance::REFUSED_PREFIX, game::LEAVING_REFUSAL);
+        app.world_mut().write_message(SessionEnded { reason: Some(left) });
+        app.update();
+        app.update();
+        assert!(app.world().resource::<LoginSession>().rejoining());
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Worlds);
+        app.update();
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Worlds);
+        assert!(!app.world().resource::<LoginSession>().rejoining(), "Back stops the rejoin");
     }
 
     #[test]

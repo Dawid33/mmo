@@ -28,6 +28,10 @@
 //!   ticket's [`crate::session::PendingJoin`]): the scenario only presses its
 //!   buttons ([`LoginIntent`]s), no password involved. A refused kept login, a
 //!   failed login or a failed join prints the screen's error line and exits non-zero.
+//!   A session whose home host was replaced rejoins as a screen session does
+//!   (`login::flow`) and embarks again; where a screen session would leave the
+//!   game (the rejoin gave up, the login was revoked, any other lost session)
+//!   it prints why and exits non-zero ([`exit_when_lost`]).
 //!
 //! The scenario drives the ordinary flow, nothing is faked: the world goes
 //! through the generator's forge job and `PendingWorld` → `AppState::Starting`
@@ -340,11 +344,14 @@ impl Plugin for DebugLaunchPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DebugLaunch { scenario: self.scenario.clone(), phase: Phase::Boot, tried: Vec::new() })
             .add_systems(Update, (boot, drive_online_login, poll_forge, auto_embark).chain());
-        // An online session ends on the world list instead of the menu.
-        for home in [AppState::MainMenu, AppState::Worlds] {
-            app.add_systems(OnTransition { exited: AppState::Starting, entered: home }, abandon)
-                .add_systems(OnTransition { exited: AppState::InWorld, entered: home }, abandon);
+        // An online session ends on the world list instead of the menu (or,
+        // its login revoked during a rejoin, on the sign-in screen).
+        for home in [AppState::MainMenu, AppState::Worlds, AppState::Login] {
+            app.add_systems(OnTransition { exited: AppState::Starting, entered: home }, (exit_when_lost, abandon).chain())
+                .add_systems(OnTransition { exited: AppState::InWorld, entered: home }, (exit_when_lost, abandon).chain());
         }
+        // A rejoin (`login::flow`): the new session embarks again.
+        app.add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Starting }, embark_after_rejoin);
     }
 }
 
@@ -359,6 +366,42 @@ fn abandon(mut launch: ResMut<DebugLaunch>, mut commands: Commands, forge: Optio
         commands.remove_resource::<DebugForge>();
     }
     launch.phase = Phase::Done;
+}
+
+/// `online`: a session that ended where a screen session leaves the game
+/// (the world list with a reason, the sign-in screen) ends the launch: why is
+/// printed, and the app exits non-zero. A session the player left (no
+/// reason) does not.
+fn exit_when_lost(
+    launch: Res<DebugLaunch>,
+    login: Option<Res<LoginSession>>,
+    last: Res<LastSessionError>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !matches!(launch.scenario, DebugScenario::Online { .. }) || matches!(launch.phase, Phase::Boot | Phase::Online(_)) {
+        return;
+    }
+    let Some(login) = login else { return };
+    let why = match (&last.0, login.error.as_str()) {
+        (_, line) if !line.is_empty() => line.to_string(),
+        (Some(reason), _) => reason.clone(),
+        (None, _) if !login.logged_in() => "the login was revoked".to_string(),
+        (None, _) => return,
+    };
+    // A session's end reason or the screens' line: never a secret.
+    error!("[debug] online: the session is over: {why}");
+    eprintln!("client debug online: the session is over: {why}");
+    exit.write(AppExit::error());
+}
+
+/// `online`: the lost session rejoins (`login::flow`); its new session
+/// embarks again (a restored player returns to its fortress).
+fn embark_after_rejoin(mut launch: ResMut<DebugLaunch>) {
+    if matches!(launch.scenario, DebugScenario::Online { .. }) && matches!(launch.phase, Phase::Embarking(_) | Phase::Done) {
+        info!("[debug] the session rejoins; embarking again once it is in");
+        launch.tried.clear();
+        launch.phase = Phase::Embarking(Sent::Nothing);
+    }
 }
 
 /// First frame: reuse the scenario's world, or forge it (`--reset` deletes it first).

@@ -17,7 +17,7 @@ use quinn::{
         self,
         pki_types::{CertificateDer, ServerName, UnixTime},
     },
-    ClientConfig, Endpoint,
+    ClientConfig, Endpoint, TransportConfig,
 };
 
 /// Longest one connect attempt may take. A localhost handshake is
@@ -30,6 +30,26 @@ pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// Give up connecting after this long. Generous on purpose: `cargo run` may
 /// still be linking a debug server, which then builds its spawn regions.
 pub const CONNECT_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How often the client pings an otherwise quiet connection (the WebTransport
+/// value, `server/src/webtransport.rs`).
+pub const CLIENT_KEEP_ALIVE: Duration = Duration::from_secs(3);
+/// How long a connection may hear nothing before it counts as lost (the
+/// WebTransport value): a dead home host is noticed in ~10 s, not quinn's
+/// default 30 s, and the session can rejoin (`login::flow`). The effective
+/// timeout is the smaller of both ends' (the server's client endpoint keeps
+/// quinn's 30 s), and the pings run on the netcode runtime's own thread, so a
+/// main or game thread busy for seconds never trips it.
+pub const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const _: () = assert!(CLIENT_KEEP_ALIVE.as_millis() * 3 <= CLIENT_IDLE_TIMEOUT.as_millis());
+
+/// The client's QUIC transport: [`CLIENT_KEEP_ALIVE`], [`CLIENT_IDLE_TIMEOUT`].
+pub fn client_transport() -> TransportConfig {
+    let mut transport = TransportConfig::default();
+    transport.keep_alive_interval(Some(CLIENT_KEEP_ALIVE));
+    transport.max_idle_timeout(Some(CLIENT_IDLE_TIMEOUT.try_into().expect("the idle timeout fits a VarInt")));
+    transport
+}
 
 /// How long and how often `connect_and_handle` retries the initial connect.
 #[derive(Clone, Copy, Debug)]
@@ -330,7 +350,7 @@ impl ServerConnection {
 
     /// Connect to the server and handle sending / receiving.
     pub async fn connect_and_handle(&mut self) -> Result<(), std::io::Error> {
-        let config = ClientConfig::new(Arc::new(
+        let mut config = ClientConfig::new(Arc::new(
             QuicClientConfig::try_from(
                 rustls::ClientConfig::builder()
                     .dangerous()
@@ -339,6 +359,7 @@ impl ServerConnection {
             )
             .unwrap(),
         ));
+        config.transport_config(Arc::new(client_transport()));
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
         endpoint.set_default_client_config(config);
         info!("client endpoint at {:?}", endpoint.local_addr().unwrap());
@@ -586,6 +607,17 @@ pub(crate) mod tests {
             .expect_err("nothing is listening");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(error.to_string().contains(&dead.to_string()));
+    }
+
+    /// A dead host is noticed within ~10 s (the WebTransport values), not
+    /// quinn's 30 s default with no keep-alive.
+    #[test]
+    fn client_transport_keeps_alive() {
+        let shown = format!("{:?}", client_transport());
+        assert!(shown.contains("keep_alive_interval: Some(3s)"), "{shown}");
+        assert!(shown.contains("max_idle_timeout: Some(10000)"), "{shown}");
+        let default = format!("{:?}", TransportConfig::default());
+        assert!(default.contains("keep_alive_interval: None"), "quinn's default has no keep-alive: {default}");
     }
 
     /// Datagrams `socket` receives within `window`.

@@ -36,16 +36,9 @@ pub const EXIT_COORDINATOR_FAILED: i32 = 4;
 /// on the way out. Distinct from a start-up error (1), a fence and a failed coordinator.
 pub const EXIT_WORLD_ROLLBACK: i32 = 5;
 
-/// What the client sees when its server was fenced.
-pub const FENCED_REFUSAL: &str = "this server was replaced; reconnect";
-
-/// What the client sees when the world restarts from an earlier save.
-pub const ROLLBACK_REFUSAL: &str = "the world is restarting; reconnect";
-
-/// What the client sees when its host left the world in a committed leave cut (its player
-/// parked and saved first): another host takes its land, the client joins again. The client
-/// matches this exact text to decide to rejoin.
-pub const LEAVING_REFUSAL: &str = "this server is stopping; reconnect";
+/// What the client sees when its server was fenced, the world rolled back, or its host left
+/// (defined in `game` so the client can match them: it rejoins on each).
+pub use game::{FENCED_REFUSAL, LEAVING_REFUSAL, ROLLBACK_REFUSAL};
 
 /// How a server's life ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

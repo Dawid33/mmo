@@ -774,6 +774,19 @@ pub const PLAYER_ELSEWHERE_REFUSAL: &str = "your character is on another server 
 /// to parked, the client never having connected there ([`crate::Reliable::PlayerParked`]).
 pub const PLAYER_PARKED_ELSEWHERE: &str = "your character was parked on another server of this world; log in again";
 
+/// What the client sees when its server was fenced (another host took its land). Here, not
+/// in `server`, so the client can match it: a client joined through the login service
+/// rejoins on it by itself (as on the two below).
+pub const FENCED_REFUSAL: &str = "this server was replaced; reconnect";
+
+/// What the client sees when the world restarts from an earlier save.
+pub const ROLLBACK_REFUSAL: &str = "the world is restarting; reconnect";
+
+/// What the client sees when its host left the world in a committed leave cut (its player
+/// parked and saved first): another host takes its land, the client joins again. The client
+/// matches this exact text to decide to rejoin.
+pub const LEAVING_REFUSAL: &str = "this server is stopping; reconnect";
+
 /// How long a region whose stored state could not be read
 /// ([`RegionOutput::LoadFailed`]) stays stopped before a start is tried
 /// again, in seconds of world time.
