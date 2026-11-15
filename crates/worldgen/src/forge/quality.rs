@@ -230,8 +230,7 @@ impl BiomeSummary {
 /// Biome and region numbers of `a`; `polar` = the forge had a pole on, `layout` = `Knobs::layout()`.
 pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> BiomeSummary {
     use super::regions::{biome_shares, region_counts};
-    // The world file is square until it stores both dimensions.
-    let (nx, nz) = (a.n as usize, a.n as usize);
+    let (nx, nz) = (a.nx as usize, a.nz as usize);
     let kind_of = |id: u16| a.regions.get(usize::from(id)).map(|r| r.kind);
 
     // Mountain regions with a 4-neighbour of a different land region.

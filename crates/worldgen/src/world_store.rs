@@ -28,7 +28,9 @@ pub fn store_path_for(terrain: &Path) -> PathBuf {
 }
 pub const PREVIEW_FILE: &str = "preview.png";
 pub const LEGACY_WORLD: &str = "worlds/default.world";
-pub const META_FORMAT: u32 = 1;
+/// `world.json`'s format. v2: `width_m` and `height_m` replace `size_m`. An
+/// older file is listed as needing a re-forge.
+pub const META_FORMAT: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WorldMeta {
@@ -38,7 +40,10 @@ pub struct WorldMeta {
     /// RFC 3339, UTC; ordering is lexical.
     pub created_utc: String,
     pub seed: u64,
-    pub size_m: f64,
+    /// West-east extent (x), metres.
+    pub width_m: f64,
+    /// North-south extent (z), metres.
+    pub height_m: f64,
     pub cell_m: f64,
     pub preset: String,
     pub knobs: BTreeMap<String, f64>,
@@ -97,6 +102,25 @@ fn check_version(v: u32) -> Result<(), String> {
     }
 }
 
+/// A world's `world.json`: its meta, or why it cannot be used. A file of an
+/// older [`META_FORMAT`] (which no longer parses as a [`WorldMeta`]) says the
+/// world needs a re-forge, like an old world file does.
+fn read_meta(path: &Path) -> Result<WorldMeta, String> {
+    let unreadable = || format!("{META_FILE} is missing or unreadable");
+    let bytes = std::fs::read(path).map_err(|_| unreadable())?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| unreadable())?;
+    match value.get("format_version").and_then(serde_json::Value::as_u64) {
+        Some(v) if v < u64::from(META_FORMAT) => {
+            return Err(format!("needs re-forge: {META_FILE} format {v} is older than {META_FORMAT}: re-forge this world"))
+        }
+        Some(v) if v > u64::from(META_FORMAT) => {
+            return Err(format!("{META_FILE} format {v} is newer than the {META_FORMAT} this build reads"))
+        }
+        _ => {}
+    }
+    serde_json::from_value(value).map_err(|_| unreadable())
+}
+
 fn check_meta(meta: &Option<WorldMeta>) -> Result<(), String> {
     let Some(m) = meta else {
         return Err(format!("{META_FILE} is missing or unreadable"));
@@ -130,11 +154,13 @@ pub fn list(root: &Path) -> Vec<WorldEntry> {
             }
             let terrain = dir.join(TERRAIN_FILE);
             let store = store_path_for(&terrain);
-            let meta = std::fs::read(dir.join(META_FILE))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<WorldMeta>(&b).ok());
+            let read = read_meta(&dir.join(META_FILE));
+            let meta = read.as_ref().ok().cloned();
             let preview = Some(dir.join(PREVIEW_FILE)).filter(|p| p.is_file());
-            let loadable = check_meta(&meta).and_then(|()| check_terrain(&terrain, &store, &meta));
+            let loadable = read
+                .map(drop)
+                .and_then(|()| check_meta(&meta))
+                .and_then(|()| check_terrain(&terrain, &store, &meta));
             found.push(WorldEntry { dir, terrain, store, preview, meta, legacy: false, loadable });
         }
     }
@@ -242,7 +268,21 @@ pub fn delete(root: &Path, entry: &WorldEntry) -> io::Result<()> {
     std::fs::remove_dir_all(&entry.dir)
 }
 
-/// Every tunable by key, as stored in `WorldMeta`.
+/// A world's extent for the menu: "100 × 50 km" (whole km from 10 km up, so
+/// 16,384 m reads 16 km), "2.5 × 2.5 km", "800 × 400 m" — the unit of the
+/// longer side.
+pub fn size_text(width_m: f64, height_m: f64) -> String {
+    let longer = width_m.max(height_m);
+    if longer >= 10_000.0 {
+        format!("{} × {} km", (width_m / 1000.0).round() as u64, (height_m / 1000.0).round() as u64)
+    } else if longer >= 1000.0 {
+        format!("{:.1} × {:.1} km", width_m / 1000.0, height_m / 1000.0)
+    } else {
+        format!("{} × {} m", width_m as u64, height_m as u64)
+    }
+}
+
+/// Every tunable by key, as stored in `WorldMeta` and in the world file.
 pub fn knobs_map(knobs: &Knobs) -> BTreeMap<String, f64> {
     crate::forge::knobs::SPECS
         .iter()
@@ -266,9 +306,11 @@ mod tests {
         WorldArtifact {
             version: ARTIFACT_VERSION,
             seed: 1,
-            size_m: 128.0,
+            width_m: 128.0,
+            height_m: 128.0,
             cell_m: 64.0,
-            n: 2,
+            nx: 2,
+            nz: 2,
             height: QRaster::fit(&[0.0; 4], HEIGHT_STEP_M),
             uplifted: QRaster::fit(&[0.0; 4], GEO_STEP_M),
             bedding: QRaster::fit(&[0.0; 4], GEO_STEP_M),
@@ -288,6 +330,7 @@ mod tests {
             region: vec![],
             regions: vec![],
             savagery: vec![],
+            knobs: knobs_map(&Knobs::default()),
         }
         .with_regions()
     }
@@ -299,7 +342,8 @@ mod tests {
             slug: slug.into(),
             created_utc: created.into(),
             seed: 1,
-            size_m: 128.0,
+            width_m: 128.0,
+            height_m: 128.0,
             cell_m: 64.0,
             preset: "default".into(),
             knobs: knobs_map(&Knobs::default()),
@@ -458,6 +502,25 @@ mod tests {
         assert_eq!(e.store, root.join("default.sqlite"));
         assert_eq!(e.terrain, root.join("default.world"));
         assert_eq!(e.loadable, Ok(()));
+    }
+
+    #[test]
+    fn size_text_names_both_sides() {
+        assert_eq!(size_text(100_352.0, 50_176.0), "100 × 50 km");
+        assert_eq!(size_text(16_384.0, 16_384.0), "16 × 16 km");
+        assert_eq!(size_text(2_500.0, 1_000.0), "2.5 × 1.0 km");
+        assert_eq!(size_text(800.0, 400.0), "800 × 400 m");
+    }
+
+    #[test]
+    fn newer_meta_format_is_not_loadable() {
+        let root = scratch("newmeta");
+        let mut m = meta("N", "n", "2026-01-01T00:00:00Z");
+        m.format_version = META_FORMAT + 1;
+        create(&root, &m, &artifact(), b"png").unwrap();
+        let e = list(&root).remove(0);
+        assert!(e.meta.is_none());
+        assert!(e.loadable.unwrap_err().contains("newer"));
     }
 
     #[test]

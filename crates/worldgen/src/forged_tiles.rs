@@ -34,7 +34,8 @@ use crate::forged::{ArtifactError, ByteRasterId, ForgedWorld, QRasterId, Rasters
 pub const TILE_CELLS: u32 = 256;
 /// Version of the tiled format (meta + tiles), independent of the forge
 /// file's `ARTIFACT_VERSION`. A mismatch is refused: re-tile or re-forge.
-pub const TILED_FORMAT_VERSION: u32 = 1;
+/// v2: width x height worlds (`WorldGlobals` `nx`, `nz`, and the knobs).
+pub const TILED_FORMAT_VERSION: u32 = 2;
 /// Decoded bytes the tile cache keeps before it evicts the least recently
 /// used tile (Decision 4); `VOXEL_TILE_CACHE_MB` overrides it
 /// ([`tile_cache_budget_from_env`]).
@@ -194,7 +195,7 @@ impl ForgedMeta {
             )));
         }
         let g = TileGeometry::new(&self.globals, self.tile_cells);
-        if g.buckets_per_side > g.tiles_per_side as usize * g.buckets_per_tile {
+        if g.buckets_x > g.tiles_x as usize * g.buckets_per_tile || g.buckets_z > g.tiles_z as usize * g.buckets_per_tile {
             return Err(ArtifactError::Format("river buckets reach past the last tile".into()));
         }
         Ok(())
@@ -210,31 +211,47 @@ fn tile_is_whole_buckets(tile_cells: u32, cell_m: f64) -> bool {
 }
 
 /// The tile grid of one world: how global cells and buckets map to tiles.
+/// Tiles are square (`tile_cells` on a side); the grid is `tiles_x` by
+/// `tiles_z`, the last column and row cut short.
 #[derive(Clone, Copy, Debug)]
 struct TileGeometry {
-    n: u32,
+    /// Raster columns (x) and rows (z).
+    nx: u32,
+    nz: u32,
     tile_cells: u32,
-    tiles_per_side: u32,
-    buckets_per_side: usize,
+    tiles_x: u32,
+    tiles_z: u32,
+    /// River buckets along x and along z (`WorldGlobals::buckets`).
+    buckets_x: usize,
+    buckets_z: usize,
     buckets_per_tile: usize,
 }
 
 impl TileGeometry {
     fn new(globals: &WorldGlobals, tile_cells: u32) -> TileGeometry {
         let buckets_per_tile = (f64::from(tile_cells) * globals.cell_m / BUCKET_M) as usize;
+        let (buckets_x, buckets_z) = globals.buckets();
         TileGeometry {
-            n: globals.n,
+            nx: globals.nx,
+            nz: globals.nz,
             tile_cells,
-            tiles_per_side: globals.n.div_ceil(tile_cells),
-            buckets_per_side: globals.buckets_per_side(),
+            tiles_x: globals.nx.div_ceil(tile_cells),
+            tiles_z: globals.nz.div_ceil(tile_cells),
+            buckets_x,
+            buckets_z,
             buckets_per_tile,
         }
+    }
+
+    /// Tiles in the grid.
+    fn tile_count(&self) -> usize {
+        self.tiles_x as usize * self.tiles_z as usize
     }
 
     /// Cells of the tile at `t`: `(x0, z0, w, h)`.
     fn cells(&self, t: TileCoords) -> (u32, u32, u32, u32) {
         let (x0, z0) = (t.tx * self.tile_cells, t.tz * self.tile_cells);
-        (x0, z0, self.tile_cells.min(self.n - x0), self.tile_cells.min(self.n - z0))
+        (x0, z0, self.tile_cells.min(self.nx - x0), self.tile_cells.min(self.nz - z0))
     }
 
     /// Buckets of the tile at `t`: `(bx0, bz0, bw, bh)` (bucket `b` lives in
@@ -242,15 +259,15 @@ impl TileGeometry {
     fn bucket_span(&self, t: TileCoords) -> (usize, usize, usize, usize) {
         let per = self.buckets_per_tile;
         let (bx0, bz0) = (t.tx as usize * per, t.tz as usize * per);
-        let span = |b0: usize| per.min(self.buckets_per_side.saturating_sub(b0));
-        (bx0, bz0, span(bx0), span(bz0))
+        let span = |b0: usize, buckets: usize| per.min(buckets.saturating_sub(b0));
+        (bx0, bz0, span(bx0, self.buckets_x), span(bz0, self.buckets_z))
     }
 
     /// The tile and local index of CLAMPED global cell `i`.
     fn route_cell(&self, i: usize) -> (TileCoords, usize, u32) {
-        let n = self.n as usize;
-        debug_assert!(i < n * n, "cell {i} outside the raster");
-        let (ix, iz) = ((i % n) as u32, (i / n) as u32);
+        let nx = self.nx as usize;
+        debug_assert!(i < nx * self.nz as usize, "cell {i} outside the raster");
+        let (ix, iz) = ((i % nx) as u32, (i / nx) as u32);
         let t = TileCoords { tx: ix / self.tile_cells, tz: iz / self.tile_cells };
         let (lx, lz) = (ix % self.tile_cells, iz % self.tile_cells);
         (t, lz as usize, lx)
@@ -258,9 +275,9 @@ impl TileGeometry {
 
     /// The tile and local bucket index of global bucket `b`.
     fn route_bucket(&self, b: usize) -> (TileCoords, usize) {
-        let per_side = self.buckets_per_side;
-        assert!(b < per_side * per_side, "river bucket {b} outside the map");
-        let (bx, bz) = (b % per_side, b / per_side);
+        let per_x = self.buckets_x;
+        assert!(b < per_x * self.buckets_z, "river bucket {b} outside the map");
+        let (bx, bz) = (b % per_x, b / per_x);
         let per = self.buckets_per_tile;
         let t = TileCoords { tx: (bx / per) as u32, tz: (bz / per) as u32 };
         let (bx0, bz0, bw, _) = self.bucket_span(t);
@@ -291,12 +308,12 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
     let artifact = &whole.artifact;
     let rasters = world.rasters();
     let geometry = TileGeometry::new(globals, tile_cells);
-    let n = globals.n as usize;
+    let n = globals.nx as usize;
     let qrasters = artifact.qrasters();
     let byte_rasters = artifact.byte_rasters();
     let mut tiles = Vec::new();
-    for tz in 0..geometry.tiles_per_side {
-        for tx in 0..geometry.tiles_per_side {
+    for tz in 0..geometry.tiles_z {
+        for tx in 0..geometry.tiles_x {
             let origin = TileCoords { tx, tz };
             let (x0, z0, w, h) = geometry.cells(origin);
             let indices = || {
@@ -320,9 +337,9 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
                 }
             }
             let (bx0, bz0, bw, bh) = geometry.bucket_span(origin);
-            let per_side = geometry.buckets_per_side;
+            let per_x = geometry.buckets_x;
             let buckets: Vec<Vec<u32>> = (bz0..bz0 + bh)
-                .flat_map(|bz| (bx0..bx0 + bw).map(move |bx| bz * per_side + bx))
+                .flat_map(|bz| (bx0..bx0 + bw).map(move |bx| bz * per_x + bx))
                 .map(|b| whole.buckets[b].clone())
                 .collect();
             let mut ids: Vec<u32> = buckets.iter().flatten().copied().collect();
@@ -513,7 +530,7 @@ pub struct TileCache {
     geometry: TileGeometry,
     q_scale: [(f32, f32); 5],
     region_count: usize,
-    /// One entry per tile of the grid (`tz * tiles_per_side + tx`): `Some`
+    /// One entry per tile of the grid (`tz * tiles_x + tx`): `Some`
     /// while the tile is cached or loading.
     slots: RwLock<Vec<Option<Arc<Slot>>>>,
     clock: AtomicU64,
@@ -606,7 +623,7 @@ impl TileCache {
             geometry,
             q_scale: meta.globals.q_scale,
             region_count: meta.globals.regions.len(),
-            slots: RwLock::new(vec![None; (geometry.tiles_per_side as usize).pow(2)]),
+            slots: RwLock::new(vec![None; geometry.tile_count()]),
             clock: AtomicU64::new(0),
             resident: AtomicUsize::new(0),
             pinned: AtomicUsize::new(0),
@@ -662,9 +679,9 @@ impl TileCache {
 
     /// The slot and tile at `t`, loading on a miss; stamps the slot.
     fn fetch(&self, t: TileCoords) -> Result<(Arc<Slot>, Arc<Tile>), String> {
-        let per_side = self.geometry.tiles_per_side;
-        if t.tx >= per_side || t.tz >= per_side {
-            return Err(format!("outside the {per_side}x{per_side} tile grid"));
+        let (tiles_x, tiles_z) = (self.geometry.tiles_x, self.geometry.tiles_z);
+        if t.tx >= tiles_x || t.tz >= tiles_z {
+            return Err(format!("outside the {tiles_x}x{tiles_z} tile grid"));
         }
         let index = self.slot_index(t);
         let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
@@ -703,17 +720,17 @@ impl TileCache {
     }
 
     fn slot_index(&self, t: TileCoords) -> usize {
-        t.tz as usize * self.geometry.tiles_per_side as usize + t.tx as usize
+        t.tz as usize * self.geometry.tiles_x as usize + t.tx as usize
     }
 
     /// Loads and pins every tile in `tx0..=tx1` x `tz0..=tz1` (clamped to the
     /// grid), row by row. The first tile that fails ends it with an error
     /// naming the tile; the tiles pinned so far are unpinned.
     pub(crate) fn pin_rect(self: &Arc<Self>, (tx0, tz0): (u32, u32), (tx1, tz1): (u32, u32)) -> Result<TilePins, String> {
-        let last = self.geometry.tiles_per_side - 1;
+        let (last_x, last_z) = (self.geometry.tiles_x - 1, self.geometry.tiles_z - 1);
         let mut pins = TilePins { tiles: Vec::new(), cache: Some(self.clone()) };
-        for tz in tz0.min(last)..=tz1.min(last) {
-            for tx in tx0.min(last)..=tx1.min(last) {
+        for tz in tz0.min(last_z)..=tz1.min(last_z) {
+            for tx in tx0.min(last_x)..=tx1.min(last_x) {
                 let t = TileCoords { tx, tz };
                 let tile = self.pin(t).map_err(|e| format!("forged tile ({tx}, {tz}): {e}"))?;
                 pins.tiles.push((t, tile));
@@ -797,7 +814,7 @@ impl TileCache {
         // Lake runs: non-empty, ascending and disjoint, each inside one row
         // of the tile's own cells, with a real level — `lake_level` looks a
         // cell up by binary search and trusts all of that.
-        let n = self.geometry.n as u64;
+        let n = self.geometry.nx as u64;
         let inside = |start: u32, end: u32| {
             let (first, last) = (u64::from(start), u64::from(end) - 1);
             let (row, col) = (first / n, first % n);

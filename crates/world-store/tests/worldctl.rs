@@ -35,7 +35,7 @@ fn worldctl_forge_writes_store() {
     let h = open(&url);
     let (world, map) = load_forged(&h).unwrap().expect("a tiled world in the store");
     assert!(world.tile_cache().is_some());
-    assert_eq!(world.globals().size_m, 2048.0);
+    assert_eq!((world.globals().width_m, world.globals().height_m), (2048.0, 2048.0));
     assert_eq!(world.globals().cell_m, 64.0);
     assert_eq!(world.globals().seed, 4);
     assert!(map.width > 0 && map.height > 0);

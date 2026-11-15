@@ -156,8 +156,9 @@ pub enum FormatKind {
     /// The store's schema/format generation (`STORE_FORMAT_VERSION`).
     Store,
     /// The forged world's tiles (`worldgen::forged_tiles::TILED_FORMAT_VERSION`);
-    /// `archived`: the original forge file is stored, so the world can be re-tiled
-    /// without re-forging.
+    /// `archived`: the original forge file is stored in a format this build
+    /// reads (`worldgen::forged::ARTIFACT_VERSION`), so the world can be
+    /// re-tiled without re-forging.
     Tiles { archived: bool },
     /// The forged world's stored world map (`forged_world_map`): another row
     /// layout, another `worldgen::tile_map::WORLD_MAP_VERSION` (`found`; 0
@@ -346,7 +347,7 @@ fn retile_hint(f: &mut fmt::Formatter<'_>, archived: bool) -> fmt::Result {
             "re-tile it from its archived forge file: `just worldctl retile --db <db>` (lossless: saved regions, players and history are kept; the server does it by itself at start)"
         )
     } else {
-        write!(f, "it keeps no archived forge file to re-tile from, so re-forge the world")
+        write!(f, "it keeps no archived forge file this build can re-tile from, so re-forge the world")
     }
 }
 

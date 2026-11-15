@@ -129,7 +129,7 @@ fn tiled_equals_whole_everywhere() {
             assert_point(f, x, z, "grid");
         }
     }
-    let n = i64::from(f.whole.globals().n);
+    let n = i64::from(f.whole.globals().nx); // square fixture
     let pad = (OUTSIDE_M / f.whole.globals().cell_m).ceil() as i64;
     for iz in -pad..n + pad {
         for ix in -pad..n + pad {
@@ -180,10 +180,10 @@ fn tile_edges_and_corners_bit_equal() {
     let f = fixture();
     let g = f.whole.globals();
     let tile_m = f64::from(FIXTURE_TILE_CELLS) * g.cell_m;
-    let tiles = g.n.div_ceil(FIXTURE_TILE_CELLS);
+    let tiles = g.nx.div_ceil(FIXTURE_TILE_CELLS); // square fixture
     let offsets = [-0.5 * g.cell_m, -1e-9, 0.0, 1e-9, 0.5 * g.cell_m];
     const ALONG_STRIDE_M: f64 = 3.0;
-    let along = (g.size_m / ALONG_STRIDE_M) as i64;
+    let along = (g.width_m / ALONG_STRIDE_M) as i64;
     for k in 0..=tiles {
         let edge = f64::from(k) * tile_m;
         for &o in &offsets {
@@ -205,7 +205,7 @@ fn tile_edges_and_corners_bit_equal() {
             }
         }
     }
-    let n = i64::from(g.n);
+    let n = i64::from(g.nx);
     let seam = i64::from(FIXTURE_TILE_CELLS);
     for k in 0..=i64::from(tiles) {
         for d in -2..=1 {
@@ -267,7 +267,7 @@ fn rivers_across_tiles_bit_equal() {
 fn past_edge_bit_equal() {
     let f = fixture();
     let g = f.whole.globals();
-    let size = g.size_m;
+    let size = g.width_m; // square fixture
     let out = [0.0, 1e-9, 0.5, 8.0, 16.0, 50.0, 100.0, 250.0, 500.0];
     const ALONG_STRIDE_M: f64 = 5.0;
     let along = (size / ALONG_STRIDE_M) as i64;
@@ -290,7 +290,7 @@ fn past_edge_bit_equal() {
             }
         }
     }
-    let n = i64::from(g.n);
+    let n = i64::from(g.nx);
     for far in [-100_000, -1000, -40, -1, n, n + 40, n + 1000, n + 100_000] {
         for c in (-50..n + 50).step_by(7) {
             assert_cell(f, far, c);
@@ -307,15 +307,15 @@ fn meta_and_tile_codecs_roundtrip() {
     assert_eq!(decode_meta(&encode_meta(&f.meta)).expect("meta decodes"), f.meta);
     assert_eq!(f.meta.tile_cells, FIXTURE_TILE_CELLS);
     assert_eq!(f.meta.format_version, worldgen::forged_tiles::TILED_FORMAT_VERSION);
-    let per_side = f.whole.globals().n.div_ceil(FIXTURE_TILE_CELLS);
-    assert_eq!(f.tiles.len() as u32, per_side * per_side);
+    let g = f.whole.globals();
+    assert_eq!(f.tiles.len() as u32, g.nx.div_ceil(FIXTURE_TILE_CELLS) * g.nz.div_ceil(FIXTURE_TILE_CELLS));
     let mut cells = 0u64;
     for t in &f.tiles {
         let bytes = encode_tile(t);
         assert_eq!(&decode_tile(&bytes).expect("tile decodes"), t, "tile {:?}", t.origin);
         cells += u64::from(t.w) * u64::from(t.h);
     }
-    assert_eq!(cells, u64::from(f.whole.globals().n).pow(2), "tiles cover every cell exactly once");
+    assert_eq!(cells, u64::from(g.nx) * u64::from(g.nz), "tiles cover every cell exactly once");
     assert!(decode_tile(b"not a tile").is_err());
     assert!(decode_meta(b"not a meta").is_err());
     let bytes = encode_tile(&f.tiles[0]);
@@ -585,7 +585,7 @@ fn pinned_lod_needs_no_loads() {
     let (min, _) = f.whole.artifact_bounds_engine_m();
     let rb = game::REGION_BLOCKS as f64;
     let (r0x, r0z) = ((min[0] / rb).floor() as i32, (min[1] / rb).floor() as i32);
-    let n_regions = (f.whole.globals().size_m / rb) as i32;
+    let n_regions = (f.whole.globals().width_m / rb) as i32; // square fixture
     let spots = [
         (-1, -1),
         (per_tile - 1, per_tile),
@@ -625,7 +625,7 @@ fn corrupt_tile_fails_the_load() {
     let f = fixture();
     let t = TileCoords { tx: 2, tz: 3 };
     let good = f.tiles.iter().find(|x| x.origin == t).expect("tile").clone();
-    let n = f.whole.globals().n;
+    let n = f.whole.globals().nx;
     let first = t.tz * FIXTURE_TILE_CELLS * n + t.tx * FIXTURE_TILE_CELLS;
     let corruptions: Vec<(&str, Box<dyn Fn(&mut Tile)>)> = vec![
         ("lake run outside the tile", Box::new(|x: &mut Tile| x.lake_runs.push((0, 1, 5.0)))),
@@ -651,19 +651,23 @@ fn corrupt_tile_fails_the_load() {
     }
 }
 
-/// The meta is refused when its size is not `n * cell_m`, or its cells are
-/// so small that sampling reads past `MAX_READ_RADIUS_CELLS`.
+/// The meta is refused when its sides are not `nx * cell_m` by `nz * cell_m`,
+/// or its cells are so small that sampling reads past `MAX_READ_RADIUS_CELLS`.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn meta_validate_checks_geometry() {
     let f = fixture();
     assert!(f.meta.validate().is_ok());
     let mut m = f.meta.clone();
-    m.globals.size_m += 16.0;
-    assert!(m.validate().is_err(), "size_m != n * cell_m");
+    m.globals.width_m += 16.0;
+    assert!(m.validate().is_err(), "width_m != nx * cell_m");
+    let mut m = f.meta.clone();
+    m.globals.height_m += 16.0;
+    assert!(m.validate().is_err(), "height_m != nz * cell_m");
     let mut m = f.meta.clone();
     m.globals.cell_m = 4.0;
-    m.globals.size_m = f64::from(m.globals.n) * 4.0;
+    m.globals.width_m = f64::from(m.globals.nx) * 4.0;
+    m.globals.height_m = f64::from(m.globals.nz) * 4.0;
     assert!(worldgen::forged_tiles::read_radius_cells(4.0) > worldgen::forged_tiles::MAX_READ_RADIUS_CELLS);
     assert!(m.validate().is_err(), "4 m cells read past MAX_READ_RADIUS_CELLS");
     for cell_m in [8.0, 16.0, 32.0, 64.0, 128.0] {
@@ -711,4 +715,36 @@ fn split_refuses_unloadable_worlds() {
     let err = split(&coarse, 3).err().expect("a tile of 3 x 16 m is not whole buckets");
     assert!(err.to_string().contains("river buckets"), "{err}");
     assert!(split(&coarse, 4).is_ok(), "4 x 16 m tiles split");
+}
+
+/// A width x height world (8,192 x 4,096 m at 64 m: 128 x 64 cells) splits
+/// into `ceil(128 / 48) x ceil(64 / 48)` = 3 x 2 tiles covering every cell
+/// once, and the tiled world samples bit-equal to the whole one on both
+/// halves (a swapped axis would route to the wrong tile).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn rectangular_split_covers_every_cell() {
+    let p = worldgen::forge::ForgeParams {
+        width_m: 8192.0,
+        height_m: 4096.0,
+        seed: 4,
+        ..worldgen::forge::ForgeParams::square(8192.0, 64.0)
+    };
+    let whole = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
+    let (meta, tiles) = split(&whole, 48).expect("the rectangle splits");
+    assert_eq!(tiles.len(), 3 * 2);
+    let grid: Vec<(u32, u32)> = tiles.iter().map(|t| (t.origin.tx, t.origin.tz)).collect();
+    assert_eq!(grid, [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]);
+    let cells: u64 = tiles.iter().map(|t| u64::from(t.w) * u64::from(t.h)).sum();
+    assert_eq!(cells, 128 * 64);
+    assert_eq!((tiles[2].w, tiles[2].h, tiles[5].w, tiles[5].h), (32, 48, 32, 16), "edge tiles are cut short");
+    let mem = MemTiles(tiles.iter().map(|t| (t.origin, encode_tile(t))).collect());
+    let tiled = ForgedWorld::from_tiles(meta, Arc::new(mem), whole.content_crc()).expect("tiled world");
+    let (min, _) = whole.artifact_bounds_engine_m();
+    for kz in -2..44 {
+        for kx in -2..86 {
+            let (x, z) = (min[0] + kx as f64 * 97.0, min[1] + kz as f64 * 97.0);
+            assert_eq!(point_bits(&whole, x, z), point_bits(&tiled, x, z), "artifact ({}, {}) m", kx * 97, kz * 97);
+        }
+    }
 }

@@ -39,21 +39,10 @@ pub enum LoadAction {
     ConfirmNo,
 }
 
-/// "16 km" (10 km and up rounds to whole km, so 16384 m reads 16 km) / "2.5 km" / "800 m".
-fn size_text(size_m: f64) -> String {
-    if size_m >= 10_000.0 {
-        format!("{} km", (size_m / 1000.0).round() as u64)
-    } else if size_m >= 1000.0 {
-        format!("{:.1} km", size_m / 1000.0)
-    } else {
-        format!("{} m", size_m as u64)
-    }
-}
-
-/// "seed 0x…, 16 km, 2026-10-30".
+/// "seed 0x…, 16 × 16 km, 2026-10-30" (`world_store::size_text`).
 pub fn detail_line(meta: &WorldMeta) -> String {
     let date = meta.created_utc.get(..10).unwrap_or(&meta.created_utc);
-    format!("seed {}, {}, {}", format_seed(meta.seed), size_text(meta.size_m), date)
+    format!("seed {}, {}, {}", format_seed(meta.seed), world_store::size_text(meta.width_m, meta.height_m), date)
 }
 
 fn short(v: f64) -> String {
@@ -339,7 +328,8 @@ mod tests {
             slug: "island-2f1a".into(),
             created_utc: "2026-10-30T12:00:00Z".into(),
             seed: 0x2F1A,
-            size_m: 16384.0,
+            width_m: 16384.0,
+            height_m: 16384.0,
             cell_m: 16.0,
             preset: preset.into(),
             knobs,
@@ -360,9 +350,7 @@ mod tests {
     #[test]
     fn detail_line_format() {
         let line = detail_line(&meta("Default", BTreeMap::new()));
-        assert_eq!(line, format!("seed {}, 16 km, 2026-10-30", format_seed(0x2F1A)));
-        assert_eq!(size_text(800.0), "800 m");
-        assert_eq!(size_text(2_500.0), "2.5 km");
+        assert_eq!(line, format!("seed {}, 16 × 16 km, 2026-10-30", format_seed(0x2F1A)));
     }
 
     #[test]

@@ -333,6 +333,22 @@ mod tests {
         }
     }
 
+    /// The biome and region layers go through the world file
+    /// (`preview_artifact`): on a 2:1 world they are `nx` x `nz` too.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn artifact_layers_render_a_rectangle() {
+        let mut p = ForgeParams { width_m: 8_192.0, height_m: 4_096.0, ..ForgeParams::square(8_192.0, 64.0) };
+        p.knobs.iters = 20.0;
+        let f = forge(&p);
+        assert_eq!((f.world.nx, f.world.nz), (128, 64));
+        for layer in [PreviewLayer::Biome, PreviewLayer::Regions] {
+            let img = render(&f, layer);
+            assert_eq!((img.width, img.height), (128, 64), "{}", layer.label());
+            assert_eq!(img.pixels.len(), 128 * 64 * 4);
+        }
+    }
+
     #[test]
     fn relief_sea_and_land_differ() {
         let f = tiny();

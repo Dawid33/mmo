@@ -714,8 +714,8 @@ fn forge_world(
         name: name.clone(),
         created_utc: rfc3339_utc(SystemTime::now()),
         seed: params.seed,
-        // The world list shows square worlds until `WorldMeta` stores both sides.
-        size_m: params.width_m,
+        width_m: params.width_m,
+        height_m: params.height_m,
         cell_m: params.cell_m,
         preset: presets::matching(&params.knobs).map_or(CUSTOM, |p| p.name).to_string(),
         knobs: world_store::knobs_map(&params.knobs),

@@ -623,6 +623,45 @@ mod tests {
         assert!(land < 0.8 * sea, "upwind/downwind rain: land edge {land:.2}, sea edge {sea:.2}");
     }
 
+    /// A 2:1 world (twice as wide as tall): one latitude per ROW (`nz`),
+    /// pole to pole down z — not per column.
+    #[test]
+    fn latitudes_run_down_the_rows_of_a_wide_world() {
+        let (nx, nz) = (2 * N, N);
+        let mut p = params(0.0);
+        p.width_m = nx as f64 * CELL_M;
+        p.knobs.pole = POLE_BOTH as f64;
+        let mut w = world_sized(N, CELL_M, |_, _| -50.0);
+        w.nx = nx;
+        for v in [&mut w.h, &mut w.uplift, &mut w.uplifted] {
+            *v = vec![-50.0; nx * nz];
+        }
+        w.ocean = vec![true; nx * nz];
+        w.outlet = w.ocean.clone();
+        let c = compute(&w, &p);
+        assert_eq!(c.latitude_deg.len(), nz);
+        assert!(c.latitude_deg[0] > 85.0 && c.latitude_deg[nz - 1] < -85.0, "{:?}", c.latitude_deg);
+        assert_eq!(c.temperature_c.len(), nx * nz);
+    }
+
+    /// A blur along z (`along_x = false`) of a single-column impulse on a
+    /// non-square grid stays in that column: a swapped stride would smear it
+    /// across the row instead (and still stay in range).
+    #[test]
+    fn box_blur_along_z_stays_in_its_column() {
+        let (nx, nz) = (12, 5);
+        let column = 7;
+        let src: Vec<f64> = (0..nx * nz).map(|i| if i % nx == column { 1.0 } else { 0.0 }).collect();
+        let out = box_blur_rows(&src, nx, nz, 2, false);
+        for i in 0..nx * nz {
+            let want = if i % nx == column { 1.0 } else { 0.0 };
+            assert_eq!(out[i], want, "cell ({}, {})", i % nx, i / nx);
+        }
+        // Along x the same impulse spreads over its row neighbours.
+        let across = box_blur_rows(&src, nx, nz, 2, true);
+        assert!(across[column - 1] > 0.0 && across[column + 3] == 0.0);
+    }
+
     #[test]
     fn latitudes_follow_the_pole() {
         let mut p = params(30.0);

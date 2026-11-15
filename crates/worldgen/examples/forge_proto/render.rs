@@ -36,11 +36,11 @@ pub fn heightmap(w: &World, path: &str) {
 /// from the shared palette (`Biome::map_rgb`, also the world map's biome layer).
 pub fn biomes(a: &worldgen::forged::WorldArtifact, path: &str) {
     let colour = |b: game::Biome| b.map_rgb();
-    let n = a.n;
-    let mut img = image::RgbImage::new(n, n);
+    let (nx, nz) = (a.nx, a.nz);
+    let mut img = image::RgbImage::new(nx, nz);
     for (i, &b) in a.biome.iter().enumerate() {
         let c = colour(game::Biome::from_u8(b).unwrap_or(game::Biome::Ocean));
-        img.put_pixel(i as u32 % n, i as u32 / n, image::Rgb(c));
+        img.put_pixel(i as u32 % nx, i as u32 / nx, image::Rgb(c));
     }
     img.save(path).expect("write biome png");
     println!("wrote {path}");

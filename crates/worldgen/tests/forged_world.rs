@@ -1116,10 +1116,10 @@ fn whole_rasters_refactor_is_bit_exact() {
         }
     }
     // Raster cells, the map and 200 m past it.
-    let n = i64::from(world.globals().n);
+    let (nx, nz) = (i64::from(world.globals().nx), i64::from(world.globals().nz));
     let pad = (OUTSIDE_M / world.globals().cell_m).ceil() as i64;
-    for iz in -pad..n + pad {
-        for ix in -pad..n + pad {
+    for iz in -pad..nz + pad {
+        for ix in -pad..nx + pad {
             f64b(&mut h, world.extended_cell_height(ix, iz));
         }
     }
@@ -1154,4 +1154,124 @@ fn whole_rasters_refactor_is_bit_exact() {
     );
     assert!(!a.rivers.is_empty() && !a.lakes.is_empty() && wet > 0, "the guard world must hold rivers and lakes");
     assert_eq!(crc, WHOLE_RASTERS_GUARD_CRC, "forged sampling changed: crc {crc:#010X}");
+}
+
+// ---- Width x height worlds (Planet Frame 1a, Task 2) ----
+
+/// An 8,192 x 4,096 m world at 64 m (128 x 64 cells), forged with a lapse of
+/// 9 C/km (not the 6.5 default), once per binary.
+fn rectangle() -> &'static (worldgen::forge::ForgeParams, WorldArtifact) {
+    static FIXTURE: std::sync::OnceLock<(worldgen::forge::ForgeParams, WorldArtifact)> = std::sync::OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let mut p = worldgen::forge::ForgeParams {
+            width_m: 8192.0,
+            height_m: 4096.0,
+            ..worldgen::forge::ForgeParams::square(8192.0, 64.0)
+        };
+        p.knobs.lapse_c_per_km = 9.0;
+        let a = worldgen::forge::forge(&p).artifact(&p);
+        (p, a)
+    })
+}
+
+/// Engine metres of the centre of raster cell `(ix, iz)`.
+fn cell_centre(world: &ForgedWorld, ix: usize, iz: usize) -> (f64, f64) {
+    let (min, _) = world.artifact_bounds_engine_m();
+    let c = world.globals().cell_m;
+    (min[0] + (ix as f64 + 0.5) * c, min[1] + (iz as f64 + 0.5) * c)
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn rectangular_artifact_round_trips() {
+    let (_, a) = rectangle();
+    assert_eq!((a.nx, a.nz), (128, 64));
+    assert_eq!((a.width_m, a.height_m, a.cell_m), (8192.0, 4096.0, 64.0));
+    a.validate().expect("valid");
+    assert_eq!(&WorldArtifact::from_bytes(&a.to_bytes()).unwrap(), a);
+    assert_eq!(a.knobs.get("lapse_c_per_km"), Some(&9.0), "the forge's knobs are stored");
+    let world = ForgedWorld::new(a.clone());
+    let g = world.globals();
+    assert_eq!((g.nx, g.nz, g.width_m, g.height_m), (128, 64, 8192.0, 4096.0));
+    let (min, max) = world.artifact_bounds_engine_m();
+    assert_eq!((max[0] - min[0], max[1] - min[1]), (8192.0, 4096.0), "the bounds are the rectangle");
+}
+
+/// A silent axis swap stays in range and never panics: read back a feature
+/// that lies only in the EAST half (x beyond `height_m`).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn sampler_reads_the_east_half() {
+    let (_, a) = rectangle();
+    let world = ForgedWorld::new(a.clone());
+    let (nx, nz) = (a.nx as usize, a.nz as usize);
+    // The highest cell of the east half (x >= 4,096 m = height_m).
+    let (top, top_h) = (0..nx * nz)
+        .filter(|&i| i % nx >= nx / 2)
+        .map(|i| (i, a.height.get(i)))
+        .max_by(|p, q| p.1.total_cmp(&q.1))
+        .unwrap();
+    let (ix, iz) = (top % nx, top / nx);
+    let (x, z) = cell_centre(&world, ix, iz);
+    assert!(x - world.artifact_bounds_engine_m().0[0] > a.height_m, "east of height_m");
+    assert_eq!(world.cell_climate(x, z).height_m, top_h, "nearest cell reads the east half");
+    let west_edge = a.height.get(iz * nx + (nx / 2 - 1));
+    assert!(top_h - west_edge > 5.0, "the clamped column would read something else ({west_edge} vs {top_h})");
+    let ground = world.sample(x, z).ground_y - SEA_LEVEL;
+    assert!((ground - f64::from(top_h)).abs() < 3.0, "sampled ground {ground} vs raster {top_h}");
+    assert!(world.surface_rock(x, z).is_some(), "inside the map");
+    // The brief's point: artifact (6,000, 2,000) m, cell (93, 31).
+    let (min, _) = world.artifact_bounds_engine_m();
+    let at = world.cell_climate(min[0] + 6000.0, min[1] + 2000.0).height_m;
+    assert_eq!(at, a.height.get(31 * nx + 93));
+}
+
+/// The sampler's snow line uses the lapse the world was forged with: the
+/// temperature it implies 1,000 m above a sea cell is 9 C (not 6.5) colder.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stored_lapse_is_used() {
+    let (_, a) = rectangle();
+    let world = ForgedWorld::new(a.clone());
+    assert_eq!(world.globals().knobs().lapse_c_per_km, 9.0);
+    let nx = a.nx as usize;
+    // A sea cell well above the snow-line temperature.
+    let i = (0..a.height.len())
+        .find(|&i| a.height.get(i) <= 0.0 && a.temperature_c.get(i) > worldgen::forged::SNOW_LINE_C + 5.0)
+        .expect("a warm sea cell");
+    let (x, z) = cell_centre(&world, i % nx, i / nx);
+    let t0 = f64::from(world.column_climate(x, z).temperature_c);
+    let line = f64::from(world.snow_line_m(x, z));
+    let snow_c = f64::from(worldgen::forged::SNOW_LINE_C);
+    let at_1000 = t0 - 1000.0 * (t0 - snow_c) / line;
+    assert!((t0 - at_1000 - 9.0).abs() < 0.1, "{} C colder at 1,000 m (sea {t0} C, snow line {line} m)", t0 - at_1000);
+}
+
+#[test]
+fn old_artifact_is_refused_with_reforge_message() {
+    let mut bytes = b"VXWF".to_vec();
+    bytes.extend_from_slice(&7u32.to_le_bytes());
+    bytes.extend_from_slice(b"an old body that is never read");
+    let err = WorldArtifact::from_bytes(&bytes).unwrap_err();
+    assert!(matches!(err, ArtifactError::OldVersion { found: 7 }), "{err:?}");
+    assert!(err.to_string().contains("re-forge"), "{err}");
+
+    // A menu world whose world.json is the old (square, `size_m`) format.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/world-store-tests/old-meta");
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join("old");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(worldgen::world_store::TERRAIN_FILE), &bytes).unwrap();
+    let old_meta = format!(
+        r#"{{"format_version":1,"name":"Old","slug":"old","created_utc":"2026-01-01T00:00:00Z","seed":1,
+            "size_m":16384.0,"cell_m":32.0,"preset":"default","knobs":{{}},"forge_ms":5,
+            "region_blocks":{},"chunk_blocks":{},"artifact_version":7}}"#,
+        game::REGION_BLOCKS,
+        game::CHUNK_BLOCKS
+    );
+    std::fs::write(dir.join(worldgen::world_store::META_FILE), old_meta).unwrap();
+    let listed = worldgen::world_store::list(&root);
+    assert_eq!(listed.len(), 1);
+    let err = listed[0].loadable.clone().unwrap_err();
+    assert!(err.contains("re-forge"), "{err}");
 }

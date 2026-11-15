@@ -62,6 +62,10 @@ pub enum EdgeKind {
     /// are outlets whose base level is their own height, which follows the
     /// land just inside (`World::follow_land_edges`).
     Land,
+    /// The map wraps round to the opposite edge (east <-> west). Appended
+    /// last so the stored discriminants of `Sea` and `Land` stay; nothing
+    /// makes a wrapping edge yet (Task 9 of the Planet Frame plan).
+    Wrap,
 }
 
 /// How `World::follow_land_edges` moves a land-edge outlet.

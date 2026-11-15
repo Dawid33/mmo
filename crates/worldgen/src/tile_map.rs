@@ -64,7 +64,9 @@ fn block_m() -> f64 {
 /// the same world — a `WorldMap` / `TileSummary` layout change, but also pure
 /// logic (summaries, landings, biome or rock picks, rounding), since a stale
 /// stored map is otherwise served silently.
-pub const WORLD_MAP_VERSION: u32 = 1;
+///
+/// v2: width x height worlds (the tiles span `width_m` by `height_m`).
+pub const WORLD_MAP_VERSION: u32 = 2;
 
 /// The map of every engine region tile intersecting `world`'s artifact, row-major
 /// by z then x. See [`summarize_tile`] for what each tile holds.
@@ -166,7 +168,7 @@ pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
 /// [`summarize_tile`] with the tile's river reaches already found.
 fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crate::forged::RiverReach>) -> TileSummary {
     let a = world.artifact().expect("whole world");
-    let n = i64::from(a.n);
+    let (nx, nz) = (i64::from(a.nx), i64::from(a.nz));
     let cell_m = a.cell_m;
     let (min, _) = world.artifact_bounds_engine_m();
     let t = tile_m();
@@ -180,9 +182,9 @@ fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crat
         if end > first { first..end } else { let i = ((lo + 0.5 * t - origin) / cell_m).floor() as i64; i..i + 1 }
     };
     let (xs, zs) = (range(tile_min[0], min[0]), range(tile_min[1], min[1]));
-    let inside = |ix: i64, iz: i64| (0..n).contains(&ix) && (0..n).contains(&iz);
+    let inside = |ix: i64, iz: i64| (0..nx).contains(&ix) && (0..nz).contains(&iz);
     let height = |ix: i64, iz: i64| {
-        if inside(ix, iz) { f64::from(a.height.get((iz * n + ix) as usize)) } else { world.extended_cell_height(ix, iz) }
+        if inside(ix, iz) { f64::from(a.height.get((iz * nx + ix) as usize)) } else { world.extended_cell_height(ix, iz) }
     };
     let cells: Vec<Cell> = zs
         .flat_map(|iz| xs.clone().map(move |ix| (ix, iz)))
@@ -212,7 +214,7 @@ fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crat
     let lake_levels: Vec<f32> = cells
         .iter()
         .filter(|c| c.inside)
-        .filter_map(|c| world.lake_level_of((c.iz * n + c.ix) as usize))
+        .filter_map(|c| world.lake_level_of((c.iz * nx + c.ix) as usize))
         .collect();
 
 
@@ -272,13 +274,13 @@ struct TileClimate {
 /// The stored per-cell fields over `cells` (see [`summarize_tile`]).
 fn climate(world: &ForgedWorld, cells: &[Cell]) -> TileClimate {
     let a = world.artifact().expect("whole world");
-    let n = i64::from(a.n);
+    let (nx, nz) = (i64::from(a.nx), i64::from(a.nz));
     let mut index: Vec<usize> =
-        cells.iter().filter(|c| c.inside).map(|c| (c.iz * n + c.ix) as usize).collect();
+        cells.iter().filter(|c| c.inside).map(|c| (c.iz * nx + c.ix) as usize).collect();
     if index.is_empty() {
         // No cell centre inside: the nearest edge cell stands in.
         let c = &cells[cells.len() / 2];
-        index.push((c.iz.clamp(0, n - 1) * n + c.ix.clamp(0, n - 1)) as usize);
+        index.push((c.iz.clamp(0, nz - 1) * nx + c.ix.clamp(0, nx - 1)) as usize);
     }
     let mut biomes = [0u32; Biome::ALL.len()];
     for &i in &index {

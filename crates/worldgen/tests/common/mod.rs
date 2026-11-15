@@ -66,9 +66,11 @@ pub fn synthetic() -> WorldArtifact {
     WorldArtifact {
         version: ARTIFACT_VERSION,
         seed: 7,
-        size_m: N as f64 * CELL_M,
+        width_m: N as f64 * CELL_M,
+        height_m: N as f64 * CELL_M,
         cell_m: CELL_M,
-        n: N as u32,
+        nx: N as u32,
+        nz: N as u32,
         height: QRaster::fit(&height, HEIGHT_STEP_M),
         uplifted: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
         bedding: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
@@ -88,6 +90,7 @@ pub fn synthetic() -> WorldArtifact {
         region: vec![],
         regions: vec![],
         savagery: vec![],
+        knobs: Default::default(),
     }
     .with_regions()
 }

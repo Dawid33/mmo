@@ -343,8 +343,7 @@ pub fn savagery(seed: u64, nx: usize, nz: usize, cell_m: f64) -> Vec<u8> {
 /// Fills `a`'s biome, region, regions and savagery from its own stored
 /// fields, so the biome raster is exactly `classify` of what a reader sees.
 pub fn derive(a: &mut WorldArtifact, good_share: f64, evil_share: f64) {
-    // The world file is square until it stores both dimensions.
-    let (nx, nz) = (a.n as usize, a.n as usize);
+    let (nx, nz) = (a.nx as usize, a.nz as usize);
     let mut lake = vec![false; nx * nz];
     for l in &a.lakes {
         for &(start, len) in &l.cells {

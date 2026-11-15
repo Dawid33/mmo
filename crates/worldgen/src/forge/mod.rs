@@ -94,14 +94,15 @@ impl Forged {
         let level = erosion::route(w, 0.0).filled;
         let lakes = self.lake_bodies(&level);
         let spawn = spawn::pick(w, a, p.seed);
-        // The world file is square until it stores both dimensions.
-        assert_eq!(w.nx, w.nz, "the world file holds square worlds only");
         let mut artifact = WorldArtifact {
             version: ARTIFACT_VERSION,
             seed: p.seed,
-            size_m: p.width_m,
+            // The grid's own extent: exactly `nx * cell_m` by `nz * cell_m`.
+            width_m: w.nx as f64 * w.dx,
+            height_m: w.nz as f64 * w.dx,
             cell_m: w.dx,
-            n: w.nx as u32,
+            nx: w.nx as u32,
+            nz: w.nz as u32,
             height: quantise(&w.h, HEIGHT_STEP_M),
             uplifted: quantise(&w.uplifted, GEO_STEP_M),
             bedding: quantise(&self.geology.bedding, GEO_STEP_M),
@@ -140,6 +141,7 @@ impl Forged {
             region: Vec::new(),
             regions: Vec::new(),
             savagery: Vec::new(),
+            knobs: crate::world_store::knobs_map(&p.knobs),
         };
         // Classified from the stored (quantised) fields, so a reader that
         // re-classifies a cell gets the stored biome.

@@ -29,7 +29,8 @@ fn fixture() -> &'static Fixture {
         let p = worldgen::forge::ForgeParams::default();
         let bytes = worldgen::forge::forge(&p).artifact(&p).to_bytes();
         let whole = ForgedWorld::from_bytes(&bytes).expect("forged bytes load");
-        assert_eq!(whole.globals().n.div_ceil(TILE_CELLS), 2, "the fixture is 2 x 2 tiles");
+        let g = whole.globals();
+        assert_eq!((g.nx.div_ceil(TILE_CELLS), g.nz.div_ceil(TILE_CELLS)), (2, 2), "the fixture is 2 x 2 tiles");
         Fixture { bytes, whole }
     })
 }
@@ -77,15 +78,13 @@ fn assert_bit_equal(whole: &ForgedWorld, tiled: &ForgedWorld) {
         }
         z += 61.0;
     }
-    let n = i64::from(whole.globals().n);
+    let (nx, nz) = (i64::from(whole.globals().nx), i64::from(whole.globals().nz));
     let seam = i64::from(TILE_CELLS);
-    for a in -2..n + 2 {
-        for b in seam - 3..seam + 3 {
-            for (ix, iz) in [(a, b), (b, a)] {
-                let (p, q) = (whole.extended_cell_height(ix, iz), tiled.extended_cell_height(ix, iz));
-                assert_eq!(p.to_bits(), q.to_bits(), "extended_cell_height({ix}, {iz})");
-            }
-        }
+    let along_x = (-2..nx + 2).flat_map(|a| (seam - 3..seam + 3).map(move |b| (a, b)));
+    let along_z = (-2..nz + 2).flat_map(|a| (seam - 3..seam + 3).map(move |b| (b, a)));
+    for (ix, iz) in along_x.chain(along_z) {
+        let (p, q) = (whole.extended_cell_height(ix, iz), tiled.extended_cell_height(ix, iz));
+        assert_eq!(p.to_bits(), q.to_bits(), "extended_cell_height({ix}, {iz})");
     }
     let region_m = game::REGION_BLOCKS as f64;
     let rc = |x: f64, z: f64| RegionCoords::new((x / region_m).floor() as i32, (z / region_m).floor() as i32);
@@ -124,6 +123,65 @@ fn write_then_load_bit_equal() {
         assert_bit_equal(&f.whole, &tiled);
         let info = h.world_info().unwrap();
         assert_eq!((info.content_crc, info.has_artifact), (Some(crc), true));
+        h.shutdown();
+    });
+}
+
+/// A width x height world (16,384 x 8,192 m at 32 m: 512 x 256 cells, so
+/// 2 x 1 tiles of `TILE_CELLS`) is stored and served bit-equal, its world
+/// map the rectangle's.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn rectangular_world_round_trips() {
+    let p = worldgen::forge::ForgeParams {
+        width_m: 16_384.0,
+        height_m: 8_192.0,
+        ..worldgen::forge::ForgeParams::square(16_384.0, 32.0)
+    };
+    let bytes = worldgen::forge::forge(&p).artifact(&p).to_bytes();
+    let whole = ForgedWorld::from_bytes(&bytes).expect("forged bytes load");
+    let expected = worldgen::tile_map::build_world_map(&whole);
+    let region_m = game::REGION_BLOCKS as u32;
+    assert!(expected.width >= 16_384 / region_m && expected.height < expected.width, "{}x{}", expected.width, expected.height);
+    each_backend("forged_rectangle", false, |url| {
+        let h = open(url);
+        write_tiled(&h, bytes.clone()).expect("write_tiled");
+        let (tiled, map) = loaded(&h);
+        let g = tiled.globals();
+        assert_eq!((g.nx, g.nz, g.width_m, g.height_m), (512, 256, 16_384.0, 8_192.0));
+        assert_eq!(map, expected);
+        assert_bit_equal(&whole, &tiled);
+        h.shutdown();
+    });
+}
+
+/// A store tiled by an older build (tile format 1) whose archived forge
+/// file is an older world file (v7: square) cannot be re-tiled: it is
+/// refused with "re-forge", and neither the server's re-tile nor `worldctl
+/// retile` writes anything over it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn old_square_world_is_refused_with_reforge() {
+    let f = fixture();
+    each_backend("forged_old_square", true, |url| {
+        let h = open(url);
+        let crc = write_tiled(&h, f.bytes.clone()).unwrap();
+        h.shutdown();
+        let mut old_archive = f.bytes.clone();
+        old_archive[4..8].copy_from_slice(&7u32.to_le_bytes());
+        raw_exec(url, "UPDATE forged_meta SET format_version = 1");
+        raw_exec(url, &format!("UPDATE forged_archive SET bytes = {} WHERE id = 1", blob_literal(url, &old_archive)));
+        let h = open(url);
+        let err = load_forged(&h).err().expect("an old square world is refused");
+        assert_eq!(err, StoreError::OtherFormat { found: 1, kind: FormatKind::Tiles { archived: false } });
+        let StoreError::OtherFormat { kind, .. } = &err else { unreachable!() };
+        assert!(!kind.retileable(), "the server must not re-tile it");
+        assert!(err.to_string().contains("re-forge"), "{err}");
+        h.shutdown();
+        let err = world_store::ctl::retile(url).unwrap_err();
+        assert!(err.contains("re-forge"), "{err}");
+        let h = open(url);
+        assert_eq!(h.world_info().unwrap().content_crc, Some(crc), "nothing was written");
         h.shutdown();
     });
 }

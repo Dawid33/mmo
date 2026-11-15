@@ -94,20 +94,28 @@ pub fn write_tiled(handle: &StoreHandle, artifact_bytes: Vec<u8>) -> Result<u32,
     Ok(content_crc)
 }
 
+/// Whether the store's archived forge file is one this build reads (its
+/// header's `ARTIFACT_VERSION`): only then can the tiles be rebuilt from it.
+/// An older one (the square worlds before v8) means the world must be
+/// re-forged — never re-tiled, nor forged anew over the store's saves.
+fn archive_is_current(handle: &StoreHandle) -> Result<bool, StoreError> {
+    let Some(archive) = handle.forged_archive()? else { return Ok(false) };
+    Ok(worldgen::forged::artifact_bytes_version(&archive).is_ok_and(|v| v == worldgen::forged::ARTIFACT_VERSION))
+}
+
 /// The stored tiled world and its world map, or `None` if none is stored. A
 /// tile format this build does not read, or a world map row of another
 /// layout / `WORLD_MAP_VERSION` (or one that does not decode), is
 /// `OtherFormat` — `FormatKind::Tiles` / `FormatKind::WorldMap`, naming `just
-/// worldctl retile --db <db>` when the archive can be re-tiled, else
-/// re-forge. Tiles are loaded later, as sampling or prefetch needs them,
-/// through [`StoreTiles`] on a clone of `handle`.
+/// worldctl retile --db <db>` when the archive can be re-tiled (a forge
+/// file of this build's `ARTIFACT_VERSION`), else re-forge. Tiles are loaded
+/// later, as sampling or prefetch needs them, through [`StoreTiles`] on a
+/// clone of `handle`.
 pub fn load_forged(handle: &StoreHandle) -> Result<Option<(ForgedWorld, WorldMap)>, StoreError> {
     let Some(head) = handle.forged_head()? else { return Ok(None) };
     if head.format_version != TILED_FORMAT_VERSION {
-        return Err(StoreError::OtherFormat {
-            found: head.format_version,
-            kind: FormatKind::Tiles { archived: head.archived },
-        });
+        let archived = head.archived && archive_is_current(handle)?;
+        return Err(StoreError::OtherFormat { found: head.format_version, kind: FormatKind::Tiles { archived } });
     }
     let meta: ForgedMeta =
         decode_meta(&head.meta).map_err(|e| StoreError::Corrupt(format!("forged_meta: {e}")))?;
