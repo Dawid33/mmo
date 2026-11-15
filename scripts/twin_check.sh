@@ -7,14 +7,15 @@
 #      unready, /readyz "forge" (nothing forged by a pod). 1b: a host waiting for the
 #      forge stops on a plain SIGTERM at once with exit code 0 (PID 1's signal path).
 #   2. worldctl forge from the toolbox; the coordinator and both hosts become Ready.
-#   3. The world registered in the twin's own login service (world-register's command).
+#   3. The world registered in the twin's own login service (world-register's kubectl command).
 #   4. Coordinator /metrics: 2 hosts live, a committed world cut.
 #   5. hosts-1 force-killed: the world keeps its generation, hosts-0 is untouched,
 #      hosts-1 comes back Ready, cuts commit again; what a landless host's death does
 #      to the successions (one Crash succession, settled: the ledger's ruling).
 #   6. hosts-0 deleted (SIGTERM): it leaves with a committed leave cut, comes back.
 #   7. The coordinator restarted: both hosts' links come up again, cuts commit.
-#   8. The web Ingress answers through Traefik, and its /login proxy reaches login.
+#   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
+#      and API, and login's /metrics and /healthz are NOT published (404).
 #   9. world-stop then world-start (the recipes): the hosts leave with committed leave
 #      cuts, the coordinator stops after them, everything comes back Ready.
 #  10. Records (asserts nothing): each pod's memory after the forge and five minutes
@@ -366,14 +367,28 @@ wait_until "$left" "the new coordinator commits a cut (within 90 s of the restar
 say "new coordinator $(coordinator_pod), generation $gen"
 
 # ---------------------------------------------------------------------------------
-step "8. the web Ingress and its /login proxy"
-http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: game.localhost' "http://127.0.0.1:8480$1" || true; }
+step "8. the web Ingress and its /login proxy (only what login's own Ingress publishes)"
+# http_code <path>: the status; the body goes to $out/web-body.
+http_code() { curl -s -o "$out/web-body" -w '%{http_code}' --max-time 10 -H 'Host: game.localhost' "http://127.0.0.1:8480$1" || true; }
 code=$(http_code /healthz)
 [ "$code" = 200 ] || fail "http://game.localhost:8480/healthz answered $code"
 say "/healthz 200"
-code=$(http_code /login/healthz)
-[ "$code" = 200 ] || fail "http://game.localhost:8480/login/healthz answered $code (the proxy does not reach login)"
-say "/login/healthz 200"
+# The key set and the API reach login (/v1/config is 404 here: the twin's login runs no
+# identity provider, and that 404 would look like the proxy's own).
+code=$(http_code /login/.well-known/jwks.json)
+[ "$code" = 200 ] && grep -qF '"keys"' "$out/web-body" ||
+    fail "http://game.localhost:8480/login/.well-known/jwks.json answered $code, not login's key set (the proxy does not reach login)"
+say "/login/.well-known/jwks.json 200 (a key set)"
+code=$(http_code /login/v1/worlds)
+[ "$code" = 200 ] && grep -qF '"twin"' "$out/web-body" ||
+    fail "http://game.localhost:8480/login/v1/worlds answered $code without world twin (the proxy does not reach login's API)"
+say "/login/v1/worlds 200 (lists twin)"
+# login's health check and metrics stay private, as its own Ingress keeps them.
+for path in /login/metrics /login/healthz; do
+    code=$(http_code "$path")
+    [ "$code" = 404 ] || fail "http://game.localhost:8480$path answered $code, not 404 (the proxy publishes it)"
+    say "$path 404"
+done
 
 # ---------------------------------------------------------------------------------
 step "9. world-stop, then world-start"
