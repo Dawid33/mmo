@@ -4,15 +4,15 @@ variable "namespace" {
 }
 
 variable "host" {
-  description = "Public hostname. Its DNS record (-> the node) is NOT made here: it already exists in the survival-world infra (Route53)."
+  description = "Public hostname. Its DNS record (-> the node) is NOT made here: the `dns` root makes it (and the redirect names' records)."
   type        = string
-  default     = "factoriosurvivalworld.com"
+  default     = "www.errantry.renownandruin.com"
 }
 
 variable "redirect_hosts" {
   description = "Other names that answer with a 301 to https://<host> (and are on the certificate)."
   type        = list(string)
-  default     = ["www.factoriosurvivalworld.com"]
+  default     = ["errantry.renownandruin.com", "renownandruin.com", "www.renownandruin.com", "factoriosurvivalworld.com", "www.factoriosurvivalworld.com"]
 }
 
 variable "site_dir" {

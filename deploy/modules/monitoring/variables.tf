@@ -41,7 +41,7 @@ variable "iam_user_name" {
 
 variable "grafana_host" {
   type    = string
-  default = "grafana.factoriosurvivalworld.com"
+  default = "grafana.errantry.renownandruin.com"
 }
 
 variable "cluster_issuer" {
@@ -56,14 +56,14 @@ variable "ingress_class" {
 }
 
 variable "manage_dns_record" {
-  description = "Create the Route53 A record grafana_host -> node_ip here. Off: the record already exists in the survival-world infra (aws_route53_record.monitoring)."
+  description = "Create the Route53 A record grafana_host -> node_ip here (the zone is dns_zone)."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "dns_zone" {
   type    = string
-  default = "factoriosurvivalworld.com"
+  default = "renownandruin.com"
 }
 
 variable "node_ip" {

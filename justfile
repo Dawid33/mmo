@@ -1732,19 +1732,19 @@ kube *args:
 # ---------------------------------------------------------------------------
 # The orion k3s server (Hetzner 5.9.7.138, kube context `orion`): OpenTofu roots
 # under deploy/envs/orion — `bootstrap` (the S3 state bucket), `platform`
-# (cert-manager, Traefik settings), `garage` (the S3-compatible object store on the
-# server itself: https://s3.factoriosurvivalworld.com) and `garage-buckets` (its buckets
+# (cert-manager, Traefik settings), `dns` (the renownandruin.com records no module makes), `garage` (the S3-compatible object store on the
+# server itself: https://s3.errantry.renownandruin.com) and `garage-buckets` (its buckets
 # and access keys, through the admin API: needs `just orion-garage-admin` running),
 # `monitoring` (Grafana, Prometheus + Thanos, Loki, Tempo, Pyroscope, Alloy; data in
 # Garage), `picoshare` (file sharing at
-# https://share.factoriosurvivalworld.com), `zulip` (team chat at
-# https://chat.factoriosurvivalworld.com; uploads in Garage, its own PostgreSQL), `keycloak`
-# (identity provider at https://auth.factoriosurvivalworld.com) and `keycloak-realm` (its realm,
+# https://share.errantry.renownandruin.com), `zulip` (team chat at
+# https://chat.errantry.renownandruin.com; uploads in Garage, its own PostgreSQL), `keycloak`
+# (identity provider at https://auth.errantry.renownandruin.com) and `keycloak-realm` (its realm,
 # clients and mail, through the admin API: needs `just orion-keycloak-admin` running), `registry`
 # (the ECR repository mmo/login and the cluster's pull-only IAM user), `login` (the
-# game's login service at https://login.factoriosurvivalworld.com), `postgres` (the CloudNativePG cluster
+# game's login service at https://login.errantry.renownandruin.com), `postgres` (the CloudNativePG cluster
 # `pg` and its nightly dump to Garage), `world` (one game world: errantry) and `site` (the website at
-# https://factoriosurvivalworld.com, from website/). State lives in AWS S3 (deploy/envs/orion/backend.s3.tfbackend,
+# https://www.errantry.renownandruin.com, from website/). State lives in AWS S3 (deploy/envs/orion/backend.s3.tfbackend,
 # key orion/<root>.tfstate); AWS credentials come from the default chain
 # (`AWS_PROFILE=…` to pick a profile). Every recipe pins the `orion` context,
 # never the current one. Plan before every apply. Design:

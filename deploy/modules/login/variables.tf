@@ -6,7 +6,7 @@ variable "namespace" {
 variable "host" {
   description = "Public hostname of the login API (clients and the game's servers are pointed at it)."
   type        = string
-  default     = "login.factoriosurvivalworld.com"
+  default     = "login.errantry.renownandruin.com"
 }
 
 variable "image_repository" {
@@ -55,7 +55,7 @@ variable "issuer_host_alias_ip" {
 }
 
 variable "issuer" {
-  description = "Keycloak realm issuer URL (VOXEL_OIDC_ISSUER), e.g. https://auth.factoriosurvivalworld.com/realms/<realm>. The root passes it."
+  description = "Keycloak realm issuer URL (VOXEL_OIDC_ISSUER), e.g. https://auth.errantry.renownandruin.com/realms/<realm>. The root passes it."
   type        = string
 }
 
@@ -137,7 +137,7 @@ variable "manage_dns_record" {
 
 variable "dns_zone" {
   type    = string
-  default = "factoriosurvivalworld.com"
+  default = "renownandruin.com"
 }
 
 variable "node_ip" {

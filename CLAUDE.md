@@ -72,9 +72,9 @@ changed build/run/test command updates its recipe in the same change.
 
 OpenTofu (not Terraform) in `deploy/`: local single-node k0s (`just deploy-local`, never the inner loop);
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
-first; roots `platform` → `garage` (+ `garage-buckets`) = https://s3.factoriosurvivalworld.com, the S3-compatible
-object store on the box itself (one copy, no off-box backup; telemetry and Zulip files live there) → `monitoring`, `picoshare` = https://share.factoriosurvivalworld.com, `zulip` = https://chat.factoriosurvivalworld.com,
-`keycloak` (+ `keycloak-realm`) = https://auth.factoriosurvivalworld.com, the identity provider → `registry` (the ECR repository `mmo/login` and the cluster's pull-only IAM user) → `login` = https://login.factoriosurvivalworld.com, the game's login service (two pods, its own PostgreSQL, metrics scraped; its image is `mmo/login` in ECR, pulled with a pull secret the CronJob `ecr-refresh` renews every 6 h; one tag, `latest`, and an image `latest` has moved past expires about a day later; a release is `just orion-login-push` — pushed as `latest` (git revision in an image label), set by digest with `kubectl set image`, never an apply — and the way back is `kubectl rollout undo` (works while the previous image is still in ECR or the node's cache); `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log; apply `registry` and push BEFORE the first apply) → `site` = https://factoriosurvivalworld.com, the static website from `website/` with the `orion`
+first; roots `platform` → `dns` (the `renownandruin.com` records no module makes) → `garage` (+ `garage-buckets`) = https://s3.errantry.renownandruin.com, the S3-compatible
+object store on the box itself (one copy, no off-box backup; telemetry and Zulip files live there) → `monitoring`, `picoshare` = https://share.errantry.renownandruin.com, `zulip` = https://chat.errantry.renownandruin.com,
+`keycloak` (+ `keycloak-realm`) = https://auth.errantry.renownandruin.com, the identity provider → `registry` (the ECR repository `mmo/login` and the cluster's pull-only IAM user) → `login` = https://login.errantry.renownandruin.com, the game's login service (two pods, its own PostgreSQL, metrics scraped; its image is `mmo/login` in ECR, pulled with a pull secret the CronJob `ecr-refresh` renews every 6 h; one tag, `latest`, and an image `latest` has moved past expires about a day later; a release is `just orion-login-push` — pushed as `latest` (git revision in an image label), set by digest with `kubectl set image`, never an apply — and the way back is `kubectl rollout undo` (works while the previous image is still in ECR or the node's cache); `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log; apply `registry` and push BEFORE the first apply) → `site` = https://www.errantry.renownandruin.com, the static website from `website/` with the `orion`
 Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
 bump re-diff `website/theme/orion/login/template.ftl` against the new `base` theme and run `just site-theme-check`); monitoring stack
 handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
@@ -84,7 +84,7 @@ print secrets.
 
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
-HTTP API at https://grafana.factoriosurvivalworld.com (`Authorization: Bearer $GRAFANA_SERVICE_TOKEN`;
+HTTP API at https://grafana.errantry.renownandruin.com (`Authorization: Bearer $GRAFANA_SERVICE_TOKEN`;
 data sources: Prometheus (local), Thanos, Loki, Tempo, Pyroscope, Alertmanager; `just orion-grafana`
 gives a local port-forward). Load it with `set -a; . ./.env; set +a` inside the one command that needs it; never echo it,
 pass it on a command line that gets logged, or write it anywhere else. Reading is fine without asking;

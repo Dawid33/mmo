@@ -1,4 +1,4 @@
-# The website at https://factoriosurvivalworld.com (www redirects to it): static
+# The website at https://www.errantry.renownandruin.com (the base name and the old names redirect to it): static
 # files from website/site behind stock nginx. Reads the realm's issuer from the
 # keycloak-realm root, so apply keycloak -> keycloak-realm first.
 #   just orion-init site && just orion-plan site && just orion-apply site

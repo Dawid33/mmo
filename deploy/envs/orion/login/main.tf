@@ -1,4 +1,4 @@
-# The game's login service on the orion k3s server: https://login.factoriosurvivalworld.com.
+# The game's login service on the orion k3s server: https://login.errantry.renownandruin.com.
 # Needs ../platform (cert-manager's ClusterIssuer), ../monitoring (the ServiceMonitor kind),
 # ../keycloak and ../keycloak-realm applied first (the issuer comes from the realm root's state),
 # and ../registry (the ECR repository and the pull user; read from its state). The image
