@@ -8,13 +8,15 @@
 #   - a host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137
 #     (SIGKILL, e.g. `kill -9`) is started again after a back-off — but under `claim` ownership
 #     (what the hosts run) a killed host's land has moved to an heir by then and does NOT come
-#     back by itself: the restarted host waits until its succession is settled and owns nothing;
+#     back by itself: the restarted process registers as a NEW host (a new id issued by the
+#     store; its unchanged VOXEL_HOST_NAME lapses the old row at once) and owns nothing at first;
 #     a host whose env words say VOXEL_OWNERSHIP=claim is also started again on exit 3
 #     (EXIT_FENCED: it was replaced — a hung host that woke after its succession — and returns
-#     as a host owning nothing; under `static` exit 3 stays fatal: two processes of one ordinal
-#     would fence each other); at most
-#     DEV_R3_RESTART_MAX times within DEV_R3_RESTART_WINDOW_SECS; any other exit, or one
-#     restart too many, ends its loop — and never a restart once the stack is stopping;
+#     as a new host owning nothing; under `static` exit 3 stays fatal: a second process of the
+#     one static host would be refused or fence it); at most
+#     DEV_R3_RESTART_MAX times within DEV_R3_RESTART_WINDOW_SECS; any other exit — 0, a host that
+#     left cleanly, included — or one restart too many, ends its loop; never a restart once the
+#     stack is stopping;
 #   - when any member ends on its own (login, the coordinator, a host loop) the stack goes
 #     down and this script exits 1;
 #   - Ctrl-C (or TERM, or HUP: a closed terminal) stops the stack in order: every host
@@ -27,7 +29,11 @@
 #   scripts/dev_r3.sh <dir> <coordinator env words> <host 0 env words> [<host 1 env words> ...]
 #
 # Env words are `NAME=value` separated by spaces (no value holds a space). State in <dir>:
-# coordinator.log, host-<n>.log, host-<n>.pid (while host n's server runs), `stopping`.
+# coordinator.log, host-<n>.log, host-<n>.pid (while the n-th host's server runs; n is the
+# position on the command line, not a host id: ids come from the store), `stopping`, and the
+# pins the coordinator writes (coordinator.cert-sha256, login-link.cert-sha256). The login
+# service is registered with the coordinator's login link (VOXEL_LOGIN_LINK_BIND, 127.0.0.1:6490)
+# once the coordinator has written login-link.cert-sha256.
 # Knobs (the defaults are what `just dev-r3` uses; tests drive the script with stubs):
 #   DEV_R3_SERVER (./target/debug/server), DEV_R3_LOGIN (./target/debug/login),
 #   DEV_R3_LOGIN_LOG (target/dev-login/login.log), DEV_R3_PIN_WAIT_SECS (180),
@@ -58,9 +64,8 @@ pin_wait_secs=${DEV_R3_PIN_WAIT_SECS:-180}
 # game::WORLD_CUT_DEADLINE_MS (30 s) + server::EXIT_SAVE_TIMEOUT (30 s) after it began:
 # 90 s at worst, + 5 s margin. KILLing a host before that leaves its row dirty (the world
 # rolls back at its return); the usual leave takes ~3 s, and a second signal kills at once.
-# (Under `claim` ownership the leave waits for no heir: HEIR_WAIT_MS, 30 s, only delays giving
-# the land away after the host is gone; a crash's HOST_LEASE_MS 10 s and SUCCESSION_DEADLINE_MS
-# 30 s run on the survivors, not on the stopping host. Rechecked against the constants: 95 s holds.)
+# (A leaver's land is given away at once, not after a wait; a crash's HOST_LEASE_MS 10 s and
+# SUCCESSION_DEADLINE_MS 30 s run on the survivors, not on the stopping host.)
 host_stop_secs=${DEV_R3_HOST_STOP_SECS:-95}
 stop_secs=${DEV_R3_STOP_SECS:-60}
 restart_max=${DEV_R3_RESTART_MAX:-3}
@@ -73,8 +78,8 @@ self=$0
 
 mkdir -p "$dir" "$(dirname "$login_log")"
 pin=$dir/coordinator.cert-sha256
-host_pin=$dir/host-0.cert-sha256
-rm -f "$pin" "$host_pin" "$dir"/host-*.pid "$dir/stopping"
+login_pin=$dir/login-link.cert-sha256
+rm -f "$pin" "$login_pin" "$dir"/host-*.pid "$dir/stopping"
 
 lpid=""
 cpid=""
@@ -191,8 +196,8 @@ stop() {
 trap stop EXIT
 trap 'interrupted=1' INT TERM HUP
 
-# Host <n> with <env words...>: started again on exit 5 or 137 — and on 3 under `claim`
-# ownership — bounded; never once stopping.
+# The <n>-th host with <env words...>: started again on exit 5 or 137 — and on 3 under `claim`
+# ownership — bounded; never on 0 (a clean leave) and never once stopping.
 host_loop() {
     local n=$1
     shift
@@ -240,12 +245,13 @@ host_loop() {
 
 VOXEL_SERVICE_TOKEN_FILE=$dir/service-token setsid "$login" serve >"$login_log" 2>&1 </dev/null &
 lpid=$!
-# Once host 0 has written its login-link pin: world `dev` gets the link.
+# Once the coordinator has written its login-link pin: world `dev` gets the link (no addresses:
+# a host's spawn ack names its endpoint).
 (
-    until [ -s "$host_pin" ]; do sleep 0.5; done
-    "$login" world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ \
-        --link 127.0.0.1:6490 --link-cert "$(cat "$host_pin")" >/dev/null &&
-        say "world dev registered with host 0's login link (127.0.0.1:6490)"
+    until [ -s "$login_pin" ]; do sleep 0.5; done
+    "$login" world add dev --name "Dev world" \
+        --link 127.0.0.1:6490 --link-cert "$(cat "$login_pin")" >/dev/null &&
+        say "world dev registered with the coordinator's login link (127.0.0.1:6490)"
 ) &
 rpid=$!
 read -ra coord_words <<<"$coord_env"

@@ -533,6 +533,21 @@ mod host_link {
         assert_eq!((j.ticket.quic, j.ticket.webtransport, j.ticket.cert_hash), (world.quic, world.webtransport, world.cert_hash));
     }
 
+    /// The world row has no addresses (registered with `--link` only) and the ack names none: the
+    /// ticket would point nowhere, so the join is refused, not answered with an empty ticket.
+    #[tokio::test]
+    async fn a_spawn_ack_without_an_endpoint_is_world_unavailable() {
+        let host = FakeHost::acking("ne");
+        let world = WorldRow { quic: None, webtransport: None, cert_hash: None, ..host.world("ne") };
+        let a = linked_app(&[world], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        let r = a.join(&refresh, "ne").await;
+        assert_eq!((r.status, r.error()), (StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable));
+        // The refresh token was not spent: the client may try again.
+        let r = a.post(PATH_REFRESH, &RefreshRequest { refresh_token: refresh }).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    }
+
     #[tokio::test]
     async fn join_fails_503_when_host_link_down() {
         // A link to a port nobody listens on (a pin that matches nothing).

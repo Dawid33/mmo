@@ -660,6 +660,8 @@ clean-old-worlds *args:
 #   just worldctl export --db <url> <out.world>
 #     writes the stored forge file back out, for the file-based tools
 #     (`world-map`, `cross-section`, `history`, `genesis-probe`);
+#   just worldctl hosts <url>
+#     prints one line per host row of a Postgres world (id, name, state, clean, land, seen, drain);
 #   just worldctl clock-reset <url>
 #     clears the world clock anchor (`dev-r3` runs it before every start);
 #   just worldctl super-region <url> <n>
@@ -681,6 +683,12 @@ clean-old-worlds *args:
 # World-store maintenance: forge a world into a store, export its forge file.
 worldctl *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p world-store --bin worldctl -- {{args}}
+
+# The host rows of the dev Postgres world (`just worldctl hosts <url>`): one line per host with its id
+# (issued by the store), name, state, clean flag, land, last beat and drain flag. Run while `dev-r3` /
+# `dev-r2` is up, or after it. Needs `pg-up`.
+world-hosts-dev:
+    just worldctl hosts {{dev_database_url}}
 
 # Forge a world straight into a store: `just forge-db worlds/w.sqlite --size 32768 --cell 16`.
 forge-db db *args:
@@ -1204,10 +1212,10 @@ run-online: _dev-login-setup
 # certificate pin (`coordinator.cert-sha256`, its cert and private key beside it).
 dev_r2_dir := "target/dev-r2"
 
-# Several hosts of one world (R3: `host … hosts=N`, `dev-r3`) keep their dev secrets and
-# pins under the git-ignored target/dev-r3/ instead: the service token, the coordinator's
-# pin, host 0's login-link pin (`host-0.cert-sha256`) and every host's peer-link pin
-# (`host-<n>.peer.cert-sha256`), plus `dev-r3`'s logs.
+# Several hosts of one world (`claim` ownership: `host`, `coordinator`, `dev-r3`) keep their dev
+# secrets and pins under the git-ignored target/dev-r3/ instead: the service token, the
+# coordinator's pin (`coordinator.cert-sha256`) and the login link's (`login-link.cert-sha256`), and
+# every host's peer-link pin (`h<index>.peer.cert-sha256`), plus `dev-r3`'s logs.
 dev_r3_dir := "target/dev-r3"
 
 # Make <dir>/service-token (random, mode 0600) unless it exists.
@@ -1224,71 +1232,72 @@ _dev-token dir:
 _dev-r2-token: (_dev-token dev_r2_dir)
 
 # The world coordinator alone (VOXEL_ROLE=coordinator) for the dev Postgres world
-# (`just pg-up` first): serves hosts on 127.0.0.1:6480 and writes its pin to
-# target/dev-r2/coordinator.cert-sha256. Play region size. For a world of several
-# hosts pass the same `hosts` as to `host` (its token and pin are then under target/dev-r3/)
-# and the same `ownership` word (default as `host`'s: `claim` for several hosts, `static`
-# for one): the coordinator declares a dead host's succession only under `claim`, and
-# refuses the Attach of a host whose VOXEL_OWNERSHIP says otherwise.
-coordinator hosts="1" ownership=(if hosts == "1" { "static" } else { "claim" }): (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
+# (`just pg-up` first): serves hosts on 127.0.0.1:6480 (pin target/dev-r2|r3/coordinator.cert-sha256) and
+# the login service on 127.0.0.1:6490 (pin login-link.cert-sha256 beside it; login dials it, never a
+# host). World id `dev`, as every dev host and the login registration. Play region size.
+# `ownership` is `claim` (default: any number of hosts, secrets and pins under target/dev-r3/) or
+# `static` (ONE host, as `dev-r2`: under target/dev-r2/); give `host` the same word. The
+# coordinator declares a dead host's succession only under `claim` and refuses a host whose
+# VOXEL_OWNERSHIP says otherwise. It reads no host count.
+coordinator ownership="claim": (_dev-token (if ownership == "static" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
-    dir={{ if hosts == "1" { dev_r2_dir } else { dev_r3_dir } }}
+    dir={{ if ownership == "static" { dev_r2_dir } else { dev_r3_dir } }}
     case "{{ownership}}" in
         claim | static) ;;
-        *) echo "coordinator: ownership is claim or static (the second word of just coordinator), not {{ownership}}" >&2; exit 1 ;;
+        *) echo "coordinator: ownership is claim or static (the argument of just coordinator), not {{ownership}}" >&2; exit 1 ;;
     esac
-    VOXEL_ROLE=coordinator VOXEL_OWNERSHIP={{ownership}} VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} \
+    VOXEL_ROLE=coordinator VOXEL_OWNERSHIP={{ownership}} VOXEL_WORLD_ID=dev VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE=$dir/service-token \
         VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
+        VOXEL_LOGIN_LINK_BIND=127.0.0.1:6490 VOXEL_LOGIN_LINK_CERT_HASH_FILE=$dir/login-link.cert-sha256 \
         RUST_BACKTRACE=1 ./target/debug/server
 
-# The environment of dev host $1 of $2 (`host`, `dev-r3`), as `NAME=value` words: peer
-# delay $3 ms, secrets and pins under $4, world store $5. Host n listens for clients on
-# UDP 6466 + 10n (WebTransport 6467 + 10n) and for its peers on 127.0.0.1:6500 + n; only
-# host 0 (the entry host, VOXEL_ENTRY_HOST's default) binds the login link (127.0.0.1:6490).
-# Ownership policy $6 (default `claim`, the callers pass it; `static` is the old fixed layout,
-# nothing else is accepted): under `claim` a killed host's land goes to an heir and does not come back by
-# itself (a restarted host waits until its succession is settled and returns owning nothing).
-# Several hosts need the login service (jwt, world `dev`); one host keeps VOXEL_AUTH as set.
+# The environment of dev host $1 (`host`, `dev-r3`), as `NAME=value` words: peer delay $2 ms,
+# secrets and pins under $3, world store $4, ownership word $5 (`claim` or `static`, nothing else).
+# The index only picks names and ports: the host is called h<index> (VOXEL_HOST_NAME: a label for
+# logs and file names; a restarted process of the same name lapses its old row at once) and
+# listens for clients on UDP 6466 + 10 x index (WebTransport 6467 + 10 x index) and for its
+# peers on 127.0.0.1:6500 + index (pin $3/h<index>.peer.cert-sha256). Its id comes from the store.
+# Hosts never bind the login link (the coordinator does). Every host advertises its own
+# WebTransport URL (a ticket names the endpoint the ack gives). Under `claim` a host needs the login service
+# (jwt, world `dev`) and a killed host's land goes to an heir and does not come back by itself (a
+# restarted process is a NEW host and owns nothing until it is given land); `static` = one
+# host (the store refuses a second), VOXEL_AUTH as set.
 # Refuses (exit 1) what `_dev-hosts-check` refuses, also under `--dry-run`.
 host_env_sh := '''
-o=$1 n=$2 dir=$4 own=${6:-claim}
+i=$1 dir=$3 own=$5
 case "$own" in
     claim | static) ;;
-    *) echo "dev host: ownership is claim or static (the fourth word of just host), not $own" >&2; exit 1 ;;
+    *) echo "dev host: ownership is claim or static (the last word of just host), not $own" >&2; exit 1 ;;
 esac
-case "$o/$n/$3" in
-    *[!0-9/]* | /* | */ | *//*) echo "dev host: ordinal, hosts and delay are whole numbers, given positionally (just host 1 2, not hosts=2)" >&2; exit 1 ;;
+case "$i/$2" in
+    *[!0-9/]* | /* | */ | *//*) echo "dev host: index and delay are whole numbers, given positionally (just host 1 2, not delay=2)" >&2; exit 1 ;;
 esac
-if [ "$n" -lt 1 ] || [ "$n" -gt 6 ] || [ "$o" -ge "$n" ]; then
-    echo "dev host: need 0 <= ordinal < hosts <= 6 (host 6's peer port would be host 4's UDP port)" >&2; exit 1
+if [ "$i" -gt 5 ]; then
+    echo "dev host: need 0 <= index <= 5 (host 6's peer port would be host 4's UDP port)" >&2; exit 1
 fi
-printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=$own VOXEL_HOST_ORDINAL=$o VOXEL_HOSTS=$n VOXEL_WORLD_DB=$5 \
+printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=$own VOXEL_HOST_NAME=h$i VOXEL_WORLD_ID=dev VOXEL_WORLD_DB=$4 \
     VOXEL_SERVICE_TOKEN_FILE=$dir/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
-    VOXEL_SERVER_PORT=$((6466 + 10 * o)) VOXEL_WT_PORT=$((6467 + 10 * o)) VOXEL_PEER_BIND=127.0.0.1:$((6500 + o)) \
-    VOXEL_PEER_LINK_DELAY_MS=$3
-if [ "$n" -gt 1 ]; then
-    printf '%s ' VOXEL_PEER_CERT_HASH_FILE=$dir/host-$o.peer.cert-sha256 \
-        VOXEL_ADVERTISE_WT=https://127.0.0.1:$((6467 + 10 * o))/ \
-        VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790
-fi
-if [ "$o" -eq 0 ]; then
-    printf '%s ' VOXEL_HOST_LINK_BIND=127.0.0.1:6490 VOXEL_HOST_LINK_CERT_HASH_FILE=$dir/host-0.cert-sha256
+    VOXEL_SERVER_PORT=$((6466 + 10 * i)) VOXEL_WT_PORT=$((6467 + 10 * i)) VOXEL_PEER_BIND=127.0.0.1:$((6500 + i)) \
+    VOXEL_PEER_CERT_HASH_FILE=$dir/h$i.peer.cert-sha256 VOXEL_ADVERTISE_WT=https://127.0.0.1:$((6467 + 10 * i))/ \
+    VOXEL_PEER_LINK_DELAY_MS=$2
+if [ "$own" = claim ]; then
+    printf '%s ' VOXEL_AUTH=jwt VOXEL_LOGIN_URL=http://127.0.0.1:8790
 fi
 '''
 
 # Refuses bad `host` / `dev-r3` arguments before any other dependency does work: whole
-# numbers given positionally (`just dev-r3 3`, not `hosts=3`), `ordinal` < `hosts`, and
+# numbers given positionally (`just dev-r3 3`, not `hosts=3`), `index` < `hosts`, and
 # `min_hosts` <= `hosts` <= 6 (from 7 hosts the peer ports 6500 + n meet the client ports
 # 6466 + 10n).
-_dev-hosts-check ordinal hosts delay min_hosts:
+_dev-hosts-check index hosts delay min_hosts:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! [[ "{{ordinal}}" =~ ^[0-9]+$ && "{{hosts}}" =~ ^[0-9]+$ && "{{delay}}" =~ ^[0-9]+$ ]]; then
-        echo "ordinal, hosts and delay are whole numbers, given positionally (just dev-r3 3, just host 1 2 — not hosts=3)" >&2; exit 1
+    if ! [[ "{{index}}" =~ ^[0-9]+$ && "{{hosts}}" =~ ^[0-9]+$ && "{{delay}}" =~ ^[0-9]+$ ]]; then
+        echo "index, hosts and delay are whole numbers, given positionally (just dev-r3 3, just host 1 2 — not hosts=3)" >&2; exit 1
     fi
     if (( {{hosts}} < {{min_hosts}} )); then
         echo "dev-r3 runs several hosts (hosts >= 2): for one host use just dev-r2" >&2; exit 1
@@ -1296,36 +1305,35 @@ _dev-hosts-check ordinal hosts delay min_hosts:
     if (( {{hosts}} > 6 )); then
         echo "at most 6 dev hosts on one machine: host 6's peer port (6506) is host 4's client port" >&2; exit 1
     fi
-    if (( {{ordinal}} >= {{hosts}} )); then
-        echo "host ordinal {{ordinal}} is not one of {{hosts}} hosts (0..{{hosts}} - 1)" >&2; exit 1
+    if (( {{index}} >= {{hosts}} )); then
+        echo "host index {{index}} is not below {{hosts}}" >&2; exit 1
     fi
 
-# A region host (VOXEL_ROLE=host) of the dev Postgres world: host `ordinal` of `hosts`
-# (several hosts: ownership `claim` — super-regions claimed on demand by the preferred live
-# host, a killed host's land moving to an heir for good — unless the fourth word is `static`,
-# the old fixed layout, e.g. `just host 1 2 0 static`; ONE host defaults to `static`, as
-# `dev-r2`; the coordinator must run the same word, see `coordinator`), dialing the coordinator at 127.0.0.1:6480 (started first or later —
-# it waits for the pin). Host n takes clients on UDP 6466 + 10n (WebTransport 6467 + 10n)
-# and its peer hosts on 127.0.0.1:6500 + n; `delay` holds every outgoing peer frame that
-# many ms (measurement only). One host (the defaults): as `just server` on 6466, local
-# player names unless VOXEL_AUTH=jwt is set (see `dev-r2`; with jwt it also takes the
-# login service's SpawnPlayer / Kick on 127.0.0.1:6490). Several hosts (`hosts` > 1, see
-# `dev-r3`, which runs them all): jwt with the login service, pins under target/dev-r3/,
-# and only host 0 binds the login link. Play region size.
-host ordinal="0" hosts="1" delay="0" ownership=(if hosts == "1" { "static" } else { "claim" }): (_dev-hosts-check ordinal hosts delay "1") (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
+# A region host (VOXEL_ROLE=host) of the dev Postgres world, dialing the coordinator at
+# 127.0.0.1:6480 (started first or later — it waits for the pin). `index` (0..5) picks the
+# host's name `h<index>` and ports only: UDP 6466 + 10 x index for clients (WebTransport
+# 6467 + 10 x index) and 127.0.0.1:6500 + index for its peers; the host's id is issued by the
+# store when it registers. Start as many as you like under `claim` (the default: super-regions
+# claimed on demand, a killed host's land moving to an heir for good; jwt with the login
+# service, pins under target/dev-r3/, see `dev-r3`, which runs them all); `static` = ONE host,
+# as `dev-r2` (target/dev-r2/). The coordinator must run the same word (`coordinator`).
+# `delay` holds every outgoing peer frame that many ms (measurement only). Play region size.
+# e.g. `just coordinator` then `just host 0` and `just host 1`.
+host index="0" delay="0" ownership="claim": (_dev-hosts-check index "6" delay "1") (_dev-token (if ownership == "static" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
-    env {{ shell(host_env_sh, ordinal, hosts, delay, if hosts == "1" { dev_r2_dir } else { dev_r3_dir }, dev_database_url, ownership) }} \
+    env {{ shell(host_env_sh, index, delay, if ownership == "static" { dev_r2_dir } else { dev_r3_dir }, dev_database_url, ownership) }} \
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The split world with login: the dev Keycloak (`kc-up`) and Postgres (`pg-up`), the `dev-login`
 # setup and login service (players log in with Keycloak), the coordinator (log target/dev-r2/coordinator.log) and, once it has written
-# its pin, host 0 in the foreground (VOXEL_AUTH=jwt, world `dev`). The host listens for the
-# login service's push on 127.0.0.1:6490 (pin target/dev-r2/host-0.cert-sha256); once it has
-# written that pin, world `dev` is re-registered with the link, so joins push `SpawnPlayer`
-# and the host admits a ticket only against it. SIGTERMs the coordinator and the login
+# its pin, the ONE host (`h0`, `static` ownership, VOXEL_AUTH=jwt, world `dev`) in the foreground. The
+# coordinator listens for the login service on 127.0.0.1:6490 (pin target/dev-r2/login-link.cert-sha256);
+# once it has written that pin, world `dev` is registered with the link (no addresses: the host's
+# spawn ack names them), so joins push `SpawnPlayer` through the coordinator and the host admits a
+# ticket only against it. SIGTERMs the coordinator and the login
 # service on exit. Connect with the dev account's kept login and no screens:
 # `VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/target/dev-login/refresh ./target/debug/client debug online`,
 # or the login screens: `VOXEL_LOGIN_URL=http://127.0.0.1:8790 just play`. The first start on an empty dev database
@@ -1339,23 +1347,24 @@ dev-r2: kc-up pg-up _dev-login-setup _dev-r2-token
     export VOXEL_OIDC_ISSUER={{dev_oidc_issuer}}
     {{cap}} {{cargo}} build --bin server
     pin={{dev_r2_dir}}/coordinator.cert-sha256
-    host_pin={{dev_r2_dir}}/host-0.cert-sha256
-    rm -f "$pin" "$host_pin"
+    login_pin={{dev_r2_dir}}/login-link.cert-sha256
+    rm -f "$pin" "$login_pin"
     VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token \
         ./target/debug/login serve >target/dev-login/login.log 2>&1 </dev/null &
     lpid=$!
     cpid=""
-    # Once the host has written its login-link pin: world `dev` gets the link.
+    # Once the coordinator has written its login-link pin: world `dev` gets the link.
     (
-        until [ -s "$host_pin" ]; do sleep 0.5; done
-        ./target/debug/login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ \
-            --link 127.0.0.1:6490 --link-cert "$(cat "$host_pin")" >/dev/null
-        echo "dev-r2: world dev registered with the host's login link (127.0.0.1:6490)"
+        until [ -s "$login_pin" ]; do sleep 0.5; done
+        ./target/debug/login world add dev --name "Dev world" \
+            --link 127.0.0.1:6490 --link-cert "$(cat "$login_pin")" >/dev/null
+        echo "dev-r2: world dev registered with the coordinator's login link (127.0.0.1:6490)"
     ) &
     rpid=$!
     trap 'echo "dev-r2: stopping the coordinator and the login service"; kill -TERM $cpid $lpid $rpid 2>/dev/null; wait $cpid $lpid 2>/dev/null || true' EXIT
-    VOXEL_ROLE=coordinator VOXEL_WORLD_DB={{dev_database_url}} \
+    VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=static VOXEL_WORLD_ID=dev VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
+        VOXEL_LOGIN_LINK_BIND=127.0.0.1:6490 VOXEL_LOGIN_LINK_CERT_HASH_FILE="$login_pin" \
         ./target/debug/server >{{dev_r2_dir}}/coordinator.log 2>&1 </dev/null &
     cpid=$!
     echo "dev-r2: login on http://127.0.0.1:8790 (target/dev-login/login.log), coordinator on 127.0.0.1:6480 ({{dev_r2_dir}}/coordinator.log)"
@@ -1369,40 +1378,48 @@ dev-r2: kc-up pg-up _dev-login-setup _dev-r2-token
         fi
         sleep 0.5
     done
-    VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_ORDINAL=0 VOXEL_HOSTS=1 \
+    VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_NAME=h0 VOXEL_WORLD_ID=dev \
         VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
-        VOXEL_HOST_LINK_BIND=127.0.0.1:6490 VOXEL_HOST_LINK_CERT_HASH_FILE="$host_pin" \
-        VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 \
+        VOXEL_ADVERTISE_WT=https://127.0.0.1:6467/ \
+        VOXEL_AUTH=jwt VOXEL_LOGIN_URL=http://127.0.0.1:8790 \
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The `dev-r3` host arguments: one single-quoted env-word list per host 0..$1, joined by
-# ` \` line ends (delay $2, dir $3, store $4, `host_env_sh` $5).
+# ` \` line ends (delay $2, dir $3, store $4, `host_env_sh` $5; ownership `claim`).
 dev_r3_launch_sh := '''
 i=0
 while [ "$i" -lt "$1" ]; do
-    words=$(sh -c "$5" sh "$i" "$1" "$2" "$3" "$4") || exit 1
+    words=$(sh -c "$5" sh "$i" "$2" "$3" "$4" claim) || exit 1
     i=$((i + 1))
     if [ "$i" -lt "$1" ]; then printf "'%s' %s\n" "$words" '\'; else printf "'%s'" "$words"; fi
 done
 '''
 
-# One world on 2..6 region hosts (R3) with login: the dev Postgres (`pg-up`, started with
+# The coordinator's env words of `dev-r3` / `go-nogo-r3` (dir $1, store $2): `claim` ownership, world `dev`,
+# hosts on 127.0.0.1:6480, the login service on 127.0.0.1:6490 (its pin: $1/login-link.cert-sha256).
+dev_r3_coordinator_sh := '''
+printf '%s ' VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_WORLD_ID=dev VOXEL_WORLD_DB=$2 \
+    VOXEL_SERVICE_TOKEN_FILE=$1/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$1/coordinator.cert-sha256 \
+    VOXEL_LOGIN_LINK_BIND=127.0.0.1:6490 VOXEL_LOGIN_LINK_CERT_HASH_FILE=$1/login-link.cert-sha256
+'''
+
+# One world on 2..6 region hosts with login: the dev Postgres (`pg-up`, started with
 # max_prepared_transactions > 0 — several hosts stage their cuts in two phases and refuse
 # to start without it), the dev Keycloak (`kc-up`), the `dev-login` setup, `worldctl clock-reset`, then
 # scripts/dev_r3.sh: the login service (players log in with Keycloak), the coordinator (log target/dev-r3/coordinator.log)
-# and, once it has written its pin, EVERY host 0..`hosts` (`host` above: host n on UDP
-# 6466 + 10n, peers on 127.0.0.1:6500 + n; logs target/dev-r3/host-<n>.log). All of them
-# on purpose: a host ordinal that has never started is still awaited by placement, so
-# logins are refused (503) until every host of VOXEL_HOSTS has registered. World `dev` is
-# re-registered with host 0's login link once host 0 has written its pin.
+# and, once it has written its pin, EVERY host h0..h<hosts-1> (`host` above: host h<n> on UDP
+# 6466 + 10n, peers on 127.0.0.1:6500 + n; logs target/dev-r3/host-<n>.log). Hosts have ids
+# issued by the store, not numbers: the index only names them. World `dev` is
+# registered with the coordinator's login link (127.0.0.1:6490, no addresses: each host's ack
+# names its endpoint) once the coordinator has written its login pin; `just world-hosts-dev` lists the host rows.
 # Every host runs under `claim` ownership: a host that is killed (`kill -9`) loses its lease,
-# its land moves to an heir (a succession) and does NOT come back by itself — the restarted
-# host waits until its succession is settled and then owns nothing.
+# its land moves to an heir (a succession) and does NOT come back by itself — a restarted host
+# is a NEW host (its own id; the same name lapses the old row at once) and owns nothing at first.
 # A host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137
 # (killed, e.g. `kill -9`) — or 3 (EXIT_FENCED: replaced, e.g. a hung host that woke after its
 # succession; restarted only because the hosts run `claim`) — is started again after 1 s — at
-# most 3 times within 60 s, then its loop gives up. Any member ending otherwise (login, the coordinator, a host loop)
+# most 3 times within 60 s, then its loop gives up; one that exits 0 is not. Any member ending otherwise (login, the coordinator, a host loop)
 # takes the whole stack down, exit 1. Ctrl-C stops the hosts first and waits for them (their
 # leave cut needs the coordinator; 95 s, a host's own exit bound), then the coordinator, then the login service (60 s
 # each); what outlives its deadline is KILLed, and a second Ctrl-C kills at once.
@@ -1421,7 +1438,7 @@ dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") kc-up pg-up _
     {{cap}} {{cargo}} build --bin server --bin worldctl
     ./target/debug/worldctl clock-reset {{dev_database_url}}
     DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} exec scripts/dev_r3.sh {{dev_r3_dir}} \
-        'VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} VOXEL_SERVICE_TOKEN_FILE={{dev_r3_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r3_dir}}/coordinator.cert-sha256' \
+        '{{ shell(dev_r3_coordinator_sh, dev_r3_dir, dev_database_url) }}' \
         {{ shell(dev_r3_launch_sh, hosts, delay, dev_r3_dir, dev_database_url, host_env_sh) }}
 
 # `go-nogo-r3`'s own state (logs, login, pins) and its own world database on the dev Postgres.
@@ -1529,7 +1546,8 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     export VOXEL_LOGIN_DB=$out/login/login.sqlite VOXEL_LOGIN_KEYS_DIR=$out/login/keys
     login=./target/release/login
     if ! ls "$VOXEL_LOGIN_KEYS_DIR"/*.pem >/dev/null 2>&1; then $login keygen >/dev/null; fi
-    $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ >/dev/null
+    # No addresses: the script below re-adds the world with the coordinator's login link, and each host's ack names its endpoint.
+    $login world add dev --name "Dev world" >/dev/null
     # A fresh login token for a probe client (its own family each time: the client rotates the
     # token in the file). Each step is its own statement; a failure ends the recipe with 3 (no verdict).
     issue_token() {
@@ -1569,7 +1587,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     echo "the stack did not stop" >"$out/unclean"
     DEV_R3_SERVER=./target/release/server DEV_R3_LOGIN=$login DEV_R3_LOGIN_LOG=$out/login/login.log \
         DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} setsid scripts/dev_r3.sh "$stack" \
-        'VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_HOSTS=2 VOXEL_WORLD_DB={{go_nogo_db_url}} VOXEL_SERVICE_TOKEN_FILE={{go_nogo_dir}}/stack/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{go_nogo_dir}}/stack/coordinator.cert-sha256' \
+        '{{ shell(dev_r3_coordinator_sh, go_nogo_dir / "stack", go_nogo_db_url) }}' \
         {{ shell(dev_r3_launch_sh, "2", if delay =~ '^[0-9]+$' { delay } else { "0" }, go_nogo_dir / "stack", go_nogo_db_url, host_env_sh) }} \
         >"$out/stack.log" 2>&1 </dev/null &
     stack_pid=$!
@@ -1589,6 +1607,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     run_client() {
         issue_token
         echo "go-nogo-r3: client, autopilot boundary=$1, {{seconds}} s ($out/client-$1.log)"
+        # VOXEL_HOSTS below is the CLIENT autopilot's own variable (pick_seam lays the seams out from it); no server reads it.
         VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY=$1 VOXEL_AUTOPILOT_SECONDS={{seconds}} \
             VOXEL_HOSTS=2 VOXEL_SUPER_REGION_REGIONS=1 PERF_LOG=1 RUST_BACKTRACE=1 \
             VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/$out/login/refresh \

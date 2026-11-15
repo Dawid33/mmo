@@ -428,6 +428,14 @@ async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>
     } else {
         (world.quic, world.webtransport, world.cert_hash)
     };
+    // A linked world whose ack and row name no address would hand out a ticket to nowhere.
+    if world.host_link.is_some() && quic.is_none() && webtransport.is_none() {
+        log::warn!(
+            "[login] join: world {} has no endpoint (the ack named none and the world row has none)",
+            world.world_id
+        );
+        return Err(Fail::world_unavailable());
+    }
     // Two joins racing with one token: the loser's spawn order is superseded by the winner's or
     // expires unused at the host; its rotation answers Reused (the family is revoked).
     let (rotated, refresh_token) = rotate_refresh(s, &req.refresh_token).await?;
