@@ -15,7 +15,8 @@
 # HOSTS_REPLICAS=N (a cluster that reads 0 hosts is refused without it, so a re-run
 # cannot "finish" with the world down).
 # Env: HOSTS_REPLICAS (the count to restore), WORLD_UPDATE_STOP_TIMEOUT (seconds
-# to wait for the host pods to go, default 150 — a leave cut is bounded by ~90 s).
+# to wait for the host pods to go, default 150 — a leave cut is bounded by ~90 s),
+# WORLD_UPDATE_READY_TIMEOUT (seconds to wait for every host Ready, default 300).
 # Exit: 0 done, 1 a step failed or timed out, 2 bad arguments or a refused start.
 set -euo pipefail
 
@@ -31,6 +32,7 @@ for ref in "$server_ref" "$web_ref"; do
     esac
 done
 stop_timeout="${WORLD_UPDATE_STOP_TIMEOUT:-150}"
+ready_timeout="${WORLD_UPDATE_READY_TIMEOUT:-300}"
 
 k() { kubectl --context "$ctx" -n "$ns" "$@"; }
 step() { echo "world_update: [$1/6] $2"; }
@@ -41,10 +43,16 @@ run() {
 }
 
 # Recovery: armed when the hosts are about to be scaled down, disarmed at the end.
-replicas='' stopped=0 finished=0 where='before step 2'
+replicas='' stopped=0 scaled_up=0 finished=0 where='before step 2'
 on_exit() {
     local rc=$?
-    if [ "$stopped" -eq 1 ] && [ "$finished" -eq 0 ]; then
+    if [ "$stopped" -eq 1 ] && [ "$finished" -eq 0 ] && [ "$scaled_up" -eq 1 ]; then
+        {
+            echo "world_update: STOPPED at: $where (exit $rc)."
+            echo "world_update: the hosts were scaled back to $replicas but are not all Ready yet; the new images are set."
+            echo "world_update: look at them: kubectl --context $ctx -n $ns get pods"
+        } >&2
+    elif [ "$stopped" -eq 1 ] && [ "$finished" -eq 0 ]; then
         {
             echo "world_update: STOPPED at: $where (exit $rc)."
             echo "world_update: the hosts are scaled to 0 (were $replicas); the world is DOWN."
@@ -98,9 +106,12 @@ else
 fi
 
 step 2 "scale hosts to 0 and wait until no host pod is left ($stop_timeout s)"
-[ "$dry" -eq 1 ] || stopped=1
 where='step 2 (scale down / wait for the host pods)'
-run scale statefulset/hosts --replicas=0
+if ! run scale statefulset/hosts --replicas=0; then
+    echo "world_update: the scale-down failed; nothing was stopped, nothing changed" >&2
+    exit 1
+fi
+[ "$dry" -eq 1 ] || stopped=1
 if [ "$dry" -eq 1 ]; then
     echo "  + wait until no pod of statefulset/hosts exists (timeout $stop_timeout s; a failed listing is retried, never read as empty)"
 else
@@ -125,28 +136,41 @@ step 3 "set the images"
 where='step 3 (set image)'
 run set image deploy/coordinator "coordinator=$server_ref"
 run set image deploy/toolbox "toolbox=$server_ref"
+# The hosts' StatefulSet is OnDelete: this only changes the template, which is what we want
+# (the hosts are at 0; the pods created at step 5 come from the new template).
 run set image statefulset/hosts "host=$server_ref"
 run set image deploy/web "web=$web_ref"
 
-step 4 "wait for the coordinator and web rollouts"
+step 4 "wait for the coordinator, toolbox and web rollouts"
 where='step 4 (rollouts)'
 run rollout status deploy/coordinator --timeout=5m
+run rollout status deploy/toolbox --timeout=5m
 run rollout status deploy/web --timeout=5m
 
 step 5 "scale hosts back to $replicas"
 where='step 5 (scale up)'
 run scale statefulset/hosts "--replicas=$replicas"
+scaled_up=1
 
 step 6 "wait until every host is Ready (300 s)"
 where='step 6 (hosts Ready)'
+# Not `rollout status`: kubectl refuses it for an OnDelete StatefulSet. Poll readyReplicas;
+# a failed read keeps waiting inside the budget and never counts as ready.
 if [ "$dry" -eq 1 ]; then
-    echo "  + kubectl --context $ctx -n $ns rollout status statefulset/hosts --timeout=300s"
+    echo "  + poll kubectl --context $ctx -n $ns get statefulset/hosts -o jsonpath={.status.readyReplicas} until it is $replicas (timeout $ready_timeout s)"
 else
-    k rollout status statefulset/hosts --timeout=300s
-    # rollout status on a freshly scaled StatefulSet can return before the new pods
-    # exist; insist on the full count.
-    ready=$(k get statefulset/hosts -o jsonpath='{.status.readyReplicas}')
-    [ "${ready:-0}" -eq "$replicas" ] || { echo "world_update: ${ready:-0} of $replicas hosts Ready" >&2; exit 1; }
+    deadline=$((SECONDS + ready_timeout))
+    while :; do
+        if ready=$(k get statefulset/hosts -o jsonpath='{.status.readyReplicas}' 2>/dev/null) &&
+            [ "${ready:-0}" -eq "$replicas" ] 2>/dev/null; then
+            break
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "world_update: after $ready_timeout s: ${ready:-0} of $replicas hosts Ready" >&2
+            exit 1
+        fi
+        sleep "${WORLD_UPDATE_POLL:-3}"
+    done
 fi
 finished=1
 echo "world_update: done (server $server_ref, web $web_ref)"
