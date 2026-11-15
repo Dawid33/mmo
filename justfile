@@ -1850,6 +1850,25 @@ orion-login-build:
 orion-login-push: orion-login-build
     KUBE_CONTEXT={{orion_context}} TOFU={{tofu}} scripts/orion_login_push.sh
 
+# The game world's images (deploy/images/server, deploy/images/web): release `server` + `worldctl`
+# and the browser bundle, both at the play region size (the size the world runs at). The bundle is
+# built with no VOXEL_WEB_SERVER / VOXEL_LOGIN_URL: the web image's nginx serves it beside the
+# login proxy, so the page needs neither.
+world-images-build:
+    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_BUILD_REVISION="$(git rev-parse --short HEAD)$([ -n "$(git status --porcelain -- crates Cargo.lock)" ] && echo -dirty || true)" {{cap}} {{cargo}} build --release -p server --bin server -p world-store --bin worldctl
+    env -u VOXEL_WEB_SERVER -u VOXEL_LOGIN_URL VOXEL_REGION_BLOCKS={{play_blocks}} CAP="{{cap}}" scripts/web_release.sh
+
+# Build both images, push them to ECR as mmo/server:latest and mmo/web:latest and print their digests
+# (scripts/orion_world_push.sh). Pushes only: it never touches the cluster.
+orion-world-push: world-images-build
+    TOFU={{tofu}} scripts/orion_world_push.sh
+
+# Stop-update-start release of a world (scripts/world_update.sh): hosts to 0, new images by digest on
+# coordinator, toolbox, hosts and web, hosts back. e.g. `just orion-world-update <server-ref> <web-ref>`
+# with the refs `orion-world-push` printed; `namespace=` picks the world's namespace.
+orion-world-update server-digest web-digest namespace="world-errantry":
+    scripts/world_update.sh {{orion_context}} {{namespace}} {{server-digest}} {{web-digest}}
+
 # The login operator commands inside a login pod, where the database is,
 # e.g. `just orion-login world list`, `just orion-login account issue-refresh <email>`.
 [positional-arguments]
