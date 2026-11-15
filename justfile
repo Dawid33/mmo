@@ -1896,10 +1896,12 @@ world_ns := "world-errantry"
 # worldctl inside the toolbox pod, where $VOXEL_WORLD_DB is. The URL is expanded in the pod and never
 # printed. e.g. `just world-ctl forge --preset default`, `just world-ctl rollback --yes`. forge, retile
 # and export take `--db <url>`; clock-reset, super-region, retire-host and rollback take the URL first
-# (the forms of worldctl's usage text).
+# (the forms of worldctl's usage text). `export` writes its file inside the toolbox pod, where it is
+# lost with the pod: copy it out with `kubectl cp` (a hint is printed).
 [positional-arguments]
 world-ctl *args:
     kubectl --context {{world_ctx}} -n {{world_ns}} exec deploy/toolbox -c toolbox -- sh -c 'cmd=$1; shift; case "$cmd" in forge|retile|export) exec worldctl "$cmd" --db "$VOXEL_WORLD_DB" "$@" ;; *) exec worldctl "$cmd" "$VOXEL_WORLD_DB" "$@" ;; esac' sh "$@"
+    @if [ "$1" = export ]; then echo "world-ctl: the exported file is inside the toolbox pod; copy it out now: kubectl --context {{world_ctx}} -n {{world_ns}} cp <toolbox-pod>:<out.world> ./<out.world> -c toolbox"; fi
 
 # The world's pods, its Services' node ports, and each pod's /readyz body (through the API server's
 # pod proxy to the health port 9100).
@@ -1950,6 +1952,14 @@ world-stop:
             sleep 2
         done
     }
+    # With the coordinator already down the hosts cannot finish their leave cut: they would hang until
+    # the grace period. Refuse before anything is scaled.
+    coord=$(k get deploy/coordinator -o jsonpath='{.spec.replicas}') || { echo "world-stop: cannot read the coordinator; nothing changed" >&2; exit 2; }
+    hostpods=$(k get pods -o name) || { echo "world-stop: cannot list the pods; nothing changed" >&2; exit 2; }
+    if [ "${coord:-0}" = 0 ] && printf '%s\n' "$hostpods" | grep -q '^pod/hosts-[0-9]'; then
+        echo "world-stop: the coordinator is at 0 replicas but host pods still exist; they cannot leave cleanly. Run \`just world-start\` first, or delete the host pods knowingly. Nothing changed." >&2
+        exit 2
+    fi
     echo "world-stop: hosts to 0, waiting until no host pod is left ($timeout s)"
     k scale statefulset/hosts --replicas=0
     wait_gone 'hosts-[0-9]'
@@ -1975,23 +1985,38 @@ world-start:
     k rollout status deploy/coordinator --timeout=5m
     echo "world-start: hosts to $count"
     k scale statefulset/hosts --replicas="$count"
-    k rollout status statefulset/hosts --timeout=300s
-    # rollout status on a freshly scaled StatefulSet can return before the new pods exist.
-    ready=$(k get statefulset/hosts -o jsonpath='{.status.readyReplicas}')
-    [ "${ready:-0}" -eq "$count" ] || { echo "world-start: ${ready:-0} of $count hosts Ready" >&2; exit 1; }
+    # The hosts StatefulSet is OnDelete: `rollout status` refuses it. Poll readyReplicas instead
+    # (WORLD_START_TIMEOUT s, default 300); a failed read keeps waiting, never counts as ready.
+    timeout="${WORLD_START_TIMEOUT:-300}"
+    deadline=$((SECONDS + timeout))
+    while :; do
+        if ready=$(k get statefulset/hosts -o jsonpath='{.status.readyReplicas}' 2>&1); then
+            case "$ready" in ''|*[!0-9]*) ready=0 ;; esac
+            [ "$ready" -ge "$count" ] && break
+            what="$ready of $count hosts Ready"
+        else
+            what="reading the StatefulSet failed ($(printf '%s' "$ready" | head -1))"
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "world-start: after $timeout s: $what" >&2
+            exit 1
+        fi
+        sleep 2
+    done
     echo "world-start: the world is up ($count hosts)"
 
 # Print (never run) the `just orion-login world add …` command that registers this world with the login
 # service. `world add` REPLACES the world's row: run it with every option, or the omitted ones are lost.
 # The world id is the namespace without its `world-` prefix; `name=` sets the displayed name.
 # --quic / --wt are host 0's VOXEL_ADVERTISE_QUIC / _WT from the ConfigMap host-endpoints; the link pin is the
-# SHA-256 of the public certificate in Secret host-link.
-world-register name="Errantry":
+# SHA-256 of the public certificate in Secret host-link-identity. A name with a single quote is refused.
+world-register $name="Errantry":
     #!/usr/bin/env bash
     set -euo pipefail
     k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
     ns="{{world_ns}}"
     id="${ns#world-}"
+    case "$name" in *\'*) echo "world-register: the name must not contain a single quote" >&2; exit 2 ;; esac
     env0=$(k get configmap host-endpoints -o jsonpath='{.data.hosts-0\.env}')
     # value <VAR>: the value of VAR in host 0's env file, `export ` and quotes stripped.
     value() { printf '%s\n' "$env0" | sed -n "s/^\(export \)\{0,1\}$1=//p" | head -1 | tr -d "\"'"; }
@@ -2001,14 +2026,14 @@ world-register name="Errantry":
         echo "world-register: hosts-0.env has no VOXEL_ADVERTISE_QUIC / VOXEL_ADVERTISE_WT" >&2
         exit 1
     fi
-    pin=$(k get secret host-link -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
+    pin=$(k get secret host-link-identity -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
     case "$pin" in
-        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret host-link" >&2; exit 1 ;;
+        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret host-link-identity" >&2; exit 1 ;;
     esac
     [ "${#pin}" -eq 64 ] || { echo "world-register: link pin is not 64 hex digits" >&2; exit 1; }
     echo "Run this (it replaces the row of world '$id'; nothing was changed by this recipe):"
     echo
-    echo "just orion-login world add $id --name '{{name}}' --quic $quic --wt $wt --link hosts-0.hosts.$ns.svc.cluster.local:6490 --link-cert $pin"
+    echo "just orion-login world add $id --name '$name' --quic $quic --wt $wt --link hosts-0.hosts.$ns.svc.cluster.local:6490 --link-cert $pin"
 
 # Roll the world's four workloads back one revision, hosts stopped meanwhile: stop (world-stop), `rollout undo`
 # on coordinator, toolbox, web and hosts, start (world-start). A database migration made by the newer
