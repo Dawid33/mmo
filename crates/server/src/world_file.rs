@@ -6,7 +6,8 @@
 //! procedural noise world on request, which keeps nothing.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use worldgen::forge::{forge, ForgeParams};
 use worldgen::forged::ForgedWorld;
@@ -25,6 +26,41 @@ pub const WORLD_DB_ENV: &str = "VOXEL_WORLD_DB";
 /// Why a world with save files from before the world store is not started.
 pub const LEGACY_SAVES_REFUSAL: &str =
     "this world has file saves from before the world store; delete them with: just clean-old-worlds";
+
+/// What a process does when its world store holds no world, no archive and has no
+/// import file: `forge` (default) forges a default world itself; `wait` — a pod whose
+/// world is forged by `worldctl forge` after it started — waits for that.
+pub const EMPTY_STORE_ENV: &str = "VOXEL_EMPTY_STORE";
+
+/// How often a waiting process looks at its store again.
+pub const EMPTY_STORE_POLL: Duration = Duration::from_secs(5);
+
+/// How often a waiting process says why (at most).
+const EMPTY_STORE_LOG: Duration = Duration::from_secs(30);
+
+/// What [`ensure_world`] returns as its error when the stop flag ended a wait.
+pub const STOPPED_WAITING: &str = "stopped while waiting for a world";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmptyStore {
+    #[default]
+    Forge,
+    Wait,
+}
+
+/// [`EMPTY_STORE_ENV`]'s value -> what an empty store does. Unset or empty = `forge`.
+pub fn empty_store_from(value: Option<&str>) -> Result<EmptyStore, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("forge") => Ok(EmptyStore::Forge),
+        Some("wait") => Ok(EmptyStore::Wait),
+        Some(other) => Err(format!("{EMPTY_STORE_ENV}={other}: expected `forge` or `wait`")),
+    }
+}
+
+/// [`empty_store_from`] the process environment; read once by each caller of [`open_world_with`].
+pub fn empty_store_from_env() -> Result<EmptyStore, String> {
+    empty_store_from(std::env::var(EMPTY_STORE_ENV).ok().as_deref())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldSource {
@@ -124,6 +160,10 @@ pub fn check_legacy_saves(store: &StoreHandle, world_file: Option<&Path>) -> Res
 /// `[server] … re-tiling` and `[perf] event=world_retiled`. Without an
 /// archive it is refused (re-forge).
 ///
+/// An empty store (no archive, no import file) is forged into with `params` under
+/// `EmptyStore::Forge`; under `Wait` this polls ([`wait_for_forge`]) until another
+/// process wrote a world, and returns [`STOPPED_WAITING`] as the error when `stop` is set.
+///
 /// Split roles on one Postgres world: the coordinator and every host run this at start.
 /// After a build that changes the tile format two of them may re-tile at once; the
 /// re-tile is one transaction, so one wins and a concurrent one may fail its start (start
@@ -133,6 +173,8 @@ pub fn ensure_world(
     store: &StoreHandle,
     import: Option<&Path>,
     params: &ForgeParams,
+    empty: EmptyStore,
+    stop: Option<&AtomicBool>,
 ) -> Result<(ForgedWorld, game::WorldMap), String> {
     let started = Instant::now();
     match world_store::load_forged(store) {
@@ -188,6 +230,10 @@ pub fn ensure_world(
             game::perf::ms(started.elapsed()),
             path.display()
         );
+    } else if empty == EmptyStore::Wait {
+        wait_for_forge(store, import, stop)?;
+        // Something is there now: read it the usual way (tiled or not, imported or not).
+        return ensure_world(store, import, params, empty, stop);
     } else {
         log::info!("[server] the world store has no world: forging a default world (this takes a while)");
         let bytes = forge(params).artifact(params).to_bytes();
@@ -195,6 +241,29 @@ pub fn ensure_world(
         game::perf_event!("world_forged", "ms={} into=store", game::perf::ms(started.elapsed()));
     }
     load_written(store)
+}
+
+/// Waits until the store holds a world (or an archive) or `import` exists, looking every
+/// [`EMPTY_STORE_POLL`]; `Err(STOPPED_WAITING)` when `stop` is set first. Forges nothing.
+fn wait_for_forge(store: &StoreHandle, import: Option<&Path>, stop: Option<&AtomicBool>) -> Result<(), String> {
+    let mut logged_at: Option<Instant> = None;
+    loop {
+        if store.world_info().map_err(|e| e.to_string())?.has_artifact || import.is_some_and(Path::exists) {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if logged_at.is_none_or(|at| now >= at + EMPTY_STORE_LOG) {
+            logged_at = Some(now);
+            log::warn!("[server] the world store has no world: waiting for 'worldctl forge'");
+        }
+        let until = now + EMPTY_STORE_POLL;
+        while Instant::now() < until {
+            if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+                return Err(STOPPED_WAITING.to_string());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 /// The world [`ensure_world`] just wrote, read back.
@@ -425,6 +494,16 @@ pub struct OpenedWorld {
 /// ([`check_legacy_saves`]), and its world taken from the store, imported or
 /// forged ([`ensure_world`]). The store is shut down again on an error.
 pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWorld, String> {
+    open_world_with(source, params, EmptyStore::Forge, None)
+}
+
+/// [`open_world`] with what an empty store does and the flag that ends a wait.
+pub fn open_world_with(
+    source: &WorldSource,
+    params: &ForgeParams,
+    empty: EmptyStore,
+    stop: Option<&AtomicBool>,
+) -> Result<OpenedWorld, String> {
     let (url, import) = match source {
         WorldSource::Procedural => return Ok(OpenedWorld { store: None, world: None, map: None, world_tick: 0 }),
         WorldSource::Store { url, import } => (url, import.as_deref()),
@@ -432,7 +511,7 @@ pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWo
     let store = StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer)
         .map_err(|e| format!("world store {url}: {e}"))?;
     let opened = check_legacy_saves(&store, import).and_then(|()| {
-        let (world, map) = ensure_world(&store, import, params)?;
+        let (world, map) = ensure_world(&store, import, params, empty, stop)?;
         let world_tick = store.world_info().map_err(|e| e.to_string())?.world_tick;
         Ok((world, map, world_tick))
     });
@@ -514,7 +593,7 @@ mod tests {
         let store = memory_store();
         // Default params: a forge here would take seconds, so this also
         // proves nothing was forged.
-        let err = ensure_world(&store, Some(&path), &ForgeParams::default()).err().expect("refused");
+        let err = ensure_world(&store, Some(&path), &ForgeParams::default(), EmptyStore::Forge, None).err().expect("refused");
         assert!(err.contains("bad.world") && err.contains("delete"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), b"not a world", "the file is left alone");
         assert!(!store.world_info().unwrap().has_artifact, "nothing imported");
@@ -524,16 +603,61 @@ mod tests {
     }
 
     #[test]
+    fn empty_store_defaults_to_forge() {
+        assert_eq!(empty_store_from(None).unwrap(), EmptyStore::Forge);
+        assert_eq!(empty_store_from(Some("")).unwrap(), EmptyStore::Forge);
+        assert_eq!(empty_store_from(Some("forge")).unwrap(), EmptyStore::Forge);
+        assert_eq!(empty_store_from(Some(" wait ")).unwrap(), EmptyStore::Wait);
+    }
+
+    #[test]
+    fn empty_store_refuses_an_unknown_word() {
+        let err = empty_store_from(Some("later")).unwrap_err();
+        assert!(err.contains(EMPTY_STORE_ENV) && err.contains("later"), "{err}");
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn an_empty_store_waits_when_told_to() {
+        let store = memory_store();
+        let written = ForgeParams { seed: 9, ..ForgeParams::square(2048.0, 64.0) };
+        let writer = {
+            let (store, written) = (store.clone(), written.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let bytes = forge(&written).artifact(&written).to_bytes();
+                world_store::write_tiled(&store, bytes).unwrap();
+            })
+        };
+        // Default params: had the waiter forged, the world would not be the writer's.
+        let (world, _map) = ensure_world(&store, None, &ForgeParams::default(), EmptyStore::Wait, None).unwrap();
+        writer.join().unwrap();
+        assert_eq!(world.content_crc(), store.world_info().unwrap().content_crc.unwrap());
+        assert_eq!(world.seed(), 9, "the writer's world, not a forge of the waiter's");
+        drop(world);
+        store.shutdown();
+    }
+
+    #[test]
+    fn a_waiting_empty_store_honours_the_stop_flag() {
+        let store = memory_store();
+        let stop = AtomicBool::new(true);
+        let err = ensure_world(&store, None, &ForgeParams::default(), EmptyStore::Wait, Some(&stop)).err().unwrap();
+        assert_eq!(err, STOPPED_WAITING);
+        store.shutdown();
+    }
+
+    #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn ensure_world_forges_into_the_store_once() {
         let store = memory_store();
         let params = ForgeParams { seed: 4, ..ForgeParams::square(2048.0, 64.0) };
-        let (first, map) = ensure_world(&store, None, &params).unwrap();
+        let (first, map) = ensure_world(&store, None, &params, EmptyStore::Forge, None).unwrap();
         assert!(first.tile_cache().is_some(), "written as tiles");
         let info = store.world_info().unwrap();
         assert!(info.has_artifact);
         assert_eq!(info.content_crc, Some(first.content_crc()));
-        let (again, again_map) = ensure_world(&store, None, &params).unwrap();
+        let (again, again_map) = ensure_world(&store, None, &params, EmptyStore::Forge, None).unwrap();
         assert_eq!(again.content_crc(), first.content_crc(), "read back, not forged again");
         assert_eq!(again_map, map);
         drop((first, again));

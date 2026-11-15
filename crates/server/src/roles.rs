@@ -473,7 +473,10 @@ pub fn run_coordinator() -> ServerExit {
     )
     .unwrap_or_else(|e| fatal(e));
     Role::Coordinator.check_store(&source).unwrap_or_else(|e| fatal(e));
-    let opened = world_file::open_world(&source, &worldgen::forge::ForgeParams::default()).unwrap_or_else(|e| fatal(e));
+    let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(e));
+    // No stop flag yet (it is made after the store opens): a wait here ends by the signal's default.
+    let opened = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, None)
+        .unwrap_or_else(|e| fatal(e));
     let store = opened.store.clone().expect("a Postgres world has a store");
     let map = opened.map.clone().expect("a stored world has a map");
     // Several hosts (`VOXEL_HOSTS` > 1): this coordinator runs their world cuts, every save

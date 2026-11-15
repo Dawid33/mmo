@@ -707,7 +707,9 @@ pub fn run() -> claims::ServerExit {
     )
     .unwrap_or_else(|e| fatal(&e));
     role.check_store(&world_source).unwrap_or_else(|e| fatal(&e));
-    let mut opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
+    let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(&e));
+    // No stop flag yet (it is made after the store opens): a wait here ends by the signal's default.
+    let mut opened = world_file::open_world_with(&world_source, &worldgen::forge::ForgeParams::default(), empty, None)
         .unwrap_or_else(|e| fatal(&e));
     let store = opened.store.clone();
     // Which regions this process simulates, and the super-region side that
