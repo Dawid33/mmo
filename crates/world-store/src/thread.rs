@@ -128,6 +128,8 @@ pub(crate) enum Request {
     PrepareCut(Box<WorldCut>, Fence, u64, Reply<CutCommitted>),
     DecideCut(Box<Decision>, Reply<bool>),
     AbortCut(CutId, Tick, Reply<bool>),
+    /// Elastic 1: the coordinator records a world cut's begin (Postgres).
+    RecordCutBegin(CutId, crate::CoordinatorFence, Reply<HostId>),
     ResolvePrepared(Reply<Vec<(CutId, bool)>>),
     StagedCutParts(Reply<Vec<(CutId, HostId)>>),
     CutDecision(CutId, Reply<Option<bool>>),
@@ -427,6 +429,12 @@ async fn serve(
                     }
                 })
             }
+            Request::RecordCutBegin(cut, fence, r) => tokio::spawn(async move {
+                r.send(match &pool {
+                    Pool::Pg(p) => two_phase::record_cut_begin(p, cut, fence).await,
+                    Pool::Sqlite(_) => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                })
+            }),
             Request::AbortCut(cut, tick, r) => tokio::spawn(async move {
                 r.send(match &pool {
                     Pool::Pg(p) => two_phase::abort_cut(p, world_tag.expect("set on Postgres"), cut, tick).await,
@@ -840,6 +848,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         }
         Request::DecideCut(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::AbortCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RecordCutBegin(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ResolvePrepared(r) => r.send(Err(StoreError::ReadOnly)),
         Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::DeclareSuccession(_, r) => r.send(Err(StoreError::ReadOnly)),

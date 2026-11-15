@@ -904,7 +904,7 @@ fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
 /// and to the coordinator (if one is up), its cut writer. Its registration.
 fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, as_slot: HostId, boot: u64) -> world_store::Registered {
     let first = db.open();
-    server::roles::resolve_before_claim(true, &first).expect("the staged parts are resolved");
+    server::roles::resolve_before_claim(true, &first, &format!("host-{}", as_slot.0)).expect("the staged parts are resolved");
     first.shutdown();
     let store = db.open();
     let want = next_id(db);
@@ -954,7 +954,9 @@ fn restart_alone(w: &mut World, db: &PgDb, dir: &std::path::Path, boot: u64) -> 
         kill_host(w, h);
     }
     let first = db.open();
-    server::roles::resolve_before_claim(true, &first).expect("the staged parts are resolved");
+    // Every host died a lease ago (the registration below judges by a lease of 0 too).
+    first.set_host_lease_ms(0);
+    server::roles::resolve_before_claim(true, &first, "").expect("the staged parts are resolved");
     first.shutdown();
     let store = db.open();
     store.set_host_lease_ms(0);

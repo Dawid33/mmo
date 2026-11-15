@@ -410,7 +410,15 @@ pub fn recover_staged_cuts(store: &world_store::StoreHandle, hosts: u32) -> Resu
 /// found by their prepared transactions' names, whatever hosts wrote them
 /// ([`world_store::StoreHandle::staged_cut_parts`]); none staged is nothing to do (a server
 /// without prepared transactions has none).
-pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle) -> Result<(), String> {
+///
+/// Elastic 1 Task 4: a cut with a part of a host that is ALIVE is not a crash's leftover but a
+/// cut under way — a host starting beside it (a newcomer) must not abort it. Such a cut is
+/// left to its coordinator (which decides it, or aborts it when a participant lapses). "Alive"
+/// is what `register_host` reads: a dirty, live row of the world's generation beaten within
+/// the host lease ([`game::HOST_LEASE_MS`]) by the database clock — a row of this process's own `name` (its
+/// earlier process, which the registration lapses) never counts. With nobody alive (a total
+/// crash) every staged part is finished, as before.
+pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, name: &str) -> Result<(), String> {
     if !postgres {
         return Ok(());
     }
@@ -418,10 +426,33 @@ pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle) ->
     if staged.is_empty() {
         return Ok(());
     }
-    log::warn!("[server] {} world cut part(s) left staged by a crash: {staged:?} (cut, host); finishing them", staged.len());
-    crate::cuts::resolve_staged_cuts(store)
-        .map(|_| ())
-        .map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))
+    let read = |e: world_store::StoreError| format!("the hosts beside the staged world cut parts could not be read: {e}");
+    let rows = store.hosts().map_err(read)?;
+    let now = store.db_now_ms().map_err(read)?;
+    let generation = store.world_generation().map_err(read)?;
+    let lease_ms = store.host_lease_ms();
+    let alive: std::collections::BTreeSet<game::HostId> = rows
+        .iter()
+        .filter(|r| r.generation == generation && (name.is_empty() || r.name != name))
+        .filter(|r| r.state == game::HOST_LIVE && !r.clean && now.saturating_sub(r.seen_ms) <= lease_ms)
+        .map(|r| r.id)
+        .collect();
+    let mut cuts: std::collections::BTreeMap<game::CutId, Vec<game::HostId>> = std::collections::BTreeMap::new();
+    for (cut, host) in staged {
+        cuts.entry(cut).or_default().push(host);
+    }
+    for (cut, hosts) in cuts {
+        if hosts.iter().any(|h| alive.contains(h)) {
+            log::info!(
+                "[server] world cut {} has staged parts of hosts {hosts:?}, alive beside this one: under way, left to its coordinator",
+                cut.0
+            );
+            continue;
+        }
+        log::warn!("[server] world cut {} part(s) left staged by a crash (hosts {hosts:?}): finishing them", cut.0);
+        store.abort_cut(cut, 0).map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))?;
+    }
+    Ok(())
 }
 
 /// A `claim` host (`policy` `Succession`: any number of hosts, its saves world cuts in two

@@ -68,6 +68,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// regions are no longer known to run) and resumes over the new link after a hello.
     pub fn set_peer(&mut self, ordinal: HostId, mut session: PeerSession, link: Box<dyn PeerLink + Send>) {
         debug_assert_eq!(session.peer(), ordinal, "a session for another host");
+        if self.forgotten_hosts.contains(&ordinal) {
+            // A zombie of a forgotten host dialing in: never linked again (its id is never
+            // issued twice; the link is dropped).
+            log::warn!("[server] a link to host {ordinal}, which is forgotten: dropped");
+            return;
+        }
         let prefilled = session.unreceived().count();
         if prefilled > 0 {
             log::error!("[server] a session for host {ordinal} came with {prefilled} message(s) already queued");
@@ -91,6 +97,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.count_pairs.contains_key(&ordinal) {
             // A pending world cut counts with that host (its count, 0, already went out):
             // the new session stays frozen until the cut is decided.
+            session.freeze();
+        }
+        if self.world_cut_outsider_arrived(ordinal) {
+            // A host outside the pending world cut (it registered after the cut began):
+            // nothing goes either way until the cut is decided (`world_cut.rs`).
             session.freeze();
         }
         self.peers.insert(ordinal, Peer { session, link, stale: false });
@@ -991,7 +1002,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Joined by a leave of the pending world cut: held back until it is decided.
         let Some(msg) = self.hold_for_leave(ordinal, msg) else { return };
         let id = self.queue_now(ordinal, msg);
-        if view {
+        if view && !self.forgotten_hosts.contains(&ordinal) {
             self.peer_in_source_view.insert((ordinal, id));
         }
     }
@@ -999,12 +1010,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `msg` to host `ordinal` now: on its session, or kept until it has one. Its id among
     /// everything queued to that host (`peer_entries`).
     pub(super) fn queue_now(&mut self, ordinal: HostId, msg: Reliable) -> u64 {
+        if self.forgotten_hosts.contains(&ordinal) {
+            // Gone for good (`forget_host`): nothing is kept for it (counted).
+            log::debug!("[server] a {} for host {ordinal}, which is forgotten: dropped", reliable_name(&msg));
+            self.peer_dropped_for_dead += 1;
+            return 0;
+        }
         let count = self.peer_queued.entry(ordinal).or_default();
         let id = *count;
         *count += 1;
         // Everything this host sends a peer is queued here, in order (a leave's held-back
         // messages when they finally go): the journal sees each state message and each
         // mark exactly where it goes on the session.
+        if msg.is_state() {
+            self.unsaved_traffic.insert(ordinal);
+        }
         match &msg {
             Reliable::CutMark { cut } => self.journal.mark_out(ordinal, *cut),
             msg if self.journals() => self.journal.sent(ordinal, id, msg, None, self.spawner.world_tick()),
@@ -1724,6 +1744,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the pending world cut is a protocol violation — applied all the same (state is never
     /// dropped), and the cut fails.
     pub(super) fn peer_reliable(&mut self, from: HostId, msg: Reliable) {
+        if msg.is_state() {
+            self.unsaved_traffic.insert(from);
+        }
         match msg {
             Reliable::CutMark { cut } => self.peer_cut_mark(from, cut),
             Reliable::InCut { cut, body } => {

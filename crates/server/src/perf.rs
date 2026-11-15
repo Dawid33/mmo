@@ -163,7 +163,7 @@ impl ServerReport {
         let lod_build_ms = ns_ms(take(&EDGE.lod_build_ns));
         let tiles = self.tiles_section();
         log::info!(
-            "[server] window={:.1}s sessions={} regions={} parked={} transfers_inflight={} pending_arrivals={} peer_unreceived={} unowned_waiting={} journal_entries={} succession_seam_events={} arrivals_despawned={} \
+            "[server] window={:.1}s sessions={} regions={} parked={} transfers_inflight={} pending_arrivals={} peer_unreceived={} unowned_waiting={} journal_entries={} succession_seam_events={} peer_dropped_for_dead={} arrivals_despawned={} \
              items_destroyed={} intent_replies_lost={} \
              | gen n={} sum={:.1}ms max={:.1}ms \
              | lod hit={} sub={} built={} inflight={} wait_terrain={} cache={} \
@@ -181,6 +181,7 @@ impl ServerReport {
             d.unowned_waiting,
             d.journal_entries,
             d.succession_seam_events,
+            d.peer_dropped_for_dead,
             d.arrivals_despawned,
             d.items_destroyed,
             d.intent_replies_lost,

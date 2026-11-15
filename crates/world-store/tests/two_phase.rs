@@ -576,6 +576,49 @@ fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
     h.shutdown();
 }
 
+/// Elastic 1 Task 4: a host registered AFTER a cut's begin was recorded (`record_cut_begin`:
+/// its id at or above the recorded bound) may be absent from the cut's decision — it owned
+/// nothing at the cut's tick; one registered before the record must be listed (an abort
+/// otherwise); a cut with no begin recorded keeps the rule before. The record is fenced on
+/// the coordinator's epoch and its first writer wins.
+#[test]
+fn a_host_registered_after_the_cuts_begin_need_not_be_listed() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let h1 = open(&w.url);
+    let (f0, f1) = fences(&h);
+    register_from_zero(&w, &h, 2);
+    let c = h.claim_coordinator().unwrap();
+    // Cut 60: begun with hosts 0 and 1 issued (bound 2); host 2 registers after it.
+    assert_eq!(h.record_cut_begin(CutId(60), c).unwrap(), hid(2), "the next id to issue");
+    let late = register(&h1, "late", 3).unwrap();
+    assert_eq!(late.id, hid(2));
+    assert_eq!(h.record_cut_begin(CutId(60), c).unwrap(), hid(2), "first writer wins");
+    prepare_both(&h, &h1, 60, &f0, &f1);
+    assert!(h.decide_cut(CutId(60), 6000, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap(), "host 2 joined after the begin");
+    h.cut_decided(CutId(60)).unwrap();
+    h1.cut_decided(CutId(60)).unwrap();
+    // Cut 61: begun AFTER host 2 registered (bound 3): host 2 must be listed.
+    assert_eq!(h.record_cut_begin(CutId(61), c).unwrap(), hid(3));
+    prepare_both(&h, &h1, 61, &f0, &f1);
+    assert!(!h.decide_cut(CutId(61), 6100, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap(), "host 2 registered before the begin");
+    h.cut_decided(CutId(61)).unwrap();
+    h1.cut_decided(CutId(61)).unwrap();
+    // Cut 62: no begin recorded — every dirty host listed, as before.
+    prepare_both(&h, &h1, 62, &f0, &f1);
+    assert!(!h.decide_cut(CutId(62), 6200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap(), "no begin: the rule before");
+    h.cut_decided(CutId(62)).unwrap();
+    h1.cut_decided(CutId(62)).unwrap();
+    assert_eq!(h.world_info().unwrap().world_tick, 6000, "only cut 60 is visible");
+    // A stale coordinator records nothing.
+    let newer = h1.claim_coordinator().unwrap();
+    assert!(matches!(h.record_cut_begin(CutId(63), c), Err(StoreError::Fenced { .. })));
+    assert_eq!(h.record_cut_begin(CutId(63), newer).unwrap(), hid(3));
+    assert_eq!(prepared(&w), 0);
+    h1.shutdown();
+    h.shutdown();
+}
+
 #[test]
 fn sqlite_is_not_two_phase_ready() {
     let h = open(&StoreUrl::Memory);

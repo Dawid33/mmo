@@ -282,3 +282,30 @@ fn a_commit_found_by_polling_truncates_and_a_late_cut_done_changes_nothing() {
     j.committed(CutId(7), &BTreeSet::new());
     assert_eq!(kept(&j, B).len(), 1, "cut 6's participants were forgotten with its abort; cut 7 named none");
 }
+
+/// Elastic 1 Task 4: a dead host is forgotten only once nothing of it is needed. Entries not
+/// reported are refused; a report taken against base cut K is refused until a later cut (the
+/// succession's settle) committed; a cut not decided that names it is refused; then it is
+/// forgotten, and nothing of it is left. A peer never journalled is forgotten at once.
+#[test]
+fn forgetting_a_peer_before_its_settle_cut_is_refused() {
+    let mut j = PeerJournal::new(K);
+    j.sent(B, 0, &transfer(1, 10), None, NOW);
+    assert!(j.forget(B).is_err(), "an entry nobody reported");
+    assert!(j.mentions(B));
+    // The succession's report takes its entries against base K.
+    assert_eq!(j.take(B).len(), 1);
+    let refused = j.forget(B).expect_err("the report is read until the settle cut commits");
+    assert!(refused.why.contains("settle"), "{refused}");
+    assert!(j.mentions(B));
+    // A cut that names it, not decided: still refused after the settle.
+    let settle = CutId(K.0 + 1);
+    j.cut_begun(settle, &participants(&[A]));
+    j.committed(settle, &participants(&[A]));
+    j.cut_begun(CutId(K.0 + 2), &participants(&[B]));
+    assert!(j.forget(B).is_err(), "a cut with it is undecided");
+    j.aborted(CutId(K.0 + 2));
+    assert_eq!(j.forget(B), Ok(()), "settled and no cut names it");
+    assert!(!j.mentions(B), "nothing of it is left");
+    assert_eq!(j.forget(game::HostId(9)), Ok(()), "a peer never journalled");
+}

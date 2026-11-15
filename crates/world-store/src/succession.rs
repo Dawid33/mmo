@@ -43,6 +43,14 @@
 //! only a FREE row, which no declaration, retirement or registration locks. That cycle cannot
 //! form any more.)
 //!
+//! **A cut's begin** (`two_phase::record_cut_begin`, Elastic 1 Task 4): `coordinator` `FOR
+//! SHARE` (the fence, as `decide_cut` takes it first), a PLAIN read of `world.next_host_id`
+//! (no lock: a registration holding the world row commits its id before the read — below the
+//! bound — or after it — at or above), the insert of the cut's own `cut_begins` row. No lock on
+//! `world`, `hosts` or `super_regions`: it joins no cycle. `decide_cut` reads that row plainly
+//! after its `world` lock (it was committed before the decision began, or is absent: the
+//! stricter rule then).
+//!
 //! **A registration** (`rows.rs` `register_host`, Elastic 1) — ONE transaction, UNFENCED: it
 //! creates the identity a fence is built from; it writes no row a cut part writes except the
 //! `in_flight` and `super_regions` rows of a total crash, which it takes at `epoch + 1` (so every
@@ -75,7 +83,9 @@
 //!   `super_regions` rows `FOR SHARE` (and the `in_flight` rows it wrote or deleted) until its
 //!   cut is decided: the registration waits for it at most its `lock_timeout`
 //!   (`CLAIM_LOCK_TIMEOUT_MS`) and fails naming the staged gids, nothing written — every start
-//!   resolves staged parts before it registers. A part being written locks `super_regions`
+//!   resolves the staged parts of hosts that are not alive before it registers (Elastic 1
+//!   Task 4, `server::roles::resolve_before_claim`: a part of a live host belongs to a cut under
+//!   way and is its coordinator's; with nobody alive — the total crash — every part). A part being written locks `super_regions`
 //!   first and `in_flight` after, as the registration does: no cycle. Nothing else here waits
 //!   for a row a part could be waiting for.
 //! - The prune: one `DELETE` of clean or dead `hosts` rows that own no `super_regions` /

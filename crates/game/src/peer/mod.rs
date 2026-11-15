@@ -10,7 +10,7 @@ mod link;
 mod msg;
 mod session;
 
-pub use journal::{CountedRead, JournalEntry, JournalEvent, PeerJournal, Subject};
+pub use journal::{CountedRead, ForgetRefused, JournalEntry, JournalEvent, PeerJournal, Subject};
 pub use link::*;
 pub use msg::*;
 pub use session::*;

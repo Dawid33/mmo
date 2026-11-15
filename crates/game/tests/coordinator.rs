@@ -1822,11 +1822,13 @@ fn leave_requests_begin_one_cut_and_a_leaver_is_not_expected_until_its_next_boot
     assert_eq!(begun(&commit_routed(&mut c)).len(), 2, "both take part again");
 }
 
-/// Final review I1: a host attaching while a cut it is not in runs (back from a clean
-/// leave, or new) aborts that cut — it may exchange entities with the participants before
-/// the cut's tick, which no part would save — and the next cut takes it in.
+/// Elastic 1 Task 4 (was Final review I1, which aborted): a host attaching while a cut it is
+/// not in runs — new, registered after the cut began — leaves that cut alone (the
+/// participants freeze their sessions with it until the decision; the store lets the decision
+/// leave out only a host registered after the begin was recorded); the cut commits without it
+/// and the next cut takes it in. A participant re-attaching still aborts.
 #[test]
-fn attach_of_a_host_outside_the_running_cut_aborts_it() {
+fn attach_of_a_host_outside_the_running_cut_leaves_it_alone() {
     let mut c = cutting();
     // Host 1 leaves in a committed cut.
     c.handle(h(1), HostMsg::LeaveRequest, 100);
@@ -1837,24 +1839,25 @@ fn attach_of_a_host_outside_the_running_cut_aborts_it() {
     assert!(c.take_decision().expect("decided").commit);
     c.decided(cut, true);
     commit_routed(&mut c);
-    // A cut of host 0 alone begins; host 1 comes back (another boot) before it is decided.
+    // A cut of host 0 alone begins; a new host (id 2) attaches before it is decided.
     c.maintain(700 + CUT_EVERY_MS);
     let alone = begun(&commit_routed(&mut c));
     assert_eq!(alone.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(0)]);
     let cut = alone[0].1;
-    let back = HostMsg::Attach { host: h(1), epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
-    c.handle(h(1), back, 1800);
-    assert!(c.left_hosts().is_empty(), "another boot: back");
+    c.handle(h(2), attach(h(2), 1, Vec::new(), Vec::new()), 1800);
     commit_routed(&mut c);
+    assert_eq!(c.take_decision(), None, "the attach decides nothing");
     c.handle(h(0), HostMsg::CutPrepared { cut }, 1800);
-    let d = c.take_decision().expect("the attach decides");
-    assert_eq!((d.cut, d.commit), (cut, false), "the cut that excludes host 1 is aborted");
-    c.decided(cut, false);
+    let d = c.take_decision().expect("host 0's part decides");
+    assert_eq!((d.cut, d.commit, d.hosts.clone()), (cut, true, vec![h(0)]), "the cut without the newcomer commits");
+    c.decided(cut, true);
     commit_routed(&mut c);
-    // The next cut takes both.
+    // The next cut takes the newcomer once its dirty row is read.
+    c.set_expected_hosts([h(0), h(2)].into_iter().collect());
     c.maintain(1800 + CUT_EVERY_MS);
-    assert_eq!(begun(&commit_routed(&mut c)).len(), 2, "both take part");
-    // A host never seen before attaching mid-cut aborts it too.
+    let next = begun(&commit_routed(&mut c));
+    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(0), h(2)], "both take part");
+    // A participant re-attaching (its link dropped) still aborts.
     let cut = c.world_cut_running().expect("running").0;
     c.handle(h(2), attach(h(2), 1, Vec::new(), Vec::new()), 1900);
     assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)));

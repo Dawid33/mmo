@@ -5,20 +5,24 @@
 //! a newer host dials every older one). Every host binds one `svc-link` listener
 //! ([`PEER_BIND_ENV`], [`PeerListener`]) BEFORE it registers — its `hosts` row names the
 //! listener's address and pin — and starts its links once the store issued its id
-//! ([`PeerLinks::start`]): a dialing link to every lower live row it reads then, each one
-//! re-reading that row every [`PEER_DISCOVERY_SECS`] while the peer is down. A higher host
-//! is admitted when it dials in, by its live `hosts` row (id and boot), and its link is made
-//! then ([`PeerLinks::take_arrived`]): a host that registers later reaches this one without
-//! a link object made in advance. Elastic 1 Task 4 replaces the one read at start with a
-//! periodic refresh (a lower host is never new: ids only grow).
+//! ([`PeerLinks::start`]): a dialing link to every lower live row it reads then, and from
+//! then on to every lower live row a later read shows ([`PeerLinks::refresh`], fed the `hosts`
+//! rows of the directory read the main loop already makes — `claims::DirectoryKeeper`, every
+//! [`world_store::TERRAIN_POLL_SECS`] or when the manager wants one; never a timer thread).
+//! Each dialer re-reads its row every [`PEER_DISCOVERY_SECS`] while the peer is down; it stops
+//! for good once that row is dead or gone (an id is never issued again), and its link is
+//! dropped when the manager forgets the host (`WorldManager::forget_host`). A higher host is
+//! admitted when it dials in, by its live `hosts` row (id and boot: from the rows the last
+//! refresh saw, one read of the store on a miss), and its link is made then
+//! ([`PeerLinks::take_arrived`]): a host that registers later reaches this one without a link
+//! object made in advance.
 //!
 //! **One ordered stream** per connection carries every frame (hello, reliable, ack,
 //! volatile) in send order. Every inbound frame is tagged with its connection (the
 //! listener's `PeerId`, or a dialer's `Up` count); a link drops frames whose tag is not
 //! its live connection's, so no frame of an older connection surfaces after
-//! [`PeerLink::connection`] changed. Of two live connections from one ordinal the newer
-//! replaces the older (as the coordinator's admission: the higher registration number
-//! wins, ties to the newer).
+//! [`PeerLink::connection`] changed. Of two live connections from one host the newer replaces
+//! the older (both are of its live row's boot: a stale process's hello names a dead boot).
 //!
 //! [`PEER_LINK_DELAY_MS_ENV`] holds every outgoing frame that long before it is written
 //! (order kept; a latency measurement knob, never on in play) and writes it when it is due:
@@ -372,26 +376,47 @@ impl PeerLink for QuicPeerLink {
 /// read). The listener's admission asks it of every host that dials in.
 pub type LiveRow = Box<dyn Fn(HostId, u64) -> Result<bool, String> + Send>;
 
+/// The live `hosts` rows last read, `id → boot` ([`PeerLinks::refresh`] replaces them): the
+/// admission answers from them, and reads the store once on a miss (a host newer than the
+/// last read).
+type LiveCache = std::sync::Arc<std::sync::Mutex<BTreeMap<HostId, u64>>>;
+
+/// The admission's [`LiveRow`]: the cache, then on a miss one read of `store` (which refills
+/// the cache).
+fn cached_live_row(cache: LiveCache, store: StoreHandle) -> LiveRow {
+    Box::new(move |id, boot| {
+        if cache.lock().unwrap_or_else(|e| e.into_inner()).get(&id) == Some(&boot) {
+            return Ok(true);
+        }
+        let rows = store.hosts().map_err(|e| e.to_string())?;
+        let live: BTreeMap<HostId, u64> =
+            rows.iter().filter(|r| r.state == game::HOST_LIVE && !r.clean).map(|r| (r.id, r.boot)).collect();
+        let ok = live.get(&id) == Some(&boot);
+        *cache.lock().unwrap_or_else(|e| e.into_inner()) = live;
+        Ok(ok)
+    })
+}
+
 /// Which host peers the listener of host `mine` serves: a HIGHER id (the higher dials the
 /// lower) whose `hosts` row is live with the boot its hello names ([`LiveRow`]: no host count,
-/// no id known in advance), one live connection per id — the newest, unless its registration
-/// number is lower than one seen (a stale process).
+/// no id known in advance), one live connection per id — the newest. (No registration-number
+/// check any more: the registration number is the id, issued once; a stale process of an id
+/// names a boot whose row is dead, and the live-row check refuses it.)
 struct Admission {
     mine: HostId,
     live_row: LiveRow,
-    best_reg: BTreeMap<HostId, u64>,
     live: BTreeMap<HostId, PeerId>,
 }
 
 impl Admission {
     fn new(mine: HostId, live_row: LiveRow) -> Self {
-        Admission { mine, live_row, best_reg: BTreeMap::new(), live: BTreeMap::new() }
+        Admission { mine, live_row, live: BTreeMap::new() }
     }
 
     /// `peer` said hello as `role`: its id and the connection it replaces, or why it is
     /// refused.
     fn admit(&mut self, peer: PeerId, role: &PeerRole) -> Result<(HostId, Option<PeerId>), String> {
-        let PeerRole::Host { id, boot, reg } = *role else {
+        let PeerRole::Host { id, boot, .. } = *role else {
             return Err(format!("{role:?} is not a host"));
         };
         if id == self.mine {
@@ -400,16 +425,11 @@ impl Admission {
         if id < self.mine {
             return Err(format!("host {id} is lower: this host dials it"));
         }
-        let best = self.best_reg.get(&id).copied().unwrap_or(0);
-        if reg < best {
-            return Err(format!("host {id} with registration {reg}: registration {best} has it (a stale process)"));
-        }
         match (self.live_row)(id, boot) {
             Ok(true) => {}
             Ok(false) => return Err(format!("host {id} (boot {boot:#x}) has no live hosts row")),
             Err(e) => return Err(format!("host {id}'s hosts row could not be read: {e}")),
         }
-        self.best_reg.insert(id, reg);
         Ok((id, self.live.insert(id, peer)))
     }
 
@@ -471,7 +491,14 @@ fn route_listener(
         };
         if let Some((ordinal, inbound)) = routed {
             if let Some(link) = links.get(&ordinal) {
-                let _ = link.send(inbound);
+                if link.send(inbound).is_err() {
+                    // The manager dropped the link (it forgot the host): nothing is routed to
+                    // it any more, and its connection is closed.
+                    log::info!("[peers] host {ordinal} is forgotten here: its connection {} is closed", peer.0);
+                    links.remove(&ordinal);
+                    senders.close(peer);
+                    continue;
+                }
                 let _ = wake.try_send(());
             }
         }
@@ -487,17 +514,18 @@ enum Found {
     Listening(SocketAddr, String),
     /// No row, or the row names no listener yet.
     Missing,
-    /// Its row was declared dead (R4, a succession): that boot is never dialed again — a
-    /// zombie of it may still listen — until another boot of the ordinal registers.
-    Dead,
+    /// No row any more, or its row was declared dead (R4, a succession): the host is gone for
+    /// good — an id is never issued twice — and is never dialed again (a zombie of it may
+    /// still listen).
+    Gone,
 }
 
 /// Host `ordinal`'s peer address and pin from the `hosts` table.
 fn lookup(store: &StoreHandle, ordinal: HostId) -> Result<Found, String> {
     let rows = store.hosts().map_err(|e| e.to_string())?;
-    let Some(row) = rows.into_iter().find(|r| r.id == ordinal) else { return Ok(Found::Missing) };
+    let Some(row) = rows.into_iter().find(|r| r.id == ordinal) else { return Ok(Found::Gone) };
     if row.state != game::HOST_LIVE {
-        return Ok(Found::Dead);
+        return Ok(Found::Gone);
     }
     match (row.peer_addr, row.peer_cert) {
         (Some(addr), Some(pin)) => {
@@ -512,9 +540,9 @@ fn lookup(store: &StoreHandle, ordinal: HostId) -> Result<Found, String> {
 /// dials it (a [`LinkDialer`] that redials one address for ever), re-reads the row every
 /// [`PEER_DISCOVERY_SECS`] while the peer is down and dials anew when it changed; on a
 /// close, drops the dialer (ending its connection) and reads the row again at once: the same
-/// live boot is dialed again, a boot declared dead (R4: the manager closes the link of a
-/// succeeded peer) is not — its dialer state is gone, and the row is re-read every
-/// [`PEER_DISCOVERY_SECS`] until the ordinal's next boot registers (live, another address).
+/// live boot is dialed again; a row declared dead (R4: the manager closes the link of a
+/// succeeded peer) or gone ends the thread for good — an id is never issued twice. The link
+/// object stays (down) until the manager forgets the host and drops it.
 fn dial_peer(
     peer: HostId,
     hello: LinkHello,
@@ -537,7 +565,6 @@ fn dial_peer(
     let mut tags = 0u64;
     let mut next_lookup = Instant::now();
     let mut said_missing = false;
-    let mut said_dead = false;
     loop {
         dialing.store(dialer.is_some(), std::sync::atomic::Ordering::SeqCst);
         if live.is_none() && Instant::now() >= next_lookup {
@@ -546,7 +573,6 @@ fn dial_peer(
                 Ok(Found::Listening(addr, pin)) => {
                     let found = (addr, pin);
                     said_missing = false;
-                    said_dead = false;
                     if target.as_ref() != Some(&found) || dialer.is_none() {
                         if target.is_some() {
                             log::info!("[peers] host {peer}'s hosts row changed: dialing anew");
@@ -563,22 +589,20 @@ fn dial_peer(
                         said_missing = true;
                     }
                 }
-                Ok(Found::Dead) => {
-                    // A succeeded boot: nothing of it is dialed (a zombie may still listen
-                    // there); its next boot registers live, at an address read then.
+                Ok(Found::Gone) => {
+                    // Dead or gone for good (an id is never issued twice): nothing of it is
+                    // dialed again (a zombie may still listen there). The thread ends; the link
+                    // stays down until the manager forgets the host and drops it.
                     drop(dialer.take());
-                    target = None;
                     dialing.store(false, std::sync::atomic::Ordering::SeqCst);
-                    if !said_dead {
-                        log::info!("[peers] host {peer}'s hosts row is dead (succeeded): not dialed until its next boot registers");
-                        said_dead = true;
-                    }
+                    log::info!("[peers] host {peer}'s hosts row is dead or gone: it is never dialed again");
+                    return;
                 }
                 Err(e) => {
                     log::warn!("[peers] reading host {peer}'s hosts row: {e}");
                     // The store is unreachable: the last live target is dialed again rather
-                    // than leaving the link down through an outage. A boot found dead has no
-                    // target any more (forgotten above), so a zombie is never redialed here.
+                    // than leaving the link down through an outage (a host found gone ended
+                    // this thread above, so a zombie is never redialed here).
                     if dialer.is_none() {
                         if let Some(t) = target.as_ref() {
                             dialer = Some(dial(t));
@@ -691,52 +715,90 @@ pub struct PeerLinks {
     links: Vec<(HostId, Box<dyn PeerLink + Send>)>,
     arrivals: Receiver<(HostId, Box<dyn PeerLink + Send>)>,
     wake: Receiver<()>,
+    wake_tx: Sender<()>,
     /// Per lower host: whether its dialing thread holds a dialer now.
     dialing: BTreeMap<HostId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    me: HostId,
+    hello: LinkHello,
+    store: StoreHandle,
+    delay: Duration,
+    /// The live rows the admission answers from ([`Self::refresh`]).
+    live: LiveCache,
 }
 
 impl PeerLinks {
     /// Starts the links of host `me` (the id the store issued it), boot `boot`, over its bound
     /// `listener`: a dialing link to every LOWER id whose `hosts` row `store` shows live now
-    /// (read once; each link re-reads its row while its peer is down), and an admission of
-    /// higher hosts by their live rows — each one's link is made when it first dials in
+    /// (one read; later ones come by [`Self::refresh`]), and an admission of higher hosts by
+    /// their live rows — each one's link is made when it first dials in
     /// ([`Self::take_arrived`]).
     pub fn start(listener: PeerListener, me: HostId, boot: u64, store: StoreHandle) -> io::Result<PeerLinks> {
         let PeerListener { listener, events, senders, advertised, token, config } = listener;
         let rows = store.hosts().map_err(io::Error::other)?;
-        let lower: Vec<HostId> =
-            rows.iter().filter(|r| r.id < me && r.state == game::HOST_LIVE && !r.clean).map(|r| r.id).collect();
         log::info!(
-            "[peers] host {me}: peers dial {advertised} (bound {}, pin {}); dialing the older live hosts {lower:?}",
+            "[peers] host {me}: peers dial {advertised} (bound {}, pin {})",
             listener.local_addr(),
             listener.cert_sha256()
         );
         let hello = LinkHello::new(token, PeerRole::Host { id: me, boot, reg: me.0 });
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
-        let mut links: Vec<(HostId, Box<dyn PeerLink + Send>)> = Vec::new();
-        let mut dialing = BTreeMap::new();
+        let live: LiveCache = std::sync::Arc::default();
+        let live_row = cached_live_row(live.clone(), store.clone());
+        let (arrivals_tx, arrivals) = crossbeam::channel::unbounded();
+        let delay = config.delay;
+        let router_wake = wake_tx.clone();
+        std::thread::Builder::new()
+            .name("peer-listener".into())
+            .spawn(move || route_listener(Admission::new(me, live_row), events, senders, arrivals_tx, delay, router_wake))?;
+        let mut links = PeerLinks {
+            listener,
+            links: Vec::new(),
+            arrivals,
+            wake,
+            wake_tx,
+            dialing: BTreeMap::new(),
+            me,
+            hello,
+            store,
+            delay,
+            live,
+        };
+        links.links = links.refresh(&rows);
+        Ok(links)
+    }
+
+    /// The `hosts` rows of a directory read (the main loop's, `claims::DirectoryKeeper`): the
+    /// admission answers from their live rows from now on, and a new dialing link is made to
+    /// every live, dirty row with an id LOWER than this host's that has none yet (the newer
+    /// host dials the older; ids only grow, so a lower host is new here only when this host
+    /// started before its row was read). Each link is returned once, for
+    /// [`game::WorldManager::set_peer`]. A host whose dialer is gone (its row dead or gone) is
+    /// never dialed again.
+    pub fn refresh(&mut self, rows: &[world_store::HostRow]) -> Vec<(HostId, Box<dyn PeerLink + Send>)> {
+        let live: BTreeMap<HostId, u64> =
+            rows.iter().filter(|r| r.state == game::HOST_LIVE && !r.clean).map(|r| (r.id, r.boot)).collect();
+        let lower: Vec<HostId> = live.keys().copied().filter(|id| *id < self.me && !self.dialing.contains_key(id)).collect();
+        *self.live.lock().unwrap_or_else(|e| e.into_inner()) = live;
+        let mut out: Vec<(HostId, Box<dyn PeerLink + Send>)> = Vec::new();
         for other in lower {
             let (inbound, link_events) = crossbeam::channel::unbounded();
             let (cmds_tx, cmds) = crossbeam::channel::unbounded();
-            let (hello, store, wake) = (hello.clone(), store.clone(), wake_tx.clone());
+            let (hello, store, wake) = (self.hello.clone(), self.store.clone(), self.wake_tx.clone());
             let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            dialing.insert(other, flag.clone());
-            std::thread::Builder::new()
+            self.dialing.insert(other, flag.clone());
+            let spawned = std::thread::Builder::new()
                 .name(format!("peer-dial-{other}"))
-                .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake, flag))?;
+                .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake, flag));
+            if let Err(e) = spawned {
+                log::error!("[peers] starting the dialer of host {other}: {e}; tried again at the next read");
+                self.dialing.remove(&other);
+                continue;
+            }
+            log::info!("[peers] host {other} found in the hosts table: dialing it");
             let wire: Box<dyn PeerWire + Send> = Box::new(DialerWire(cmds_tx));
-            links.push((other, Box::new(QuicPeerLink::new(other, wire, link_events, config.delay, wake_tx.clone()))));
+            out.push((other, Box::new(QuicPeerLink::new(other, wire, link_events, self.delay, self.wake_tx.clone()))));
         }
-        let live_row: LiveRow = Box::new(move |id, boot| {
-            let rows = store.hosts().map_err(|e| e.to_string())?;
-            Ok(rows.iter().any(|r| r.id == id && r.boot == boot && r.state == game::HOST_LIVE))
-        });
-        let (arrivals_tx, arrivals) = crossbeam::channel::unbounded();
-        let delay = config.delay;
-        std::thread::Builder::new()
-            .name("peer-listener".into())
-            .spawn(move || route_listener(Admission::new(me, live_row), events, senders, arrivals_tx, delay, wake_tx))?;
-        Ok(PeerLinks { listener, links, arrivals, wake, dialing })
+        out
     }
 
     /// The links made at start (one per lower live host), for [`game::WorldManager::set_peer`];
@@ -954,8 +1016,7 @@ mod tests {
     }
 
     /// The listener admits higher ids with a live row of the hello's boot only (no host
-    /// count: any id); of two connections of one id the newer replaces the older unless its
-    /// registration number is lower.
+    /// count: any id); of two connections of one id the newer replaces the older.
     #[test]
     fn admission_takes_higher_live_ids_and_the_newest_connection() {
         let host = |id, reg| PeerRole::Host { id, boot: 1, reg };
@@ -969,10 +1030,10 @@ mod tests {
         assert_eq!(a.admit(PeerId(10), &host(h(41), 41)), Ok((h(41), None)), "any id, no count");
         assert_eq!(a.admit(PeerId(5), &host(h(2), 4)), Ok((h(2), None)));
         assert_eq!(a.admit(PeerId(6), &host(h(2), 4)), Ok((h(2), Some(PeerId(5)))), "the newer replaces the older");
-        assert!(a.admit(PeerId(7), &host(h(2), 3)).is_err(), "a stale process");
+        assert_eq!(a.admit(PeerId(7), &host(h(2), 3)), Ok((h(2), Some(PeerId(6)))), "no registration-number check: the live row decides");
         a.gone(h(2), PeerId(5));
-        assert_eq!(a.live.get(&h(2)), Some(&PeerId(6)), "a replaced connection's end changes nothing");
-        a.gone(h(2), PeerId(6));
+        assert_eq!(a.live.get(&h(2)), Some(&PeerId(7)), "a replaced connection's end changes nothing");
+        a.gone(h(2), PeerId(7));
         assert_eq!(a.admit(PeerId(8), &host(h(2), 4)), Ok((h(2), None)));
         let unreadable: LiveRow = Box::new(|_, _| Err("down".into()));
         assert!(Admission::new(h(1), unreadable).admit(PeerId(1), &host(h(2), 1)).is_err(), "an unreadable row admits nobody");

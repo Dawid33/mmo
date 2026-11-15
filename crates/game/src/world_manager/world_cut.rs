@@ -103,6 +103,27 @@
 //! the peer's count stays, received ones inside this host's count go). Every participant,
 //! counted with or not, is recorded at `BeginCut` (`PeerJournal::cut_begun`).
 //!
+//! **Hosts outside the cut** (Elastic 1 Task 4). A host that registered after the cut began
+//! (the store recorded the begin before its id was issued: `world_store` `record_cut_begin`)
+//! is not in it and does not abort it: the decision may leave it out. It owned nothing when
+//! it registered (another host was alive), so what it may hold at T can only have come from a
+//! participant — and no participant lets that happen:
+//! - at its `BeginCut` a participant refuses its part if it exchanged a state message
+//!   (transfer, player move, intent, reply; `unsaved_traffic`) with a host outside the cut
+//!   since the last committed cut both took part in (left and succeeded hosts aside: their own
+//!   rules hold) — what that host holds may be this cut's;
+//! - from its `BeginCut` until the cut's `CutDone` a participant FREEZES its session with
+//!   every host outside the cut (one whose session is made meanwhile, `set_peer`, too):
+//!   nothing is sent or read. What it queues for such a host stays in its session and is this
+//!   part's row or record exactly as for an absent peer (`cut_peer_rows`,
+//!   `cut_peer_players`); what that host sends waits in ITS session (its own state, in no part
+//!   of this cut: it is in the next one).
+//! So nothing of the cut's state crosses to a host outside it before the decision: a restore
+//! from the cut has every entity, item and player once, and the newcomer's land — regions it
+//! claimed — is untouched by the cut (a part writes only its own regions). The journal does
+//! not truncate toward a host outside the cut (`cut_begun` names the participants only). The
+//! next cut lists the newcomer (its dirty row is read by the coordinator).
+//!
 //! **Leave cuts** (R3 Task 14). A host about to exit asks for one
 //! ([`WorldManager::request_leave`]); on the `BeginCut` naming it in `leaving` it parks every
 //! player and region (their `Stopped` answers are the cut's; nothing is woken for it any
@@ -158,6 +179,9 @@ pub(super) struct WorldCutRun {
     /// Inside [`WorldManager::begin_world_cut`]: a failure there is answered by its caller
     /// (one `CutFailed`).
     pub beginning: bool,
+    /// Hosts outside the cut whose session this host froze for it (the module docs, "Hosts
+    /// outside the cut"): thawed at its `CutDone`.
+    pub outsiders: BTreeSet<HostId>,
 }
 
 /// The cut tick must be at least this many ticks past the world tick when the host begins
@@ -250,6 +274,21 @@ impl<S: RegionSpawner> WorldManager<S> {
             return Err(CutFailure::Aborted);
         }
         let peers: BTreeSet<HostId> = all.into_iter().filter(|h| *h != me).collect();
+        // Hosts outside the cut (Elastic 1 Task 4: registered after it began). One this host
+        // exchanged state with that no committed cut of both has saved may hold some of this
+        // cut's state, which no part would write: this part is refused ("wait, never guess";
+        // the next cut lists it). Hosts that left or were succeeded have their own rules.
+        let outside = |h: &HostId| !peers.contains(h) && *h != me && !self.left_peers.contains_key(h) && !self.succeeded_peers.contains_key(h);
+        let unsaved: Vec<HostId> = self.unsaved_traffic.iter().copied().filter(|h| outside(h)).collect();
+        if !unsaved.is_empty() {
+            log::warn!(
+                "world cut {} of hosts {hosts:?}: this host exchanged state with hosts {unsaved:?}, which are not in it and \
+                 no cut has saved since: refused (the next cut takes them in)",
+                cut.0
+            );
+            return Err(CutFailure::Aborted);
+        }
+        let outsiders: BTreeSet<HostId> = self.peers.keys().copied().filter(|h| outside(h)).collect();
         // A participant this host cannot reach now would never bring its mark: the pair
         // counts instead (the fourth case), once the part is begun.
         let unreachable: Vec<HostId> = peers.iter().copied().filter(|p| !self.peer_reachable(*p)).collect();
@@ -264,10 +303,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         let marks_in: BTreeSet<HostId> = self.early_marks.iter().filter(|(p, c)| **c == cut && peers.contains(p)).map(|(p, _)| *p).collect();
         self.early_marks.retain(|_, c| *c > cut);
         self.world_cut =
-            Some(WorldCutRun { cut, tick, peers, marks_in, mark_sent: false, state: PartState::Pending, beginning: true });
+            Some(WorldCutRun { cut, tick, peers, marks_in, mark_sent: false, state: PartState::Pending, beginning: true, outsiders: BTreeSet::new() });
+        // Nothing goes to or comes from a host outside the cut until it is decided: what this
+        // host queues for one stays in its session (this part's rows, as for an absent peer),
+        // what it sent stays its own.
+        for o in outsiders {
+            self.freeze_outsider(o);
+        }
         if self.begin_cut_at(cut, tick).is_none() {
             // A dead region thread: the part failed; the caller sends the one `CutFailed`.
-            self.world_cut = None;
+            if let Some(run) = self.world_cut.take() {
+                for o in &run.outsiders {
+                    if let Some(peer) = self.peers.get_mut(o) {
+                        peer.session.thaw();
+                    }
+                }
+            }
             return Err(CutFailure::Aborted);
         }
         if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
@@ -455,6 +506,33 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.returning_owns(ordinal, owns_seen);
             }
         }
+        if committed {
+            self.forget_landless_leavers();
+        }
+    }
+
+    /// Hosts that left cleanly holding NO land — as the leave noted it (`left_land`) and as the
+    /// directory gives it now — are forgotten ([`Self::forget_host`]): no `Leave` succession
+    /// can owe an heir anything of them, and a restarted process is a new host (Elastic 1), so
+    /// nothing will ever be sent to that id again. One still holding land is kept: its
+    /// `left_land` and held session are its `Leave` succession's, which forgets it when it
+    /// settles.
+    pub(super) fn forget_landless_leavers(&mut self) {
+        let landless: Vec<HostId> = self
+            .left_peers
+            .keys()
+            .copied()
+            .filter(|o| !self.leave_pairs.contains_key(o) && !self.returning_peers.contains_key(o))
+            .filter(|o| self.left_land.get(o).is_some_and(|l| l.as_ref().is_some_and(|l| l.is_empty())))
+            .filter(|o| self.land_of(*o).is_some_and(|l| l.is_empty()))
+            .filter(|o| !self.successions.values().any(|r| r.order.predecessor == *o))
+            .collect();
+        for o in landless {
+            match self.forget_host(o) {
+                Ok(()) => log::info!("[server] host {o} left holding no land: forgotten"),
+                Err(e) => log::warn!("[server] host {o} left holding no land, but is not forgotten: {e}"),
+            }
+        }
     }
 
     /// Under `claim`: the land host `ordinal` holds as this host's directory gives it now
@@ -520,6 +598,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.release_left(o);
             }
         }
+        self.forget_landless_leavers();
     }
 
     /// Host `from`'s hello of boot `boot`: a host that left comes back as another boot —
@@ -679,7 +758,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         } else {
             self.journal.aborted(cut);
         }
+        if committed {
+            // What this host exchanged with the participants is saved by this cut.
+            self.unsaved_traffic.retain(|h| !participants.contains(h));
+        }
         if let Some(run) = self.world_cut.take_if(|r| r.cut == cut) {
+            for o in &run.outsiders {
+                if let Some(peer) = self.peers.get_mut(o) {
+                    log::info!("[server] world cut {} decided: host {o}, outside it, is reachable again", cut.0);
+                    peer.session.thaw();
+                }
+            }
             match run.state {
                 PartState::Pending => {
                     if self.pending_cut.as_ref().is_some_and(|c| c.id == cut) {
@@ -820,6 +909,36 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The other participants of world cut `id` (empty for a one-phase cut).
     pub(super) fn world_cut_peers(&self, id: CutId) -> BTreeSet<HostId> {
         self.world_cut.as_ref().filter(|r| r.cut == id).map(|r| r.peers.clone()).unwrap_or_default()
+    }
+
+    /// Host `o`, outside the pending world cut, is frozen until the cut's `CutDone`.
+    fn freeze_outsider(&mut self, o: HostId) {
+        let Some(run) = self.world_cut.as_mut() else { return };
+        if run.outsiders.insert(o) {
+            log::info!("[server] world cut {}: host {o} is not in it: nothing goes to or comes from it until it is decided", run.cut.0);
+        }
+        if let Some(peer) = self.peers.get_mut(&o) {
+            peer.session.freeze();
+        }
+    }
+
+    /// A session with host `o` is made while a world cut is pending here (`set_peer`): `true`
+    /// (it is to be frozen) when `o` is outside that cut — noted, and thawed at its `CutDone`.
+    pub(super) fn world_cut_outsider_arrived(&mut self, o: HostId) -> bool {
+        let Some(run) = self.world_cut.as_mut() else { return false };
+        if run.peers.contains(&o) || self.left_peers.contains_key(&o) || self.succeeded_peers.contains_key(&o) {
+            return false;
+        }
+        if run.outsiders.insert(o) {
+            log::info!("[server] world cut {}: host {o} joined during it: nothing goes to or comes from it until it is decided", run.cut.0);
+        }
+        true
+    }
+
+    /// Test support: the hosts outside the pending world cut this host froze for it.
+    #[doc(hidden)]
+    pub fn world_cut_outsiders(&self) -> Vec<HostId> {
+        self.world_cut.as_ref().map(|r| r.outsiders.iter().copied().collect()).unwrap_or_default()
     }
 
     /// The pending cut `id` is complete (`ready_cut`).

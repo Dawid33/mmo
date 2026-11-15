@@ -335,6 +335,49 @@ fn peer_with_a_wrong_token_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Elastic 1 Task 4: a dial with the right service token and a hello naming a host id that has
+/// no live `hosts` row (never issued, or another boot of a live id) is refused: the listener
+/// closes it and no link is made for it; a hello of a live row is admitted.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_unregistered_peer_is_refused() {
+    let Some(db) = PgDb::create("unreg") else { return };
+    let dir = scratch("unreg");
+    let (s0, l0, _c0) = fixed_host(&db, &dir, 1, TOKEN, "127.0.0.1:0");
+    let (addr, pin) = (l0.local_addr(), l0.cert_sha256().to_string());
+    let dial = |id: u64, boot: u64| {
+        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: h(id), boot, reg: id });
+        svc_link::LinkDialer::connect::<PeerMsg, PeerMsg>(addr, pin.clone(), hello)
+    };
+    // Id 41 was never issued; id 0 is host 0 itself (dialed by nobody).
+    for (id, boot) in [(41, 77), (0, 1)] {
+        let (_out, events) = dial(id, boot);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut closed = false;
+        while Instant::now() < deadline && !closed {
+            if let Ok(svc_link::LinkEvent::Down(_)) = events.recv_timeout(Duration::from_millis(50)) {
+                closed = true;
+            }
+            assert!(l0.take_arrived().is_empty(), "host {id} (no live row) was admitted");
+        }
+        assert!(closed, "the listener closed the dial of host {id}");
+    }
+    // A host registered after host 0 started (a live row, found by the admission's one read
+    // on a miss) is admitted: its link arrives.
+    let (s1, l1, _c1) = fixed_host(&db, &dir, 2, TOKEN, "127.0.0.1:0");
+    let deadline = Instant::now() + WAIT;
+    let mut arrived = Vec::new();
+    while Instant::now() < deadline && arrived.is_empty() {
+        arrived = l0.take_arrived();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(arrived.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [h(1)], "the registered host is admitted");
+    drop((arrived, l0, l1));
+    s0.shutdown();
+    s1.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The lower host restarts on another port (a new boot): Elastic 1 — the restart is a NEW host
 /// with a higher id, so it dials the host that was higher before (admitted by its live row)
 /// and is connected within 5 s, and frames flow; the old id is never dialed again.
@@ -932,7 +975,8 @@ fn dirty_restart_rolls_every_host_back_once() {
 /// A host whose `hosts` row was marked dead (a takeover declared it) learns it from its next
 /// heartbeat — the lease answers "replaced" — and its loop ends fenced within 3 s: its
 /// sessions refused, nothing more saved (its seam region's row stays as it was), nothing
-/// left prepared. The other host's cuts carry on without it: a dead row is not expected.
+/// left prepared. The other host's cuts do not commit without it (Elastic 1 Task 4): they
+/// exchanged state since their last committed cut, and no succession resolved it.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn replaced_host_exits_fenced_at_its_next_heartbeat() {
@@ -968,36 +1012,23 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     let before = saved(&db);
     assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Fenced);
     assert_eq!(saved(&db), before, "a replaced host saves nothing on its way out");
-    // Host 0's cuts go on: host 1's dead row is no longer expected in a cut.
+    // Elastic 1 Task 4: host 0's cuts do NOT go on. Host 1's dead row is no longer expected,
+    // but host 0 exchanged state with host 1 since their last committed cut, and host 1 is in
+    // none of the cuts now (marked dead by hand, under `Rollback`, with no succession — in the
+    // product only a declaration marks a row dead, and its succession makes host 1 a
+    // succeeded peer here): what crossed from host 1 may be stored in host 1's last part AND in
+    // host 0's (the R3 version of this test pinned exactly that: entities stored twice). Host 0
+    // refuses its part instead ("wait, never guess", `world_cut.rs` "Hosts outside the cut").
     let (last, _) = last_committed(&db);
-    w.pair.until("a world cut of host 0 alone committed", |_| decisions(&db).iter().any(|(c, _, k)| *k && *c > last));
-    w.pair.until("host 0 settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
-    assert_eq!(saved(&db), before, "nothing of host 1's region saved after it was replaced");
-    // Conservation, as far as this hand-made death allows. The row was marked dead by
-    // hand, under `Rollback`, with no succession: nothing adopts host 1's last committed
-    // part. (In the product only a declaration marks a row dead, in the same transaction
-    // as the succession that hands the land to an heir, and no cut commits until one
-    // settles it — the heir's part adopting those rows, the survivors' journals saying
-    // what crossed since.) So an entity that crossed from host 1 to host 0 after host 1's
-    // last committed cut is in host 0's rows now AND still in host 1's stale ones — that
-    // and nothing else: every entity stored twice is exactly one row of host 0's and one
-    // of a host 1 region never saved again (at or before host 1's last saved tick).
-    let s = w.claims[0].store().super_region_regions();
-    let owner = |rx: i64, rz: i64| {
-        let rc = RegionCoords::new(rx as i32, rz as i32);
-        fixed_owner(rc, s)
-    };
-    let host1_last = before.iter().copied().max().expect("host 1's region was saved");
-    let twice = entity_rows_stored_twice(&db);
-    for rows in twice.chunk_by(|a, b| a[..3] == b[..3]) {
-        let mut owners: Vec<HostId> = rows.iter().map(|r| owner(r[3], r[4])).collect();
-        owners.sort();
-        assert_eq!(owners, [h(0), h(1)], "an entity stored twice is one row of host 0's and one of host 1's: {twice:?}");
-        let stale = rows.iter().find(|r| owner(r[3], r[4]) == h(1)).unwrap();
-        assert!(stale[5] <= host1_last, "host 1's copy is from its last committed part (tick {host1_last}): {twice:?}");
-        let fresh = rows.iter().find(|r| owner(r[3], r[4]) == h(0)).unwrap();
-        assert!(fresh[5] > host1_last, "host 0's copy is from a cut it took alone: {twice:?}");
+    let until = Instant::now() + 6 * CUT_EVERY;
+    while Instant::now() < until {
+        w.pair.round();
+        std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(!decisions(&db).iter().any(|(c, _, k)| *k && *c > last), "no cut of host 0 alone commits beside unsaved traffic with host 1");
+    assert!(decisions(&db).iter().any(|(c, _, k)| !*k && *c > last), "host 0 refused its parts: the cuts were aborted");
+    assert_eq!(saved(&db), before, "nothing of host 1's region saved after it was replaced");
+    assert!(entity_rows_stored_twice(&db).is_empty(), "no entity stored twice");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }
@@ -1006,15 +1037,16 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
 // departed host never returns, its land and the transfers waiting for it reach a new host only
 // through a `Leave` succession, which this rig's `Rollback` coordinator never declares.
 
-/// Final review I1, Elastic 1: host 1 leaves cleanly and its process starts again — a NEW
-/// host owning nothing — while a cut of host 0 alone is pending (begun, host 0's part not
-/// staged yet). What the code does today: that cut is ABORTED (by the coordinator on the new
-/// host's attach, or by the store's decision: the new host's row is dirty and unlisted); the
-/// next cut takes host 0 and the new host and commits, and a slime of host 0's is held and
-/// stored once. (Task 4's `a_host_joining_during_a_cut_is_in_the_next_one` replaces the abort.)
+/// Final review I1, Elastic 1 Task 4 (Review Focus 4): host 1 leaves cleanly and its process
+/// starts again — a NEW host owning nothing — while a cut of host 0 alone is pending (begun and
+/// its begin recorded in the store, host 0's part not decided). The cut is NOT aborted: host 0
+/// freezes its session with the newcomer until the decision (`world_cut.rs`, "Hosts outside the
+/// cut"), the coordinator lets the attach pass, and the store lets the decision leave out a host
+/// registered after the recorded begin. It commits with host 0's part only; the next cut takes
+/// host 0 and the new host and commits; a slime of host 0's is held and stored once.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_new_host_registering_beside_a_cut_that_excludes_it_aborts_that_cut() {
+fn a_new_host_registering_beside_a_cut_that_excludes_it_is_in_the_next_cut() {
     install_props();
     let Some(db) = PgDb::create("lback") else { return };
     let dir = scratch("lback");
@@ -1025,18 +1057,24 @@ fn a_new_host_registering_beside_a_cut_that_excludes_it_aborts_that_cut() {
     assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [1]);
     let a0 = seam_of(&w, h(0));
     let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
-    // A cut of host 0 alone begins; nothing of host 0 runs from here until host 1 is back.
+    // A cut of host 0 alone begins, and the coordinator records its begin.
     let cut = until_part(&mut w, 0, &["pending", "marked"]);
     assert_eq!(decision_of(&db, cut), None);
-    // Elastic 1: host 1's process starts again as a NEW host (owning nothing) while the cut of
-    // host 0 alone is pending. Today that cut is ABORTED: the decision lists every live dirty
-    // row, and the new host's is not in it (Task 4: a host joining mid-cut is in the next cut).
+    let begun = format!("SELECT COUNT(*) FROM cut_begins WHERE cut_id = {}", cut.0);
+    w.pair.until("the cut's begin is recorded", |_| query_i64s(&db, &begun) == [1]);
+    // Host 1's process starts again as a NEW host while the cut is pending.
     let again = restart_host(&mut w, &db, &dir, h(1), 3001);
     assert_eq!((again.generation, again.bumped), (generation, false), "a new host: the generation kept");
+    assert!(query_i64s(&db, &format!("SELECT hosts_below FROM cut_begins WHERE cut_id = {}", cut.0))[0] <= again.id.0 as i64);
     w.pair.until("the cut that excludes the new host is decided", |_| decision_of(&db, cut).is_some());
-    assert_eq!(decision_of(&db, cut), Some(false), "the cut of host 0 alone is aborted");
+    assert_eq!(decision_of(&db, cut), Some(true), "the cut of host 0 alone commits beside the newcomer");
     w.pair.until("the new host attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
     w.until_committed_after(&db, cut.0 as i64);
+    let last: Vec<i64> = query_i64s(&db, "SELECT MAX(cut_id) FROM cut_decisions WHERE committed = 1");
+    assert!(last[0] > cut.0 as i64, "a later cut committed");
+    w.pair.until("the new host took part in a later committed cut", |p| {
+        p.sims.iter().any(|s| s.ordinal == again.id && s.manager.peer_journal().base() > cut)
+    });
     assert_eq!(holders_all(&mut w, id).len(), 1, "held once: {:?}", holders_all(&mut w, id));
     let (birth, serial) = (id.birth_region, id.serial);
     let stored = query_i64s(
@@ -1070,7 +1108,7 @@ fn role_all_on_postgres_resolves_an_orphan_part_before_its_claim() {
     assert_eq!(prepared(&db), 1);
     // Role `all` on the same world.
     let all = db.open();
-    server::roles::resolve_before_claim(true, &all).expect("the start-up resolves staged parts");
+    server::roles::resolve_before_claim(true, &all, "").expect("the start-up resolves staged parts");
     let (tx, rx) = crossbeam::channel::bounded(1);
     let claimer = {
         let all = all.clone();

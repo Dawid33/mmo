@@ -207,6 +207,12 @@ impl StoreHandle {
         self.cuts.host_lease_ms.store(ms, Ordering::SeqCst);
     }
 
+    /// The host lease (ms) this handle judges `hosts` rows by ([`game::HOST_LEASE_MS`] unless a
+    /// test shortened it, [`Self::set_host_lease_ms`]).
+    pub fn host_lease_ms(&self) -> u64 {
+        self.cuts.host_lease_ms.load(Ordering::SeqCst)
+    }
+
     /// Test hook: the `lock_timeout` of this handle's later cut transactions, in ms
     /// (default [`crate::CUT_LOCK_TIMEOUT_MS`]). Shared by every clone.
     #[doc(hidden)]
@@ -578,6 +584,19 @@ impl StoreHandle {
         let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
         let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after };
         self.ask_later(|r| Request::DecideCut(Box::new(d), r))
+    }
+
+    /// The coordinator records that world cut `cut` began (Elastic 1 Task 4): the bound under
+    /// which every host id was issued before now. A host whose id is at or above it may be
+    /// absent from the cut's decision ([`Self::decide_cut`]). Fenced on the coordinator's
+    /// epoch; first writer wins. Postgres only.
+    pub fn record_cut_begin(&self, cut: CutId, fence: CoordinatorFence) -> Result<HostId, StoreError> {
+        self.ask(|r| Request::RecordCutBegin(cut, fence, r))
+    }
+
+    /// [`Self::record_cut_begin`], answered on the receiver.
+    pub fn record_cut_begin_later(&self, cut: CutId, fence: CoordinatorFence) -> crossbeam::channel::Receiver<Result<HostId, StoreError>> {
+        self.ask_later(|r| Request::RecordCutBegin(cut, fence, r))
     }
 
     /// A host's "abort unless decided": records an abort of `cut` if it has no

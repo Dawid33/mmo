@@ -363,6 +363,11 @@ pub struct MultiRig {
     pub land_on_demand: bool,
     /// The successions [`Self::drive_land`] declared, in order.
     pub land_declared: Vec<game::Succession>,
+    /// The rig store's `cut_begins` (Elastic 1 Task 4): per world cut, the next host id when
+    /// its begin was recorded ([`Self::drive_world_cuts`], as the coordinator runtime records
+    /// it). A host at or above it registered after the cut began and may be absent from its
+    /// decision ([`Self::decide_settling`]).
+    pub begins: BTreeMap<CutId, u64>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -483,6 +488,7 @@ impl MultiRig {
                 left: BTreeMap::new(),
                 land_on_demand: false,
                 land_declared: Vec::new(),
+                begins: BTreeMap::new(),
             };
         for h in host_ids(keepers) {
             rig.keep(h);
@@ -638,6 +644,12 @@ impl MultiRig {
     /// undecided cut aborted).
     pub fn drive_world_cuts(&mut self) {
         let Some(core) = self.coordinator.clone() else { return };
+        // The runtime records each cut's begin (`record_cut_begin`): the next id to issue.
+        let running = core.lock().unwrap_or_else(|e| e.into_inner()).world_cut_running();
+        if let Some((cut, _)) = running {
+            let next = self.hosts.len() as u64;
+            self.begins.entry(cut).or_insert(next);
+        }
         for h in host_ids(self.hosts.len() as u32) {
             let m = &mut self.hosts[h.0 as usize].manager;
             // Only a world cut's part (a test's one-phase cut stays for the test to take).
@@ -749,7 +761,14 @@ impl MultiRig {
         let listed: BTreeSet<HostId> = hosts.iter().copied().collect();
         let open = self.open_successions();
         let named: BTreeSet<game::SuccessionId> = settles.iter().copied().collect();
-        let stored = commit && staged == listed && open == named;
+        // As `decide_cut`: every live host whose row is dirty is listed — but one registered
+        // after the cut's begin was recorded (`begins`).
+        let bound = self.begins.get(&cut).copied();
+        let unlisted: Vec<HostId> = host_ids(self.hosts.len() as u32)
+            .filter(|h| !self.dead.contains(h) && self.left.get(h) != Some(&self.boots[h.0 as usize]))
+            .filter(|h| !listed.contains(h) && bound.is_none_or(|b| h.0 < b))
+            .collect();
+        let stored = commit && unlisted.is_empty() && staged == listed && open == named;
         if stored && self.adopting {
             // The pairing the store does not check (Task 9): the heir's part of a cut that
             // settles a succession adopts its predecessor.
@@ -1594,7 +1613,7 @@ impl MultiRig {
     }
 
     /// Host `h`'s keeper: a client whose body stands in the middle of its home region.
-    fn keep(&mut self, h: HostId) {
+    pub fn keep(&mut self, h: HostId) {
         let home = self.homes[h.0 as usize];
         let y = super::standing_y(super::FLOOR_TOP);
         let record = PlayerRecord {

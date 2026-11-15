@@ -771,6 +771,9 @@ pub struct CoordinatorRuntime {
     hosts_rx: Option<(u64, Answer<Vec<world_store::HostRow>>)>,
     /// The decision being recorded (one at a time: the core runs one cut at a time).
     recording: Option<Recording>,
+    /// The world cut whose begin was last sent to the store (`record_cut_begin`, Elastic 1
+    /// Task 4), and its answer while it is on its way.
+    begin_recorded: Option<(game::CutId, Option<Answer<HostId>>)>,
     /// Lookups of cut outcomes in flight or waiting to be tried again.
     lookups: Vec<Lookup>,
     /// `now_ms` of the last warning about a failing world-cut store call.
@@ -869,6 +872,7 @@ impl CoordinatorRuntime {
             hosts_read_ms: None,
             hosts_rx: None,
             recording: None,
+            begin_recorded: None,
             lookups: Vec::new(),
             warned_ms: None,
             successions,
@@ -1166,6 +1170,31 @@ impl CoordinatorRuntime {
     fn pump_cuts(&mut self, now: u64) -> Result<(), ()> {
         if self.cuts.is_none() {
             return Ok(());
+        }
+        // Every cut's begin is recorded in the store (Elastic 1 Task 4): the decision may then
+        // leave out a host registered after it (it owned nothing at the cut's tick, and the
+        // participants froze their sessions with it). Not waited for: a decision taken before
+        // the record lands lists every dirty host, as before — safe, a newcomer then aborts it.
+        if let Some((cut, _)) = self.core.world_cut_running() {
+            if self.begin_recorded.as_ref().is_none_or(|(c, _)| *c != cut) {
+                self.begin_recorded = Some((cut, Some(self.store.record_cut_begin_later(cut, self.fence))));
+            }
+        }
+        if let Some((cut, Some(rx))) = self.begin_recorded.as_mut() {
+            let cut = *cut;
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Ok(Ok(bound)) => {
+                    log::debug!("[coordinator] world cut {}: begin recorded (hosts below {bound} must take part)", cut.0);
+                    self.begin_recorded = Some((cut, None));
+                }
+                Ok(Err(StoreError::Fenced { .. })) => return Err(()),
+                Ok(Err(e)) => {
+                    self.begin_recorded = Some((cut, None));
+                    self.warn_cuts(now, &format!("world cut {}: its begin could not be recorded ({e}); a host joining during it aborts it", cut.0));
+                }
+                Err(TryRecvError::Disconnected) => self.begin_recorded = Some((cut, None)),
+            }
         }
         if self.recording.is_none() {
             if let Some(d) = self.core.take_decision() {

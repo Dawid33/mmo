@@ -416,8 +416,10 @@ impl DirectoryRead {
         DirectoryRead { owners: store.owners_later(), hosts: store.hosts_later(), now: store.db_now_ms_later(), got: (None, None, None) }
     }
 
-    /// The read's rows and live hosts once all three answered; an error as soon as one fails.
-    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>), StoreError>> {
+    /// The read's rows, live hosts and `hosts` rows once all three answered; an error as soon
+    /// as one fails.
+    #[allow(clippy::type_complexity)]
+    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, Vec<HostRow>), StoreError>> {
         fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
             if slot.is_none() {
                 match rx.try_recv() {
@@ -435,7 +437,7 @@ impl DirectoryRead {
         match &mut self.got {
             (rows @ Some(_), hosts @ Some(_), Some(now)) => {
                 let live = live_hosts(hosts.as_ref().expect("matched"), *now);
-                Some(Ok((rows.take().expect("matched"), live)))
+                Some(Ok((rows.take().expect("matched"), live, hosts.take().expect("matched"))))
             }
             _ => None,
         }
@@ -471,6 +473,9 @@ pub struct DirectoryKeeper {
     read_wanted: bool,
     next_read: Instant,
     warned: Option<Instant>,
+    /// The `hosts` rows of the latest directory read, until taken ([`Self::take_hosts_read`]:
+    /// the peer links' discovery, Elastic 1 Task 4).
+    hosts_read: Option<Vec<HostRow>>,
 }
 
 /// What the [`DirectoryKeeper`] asks of the manager (a trait so a test can play it).
@@ -512,7 +517,15 @@ impl DirectoryKeeper {
             read_wanted: false,
             next_read,
             warned: None,
+            hosts_read: None,
         }
+    }
+
+    /// The `hosts` rows the latest directory read brought (each read once): what the peer links
+    /// discover hosts from ([`crate::peer_link::PeerLinks::refresh`]) — the same read, every
+    /// [`world_store::TERRAIN_POLL_SECS`] or when the manager wants one, never a read of its own.
+    pub fn take_hosts_read(&mut self) -> Option<Vec<HostRow>> {
+        self.hosts_read.take()
     }
 
     fn warn(&mut self, what: &str) {
@@ -574,8 +587,9 @@ impl DirectoryKeeper {
             if let Some(answer) = read.poll() {
                 self.reading = None;
                 match answer {
-                    Ok((rows, live)) => {
+                    Ok((rows, live, hosts)) => {
                         manager.directory_read(rows, live);
+                        self.hosts_read = Some(hosts);
                         if self.claims_wait_for_read.is_some_and(|after| n > after) {
                             self.claims_wait_for_read = None;
                         }

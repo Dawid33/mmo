@@ -767,7 +767,6 @@ pub fn run() -> claims::ServerExit {
     // world cuts, the login relay and observer sessions. A `static` host is alone (the store
     // refuses a second one beside a live row).
     let claim_on_demand = crash_policy == game::CrashPolicy::Succession;
-    let several = claim_on_demand;
     // This host's name (`VOXEL_HOST_NAME`, default empty): labels, file names, `hosts.name`.
     let host_name = match role {
         roles::Role::Host => std::env::var(HOST_NAME_ENV).unwrap_or_default().trim().to_string(),
@@ -831,7 +830,7 @@ pub fn run() -> claims::ServerExit {
     // crash left staged are finished first, whatever hosts staged them (a `claim` host: and
     // two-phase commit must be available).
     if let Some(store) = &store {
-        roles::resolve_before_claim(postgres, store).unwrap_or_else(|e| fatal(&e));
+        roles::resolve_before_claim(postgres, store, &host_name).unwrap_or_else(|e| fatal(&e));
         roles::check_two_phase(crash_policy, store).unwrap_or_else(|e| fatal(&e));
     }
     // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main loop like a last
@@ -849,7 +848,7 @@ pub fn run() -> claims::ServerExit {
     let mut peer_listener: Option<peer_link::PeerListener> = None;
     let host_id = match (&store, role) {
         (Some(store), roles::Role::Host) => {
-            if several {
+            if claim_on_demand {
                 let config = peer_link::PeerLinkConfig::from_env(&host_name).unwrap_or_else(|e| fatal(&e));
                 let token =
                     svc_link::service_token_from_env().unwrap_or_else(|e| fatal(&format!("the service link's token: {e}")));
@@ -894,7 +893,7 @@ pub fn run() -> claims::ServerExit {
     // `claim`: the login service is linked to one host, the entry host (Elastic 1 interim,
     // until the coordinator relays logins: the lowest live id at this host's start); every
     // host relays its spawn orders and kicks to the host holding the player (`login_link`).
-    let entry_host = match (&store, several) {
+    let entry_host = match (&store, claim_on_demand) {
         (Some(store), true) => Some(login_link::entry_host_of(store, host_id).unwrap_or_else(|e| fatal(&e))),
         _ => None,
     };
@@ -913,7 +912,7 @@ pub fn run() -> claims::ServerExit {
     }
     // Several hosts: a client another host sends here (`RegionElsewhere`) connects with the
     // ticket that host vouched for; the main loop records its orders.
-    let observer_orders = several.then(|| Arc::new(auth_edge::ObserverOrders::new(auth_edge::system_clock())));
+    let observer_orders = claim_on_demand.then(|| Arc::new(auth_edge::ObserverOrders::new(auth_edge::system_clock())));
     if let Some(orders) = &observer_orders {
         authenticator = authenticator.with_observer_orders(orders.clone());
     }
@@ -1142,13 +1141,12 @@ pub fn run() -> claims::ServerExit {
         lod_builder,
         lod_result_recv,
     );
-    let host_ordinal = host_id;
     manager.set_ownership(ownership, super_region_regions);
     // `claim`: the directory read whole before anything is placed or restored (until then
     // every owner is `Unknown`), and the loop's claim keeper.
     let mut directory_keeper = None;
     if let Some(claims) = claims.as_ref().filter(|_| claim_on_demand) {
-        let (rows, live) = claims::read_directory(claims.store(), host_ordinal)
+        let (rows, live) = claims::read_directory(claims.store(), host_id)
             .unwrap_or_else(|e| fatal(&format!("reading the ownership directory: {e}")));
         info!("[server] ownership directory: {} super-regions, live hosts {live:?}", rows.len());
         manager.directory_read(rows, live);
@@ -1158,7 +1156,7 @@ pub fn run() -> claims::ServerExit {
     // `claim` with several hosts: an heir's adoption reads (R4, a succession) — what it
     // inherits, read on the store thread while this loop (and its heartbeat) runs on.
     let mut adoption_reader =
-        claims.as_ref().filter(|_| several).map(|claims| claims::AdoptionReader::new(claims.clone()));
+        claims.as_ref().filter(|_| claim_on_demand).map(|claims| claims::AdoptionReader::new(claims.clone()));
     manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {
         manager.set_entry_host(entry);
@@ -1183,7 +1181,7 @@ pub fn run() -> claims::ServerExit {
         // Before any placement: the hosts that left cleanly hold nobody (a spawn order does
         // not wait for them). A read that fails leaves every host expected (orders wait).
         if let Some(store) = &store {
-            match peer_link::left_cleanly(store, host_ordinal) {
+            match peer_link::left_cleanly(store, host_id) {
                 Ok(left) => manager.note_left_peers(left),
                 Err(e) => log::warn!("[server] reading which hosts left cleanly: {e}; every host is awaited"),
             }
@@ -1246,7 +1244,7 @@ pub fn run() -> claims::ServerExit {
         lease::beat_at_boot(&mut heartbeat, "reading the stored regions and what was in flight");
         // Several hosts: the coordinator picks every cut (a world cut, staged and decided
         // together); one host cuts on its own (the one-phase cut).
-        if several {
+        if claim_on_demand {
             cuts::CutWriter::with_world_cuts(claims, world_generation.clone())
         } else {
             cuts::CutWriter::new(claims)
@@ -1255,7 +1253,7 @@ pub fn run() -> claims::ServerExit {
 
     // Several hosts: other hosts' saves re-seed the halos of their parked regions next to
     // this host's (`VOXEL_TERRAIN_NOTIFY`, `VOXEL_WORLD_DB_DIRECT`; one host: nothing to learn).
-    let mut terrain_watch = match (&cuts, several) {
+    let mut terrain_watch = match (&cuts, claim_on_demand) {
         (Some(cuts), true) => {
             let mode = world_store::NotifyMode::from_env().unwrap_or_else(|e| fatal(&e));
             info!("[server] stored terrain of other hosts: {mode:?} (a resync every {} s)", world_store::TERRAIN_POLL_SECS);
@@ -1332,8 +1330,7 @@ pub fn run() -> claims::ServerExit {
         if lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now()) {
             break 'main;
         }
-        // A newer host dialed in: its session, over the link made for it (Elastic 1 Task 4
-        // replaces this with discovery from the `hosts` rows).
+        // A newer host dialed in: its session, over the link made for it.
         if let Some(links) = &peer_links {
             for (other, link) in links.take_arrived() {
                 info!("[server] host {other} joined: a peer session with it");
@@ -1344,6 +1341,15 @@ pub fn run() -> claims::ServerExit {
         // `claim`: claims the manager wants, directory reads (never blocks).
         if let Some(keeper) = directory_keeper.as_mut() {
             keeper.pump(&mut manager);
+            // The `hosts` rows that read brought: an older host found since is dialed, and the
+            // admission answers from them (Elastic 1 Task 4 — the directory's own period,
+            // `world_store::TERRAIN_POLL_SECS`, or sooner when the manager wants a read).
+            if let (Some(rows), Some(links)) = (keeper.take_hosts_read(), peer_links.as_mut()) {
+                for (other, link) in links.refresh(&rows) {
+                    info!("[server] host {other} found in the hosts table: a peer session with it");
+                    manager.set_peer(other, game::PeerSession::new(peer_hello(), other), link);
+                }
+            }
         }
         // An heir: the store's half of an adoption (never blocks; `Fenced` sets the flag).
         if let Some(reader) = adoption_reader.as_mut() {

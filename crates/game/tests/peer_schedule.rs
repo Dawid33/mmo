@@ -8309,7 +8309,7 @@ fn leaver_back_at_its_declaration(rig: &mut MultiRig, hello_first: bool) {
     let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
     if hello_first {
-        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[back.0 as usize].manager.peer_is_reachable(s)), "the new host is linked to S");
+        assert!(until(rig, CROSS_ROUNDS, |rig| linked_or_outside(rig, back, s)), "the new host is linked to S (or S froze it, outside S's pending cut)");
         for _ in 0..WAIT_ROUNDS {
             rig.round();
         }
@@ -8390,9 +8390,12 @@ fn ownerless_returns(rig: &mut MultiRig) {
     assert!(until_decided(rig, cut), "the leave cut commits");
     let others: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| *h != leaver).collect();
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[(*h).0 as usize].manager.peer_left(leaver))),
-        "every other host holds its session"
+        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[(*h).0 as usize].manager.is_forgotten(leaver))),
+        "every other host forgot the leaver (Elastic 1 Task 4: it left holding no land)"
     );
+    for h in &others {
+        assert_eq!(rig.hosts[h.0 as usize].manager.mentions(leaver), Vec::<&str>::new(), "host {h} still mentions the leaver");
+    }
     rig.kill(leaver);
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
@@ -8401,8 +8404,8 @@ fn ownerless_returns(rig: &mut MultiRig) {
     let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[(*h).0 as usize].manager.peer_is_reachable(back))),
-        "every survivor reaches the new host (seed {}, link delay {})",
+        until_cut_rounds(rig, WORLD_CUT_ROUNDS, |rig| others.iter().all(|h| rig.hosts[(*h).0 as usize].manager.peer_is_reachable(back))),
+        "every survivor reaches the new host — once a cut it may have started beside is decided (seed {}, link delay {})",
         rig.seed,
         rig.link_delay
     );
@@ -8512,7 +8515,7 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
     let back = rig.start("L");
     let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[back.0 as usize].manager.peer_is_reachable(s)), "the new host is linked to S");
+    assert!(until(rig, CROSS_ROUNDS, |rig| linked_or_outside(rig, back, s)), "the new host is linked to S (or S froze it, outside S's pending cut)");
     for _ in 0..WAIT_ROUNDS {
         rig.round();
         if !hello_first {
@@ -8603,7 +8606,7 @@ fn back_before_the_late_cut_done(rig: &mut MultiRig) {
     let back = rig.start("L");
     let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[back.0 as usize].manager.peer_is_reachable(s)), "the new host is linked to S");
+    assert!(until(rig, CROSS_ROUNDS, |rig| linked_or_outside(rig, back, s)), "the new host is linked to S (or S froze it, outside S's pending cut)");
     for _ in 0..WAIT_ROUNDS {
         rig.round();
         assert!(!rig.owners_of(id).iter().any(|(h, _)| *h == back), "nothing held for the left id goes to the new host");
@@ -9040,4 +9043,182 @@ fn heir_applies_late(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn an_observer_subscribe_reaching_the_heir_early_waits_for_its_adoption() {
     sweep("an_observer_subscribe_reaching_the_heir_early_waits_for_its_adoption", 3, 1, SEEDS / 4, heir_applies_late);
+}
+
+// --- Elastic 1 Task 4: peers come and go -------------------------------------------------
+
+/// Cut rounds (at most `budget`) until `done`; whether it came.
+fn until_cut_rounds(rig: &mut MultiRig, budget: usize, mut done: impl FnMut(&mut MultiRig) -> bool) -> bool {
+    for _ in 0..budget {
+        rig.cut_round();
+        if done(rig) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Host `new`'s session with `s` is up — or `s` froze it, `new` being outside a world cut
+/// pending on `s` (`world_cut.rs`, "Hosts outside the cut": reachable once it is decided).
+fn linked_or_outside(rig: &MultiRig, new: HostId, s: HostId) -> bool {
+    rig.hosts[new.0 as usize].manager.peer_is_reachable(s) || rig.hosts[s.0 as usize].manager.world_cut_outsiders().contains(&new)
+}
+
+/// A region next to `rc` that is none of `chain`'s.
+fn beside_chain(rc: RegionCoords, chain: &[RegionCoords]) -> RegionCoords {
+    [(-1, 0), (0, -1), (0, 1), (1, 0)]
+        .into_iter()
+        .map(|(dx, dz)| RegionCoords::new(rc.x + dx, rc.z + dz))
+        .find(|n| !chain.contains(n))
+        .expect("a free side")
+}
+
+/// The rig's `super_regions` row of `rc` goes to host `to` (a claim's outcome, at the next
+/// epoch); every live host reads the directory again.
+fn give_land(rig: &mut MultiRig, rc: RegionCoords, to: HostId) {
+    let sr = sr_of(rig, rc);
+    let store = rig.claim_store.as_mut().expect("claims");
+    let epoch = store.get(&sr).map_or(0, |(_, e)| *e) + 1;
+    store.insert(sr, (Some(to), epoch));
+    let live: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    for h in live {
+        rig.read_directory(h);
+    }
+}
+
+/// Every live host the coordinator expects in its cuts (their rows as read).
+fn expect_live(rig: &mut MultiRig) {
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    rig.core().set_expected_hosts(live);
+}
+
+/// Cut rounds until a world cut with exactly `hosts`' parts committed after `before`.
+fn until_cut_of(rig: &mut MultiRig, before: game::CutId, hosts: &[HostId]) -> game::CutId {
+    let want: std::collections::BTreeSet<HostId> = hosts.iter().copied().collect();
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if let Some((cut, parts)) = &rig.last_cut {
+            if *cut > before && parts.keys().copied().collect::<std::collections::BTreeSet<_>>() == want {
+                return *cut;
+            }
+        }
+        rig.cut_round();
+    }
+    panic!("no cut of {hosts:?} committed after {}: {:?} (seed {}, link delay {})", before.0, rig.decided, rig.seed, rig.link_delay);
+}
+
+/// A third host starts beside two running ones (Elastic 1: issued a new id, owning nothing):
+/// once linked, every pair of hosts reaches each other; a slime of A's walks into land the
+/// rig's store gives the new host, lands there once, and the next world cut has three parts —
+/// the slime stored once, once in the world restarted from it.
+fn third_host_joins(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let ra = chain[0];
+    let a = rig.owner(ra);
+    let id = slime_in(rig, ra, 0);
+    until_committed(rig, 1);
+    let c = rig.start("c");
+    expect_live(rig);
+    let live: Vec<HostId> = host_ids(rig.hosts.len() as u32).collect();
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| live.iter().all(|x| live.iter().all(|y| x == y || r.hosts[x.0 as usize].manager.peer_is_reachable(*y)))),
+        "every pair of hosts reaches each other (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    let n = beside_chain(ra, &chain);
+    give_land(rig, n, c);
+    // A player of the new host stands in its land: the region runs there.
+    rig.homes[c.0 as usize] = n;
+    rig.keep(c);
+    assert!(cross_to(rig, id, ra, (c, n)), "the slime reached the new host's land: {:?}", rig.owners_of(id));
+    let before = rig.last_committed().0;
+    let mut all = live.clone();
+    all.sort();
+    until_cut_of(rig, before, &all);
+    assert_eq!(live_count(rig, id), 1, "live once");
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+    assert_restored_once(rig, &[id]);
+    assert!(rig.hosts[a.0 as usize].manager.peer_is_reachable(c));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_third_host_joins_two_running_hosts() {
+    sweep("a_third_host_joins_two_running_hosts", 2, 1, SEEDS / 4, third_host_joins);
+}
+
+/// A host registers and attaches while a world cut of A and B is pending (Elastic 1 Task 4,
+/// Review Focus 4): the cut is NOT aborted — A and B froze their sessions with the newcomer
+/// for it — and commits with A's and B's parts only; the newcomer is reachable once it is
+/// decided and takes part in the next cut (three parts). A slime of A's crosses into the
+/// newcomer's land between the two cuts: it is once in the world restarted from each cut, and
+/// live once.
+fn join_during_a_cut(rig: &mut MultiRig) {
+    let chain = succession_world(rig);
+    let ra = chain[0];
+    let (a, b) = (rig.owner(ra), rig.owner(chain[1]));
+    let id = slime_in(rig, ra, 0);
+    until_committed(rig, 1);
+    let (cut, _) = until_world_cut_on(rig, a);
+    assert_eq!(rig.hosts[b.0 as usize].manager.world_cut(), Some(cut), "B takes part in it too");
+    let c = rig.start("c");
+    for h in [a, b] {
+        assert_eq!(rig.hosts[h.0 as usize].manager.world_cut_outsiders(), [c], "host {h} froze its session with the newcomer");
+        assert!(!rig.hosts[h.0 as usize].manager.peer_is_reachable(c));
+    }
+    assert!(until_decided(rig, cut), "the cut of A and B commits beside the newcomer (seed {}, link delay {})", rig.seed, rig.link_delay);
+    let (_, parts) = rig.last_committed();
+    assert_eq!(parts.keys().copied().collect::<Vec<_>>(), [a, b], "parts of A and B only");
+    assert_restored_once(rig, &[id]);
+    expect_live(rig);
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| [a, b].iter().all(|h| r.hosts[h.0 as usize].manager.peer_is_reachable(c) && r.hosts[c.0 as usize].manager.peer_is_reachable(*h))),
+        "the newcomer is reachable once the cut is decided (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    let n = beside_chain(ra, &chain);
+    give_land(rig, n, c);
+    // A player of the new host stands in its land: the region runs there.
+    rig.homes[c.0 as usize] = n;
+    rig.keep(c);
+    assert!(cross_to(rig, id, ra, (c, n)), "the slime reached the newcomer's land: {:?}", rig.owners_of(id));
+    let mut all = vec![a, b, c];
+    all.sort();
+    until_cut_of(rig, cut, &all);
+    assert_eq!(live_count(rig, id), 1, "live once");
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+    assert_restored_once(rig, &[id]);
+    rig.assert_journals_explain_the_cut();
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_joining_during_a_cut_is_in_the_next_one() {
+    sweep("a_host_joining_during_a_cut_is_in_the_next_one", 2, 1, SEEDS / 4, join_during_a_cut);
+}
+
+/// After a settled succession of a dead host, nothing of it is left on any live host: every
+/// per-host field of the manager forgets it (`WorldManager::mentions`, generated from the same
+/// field list as `forget_host`), and it is never linked or written to again.
+fn forgotten_leaves_no_trace(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let dead = rig.owner(rd);
+    let id = slime_in(rig, rs, 0);
+    until_committed(rig, 1);
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    assert_settled_whole(rig, &succession, &[id]);
+    for h in host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)) {
+        let m = &rig.hosts[h.0 as usize].manager;
+        assert_eq!(m.mentions(dead), Vec::<&str>::new(), "host {h} still mentions host {dead} (seed {}, link delay {})", rig.seed, rig.link_delay);
+        assert!(m.is_forgotten(dead), "host {h} forgot host {dead}");
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_forgotten_host_leaves_no_trace() {
+    sweep_hosts("a_forgotten_host_leaves_no_trace", forgotten_leaves_no_trace);
 }

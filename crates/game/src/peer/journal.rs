@@ -109,6 +109,10 @@ pub struct PeerJournal {
     /// ([`Self::cut_begun`]): whichever path reports the commit, it truncates toward them.
     cuts: BTreeMap<CutId, BTreeSet<HostId>>,
     base: CutId,
+    /// Peers whose entries were taken for a succession report ([`Self::take`]), with the base
+    /// the journal counted from then: the report is read until a cut after it commits (the
+    /// succession's settle cut), so the peer is not forgotten before ([`Self::forget`]).
+    taken: BTreeMap<HostId, CutId>,
     /// Test support: the marks the last truncating commit read, per peer `(out, in)`.
     last_marks: Option<(CutId, BTreeMap<HostId, (Option<u64>, Option<u64>)>)>,
     /// Test support: the pairs the last truncating commit read by counts.
@@ -129,7 +133,7 @@ impl PeerJournal {
     /// An empty journal from committed cut `base` (at boot: the store's last committed
     /// cut, `CutId(0)` before any).
     pub fn new(base: CutId) -> Self {
-        Self { peers: BTreeMap::new(), cuts: BTreeMap::new(), base, last_marks: None, last_counted: None }
+        Self { peers: BTreeMap::new(), cuts: BTreeMap::new(), base, taken: BTreeMap::new(), last_marks: None, last_counted: None }
     }
 
     /// This host takes part in world cut `cut` with `participants` (the other hosts of it):
@@ -258,9 +262,50 @@ impl PeerJournal {
         }
     }
 
-    /// Every entry with `peer`, in order; the journal forgets that peer.
+    /// Every entry with `peer`, in order (a succession's report); the journal drops them and
+    /// remembers the base it counted from, so the peer is forgotten ([`Self::forget`]) only
+    /// once a later cut — the succession's settle — committed.
     pub fn take(&mut self, peer: HostId) -> Vec<JournalEntry> {
+        self.taken.insert(peer, self.base);
         self.peers.remove(&peer).map(|log| log.rows.into_iter().map(|r| r.entry).collect()).unwrap_or_default()
+    }
+
+    /// The journal forgets `peer` for good (a dead or departed host the manager forgets,
+    /// `WorldManager::forget_host`): its marks, counts and every trace of it. Refused while
+    /// anything of it is still needed — entries not reported or explained by a cut (a
+    /// succession reads them), a report taken against a base no later cut has committed past
+    /// yet (the settle cut is the one that makes it unnecessary), or a cut not decided yet
+    /// that it takes part in. A peer never journalled is forgotten at once.
+    pub fn forget(&mut self, peer: HostId) -> Result<(), ForgetRefused> {
+        let rows = self.peers.get(&peer).map_or(0, |log| log.rows.len());
+        if rows > 0 {
+            return Err(ForgetRefused { peer, why: format!("{rows} journal entries with it are not reported or saved") });
+        }
+        if let Some(&at) = self.taken.get(&peer).filter(|at| **at >= self.base) {
+            return Err(ForgetRefused {
+                peer,
+                why: format!("its report was taken against cut {} and no later cut has committed (the settle cut)", at.0),
+            });
+        }
+        if let Some((cut, _)) = self.cuts.iter().find(|(_, p)| p.contains(&peer)) {
+            return Err(ForgetRefused { peer, why: format!("world cut {} with it is not decided", cut.0) });
+        }
+        self.peers.remove(&peer);
+        self.taken.remove(&peer);
+        if let Some((_, read)) = self.last_marks.as_mut() {
+            read.remove(&peer);
+        }
+        if let Some((_, read)) = self.last_counted.as_mut() {
+            read.remove(&peer);
+        }
+        Ok(())
+    }
+
+    /// Whether the journal holds anything of `peer` (entries, marks, counts, a report taken).
+    pub fn mentions(&self, peer: HostId) -> bool {
+        self.peers.contains_key(&peer)
+            || self.taken.contains_key(&peer)
+            || self.cuts.values().any(|p| p.contains(&peer))
     }
 
     /// The entries with `peer`, in order, each with its queue id (a sent entry's id among
@@ -299,6 +344,21 @@ impl PeerJournal {
         self.len() == 0
     }
 }
+
+/// Why [`PeerJournal::forget`] refused to forget a peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgetRefused {
+    pub peer: HostId,
+    pub why: String,
+}
+
+impl std::fmt::Display for ForgetRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the peer journal still needs host {}: {}", self.peer, self.why)
+    }
+}
+
+impl std::error::Error for ForgetRefused {}
 
 /// `msg` without its [`Reliable::InCut`] wrapper (its cut becomes `accounted`).
 fn unwrap(msg: &Reliable, accounted: Option<CutId>) -> (&Reliable, Option<CutId>) {

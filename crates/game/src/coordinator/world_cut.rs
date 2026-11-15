@@ -16,6 +16,11 @@
 //! until they come back: an `Attach` of another boot, or a `hosts` row of another boot
 //! ([`Coordinator::set_host_boots`]). An aborted leave cut forgets the requests (those hosts
 //! exit without a cut: the world rolls back to the last cut when they return).
+//!
+//! **A host joining during a cut (Elastic 1 Task 4).** A host that attaches while a cut it is
+//! not in runs does not abort it; the runtime records each cut's begin in the store
+//! ([`Coordinator::world_cut_running`] → `record_cut_begin`), so the decision may leave out a
+//! host registered after it. The next cut lists the newcomer (its dirty row is read).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -404,11 +409,15 @@ impl Coordinator {
         self.cuts.lead
     }
 
-    /// An `Attach` of `host`: it is attached; a cut not decided yet is aborted — one it
-    /// takes part in (its link dropped: messages of the cut may be lost), and one it does
-    /// not (a host arriving makes the cut's participants stale: it may exchange entities
-    /// with them before the cut's tick, which no part would save); the cut it says is
-    /// pending is answered.
+    /// An `Attach` of `host`: it is attached; a cut not decided yet that it takes part in is
+    /// aborted (its link dropped: messages of the cut may be lost); the cut it says is
+    /// pending is answered. A host outside the running cut (Elastic 1 Task 4: one that
+    /// registered after the cut began) leaves the cut alone: every participant freezes its
+    /// session with a host outside the cut from its `BeginCut` until the decision and fails
+    /// its part if it exchanged state with one no cut has saved yet
+    /// (`world_manager/world_cut.rs`, "Hosts outside the cut"), and the store lets the
+    /// decision leave out only a host registered after the cut's begin was recorded
+    /// (`world_store` `record_cut_begin`). It is in the next cut.
     pub(super) fn cut_attach(&mut self, host: HostId, pending: Option<CutId>, boot: u64) {
         self.cuts.attached.insert(host);
         self.cuts.boots.insert(host, boot);
@@ -420,8 +429,11 @@ impl Coordinator {
             log::info!("coordinator: succeeded host {host} is back as boot {boot}: expected again");
             self.cuts.succeeded.remove(&host);
         }
-        let why = if self.cuts.run.as_ref().is_some_and(|r| r.has(host)) { "re-attached" } else { "attached, not in the cut" };
-        self.abort_running(host, why);
+        if self.cuts.run.as_ref().is_some_and(|r| r.has(host)) {
+            self.abort_running(host, "re-attached");
+        } else if let Some(run) = self.cuts.run.as_ref().filter(|r| r.verdict.is_none()) {
+            log::info!("coordinator: host {host} attached during world cut {}, which it is not in: it is in the next one", run.cut.0);
+        }
         if let Some(cut) = pending {
             if self.cuts.run.as_ref().is_none_or(|r| r.cut != cut) {
                 self.answer_cut(host, cut);

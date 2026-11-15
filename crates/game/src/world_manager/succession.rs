@@ -295,6 +295,197 @@ fn resolve(reports: &BTreeMap<HostId, SuccessionReportIn>) -> Resolved {
     out
 }
 
+
+// --- forgetting a host (Elastic 1 Task 4) ----------------------------------------------------
+
+/// THE list of the manager's fields by how they hold a host (one list: [`WorldManager::forget_host`]
+/// and [`WorldManager::mentions`] are both generated from it). Every field of `WorldManager`
+/// is named here exactly once — the generated code destructures the struct with no `..` — so
+/// a new field does not compile until it is classified: per host (one of the kinds) or
+/// `other` (holds no host, or holds one only for a moment that a forgotten host never reaches:
+/// `world_cut` names participants of a cut that is decided before any host is forgotten;
+/// `spawn_held` / `spawn_here` / `kicks_in` are answered within `SPAWN_SYNC_WAIT_MS`;
+/// `entry_host` is the login link's; `successions`, `succession_reports`, `adoptions` end at
+/// `SuccessionDone`, where the predecessor is forgotten; `forgotten_hosts` is the tombstone).
+/// Kinds: `key_map` / `key_set` keyed by the host; `pair_set` of `(host, _)`; `value_map`
+/// whose values are hosts; `value_first` / `value_second` whose value tuples hold the host
+/// first / second (`value_second` is re-pointed at this host, not dropped: a player handed
+/// here by the forgotten host still gets its session grace); `key_second` keyed by
+/// `(_, host)`; `value_sets` of host sets; `journal` the peer journal.
+macro_rules! host_fields {
+    ($callback:ident) => {
+        $callback! {
+            key_map: [
+            peers, peer_waiting, peer_queued, peer_endpoints, peer_boots, left_peers, returning_peers,
+            left_land, leave_pairs, count_pairs, early_marks, succeeded_peers
+            ],
+            key_set: [peer_synced, pair_owns_seen, left_land_unread, unsaved_traffic],
+            pair_set: [dead_boots, peer_in_source_view],
+            value_map: [foreign_running, redirected, departed],
+            value_first: [handed, claim_wanted_sent],
+            key_second: [observer_tickets],
+            value_second: [awaiting_session],
+            value_sets: [kicks_pending],
+            journal: [journal],
+            other: [
+            spawner, generator, regions, parked, terrain_cache, pristine_terrain, pristine_terrain_max,
+            sessions, homes, world_map, route_map, pending_events, world, world_view, spawn_waiting,
+            world_live, world_attach, attach_epoch, world_generation, host_generation, world_boot,
+            next_request_seq, settled_below, pending_requests, expired_requests, claim_seq, claim_changes,
+            claim_reported, player_hop, hop_renumbers, outbox, world_request_timeout_ms, world_counters,
+            site_regions, society_grid, world_ms, world_notices, fortress_of, adventurer_of, player_of,
+            parking, moving, parked_players, awaiting_park, deferred_packets, clock_ms, unavailable, ownership,
+            creating, out, region_out_send, lod_subscribers, lod_cache, lod_cache_max, lod_access_counter,
+            lod_in_flight, lod_submitted_at, perf, lod_pending_terrain, lod_tile_waiting, lod_builder,
+            lod_results, directive_stamps, in_flight, pending_cut, ready_cut, outstanding_cuts, uncommitted,
+            uncommitted_seq, cut_lead, next_cut_id, cut_order, silent_stopping, last_cut_caught,
+            stored_regions, locations, in_flight_intents, intent_mailbox, pending_arrivals, arrivals_despawned,
+            recently_despawned, despawn_warned, intent_replies_lost, parked_bodies, items_destroyed,
+            incarnation, incarnation_seen, next_incarnation, unowned_waiting, claims_wanted, claim_asks,
+            land_wanted, land_wanted_sent, land_scanned_ms, directory_wanted, journal_always,
+            peer_dropped_for_dead, forgotten_hosts, foreign_halo_stale, higher_generation, endpoint,
+            asked_elsewhere_answered_ms, observer_orders, nonces, observer_revocations,
+            foreign_input_warned_ms, unseeded_warned, world_cut, world_cut_seen, wrapper_seen, marks_queued,
+            leave_requested, leaving_cut, leave_outcome, leave_decided, leave_parked, world_cut_done,
+            inbound_accounted, entry_host, logins, spawn_held, spawn_here, kicks_in, kicked, login_out,
+            spawn_pins, kick_warned_ms, successions, succession_reports, succession_wait_logged_ms, inheriting,
+            successions_done, adoptions, succession_pinned, succession_seam_events
+            ],
+        }
+    };
+}
+
+/// [`host_fields`]' callback: `forget_fields`, every per-host field without the host.
+macro_rules! forget_fields {
+    (
+        key_map: [$($km:ident),* $(,)?],
+        key_set: [$($ks:ident),* $(,)?],
+        pair_set: [$($ps:ident),* $(,)?],
+        value_map: [$($vm:ident),* $(,)?],
+        value_first: [$($vf:ident),* $(,)?],
+        key_second: [$($k2:ident),* $(,)?],
+        value_second: [$($v2:ident),* $(,)?],
+        value_sets: [$($vs:ident),* $(,)?],
+        journal: [$j:ident],
+        other: [$($o:ident),* $(,)?],
+    ) => {
+        /// Every per-host field of [`host_fields`] forgets `h` (`value_second` points at `me`);
+        /// the journal is [`WorldManager::forget_host`]'s (it may refuse).
+        fn forget_fields(&mut self, h: HostId, me: HostId) {
+            let WorldManager { $($km,)* $($ks,)* $($ps,)* $($vm,)* $($vf,)* $($k2,)* $($v2,)* $($vs,)* $j: _, $($o: _,)* } = self;
+            $( $km.remove(&h); )*
+            $( $ks.remove(&h); )*
+            $( $ps.retain(|(o, _)| *o != h); )*
+            $( $vm.retain(|_, o| *o != h); )*
+            $( $vf.retain(|_, v| v.0 != h); )*
+            $( $k2.retain(|k, _| k.1 != h); )*
+            $( for v in $v2.values_mut() { if v.1 == h { v.1 = me; } } )*
+            $( for v in $vs.values_mut() { v.remove(&h); } $vs.retain(|_, v| !v.is_empty()); )*
+        }
+    };
+}
+
+/// [`host_fields`]' callback: `mentions`, the per-host fields that still hold a host.
+macro_rules! mention_fields {
+    (
+        key_map: [$($km:ident),* $(,)?],
+        key_set: [$($ks:ident),* $(,)?],
+        pair_set: [$($ps:ident),* $(,)?],
+        value_map: [$($vm:ident),* $(,)?],
+        value_first: [$($vf:ident),* $(,)?],
+        key_second: [$($k2:ident),* $(,)?],
+        value_second: [$($v2:ident),* $(,)?],
+        value_sets: [$($vs:ident),* $(,)?],
+        journal: [$j:ident],
+        other: [$($o:ident),* $(,)?],
+    ) => {
+        /// Test support: the fields of [`host_fields`] that still hold host `h` (by name): empty
+        /// once it was forgotten ([`Self::forget_host`]).
+        #[doc(hidden)]
+        pub fn mentions(&self, h: HostId) -> Vec<&'static str> {
+            let WorldManager { $($km,)* $($ks,)* $($ps,)* $($vm,)* $($vf,)* $($k2,)* $($v2,)* $($vs,)* $j, $($o: _,)* } = self;
+            let mut out = Vec::new();
+            $( if $km.contains_key(&h) { out.push(stringify!($km)); } )*
+            $( if $ks.contains(&h) { out.push(stringify!($ks)); } )*
+            $( if $ps.iter().any(|(o, _)| *o == h) { out.push(stringify!($ps)); } )*
+            $( if $vm.values().any(|o| *o == h) { out.push(stringify!($vm)); } )*
+            $( if $vf.values().any(|v| v.0 == h) { out.push(stringify!($vf)); } )*
+            $( if $k2.keys().any(|k| k.1 == h) { out.push(stringify!($k2)); } )*
+            $( if $v2.values().any(|v| v.1 == h) { out.push(stringify!($v2)); } )*
+            $( if $vs.values().any(|v| v.contains(&h)) { out.push(stringify!($vs)); } )*
+            if $j.mentions(h) { out.push(stringify!($j)); }
+            out
+        }
+    };
+}
+
+impl<S: RegionSpawner> WorldManager<S> {
+    host_fields!(forget_fields);
+    host_fields!(mention_fields);
+
+    /// Host `host` is gone for good (Elastic 1 Task 4): every field of [`host_fields`] forgets
+    /// it, its session and link are dropped (a dialer to it stops: the server's dialing thread
+    /// ends when its link is dropped), and it is never linked or written to again (an id is
+    /// never issued twice). Called for the predecessor of a SETTLED succession (at
+    /// `SuccessionDone`: the settle cut committed, the reports are no longer read) and for a
+    /// host that left cleanly holding no land (`world_cut.rs` `forget_landless_leavers`: no
+    /// `Leave` succession can owe its heir anything of it). Refused — nothing forgotten — while
+    /// the peer journal still needs it ([`crate::PeerJournal::forget`]).
+    ///
+    /// **What is dropped** (counted, `peer_dropped_for_dead=`): what this host still owed it —
+    /// its session's unacknowledged messages, `peer_waiting`, what a leave or count pair held.
+    /// For the predecessor of a settled succession nothing state-bearing is left there: the
+    /// succession took its session's messages (`apply_succession`: transfers and moves are
+    /// `Sent` journal entries the heir resolved, intents and replies went to the heir as
+    /// `owed`); for a landless leaver no state message is addressed to it (it owns no region).
+    /// What may be: a `SpawnOrder` / `SpawnAck` (the login service's client retries its join),
+    /// a `Kick` (durable in the login service until acknowledged — it is acknowledged here, as
+    /// a succession does: the forgotten host holds nobody — and sent again by the login service
+    /// otherwise), `KickAck`, `SessionEnded`, `PlayerParked`, `ObserverOrder`, `Owns`,
+    /// `CutMark` (no cut is pending with it: it is outside every later cut).
+    pub fn forget_host(&mut self, host: HostId) -> Result<(), crate::ForgetRefused> {
+        let me = self.ordinal();
+        if host == me {
+            return Err(crate::ForgetRefused { peer: host, why: "it is this host".into() });
+        }
+        self.journal.forget(host)?;
+        let mut dropped = 0usize;
+        if let Some(peer) = self.peers.get_mut(&host) {
+            dropped += peer.session.take_unreceived().len();
+            peer.link.close();
+        }
+        dropped += self.peer_waiting.get(&host).map_or(0, Vec::len);
+        dropped += self.leave_pairs.get(&host).map_or(0, |p| p.held.len());
+        dropped += self.count_pairs.get(&host).map_or(0, |p| p.held.len());
+        // A kick no longer waits for its acknowledgement.
+        let mut acked = Vec::new();
+        for (key, waiting) in self.kicks_pending.iter_mut() {
+            if waiting.remove(&host) && waiting.is_empty() {
+                acked.push(key.clone());
+            }
+        }
+        for key in acked {
+            self.kicks_pending.remove(&key);
+            self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch: key.1 });
+        }
+        self.forget_fields(host, me);
+        self.forgotten_hosts.insert(host);
+        self.peer_dropped_for_dead += dropped as u64;
+        log::info!("[server] host {host} is forgotten ({dropped} message(s) owed to it dropped)");
+        Ok(())
+    }
+
+    /// Whether host `host` was forgotten ([`Self::forget_host`]).
+    pub fn is_forgotten(&self, host: HostId) -> bool {
+        self.forgotten_hosts.contains(&host)
+    }
+
+    /// Messages to forgotten hosts dropped unsent, since start (`peer_dropped_for_dead=`).
+    pub fn peer_dropped_for_dead(&self) -> u64 {
+        self.peer_dropped_for_dead
+    }
+}
+
 impl<S: RegionSpawner> WorldManager<S> {
     /// The coordinator's order of succession `s` ([`crate::CoordMsg::Succession`]): answered
     /// as the module docs say — now, or once this host's journal counts from its base cut.
@@ -702,6 +893,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// spawner (the settle cut rewrote every stored region that held one of them).
     pub(super) fn succession_done(&mut self, id: SuccessionId, settled: bool) {
         let run = self.successions.remove(&id);
+        let predecessor = run.as_ref().map(|r| r.order.predecessor).or_else(|| self.adoptions.get(&id).map(|a| a.predecessor));
         let reports = self.succession_reports.remove(&id);
         if run.is_some() || reports.is_some() {
             log::info!("[server] succession {} {}", id.0, if settled { "settled" } else { "abandoned" });
@@ -729,6 +921,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         // placed once, at the client's next join (see the module docs).
         if settled {
             self.retry_held_spawns();
+            // Its settle cut committed: nothing of the predecessor is read any more.
+            if let Some(pred) = predecessor.filter(|p| !self.successions.values().any(|r| r.order.predecessor == *p)) {
+                if let Err(e) = self.forget_host(pred) {
+                    log::warn!("[server] succession {} settled, but host {pred} is not forgotten: {e}", id.0);
+                }
+            }
         }
     }
 
