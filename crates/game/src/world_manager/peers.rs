@@ -741,10 +741,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// succession not applied, a host that left), remembered (`Session::asked_elsewhere`)
     /// and answered by [`Self::answer_asked_elsewhere`] as soon as it can be ("wait, never
     /// guess"). An observer session is never redirected from here (its client reads no
-    /// `RegionElsewhere` from this connection, as before); it only waits for this host to
-    /// own the region.
+    /// `RegionElsewhere` from this connection): every subscribe it cannot serve waits for
+    /// this host to own the region — the heir of a host whose succession it has not applied
+    /// or adopted yet. One that belongs to yet another host waits until the client lets it
+    /// go: a client re-asks its home for a region an observer connection has not served
+    /// within `OBSERVER_RETRY_MAX_MS`, releasing it there.
     pub(super) fn subscribe_elsewhere(&mut self, client: ClientId, rc: RegionCoords) {
         let Some(kind) = self.sessions.get(&client).map(|s| s.kind) else { return };
+        if kind == SessionKind::Observer {
+            if !self.reaches(rc) {
+                self.note_unowned(rc);
+            }
+            log::debug!("client {client}: {rc:?} ({:?}) is not served here; its observer subscribe waits", self.owner_of(rc));
+            self.remember_asked(client, rc);
+            return;
+        }
         if !self.reaches(rc) {
             // With no owner known it is wanted for a claim.
             self.note_unowned(rc);
@@ -753,8 +764,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         match self.redirect(client, rc) {
-            Redirect::Sent(owner) if kind == SessionKind::Home => self.redirected_to(client, rc, owner),
-            Redirect::Sent(_) | Redirect::Never => {}
+            Redirect::Sent(owner) => self.redirected_to(client, rc, owner),
+            Redirect::Never => {}
             Redirect::Later => self.remember_asked(client, rc),
         }
     }
@@ -881,7 +892,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             return Redirect::Never;
         };
         let Some(endpoint) = self.peer_endpoints.get(&owner).cloned() else {
-            log::warn!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known yet; the subscribe waits");
+            // Per subscribe (a client re-asks): debug only; it waits (`asked_elsewhere`).
+            log::debug!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known yet; the subscribe waits");
             return Redirect::Later;
         };
         if self.sessions.get(&client).and_then(|s| s.player).is_none() {

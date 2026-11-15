@@ -87,6 +87,17 @@ pub trait ConnOpener {
     fn open(&mut self, key: u32, endpoint: &HostEndpoint, credential: Credential) -> ConnHandle;
 }
 
+/// What [`ConnectionSet::on_region_named`] did with a `RegionElsewhere`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Named {
+    /// Served by the home connection and subscribed there.
+    Home,
+    /// Served by this (observer) connection and subscribed there.
+    Observer(u32),
+    /// Nothing sent (the home's own host not known yet, or no way to connect).
+    Unrouted,
+}
+
 /// What a closed connection was ([`ConnectionSet::on_closed`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Closed {
@@ -223,14 +234,8 @@ impl ConnectionSet {
         }
     }
 
-    /// The home sent `region`'s owner: open a connection to `endpoint.ordinal` unless one
-    /// is live (one connection per host, however many regions; after the home moved, the
-    /// old home's connection serves as this one), serve `region` from it and subscribe it
-    /// there. A region another connection served is released there first (re-mapped: its
-    /// owner died and an heir took it, R4) — one host serves it at a time. Never opens an
-    /// observer connection to the home host itself (an observer ticket must not replace
-    /// the home session there): the home naming itself serves the region from the home
-    /// connection ([`Self::remap_to_home`]) and it is subscribed there.
+    /// The home sent `region`'s owner ([`Self::on_region_named`] with an opener; what it
+    /// did is left to the caller).
     pub fn on_region_elsewhere(
         &mut self,
         region: RegionId,
@@ -238,20 +243,45 @@ impl ConnectionSet {
         ticket: ObserverTicket,
         opener: &mut dyn ConnOpener,
     ) {
+        let _ = self.on_region_named(region, endpoint, ticket, Some(opener));
+    }
+
+    /// The home sent `region`'s owner (`RegionElsewhere`) — the one place it is acted on:
+    /// - the home itself (R4: it inherited the region from the host that served it): the
+    ///   region is served by the home connection ([`Self::remap_to_home`]) and subscribed
+    ///   there — never dialled (an observer ticket must not replace the home session);
+    /// - another host: a connection to `endpoint.ordinal` is opened unless one is live (one
+    ///   connection per host, however many regions; after the home moved, the old home's
+    ///   connection serves as this one), the region is served from it and subscribed there.
+    ///   A region another connection served is released there first (re-mapped: its owner
+    ///   died and an heir took it) — one host serves it at a time.
+    ///
+    /// What it did ([`Named`]): `Unrouted` (nothing sent) before the home named its own host,
+    /// or for another host with no `opener` (a transport with one connection only).
+    pub fn on_region_named(
+        &mut self,
+        region: RegionId,
+        endpoint: HostEndpoint,
+        ticket: ObserverTicket,
+        opener: Option<&mut dyn ConnOpener>,
+    ) -> Named {
         let ordinal = endpoint.ordinal;
         let Some(home) = self.home_ordinal() else {
             log::warn!("[client] {region:?} is said to be host {ordinal}'s before the home named itself: ignored");
-            return;
+            return Named::Unrouted;
         };
         if ordinal == home {
-            log::info!("[client] {region:?} is served by the home (host {ordinal}) now");
             self.remap_to_home(region);
             self.route(Outgoing::Conn(self.home, ClientPacket::RequestRegionConnection(region)));
-            return;
+            return Named::Home;
         }
         let key = match self.conn_to(ordinal) {
             Some(key) => key,
             None => {
+                let Some(opener) = opener else {
+                    log::warn!("[client] {region:?} is served by host {ordinal}, which this transport cannot connect to");
+                    return Named::Unrouted;
+                };
                 let key = self.next_key;
                 self.next_key += 1;
                 log::info!("[client] connecting to host {ordinal} for {region:?} (connection {key})");
@@ -267,12 +297,13 @@ impl ConnectionSet {
             self.route(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(region)));
         }
         self.route(Outgoing::Conn(key, ClientPacket::RequestRegionConnection(region)));
+        Named::Observer(key)
     }
 
     /// `region` is served by the home connection from now on (the home named itself for
     /// it, R4: it inherited the region from the host that served it): another connection
-    /// that served it lets it go. The caller subscribes it on the home.
-    pub fn remap_to_home(&mut self, region: RegionId) {
+    /// that served it lets it go. [`Self::on_region_named`] subscribes it on the home.
+    fn remap_to_home(&mut self, region: RegionId) {
         let home = self.home;
         if let Some(old) = self.region_conn.insert(region, home).filter(|old| *old != home) {
             self.route(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(region)));

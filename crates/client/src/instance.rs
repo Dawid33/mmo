@@ -4,7 +4,7 @@
 use crossbeam::channel::{Receiver, Sender};
 #[cfg(not(target_arch = "wasm32"))]
 use crossbeam::select;
-use crate::connections::{Closed, ConnEvent, ConnHandle, ConnOpener, ConnectionSet, Outgoing};
+use crate::connections::{Closed, ConnEvent, ConnHandle, ConnOpener, ConnectionSet, Named, Outgoing};
 use crate::regions::runner::{RegionCmd, RegionReport};
 use game::{ClientId, ReconcileStats, RegionCoords, RegionId, Rollback, ServerPacket};
 use game::{
@@ -189,6 +189,18 @@ pub struct GameInstanceManager {
     /// (`conn_clock_ms`) the last went. A `RegionElsewhere` for one released meanwhile
     /// is a late answer, not a move — however many requests and releases came between.
     asked_home: BTreeMap<RegionCoords, (u32, u64)>,
+    /// Regions subscribed on another host's connection (`RegionElsewhere`) and not held
+    /// yet, with when (`conn_clock_ms`): one that connection has not served within
+    /// `connections::OBSERVER_RETRY_MAX_MS` is let go there and asked of the home again
+    /// (`ask_unanswered_again`; R4: an observer session waits rather than redirect).
+    asked_observer: BTreeMap<RegionCoords, u64>,
+    /// Regions released from the window while another host's connection served them, and
+    /// when: the home may still answer for one (a re-answer after a succession crossing
+    /// the release, R4), which reads like a move ([`AMBIGUOUS_MOVE_HOLD_MS`]).
+    released_elsewhere: BTreeMap<RegionCoords, u64>,
+    /// A `pending_move` taken from such an answer, and until when it is held without the
+    /// move's `PlayerRegion`.
+    ambiguous_move: Option<(RegionCoords, u64)>,
     /// Since when (`conn_clock_ms`) the predicted body — or a move — is on another
     /// host than the home's with no `PlayerRegion` from there, and whether that was
     /// logged ([`HOME_UNCONFIRMED_WARN_MS`]).
@@ -354,6 +366,15 @@ const _: () = assert!(HOME_UNCONFIRMED_WARN_MS > game::HANDOFF_SESSION_GRACE_MS)
 /// `connections::OBSERVER_RETRY_MAX_MS` (a home that cannot answer yet remembers it and
 /// answers when it can, R4; this is the backstop for an answer lost on the way).
 const ASKED_HOME_FORGET_MS: u64 = 10_000;
+
+/// How long a move read from a `RegionElsewhere` for a region released from the window
+/// less than `ASKED_HOME_FORGET_MS` ago (while another host served it) is held without the
+/// move's `PlayerRegion` (`GameInstanceManager::ambiguous_move`): it may be the home's late
+/// re-answer for that region after a succession, not a move. A real move's `PlayerRegion`
+/// comes within the hosts' hand-off grace, or its body is parked there and the session is
+/// told; so the hold is dropped after this and the window lets the region go.
+pub const AMBIGUOUS_MOVE_HOLD_MS: u64 = 10_000;
+const _: () = assert!(AMBIGUOUS_MOVE_HOLD_MS > game::HANDOFF_SESSION_GRACE_MS);
 
 /// Client-side rolling counters for reconciliation load and clock drift,
 /// flushed to one INFO line every `METRICS_REPORT_INTERVAL`. The window start
@@ -751,6 +772,9 @@ impl GameInstanceManager {
             conn_clock_ms: 0,
             pending_move: None,
             asked_home: BTreeMap::new(),
+            asked_observer: BTreeMap::new(),
+            released_elsewhere: BTreeMap::new(),
+            ambiguous_move: None,
             home_unconfirmed_since: None,
             home_unconfirmed_warned: false,
             lod_resend: std::collections::BTreeSet::new(),
@@ -1631,18 +1655,66 @@ impl GameInstanceManager {
         }
         let stale: Vec<RegionCoords> = self.subscribed.difference(&desired).copied().collect();
         for rc in stale {
-            let served_elsewhere = self.conns.connection_of(rc) != self.conns.home();
-            self.send_out(Outgoing::Region(rc, ClientPacket::ReleaseRegionConnection(rc)));
-            if served_elsewhere {
-                // The home remembers where it sent the client for it (it answers again
-                // after a succession of that host, R4) until it is released there too.
-                self.send_out(Outgoing::Home(ClientPacket::ReleaseRegionConnection(rc)));
-            }
-            self.conns.release(rc);
-            self.observer_retry.remove(&rc);
-            self.drop_region(rc);
+            self.release_region(rc);
         }
         self.subscribed = desired;
+    }
+
+    /// The home's `RegionElsewhere` for `region` (`ConnectionSet::on_region_named` acts on
+    /// it). One no longer wanted that answers a subscribe is late, as is one naming the home
+    /// (a move comes as `PlayerRegion`); an unasked one naming another host is a move — the
+    /// home moved the player to that host's region (a Play, an embark there): subscribed
+    /// there and held in the window until that host's `PlayerRegion` makes it the home
+    /// (only for [`AMBIGUOUS_MOVE_HOLD_MS`] when the region was just released while another
+    /// host served it: the home's late re-answer reads the same).
+    fn region_elsewhere(&mut self, region: RegionCoords, endpoint: game::HostEndpoint, ticket: game::ObserverTicket) {
+        let asked = self.answered_home(region);
+        let wanted = self.subscribed.contains(&region);
+        let ordinal = endpoint.ordinal;
+        if !wanted && (asked || Some(ordinal) == self.conns.home_ordinal()) {
+            log::debug!("[client] {region:?} is host {ordinal}'s, but no longer wanted");
+            return;
+        }
+        let opener = self.opener.as_deref_mut().map(|o| o as &mut dyn ConnOpener);
+        match self.conns.on_region_named(region, endpoint, ticket, opener) {
+            Named::Home => {
+                // Asked of the home like any subscribe through it (`request_region`).
+                info!("[client] {region:?} is served by the home (host {ordinal}) now");
+                let asked = self.asked_home.entry(region).or_insert((0, 0));
+                *asked = (asked.0 + 1, self.conn_clock_ms);
+            }
+            Named::Observer(_) => {
+                self.asked_observer.insert(region, self.conn_clock_ms);
+                if !wanted {
+                    info!("[client] moved to {region:?}, host {ordinal}'s");
+                    self.pending_move = Some(region);
+                    self.subscribed.insert(region);
+                    self.ambiguous_move = self
+                        .released_elsewhere
+                        .contains_key(&region)
+                        .then_some((region, self.conn_clock_ms + AMBIGUOUS_MOVE_HOLD_MS));
+                } else {
+                    info!("[client] {region:?} is served by host {ordinal}");
+                }
+            }
+            Named::Unrouted => {}
+        }
+    }
+
+    /// `rc` left the window: released where it is served — and at the home too when
+    /// another host serves it (the home remembers where it sent the client for it, and
+    /// answers again after a succession of that host, R4, until it is released there) —
+    /// and dropped here. The caller takes it out of `subscribed`.
+    fn release_region(&mut self, rc: RegionCoords) {
+        let served_elsewhere = self.conns.connection_of(rc) != self.conns.home();
+        self.send_out(Outgoing::Region(rc, ClientPacket::ReleaseRegionConnection(rc)));
+        if served_elsewhere {
+            self.send_out(Outgoing::Home(ClientPacket::ReleaseRegionConnection(rc)));
+            self.released_elsewhere.insert(rc, self.conn_clock_ms);
+        }
+        self.conns.release(rc);
+        self.observer_retry.remove(&rc);
+        self.drop_region(rc);
     }
 
     /// Remove a region from the local world and the render bridge.
@@ -2009,11 +2081,42 @@ impl GameInstanceManager {
             })
             .map(|(rc, _)| *rc)
             .collect();
-        if again.is_empty() {
+        if !again.is_empty() {
+            info!(
+                "[client] {} region(s) the home has not answered for {} ms, asked again: {again:?}",
+                again.len(),
+                crate::connections::OBSERVER_RETRY_MAX_MS
+            );
+            for rc in again {
+                self.request_region(rc);
+            }
+        }
+        // Another host's connection that has not served a region subscribed there: let go
+        // there and asked of the home, which says again who serves it (an observer session
+        // waits rather than redirect: the region may be a third host's by now).
+        let (subscribed, host, conns) = (&self.subscribed, &self.host, &self.conns);
+        self.asked_observer.retain(|rc, _| {
+            let conn = conns.connection_of(*rc);
+            subscribed.contains(rc) && !host.contains(rc) && conn != home && conns.is_live(conn)
+        });
+        let stuck: Vec<(RegionCoords, u32)> = self
+            .asked_observer
+            .iter()
+            .filter(|(_, at)| now.saturating_sub(**at) >= crate::connections::OBSERVER_RETRY_MAX_MS)
+            .map(|(rc, _)| (*rc, self.conns.connection_of(*rc)))
+            .collect();
+        if stuck.is_empty() {
             return;
         }
-        info!("[client] {} region(s) the home has not answered for {} ms, asked again: {again:?}", again.len(), crate::connections::OBSERVER_RETRY_MAX_MS);
-        for rc in again {
+        info!(
+            "[client] {} region(s) another host's connection has not served for {} ms, asked of the home again: {stuck:?}",
+            stuck.len(),
+            crate::connections::OBSERVER_RETRY_MAX_MS
+        );
+        for (rc, conn) in stuck {
+            self.asked_observer.remove(&rc);
+            self.send_out(Outgoing::Conn(conn, ClientPacket::ReleaseRegionConnection(rc)));
+            self.conns.release(rc);
             self.request_region(rc);
         }
     }
@@ -2039,6 +2142,16 @@ impl GameInstanceManager {
             info!("[client] connection {key} served no region for {} ms: closed", crate::connections::CONN_IDLE_CLOSE_MS);
         }
         self.ask_unanswered_again();
+        self.released_elsewhere.retain(|_, at| now.saturating_sub(*at) < ASKED_HOME_FORGET_MS);
+        if let Some((rc, until)) = self.ambiguous_move {
+            if self.pending_move != Some(rc) {
+                self.ambiguous_move = None;
+            } else if now >= until {
+                info!("[client] no PlayerRegion for {rc:?} within {AMBIGUOUS_MOVE_HOLD_MS} ms: a late answer, not a move");
+                self.ambiguous_move = None;
+                self.pending_move = None;
+            }
+        }
         let (subscribed, host) = (&self.subscribed, &self.host);
         self.asked_home.retain(|rc, (_, at)| {
             now.saturating_sub(*at) < ASKED_HOME_FORGET_MS || (subscribed.contains(rc) && !host.contains(rc))
@@ -2272,40 +2385,7 @@ impl GameInstanceManager {
             }
             // Only the home sends these (`handle_packet`): a client dials no
             // address from anywhere else.
-            game::ServerPacket::RegionElsewhere { region, endpoint, ticket } => {
-                let asked = self.answered_home(region);
-                if !self.subscribed.contains(&region) && asked {
-                    // Released while the answer was on its way.
-                    log::debug!("[client] {region:?} is host {}'s, but no longer wanted", endpoint.ordinal);
-                } else if Some(endpoint.ordinal) == self.conns.home_ordinal() {
-                    // The home serves it now (R4: it inherited it from the host that did).
-                    // Never a move (that comes as `PlayerRegion`): one no longer wanted is a
-                    // late answer.
-                    if self.subscribed.contains(&region) {
-                        info!("[client] {region:?} is served by the home (host {}) now", endpoint.ordinal);
-                        self.conns.remap_to_home(region);
-                        self.request_region(region);
-                    } else {
-                        log::debug!("[client] {region:?} is the home's, but no longer wanted");
-                    }
-                } else if let Some(opener) = self.opener.as_mut() {
-                    if !self.subscribed.contains(&region) {
-                        // Unasked: the home moved the player to another host's region
-                        // (a Play, an embark there). Subscribe it there and hold it in
-                        // the window; that host's `PlayerRegion` makes it the home.
-                        info!("[client] moved to {region:?}, host {}'s", endpoint.ordinal);
-                        self.pending_move = Some(region);
-                        self.subscribed.insert(region);
-                    }
-                    info!("[client] {region:?} is served by host {}", endpoint.ordinal);
-                    self.conns.on_region_elsewhere(region, endpoint, ticket, opener.as_mut());
-                } else {
-                    warn!(
-                        "[client] {region:?} is served by host {}, which this transport cannot connect to",
-                        endpoint.ordinal
-                    );
-                }
-            }
+            game::ServerPacket::RegionElsewhere { region, endpoint, ticket } => self.region_elsewhere(region, endpoint, ticket),
         }
         Ok(())
     }
@@ -3024,6 +3104,146 @@ mod manager_tests {
         at(&mut manager, 3 * max + ASKED_HOME_FORGET_MS);
         assert!(!manager.asked_home.contains_key(&wanted), "and forgotten");
         assert!(manager.asked_home.contains_key(&observed), "one not held stays");
+    }
+
+    /// The bridge and game-event ends a test keeps alive (dropped, the manager's sends fail).
+    type KeptEnds = (Receiver<ClientUpdateEvent>, crossbeam::channel::Sender<GameEventKind>);
+
+    /// A manager whose home is host 0 (its `Host` and `PlayerRegion` came), recording the
+    /// connections it opens; the home's packets drained.
+    fn manager_on_host_0() -> (GameInstanceManager, crossbeam::channel::Sender<ServerPacket>, Receiver<ServerPacket>, RecordingOpener, KeptEnds) {
+        let (mut manager, server_send, server_recv, client_recv, game) = manager_with_player();
+        let opener = RecordingOpener::default();
+        manager.set_conn_opener(Box::new(opener.clone()));
+        server_send.send(ServerPacket::Host(host_endpoint(0))).unwrap();
+        server_send.send(ServerPacket::PlayerRegion(Some(RegionCoords::new(0, 0)), 0)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let _ = manager_packets(&manager);
+        (manager, server_send, server_recv, opener, (client_recv, game))
+    }
+
+    fn host_endpoint(ordinal: u32) -> game::HostEndpoint {
+        game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None }
+    }
+
+    fn elsewhere(region: RegionCoords, ordinal: u32) -> ServerPacket {
+        ServerPacket::RegionElsewhere { region, endpoint: host_endpoint(ordinal), ticket: game::ObserverTicket { client: 0, nonce: 1 } }
+    }
+
+    /// Whether `packets` hold a subscribe (`true`) or release (`false`) of `rc`.
+    fn has(packets: &[ClientPacket], rc: RegionCoords, subscribe: bool) -> bool {
+        packets.iter().any(|p| match p {
+            ClientPacket::RequestRegionConnection(r) => subscribe && *r == rc,
+            ClientPacket::ReleaseRegionConnection(r) => !subscribe && *r == rc,
+            _ => false,
+        })
+    }
+
+    /// R4 Task 16, fix round 1: the manager's arm for a `RegionElsewhere` naming the home —
+    /// a wanted region host 1 served is released there, served by the home connection and
+    /// subscribed there (remembered as asked of the home); no connection is opened. One no
+    /// longer wanted is ignored (never a move).
+    #[test]
+    fn region_elsewhere_naming_the_home_is_subscribed_at_home() {
+        let (mut manager, server_send, server_recv, opener, _kept) = manager_on_host_0();
+        let r = RegionCoords::new(5, 0);
+        manager.subscribed.insert(r);
+        manager.request_region(r);
+        server_send.send(elsewhere(r, 1)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let _ = manager_packets(&manager);
+        let on_one = opener.0.lock().unwrap()[0].clone();
+        assert!(has(&on_one.try_iter().collect::<Vec<_>>(), r, true), "subscribed on host 1 first");
+        assert_eq!(manager.region_host(r), Some(1));
+        server_send.send(elsewhere(r, 0)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert!(has(&on_one.try_iter().collect::<Vec<_>>(), r, false), "released on host 1");
+        assert!(has(&manager_packets(&manager), r, true), "subscribed at home");
+        assert_eq!(manager.region_host(r), Some(0));
+        assert!(manager.asked_home.contains_key(&r), "asked of the home, until answered");
+        assert_eq!(opener.0.lock().unwrap().len(), 1, "no connection opened to the home host");
+        // Not wanted: nothing.
+        let gone = RegionCoords::new(-5, 0);
+        server_send.send(elsewhere(gone, 0)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert!(manager_packets(&manager).is_empty());
+        assert!(!manager.subscribed.contains(&gone) && manager.pending_move.is_none(), "never a move");
+    }
+
+    /// R4 Task 16, fix round 1: a region subscribed on host 1's connection that host 1
+    /// never serves (its observer session waits: the region may be a third host's by now) is
+    /// let go there after `OBSERVER_RETRY_MAX_MS` and asked of the home again; a region it
+    /// serves is left alone.
+    #[test]
+    fn a_region_an_observer_connection_does_not_serve_is_asked_of_the_home() {
+        let (mut manager, server_send, server_recv, opener, _kept) = manager_on_host_0();
+        let (stuck, served) = (RegionCoords::new(5, 0), RegionCoords::new(5, 1));
+        let t0 = manager.conn_clock_ms;
+        for rc in [stuck, served] {
+            manager.subscribed.insert(rc);
+            manager.request_region(rc);
+            server_send.send(elsewhere(rc, 1)).unwrap();
+        }
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let one = manager.conns.conn_to(1).expect("a connection to host 1");
+        let on_one = opener.0.lock().unwrap()[0].clone();
+        let _ = on_one.try_iter().count();
+        let _ = manager_packets(&manager);
+        // Host 1 serves `served`.
+        let mut world = game::World::new();
+        world.load(&served, Region::from_chunks(served, Vec::new()));
+        let (events, incoming) = crossbeam::channel::unbounded();
+        events.send((one, ConnEvent::Packet(world.build_region_server_packet(&served)))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        assert!(manager.loaded_regions().contains(&served));
+        let max = crate::connections::OBSERVER_RETRY_MAX_MS;
+        manager.conn_clock_ms = t0 + max - 1;
+        manager.maintain_connections();
+        assert!(on_one.try_iter().next().is_none() && manager_packets(&manager).is_empty(), "not before OBSERVER_RETRY_MAX_MS");
+        manager.conn_clock_ms = t0 + max;
+        manager.maintain_connections();
+        let sent_one: Vec<ClientPacket> = on_one.try_iter().collect();
+        let sent_home = manager_packets(&manager);
+        assert!(has(&sent_one, stuck, false), "let go on host 1: {sent_one:?}");
+        assert!(has(&sent_home, stuck, true), "asked of the home: {sent_home:?}");
+        assert_eq!(manager.region_host(stuck), Some(0));
+        assert!(!has(&sent_one, served, false) && !has(&sent_home, served, true), "a served region is left alone");
+        assert_eq!(manager.region_host(served), Some(1));
+    }
+
+    /// R4 Task 16, fix round 1: a region host 1 served leaves the window; the home's
+    /// re-answer for it (crossing the release) reads like a move. It is held only
+    /// `AMBIGUOUS_MOVE_HOLD_MS` without the move's `PlayerRegion`; a real move for a region
+    /// never released is held until its `PlayerRegion`.
+    #[test]
+    fn a_late_answer_for_a_just_released_region_is_not_held_as_a_move() {
+        let (mut manager, server_send, server_recv, _opener, _kept) = manager_on_host_0();
+        let r = RegionCoords::new(5, 0);
+        manager.subscribed.insert(r);
+        manager.request_region(r);
+        server_send.send(elsewhere(r, 1)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let t0 = manager.conn_clock_ms;
+        manager.release_region(r);
+        manager.subscribed.remove(&r);
+        assert!(has(&manager_packets(&manager), r, false), "released at the home too");
+        server_send.send(elsewhere(r, 1)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert_eq!(manager.pending_move, Some(r), "it reads like a move");
+        manager.conn_clock_ms = t0 + AMBIGUOUS_MOVE_HOLD_MS - 1;
+        manager.maintain_connections();
+        assert_eq!(manager.pending_move, Some(r));
+        manager.conn_clock_ms = t0 + AMBIGUOUS_MOVE_HOLD_MS;
+        manager.maintain_connections();
+        assert_eq!(manager.pending_move, None, "no PlayerRegion came: a late answer, let go");
+        // A real move: held until its PlayerRegion.
+        let m = RegionCoords::new(9, 0);
+        server_send.send(elsewhere(m, 1)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert_eq!(manager.pending_move, Some(m));
+        manager.conn_clock_ms += 10 * AMBIGUOUS_MOVE_HOLD_MS;
+        manager.maintain_connections();
+        assert_eq!(manager.pending_move, Some(m), "a move into a region never released waits for its PlayerRegion");
     }
 
     /// Fix round (Task 18 m4): a region subscribed and released twice through the home,

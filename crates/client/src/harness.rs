@@ -486,6 +486,14 @@ impl SimHarness {
     /// every row of the layout it held moves to the heir at the next epoch, every live
     /// host gets the order (base cut 0: no world cut ever ran here). The heir's adoption
     /// read is answered by the following steps. The heir.
+    ///
+    /// Mirrors the coordinator: the order is what `coordinator/succession.rs`'s `order`
+    /// builds from the store's `Succession` (`declare_succession`: every row of the
+    /// predecessor to the heir at epoch + 1, the survivors every live host). Before it,
+    /// every live host reads its directory as the server's backstop read would after the
+    /// dead host's lease lapsed (`WorldManager::directory_read`: the rows unchanged, the
+    /// dead host no longer live), so `owner_of` / `Directory::preferred` answer as in
+    /// production.
     pub fn run_succession(&mut self, dead: u32) -> u32 {
         assert!(self.dead_hosts.contains(&(dead as usize)), "host {dead} is not dead");
         let hosts = self.servers.len() as u32;
@@ -496,6 +504,13 @@ impl SimHarness {
             .filter(|(_, owner, _)| *owner == Some(dead))
             .map(|(sr, _, epoch)| (sr, epoch + 1))
             .collect();
+        let rows: Vec<(game::SuperRegion, i64, u64)> = claimed_rows(hosts, HARNESS_SUPER_REGION_REGIONS)
+            .into_iter()
+            .map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, i64::from), epoch))
+            .collect();
+        for &h in &live {
+            self.servers[h as usize].manager_mut().directory_read(rows.clone(), live.clone());
+        }
         self.successions += 1;
         let order = game::CoordMsg::Succession {
             id: game::SuccessionId(self.successions),

@@ -8553,6 +8553,36 @@ fn until_upkept(rig: &mut MultiRig, budget: usize, mut done: impl FnMut(&mut Mul
     false
 }
 
+/// [`until_upkept`] with `done` sampled after every step of each cut round (the hosts'
+/// ticks and peer pumps — adoptions included —, each host's upkeep, the world cuts and the
+/// land drain), not only at its end: a state that holds only between steps is seen.
+fn until_watched(rig: &mut MultiRig, budget: usize, mut done: impl FnMut(&mut MultiRig) -> bool) -> bool {
+    for _ in 0..budget {
+        if rig.coordinator.is_some() {
+            let tick = rig.hosts[0].manager.spawner_mut().world_tick();
+            rig.core().set_world_tick(tick);
+        }
+        rig.round();
+        let mut hit = done(rig);
+        for h in 0..rig.hosts.len() {
+            let now = rig.hosts[h].now_ms;
+            rig.hosts[h].manager.maintain(now);
+            rig.hosts[h].settle();
+            hit |= done(rig);
+        }
+        rig.drive_world_cuts();
+        hit |= done(rig);
+        rig.drive_land();
+        for h in 0..rig.hosts.len() {
+            rig.hosts[h].settle();
+        }
+        if hit | done(rig) {
+            return true;
+        }
+    }
+    false
+}
+
 /// The test player's subscribe of `rc`, as its client sends it.
 fn subscribe_packet(rc: RegionCoords) -> game::ServerEvent {
     game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rc), P_CLIENT)
@@ -8667,7 +8697,7 @@ fn redirected_to_the_heir(rig: &mut MultiRig, home_is_heir: bool) {
     let succession = rig.run_succession(dead).remove(0);
     assert_eq!(succession.heir, heir);
     let mut early = false;
-    let answered = until_upkept(rig, SUCCESSION_ROUNDS, |rig| {
+    let answered = until_watched(rig, SUCCESSION_ROUNDS, |rig| {
         let again = elsewhere_for(rig, home, rd).len() > 1;
         // The heir answers for its inherited land only once it adopted it.
         early |= again && home_is_heir && !rig.hosts[home as usize].manager.inheriting().is_empty();
@@ -8705,4 +8735,82 @@ fn observers_of_a_dead_host_are_redirected_to_the_heir() {
     sweep("observers_of_a_dead_host_are_redirected_to_the_heir (home is the heir)", 3, 1, SEEDS / 4, |rig| {
         redirected_to_the_heir(rig, true)
     });
+}
+
+/// Fix round 1 (Task 16): an observer session never redirects (its client reads no
+/// `RegionElsewhere` from it). A subscribe on host B for a region host A owns and B
+/// reaches is remembered there — no `RegionElsewhere`, no ticket, no order to A — until
+/// the client releases it (its home re-asks for it: the client's side).
+fn observer_never_redirects(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    rig.hosts[hb as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    rig.record_packets();
+    assert!(rig.hosts[hb as usize].manager.reaches(a));
+    rig.hosts[hb as usize].event(subscribe_packet(a));
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    assert!(elsewhere_for(rig, hb, a).is_empty(), "an observer session sends no RegionElsewhere");
+    assert!(rig.hosts[ha as usize].manager.take_observer_orders().is_empty(), "nor orders a ticket");
+    assert_eq!(rig.hosts[hb as usize].manager.client_answers(P_CLIENT), (vec![a], vec![]), "it waits");
+    rig.hosts[hb as usize].event(release_packet(a));
+    assert_eq!(rig.hosts[hb as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "until released");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_observer_session_waits_and_never_redirects() {
+    sweep("an_observer_session_waits_and_never_redirects", 2, 1, SEEDS / 4, observer_never_redirects);
+}
+
+/// Fix round 1 (Task 16): the home survives host D's death and sends its client to the
+/// heir; the client's observer subscribe reaches the heir BEFORE the heir applied the
+/// succession (its order held back), while its directory still names D (whose session it
+/// may still read as reachable). The heir redirects nothing: the subscribe waits, and is
+/// served — on the observer session, once — after the heir applied and adopted. The home
+/// never serves the region; conservation is checked every round.
+fn heir_applies_late(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let rd = chain[1];
+    let dead = rig.owner(rd);
+    let (heir, other) = heir_and_survivor(rig, dead);
+    let home = other.expect("three hosts");
+    let rh = chain.iter().copied().find(|rc| rig.owner(*rc) == home).expect("the home's region");
+    rig.connect_home(home, P_CLIENT, P_PLAYER, record_at(rh, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    rig.hosts[heir as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    rig.record_packets();
+    rig.hold_orders(heir, true);
+    rig.kill(dead);
+    assert_eq!(rig.hosts[heir as usize].manager.owner_of(rd), game::Owner::Host(dead), "the heir's directory names D");
+    rig.hosts[heir as usize].event(subscribe_packet(rd));
+    let succession = rig.run_succession(dead).remove(0);
+    assert_eq!(succession.heir, heir);
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+        assert!(rig.hosts[heir as usize].manager.successions().is_empty(), "the heir has not applied the order");
+    }
+    assert!(!served_to_player(rig, heir, rd), "nothing served before the heir applied");
+    assert_eq!(rig.hosts[heir as usize].manager.client_answers(P_CLIENT).0, vec![rd], "the subscribe waits on the heir");
+    rig.hold_orders(heir, false);
+    assert!(
+        until_upkept(rig, SUCCESSION_ROUNDS, |rig| served_to_player(rig, heir, rd)),
+        "the heir serves {rd:?} once it applied and adopted (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    assert!(rig.hosts[heir as usize].manager.inheriting().is_empty(), "served only once adopted");
+    assert!(elsewhere_for(rig, heir, rd).is_empty(), "the heir's observer session redirected nothing");
+    assert!(!served_to_player(rig, home, rd), "the home never serves it");
+    assert_eq!(rig.hosts[heir as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "nothing left waiting");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_observer_subscribe_reaching_the_heir_early_waits_for_its_adoption() {
+    sweep("an_observer_subscribe_reaching_the_heir_early_waits_for_its_adoption", 3, 1, SEEDS / 4, heir_applies_late);
 }
