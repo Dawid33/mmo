@@ -578,7 +578,8 @@ impl Plugin for CommanderPlugin {
                     adventure::send_mode_toggle,
                     adventure::on_mode_change,
                     first_person::toggle_first_person,
-                    first_person::sync_first_person_camera,
+                    // Before the eyes are moved toward their new target.
+                    first_person::sync_first_person_camera.before(super::interpolate::interpolate_transforms),
                     adventure::sync_body_visibility,
                 )
                     .chain()
@@ -1088,7 +1089,7 @@ pub fn eye_in_water(mirror: &tiles::TileMirror, eye: Vec3) -> bool {
 pub fn first_person_water_fog(
     mirror: Res<tiles::TileMirror>,
     view: Option<Res<crate::renderer::atmosphere::ViewDistance>>,
-    mut cams: Query<(&GlobalTransform, &mut bevy::pbr::DistanceFog), (With<Camera3d>, With<crate::renderer::bridge::LocalBody>)>,
+    mut cams: Query<(&GlobalTransform, &mut bevy::pbr::DistanceFog), (With<Camera3d>, With<first_person::Eyes>)>,
 ) {
     for (gt, mut fog) in &mut cams {
         let want = if eye_in_water(&mirror, gt.translation()) {

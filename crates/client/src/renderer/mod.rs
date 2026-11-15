@@ -17,6 +17,7 @@ mod avatar;
 mod block_textures;
 pub mod bricks;
 pub mod bridge;
+pub mod chat;
 pub(crate) mod collider_debug;
 pub mod commander;
 pub(crate) mod cursor;
@@ -36,6 +37,7 @@ pub(crate) mod input;
 mod interpolate;
 mod look;
 mod motion_probe;
+pub mod crossing_timeline;
 pub mod join_timeline;
 pub mod item_icons;
 pub mod item_flights;
@@ -49,6 +51,7 @@ pub mod rigs;
 mod skybox;
 pub mod slint_composite;
 pub mod slint_overlay;
+pub mod text_entry;
 pub use slint_composite::UiCamera;
 pub mod voxel_bodies;
 mod voxel_material;
@@ -146,6 +149,7 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<grid_debug::GridDebug>()
         .init_resource::<cursor::CursorPolicy>()
         .add_session_reset_with(cursor::reset_session_grab)
+        .add_session_reset::<text_entry::TextEntry>()
         .add_session_reset::<meshing::queue::ChunkGrid>()
         .add_session_reset::<meshing::queue::RemeshQueue>()
         .init_resource::<meshing::queue::MeshBudgets>()
@@ -169,6 +173,10 @@ impl Plugin for SimBridgePlugin {
         .add_systems(
             PreUpdate,
             (
+                // Before anything reads the keys: while a text field has the
+                // keyboard there are none, and the frame it takes it the sim
+                // is sent the key-ups of what was held.
+                text_entry::mute_keys_while_typing.after(bevy::input::InputSystems),
                 input::forward_input
                     .after(bevy::input::InputSystems)
                     .run_if(world_systems_enabled()),
@@ -189,6 +197,7 @@ impl Plugin for SimBridgePlugin {
                     // the frontend (menu) when no world is running.
                     bridge::enforce_single_active_camera,
                     slint_overlay::drain_ui_updates.run_if(world_systems_enabled()),
+                    cursor::retake_pointer,
                     cursor::apply_cursor_policy,
                 )
                     .chain(),
@@ -262,6 +271,8 @@ impl Plugin for SimBridgePlugin {
                 .after(interpolate::interpolate_transforms)
                 .run_if(world_systems_enabled()),
         );
+        // One timeline per region crossing (`[perf] event=crossing_*`).
+        app.add_systems(Update, crossing_timeline::track_crossing_timeline.run_if(world_systems_enabled()));
         // Sim-animated entities (`game::anim`): model child, then the pose
         // from the sim state over the interpolated body.
         app.add_systems(
@@ -281,6 +292,7 @@ impl Plugin for SimBridgePlugin {
             app.add_plugins((
                 commander::CommanderPlugin,
                 slint_overlay::SlintOverlayPlugin,
+                chat::ChatPlugin,
                 slice_plane::SlicePlanePlugin,
             ));
         }
@@ -585,6 +597,502 @@ const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
     (
         "spruce_rings.png",
         include_bytes!("../../../../assets/blocks/spruce_rings.png"),
+    ),
+    (
+        "acacia_planks.png",
+        include_bytes!("../../../../assets/blocks/acacia_planks.png"),
+    ),
+    (
+        "andesite.png",
+        include_bytes!("../../../../assets/blocks/andesite.png"),
+    ),
+    (
+        "birch_planks.png",
+        include_bytes!("../../../../assets/blocks/birch_planks.png"),
+    ),
+    (
+        "black_concrete.png",
+        include_bytes!("../../../../assets/blocks/black_concrete.png"),
+    ),
+    (
+        "black_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/black_stained_glass.png"),
+    ),
+    (
+        "black_terracotta.png",
+        include_bytes!("../../../../assets/blocks/black_terracotta.png"),
+    ),
+    (
+        "black_wool.png",
+        include_bytes!("../../../../assets/blocks/black_wool.png"),
+    ),
+    (
+        "blue_concrete.png",
+        include_bytes!("../../../../assets/blocks/blue_concrete.png"),
+    ),
+    (
+        "blue_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/blue_stained_glass.png"),
+    ),
+    (
+        "blue_terracotta.png",
+        include_bytes!("../../../../assets/blocks/blue_terracotta.png"),
+    ),
+    (
+        "blue_wool.png",
+        include_bytes!("../../../../assets/blocks/blue_wool.png"),
+    ),
+    (
+        "bone_block.png",
+        include_bytes!("../../../../assets/blocks/bone_block.png"),
+    ),
+    (
+        "bone_block_top.png",
+        include_bytes!("../../../../assets/blocks/bone_block_top.png"),
+    ),
+    (
+        "bookshelf.png",
+        include_bytes!("../../../../assets/blocks/bookshelf.png"),
+    ),
+    (
+        "bricks.png",
+        include_bytes!("../../../../assets/blocks/bricks.png"),
+    ),
+    (
+        "brown_concrete.png",
+        include_bytes!("../../../../assets/blocks/brown_concrete.png"),
+    ),
+    (
+        "brown_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/brown_stained_glass.png"),
+    ),
+    (
+        "brown_terracotta.png",
+        include_bytes!("../../../../assets/blocks/brown_terracotta.png"),
+    ),
+    (
+        "brown_wool.png",
+        include_bytes!("../../../../assets/blocks/brown_wool.png"),
+    ),
+    (
+        "calcite.png",
+        include_bytes!("../../../../assets/blocks/calcite.png"),
+    ),
+    (
+        "chiseled_sandstone.png",
+        include_bytes!("../../../../assets/blocks/chiseled_sandstone.png"),
+    ),
+    (
+        "clay.png",
+        include_bytes!("../../../../assets/blocks/clay.png"),
+    ),
+    (
+        "cobbled_deepslate.png",
+        include_bytes!("../../../../assets/blocks/cobbled_deepslate.png"),
+    ),
+    (
+        "cobbled_road.png",
+        include_bytes!("../../../../assets/blocks/cobbled_road.png"),
+    ),
+    (
+        "cobblestone.png",
+        include_bytes!("../../../../assets/blocks/cobblestone.png"),
+    ),
+    (
+        "copper_block.png",
+        include_bytes!("../../../../assets/blocks/copper_block.png"),
+    ),
+    (
+        "cracked_stone_bricks.png",
+        include_bytes!("../../../../assets/blocks/cracked_stone_bricks.png"),
+    ),
+    (
+        "cut_sandstone.png",
+        include_bytes!("../../../../assets/blocks/cut_sandstone.png"),
+    ),
+    (
+        "cyan_concrete.png",
+        include_bytes!("../../../../assets/blocks/cyan_concrete.png"),
+    ),
+    (
+        "cyan_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/cyan_stained_glass.png"),
+    ),
+    (
+        "cyan_terracotta.png",
+        include_bytes!("../../../../assets/blocks/cyan_terracotta.png"),
+    ),
+    (
+        "cyan_wool.png",
+        include_bytes!("../../../../assets/blocks/cyan_wool.png"),
+    ),
+    (
+        "dark_oak_planks.png",
+        include_bytes!("../../../../assets/blocks/dark_oak_planks.png"),
+    ),
+    (
+        "dark_prismarine.png",
+        include_bytes!("../../../../assets/blocks/dark_prismarine.png"),
+    ),
+    (
+        "deepslate.png",
+        include_bytes!("../../../../assets/blocks/deepslate.png"),
+    ),
+    (
+        "deepslate_bricks.png",
+        include_bytes!("../../../../assets/blocks/deepslate_bricks.png"),
+    ),
+    (
+        "diorite.png",
+        include_bytes!("../../../../assets/blocks/diorite.png"),
+    ),
+    (
+        "glass.png",
+        include_bytes!("../../../../assets/blocks/glass.png"),
+    ),
+    (
+        "gold_block.png",
+        include_bytes!("../../../../assets/blocks/gold_block.png"),
+    ),
+    (
+        "gray_concrete.png",
+        include_bytes!("../../../../assets/blocks/gray_concrete.png"),
+    ),
+    (
+        "gray_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/gray_stained_glass.png"),
+    ),
+    (
+        "gray_terracotta.png",
+        include_bytes!("../../../../assets/blocks/gray_terracotta.png"),
+    ),
+    (
+        "gray_wool.png",
+        include_bytes!("../../../../assets/blocks/gray_wool.png"),
+    ),
+    (
+        "green_concrete.png",
+        include_bytes!("../../../../assets/blocks/green_concrete.png"),
+    ),
+    (
+        "green_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/green_stained_glass.png"),
+    ),
+    (
+        "green_terracotta.png",
+        include_bytes!("../../../../assets/blocks/green_terracotta.png"),
+    ),
+    (
+        "green_wool.png",
+        include_bytes!("../../../../assets/blocks/green_wool.png"),
+    ),
+    (
+        "hay_bale.png",
+        include_bytes!("../../../../assets/blocks/hay_bale.png"),
+    ),
+    (
+        "hay_bale_top.png",
+        include_bytes!("../../../../assets/blocks/hay_bale_top.png"),
+    ),
+    (
+        "iron_block.png",
+        include_bytes!("../../../../assets/blocks/iron_block.png"),
+    ),
+    (
+        "jungle_planks.png",
+        include_bytes!("../../../../assets/blocks/jungle_planks.png"),
+    ),
+    (
+        "light_blue_concrete.png",
+        include_bytes!("../../../../assets/blocks/light_blue_concrete.png"),
+    ),
+    (
+        "light_blue_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/light_blue_stained_glass.png"),
+    ),
+    (
+        "light_blue_terracotta.png",
+        include_bytes!("../../../../assets/blocks/light_blue_terracotta.png"),
+    ),
+    (
+        "light_blue_wool.png",
+        include_bytes!("../../../../assets/blocks/light_blue_wool.png"),
+    ),
+    (
+        "light_gray_concrete.png",
+        include_bytes!("../../../../assets/blocks/light_gray_concrete.png"),
+    ),
+    (
+        "light_gray_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/light_gray_stained_glass.png"),
+    ),
+    (
+        "light_gray_terracotta.png",
+        include_bytes!("../../../../assets/blocks/light_gray_terracotta.png"),
+    ),
+    (
+        "light_gray_wool.png",
+        include_bytes!("../../../../assets/blocks/light_gray_wool.png"),
+    ),
+    (
+        "lime_concrete.png",
+        include_bytes!("../../../../assets/blocks/lime_concrete.png"),
+    ),
+    (
+        "lime_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/lime_stained_glass.png"),
+    ),
+    (
+        "lime_terracotta.png",
+        include_bytes!("../../../../assets/blocks/lime_terracotta.png"),
+    ),
+    (
+        "lime_wool.png",
+        include_bytes!("../../../../assets/blocks/lime_wool.png"),
+    ),
+    (
+        "magenta_concrete.png",
+        include_bytes!("../../../../assets/blocks/magenta_concrete.png"),
+    ),
+    (
+        "magenta_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/magenta_stained_glass.png"),
+    ),
+    (
+        "magenta_terracotta.png",
+        include_bytes!("../../../../assets/blocks/magenta_terracotta.png"),
+    ),
+    (
+        "magenta_wool.png",
+        include_bytes!("../../../../assets/blocks/magenta_wool.png"),
+    ),
+    (
+        "mangrove_planks.png",
+        include_bytes!("../../../../assets/blocks/mangrove_planks.png"),
+    ),
+    (
+        "mossy_stone_bricks.png",
+        include_bytes!("../../../../assets/blocks/mossy_stone_bricks.png"),
+    ),
+    (
+        "mud_bricks.png",
+        include_bytes!("../../../../assets/blocks/mud_bricks.png"),
+    ),
+    (
+        "oak_planks.png",
+        include_bytes!("../../../../assets/blocks/oak_planks.png"),
+    ),
+    (
+        "orange_concrete.png",
+        include_bytes!("../../../../assets/blocks/orange_concrete.png"),
+    ),
+    (
+        "orange_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/orange_stained_glass.png"),
+    ),
+    (
+        "orange_terracotta.png",
+        include_bytes!("../../../../assets/blocks/orange_terracotta.png"),
+    ),
+    (
+        "orange_wool.png",
+        include_bytes!("../../../../assets/blocks/orange_wool.png"),
+    ),
+    (
+        "packed_mud.png",
+        include_bytes!("../../../../assets/blocks/packed_mud.png"),
+    ),
+    (
+        "pink_concrete.png",
+        include_bytes!("../../../../assets/blocks/pink_concrete.png"),
+    ),
+    (
+        "pink_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/pink_stained_glass.png"),
+    ),
+    (
+        "pink_terracotta.png",
+        include_bytes!("../../../../assets/blocks/pink_terracotta.png"),
+    ),
+    (
+        "pink_wool.png",
+        include_bytes!("../../../../assets/blocks/pink_wool.png"),
+    ),
+    (
+        "polished_andesite.png",
+        include_bytes!("../../../../assets/blocks/polished_andesite.png"),
+    ),
+    (
+        "polished_deepslate.png",
+        include_bytes!("../../../../assets/blocks/polished_deepslate.png"),
+    ),
+    (
+        "polished_diorite.png",
+        include_bytes!("../../../../assets/blocks/polished_diorite.png"),
+    ),
+    (
+        "polished_granite.png",
+        include_bytes!("../../../../assets/blocks/polished_granite.png"),
+    ),
+    (
+        "prismarine.png",
+        include_bytes!("../../../../assets/blocks/prismarine.png"),
+    ),
+    (
+        "purple_concrete.png",
+        include_bytes!("../../../../assets/blocks/purple_concrete.png"),
+    ),
+    (
+        "purple_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/purple_stained_glass.png"),
+    ),
+    (
+        "purple_terracotta.png",
+        include_bytes!("../../../../assets/blocks/purple_terracotta.png"),
+    ),
+    (
+        "purple_wool.png",
+        include_bytes!("../../../../assets/blocks/purple_wool.png"),
+    ),
+    (
+        "quartz.png",
+        include_bytes!("../../../../assets/blocks/quartz.png"),
+    ),
+    (
+        "quartz_bricks.png",
+        include_bytes!("../../../../assets/blocks/quartz_bricks.png"),
+    ),
+    (
+        "quartz_pillar.png",
+        include_bytes!("../../../../assets/blocks/quartz_pillar.png"),
+    ),
+    (
+        "quartz_pillar_top.png",
+        include_bytes!("../../../../assets/blocks/quartz_pillar_top.png"),
+    ),
+    (
+        "red_concrete.png",
+        include_bytes!("../../../../assets/blocks/red_concrete.png"),
+    ),
+    (
+        "red_sandstone.png",
+        include_bytes!("../../../../assets/blocks/red_sandstone.png"),
+    ),
+    (
+        "red_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/red_stained_glass.png"),
+    ),
+    (
+        "red_terracotta.png",
+        include_bytes!("../../../../assets/blocks/red_terracotta.png"),
+    ),
+    (
+        "red_wool.png",
+        include_bytes!("../../../../assets/blocks/red_wool.png"),
+    ),
+    (
+        "smooth_quartz.png",
+        include_bytes!("../../../../assets/blocks/smooth_quartz.png"),
+    ),
+    (
+        "smooth_red_sandstone.png",
+        include_bytes!("../../../../assets/blocks/smooth_red_sandstone.png"),
+    ),
+    (
+        "smooth_sandstone.png",
+        include_bytes!("../../../../assets/blocks/smooth_sandstone.png"),
+    ),
+    (
+        "smooth_stone.png",
+        include_bytes!("../../../../assets/blocks/smooth_stone.png"),
+    ),
+    (
+        "spruce_planks.png",
+        include_bytes!("../../../../assets/blocks/spruce_planks.png"),
+    ),
+    (
+        "stone_bricks.png",
+        include_bytes!("../../../../assets/blocks/stone_bricks.png"),
+    ),
+    (
+        "stripped_acacia.png",
+        include_bytes!("../../../../assets/blocks/stripped_acacia.png"),
+    ),
+    (
+        "stripped_birch.png",
+        include_bytes!("../../../../assets/blocks/stripped_birch.png"),
+    ),
+    (
+        "stripped_dark_oak.png",
+        include_bytes!("../../../../assets/blocks/stripped_dark_oak.png"),
+    ),
+    (
+        "stripped_jungle.png",
+        include_bytes!("../../../../assets/blocks/stripped_jungle.png"),
+    ),
+    (
+        "stripped_mangrove.png",
+        include_bytes!("../../../../assets/blocks/stripped_mangrove.png"),
+    ),
+    (
+        "stripped_oak.png",
+        include_bytes!("../../../../assets/blocks/stripped_oak.png"),
+    ),
+    (
+        "stripped_spruce.png",
+        include_bytes!("../../../../assets/blocks/stripped_spruce.png"),
+    ),
+    (
+        "stripped_warped.png",
+        include_bytes!("../../../../assets/blocks/stripped_warped.png"),
+    ),
+    (
+        "terracotta.png",
+        include_bytes!("../../../../assets/blocks/terracotta.png"),
+    ),
+    (
+        "thatch.png",
+        include_bytes!("../../../../assets/blocks/thatch.png"),
+    ),
+    (
+        "tuff.png",
+        include_bytes!("../../../../assets/blocks/tuff.png"),
+    ),
+    (
+        "warped_planks.png",
+        include_bytes!("../../../../assets/blocks/warped_planks.png"),
+    ),
+    (
+        "white_concrete.png",
+        include_bytes!("../../../../assets/blocks/white_concrete.png"),
+    ),
+    (
+        "white_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/white_stained_glass.png"),
+    ),
+    (
+        "white_terracotta.png",
+        include_bytes!("../../../../assets/blocks/white_terracotta.png"),
+    ),
+    (
+        "white_wool.png",
+        include_bytes!("../../../../assets/blocks/white_wool.png"),
+    ),
+    (
+        "yellow_concrete.png",
+        include_bytes!("../../../../assets/blocks/yellow_concrete.png"),
+    ),
+    (
+        "yellow_stained_glass.png",
+        include_bytes!("../../../../assets/blocks/yellow_stained_glass.png"),
+    ),
+    (
+        "yellow_terracotta.png",
+        include_bytes!("../../../../assets/blocks/yellow_terracotta.png"),
+    ),
+    (
+        "yellow_wool.png",
+        include_bytes!("../../../../assets/blocks/yellow_wool.png"),
     ),
 ];
 

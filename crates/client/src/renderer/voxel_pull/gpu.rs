@@ -233,6 +233,14 @@ struct GpuNearCullView {
     /// distance in world units (<= 0: bands off — fine chunks draw, coarse
     /// twins never).
     detail: [f32; 4],
+    /// Shadow-caster culling (`super::NearDetail::receivers`): the main
+    /// camera's lit view volume as inward half-spaces, set for the sun's
+    /// shadow views only (`camera.w = 2`, `camera.xyz` points at the light). A
+    /// caster wholly outside a half-space whose normal has a component
+    /// toward the light can never shadow anything inside it.
+    receivers: [[f32; 4]; super::RECEIVER_PLANES],
+    /// x = how many of `receivers` are set (0: no such cull).
+    receiver_count: [u32; 4],
 }
 
 /// `camera.w` of an orthographic view: cull by direction, not eye position.
@@ -277,7 +285,11 @@ impl GpuNearCullView {
         hzb_mip_count: u32,
         fortress: Option<&crate::renderer::fortress_view::FortressViewUniform>,
         detail: Option<&super::NearDetail>,
+        shadow: bool,
     ) -> Self {
+        // Only a shadow view culls its casters by what the main camera sees;
+        // the main camera's own views draw to their horizon.
+        let receivers = detail.filter(|_| shadow);
         let clip_from_world = resolve_clip_from_world(
             view.clip_from_world,
             view.clip_from_view,
@@ -294,6 +306,8 @@ impl GpuNearCullView {
             camera: cull_camera(view, face_culling_enabled()),
             cut: cull_cut(fortress),
             detail: detail.map_or([0.0; 4], super::NearDetail::cull_uniform),
+            receivers: receivers.map_or([[0.0; 4]; super::RECEIVER_PLANES], |d| d.receivers.map(|p| p.to_array())),
+            receiver_count: [receivers.map_or(0, |d| d.receiver_count), 0, 0, 0],
         }
     }
 }
@@ -546,6 +560,7 @@ pub fn prepare_gpu_near_view_buffers(
         Option<&ViewDepthPyramid>,
         Option<&mut GpuNearViewBuffers>,
         Has<crate::session::FrontendCamera>,
+        Has<bevy::pbr::ShadowView>,
     )>,
 ) {
     if !matches!(*mode, ActiveNearMode::GpuDriven { .. }) {
@@ -559,7 +574,7 @@ pub fn prepare_gpu_near_view_buffers(
         return;
     }
     let capacity = geometric_gpu_capacity(slot_count);
-    for (entity, view, depth_pyramid, existing, frontend) in &mut views {
+    for (entity, view, depth_pyramid, existing, frontend, shadow) in &mut views {
         // No near-terrain cull or draw for the frontend camera's view.
         if !crate::session::view_draws_world(frontend) {
             if existing.is_some() {
@@ -573,6 +588,7 @@ pub fn prepare_gpu_near_view_buffers(
             depth_pyramid.map_or(0, |pyramid| pyramid.mip_count),
             fortress_view.as_deref(),
             detail.as_deref(),
+            shadow,
         );
         if let Some(mut existing) = existing {
             if existing.capacity == capacity

@@ -220,6 +220,80 @@ fn placing_into_the_players_own_body_is_refused() {
     assert!(changed(&before, &blocks(&region)).is_empty(), "must not bury the player");
 }
 
+/// Holding jump and the place button while looking straight down builds a
+/// pillar: each jump leaves one block under the feet as soon as they clear
+/// its cell, and the player lands on it.
+#[test]
+fn holding_place_and_jump_looking_down_pillars_up() {
+    let mut region = region(|| Chunk::flat_floor(16));
+    let before = blocks(&region);
+    let (_, y0, _, _) = player(&region);
+    run(
+        &mut region,
+        &[
+            input(InputEvent::MouseMotion { dx: 0.0, dy: DOWN }),
+            input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true }),
+            input(InputEvent::Key { key: Key::Space, pressed: true }),
+        ],
+    );
+    let mut heights = Vec::new();
+    for _ in 0..60 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+        let n = changed(&before, &blocks(&region)).len();
+        if heights.last() != Some(&n) {
+            heights.push(n);
+        }
+    }
+    assert!(heights.len() >= 3 && heights.windows(2).all(|w| w[1] == w[0] + 1), "one block per jump: {heights:?}");
+    let diff = changed(&before, &blocks(&region));
+    // One column under the body (the spawn straddles a block edge: the one
+    // the look falls in).
+    let [cx, _, cz] = world_of(diff[0]);
+    let column = [cx, cz];
+    let mut ys: Vec<i32> = diff
+        .iter()
+        .map(|&d| {
+            let [x, y, z] = world_of(d);
+            assert_eq!(([x, z], d.2), (column, PLACE_BLOCK), "placed in the player's own column: {diff:?}");
+            y
+        })
+        .collect();
+    ys.sort();
+    assert_eq!(ys, (1..=diff.len() as i32).collect::<Vec<_>>(), "a gapless pillar from the floor up");
+    let (_, y, _, _) = player(&region);
+    let rise = (y - y0) / BLOCK_VOXELS as f32;
+    assert!(rise > diff.len() as f32 - 1.5, "the player rides the pillar up: {rise} blocks on {} placed", diff.len());
+
+    // Standing still with the button held places nothing more.
+    region.handle_event(input(InputEvent::Key { key: Key::Space, pressed: false })).unwrap();
+    for _ in 0..20 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+    }
+    let settled = changed(&before, &blocks(&region)).len();
+    for _ in 0..20 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+    }
+    assert_eq!(changed(&before, &blocks(&region)).len(), settled, "no jump, no block");
+}
+
+/// Holding the place button away from the feet places once, on the press.
+#[test]
+fn holding_place_ahead_places_one_block_only() {
+    let mut region = region(|| Chunk::flat_floor(32));
+    let before = blocks(&region);
+    run(
+        &mut region,
+        &[
+            input(InputEvent::MouseMotion { dx: 0.0, dy: DOWN_45 }),
+            input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true }),
+        ],
+    );
+    for _ in 0..20 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+    }
+    assert_eq!(changed(&before, &blocks(&region)).len(), 1, "holding does not repeat away from the feet");
+}
+
 #[test]
 fn clicking_at_the_sky_changes_nothing() {
     let mut region = region(|| Chunk::flat_floor(16));

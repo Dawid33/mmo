@@ -307,6 +307,12 @@ impl GpuQuadArena {
         let Some(allocation) = self.allocations.remove(&entity) else {
             return;
         };
+        // Counted for the crossing timeline (`crossing_timeline::GPU`).
+        {
+            use super::super::crossing_timeline::{GpuCounters, GPU};
+            GpuCounters::add(&GPU.pull_releases, 1);
+            GpuCounters::add(&GPU.pull_release_quads, u64::from(allocation.quad_count));
+        }
         self.record_allocator.free(allocation.record_range());
         if let Some(metadata) = self
             .metadata

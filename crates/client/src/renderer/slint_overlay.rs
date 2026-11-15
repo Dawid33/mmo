@@ -335,6 +335,19 @@ pub fn slot_ref(container: bool, index: i32) -> Option<game::SlotRef> {
 /// non-send resource on the main thread).
 struct GameUiActions(Rc<RefCell<Vec<UiAction>>>);
 
+/// Queues `action` as if its button in the game UI had been pressed (chat
+/// commands); `apply_ui_actions` takes it with the same checks. `false`
+/// without a game UI.
+pub(crate) fn queue_ui_action(world: &World, action: UiAction) -> bool {
+    match world.get_non_send::<GameUiActions>() {
+        Some(actions) => {
+            actions.0.borrow_mut().push(action);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Any Slint component drawn as a window-sized layer over the 3D view:
 /// sized to the window, fed its input, deciding who owns the pointer, and
 /// uploaded into the texture it is shown with. The game UI is one
@@ -833,6 +846,7 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_inventory_slot_pressed(move |container, index, right| queue.borrow_mut().push((container, index, right)));
     world.insert_non_send(InventoryClicks(clicks));
     world.insert_non_send(GameUiActions(actions));
+    super::chat::ui::connect(ui, world);
     #[cfg(feature = "dev_ui")]
     super::dev_ui::connect_debug_tab(ui, world);
 }

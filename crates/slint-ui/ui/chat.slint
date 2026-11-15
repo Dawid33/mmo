@@ -1,0 +1,100 @@
+// The chat (crates/client/src/renderer/chat/): `ChatLines` is a column of
+// lines, newest at the bottom, used both for the lines the pass-through HUD
+// shows for a few seconds and inside `ChatBox`, the open box with its input
+// field in the interactive game UI.
+
+// One line; `kind` 0 = said by the player, 1 = a command's answer, 2 = an error.
+export struct ChatRow {
+    text: string,
+    kind: int,
+}
+
+export global ChatConfig {
+    out property <length> font-size: 14px;
+    out property <length> pad: 6px;
+    out property <length> field-height: 28px;
+    // Left edge, and the gap kept under the box: above the commander's
+    // minimap (`HudConfig.minimap-size` + its margins).
+    out property <length> left: 12px;
+    out property <length> bottom: 248px;
+    out property <length> max-width: 640px;
+    out property <length> box-height: 280px;
+}
+
+export component ChatLines {
+    in property <[ChatRow]> lines;
+
+    VerticalLayout {
+        alignment: end;
+        spacing: 2px;
+        for row in root.lines: Text {
+            text: row.text;
+            color: row.kind == 2 ? #ff8a7a : row.kind == 1 ? #e8d28a : #ffffff;
+            font-size: ChatConfig.font-size;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The open box: the session's lines (scrolled to the newest) over a
+// one-line input field. `accepted` reports the field's text on Enter; the
+// client clears `draft` and closes the box.
+export component ChatBox {
+    in property <[ChatRow]> lines;
+    in-out property <string> draft <=> input.text;
+    callback accepted(string);
+
+    // Gives the field the keyboard, the cursor after its text (offsets past
+    // the end are clamped to it).
+    public function take-focus() {
+        input.focus();
+        input.set-selection-offsets(100000, 100000);
+    }
+
+    public function drop-focus() {
+        input.clear-focus();
+    }
+
+    Rectangle {
+        background: rgba(0, 0, 0, 0.55);
+    }
+
+    scroll := Flickable {
+        x: ChatConfig.pad;
+        y: ChatConfig.pad;
+        width: root.width - 2 * ChatConfig.pad;
+        height: root.height - 3 * ChatConfig.pad - ChatConfig.field-height;
+        viewport-width: self.width;
+        viewport-height: max(self.height, log.preferred-height);
+        viewport-y: self.height - self.viewport-height;
+
+        log := ChatLines {
+            width: scroll.width;
+            height: scroll.viewport-height;
+            lines: root.lines;
+        }
+    }
+
+    Rectangle {
+        x: ChatConfig.pad;
+        y: root.height - ChatConfig.pad - ChatConfig.field-height;
+        width: root.width - 2 * ChatConfig.pad;
+        height: ChatConfig.field-height;
+        background: rgba(20, 14, 10, 0.9);
+        border-width: 1px;
+        border-color: rgba(190, 150, 70, 0.6);
+
+        input := TextInput {
+            x: ChatConfig.pad;
+            width: parent.width - 2 * ChatConfig.pad;
+            height: parent.height;
+            single-line: true;
+            vertical-alignment: center;
+            color: #ffffff;
+            font-size: ChatConfig.font-size;
+            accepted => {
+                root.accepted(self.text);
+            }
+        }
+    }
+}

@@ -103,7 +103,17 @@ pub struct NearDetail {
     pub eye: Vec3,
     /// World units; 0 = no eye yet / bands off.
     pub distance: f32,
+    /// What the main camera can see lit by the sun: its frustum, cut off at
+    /// the sun's shadow distance, as inward half-spaces (`xyz` = unit
+    /// normal, `n · p + w >= 0` inside) — [`shadow_receiver_planes`]. The
+    /// cull compute drops shadow casters that cannot reach it. Meaningful
+    /// only when `receiver_count` is `RECEIVER_PLANES`; 0 = no such cull.
+    pub receivers: [Vec4; RECEIVER_PLANES],
+    pub receiver_count: u32,
 }
+
+/// Half-spaces of [`NearDetail::receivers`]: left, right, bottom, top, near, far.
+pub const RECEIVER_PLANES: usize = 6;
 
 impl NearDetail {
     pub fn cull_uniform(&self) -> [f32; 4] {
@@ -111,15 +121,50 @@ impl NearDetail {
     }
 }
 
-/// The active world camera's eye into [`NearDetail`].
+/// The half-spaces bounding what a camera sees within `reach` world units
+/// along its view direction: the four sides and the near plane of
+/// `clip_from_world` (Gribb–Hartmann; reverse-Z, so near is `w - z >= 0`),
+/// and a far plane `reach` in front of `eye` (the projection's own far plane
+/// is at infinity). `None` if the matrix yields a degenerate plane.
+pub fn shadow_receiver_planes(clip_from_world: Mat4, eye: Vec3, forward: Vec3, reach: f32) -> Option<[Vec4; RECEIVER_PLANES]> {
+    let (r0, r1, r2, r3) = (clip_from_world.row(0), clip_from_world.row(1), clip_from_world.row(2), clip_from_world.row(3));
+    let far_point = eye + forward * reach;
+    let raw = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 - r2, (-forward).extend(forward.dot(far_point))];
+    let mut planes = [Vec4::ZERO; RECEIVER_PLANES];
+    for (plane, raw) in planes.iter_mut().zip(raw) {
+        let length = raw.truncate().length();
+        if !(length.is_finite() && length > 1.0e-12) {
+            return None;
+        }
+        *plane = raw / length;
+    }
+    Some(planes)
+}
+
+/// The active world camera's eye and lit view volume into [`NearDetail`].
 pub fn track_near_detail(
     mut detail: ResMut<NearDetail>,
     cameras: Query<(&GlobalTransform, &Camera), (With<Camera3d>, Without<crate::session::FrontendCamera>)>,
+    suns: Query<&bevy::light::CascadeShadowConfig, With<DirectionalLight>>,
 ) {
     let distance = near_detail_distance_m() * game::movement::UNITS_PER_METER;
-    let eye = cameras.iter().find(|(_, c)| c.is_active).map(|(t, _)| t.translation());
-    let next = match eye {
-        Some(eye) => NearDetail { eye, distance },
+    let camera = cameras.iter().find(|(_, c)| c.is_active);
+    let next = match camera {
+        Some((transform, camera)) => {
+            let eye = transform.translation();
+            // One sun; its last cascade bound is how far shadows are drawn.
+            let reach = suns.iter().filter_map(|config| config.bounds.last().copied()).fold(0.0f32, f32::max);
+            let clip_from_world = camera.clip_from_view() * transform.to_matrix().inverse();
+            let planes = (reach > 0.0)
+                .then(|| shadow_receiver_planes(clip_from_world, eye, transform.forward().as_vec3(), reach))
+                .flatten();
+            NearDetail {
+                eye,
+                distance,
+                receivers: planes.unwrap_or_default(),
+                receiver_count: if planes.is_some() { RECEIVER_PLANES as u32 } else { 0 },
+            }
+        }
         None => NearDetail::default(),
     };
     if *detail != next {
@@ -129,7 +174,10 @@ pub fn track_near_detail(
 
 impl PartialEq for NearDetail {
     fn eq(&self, other: &Self) -> bool {
-        self.eye == other.eye && self.distance == other.distance
+        self.eye == other.eye
+            && self.distance == other.distance
+            && self.receivers == other.receivers
+            && self.receiver_count == other.receiver_count
     }
 }
 

@@ -316,6 +316,18 @@ pub const LOD_MAX_CELL_PX: f32 = 2.5;
 /// frame at the camera's 60° vertical FOV (`540 / tan 30°`).
 pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
 
+/// The finest factor a ring table uses. At the play sizes (256 m regions and
+/// up) that is block scale ([`COARSE_MIN_FACTOR`]): the client already draws
+/// its own near regions at block scale beyond ~96 m (coarse twins,
+/// `NEAR_DETAIL_DISTANCE_M`), so a finer first ring showed the regions past
+/// them in MORE detail than the terrain in front — 10.2M of the 26.6M far
+/// quads at 256 m regions, a third of the frame on an integrated GPU
+/// (2026-11-14 capture) — and made the server generate every one of those
+/// regions in full to downsample it. The pixel budget therefore does not bind
+/// the first ring there (`ring_table_keeps_cells_within_the_pixel_budget`).
+/// The 1 km test sizes keep their sub-block rings.
+pub const LOD_MIN_RING_FACTOR: u32 = if crate::REGION_BLOCKS >= 256 { COARSE_MIN_FACTOR } else { LOD_FACTORS[0] };
+
 /// Ring table: `(chebyshev_bound, lod_factor)` with ascending bounds. A
 /// region at Chebyshev distance `d` from the viewer region renders at the
 /// factor of the first entry with `d <= bound`; None past the last bound.
@@ -334,21 +346,25 @@ pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
 /// checks whichever table the build ships, `ring_table_ends_at_the_horizon`
 /// that it stops at the horizon.
 ///
-/// The play sizes (256 / 512) reach 15 km since 2026-11-05 — an overcast
-/// day's visibility (the client's haze is ~2 % contrast at 80 % of the reach,
-/// `atmosphere::VISIBILITY_SHARE_OF_REACH`), with factors 128 and 512 added
-/// so the cells keep doubling instead of jumping 64 → 256 (~4,400 keys at
-/// 256 m regions, against 80 at the old 1 km); 64 / 128 — tests and
-/// `render-bench` — keep 1 km so their key counts and baselines do not move. Every
+/// The play sizes (256 / 512) reach 3 km (3,072 m; 624 keys at 256 m
+/// regions) since 2026-11-14. They reached 15 km from 2026-11-05 (~4,560
+/// keys, factors up to 512): drawing it was nearly free past 3 km, but
+/// streaming it took the server's LOD workers over a minute after every join
+/// and the 3 km inside it were already a third of an integrated GPU's frame.
+/// Their first ring is block scale ([`LOD_MIN_RING_FACTOR`]). The client's
+/// haze follows the reach (`atmosphere::VISIBILITY_SHARE_OF_REACH`), and
+/// `VOXEL_VIEW_DISTANCE_M` still builds any longer table at run time (up to
+/// 16 km). 64 / 128 — tests and `render-bench` — keep 1 km so their key
+/// counts and baselines do not move. Every
 /// table equals [`ring_table_for`] at its horizon except 64's `(13, 16)` (the
 /// rule gives 12), which predates the rule and is pinned by fixtures.
 /// The client's `VOXEL_VIEW_DISTANCE_M` builds another one at run time.
 pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_BLOCKS {
     64 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
     128 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
-    256 => &[(2, 8), (3, 16), (6, 32), (12, 64), (24, 128), (47, 256), (60, 512)],
+    256 => &[(3, 16), (6, 32), (12, 64)],
     // Factor 32 a region out would be 3.7 px per cell, hence factor 16 to 2.
-    512 => &[(2, 16), (3, 32), (6, 64), (12, 128), (24, 256), (30, 512)],
+    512 => &[(2, 16), (3, 32), (6, 64)],
     _ => panic!("no LOD_RING_TABLE for this REGION_BLOCKS"),
 };
 
@@ -356,8 +372,8 @@ pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_BLOCKS {
 /// Chebyshev bound × `REGION_SIZE` ([`ring_table_reach_units`]). It is also
 /// the NEAREST the horizon edge can be (the viewer may stand on their
 /// region's edge), which is where the client's fog goes opaque by default.
-/// 1 km (16 384 units) at 64 / 128 m regions, 15,360 m at the play sizes.
-pub const LOD_HORIZON_UNITS: f32 = if crate::REGION_BLOCKS >= 256 { 245_760.0 } else { 16_384.0 };
+/// 1 km (16 384 units) at 64 / 128 m regions, 3,072 m at the play sizes.
+pub const LOD_HORIZON_UNITS: f32 = if crate::REGION_BLOCKS >= 256 { 49_152.0 } else { 16_384.0 };
 
 /// Reach of a ring table in world units: its last bound × `REGION_SIZE`
 /// (0 for an empty table).
@@ -371,8 +387,9 @@ pub fn ring_table_reach_units(table: &[(i32, u32)]) -> f32 {
 /// budget at the ring's start (worst case: the viewer on their region's edge,
 /// the first ring starting one region out, as
 /// `ring_table_keeps_cells_within_the_pixel_budget` assumes) and lasts until
-/// the next coarser factor fits. Factors only grow outward. Empty for
-/// `horizon_regions < 1`.
+/// the next coarser factor fits. Factors only grow outward and never go
+/// below [`LOD_MIN_RING_FACTOR`] (the first ring may be over budget for
+/// that). Empty for `horizon_regions < 1`.
 pub fn ring_table_for(horizon_regions: i32) -> Vec<(i32, u32)> {
     // Nearest start distance (regions) at which `factor` is within budget.
     let fits_from = |factor: u32| -> i32 {
@@ -381,7 +398,7 @@ pub fn ring_table_for(horizon_regions: i32) -> Vec<(i32, u32)> {
     };
     let mut table = Vec::new();
     let mut prev = 0;
-    let mut i = 0;
+    let mut i = LOD_FACTORS.iter().position(|&f| f == LOD_MIN_RING_FACTOR).expect("the floor is a LOD factor");
     while prev < horizon_regions {
         let start = prev.max(1);
         while i + 1 < LOD_FACTORS.len() && fits_from(LOD_FACTORS[i + 1]) <= start {
@@ -1198,15 +1215,32 @@ mod tests {
         // starts `prev` whole regions away.
         // Near radius 1 (3x3) is the tightest window any preset runs a full
         // table with; the production 5x5 only pushes the first ring further out.
+        // A ring at the floor factor is exempt: nothing finer is streamed
+        // (`LOD_MIN_RING_FACTOR`).
         let mut prev = 1;
         for &(bound, factor) in LOD_RING_TABLE {
             let start = prev as f32 * REGION_SIZE;
             let px = factor as f32 / start * LOD_REFERENCE_FOCAL_PX;
             assert!(
-                px <= LOD_MAX_CELL_PX,
+                px <= LOD_MAX_CELL_PX || factor == LOD_MIN_RING_FACTOR,
                 "factor {factor} starts {start} voxels out: {px:.2} px per cell"
             );
+            assert!(factor >= LOD_MIN_RING_FACTOR, "factor {factor} is under the floor");
             prev = bound;
+        }
+    }
+
+    /// The play sizes stream nothing finer than block scale, which is also
+    /// where the cheap worldgen path starts; the 1 km test sizes keep theirs.
+    #[test]
+    fn the_finest_ring_is_block_scale_at_the_play_sizes() {
+        let finest = LOD_RING_TABLE[0].1;
+        assert!(finest >= LOD_MIN_RING_FACTOR, "{LOD_RING_TABLE:?}");
+        if crate::REGION_BLOCKS >= 256 {
+            assert_eq!(finest, COARSE_MIN_FACTOR);
+            assert_eq!(ring_table_for(1), [(1, COARSE_MIN_FACTOR)]);
+        } else {
+            assert_eq!(LOD_MIN_RING_FACTOR, LOD_FACTORS[0]);
         }
     }
 
@@ -1238,7 +1272,10 @@ mod tests {
             for &(bound, factor) in &table {
                 assert!(bound >= prev && factor > last_factor, "{table:?}");
                 let px = factor as f32 / (prev as f32 * REGION_SIZE) * LOD_REFERENCE_FOCAL_PX;
-                assert!(px <= LOD_MAX_CELL_PX, "horizon {horizon}: factor {factor} at {prev}: {px:.2} px");
+                assert!(
+                    px <= LOD_MAX_CELL_PX || factor == LOD_MIN_RING_FACTOR,
+                    "horizon {horizon}: factor {factor} at {prev}: {px:.2} px"
+                );
                 assert!(LOD_FACTORS.contains(&factor));
                 prev = bound;
                 last_factor = factor;

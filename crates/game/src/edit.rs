@@ -1,5 +1,7 @@
 //! Player block editing: a left click breaks the block under the crosshair, a
-//! right click places one against the face it was hit on.
+//! right click places one against the face it was hit on. Held, the right
+//! button keeps filling the cell under the player's feet as a jump frees it
+//! (`Rollback::pillar_target`).
 //!
 //! Clicks arrive as ordinary tick-stamped `PlayerInput` mouse-button events,
 //! so an edit runs inside the tick on both the predicting client and the
@@ -51,6 +53,12 @@ pub const PLACE_BLOCK: BlockId = BlockId(1);
 pub const BREAK_BUTTON: MouseButton = MouseButton::Left;
 /// Mouse button that places a block against the targeted face.
 pub const PLACE_BUTTON: MouseButton = MouseButton::Right;
+
+/// A held place button fills the cell under the feet once they are clear of
+/// it and no more than this far above its top, in sim units (one block): a
+/// jump leaves a block under itself, a hover high above the ground does not
+/// pour a column.
+pub const PILLAR_MAX_GAP: f32 = BLOCK_VOXELS as f32;
 
 /// Region-local block coordinates: block `b` spans world units
 /// `[b * BLOCK_VOXELS, (b + 1) * BLOCK_VOXELS)` on each axis.
@@ -204,6 +212,40 @@ impl Rollback {
             }
         }
         false
+    }
+
+    /// Whether `client`'s held place button places this tick (pillaring up,
+    /// Minecraft style): the cell against the face under the crosshair is
+    /// the one right under its own body — inside the body's footprint, its
+    /// top at or below the feet and within [`PILLAR_MAX_GAP`] of them. A
+    /// press places anywhere; holding repeats only here, where the body
+    /// itself paces it (the next cell up is free only after the next jump).
+    pub fn pillar_target(&self, client: ClientId) -> bool {
+        let Some(hit) = self.eye_hit(client) else { return false };
+        if hit.normal == [0; 3] {
+            return false;
+        }
+        let target = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
+        let Some(&e) = self.data.player_entites.get(&client) else { return false };
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return false };
+        let Some(body) = self.data.physics.bodies.get(handle) else { return false };
+        // The body's box: every collider's, as `block_overlaps_body` reads them.
+        let mut bounds: Option<([f32; 3], [f32; 3])> = None;
+        for &ch in body.colliders() {
+            let Some(collider) = self.data.physics.colliders.get(ch) else { continue };
+            let aabb = collider.compute_aabb();
+            let (lo, hi) = bounds.get_or_insert(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]));
+            for a in 0..3 {
+                lo[a] = lo[a].min(aabb.mins[a]);
+                hi[a] = hi[a].max(aabb.maxs[a]);
+            }
+        }
+        let Some((lo, hi)) = bounds else { return false };
+        let size = BLOCK_VOXELS as f32;
+        let cell_lo = [target[0] as f32 * size, target[1] as f32 * size, target[2] as f32 * size];
+        let top = cell_lo[1] + size;
+        let under = [0, 2].into_iter().all(|a| lo[a] < cell_lo[a] + size && hi[a] > cell_lo[a]);
+        under && top <= lo[1] && lo[1] - top <= PILLAR_MAX_GAP
     }
 
     /// Sets one whole block, undo-safely: chunk data, render voxels and

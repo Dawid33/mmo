@@ -401,7 +401,7 @@ fn apply_distance_fog(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> 
 // Draw the home region's perimeter onto `color` at ground point `p` (world
 // xz) as a line `shape.x` world units wide (at least `shape.y` pixels) that
 // starts on the edge and grows outward — nothing is drawn inside the play
-// area — and dim what lies outside it.
+// area, and the world outside it keeps its colours.
 fn apply_boundaries(color: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     let b = boundaries;
     if (b.home_color.a <= 0.0) {
@@ -413,18 +413,11 @@ fn apply_boundaries(color: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     let sd = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0);
     let unit_px = 1.0 / max(fwidth(sd), 1e-4);
     let sd_px = sd * unit_px;
-    var c = color;
-    if (sd > 0.0) {
-        // Outside home: darken and desaturate, eased in from the edge.
-        let t = smoothstep(0.0, b.shape.z, sd);
-        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-        c = mix(c, vec3<f32>(luma), b.dim.y * t) * (1.0 - b.dim.x * t);
-    }
     // Both antialiased edges sit outside the perimeter: the inner one fades
     // in over the first pixel past it.
     let w = max(b.shape.x * unit_px, b.shape.y);
     let line = smoothstep(0.0, 1.0, sd_px) * (1.0 - smoothstep(w, w + 1.0, sd_px));
-    return mix(c, b.home_color.rgb, line * b.home_color.a);
+    return mix(color, b.home_color.rgb, line * b.home_color.a);
 }
 
 #ifdef XRAY

@@ -18,6 +18,10 @@
 //!   `--adventure-at SITE` starts an adventure at that site instead of
 //!   embarking (`just run-two`: client 2 adventures in client 1's fortress,
 //!   whose id client 1 logs as `[debug] embarked: fortress site=N`).
+//!   `--adventure` (`just run --adventure`) does the same at a site it picks
+//!   itself: the first one the Adventure tab would offer
+//!   ([`choose_adventure_site`]). Either flag retires a fortress the server
+//!   restored the player into first (it stays returnable).
 //! - `online` — start from the login kept in `VOXEL_LOGIN_REFRESH_FILE` (a
 //!   refresh token an operator issued: `login account issue-refresh <email>`)
 //!   at the login service (`VOXEL_LOGIN_URL`), join its world `--world <id>`
@@ -52,7 +56,7 @@ use crate::frontend::generator::{progress_text, ForgeEvent, ForgeJob};
 use crate::instance::ClientRequest;
 use crate::login::flow::{LoginIntent, LoginSession, RejoinEnd};
 use crate::renderer::commander::CommanderCamera;
-use crate::renderer::history_view::{embark_tile_check, HistoryView};
+use crate::renderer::history_view::{embark_tile_check, populated, HistoryView};
 use crate::renderer::world_map::WorldMapState;
 use crate::renderer::ClientRequests;
 use crate::session::{AppState, Embarked, LastSessionError, PendingWorld, PreparingWorld, SessionEnded, StartingStatus};
@@ -76,7 +80,7 @@ fn debug_world_override() -> Option<String> {
     }
 }
 
-pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --join HOST:PORT] [--adventure-at SITE]]\n       \
+pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --join HOST:PORT] [--adventure | --adventure-at SITE] [--prefab NAME[:DX,DZ[:TURN]]... | --town STYLE[:ARMS[:LEN]]]]\n       \
     client [debug online [--world ID]]\n\
     \n\
     With no arguments the client opens on the main menu.\n\
@@ -86,7 +90,14 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
                  reused between runs, --reset re-forges it and embarks afresh;\n             \
                  --port N hosts its server on UDP port N, --join HOST:PORT joins a\n             \
                  running server instead (several clients on one world); --adventure-at SITE\n             \
-                 starts an adventure at site SITE (a number) instead of embarking\n  \
+                 starts an adventure at site SITE (a number) instead of embarking,\n             \
+                 --adventure at the first populated site; --prefab (repeatable, joined with `;`)\n             \
+                 stamps prefabs beside the landing of the region you embark in (not the spawn\n             \
+                 region a fresh session waits in; other regions are untouched): only in a region\n             \
+                 never saved (--reset, which --town takes too); extra prefab\n             \
+                 directories via VOXEL_PREFAB_DIRS; --town STYLE[:ARMS[:LEN]] lays one town of\n             \
+                 that style (ARMS 1..=4 streets of LEN 16..=256 blocks) beside that landing\n             \
+                 instead (not with --prefab), from the houses tagged STYLE (`just town`)\n  \
       online     start from the kept login (VOXEL_LOGIN_URL, VOXEL_LOGIN_REFRESH_FILE), join the\n             \
                  login service's world ID (default `dev`) and embark as `embarked` does\n             \
                  (`just run-online` starts the login service and a server for it)";
@@ -94,21 +105,39 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
 /// The `online` preset's world when `--world` is not given (`just dev-login`'s).
 pub const DEFAULT_ONLINE_WORLD: &str = "dev";
 
+/// Where `--adventure` / `--adventure-at` starts the adventure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdventureStart {
+    /// `--adventure-at SITE`.
+    Site(SiteId),
+    /// `--adventure`: [`choose_adventure_site`].
+    FirstPopulated,
+}
+
 /// A debug launch picked on the command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DebugScenario {
     /// `port`: host the world's server there. `join`: play on that running
     /// server instead of the world's own (never with `reset` or `port`).
-    /// `adventure_at`: start an adventure at that site instead of embarking.
-    Embarked { reset: bool, port: Option<u16>, join: Option<std::net::SocketAddr>, adventure_at: Option<SiteId> },
+    /// `adventure`: start an adventure there instead of embarking.
+    /// `prefab`: the `--prefab` entries joined with `;` (a `parse_dev_spec` string).
+    Embarked {
+        reset: bool,
+        port: Option<u16>,
+        join: Option<std::net::SocketAddr>,
+        adventure: Option<AdventureStart>,
+        prefab: Option<String>,
+        /// `town`: the `--town` value, `STYLE[:ARMS[:LEN]]` (a `parse_town_spec` string).
+        town: Option<String>,
+    },
     /// Log in, join the login service's `world`, embark.
     Online { world: String },
 }
 
 impl DebugScenario {
-    fn adventure_at(&self) -> Option<SiteId> {
+    fn adventure(&self) -> Option<AdventureStart> {
         match self {
-            DebugScenario::Embarked { adventure_at, .. } => *adventure_at,
+            DebugScenario::Embarked { adventure, .. } => *adventure,
             DebugScenario::Online { .. } => None,
         }
     }
@@ -141,8 +170,10 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
             let mut reset = false;
             let mut port = None;
             let mut join = None;
-            let mut adventure_at = None;
+            let mut adventure = None;
             let mut world = None;
+            let mut prefab: Option<String> = None;
+            let mut town: Option<String> = None;
             let mut flags = flags.iter();
             while let Some(flag) = flags.next() {
                 let mut value = || {
@@ -165,7 +196,30 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                     "--adventure-at" => {
                         let v = value()?;
                         let site = v.parse::<u32>().map_err(|e| format!("bad --adventure-at `{v}`: {e}\n\n{USAGE}"))?;
-                        adventure_at = Some(SiteId(site));
+                        if adventure.replace(AdventureStart::Site(SiteId(site))).is_some() {
+                            return Err(format!("--adventure and --adventure-at: only one, once\n\n{USAGE}"));
+                        }
+                    }
+                    "--adventure" => {
+                        if adventure.replace(AdventureStart::FirstPopulated).is_some() {
+                            return Err(format!("--adventure and --adventure-at: only one, once\n\n{USAGE}"));
+                        }
+                    }
+                    "--prefab" => {
+                        let v = value()?;
+                        if v.trim().is_empty() || v.starts_with('-') {
+                            return Err(format!("bad --prefab `{v}`: want NAME[:DX,DZ[:TURN]]\n\n{USAGE}"));
+                        }
+                        prefab = Some(match prefab.take() {
+                            Some(p) => format!("{p};{v}"),
+                            None => v.to_string(),
+                        });
+                    }
+                    "--town" => {
+                        let v = value()?;
+                        if v.trim().is_empty() || v.starts_with('-') || town.replace(v.to_string()).is_some() {
+                            return Err(format!("bad --town `{v}`: want STYLE[:ARMS[:LEN]], once\n\n{USAGE}"));
+                        }
                     }
                     "--world" => {
                         let v = value()?;
@@ -181,8 +235,21 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                 return Err(format!("--join plays on another client's world: not with --reset or --port\n\n{USAGE}"));
             }
             match *preset {
-                "embarked" if world.is_none() => Ok(Some(DebugScenario::Embarked { reset, port, join, adventure_at })),
-                "online" if !reset && port.is_none() && join.is_none() && adventure_at.is_none() => {
+                "embarked"
+                    if world.is_none()
+                        && !(join.is_some() && (prefab.is_some() || town.is_some()))
+                        && !(prefab.is_some() && town.is_some()) =>
+                {
+                    Ok(Some(DebugScenario::Embarked { reset, port, join, adventure, prefab, town }))
+                }
+                "online"
+                    if !reset
+                        && port.is_none()
+                        && join.is_none()
+                        && adventure.is_none()
+                        && prefab.is_none()
+                        && town.is_none() =>
+                {
                     Ok(Some(DebugScenario::Online { world: world.unwrap_or_else(|| DEFAULT_ONLINE_WORLD.into()) }))
                 }
                 "embarked" | "online" => Err(format!("flags not valid for `debug {preset}`\n\n{USAGE}")),
@@ -235,6 +302,12 @@ pub fn choose_embark(options: &EmbarkOptions, map: &WorldMap, sites: &[SiteMarke
         .filter(|rc| embark_tile_check(&grid, sites, *rc).is_ok())
         .min_by_key(|rc| chebyshev(*rc, home))?;
     Some(EmbarkRequest { civ: civ.civ, people, region })
+}
+
+/// `--adventure`'s site: the first the Adventure tab would offer — a populated
+/// site of the lowest civ, in the order the server lists them.
+pub fn choose_adventure_site(sites: &[SiteMarker]) -> Option<SiteId> {
+    sites.iter().filter(|s| populated(s)).min_by_key(|s| s.civ).map(|s| s.site)
 }
 
 /// What the automatic embark does next, from what the server has sent.
@@ -306,7 +379,7 @@ enum Sent {
     Return,
     /// A ReturnTo was refused, then an Embark sent.
     Embark,
-    /// A StartAdventure (`--adventure-at`).
+    /// A StartAdventure (`--adventure`, `--adventure-at`).
     Adventure,
 }
 
@@ -416,8 +489,8 @@ fn boot(
     if launch.phase != Phase::Boot {
         return;
     }
-    let (reset, port, join) = match &launch.scenario {
-        DebugScenario::Embarked { reset, port, join, .. } => (*reset, *port, *join),
+    let (reset, port, join, prefab, town) = match &launch.scenario {
+        DebugScenario::Embarked { reset, port, join, prefab, town, .. } => (*reset, *port, *join, prefab.clone(), town.clone()),
         DebugScenario::Online { world } => {
             // The Play online flow from its login screen: `drive_online_login` presses its buttons.
             info!("[debug] logging in to join the login service's world {world}");
@@ -432,6 +505,16 @@ fn boot(
         launch.phase = Phase::Embarking(Sent::Nothing);
         next.set(AppState::Starting);
         return;
+    }
+    let prefab_given = prefab.is_some();
+    if let Some(spec) = prefab {
+        info!("[debug] --prefab {spec}: beside the landing of the home region");
+        commands.insert_resource(crate::local_host::DevStructures(format!("home={spec}")));
+    }
+    let town_given = town.is_some();
+    if let Some(spec) = town {
+        info!("[debug] --town {spec}: a town beside the landing of the home region");
+        commands.insert_resource(crate::local_host::DevStructures(format!("town={spec}")));
     }
     if let Some(port) = port {
         info!("[debug] hosting the world's server on UDP port {port}");
@@ -451,6 +534,18 @@ fn boot(
             dir.display()
         );
         return fail(why, &mut launch, &mut error);
+    }
+    if prefab_given && !reset && dir.exists() {
+        warn!(
+            "[debug] --prefab on the existing world {}: regions saved earlier keep their old terrain, only regions never visited show the prefab (add --reset to re-forge)",
+            dir.display()
+        );
+    }
+    if town_given && !reset && dir.exists() {
+        warn!(
+            "[debug] --town on the existing world {}: regions saved earlier keep their old terrain, only regions never visited show the town (add --reset to re-forge)",
+            dir.display()
+        );
     }
     if reset && dir.exists() {
         info!("[debug] --reset: deleting {}", dir.display());
@@ -640,6 +735,27 @@ fn auto_embark(
         return;
     }
     let Some(mut embarked) = embarked else { return };
+    let adventure = launch.scenario.adventure();
+    if embarked.0 && adventure.is_some() && sent == Sent::Nothing && history.adventuring.is_none() && history.fortress.is_some()
+    {
+        // The server restored the player into its fortress, and an adventure was
+        // asked for: retire first, as the menu's Retire does (the site stays returnable).
+        let Some(requests) = requests else { return };
+        if requests.0.send(ClientRequest::Retire).is_err() {
+            warn!("[debug] retire not sent: no game thread");
+            launch.phase = Phase::Done;
+            return;
+        }
+        info!("[debug] retiring the restored fortress to start an adventure");
+        history.fortress = None;
+        history.fortress_region = None;
+        history.retired = true;
+        history.options_requested = false;
+        history.embark_result = None;
+        history.embark_refusal = None;
+        embarked.0 = false;
+        return;
+    }
     if embarked.0 {
         // `just run-two` reads the fortress line to send client 2 there.
         match (history.adventuring, history.fortress) {
@@ -659,15 +775,33 @@ fn auto_embark(
         return;
     }
     let (Some(map), Some(requests)) = (world_map.map.as_ref(), requests) else { return };
-    if let Some(site) = launch.scenario.adventure_at() {
+    if let Some(start) = adventure {
         // `apply_adventure_result` sets `Embarked` on success (seen next frame).
         if sent == Sent::Adventure {
             if let Some((why, _)) = history.adventure_refusal {
-                error!("[debug] adventure at site {} refused ({why:?}); the arrival map is yours", site.0);
+                error!("[debug] adventure refused ({why:?}); the arrival map is yours");
                 launch.phase = Phase::Done;
             }
             return;
         }
+        let site = match start {
+            AdventureStart::Site(site) => site,
+            AdventureStart::FirstPopulated => {
+                // The options answer follows the sites: once it is in, the site list is too.
+                if !history.options_requested && requests.0.send(ClientRequest::RequestEmbarkOptions).is_ok() {
+                    history.options_requested = true;
+                }
+                if history.embark_options.is_none() {
+                    return;
+                }
+                let Some(site) = choose_adventure_site(&history.sites) else {
+                    error!("[debug] no populated site to adventure from; the arrival map is yours");
+                    launch.phase = Phase::Done;
+                    return;
+                };
+                site
+            }
+        };
         if requests.0.send(ClientRequest::StartAdventure(site)).is_err() {
             warn!("[debug] adventure request not sent: no game thread");
             launch.phase = Phase::Done;
@@ -752,7 +886,7 @@ mod tests {
 
     #[test]
     fn debug_embarked_parses_with_and_without_reset() {
-        let plain = |reset| Ok(Some(DebugScenario::Embarked { reset, port: None, join: None, adventure_at: None }));
+        let plain = |reset| Ok(Some(DebugScenario::Embarked { reset, port: None, join: None, adventure: None, prefab: None, town: None }));
         assert_eq!(parse_args(&["debug", "embarked"]), plain(false));
         assert_eq!(parse_args(&["debug", "embarked", "--reset"]), plain(true));
     }
@@ -761,7 +895,7 @@ mod tests {
     fn debug_embarked_hosts_or_joins() {
         assert_eq!(
             parse_args(&["debug", "embarked", "--reset", "--port", "6470"]),
-            Ok(Some(DebugScenario::Embarked { reset: true, port: Some(6470), join: None, adventure_at: None }))
+            Ok(Some(DebugScenario::Embarked { reset: true, port: Some(6470), join: None, adventure: None, prefab: None, town: None }))
         );
         assert_eq!(
             parse_args(&["debug", "embarked", "--join", "127.0.0.1:6470", "--adventure-at", "3"]),
@@ -769,7 +903,20 @@ mod tests {
                 reset: false,
                 port: None,
                 join: Some("127.0.0.1:6470".parse().unwrap()),
-                adventure_at: Some(SiteId(3)),
+                adventure: Some(AdventureStart::Site(SiteId(3))),
+                prefab: None,
+                town: None,
+            }))
+        );
+        assert_eq!(
+            parse_args(&["debug", "embarked", "--adventure"]),
+            Ok(Some(DebugScenario::Embarked {
+                reset: false,
+                port: None,
+                join: None,
+                adventure: Some(AdventureStart::FirstPopulated),
+                prefab: None,
+                town: None,
             }))
         );
         for bad in [
@@ -778,6 +925,63 @@ mod tests {
             &["debug", "embarked", "--join", "nowhere"],
             &["debug", "embarked", "--join", "127.0.0.1:1", "--reset"],
             &["debug", "embarked", "--adventure-at", "x"],
+            &["debug", "embarked", "--adventure", "--adventure-at", "3"],
+            &["debug", "embarked", "--adventure", "--adventure"],
+        ] {
+            assert!(parse_args(bad).unwrap_err().contains("usage: client"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn debug_embarked_collects_prefabs() {
+        let with = |p: &str| {
+            Ok(Some(DebugScenario::Embarked {
+                reset: true,
+                port: None,
+                join: None,
+                adventure: None,
+                prefab: Some(p.into()),
+                town: None,
+            }))
+        };
+        assert_eq!(parse_args(&["debug", "embarked", "--reset", "--prefab", "dev-hut"]), with("dev-hut"));
+        assert_eq!(
+            parse_args(&["debug", "embarked", "--reset", "--prefab", "dev-hut", "--prefab", "statuen-06:40,0:1"]),
+            with("dev-hut;statuen-06:40,0:1")
+        );
+        for bad in [
+            &["debug", "embarked", "--prefab"][..],
+            &["debug", "embarked", "--prefab", ""],
+            &["debug", "embarked", "--prefab", "--reset"],
+            &["debug", "embarked", "--join", "127.0.0.1:1", "--prefab", "dev-hut"],
+        ] {
+            assert!(parse_args(bad).unwrap_err().contains("usage: client"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn debug_embarked_takes_a_town() {
+        let with = |t: &str| {
+            Ok(Some(DebugScenario::Embarked {
+                reset: true,
+                port: None,
+                join: None,
+                adventure: None,
+                prefab: None,
+                town: Some(t.into()),
+            }))
+        };
+        assert_eq!(parse_args(&["debug", "embarked", "--reset", "--town", "medieval"]), with("medieval"));
+        assert_eq!(parse_args(&["debug", "embarked", "--reset", "--town", "medieval:2:64"]), with("medieval:2:64"));
+        for bad in [
+            &["debug", "embarked", "--town"][..],
+            &["debug", "embarked", "--town", ""],
+            &["debug", "embarked", "--town", "--reset"],
+            &["debug", "embarked", "--town", "a", "--town", "b"],
+            &["debug", "embarked", "--town", "a", "--prefab", "dev-hut"],
+            &["debug", "embarked", "--prefab", "dev-hut", "--town", "a"],
+            &["debug", "embarked", "--join", "127.0.0.1:1", "--town", "a"],
+            &["debug", "online", "--town", "a"],
         ] {
             assert!(parse_args(bad).unwrap_err().contains("usage: client"), "{bad:?}");
         }
@@ -795,11 +999,29 @@ mod tests {
             &["debug", "online", "--port", "6470"],
             &["debug", "online", "--join", "127.0.0.1:6470"],
             &["debug", "online", "--adventure-at", "3"],
+            &["debug", "online", "--adventure"],
             &["debug", "online", "--wat"],
             &["debug", "embarked", "--world", "x"],
         ] {
             assert!(parse_args(bad).unwrap_err().contains("usage: client"), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn adventure_picks_the_first_populated_site_of_the_lowest_civ() {
+        use game::history::CivId;
+        let site = |id, civ, population, abandoned| SiteMarker {
+            site: SiteId(id),
+            civ: CivId(civ),
+            region: RegionCoords::new(0, 0),
+            name: String::new(),
+            population,
+            abandoned,
+            returnable: false,
+        };
+        let sites = [site(0, 1, 5, false), site(1, 0, 0, false), site(2, 0, 4, true), site(3, 0, 2, false), site(4, 0, 9, false)];
+        assert_eq!(choose_adventure_site(&sites), Some(SiteId(3)));
+        assert_eq!(choose_adventure_site(&sites[1..3]), None, "empty or abandoned: nowhere to start");
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub const DRAG_THRESHOLD_PX: f32 = 4.0;
 pub const PICK_STEP_M: f32 = 0.5;
 /// How far a ground pick (the cursor ray, the orbit pivot) looks, metres.
 /// Picks only meet the height grid of loaded near terrain, and the march is
-/// linear in it, so it is NOT the view distance (15 km at the play sizes):
+/// linear in it, so it is NOT the view distance (3 km at the play sizes):
 /// the old 1 km horizon.
 pub const PICK_REACH_M: f32 = 1024.0;
 /// Bisection rounds refining a ground-pick hit.

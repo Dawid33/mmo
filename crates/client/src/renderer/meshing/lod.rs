@@ -64,11 +64,23 @@ fn skirt_extend(q: &mut Quad) {
 /// never merges different blocks) — the skirt would lie coplanar on it and
 /// z-fight. A seam can only open where that row is NOT an exposed wall.
 pub(crate) fn lod_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
-    let padded = gather_padded(grid, neighbors);
+    padded_lod_quads(&gather_padded(grid, neighbors))
+}
+
+/// [`lod_quads`] for a streamed LOD cell (a key's grid, wired to the other
+/// grids of its key): the same mesh without the underside of the terrain's
+/// crust (`neighbors::fill_under_crust`).
+pub(crate) fn lod_cell_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
+    let mut padded = gather_padded(grid, neighbors);
+    super::neighbors::fill_under_crust(&mut padded, neighbors);
+    padded_lod_quads(&padded)
+}
+
+fn padded_lod_quads(padded: &super::binary::PaddedVoxels) -> Vec<Quad> {
     // LOD stays opaque: coarse cells of leaves are solid foliage.
-    let mut quads = binary::mesh_quads(&padded, &binary::CutoutTable::NONE);
+    let mut quads = binary::mesh_quads(padded, &binary::CutoutTable::NONE);
     for q in &mut quads {
-        if q.face.axis() != 1 && is_border_side_quad(q) && !wall_below(&padded, q) {
+        if q.face.axis() != 1 && is_border_side_quad(q) && !wall_below(padded, q) {
             q.min[1] += 1;
             skirt_extend(q);
         } else {
@@ -99,7 +111,8 @@ fn wall_below(p: &super::binary::PaddedVoxels, q: &Quad) -> bool {
     })
 }
 
-/// Mesh a coarse LOD grid. See `lod_quads` for the bias/skirt contract.
+/// Mesh a coarse LOD grid as it is (no crust fill — `lod_cell_quads` is what
+/// streamed cells use). See `lod_quads` for the bias/skirt contract.
 pub fn mesh_lod_grid(
     grid: &[Voxel],
     neighbors: &BTreeMap<[i32; 3], &[Voxel]>,
@@ -141,7 +154,7 @@ fn mesh_lod_output(
     layers: &BlockTextureLayers,
     pull: bool,
 ) -> MeshWire {
-    let quads = lod_quads(grid, neighbors);
+    let quads = lod_cell_quads(grid, neighbors);
     let quad_count = u32::try_from(quads.len()).expect("terrain quad count fits u32");
     let (mesh, records) = if pull {
         let r = records::quads_to_records(&quads, layers);

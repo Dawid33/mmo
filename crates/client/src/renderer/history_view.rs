@@ -86,7 +86,8 @@ pub struct AdventureSelection {
     pub site: Option<SiteId>,
 }
 
-fn populated(s: &SiteMarker) -> bool {
+/// A site an adventure may start from.
+pub(crate) fn populated(s: &SiteMarker) -> bool {
     !s.abandoned && s.population > 0
 }
 

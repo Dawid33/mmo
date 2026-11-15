@@ -38,7 +38,45 @@ struct CullView {
     // camera's eye (every view, shadow cascades included, so the camera and
     // its shadows pick the same mesh), w = the switch distance (<= 0: off).
     detail: vec4<f32>,
+    // Shadow-caster culling (gpu.rs GpuNearCullView::receivers): the MAIN
+    // camera's view volume out to the shadow distance, as inward half-spaces
+    // (xyz = unit normal, dot(n, p) + w >= 0 inside); receiver_count.x of
+    // them are set — in the sun's shadow views only (0: off).
+    receivers: array<vec4<f32>, 6>,
+    receiver_count: vec4<u32>,
 };
+
+// World units a caster may sit outside the lit view volume and still draw:
+// shadow filtering reads a few texels around a receiver.
+const RECEIVER_MARGIN: f32 = 64.0;
+
+// Can this chunk shadow anything the main camera sees? The sun's shadow
+// views only (camera.w = 2: camera.xyz is the unit direction toward the
+// light; no other view is given receivers). A
+// caster's shadow runs away from the light, so a half-space of the view
+// volume whose inward normal has a component TOWARD the light bounds the
+// casters too: a chunk wholly outside it only moves further out along its
+// shadow. Half-spaces facing away from the light bound nothing (a caster
+// outside them shadows into the volume) and are skipped; the silhouette
+// planes between the two kinds are left out, which only keeps a few more.
+fn casts_into_view(chunk: ChunkMeta) -> bool {
+    if view.camera.w < 1.5 {
+        return true;
+    }
+    let toward_light = view.camera.xyz;
+    let count = min(view.receiver_count.x, 6u);
+    for (var i = 0u; i < count; i += 1u) {
+        let plane = view.receivers[i];
+        if dot(plane.xyz, toward_light) <= 0.0 {
+            continue;
+        }
+        let reach = dot(abs(plane.xyz), chunk.half_extents.xyz) + RECEIVER_MARGIN;
+        if dot(plane.xyz, chunk.center.xyz) + plane.w + reach < 0.0 {
+            return false;
+        }
+    }
+    return true;
+}
 
 // ChunkMeta.center.w: which detail band a slot belongs to (voxel_pull
 // DetailBand). A sim chunk with a coarse twin draws within the switch
@@ -211,7 +249,7 @@ fn write_command(index: u32, chunk: ChunkMeta, start: u32, count: u32) {
 
 fn emit_command(slot: u32, chunk: ChunkMeta, frustum_ok: bool) {
     let cut = cut_state(chunk);
-    let visible = frustum_ok && cut != CUT_HIDDEN && band_visible(chunk);
+    let visible = frustum_ok && cut != CUT_HIDDEN && band_visible(chunk) && casts_into_view(chunk);
     // Unsorted records (flag) draw as one whole range, never face-culled.
     let unsorted = chunk.face_ends_hi.z != 0u;
     var emitted_quads = 0u;

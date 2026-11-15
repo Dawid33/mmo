@@ -810,7 +810,10 @@ impl Region {
                     .filter_map(|(id, c)| {
                         if c.input.mouse_pressed(&crate::edit::BREAK_BUTTON) {
                             Some((*id, crate::edit::EditAction::Break))
-                        } else if c.input.mouse_pressed(&crate::edit::PLACE_BUTTON) {
+                        } else if c.input.mouse_pressed(&crate::edit::PLACE_BUTTON)
+                            // Held: only the cell a jump frees underfoot.
+                            || (c.input.mouse_held(&crate::edit::PLACE_BUTTON) && self.data.pillar_target(*id))
+                        {
                             Some((*id, crate::edit::EditAction::Place))
                         } else {
                             None
@@ -838,7 +841,11 @@ impl Region {
                     .filter(|(_, c)| c.mode == crate::PlayMode::Adventure)
                     .map(|(id, c)| {
                         let hands = c.fps_cam_mode && !c.inventory_open;
-                        let place = hands && c.input.mouse_pressed(&crate::edit::PLACE_BUTTON);
+                        let place = hands
+                            && (c.input.mouse_pressed(&crate::edit::PLACE_BUTTON)
+                                // Held: only the cell a jump frees underfoot.
+                                || (c.input.mouse_held(&crate::edit::PLACE_BUTTON)
+                                    && self.data.pillar_target(*id)));
                         let throw = (hands && c.input.key_pressed(&Key::KeyQ))
                             .then(|| c.input.key_held(&Key::ControlLeft));
                         (*id, place, throw)

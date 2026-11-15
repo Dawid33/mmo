@@ -362,6 +362,17 @@ pub fn prepare_chunk_quads(
         let transforms_grew = transform_capacity > arena.transforms.capacity();
         arena.records.reserve(record_capacity, &device);
         arena.transforms.reserve(transform_capacity, &device);
+        // Counted for the crossing timeline (`crossing_timeline::GPU`).
+        {
+            use super::super::crossing_timeline::{GpuCounters, GPU};
+            GpuCounters::add(&GPU.pull_uploads, 1);
+            GpuCounters::add(&GPU.pull_upload_quads, u64::from(quad_count));
+            if records_grew {
+                GpuCounters::add(&GPU.pull_regrows, 1);
+                let bytes = arena.records.values().len() * std::mem::size_of::<super::super::meshing::records::QuadRecord>();
+                GpuCounters::add(&GPU.pull_regrow_bytes, bytes as u64);
+            }
+        }
         if records_grew {
             arena.records.write_buffer(&device, &queue);
         } else {
@@ -407,6 +418,7 @@ pub fn prepare_chunk_quads(
     arena.metadata_dirty.clear();
 
     if rebuild_bind_group {
+        super::super::crossing_timeline::GpuCounters::add(&super::super::crossing_timeline::GPU.pull_bind_groups, 1);
         // The designation overlay texture: written in place by
         // `fortress_view::upload_overlay` (the dirty sub-box), so the bind
         // group only needs its view.

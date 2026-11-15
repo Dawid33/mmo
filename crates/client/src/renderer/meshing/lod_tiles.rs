@@ -35,8 +35,36 @@ use super::lod::{FarFrameUploads, LodBuildQueue, LodChunk, LodMeshTask, LodRaste
 use super::queue::MeshBudgets;
 use super::ChunkMaterial;
 
-/// Cell groups per tile edge: a tile merges up to this many cubed cells.
+/// Most cell groups per tile edge (a record's brick placement holds 0..8
+/// per axis): a tile merges up to this many cubed cells.
 pub const LOD_TILE_GROUPS: i32 = 8;
+
+/// Tiles of the rings a sun shadow cascade can reach are kept to about this
+/// edge, metres, on the GPU-culled path.
+pub const NEAR_TILE_EDGE_M: i32 = 64;
+/// The coarsest factor whose ring starts within the shadow distance at any
+/// region size (block scale: the first ring of the play sizes).
+pub const NEAR_TILE_MAX_FACTOR: u32 = game::lod::COARSE_MIN_FACTOR;
+
+/// Cell groups per tile edge at `factor`.
+///
+/// A tile is one cull unit: every view that touches its bounds draws all of
+/// it. At block scale an 8-group tile is a whole 256 m region (~57k quads),
+/// and each sun cascade that reached into one drew it whole — 4.9 of the
+/// 7.8 ms the four cascades cost on an integrated GPU (2026-11-14). So the
+/// rings near enough to cast into a cascade (`NEAR_TILE_MAX_FACTOR` and
+/// finer) get tiles of about [`NEAR_TILE_EDGE_M`]; the rings beyond keep the
+/// largest tile, where the slot count matters more than the cut. The
+/// per-chunk backend (WebGL2: one draw per tile, CPU-culled) keeps the
+/// largest tile everywhere.
+pub fn tile_groups(factor: u32, per_chunk: bool) -> i32 {
+    if per_chunk || factor > NEAR_TILE_MAX_FACTOR {
+        return LOD_TILE_GROUPS;
+    }
+    // A cell group's edge in metres: 32 cells of `factor` voxels.
+    let group_m = (BRICK_VOXELS as i32 * factor as i32) / game::BLOCK_VOXELS as i32;
+    (NEAR_TILE_EDGE_M / group_m.max(1)).clamp(1, LOD_TILE_GROUPS)
+}
 
 /// A LOD cell's group coordinates within its root (`spawn_lod_root`).
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,20 +84,21 @@ pub struct LodTileMesh {
     pub tile: [i32; 3],
 }
 
-/// The tile a cell group falls in.
-pub fn tile_of(group: [i32; 3]) -> [i32; 3] {
-    group.map(|g| g.div_euclid(LOD_TILE_GROUPS))
+/// The tile a cell group falls in, with `groups` cell groups per tile edge
+/// ([`tile_groups`]).
+pub fn tile_of(group: [i32; 3], groups: i32) -> [i32; 3] {
+    group.map(|g| g.div_euclid(groups))
 }
 
-/// A cell's place inside its tile (each axis 0..8): its records' brick bits.
-pub fn cell_local(group: [i32; 3]) -> [u8; 3] {
-    group.map(|g| g.rem_euclid(LOD_TILE_GROUPS) as u8)
+/// A cell's place inside its tile (each axis 0..`groups`): its records' brick bits.
+pub fn cell_local(group: [i32; 3], groups: i32) -> [u8; 3] {
+    group.map(|g| g.rem_euclid(groups) as u8)
 }
 
 /// Root-local transform of a tile at `factor`: the cells' own placement rule
 /// (`spawn_lod_root`: `group * 32 * factor`, y lowered one cell for the skirt).
-pub fn tile_transform(tile: [i32; 3], factor: u32) -> Transform {
-    let span = BRICK_VOXELS as i32 * factor as i32 * LOD_TILE_GROUPS;
+pub fn tile_transform(tile: [i32; 3], factor: u32, groups: i32) -> Transform {
+    let span = BRICK_VOXELS as i32 * factor as i32 * groups;
     Transform {
         translation: Vec3::new(
             (tile[0] * span) as f32,
@@ -81,11 +110,33 @@ pub fn tile_transform(tile: [i32; 3], factor: u32) -> Transform {
     }
 }
 
-/// Constant bounds of a tile mesh, in cells: the tile cube plus the skirted
-/// cells' one-cell Y headroom (see `apply_lod_meshes`).
-pub fn tile_aabb() -> Aabb {
-    let half = (LOD_TILE_GROUPS * BRICK_VOXELS as i32) as f32 / 2.0;
-    Aabb { center: Vec3A::new(half, half + 0.5, half), half_extents: Vec3A::new(half, half + 0.5, half) }
+/// Bounds of a tile mesh, in cells: the box of the cells it merged (their
+/// places inside the tile, `cell_local`) plus the skirted cells' one-cell Y
+/// headroom (see `apply_lod_meshes`). Tight on purpose: terrain fills one or
+/// two cell groups of a tile's height, and the full cube — 256 m tall at
+/// block scale — reached into shadow cascades and view frusta its quads
+/// were nowhere near. `None` without cells.
+pub fn tile_aabb(cells: impl IntoIterator<Item = [u8; 3]>) -> Option<Aabb> {
+    let (mut lo, mut hi) = ([u8::MAX; 3], [0u8; 3]);
+    let mut any = false;
+    for local in cells {
+        any = true;
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(local[axis]);
+            hi[axis] = hi[axis].max(local[axis]);
+        }
+    }
+    if !any {
+        return None;
+    }
+    let cell = BRICK_VOXELS as f32;
+    let min = Vec3A::new(f32::from(lo[0]) * cell, f32::from(lo[1]) * cell, f32::from(lo[2]) * cell);
+    let max = Vec3A::new(
+        (f32::from(hi[0]) + 1.0) * cell,
+        (f32::from(hi[1]) + 1.0) * cell + 1.0,
+        (f32::from(hi[2]) + 1.0) * cell,
+    );
+    Some(Aabb { center: (min + max) * 0.5, half_extents: (max - min) * 0.5 })
 }
 
 type VoxelMaterial = ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>;
@@ -110,15 +161,23 @@ pub fn rebuild_lod_tiles(
         return;
     }
     let per_chunk = per_chunk_backend(render_config.as_deref());
-    let wanted: BTreeSet<(Entity, [i32; 3])> =
-        dirty.iter().map(|(parent, group)| (parent.parent(), tile_of(group.0))).collect();
-    for (root, tile) in wanted {
+    // A root's cells share one factor (`spawn_lod_root`), hence one tile size.
+    let wanted: BTreeSet<(Entity, i32, [i32; 3])> = dirty
+        .iter()
+        .filter_map(|(parent, group)| {
+            let root = parent.parent();
+            let factor = children.get(root).ok()?.iter().find_map(|c| cells.get(c).ok().map(|(_, lod, ..)| lod.factor))?;
+            let groups = tile_groups(factor, per_chunk);
+            Some((root, groups, tile_of(group.0, groups)))
+        })
+        .collect();
+    for (root, groups, tile) in wanted {
         if uploads.0 >= budgets.uploads_per_frame {
             break;
         }
         let Ok(kids) = children.get(root) else { continue };
         let members: Vec<Entity> =
-            kids.iter().filter(|&c| cells.get(c).is_ok_and(|(g, ..)| tile_of(g.0) == tile)).collect();
+            kids.iter().filter(|&c| cells.get(c).is_ok_and(|(g, ..)| tile_of(g.0, groups) == tile)).collect();
         let settled = members
             .iter()
             .all(|&c| !queue.contains_raster(c) && cells.get(c).is_ok_and(|(_, _, _, meshing, _)| !meshing));
@@ -132,7 +191,7 @@ pub fn rebuild_lod_tiles(
             .iter()
             .filter_map(|&c| {
                 let (group, _, recs, _, _) = cells.get(c).ok()?;
-                Some((cell_local(group.0), recs?.0.clone()))
+                Some((cell_local(group.0, groups), recs?.0.clone()))
             })
             .collect();
         let merged = records::merge_records(parts.iter().map(|(local, r)| (*local, r.as_slice())));
@@ -145,7 +204,7 @@ pub fn rebuild_lod_tiles(
             None if merged.is_empty() => continue,
             None => {
                 let e = commands
-                    .spawn((tile_transform(tile, factor), Visibility::default(), LodTileMesh { tile }, ChildOf(root)))
+                    .spawn((tile_transform(tile, factor, groups), Visibility::default(), LodTileMesh { tile }, ChildOf(root)))
                     .id();
                 root_tiles.0.insert(tile, e);
                 e
@@ -157,7 +216,10 @@ pub fn rebuild_lod_tiles(
             continue;
         }
         uploads.0 += 1;
-        ec.insert((tile_aabb(), NoAutoAabb));
+        // Cells that meshed to nothing (buried, empty) hold no quads to bound.
+        let bounds = tile_aabb(parts.iter().filter(|(_, r)| !r.is_empty()).map(|(local, _)| *local))
+            .expect("merged records come from at least one cell");
+        ec.insert((bounds, NoAutoAabb));
         if per_chunk {
             let data = records_to_mesh_data(&merged).expect("non-empty records mesh");
             ec.insert(Mesh3d(meshes.add(data.into_mesh())));
@@ -176,9 +238,11 @@ mod tests {
 
     #[test]
     fn tiles_partition_groups_and_offsets_stay_in_nine_bits() {
-        assert_eq!(tile_of([0, 0, 0]), [0, 0, 0]);
-        assert_eq!(tile_of([7, 8, -1]), [0, 1, -1]);
-        assert_eq!(cell_local([7, 8, -1]), [7, 0, 7]);
+        assert_eq!(tile_of([0, 0, 0], 8), [0, 0, 0]);
+        assert_eq!(tile_of([7, 8, -1], 8), [0, 1, -1]);
+        assert_eq!(cell_local([7, 8, -1], 8), [7, 0, 7]);
+        assert_eq!(tile_of([7, 8, -1], 2), [3, 4, -1]);
+        assert_eq!(cell_local([7, 8, -1], 2), [1, 0, 1]);
         // Largest position a cell can reach inside its tile: 7 * 32 + 33.
         assert!(7 * BRICK_VOXELS as u32 + 33 <= super::super::pack::POS_MAX);
     }
@@ -187,16 +251,47 @@ mod tests {
     fn a_tile_sits_where_its_first_cell_would() {
         for factor in [2u32, 4, 16, 256] {
             for tile in [[0, 0, 0], [1, -1, 2]] {
-                let group = tile.map(|t| t * LOD_TILE_GROUPS);
+                let groups = tile_groups(factor, false);
+                let group = tile.map(|t| t * groups);
                 let span = 32 * factor as i32;
                 let cell = Vec3::new(
                     (group[0] * span) as f32,
                     (group[1] * span - factor as i32) as f32,
                     (group[2] * span) as f32,
                 );
-                assert_eq!(tile_transform(tile, factor).translation, cell);
-                assert_eq!(tile_transform(tile, factor).scale, Vec3::splat(factor as f32));
+                assert_eq!(tile_transform(tile, factor, groups).translation, cell);
+                assert_eq!(tile_transform(tile, factor, groups).scale, Vec3::splat(factor as f32));
             }
         }
+    }
+
+    /// Rings a shadow cascade can reach get ~64 m tiles on the GPU-culled
+    /// path; farther rings and the per-chunk backend keep the largest tile.
+    #[test]
+    fn near_rings_get_small_tiles() {
+        // Block scale: a 32 m cell group, two per tile edge.
+        assert_eq!(tile_groups(16, false), 2);
+        assert_eq!(tile_groups(8, false), 4);
+        for factor in [2, 4] {
+            assert_eq!(tile_groups(factor, false), LOD_TILE_GROUPS, "factor {factor}: 64 m is 8 groups or more");
+        }
+        for factor in [32, 64, 512] {
+            assert_eq!(tile_groups(factor, false), LOD_TILE_GROUPS);
+        }
+        for factor in game::lod::LOD_FACTORS {
+            assert_eq!(tile_groups(factor, true), LOD_TILE_GROUPS);
+        }
+    }
+
+    /// A tile's bounds are the box of its cells, not the tile cube.
+    #[test]
+    fn tile_bounds_follow_the_cells() {
+        assert!(tile_aabb([]).is_none());
+        let one = tile_aabb([[1, 0, 3]]).unwrap();
+        assert_eq!(Vec3::from(one.center), Vec3::new(48.0, 16.5, 112.0));
+        assert_eq!(Vec3::from(one.half_extents), Vec3::new(16.0, 16.5, 16.0));
+        let two = tile_aabb([[0, 1, 0], [7, 2, 7]]).unwrap();
+        assert_eq!(Vec3::from(two.center), Vec3::new(128.0, 64.5, 128.0));
+        assert_eq!(Vec3::from(two.half_extents), Vec3::new(128.0, 32.5, 128.0));
     }
 }

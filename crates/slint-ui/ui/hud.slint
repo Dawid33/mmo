@@ -5,6 +5,7 @@
 // asserts they match its constants.
 import { GameTheme } from "theme.slint";
 import { InventoryConfig, ItemSlot, SlotCell } from "inventory.slint";
+import { ChatConfig, ChatLines, ChatRow } from "chat.slint";
 
 export global HudConfig {
     out property <length> crosshair-arm: 16px;
@@ -44,6 +45,26 @@ export component HudUi inherits Window {
     in property <bool> minimap-visible;
     in property <image> minimap-base;
     in property <image> minimap-overlay;
+
+    // The chat's newest lines while its box is closed (the client drops each
+    // after a few seconds), where the box opens.
+    in property <[ChatRow]> chat-recent;
+
+    if root.chat-recent.length > 0: Rectangle {
+        x: ChatConfig.left;
+        y: root.height - self.height - ChatConfig.bottom;
+        width: min(root.width * 0.4, ChatConfig.max-width);
+        height: recent.preferred-height + 2 * ChatConfig.pad;
+        background: rgba(0, 0, 0, 0.45);
+
+        recent := ChatLines {
+            x: ChatConfig.pad;
+            y: ChatConfig.pad;
+            width: parent.width - 2 * ChatConfig.pad;
+            height: self.preferred-height;
+            lines: root.chat-recent;
+        }
+    }
 
     if root.minimap-visible: Rectangle {
         // The outline, outside the map.

@@ -88,6 +88,11 @@ const ARENA_LOG_SECS: f32 = 5.0;
 /// live chunk slots and quads, split into sim chunks (16 m; `with_twin` =
 /// those with a coarse twin, drawn only near the camera), coarse twins
 /// (`meshing::coarse`) and LOD tiles — the volume every view's cull walks.
+/// The LOD tiles are also split by horizontal size (a tile is 16 m × its
+/// factor: `128m` = factor 8 … `8192m` = factor 512) and by face id
+/// (`Face::index()` order: +X −X +Y −Y +Z −Z, then cutout) — a bottom-face
+/// count near the top-face one means the far terrain's underside is being
+/// meshed (`neighbors::fill_under_crust`).
 fn log_arena_geometry(
     arena: Option<bevy::prelude::Res<super::voxel_pull::arena::GpuQuadArena>>,
     mut last: bevy::prelude::Local<Option<std::time::Instant>>,
@@ -100,6 +105,9 @@ fn log_arena_geometry(
     *last = Some(now);
     let sim_half = game::CHUNK_UNITS as f32 * 0.5 * 1.01;
     let (mut near, mut near_q, mut fine_q, mut coarse, mut coarse_q, mut lod, mut lod_q) = (0u32, 0u64, 0u64, 0u32, 0u64, 0u32, 0u64);
+    let mut lod_by_size = std::collections::BTreeMap::<u32, (u32, u64)>::new();
+    // LOD quads per face id (`Face::index()` order), then cutout.
+    let mut lod_faces = [0u64; 7];
     for m in arena.metadata.values().iter().filter(|m| m.quad_count != 0) {
         let q = u64::from(m.quad_count);
         match m.center[3] as u32 {
@@ -117,11 +125,23 @@ fn log_arena_geometry(
             _ => {
                 lod += 1;
                 lod_q += q;
+                let entry = lod_by_size.entry(m.half_extents[0] as u32 * 2 / game::BLOCK_VOXELS as u32).or_insert((0u32, 0u64));
+                entry.0 += 1;
+                entry.1 += q;
+                let mut prev = 0u32;
+                for (f, total) in lod_faces.iter_mut().take(6).enumerate() {
+                    *total += u64::from(m.face_ends[f] - prev.min(m.face_ends[f]));
+                    prev = m.face_ends[f];
+                }
+                lod_faces[6] += q - u64::from(m.face_ends[7].min(m.quad_count));
             }
         }
     }
+    // LOD tiles by horizontal size (metres): where the far quads sit.
+    let by_size: Vec<String> = lod_by_size.iter().map(|(m, (n, q))| format!("{m}m:{n}/{q}")).collect();
     bevy::log::info!(
-        "[arena] near_chunks={near} near_quads={near_q} (with_twin={fine_q}) coarse_twins={coarse} coarse_quads={coarse_q} lod_slots={lod} lod_quads={lod_q}"
+        "[arena] near_chunks={near} near_quads={near_q} (with_twin={fine_q}) coarse_twins={coarse} coarse_quads={coarse_q} lod_slots={lod} lod_quads={lod_q} lod_by_size(tiles/quads)=[{}] lod_faces={lod_faces:?}",
+        by_size.join(" ")
     );
 }
 

@@ -151,6 +151,7 @@ impl LoadingCover {
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn update_loading_cover(
     mut cover: ResMut<LoadingCover>,
+    policy: Option<ResMut<crate::renderer::cursor::CursorPolicy>>,
     time: Res<Time<Real>>,
     state: Option<Res<State<AppState>>>,
     embarked: Option<Res<Embarked>>,
@@ -200,6 +201,14 @@ pub fn update_loading_cover(
             warn!("[loading] the world did not settle in {LOADING_TIMEOUT_SECS} s; lifting the loading screen anyway");
         }
         game::perf_event!("loading_screen_lifted", "secs={secs:.2} timed_out={timed_out}");
+    }
+    // Until the cover is gone (faded out too) the player's input goes nowhere
+    // and the pointer stays free (`CursorPolicy::loading`).
+    if let Some(mut policy) = policy {
+        let loading = cover.phase != CoverPhase::Clear;
+        if policy.loading != loading {
+            policy.loading = loading;
+        }
     }
 }
 

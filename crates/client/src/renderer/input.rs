@@ -146,12 +146,19 @@ pub fn forward_input(
     // Releases still go through so a button held when it opened never sticks.
     // A modal game screen (the Esc menu, the map, the inventory) holds the
     // pointer the same way: its clicks must not mine or place.
-    let overlay_open = cursor.is_some_and(|c| c.blocks_game());
+    // So does a pointer given back (`CursorPolicy::released`): the click that
+    // takes it again must not also break a block.
+    let overlay_open = cursor.as_ref().is_some_and(|c| c.blocks_game() || (c.released && c.wants_grab()));
     let send = |ev: InputEvent| {
         let _ = game.0.send(GameEventKind::PlayerInput(player, ev));
     };
 
-    if !commander {
+    // Behind the loading screen nothing the player does reaches the sim: no
+    // key, click or mouse travel (the body would walk and turn in a world the
+    // player cannot see yet). Only the window size below still goes through.
+    let loading = cursor.is_some_and(|c| c.loading);
+    if loading {
+    } else if !commander {
         forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send);
     } else if first_person {
         // E is the sim's inventory key in Adventure; elsewhere it is the

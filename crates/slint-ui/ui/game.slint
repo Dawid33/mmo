@@ -8,8 +8,9 @@ import { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
 import { MenuColumn, MenuLayout } from "menu-column.slint";
 import { StubWindow } from "stub-window.slint";
 import { InventoryScreen, ItemSlot } from "inventory.slint";
+import { ChatBox, ChatConfig, ChatRow } from "chat.slint";
 
-export { ItemSlot, EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
+export { ChatRow, ItemSlot, EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -374,6 +375,30 @@ export component GameUi inherits Window {
             y: status.content-y;
             text: root.game-status;
         }
+    }
+
+    // The chat box (chat.slint), bottom left above the minimap, while the
+    // client has it open (`chat-open`). Always instantiated, so the client
+    // can hand its field the keyboard (`chat-take-focus`) the moment it opens.
+    in property <bool> chat-open;
+    in property <[ChatRow]> chat-lines;
+    in-out property <string> chat-draft;
+    callback chat-accepted(string);
+    public function chat-take-focus() {
+        chat.take-focus();
+    }
+    public function chat-drop-focus() {
+        chat.drop-focus();
+    }
+    chat := ChatBox {
+        visible: root.chat-open;
+        x: ChatConfig.left;
+        y: root.height - self.height - ChatConfig.bottom;
+        width: min(root.width * 0.4, ChatConfig.max-width);
+        height: min(ChatConfig.box-height, root.height - ChatConfig.bottom - ChatConfig.left);
+        lines: root.chat-lines;
+        draft <=> root.chat-draft;
+        accepted(text) => { root.chat-accepted(text); }
     }
 
     // `visible` rather than `if`, so its hit-test positions stay readable.

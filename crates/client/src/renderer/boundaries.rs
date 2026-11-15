@@ -1,6 +1,6 @@
 //! Terrain boundary overlay: a thin warm line along the perimeter of the
 //! player's home region, just outside it (a quarter block wide, never under
-//! ~1.5 px; nothing is drawn inside the play area), with the world outside it slightly dimmed and desaturated. Painted by
+//! ~1.5 px; nothing is drawn inside the play area); the world outside it keeps its colours. Painted by
 //! `voxel_pull.wgsl` from one small uniform (group(1) binding 5), so it hugs
 //! every slope and reaches the LOD rings with no geometry of its own. (Only
 //! the home region is simulated at the play region size, so it also marks the
@@ -22,11 +22,6 @@ pub const HOME_LINE_COLOR: Vec3 = Vec3::new(1.0, 0.78, 0.42);
 pub const HOME_LINE_OPACITY: f32 = 0.6;
 pub const HOME_LINE_WIDTH: f32 = 0.25 * M;
 pub const HOME_LINE_MIN_PX: f32 = 1.5;
-/// Outside the home region: how much darker (0..1) and how desaturated (0..1)
-/// the terrain gets, reached over `OUTSIDE_FADE` from the edge.
-pub const OUTSIDE_DARKEN: f32 = 0.12;
-pub const OUTSIDE_DESATURATE: f32 = 0.2;
-pub const OUTSIDE_FADE: f32 = 6.0 * M;
 
 /// Whether the overlay is drawn. Client-only, on by default; F8 flips it.
 #[derive(Resource)]
@@ -49,9 +44,9 @@ pub struct BoundaryUniform {
     pub home_rect: Vec4,
     /// rgb + opacity.
     pub home_color: Vec4,
-    /// line width (world units), min line width (px), outside fade distance, unused.
+    /// line width (world units), min line width (px), unused, unused.
     pub shape: Vec4,
-    /// outside darken, outside desaturate, unused, unused.
+    /// Unused (was the outside darken / desaturate; kept for the shader's layout).
     pub dim: Vec4,
 }
 
@@ -79,8 +74,8 @@ pub fn update_boundary_uniform(
 /// Pure uniform builder.
 pub fn build_uniform(enabled: bool, home: Option<RegionCoords>) -> BoundaryUniform {
     let mut u = BoundaryUniform {
-        shape: Vec4::new(HOME_LINE_WIDTH, HOME_LINE_MIN_PX, OUTSIDE_FADE, 0.0),
-        dim: Vec4::new(OUTSIDE_DARKEN, OUTSIDE_DESATURATE, 0.0, 0.0),
+        shape: Vec4::new(HOME_LINE_WIDTH, HOME_LINE_MIN_PX, 0.0, 0.0),
+        dim: Vec4::ZERO,
         ..default()
     };
     let Some(home) = home.filter(|_| enabled) else {

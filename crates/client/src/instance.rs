@@ -255,6 +255,9 @@ pub struct GameInstanceManager {
     /// Last ring-factor assignment per region (the stickiness `prev` for the
     /// next `desired_lod` call).
     lod_assigned: BTreeMap<RegionCoords, u32>,
+    /// The key set `desired_lod` last returned and the inputs it was for
+    /// (`update_lod_window`).
+    lod_desired: Option<LodDesired>,
     /// Ring table driving `update_lod_window` — a field (defaulting to
     /// `LOD_RING_TABLE`) so test harnesses can shrink it: every key it
     /// yields costs the server a real build, which headless suites pay
@@ -298,6 +301,9 @@ pub struct GameInstanceManager {
     perf: PerfBudget,
     #[cfg(not(target_arch = "wasm32"))]
     crossing: CrossingProbe,
+    /// Timing of near-window and LOD-ring shifts (`[perf] event=window_shift`, …).
+    #[cfg(not(target_arch = "wasm32"))]
+    shift: ShiftProbe,
     /// Per-region forward-tick wall times for the F3 Debug tab (native only).
     #[cfg(not(target_arch = "wasm32"))]
     tick_times: TickTimes,
@@ -523,6 +529,17 @@ impl CrossingProbe {
     fn flip(&mut self, from: RegionCoords, to: RegionCoords, stalled_at_flip: usize, hosts: (Option<u32>, Option<u32>)) {
         // Crossed again inside the window: close the old one early.
         self.report();
+        // The instant itself (the `region_crossing` summary comes a window later).
+        game::perf_event!(
+            "crossing_flip",
+            "from={},{} to={},{} stalled_at_flip={} host_flip={}",
+            from.x,
+            from.z,
+            to.x,
+            to.z,
+            stalled_at_flip,
+            u8::from(hosts.0 != hosts.1)
+        );
         *self = CrossingProbe {
             open: Some((Instant::now(), from, to)),
             hosts,
@@ -578,6 +595,13 @@ impl CrossingProbe {
         if let Some((at, _, to)) = self.open {
             if to == home && self.confirm.is_none() {
                 self.confirm = Some(at.elapsed());
+                game::perf_event!(
+                    "crossing_confirmed",
+                    "to={},{} since_flip_ms={}",
+                    to.x,
+                    to.z,
+                    game::perf::ms(at.elapsed())
+                );
             }
         }
     }
@@ -619,6 +643,141 @@ impl CrossingProbe {
         );
         // The next crossing's baseline starts now.
         self.before_tick_gap_max = Duration::ZERO;
+    }
+}
+
+/// Game-thread timing of the near window and the LOD rings moving (a crossing
+/// shifts both once the viewer is `WINDOW_RECENTER_MARGIN_M` past the seam):
+/// when the shift was decided, when each requested region's snapshot came, when
+/// the last one did, when the paced LOD requests were all sent and when their
+/// payloads had all arrived. The render side's `crossing_*` lines share `t_ms`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ShiftProbe {
+    /// Regions asked for and not answered by a snapshot yet, and since when.
+    waiting: BTreeMap<RegionCoords, Instant>,
+    /// The near shift the waiting regions belong to (`None`: the join, a retry).
+    near_at: Option<Instant>,
+    near_loaded: u32,
+    /// The LOD shift in progress.
+    lod_at: Option<Instant>,
+    lod_requested: u32,
+    lod_released: u32,
+    lod_requests_done: bool,
+    lod_received: u32,
+    /// Keys requested in this shift whose payload has not come yet.
+    lod_waiting: std::collections::BTreeSet<game::lod::LodKey>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ShiftProbe {
+    fn requested(&mut self, rc: RegionCoords) {
+        self.waiting.insert(rc, Instant::now());
+    }
+
+    /// The near window changed: `wanted` were just requested, `stale` released.
+    fn window_shift(&mut self, center: RegionCoords, wanted: &[RegionCoords], stale: &[RegionCoords], subscribed: usize) {
+        for rc in stale {
+            self.waiting.remove(rc);
+        }
+        let list = |v: &[RegionCoords]| v.iter().map(|rc| format!("{},{}", rc.x, rc.z)).collect::<Vec<_>>().join(";");
+        game::perf_event!(
+            "window_shift",
+            "center={},{} requested={} released={} wanted=[{}] stale=[{}] subscribed={}",
+            center.x,
+            center.z,
+            wanted.len(),
+            stale.len(),
+            list(wanted),
+            list(stale),
+            subscribed
+        );
+        if !wanted.is_empty() {
+            self.near_at.get_or_insert_with(Instant::now);
+        }
+    }
+
+    /// A snapshot of `rc` came: how long after its request, if one is known.
+    fn region_loaded(&mut self, rc: RegionCoords) -> Option<Duration> {
+        let since = self.waiting.remove(&rc).map(|at| at.elapsed());
+        if let Some(at) = self.near_at {
+            self.near_loaded += u32::from(since.is_some());
+            if self.waiting.is_empty() {
+                game::perf_event!(
+                    "window_loaded",
+                    "since_shift_ms={} regions={}",
+                    game::perf::ms(at.elapsed()),
+                    self.near_loaded
+                );
+                self.near_at = None;
+                self.near_loaded = 0;
+            }
+        }
+        since
+    }
+
+    /// One tick's part of a LOD diff: `released` keys let go, `requested` asked
+    /// for, `remaining` still to ask (the requests are paced).
+    fn lod_diff(&mut self, released: &[game::lod::LodKey], requested: &[game::lod::LodKey], remaining: usize) {
+        if self.lod_at.is_none() {
+            self.lod_at = Some(Instant::now());
+            game::perf_event!(
+                "lod_shift",
+                "released={} wanted={}",
+                released.len(),
+                requested.len() + remaining
+            );
+        }
+        self.lod_requests_done = false;
+        self.lod_released += released.len() as u32;
+        self.lod_requested += requested.len() as u32;
+        for key in released {
+            self.lod_waiting.remove(key);
+        }
+        self.lod_waiting.extend(requested.iter().copied());
+    }
+
+    /// The subscriptions match the desired set: every request has been sent.
+    fn lod_settled(&mut self) {
+        let Some(at) = self.lod_at else { return };
+        if !self.lod_requests_done {
+            self.lod_requests_done = true;
+            game::perf_event!(
+                "lod_shift_requested",
+                "since_shift_ms={} requested={} released={}",
+                game::perf::ms(at.elapsed()),
+                self.lod_requested,
+                self.lod_released
+            );
+        }
+        self.lod_close();
+    }
+
+    fn lod_data(&mut self, key: game::lod::LodKey) {
+        if self.lod_waiting.remove(&key) {
+            self.lod_received += 1;
+            self.lod_close();
+        }
+    }
+
+    /// Requests all sent and every payload in: the LOD shift is over.
+    fn lod_close(&mut self) {
+        let Some(at) = self.lod_at else { return };
+        if !self.lod_requests_done || !self.lod_waiting.is_empty() {
+            return;
+        }
+        game::perf_event!(
+            "lod_shift_received",
+            "since_shift_ms={} received={} requested={} released={}",
+            game::perf::ms(at.elapsed()),
+            self.lod_received,
+            self.lod_requested,
+            self.lod_released
+        );
+        self.lod_at = None;
+        self.lod_requested = 0;
+        self.lod_released = 0;
+        self.lod_received = 0;
     }
 }
 
@@ -697,6 +856,14 @@ fn desired_window(
         desired.extend(fortress.window_radius(fortress_radius.max(0)));
     }
     desired
+}
+
+/// A memoised [`desired_lod`] result: the key set, and what it was computed for.
+struct LodDesired {
+    center: RegionCoords,
+    excluded: std::collections::BTreeSet<RegionCoords>,
+    table: &'static [(i32, u32)],
+    keys: std::collections::BTreeSet<game::lod::LodKey>,
 }
 
 /// Ring assignment for every region in view: per-region factor via the
@@ -802,6 +969,7 @@ impl GameInstanceManager {
             window_center: None,
             subscribed: std::collections::BTreeSet::new(),
             lod_assigned: BTreeMap::new(),
+            lod_desired: None,
             lod_table: game::lod::LOD_RING_TABLE,
             near_radius: 1,
             fortress_radius: 0,
@@ -824,6 +992,8 @@ impl GameInstanceManager {
             tick_times: TickTimes::default(),
             #[cfg(not(target_arch = "wasm32"))]
             crossing: CrossingProbe::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            shift: ShiftProbe::default(),
         }
     }
 
@@ -1624,10 +1794,12 @@ impl GameInstanceManager {
         }
         // No view = the client is not in the home region's data right now.
         let view = self.views.get(&home);
-        let hotbar = view.map(|v| v.hotbar.clone()).unwrap_or_default();
-        if hotbar != self.prev_hotbar {
+        // Mid-handoff the client is briefly in neither region's data: an empty
+        // hotbar sent for that tick flashed the bottom HUD at every crossing,
+        // so the last one stays until the home region has the client again.
+        if let Some(hotbar) = view.map(|v| &v.hotbar).filter(|h| **h != self.prev_hotbar) {
             let _ = self.ui_update_send.send(game::UiUpdate::Hotbar(hotbar.clone()));
-            self.prev_hotbar = hotbar;
+            self.prev_hotbar = hotbar.clone();
         }
         if let Some(v) = view {
             let screen = game::build_inventory_view(v.inventory_open, &v.inventory, &v.cursor, v.container.as_ref());
@@ -1673,15 +1845,17 @@ impl GameInstanceManager {
             return;
         }
         let wanted: Vec<RegionCoords> = desired.difference(&self.subscribed).copied().collect();
-        for rc in wanted {
+        for &rc in &wanted {
             // The home, unless another host already serves it (it answers with
             // `RegionElsewhere` for a region another host owns).
             self.request_region(rc);
         }
         let stale: Vec<RegionCoords> = self.subscribed.difference(&desired).copied().collect();
-        for rc in stale {
+        for &rc in &stale {
             self.release_region(rc);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.shift.window_shift(center, &wanted, &stale, desired.len());
         self.subscribed = desired;
     }
 
@@ -1760,14 +1934,33 @@ impl GameInstanceManager {
             return;
         };
         let excluded = self.window_for(center);
-        let (assigned, desired) = desired_lod(
-            center,
-            &excluded,
-            &self.lod_assigned,
-            self.lod_table,
-            game::lod::LOD_STICKY_BAND,
-        );
-        self.lod_assigned = assigned;
+        // The assignment walks every region within the horizon (~15,000 at
+        // a 15 km view) through three ordered maps: ~10 ms there, on every tick. It only
+        // depends on these inputs — `lod_assigned` is its own previous
+        // output, and a second pass over the same inputs returns it
+        // unchanged (the sticky band keeps every factor) — so it is redone
+        // only when one of them moves.
+        let mut cache = self
+            .lod_desired
+            .take()
+            .filter(|c| c.center == center && c.excluded == excluded && c.table == self.lod_table);
+        if cache.is_none() {
+            let (assigned, keys) =
+                desired_lod(center, &excluded, &self.lod_assigned, self.lod_table, game::lod::LOD_STICKY_BAND);
+            self.lod_assigned = assigned;
+            cache = Some(LodDesired { center, excluded: excluded.clone(), table: self.lod_table, keys });
+        }
+        let cache = cache.expect("filled above");
+        self.apply_lod_window(&excluded, &cache.keys);
+        self.lod_desired = Some(cache);
+    }
+
+    /// [`Self::update_lod_window`] for one desired key set.
+    fn apply_lod_window(
+        &mut self,
+        excluded: &std::collections::BTreeSet<RegionCoords>,
+        desired: &std::collections::BTreeSet<game::lod::LodKey>,
+    ) {
         // A former home lets go of the keys it held, paced like the requests.
         let mut released = 0;
         while released < LOD_REQUESTS_PER_TICK {
@@ -1785,7 +1978,7 @@ impl GameInstanceManager {
             self.lod_resend.remove(key);
             self.send_out(Outgoing::Home(ClientPacket::RequestLod(*key)));
         }
-        if desired == self.lod_subscribed {
+        if *desired == self.lod_subscribed {
             if !self.join.lod_requests_done && !desired.is_empty() {
                 // The paced RequestLod diff has fully drained for the first time.
                 self.join.lod_requests_done = true;
@@ -1795,11 +1988,13 @@ impl GameInstanceManager {
                     desired.len()
                 );
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            self.shift.lod_settled();
             return;
         }
         let stale: Vec<game::lod::LodKey> =
-            self.lod_subscribed.difference(&desired).copied().collect();
-        for key in stale {
+            self.lod_subscribed.difference(desired).copied().collect();
+        for &key in &stale {
             self.send_out(Outgoing::Home(ClientPacket::ReleaseLod(key)));
             let near_takeover = key.regions().iter().any(|rc| excluded.contains(rc));
             let _ = self
@@ -1815,9 +2010,14 @@ impl GameInstanceManager {
             .take(LOD_REQUESTS_PER_TICK - resend.len())
             .copied()
             .collect();
-        for key in wanted {
+        for &key in &wanted {
             self.send_out(Outgoing::Home(ClientPacket::RequestLod(key)));
             self.lod_subscribed.insert(key);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let remaining = desired.difference(&self.lod_subscribed).count();
+            self.shift.lod_diff(&stale, &wanted, remaining);
         }
     }
 
@@ -2091,6 +2291,8 @@ impl GameInstanceManager {
             let asked = self.asked_home.entry(rc).or_insert((0, 0));
             *asked = (asked.0 + 1, self.conn_clock_ms);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.shift.requested(rc);
         self.send_out(Outgoing::Region(rc, ClientPacket::RequestRegionConnection(rc)));
     }
 
@@ -2313,17 +2515,21 @@ impl GameInstanceManager {
                     self.perf.snapshot_count += 1;
                     self.perf.snapshot_total += snap_start.elapsed();
                     self.crossing.snapshot(snap_start.elapsed());
+                    // Before `region_loaded`, so `window_loaded` follows the last one.
+                    let since_request = self.shift.waiting.get(&id).map(|at| at.elapsed());
                     // Game-thread cost of one snapshot: teardown + the two
                     // `Rollback` clones in `new_region` + world insert.
                     game::perf_event!(
                         "region_loaded",
-                        "region={},{} load_ms={} loaded={} subscribed={}",
+                        "region={},{} load_ms={} since_request_ms={} loaded={} subscribed={}",
                         id.x,
                         id.z,
                         game::perf::ms(snap_start.elapsed()),
+                        since_request.map_or(-1.0, game::perf::ms),
                         self.perf.snapshot_count,
                         self.subscribed.len()
                     );
+                    self.shift.region_loaded(id);
                 }
                 // Replay events that raced ahead of the snapshot; reconcile
                 // skips anything already baked in (base_event_id).
@@ -2371,6 +2577,8 @@ impl GameInstanceManager {
                         self.join.lod_received.clear();
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                self.shift.lod_data(key);
                 let _ = self
                     .client_event_send
                     .send(ClientUpdateEvent::LodData(key, payload, water));

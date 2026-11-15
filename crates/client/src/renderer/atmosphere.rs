@@ -120,8 +120,8 @@ pub const VISIBILITY_CONTRAST: f32 = 0.02;
 
 /// Default visibility as a share of the LOD rings' reach. At 0.8 the ring
 /// edge (1.25 × visibility) keeps ~0.75 % contrast — invisible, where a
-/// higher share starts to show the cut. With the play-size 15 km rings that
-/// is ~12 km: an overcast or hazy day.
+/// higher share starts to show the cut. With the play-size 3 km rings that
+/// is ~2.5 km: a hazy day (a 15 km `VOXEL_VIEW_DISTANCE_M` gives ~12 km).
 pub const VISIBILITY_SHARE_OF_REACH: f32 = 0.8;
 
 /// The reach the default haze is sized for never drops below this, in

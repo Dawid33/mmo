@@ -292,6 +292,23 @@ fn place_consumes_selected_and_refuses_non_block() {
     assert_eq!(slot(&region, 0), Some(ItemStack { item: STICK, count: 1 }));
 }
 
+/// Jump and the place button held, looking straight down: each jump puts
+/// one of the selected block under the feet and takes it from the stack.
+#[test]
+fn holding_place_and_jump_pillars_up_from_the_hotbar() {
+    let mut region = region(1000.0);
+    set_slot(&mut region, 0, Some(ItemStack { item: ItemId(2), count: 3 }));
+    let y0 = body(&region)[1];
+    mouse(&mut region, MouseButton::Right, true);
+    key(&mut region, Key::Space, true);
+    ticks(&mut region, 80);
+    assert_eq!(slot(&region, 0), None, "the three stones went into the pillar");
+    let rise = (body(&region)[1] - y0) / game::BLOCK_VOXELS as f32;
+    assert!((2.9..4.4).contains(&rise), "the player stands on three blocks (or is mid-jump over them): {rise}");
+    let feet = target(&region);
+    assert_eq!((feet[1], block(&region, feet)), (4, BlockId(2)), "stone under the feet, on the two-block floor");
+}
+
 #[test]
 fn place_with_empty_slot_does_nothing() {
     let mut region = region(DOWN_45);

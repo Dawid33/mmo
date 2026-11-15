@@ -33,7 +33,7 @@ pub const FORTRESS_NEAR_RADIUS: i32 = 1;
 pub const SMALL_LOD_RING_TABLE: &[(i32, u32)] = &[(2, game::lod::LOD_RING_TABLE[0].1)];
 /// Upper bound on `VOXEL_VIEW_DISTANCE_M` (`?view=` in the browser), in
 /// metres. Every ring region is a `RequestLod` key the server builds and the
-/// client meshes (~4,400 at the default 15 km and 256 m regions); past 16 km
+/// client meshes (624 at the default 3 km and 256 m regions, ~4,560 at 15 km); past 16 km
 /// the coarsest factor (512) runs over the pixel budget's spacing and the key
 /// count climbs fast, so a typo should fail loudly instead of flooding both sides.
 pub const MAX_VIEW_DISTANCE_M: f32 = 16_384.0;
