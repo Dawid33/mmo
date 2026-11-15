@@ -2139,18 +2139,51 @@ orion-pg-backup-now:
     kubectl --context {{orion_context}} -n postgres create job --from=cronjob/pg-dump "$job"
     echo "orion-pg-backup-now: started $job"
 
-# PRINTS the commands that restore one dump into a SCRATCH database (it runs nothing: a restore
-# overwrites). world is the world id (e.g. errantry), object the dump's key under it
-# (e.g. 20261115T031500Z.dump; `aws s3 ls` lists them). Restoring over the live database is a
-# separate, deliberate step: stop the world first (`just world-stop`).
+# PRINTS (runs nothing: a restore overwrites) the two sequences that restore one nightly dump: A, the
+# drill into a SCRATCH database beside the live one, checked by its table owners; B, the live restore
+# (world stopped, the live database renamed aside, recreated owned by the world's role, restored, owners
+# checked, world started). world is the world id (e.g. errantry), object the dump's key under it
+# (e.g. 20261115T031500Z.dump; `aws s3 ls` lists them). Restored objects are owned by role world_<id>
+# (`--no-owner --role`): the world's own role can write and migrate them.
 orion-pg-restore world object:
-    @echo "# 1. fetch the dump (S3 endpoint and bucket: the pg-dump CronJob's S3_ENDPOINT / BUCKET)"
-    @echo "aws s3 cp --endpoint-url <S3_ENDPOINT> s3://<BUCKET>/{{world}}/{{object}} ./{{world}}-{{object}}"
-    @echo "# 2. a scratch database in the postgres cluster (the primary pod of its Cluster)"
-    @echo "kubectl --context {{orion_context}} -n postgres exec <primary-pod> -- createdb world_{{world}}_restore"
-    @echo "# 3. restore into it"
-    @echo "kubectl --context {{orion_context}} -n postgres exec -i <primary-pod> -- pg_restore --no-owner -d world_{{world}}_restore < ./{{world}}-{{object}}"
-    @echo "# 4. look at it (the world's own database is world_{{world}}; do not restore over it with the world running)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    db="world_{{world}}"
+    k="kubectl --context {{orion_context}} -n postgres"
+    cat <<EOF
+    # Both sequences: fetch the dump (S3 endpoint and bucket: the pg-dump CronJob's S3_ENDPOINT / BUCKET;
+    # Garage needs the two checksum settings), and find the primary pod of the Cluster pg.
+    AWS_REQUEST_CHECKSUM_CALCULATION=when_required AWS_RESPONSE_CHECKSUM_VALIDATION=when_required \\
+      aws s3 cp --endpoint-url <S3_ENDPOINT> s3://<BUCKET>/{{world}}/{{object}} ./{{world}}-{{object}}
+    $k get pods -l cnpg.io/cluster=pg,cnpg.io/instanceRole=primary -o name     # = <primary-pod> below
+
+    # ===== A. DRILL: restore into a scratch database (the world keeps running) =====
+    $k exec <primary-pod> -c postgres -- createdb -O $db ${db}_restore
+    $k exec -i <primary-pod> -c postgres -- pg_restore --no-owner --role=$db -d ${db}_restore < ./{{world}}-{{object}}
+    # check: every table is owned by $db (one line: "$db|<count>"), and the world's tables are there
+    $k exec <primary-pod> -c postgres -- psql -d ${db}_restore -Atc "select tableowner, count(*) from pg_tables where schemaname = 'public' group by 1"
+    $k exec <primary-pod> -c postgres -- psql -d ${db}_restore -Atc "select version from _sqlx_migrations order by version desc limit 1"
+    # done looking: drop it
+    $k exec <primary-pod> -c postgres -- dropdb ${db}_restore
+
+    # ===== B. LIVE RESTORE: the world returns to the moment of the dump =====
+    # 1. stop the world (hosts leave through their leave cuts, then the coordinator)
+    just world_ctx={{orion_context}} world_ns=world-{{world}} world-stop
+    # 2. move the live database aside (kept for a look; "being accessed by other users": find them with
+    #    select pid, application_name from pg_stat_activity where datname = '$db')
+    $k exec <primary-pod> -c postgres -- psql -c "alter database $db rename to ${db}_before_restore"
+    # 3. a new empty database owned by the world's role (if it says it exists, the operator recreated it
+    #    already: check it is empty with step 5's first query, and go on)
+    $k exec <primary-pod> -c postgres -- createdb -O $db $db
+    # 4. restore into it, every object owned by the world's role
+    $k exec -i <primary-pod> -c postgres -- pg_restore --no-owner --role=$db -d $db < ./{{world}}-{{object}}
+    # 5. check: every table is owned by $db (one line: "$db|<count>")
+    $k exec <primary-pod> -c postgres -- psql -d $db -Atc "select tableowner, count(*) from pg_tables where schemaname = 'public' group by 1"
+    # 6. start the world
+    just world_ctx={{orion_context}} world_ns=world-{{world}} world-start
+    # 7. later, once the world plays: drop the old one
+    $k exec <primary-pod> -c postgres -- dropdb ${db}_before_restore
+    EOF
 
 # Put the login root's service token on the box (/srv/mmo/secrets/service-token, mode 600) for the
 # game host. The token travels through the pipe only.
