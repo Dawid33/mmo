@@ -10,11 +10,12 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use game::HostId;
 use game::{CutId, PlayerId, PlayerRecord, RegionCoords, Tick, WorldCut};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::counters::Counters;
-use crate::rows::{self, CutEnd};
+use crate::rows::{self, i, CutEnd};
 use crate::succession::{self, SUCCESSION_UNSUPPORTED};
 use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 use crate::{
@@ -99,14 +100,14 @@ pub(crate) enum Request {
     StoredRegionsSince(Tick, Reply<std::collections::BTreeMap<RegionCoords, u64>>),
     /// `pg_notify` of a committed cut (SQLite: nothing to do).
     NotifyCut(CutId, Tick, Reply<()>),
-    LoadInFlight(Option<u32>, Reply<Vec<game::InFlightRow>>),
+    LoadInFlight(Option<HostId>, Reply<Vec<game::InFlightRow>>),
     LoadHistory(Reply<Option<Vec<u8>>>),
     CommitCut(Box<WorldCut>, Fence, Reply<CutCommitted>),
     ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
     /// Claim the list; with a boot, only while that boot's `hosts` row is live.
-    ClaimSuperRegions(u32, Vec<SuperRegion>, Option<u64>, Reply<Fence>),
+    ClaimSuperRegions(HostId, Vec<SuperRegion>, Option<u64>, Reply<Fence>),
     /// Claim only the absent or free super-regions of the list, as the live boot given.
-    ClaimFree(u32, u64, Vec<SuperRegion>, Reply<Fence>),
+    ClaimFree(HostId, u64, Vec<SuperRegion>, Reply<Fence>),
     /// Free the fence's super-regions.
     Release(Fence, Reply<()>),
     ClaimCoordinator(Reply<CoordinatorFence>),
@@ -118,9 +119,9 @@ pub(crate) enum Request {
     RegisterHost(crate::HostRow, Fence, game::CrashPolicy, Reply<crate::BootVerdict>),
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
-    Heartbeat(u32, u64, Reply<bool>),
+    Heartbeat(HostId, u64, Reply<bool>),
     Owners(Reply<Vec<(SuperRegion, i64, u64)>>),
-    OwnedBy(u32, Reply<Fence>),
+    OwnedBy(HostId, Reply<Fence>),
     DbNowMs(Reply<u64>),
     TwoPhaseReady(Reply<()>),
     /// A host's part of a two-phase cut, at the host's world generation.
@@ -139,12 +140,12 @@ pub(crate) enum Request {
     /// successions abandoned)`.
     RollbackWorldOperator(Reply<(u64, u64)>),
     /// R4: the operator retires a host while no host runs (`worldctl retire-host`; Postgres).
-    RetireOffline(u32, Reply<crate::Retired>),
+    RetireOffline(HostId, Reply<crate::Retired>),
     /// R4: the operator vouches for a lapsed host's death (`worldctl retire-host`; Postgres).
-    VouchHost(u32, Reply<crate::Vouched>),
+    VouchHost(HostId, Reply<crate::Vouched>),
     OpenSuccessions(Reply<Vec<crate::Succession>>),
     /// An heir reads its predecessor's in-flight rows.
-    LoadInFlightOf(u32, Fence, Reply<Vec<game::InFlightRow>>),
+    LoadInFlightOf(HostId, Fence, Reply<Vec<game::InFlightRow>>),
     RegionsOfEntities(Vec<game::EntityId>, Reply<Vec<(game::EntityId, RegionCoords)>>),
     /// Test support (the handle's `#[doc(hidden)]` hooks).
     TestHook(TestHook, Reply<()>),
@@ -157,8 +158,8 @@ pub(crate) struct Decision {
     pub cut: CutId,
     pub tick: Tick,
     pub commit: bool,
-    pub hosts: Vec<u32>,
-    pub leaving: Vec<u32>,
+    pub hosts: Vec<HostId>,
+    pub leaving: Vec<HostId>,
     pub fence: CoordinatorFence,
     pub generation: u64,
     /// The open successions a commit settles (R4).
@@ -169,8 +170,8 @@ pub(crate) struct Decision {
 
 /// [`crate::StoreHandle::declare_succession`]'s arguments.
 pub(crate) struct Declare {
-    pub dead: Vec<(u32, u64)>,
-    pub heirs: Vec<u32>,
+    pub dead: Vec<(HostId, u64)>,
+    pub heirs: Vec<HostId>,
     pub kind: crate::SuccessionKind,
     pub fence: CoordinatorFence,
     pub generation: u64,
@@ -705,7 +706,7 @@ async fn serve(
 }
 
 /// A lease beat for the beat task: `(ordinal, boot, answer)`.
-type Beat = (u32, u64, Reply<bool>);
+type Beat = (HostId, u64, Reply<bool>);
 
 /// `application_name` of a store's heartbeat connection.
 pub(crate) const HEARTBEAT_APP: &str = "mmo-heartbeat";
@@ -737,7 +738,7 @@ async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::Unbounde
             }
             let mut tx = conn.as_mut().expect("connected above").begin().await?;
             sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", crate::HEARTBEAT_LOCK_TIMEOUT_MS)).execute(&mut *tx).await?;
-            let done = sqlx::query(&sql).bind(i64::from(ordinal)).bind(crate::rows::i(boot)).execute(&mut *tx).await?;
+            let done = sqlx::query(&sql).bind(i(ordinal.0)).bind(crate::rows::i(boot)).execute(&mut *tx).await?;
             tx.commit().await?;
             Ok::<bool, sqlx::Error>(done.rows_affected() == 1)
         };

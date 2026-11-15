@@ -48,7 +48,7 @@
 //! the parked players (`WorldManager`'s `parked_players`).
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{EntityBundle, IntentMsg, PlayerId, PlayerRecord, PortableRegion, RegionCoords, Tick};
+use crate::{HostId, EntityBundle, IntentMsg, PlayerId, PlayerRecord, PortableRegion, RegionCoords, Tick};
 
 /// How far ahead of the world tick a cut is placed: every region reaches it
 /// on its own clock (one second at 50 ms ticks).
@@ -84,7 +84,7 @@ pub enum InFlightRow {
 pub struct WorldCut {
     pub id: CutId,
     /// The region host that cut it (0 = the only one); scopes the in-flight rows it replaces.
-    pub host: u32,
+    pub host: HostId,
     pub tick: Tick,
     pub regions: Vec<(RegionCoords, PortableRegion)>,
     pub in_flight: Vec<InFlightRow>,
@@ -96,7 +96,7 @@ pub struct WorldCut {
     /// R4: host ordinals whose in-flight rows this part also replaces — the predecessors of
     /// the open successions that made this host their heir (the store refuses any other).
     /// Empty everywhere else.
-    pub adopts: Vec<u32>,
+    pub adopts: Vec<HostId>,
 }
 
 /// A region's snapshots not committed yet, merged ([`PortableRegion::merge`]);

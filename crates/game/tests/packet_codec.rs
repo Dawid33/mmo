@@ -195,7 +195,7 @@ fn new_variants_round_trip_and_old_indices_are_unchanged() {
     assert_eq!(tag(&bincode::serialize(&Credential::Jwt("x".into())).unwrap()), 1, "Jwt's tag");
 
     let endpoint = HostEndpoint {
-        ordinal: 3,
+        id: game::HostId(3),
         quic: Some("10.0.0.3:6470".into()),
         webtransport: Some("https://h3.example:6466".into()),
         cert_hash: Some("ab12".into()),

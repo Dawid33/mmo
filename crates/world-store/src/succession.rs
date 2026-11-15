@@ -74,6 +74,7 @@
 
 use std::collections::BTreeSet;
 
+use game::HostId;
 use game::{CutId, HOST_DEAD, HOST_LIVE};
 use sqlx::{PgPool, Row};
 
@@ -83,16 +84,16 @@ use crate::{CoordinatorFence, StoreError, SuperRegion};
 pub use game::{Declared, Succession, SuccessionId, SuccessionKind};
 
 /// `successions.survivors`: ordinals, comma-separated.
-pub(crate) fn encode_survivors(survivors: &[u32]) -> String {
-    survivors.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+pub(crate) fn encode_survivors(survivors: &[HostId]) -> String {
+    survivors.iter().map(|h| h.0.to_string()).collect::<Vec<_>>().join(",")
 }
 
-pub(crate) fn decode_survivors(id: u64, s: &str) -> Result<Vec<u32>, StoreError> {
+pub(crate) fn decode_survivors(id: u64, s: &str) -> Result<Vec<HostId>, StoreError> {
     if s.is_empty() {
         return Ok(Vec::new());
     }
     s.split(',')
-        .map(|o| o.parse().map_err(|_| StoreError::Corrupt(format!("successions {id}: survivors {s:?}"))))
+        .map(|o| o.parse().map(HostId).map_err(|_| StoreError::Corrupt(format!("successions {id}: survivors {s:?}"))))
         .collect()
 }
 
@@ -176,15 +177,15 @@ const ROLLING_BACK: &str = "a world rollback";
 /// [`crate::StoreHandle::declare_succession`] (Postgres): see the module docs for the locks.
 pub(crate) async fn declare(
     pool: &PgPool,
-    dead: Vec<(u32, u64)>,
-    heirs: Vec<u32>,
+    dead: Vec<(HostId, u64)>,
+    heirs: Vec<HostId>,
     kind: SuccessionKind,
     fence: CoordinatorFence,
     generation: u64,
     lock_timeout_ms: u64,
     lease_ms: u64,
 ) -> Result<Declared, StoreError> {
-    let predecessors: BTreeSet<u32> = dead.iter().map(|(o, _)| *o).collect();
+    let predecessors: BTreeSet<HostId> = dead.iter().map(|(o, _)| *o).collect();
     if dead.is_empty() || heirs.len() != dead.len() || predecessors.len() != dead.len() {
         return Err(StoreError::Unsupported(format!(
             "a succession needs one heir per predecessor and each predecessor once (dead {dead:?}, heirs {heirs:?})"
@@ -241,9 +242,9 @@ impl From<StoreError> for DeclareError {
 #[allow(clippy::too_many_arguments)]
 async fn declare_in(
     tx: &mut sqlx::PgConnection,
-    dead: &[(u32, u64)],
-    heirs: &[u32],
-    predecessors: &BTreeSet<u32>,
+    dead: &[(HostId, u64)],
+    heirs: &[HostId],
+    predecessors: &BTreeSet<HostId>,
     kind: SuccessionKind,
     fence: CoordinatorFence,
     generation: u64,
@@ -257,7 +258,7 @@ async fn declare_in(
         return Ok(Declared::SuccessionOpen);
     }
     // The predecessors' rows, locked in ordinal order: a heartbeat waits for this transaction.
-    let mut sorted: Vec<(u32, u64)> = dead.to_vec();
+    let mut sorted: Vec<(HostId, u64)> = dead.to_vec();
     sorted.sort();
     let (mut gone, mut not_lapsed) = (Vec::new(), Vec::new());
     for (ordinal, boot) in &sorted {
@@ -266,7 +267,7 @@ async fn declare_in(
              EXISTS (SELECT 1 FROM successions WHERE predecessor = $1 AND predecessor_boot = hosts.boot AND abandoned = 0) \
              FROM hosts WHERE ordinal = $1 FOR NO KEY UPDATE"
         ))
-        .bind(i64::from(*ordinal))
+        .bind(i((*ordinal).0))
         .bind(i(lease_ms))
         .fetch_optional(&mut *tx)
         .await?;
@@ -294,7 +295,7 @@ async fn declare_in(
             "SELECT seen_ms <> 0 AND {PG_NOW_MS} - seen_ms <= $2 FROM hosts \
              WHERE ordinal = $1 AND clean = 0 AND state = {HOST_LIVE}"
         ))
-        .bind(i64::from(*heir))
+        .bind(i(heir.0))
         .bind(i(lease_ms))
         .fetch_optional(&mut *tx)
         .await?;
@@ -318,7 +319,7 @@ async fn declare_in(
     .await?;
     let mut survivors = Vec::with_capacity(live.len());
     for o in live {
-        let o = u32::try_from(o).map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {o}")))?;
+        let o = u64::try_from(o).map(HostId).map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {o}")))?;
         if !predecessors.contains(&o) {
             survivors.push(o);
         }
@@ -330,21 +331,21 @@ async fn declare_in(
     for ((predecessor, boot), heir) in dead.iter().zip(heirs) {
         if kind == SuccessionKind::Crash {
             sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE ordinal = $1 AND boot = $2"))
-                .bind(i64::from(*predecessor))
+                .bind(i(predecessor.0))
                 .bind(i(*boot))
                 .execute(&mut *tx)
                 .await?;
         }
         // Key order first (a claim upserts in key order too), then the claim itself.
         sqlx::query("SELECT 1 FROM super_regions WHERE owner = $1 ORDER BY sx, sz FOR NO KEY UPDATE")
-            .bind(i64::from(*predecessor))
+            .bind(i(predecessor.0))
             .execute(&mut *tx)
             .await?;
         let rows = sqlx::query(
             "UPDATE super_regions SET owner = $1, epoch = epoch + 1 WHERE owner = $2 RETURNING sx, sz, epoch",
         )
-        .bind(i64::from(*heir))
-        .bind(i64::from(*predecessor))
+        .bind(i(heir.0))
+        .bind(i(predecessor.0))
         .fetch_all(&mut *tx)
         .await?;
         let mut moved = Vec::with_capacity(rows.len());
@@ -365,9 +366,9 @@ async fn declare_in(
              declared_utc, survivors, moved) VALUES ($1, $2, $3, $4, $5, $6, NULL, 0, $7, $8, $9)",
         )
         .bind(id)
-        .bind(i64::from(*predecessor))
+        .bind(i(predecessor.0))
         .bind(i(*boot))
-        .bind(i64::from(*heir))
+        .bind(i(heir.0))
         .bind(kind.code())
         .bind(base_cut)
         .bind(crate::open::utc_now())
@@ -497,8 +498,8 @@ mod tests {
         assert_eq!(decode_moved(1, &encode_moved(&moved)).unwrap(), moved);
         assert_eq!(decode_moved(1, "").unwrap(), vec![]);
         assert!(decode_moved(1, "1:2").is_err());
-        assert_eq!(decode_survivors(1, &encode_survivors(&[0, 2])).unwrap(), vec![0, 2]);
-        assert_eq!(decode_survivors(1, "").unwrap(), Vec::<u32>::new());
+        assert_eq!(decode_survivors(1, &encode_survivors(&[HostId(0), HostId(2)])).unwrap(), vec![HostId(0), HostId(2)]);
+        assert_eq!(decode_survivors(1, "").unwrap(), Vec::<HostId>::new());
         assert!(decode_survivors(1, "x").is_err());
     }
 }

@@ -22,7 +22,7 @@ use game::history::{
     CalendarTick, EmbarkRefusal, History, LegendsFilter, LegendsQuery, Location, PersonId, Sex, SiteId,
 };
 use game::{
-    ClientId, ClientPacket, EmbarkRequest, InlineLodBuilder, InlineSpawner, LodBuilder, Ownership, PlayerId,
+    ClientId, HostId, ClientPacket, EmbarkRequest, InlineLodBuilder, InlineSpawner, LodBuilder, Ownership, PlayerId,
     RegionCoords, RegionOutput, RegionSpawner, ServerEvent, ServerPacket, WorldLink, WorldManager, WorldMap,
 };
 use server::claims::{Fenced, HostClaims, ServerExit};
@@ -172,16 +172,16 @@ impl Coordinator {
 /// Host `ordinal`'s link to the coordinator at `addr`, its pin read from `cert_file`
 /// (waited for); its hello carries the host's registration number `reg` (the coordinator
 /// admits only its `hosts` row's, while live).
-fn quic_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: u32, boot: u64, reg: u64) -> QuicWorldLink {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal, boot, reg });
+fn quic_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, boot: u64, reg: u64) -> QuicWorldLink {
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg });
     QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file), hello)
 }
 
 /// Registers boot `boot` as host `ordinal` (as a `host` process does once per boot, with
 /// no claims): its registration.
-fn register_host(store: &StoreHandle, ordinal: u32, boot: u64) -> world_store::HostBoot {
+fn register_host(store: &StoreHandle, ordinal: HostId, boot: u64) -> world_store::HostBoot {
     let row = world_store::HostRow {
-        ordinal,
+        id: ordinal,
         boot,
         generation: 0,
         clean: false,
@@ -253,7 +253,7 @@ impl Host {
         manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
         // Registered once per boot, as a `host` process is (the coordinator admits its
         // hello by the registration number); it runs the generation it registered at.
-        let registered = register_host(store, ownership.ordinal(), boot);
+        let registered = register_host(store, ownership.me(), boot);
         manager.set_host_generation(registered.generation);
         manager.set_world_link(link(registered.reg), boot, 0);
         manager.set_world_map(map.clone());
@@ -415,8 +415,8 @@ fn split_world_plays_like_all_in_one() {
     let host_store = split_db.open();
     let (a_split, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
     assert_eq!(a_split, a, "the same player id in both worlds");
-    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, 0, 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, h(0), 1, reg)) };
+    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
     let split_packets = play_script(&mut host, a, &req);
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
@@ -475,8 +475,8 @@ fn host_survives_coordinator_absence_at_start() {
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
-    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 7, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 7);
+    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 7, reg)) };
+    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 7);
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     let tick_before = host.manager.spawner_mut().world_tick();
     for _ in 0..20 {
@@ -539,9 +539,9 @@ fn standing_in(region: RegionCoords) -> game::PlayerRecord {
 
 /// Two members of the first site, not taken in `taken`, into the first region from (2, 2)
 /// where a player may found one and host `ordinal` (of two) owns.
-fn embark_request_on(h: &History, s: u32, ordinal: u32, taken: &[PersonId]) -> EmbarkRequest {
+fn embark_request_on(h: &History, s: u32, ordinal: HostId, taken: &[PersonId]) -> EmbarkRequest {
     let site = h.sites().next().expect("a site");
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: 2 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { id: HostId(0), hosts: 2 }.owner_of(rc, s);
     let region = (2..46)
         .flat_map(|z| (2..46).map(move |x| RegionCoords::new(x, z)))
         .find(|r| owner(*r) == ordinal && h.player_embark_allowed(*r).is_ok())
@@ -572,17 +572,17 @@ fn two_hosts_attach_and_both_get_their_people() {
     let key = |n: &str| PlayerKey::Local(game::PlayerName::parse(n).unwrap());
     let (a, _) = StorePlayers(store0.clone()).resolve(&key("a")).unwrap();
     let (b, _) = StorePlayers(store1.clone()).resolve(&key("b")).unwrap();
-    let link = |ordinal: u32| {
+    let link = |ordinal: HostId| {
         let cert_file = cert_file.clone();
-        move |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, ordinal, 10 + u64::from(ordinal), reg)) }
+        move |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, ordinal, 10 + ordinal.0, reg)) }
     };
-    let mut h0 = Host::start(&store0, &map, game::Static { ordinal: 0, hosts: 2 }, link(0), None, 10);
+    let mut h0 = Host::start(&store0, &map, game::Static { id: h(0), hosts: 2 }, link(h(0)), None, 10);
     h0.until("host 0 attached", |h| h.manager.world_attached());
 
     // Host 0's player embarks into a region of host 0.
-    let req0 = embark_request_on(&stored_history(&coordinator.store, &map), s, 0, &[]);
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: 2 }.owner_of(rc, s);
-    let spawn0 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == 0).expect("a region of host 0");
+    let req0 = embark_request_on(&stored_history(&coordinator.store, &map), s, h(0), &[]);
+    let owner = |rc: RegionCoords| game::Static { id: h(0), hosts: 2 }.owner_of(rc, s);
+    let spawn0 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == h(0)).expect("a region of host 0");
     h0.send(ServerEvent::ClientConnected { client: A, player: a, record: Some(standing_in(spawn0)) });
     h0.send(ServerEvent::ClientPacket(ClientPacket::Embark(req0.clone()), A));
     h0.until("host 0's embark", |h| !h.embark_results(A).is_empty());
@@ -594,13 +594,13 @@ fn two_hosts_attach_and_both_get_their_people() {
     });
 
     // Host 1 attaches: nothing of host 0's parks.
-    let mut h1 = Host::start(&store1, &map, game::Static { ordinal: 1, hosts: 2 }, link(1), None, 11);
+    let mut h1 = Host::start(&store1, &map, game::Static { id: h(1), hosts: 2 }, link(h(1)), None, 11);
     until_both(&mut h0, &mut h1, "host 1 attached", |_, h1| h1.manager.world_attached());
     let req1 = {
         let taken = req0.people.clone();
-        coordinator.thread.inspect(move |c| embark_request_on(c.history(), s, 1, &taken), WAIT).expect("the coordinator answers")
+        coordinator.thread.inspect(move |c| embark_request_on(c.history(), s, h(1), &taken), WAIT).expect("the coordinator answers")
     };
-    let spawn1 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == 1).expect("a region of host 1");
+    let spawn1 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == h(1)).expect("a region of host 1");
     h1.send(ServerEvent::ClientConnected { client: A, player: b, record: Some(standing_in(spawn1)) });
     h1.send(ServerEvent::ClientPacket(ClientPacket::Embark(req1.clone()), A));
     until_both(&mut h0, &mut h1, "host 1's embark", |_, h1| !h1.embark_results(A).is_empty());
@@ -650,7 +650,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
     let dir = scratch("stalereg");
     let cert_file = dir.join("coordinator.cert-sha256");
     let store = db.open();
-    let (first, second) = (register_host(&store, 0, 1), register_host(&store, 0, 2));
+    let (first, second) = (register_host(&store, h(0), 1), register_host(&store, h(0), 2));
     // Both Attach at the world's generation now (the second registration raised it: R3's
     // rule for a dirty predecessor): only the registration tells them apart.
     let generation = second.generation;
@@ -662,7 +662,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
     let (coordinator, _) = Coordinator::start(&db, &map, addr, cert_file.clone());
     let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file).unwrap();
     let dial = |boot: u64, reg: u64| {
-        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 0, boot, reg });
+        let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: h(0), boot, reg });
         let (link, events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin.clone(), hello);
         let deadline = Instant::now() + WAIT;
         loop {
@@ -671,7 +671,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
                 _ => assert!(Instant::now() < deadline, "the link never came up"),
             }
         }
-        link.send(game::HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }).unwrap();
+        link.send(game::HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }).unwrap();
         (link, events)
     };
     let (stale, stale_events) = dial(1, first);
@@ -702,7 +702,7 @@ fn raw_host_link(
     reg: u64,
 ) -> (crossbeam::channel::Sender<game::HostMsg>, Receiver<svc_link::LinkEvent<game::CoordMsg>>) {
     let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", cert_file).unwrap();
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 0, boot, reg });
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: h(0), boot, reg });
     let (link, events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin, hello);
     let deadline = Instant::now() + WAIT;
     loop {
@@ -717,7 +717,7 @@ fn raw_host_link(
 /// An empty `Attach` of host 0 at `generation` under `policy`.
 fn bare_attach(generation: u64, boot: u64, policy: game::CrashPolicy) -> game::HostMsg {
     game::HostMsg::Attach {
-        host: 0,
+        host: h(0),
         epoch: 1,
         running: Vec::new(),
         online: Vec::new(),
@@ -745,7 +745,7 @@ fn a_host_under_another_crash_policy_is_refused_by_the_coordinator() {
     let dir = scratch("policymismatch");
     let cert_file = dir.join("coordinator.cert-sha256");
     let store = db.open();
-    let registered = register_host(&store, 0, 1);
+    let registered = register_host(&store, h(0), 1);
     let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
     let cuts = coordinator_rt::WorldCuts { every: Duration::from_secs(3600), tick: Box::new(|| 0) };
     let listening = coordinator_rt::start_listening_as(
@@ -801,7 +801,7 @@ fn a_host_of_an_older_generation_is_told_the_generation() {
     let cert_file = dir.join("coordinator.cert-sha256");
     let store = db.open();
     // The second registration of a dirty ordinal raises the generation (R3's rule).
-    let (first, second) = (register_host(&store, 0, 1), register_host(&store, 0, 2));
+    let (first, second) = (register_host(&store, h(0), 1), register_host(&store, h(0), 2));
     assert!(second.generation > first.generation);
     let (coordinator, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
     let (link, events) = raw_host_link(addr, &cert_file, 2, second.reg);
@@ -996,8 +996,8 @@ fn crash_mid_play(seed: u64) {
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
-    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
+    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
@@ -1098,8 +1098,8 @@ fn embark_during_downtime_completes_once() {
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
-    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
+    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
 
     c1.kill();
@@ -1157,8 +1157,8 @@ fn embark_answered_then_crash_is_not_refounded() {
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
-    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
+    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
     for _ in 0..10 {
@@ -1215,8 +1215,8 @@ fn request_timeout_answers_world_unavailable() {
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
-    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), 0, 1, reg)) };
-    let mut host = Host::start(&host_store, &map, game::Static { ordinal: 0, hosts: 1 }, link, None, 1);
+    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 1, reg)) };
+    let mut host = Host::start(&host_store, &map, game::Static { id: h(0), hosts: 1 }, link, None, 1);
     host.manager.set_world_request_timeout_ms(TIMEOUT_MS);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
@@ -1254,3 +1254,9 @@ fn request_timeout_answers_world_unavailable() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+/// A host id from its number.
+#[allow(dead_code)]
+fn h(n: u64) -> game::HostId {
+    game::HostId(n)
+}

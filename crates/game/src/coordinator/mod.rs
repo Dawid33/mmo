@@ -31,6 +31,7 @@ pub use world_cut::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::HostId;
 use crate::history::persist::HistoryLoadError;
 use crate::history::{
     AdventureRefusal, CalendarTick, Directive, EmbarkRefusal, History, SiteId, SocietyGrid, TICKS_PER_DAY,
@@ -115,7 +116,7 @@ pub struct Coordinator {
     /// Per host, the boots its `Attach`es named: a new one forgets the host's answers of
     /// every other boot. Never saved (an unknown boot after a restart forgets nothing the
     /// host could still ask about: its process is the one attaching).
-    boots_seen: BTreeMap<u32, BTreeSet<u64>>,
+    boots_seen: BTreeMap<HostId, BTreeSet<u64>>,
     /// `clock_ms` of the last error about an oversized memo.
     memo_warned_ms: Option<u64>,
     /// Waiting for a save: the first gated message and everything after it, in order.
@@ -124,12 +125,12 @@ pub struct Coordinator {
     out: Vec<(Target, CoordMsg)>,
     /// Which host runs each region, as announced (`RegionStarted`, `Attach`, a delivered
     /// `PersonCrossed`); a park forgets it. Rebuilt by every `Attach`, never saved.
-    region_host: BTreeMap<RegionCoords, u32>,
+    region_host: BTreeMap<RegionCoords, HostId>,
     /// The host each online player is online on (`PlayerOnline`, an `Attach`'s online
     /// list, the host that was granted its claim). Rebuilt by every `Attach`, never saved.
     /// A player in transit to a host (`PlayerHandedTo`) stays online on that host until it
     /// reports. Never saved.
-    online_on: BTreeMap<PlayerId, u32>,
+    online_on: BTreeMap<PlayerId, HostId>,
     /// The highest hop ([`HostMsg`]'s hop rule) of each player's presence messages
     /// applied: a message with a lower one is stale. Unknown = 0 (a restart loses it and
     /// the next reports set it again); cleared by an `Attach` of a newer world
@@ -141,10 +142,10 @@ pub struct Coordinator {
     /// the host and the hop it reported. A message of another host that moves the player
     /// away from it tells it ([`CoordMsg::HopIs`]): if it still holds the player it
     /// re-asserts above the new hop. Never saved.
-    online_reported: BTreeMap<PlayerId, (u32, u64)>,
+    online_reported: BTreeMap<PlayerId, (HostId, u64)>,
     /// Displaced-host notifications sent, `(player, host, reported hop)`: at most one each.
     /// A player's go when it goes offline on its host; all go at a newer generation.
-    displaced_told: BTreeSet<(PlayerId, u32, u64)>,
+    displaced_told: BTreeSet<(PlayerId, HostId, u64)>,
     /// `Some(n)`: a save was taken ([`Self::take_save`]) holding the state behind the
     /// first `n` messages of `gated`; [`Self::saved`] releases them.
     save_in_flight: Option<usize>,
@@ -248,7 +249,7 @@ impl Coordinator {
     }
 
     /// The host `player` is online on, as the coordinator has it.
-    pub fn online_on(&self, player: PlayerId) -> Option<u32> {
+    pub fn online_on(&self, player: PlayerId) -> Option<HostId> {
         self.online_on.get(&player).copied()
     }
 
@@ -258,7 +259,7 @@ impl Coordinator {
     }
 
     /// The host that runs `rc`, as announced to the coordinator.
-    pub fn region_host(&self, rc: RegionCoords) -> Option<u32> {
+    pub fn region_host(&self, rc: RegionCoords) -> Option<HostId> {
         self.region_host.get(&rc).copied()
     }
 
@@ -269,7 +270,7 @@ impl Coordinator {
     }
 
     /// Apply one message of host `host` (the ordinal its link is for).
-    pub fn handle(&mut self, host: u32, msg: HostMsg, now_ms: u64) {
+    pub fn handle(&mut self, host: HostId, msg: HostMsg, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
         // A zombie of a succeeded boot (R4) changes nothing: its state-changing requests are
@@ -409,7 +410,7 @@ impl Coordinator {
     /// refused `WorldUnavailable` (memoised, as a settle of it would be); anything else is
     /// dropped — its presence, regions and attaches would point the coordinator's view at a
     /// dead host again.
-    fn zombie_message(&mut self, host: u32, msg: HostMsg) {
+    fn zombie_message(&mut self, host: HostId, msg: HostMsg) {
         match msg {
             HostMsg::Request { id, req, .. } | HostMsg::Settle { id, req } if req.changes_state() => {
                 log::warn!("coordinator: a request of host {host}'s succeeded boot: refused");
@@ -421,7 +422,7 @@ impl Coordinator {
 
     /// A lifecycle message of `host` about `rc`, which another host announced since: stale,
     /// ignored (the other host's own messages run the region in the history).
-    fn runs_elsewhere(&self, rc: RegionCoords, host: u32) -> bool {
+    fn runs_elsewhere(&self, rc: RegionCoords, host: HostId) -> bool {
         match self.region_host.get(&rc) {
             Some(&other) if other != host => {
                 log::warn!("coordinator: host {host}'s message about {rc:?} ignored: host {other} runs it");
@@ -575,13 +576,13 @@ impl Coordinator {
     /// its `Attach` re-decides every region it runs from its bodies, so they are stale.
     /// Those already handed to the link reach the host ahead of [`CoordMsg::Attached`],
     /// and it drops them. Other hosts' directives stand.
-    fn drop_unsent_directives(&mut self, host: u32) {
+    fn drop_unsent_directives(&mut self, host: HostId) {
         self.drop_unsent(host, "directives", |m| matches!(m, CoordMsg::Directive { .. }));
     }
 
     /// Forget every message for `host` matching `drops` not yet handed out (waiting or
     /// free to leave), superseded by its attach (`what` names them in the log).
-    fn drop_unsent(&mut self, host: u32, what: &str, drops: impl Fn(&CoordMsg) -> bool) {
+    fn drop_unsent(&mut self, host: HostId, what: &str, drops: impl Fn(&CoordMsg) -> bool) {
         let dropped_here = |(to, m): &(Target, CoordMsg)| *to == Target::Host(host) && drops(m);
         let before = self.gated.len() + self.out.len();
         if let Some(n) = self.save_in_flight.as_mut() {
@@ -631,11 +632,11 @@ impl Coordinator {
     /// online on it, and it gets the view.
     fn attach(
         &mut self,
-        host: u32,
+        host: HostId,
         epoch: u64,
         running: Vec<RunningRegion>,
         online: Vec<OnlinePlayer>,
-        handed: Vec<(PlayerId, u32, u64)>,
+        handed: Vec<(PlayerId, HostId, u64)>,
     ) {
         log::info!(
             "coordinator: host {host} attached (epoch {epoch}) with {} running regions, {} online, {} handed",
@@ -706,7 +707,7 @@ impl Coordinator {
     /// A report whose hop is lower than the player's latest is stale and ignored; the
     /// host is told the latest ([`CoordMsg::HopIs`]) in case the report is of its current
     /// placement (a login that could not know the hops elsewhere).
-    fn player_online(&mut self, host: u32, report: OnlinePlayer) {
+    fn player_online(&mut self, host: HostId, report: OnlinePlayer) {
         let OnlinePlayer { player, claim, claim_pending, report, hop } = report;
         let known = self.hop_of(player);
         let on = self.online_on.get(&player).copied();
@@ -750,7 +751,7 @@ impl Coordinator {
     /// it, it is the end of a placement whose start has not arrived yet (it travels on
     /// another link, or was lost): offline at that hop, and every message of that hop or
     /// lower is stale from here on.
-    fn player_offline(&mut self, host: u32, player: PlayerId, hop: u64) {
+    fn player_offline(&mut self, host: HostId, player: PlayerId, hop: u64) {
         let known = self.hop_of(player);
         let on = self.online_on.get(&player).copied();
         if hop < known || (hop == known && on != Some(host)) {
@@ -774,7 +775,7 @@ impl Coordinator {
     /// the player and ignores it; if it does hold it (its placement lost the race against
     /// an older placement's messages in flight, or a duplicate) it renumbers above `hop`
     /// and reports again — the newest reporter wins, as the newest session does.
-    fn displace(&mut self, player: PlayerId, by: u32, hop: u64) {
+    fn displace(&mut self, player: PlayerId, by: HostId, hop: u64) {
         let Some(&(host, reported)) = self.online_reported.get(&player) else { return };
         if host == by || self.online_on.get(&player) != Some(&host) {
             return;
@@ -789,7 +790,7 @@ impl Coordinator {
     /// `to` (its claim in use) until `to` reports it (at `hop + 1`). Stale below the latest
     /// hop, and at it from a host the player is not online on; above it, the placement on
     /// `host` whose start has not arrived yet, then the hand-over.
-    fn player_handed(&mut self, host: u32, player: PlayerId, to: u32, hop: u64) {
+    fn player_handed(&mut self, host: HostId, player: PlayerId, to: HostId, hop: u64) {
         let known = self.hop_of(player);
         let on = self.online_on.get(&player).copied();
         if hop < known || (hop == known && on != Some(host)) {
@@ -862,7 +863,7 @@ impl Coordinator {
     /// Settle a timed-out state-changing request ([`HostMsg::Settle`]): its memoised
     /// answer if it was applied, else a `WorldUnavailable` refusal, memoised without
     /// executing it (a later copy of the request gets that refusal too).
-    fn settle(&mut self, host: u32, id: RequestId, req: WorldRequest) {
+    fn settle(&mut self, host: HostId, id: RequestId, req: WorldRequest) {
         let reply = match self.memo.get(&id) {
             Some(reply) => reply.clone(),
             None => {
@@ -887,12 +888,12 @@ impl Coordinator {
     /// Whether a request of `player` made at placement `hop` on `host` is of an older
     /// placement than the one the coordinator knows: below its hop, or at it while the
     /// player is online on another host (two hosts are never online at one hop).
-    fn from_older_placement(&self, host: u32, player: PlayerId, hop: u64) -> bool {
+    fn from_older_placement(&self, host: HostId, player: PlayerId, hop: u64) -> bool {
         let known = self.hop_of(player);
         hop < known || (hop == known && self.online_on.get(&player).is_some_and(|on| *on != host))
     }
 
-    fn request(&mut self, host: u32, id: RequestId, player: PlayerId, hop: u64, req: WorldRequest) {
+    fn request(&mut self, host: HostId, id: RequestId, player: PlayerId, hop: u64, req: WorldRequest) {
         if let Some(reply) = self.memo.get(&id) {
             log::debug!("coordinator: {id:?} repeated; answering from the memo");
             let reply = reply.clone();
@@ -946,7 +947,7 @@ impl Coordinator {
         let quiet = self.memo_warned_ms.is_some_and(|ms| self.clock_ms.saturating_sub(ms) < MEMO_WARN_SECS * 1000);
         if self.memo.len() > ANSWERED_MEMO_MAX && !quiet {
             self.memo_warned_ms = Some(self.clock_ms);
-            let mut per_host: BTreeMap<u32, usize> = BTreeMap::new();
+            let mut per_host: BTreeMap<HostId, usize> = BTreeMap::new();
             for id in self.memo.keys() {
                 *per_host.entry(id.host).or_default() += 1;
             }
@@ -962,7 +963,7 @@ impl Coordinator {
     /// an `Attach`'s watermark): forgotten. At an `Attach` (`attach`) naming a boot not
     /// seen from the host before, the host's answers of every other boot go too (that
     /// process is gone).
-    fn forget_settled(&mut self, host: u32, boot: u64, below: u64, attach: bool) {
+    fn forget_settled(&mut self, host: HostId, boot: u64, below: u64, attach: bool) {
         let new_boot = attach && self.boots_seen.entry(host).or_default().insert(boot);
         let forget = |id: &RequestId| id.host == host && ((id.boot == boot && id.seq < below) || (new_boot && id.boot != boot));
         let before = self.memo.len();

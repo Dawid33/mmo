@@ -481,7 +481,7 @@ impl SimWorker {
                         SimOut::Open { conn, endpoint, credential } => {
                             match crate::web_endpoint::web_server_for_host(&endpoint) {
                                 Ok(server) => {
-                                    log::info!("[session] connection {conn}: to host {} ({server:?})", endpoint.ordinal);
+                                    log::info!("[session] connection {conn}: to host {} ({server:?})", endpoint.id);
                                     open_connection(&worker, &mut conns, conn, server, Some(credential));
                                 }
                                 Err(reason) => post_to_sim(&worker, &ToSim::Closed { conn, reason }),

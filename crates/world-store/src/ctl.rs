@@ -57,6 +57,7 @@
 
 use std::path::Path;
 
+use game::HostId;
 use worldgen::forge::{self, ForgeParams};
 
 use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
@@ -190,9 +191,9 @@ fn parse_super_region(args: &[String]) -> Result<(StoreUrl, u32), String> {
 }
 
 /// `retire-host`'s store and ordinal: `<url> <ordinal>`. Errors never echo the URL.
-fn parse_retire_host(args: &[String]) -> Result<(StoreUrl, u32), String> {
+fn parse_retire_host(args: &[String]) -> Result<(StoreUrl, HostId), String> {
     let [url, ordinal] = args else { return Err(USAGE.to_string()) };
-    let ordinal = ordinal.trim().parse::<u32>().map_err(|_| format!("retire-host: {ordinal:?} is not a host ordinal"))?;
+    let ordinal = ordinal.trim().parse::<u64>().map(HostId).map_err(|_| format!("retire-host: {ordinal:?} is not a host ordinal"))?;
     let db = StoreUrl::parse(url).map_err(|e| format!("retire-host: the world store URL: {e}"))?;
     Ok((db, ordinal))
 }
@@ -305,7 +306,7 @@ pub fn set_super_region(db: &StoreUrl, n: u32) -> Result<(), String> {
 
 /// Retires host `ordinal` of `db` (see the module docs): what it did, or why not. Errors never
 /// echo the URL.
-pub fn retire_host(db: &StoreUrl, ordinal: u32) -> Result<String, String> {
+pub fn retire_host(db: &StoreUrl, ordinal: HostId) -> Result<String, String> {
     if !matches!(db, StoreUrl::Postgres(_)) {
         return Err("retire-host: a world of several hosts is a Postgres world; this store has one host, nothing to retire".into());
     }
@@ -316,30 +317,33 @@ pub fn retire_host(db: &StoreUrl, ordinal: u32) -> Result<String, String> {
 }
 
 /// [`retire_host`] on an open store.
-fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: u32) -> Result<String, String> {
+fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: HostId) -> Result<String, String> {
+    // Operator-facing text names a host by its number (as `worldctl retire-host <url> <n>` takes it).
+    let ord = ordinal.0;
     let fail = |e: crate::StoreError| format!("retire-host: {e}");
     let rows = store.hosts().map_err(fail)?;
     let now = store.db_now_ms().map_err(fail)?;
     let fresh = |r: &crate::HostRow| r.seen_ms != 0 && now.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS;
     let running = |r: &crate::HostRow| !r.clean && r.state == crate::HOST_LIVE && fresh(r);
-    if rows.iter().any(|r| r.ordinal == ordinal && running(r)) {
-        return Err(format!("retire-host: host {ordinal} is running: stop it first"));
+    if rows.iter().any(|r| r.id == ordinal && running(r)) {
+        return Err(format!("retire-host: host {ord} is running: stop it first"));
     }
-    let alive: Vec<u32> = rows.iter().filter(|r| r.ordinal != ordinal && running(r)).map(|r| r.ordinal).collect();
+    let alive: Vec<HostId> = rows.iter().filter(|r| r.id != ordinal && running(r)).map(|r| r.id).collect();
+    let alive_n: Vec<u64> = alive.iter().map(|h| h.0).collect();
     if !alive.is_empty() {
         return match store.vouch_host(ordinal).map_err(fail)? {
             crate::Vouched::Vouched => Ok(format!(
-                "worldctl: host {ordinal}'s row in {db} is vouched dead (seen_ms = 0); hosts {alive:?} run: the coordinator \
-                 declares host {ordinal} dead at its next read and one of them inherits its land (claim ownership)"
+                "worldctl: host {ord}'s row in {db} is vouched dead (seen_ms = 0); hosts {alive_n:?} run: the coordinator \
+                 declares host {ord} dead at its next read and one of them inherits its land (claim ownership)"
             )),
-            crate::Vouched::Running => Err(format!("retire-host: host {ordinal} is running: stop it first")),
+            crate::Vouched::Running => Err(format!("retire-host: host {ord} is running: stop it first")),
             crate::Vouched::Refused(why) => Err(format!("retire-host: {why}")),
         };
     }
     // Nobody alive. The refusals that need no write first (the store checks them again, under
     // its locks): only then are the parts a crash left staged finished (as every start does) —
     // a refused command writes nothing.
-    let row = rows.iter().find(|r| r.ordinal == ordinal).map(|r| (r.clean, r.state));
+    let row = rows.iter().find(|r| r.id == ordinal).map(|r| (r.clean, r.state));
     if let Some(why) = crate::operator::not_retirable(ordinal, row) {
         return Err(format!("retire-host: {why}"));
     }
@@ -348,7 +352,7 @@ fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: u32) -> Result<String,
             return Err(format!("retire-host: {why}"));
         }
     }
-    if !rows.iter().any(|r| r.ordinal != ordinal && r.state == crate::HOST_LIVE) {
+    if !rows.iter().any(|r| r.id != ordinal && r.state == crate::HOST_LIVE) {
         return Err(no_heir(ordinal));
     }
     for (cut, committed) in store.resolve_prepared().map_err(fail)? {
@@ -356,18 +360,19 @@ fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: u32) -> Result<String,
     }
     match store.retire_offline(ordinal).map_err(fail)? {
         crate::Retired::Opened(s) => Ok(format!(
-            "worldctl: host {ordinal} (boot {:#x}) of {db} retired while no host ran: succession {} opened, heir {} \
+            "worldctl: host {ord} (boot {:#x}) of {db} retired while no host ran: succession {} opened, heir {} \
              inherits its {} super-region(s) as of world cut {}; start host {} — it adopts them at its boot and its first \
              committed world cut settles the succession",
             s.predecessor_boot,
             s.id.0,
-            s.heir,
+            s.heir.0,
             s.moved.len(),
             s.base_cut.0,
-            s.heir
+            s.heir.0
         )),
         crate::Retired::Running(hosts) => Err(format!(
-            "retire-host: hosts {hosts:?} began beating meanwhile; nothing written — run retire-host again (it then vouches)"
+            "retire-host: hosts {:?} began beating meanwhile; nothing written — run retire-host again (it then vouches)",
+            hosts.iter().map(|h| h.0).collect::<Vec<_>>()
         )),
         crate::Retired::NoHeir => Err(no_heir(ordinal)),
         crate::Retired::Refused(why) => Err(format!("retire-host: {why}")),
@@ -375,8 +380,11 @@ fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: u32) -> Result<String,
 }
 
 /// What `retire-host` says when no other ordinal can inherit.
-fn no_heir(ordinal: u32) -> String {
-    format!("retire-host: nothing to give host {ordinal}'s land to: start a host of another ordinal once, or start host {ordinal}")
+fn no_heir(ordinal: HostId) -> String {
+    format!(
+        "retire-host: nothing to give host {0}'s land to: start a host of another ordinal once, or start host {0}",
+        ordinal.0
+    )
 }
 
 /// Rolls `db`'s world back (`rollback --yes`): `(generation, successions abandoned)`.

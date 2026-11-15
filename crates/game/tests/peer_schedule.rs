@@ -4,10 +4,11 @@
 //! `jittery`, the link delay rolling through 0..=3 with the seed). Every round checks
 //! conservation across hosts ([`MultiRig::assert_conserved_world`]); a failure names a
 //! replayable `(mode, seed, delay)`. Run via `just test-threads`.
-use game::{InlineSchedule, RegionCoords, RegionSpawner, FLIP_HYSTERESIS, REGION_SIZE};
+use crate::common::h;
+use game::{HostId, InlineSchedule, RegionCoords, RegionSpawner, FLIP_HYSTERESIS, REGION_SIZE};
 
 use crate::common::cut_store::CutStore;
-use crate::common::multi_rig::{four_host_corner, host_seam, rig_endpoint, MultiRig};
+use crate::common::multi_rig::{four_host_corner, host_ids, host_seam, rig_endpoint, MultiRig};
 use crate::common::rig::{assert_same_streams, Streams};
 
 /// Seeds swept per schedule mode.
@@ -108,7 +109,7 @@ fn cross_once(rig: &mut MultiRig) {
     rig.run(b);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     until_settled_in(rig, id, b);
-    let source = rig.owner(a) as usize;
+    let source = rig.owner(a).0 as usize;
     assert_eq!(rig.hosts[source].manager.pending_arrival_total(), 0, "nothing waits on the sending host");
     assert_eq!(rig.hosts[source].manager.in_flight_count(), 0, "nothing in flight on the sending host");
 }
@@ -223,7 +224,7 @@ fn shuffled_two_hosts_match_lockstep() {
 /// sender's), and is delivered when the region next runs.
 fn into_parked(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
-    let (ha, hb) = (rig.owner(a) as usize, rig.owner(b) as usize);
+    let (ha, hb) = (rig.owner(a).0 as usize, rig.owner(b).0 as usize);
     rig.run(a);
     rig.run(b);
     rig.park(b);
@@ -263,7 +264,7 @@ fn across_a_down_link(rig: &mut MultiRig) {
         rig.round();
     }
     assert!(rig.owners_of(id).is_empty(), "nothing holds the slime but the session: {:?}", rig.owners_of(id));
-    let queued = rig.hosts[ha as usize].manager.peer_unreceived_ids();
+    let queued = rig.hosts[ha.0 as usize].manager.peer_unreceived_ids();
     assert_eq!(queued, [(hb, id, false)], "the transfer waits unsent in the session to host {hb}");
     rig.link_up(ha, hb);
     until_settled_in(rig, id, b);
@@ -368,12 +369,12 @@ fn cut_and_restore(rig: &mut MultiRig) {
     rig.link_down(ha, hb);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     for _ in 0..WAIT_ROUNDS {
-        if rig.hosts[ha as usize].manager.peer_unreceived() > 0 {
+        if rig.hosts[ha.0 as usize].manager.peer_unreceived() > 0 {
             break;
         }
         rig.round();
     }
-    let cut = cut_on(rig, ha as usize);
+    let cut = cut_on(rig, ha.0 as usize);
     let mut store = CutStore::default();
     store.apply(&cut);
     assert_eq!(store.places(id), [(b, "row")], "the cut holds the unreceived transfer once, as a row");
@@ -383,13 +384,13 @@ fn cut_and_restore(rig: &mut MultiRig) {
     let mut restored = MultiRig::new(2, 1, None, 0, 0);
     restored.run(a);
     restored.run(b);
-    restored.hosts[ha as usize].manager.restore_in_flight(cut.in_flight.clone());
+    restored.hosts[ha.0 as usize].manager.restore_in_flight(cut.in_flight.clone());
     assert_eq!(
-        restored.hosts[ha as usize].manager.peer_unreceived_ids(),
+        restored.hosts[ha.0 as usize].manager.peer_unreceived_ids(),
         [(hb, id, false)],
         "the row is queued to its owner again"
     );
-    assert_eq!(restored.hosts[ha as usize].manager.pending_arrival_total(), 0, "not held on the sending host");
+    assert_eq!(restored.hosts[ha.0 as usize].manager.pending_arrival_total(), 0, "not held on the sending host");
     until_settled_in(&mut restored, id, b);
 }
 
@@ -410,18 +411,18 @@ const HOLD_HOME_ROUNDS: u32 = 1000;
 fn depart_after_the_answer(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let home = rig.homes[ha as usize];
+    let home = rig.homes[ha.0 as usize];
     rig.run(a);
     rig.run(b);
     rig.link_down(ha, hb);
     let id = rig.spawn_slime(a, [REGION_SIZE / 2.0, crate::common::above_floor_y(), REGION_SIZE / 2.0]);
     rig.round();
     // A cut that `a` answers while `home` keeps it pending.
-    let m = &mut rig.hosts[ha as usize].manager;
+    let m = &mut rig.hosts[ha.0 as usize].manager;
     m.spawner_mut().hold(home, HOLD_HOME_ROUNDS);
     let mut answered = false;
     for _ in 0..CUT_ROUNDS {
-        let m = &mut rig.hosts[ha as usize].manager;
+        let m = &mut rig.hosts[ha.0 as usize].manager;
         if m.pending_cut().is_none() {
             // None yet, or `a` missed it: (again) a cut ahead of the world tick.
             let world = m.spawner_mut().world_tick();
@@ -429,7 +430,7 @@ fn depart_after_the_answer(rig: &mut MultiRig) {
             m.begin_cut((world + CUT_LEAD).saturating_sub(lead)).expect("no cut pending");
         }
         rig.round();
-        let m = &rig.hosts[ha as usize].manager;
+        let m = &rig.hosts[ha.0 as usize].manager;
         if m.pending_cut().is_some() && !m.awaiting_cut().contains(&a) {
             answered = true;
             break;
@@ -441,21 +442,21 @@ fn depart_after_the_answer(rig: &mut MultiRig) {
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     for _ in 0..WAIT_ROUNDS {
         rig.round();
-        if !rig.hosts[ha as usize].manager.peer_unreceived_ids().is_empty() {
+        if !rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().is_empty() {
             break;
         }
     }
-    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_ids(), [(hb, id, false)], "queued to host {hb}");
-    rig.hosts[ha as usize].manager.spawner_mut().hold(home, 0);
-    let cut = cut_on(rig, ha as usize);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.peer_unreceived_ids(), [(hb, id, false)], "queued to host {hb}");
+    rig.hosts[ha.0 as usize].manager.spawner_mut().hold(home, 0);
+    let cut = cut_on(rig, ha.0 as usize);
     let mut store = CutStore::default();
     store.apply(&cut);
     assert_eq!(store.places(id), [(a, "state")], "saved once, in its source's snapshot");
     // Restoring the cut's rows queues nothing for it (the snapshot brings it back).
     let mut restored = MultiRig::new(2, 1, None, 0, 0);
-    restored.hosts[ha as usize].manager.restore_in_flight(cut.in_flight.clone());
+    restored.hosts[ha.0 as usize].manager.restore_in_flight(cut.in_flight.clone());
     assert!(
-        restored.hosts[ha as usize].manager.peer_unreceived_ids().iter().all(|(_, q, _)| *q != id),
+        restored.hosts[ha.0 as usize].manager.peer_unreceived_ids().iter().all(|(_, q, _)| *q != id),
         "no row of it is queued again"
     );
 }
@@ -595,11 +596,11 @@ fn halo_link_flap(rig: &mut MultiRig) {
     rig.run(b);
     let id = rig.spawn_slime(a, in_band(a, b));
     assert!(until(rig, CROSS_ROUNDS, |r| mirror_in(r, b, id)), "b never mirrored a's slime");
-    let known = rig.hosts[hb as usize].manager.foreign_running();
+    let known = rig.hosts[hb.0 as usize].manager.foreign_running();
     assert!(known.contains(&a), "host {hb} knows `a` runs: {known:?}");
     rig.link_down(ha, hb);
     assert!(until(rig, WAIT_ROUNDS, |r| !mirror_in(r, b, id)), "the mirror outlived the link");
-    assert!(rig.hosts[hb as usize].manager.foreign_running().is_empty(), "nothing of host {ha} is known to run");
+    assert!(rig.hosts[hb.0 as usize].manager.foreign_running().is_empty(), "nothing of host {ha} is known to run");
     let block = border_block(a, b);
     dig(rig, a, block);
     for _ in 0..WAIT_ROUNDS {
@@ -611,7 +612,7 @@ fn halo_link_flap(rig: &mut MultiRig) {
         until(rig, CROSS_ROUNDS, |r| seen_from(r, b, a, block).is_none() && mirror_in(r, b, id)),
         "b's halo was never seeded again"
     );
-    assert_eq!(rig.hosts[hb as usize].manager.foreign_running(), known, "exactly what ran before");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.foreign_running(), known, "exactly what ran before");
 }
 
 #[test]
@@ -642,7 +643,7 @@ fn halo_no_wake(rig: &mut MultiRig) {
                 }
             }
         }
-        assert!(!rig.hosts[hb as usize].manager.running_regions().contains(&b), "halo woke {b:?}");
+        assert!(!rig.hosts[hb.0 as usize].manager.running_regions().contains(&b), "halo woke {b:?}");
     }
 }
 
@@ -716,10 +717,10 @@ fn deposit_to_unreachable(rig: &mut MultiRig) {
     rig.run(a);
     rig.run(b);
     rig.link_down(ha, hb);
-    assert!(until(rig, WAIT_ROUNDS, |r| !r.hosts[ha as usize].manager.reaches(b)), "the link never went down");
+    assert!(until(rig, WAIT_ROUNDS, |r| !r.hosts[ha.0 as usize].manager.reaches(b)), "the link never went down");
     deposit_across(rig, a, b);
     assert!(until(rig, CROSS_ROUNDS, |r| pile_items(r, a) == DEPOSIT), "the items never came back to a");
-    assert!(rig.hosts[ha as usize].manager.peer_unreceived_intents().is_empty(), "nothing queued to host {hb}");
+    assert!(rig.hosts[ha.0 as usize].manager.peer_unreceived_intents().is_empty(), "nothing queued to host {hb}");
     assert_eq!(pile_items(rig, b), 0);
     rig.link_up(ha, hb);
     for _ in 0..WAIT_ROUNDS {
@@ -743,8 +744,8 @@ fn reply_across_a_flap(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     deposit_across(rig, a, b);
-    let is = |r: &MultiRig, h: u32, reply: bool| {
-        r.hosts[h as usize].manager.peer_unreceived_intents().iter().any(|(_, m, _)| matches!(m, game::IntentMsg::Reply(_)) == reply)
+    let is = |r: &MultiRig, h: HostId, reply: bool| {
+        r.hosts[h.0 as usize].manager.peer_unreceived_intents().iter().any(|(_, m, _)| matches!(m, game::IntentMsg::Reply(_)) == reply)
     };
     let mut went = false;
     let queued = until(rig, CROSS_ROUNDS, |r| {
@@ -764,7 +765,7 @@ fn reply_across_a_flap(rig: &mut MultiRig) {
         pile_items(rig, a),
         rig.peer_unreceived()
     );
-    assert!(!rig.hosts[hb as usize].manager.running_regions().contains(&b), "an intent never wakes its owner");
+    assert!(!rig.hosts[hb.0 as usize].manager.running_regions().contains(&b), "an intent never wakes its owner");
 }
 
 #[test]
@@ -786,7 +787,7 @@ fn intent_cut_and_restore(rig: &mut MultiRig) {
     // As `a`'s own `Intents` output, before its host noticed the link is down.
     let [x, y, z] = deposit_cell(a, b);
     let cell = game::WorldBlockPos::from_local(a, game::BlockPos::new(x, y, z));
-    let due = rig.hosts[ha as usize].manager.spawner_mut().world_tick() + 1;
+    let due = rig.hosts[ha.0 as usize].manager.spawner_mut().world_tick() + 1;
     let by = game::EntityId::of_region(a);
     let stack = game::ItemStack { item: DIRT, count: DEPOSIT };
     let intent = game::Intent::DepositItems {
@@ -797,21 +798,21 @@ fn intent_cut_and_restore(rig: &mut MultiRig) {
         by,
     };
     let msg = game::IntentMsg::Intent(game::SentIntent { target: game::Target::Pile(cell), intent, from: a, due });
-    let host = &mut rig.hosts[ha as usize];
+    let host = &mut rig.hosts[ha.0 as usize];
     let now = host.now_ms;
     host.manager.handle_region_output(a, game::RegionOutput::Intents(vec![msg]), now);
     rig.items = Some(u64::from(DEPOSIT));
-    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_intents(), [(hb, msg, false)], "queued to host {hb}");
-    let cut = cut_on(rig, ha as usize);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.peer_unreceived_intents(), [(hb, msg, false)], "queued to host {hb}");
+    let cut = cut_on(rig, ha.0 as usize);
     let rows: Vec<_> = cut.in_flight.iter().filter(|r| matches!(r, game::InFlightRow::Intent { .. })).cloned().collect();
     assert_eq!(rows, [game::InFlightRow::Intent { target: b, msg }], "the cut holds the unreceived intent once");
 
     // A host restarted from that cut, the link up.
     let mut restored = MultiRig::new(2, 1, None, 0, 0);
     restored.run(a);
-    restored.hosts[ha as usize].manager.restore_in_flight(cut.in_flight.clone());
+    restored.hosts[ha.0 as usize].manager.restore_in_flight(cut.in_flight.clone());
     assert_eq!(
-        restored.hosts[ha as usize].manager.peer_unreceived_intents(),
+        restored.hosts[ha.0 as usize].manager.peer_unreceived_intents(),
         [(hb, msg, false)],
         "the row is queued to its owner again"
     );
@@ -834,7 +835,7 @@ fn one_phase_cut_holds_unreceived_intent_and_restore_requeues_it() {
 /// (`same`) or differ, among `hosts` hosts (`s` regions per super-region side),
 /// avoiding `taken`.
 fn x_pair(hosts: u32, s: u32, same: bool, taken: &[RegionCoords]) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
     let mut all: Vec<RegionCoords> = (-8..=8).flat_map(|x| (-8..=8).map(move |z| RegionCoords::new(x, z))).collect();
     all.sort_by_key(|rc| (rc.x.abs() + rc.z.abs(), rc.x, rc.z));
     for a in all {
@@ -980,7 +981,7 @@ fn request_answered_from_cache(rig: &mut MultiRig) {
     rig.park(a);
     rig.link_up(ha, hb);
     assert!(
-        until(rig, CROSS_ROUNDS, |r| r.hosts[ha as usize].manager.foreign_running().contains(&b)),
+        until(rig, CROSS_ROUNDS, |r| r.hosts[ha.0 as usize].manager.foreign_running().contains(&b)),
         "host {ha} learns `b` runs"
     );
     assert!(seen_from(rig, b, a, block).is_some(), "b's halo of a is worldgen's");
@@ -1041,10 +1042,10 @@ fn replace_link(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
-    let due = rig.hosts[ha as usize].manager.spawner_mut().world_tick() + 1;
+    let due = rig.hosts[ha.0 as usize].manager.spawner_mut().world_tick() + 1;
     for (from, to, h) in [(a, b, ha), (b, a, hb)] {
         let msgs: Vec<_> = OWED.iter().map(|&n| refusal_of(from, to, due, n)).collect();
-        let host = &mut rig.hosts[h as usize];
+        let host = &mut rig.hosts[h.0 as usize];
         let now = host.now_ms;
         host.manager.handle_region_output(from, game::RegionOutput::Intents(msgs), now);
     }
@@ -1063,7 +1064,7 @@ fn replace_link(rig: &mut MultiRig) {
         rig.round();
     }
     assert_eq!((pile_items(rig, a), pile_items(rig, b)), (total, total), "nothing came twice");
-    assert!(rig.hosts[ha as usize].manager.reaches(b) && rig.hosts[hb as usize].manager.reaches(a), "the link is up");
+    assert!(rig.hosts[ha.0 as usize].manager.reaches(b) && rig.hosts[hb.0 as usize].manager.reaches(a), "the link is up");
 }
 
 #[test]
@@ -1080,30 +1081,30 @@ fn identical_in_and_out_of_view(rig: &mut MultiRig) {
     crate::common::install_real_block_props();
     let (a, b) = x_pair(2, 1, false, &[]);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let home = rig.homes[ha as usize];
+    let home = rig.homes[ha.0 as usize];
     rig.run(a);
     rig.run(b);
-    rig.hosts[ha as usize].manager.spawner_mut().hold(home, HOLD_HOME_ROUNDS);
+    rig.hosts[ha.0 as usize].manager.spawner_mut().hold(home, HOLD_HOME_ROUNDS);
     let mut answered = false;
     for _ in 0..CUT_ROUNDS {
-        let m = &mut rig.hosts[ha as usize].manager;
+        let m = &mut rig.hosts[ha.0 as usize].manager;
         if m.pending_cut().is_none() {
             let world = m.spawner_mut().world_tick();
             let lead = m.cut_lead();
             m.begin_cut((world + CUT_LEAD).saturating_sub(lead)).expect("no cut pending");
         }
         rig.round();
-        let m = &rig.hosts[ha as usize].manager;
+        let m = &rig.hosts[ha.0 as usize].manager;
         if m.pending_cut().is_some() && !m.awaiting_cut().contains(&a) {
             answered = true;
             break;
         }
     }
     assert!(answered, "`a` never answered a pending cut");
-    let due = rig.hosts[ha as usize].manager.spawner_mut().world_tick() + 1;
+    let due = rig.hosts[ha.0 as usize].manager.spawner_mut().world_tick() + 1;
     let msg = refusal_to(a, b, due);
     let inject = |rig: &mut MultiRig, from: RegionCoords| {
-        let host = &mut rig.hosts[ha as usize];
+        let host = &mut rig.hosts[ha.0 as usize];
         let now = host.now_ms;
         host.manager.handle_region_output(from, game::RegionOutput::Intents(vec![msg]), now);
     };
@@ -1111,18 +1112,18 @@ fn identical_in_and_out_of_view(rig: &mut MultiRig) {
     inject(rig, a);
     rig.items = Some(u64::from(DEPOSIT));
     assert!(
-        until(rig, CROSS_ROUNDS, |r| r.hosts[ha as usize].manager.peer_unreceived_intents().is_empty()),
+        until(rig, CROSS_ROUNDS, |r| r.hosts[ha.0 as usize].manager.peer_unreceived_intents().is_empty()),
         "the first reply is acknowledged"
     );
     rig.link_down(ha, hb);
-    assert!(until(rig, WAIT_ROUNDS, |r| !r.hosts[ha as usize].manager.reaches(b)), "the link never went down");
+    assert!(until(rig, WAIT_ROUNDS, |r| !r.hosts[ha.0 as usize].manager.reaches(b)), "the link never went down");
     // From `home`, which has not answered (held): not in view.
     inject(rig, home);
     rig.items = Some(u64::from(2 * DEPOSIT));
-    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_intents(), [(hb, msg, false)]);
-    assert!(rig.hosts[ha as usize].manager.pending_cut().is_some(), "still the same cut");
-    rig.hosts[ha as usize].manager.spawner_mut().hold(home, 0);
-    let cut = cut_on(rig, ha as usize);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.peer_unreceived_intents(), [(hb, msg, false)]);
+    assert!(rig.hosts[ha.0 as usize].manager.pending_cut().is_some(), "still the same cut");
+    rig.hosts[ha.0 as usize].manager.spawner_mut().hold(home, 0);
+    let cut = cut_on(rig, ha.0 as usize);
     let rows: Vec<_> = cut.in_flight.iter().filter(|r| matches!(r, game::InFlightRow::Intent { .. })).cloned().collect();
     assert_eq!(rows, [game::InFlightRow::Intent { target: b, msg }], "one row: the one not in view");
 }
@@ -1162,7 +1163,7 @@ fn record_at(rc: RegionCoords, xz: [f32; 2]) -> game::PlayerRecord {
 }
 
 /// Rounds until the test player has a body; its host, region and id.
-fn until_body(rig: &mut MultiRig) -> (u32, RegionCoords, game::EntityId) {
+fn until_body(rig: &mut MultiRig) -> (HostId, RegionCoords, game::EntityId) {
     for _ in 0..BODY_ROUNDS {
         if let Some(body) = rig.player_body(P_CLIENT) {
             return body;
@@ -1185,15 +1186,15 @@ fn until_player_settled_in(rig: &mut MultiRig, rc: RegionCoords) {
 }
 
 /// The packets host `h` sent the test player since recording began.
-fn packets_to(rig: &MultiRig, h: u32) -> Vec<&game::ServerPacket> {
-    let seen = rig.hosts[h as usize].packets_seen.as_ref().expect("recording packets");
+fn packets_to(rig: &MultiRig, h: HostId) -> Vec<&game::ServerPacket> {
+    let seen = rig.hosts[h.0 as usize].packets_seen.as_ref().expect("recording packets");
     seen.iter().filter(|(to, _)| *to == Some(P_CLIENT)).map(|(_, p)| p).collect()
 }
 
 /// The pair of regions nearest the origin whose owners differ, `b` one step -z of `a`
 /// (W walks a body toward -z).
 fn north_host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
     for r in 0..64 {
         for x in -r..=r {
             for z in -r..=r {
@@ -1230,7 +1231,7 @@ fn player_crosses(rig: &mut MultiRig) {
         rig.round();
         assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "one body, in {b:?}, staying");
     }
-    let (ma, mb) = (&rig.hosts[ha as usize].manager, &rig.hosts[hb as usize].manager);
+    let (ma, mb) = (&rig.hosts[ha.0 as usize].manager, &rig.hosts[hb.0 as usize].manager);
     assert_eq!((ma.home_of(P_CLIENT), mb.home_of(P_CLIENT)), (None, Some(b)), "the home followed the body");
     assert_eq!(ma.session_kind(P_CLIENT), Some(game::SessionKind::Observer), "the session it left observes");
     assert_eq!(mb.session_kind(P_CLIENT), Some(game::SessionKind::Home), "the session it reached is the home");
@@ -1249,8 +1250,8 @@ fn player_crosses_host_seam_once_and_home_follows() {
 
 /// A stamped input from the test player to host `h` (where the client believes its body
 /// is), predicted `INPUT_LEAD` ticks ahead.
-fn stamped_to(rig: &mut MultiRig, h: u32, input: game::InputEvent) {
-    let rig = &mut rig.hosts[h as usize];
+fn stamped_to(rig: &mut MultiRig, h: HostId, input: game::InputEvent) {
+    let rig = &mut rig.hosts[h.0 as usize];
     let tick = rig.manager.spawner_mut().world_tick();
     let ev = game::GameEvent::new(game::GameEventKind::PlayerInput(P_CLIENT, input), 0, RegionCoords::new(0, 0));
     rig.event(game::ServerEvent::ClientPacket(game::ClientPacket::GameEventAfterTick(ev, tick + INPUT_LEAD), P_CLIENT));
@@ -1269,7 +1270,7 @@ fn held_key(rig: &mut MultiRig) {
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, WALK_START]));
     until_body(rig);
     for h in [ha, hb] {
-        rig.hosts[h as usize].events_seen = Some(Vec::new());
+        rig.hosts[h.0 as usize].events_seen = Some(Vec::new());
     }
     stamped_to(rig, ha, InputEvent::Key { key: Key::KeyE, pressed: true });
     stamped_to(rig, ha, InputEvent::Key { key: Key::KeyE, pressed: false });
@@ -1296,7 +1297,7 @@ fn held_key(rig: &mut MultiRig) {
     until_player_settled_in(rig, b);
     let mut count = vec![0u32; seq as usize + 1];
     for (h, rc) in [(ha, a), (hb, b)] {
-        for (at, kind) in rig.hosts[h as usize].events_seen.take().expect("recording") {
+        for (at, kind) in rig.hosts[h.0 as usize].events_seen.take().expect("recording") {
             if let game::GameEventKind::PlayerInput(P_CLIENT, InputEvent::Resized { width, .. }) = kind {
                 assert_eq!(at, rc, "marker {width} applied on host {h} in {at:?}");
                 count[width as usize] += 1;
@@ -1306,7 +1307,7 @@ fn held_key(rig: &mut MultiRig) {
     for s in 1..=seq {
         assert_eq!(count[s as usize], 1, "marker {s} of {seq} applied {} times", count[s as usize]);
     }
-    assert_eq!(rig.hosts[ha as usize].manager.departed().get(&P_PLAYER), Some(&hb), "one crossing, no way back");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.departed().get(&P_PLAYER), Some(&hb), "one crossing, no way back");
 }
 
 #[test]
@@ -1344,7 +1345,7 @@ fn ping_pong(rig: &mut MultiRig) {
         rig.round();
         assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "one body, back in {a:?}");
     }
-    let (ma, mb) = (&rig.hosts[ha as usize].manager, &rig.hosts[hb as usize].manager);
+    let (ma, mb) = (&rig.hosts[ha.0 as usize].manager, &rig.hosts[hb.0 as usize].manager);
     assert_eq!((ma.home_of(P_CLIENT), mb.home_of(P_CLIENT)), (Some(a), None));
     assert_eq!(ma.session_kind(P_CLIENT), Some(game::SessionKind::Home));
     assert_eq!(mb.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
@@ -1390,8 +1391,8 @@ fn no_session_there(rig: &mut MultiRig) {
     let (_, _, id) = until_body(rig);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
-    assert_eq!(rig.hosts[hb as usize].manager.home_of(P_CLIENT), Some(b));
-    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), None);
+    assert_eq!(rig.hosts[hb.0 as usize].manager.home_of(P_CLIENT), Some(b));
+    assert_eq!(rig.hosts[hb.0 as usize].manager.session_kind(P_CLIENT), None);
     // Not before the grace.
     rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS / 2);
     rig.round();
@@ -1412,7 +1413,7 @@ fn no_session_there(rig: &mut MultiRig) {
     assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked on host {hb}, once");
     assert!(rig.player_owners(P_CLIENT).is_empty(), "no body left");
     for h in [ha, hb] {
-        assert_eq!(rig.hosts[h as usize].manager.home_of(P_CLIENT), None);
+        assert_eq!(rig.hosts[h.0 as usize].manager.home_of(P_CLIENT), None);
     }
 }
 
@@ -1442,7 +1443,7 @@ fn disconnect_crossing(rig: &mut MultiRig, early: bool, lag: bool) {
         let mut handed = false;
         for _ in 0..CROSS_ROUNDS {
             rig.round();
-            if rig.hosts[ha as usize].manager.home_of(P_CLIENT).is_none() {
+            if rig.hosts[ha.0 as usize].manager.home_of(P_CLIENT).is_none() {
                 handed = true;
                 break;
             }
@@ -1467,7 +1468,7 @@ fn disconnect_crossing(rig: &mut MultiRig, early: bool, lag: bool) {
     assert_eq!(rig.parked_on(P_PLAYER).len(), 1, "parked once");
     assert!(rig.player_owners(P_CLIENT).is_empty());
     for h in [ha, hb] {
-        let m = &rig.hosts[h as usize].manager;
+        let m = &rig.hosts[h.0 as usize].manager;
         assert_eq!((m.home_of(P_CLIENT), m.session_kind(P_CLIENT)), (None, None), "host {h} holds nothing of it");
     }
 }
@@ -1490,7 +1491,7 @@ fn subscribe_elsewhere(rig: &mut MultiRig) {
     until_body(rig);
     rig.record_packets();
     let subscribe = game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), P_CLIENT);
-    rig.hosts[ha as usize].event(subscribe);
+    rig.hosts[ha.0 as usize].event(subscribe);
     let tickets: Vec<game::ObserverTicket> = packets_to(rig, ha)
         .into_iter()
         .filter_map(|p| match p {
@@ -1506,7 +1507,7 @@ fn subscribe_elsewhere(rig: &mut MultiRig) {
     let mut orders = Vec::new();
     for _ in 0..CROSS_ROUNDS {
         rig.round();
-        orders.extend(rig.hosts[hb as usize].manager.take_observer_orders());
+        orders.extend(rig.hosts[hb.0 as usize].manager.take_observer_orders());
         if !orders.is_empty() && rig.peer_unreceived() == 0 {
             break;
         }
@@ -1516,7 +1517,7 @@ fn subscribe_elsewhere(rig: &mut MultiRig) {
     assert_eq!((client, player, nonce, ttl_secs), (P_CLIENT, P_PLAYER, ticket.nonce, game::OBSERVER_ORDER_TTL_SECS));
     // Asked again: the same ticket, no second order.
     let subscribe = game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), P_CLIENT);
-    rig.hosts[ha as usize].event(subscribe);
+    rig.hosts[ha.0 as usize].event(subscribe);
     let again = packets_to(rig, ha)
         .into_iter()
         .filter(|p| matches!(p, game::ServerPacket::RegionElsewhere { ticket: t, .. } if *t == ticket))
@@ -1524,9 +1525,9 @@ fn subscribe_elsewhere(rig: &mut MultiRig) {
     assert_eq!(again, 2, "the same ticket again");
     for _ in 0..WAIT_ROUNDS {
         rig.round();
-        assert!(rig.hosts[hb as usize].manager.take_observer_orders().is_empty(), "no second order");
+        assert!(rig.hosts[hb.0 as usize].manager.take_observer_orders().is_empty(), "no second order");
     }
-    assert!(!rig.hosts[ha as usize].manager.running_regions().contains(&b), "never run here");
+    assert!(!rig.hosts[ha.0 as usize].manager.running_regions().contains(&b), "never run here");
 }
 
 #[test]
@@ -1550,7 +1551,7 @@ fn unreachable(rig: &mut MultiRig) {
         rig.round();
     }
     assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "handed back to {a:?}");
-    let m = &rig.hosts[ha as usize].manager;
+    let m = &rig.hosts[ha.0 as usize].manager;
     assert_eq!(m.home_of(P_CLIENT), Some(a));
     assert_eq!(m.session_kind(P_CLIENT), Some(game::SessionKind::Home));
     assert!(m.departed().is_empty());
@@ -1568,8 +1569,8 @@ fn player_cannot_enter_an_unreachable_host() {
 
 /// Host `h` fails to load `rc` now (its store read failed): `rc` is unavailable there
 /// for its retry window.
-fn fail_load(rig: &mut MultiRig, h: u32, rc: RegionCoords) {
-    let r = &mut rig.hosts[h as usize];
+fn fail_load(rig: &mut MultiRig, h: HostId, rc: RegionCoords) {
+    let r = &mut rig.hosts[h.0 as usize];
     r.manager.spawner_mut().fail_next_start(rc);
     r.event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rc), crate::common::rig::CLIENT));
     r.event(game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(rc), crate::common::rig::CLIENT));
@@ -1588,8 +1589,8 @@ fn until_parked(rig: &mut MultiRig) {
 }
 
 /// Neither host holds the test client as online or homed.
-fn holds_nothing(rig: &MultiRig, h: u32) {
-    let m = &rig.hosts[h as usize].manager;
+fn holds_nothing(rig: &MultiRig, h: HostId) {
+    let m = &rig.hosts[h.0 as usize].manager;
     assert_eq!((m.home_of(P_CLIENT), m.player_of(P_CLIENT)), (None, None), "host {h} holds the player");
 }
 
@@ -1613,12 +1614,12 @@ fn into_unavailable(rig: &mut MultiRig) {
     assert!(rig.player_owners(P_CLIENT).is_empty(), "no body");
     holds_nothing(rig, ha);
     holds_nothing(rig, hb);
-    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), None, "its session there ended");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.session_kind(P_CLIENT), None, "its session there ended");
     let refused = packets_to(rig, hb)
         .iter()
         .any(|p| matches!(p, game::ServerPacket::Refused(why) if why == game::REGION_UNAVAILABLE_REFUSAL));
     assert!(refused, "the session on host {hb} was told why");
-    assert_eq!(rig.hosts[hb as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
+    assert_eq!(rig.hosts[hb.0 as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
 }
 
 #[test]
@@ -1636,7 +1637,7 @@ fn fails_after_arrival(rig: &mut MultiRig) {
     rig.run(a);
     rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     let (_, _, id) = until_body(rig);
-    rig.hosts[hb as usize].manager.spawner_mut().fail_next_start(b);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().fail_next_start(b);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_parked(rig);
     assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
@@ -1673,13 +1674,13 @@ fn login_where_it_left(rig: &mut MultiRig) {
     const NEW_CLIENT: game::ClientId = 8;
     for client in [P_CLIENT, NEW_CLIENT] {
         let record = record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]);
-        rig.hosts[ha as usize].event(game::ServerEvent::ClientConnected { client, player: P_PLAYER, record: Some(record) });
+        rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientConnected { client, player: P_PLAYER, record: Some(record) });
         for _ in 0..WAIT_ROUNDS {
             rig.round();
         }
-        let m = &rig.hosts[ha as usize].manager;
+        let m = &rig.hosts[ha.0 as usize].manager;
         assert_eq!((m.home_of(client), m.player_of(client), m.session_kind(client)), (None, None, None), "client {client}");
-        let seen = rig.hosts[ha as usize].packets_seen.as_ref().expect("recording");
+        let seen = rig.hosts[ha.0 as usize].packets_seen.as_ref().expect("recording");
         let refused = seen.iter().any(|(to, p)| {
             *to == Some(client) && matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_ELSEWHERE_REFUSAL)
         });
@@ -1719,8 +1720,8 @@ fn ping_pong_sessionless(rig: &mut MultiRig) {
     }
     assert!(back, "the body never reached {b:?}");
     until_player_settled_in(rig, a);
-    rig.hosts[hb as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
-    let m = &rig.hosts[hb as usize].manager;
+    rig.hosts[hb.0 as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    let m = &rig.hosts[hb.0 as usize].manager;
     assert_eq!(m.session_kind(P_CLIENT), Some(game::SessionKind::Observer), "no body here: an observer");
     assert_eq!(m.home_of(P_CLIENT), None);
     rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS);
@@ -1751,10 +1752,10 @@ fn awaited_session_home_hop(rig: &mut MultiRig) {
     let (_, _, id) = until_body(rig);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
-    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), None, "no session on host {hb} yet");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.session_kind(P_CLIENT), None, "no session on host {hb} yet");
     assert!(home_hops(&packets_to(rig, hb)).is_empty(), "nothing told before the session came");
-    rig.hosts[hb as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
-    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Home));
+    rig.hosts[hb.0 as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    assert_eq!(rig.hosts[hb.0 as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Home));
     rig.round();
     let hops = home_hops(&packets_to(rig, hb));
     assert_eq!(hops.iter().map(|(_, r)| *r).collect::<Vec<_>>(), [b], "HomeHop right before PlayerRegion({b:?})");
@@ -1788,25 +1789,25 @@ fn pending_claim(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
-    let now = rig.hosts[ha as usize].now_ms;
-    rig.hosts[ha as usize].manager.set_world_link(Box::new(NoCoordinator), 1, now);
+    let now = rig.hosts[ha.0 as usize].now_ms;
+    rig.hosts[ha.0 as usize].manager.set_world_link(Box::new(NoCoordinator), 1, now);
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     let (_, _, id) = until_body(rig);
     let embark = game::EmbarkRequest { civ: game::history::CivId(0), people: Vec::new(), region: a };
-    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(embark), P_CLIENT));
+    rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(embark), P_CLIENT));
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     for _ in 0..WAIT_ROUNDS {
         rig.round();
     }
     assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "handed back while the request is pending");
-    assert!(rig.hosts[ha as usize].manager.departed().is_empty());
+    assert!(rig.hosts[ha.0 as usize].manager.departed().is_empty());
     // The request times out (never sent): nothing is pending any more.
     rig.maintain_all(game::WORLD_REQUEST_TIMEOUT_SECS * 1000);
     rig.round();
     let (_, _, id) = rig.player_body(P_CLIENT).expect("a body");
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
-    assert_eq!(rig.hosts[ha as usize].manager.departed().get(&P_PLAYER), Some(&hb));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.departed().get(&P_PLAYER), Some(&hb));
 }
 
 #[test]
@@ -1890,18 +1891,18 @@ impl game::WorldLink for ScriptedCoordinator {
 }
 
 /// Host `h`'s world link is a [`ScriptedCoordinator`] (replies held back if `hold`).
-fn install_coordinator(rig: &mut MultiRig, h: u32, hold: bool) -> ScriptedCoordinator {
+fn install_coordinator(rig: &mut MultiRig, h: HostId, hold: bool) -> ScriptedCoordinator {
     let link = ScriptedCoordinator::default();
     link.script().hold = hold;
-    let now = rig.hosts[h as usize].now_ms;
-    rig.hosts[h as usize].manager.set_world_link(Box::new(link.clone()), 1, now);
+    let now = rig.hosts[h.0 as usize].now_ms;
+    rig.hosts[h.0 as usize].manager.set_world_link(Box::new(link.clone()), 1, now);
     link
 }
 
 /// The test player asks host `h` to embark in `region`.
-fn embark_into(rig: &mut MultiRig, h: u32, region: RegionCoords) {
+fn embark_into(rig: &mut MultiRig, h: HostId, region: RegionCoords) {
     let req = game::EmbarkRequest { civ: game::history::CivId(0), people: Vec::new(), region };
-    rig.hosts[h as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+    rig.hosts[h.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
 }
 
 /// The test player standing in the middle of `rc`.
@@ -1920,9 +1921,9 @@ fn has_player_row(cut: &game::WorldCut) -> bool {
 }
 
 /// Rounds until host `h` has handed the test player away (`departed`).
-fn until_departed(rig: &mut MultiRig, h: u32) {
+fn until_departed(rig: &mut MultiRig, h: HostId) {
     for _ in 0..CROSS_ROUNDS {
-        if rig.hosts[h as usize].manager.departed().contains_key(&P_PLAYER) {
+        if rig.hosts[h.0 as usize].manager.departed().contains_key(&P_PLAYER) {
             return;
         }
         rig.round();
@@ -1933,13 +1934,13 @@ fn until_departed(rig: &mut MultiRig, h: u32) {
 /// The test player moved from host `ha` into `b` on host `hb` and stays there: one body,
 /// the home and the claim (`claim`) on `hb` only, an observer left on `ha`, which sent
 /// `RegionElsewhere` for `b` (never `PlayerRegion`), while `hb` sent `PlayerRegion`.
-fn assert_moved(rig: &mut MultiRig, ha: u32, hb: u32, b: RegionCoords, claim: Option<game::Claim>) {
+fn assert_moved(rig: &mut MultiRig, ha: HostId, hb: HostId, b: RegionCoords, claim: Option<game::Claim>) {
     for _ in 0..WAIT_ROUNDS {
         rig.round();
         assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "one body, in {b:?}, staying");
     }
     assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked");
-    let (ma, mb) = (&rig.hosts[ha as usize].manager, &rig.hosts[hb as usize].manager);
+    let (ma, mb) = (&rig.hosts[ha.0 as usize].manager, &rig.hosts[hb.0 as usize].manager);
     assert_eq!((ma.home_of(P_CLIENT), mb.home_of(P_CLIENT)), (None, Some(b)), "the home moved");
     assert_eq!(ma.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
     assert_eq!(mb.session_kind(P_CLIENT), Some(game::SessionKind::Home));
@@ -1982,27 +1983,27 @@ fn embark_into_a_foreign_host_moves_the_player_once() {
 }
 
 /// A region near the origin host `h` owns.
-fn region_of(rig: &MultiRig, h: u32) -> RegionCoords {
+fn region_of(rig: &MultiRig, h: HostId) -> RegionCoords {
     (1..64).map(|x| RegionCoords::new(x, 0)).find(|rc| rig.owner(*rc) == h).expect("a region of the host near the origin")
 }
 
 /// The test player holding [`RETIRED_SITE`] in a region of the host that does NOT own
 /// the spawn region: `(its region, its host, the spawn host)`.
-fn retire_setup(rig: &mut MultiRig) -> (RegionCoords, u32, u32) {
+fn retire_setup(rig: &mut MultiRig) -> (RegionCoords, HostId, HostId) {
     let hs = rig.owner(game::SPAWN_REGION);
-    let ha = 1 - hs;
+    let ha = HostId(1 - hs.0);
     let a = region_of(rig, ha);
     rig.run(a);
     rig.record_packets();
     let record = game::PlayerRecord { fortress: Some(RETIRED_SITE), ..centre_of(a) };
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
     until_body(rig);
-    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(RETIRED_SITE)));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(RETIRED_SITE)));
     (a, ha, hs)
 }
 
-fn retire(rig: &mut MultiRig, h: u32) {
-    rig.hosts[h as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Retire, P_CLIENT));
+fn retire(rig: &mut MultiRig, h: HostId) {
+    rig.hosts[h.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Retire, P_CLIENT));
 }
 
 /// Retire to a spawn region another host owns: the fortress is given up here, the player
@@ -2034,15 +2035,15 @@ fn move_to_unreachable(rig: &mut MultiRig) {
     let (_, _, id) = until_body(rig);
     rig.record_packets();
     embark_into(rig, ha, b);
-    assert_eq!(rig.hosts[ha as usize].manager.pending_world_requests(), 1, "asked while host {hb} is reachable");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.pending_world_requests(), 1, "asked while host {hb} is reachable");
     rig.link_down(ha, hb);
     for _ in 0..WAIT_ROUNDS {
-        if !rig.hosts[ha as usize].manager.reaches(b) {
+        if !rig.hosts[ha.0 as usize].manager.reaches(b) {
             break;
         }
         rig.round();
     }
-    assert!(!rig.hosts[ha as usize].manager.reaches(b), "host {hb} is unreachable");
+    assert!(!rig.hosts[ha.0 as usize].manager.reaches(b), "host {hb} is unreachable");
     coordinator.release();
     rig.round();
     let refused = packets_to(rig, ha).iter().any(|p| {
@@ -2055,7 +2056,7 @@ fn move_to_unreachable(rig: &mut MultiRig) {
         assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "the body stays in {a:?}");
     }
     assert_eq!(rig.player_body(P_CLIENT).map(|(_, _, i)| i), Some(id), "the same body");
-    let m = &rig.hosts[ha as usize].manager;
+    let m = &rig.hosts[ha.0 as usize].manager;
     assert_eq!((m.home_of(P_CLIENT), m.session_kind(P_CLIENT)), (Some(a), Some(game::SessionKind::Home)));
     assert_eq!(m.client_claim(P_CLIENT), None, "no fortress held");
     assert!(m.departed().is_empty());
@@ -2072,7 +2073,7 @@ fn move_to_unreachable_host_is_refused_before_parking() {
 /// The test player (on host `ha`, every host observing it if `everywhere`, else a session
 /// on `ha` only) embarks into `b` on host `hb`; the link drops once the move's park went
 /// out, and the move is queued on `ha`. `(b, ha, hb)`.
-fn move_queued_link_down(rig: &mut MultiRig, everywhere: bool) -> (RegionCoords, u32, u32) {
+fn move_queued_link_down(rig: &mut MultiRig, everywhere: bool) -> (RegionCoords, HostId, HostId) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
@@ -2087,8 +2088,8 @@ fn move_queued_link_down(rig: &mut MultiRig, everywhere: bool) -> (RegionCoords,
     embark_into(rig, ha, b);
     coordinator.release();
     // The answer is applied (the park goes to `a`), then the link drops.
-    let now = rig.hosts[ha as usize].now_ms;
-    rig.hosts[ha as usize].manager.pump_world(now);
+    let now = rig.hosts[ha.0 as usize].now_ms;
+    rig.hosts[ha.0 as usize].manager.pump_world(now);
     rig.link_down(ha, hb);
     until_departed(rig, ha);
     (b, ha, hb)
@@ -2102,8 +2103,8 @@ fn drop_after_park(rig: &mut MultiRig) {
     let (b, ha, hb) = move_queued_link_down(rig, true);
     assert!(rig.player_owners(P_CLIENT).is_empty(), "no body: the record is on its way");
     assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked on either host");
-    assert!(rig.hosts[ha as usize].manager.peer_unreceived() > 0, "the move waits for host {hb}");
-    let cut = cut_on(rig, ha as usize);
+    assert!(rig.hosts[ha.0 as usize].manager.peer_unreceived() > 0, "the move waits for host {hb}");
+    let cut = cut_on(rig, ha.0 as usize);
     let records = records_in(&cut);
     assert_eq!(records.len(), 1, "the cut holds the player once");
     assert_eq!((records[0].region, records[0].fortress), (b, Some(EMBARK_SITE)), "where it is headed, with its claim");
@@ -2111,7 +2112,7 @@ fn drop_after_park(rig: &mut MultiRig) {
     rig.link_up(ha, hb);
     until_player_settled_in(rig, b);
     assert_moved(rig, ha, hb, b, Some(game::Claim::Fortress(EMBARK_SITE)));
-    let later = cut_on(rig, ha as usize);
+    let later = cut_on(rig, ha.0 as usize);
     assert!(records_in(&later).is_empty(), "host {hb} holds it now; host {ha} writes it no more");
 }
 
@@ -2138,8 +2139,8 @@ fn observer_disconnect(rig: &mut MultiRig) {
         assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "the body stays on host {hb}");
     }
     assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked");
-    assert_eq!(rig.hosts[ha as usize].manager.session_kind(P_CLIENT), None);
-    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Home));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.session_kind(P_CLIENT), None);
+    assert_eq!(rig.hosts[hb.0 as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Home));
     assert_eq!(rig.peer_unreceived(), 0);
 }
 
@@ -2160,7 +2161,7 @@ fn foreign_record_cut(rig: &mut MultiRig) {
     retire(rig, ha);
     rig.link_down(ha, hs);
     until_departed(rig, ha);
-    let cut = cut_on(rig, ha as usize);
+    let cut = cut_on(rig, ha.0 as usize);
     let records = records_in(&cut);
     assert_eq!(records.len(), 1, "the cut holds the player once");
     assert_eq!((records[0].region, records[0].fortress), (spawn, None));
@@ -2171,7 +2172,7 @@ fn foreign_record_cut(rig: &mut MultiRig) {
     );
     rig.link_up(ha, hs);
     until_player_settled_in(rig, spawn);
-    let later = cut_on(rig, ha as usize);
+    let later = cut_on(rig, ha.0 as usize);
     assert!(records_in(&later).is_empty(), "host {hs} holds it now");
 }
 
@@ -2216,7 +2217,7 @@ fn handoff_in_transit_cut(rig: &mut MultiRig) {
     let mut handed = false;
     for _ in 0..CROSS_ROUNDS {
         round_with(rig, |rig| {
-            if rig.hosts[ha as usize].manager.departed().contains_key(&P_PLAYER) {
+            if rig.hosts[ha.0 as usize].manager.departed().contains_key(&P_PLAYER) {
                 handed = true;
                 rig.link_down(ha, hb);
             }
@@ -2226,7 +2227,7 @@ fn handoff_in_transit_cut(rig: &mut MultiRig) {
         }
     }
     assert!(handed, "host {ha} never handed the body off");
-    let cut = cut_on(rig, ha as usize);
+    let cut = cut_on(rig, ha.0 as usize);
     let records = records_in(&cut);
     assert_eq!(records.len(), 1, "the cut holds the player once");
     assert_eq!(records[0].region, b, "in the region it is headed for");
@@ -2238,8 +2239,8 @@ fn handoff_in_transit_cut(rig: &mut MultiRig) {
     let mut restored = MultiRig::new(2, 1, None, 0, 0);
     restored.run(a);
     restored.run(b);
-    restored.hosts[ha as usize].manager.restore_in_flight(cut.in_flight.clone());
-    assert!(restored.hosts[ha as usize].manager.peer_unreceived_ids().is_empty(), "no hand-off queued again");
+    restored.hosts[ha.0 as usize].manager.restore_in_flight(cut.in_flight.clone());
+    assert!(restored.hosts[ha.0 as usize].manager.peer_unreceived_ids().is_empty(), "no hand-off queued again");
     for _ in 0..WAIT_ROUNDS {
         restored.round();
     }
@@ -2265,7 +2266,7 @@ fn far_park_told(rig: &mut MultiRig) {
     let (_, _, id) = until_body(rig);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
-    assert_eq!(rig.hosts[ha as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
     let mut parked = false;
     for _ in 0..CROSS_ROUNDS {
         rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS / 2);
@@ -2290,7 +2291,7 @@ fn far_park_told(rig: &mut MultiRig) {
         .filter(|p| matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_PARKED_ELSEWHERE))
         .count();
     assert_eq!(told, 1, "host {ha}'s observer session was told once");
-    let m = &rig.hosts[ha as usize].manager;
+    let m = &rig.hosts[ha.0 as usize].manager;
     assert_eq!(m.session_kind(P_CLIENT), None, "and ended");
     assert_eq!(m.departed().get(&P_PLAYER), Some(&hb), "still pointing at host {hb}");
     assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
@@ -2309,7 +2310,7 @@ fn client_is_told_when_the_far_host_parks_its_body() {
 const LOGIN_CLIENT: game::ClientId = 8;
 
 /// Every body of the test player, under either session id: `(host, region)`.
-fn player_bodies_any(rig: &mut MultiRig) -> Vec<(u32, RegionCoords)> {
+fn player_bodies_any(rig: &mut MultiRig) -> Vec<(HostId, RegionCoords)> {
     let mut out = rig.player_owners(P_CLIENT);
     out.extend(rig.player_owners(LOGIN_CLIENT));
     out
@@ -2318,7 +2319,7 @@ fn player_bodies_any(rig: &mut MultiRig) -> Vec<(u32, RegionCoords)> {
 /// After a login placed the player on host `hb` from the record host `ha`'s cut wrote,
 /// the link comes back and the copy queued on `ha` arrives: it is dropped — the body the
 /// login made is the only one, and nothing is parked.
-fn after_login_the_copy_is_dropped(rig: &mut MultiRig, cut: game::WorldCut, b: RegionCoords, ha: u32, hb: u32) {
+fn after_login_the_copy_is_dropped(rig: &mut MultiRig, cut: game::WorldCut, b: RegionCoords, ha: HostId, hb: HostId) {
     let record = records_in(&cut).first().map(|r| (*r).clone()).expect("the cut holds the player");
     assert_eq!(record.region, b);
     rig.connect_home(hb, LOGIN_CLIENT, P_PLAYER, record);
@@ -2341,7 +2342,7 @@ fn after_login_the_copy_is_dropped(rig: &mut MultiRig, cut: game::WorldCut, b: R
         assert_eq!(player_bodies_any(rig), [(hb, b)], "one body, the one the login made");
     }
     assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked");
-    let mb = &rig.hosts[hb as usize].manager;
+    let mb = &rig.hosts[hb.0 as usize].manager;
     assert_eq!(mb.player_of(LOGIN_CLIENT), Some(P_PLAYER));
     assert_eq!(mb.player_of(P_CLIENT), None, "the arriving copy placed nothing");
     assert_eq!(mb.home_of(P_CLIENT), None);
@@ -2350,7 +2351,7 @@ fn after_login_the_copy_is_dropped(rig: &mut MultiRig, cut: game::WorldCut, b: R
 
 fn move_after_login(rig: &mut MultiRig) {
     let (b, ha, hb) = move_queued_link_down(rig, true);
-    let cut = cut_on(rig, ha as usize);
+    let cut = cut_on(rig, ha.0 as usize);
     after_login_the_copy_is_dropped(rig, cut, b, ha, hb);
 }
 
@@ -2371,7 +2372,7 @@ fn handoff_after_login(rig: &mut MultiRig) {
     let mut handed = false;
     for _ in 0..CROSS_ROUNDS {
         round_with(rig, |rig| {
-            if rig.hosts[ha as usize].manager.departed().contains_key(&P_PLAYER) {
+            if rig.hosts[ha.0 as usize].manager.departed().contains_key(&P_PLAYER) {
                 handed = true;
                 rig.link_down(ha, hb);
             }
@@ -2381,7 +2382,7 @@ fn handoff_after_login(rig: &mut MultiRig) {
         }
     }
     assert!(handed, "host {ha} never handed the body off");
-    let cut = cut_on(rig, ha as usize);
+    let cut = cut_on(rig, ha.0 as usize);
     after_login_the_copy_is_dropped(rig, cut, b, ha, hb);
 }
 
@@ -2402,12 +2403,12 @@ fn move_into_unavailable(rig: &mut MultiRig) {
     rig.host_of(b).manager.spawner_mut().fail_next_start(b);
     rig.host_of(b).event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), crate::common::rig::CLIENT));
     for _ in 0..WAIT_ROUNDS {
-        if rig.hosts[hb as usize].manager.unavailable_regions().contains(&b) {
+        if rig.hosts[hb.0 as usize].manager.unavailable_regions().contains(&b) {
             break;
         }
         rig.round();
     }
-    assert!(rig.hosts[hb as usize].manager.unavailable_regions().contains(&b), "{b:?} failed to load");
+    assert!(rig.hosts[hb.0 as usize].manager.unavailable_regions().contains(&b), "{b:?} failed to load");
     install_coordinator(rig, ha, false);
     rig.record_packets();
     rig.connect_home(ha, P_CLIENT, P_PLAYER, centre_of(a));
@@ -2426,14 +2427,14 @@ fn move_into_unavailable(rig: &mut MultiRig) {
         rig.round();
     }
     assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
-    assert_eq!(rig.hosts[hb as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
+    assert_eq!(rig.hosts[hb.0 as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
     assert!(rig.player_owners(P_CLIENT).is_empty());
     let told = packets_to(rig, ha)
         .iter()
         .filter(|p| matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_PARKED_ELSEWHERE))
         .count();
     assert_eq!(told, 1, "host {ha}'s observer session was told once");
-    assert_eq!(rig.hosts[ha as usize].manager.session_kind(P_CLIENT), None);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.session_kind(P_CLIENT), None);
 }
 
 #[test]
@@ -2446,7 +2447,7 @@ fn move_into_an_unavailable_region_parks_and_tells_the_sender() {
 /// Fortress mode there, no claim anywhere.
 fn end_adventure_foreign(rig: &mut MultiRig) {
     let hs = rig.owner(game::SPAWN_REGION);
-    let ha = 1 - hs;
+    let ha = HostId(1 - hs.0);
     let a = region_of(rig, ha);
     rig.run(a);
     rig.record_packets();
@@ -2454,12 +2455,12 @@ fn end_adventure_foreign(rig: &mut MultiRig) {
     let record = game::PlayerRecord { client, adventure: Some(RETIRED_SITE), ..centre_of(a) };
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
     until_body(rig);
-    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Adventure(RETIRED_SITE)));
-    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::EndAdventure, P_CLIENT));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Adventure(RETIRED_SITE)));
+    rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::EndAdventure, P_CLIENT));
     until_player_settled_in(rig, game::SPAWN_REGION);
     assert_moved(rig, ha, hs, game::SPAWN_REGION, None);
     let mut mode = None;
-    rig.hosts[hs as usize].manager.spawner_mut().with_region(game::SPAWN_REGION, |region| {
+    rig.hosts[hs.0 as usize].manager.spawner_mut().with_region(game::SPAWN_REGION, |region| {
         mode = region.data().clients.get(&P_CLIENT).map(|c| c.mode);
     });
     assert_eq!(mode, Some(game::PlayMode::Fortress), "back in Fortress mode");
@@ -2495,10 +2496,10 @@ fn disconnect_while_queued(rig: &mut MultiRig) {
         rig.round();
     }
     assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
-    assert_eq!(rig.hosts[hb as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
+    assert_eq!(rig.hosts[hb.0 as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
     assert!(rig.player_owners(P_CLIENT).is_empty());
     for h in [ha, hb] {
-        let m = &rig.hosts[h as usize].manager;
+        let m = &rig.hosts[h.0 as usize].manager;
         assert_eq!((m.home_of(P_CLIENT), m.session_kind(P_CLIENT)), (None, None), "host {h} holds nothing of it");
     }
 }
@@ -2536,7 +2537,7 @@ fn history_with_site(at: RegionCoords, n: usize) -> (game::history::History, gam
 const FAR_SITE: RegionCoords = RegionCoords { x: -14, z: 44 };
 
 /// Every body of `person` in a running region of a host: `(host, region, id)`.
-fn person_bodies(rig: &mut MultiRig, person: game::history::PersonId) -> Vec<(u32, RegionCoords, game::EntityId)> {
+fn person_bodies(rig: &mut MultiRig, person: game::history::PersonId) -> Vec<(HostId, RegionCoords, game::EntityId)> {
     let mut out = Vec::new();
     for (h, r) in rig.hosts.iter_mut().enumerate() {
         for rc in r.manager.running_regions() {
@@ -2544,7 +2545,7 @@ fn person_bodies(rig: &mut MultiRig, person: game::history::PersonId) -> Vec<(u3
                 let data = region.data();
                 for (id, &key) in data.id_index.iter() {
                     if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { person: p }) if *p == person) {
-                        out.push((h as u32, rc, *id));
+                        out.push((HostId(h as u64), rc, *id));
                     }
                 }
             });
@@ -2625,7 +2626,7 @@ fn assert_population(
 }
 
 /// Every `PersonCrossed` of `person` host `h` sent its coordinator.
-fn crossings_reported(rig: &MultiRig, h: u32, person: game::history::PersonId) -> Vec<(RegionCoords, bool)> {
+fn crossings_reported(rig: &MultiRig, h: HostId, person: game::history::PersonId) -> Vec<(RegionCoords, bool)> {
     rig.sent_to_coordinator(h)
         .into_iter()
         .filter_map(|m| match m {
@@ -2668,7 +2669,7 @@ fn person_crosses(rig: &mut MultiRig, running: bool) {
     for _ in 0..CROSS_ROUNDS {
         rig.round();
         assert_population(rig, &people, &mut seen);
-        let bodies: Vec<(u32, RegionCoords)> = person_bodies(rig, p).into_iter().map(|(h, rc, _)| (h, rc)).collect();
+        let bodies: Vec<(HostId, RegionCoords)> = person_bodies(rig, p).into_iter().map(|(h, rc, _)| (h, rc)).collect();
         let location = rig.core().history().person(p).unwrap().location;
         let quiet = rig.coordinator_pending().is_empty() && rig.peer_unreceived() == 0;
         let done = if running {
@@ -2716,8 +2717,8 @@ const P2_CLIENT: game::ClientId = 9;
 const P2_PLAYER: game::PlayerId = game::PlayerId(101);
 
 /// The `EmbarkResult`s host `h` sent `client` since recording began.
-fn embark_results_to(rig: &MultiRig, h: u32, client: game::ClientId) -> Vec<Result<game::history::SiteId, game::history::EmbarkRefusal>> {
-    let seen = rig.hosts[h as usize].packets_seen.as_ref().expect("recording packets");
+fn embark_results_to(rig: &MultiRig, h: HostId, client: game::ClientId) -> Vec<Result<game::history::SiteId, game::history::EmbarkRefusal>> {
+    let seen = rig.hosts[h.0 as usize].packets_seen.as_ref().expect("recording packets");
     seen.iter()
         .filter_map(|(to, p)| match p {
             game::ServerPacket::EmbarkResult(r) if *to == Some(client) => Some(*r),
@@ -2759,15 +2760,15 @@ fn claim_travels(rig: &mut MultiRig) {
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
     let (_, _, id) = until_body(rig);
     let req = game::EmbarkRequest { civ, people: founders[0..2].to_vec(), region: a };
-    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+    rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
     rounds_until(rig, "the embark is answered", |rig| !embark_results_to(rig, ha, P_CLIENT).is_empty());
     let site = embark_results_to(rig, ha, P_CLIENT)[0].expect("embarked");
-    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)), "{a:?} holds the body");
     until_player_settled_in(rig, b);
     rounds_until(rig, "the coordinator settles", |rig| coordinator_quiet(rig));
-    assert_eq!(rig.hosts[hb as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
-    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), None);
+    assert_eq!(rig.hosts[hb.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), None);
     {
         let core = rig.core();
         assert_eq!(core.online_on(P_PLAYER), Some(hb), "online on the new host");
@@ -2777,7 +2778,7 @@ fn claim_travels(rig: &mut MultiRig) {
     rig.connect_home(ha, P2_CLIENT, P2_PLAYER, centre_of(a));
     rounds_until(rig, "the second player is placed", |rig| !rig.player_owners(P2_CLIENT).is_empty());
     let ask = |rig: &mut MultiRig| {
-        rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::ReturnTo(site), P2_CLIENT))
+        rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::ReturnTo(site), P2_CLIENT))
     };
     ask(rig);
     rounds_until(rig, "the return is answered", |rig| !embark_results_to(rig, ha, P2_CLIENT).is_empty());
@@ -2817,7 +2818,7 @@ fn embark_foreign_founders(rig: &mut MultiRig, running: bool) {
     until_body(rig);
     let party = founders[0..2].to_vec();
     let req = game::EmbarkRequest { civ, people: party.clone(), region: b };
-    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+    rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
     until_player_settled_in(rig, b);
     let site = embark_results_to(rig, ha, P_CLIENT).first().copied().expect("answered").expect("embarked");
     rounds_until(rig, "the founders stand in their fortress", |rig| {
@@ -2826,11 +2827,11 @@ fn embark_foreign_founders(rig: &mut MultiRig, running: bool) {
     });
     assert_moved(rig, ha, hb, b, Some(game::Claim::Fortress(site)));
     for p in &party {
-        let at: Vec<(u32, RegionCoords)> = person_bodies(rig, *p).iter().map(|(h, rc, _)| (*h, *rc)).collect();
+        let at: Vec<(HostId, RegionCoords)> = person_bodies(rig, *p).iter().map(|(h, rc, _)| (*h, *rc)).collect();
         assert_eq!(at, [(hb, b)], "{p:?} stands in {b:?} on host {hb}, once");
         assert_eq!(rig.core().history().person(*p).unwrap().location, game::history::Location::InRegion(b));
     }
-    assert_eq!(rig.hosts[hb as usize].manager.site_region(site), Some(b), "host {hb} knows the new site");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.site_region(site), Some(b), "host {hb} knows the new site");
     assert_eq!(rig.core().online_on(P_PLAYER), Some(hb));
     assert_eq!(rig.core().claim_of(P_PLAYER), Some(game::Claim::Fortress(site)));
 }
@@ -2852,7 +2853,7 @@ fn embark_into_a_foreign_host_spawns_the_founders_there() {
 
 /// Fortress `site` founded by the test player (on host `ha`) in `a`, where it stands, with
 /// a second player connected on `ha`: `(a, b, ha, hb, site, the player's body)`.
-fn holder_and_rival(rig: &mut MultiRig) -> (RegionCoords, RegionCoords, u32, u32, game::history::SiteId, game::EntityId) {
+fn holder_and_rival(rig: &mut MultiRig) -> (RegionCoords, RegionCoords, HostId, HostId, game::history::SiteId, game::EntityId) {
     holder_and_rival_with(rig, false)
 }
 
@@ -2860,7 +2861,7 @@ fn holder_and_rival(rig: &mut MultiRig) -> (RegionCoords, RegionCoords, u32, u32
 fn holder_and_rival_with(
     rig: &mut MultiRig,
     b_unavailable: bool,
-) -> (RegionCoords, RegionCoords, u32, u32, game::history::SiteId, game::EntityId) {
+) -> (RegionCoords, RegionCoords, HostId, HostId, game::history::SiteId, game::EntityId) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     let (history, civ, founders) = history_with_site(FAR_SITE, 4);
@@ -2869,7 +2870,7 @@ fn holder_and_rival_with(
         rig.host_of(b).manager.spawner_mut().fail_next_start(b);
         let keeper = crate::common::rig::CLIENT;
         rig.host_of(b).event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), keeper));
-        rounds_until(rig, "b fails to load", |rig| rig.hosts[hb as usize].manager.unavailable_regions().contains(&b));
+        rounds_until(rig, "b fails to load", |rig| rig.hosts[hb.0 as usize].manager.unavailable_regions().contains(&b));
     } else {
         rig.run(b);
     }
@@ -2878,7 +2879,7 @@ fn holder_and_rival_with(
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
     let (_, _, id) = until_body(rig);
     let req = game::EmbarkRequest { civ, people: founders[0..2].to_vec(), region: a };
-    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+    rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
     rounds_until(rig, "the embark is answered", |rig| !embark_results_to(rig, ha, P_CLIENT).is_empty());
     let site = embark_results_to(rig, ha, P_CLIENT)[0].expect("embarked");
     rig.connect_home(ha, P2_CLIENT, P2_PLAYER, centre_of(a));
@@ -2888,8 +2889,8 @@ fn holder_and_rival_with(
 }
 
 /// The second player asks host `h` to return to `site`.
-fn return_to(rig: &mut MultiRig, h: u32, site: game::history::SiteId) {
-    rig.hosts[h as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::ReturnTo(site), P2_CLIENT));
+fn return_to(rig: &mut MultiRig, h: HostId, site: game::history::SiteId) {
+    rig.hosts[h.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::ReturnTo(site), P2_CLIENT));
 }
 
 /// While the fortress's holder walks over a host seam, a second player asks to return to
@@ -2911,7 +2912,7 @@ fn claim_kept_while_crossing(rig: &mut MultiRig) {
     }
     assert!(settled, "the holder never settled in {b:?}");
     assert_eq!(rig.core().online_on(P_PLAYER), Some(hb));
-    assert_eq!(rig.hosts[hb as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
+    assert_eq!(rig.hosts[hb.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
     assert_eq!(rig.core().claim_of(P2_PLAYER), None);
     if rig.lockstep && rig.link_delay == 0 {
         assert_eq!(rig.hop_is_received(), 0, "in order, a real hand-over tells nobody anything");
@@ -2959,16 +2960,16 @@ fn old_claim_is_after_round_trip(rig: &mut MultiRig) {
     rig.with_coordinator(history);
     // Another player, online on a host outside the rig, plays the site.
     let held = game::OnlinePlayer { player: other, claim: Some(game::Claim::Fortress(site)), claim_pending: false, report: 1, hop: 1 };
-    rig.core().handle(9, game::HostMsg::PlayerOnline(held), 0);
+    rig.core().handle(h(9), game::HostMsg::PlayerOnline(held), 0);
     // A's answers are held back: the coordinator's answer to the report below waits.
     rig.hold_world(ha, true);
     let record = game::PlayerRecord { fortress: Some(site), ..centre_of(a) };
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
     let (_, _, id) = until_body(rig);
-    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)), "the early guess");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)), "the early guess");
     rounds_until(rig, "the report is answered", |rig| rig.coordinator_pending().is_empty());
     // The other player leaves: the fortress is the test player's to take up.
-    rig.core().handle(9, game::HostMsg::PlayerOffline { player: other, hop: 1 }, 0);
+    rig.core().handle(h(9), game::HostMsg::PlayerOffline { player: other, hop: 1 }, 0);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
     rounds_until(rig, "host B's report is answered", |rig| rig.coordinator_pending().is_empty());
@@ -2982,8 +2983,8 @@ fn old_claim_is_after_round_trip(rig: &mut MultiRig) {
     for _ in 0..WAIT_ROUNDS {
         rig.round();
     }
-    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)), "kept");
-    assert_eq!(rig.hosts[hb as usize].manager.client_claim(P_CLIENT), None);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)), "kept");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.client_claim(P_CLIENT), None);
     assert_eq!(rig.core().claim_of(P_PLAYER), Some(game::Claim::Fortress(site)));
     assert_eq!(rig.core().online_on(P_PLAYER), Some(ha));
 }
@@ -3051,9 +3052,9 @@ fn until_decided(rig: &mut MultiRig, cut: game::CutId) -> bool {
 }
 
 /// Cut rounds until host `h` takes part in a world cut not decided yet: its id and tick.
-fn until_world_cut_on(rig: &mut MultiRig, h: u32) -> (game::CutId, u64) {
+fn until_world_cut_on(rig: &mut MultiRig, h: HostId) -> (game::CutId, u64) {
     for _ in 0..WORLD_CUT_ROUNDS {
-        let m = &rig.hosts[h as usize].manager;
+        let m = &rig.hosts[h.0 as usize].manager;
         if let (Some(cut), Some((id, tick))) = (m.world_cut(), m.pending_cut()) {
             if cut == id && !rig.decided.contains_key(&cut) {
                 return (id, tick);
@@ -3291,7 +3292,7 @@ fn intents_on_the_wire(rig: &mut MultiRig, running: bool) {
         let now = world_tick(rig);
         while sent < 6 && now + 3 >= t + sent {
             let (from, to) = if running && sent % 2 == 1 { (b, a) } else { (a, b) };
-            let host = rig.owner(from) as usize;
+            let host = rig.owner(from).0 as usize;
             if rig.hosts[host].manager.pending_cut().is_some_and(|(c, _)| c == cut)
                 && rig.hosts[host].manager.awaiting_cut().contains(&from)
             {
@@ -3443,7 +3444,7 @@ fn link_down_commits(rig: &mut MultiRig) {
     let (cut, committed) = until_cut_after(rig, after, &slimes, a, b);
     assert!(committed, "cut {} begun with the link down commits (seed {}, link delay {})", cut.0, rig.seed, rig.link_delay);
     assert_eq!(rig.last_committed().0, cut);
-    assert!(!rig.hosts[ha as usize].manager.peer_is_reachable(hb), "the link stayed down");
+    assert!(!rig.hosts[ha.0 as usize].manager.peer_is_reachable(hb), "the link stayed down");
     assert_counted_cut_whole(rig, &slimes, a, b);
     after_the_link_returns(rig, &slimes, a, b);
 }
@@ -3460,12 +3461,12 @@ fn cut_with_a_link_down_commits_by_counts() {
 fn link_drop_before_the_marks(rig: &mut MultiRig) {
     let (a, b, slimes) = counted_world(rig);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let pending = |rig: &MultiRig, h: u32| matches!(rig.hosts[h as usize].manager.world_cut_state(), Some((_, "pending")));
+    let pending = |rig: &MultiRig, h: HostId| matches!(rig.hosts[h.0 as usize].manager.world_cut_state(), Some((_, "pending")));
     let mut r = 0usize;
     let cut = loop {
         assert!(r < WORLD_CUT_ROUNDS, "never both pending (seed {})", rig.seed);
-        if pending(rig, ha) && pending(rig, hb) && rig.hosts[ha as usize].manager.world_cut() == rig.hosts[hb as usize].manager.world_cut() {
-            break rig.hosts[ha as usize].manager.world_cut().expect("pending");
+        if pending(rig, ha) && pending(rig, hb) && rig.hosts[ha.0 as usize].manager.world_cut() == rig.hosts[hb.0 as usize].manager.world_cut() {
+            break rig.hosts[ha.0 as usize].manager.world_cut().expect("pending");
         }
         counted_round(rig, &slimes, a, b, r);
         r += 1;
@@ -3503,11 +3504,11 @@ fn received_unacked(rig: &mut MultiRig) -> bool {
     rig.run(a);
     rig.run(b);
     world_cuts(rig);
-    let open = |rig: &MultiRig, h: u32| matches!(rig.hosts[h as usize].manager.world_cut_state(), Some((_, "pending" | "marked")));
+    let open = |rig: &MultiRig, h: HostId| matches!(rig.hosts[h.0 as usize].manager.world_cut_state(), Some((_, "pending" | "marked")));
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
-        let c = rig.hosts[ha as usize].manager.world_cut();
-        if c.is_some() && c == rig.hosts[hb as usize].manager.world_cut() && open(rig, ha) && open(rig, hb) {
+        let c = rig.hosts[ha.0 as usize].manager.world_cut();
+        if c.is_some() && c == rig.hosts[hb.0 as usize].manager.world_cut() && open(rig, ha) && open(rig, hb) {
             cut = c;
             break;
         }
@@ -3518,8 +3519,8 @@ fn received_unacked(rig: &mut MultiRig) -> bool {
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     let received = |rig: &mut MultiRig| {
         let on_b = rig.owners_of(id).iter().any(|(h, _)| *h == hb)
-            || rig.hosts[hb as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == id);
-        let unacked = rig.hosts[ha as usize].manager.peer_unreceived_ids().iter().any(|(p, i, sent)| *p == hb && *i == id && *sent);
+            || rig.hosts[hb.0 as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == id);
+        let unacked = rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, sent)| *p == hb && *i == id && *sent);
         on_b && unacked
     };
     let mut hit = false;
@@ -3543,7 +3544,7 @@ fn received_unacked(rig: &mut MultiRig) -> bool {
     assert_eq!(places.len(), 1, "{id:?} in exactly one part: {places:?} (seed {}, link delay {})", rig.seed, rig.link_delay);
     assert_eq!(places[0].0, hb, "the receiver's: {places:?}");
     // A's journal keeps no entry of it: the counted cut explains it (B's part holds it).
-    let heard = |rig: &MultiRig| [ha, hb].iter().all(|h| rig.hosts[*h as usize].manager.peer_journal().base() == cut);
+    let heard = |rig: &MultiRig| [ha, hb].iter().all(|h| rig.hosts[(*h).0 as usize].manager.peer_journal().base() == cut);
     for _ in 0..WORLD_CUT_ROUNDS {
         if heard(rig) {
             break;
@@ -3578,11 +3579,11 @@ fn returning_link_held(rig: &mut MultiRig) {
     rig.run(a);
     rig.run(b);
     world_cuts(rig);
-    let pending = |rig: &MultiRig, h: u32| matches!(rig.hosts[h as usize].manager.world_cut_state(), Some((_, "pending")));
+    let pending = |rig: &MultiRig, h: HostId| matches!(rig.hosts[h.0 as usize].manager.world_cut_state(), Some((_, "pending")));
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
-        let c = rig.hosts[ha as usize].manager.world_cut();
-        if c.is_some() && c == rig.hosts[hb as usize].manager.world_cut() && pending(rig, ha) && pending(rig, hb) {
+        let c = rig.hosts[ha.0 as usize].manager.world_cut();
+        if c.is_some() && c == rig.hosts[hb.0 as usize].manager.world_cut() && pending(rig, ha) && pending(rig, hb) {
             cut = c;
             break;
         }
@@ -3593,7 +3594,7 @@ fn returning_link_held(rig: &mut MultiRig) {
     rig.cut_round();
     rig.link_up(ha, hb);
     let late = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
-    let prepared = |rig: &MultiRig, h: u32| matches!(rig.hosts[h as usize].manager.world_cut_state(), Some((c, "prepared")) if c == cut);
+    let prepared = |rig: &MultiRig, h: HostId| matches!(rig.hosts[h.0 as usize].manager.world_cut_state(), Some((c, "prepared")) if c == cut);
     assert!(
         (0..WORLD_CUT_ROUNDS).any(|_| {
             if prepared(rig, hb) {
@@ -3607,19 +3608,19 @@ fn returning_link_held(rig: &mut MultiRig) {
         rig.seed
     );
     rig.hold_world(hb, true);
-    assert!(rig.hosts[hb as usize].manager.peer_frozen(ha), "B's session is frozen");
-    let count = rig.hosts[hb as usize].manager.peer_received_through(ha);
+    assert!(rig.hosts[hb.0 as usize].manager.peer_frozen(ha), "B's session is frozen");
+    let count = rig.hosts[hb.0 as usize].manager.peer_received_through(ha);
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
-        assert!(rig.hosts[hb as usize].manager.peer_frozen(ha), "frozen until B hears the decision (seed {})", rig.seed);
-        assert_eq!(rig.hosts[hb as usize].manager.peer_received_through(ha), count, "nothing above B's count arrives");
+        assert!(rig.hosts[hb.0 as usize].manager.peer_frozen(ha), "frozen until B hears the decision (seed {})", rig.seed);
+        assert_eq!(rig.hosts[hb.0 as usize].manager.peer_received_through(ha), count, "nothing above B's count arrives");
         assert!(!rig.owners_of(late).iter().any(|(h, _)| *h == hb), "the late slime is not on B before its CutDone");
-        assert!(!rig.hosts[hb as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == late));
+        assert!(!rig.hosts[hb.0 as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == late));
     }
     rig.hold_world(hb, false);
     assert!(until_decided(rig, cut), "cut {} commits", cut.0);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| !rig.hosts[hb as usize].manager.peer_frozen(ha) && !rig.hosts[ha as usize].manager.peer_frozen(hb)),
+        until(rig, CROSS_ROUNDS, |rig| !rig.hosts[hb.0 as usize].manager.peer_frozen(ha) && !rig.hosts[ha.0 as usize].manager.peer_frozen(hb)),
         "both sessions thawed after the decision"
     );
     until_quiet(rig);
@@ -3652,11 +3653,11 @@ fn other_boot_counts(rig: &mut MultiRig) {
     // B's leaving boot sends A a slime: A counts B's numbering past 0.
     let early = slime_in(rig, b, 0);
     assert!(cross_to(rig, early, b, (ha, a)), "the early slime reached A");
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.hosts[hb.0 as usize].manager.request_leave();
     let cut = until_leave_begun(rig, ha, hb);
     assert!(until_decided(rig, cut), "the leave cut commits");
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha as usize].manager.peer_left(hb)), "A holds its session with B");
-    let left_boot = rig.boots[hb as usize];
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.peer_left(hb)), "A holds its session with B");
+    let left_boot = rig.boots[hb.0 as usize];
     rig.kill(hb);
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
@@ -3666,13 +3667,13 @@ fn other_boot_counts(rig: &mut MultiRig) {
     rig.core().set_expected_hosts([ha, hb].into_iter().collect());
     // A player of the new boot keeps `b` running there (the restarted host has no keeper).
     rig.connect_home(hb, P2_CLIENT, P2_PLAYER, centre_of(b));
-    assert!(until(rig, BODY_ROUNDS, |rig| rig.hosts[hb as usize].manager.running_regions().contains(&b)), "b runs on the new boot");
+    assert!(until(rig, BODY_ROUNDS, |rig| rig.hosts[hb.0 as usize].manager.running_regions().contains(&b)), "b runs on the new boot");
     let late = slime_in(rig, b, 1);
     assert!(push_over(rig, late, b, a), "the late slime stands in {b:?}");
     assert!(
         (0..CROSS_ROUNDS).any(|_| {
             rig.cut_round();
-            rig.hosts[hb as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == ha && *i == late)
+            rig.hosts[hb.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == ha && *i == late)
         }),
         "the late slime waits in the new boot's session"
     );
@@ -3734,8 +3735,8 @@ fn leave_counted(rig: &mut MultiRig) {
         (0..CROSS_ROUNDS).any(|_| {
             rig.cut_round();
             let on_b = rig.owners_of(got).iter().any(|(h, _)| *h == hb)
-                || rig.hosts[hb as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == got);
-            on_b && rig.hosts[ha as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == hb && *i == got)
+                || rig.hosts[hb.0 as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == got);
+            on_b && rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == hb && *i == got)
         }),
         "B holds the slime, A still owes it"
     );
@@ -3744,19 +3745,19 @@ fn leave_counted(rig: &mut MultiRig) {
     assert!(
         (0..CROSS_ROUNDS).any(|_| {
             rig.cut_round();
-            rig.hosts[ha as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == hb && *i == early)
+            rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == hb && *i == early)
         }),
         "the early slime waits in A's session"
     );
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.hosts[hb.0 as usize].manager.request_leave();
     let cut = until_leave_begun(rig, ha, hb);
-    assert!(rig.hosts[ha as usize].manager.peer_frozen(hb), "A counts with B across the down link");
+    assert!(rig.hosts[ha.0 as usize].manager.peer_frozen(hb), "A counts with B across the down link");
     let late = rig.spawn_slime(a, past_seam(a, b, 2.0 * REGION_SIZE / 3.0));
     assert!(until_decided(rig, cut), "the leave cut commits by counts (seed {}, link delay {})", rig.seed, rig.link_delay);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha as usize].manager.peer_left(hb)), "A holds its session with B");
-    assert!(!rig.hosts[ha as usize].manager.peer_frozen(hb), "thawed at the CutDone, still held");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.peer_left(hb)), "A holds its session with B");
+    assert!(!rig.hosts[ha.0 as usize].manager.peer_frozen(hb), "thawed at the CutDone, still held");
     let carries = |r: &game::Reliable, id: game::EntityId| matches!(r.inner(), game::Reliable::Transfer { bundle, .. } if bundle.id == id);
-    let owed = rig.hosts[ha as usize].manager.peer_owed(hb);
+    let owed = rig.hosts[ha.0 as usize].manager.peer_owed(hb);
     assert!(owed.iter().any(|r| carries(r, early)), "the slime above B's count is still owed (seed {})", rig.seed);
     assert!(owed.iter().any(|r| carries(r, late)), "the slime held back is still owed");
     assert!(!owed.iter().any(|r| carries(r, got)), "what B counted is forgotten (seed {})", rig.seed);
@@ -3775,7 +3776,7 @@ fn leave_counted(rig: &mut MultiRig) {
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
-    assert!(rig.hosts[ha as usize].manager.peer_left(hb), "still held for the same boot");
+    assert!(rig.hosts[ha.0 as usize].manager.peer_left(hb), "still held for the same boot");
     until_committed(rig, 1);
     let (last, parts) = rig.last_committed();
     assert!(last > cut && !parts.contains_key(&hb), "the next cut is A's alone");
@@ -3808,8 +3809,8 @@ fn counted_then_dead(rig: &mut MultiRig) {
     until_committed(rig, 1);
     rig.link_down(x, y);
     assert!(push_over(rig, to_y, cx, cy) && push_over(rig, to_x, cy, cx), "both slimes stand in their regions");
-    let queued = |rig: &MultiRig, h: u32, peer: u32, id: game::EntityId| {
-        rig.hosts[h as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == peer && *i == id)
+    let queued = |rig: &MultiRig, h: HostId, peer: HostId, id: game::EntityId| {
+        rig.hosts[h.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == peer && *i == id)
     };
     assert!(
         (0..CROSS_ROUNDS).any(|_| {
@@ -3856,7 +3857,7 @@ fn a_host_dying_after_a_cut_counted_with_it_hands_its_heir_exact_journals() {
 /// lead is back to [`game::WORLD_CUT_LEAD_TICKS`].
 fn missed_tick(rig: &mut MultiRig) {
     world_cuts(rig);
-    rig.hold_world(1, true);
+    rig.hold_world(h(1), true);
     for _ in 0..WORLD_CUT_ROUNDS {
         if rig.core().world_cut_running().is_some() {
             break;
@@ -3867,7 +3868,7 @@ fn missed_tick(rig: &mut MultiRig) {
     while world_tick(rig) < t {
         rig.cut_round();
     }
-    rig.hold_world(1, false);
+    rig.hold_world(h(1), false);
     assert!(!until_decided(rig, cut), "the missed cut is aborted");
     assert_eq!(rig.core().world_cut_lead(), 2 * game::WORLD_CUT_LEAD_TICKS, "the lead doubled");
     until_committed(rig, 1);
@@ -3884,16 +3885,16 @@ fn missed_tick_doubles_the_lead_and_the_retry_commits() {
 /// on any host); once it is not expected any more, one commits.
 fn no_cut_while_absent(rig: &mut MultiRig) {
     world_cuts(rig);
-    rig.core().set_expected_hosts([0, 1, 2].into_iter().collect());
+    rig.core().set_expected_hosts([0, 1, 2].into_iter().map(h).collect());
     for _ in 0..4 * (WORLD_CUT_EVERY_MS / game::TICK_RATE) as usize {
         rig.cut_round();
         assert_eq!(rig.core().world_cut_running(), None, "no cut while host 2 is absent");
         assert!(rig.hosts.iter().all(|r| r.manager.world_cut().is_none()));
     }
-    for h in 0..2 {
-        assert!(!rig.sent_to_coordinator(h).iter().any(|m| matches!(m, game::HostMsg::CutPrepared { .. } | game::HostMsg::CutFailed { .. })));
+    for n in 0..2 {
+        assert!(!rig.sent_to_coordinator(h(n)).iter().any(|m| matches!(m, game::HostMsg::CutPrepared { .. } | game::HostMsg::CutFailed { .. })));
     }
-    rig.core().set_expected_hosts([0, 1].into_iter().collect());
+    rig.core().set_expected_hosts([0, 1].into_iter().map(h).collect());
     until_committed(rig, 1);
 }
 
@@ -3908,9 +3909,9 @@ fn no_cut_while_an_expected_host_is_absent() {
 /// cut it took part in and is answered) the next cut commits.
 fn host_detaching(rig: &mut MultiRig) {
     world_cuts(rig);
-    let (cut, _) = until_world_cut_on(rig, 1);
+    let (cut, _) = until_world_cut_on(rig, h(1));
     rig.hosts[1].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
-    rig.core().host_detached(1);
+    rig.core().host_detached(h(1));
     assert!(!until_decided(rig, cut), "the cut is aborted");
     rig.hosts[1].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
     for _ in 0..WORLD_CUT_ROUNDS {
@@ -3933,7 +3934,7 @@ fn host_detaching_mid_cut_aborts_it() {
 fn inventory_now(rig: &mut MultiRig, client: game::ClientId) -> Option<game::Inventory> {
     let (h, rc, _) = rig.player_body(client)?;
     let mut inv = None;
-    rig.hosts[h as usize].manager.spawner_mut().with_region(rc, |r| inv = r.data().clients.get(&client).map(|c| c.inventory.clone()));
+    rig.hosts[h.0 as usize].manager.spawner_mut().with_region(rc, |r| inv = r.data().clients.get(&client).map(|c| c.inventory.clone()));
     inv
 }
 
@@ -3958,7 +3959,7 @@ fn mid_move(rig: &mut MultiRig) -> bool {
     let (cut, t) = until_world_cut_on(rig, ha);
     // Two more stones, before the cut tick: what the record at T must hold.
     let (h, rc, _) = rig.player_body(P_CLIENT).expect("a body");
-    rig.hosts[h as usize].manager.spawner_mut().with_region(rc, |r| {
+    rig.hosts[h.0 as usize].manager.spawner_mut().with_region(rc, |r| {
         r.with_data(|d| {
             d.clients.get_mut(&P_CLIENT).unwrap().inventory.add(game::ItemStack { item: game::ItemId(2), count: 2 });
         })
@@ -3972,7 +3973,7 @@ fn mid_move(rig: &mut MultiRig) -> bool {
         let now = world_tick(rig);
         if !embarked && now >= fire {
             let req = game::EmbarkRequest { civ, people: founders[0..2].to_vec(), region: b };
-            rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+            rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
             embarked = true;
         }
         if !walked && now + 1 >= t {
@@ -4030,7 +4031,7 @@ fn cut_mid_move_holds_the_player_once() {
 fn cut_lagging_source(rig: &mut MultiRig, player: bool) {
     let (a, b) = host_seam(2, 1);
     let ha = rig.owner(a);
-    let home = rig.homes[ha as usize];
+    let home = rig.homes[ha.0 as usize];
     rig.run(a);
     rig.run(b);
     world_cuts(rig);
@@ -4045,15 +4046,15 @@ fn cut_lagging_source(rig: &mut MultiRig, player: bool) {
         rig.cut_round();
     }
     let lag = (t - world_tick(rig)) as u32 + LAG_AROUND_T;
-    rig.hosts[ha as usize].manager.spawner_mut().hold(home, lag);
+    rig.hosts[ha.0 as usize].manager.spawner_mut().hold(home, lag);
     for _ in 0..WORLD_CUT_ROUNDS {
-        let m = &rig.hosts[ha as usize].manager;
+        let m = &rig.hosts[ha.0 as usize].manager;
         if m.pending_cut().is_some_and(|(c, _)| c == cut) && !m.awaiting_cut().contains(&a) {
             break;
         }
         rig.cut_round();
     }
-    let m = &rig.hosts[ha as usize].manager;
+    let m = &rig.hosts[ha.0 as usize].manager;
     assert!(m.awaiting_cut().contains(&home), "the keeper region still lags");
     assert_eq!(m.world_cut_state().map(|s| s.1), Some("pending"), "the host's mark is not out");
     let id = if player { rig.player_body(P_CLIENT).expect("a body").2 } else { slime };
@@ -4067,7 +4068,7 @@ fn cut_lagging_source(rig: &mut MultiRig, player: bool) {
         }
     }
     assert!(landed, "the crossing landed on the other host within {LANDS_WITHIN_ROUNDS} rounds");
-    rig.hosts[ha as usize].manager.spawner_mut().hold(home, 0);
+    rig.hosts[ha.0 as usize].manager.spawner_mut().hold(home, 0);
     assert!(until_decided(rig, cut), "the cut commits");
     if player {
         assert_eq!(rig.last_cut_writers(P_PLAYER), [ha], "the player is in {a:?}'s snapshot only");
@@ -4108,14 +4109,14 @@ fn refusal_after_mark(rig: &mut MultiRig, short: bool) -> bool {
         rig.cut_round();
     }
     let lag = if short { 6 } else { 6 + LAG_AROUND_T };
-    rig.hosts[ha as usize].manager.spawner_mut().hold(a, lag);
+    rig.hosts[ha.0 as usize].manager.spawner_mut().hold(a, lag);
     for _ in 0..WORLD_CUT_ROUNDS {
-        if matches!(rig.hosts[hb as usize].manager.world_cut_state(), Some((c, "marked" | "complete" | "prepared")) if c == cut) {
+        if matches!(rig.hosts[hb.0 as usize].manager.world_cut_state(), Some((c, "marked" | "complete" | "prepared")) if c == cut) {
             break;
         }
         rig.cut_round();
     }
-    assert!(rig.hosts[ha as usize].manager.awaiting_cut().contains(&a), "`a` has not answered");
+    assert!(rig.hosts[ha.0 as usize].manager.awaiting_cut().contains(&a), "`a` has not answered");
     deposit_from(rig, a, b);
     let decided = until_decided(rig, cut);
     let expected = u64::from(DEPOSIT);
@@ -4181,28 +4182,28 @@ fn wrapper_before_begin(rig: &mut MultiRig) {
     let slime = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 3.0]);
     let k = game::CutId(5);
     let t = world_tick(rig) + 20;
-    rig.hosts[ha as usize].manager.begin_world_cut(k, t, &[0, 1], &[]).expect("host A begins K");
+    rig.hosts[ha.0 as usize].manager.begin_world_cut(k, t, &[h(0), h(1)], &[]).expect("host A begins K");
     for _ in 0..WORLD_CUT_ROUNDS {
-        if !rig.hosts[ha as usize].manager.awaiting_cut().contains(&a) {
+        if !rig.hosts[ha.0 as usize].manager.awaiting_cut().contains(&a) {
             break;
         }
         rig.round();
     }
-    assert!(!rig.hosts[ha as usize].manager.awaiting_cut().contains(&a), "`a` answered K");
+    assert!(!rig.hosts[ha.0 as usize].manager.awaiting_cut().contains(&a), "`a` answered K");
     assert!(rig.teleport(a, slime, past_seam(a, b, REGION_SIZE / 3.0)));
-    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(b), P_CLIENT));
+    rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(b), P_CLIENT));
     for _ in 0..CROSS_ROUNDS {
         rig.round();
-        let player_there = rig.hosts[hb as usize].manager.player_of(P_CLIENT) == Some(P_PLAYER);
+        let player_there = rig.hosts[hb.0 as usize].manager.player_of(P_CLIENT) == Some(P_PLAYER);
         if player_there && rig.owners_of(slime).iter().any(|(_, rc)| *rc == b) {
             break;
         }
     }
-    assert_eq!(rig.hosts[hb as usize].manager.player_of(P_CLIENT), Some(P_PLAYER), "the player reached host {hb}");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.player_of(P_CLIENT), Some(P_PLAYER), "the player reached host {hb}");
     assert!(rig.owners_of(slime).iter().any(|(_, rc)| *rc == b), "the slime reached host {hb}");
     let now = world_tick(rig);
     assert_eq!(
-        rig.hosts[hb as usize].manager.begin_world_cut(k, now + game::WORLD_CUT_LEAD_TICKS, &[0, 1], &[]),
+        rig.hosts[hb.0 as usize].manager.begin_world_cut(k, now + game::WORLD_CUT_LEAD_TICKS, &[h(0), h(1)], &[]),
         Err(game::CutFailure::Missed),
         "a wrapper of K came first: K is missed"
     );
@@ -4233,31 +4234,31 @@ fn wrapped_wake_keeps_accounted(rig: &mut MultiRig) {
     let (_, _, body) = until_body(rig);
     // Mail for `b` (a reply) waits on host B.
     let due = world_tick(rig);
-    rig.hosts[hb as usize].manager.apply_peer_reliable(ha, game::Reliable::Intent(refusal_to(a, b, due)));
+    rig.hosts[hb.0 as usize].manager.apply_peer_reliable(ha, game::Reliable::Intent(refusal_to(a, b, due)));
     rig.items = None;
     let k = game::CutId(6);
     let t = world_tick(rig) + 20;
-    rig.hosts[ha as usize].manager.begin_world_cut(k, t, &[0, 1], &[]).expect("host A begins K");
+    rig.hosts[ha.0 as usize].manager.begin_world_cut(k, t, &[h(0), h(1)], &[]).expect("host A begins K");
     for _ in 0..WORLD_CUT_ROUNDS {
-        if !rig.hosts[ha as usize].manager.awaiting_cut().contains(&a) {
+        if !rig.hosts[ha.0 as usize].manager.awaiting_cut().contains(&a) {
             break;
         }
         rig.round();
     }
     // `b`'s inputs wait once it runs, so the arrival stays in flight.
-    rig.hosts[hb as usize].manager.spawner_mut().hold_inputs(b, 40);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold_inputs(b, 40);
     assert!(rig.teleport(a, body, past_seam(a, b, REGION_SIZE / 2.0)));
     let mut seen = None;
     for _ in 0..CROSS_ROUNDS {
         rig.round();
-        seen = rig.hosts[hb as usize].manager.in_flight_accounted().into_iter().find(|(id, _)| *id == body);
+        seen = rig.hosts[hb.0 as usize].manager.in_flight_accounted().into_iter().find(|(id, _)| *id == body);
         if seen.is_some() {
             break;
         }
     }
-    assert!(rig.hosts[hb as usize].manager.running_regions().contains(&b), "the hand-off woke `b`");
+    assert!(rig.hosts[hb.0 as usize].manager.running_regions().contains(&b), "the hand-off woke `b`");
     assert_eq!(seen, Some((body, Some(k))), "the arrival keeps the cut its sender accounts for it in");
-    rig.hosts[hb as usize].manager.spawner_mut().hold_inputs(b, 0);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold_inputs(b, 0);
 }
 
 #[test]
@@ -4273,7 +4274,7 @@ fn wrapped_hand_off_waking_a_region_with_mail_keeps_its_accounted_cut() {
 fn bare_after_mark(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let home_b = rig.homes[hb as usize];
+    let home_b = rig.homes[hb.0 as usize];
     rig.run(a);
     rig.run(b);
     world_cuts(rig);
@@ -4285,9 +4286,9 @@ fn bare_after_mark(rig: &mut MultiRig) {
         rig.cut_round();
     }
     let lag = (t - world_tick(rig)) as u32 + LAG_AROUND_T;
-    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, lag);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold(home_b, lag);
     for _ in 0..WORLD_CUT_ROUNDS {
-        if matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked" | "complete"))if c == cut) {
+        if matches!(rig.hosts[ha.0 as usize].manager.world_cut_state(), Some((c, "marked" | "complete"))if c == cut) {
             break;
         }
         rig.cut_round();
@@ -4306,7 +4307,7 @@ fn bare_after_mark(rig: &mut MultiRig) {
         .into_iter()
         .any(|m| m == game::HostMsg::CutFailed { cut, why: game::CutFailure::Aborted });
     assert!(failed, "host {hb} failed the cut");
-    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, 0);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold(home_b, 0);
     assert!(!until_decided(rig, cut), "the cut is aborted");
     until_committed(rig, 1);
     assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
@@ -4322,9 +4323,9 @@ fn bare_message_after_a_mark_fails_the_cut() {
 /// refused (`Aborted`) without touching the pending one, which commits.
 fn second_begin(rig: &mut MultiRig) {
     world_cuts(rig);
-    let (cut, t) = until_world_cut_on(rig, 0);
+    let (cut, t) = until_world_cut_on(rig, h(0));
     let other = game::CutId(cut.0 + 1000);
-    let refused = rig.hosts[0].manager.begin_world_cut(other, t + 40, &[0, 1], &[]);
+    let refused = rig.hosts[0].manager.begin_world_cut(other, t + 40, &[h(0), h(1)], &[]);
     assert_eq!(refused, Err(game::CutFailure::Aborted), "a second cut is refused");
     assert_eq!(rig.hosts[0].manager.pending_cut(), Some((cut, t)), "the pending cut is untouched");
     assert_eq!(rig.hosts[0].manager.world_cut(), Some(cut));
@@ -4386,19 +4387,19 @@ fn returned_before_t(rig: &mut MultiRig, how: Return) -> bool {
     if walks {
         // Both hosts must have the cut pending (each notes the player it sends bare).
         for _ in 0..CROSS_ROUNDS {
-            if rig.hosts[hb as usize].manager.world_cut() == Some(cut) {
+            if rig.hosts[hb.0 as usize].manager.world_cut() == Some(cut) {
                 break;
             }
             rig.cut_round();
         }
     }
-    let over = |rig: &mut MultiRig, from: u32, to: RegionCoords| {
+    let over = |rig: &mut MultiRig, from: HostId, to: RegionCoords| {
         if walks {
             let (_, rc, id) = rig.player_body(P_CLIENT).expect("a body");
             let other = if rc == a { b } else { a };
             rig.teleport(rc, id, past_seam(rc, other, REGION_SIZE / 2.0));
         } else {
-            rig.hosts[from as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(to), P_CLIENT));
+            rig.hosts[from.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(to), P_CLIENT));
         }
     };
     over(rig, ha, b);
@@ -4414,7 +4415,7 @@ fn returned_before_t(rig: &mut MultiRig, how: Return) -> bool {
             until_player_in(rig, a)
         } else {
             (0..CROSS_ROUNDS).any(|_| {
-                let home = rig.hosts[ha as usize].manager.player_of(P_CLIENT) == Some(P_PLAYER);
+                let home = rig.hosts[ha.0 as usize].manager.player_of(P_CLIENT) == Some(P_PLAYER);
                 if !home {
                     rig.cut_round();
                 }
@@ -4425,7 +4426,7 @@ fn returned_before_t(rig: &mut MultiRig, how: Return) -> bool {
     if back {
         match how {
             Return::MovesThenLocalMove => {
-                rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(a2), P_CLIENT));
+                rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(a2), P_CLIENT));
             }
             _ => {
                 rig.disconnect(ha, P_CLIENT);
@@ -4478,7 +4479,7 @@ fn player_sent_and_returned_before_t_is_in_exactly_one_part() {
 fn case_three(rig: &mut MultiRig) -> bool {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let home_b = rig.homes[hb as usize];
+    let home_b = rig.homes[hb.0 as usize];
     rig.run(a);
     rig.run(b);
     world_cuts(rig);
@@ -4487,14 +4488,14 @@ fn case_three(rig: &mut MultiRig) -> bool {
         rig.cut_round();
     }
     let lag = (t - world_tick(rig)) as u32 + LAG_AROUND_T;
-    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, lag);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold(home_b, lag);
     for _ in 0..WORLD_CUT_ROUNDS {
-        if matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked"))if c == cut) {
+        if matches!(rig.hosts[ha.0 as usize].manager.world_cut_state(), Some((c, "marked"))if c == cut) {
             break;
         }
         rig.cut_round();
     }
-    if !matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked")) if c == cut) {
+    if !matches!(rig.hosts[ha.0 as usize].manager.world_cut_state(), Some((c, "marked")) if c == cut) {
         return false;
     }
     // A slime made after `a` answered (in no snapshot), taken out of `a` as a transfer.
@@ -4510,13 +4511,13 @@ fn case_three(rig: &mut MultiRig) -> bool {
     bundle.rebase(a, b);
     let stamp = t - 2;
     let transfer = game::Reliable::Transfer { target: b, stamp, bundle: Box::new(bundle), player: None };
-    rig.hosts[ha as usize].manager.send_reliable_for_test(hb, transfer, false);
+    rig.hosts[ha.0 as usize].manager.send_reliable_for_test(hb, transfer, false);
     // A player on no host, moved to `b`.
     let handoff = game::PlayerHandoff { client: P3_CLIENT, player: P3_PLAYER, claim: None, login: None, park: false, hop: 1 };
     let record = stocked_record(b, 6);
     let mv = game::Reliable::PlayerMove { handoff, record: Box::new(record.clone()), target: b };
-    rig.hosts[ha as usize].manager.send_reliable_for_test(hb, mv, false);
-    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, 0);
+    rig.hosts[ha.0 as usize].manager.send_reliable_for_test(hb, mv, false);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold(home_b, 0);
     if !until_decided(rig, cut) {
         return false;
     }
@@ -4564,22 +4565,22 @@ fn case_three_crossings_stay_in_the_senders_part() {
 fn lead_window(rig: &mut MultiRig) -> bool {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let home_b = rig.homes[hb as usize];
+    let home_b = rig.homes[hb.0 as usize];
     rig.run(a);
     // Host B idle: its keeper leaves (its body parks: not a tracked entity any more), its
     // home parks.
     let mut keeper = None;
-    rig.hosts[hb as usize].manager.spawner_mut().with_region(home_b, |r| {
+    rig.hosts[hb.0 as usize].manager.spawner_mut().with_region(home_b, |r| {
         let d = r.data();
         keeper = d.player_entites.get(&crate::common::rig::CLIENT).and_then(|k| *d.ecs.id.try_get(*k));
     });
     // Its body may end by parking (the keeper's player is the host's ordinal).
     if let Some(id) = keeper {
-        rig.player_bodies.insert(id, game::PlayerId(u64::from(hb)));
+        rig.player_bodies.insert(id, game::PlayerId(hb.0));
     }
     rig.disconnect(hb, crate::common::rig::CLIENT);
     rig.park(home_b);
-    assert!(rig.hosts[hb as usize].manager.running_regions().is_empty(), "host {hb} runs nothing");
+    assert!(rig.hosts[hb.0 as usize].manager.running_regions().is_empty(), "host {hb} runs nothing");
     world_cuts(rig);
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, stocked_record(a, 4));
     let (_, _, body) = until_body(rig);
@@ -4587,12 +4588,12 @@ fn lead_window(rig: &mut MultiRig) -> bool {
     let slime = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 3.0]);
     let (cut, t) = until_world_cut_on(rig, ha);
     for _ in 0..CROSS_ROUNDS {
-        if rig.hosts[hb as usize].manager.world_cut() == Some(cut) {
+        if rig.hosts[hb.0 as usize].manager.world_cut() == Some(cut) {
             break;
         }
         rig.cut_round();
     }
-    assert_eq!(rig.hosts[hb as usize].manager.world_cut(), Some(cut), "host {hb} takes part");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.world_cut(), Some(cut), "host {hb} takes part");
     // Over: the player wakes `b`, then the slime follows.
     assert!(rig.teleport(a, body, past_seam(a, b, REGION_SIZE / 2.0)));
     let woke = until_player_in(rig, b);
@@ -4618,7 +4619,7 @@ fn lead_window(rig: &mut MultiRig) -> bool {
     }
     let back_before_t = slime_over && world_tick(rig) + 1 < t;
     let committed = until_decided(rig, cut);
-    let marked = rig.hosts[hb as usize].manager.marks_queued().iter().find(|(c, _)| *c == cut).map(|(_, at)| *at);
+    let marked = rig.hosts[hb.0 as usize].manager.marks_queued().iter().find(|(c, _)| *c == cut).map(|(_, at)| *at);
     assert!(marked.is_some_and(|at| at >= t), "host {hb} queued its marks of K at {marked:?}, before the cut tick {t}");
     if !(back_before_t && committed) {
         return false;
@@ -4651,7 +4652,7 @@ fn region_woken_in_the_lead_window_is_owned_by_exactly_one_part() {
 fn person_never_a_row(rig: &mut MultiRig) -> bool {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let home_b = rig.homes[hb as usize];
+    let home_b = rig.homes[hb.0 as usize];
     let (history, _, people) = history_with_site(a, 3);
     rig.run(a);
     rig.run(b);
@@ -4670,14 +4671,14 @@ fn person_never_a_row(rig: &mut MultiRig) -> bool {
         rig.cut_round();
     }
     let lag = (t - world_tick(rig)) as u32 + LAG_AROUND_T;
-    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, lag);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold(home_b, lag);
     for _ in 0..WORLD_CUT_ROUNDS {
-        if matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked")) if c == cut) {
+        if matches!(rig.hosts[ha.0 as usize].manager.world_cut_state(), Some((c, "marked")) if c == cut) {
             break;
         }
         rig.cut_round();
     }
-    assert!(matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked")) if c == cut), "host {ha} marked");
+    assert!(matches!(rig.hosts[ha.0 as usize].manager.world_cut_state(), Some((c, "marked")) if c == cut), "host {ha} marked");
     let mut bundle = None;
     rig.host_of(a).manager.spawner_mut().with_region(a, |r| {
         let key = r.data().id_index[&bodies[0]];
@@ -4688,8 +4689,8 @@ fn person_never_a_row(rig: &mut MultiRig) -> bool {
     assert!(matches!(bundle.kind, game::EntityKind::Person { .. }));
     bundle.rebase(a, b);
     let transfer = game::Reliable::Transfer { target: b, stamp: t - 2, bundle: Box::new(bundle), player: None };
-    rig.hosts[ha as usize].manager.send_reliable_for_test(hb, transfer, false);
-    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, 0);
+    rig.hosts[ha.0 as usize].manager.send_reliable_for_test(hb, transfer, false);
+    rig.hosts[hb.0 as usize].manager.spawner_mut().hold(home_b, 0);
     until_decided(rig, cut);
     // Host A's part as it was staged, committed or aborted.
     let staged = match rig.last_cut.as_ref().filter(|(c, _)| *c == cut) {
@@ -4705,13 +4706,13 @@ fn person_never_a_row(rig: &mut MultiRig) -> bool {
     let id = bodies[1];
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)), "{a:?} holds the person");
     for _ in 0..WAIT_ROUNDS {
-        if rig.hosts[ha as usize].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id) {
+        if rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id) {
             break;
         }
         rig.cut_round();
     }
-    assert!(rig.hosts[ha as usize].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id), "queued to host {hb}");
-    let one_phase = cut_on(rig, ha as usize);
+    assert!(rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id), "queued to host {hb}");
+    let one_phase = cut_on(rig, ha.0 as usize);
     assert!(part_holds(&one_phase, id).is_none(), "no row of the person in the one-phase cut");
     staged.is_some()
 }
@@ -4733,22 +4734,22 @@ fn person_bundle_is_never_a_cut_row() {
 fn committed_leave(rig: &mut MultiRig) -> bool {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let home_b = rig.homes[hb as usize];
+    let home_b = rig.homes[hb.0 as usize];
     rig.run(a);
     world_cuts(rig);
     // B's keeper body parks with B's leave (the keeper's player is the host's ordinal).
     let mut keeper = None;
-    rig.hosts[hb as usize].manager.spawner_mut().with_region(home_b, |r| {
+    rig.hosts[hb.0 as usize].manager.spawner_mut().with_region(home_b, |r| {
         let d = r.data();
         keeper = d.player_entites.get(&crate::common::rig::CLIENT).and_then(|k| *d.ecs.id.try_get(*k));
     });
-    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(u64::from(hb)));
+    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(hb.0));
     let early = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 3.0));
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.hosts[hb.0 as usize].manager.request_leave();
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
-        let leaving = rig.hosts[hb as usize].manager.leaving_cut();
-        if leaving.is_some() && rig.hosts[ha as usize].manager.world_cut() == leaving {
+        let leaving = rig.hosts[hb.0 as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[ha.0 as usize].manager.world_cut() == leaving {
             cut = leaving;
             break;
         }
@@ -4765,13 +4766,13 @@ fn committed_leave(rig: &mut MultiRig) -> bool {
     let mut hit = false;
     for _ in 0..WORLD_CUT_ROUNDS {
         assert!(
-            !rig.hosts[hb as usize].manager.pending_arrival_ids().iter().any(|(id, _)| *id == late),
+            !rig.hosts[hb.0 as usize].manager.pending_arrival_ids().iter().any(|(id, _)| *id == late),
             "the slime sent after the leave cut began reached the leaving host"
         );
-        let prepared = |h: u32| matches!(rig.hosts[h as usize].manager.world_cut_state(), Some((c, "prepared")) if c == cut);
+        let prepared = |h: HostId| matches!(rig.hosts[h.0 as usize].manager.world_cut_state(), Some((c, "prepared")) if c == cut);
         if rig.decided.contains_key(&cut) || (prepared(ha) && prepared(hb)) {
             // B exits: its link goes.
-            hit = rig.hosts[ha as usize].manager.peer_owed(hb).iter().any(mark);
+            hit = rig.hosts[ha.0 as usize].manager.peer_owed(hb).iter().any(mark);
             rig.link_down(ha, hb);
             break;
         }
@@ -4781,13 +4782,13 @@ fn committed_leave(rig: &mut MultiRig) -> bool {
         return false;
     }
     for _ in 0..WAIT_ROUNDS {
-        if rig.hosts[ha as usize].manager.peer_left(hb) {
+        if rig.hosts[ha.0 as usize].manager.peer_left(hb) {
             break;
         }
         rig.cut_round();
     }
-    assert!(rig.hosts[ha as usize].manager.peer_left(hb), "host {ha} holds its session with the host that left");
-    let owed = rig.hosts[ha as usize].manager.peer_owed(hb);
+    assert!(rig.hosts[ha.0 as usize].manager.peer_left(hb), "host {ha} holds its session with the host that left");
+    let owed = rig.hosts[ha.0 as usize].manager.peer_owed(hb);
     assert!(!owed.iter().any(mark), "the mark is forgotten after the committed leave");
     assert!(!owed.iter().any(|r| carries(r, early)), "what went before the mark is forgotten");
     assert!(owed.iter().any(|r| carries(r, late)), "the slime held back is still owed");
@@ -4802,9 +4803,9 @@ fn committed_leave(rig: &mut MultiRig) -> bool {
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
-    assert!(rig.hosts[ha as usize].manager.peer_left(hb), "still held for the same boot");
+    assert!(rig.hosts[ha.0 as usize].manager.peer_left(hb), "still held for the same boot");
     assert!(
-        rig.hosts[ha as usize].manager.peer_unreceived_ids().contains(&(hb, late, false)),
+        rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().contains(&(hb, late, false)),
         "the held-back slime was never sent"
     );
     // A's next cut, B absent: the slime is A's row.
@@ -4826,7 +4827,7 @@ fn held_session_entries_before_the_mark_are_dropped_after_a_committed_leave() {
 fn misrouted_transfer(rig: &mut MultiRig) {
     let home0 = rig.homes[0];
     let home2 = rig.homes[2];
-    assert_eq!(rig.owner(home2), 2);
+    assert_eq!(rig.owner(home2), h(2));
     let id = rig.spawn_slime(home0, [REGION_SIZE / 3.0, crate::common::above_floor_y(), REGION_SIZE / 3.0]);
     let mut bundle = None;
     rig.hosts[0].manager.spawner_mut().with_region(home0, |r| {
@@ -4840,14 +4841,14 @@ fn misrouted_transfer(rig: &mut MultiRig) {
     bundle.body.pose = game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0));
     let stamp = world_tick(rig);
     let transfer = game::Reliable::Transfer { target: home2, stamp, bundle: Box::new(bundle), player: None };
-    rig.hosts[0].manager.apply_peer_reliable(1, transfer);
+    rig.hosts[0].manager.apply_peer_reliable(h(1), transfer);
     for _ in 0..CROSS_ROUNDS {
-        if rig.owners_of(id) == [(2, home2)] && rig.peer_unreceived() == 0 {
+        if rig.owners_of(id) == [(h(2), home2)] && rig.peer_unreceived() == 0 {
             break;
         }
         rig.round();
     }
-    assert_eq!(rig.owners_of(id), [(2, home2)], "bounced on to its owner, once");
+    assert_eq!(rig.owners_of(id), [(h(2), home2)], "bounced on to its owner, once");
     assert_eq!(live_count(rig, id), 1);
 }
 
@@ -4858,21 +4859,21 @@ fn transfer_for_a_region_of_a_third_host_is_bounced_to_its_owner() {
 }
 
 /// Host B's keeper body may end by parking (B leaves): registered as a player body.
-fn keeper_may_park(rig: &mut MultiRig, hb: u32) {
-    let home_b = rig.homes[hb as usize];
+fn keeper_may_park(rig: &mut MultiRig, hb: HostId) {
+    let home_b = rig.homes[hb.0 as usize];
     let mut keeper = None;
-    rig.hosts[hb as usize].manager.spawner_mut().with_region(home_b, |r| {
+    rig.hosts[hb.0 as usize].manager.spawner_mut().with_region(home_b, |r| {
         let d = r.data();
         keeper = d.player_entites.get(&crate::common::rig::CLIENT).and_then(|k| *d.ecs.id.try_get(*k));
     });
-    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(u64::from(hb)));
+    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(hb.0));
 }
 
 /// Cut rounds until host `hb`'s leave cut has begun on it and on host `ha`: its id.
-fn until_leave_begun(rig: &mut MultiRig, ha: u32, hb: u32) -> game::CutId {
+fn until_leave_begun(rig: &mut MultiRig, ha: HostId, hb: HostId) -> game::CutId {
     for _ in 0..WORLD_CUT_ROUNDS {
-        let leaving = rig.hosts[hb as usize].manager.leaving_cut();
-        if leaving.is_some() && rig.hosts[ha as usize].manager.world_cut() == leaving {
+        let leaving = rig.hosts[hb.0 as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[ha.0 as usize].manager.world_cut() == leaving {
             return leaving.unwrap();
         }
         rig.cut_round();
@@ -4882,13 +4883,13 @@ fn until_leave_begun(rig: &mut MultiRig, ha: u32, hb: u32) -> game::CutId {
 
 /// Host `h`'s coordinator link drops (the runtime tells the core it detached) and, after
 /// some rounds, comes back (a new connection: the host attaches again).
-fn flap_world_link(rig: &mut MultiRig, h: u32) {
-    rig.hosts[h as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
+fn flap_world_link(rig: &mut MultiRig, h: HostId) {
+    rig.hosts[h.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
     rig.core().host_detached(h);
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
-    rig.hosts[h as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
+    rig.hosts[h.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
 }
 
 /// Fix round 1 (I1): host B asks to leave while attached, and its coordinator link drops
@@ -4900,7 +4901,7 @@ fn leave_after_a_link_flap(rig: &mut MultiRig) {
     rig.run(a);
     world_cuts(rig);
     keeper_may_park(rig, hb);
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.hosts[hb.0 as usize].manager.request_leave();
     rig.cut_round();
     flap_world_link(rig, hb);
     let cut = until_leave_begun(rig, ha, hb);
@@ -4923,12 +4924,12 @@ fn aborted_leave(rig: &mut MultiRig) {
     rig.run(a);
     world_cuts(rig);
     keeper_may_park(rig, hb);
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.hosts[hb.0 as usize].manager.request_leave();
     let cut = until_leave_begun(rig, ha, hb);
     let first = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 3.0));
     rig.cut_round();
     let second = rig.spawn_slime(a, past_seam(a, b, 2.0 * REGION_SIZE / 3.0));
-    let held = |rig: &MultiRig, id| rig.hosts[ha as usize].manager.peer_unreceived_ids().contains(&(hb, id, false));
+    let held = |rig: &MultiRig, id| rig.hosts[ha.0 as usize].manager.peer_unreceived_ids().contains(&(hb, id, false));
     for _ in 0..WAIT_ROUNDS {
         if held(rig, first) && held(rig, second) {
             break;
@@ -4937,30 +4938,30 @@ fn aborted_leave(rig: &mut MultiRig) {
     }
     assert!(held(rig, first) && held(rig, second), "both slimes held back on host {ha}");
     // B's link goes while the leave cut runs: it is aborted.
-    rig.hosts[hb as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
+    rig.hosts[hb.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
     rig.core().host_detached(hb);
     assert!(!until_decided(rig, cut), "the leave cut is aborted");
-    rig.hosts[hb as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
+    rig.hosts[hb.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
     for _ in 0..CROSS_ROUNDS {
-        let waiting: Vec<game::EntityId> = rig.hosts[hb as usize].manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
+        let waiting: Vec<game::EntityId> = rig.hosts[hb.0 as usize].manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
         if waiting.contains(&first) && waiting.contains(&second) && rig.peer_unreceived() == 0 {
             break;
         }
         rig.cut_round();
     }
-    let waiting: Vec<game::EntityId> = rig.hosts[hb as usize].manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
+    let waiting: Vec<game::EntityId> = rig.hosts[hb.0 as usize].manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
     let at = |id| waiting.iter().position(|w| *w == id);
     assert!(at(first).is_some() && at(second).is_some(), "both slimes released to host {hb}: {waiting:?}");
     assert!(at(first) < at(second), "in the order they were sent");
     assert_eq!(live_count(rig, first), 1);
     assert_eq!(live_count(rig, second), 1);
-    assert!(!rig.hosts[ha as usize].manager.peer_left(hb), "an aborted leave holds nothing");
+    assert!(!rig.hosts[ha.0 as usize].manager.peer_left(hb), "an aborted leave holds nothing");
     // An ordinary cut of both hosts, then the retried leave.
     until_committed(rig, 1);
     let (_, parts) = rig.last_committed();
     assert!(parts.contains_key(&ha) && parts.contains_key(&hb), "both hosts in the next cut");
-    assert_eq!(rig.hosts[hb as usize].manager.leave_outcome(), Some(false));
-    assert!(rig.hosts[hb as usize].manager.retry_leave(), "the leave is asked for again");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.leave_outcome(), Some(false));
+    assert!(rig.hosts[hb.0 as usize].manager.retry_leave(), "the leave is asked for again");
     let again = until_leave_begun(rig, ha, hb);
     assert!(again > cut);
     assert!(until_decided(rig, again), "the retried leave commits");
@@ -4987,7 +4988,7 @@ fn players_toward_a_leaver(rig: &mut MultiRig) {
     // A body bundle to carry the handed player (a copy of a slime's, under a new id).
     let slime = rig.spawn_slime(a, [REGION_SIZE / 2.0, crate::common::above_floor_y(), REGION_SIZE / 2.0]);
     let mut bundle = None;
-    rig.hosts[ha as usize].manager.spawner_mut().with_region(a, |r| {
+    rig.hosts[ha.0 as usize].manager.spawner_mut().with_region(a, |r| {
         let key = r.data().id_index[&slime];
         bundle = Some(r.data().bundle_of(key));
     });
@@ -4997,18 +4998,18 @@ fn players_toward_a_leaver(rig: &mut MultiRig) {
     bundle.body.pose = game::Pose::from_translation(game::rapier3d::math::Vector::new(1.0, crate::common::above_floor_y(), REGION_SIZE / 2.0));
     let (walker, mover) = ((60, game::PlayerId(600)), (61, game::PlayerId(610)));
     bundle.client = Some((walker.0, game::Client::default()));
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.hosts[hb.0 as usize].manager.request_leave();
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
         // On B, right after its BeginCut (no mark of A's yet: A marks at the cut tick).
-        if let Some(c) = rig.hosts[hb as usize].manager.leaving_cut() {
+        if let Some(c) = rig.hosts[hb.0 as usize].manager.leaving_cut() {
             cut = Some(c);
             break;
         }
         rig.cut_round();
     }
     let cut = cut.expect("the leave cut began on B");
-    assert!(rig.hosts[hb as usize].manager.leave_parked());
+    assert!(rig.hosts[hb.0 as usize].manager.leave_parked());
     let handoff = |(client, player): (game::ClientId, game::PlayerId)| game::PlayerHandoff {
         client,
         player,
@@ -5019,14 +5020,14 @@ fn players_toward_a_leaver(rig: &mut MultiRig) {
     };
     let stamp = world_tick(rig);
     let walk = game::Reliable::Transfer { target: b, stamp, bundle: Box::new(bundle), player: Some(handoff(walker)) };
-    rig.hosts[hb as usize].manager.apply_peer_reliable(ha, walk);
+    rig.hosts[hb.0 as usize].manager.apply_peer_reliable(ha, walk);
     let record = centre_of(b);
     let mv = game::Reliable::PlayerMove { handoff: handoff(mover), record: Box::new(record), target: b };
-    rig.hosts[hb as usize].manager.apply_peer_reliable(ha, mv);
+    rig.hosts[hb.0 as usize].manager.apply_peer_reliable(ha, mv);
     for (_, p) in [walker, mover] {
-        assert!(rig.hosts[hb as usize].manager.parked_record(p).is_some(), "player {} parked on B", p.0);
+        assert!(rig.hosts[hb.0 as usize].manager.parked_record(p).is_some(), "player {} parked on B", p.0);
     }
-    assert!(!rig.hosts[hb as usize].manager.running_regions().contains(&b), "nothing woke {b:?}");
+    assert!(!rig.hosts[hb.0 as usize].manager.running_regions().contains(&b), "nothing woke {b:?}");
     assert!(until_decided(rig, cut), "the leave cut commits");
     let (_, parts) = rig.last_committed();
     for (_, p) in [walker, mover] {
@@ -5064,7 +5065,7 @@ fn leave_traffic(rig: &mut MultiRig) -> LeaveTraffic {
     rig.run(a);
     rig.run(b);
     world_cuts(rig);
-    for h in 0..rig.hosts.len() as u32 {
+    for h in host_ids(rig.hosts.len() as u32) {
         keeper_may_park(rig, h);
     }
     rig.parked_hold = true;
@@ -5083,7 +5084,7 @@ fn leave_traffic(rig: &mut MultiRig) -> LeaveTraffic {
 
 /// Whether `rc` runs on its owner, which has not parked for a leave.
 fn runs_unparked(rig: &mut MultiRig, rc: RegionCoords) -> bool {
-    let h = rig.owner(rc) as usize;
+    let h = rig.owner(rc).0 as usize;
     !rig.hosts[h].manager.leave_parked() && rig.hosts[h].manager.running_regions().contains(&rc)
 }
 
@@ -5113,12 +5114,12 @@ fn traffic_round(rig: &mut MultiRig, t: &mut LeaveTraffic, round: usize) {
 
 /// Traffic rounds until every host in `leavers` is named leaving in one world cut and
 /// that cut has begun on every host in `on` too: its id.
-fn until_leave_of(rig: &mut MultiRig, t: &mut LeaveTraffic, leavers: &[u32], on: &[u32]) -> game::CutId {
+fn until_leave_of(rig: &mut MultiRig, t: &mut LeaveTraffic, leavers: &[HostId], on: &[HostId]) -> game::CutId {
     for round in 0..WORLD_CUT_ROUNDS {
-        let first = rig.hosts[leavers[0] as usize].manager.leaving_cut();
+        let first = rig.hosts[leavers[0].0 as usize].manager.leaving_cut();
         if let Some(cut) = first {
-            let all_leave = leavers.iter().all(|h| rig.hosts[*h as usize].manager.leaving_cut() == Some(cut));
-            let begun = on.iter().all(|h| rig.hosts[*h as usize].manager.world_cut() == Some(cut));
+            let all_leave = leavers.iter().all(|h| rig.hosts[(*h).0 as usize].manager.leaving_cut() == Some(cut));
+            let begun = on.iter().all(|h| rig.hosts[(*h).0 as usize].manager.world_cut() == Some(cut));
             if all_leave && begun {
                 return cut;
             }
@@ -5130,9 +5131,9 @@ fn until_leave_of(rig: &mut MultiRig, t: &mut LeaveTraffic, leavers: &[u32], on:
 
 /// Cut rounds until every host in `leavers` has its leave settled (its `CutDone` came and
 /// the server settled it): what its exit loop waits for.
-fn until_leaves_settled(rig: &mut MultiRig, leavers: &[u32]) {
+fn until_leaves_settled(rig: &mut MultiRig, leavers: &[HostId]) {
     for _ in 0..WAIT_ROUNDS {
-        if leavers.iter().all(|h| rig.hosts[*h as usize].manager.leave_outcome().is_some()) {
+        if leavers.iter().all(|h| rig.hosts[(*h).0 as usize].manager.leave_outcome().is_some()) {
             return;
         }
         rig.cut_round();
@@ -5146,7 +5147,7 @@ fn until_leaves_settled(rig: &mut MultiRig, leavers: &[u32]) {
 /// again — and the world is whole: each slime once, every item once, one body per player.
 fn assert_whole_after_leaves(rig: &mut MultiRig, t: &LeaveTraffic) {
     let n = rig.hosts.len() as u32;
-    assert_eq!(rig.core().left_hosts(), (0..n).collect::<Vec<_>>(), "every host left");
+    assert_eq!(rig.core().left_hosts(), host_ids(n).collect::<Vec<_>>(), "every host left");
     for (id, _, _) in &t.slimes {
         assert_eq!(rig.stored_places(*id).len(), 1, "{id:?} stored once: {:?}", rig.stored_places(*id));
     }
@@ -5180,9 +5181,9 @@ fn assert_whole_after_leaves(rig: &mut MultiRig, t: &LeaveTraffic) {
 /// returned world is whole.
 fn every_host_leaves(rig: &mut MultiRig) {
     let mut t = leave_traffic(rig);
-    let all: Vec<u32> = (0..rig.hosts.len() as u32).collect();
+    let all: Vec<HostId> = host_ids(rig.hosts.len() as u32).collect();
     for &h in &all {
-        rig.hosts[h as usize].manager.request_leave();
+        rig.hosts[h.0 as usize].manager.request_leave();
     }
     let cut = until_leave_of(rig, &mut t, &all, &all);
     assert!(until_decided(rig, cut), "the leave cut of every host commits");
@@ -5191,7 +5192,7 @@ fn every_host_leaves(rig: &mut MultiRig) {
     assert_eq!(parts.keys().copied().collect::<Vec<_>>(), all, "one part of every host");
     until_leaves_settled(rig, &all);
     for &h in &all {
-        assert_eq!(rig.hosts[h as usize].manager.leave_outcome(), Some(true), "host {h} left cleanly");
+        assert_eq!(rig.hosts[h.0 as usize].manager.leave_outcome(), Some(true), "host {h} left cleanly");
     }
     assert_whole_after_leaves(rig, &t);
 }
@@ -5215,20 +5216,20 @@ fn three_hosts_leave_in_one_cut() {
 fn consecutive_leaves(rig: &mut MultiRig) {
     let mut t = leave_traffic(rig);
     let (ha, hb) = (rig.owner(t.a), rig.owner(t.b));
-    rig.hosts[ha as usize].manager.request_leave();
+    rig.hosts[ha.0 as usize].manager.request_leave();
     let first = until_leave_of(rig, &mut t, &[ha], &[ha, hb]);
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.hosts[hb.0 as usize].manager.request_leave();
     assert!(until_decided(rig, first), "host {ha}'s leave cut commits");
-    assert_ne!(rig.hosts[hb as usize].manager.leaving_cut(), Some(first), "host {hb} stayed in it");
+    assert_ne!(rig.hosts[hb.0 as usize].manager.leaving_cut(), Some(first), "host {hb} stayed in it");
     let second = until_leave_of(rig, &mut t, &[hb], &[hb]);
     assert!(second > first);
-    assert!(rig.hosts[hb as usize].manager.peer_left(ha), "host {hb} saw host {ha} leave");
+    assert!(rig.hosts[hb.0 as usize].manager.peer_left(ha), "host {hb} saw host {ha} leave");
     assert!(until_decided(rig, second), "host {hb}'s leave cut, alone, commits");
     let (_, parts) = rig.last_committed();
     assert_eq!(parts.keys().copied().collect::<Vec<_>>(), [hb], "the second cut is host {hb}'s alone");
     until_leaves_settled(rig, &[ha, hb]);
-    assert_eq!(rig.hosts[hb as usize].manager.leave_outcome(), Some(true));
-    assert_eq!(rig.hosts[ha as usize].manager.leave_outcome(), Some(true));
+    assert_eq!(rig.hosts[hb.0 as usize].manager.leave_outcome(), Some(true));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.leave_outcome(), Some(true));
     assert_whole_after_leaves(rig, &t);
 }
 
@@ -5248,17 +5249,17 @@ const NEW_LOGIN_CLIENT: game::ClientId = 12;
 const FRESH_PLAYER: game::PlayerId = game::PlayerId(103);
 
 /// What each host told its login service so far, appended to `out` as `(host, message)`.
-fn collect_login_out(rig: &mut MultiRig, out: &mut Vec<(u32, game::LoginOut)>) {
+fn collect_login_out(rig: &mut MultiRig, out: &mut Vec<(HostId, game::LoginOut)>) {
     for (h, r) in rig.hosts.iter_mut().enumerate() {
-        out.extend(r.manager.take_login_out().into_iter().map(|o| (h as u32, o)));
+        out.extend(r.manager.take_login_out().into_iter().map(|o| (HostId(h as u64), o)));
     }
 }
 
 /// The host of a 3-host rig that owns neither `a` nor `b` (the entry host of the login
 /// tests: the login service is linked to it only), set as every host's entry host.
-fn third_host_as_entry(rig: &mut MultiRig, a: RegionCoords, b: RegionCoords) -> u32 {
+fn third_host_as_entry(rig: &mut MultiRig, a: RegionCoords, b: RegionCoords) -> HostId {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let entry = (0..rig.hosts.len() as u32).find(|h| *h != ha && *h != hb).expect("a third host");
+    let entry = host_ids(rig.hosts.len() as u32).find(|h| *h != ha && *h != hb).expect("a third host");
     for r in &mut rig.hosts {
         r.manager.set_entry_host(entry);
     }
@@ -5273,10 +5274,10 @@ fn place_spawn_rules(rig: &mut MultiRig) {
     use game::Placement::{Here, Host};
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let at = |h: u32, owner: u32| if h == owner { Here } else { Host(owner) };
+    let at = |h: HostId, owner: HostId| if h == owner { Here } else { Host(owner) };
     let spawn_owner = rig.owner(game::SPAWN_REGION);
     for h in [ha, hb] {
-        let m = &rig.hosts[h as usize].manager;
+        let m = &rig.hosts[h.0 as usize].manager;
         assert_eq!(m.place_spawn(FRESH_PLAYER, None), at(h, spawn_owner), "no record, on host {h}");
         assert_eq!(m.place_spawn(FRESH_PLAYER, Some(a)), at(h, ha), "a record in {a:?}, on host {h}");
         assert_eq!(m.place_spawn(FRESH_PLAYER, Some(b)), at(h, hb), "a record in {b:?}, on host {h}");
@@ -5285,12 +5286,12 @@ fn place_spawn_rules(rig: &mut MultiRig) {
     rig.run(b);
     rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 1);
     let (_, _, id) = until_body(rig);
-    assert_eq!(rig.hosts[ha as usize].manager.place_spawn(P_PLAYER, Some(b)), Here, "online here");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.place_spawn(P_PLAYER, Some(b)), Here, "online here");
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
     // Its stored record still says `a` (no cut since).
-    assert_eq!(rig.hosts[ha as usize].manager.place_spawn(P_PLAYER, Some(a)), Host(hb), "handed away: where it went");
-    assert_eq!(rig.hosts[hb as usize].manager.place_spawn(P_PLAYER, Some(a)), Here, "online here (handed here)");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.place_spawn(P_PLAYER, Some(a)), Host(hb), "handed away: where it went");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.place_spawn(P_PLAYER, Some(a)), Here, "online here (handed here)");
     // Its session never comes to hb: parked there after the grace.
     for _ in 0..CROSS_ROUNDS {
         if !rig.parked_on(P_PLAYER).is_empty() {
@@ -5300,8 +5301,8 @@ fn place_spawn_rules(rig: &mut MultiRig) {
         rig.round();
     }
     assert_eq!(rig.parked_on(P_PLAYER), [hb]);
-    assert_eq!(rig.hosts[hb as usize].manager.place_spawn(P_PLAYER, Some(a)), Here, "parked here");
-    assert_eq!(rig.hosts[ha as usize].manager.place_spawn(P_PLAYER, Some(a)), Host(hb), "parked where it went");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.place_spawn(P_PLAYER, Some(a)), Here, "parked here");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.place_spawn(P_PLAYER, Some(a)), Host(hb), "parked where it went");
 }
 
 #[test]
@@ -5318,13 +5319,13 @@ fn place_spawn_order_of_rules() {
 /// server answered the order in.
 fn login_through_entry(
     rig: &mut MultiRig,
-    entry: u32,
+    entry: HostId,
     (client, epoch): (game::ClientId, u64),
     a: RegionCoords,
     serve_every: u64,
-    out: &mut Vec<(u32, game::LoginOut)>,
+    out: &mut Vec<(HostId, game::LoginOut)>,
     mut walk: impl FnMut(&mut MultiRig, u64),
-) -> (u32, bool, u64) {
+) -> (HostId, bool, u64) {
     let order = game::ServerEvent::SpawnOrder {
         origin: entry,
         hops: 0,
@@ -5333,7 +5334,7 @@ fn login_through_entry(
         player: P_PLAYER,
         record_region: Some(a),
     };
-    rig.hosts[entry as usize].event(order);
+    rig.hosts[entry.0 as usize].event(order);
     let mut taken = Vec::new();
     let is_ack = |o: &game::LoginOut| matches!(o, game::LoginOut::SpawnAck { session_epoch, .. } if *session_epoch == epoch);
     for round in 0..CROSS_ROUNDS as u64 {
@@ -5351,7 +5352,7 @@ fn login_through_entry(
     }
     assert_eq!(taken.len(), 1, "one host took the order of epoch {epoch}: {taken:?}");
     let (answered, (placed, _)) = taken[0];
-    let acks: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| is_ack(o)).collect();
+    let acks: Vec<&(HostId, game::LoginOut)> = out.iter().filter(|(_, o)| is_ack(o)).collect();
     let want = game::LoginOut::SpawnAck {
         player_token: LOGIN_TOKEN.into(),
         session_epoch: epoch,
@@ -5362,7 +5363,7 @@ fn login_through_entry(
     let centre = [REGION_SIZE / 2.0, REGION_SIZE / 2.0];
     rig.record_packets();
     rig.connect_login(placed, client, P_PLAYER, Some(record_at(a, centre)), LOGIN_TOKEN, epoch);
-    let seen = rig.hosts[placed as usize].packets_seen.as_ref().expect("recording");
+    let seen = rig.hosts[placed.0 as usize].packets_seen.as_ref().expect("recording");
     let refused = seen.iter().any(|(to, p)| {
         *to == Some(client) && matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_ELSEWHERE_REFUSAL)
     });
@@ -5435,7 +5436,7 @@ fn spawn_behind_handoff(rig: &mut MultiRig) {
     assert!(rig.parked_on(P_PLAYER).is_empty(), "no parked copy beside the body");
     let ended_once = |epoch: u64| {
         let end = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: epoch };
-        let ends: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| *o == end).collect();
+        let ends: Vec<&(HostId, game::LoginOut)> = out.iter().filter(|(_, o)| *o == end).collect();
         assert_eq!(ends, [&(entry, end.clone())], "login {epoch} ended once, told to the entry host: {out:?}");
     };
     ended_once(1);
@@ -5470,7 +5471,7 @@ fn kick_crossing(rig: &mut MultiRig) {
     let (_, _, id) = until_body(rig);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     let kick = game::ServerEvent::Kick { player_token: LOGIN_TOKEN.into(), session_epoch: 1, reason: "signed out".into() };
-    rig.hosts[entry as usize].event(kick);
+    rig.hosts[entry.0 as usize].event(kick);
     let mut out = Vec::new();
     for _ in 0..CROSS_ROUNDS {
         rig.round();
@@ -5490,12 +5491,12 @@ fn kick_crossing(rig: &mut MultiRig) {
     assert!(parked == [ha] || parked == [hb], "parked once, on A or B: {parked:?}");
     let ack = game::LoginOut::KickAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
     let ended = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
-    let acks: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ack).collect();
+    let acks: Vec<&(HostId, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ack).collect();
     assert_eq!(acks, [&(entry, ack.clone())], "acknowledged once, by the entry host: {out:?}");
-    let ends: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ended).collect();
+    let ends: Vec<&(HostId, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ended).collect();
     assert_eq!(ends, [&(entry, ended.clone())], "the login ended once, told to the entry host: {out:?}");
     // A resend (the login service's sweep) is acknowledged again and changes nothing.
-    rig.hosts[entry as usize].event(game::ServerEvent::Kick {
+    rig.hosts[entry.0 as usize].event(game::ServerEvent::Kick {
         player_token: LOGIN_TOKEN.into(),
         session_epoch: 1,
         reason: "signed out".into(),
@@ -5525,7 +5526,7 @@ fn kick_reaches_a_crossing_login_and_is_acked_once() {
 /// one.
 fn store_spawn_waits_for_sync(rig: &mut MultiRig) {
     let (b, ha, hb) = move_queued_link_down(rig, true);
-    rig.hosts[hb as usize].manager.set_entry_host(hb);
+    rig.hosts[hb.0 as usize].manager.set_entry_host(hb);
     let order = game::ServerEvent::SpawnOrder {
         origin: hb,
         hops: 0,
@@ -5534,7 +5535,7 @@ fn store_spawn_waits_for_sync(rig: &mut MultiRig) {
         player: P_PLAYER,
         record_region: Some(b),
     };
-    rig.hosts[hb as usize].event(order);
+    rig.hosts[hb.0 as usize].event(order);
     let (mut taken, mut out) = (Vec::new(), Vec::new());
     for _ in 0..WAIT_ROUNDS {
         rig.round();
@@ -5542,7 +5543,7 @@ fn store_spawn_waits_for_sync(rig: &mut MultiRig) {
         collect_login_out(rig, &mut out);
     }
     assert!(taken.is_empty() && out.is_empty(), "nothing placed while host {ha} has not synced: {taken:?} {out:?}");
-    assert_eq!(rig.hosts[hb as usize].manager.spawn_orders_waiting(), 1, "the order waits");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.spawn_orders_waiting(), 1, "the order waits");
     rig.link_up(ha, hb);
     for _ in 0..CROSS_ROUNDS {
         rig.round();
@@ -5565,7 +5566,7 @@ fn store_spawn_waits_for_sync(rig: &mut MultiRig) {
     }
     assert_eq!(rig.player_owners(NEW_LOGIN_CLIENT), [(hb, b)], "one body, where the move took it");
     assert!(rig.parked_on(P_PLAYER).is_empty());
-    let claim = rig.hosts[hb as usize].manager.client_claim(NEW_LOGIN_CLIENT);
+    let claim = rig.hosts[hb.0 as usize].manager.client_claim(NEW_LOGIN_CLIENT);
     assert_eq!(claim, Some(game::Claim::Fortress(EMBARK_SITE)), "the moved record's fortress, not the stored record's none");
 }
 
@@ -5580,8 +5581,8 @@ fn spawn_from_the_store_waits_for_every_peer_sync() {
 /// A spawn order for a player no host holds, its stored record in `rc`, at `h` (its own
 /// entry host); rounds (the server answering) until host `h` told its login service
 /// something, or `budget` rounds. What it told.
-fn store_order_at(rig: &mut MultiRig, h: u32, rc: RegionCoords, epoch: u64, budget: usize) -> Vec<(u32, game::LoginOut)> {
-    rig.hosts[h as usize].manager.set_entry_host(h);
+fn store_order_at(rig: &mut MultiRig, h: HostId, rc: RegionCoords, epoch: u64, budget: usize) -> Vec<(HostId, game::LoginOut)> {
+    rig.hosts[h.0 as usize].manager.set_entry_host(h);
     let order = game::ServerEvent::SpawnOrder {
         origin: h,
         hops: 0,
@@ -5590,7 +5591,7 @@ fn store_order_at(rig: &mut MultiRig, h: u32, rc: RegionCoords, epoch: u64, budg
         player: FRESH_PLAYER,
         record_region: Some(rc),
     };
-    rig.hosts[h as usize].event(order);
+    rig.hosts[h.0 as usize].event(order);
     let mut out = Vec::new();
     for _ in 0..budget {
         rig.serve_logins();
@@ -5608,25 +5609,25 @@ fn store_order_at(rig: &mut MultiRig, h: u32, rc: RegionCoords, epoch: u64, budg
 /// told the manager (`note_left_peers`): a store placement on A is taken at once. Then C
 /// returns as a new boot: it is expected again (and synced by its `Running`).
 fn left_host_not_awaited(rig: &mut MultiRig) {
-    let (ha, hc) = (0, 2);
-    let a = rig.homes[ha as usize];
+    let (ha, hc) = (h(0), h(2));
+    let a = rig.homes[ha.0 as usize];
     rig.link_down(ha, hc);
-    rig.link_down(1, hc);
+    rig.link_down(h(1), hc);
     rig.round();
-    assert!(!rig.hosts[ha as usize].manager.peers_synced(), "host {hc} is gone: not synced");
+    assert!(!rig.hosts[ha.0 as usize].manager.peers_synced(), "host {hc} is gone: not synced");
     // The boot C left as (before the one that comes back).
-    rig.hosts[ha as usize].manager.note_left_peers([(hc, 1)]);
-    assert!(rig.hosts[ha as usize].manager.peers_synced(), "a host that left holds nobody");
+    rig.hosts[ha.0 as usize].manager.note_left_peers([(hc, 1)]);
+    assert!(rig.hosts[ha.0 as usize].manager.peers_synced(), "a host that left holds nobody");
     let out = store_order_at(rig, ha, a, 2, 1);
     let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: true, endpoint: Some(rig_endpoint(ha)) };
     assert_eq!(out, [(ha, ack)], "taken without waiting");
     // C comes back (a new boot's hello): expected again, synced once its `Running` came.
     rig.link_up(ha, hc);
-    rig.link_up(1, hc);
+    rig.link_up(h(1), hc);
     let mut synced = false;
     for _ in 0..CROSS_ROUNDS {
         rig.round();
-        if !rig.hosts[ha as usize].manager.peer_left(hc) && rig.hosts[ha as usize].manager.peers_synced() {
+        if !rig.hosts[ha.0 as usize].manager.peer_left(hc) && rig.hosts[ha.0 as usize].manager.peers_synced() {
             synced = true;
             break;
         }
@@ -5643,14 +5644,14 @@ fn a_host_that_left_cleanly_is_not_awaited_by_a_store_placement() {
 /// The same with host C merely down (crashed, not left): the store placement waits for it
 /// and is refused once `SPAWN_SYNC_WAIT_MS` passed.
 fn down_host_awaited(rig: &mut MultiRig) {
-    let (ha, hc) = (0, 2);
-    let a = rig.homes[ha as usize];
+    let (ha, hc) = (h(0), h(2));
+    let a = rig.homes[ha.0 as usize];
     rig.link_down(ha, hc);
-    rig.link_down(1, hc);
+    rig.link_down(h(1), hc);
     rig.round();
     let out = store_order_at(rig, ha, a, 2, WAIT_ROUNDS);
     assert!(out.is_empty(), "nothing while host {hc} may hold the player: {out:?}");
-    assert_eq!(rig.hosts[ha as usize].manager.spawn_orders_waiting(), 1);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.spawn_orders_waiting(), 1);
     rig.maintain_all(game::SPAWN_SYNC_WAIT_MS);
     let mut out = Vec::new();
     rig.round();
@@ -5672,7 +5673,7 @@ fn refused_order_unpins(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
-    rig.hosts[ha as usize].manager.set_entry_host(ha);
+    rig.hosts[ha.0 as usize].manager.set_entry_host(ha);
     rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 2);
     let (_, _, id) = until_body(rig);
     let order = game::ServerEvent::SpawnOrder {
@@ -5683,10 +5684,10 @@ fn refused_order_unpins(rig: &mut MultiRig) {
         player: P_PLAYER,
         record_region: Some(a),
     };
-    rig.hosts[ha as usize].event(order);
-    let taken = rig.hosts[ha as usize].manager.take_spawn_here();
+    rig.hosts[ha.0 as usize].event(order);
+    let taken = rig.hosts[ha.0 as usize].manager.take_spawn_here();
     assert_eq!(taken.len(), 1, "held here: taken");
-    rig.hosts[ha as usize].manager.spawn_answered(taken[0].clone(), false);
+    rig.hosts[ha.0 as usize].manager.spawn_answered(taken[0].clone(), false);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
     assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "it crossed");
@@ -5704,7 +5705,7 @@ fn a_refused_order_does_not_keep_the_player() {
 fn refused_login_ends_once(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let ha = rig.owner(a);
-    rig.hosts[ha as usize].manager.set_entry_host(ha);
+    rig.hosts[ha.0 as usize].manager.set_entry_host(ha);
     rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(b, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 1);
     let mut out = Vec::new();
     for _ in 0..WAIT_ROUNDS {
@@ -5738,7 +5739,7 @@ fn rendezvous_rows(
     rig: &MultiRig,
     free: &[game::SuperRegion],
     unknown: &[game::SuperRegion],
-) -> Vec<(game::SuperRegion, Option<u32>, u64)> {
+) -> Vec<(game::SuperRegion, Option<HostId>, u64)> {
     let hosts = rig.hosts.len() as u32;
     let mut rows = Vec::new();
     for sx in -16..=48 {
@@ -5768,14 +5769,14 @@ fn into_a_free_super_region(rig: &mut MultiRig) {
     let rows = rendezvous_rows(rig, &[sr_of(rig, b)], &[]);
     rig.with_directory(rows);
     let ha = rig.owner(a);
-    assert_eq!(rig.hosts[ha as usize].manager.owner_of(b), game::Owner::Free);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.owner_of(b), game::Owner::Free);
     rig.run(a);
     world_cuts(rig);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
-    let waiting = |rig: &MultiRig| -> Vec<(u32, game::SuperRegion, game::EntityId)> {
+    let waiting = |rig: &MultiRig| -> Vec<(HostId, game::SuperRegion, game::EntityId)> {
         let mut out = Vec::new();
         for (h, r) in rig.hosts.iter().enumerate() {
-            out.extend(r.manager.unowned_waiting_ids().into_iter().map(|(sr, id)| (h as u32, sr, id)));
+            out.extend(r.manager.unowned_waiting_ids().into_iter().map(|(sr, id)| (HostId(h as u64), sr, id)));
         }
         out
     };
@@ -5821,7 +5822,7 @@ fn clamped_at_an_unknown_seam(rig: &mut MultiRig) {
     let rows = rendezvous_rows(rig, &[], &[sr_of(rig, b)]);
     rig.with_directory(rows);
     let ha = rig.owner(a);
-    assert_eq!(rig.hosts[ha as usize].manager.owner_of(b), game::Owner::Unknown);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.owner_of(b), game::Owner::Unknown);
     rig.run(a);
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     let (_, _, id) = until_body(rig);
@@ -5830,7 +5831,7 @@ fn clamped_at_an_unknown_seam(rig: &mut MultiRig) {
         rig.round();
     }
     assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "handed back to {a:?}");
-    let m = &rig.hosts[ha as usize].manager;
+    let m = &rig.hosts[ha.0 as usize].manager;
     assert_eq!(m.home_of(P_CLIENT), Some(a));
     assert_eq!(m.session_kind(P_CLIENT), Some(game::SessionKind::Home));
     assert!(m.departed().is_empty());
@@ -5864,7 +5865,7 @@ fn push_player_into(rig: &mut MultiRig, a: RegionCoords, b: RegionCoords, rounds
 }
 
 /// Every host's answer for who owns `rc`.
-fn owners_seen(rig: &MultiRig, rc: RegionCoords) -> Vec<Option<u32>> {
+fn owners_seen(rig: &MultiRig, rc: RegionCoords) -> Vec<Option<HostId>> {
     rig.hosts.iter().map(|r| r.manager.owner_host(rc)).collect()
 }
 
@@ -5885,7 +5886,7 @@ fn claimed_when_a_player_walks_to_it(rig: &mut MultiRig) {
     rig.with_claims();
     let ha = rig.owner(a);
     let preferred = game::rendezvous_owner(sr, hosts);
-    assert_eq!(rig.hosts[ha as usize].manager.owner_of(b), game::Owner::Free);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.owner_of(b), game::Owner::Free);
     rig.run(a);
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
@@ -5921,9 +5922,9 @@ fn told_where_its_body_went(rig: &mut MultiRig) {
     rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
     rig.record_packets();
-    rig.hosts[ha as usize].event(subscribe_packet(b));
+    rig.hosts[ha.0 as usize].event(subscribe_packet(b));
     assert!(push_player_into(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?}: {:?}", rig.player_body(P_CLIENT));
-    let named: Vec<u32> = elsewhere_for(rig, ha, b).into_iter().map(|(o, _)| o).collect();
+    let named: Vec<HostId> = elsewhere_for(rig, ha, b).into_iter().map(|(o, _)| o).collect();
     assert!(
         named.contains(&preferred),
         "host {ha} handed the body to host {preferred} and never named it for {b:?} (named: {named:?}; seed {}, link delay {})",
@@ -5991,17 +5992,17 @@ fn owns_delivers_what_waited(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let sr = sr_of(rig, b);
     rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
-    let (ha, hb) = (rig.owner(a), 1 - rig.owner(a));
+    let (ha, hb) = (rig.owner(a), HostId(1 - rig.owner(a).0));
     rig.run(a);
     world_cuts(rig);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha as usize].manager.unowned_waiting_ids() == [(sr, id)]),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
         "the slime never waited for an owner"
     );
-    rig.hosts[hb as usize].manager.claimed(vec![(sr, 2)]);
+    rig.hosts[hb.0 as usize].manager.claimed(vec![(sr, 2)]);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha as usize].manager.owner_of(b) == game::Owner::Host(hb)),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.owner_of(b) == game::Owner::Host(hb)),
         "host {ha} never learned host {hb}'s claim"
     );
     rig.run(b);
@@ -6025,7 +6026,7 @@ fn late_peer_learns(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let sr = sr_of(rig, b);
     rig.with_directory(rendezvous_rows(rig, &[], &[sr]));
-    let (ha, hb) = (rig.owner(a), 1 - rig.owner(a));
+    let (ha, hb) = (rig.owner(a), HostId(1 - rig.owner(a).0));
     let mut theirs = rendezvous_rows(rig, &[], &[]);
     for row in &mut theirs {
         if row.0 == sr {
@@ -6036,18 +6037,18 @@ fn late_peer_learns(rig: &mut MultiRig) {
     rig.run(a);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha as usize].manager.unowned_waiting_ids() == [(sr, id)]),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
         "the slime never waited for an owner"
     );
     for _ in 0..WAIT_ROUNDS {
         rig.round();
     }
-    assert_eq!(rig.hosts[ha as usize].manager.owner_of(b), game::Owner::Unknown, "nothing told host {ha} yet");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.owner_of(b), game::Owner::Unknown, "nothing told host {ha} yet");
     rig.link_down(ha, hb);
     rig.round();
     rig.link_up(ha, hb);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha as usize].manager.owner_of(b) == game::Owner::Host(hb)),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.owner_of(b) == game::Owner::Host(hb)),
         "host {ha} never learned host {hb}'s rows at its hello"
     );
     rig.run(b);
@@ -6077,7 +6078,7 @@ fn host_chain(hosts: u32) -> Vec<RegionCoords> {
     if hosts == 2 {
         return vec![a, b];
     }
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, 1);
+    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, 1);
     for (x, y) in [(a, b), (b, a)] {
         for c in [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| RegionCoords::new(y.x + dx, y.z + dz)) {
             if owner(c) != owner(x) && owner(c) != owner(y) {
@@ -6170,7 +6171,7 @@ fn journal_explains(rig: &mut MultiRig) {
             None if !holding
                 && drops * 2 < committed(rig)
                 && (roll >> 40) % 4 == 0
-                && matches!(rig.hosts[x as usize].manager.world_cut_state(), Some((_, "pending" | "marked"))) =>
+                && matches!(rig.hosts[x.0 as usize].manager.world_cut_state(), Some((_, "pending" | "marked"))) =>
             {
                 rig.link_down(x, z);
                 drops += 1;
@@ -6234,7 +6235,7 @@ fn polled_commit(rig: &mut MultiRig) -> bool {
     // The next cut: once host `h` takes part in it, the coordinator's messages to it are held.
     let cut = loop {
         assert!(r < 2 * WORLD_CUT_ROUNDS, "host {h} never took part in another cut");
-        if let Some((c, "pending" | "marked")) = rig.hosts[h as usize].manager.world_cut_state() {
+        if let Some((c, "pending" | "marked")) = rig.hosts[h.0 as usize].manager.world_cut_state() {
             if !rig.decided.contains_key(&c) {
                 break c;
             }
@@ -6252,21 +6253,21 @@ fn polled_commit(rig: &mut MultiRig) -> bool {
         rig.hold_world(h, false);
         return false;
     }
-    assert_eq!(rig.hosts[h as usize].manager.world_cut(), Some(cut), "host {h} has not heard the decision");
-    assert!(rig.hosts[h as usize].manager.peer_journal().base() < cut);
+    assert_eq!(rig.hosts[h.0 as usize].manager.world_cut(), Some(cut), "host {h} has not heard the decision");
+    assert!(rig.hosts[h.0 as usize].manager.peer_journal().base() < cut);
     // The server's poll of the store finds the commit.
-    rig.hosts[h as usize].manager.cut_committed(cut, Vec::new());
-    assert_eq!(rig.hosts[h as usize].manager.peer_journal().base(), cut);
+    rig.hosts[h.0 as usize].manager.cut_committed(cut, Vec::new());
+    assert_eq!(rig.hosts[h.0 as usize].manager.peer_journal().base(), cut);
     rig.assert_journals_explain_the_cut();
-    let other = 1 - h;
-    let held: Vec<game::JournalEntry> = rig.hosts[h as usize].manager.peer_journal().entries(other).map(|(e, _)| e.clone()).collect();
+    let other = HostId(1 - h.0);
+    let held: Vec<game::JournalEntry> = rig.hosts[h.0 as usize].manager.peer_journal().entries(other).map(|(e, _)| e.clone()).collect();
     rig.hold_world(h, false);
-    while rig.hosts[h as usize].manager.world_cut() == Some(cut) {
+    while rig.hosts[h.0 as usize].manager.world_cut() == Some(cut) {
         assert!(r < 4 * WORLD_CUT_ROUNDS, "host {h} never heard the decision of cut {}", cut.0);
         rig.cut_round();
         r += 1;
     }
-    let now: Vec<game::JournalEntry> = rig.hosts[h as usize].manager.peer_journal().entries(other).map(|(e, _)| e.clone()).collect();
+    let now: Vec<game::JournalEntry> = rig.hosts[h.0 as usize].manager.peer_journal().entries(other).map(|(e, _)| e.clone()).collect();
     assert!(now.starts_with(&held), "the late CutDone changed what the journal held: {held:?} → {now:?}");
     rig.assert_journals_explain_the_cut();
     true
@@ -6293,7 +6294,7 @@ fn rollback_hosts_journal_nothing(rig: &mut MultiRig) {
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     until_settled_in(rig, id, b);
     for h in [ha, hb] {
-        assert!(rig.hosts[h as usize].manager.peer_journal().is_empty(), "host {h} journals under `static`");
+        assert!(rig.hosts[h.0 as usize].manager.peer_journal().is_empty(), "host {h} journals under `static`");
     }
     // The same hosts under `claim` (a directory laid out as `static` lays it out): journalled.
     let rows = rendezvous_rows(rig, &[], &[]);
@@ -6331,9 +6332,9 @@ fn succession_world(rig: &mut MultiRig) -> Vec<RegionCoords> {
 }
 
 /// The heir of `dead` among the rig's other live hosts, and a survivor that is not it.
-fn heir_and_survivor(rig: &MultiRig, dead: u32) -> (u32, Option<u32>) {
-    let live: std::collections::BTreeSet<u32> =
-        (0..rig.hosts.len() as u32).filter(|h| *h != dead && !rig.dead.contains(h)).collect();
+fn heir_and_survivor(rig: &MultiRig, dead: HostId) -> (HostId, Option<HostId>) {
+    let live: std::collections::BTreeSet<HostId> =
+        host_ids(rig.hosts.len() as u32).filter(|h| *h != dead && !rig.dead.contains(h)).collect();
     let heir = game::heir_of(dead, &live).expect("a live host");
     (heir, live.into_iter().find(|h| *h != heir))
 }
@@ -6357,8 +6358,8 @@ fn order_of(s: &game::Succession) -> game::CoordMsg {
 fn until_applied(rig: &mut MultiRig, s: &game::Succession) {
     for _ in 0..SUCCESSION_ROUNDS {
         let applied = rig.core().succession_progress().into_iter().find(|(id, _, _)| *id == s.id).map(|(_, a, _)| a);
-        let reports: Vec<u32> =
-            rig.hosts[s.heir as usize].manager.succession_reports(s.id).map(|r| r.keys().copied().collect()).unwrap_or_default();
+        let reports: Vec<HostId> =
+            rig.hosts[s.heir.0 as usize].manager.succession_reports(s.id).map(|r| r.keys().copied().collect()).unwrap_or_default();
         if applied.as_deref() == Some(&s.survivors[..]) && reports == s.survivors {
             return;
         }
@@ -6403,7 +6404,7 @@ fn reports_against_the_base(rig: &mut MultiRig) -> bool {
     // The next cut host `s` takes part in: its decision is held from `s`.
     let cut = loop {
         assert!(r < 2 * WORLD_CUT_ROUNDS, "host {s} never took part in another cut");
-        if let Some((c, "pending" | "marked")) = rig.hosts[s as usize].manager.world_cut_state() {
+        if let Some((c, "pending" | "marked")) = rig.hosts[s.0 as usize].manager.world_cut_state() {
             if !rig.decided.contains_key(&c) {
                 break c;
             }
@@ -6421,7 +6422,7 @@ fn reports_against_the_base(rig: &mut MultiRig) -> bool {
         rig.hold_world(s, false);
         return false;
     }
-    let journal = rig.hosts[s as usize].manager.peer_journal().clone();
+    let journal = rig.hosts[s.0 as usize].manager.peer_journal().clone();
     assert!(journal.base() < cut, "host {s} has not heard the commit");
     let before: Vec<game::JournalEntry> = journal.entries(dead).map(|(e, _)| e.clone()).collect();
     let truncated = {
@@ -6433,9 +6434,9 @@ fn reports_against_the_base(rig: &mut MultiRig) -> bool {
     let succession = rig.run_succession(dead).remove(0);
     assert_eq!((succession.base_cut, succession.heir), (cut, heir), "declared from the cut, to the heir");
     // The order reaches `s` before the cut's decision.
-    rig.hosts[s as usize].manager.apply_coordinator_message(order_of(&succession));
+    rig.hosts[s.0 as usize].manager.apply_coordinator_message(order_of(&succession));
     for _ in 0..WAIT_ROUNDS {
-        let m = &rig.hosts[s as usize].manager;
+        let m = &rig.hosts[s.0 as usize].manager;
         assert_eq!(m.successions(), vec![(succession.id, false)], "host {s} waits for its base cut");
         assert!(
             !m.peer_owed(heir).iter().any(|msg| matches!(msg, game::Reliable::SuccessionReport { .. })),
@@ -6445,7 +6446,7 @@ fn reports_against_the_base(rig: &mut MultiRig) -> bool {
     }
     rig.hold_world(s, false);
     until_applied(rig, &succession);
-    let report = &rig.hosts[heir as usize].manager.succession_reports(succession.id).expect("reports")[&s];
+    let report = &rig.hosts[heir.0 as usize].manager.succession_reports(succession.id).expect("reports")[&s];
     assert_eq!(report.base_cut, cut);
     assert!(
         report.entries.starts_with(&truncated),
@@ -6455,19 +6456,19 @@ fn reports_against_the_base(rig: &mut MultiRig) -> bool {
         truncated.len(),
         rig.seed
     );
-    assert!(rig.hosts[s as usize].manager.peer_journal().entries(dead).next().is_none(), "taken");
+    assert!(rig.hosts[s.0 as usize].manager.peer_journal().entries(dead).next().is_none(), "taken");
     // The heir filed its own; once it adopts (driven here: Task 9's), the next cut settles it.
     let now = rig.hosts.iter().map(|h| h.now_ms).max().unwrap_or(0);
     rig.core().handle(heir, game::HostMsg::SuccessionAdopted { id: succession.id }, now);
     for _ in 0..WORLD_CUT_ROUNDS {
-        if rig.successions.iter().all(|(_, settled)| settled.is_some()) && rig.hosts[s as usize].manager.successions().is_empty() {
+        if rig.successions.iter().all(|(_, settled)| settled.is_some()) && rig.hosts[s.0 as usize].manager.successions().is_empty() {
             break;
         }
         rig.cut_round();
     }
     assert!(rig.successions.iter().all(|(_, settled)| settled.is_some()), "the next commit settles it: {:?}", rig.decided);
     for h in [s, heir] {
-        assert!(rig.hosts[h as usize].manager.successions().is_empty(), "host {h} heard the settle");
+        assert!(rig.hosts[h.0 as usize].manager.successions().is_empty(), "host {h} heard the settle");
     }
     truncated.len() < before.len()
 }
@@ -6511,9 +6512,9 @@ fn owed_to_the_heir(rig: &mut MultiRig) {
         game::Reliable::Intent(second),
     ];
     for msg in orders {
-        rig.hosts[s as usize].manager.send_reliable_for_test(dead, msg, false);
+        rig.hosts[s.0 as usize].manager.send_reliable_for_test(dead, msg, false);
     }
-    let m = &mut rig.hosts[s as usize].manager;
+    let m = &mut rig.hosts[s.0 as usize].manager;
     m.wait_for_session_for_test(dead, game::Reliable::Intent(waiting));
     m.wait_for_session_for_test(dead, game::Reliable::CutMark { cut: game::CutId(78) });
     m.hold_for_leave_for_test(dead, game::CutId(79), game::Reliable::InCut { cut: game::CutId(79), body: Box::new(game::Reliable::Intent(held)) });
@@ -6523,27 +6524,27 @@ fn owed_to_the_heir(rig: &mut MultiRig) {
     rig.round();
     assert!(push_over(rig, slime, rs, rd), "the slime is in {rs:?}");
     for _ in 0..CROSS_ROUNDS {
-        if rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, id, _)| *p == dead && *id == slime) {
+        if rig.hosts[s.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, id, _)| *p == dead && *id == slime) {
             break;
         }
         rig.round();
     }
-    assert!(rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, id, _)| *p == dead && *id == slime));
+    assert!(rig.hosts[s.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, id, _)| *p == dead && *id == slime));
     rig.items = Some(u64::from(OWED[1] + OWED[2] + OWED[0] + OWED[0] + OWED[1]));
     rig.assert_conserved_world();
-    rig.hosts[s as usize].manager.take_login_out();
+    rig.hosts[s.0 as usize].manager.take_login_out();
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     until_applied(rig, &succession);
-    let report = &rig.hosts[heir as usize].manager.succession_reports(succession.id).expect("reports")[&s];
+    let report = &rig.hosts[heir.0 as usize].manager.succession_reports(succession.id).expect("reports")[&s];
     let expected: Vec<game::Reliable> = [first, wrapped, second, waiting, held].into_iter().map(game::Reliable::Intent).collect();
     assert_eq!(report.owed, expected, "the intents, in order (session, waiting, held), unwrapped");
     assert!(
         report.entries.iter().any(|e| e.subject == game::Subject::Entity(slime) && matches!(e.event, game::JournalEvent::Sent(_))),
         "the transfer is a Sent entry of the journal"
     );
-    assert!(rig.hosts[s as usize].manager.peer_owed(dead).is_empty(), "nothing is owed to the dead host");
-    let out = rig.hosts[s as usize].manager.take_login_out();
+    assert!(rig.hosts[s.0 as usize].manager.peer_owed(dead).is_empty(), "nothing is owed to the dead host");
+    let out = rig.hosts[s.0 as usize].manager.take_login_out();
     assert!(
         out.iter().any(|o| matches!(o, game::LoginOut::SpawnAck { ok: false, session_epoch: 3, .. })),
         "the spawn order is refused to its origin: {out:?}"
@@ -6561,9 +6562,9 @@ fn owed_state_messages_go_to_the_heir_and_orders_are_dropped() {
 }
 
 /// Rounds until host `from`'s `departed` points `player` at `to`.
-fn until_handed_to(rig: &mut MultiRig, from: u32, player: game::PlayerId, to: u32) {
+fn until_handed_to(rig: &mut MultiRig, from: HostId, player: game::PlayerId, to: HostId) {
     for _ in 0..CROSS_ROUNDS {
-        if rig.hosts[from as usize].manager.departed().get(&player) == Some(&to) {
+        if rig.hosts[from.0 as usize].manager.departed().get(&player) == Some(&to) {
             return;
         }
         rig.round();
@@ -6599,7 +6600,7 @@ fn departed_pointers(rig: &mut MultiRig) -> bool {
     assert!(rig.teleport(rs, body2, past_seam(rs, rd, REGION_SIZE / 3.0)));
     until_handed_to(rig, s, P2_PLAYER, dead);
     // Which of them the survivor's journal still carries (a cut may have committed meanwhile).
-    let carried: std::collections::BTreeSet<game::PlayerId> = rig.hosts[s as usize]
+    let carried: std::collections::BTreeSet<game::PlayerId> = rig.hosts[s.0 as usize]
         .manager
         .peer_journal()
         .entries(dead)
@@ -6612,7 +6613,7 @@ fn departed_pointers(rig: &mut MultiRig) -> bool {
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     until_applied(rig, &succession);
-    let departed = rig.hosts[s as usize].manager.departed().clone();
+    let departed = rig.hosts[s.0 as usize].manager.departed().clone();
     for p in [P_PLAYER, P2_PLAYER] {
         if carried.contains(&p) {
             assert_eq!(departed.get(&p), Some(&heir), "player {} (carried) points at the heir", p.0);
@@ -6641,32 +6642,32 @@ fn zombie_refused(rig: &mut MultiRig) {
     let chain = succession_world(rig);
     let dead = rig.owner(chain[1]);
     let (heir, _) = heir_and_survivor(rig, dead);
-    let old_boot = rig.boots[dead as usize];
+    let old_boot = rig.boots[dead.0 as usize];
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     until_applied(rig, &succession);
     // The heir tells the dead ordinal of a claim: it waits for that ordinal's next boot.
-    rig.hosts[heir as usize].manager.send_reliable_for_test(dead, game::Reliable::Owns { rows: vec![(FAR_SR, 9)] }, false);
+    rig.hosts[heir.0 as usize].manager.send_reliable_for_test(dead, game::Reliable::Owns { rows: vec![(FAR_SR, 9)] }, false);
     let far = RegionCoords::new(FAR_SR.0, FAR_SR.1);
     rig.start_as(dead, old_boot);
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
-        assert!(!rig.hosts[heir as usize].manager.peer_is_reachable(dead), "the dead boot is never reachable");
-        assert_eq!(rig.hosts[dead as usize].manager.owner_of(far), game::Owner::Free, "the zombie learns nothing");
+        assert!(!rig.hosts[heir.0 as usize].manager.peer_is_reachable(dead), "the dead boot is never reachable");
+        assert_eq!(rig.hosts[dead.0 as usize].manager.owner_of(far), game::Owner::Free, "the zombie learns nothing");
     }
     rig.kill(dead);
     let boot = rig.start(dead);
     assert_ne!(boot, old_boot);
     for _ in 0..CROSS_ROUNDS {
-        let m = &rig.hosts[heir as usize].manager;
-        if m.peer_is_reachable(dead) && m.peers_synced() && rig.hosts[dead as usize].manager.owner_of(far) == game::Owner::Host(heir) {
+        let m = &rig.hosts[heir.0 as usize].manager;
+        if m.peer_is_reachable(dead) && m.peers_synced() && rig.hosts[dead.0 as usize].manager.owner_of(far) == game::Owner::Host(heir) {
             break;
         }
         rig.cut_round();
     }
-    assert!(rig.hosts[heir as usize].manager.peer_is_reachable(dead), "the new boot is welcome");
-    assert_eq!(rig.hosts[dead as usize].manager.owner_of(far), game::Owner::Host(heir), "and gets what waited for its ordinal");
-    assert!(rig.hosts[heir as usize].manager.peers_synced(), "the new boot synced: a store placement waits for nobody");
+    assert!(rig.hosts[heir.0 as usize].manager.peer_is_reachable(dead), "the new boot is welcome");
+    assert_eq!(rig.hosts[dead.0 as usize].manager.owner_of(far), game::Owner::Host(heir), "and gets what waited for its ordinal");
+    assert!(rig.hosts[heir.0 as usize].manager.peers_synced(), "the new boot synced: a store placement waits for nobody");
 }
 
 #[test]
@@ -6700,20 +6701,20 @@ fn heir_holds_inherited_land(rig: &mut MultiRig) {
         assert!(push_over(rig, id, from, rd), "the slime is in {from:?}");
         slimes.push(id);
     }
-    rig.hosts[heir as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), crate::common::rig::CLIENT));
-    assert_eq!(rig.hosts[heir as usize].manager.place_spawn(FRESH_PLAYER, Some(rd)), game::Placement::Wait, "a placement waits");
+    rig.hosts[heir.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), crate::common::rig::CLIENT));
+    assert_eq!(rig.hosts[heir.0 as usize].manager.place_spawn(FRESH_PLAYER, Some(rd)), game::Placement::Wait, "a placement waits");
     for _ in 0..CROSS_ROUNDS {
         rig.cut_round();
-        let running = rig.hosts[heir as usize].manager.running_regions();
+        let running = rig.hosts[heir.0 as usize].manager.running_regions();
         assert!(!running.iter().any(|rc| moved.contains(rc)), "the heir started an inherited region: {running:?} (seed {})", rig.seed);
     }
-    let waiting: Vec<game::EntityId> = rig.hosts[heir as usize].manager.unowned_waiting_ids().into_iter().map(|(_, id)| id).collect();
+    let waiting: Vec<game::EntityId> = rig.hosts[heir.0 as usize].manager.unowned_waiting_ids().into_iter().map(|(_, id)| id).collect();
     for id in &slimes {
         assert_eq!(waiting.iter().filter(|w| *w == id).count(), 1, "{id:?} waits on the heir: {waiting:?}");
     }
-    rig.hosts[heir as usize].manager.adopt_inherited(succession.id);
+    rig.hosts[heir.0 as usize].manager.adopt_inherited(succession.id);
     rig.round();
-    assert!(rig.hosts[heir as usize].manager.unowned_waiting_ids().is_empty(), "delivered once adopted");
+    assert!(rig.hosts[heir.0 as usize].manager.unowned_waiting_ids().is_empty(), "delivered once adopted");
     for id in &slimes {
         assert_eq!(live_count(rig, *id), 1, "{id:?} is held once");
     }
@@ -6737,9 +6738,9 @@ fn heir_masks_from_the_order(rig: &mut MultiRig) {
     until_committed(rig, 1);
     rig.kill(dead);
     let sr = game::super_region_of(rd, rig.s);
-    let survivors: Vec<u32> = (0..rig.hosts.len() as u32).filter(|h| *h != dead).collect();
-    let dead_boot = rig.boots[dead as usize];
-    let m = &mut rig.hosts[heir as usize].manager;
+    let survivors: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| *h != dead).collect();
+    let dead_boot = rig.boots[dead.0 as usize];
+    let m = &mut rig.hosts[heir.0 as usize].manager;
     // An order whose base cut this host's journal does not count from yet: it waits.
     let order = game::Succession {
         id: game::SuccessionId(77),
@@ -6756,10 +6757,10 @@ fn heir_masks_from_the_order(rig: &mut MultiRig) {
     // The directory read lands meanwhile: the store gives the moved row to the heir.
     let rows: Vec<(game::SuperRegion, i64, u64)> = rendezvous_rows(rig, &[], &[])
         .into_iter()
-        .map(|(s, owner, epoch)| if s == sr { (s, i64::from(heir), 2) } else { (s, owner.map_or(game::NO_OWNER, i64::from), epoch) })
+        .map(|(s, owner, epoch)| if s == sr { (s, (heir.0 as i64), 2) } else { (s, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch) })
         .collect();
-    let live = (0..rig.hosts.len() as u32).filter(|h| *h != dead).collect();
-    let m = &mut rig.hosts[heir as usize].manager;
+    let live = host_ids(rig.hosts.len() as u32).filter(|h| *h != dead).collect();
+    let m = &mut rig.hosts[heir.0 as usize].manager;
     m.directory_read(rows, live);
     assert!(!m.owns(rd), "the heir owns inherited land before it resolved the journals");
     assert_eq!(m.place_spawn(FRESH_PLAYER, Some(rd)), game::Placement::Wait, "a placement waits");
@@ -6781,18 +6782,18 @@ fn order_before_the_leave_cuts_decision(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(chain[0]), rig.owner(chain[1]));
     until_committed(rig, 1);
     // B's keeper body parks with B's leave (the keeper's player is the host's ordinal).
-    let home_b = rig.homes[hb as usize];
+    let home_b = rig.homes[hb.0 as usize];
     let mut keeper = None;
-    rig.hosts[hb as usize].manager.spawner_mut().with_region(home_b, |r| {
+    rig.hosts[hb.0 as usize].manager.spawner_mut().with_region(home_b, |r| {
         let d = r.data();
         keeper = d.player_entites.get(&crate::common::rig::CLIENT).and_then(|k| *d.ecs.id.try_get(*k));
     });
-    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(u64::from(hb)));
-    rig.hosts[hb as usize].manager.request_leave();
+    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(hb.0));
+    rig.hosts[hb.0 as usize].manager.request_leave();
     let mut began = false;
     for _ in 0..WORLD_CUT_ROUNDS {
-        let leaving = rig.hosts[hb as usize].manager.leaving_cut();
-        if leaving.is_some() && rig.hosts[ha as usize].manager.world_cut() == leaving {
+        let leaving = rig.hosts[hb.0 as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[ha.0 as usize].manager.world_cut() == leaving {
             began = true;
             break;
         }
@@ -6800,8 +6801,8 @@ fn order_before_the_leave_cuts_decision(rig: &mut MultiRig) {
     }
     assert!(began, "the leave cut began on both hosts");
     rig.kill(hb);
-    let dead_boot = rig.boots[hb as usize];
-    let m = &mut rig.hosts[ha as usize].manager;
+    let dead_boot = rig.boots[hb.0 as usize];
+    let m = &mut rig.hosts[ha.0 as usize].manager;
     let order = game::Succession {
         id: game::SuccessionId(78),
         predecessor: hb,
@@ -6818,7 +6819,7 @@ fn order_before_the_leave_cuts_decision(rig: &mut MultiRig) {
     let mut reachable = false;
     for _ in 0..WORLD_CUT_ROUNDS {
         // The next boot hears host A's first sync only if A's session to it is not held.
-        if rig.hosts[ha as usize].manager.peer_is_reachable(hb) && rig.hosts[hb as usize].manager.peers_synced() {
+        if rig.hosts[ha.0 as usize].manager.peer_is_reachable(hb) && rig.hosts[hb.0 as usize].manager.peers_synced() {
             reachable = true;
             break;
         }
@@ -6866,8 +6867,8 @@ fn sweep_hosts_hits(name: &str, scenario: fn(&mut MultiRig) -> bool) {
 
 /// Whether host `h`'s peer journal holds an entry about `subject` with host `peer` that
 /// went the way `sent` says.
-fn journalled(rig: &MultiRig, h: u32, peer: u32, subject: game::Subject, sent: bool) -> bool {
-    rig.hosts[h as usize]
+fn journalled(rig: &MultiRig, h: HostId, peer: HostId, subject: game::Subject, sent: bool) -> bool {
+    rig.hosts[h.0 as usize]
         .manager
         .peer_journal()
         .entries(peer)
@@ -6875,7 +6876,7 @@ fn journalled(rig: &MultiRig, h: u32, peer: u32, subject: game::Subject, sent: b
 }
 
 /// Cut rounds until `id` is owned by `rc` on host `h`; `false` past [`CROSS_ROUNDS`].
-fn until_owned(rig: &mut MultiRig, id: game::EntityId, h: u32, rc: RegionCoords) -> bool {
+fn until_owned(rig: &mut MultiRig, id: game::EntityId, h: HostId, rc: RegionCoords) -> bool {
     for _ in 0..CROSS_ROUNDS {
         if rig.owners_of(id) == [(h, rc)] {
             return true;
@@ -6900,7 +6901,7 @@ fn until_landed(rig: &mut MultiRig, id: game::EntityId) -> bool {
 /// Cut rounds pushing `id` from `from` over its seam (again whenever it stands in `from`:
 /// a slime may hop back) until host `to.0` owns it in `to.1`; `false` past
 /// [`CROSS_ROUNDS`].
-fn cross_to(rig: &mut MultiRig, id: game::EntityId, from: RegionCoords, to: (u32, RegionCoords)) -> bool {
+fn cross_to(rig: &mut MultiRig, id: game::EntityId, from: RegionCoords, to: (HostId, RegionCoords)) -> bool {
     for _ in 0..CROSS_ROUNDS {
         match rig.owners_of(id).as_slice() {
             [o] if *o == to => return true,
@@ -6924,9 +6925,9 @@ fn slime_in(rig: &mut MultiRig, rc: RegionCoords, i: usize) -> game::EntityId {
 fn until_settled(rig: &mut MultiRig, s: &game::Succession) {
     for _ in 0..WORLD_CUT_ROUNDS {
         let settled = rig.successions.iter().any(|(x, c)| x.id == s.id && c.is_some());
-        let heard = (0..rig.hosts.len() as u32)
+        let heard = host_ids(rig.hosts.len() as u32)
             .filter(|h| !rig.dead.contains(h))
-            .all(|h| rig.hosts[h as usize].manager.successions().iter().all(|(id, _)| *id != s.id));
+            .all(|h| rig.hosts[h.0 as usize].manager.successions().iter().all(|(id, _)| *id != s.id));
         if settled && heard {
             return;
         }
@@ -6956,8 +6957,8 @@ fn assert_settled_whole(rig: &mut MultiRig, s: &game::Succession, live: &[game::
         "the settle cut's part of heir {heir} adopts host {pred}: {:?}",
         rig.adopts
     );
-    for h in (0..rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)) {
-        let m = &rig.hosts[h as usize].manager;
+    for h in host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)) {
+        let m = &rig.hosts[h.0 as usize].manager;
         assert!(m.succession_pinned().is_empty(), "host {h} unpinned at the settle: {:?}", m.succession_pinned());
         assert!(m.inheriting().is_empty(), "host {h} masks nothing");
         assert!(m.all_succession_reports().is_empty(), "host {h} holds no report");
@@ -7157,7 +7158,7 @@ fn row_delivered_out(rig: &mut MultiRig) -> bool {
     rig.with_adoption();
     let id = rig.spawn_slime(rd, past_seam(rd, b, REGION_SIZE / 2.0));
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[dead as usize].manager.unowned_waiting_ids() == [(sr, id)]),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[dead.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
         "the slime never waited for an owner on the dead host"
     );
     until_committed(rig, 1);
@@ -7165,7 +7166,7 @@ fn row_delivered_out(rig: &mut MultiRig) -> bool {
     // Claims from now on: the preferred host claims `b`, and the slime goes out to it.
     rig.with_claims();
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[p as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == id)),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[p.0 as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == id)),
         "the slime never reached host {p}"
     );
     let hit = row && journalled(rig, p, dead, game::Subject::Entity(id), false) && rig.stored_places(id) == [(dead, b, "row")];
@@ -7196,10 +7197,10 @@ fn player_handed_to_the_dead(rig: &mut MultiRig, on_the_wire: bool) -> bool {
     assert!(rig.teleport(rs, body, past_seam(rs, rd, REGION_SIZE / 2.0)));
     let hit = if on_the_wire {
         until_handed_to(rig, s, P_PLAYER, dead);
-        rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == dead && *i == body)
+        rig.hosts[s.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == dead && *i == body)
     } else {
         let acked = until(rig, CROSS_ROUNDS, |rig| {
-            rig.player_owners(P_CLIENT) == [(dead, rd)] && rig.hosts[s as usize].manager.peer_unreceived_ids().is_empty()
+            rig.player_owners(P_CLIENT) == [(dead, rd)] && rig.hosts[s.0 as usize].manager.peer_unreceived_ids().is_empty()
         });
         assert!(acked, "the player never reached {rd:?}");
         true
@@ -7212,13 +7213,13 @@ fn player_handed_to_the_dead(rig: &mut MultiRig, on_the_wire: bool) -> bool {
     // The client is told (it rejoins on this refusal): the session the handing host still
     // holds for it — its home while the hand-off was on the wire — is refused, by the heir
     // itself or on the heir's word (`PlayerParked`); nobody else would ever end it.
-    let seen = rig.hosts[s as usize].packets_seen.as_ref().expect("recording packets");
+    let seen = rig.hosts[s.0 as usize].packets_seen.as_ref().expect("recording packets");
     let refusals = seen
         .iter()
         .filter(|(to, p)| *to == Some(P_CLIENT) && matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_PARKED_ELSEWHERE))
         .count();
     assert_eq!(refusals, 1, "the handing host {s} refuses its session of the client once (heir {})", succession.heir);
-    assert!(rig.hosts[s as usize].manager.player_of(P_CLIENT).is_none(), "no session of the client is left on host {s}");
+    assert!(rig.hosts[s.0 as usize].manager.player_of(P_CLIENT).is_none(), "no session of the client is left on host {s}");
     assert!(rig.player_owners(P_CLIENT).is_empty(), "no body");
     until_committed(rig, 1);
     assert_eq!(rig.committed_players[&P_PLAYER].region, rd, "its record stands where the hand-off took it");
@@ -7259,7 +7260,7 @@ fn player_left_the_dead(rig: &mut MultiRig) -> bool {
     assert_settled_whole(rig, &succession, &[]);
     assert_eq!(rig.player_owners(P_CLIENT), [(s, rs)], "it plays on the survivor");
     assert!(rig.parked_on(P_PLAYER).is_empty(), "parked nowhere");
-    assert_eq!(rig.hosts[s as usize].manager.player_of(P_CLIENT), Some(P_PLAYER), "online there");
+    assert_eq!(rig.hosts[s.0 as usize].manager.player_of(P_CLIENT), Some(P_PLAYER), "online there");
     until_committed(rig, 1);
     assert_player_once(rig, P_PLAYER);
     hit
@@ -7303,7 +7304,7 @@ fn player_left_the_dead_for_a_third_host(rig: &mut MultiRig) -> bool {
     assert!(adopted, "heir {heir} never adopted succession {}", succession.id.0);
     assert_eq!(rig.committed_players[&P_PLAYER].region, rd, "the settle cut has not rewritten the record");
     assert_eq!(
-        rig.hosts[heir as usize].manager.place_spawn(P_PLAYER, Some(rd)),
+        rig.hosts[heir.0 as usize].manager.place_spawn(P_PLAYER, Some(rd)),
         game::Placement::Host(s),
         "the heir sends a login of the player on to the survivor that holds it"
     );
@@ -7344,7 +7345,7 @@ fn player_on_the_dead_since_the_cut(rig: &mut MultiRig) {
     assert!(rig.player_owners(P_CLIENT).is_empty() && rig.parked_on(P_PLAYER).is_empty(), "nowhere until it logs in");
     let record = rig.committed_players[&P_PLAYER].clone();
     assert_eq!(record.region, rd);
-    assert_eq!(rig.hosts[heir as usize].manager.place_spawn(P_PLAYER, Some(rd)), game::Placement::Here, "placed on the heir");
+    assert_eq!(rig.hosts[heir.0 as usize].manager.place_spawn(P_PLAYER, Some(rd)), game::Placement::Here, "placed on the heir");
     rig.connect_home(heir, LOGIN_CLIENT, P_PLAYER, record);
     assert!(until(rig, BODY_ROUNDS, |rig| rig.player_owners(LOGIN_CLIENT) == [(heir, rd)]), "its body on the heir");
     for _ in 0..WAIT_ROUNDS {
@@ -7407,7 +7408,7 @@ fn person_into_inherited(rig: &mut MultiRig, waiting: bool) -> bool {
         let heir = succession.heir;
         let (_, rc, id) = person_bodies(rig, p)[0];
         assert!(rig.teleport(rc, id, past_seam(rc, rd, REGION_SIZE / 2.0)));
-        let waits = until(rig, CROSS_ROUNDS, |rig| rig.hosts[heir as usize].manager.unowned_waiting_ids().iter().any(|(_, i)| *i == id));
+        let waits = until(rig, CROSS_ROUNDS, |rig| rig.hosts[heir.0 as usize].manager.unowned_waiting_ids().iter().any(|(_, i)| *i == id));
         rig.with_adoption();
         (waits, succession)
     } else {
@@ -7432,7 +7433,7 @@ fn person_into_inherited(rig: &mut MultiRig, waiting: bool) -> bool {
     }
     assert!(adopted, "the heir never adopted");
     // Right after the adoption: the person's bundle was not delivered here.
-    let m = &rig.hosts[heir as usize].manager;
+    let m = &rig.hosts[heir.0 as usize].manager;
     let arriving = m.in_flight_ids().iter().chain(m.pending_arrival_ids().iter()).any(|(i, _)| *i == id);
     assert!(!arriving, "the heir delivered {p:?}'s bundle (seed {}, link delay {})", rig.seed, rig.link_delay);
     // (A body the history makes for the person has a new id: its journey home may start in
@@ -7489,7 +7490,7 @@ fn intent_owed(rig: &mut MultiRig) {
     rig.link_down(s, dead);
     let due = world_tick(rig) + 5;
     for (i, n) in OWED.iter().enumerate() {
-        rig.hosts[s as usize].manager.send_reliable_for_test(dead, game::Reliable::Intent(refusal_of(rs, rd, due + i as u64, *n)), false);
+        rig.hosts[s.0 as usize].manager.send_reliable_for_test(dead, game::Reliable::Intent(refusal_of(rs, rd, due + i as u64, *n)), false);
     }
     let total = u64::from(OWED.iter().sum::<u32>());
     rig.items = Some(total);
@@ -7540,7 +7541,7 @@ fn only_survivor(rig: &mut MultiRig) {
     let mut last = None;
     while rig.hosts.len() - rig.dead.len() > 1 {
         let dead = rig.owner(chain[1 + rig.dead.len() % (chain.len() - 1)]);
-        let dead = if rig.dead.contains(&dead) { (0..rig.hosts.len() as u32).find(|h| !rig.dead.contains(h)).unwrap() } else { dead };
+        let dead = if rig.dead.contains(&dead) { host_ids(rig.hosts.len() as u32).find(|h| !rig.dead.contains(h)).unwrap() } else { dead };
         rig.kill(dead);
         let succession = rig.run_succession(dead).remove(0);
         assert_settled_whole(rig, &succession, &[]);
@@ -7603,11 +7604,11 @@ fn heir_killed_before_the_settle(rig: &mut MultiRig) -> bool {
     let heir = succession.heir;
     rig.kill(heir);
     let generation = rig.roll_back(heir);
-    let live: Vec<u32> = (0..rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
-    let mut told: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let live: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    let mut told: std::collections::BTreeSet<HostId> = std::collections::BTreeSet::new();
     for _ in 0..CROSS_ROUNDS {
         for &h in &live {
-            if rig.hosts[h as usize].manager.take_higher_generation() == Some(generation) {
+            if rig.hosts[h.0 as usize].manager.take_higher_generation() == Some(generation) {
                 told.insert(h);
             }
         }
@@ -7645,17 +7646,17 @@ fn leave_kind(rig: &mut MultiRig) {
     let stayed = slime_in(rig, rd, 0);
     let crosser = slime_in(rig, rs, 1);
     until_committed(rig, 1);
-    rig.hosts[leaver as usize].manager.request_leave();
+    rig.hosts[leaver.0 as usize].manager.request_leave();
     let cut = until_leave_begun(rig, s, leaver);
     assert!(until_decided(rig, cut), "the leave cut commits");
     rig.kill(leaver);
     assert!(push_over(rig, crosser, rs, rd));
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == leaver && *i == crosser)),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == leaver && *i == crosser)),
         "the crossing waits for the leaver"
     );
-    for h in (0..rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)) {
-        let received: Vec<_> = rig.hosts[h as usize]
+    for h in host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)) {
+        let received: Vec<_> = rig.hosts[h.0 as usize]
             .manager
             .peer_journal()
             .entries(leaver)
@@ -7808,7 +7809,7 @@ fn pinned_load_fails(rig: &mut MultiRig) {
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     let heir = succession.heir;
-    let failed = until(rig, SUCCESSION_ROUNDS, |rig| rig.hosts[heir as usize].manager.is_unavailable(rd));
+    let failed = until(rig, SUCCESSION_ROUNDS, |rig| rig.hosts[heir.0 as usize].manager.is_unavailable(rd));
     assert!(failed, "the heir's load of {rd:?} failed once");
     assert_settled_whole(rig, &succession, &[id]);
 }
@@ -7843,7 +7844,7 @@ fn held_spawn_finds_the_journal(rig: &mut MultiRig) -> bool {
     let succession = rig.run_succession(dead).remove(0);
     let heir = succession.heir;
     until_applied(rig, &succession);
-    rig.hosts[heir as usize].manager.set_entry_host(heir);
+    rig.hosts[heir.0 as usize].manager.set_entry_host(heir);
     let order = game::ServerEvent::SpawnOrder {
         origin: heir,
         hops: 0,
@@ -7852,12 +7853,12 @@ fn held_spawn_finds_the_journal(rig: &mut MultiRig) -> bool {
         player: P_PLAYER,
         record_region: Some(rd),
     };
-    rig.hosts[heir as usize].event(order);
+    rig.hosts[heir.0 as usize].event(order);
     for _ in 0..WAIT_ROUNDS {
         rig.round();
         assert!(rig.serve_logins().is_empty(), "nothing placed while the land is masked");
     }
-    assert_eq!(rig.hosts[heir as usize].manager.spawn_orders_waiting(), 1, "the order waits");
+    assert_eq!(rig.hosts[heir.0 as usize].manager.spawn_orders_waiting(), 1, "the order waits");
     rig.with_adoption();
     let mut taken = Vec::new();
     for _ in 0..SUCCESSION_ROUNDS {
@@ -7868,7 +7869,7 @@ fn held_spawn_finds_the_journal(rig: &mut MultiRig) -> bool {
         }
     }
     assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "the heir took the order");
-    let parked = rig.hosts[heir as usize].manager.parked_record(P_PLAYER).cloned().expect("parked from the journal");
+    let parked = rig.hosts[heir.0 as usize].manager.parked_record(P_PLAYER).cloned().expect("parked from the journal");
     assert_eq!(parked.region, rd);
     if hit {
         assert_ne!(parked.pose.translation, base.pose.translation, "the journal's record, not the base cut's");
@@ -7942,7 +7943,7 @@ fn an_heir_of_two_predecessors_settles_both_in_one_cut() {
 /// The spawn orders `rig`'s hosts took (recorded and answered ok, as the server does),
 /// with the host that took each, and what the login service is told, gathered over `rounds`
 /// rounds (stopping at the first answer when `until_answer`).
-fn logins_over(rig: &mut MultiRig, rounds: usize, until_answer: bool) -> (Vec<(u32, game::SpawnRequest)>, Vec<(u32, game::LoginOut)>) {
+fn logins_over(rig: &mut MultiRig, rounds: usize, until_answer: bool) -> (Vec<(HostId, game::SpawnRequest)>, Vec<(HostId, game::LoginOut)>) {
     let (mut taken, mut out) = (Vec::new(), Vec::new());
     for _ in 0..rounds {
         rig.round();
@@ -7957,8 +7958,8 @@ fn logins_over(rig: &mut MultiRig, rounds: usize, until_answer: bool) -> (Vec<(u
 
 /// A spawn order for `player` (session epoch `epoch`, its stored record in `rc`) as the
 /// login service gives it to host `entry`, its entry host.
-fn spawn_order_at(rig: &mut MultiRig, entry: u32, player: game::PlayerId, rc: RegionCoords, epoch: u64) {
-    rig.hosts[entry as usize].manager.set_entry_host(entry);
+fn spawn_order_at(rig: &mut MultiRig, entry: HostId, player: game::PlayerId, rc: RegionCoords, epoch: u64) {
+    rig.hosts[entry.0 as usize].manager.set_entry_host(entry);
     let order = game::ServerEvent::SpawnOrder {
         origin: entry,
         hops: 0,
@@ -7967,7 +7968,7 @@ fn spawn_order_at(rig: &mut MultiRig, entry: u32, player: game::PlayerId, rc: Re
         player,
         record_region: Some(rc),
     };
-    rig.hosts[entry as usize].event(order);
+    rig.hosts[entry.0 as usize].event(order);
 }
 
 /// The test player's record at a committed cut K lies in a survivor's land (`on_heir`: the
@@ -8005,7 +8006,7 @@ fn login_before_adoption(rig: &mut MultiRig, on_heir: bool) -> bool {
     assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "the heir took the order once adopted");
     let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 6, ok: true, endpoint: Some(rig_endpoint(heir)) };
     assert_eq!(out, [(s, ack)], "the login service is told by its entry host");
-    let parked = rig.hosts[heir as usize].manager.parked_record(P_PLAYER).cloned().expect("parked from the journal");
+    let parked = rig.hosts[heir.0 as usize].manager.parked_record(P_PLAYER).cloned().expect("parked from the journal");
     assert_eq!(parked.region, rd, "the journal's record");
     // The login connects with the store's K record: the journal's parked one wins.
     rig.connect_login(heir, NEW_LOGIN_CLIENT, P_PLAYER, Some(base), LOGIN_TOKEN, 6);
@@ -8059,7 +8060,7 @@ fn unrelated_login(rig: &mut MultiRig) {
     spawn_order_at(rig, heir, FRESH_PLAYER, rh, 2);
     let (taken, out) = logins_over(rig, WAIT_ROUNDS, false);
     assert!(taken.is_empty() && out.is_empty(), "held until the adoption: {taken:?} {out:?}");
-    assert_eq!(rig.hosts[heir as usize].manager.spawn_orders_waiting(), 1, "the order waits");
+    assert_eq!(rig.hosts[heir.0 as usize].manager.spawn_orders_waiting(), 1, "the order waits");
     rig.with_adoption();
     let (taken, out) = logins_over(rig, SUCCESSION_ROUNDS, true);
     assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "placed on the heir");
@@ -8090,13 +8091,13 @@ fn drained_world(rig: &mut MultiRig, then: impl FnOnce(&mut MultiRig, &[RegionCo
     keeper_may_park(rig, leaver);
     then(rig, &chain);
     until_committed(rig, 1);
-    rig.hosts[leaver as usize].manager.request_leave();
+    rig.hosts[leaver.0 as usize].manager.request_leave();
     let cut = until_leave_begun(rig, s, leaver);
     assert!(until_decided(rig, cut), "the leave cut commits");
-    assert_eq!(rig.left.get(&leaver), Some(&rig.boots[leaver as usize]), "its row is clean");
-    let others: Vec<u32> = (0..rig.hosts.len() as u32).filter(|h| *h != leaver).collect();
+    assert_eq!(rig.left.get(&leaver), Some(&rig.boots[leaver.0 as usize]), "its row is clean");
+    let others: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| *h != leaver).collect();
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[*h as usize].manager.peer_left(leaver))),
+        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[(*h).0 as usize].manager.peer_left(leaver))),
         "every other host heard the leave cut's decision"
     );
     rig.kill(leaver);
@@ -8104,7 +8105,7 @@ fn drained_world(rig: &mut MultiRig, then: impl FnOnce(&mut MultiRig, &[RegionCo
 }
 
 /// The `LandWanted`s host `h` sent its coordinator so far, by super-region.
-fn land_asks(rig: &MultiRig, h: u32) -> std::collections::BTreeMap<game::SuperRegion, usize> {
+fn land_asks(rig: &MultiRig, h: HostId) -> std::collections::BTreeMap<game::SuperRegion, usize> {
     let mut out = std::collections::BTreeMap::new();
     for m in rig.sent_to_coordinator(h) {
         if let game::HostMsg::LandWanted { sr } = m {
@@ -8143,21 +8144,21 @@ fn held_for_a_leaver(rig: &mut MultiRig) {
     let leaver = rig.owner(rd);
     let crosser = slime_in(rig, rs, 1);
     rig.with_land_on_demand(HEIR_WAIT_RIG_MS);
-    let asked_from = rig.hosts[s as usize].now_ms;
+    let asked_from = rig.hosts[s.0 as usize].now_ms;
     assert!(push_over(rig, crosser, rs, rd));
     // An item-carrying reply for L's region, sent after the leave: held in the session too.
     crate::common::install_real_block_props();
     let due = world_tick(rig) + 5;
-    rig.hosts[s as usize].manager.send_reliable_for_test(leaver, game::Reliable::Intent(refusal_of(rs, rd, due, DEPOSIT)), false);
+    rig.hosts[s.0 as usize].manager.send_reliable_for_test(leaver, game::Reliable::Intent(refusal_of(rs, rd, due, DEPOSIT)), false);
     rig.items = Some(u64::from(DEPOSIT));
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == leaver && *i == crosser)),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == leaver && *i == crosser)),
         "the crossing waits for the leaver"
     );
     let succession = until_land_declared(rig);
     assert_eq!((succession.predecessor, succession.kind), (leaver, game::SuccessionKind::Leave), "{succession:?}");
     assert_eq!(succession.predecessor_boot, rig.left[&leaver], "the boot that left");
-    let asked_ms = rig.hosts[s as usize].now_ms - asked_from;
+    let asked_ms = rig.hosts[s.0 as usize].now_ms - asked_from;
     let asks = land_asks(rig, s);
     let sr = game::super_region_of(rd, rig.s);
     assert!(asks.get(&sr).is_some_and(|n| *n >= 1), "host {s} asked for {sr:?}: {asks:?}");
@@ -8168,8 +8169,8 @@ fn held_for_a_leaver(rig: &mut MultiRig) {
             rig.seed
         );
     }
-    for h in (0..rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)) {
-        let received = rig.hosts[h as usize]
+    for h in host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)) {
+        let received = rig.hosts[h.0 as usize]
             .manager
             .peer_journal()
             .entries(leaver)
@@ -8296,7 +8297,7 @@ fn leaver_back_at_its_declaration(rig: &mut MultiRig, hello_first: bool) {
     let crosser = slime_in(rig, rs, 1);
     assert!(push_over(rig, crosser, rs, rd));
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == leaver && *i == crosser)),
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == leaver && *i == crosser)),
         "the crossing waits for the leaver"
     );
     // Declared between cuts, as the coordinator declares (`declare_wanted`).
@@ -8311,30 +8312,30 @@ fn leaver_back_at_its_declaration(rig: &mut MultiRig, hello_first: bool) {
     }
     // Another boot of L registers after the declaration: it owns nothing.
     rig.start(leaver);
-    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
     if hello_first {
-        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver.0 as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
         for _ in 0..WAIT_ROUNDS {
             rig.round();
         }
         // Its hello alone releases nothing: it holds none of the land it left with. Not even
         // once S's directory, read again (the backstop read), shows the heir holding that land
         // before S applied the order: what S holds is owed to the heir.
-        assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S still holds what waited for the leaver");
+        assert!(rig.hosts[s.0 as usize].manager.peer_left(leaver), "S still holds what waited for the leaver");
         rig.read_directory(s);
         for _ in 0..WAIT_ROUNDS {
             rig.round();
         }
-        assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S holds until it applied the order");
-        assert!(rig.hosts[s as usize].manager.successions().is_empty(), "the order is still held back");
+        assert!(rig.hosts[s.0 as usize].manager.peer_left(leaver), "S holds until it applied the order");
+        assert!(rig.hosts[s.0 as usize].manager.successions().is_empty(), "the order is still held back");
         rig.hold_world(s, false);
-        let applied = |rig: &mut MultiRig| !rig.hosts[s as usize].manager.successions().is_empty();
+        let applied = |rig: &mut MultiRig| !rig.hosts[s.0 as usize].manager.successions().is_empty();
         for _ in 0..SUCCESSION_ROUNDS {
             if applied(rig) {
                 break;
             }
-            assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S holds until it applied the order");
+            assert!(rig.hosts[s.0 as usize].manager.peer_left(leaver), "S holds until it applied the order");
             rig.round();
         }
     }
@@ -8388,15 +8389,15 @@ fn ownerless_returns(rig: &mut MultiRig) {
     keeper_may_park(rig, leaver);
     until_committed(rig, 1);
     rig.free_land_of(leaver);
-    for h in 0..rig.hosts.len() as u32 {
-        assert_eq!(rig.hosts[h as usize].manager.owner_of(rd), game::Owner::Free, "host {h}: the leaver holds nothing");
+    for h in host_ids(rig.hosts.len() as u32) {
+        assert_eq!(rig.hosts[h.0 as usize].manager.owner_of(rd), game::Owner::Free, "host {h}: the leaver holds nothing");
     }
-    rig.hosts[leaver as usize].manager.request_leave();
+    rig.hosts[leaver.0 as usize].manager.request_leave();
     let cut = until_leave_begun(rig, s, leaver);
     assert!(until_decided(rig, cut), "the leave cut commits");
-    let others: Vec<u32> = (0..rig.hosts.len() as u32).filter(|h| *h != leaver).collect();
+    let others: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| *h != leaver).collect();
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[*h as usize].manager.peer_left(leaver))),
+        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[(*h).0 as usize].manager.peer_left(leaver))),
         "every other host holds its session"
     );
     rig.kill(leaver);
@@ -8404,11 +8405,11 @@ fn ownerless_returns(rig: &mut MultiRig) {
         rig.cut_round();
     }
     rig.start(leaver);
-    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
     rig.core().set_expected_hosts(live);
     assert!(
         until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| {
-            let m = &rig.hosts[*h as usize].manager;
+            let m = &rig.hosts[(*h).0 as usize].manager;
             !m.peer_left(leaver) && m.peer_is_reachable(leaver)
         })),
         "every survivor released its session at the new boot's hello (seed {}, link delay {})",
@@ -8474,12 +8475,12 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
     let from_t = slime_in(rig, rt, 2);
     until_committed(rig, 1);
     rig.with_land_on_demand(0);
-    rig.hosts[leaver as usize].manager.request_leave();
+    rig.hosts[leaver.0 as usize].manager.request_leave();
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
         rig.cut_round();
-        let leaving = rig.hosts[leaver as usize].manager.leaving_cut();
-        if leaving.is_some() && rig.hosts[s as usize].manager.world_cut_state() == leaving.map(|c| (c, "prepared")) {
+        let leaving = rig.hosts[leaver.0 as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[s.0 as usize].manager.world_cut_state() == leaving.map(|c| (c, "prepared")) {
             cut = leaving;
             break;
         }
@@ -8493,12 +8494,12 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
         let rows: Vec<(game::SuperRegion, u64)> =
             store.iter().filter(|(_, (o, _))| *o == Some(leaver)).map(|(sr, (_, e))| (*sr, *e)).collect();
         assert!(!rows.is_empty());
-        rig.hosts[s as usize].manager.apply_peer_reliable(leaver, game::Reliable::Owns { rows });
+        rig.hosts[s.0 as usize].manager.apply_peer_reliable(leaver, game::Reliable::Owns { rows });
     }
     // Toward L while the leave pair holds back what S sends it.
     assert!(push_over(rig, from_s, rs, rd));
     let due = world_tick(rig) + 5;
-    rig.hosts[s as usize].manager.send_reliable_for_test(leaver, game::Reliable::Intent(refusal_of(rs, rd, due, LATE_ITEMS)), false);
+    rig.hosts[s.0 as usize].manager.send_reliable_for_test(leaver, game::Reliable::Intent(refusal_of(rs, rd, due, LATE_ITEMS)), false);
     rig.items = Some(u64::from(LATE_ITEMS));
     assert!(until_decided(rig, cut), "the leave cut commits");
     rig.kill(leaver);
@@ -8506,11 +8507,11 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
     let succession = until_land_declared(rig);
     assert_eq!((succession.predecessor, succession.kind), (leaver, game::SuccessionKind::Leave));
     assert!(succession.survivors.contains(&s));
-    assert!(rig.hosts[s as usize].manager.successions().is_empty(), "S has the order not yet");
+    assert!(rig.hosts[s.0 as usize].manager.successions().is_empty(), "S has the order not yet");
     rig.read_directory(s);
     let heir_seen = if succession.heir == s { game::Owner::Me } else { game::Owner::Host(succession.heir) };
-    assert_eq!(rig.hosts[s as usize].manager.owner_of(rd), heir_seen, "S's directory shows the heir");
-    let s_left = |rig: &MultiRig| rig.hosts[s as usize].manager.peer_left(leaver);
+    assert_eq!(rig.hosts[s.0 as usize].manager.owner_of(rd), heir_seen, "S's directory shows the heir");
+    let s_left = |rig: &MultiRig| rig.hosts[s.0 as usize].manager.peer_left(leaver);
     if !hello_first {
         // S learns the commit (its `CutDone`), not the order.
         rig.hold_orders(s, true);
@@ -8518,9 +8519,9 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
         assert!(until(rig, CROSS_ROUNDS, |r| s_left(r)), "S noted the leave");
     }
     rig.start(leaver);
-    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver.0 as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
     for _ in 0..WAIT_ROUNDS {
         rig.round();
         if !hello_first {
@@ -8530,12 +8531,12 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
     rig.hold_world(s, false);
     rig.hold_orders(s, false);
     for _ in 0..SUCCESSION_ROUNDS {
-        if !rig.hosts[s as usize].manager.successions().is_empty() {
+        if !rig.hosts[s.0 as usize].manager.successions().is_empty() {
             break;
         }
         rig.round();
     }
-    assert!(!rig.hosts[s as usize].manager.successions().is_empty(), "S applied the order");
+    assert!(!rig.hosts[s.0 as usize].manager.successions().is_empty(), "S applied the order");
     assert_settled_whole(rig, &succession, &[from_s, from_t]);
     rig.run(rd);
     for id in [from_s, from_t] {
@@ -8593,12 +8594,12 @@ fn back_before_the_late_cut_done(rig: &mut MultiRig) {
     keeper_may_park(rig, leaver);
     let id = slime_in(rig, rs, 1);
     until_committed(rig, 1);
-    rig.hosts[leaver as usize].manager.request_leave();
+    rig.hosts[leaver.0 as usize].manager.request_leave();
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
         rig.cut_round();
-        let leaving = rig.hosts[leaver as usize].manager.leaving_cut();
-        if leaving.is_some() && rig.hosts[s as usize].manager.world_cut_state() == leaving.map(|c| (c, "prepared")) {
+        let leaving = rig.hosts[leaver.0 as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[s.0 as usize].manager.world_cut_state() == leaving.map(|c| (c, "prepared")) {
             cut = leaving;
             break;
         }
@@ -8609,24 +8610,24 @@ fn back_before_the_late_cut_done(rig: &mut MultiRig) {
     assert!(until_decided(rig, cut), "the leave cut commits");
     rig.kill(leaver);
     rig.start(leaver);
-    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver.0 as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
     for _ in 0..WAIT_ROUNDS {
         rig.round();
     }
-    assert!(!rig.hosts[s as usize].manager.peer_is_reachable(leaver), "nothing goes to the new boot before S learns the leave");
+    assert!(!rig.hosts[s.0 as usize].manager.peer_is_reachable(leaver), "nothing goes to the new boot before S learns the leave");
     rig.hold_world(s, false);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| !rig.hosts[s as usize].manager.peer_left(leaver) && rig.hosts[s as usize].manager.peer_is_reachable(leaver)),
+        until(rig, CROSS_ROUNDS, |rig| !rig.hosts[s.0 as usize].manager.peer_left(leaver) && rig.hosts[s.0 as usize].manager.peer_is_reachable(leaver)),
         "S released its session to the new boot at the late CutDone (seed {}, link delay {})",
         rig.seed,
         rig.link_delay
     );
     // The new boot has no keeper: an observer of it subscribes to L's region.
     let watcher = 31;
-    rig.hosts[leaver as usize].event(game::ServerEvent::ObserverConnected { client: watcher, player: game::PlayerId(310) });
-    rig.hosts[leaver as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), watcher));
+    rig.hosts[leaver.0 as usize].event(game::ServerEvent::ObserverConnected { client: watcher, player: game::PlayerId(310) });
+    rig.hosts[leaver.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), watcher));
     assert!(until_landed(rig, id), "the slime landed");
     assert_eq!(rig.owners_of(id), [(leaver, rd)], "in L's region, on its new boot");
     assert_eq!(live_count(rig, id), 1);
@@ -8657,34 +8658,34 @@ fn boot_after_the_declaration(rig: &mut MultiRig) {
     let from_t = slime_in(rig, rt, 2);
     until_committed(rig, 1);
     for h in [s, leaver] {
-        rig.hosts[h as usize].manager.request_leave();
+        rig.hosts[h.0 as usize].manager.request_leave();
         let cut = until_leave_begun(rig, t, h);
         assert!(until_decided(rig, cut), "host {h}'s leave cut commits");
-        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[t as usize].manager.peer_left(h)), "T noted host {h}'s leave");
+        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[t.0 as usize].manager.peer_left(h)), "T noted host {h}'s leave");
         rig.kill(h);
     }
-    let left_as = rig.boots[leaver as usize];
+    let left_as = rig.boots[leaver.0 as usize];
     rig.with_land_on_demand(0);
     assert!(push_over(rig, from_t, rt, rd));
     let succession = until_land_declared(rig);
     assert_eq!((succession.predecessor, succession.heir, succession.survivors.clone()), (leaver, t, vec![t]));
     // S boots again, the succession open.
     rig.start(s);
-    rig.hosts[s as usize].manager.note_left_peers([(leaver, left_as)]);
-    assert!(rig.hosts[s as usize].manager.peer_left(leaver), "S's new boot holds L's session");
+    rig.hosts[s.0 as usize].manager.note_left_peers([(leaver, left_as)]);
+    assert!(rig.hosts[s.0 as usize].manager.peer_left(leaver), "S's new boot holds L's session");
     rig.start(leaver);
-    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
     rig.core().set_expected_hosts(live);
     assert!(
         until(rig, CROSS_ROUNDS, |rig| {
-            let m = &rig.hosts[s as usize].manager;
+            let m = &rig.hosts[s.0 as usize].manager;
             !m.peer_left(leaver) && m.peer_is_reachable(leaver)
         }),
         "S's new boot released L's new boot at its hello (seed {}, link delay {})",
         rig.seed,
         rig.link_delay
     );
-    assert!(rig.hosts[s as usize].manager.successions().is_empty(), "no order comes to a host that is no survivor");
+    assert!(rig.hosts[s.0 as usize].manager.successions().is_empty(), "no order comes to a host that is no survivor");
     assert_settled_whole(rig, &succession, &[from_t]);
     let (_, parts) = rig.last_committed();
     assert_eq!(parts.len(), 3, "a cut of all three committed");
@@ -8714,31 +8715,31 @@ fn survivor_booted_between(rig: &mut MultiRig) {
     let from_t = slime_in(rig, rt, 2);
     until_committed(rig, 1);
     for h in [s, leaver] {
-        rig.hosts[h as usize].manager.request_leave();
+        rig.hosts[h.0 as usize].manager.request_leave();
         let cut = until_leave_begun(rig, t, h);
         assert!(until_decided(rig, cut), "host {h}'s leave cut commits");
-        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[t as usize].manager.peer_left(h)), "T noted host {h}'s leave");
+        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[t.0 as usize].manager.peer_left(h)), "T noted host {h}'s leave");
         rig.kill(h);
     }
-    let left_as = rig.boots[leaver as usize];
+    let left_as = rig.boots[leaver.0 as usize];
     // S boots again before the declaration: a survivor of it. Its order is held back.
     rig.start(s);
-    let live: std::collections::BTreeSet<u32> = [s, t].into_iter().collect();
+    let live: std::collections::BTreeSet<HostId> = [s, t].into_iter().collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s as usize].manager.world_attached()), "S attached");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.world_attached()), "S attached");
     rig.hold_world(s, true);
     rig.with_land_on_demand(0);
     assert!(push_over(rig, from_t, rt, rd));
     let succession = until_land_declared(rig);
     assert!(succession.survivors.contains(&s), "S is a survivor: {succession:?}");
     rig.read_directory(s);
-    rig.hosts[s as usize].manager.note_left_peers([(leaver, left_as)]);
+    rig.hosts[s.0 as usize].manager.note_left_peers([(leaver, left_as)]);
     rig.start(leaver);
-    let live: std::collections::BTreeSet<u32> = (0..rig.hosts.len() as u32).collect();
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
     rig.core().set_expected_hosts(live);
     assert!(
         until(rig, CROSS_ROUNDS, |rig| {
-            let m = &rig.hosts[s as usize].manager;
+            let m = &rig.hosts[s.0 as usize].manager;
             !m.peer_left(leaver) && m.peer_is_reachable(leaver)
         }),
         "S released L's next boot at its hello"
@@ -8748,7 +8749,7 @@ fn survivor_booted_between(rig: &mut MultiRig) {
         until(rig, SUCCESSION_ROUNDS, |rig| rig.core().succession_progress().iter().any(|(i, a, _)| *i == succession.id && a.contains(&s))),
         "S applied the order"
     );
-    assert!(rig.hosts[s as usize].manager.peer_is_reachable(leaver), "the new boot's link is left alone");
+    assert!(rig.hosts[s.0 as usize].manager.peer_is_reachable(leaver), "the new boot's link is left alone");
     assert_settled_whole(rig, &succession, &[from_t]);
     rig.run(rd);
     assert!(until_landed(rig, from_t), "the slime landed");
@@ -8767,12 +8768,12 @@ fn a_survivor_booted_before_the_declaration_reports_nothing_of_a_released_leaver
 
 /// The `RegionElsewhere`s host `h` sent the test player for `rc` since recording began:
 /// the host each names, and its ticket.
-fn elsewhere_for(rig: &MultiRig, h: u32, rc: RegionCoords) -> Vec<(u32, game::ObserverTicket)> {
+fn elsewhere_for(rig: &MultiRig, h: HostId, rc: RegionCoords) -> Vec<(HostId, game::ObserverTicket)> {
     packets_to(rig, h)
         .into_iter()
         .filter_map(|p| match p {
             game::ServerPacket::RegionElsewhere { region, endpoint, ticket } if *region == rc => {
-                Some((endpoint.ordinal, ticket.clone()))
+                Some((endpoint.id, ticket.clone()))
             }
             _ => None,
         })
@@ -8781,7 +8782,7 @@ fn elsewhere_for(rig: &MultiRig, h: u32, rc: RegionCoords) -> Vec<(u32, game::Ob
 
 /// Whether host `h` sent the test player region traffic of `rc` since recording began (it
 /// serves the region to the client's session there; the rig keeps no snapshot packet).
-fn served_to_player(rig: &MultiRig, h: u32, rc: RegionCoords) -> bool {
+fn served_to_player(rig: &MultiRig, h: HostId, rc: RegionCoords) -> bool {
     packets_to(rig, h).into_iter().any(|p| match p {
         game::ServerPacket::GameEvent(e) | game::ServerPacket::HashedGameEvent(e, ..) => e.region_id == rc,
         _ => false,
@@ -8841,10 +8842,10 @@ fn release_packet(rc: RegionCoords) -> game::ServerEvent {
 
 /// Host `hb` collects observer orders (at most [`CROSS_ROUNDS`] cut rounds) until one for
 /// the test player with `nonce` came: whether it did.
-fn until_order(rig: &mut MultiRig, hb: u32, nonce: u64) -> bool {
+fn until_order(rig: &mut MultiRig, hb: HostId, nonce: u64) -> bool {
     let mut seen = false;
     until_upkept(rig, CROSS_ROUNDS, |rig| {
-        let orders = rig.hosts[hb as usize].manager.take_observer_orders();
+        let orders = rig.hosts[hb.0 as usize].manager.take_observer_orders();
         seen |= orders.iter().any(|(c, p, n, _)| (*c, *p, *n) == (P_CLIENT, P_PLAYER, nonce));
         seen
     });
@@ -8852,12 +8853,12 @@ fn until_order(rig: &mut MultiRig, hb: u32, nonce: u64) -> bool {
 }
 
 /// A region near the origin host `h` owns (`static` layout), other than every one of `not`.
-fn another_region_of(hosts: u32, h: u32, not: &[RegionCoords]) -> RegionCoords {
+fn another_region_of(hosts: u32, h: HostId, not: &[RegionCoords]) -> RegionCoords {
     for r in 0..16 {
         for x in -r..=r {
             for z in -r..=r {
                 let rc = RegionCoords::new(x, z);
-                if (game::Static { ordinal: 0, hosts }).owner_of(rc, 1) == h && !not.contains(&rc) {
+                if (game::Static { id: HostId::SOLO, hosts }).owner_of(rc, 1) == h && !not.contains(&rc) {
                     return rc;
                 }
             }
@@ -8878,12 +8879,12 @@ fn answered_when_it_returns(rig: &mut MultiRig) {
     rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
     rig.link_down(ha, hb);
-    assert!(until_upkept(rig, WAIT_ROUNDS, |rig| !rig.hosts[ha as usize].manager.reaches(b)), "host {hb} is unreachable");
+    assert!(until_upkept(rig, WAIT_ROUNDS, |rig| !rig.hosts[ha.0 as usize].manager.reaches(b)), "host {hb} is unreachable");
     rig.record_packets();
     for rc in [b, released] {
-        rig.hosts[ha as usize].event(subscribe_packet(rc));
+        rig.hosts[ha.0 as usize].event(subscribe_packet(rc));
     }
-    rig.hosts[ha as usize].event(release_packet(released));
+    rig.hosts[ha.0 as usize].event(release_packet(released));
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
@@ -8907,12 +8908,12 @@ fn answered_when_it_returns(rig: &mut MultiRig) {
     // The home remembers where it sent the client (for a succession of that host) and
     // nothing else; neither travels with the body: once it is handed to host B, the old
     // home (an observer session now) holds none of it.
-    assert_eq!(rig.hosts[ha as usize].manager.client_answers(P_CLIENT), (vec![], vec![(b, hb)]));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_answers(P_CLIENT), (vec![], vec![(b, hb)]));
     let (_, _, id) = until_body(rig);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
-    assert_eq!(rig.hosts[ha as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
-    assert_eq!(rig.hosts[ha as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "the hop drops the old home's");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "the hop drops the old home's");
 }
 
 #[test]
@@ -8936,8 +8937,8 @@ fn redirected_to_the_heir(rig: &mut MultiRig, home_is_heir: bool) {
     rig.connect_home(home, P_CLIENT, P_PLAYER, record_at(rh, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
     rig.record_packets();
-    rig.hosts[home as usize].event(subscribe_packet(rd));
-    let first: Vec<u32> = elsewhere_for(rig, home, rd).iter().map(|(o, _)| *o).collect();
+    rig.hosts[home.0 as usize].event(subscribe_packet(rd));
+    let first: Vec<HostId> = elsewhere_for(rig, home, rd).iter().map(|(o, _)| *o).collect();
     assert_eq!(first, vec![dead], "sent to its owner first");
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
@@ -8946,7 +8947,7 @@ fn redirected_to_the_heir(rig: &mut MultiRig, home_is_heir: bool) {
     let answered = until_watched(rig, SUCCESSION_ROUNDS, |rig| {
         let again = elsewhere_for(rig, home, rd).len() > 1;
         // The heir answers for its inherited land only once it adopted it.
-        early |= again && home_is_heir && !rig.hosts[home as usize].manager.inheriting().is_empty();
+        early |= again && home_is_heir && !rig.hosts[home.0 as usize].manager.inheriting().is_empty();
         again
     });
     assert!(answered, "the home answered again for {rd:?} after host {dead}'s succession (seed {}, link delay {})", rig.seed, rig.link_delay);
@@ -8957,12 +8958,12 @@ fn redirected_to_the_heir(rig: &mut MultiRig, home_is_heir: bool) {
     assert_eq!(to, heir, "the region's owner now");
     if home_is_heir {
         // Its client maps the region to the home and subscribes there.
-        rig.hosts[home as usize].event(subscribe_packet(rd));
+        rig.hosts[home.0 as usize].event(subscribe_packet(rd));
         assert!(until_upkept(rig, CROSS_ROUNDS, |rig| served_to_player(rig, home, rd)), "{rd:?} is served on the home session");
     } else {
         assert!(until_order(rig, heir, ticket.nonce), "the heir is told to expect the ticket");
-        rig.hosts[heir as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
-        rig.hosts[heir as usize].event(subscribe_packet(rd));
+        rig.hosts[heir.0 as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+        rig.hosts[heir.0 as usize].event(subscribe_packet(rd));
         assert!(
             until_upkept(rig, SUCCESSION_ROUNDS, |rig| served_to_player(rig, heir, rd)),
             "the heir serves {rd:?} to the client's observer session (seed {}, link delay {})",
@@ -8993,18 +8994,18 @@ fn observer_never_redirects(rig: &mut MultiRig) {
     rig.run(a);
     rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
-    rig.hosts[hb as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    rig.hosts[hb.0 as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
     rig.record_packets();
-    assert!(rig.hosts[hb as usize].manager.reaches(a));
-    rig.hosts[hb as usize].event(subscribe_packet(a));
+    assert!(rig.hosts[hb.0 as usize].manager.reaches(a));
+    rig.hosts[hb.0 as usize].event(subscribe_packet(a));
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
     assert!(elsewhere_for(rig, hb, a).is_empty(), "an observer session sends no RegionElsewhere");
-    assert!(rig.hosts[ha as usize].manager.take_observer_orders().is_empty(), "nor orders a ticket");
-    assert_eq!(rig.hosts[hb as usize].manager.client_answers(P_CLIENT), (vec![a], vec![]), "it waits");
-    rig.hosts[hb as usize].event(release_packet(a));
-    assert_eq!(rig.hosts[hb as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "until released");
+    assert!(rig.hosts[ha.0 as usize].manager.take_observer_orders().is_empty(), "nor orders a ticket");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.client_answers(P_CLIENT), (vec![a], vec![]), "it waits");
+    rig.hosts[hb.0 as usize].event(release_packet(a));
+    assert_eq!(rig.hosts[hb.0 as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "until released");
 }
 
 #[test]
@@ -9028,20 +9029,20 @@ fn heir_applies_late(rig: &mut MultiRig) {
     let rh = chain.iter().copied().find(|rc| rig.owner(*rc) == home).expect("the home's region");
     rig.connect_home(home, P_CLIENT, P_PLAYER, record_at(rh, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
-    rig.hosts[heir as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    rig.hosts[heir.0 as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
     rig.record_packets();
     rig.hold_orders(heir, true);
     rig.kill(dead);
-    assert_eq!(rig.hosts[heir as usize].manager.owner_of(rd), game::Owner::Host(dead), "the heir's directory names D");
-    rig.hosts[heir as usize].event(subscribe_packet(rd));
+    assert_eq!(rig.hosts[heir.0 as usize].manager.owner_of(rd), game::Owner::Host(dead), "the heir's directory names D");
+    rig.hosts[heir.0 as usize].event(subscribe_packet(rd));
     let succession = rig.run_succession(dead).remove(0);
     assert_eq!(succession.heir, heir);
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
-        assert!(rig.hosts[heir as usize].manager.successions().is_empty(), "the heir has not applied the order");
+        assert!(rig.hosts[heir.0 as usize].manager.successions().is_empty(), "the heir has not applied the order");
     }
     assert!(!served_to_player(rig, heir, rd), "nothing served before the heir applied");
-    assert_eq!(rig.hosts[heir as usize].manager.client_answers(P_CLIENT).0, vec![rd], "the subscribe waits on the heir");
+    assert_eq!(rig.hosts[heir.0 as usize].manager.client_answers(P_CLIENT).0, vec![rd], "the subscribe waits on the heir");
     rig.hold_orders(heir, false);
     assert!(
         until_upkept(rig, SUCCESSION_ROUNDS, |rig| served_to_player(rig, heir, rd)),
@@ -9049,10 +9050,10 @@ fn heir_applies_late(rig: &mut MultiRig) {
         rig.seed,
         rig.link_delay
     );
-    assert!(rig.hosts[heir as usize].manager.inheriting().is_empty(), "served only once adopted");
+    assert!(rig.hosts[heir.0 as usize].manager.inheriting().is_empty(), "served only once adopted");
     assert!(elsewhere_for(rig, heir, rd).is_empty(), "the heir's observer session redirected nothing");
     assert!(!served_to_player(rig, home, rd), "the home never serves it");
-    assert_eq!(rig.hosts[heir as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "nothing left waiting");
+    assert_eq!(rig.hosts[heir.0 as usize].manager.client_answers(P_CLIENT), (vec![], vec![]), "nothing left waiting");
 }
 
 #[test]

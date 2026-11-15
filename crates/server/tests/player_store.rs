@@ -47,7 +47,7 @@ fn resolve_same_token_same_id_across_reopen() {
         assert!(ra.is_none(), "a new player has no record");
         // Records reach the store only in save cuts.
         let cut = game::WorldCut {
-            host: 0,
+            host: h(0),
             id: game::CutId(1),
             tick: 5,
             regions: Vec::new(),
@@ -118,4 +118,10 @@ fn store_players_resolve_local_names_across_reopen() {
     assert_eq!(store.resolve(&token(1)).unwrap().0, online);
     handle.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host id from its number.
+#[allow(dead_code)]
+fn h(n: u64) -> game::HostId {
+    game::HostId(n)
 }

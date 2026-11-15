@@ -181,7 +181,7 @@ impl ConnOpener for NetThread {
                 self.connect(key, ConnTarget::Name(quic.clone()), Some(credential), outgoing, endpoint.cert_hash.clone())
             }
             None => {
-                let ordinal = endpoint.ordinal;
+                let ordinal = endpoint.id;
                 let _ = self.events.send((key, ConnEvent::Closed(format!("host {ordinal} offers no QUIC address"))));
             }
         }

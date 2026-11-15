@@ -1,6 +1,7 @@
 //! `game::peer`: the host↔host session over a seeded, delaying in-process link. Every
 //! test runs 32 seeds; a failure names its seed.
 
+use crate::common::h;
 use std::collections::VecDeque;
 
 use game::{
@@ -21,12 +22,12 @@ fn roll(seed: u64, i: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn hello(ordinal: u32, boot: u64, generation: u64) -> PeerHello {
+fn hello(ordinal: game::HostId, boot: u64, generation: u64) -> PeerHello {
     PeerHello {
-        ordinal,
+        id: ordinal,
         boot,
         generation,
-        endpoint: HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None },
+        endpoint: HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None },
         received_through: 0,
         received_from_boot: None,
     }
@@ -148,7 +149,7 @@ struct Side {
 }
 
 impl Side {
-    fn new(me: PeerHello, peer: u32, link: InlinePeerLink) -> Self {
+    fn new(me: PeerHello, peer: game::HostId, link: InlinePeerLink) -> Self {
         Side { s: PeerSession::new(me, peer), link: Tap::new(link), got: Vec::new(), vol: Vec::new(), events: Vec::new() }
     }
 
@@ -174,7 +175,7 @@ impl Side {
 
 fn pair(seed: u64, max_delay: u32) -> (Side, Side) {
     let (la, lb) = InlinePeerLink::pair(seed, max_delay);
-    (Side::new(hello(0, 100, 1), 1, la), Side::new(hello(1, 200, 1), 0, lb))
+    (Side::new(hello(h(0), 100, 1), h(1), la), Side::new(hello(h(1), 200, 1), h(0), lb))
 }
 
 /// Pumps both sides (in a seeded order) until `done` or `MAX_ROUNDS`.
@@ -311,7 +312,7 @@ fn new_peer_boot_restarts_numbering_and_requeues() {
         let owed = a.unreceived();
         let b_old_got = b.got.clone();
         // The restarted b: a new boot, nothing remembered.
-        let mut b2 = Side::new(hello(1, 201, 1), 0, std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner);
+        let mut b2 = Side::new(hello(h(1), 201, 1), h(0), std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner);
         for n in 101..=105 {
             b2.s.queue(payload(n));
         }
@@ -339,8 +340,8 @@ fn new_peer_boot_restarts_numbering_and_requeues() {
 fn higher_generation_is_reported_and_nothing_delivered() {
     for seed in 0..SEEDS {
         let (la, lb) = InlinePeerLink::pair(seed, 3);
-        let mut a = Side::new(hello(0, 100, 1), 1, la);
-        let mut b = Side::new(hello(1, 200, 2), 0, lb);
+        let mut a = Side::new(hello(h(0), 100, 1), h(1), la);
+        let mut b = Side::new(hello(h(1), 200, 2), h(0), lb);
         let mut now = 0;
         for n in 1..=10 {
             a.s.queue(payload(n));
@@ -427,7 +428,7 @@ fn drop_through_mark_forgets_exactly_the_prefix() {
         assert_eq!(a.unreceived(), (50..=55).collect::<Vec<_>>(), "seed {seed}: exactly the prefix forgotten");
         // The peer comes back as a new boot: it gets exactly what is still owed.
         a.link.set_up(false);
-        let mut b2 = Side::new(hello(1, 201, 1), 0, std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner);
+        let mut b2 = Side::new(hello(h(1), 201, 1), h(0), std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner);
         b2.link.set_up(true);
         run(seed, &mut a, &mut b2, &mut now, |_, b2| b2.s.is_reachable());
         a.s.release();
@@ -487,7 +488,7 @@ fn crash_b(seed: u64, now: &mut u64) -> (Side, Side, Vec<u64>) {
     a.link.set_up(false);
     let link = std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner;
     let owed = a.unreceived();
-    (a, Side::new(hello(1, 201, 1), 0, link), owed)
+    (a, Side::new(hello(h(1), 201, 1), h(0), link), owed)
 }
 
 #[test]
@@ -721,7 +722,7 @@ fn ack_above_anything_sent_breaks_the_connection() {
         a.link.inject.push_back(PeerMsg::Hello(PeerHello {
             received_through: 1000,
             received_from_boot: Some(100),
-            ..hello(1, 200, 1)
+            ..hello(h(1), 200, 1)
         }));
         now += 1;
         a.pump(now);
@@ -742,8 +743,8 @@ fn ack_above_anything_sent_breaks_the_connection() {
 fn lower_generation_peer_returns_at_equal_generation() {
     for seed in 0..SEEDS {
         let (la, lb) = InlinePeerLink::pair(seed, 3);
-        let mut a = Side::new(hello(0, 100, 1), 1, la);
-        let mut b = Side::new(hello(1, 200, 0), 0, lb);
+        let mut a = Side::new(hello(h(0), 100, 1), h(1), la);
+        let mut b = Side::new(hello(h(1), 200, 0), h(0), lb);
         let mut now = 0;
         for n in 1..=3 {
             a.s.queue(payload(n));
@@ -753,7 +754,7 @@ fn lower_generation_peer_returns_at_equal_generation() {
         assert_eq!(b.events, vec![PeerEvent::HigherGeneration(1)], "seed {seed}");
         a.link.set_up(false);
         let link = std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner;
-        let mut b2 = Side::new(hello(1, 201, 1), 0, link);
+        let mut b2 = Side::new(hello(h(1), 201, 1), h(0), link);
         b2.s.queue(payload(101));
         b2.link.set_up(true);
         run(seed, &mut a, &mut b2, &mut now, |a, b2| {
@@ -840,15 +841,15 @@ fn manager_closes_a_link_whose_session_broke() {
     let mut rig = crate::common::rig::Rig::with_ownership(
         game::InlineSpawner::default(),
         crate::common::seam_translate::uniform_floor,
-        Box::new(game::Static { ordinal: 0, hosts: 2 }),
+        Box::new(game::Static { id: h(0), hosts: 2 }),
         1,
     );
     let (mine, mut theirs) = InlinePeerLink::pair(7, 0);
     let mine = std::sync::Arc::new(std::sync::Mutex::new(mine));
     let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     rig.manager.set_peer(
-        1,
-        PeerSession::new(hello(0, 100, 1), 1),
+        h(1),
+        PeerSession::new(hello(h(0), 100, 1), h(1)),
         Box::new(Closing { inner: mine.clone(), closes: closes.clone() }),
     );
     let mut now = 0;
@@ -861,7 +862,7 @@ fn manager_closes_a_link_whose_session_broke() {
     // Up: our hello out, theirs in.
     let got = pump(&mut rig, &mut theirs);
     assert!(matches!(got.as_slice(), [PeerMsg::Hello(_)]), "{got:?}");
-    theirs.send(PeerMsg::Hello(hello(1, 200, 1)));
+    theirs.send(PeerMsg::Hello(hello(h(1), 200, 1)));
     pump(&mut rig, &mut theirs);
     assert_eq!(closes.load(Ordering::SeqCst), 0, "an up session closes nothing");
 
@@ -870,13 +871,13 @@ fn manager_closes_a_link_whose_session_broke() {
     mine.lock().unwrap().set_up(true);
     let got = pump(&mut rig, &mut theirs);
     assert!(matches!(got.as_slice(), [PeerMsg::Hello(_)]), "a new hello: {got:?}");
-    theirs.send(PeerMsg::Hello(hello(1, 200, 1)));
+    theirs.send(PeerMsg::Hello(hello(h(1), 200, 1)));
     pump(&mut rig, &mut theirs);
     mine.lock().unwrap().set_up(false);
     pump(&mut rig, &mut theirs);
     mine.lock().unwrap().set_up(true);
     pump(&mut rig, &mut theirs);
-    theirs.send(PeerMsg::Hello(hello(1, 200, 1)));
+    theirs.send(PeerMsg::Hello(hello(h(1), 200, 1)));
     pump(&mut rig, &mut theirs);
     assert_eq!(closes.load(Ordering::SeqCst), 0, "a dropped or replaced connection is not closed");
 
@@ -895,7 +896,7 @@ fn manager_closes_a_link_whose_session_broke() {
 #[test]
 fn redacted_messages_hide_player_tokens() {
     let order = Reliable::SpawnOrder {
-        origin: 0,
+        origin: h(0),
         hops: 0,
         player_token: "tok-secret-1".into(),
         session_epoch: 1,

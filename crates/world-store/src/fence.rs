@@ -7,6 +7,7 @@
 //! nothing. The epoch replaces Postgres' old advisory "world lock": many
 //! processes may open one database, each writes only what it holds.
 
+use game::HostId;
 use std::collections::{BTreeMap, BTreeSet};
 
 use game::{RegionCoords, WorldCut, super_region_of};
@@ -16,9 +17,9 @@ pub type SuperRegion = (i32, i32);
 
 /// What a host claimed: its owner id and, per super-region, the epoch the
 /// claim set. Passed to every fenced region load and cut commit.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fence {
-    pub owner: u32,
+    pub owner: HostId,
     pub epochs: BTreeMap<SuperRegion, u64>,
     /// The process runs every host's regions (`game::AllInOne`): it adopts every
     /// host's in-flight rows ([`Fence::in_flight_scope`]) and its cuts replace them all.
@@ -27,10 +28,16 @@ pub struct Fence {
     pub all_hosts: bool,
 }
 
+impl Default for Fence {
+    fn default() -> Self {
+        Fence { owner: HostId::SOLO, epochs: BTreeMap::new(), all_hosts: false }
+    }
+}
+
 impl Fence {
     /// Whose in-flight rows this process adopts at start
     /// ([`crate::StoreHandle::load_in_flight`]): `None` = every host's.
-    pub fn in_flight_scope(&self) -> Option<u32> {
+    pub fn in_flight_scope(&self) -> Option<HostId> {
         (!self.all_hosts).then_some(self.owner)
     }
 

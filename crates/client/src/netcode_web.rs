@@ -117,7 +117,7 @@ impl ConnOpener for PageOpener {
         let (send, outgoing) = crossbeam::channel::unbounded();
         match crate::web_endpoint::web_server_for_host(endpoint) {
             Ok(server) => {
-                info!("[client] connection {key}: to host {} ({server:?})", endpoint.ordinal);
+                info!("[client] connection {key}: to host {} ({server:?})", endpoint.id);
                 connect(server, key, self.events.clone(), outgoing, Some(credential));
             }
             Err(why) => {

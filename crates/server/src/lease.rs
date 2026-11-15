@@ -2,6 +2,7 @@
 //! ([`register_or_wait`]), and the heartbeat its MAIN loop pumps ([`Heartbeat`]). The
 //! coordinator declares a host dead from the beats it stops reading (`game::LeaseWatch`).
 
+use game::HostId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,7 @@ pub enum LeaseState {
 /// when it is there.
 pub struct Heartbeat {
     store: StoreHandle,
-    ordinal: u32,
+    ordinal: HostId,
     boot: u64,
     /// When the next beat is due (`None`: at the first pump).
     next_at: Option<Instant>,
@@ -47,7 +48,7 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    pub fn new(store: StoreHandle, ordinal: u32, boot: u64) -> Self {
+    pub fn new(store: StoreHandle, ordinal: HostId, boot: u64) -> Self {
         let period = Duration::from_millis(HOST_HEARTBEAT_MS);
         Heartbeat { store, ordinal, boot, next_at: None, pending: None, warned_at: None, replaced: false, period }
     }
@@ -161,7 +162,7 @@ pub fn register_or_wait(
     policy: CrashPolicy,
     stop: &AtomicBool,
 ) -> Result<Option<HostBoot>, StoreError> {
-    let ordinal = row.ordinal;
+    let ordinal = row.id;
     let mut logged_at: Option<Instant> = None;
     let health = crate::health::Health::global();
     loop {
@@ -203,11 +204,20 @@ pub fn register_or_wait(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use game::HostId;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use super::*;
 
-    fn row(ordinal: u32, boot: u64) -> HostRow {
+    fn row(ordinal: HostId, boot: u64) -> HostRow {
         HostRow {
-            ordinal,
+            id: ordinal,
             boot,
             generation: 0,
             clean: false,
@@ -228,16 +238,16 @@ mod tests {
     #[test]
     fn a_boot_beats_between_its_start_up_steps() {
         let store = StoreHandle::open(&world_store::StoreUrl::Memory, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
-        let verdict = store.register_host(row(0, 10), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        let verdict = store.register_host(row(h(0), 10), &Fence::default(), CrashPolicy::Rollback).unwrap();
         assert!(matches!(verdict, BootVerdict::Registered(_)), "{verdict:?}");
         let seen = || store.hosts().unwrap()[0].seen_ms;
         let first = seen();
         std::thread::sleep(Duration::from_millis(5));
-        let mut beat = Heartbeat::new(store.clone(), 0, 10);
+        let mut beat = Heartbeat::new(store.clone(), h(0), 10);
         assert_eq!(beat.beat_now("a step"), LeaseState::Held);
         assert!(seen() > first, "the waited beat moved seen_ms");
         // Another boot of the ordinal registered meanwhile: replaced, and it stays so.
-        store.register_host(row(0, 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        store.register_host(row(h(0), 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
         assert_eq!(beat.beat_now("a later step"), LeaseState::Replaced);
         assert_eq!(beat.pump(Instant::now()), LeaseState::Replaced);
         store.shutdown();

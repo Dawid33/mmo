@@ -1,14 +1,15 @@
 //! The lease on a `hosts` row (R4): `register_host` stamps `seen_ms`, `state` and a rising
 //! `reg`; `heartbeat` moves `seen_ms` for the live boot only.
 
+use crate::common::hid;
 use game::CrashPolicy;
 use world_store::{BootVerdict, Fence, HOST_LIVE, HostBoot, HostRow, WaitFor};
 
 use crate::handle::{TEST_SUPER_REGIONS, each_backend, open, raw_exec, register};
 
-fn row(ordinal: u32, boot: u64) -> HostRow {
+fn row(ordinal: game::HostId, boot: u64) -> HostRow {
     HostRow {
-        ordinal,
+        id: ordinal,
         boot,
         // Ignored by `register_host`.
         generation: 99,
@@ -28,19 +29,19 @@ fn row(ordinal: u32, boot: u64) -> HostRow {
 fn register_stamps_seen_and_a_rising_reg() {
     each_backend("lease_register", false, |url| {
         let h = open(url);
-        let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
-        let b = h.claim_super_regions(1, vec![TEST_SUPER_REGIONS[1]]).unwrap();
-        let boot0 = register(&h, row(0, 10), &a).unwrap();
-        let boot1 = register(&h, row(1, 11), &b).unwrap();
+        let a = h.claim_super_regions(hid(0), vec![TEST_SUPER_REGIONS[0]]).unwrap();
+        let b = h.claim_super_regions(hid(1), vec![TEST_SUPER_REGIONS[1]]).unwrap();
+        let boot0 = register(&h, row(hid(0), 10), &a).unwrap();
+        let boot1 = register(&h, row(hid(1), 11), &b).unwrap();
         assert_eq!((boot0.reg, boot1.reg), (1, 2));
         let now = h.db_now_ms().unwrap();
         let rows = h.hosts().unwrap();
-        assert_eq!(rows.iter().map(|r| (r.ordinal, r.reg, r.state)).collect::<Vec<_>>(), vec![(0, 1, HOST_LIVE), (1, 2, HOST_LIVE)]);
+        assert_eq!(rows.iter().map(|r| (r.id, r.reg, r.state)).collect::<Vec<_>>(), vec![(hid(0), 1, HOST_LIVE), (hid(1), 2, HOST_LIVE)]);
         for r in &rows {
             assert!(r.seen_ms.abs_diff(now) < 5_000, "seen_ms {} vs db now {now}", r.seen_ms);
         }
         // A re-registration takes the next number.
-        assert_eq!(register(&h, row(0, 12), &a).unwrap().reg, 3);
+        assert_eq!(register(&h, row(hid(0), 12), &a).unwrap().reg, 3);
         h.shutdown();
     });
 }
@@ -49,24 +50,24 @@ fn register_stamps_seen_and_a_rising_reg() {
 fn heartbeat_moves_seen_ms_for_the_live_boot_only() {
     each_backend("lease_heartbeat", true, |url| {
         let h = open(url);
-        let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
-        register(&h, row(0, 10), &a).unwrap();
+        let a = h.claim_super_regions(hid(0), vec![TEST_SUPER_REGIONS[0]]).unwrap();
+        register(&h, row(hid(0), 10), &a).unwrap();
         let seen = || h.hosts().unwrap()[0].seen_ms;
         let first = seen();
         std::thread::sleep(std::time::Duration::from_millis(30));
-        assert!(h.heartbeat(0, 10).unwrap());
+        assert!(h.heartbeat(hid(0), 10).unwrap());
         let second = seen();
         assert!(second > first, "{second} > {first}");
         // Another boot of the ordinal, or an ordinal that never registered: replaced.
-        assert!(!h.heartbeat(0, 11).unwrap());
-        assert!(!h.heartbeat(5, 10).unwrap());
+        assert!(!h.heartbeat(hid(0), 11).unwrap());
+        assert!(!h.heartbeat(hid(5), 10).unwrap());
         assert_eq!(seen(), second);
         // A dead row no longer takes beats.
         h.shutdown();
         raw_exec(url, "UPDATE hosts SET state = 1");
         let h = open(url);
         let before = h.hosts().unwrap()[0].seen_ms;
-        assert!(!h.heartbeat(0, 10).unwrap());
+        assert!(!h.heartbeat(hid(0), 10).unwrap());
         assert_eq!(h.hosts().unwrap()[0].seen_ms, before);
         h.shutdown();
     });
@@ -86,22 +87,22 @@ fn a_heartbeat_behind_a_held_row_lock_errors_instead_of_waiting() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let db = rt.block_on(crate::common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let h = open(&StoreUrl::Postgres(db.url.clone()));
-    let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
-    register(&h, row(0, 10), &a).unwrap();
+    let a = h.claim_super_regions(hid(0), vec![TEST_SUPER_REGIONS[0]]).unwrap();
+    register(&h, row(hid(0), 10), &a).unwrap();
     rt.block_on(async {
         let mut conn = sqlx::PgConnection::connect(&db.url).await.unwrap();
         let mut tx = conn.begin().await.unwrap();
         sqlx::query("SELECT 1 FROM hosts WHERE ordinal = 0 FOR UPDATE").execute(&mut *tx).await.unwrap();
         let started = std::time::Instant::now();
         let h2 = h.clone();
-        let beat = tokio::task::spawn_blocking(move || h2.heartbeat(0, 10)).await.unwrap();
+        let beat = tokio::task::spawn_blocking(move || h2.heartbeat(hid(0), 10)).await.unwrap();
         let waited = started.elapsed();
         assert!(matches!(&beat, Err(e) if e.is_lock_conflict()), "a beat behind a row lock is a lock conflict, got {beat:?}");
         assert!(waited < std::time::Duration::from_millis(HEARTBEAT_LOCK_TIMEOUT_MS * 3), "waited {waited:?}");
         tx.rollback().await.unwrap();
         // Released: the beat goes through again.
         let h2 = h.clone();
-        assert!(tokio::task::spawn_blocking(move || h2.heartbeat(0, 10)).await.unwrap().unwrap());
+        assert!(tokio::task::spawn_blocking(move || h2.heartbeat(hid(0), 10)).await.unwrap().unwrap());
     });
     h.shutdown();
     drop(db);
@@ -123,17 +124,17 @@ fn a_heartbeat_does_not_wait_for_the_shared_pool() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let db = rt.block_on(crate::common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let h = open(&StoreUrl::Postgres(db.url.clone()));
-    let a = h.claim_super_regions(0, vec![TEST_SUPER_REGIONS[0]]).unwrap();
-    register(&h, row(0, 10), &a).unwrap();
+    let a = h.claim_super_regions(hid(0), vec![TEST_SUPER_REGIONS[0]]).unwrap();
+    register(&h, row(hid(0), 10), &a).unwrap();
     let before = h.hosts().unwrap()[0].seen_ms;
     std::thread::sleep(std::time::Duration::from_millis(30));
     h.hold_pool_connections(STORE_POOL_MAX, HELD_MS).unwrap();
     let started = std::time::Instant::now();
-    assert!(h.heartbeat(0, 10).unwrap(), "the live boot's beat");
+    assert!(h.heartbeat(hid(0), 10).unwrap(), "the live boot's beat");
     let waited = started.elapsed();
     assert!(waited < std::time::Duration::from_millis(HELD_MS / 2), "the beat waited {waited:?} for the busy shared pool");
     // Another boot of the ordinal is still answered `false` on that connection.
-    assert!(!h.heartbeat(0, 11).unwrap());
+    assert!(!h.heartbeat(hid(0), 11).unwrap());
     // (The read waits for the pool; the beat above did not.)
     assert!(h.hosts().unwrap()[0].seen_ms > before);
     h.shutdown();
@@ -142,7 +143,7 @@ fn a_heartbeat_does_not_wait_for_the_shared_pool() {
 
 /// Host 0's registration as a boot under `policy`: the boot after one of the same ordinal.
 fn boot_as(h: &world_store::StoreHandle, boot: u64, policy: CrashPolicy) -> BootVerdict {
-    h.register_host(row(0, boot), &Fence::default(), policy).unwrap()
+    h.register_host(row(hid(0), boot), &Fence::default(), policy).unwrap()
 }
 
 /// Host 0 boots again (boot 20) under `Succession` after its previous boot (10) and host 1's
@@ -218,17 +219,17 @@ fn boot_verdicts() {
             raw_exec(url, "UPDATE world SET generation = 0");
             let h = open(url);
             boot_as(&h, 10, CrashPolicy::Rollback);
-            h.register_host(row(1, 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
+            h.register_host(row(hid(1), 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
             h.shutdown();
             for sql in case.setup.iter() {
                 raw_exec(url, sql);
             }
             let h = open(url);
-            let before = h.hosts().unwrap().into_iter().find(|r| r.ordinal == 0);
+            let before = h.hosts().unwrap().into_iter().find(|r| r.id == hid(0));
             let verdict = boot_as(&h, 20, CrashPolicy::Succession);
             assert!((case.verdict)(&verdict), "{}: {verdict:?}", case.what);
             assert_eq!(h.world_generation().unwrap(), case.generation, "{}: the world generation", case.what);
-            let prior = h.hosts().unwrap().into_iter().find(|r| r.ordinal == 0).expect("host 0's row");
+            let prior = h.hosts().unwrap().into_iter().find(|r| r.id == hid(0)).expect("host 0's row");
             match case.prior_vouched {
                 None => assert_eq!((prior.boot, prior.state), (20, HOST_LIVE), "{}: registered", case.what),
                 Some(vouched) => {
@@ -261,7 +262,7 @@ fn the_first_boot_after_a_total_crash_gives_the_other_rows_a_fresh_lease() {
             raw_exec(url, "DELETE FROM hosts");
             raw_exec(url, "UPDATE world SET generation = 0");
             let h = open(url);
-            for (ordinal, boot) in [(0, 10), (1, 11), (2, 12), (3, 13)] {
+            for (ordinal, boot) in [(hid(0), 10), (hid(1), 11), (hid(2), 12), (hid(3), 13)] {
                 h.register_host(row(ordinal, boot), &Fence::default(), CrashPolicy::Rollback).unwrap();
             }
             h.shutdown();
@@ -269,19 +270,19 @@ fn the_first_boot_after_a_total_crash_gives_the_other_rows_a_fresh_lease() {
             // Host 3 left clean; its row is no lease anybody waits for.
             raw_exec(url, "UPDATE hosts SET clean = 1, seen_ms = 1 WHERE ordinal = 3");
             let h = open(url);
-            let verdict = h.register_host(row(0, 20), &Fence::default(), policy).unwrap();
+            let verdict = h.register_host(row(hid(0), 20), &Fence::default(), policy).unwrap();
             assert!(matches!(verdict, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })), "{policy:?}: {verdict:?}");
             let now = h.db_now_ms().unwrap();
             let rows = h.hosts().unwrap();
-            for r in rows.iter().filter(|r| r.ordinal == 1 || r.ordinal == 2) {
-                assert_eq!((r.boot, r.generation, r.state), (10 + u64::from(r.ordinal), 0, HOST_LIVE), "the row is otherwise as it was");
+            for r in rows.iter().filter(|r| r.id == hid(1) || r.id == hid(2)) {
+                assert_eq!((r.boot, r.generation, r.state), (10 + r.id.0, 0, HOST_LIVE), "the row is otherwise as it was");
                 if refreshed {
-                    assert!(r.seen_ms.abs_diff(now) < 5_000, "{policy:?}: host {}'s lease starts again: {} vs db now {now}", r.ordinal, r.seen_ms);
+                    assert!(r.seen_ms.abs_diff(now) < 5_000, "{policy:?}: host {}'s lease starts again: {} vs db now {now}", r.id, r.seen_ms);
                 } else {
-                    assert_eq!(r.seen_ms, 1, "{policy:?}: host {}'s row is untouched", r.ordinal);
+                    assert_eq!(r.seen_ms, 1, "{policy:?}: host {}'s row is untouched", r.id);
                 }
             }
-            assert_eq!(rows.iter().find(|r| r.ordinal == 3).unwrap().seen_ms, 1, "{policy:?}: a clean row is no lease");
+            assert_eq!(rows.iter().find(|r| r.id == hid(3)).unwrap().seen_ms, 1, "{policy:?}: a clean row is no lease");
             h.shutdown();
         }
     });
@@ -293,31 +294,31 @@ fn the_first_boot_after_a_total_crash_gives_the_other_rows_a_fresh_lease() {
 fn rollback_policy_keeps_the_r3_rule() {
     each_backend("lease_rollback", true, |url| {
         let h = open(url);
-        let reg = |ordinal: u32, boot: u64| -> HostBoot {
+        let reg = |ordinal: game::HostId, boot: u64| -> HostBoot {
             match h.register_host(row(ordinal, boot), &Fence::default(), CrashPolicy::Rollback).unwrap() {
                 BootVerdict::Registered(b) => b,
                 other => panic!("Rollback never waits: {other:?}"),
             }
         };
-        assert!(!reg(0, 1).bumped);
-        assert!(!reg(1, 2).bumped);
+        assert!(!reg(hid(0), 1).bumped);
+        assert!(!reg(hid(1), 2).bumped);
         // A crashed and reboots while B is alive: its row was dirty at the world's generation.
-        let again = reg(0, 3);
+        let again = reg(hid(0), 3);
         assert_eq!((again.generation, again.bumped), (1, true));
         // B restarts because it saw generation 1: its row says 0, so it adopts.
-        let adopted = reg(1, 4);
+        let adopted = reg(hid(1), 4);
         assert_eq!((adopted.generation, adopted.bumped), (1, false));
         assert_eq!(h.world_generation().unwrap(), 1);
         h.shutdown();
         // A row marked dead changes nothing under Rollback: a second crash of B bumps again.
         raw_exec(url, "UPDATE hosts SET state = 1 WHERE ordinal = 1");
         let h = open(url);
-        match h.register_host(row(1, 5), &Fence::default(), CrashPolicy::Rollback).unwrap() {
+        match h.register_host(row(hid(1), 5), &Fence::default(), CrashPolicy::Rollback).unwrap() {
             BootVerdict::Registered(b) => assert_eq!((b.generation, b.bumped), (2, true)),
             other => panic!("Rollback never waits: {other:?}"),
         }
         let rows = h.hosts().unwrap();
-        assert_eq!(rows.iter().map(|r| (r.ordinal, r.generation)).collect::<Vec<_>>(), vec![(0, 1), (1, 2)]);
+        assert_eq!(rows.iter().map(|r| (r.id, r.generation)).collect::<Vec<_>>(), vec![(hid(0), 1), (hid(1), 2)]);
         h.shutdown();
     });
 }
@@ -328,14 +329,14 @@ fn rollback_policy_keeps_the_r3_rule() {
 fn total_crash_bumps_once_and_everyone_resumes() {
     each_backend("lease_total_crash", true, |url| {
         let h = open(url);
-        h.register_host(row(0, 10), &Fence::default(), CrashPolicy::Rollback).unwrap();
-        h.register_host(row(1, 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        h.register_host(row(hid(0), 10), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        h.register_host(row(hid(1), 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
         h.shutdown();
         raw_exec(url, "UPDATE hosts SET seen_ms = 1");
         let h = open(url);
-        let a = h.register_host(row(0, 20), &Fence::default(), CrashPolicy::Succession).unwrap();
+        let a = h.register_host(row(hid(0), 20), &Fence::default(), CrashPolicy::Succession).unwrap();
         assert!(matches!(a, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })), "{a:?}");
-        let b = h.register_host(row(1, 21), &Fence::default(), CrashPolicy::Succession).unwrap();
+        let b = h.register_host(row(hid(1), 21), &Fence::default(), CrashPolicy::Succession).unwrap();
         assert!(matches!(b, BootVerdict::Registered(HostBoot { generation: 1, bumped: false, .. })), "{b:?}");
         assert_eq!(h.world_generation().unwrap(), 1);
         h.shutdown();
@@ -352,13 +353,13 @@ fn a_lone_claim_host_restarts_after_a_crash_without_waiting() {
         let h = open(url);
         assert!(matches!(boot_as(&h, 10, CrashPolicy::Succession), BootVerdict::Registered(HostBoot { bumped: false, .. })));
         // It crashed right after a beat: its row is dirty, live and fresh.
-        assert!(h.heartbeat(0, 10).unwrap());
+        assert!(h.heartbeat(hid(0), 10).unwrap());
         let started = std::time::Instant::now();
         let again = boot_as(&h, 20, CrashPolicy::Succession);
         assert!(matches!(again, BootVerdict::Registered(HostBoot { generation: 1, bumped: true, .. })), "{again:?}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "registered at once");
         let rows = h.hosts().unwrap();
-        assert_eq!(rows.iter().map(|r| (r.ordinal, r.boot, r.state, r.clean)).collect::<Vec<_>>(), vec![(0, 20, HOST_LIVE, false)]);
+        assert_eq!(rows.iter().map(|r| (r.id, r.boot, r.state, r.clean)).collect::<Vec<_>>(), vec![(hid(0), 20, HOST_LIVE, false)]);
         h.shutdown();
     });
 }
@@ -375,39 +376,39 @@ fn a_retired_ordinal_waits_for_its_succession_whatever_the_generation() {
     for settle in [true, false] {
         let Some(w) = World::new(2) else { return };
         let rows1 = vec![in_flight(RegionCoords::new(1, 5))];
-        w.hosts[0].prepare_cut(part(1, 0, vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
-        w.hosts[1].prepare_cut(part(1, 1, rows1.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-        assert!(w.h.decide_cut(CutId(1), 100, true, vec![0, 1], vec![], w.c, 0, vec![]).unwrap());
+        w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+        w.hosts[1].prepare_cut(part(1, hid(1), rows1.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+        assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], w.c, 0, vec![]).unwrap());
         for h in &w.hosts {
             assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
         }
         crate::two_phase::exec(&w.w, &format!("UPDATE hosts SET seen_ms = seen_ms - {}", 2 * game::HOST_LEASE_MS));
-        let s = match w.h.retire_offline(1).unwrap() {
+        let s = match w.h.retire_offline(hid(1)).unwrap() {
             world_store::Retired::Opened(s) => s,
             other => panic!("{other:?}"),
         };
         assert_eq!(w.h.world_generation().unwrap(), 1);
         let before = w.h.hosts().unwrap();
         for policy in [CrashPolicy::Succession, CrashPolicy::Rollback] {
-            let v = w.hosts[1].register_host(HostRow { boot: 900, ..host_row(1) }, &Fence::default(), policy).unwrap();
+            let v = w.hosts[1].register_host(HostRow { boot: 900, ..host_row(hid(1)) }, &Fence::default(), policy).unwrap();
             assert_eq!(v, BootVerdict::Wait(WaitFor::Succession), "settle {settle}, {policy:?}: the retired ordinal waits");
         }
         assert_eq!(w.h.hosts().unwrap(), before, "nothing written");
         assert_eq!(w.h.world_generation().unwrap(), 1);
         if settle {
-            let heir = w.h.owned_by(0).unwrap();
-            let adopting = game::WorldCut { adopts: vec![1], ..part(2, 0, rows1.clone()) };
+            let heir = w.h.owned_by(hid(0)).unwrap();
+            let adopting = game::WorldCut { adopts: vec![hid(1)], ..part(2, hid(0), rows1.clone()) };
             w.hosts[0].prepare_cut(adopting, heir, 1).recv().unwrap().unwrap();
-            assert!(w.h.decide_cut(CutId(2), 200, true, vec![0], vec![], w.c, 1, vec![s.id]).unwrap());
+            assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 1, vec![s.id]).unwrap());
             assert_eq!(w.hosts[0].cut_decided(CutId(2)).unwrap(), Some(true));
         } else {
             w.h.rollback_world_operator().unwrap();
         }
-        let v = w.hosts[1].register_host(HostRow { boot: 901, ..host_row(1) }, &Fence::default(), CrashPolicy::Succession).unwrap();
+        let v = w.hosts[1].register_host(HostRow { boot: 901, ..host_row(hid(1)) }, &Fence::default(), CrashPolicy::Succession).unwrap();
         assert!(matches!(v, BootVerdict::Registered(_)), "settle {settle}: {v:?}");
-        assert!(w.h.owned_by(1).unwrap().epochs.is_empty(), "settle {settle}: it owns nothing");
-        assert!(w.h.load_in_flight(Some(1)).unwrap().is_empty(), "settle {settle}: no in-flight row to restore");
-        assert_ne!(boot_of(1), 901);
+        assert!(w.h.owned_by(hid(1)).unwrap().epochs.is_empty(), "settle {settle}: it owns nothing");
+        assert!(w.h.load_in_flight(Some(hid(1))).unwrap().is_empty(), "settle {settle}: no in-flight row to restore");
+        assert_ne!(boot_of(hid(1)), 901);
         w.shutdown();
     }
 }

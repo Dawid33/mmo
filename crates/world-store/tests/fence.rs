@@ -3,6 +3,7 @@
 //! coordinator saves alike — and writes nothing. Read-only handles, and
 //! Postgres opening without a world lock.
 
+use crate::common::hid;
 use std::time::Duration;
 
 use game::{ChunkCoords, CutId, InFlightRow, PortableRegion, RegionCoords, WorldCut};
@@ -33,7 +34,7 @@ fn cut(h: &StoreHandle, id: u64) -> WorldCut {
     let (pid, _) = h.resolve_player("local:fenced").unwrap();
     WorldCut {
         id: CutId(id),
-        host: 0,
+        host: hid(0),
         tick: 100 * id,
         regions: vec![(A, region_a())],
         in_flight: vec![InFlightRow::Intent { target: A, msg: intent() }],
@@ -66,11 +67,11 @@ fn raw_exec_unmigrated(url: &StoreUrl, sql: &str) {
 fn stale_owner_commit_is_refused_and_writes_nothing() {
     each_backend("fence_commit", false, |url| {
         let h = open(url);
-        let fence_a = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let fence_a = h.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap();
         assert!(fence_a.epochs.values().all(|e| *e == 1), "{fence_a:?}");
-        let fence_b = h.claim_super_regions(1, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let fence_b = h.claim_super_regions(hid(1), TEST_SUPER_REGIONS.to_vec()).unwrap();
         assert!(fence_b.epochs.values().all(|e| *e == 2), "{fence_b:?}");
-        assert_eq!(fence_b.owner, 1);
+        assert_eq!(fence_b.owner, hid(1));
 
         let err = h.commit_cut(cut(&h, 1), fence_a.clone()).recv().unwrap().unwrap_err();
         assert!(matches!(err, StoreError::Fenced { sr: Some(_) }), "{err}");
@@ -110,9 +111,9 @@ const FOREIGN: RegionCoords = RegionCoords { x: 1000, z: 1000 };
 fn player_record_in_a_foreign_super_region_commits() {
     each_backend("fence_foreign_record", false, |url| {
         let h = open(url);
-        let fence = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let fence = h.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap();
         let foreign_sr = game::super_region_of(FOREIGN, h.super_region_regions());
-        let other = h.claim_super_regions(1, vec![foreign_sr]).unwrap();
+        let other = h.claim_super_regions(hid(1), vec![foreign_sr]).unwrap();
         assert!(!fence.epochs.contains_key(&foreign_sr) && other.epochs.contains_key(&foreign_sr));
         let mut c = cut(&h, 1);
         c.players[0].1.region = FOREIGN;
@@ -130,8 +131,8 @@ fn player_record_in_a_foreign_super_region_commits() {
 fn stale_owner_still_cannot_write_a_player_record() {
     each_backend("fence_stale_record", false, |url| {
         let h = open(url);
-        let stale = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
-        let _newer = h.claim_super_regions(1, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let stale = h.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let _newer = h.claim_super_regions(hid(1), TEST_SUPER_REGIONS.to_vec()).unwrap();
         for region in [A, FOREIGN] {
             let mut c = WorldCut { regions: vec![], in_flight: vec![], ..cut(&h, 1) };
             c.players[0].1.region = region;
@@ -147,10 +148,10 @@ fn stale_owner_still_cannot_write_a_player_record() {
 fn stale_owner_region_load_is_refused() {
     each_backend("fence_load", false, |url| {
         let h = open(url);
-        let fence_a = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let fence_a = h.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap();
         h.commit_cut(cut(&h, 1), fence_a.clone()).recv().unwrap().unwrap();
         assert!(h.load_region(A, &fence_a).unwrap().is_some());
-        let fence_b = h.claim_super_regions(0, vec![(0, 0)]).unwrap();
+        let fence_b = h.claim_super_regions(hid(0), vec![(0, 0)]).unwrap();
         assert_eq!(fence_b.epochs[&(0, 0)], 2, "the same owner claiming again also bumps the epoch");
         assert_eq!(h.load_region(A, &fence_a).unwrap_err(), StoreError::Fenced { sr: Some((0, 0)) });
         assert!(h.load_region(A, &fence_b).unwrap().is_some());
@@ -193,8 +194,8 @@ fn two_pg_writers_open_without_lock() {
     let url = StoreUrl::Postgres(db.url.clone());
     let first = open(&url);
     let second = open(&url);
-    let fence_1 = first.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
-    let fence_2 = second.claim_super_regions(1, TEST_SUPER_REGIONS.to_vec()).unwrap();
+    let fence_1 = first.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap();
+    let fence_2 = second.claim_super_regions(hid(1), TEST_SUPER_REGIONS.to_vec()).unwrap();
     assert!(matches!(first.commit_cut(cut(&first, 1), fence_1).recv().unwrap(), Err(StoreError::Fenced { .. })));
     second.commit_cut(cut(&second, 2), fence_2).recv().unwrap().unwrap();
     second.shutdown();
@@ -241,7 +242,7 @@ fn two_pg_writers_open_a_fresh_database_at_once() {
 fn read_only_refuses_writes_and_unknown_schema() {
     each_backend("fence_ro", true, |url| {
         let w = open(url);
-        let fence = w.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let fence = w.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap();
         w.commit_cut(cut(&w, 1), fence.clone()).recv().unwrap().unwrap();
         // Beside the open writer (SQLite: the writer's file lock is not taken).
         let r = StoreHandle::open(url, Dials::BUILT, OpenMode::ReadOnly).unwrap();
@@ -250,7 +251,7 @@ fn read_only_refuses_writes_and_unknown_schema() {
         assert!(r.resolve_player("local:fenced").unwrap().1.is_some(), "a known player is a read");
         assert_eq!(r.resolve_player("local:new").unwrap_err(), StoreError::ReadOnly);
         assert_eq!(r.commit_cut(cut(&w, 2), fence.clone()).recv().unwrap().unwrap_err(), StoreError::ReadOnly);
-        assert_eq!(r.claim_super_regions(0, vec![(0, 0)]).unwrap_err(), StoreError::ReadOnly);
+        assert_eq!(r.claim_super_regions(hid(0), vec![(0, 0)]).unwrap_err(), StoreError::ReadOnly);
         assert_eq!(r.claim_coordinator().unwrap_err(), StoreError::ReadOnly);
         let err = r.save_coordinator(vec![1], world_store::CoordinatorFence { epoch: 1 }).recv().unwrap().unwrap_err();
         assert_eq!(err, StoreError::ReadOnly);
@@ -285,7 +286,7 @@ fn concurrent_claim_and_commit_serialise() {
     let db = rt.block_on(common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let url = StoreUrl::Postgres(db.url.clone());
     let h = open(&url);
-    let old = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
+    let old = h.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap();
 
     let mut conn = rt.block_on(sqlx::PgConnection::connect(&db.url)).unwrap();
     let mut tx = rt.block_on(conn.begin()).unwrap();
@@ -299,7 +300,7 @@ fn concurrent_claim_and_commit_serialise() {
     let claimer = {
         let h = h.clone();
         std::thread::spawn(move || {
-            let _ = done_tx.send(h.claim_super_regions(1, TEST_SUPER_REGIONS.to_vec()));
+            let _ = done_tx.send(h.claim_super_regions(hid(1), TEST_SUPER_REGIONS.to_vec()));
         })
     };
     assert!(done_rx.recv_timeout(BLOCKED_FOR).is_err(), "the claim waits for the commit's row lock");

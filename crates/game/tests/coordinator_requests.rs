@@ -7,6 +7,7 @@
 //! `InlineWorldLink::set_up`. Each test sweeps [`SEEDS`] seeds; a failure names the seed
 //! to replay.
 
+use crate::common::h;
 use std::sync::{Arc, Mutex};
 
 use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, land_map, years_before};
@@ -1140,12 +1141,12 @@ fn renumber_budget_is_per_placement() {
     for _ in 0..=game::coordinator::HOP_RENUMBER_MAX_PER_PLAYER {
         let next = w.coordinator().hop_of(a) + 1;
         let now = w.now_ms;
-        w.link().coordinator_mut().handle(9, HostMsg::PlayerOnline(report(next)), now);
+        w.link().coordinator_mut().handle(h(9), HostMsg::PlayerOnline(report(next)), now);
         w.drain();
     }
-    assert_eq!(w.coordinator().online_on(a), Some(9), "the budget ran out: A stays displaced");
+    assert_eq!(w.coordinator().online_on(a), Some(h(9)), "the budget ran out: A stays displaced");
     w.send(ServerEvent::ClientDisconnected(A));
     w.send(ServerEvent::connected(A));
     w.drain();
-    assert_eq!(w.coordinator().online_on(a), Some(0), "a new placement renumbers again: online here");
+    assert_eq!(w.coordinator().online_on(a), Some(h(0)), "a new placement renumbers again: online here");
 }

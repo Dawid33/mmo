@@ -122,7 +122,7 @@ pub fn web_server_for_host(endpoint: &game::HostEndpoint) -> Result<WebServer, S
     let url = endpoint
         .webtransport
         .as_deref()
-        .ok_or_else(|| format!("host {} offers no WebTransport address", endpoint.ordinal))?;
+        .ok_or_else(|| format!("host {} offers no WebTransport address", endpoint.id))?;
     let url = webtransport_url(url)?;
     Ok(pinned(url, endpoint.cert_hash.as_deref())?.unwrap_or_else(|| WebServer::Trusted { url: url.into() }))
 }
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn another_host_is_pinned_by_its_own_hash_never_the_dev_file() {
         let endpoint = |wt: Option<&str>, hash: Option<&str>| game::HostEndpoint {
-            ordinal: 1,
+            id: game::HostId(1),
             quic: None,
             webtransport: wt.map(Into::into),
             cert_hash: hash.map(Into::into),

@@ -82,7 +82,7 @@ pub enum PeerRole {
     /// `reg` (its `hosts` row's, one more than any before it): a boot that registered later
     /// has the higher one, so a listener keeping one peer per ordinal can tell a stale
     /// process (about to be fenced) from its replacement — whatever it claims or loses.
-    Host { ordinal: u32, boot: u64, reg: u64 },
+    Host { id: game::HostId, boot: u64, reg: u64 },
     Login,
     Coordinator,
 }

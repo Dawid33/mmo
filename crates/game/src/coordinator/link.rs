@@ -1,6 +1,7 @@
 //! The host's end of its link to the world coordinator, and the inline link that runs a
 //! [`Coordinator`] in the host's own thread (single-player on wasm, tests).
 
+use crate::HostId;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -46,7 +47,7 @@ fn mix(seed: u64, i: u64) -> u64 {
 /// with each host's messages not read by its link yet. Derefs to the coordinator.
 pub struct SharedCore {
     coordinator: Coordinator,
-    boxes: BTreeMap<u32, VecDeque<CoordMsg>>,
+    boxes: BTreeMap<HostId, VecDeque<CoordMsg>>,
 }
 
 impl SharedCore {
@@ -114,7 +115,7 @@ const INPUT_DELAY_SALT: u64 = 0x5EED_1A7E;
 pub struct InlineWorldLink {
     core: Core,
     /// The host the core is told the messages are from.
-    host: u32,
+    host: HostId,
     /// Messages for the core, with the pump step from which they may be handled.
     in_q: VecDeque<(u64, HostMsg)>,
     /// Outputs with the pump step from which they may be read.
@@ -133,18 +134,18 @@ pub struct InlineWorldLink {
 
 impl InlineWorldLink {
     pub fn new(coord: Coordinator) -> Self {
-        Self::over(Core::Owned(coord), 0)
+        Self::over(Core::Owned(coord), HostId::SOLO)
     }
 
     /// Host `host`'s link to `core`, which other hosts' links share: each host reads only
     /// what the core sends it (or every host). Make every host's link before any of them
     /// is pumped: a host whose link does not exist yet misses what is sent to every host.
-    pub fn shared(core: Arc<Mutex<SharedCore>>, host: u32) -> Self {
+    pub fn shared(core: Arc<Mutex<SharedCore>>, host: HostId) -> Self {
         lock(&core).boxes.entry(host).or_default();
         Self::over(Core::Shared(core), host)
     }
 
-    fn over(core: Core, host: u32) -> Self {
+    fn over(core: Core, host: HostId) -> Self {
         InlineWorldLink {
             core,
             host,

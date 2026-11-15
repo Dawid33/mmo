@@ -6,7 +6,7 @@ use crossbeam::channel::{Receiver, Sender};
 use crossbeam::select;
 use crate::connections::{Closed, ConnEvent, ConnHandle, ConnOpener, ConnectionSet, Named, Outgoing};
 use crate::regions::runner::{RegionCmd, RegionReport};
-use game::{ClientId, ReconcileStats, RegionCoords, RegionId, Rollback, ServerPacket};
+use game::{ClientId, HostId, ReconcileStats, RegionCoords, RegionId, Rollback, ServerPacket};
 use game::{
     ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind,
 };
@@ -184,7 +184,7 @@ pub struct GameInstanceManager {
     /// How many times in a row each host's observer connection ended with regions to
     /// ask for again (by host ordinal; reset by a snapshot from that host): the retry
     /// backs off.
-    observer_failures: BTreeMap<u32, u32>,
+    observer_failures: BTreeMap<HostId, u32>,
     /// Session time in ms: `TICK_RATE` per client tick (no wall clock: harnesses and
     /// wasm run it too).
     conn_clock_ms: u64,
@@ -503,7 +503,7 @@ struct CrossingProbe {
     open: Option<(Instant, RegionCoords, RegionCoords)>,
     /// The hosts serving the region left and the region entered (`None`: not known),
     /// as the client's connections had them at the flip: a host flip when they differ.
-    hosts: (Option<u32>, Option<u32>),
+    hosts: (Option<HostId>, Option<HostId>),
     /// Ticks the new home still had to sit out (ahead of the clock) at the flip.
     stalled_at_flip: usize,
     last_home_tick: Option<Instant>,
@@ -526,7 +526,7 @@ struct CrossingProbe {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CrossingProbe {
-    fn flip(&mut self, from: RegionCoords, to: RegionCoords, stalled_at_flip: usize, hosts: (Option<u32>, Option<u32>)) {
+    fn flip(&mut self, from: RegionCoords, to: RegionCoords, stalled_at_flip: usize, hosts: (Option<HostId>, Option<HostId>)) {
         // Crossed again inside the window: close the old one early.
         self.report();
         // The instant itself (the `region_crossing` summary comes a window later).
@@ -638,8 +638,8 @@ impl CrossingProbe {
             game::perf::ms(self.snapshot_time),
             game::perf::ms(self.snapshot_max),
             u8::from(self.hosts.0 != self.hosts.1),
-            self.hosts.0.map_or(-1, i64::from),
-            self.hosts.1.map_or(-1, i64::from)
+            self.hosts.0.map_or(-1, |h| h.0 as i64),
+            self.hosts.1.map_or(-1, |h| h.0 as i64)
         );
         // The next crossing's baseline starts now.
         self.before_tick_gap_max = Duration::ZERO;
@@ -1027,18 +1027,18 @@ impl GameInstanceManager {
 
     /// The host of the connection that serves `rc` (harness hook; `None` before the
     /// home named itself).
-    pub fn region_host(&self, rc: RegionCoords) -> Option<u32> {
+    pub fn region_host(&self, rc: RegionCoords) -> Option<HostId> {
         self.conns.ordinal_of(self.conns.connection_of(rc))
     }
 
     /// The home connection's host (harness hook; `None` before it named itself).
-    pub fn home_host(&self) -> Option<u32> {
+    pub fn home_host(&self) -> Option<HostId> {
         self.conns.home_ordinal()
     }
 
     /// The hosts this session holds a connection to, by connection key (harness
     /// hook).
-    pub fn connection_hosts(&self) -> Vec<(u32, Option<u32>)> {
+    pub fn connection_hosts(&self) -> Vec<(u32, Option<HostId>)> {
         self.conns.keys().into_iter().map(|key| (key, self.conns.ordinal_of(key))).collect()
     }
 
@@ -1869,7 +1869,7 @@ impl GameInstanceManager {
     fn region_elsewhere(&mut self, region: RegionCoords, endpoint: game::HostEndpoint, ticket: game::ObserverTicket) {
         let asked = self.answered_home(region);
         let wanted = self.subscribed.contains(&region);
-        let ordinal = endpoint.ordinal;
+        let ordinal = endpoint.id;
         if !wanted && (asked || Some(ordinal) == self.conns.home_ordinal()) {
             log::debug!("[client] {region:?} is host {ordinal}'s, but no longer wanted");
             return;
@@ -2131,7 +2131,7 @@ impl GameInstanceManager {
             }
             packet if conn == self.conns.home() => return self.apply_packet(conn, packet),
             ServerPacket::Host(endpoint) => {
-                if !self.conns.on_host(conn, endpoint.ordinal) {
+                if !self.conns.on_host(conn, endpoint.id) {
                     self.close_observer(conn, "its Host packet names another host", false);
                 }
             }
@@ -2619,9 +2619,9 @@ impl GameInstanceManager {
             game::ServerPacket::HomeHop(_) => debug_assert!(false, "HomeHop reached apply_packet"),
             // The first packet of every session: which host the home is.
             game::ServerPacket::Host(endpoint) => {
-                info!("[client] the home connection is to host {}", endpoint.ordinal);
-                if !self.conns.on_host(conn, endpoint.ordinal) {
-                    warn!("[client] the home connection's Host packet names host {}: kept as it was", endpoint.ordinal);
+                info!("[client] the home connection is to host {}", endpoint.id);
+                if !self.conns.on_host(conn, endpoint.id) {
+                    warn!("[client] the home connection's Host packet names host {}: kept as it was", endpoint.id);
                 }
             }
             // Only the home sends these (`handle_packet`): a client dials no
@@ -2923,6 +2923,13 @@ impl GameInstanceManager {
 #[cfg(test)]
 mod manager_tests {
     use super::*;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use game::ClientUpdateEvent;
     use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -3135,13 +3142,13 @@ mod manager_tests {
         manager.set_lod_table(game::lod::LOD_RING_TABLE);
         let home = RegionCoords::new(0, 0);
         let b_region = RegionCoords::new(1, 0);
-        let endpoint = |ordinal| game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None };
-        server_send.send(ServerPacket::Host(endpoint(0))).unwrap();
+        let endpoint = |ordinal| game::HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None };
+        server_send.send(ServerPacket::Host(endpoint(h(0)))).unwrap();
         server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
         server_send
             .send(ServerPacket::RegionElsewhere {
                 region: b_region,
-                endpoint: endpoint(1),
+                endpoint: endpoint(h(1)),
                 ticket: game::ObserverTicket { client: 0, nonce: 1 },
             })
             .unwrap();
@@ -3151,7 +3158,7 @@ mod manager_tests {
         }
         let keys = manager.lod_subscribed.clone();
         assert!(keys.len() > 2 * LOD_REQUESTS_PER_TICK, "more keys than a tick sends: {}", keys.len());
-        let b = manager.conns.conn_to(1).expect("a connection to host 1");
+        let b = manager.conns.conn_to(h(1)).expect("a connection to host 1");
         let a = crate::connections::LOGIN_CONN;
         let (events, incoming) = crossbeam::channel::unbounded();
         let mut flip = |manager: &mut GameInstanceManager, conn: u32, hop: u64| {
@@ -3192,19 +3199,19 @@ mod manager_tests {
         let home = RegionCoords::new(0, 0);
         let b_region = RegionCoords::new(1, 0);
         let r = RegionCoords::new(-1, 0);
-        let endpoint = |ordinal| game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None };
-        server_send.send(ServerPacket::Host(endpoint(0))).unwrap();
+        let endpoint = |ordinal| game::HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None };
+        server_send.send(ServerPacket::Host(endpoint(h(0)))).unwrap();
         server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
         server_send
             .send(ServerPacket::RegionElsewhere {
                 region: b_region,
-                endpoint: endpoint(1),
+                endpoint: endpoint(h(1)),
                 ticket: game::ObserverTicket { client: 0, nonce: 1 },
             })
             .unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         let a = crate::connections::LOGIN_CONN;
-        let b = manager.conns.conn_to(1).expect("a connection to host 1");
+        let b = manager.conns.conn_to(h(1)).expect("a connection to host 1");
         // R is wanted and asked of home A; no answer yet.
         manager.subscribed.insert(r);
         manager.request_region(r);
@@ -3253,7 +3260,7 @@ mod manager_tests {
     #[test]
     fn a_long_retry_wait_is_cut_short_when_the_body_comes_near() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
-        let endpoint = game::HostEndpoint { ordinal: 0, quic: None, webtransport: None, cert_hash: None };
+        let endpoint = game::HostEndpoint { id: h(0), quic: None, webtransport: None, cert_hash: None };
         server_send.send(ServerPacket::Host(endpoint)).unwrap();
         server_send.send(ServerPacket::PlayerRegion(Some(RegionCoords::new(0, 0)), 0)).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
@@ -3289,8 +3296,8 @@ mod manager_tests {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let opener = RecordingOpener::default();
         manager.set_conn_opener(Box::new(opener.clone()));
-        let endpoint = |ordinal| game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None };
-        server_send.send(ServerPacket::Host(endpoint(0))).unwrap();
+        let endpoint = |ordinal| game::HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None };
+        server_send.send(ServerPacket::Host(endpoint(h(0)))).unwrap();
         server_send.send(ServerPacket::PlayerRegion(Some(RegionCoords::new(0, 0)), 0)).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         let (wanted, gone, observed) = (RegionCoords::new(5, 0), RegionCoords::new(-5, 0), RegionCoords::new(0, 5));
@@ -3304,12 +3311,12 @@ mod manager_tests {
         server_send
             .send(ServerPacket::RegionElsewhere {
                 region: observed,
-                endpoint: endpoint(1),
+                endpoint: endpoint(h(1)),
                 ticket: game::ObserverTicket { client: 0, nonce: 1 },
             })
             .unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
-        let one = manager.conns.conn_to(1).expect("a connection to host 1");
+        let one = manager.conns.conn_to(h(1)).expect("a connection to host 1");
         manager.close_observer(one, "closed in the test", false);
         // `gone` leaves the window.
         manager.subscribed.remove(&gone);
@@ -3361,18 +3368,18 @@ mod manager_tests {
         let (mut manager, server_send, server_recv, client_recv, game) = manager_with_player();
         let opener = RecordingOpener::default();
         manager.set_conn_opener(Box::new(opener.clone()));
-        server_send.send(ServerPacket::Host(host_endpoint(0))).unwrap();
+        server_send.send(ServerPacket::Host(host_endpoint(h(0)))).unwrap();
         server_send.send(ServerPacket::PlayerRegion(Some(RegionCoords::new(0, 0)), 0)).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         let _ = manager_packets(&manager);
         (manager, server_send, server_recv, opener, (client_recv, game))
     }
 
-    fn host_endpoint(ordinal: u32) -> game::HostEndpoint {
-        game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None }
+    fn host_endpoint(ordinal: HostId) -> game::HostEndpoint {
+        game::HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None }
     }
 
-    fn elsewhere(region: RegionCoords, ordinal: u32) -> ServerPacket {
+    fn elsewhere(region: RegionCoords, ordinal: HostId) -> ServerPacket {
         ServerPacket::RegionElsewhere { region, endpoint: host_endpoint(ordinal), ticket: game::ObserverTicket { client: 0, nonce: 1 } }
     }
 
@@ -3395,22 +3402,22 @@ mod manager_tests {
         let r = RegionCoords::new(5, 0);
         manager.subscribed.insert(r);
         manager.request_region(r);
-        server_send.send(elsewhere(r, 1)).unwrap();
+        server_send.send(elsewhere(r, h(1))).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         let _ = manager_packets(&manager);
         let on_one = opener.0.lock().unwrap()[0].clone();
         assert!(has(&on_one.try_iter().collect::<Vec<_>>(), r, true), "subscribed on host 1 first");
-        assert_eq!(manager.region_host(r), Some(1));
-        server_send.send(elsewhere(r, 0)).unwrap();
+        assert_eq!(manager.region_host(r), Some(h(1)));
+        server_send.send(elsewhere(r, h(0))).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         assert!(has(&on_one.try_iter().collect::<Vec<_>>(), r, false), "released on host 1");
         assert!(has(&manager_packets(&manager), r, true), "subscribed at home");
-        assert_eq!(manager.region_host(r), Some(0));
+        assert_eq!(manager.region_host(r), Some(h(0)));
         assert!(manager.asked_home.contains_key(&r), "asked of the home, until answered");
         assert_eq!(opener.0.lock().unwrap().len(), 1, "no connection opened to the home host");
         // Not wanted: nothing.
         let gone = RegionCoords::new(-5, 0);
-        server_send.send(elsewhere(gone, 0)).unwrap();
+        server_send.send(elsewhere(gone, h(0))).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         assert!(manager_packets(&manager).is_empty());
         assert!(!manager.subscribed.contains(&gone) && manager.pending_move.is_none(), "never a move");
@@ -3428,10 +3435,10 @@ mod manager_tests {
         for rc in [stuck, served] {
             manager.subscribed.insert(rc);
             manager.request_region(rc);
-            server_send.send(elsewhere(rc, 1)).unwrap();
+            server_send.send(elsewhere(rc, h(1))).unwrap();
         }
         assert!(manager.pump_packets(&server_recv).unwrap());
-        let one = manager.conns.conn_to(1).expect("a connection to host 1");
+        let one = manager.conns.conn_to(h(1)).expect("a connection to host 1");
         let on_one = opener.0.lock().unwrap()[0].clone();
         let _ = on_one.try_iter().count();
         let _ = manager_packets(&manager);
@@ -3452,9 +3459,9 @@ mod manager_tests {
         let sent_home = manager_packets(&manager);
         assert!(has(&sent_one, stuck, false), "let go on host 1: {sent_one:?}");
         assert!(has(&sent_home, stuck, true), "asked of the home: {sent_home:?}");
-        assert_eq!(manager.region_host(stuck), Some(0));
+        assert_eq!(manager.region_host(stuck), Some(h(0)));
         assert!(!has(&sent_one, served, false) && !has(&sent_home, served, true), "a served region is left alone");
-        assert_eq!(manager.region_host(served), Some(1));
+        assert_eq!(manager.region_host(served), Some(h(1)));
     }
 
     /// Final review C minor 8: a subscribe that goes to another host's connection because
@@ -3468,10 +3475,10 @@ mod manager_tests {
         for rc in [r, served] {
             manager.subscribed.insert(rc);
             manager.request_region(rc);
-            server_send.send(elsewhere(rc, 1)).unwrap();
+            server_send.send(elsewhere(rc, h(1))).unwrap();
         }
         assert!(manager.pump_packets(&server_recv).unwrap());
-        let one = manager.conns.conn_to(1).expect("a connection to host 1");
+        let one = manager.conns.conn_to(h(1)).expect("a connection to host 1");
         assert_eq!(manager.conns.connection_of(r), one);
         let on_one = opener.0.lock().unwrap()[0].clone();
         let _ = on_one.try_iter().count();
@@ -3508,8 +3515,8 @@ mod manager_tests {
         let sent_home = manager_packets(&manager);
         assert!(has(&sent_one, r, false), "let go on host 1: {sent_one:?}");
         assert!(has(&sent_home, r, true), "asked of the home: {sent_home:?}");
-        assert_eq!(manager.region_host(r), Some(0));
-        assert_eq!(manager.region_host(served), Some(1), "a served region is left alone");
+        assert_eq!(manager.region_host(r), Some(h(0)));
+        assert_eq!(manager.region_host(served), Some(h(1)), "a served region is left alone");
     }
 
     /// R4 Task 16, fix round 1: a region host 1 served leaves the window; the home's
@@ -3522,13 +3529,13 @@ mod manager_tests {
         let r = RegionCoords::new(5, 0);
         manager.subscribed.insert(r);
         manager.request_region(r);
-        server_send.send(elsewhere(r, 1)).unwrap();
+        server_send.send(elsewhere(r, h(1))).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         let t0 = manager.conn_clock_ms;
         manager.release_region(r);
         manager.subscribed.remove(&r);
         assert!(has(&manager_packets(&manager), r, false), "released at the home too");
-        server_send.send(elsewhere(r, 1)).unwrap();
+        server_send.send(elsewhere(r, h(1))).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         assert_eq!(manager.pending_move, Some(r), "it reads like a move");
         manager.conn_clock_ms = t0 + AMBIGUOUS_MOVE_HOLD_MS - 1;
@@ -3539,7 +3546,7 @@ mod manager_tests {
         assert_eq!(manager.pending_move, None, "no PlayerRegion came: a late answer, let go");
         // A real move: held until its PlayerRegion.
         let m = RegionCoords::new(9, 0);
-        server_send.send(elsewhere(m, 1)).unwrap();
+        server_send.send(elsewhere(m, h(1))).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         assert_eq!(manager.pending_move, Some(m));
         manager.conn_clock_ms += 10 * AMBIGUOUS_MOVE_HOLD_MS;
@@ -3557,13 +3564,13 @@ mod manager_tests {
         manager.set_conn_opener(Box::new(CountingOpener(opens.clone())));
         let home = RegionCoords::new(0, 0);
         let far = RegionCoords::new(5, 0);
-        let endpoint = game::HostEndpoint { ordinal: 1, quic: None, webtransport: None, cert_hash: None };
+        let endpoint = game::HostEndpoint { id: h(1), quic: None, webtransport: None, cert_hash: None };
         let elsewhere = || ServerPacket::RegionElsewhere {
             region: far,
             endpoint: endpoint.clone(),
             ticket: game::ObserverTicket { client: 0, nonce: 1 },
         };
-        server_send.send(ServerPacket::Host(game::HostEndpoint { ordinal: 0, ..endpoint.clone() })).unwrap();
+        server_send.send(ServerPacket::Host(game::HostEndpoint { id: h(0), ..endpoint.clone() })).unwrap();
         server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
         assert!(manager.pump_packets(&server_recv).unwrap());
         for _ in 0..2 {

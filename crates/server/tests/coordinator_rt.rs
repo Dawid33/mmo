@@ -341,7 +341,7 @@ fn r1_world_migrates_history_row() {
     history.advance(game::history::CalendarTick(history.now().0 + 2 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY));
     let r1 = game::history::persist::encode(&history);
     let cut = game::WorldCut {
-        host: 0,
+        host: h(0),
         id: game::CutId(1),
         tick: 1,
         regions: Vec::new(),
@@ -394,9 +394,9 @@ fn directive_not_sent_before_save() {
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     let player = PlayerId(1);
-    let id = RequestId { host: 0, boot: 1, seq: 1 };
+    let id = RequestId { host: h(0), boot: 1, seq: 1 };
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
+    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
     // The fortress region runs: the founding embodies the party there by directives.
     link.send(HostMsg::RegionStarted { rc: req.region, incarnation: 1 });
     link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req.clone()) });
@@ -456,8 +456,8 @@ fn fenced_coordinator_stops() {
     store.claim_coordinator().unwrap();
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
+    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the fenced coordinator kept running");
         std::thread::sleep(Duration::from_millis(10));
@@ -496,8 +496,8 @@ fn overlapping_start_claims_before_it_loads() {
     store.fail_next_writes(2);
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
+    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
     while store.failing_writes_left() > 1 {
         assert!(Instant::now() < deadline, "the founding's save was never tried");
         std::thread::sleep(Duration::from_millis(5));
@@ -559,4 +559,10 @@ fn coordinator_panic_skips_the_exit_cut() {
     assert_eq!(player_sites(&saved), vec![site]);
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host id from its number.
+#[allow(dead_code)]
+fn h(n: u64) -> game::HostId {
+    game::HostId(n)
 }

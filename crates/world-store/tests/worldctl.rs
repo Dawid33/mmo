@@ -3,6 +3,7 @@
 //! archived forge file back out, and a store another process holds is refused
 //! with the lock message instead of waiting for it.
 
+use crate::common::hid;
 use world_store::{StoreHandle, StoreUrl, ctl, load_forged};
 
 use crate::handle::open;
@@ -113,7 +114,7 @@ fn super_region_only_before_the_first_claim() {
         let h = open(url);
         assert_eq!(h.super_region_regions(), 1, "stored, and read back at open");
         // A host claims: the side is fixed from now on.
-        h.claim_super_regions(0, vec![(0, 0)]).unwrap();
+        h.claim_super_regions(hid(0), vec![(0, 0)]).unwrap();
         h.shutdown();
         let err = ctl::run(&args(&["super-region", &url_arg, "4"])).err().expect("refused once claimed");
         assert!(err.contains("claimed"), "{err}");
@@ -138,13 +139,13 @@ fn super_region_refuses_a_claim_opened_at_the_old_side() {
     let early = open(&url);
     assert_eq!(early.super_region_regions(), game::DEFAULT_SUPER_REGION_REGIONS);
     ctl::run(&args(&["super-region", &db.url, "2"])).expect("nobody has claimed yet");
-    let err = early.claim_super_regions(0, vec![(0, 0)]).err().expect("a claim at the old side is refused");
+    let err = early.claim_super_regions(hid(0), vec![(0, 0)]).err().expect("a claim at the old side is refused");
     assert!(matches!(err, world_store::StoreError::OtherSuperRegionSide { stored: 2, opened } if opened == game::DEFAULT_SUPER_REGION_REGIONS), "{err}");
     early.shutdown();
     // A process opened at the new side claims; from then on the side is fixed.
     let late = open(&url);
     assert_eq!(late.super_region_regions(), 2);
-    late.claim_super_regions(0, vec![(0, 0)]).unwrap();
+    late.claim_super_regions(hid(0), vec![(0, 0)]).unwrap();
     let err = ctl::run(&args(&["super-region", &db.url, "1"])).err().expect("refused after a claim");
     assert!(err.contains("claimed"), "{err}");
     late.shutdown();
@@ -241,7 +242,7 @@ fn retire_refuses_a_heartbeating_host() {
     let err = said(&url, &["retire-host", &url, "1"]).expect_err("host 1 beats");
     assert!(err.contains("host 1 is running: stop it first"), "{err}");
     // Host 0 lapsed: host 1 still beats — refused all the same.
-    w.lapse(0);
+    w.lapse(hid(0));
     let err = said(&url, &["retire-host", &url, "1"]).expect_err("host 1 beats");
     assert!(err.contains("host 1 is running: stop it first"), "{err}");
     for (list, want) in [
@@ -252,7 +253,7 @@ fn retire_refuses_a_heartbeating_host() {
         let err = said(&url, &list).expect_err("refused");
         assert!(err.contains(want), "{list:?}: {err}");
     }
-    assert_eq!(w.state_of(1), (HOST_LIVE, false));
+    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
     assert!(w.h.hosts().unwrap().iter().all(|r| r.seen_ms != 0), "nothing vouched");
     assert!(w.h.open_successions().unwrap().is_empty());
     w.shutdown();
@@ -266,23 +267,23 @@ fn retire_vouches_while_others_live() {
     let Some(w) = World::new(3) else { return };
     let url = url_of(&w);
     // Host 2 lapsed, then vouched by the operator; it beats again (it was only slow).
-    w.lapse(2);
+    w.lapse(hid(2));
     let out = said(&url, &["retire-host", &url, "2"]).expect("vouched");
     assert!(out.contains("vouched"), "{out}");
     assert_eq!(w.h.hosts().unwrap()[2].seen_ms, 0, "vouched: seen_ms = 0");
     assert!(w.h.open_successions().unwrap().is_empty(), "the command declares nothing itself");
-    assert!(w.hosts[2].heartbeat(2, boot_of(2)).unwrap());
-    assert_eq!(w.declare(2, 0, SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![2]), "it beat: harmless");
-    assert_eq!(w.state_of(2), (HOST_LIVE, false));
+    assert!(w.hosts[2].heartbeat(hid(2), boot_of(hid(2))).unwrap());
+    assert_eq!(w.declare(hid(2), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(2)]), "it beat: harmless");
+    assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false));
     // Running again: a second vouch is refused.
     let err = said(&url, &["retire-host", &url, "2"]).expect_err("host 2 beats");
     assert!(err.contains("host 2 is running: stop it first"), "{err}");
     // Host 1 is gone for good: vouched, and declared at the coordinator's next pass.
-    w.lapse(1);
+    w.lapse(hid(1));
     said(&url, &["retire-host", &url, "1"]).expect("vouched");
-    let s = w.declared(1, 0);
-    assert_eq!((s.predecessor, s.heir, s.survivors.clone()), (1, 0, vec![0, 2]), "an ordinary declaration");
-    assert_eq!(w.state_of(1), (HOST_DEAD, false));
+    let s = w.declared(hid(1), hid(0));
+    assert_eq!((s.predecessor, s.heir, s.survivors.clone()), (hid(1), hid(0), vec![hid(0), hid(2)]), "an ordinary declaration");
+    assert_eq!(w.state_of(hid(1)), (HOST_DEAD, false));
     w.shutdown();
 }
 
@@ -298,15 +299,15 @@ fn retire_offline_opens_a_succession_to_the_lowest_other_host() {
     let url = url_of(&w);
     // A committed cut first (host 0 carries an in-flight row): the succession's base.
     let rows0 = vec![in_flight(RegionCoords::new(0, 9))];
-    w.hosts[0].prepare_cut(part(1, 0, rows0.clone()), w.fences[0].clone(), 0).recv().unwrap().unwrap();
-    w.hosts[1].prepare_cut(part(1, 1, vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(1, 2, vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![0, 1, 2], vec![], w.c, 0, vec![]).unwrap());
+    w.hosts[0].prepare_cut(part(1, hid(0), rows0.clone()), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[2].prepare_cut(part(1, hid(2), vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1), hid(2)], vec![], w.c, 0, vec![]).unwrap());
     for h in &w.hosts {
         assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
     }
     // A staged part a crash left behind (cut 2, host 0's): the command resolves it first.
-    w.hosts[0].prepare_cut(part(2, 0, vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[0].prepare_cut(part(2, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     assert_eq!(prepared(&w.w), 1);
     lapse_all(&w);
     // Host 0 is retired: the lowest OTHER ordinal (1) inherits.
@@ -316,19 +317,19 @@ fn retire_offline_opens_a_succession_to_the_lowest_other_host() {
     let open = w.h.open_successions().unwrap();
     assert_eq!(open.len(), 1);
     let s = &open[0];
-    assert_eq!((s.predecessor, s.predecessor_boot, s.heir, s.kind), (0, boot_of(0), 1, SuccessionKind::Crash));
-    assert_eq!(s.survivors, Vec::<u32>::new(), "nobody ran: no survivor");
+    assert_eq!((s.predecessor, s.predecessor_boot, s.heir, s.kind), (hid(0), boot_of(hid(0)), hid(1), SuccessionKind::Crash));
+    assert_eq!(s.survivors, Vec::<game::HostId>::new(), "nobody ran: no survivor");
     assert_eq!(s.base_cut, CutId(1), "the last committed cut");
     let mut want: Vec<_> = w.fences[0].epochs.iter().map(|(sr, e)| (*sr, e + 1)).collect();
     want.sort();
     assert_eq!(s.moved, want, "every super-region of host 0, epoch + 1");
-    assert!(w.h.owned_by(0).unwrap().epochs.is_empty());
-    let heir = w.h.owned_by(1).unwrap();
+    assert!(w.h.owned_by(hid(0)).unwrap().epochs.is_empty());
+    let heir = w.h.owned_by(hid(1)).unwrap();
     for (sr, e) in &s.moved {
         assert_eq!(heir.epochs.get(sr), Some(e));
     }
-    assert_eq!(w.state_of(0), (HOST_DEAD, false), "dead, dirty until settled");
-    assert_eq!(w.hosts[1].load_in_flight_of(0, &heir).unwrap(), rows0, "the heir reads the dead host's rows");
+    assert_eq!(w.state_of(hid(0)), (HOST_DEAD, false), "dead, dirty until settled");
+    assert_eq!(w.hosts[1].load_in_flight_of(hid(0), &heir).unwrap(), rows0, "the heir reads the dead host's rows");
     // Refused now: host 0 is dead already; host 1 is named by the open succession.
     let err = said(&url, &["retire-host", &url, "0"]).expect_err("dead already");
     assert!(err.contains("host 0"), "{err}");
@@ -338,20 +339,20 @@ fn retire_offline_opens_a_succession_to_the_lowest_other_host() {
     // The retirement raised the generation: the hosts that boot again run at 1.
     assert_eq!(w.h.world_generation().unwrap(), 1);
     // The settle rule holds: only a commit naming it commits; it cleans host 0's row.
-    let heir_part = |id: u64| game::WorldCut { adopts: vec![0], ..part(id, 1, rows0.clone()) };
-    w.hosts[1].prepare_cut(part(3, 1, vec![]), heir.clone(), 1).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(3, 2, vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
-    assert!(!w.h.decide_cut(CutId(3), 300, true, vec![1, 2], vec![], w.c, 1, vec![]).unwrap(), "settles nothing");
+    let heir_part = |id: u64| game::WorldCut { adopts: vec![hid(0)], ..part(id, hid(1), rows0.clone()) };
+    w.hosts[1].prepare_cut(part(3, hid(1), vec![]), heir.clone(), 1).recv().unwrap().unwrap();
+    w.hosts[2].prepare_cut(part(3, hid(2), vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
+    assert!(!w.h.decide_cut(CutId(3), 300, true, vec![hid(1), hid(2)], vec![], w.c, 1, vec![]).unwrap(), "settles nothing");
     for h in [1, 2] {
         assert_eq!(w.hosts[h].cut_decided(CutId(3)).unwrap(), Some(false));
     }
     w.hosts[1].prepare_cut(heir_part(4), heir.clone(), 1).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(4, 2, vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(4), 400, true, vec![1, 2], vec![], w.c, 1, vec![s.id]).unwrap());
+    w.hosts[2].prepare_cut(part(4, hid(2), vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(4), 400, true, vec![hid(1), hid(2)], vec![], w.c, 1, vec![s.id]).unwrap());
     assert!(w.h.open_successions().unwrap().is_empty());
-    assert_eq!(w.state_of(0), (HOST_DEAD, true));
-    assert_eq!(w.h.load_in_flight(Some(1)).unwrap(), rows0, "adopted under the heir");
-    assert!(w.h.load_in_flight(Some(0)).unwrap().is_empty());
+    assert_eq!(w.state_of(hid(0)), (HOST_DEAD, true));
+    assert_eq!(w.h.load_in_flight(Some(hid(1))).unwrap(), rows0, "adopted under the heir");
+    assert!(w.h.load_in_flight(Some(hid(0))).unwrap().is_empty());
     assert_eq!(prepared(&w.w), 0);
     w.shutdown();
 }
@@ -369,8 +370,8 @@ fn retire_offline_with_no_other_host_is_refused() {
         err.contains("nothing to give host 1's land to: start a host of another ordinal once, or start host 1"),
         "{err}"
     );
-    assert_eq!(w.state_of(1), (HOST_LIVE, false));
-    assert_eq!(w.h.owned_by(1).unwrap(), w.fences[1], "nothing moved");
+    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
+    assert_eq!(w.h.owned_by(hid(1)).unwrap(), w.fences[1], "nothing moved");
     assert!(w.h.open_successions().unwrap().is_empty());
     w.shutdown();
     let dir = temp_dir("retire_sqlite");
@@ -392,12 +393,12 @@ fn rollback_needs_yes_and_bumps_once() {
     let Some(w) = World::new(2) else { return };
     let url = url_of(&w);
     let rows1 = vec![in_flight(RegionCoords::new(1, 5))];
-    w.hosts[0].prepare_cut(part(1, 0, vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
-    w.hosts[1].prepare_cut(part(1, 1, rows1.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![0, 1], vec![], w.c, 0, vec![]).unwrap());
+    w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[1].prepare_cut(part(1, hid(1), rows1.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], w.c, 0, vec![]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
-    w.vouch(1);
-    let s = w.declared(1, 0);
+    w.vouch(hid(1));
+    let s = w.declared(hid(1), hid(0));
     let err = said(&url, &["rollback", &url]).expect_err("needs --yes");
     assert!(err.contains("--yes") && err.contains("every host restarts from the last save"), "{err}");
     assert_eq!(w.h.world_generation().unwrap(), 0, "nothing written");
@@ -407,16 +408,16 @@ fn rollback_needs_yes_and_bumps_once() {
     assert_eq!(w.h.world_generation().unwrap(), 1, "once");
     assert!(w.h.open_successions().unwrap().is_empty());
     assert_eq!(scalar_i64(&w.w, &format!("SELECT abandoned FROM successions WHERE id = {}", s.id.0)), 1);
-    let heir = w.h.owned_by(0).unwrap();
+    let heir = w.h.owned_by(hid(0)).unwrap();
     for (sr, e) in &s.moved {
         assert_eq!(heir.epochs.get(sr), Some(e), "the land stays with the heir");
     }
-    assert!(w.h.load_in_flight(Some(1)).unwrap().is_empty(), "no row left under the dead host");
-    assert_eq!(w.h.load_in_flight(Some(0)).unwrap(), rows1, "its rows are the heir's");
+    assert!(w.h.load_in_flight(Some(hid(1))).unwrap().is_empty(), "no row left under the dead host");
+    assert_eq!(w.h.load_in_flight(Some(hid(0))).unwrap(), rows1, "its rows are the heir's");
     // The running processes learn it at their next write.
-    let err = w.hosts[0].prepare_cut(part(2, 0, vec![]), heir.clone(), 0).recv().unwrap().unwrap_err();
+    let err = w.hosts[0].prepare_cut(part(2, hid(0), vec![]), heir.clone(), 0).recv().unwrap().unwrap_err();
     assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
-    let err = w.h.decide_cut(CutId(2), 200, true, vec![0], vec![], w.c, 0, vec![]).unwrap_err();
+    let err = w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![]).unwrap_err();
     assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
     assert_eq!(w.h.abort_cut(CutId(2), 200), Ok(false), "the coordinator still records its abort");
     // A second run bumps once more (each run is one rollback).
@@ -442,13 +443,13 @@ fn retire_offline_bumps_the_generation_whatever_the_heirs_row() {
         said(&url, &["retire-host", &url, "1"]).expect("retired offline");
         assert_eq!(w.h.world_generation().unwrap(), 1, "heir clean {heir_clean}: raised once");
         // The old generation's processes: a host's part, the coordinator's decision.
-        let err = w.hosts[2].prepare_cut(part(1, 2, vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap_err();
+        let err = w.hosts[2].prepare_cut(part(1, hid(2), vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap_err();
         assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 }, "heir clean {heir_clean}");
-        let err = w.h.decide_cut(CutId(1), 100, true, vec![0, 2], vec![], w.c, 0, vec![]).unwrap_err();
+        let err = w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(2)], vec![], w.c, 0, vec![]).unwrap_err();
         assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
         // The heir boots: registered at the new generation, not raised again.
         let next = w.hosts[0]
-            .register_host(world_store::HostRow { boot: 7000, ..crate::succession::row(0) }, &world_store::Fence::default(), game::CrashPolicy::Succession)
+            .register_host(world_store::HostRow { boot: 7000, ..crate::succession::row(hid(0)) }, &world_store::Fence::default(), game::CrashPolicy::Succession)
             .unwrap();
         assert!(
             matches!(next, world_store::BootVerdict::Registered(world_store::HostBoot { generation: 1, bumped: false, .. })),

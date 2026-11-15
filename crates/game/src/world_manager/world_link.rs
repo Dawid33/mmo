@@ -3,6 +3,7 @@
 //! adventure requests). Split out of `mod.rs`; the core calls in through the
 //! `pub(super)` methods here.
 
+use crate::HostId;
 use super::*;
 
 /// Seconds a player's world request (embark, return, adventure, legends, person info,
@@ -262,7 +263,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The host's number in request ids and its `Attach`: its ordinal (`AllInOne`: 0).
-    fn world_host(&self) -> u32 {
+    fn world_host(&self) -> HostId {
         self.ordinal()
     }
 
@@ -413,7 +414,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.outbox.retain(|m| {
             !matches!(m, HostMsg::PlayerOnline(_) | HostMsg::PlayerOffline { .. } | HostMsg::PlayerHandedTo { .. })
         });
-        let handed: Vec<(PlayerId, u32, u64)> = self
+        let handed: Vec<(PlayerId, HostId, u64)> = self
             .handed
             .iter_mut()
             .map(|(p, (to, hop, carried))| {
@@ -699,7 +700,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `player` leaves for host `to`, its claim going along: the coordinator is told
     /// (`PlayerHandedTo`, at its hop here), and the next `Attach`es list it until one is
     /// echoed.
-    pub(super) fn world_handed(&mut self, player: PlayerId, to: u32) {
+    pub(super) fn world_handed(&mut self, player: PlayerId, to: HostId) {
         let hop = self.hop_here(player);
         self.handed.insert(player, (to, hop, 0));
         self.world_send(HostMsg::PlayerHandedTo { player, to, hop });

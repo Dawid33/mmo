@@ -20,6 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CoordMsg, Coordinator, CutFailure, Target};
+use crate::HostId;
 use crate::{CutId, SuccessionId, Tick};
 
 /// How far ahead of the coordinator's world tick a world cut is placed: every host gets
@@ -58,14 +59,14 @@ pub const SETTLE_CUT_RETRY_MS: u64 = 2_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CutsBlocked {
     /// Hosts with a dirty `hosts` row that are not attached.
-    pub missing: Vec<u32>,
+    pub missing: Vec<HostId>,
     /// Hosts attached with no dirty `hosts` row (registered since the rows were last read).
-    pub unexpected: Vec<u32>,
+    pub unexpected: Vec<HostId>,
     /// Open successions (R4) not answered yet by every survivor and their heir.
     pub successions: Vec<SuccessionId>,
     /// Those of `successions` opened while no host ran (`worldctl retire-host`) whose heir
     /// has not attached since, with that heir: no deadline runs for them until it does.
-    pub awaiting_heir: Vec<(SuccessionId, u32)>,
+    pub awaiting_heir: Vec<(SuccessionId, HostId)>,
 }
 
 impl std::fmt::Display for CutsBlocked {
@@ -78,11 +79,11 @@ impl std::fmt::Display for CutsBlocked {
                  (VOXEL_HOST_ORDINAL), or retire one that will never return with `worldctl retire-host <url> \
                  <ordinal>` (claim ownership: its land goes to an heir); until then nothing is saved and stopping \
                  the others rolls the world back to the last cut;",
-                self.missing
+                self.missing.iter().map(|h| h.0).collect::<Vec<_>>()
             )?;
         }
         if !self.unexpected.is_empty() {
-            write!(f, " hosts {:?} are attached but have no dirty `hosts` row (registered since the last read?);", self.unexpected)?;
+            write!(f, " hosts {:?} are attached but have no dirty `hosts` row (registered since the last read?);", self.unexpected.iter().map(|h| h.0).collect::<Vec<_>>())?;
         }
         let ids: Vec<u64> =
             self.successions.iter().filter(|id| !self.awaiting_heir.iter().any(|(a, _)| a == *id)).map(|id| id.0).collect();
@@ -94,6 +95,7 @@ impl std::fmt::Display for CutsBlocked {
             )?;
         }
         for (id, heir) in &self.awaiting_heir {
+            let heir = heir.0;
             write!(
                 f,
                 " succession {} was opened while no host ran and waits for its heir, host {heir}, to start: no deadline \
@@ -114,8 +116,8 @@ pub struct CutDecide {
     pub cut: CutId,
     pub tick: Tick,
     pub commit: bool,
-    pub hosts: Vec<u32>,
-    pub leaving: Vec<u32>,
+    pub hosts: Vec<HostId>,
+    pub leaving: Vec<HostId>,
     pub generation: u64,
     /// The open successions this cut settles if it commits (R4): every one open when it
     /// began — none begins while one is not answered by all its survivors and its heir, so
@@ -130,13 +132,13 @@ pub struct CutDecide {
 struct CutRun {
     cut: CutId,
     tick: Tick,
-    hosts: Vec<u32>,
-    leaving: Vec<u32>,
+    hosts: Vec<HostId>,
+    leaving: Vec<HostId>,
     generation: u64,
     /// [`CutDecide::settles`].
     settles: Vec<SuccessionId>,
     /// Participants whose part is staged.
-    prepared: BTreeSet<u32>,
+    prepared: BTreeSet<HostId>,
     /// `clock_ms` past which it is aborted.
     deadline_ms: u64,
     /// Decided here (`Some(commit)`), waiting for the runtime.
@@ -147,11 +149,11 @@ struct CutRun {
 
 impl CutRun {
     /// Every host taking part (`hosts`: the leaving ones are among them).
-    fn participants(&self) -> impl Iterator<Item = u32> + '_ {
+    fn participants(&self) -> impl Iterator<Item = HostId> + '_ {
         self.hosts.iter().copied()
     }
 
-    fn has(&self, host: u32) -> bool {
+    fn has(&self, host: HostId) -> bool {
         self.participants().any(|h| h == host)
     }
 }
@@ -169,12 +171,12 @@ pub(super) struct WorldCuts {
     next: u64,
     /// The hosts whose part every cut needs (the runtime: those whose `hosts` row is not
     /// clean).
-    expected: BTreeSet<u32>,
+    expected: BTreeSet<HostId>,
     /// `expected` is as last read ([`Coordinator::expected_hosts_unknown`] clears it: a
     /// failed read, no cut until the next good one).
     expected_known: bool,
     /// The hosts attached (an `Attach` handled, no detach since).
-    attached: BTreeSet<u32>,
+    attached: BTreeSet<HostId>,
     /// The world tick as the runtime last set it.
     world_tick: Tick,
     lead: Tick,
@@ -184,14 +186,14 @@ pub(super) struct WorldCuts {
     /// Outcomes of decided cuts, newest [`WORLD_CUT_OUTCOMES_KEPT`].
     outcomes: BTreeMap<CutId, bool>,
     /// `(host, cut)` whose outcome the runtime is to look up in the store.
-    lookups: Vec<(u32, CutId)>,
+    lookups: Vec<(HostId, CutId)>,
     /// Hosts asking to leave, with the `clock_ms` of their first request.
-    leave_requests: BTreeMap<u32, u64>,
+    leave_requests: BTreeMap<HostId, u64>,
     /// Hosts that left in a committed cut, with the boot they left as (`None`: unknown):
     /// not expected until another boot of theirs attaches or registers.
-    left: BTreeMap<u32, Option<u64>>,
+    left: BTreeMap<HostId, Option<u64>>,
     /// Each host's boot as its latest `Attach` named it.
-    boots: BTreeMap<u32, u64>,
+    boots: BTreeMap<HostId, u64>,
     /// `clock_ms` since which a due cut has been blocked by a host mismatch.
     blocked_since: Option<u64>,
     /// `clock_ms` the mismatch was last reported at.
@@ -200,7 +202,7 @@ pub(super) struct WorldCuts {
     blocked: Option<CutsBlocked>,
     /// Hosts succeeded (R4), with the boot that died: not expected (nor counted attached)
     /// until another boot of theirs attaches or registers, as for `left`.
-    succeeded: BTreeMap<u32, u64>,
+    succeeded: BTreeMap<HostId, u64>,
 }
 
 impl Default for WorldCuts {
@@ -244,7 +246,7 @@ impl Coordinator {
     }
 
     /// The hosts every world cut needs a part of (those whose `hosts` row is not clean).
-    pub fn set_expected_hosts(&mut self, hosts: BTreeSet<u32>) {
+    pub fn set_expected_hosts(&mut self, hosts: BTreeSet<HostId>) {
         self.cuts.expected = hosts;
         self.cuts.expected_known = true;
     }
@@ -262,7 +264,7 @@ impl Coordinator {
 
     /// Host `host`'s link went down: a cut it takes part in and not decided yet is aborted;
     /// a leave request of it not begun is forgotten (it sends it again with its `Attach`).
-    pub fn host_detached(&mut self, host: u32) {
+    pub fn host_detached(&mut self, host: HostId) {
         self.cuts.attached.remove(&host);
         self.cuts.leave_requests.remove(&host);
         self.abort_for(host, "detached");
@@ -270,7 +272,7 @@ impl Coordinator {
 
     /// The boot each host's `hosts` row names: a host that left as another boot has
     /// registered again, and is expected again.
-    pub fn set_host_boots(&mut self, boots: BTreeMap<u32, u64>) {
+    pub fn set_host_boots(&mut self, boots: BTreeMap<HostId, u64>) {
         self.cuts.left.retain(|h, left_as| match (boots.get(h), *left_as) {
             (Some(b), Some(l)) if *b != l => {
                 log::info!("coordinator: host {h} registered again (boot {b}): expected again");
@@ -295,20 +297,20 @@ impl Coordinator {
     }
 
     /// The hosts that left in a committed cut and have not come back.
-    pub fn left_hosts(&self) -> Vec<u32> {
+    pub fn left_hosts(&self) -> Vec<HostId> {
         self.cuts.left.keys().copied().collect()
     }
 
     /// Test support: the running world cut, the hosts whose part is staged, and its
     /// verdict if taken.
     #[doc(hidden)]
-    pub fn world_cut_progress(&self) -> Option<(CutId, Vec<u32>, Option<bool>)> {
+    pub fn world_cut_progress(&self) -> Option<(CutId, Vec<HostId>, Option<bool>)> {
         self.cuts.run.as_ref().map(|r| (r.cut, r.prepared.iter().copied().collect(), r.verdict))
     }
 
     /// Host `host` asks to leave ([`crate::HostMsg::LeaveRequest`]): it is named `leaving` in
     /// the next cut, which begins [`LEAVE_BATCH_MS`] after the first request not served.
-    pub(super) fn leave_request(&mut self, host: u32) {
+    pub(super) fn leave_request(&mut self, host: HostId) {
         if self.cuts.every_ms.is_none() {
             log::warn!("coordinator: host {host} asks to leave, but world cuts are off; ignored");
             return;
@@ -382,12 +384,12 @@ impl Coordinator {
 
     /// `(host, cut)` pairs whose outcome is not known here: look each up in the store
     /// (an undecided one aborted) and answer with [`Self::cut_outcome`].
-    pub fn take_cut_lookups(&mut self) -> Vec<(u32, CutId)> {
+    pub fn take_cut_lookups(&mut self) -> Vec<(HostId, CutId)> {
         std::mem::take(&mut self.cuts.lookups)
     }
 
     /// The stored outcome of `cut`, for `host` (a lookup's answer).
-    pub fn cut_outcome(&mut self, host: u32, cut: CutId, committed: bool) {
+    pub fn cut_outcome(&mut self, host: HostId, cut: CutId, committed: bool) {
         self.remember_outcome(cut, committed);
         self.push(Target::Host(host), CoordMsg::CutDone { cut, committed });
     }
@@ -407,7 +409,7 @@ impl Coordinator {
     /// not (a host arriving makes the cut's participants stale: it may exchange entities
     /// with them before the cut's tick, which no part would save); the cut it says is
     /// pending is answered.
-    pub(super) fn cut_attach(&mut self, host: u32, pending: Option<CutId>, boot: u64) {
+    pub(super) fn cut_attach(&mut self, host: HostId, pending: Option<CutId>, boot: u64) {
         self.cuts.attached.insert(host);
         self.cuts.boots.insert(host, boot);
         if self.cuts.left.get(&host).is_some_and(|left_as| *left_as != Some(boot)) {
@@ -427,7 +429,7 @@ impl Coordinator {
         }
     }
 
-    pub(super) fn cut_prepared(&mut self, host: u32, cut: CutId) {
+    pub(super) fn cut_prepared(&mut self, host: HostId, cut: CutId) {
         match self.cuts.run.as_mut() {
             Some(run) if run.cut == cut => {
                 if !run.has(host) {
@@ -445,7 +447,7 @@ impl Coordinator {
         }
     }
 
-    pub(super) fn cut_failed(&mut self, host: u32, cut: CutId, why: CutFailure) {
+    pub(super) fn cut_failed(&mut self, host: HostId, cut: CutId, why: CutFailure) {
         match self.cuts.run.as_mut() {
             Some(run) if run.cut == cut => {
                 if run.verdict.is_none() && run.has(host) {
@@ -488,9 +490,9 @@ impl Coordinator {
         // that left is neither (its process may still be attached on its way out).
         // A succeeded host is neither either (a zombie of it may still be attached).
         let (left, succeeded) = (&self.cuts.left, &self.cuts.succeeded);
-        let out = |h: &u32| !left.contains_key(h) && !succeeded.contains_key(h);
-        let expected: BTreeSet<u32> = self.cuts.expected.iter().copied().filter(out).collect();
-        let attached: BTreeSet<u32> = self.cuts.attached.iter().copied().filter(out).collect();
+        let out = |h: &HostId| !left.contains_key(h) && !succeeded.contains_key(h);
+        let expected: BTreeSet<HostId> = self.cuts.expected.iter().copied().filter(out).collect();
+        let attached: BTreeSet<HostId> = self.cuts.attached.iter().copied().filter(out).collect();
         // R4: no cut while a succession is open and not answered by everyone (nor while one
         // is being declared, a rollback is wanted, or the open ones are not known yet).
         let waiting = self.successions_block_cuts();
@@ -523,11 +525,11 @@ impl Coordinator {
         self.cuts.next += 1;
         let cut = CutId((self.cuts.epoch << 32) | self.cuts.next);
         let tick = self.cuts.world_tick + self.cuts.lead;
-        let hosts: Vec<u32> = expected.iter().copied().collect();
+        let hosts: Vec<HostId> = expected.iter().copied().collect();
         // The hosts leaving in this cut (among `hosts`); a request of a host not expected is
         // dropped (it is not in the cut; it exits without one).
-        let leaving: Vec<u32> = if leave_due {
-            let asked: Vec<u32> = std::mem::take(&mut self.cuts.leave_requests).into_keys().collect();
+        let leaving: Vec<HostId> = if leave_due {
+            let asked: Vec<HostId> = std::mem::take(&mut self.cuts.leave_requests).into_keys().collect();
             for h in asked.iter().filter(|h| !expected.contains(h)) {
                 log::warn!("coordinator: host {h} asks to leave, but it is not expected; ignored");
             }
@@ -566,7 +568,7 @@ impl Coordinator {
     /// ([`crate::HostMsg::CutPeerCount`]): relayed to `peer` while `cut` runs undecided and
     /// both are participants (two different ones); dropped otherwise — a count of a decided
     /// cut (an abort for a lapsed participant included) is never used.
-    pub(super) fn cut_peer_count(&mut self, host: u32, cut: CutId, peer: u32, received_through: u64, boot: u64) {
+    pub(super) fn cut_peer_count(&mut self, host: HostId, cut: CutId, peer: HostId, received_through: u64, boot: u64) {
         let running = self.cuts.run.as_ref().filter(|r| r.cut == cut && r.verdict.is_none());
         if !running.is_some_and(|r| host != peer && r.has(host) && r.has(peer)) {
             log::debug!("coordinator: host {host}'s count toward host {peer} in cut {} dropped: not between participants of it running", cut.0);
@@ -578,18 +580,18 @@ impl Coordinator {
 
     /// The participants of the running cut (decided or not, until its decision is
     /// recorded), if one runs.
-    pub(super) fn cuts_running_participants(&self) -> Option<Vec<u32>> {
+    pub(super) fn cuts_running_participants(&self) -> Option<Vec<HostId>> {
         self.cuts.run.as_ref().map(|r| r.participants().collect())
     }
 
     /// A participant `host` of the running cut lost its lease: the cut, not decided yet, is
     /// aborted (a succession is declared only between cuts).
-    pub(super) fn abort_cut_for_lapse(&mut self, host: u32) {
+    pub(super) fn abort_cut_for_lapse(&mut self, host: HostId) {
         self.abort_for(host, "lost its lease");
     }
 
     /// The hosts attached now that neither left nor were succeeded.
-    pub(super) fn attached_live(&self) -> Vec<u32> {
+    pub(super) fn attached_live(&self) -> Vec<HostId> {
         self.cuts
             .attached
             .iter()
@@ -600,17 +602,17 @@ impl Coordinator {
 
     /// Whether a message of `host` comes from a succeeded boot of it (`boot`: the boot an
     /// `Attach` names; otherwise the boot of its latest `Attach`): a zombie, ignored.
-    pub(super) fn from_succeeded_boot(&self, host: u32, boot: Option<u64>) -> bool {
+    pub(super) fn from_succeeded_boot(&self, host: HostId, boot: Option<u64>) -> bool {
         let Some(&dead) = self.cuts.succeeded.get(&host) else { return false };
         boot.or_else(|| self.cuts.boots.get(&host).copied()) == Some(dead)
     }
 
-    pub(super) fn is_attached(&self, host: u32) -> bool {
+    pub(super) fn is_attached(&self, host: HostId) -> bool {
         self.cuts.attached.contains(&host)
     }
 
     /// The boot host `host`'s latest `Attach` named (`None`: it never attached).
-    pub(super) fn attached_boot(&self, host: u32) -> Option<u64> {
+    pub(super) fn attached_boot(&self, host: HostId) -> Option<u64> {
         self.cuts.boots.get(&host).copied()
     }
 
@@ -621,26 +623,26 @@ impl Coordinator {
     }
 
     /// Whether `host`'s latest known boot was succeeded and no other boot of it came since.
-    pub(super) fn host_is_succeeded(&self, host: u32) -> bool {
+    pub(super) fn host_is_succeeded(&self, host: HostId) -> bool {
         self.cuts.succeeded.contains_key(&host)
     }
 
     /// Host `host`'s boot `boot` was succeeded (R4): not expected, nor counted attached,
     /// until another boot of it comes.
-    pub(super) fn note_succeeded(&mut self, host: u32, boot: u64) {
+    pub(super) fn note_succeeded(&mut self, host: HostId, boot: u64) {
         self.cuts.succeeded.insert(host, boot);
         self.cuts.leave_requests.remove(&host);
     }
 
     /// A running cut `host` takes part in, not decided yet, is aborted (`why`, for the log).
-    fn abort_for(&mut self, host: u32, why: &str) {
+    fn abort_for(&mut self, host: HostId, why: &str) {
         if self.cuts.run.as_ref().is_some_and(|r| r.has(host)) {
             self.abort_running(host, why);
         }
     }
 
     /// The running cut, not decided yet, is aborted because of `host` (`why`, for the log).
-    fn abort_running(&mut self, host: u32, why: &str) {
+    fn abort_running(&mut self, host: HostId, why: &str) {
         if let Some(run) = self.cuts.run.as_mut().filter(|r| r.verdict.is_none()) {
             log::warn!("coordinator: world cut {}: host {host} {why}; aborted", run.cut.0);
             run.verdict = Some(false);
@@ -649,7 +651,7 @@ impl Coordinator {
 
     /// `host` asks about `cut`, which is not the cut running: its outcome if remembered,
     /// else the runtime looks it up.
-    fn answer_cut(&mut self, host: u32, cut: CutId) {
+    fn answer_cut(&mut self, host: HostId, cut: CutId) {
         match self.cuts.outcomes.get(&cut).copied() {
             Some(committed) => self.push(Target::Host(host), CoordMsg::CutDone { cut, committed }),
             None => {

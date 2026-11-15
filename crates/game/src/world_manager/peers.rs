@@ -35,6 +35,7 @@
 //! the owner told to expect it ([`Reliable::ObserverOrder`]).
 
 use super::*;
+use crate::HostId;
 use crate::{PeerEvent, PeerLink, PeerSession, Reliable, Volatile};
 
 /// A message waiting for its region to have an owner this host knows
@@ -65,7 +66,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// link is swapped; the session's connection is reset
     /// ([`PeerSession::reset_connection`]), so its next pump reports `Down` (that host's
     /// regions are no longer known to run) and resumes over the new link after a hello.
-    pub fn set_peer(&mut self, ordinal: u32, mut session: PeerSession, link: Box<dyn PeerLink + Send>) {
+    pub fn set_peer(&mut self, ordinal: HostId, mut session: PeerSession, link: Box<dyn PeerLink + Send>) {
         debug_assert_eq!(session.peer(), ordinal, "a session for another host");
         let prefilled = session.unreceived().count();
         if prefilled > 0 {
@@ -99,7 +100,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// what is queued. Called first by [`Self::maintain`].
     pub fn pump_peers(&mut self, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
-        let ordinals: Vec<u32> = self.peers.keys().copied().collect();
+        let ordinals: Vec<HostId> = self.peers.keys().copied().collect();
         for ordinal in ordinals {
             let Some(peer) = self.peers.get_mut(&ordinal) else { continue };
             if peer.stale {
@@ -142,7 +143,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The host that simulates `rc` (this one included); `None` while nobody owns it or
     /// this host does not know who does.
-    pub fn owner_host(&self, rc: RegionCoords) -> Option<u32> {
+    pub fn owner_host(&self, rc: RegionCoords) -> Option<HostId> {
         match self.owner_of(rc) {
             crate::Owner::Me => Some(self.ordinal()),
             crate::Owner::Host(h) => Some(h),
@@ -151,7 +152,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The other host that owns `rc`, if another host does.
-    pub(super) fn foreign_host(&self, rc: RegionCoords) -> Option<u32> {
+    pub(super) fn foreign_host(&self, rc: RegionCoords) -> Option<HostId> {
         match self.owner_of(rc) {
             crate::Owner::Host(h) => Some(h),
             _ => None,
@@ -176,7 +177,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Whether host `ordinal`'s session is reachable now (and it is not of a newer
     /// generation, nor joined to this host by a leave: `world_cut.rs`).
-    pub(super) fn peer_reachable(&self, ordinal: u32) -> bool {
+    pub(super) fn peer_reachable(&self, ordinal: HostId) -> bool {
         self.peers.get(&ordinal).is_some_and(|p| !p.stale && p.session.is_reachable()) && !self.leave_blocks(ordinal)
     }
 
@@ -191,14 +192,14 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// What a leave, or a world cut counted across a down link, holds back for each host
     /// (`world_cut.rs`), never sent yet.
-    fn leave_held(&self) -> impl Iterator<Item = (u32, &Reliable)> {
+    fn leave_held(&self) -> impl Iterator<Item = (HostId, &Reliable)> {
         let counted = self.count_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)));
         self.leave_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r))).chain(counted)
     }
 
     /// Per host, what waits for it outside a session, never sent: waiting for a session
     /// (`peer_waiting`), or held back by a leave or a counted cut.
-    fn never_sent(&self) -> impl Iterator<Item = (u32, Vec<&Reliable>)> {
+    fn never_sent(&self) -> impl Iterator<Item = (HostId, Vec<&Reliable>)> {
         let waiting = self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
         let counted = self.count_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>()));
         waiting.chain(self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>()))).chain(counted)
@@ -207,7 +208,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Test support: the entity of every [`Reliable::Transfer`] not acknowledged yet —
     /// `(peer, id, on the wire)`; `false` = never sent (queued, or waiting for a session),
     /// `true` = sent, so the peer may already hold it.
-    pub fn peer_unreceived_ids(&self) -> Vec<(u32, crate::EntityId, bool)> {
+    pub fn peer_unreceived_ids(&self) -> Vec<(HostId, crate::EntityId, bool)> {
         let mut out = Vec::new();
         for (&ordinal, peer) in &self.peers {
             let unsent: BTreeSet<crate::EntityId> = peer.session.unsent().filter_map(transfer_id).collect();
@@ -225,7 +226,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Test support: the client and player of every [`Reliable::PlayerMove`] not
     /// acknowledged yet — `(peer, client, player, on the wire)`, as
     /// [`Self::peer_unreceived_ids`].
-    pub fn peer_unreceived_moves(&self) -> Vec<(u32, ClientId, PlayerId, bool)> {
+    pub fn peer_unreceived_moves(&self) -> Vec<(HostId, ClientId, PlayerId, bool)> {
         let mut out = Vec::new();
         for (&ordinal, peer) in &self.peers {
             let unsent = peer.session.unsent().count();
@@ -248,7 +249,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: every [`Reliable::Intent`] (an intent or a reply) not acknowledged
     /// yet — `(peer, msg, on the wire)`, as [`Self::peer_unreceived_ids`].
-    pub fn peer_unreceived_intents(&self) -> Vec<(u32, crate::IntentMsg, bool)> {
+    pub fn peer_unreceived_intents(&self) -> Vec<(HostId, crate::IntentMsg, bool)> {
         let mut out = Vec::new();
         for (&ordinal, peer) in &self.peers {
             let unsent = peer.session.unsent().count();
@@ -319,7 +320,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The players this host handed to another, with that host.
-    pub fn departed(&self) -> &BTreeMap<PlayerId, u32> {
+    pub fn departed(&self) -> &BTreeMap<PlayerId, HostId> {
         &self.departed
     }
 
@@ -352,7 +353,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The host `client`'s player was handed to, if this host handed it away.
-    pub(super) fn departed_host(&self, client: ClientId) -> Option<u32> {
+    pub(super) fn departed_host(&self, client: ClientId) -> Option<HostId> {
         let player = self.player_of.get(&client).copied().or_else(|| self.sessions.get(&client)?.player)?;
         self.departed.get(&player).copied()
     }
@@ -439,7 +440,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// where it lands if its park was on the way.
     fn accept_handoff(
         &mut self,
-        from: u32,
+        from: HostId,
         target: RegionCoords,
         stamp: crate::Tick,
         bundle: crate::EntityBundle,
@@ -570,7 +571,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ([`HANDOFF_SESSION_GRACE_MS`]) — its body created at `target`'s landing with what it
     /// carries, as a move within one host creates it. A `target` that cannot be loaded
     /// parks the record here ([`Self::park_handed`]).
-    fn accept_move(&mut self, from: u32, h: crate::PlayerHandoff, record: PlayerRecord, target: RegionCoords) {
+    fn accept_move(&mut self, from: HostId, h: crate::PlayerHandoff, record: PlayerRecord, target: RegionCoords) {
         let now_ms = self.clock_ms;
         let c = h.client;
         log::info!("[server] player {} (client {c}) moved here by host {from} into {target:?}", h.player.0);
@@ -628,7 +629,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `c`'s body was handed here by host `from`: its session here (an observer, if any)
     /// becomes the home — whether it did — else the session is awaited
     /// ([`HANDOFF_SESSION_GRACE_MS`]).
-    fn promote_session(&mut self, c: ClientId, from: u32, now_ms: u64) -> bool {
+    fn promote_session(&mut self, c: ClientId, from: HostId, now_ms: u64) -> bool {
         match self.sessions.get_mut(&c) {
             Some(session) => {
                 session.kind = SessionKind::Home;
@@ -666,7 +667,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// arriving `hop - 1`: the copy here takes the arriving hop if it is higher, and is
     /// reported again at it (online, or offline when it is not online here) — its older
     /// reports would be stale against that transit and could never end it.
-    fn drop_arriving_copy(&mut self, from: u32, player: PlayerId, hop: u64) {
+    fn drop_arriving_copy(&mut self, from: HostId, player: PlayerId, hop: u64) {
         log::warn!("[server] player {} from host {from} is already here; the arriving copy is dropped", player.0);
         if hop <= self.hop_here(player) {
             return;
@@ -690,7 +691,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// region cannot be loaded; with none, host `from` is told
     /// ([`Self::tell_parked`]). Never announced online here, it is reported offline: the
     /// sending host reported it in transit to this host (`PlayerHandedTo`), not offline.
-    fn park_handed(&mut self, from: u32, client: ClientId, player: PlayerId, record: PlayerRecord, now_ms: u64) {
+    fn park_handed(&mut self, from: HostId, client: ClientId, player: PlayerId, record: PlayerRecord, now_ms: u64) {
         let hop = self.hop_here(player);
         self.world_send(HostMsg::PlayerOffline { player, hop });
         self.cut_transit(player, &record);
@@ -705,7 +706,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Host `from` handed `player` (of `client`) here and this host parked it with no
     /// session of the client: `from` ends the session it may still hold for the client.
-    fn tell_parked(&mut self, from: u32, client: ClientId, player: PlayerId) {
+    fn tell_parked(&mut self, from: HostId, client: ClientId, player: PlayerId) {
         if from == self.ordinal() {
             // Handed here by a host declared dead since (a succession): nobody to tell.
             log::info!("[server] player {} (client {client}) parked here with no session", player.0);
@@ -725,7 +726,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Host `from` parked `player`, handed there from here, with no session of `client`
     /// there: this host's observer session of the client (if any) ends, the client told
     /// why. `departed` stays (the record is on `from`).
-    fn player_parked_elsewhere(&mut self, from: u32, client: ClientId, player: PlayerId) {
+    fn player_parked_elsewhere(&mut self, from: HostId, client: ClientId, player: PlayerId) {
         let observing =
             self.sessions.get(&client).is_some_and(|s| s.kind == SessionKind::Observer && s.player == Some(player));
         if !observing {
@@ -779,7 +780,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// that follows the claim forgets what waited ([`Self::forget_home_answers`]); a client
     /// never told has no connection to `owner`, where its player would park for want of a
     /// session (`HANDOFF_SESSION_GRACE_MS`).
-    fn name_new_home(&mut self, client: ClientId, target: RegionCoords, owner: u32) {
+    fn name_new_home(&mut self, client: ClientId, target: RegionCoords, owner: HostId) {
         if self.sessions.get(&client).map(|s| s.kind) != Some(SessionKind::Home) {
             return;
         }
@@ -801,7 +802,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `client`'s home session here sent it to host `owner` for `rc`.
-    fn redirected_to(&mut self, client: ClientId, rc: RegionCoords, owner: u32) {
+    fn redirected_to(&mut self, client: ClientId, rc: RegionCoords, owner: HostId) {
         if let Some(session) = self.sessions.get_mut(&client) {
             session.asked_elsewhere.remove(&rc);
         }
@@ -885,7 +886,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Host `pred` was succeeded (its land is the heir's now): every region a home session
     /// here was sent to it for is answered again (`redirected`, the entry kept as where the
     /// client takes the region from until then) — now, or when it can be.
-    pub(super) fn reanswer_redirected_to(&mut self, pred: u32) {
+    pub(super) fn reanswer_redirected_to(&mut self, pred: HostId) {
         let to_pred: Vec<(ClientId, RegionCoords)> =
             self.redirected.iter().filter(|(_, o)| **o == pred).map(|(k, _)| *k).collect();
         if to_pred.is_empty() {
@@ -937,7 +938,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Test support: the regions `client`'s session here waits to answer
     /// (`Session::asked_elsewhere`), and those it sent the client elsewhere for, with the host.
     #[doc(hidden)]
-    pub fn client_answers(&self, client: ClientId) -> (Vec<RegionCoords>, Vec<(RegionCoords, u32)>) {
+    pub fn client_answers(&self, client: ClientId) -> (Vec<RegionCoords>, Vec<(RegionCoords, HostId)>) {
         let asked = self.sessions.get(&client).map(|s| s.asked_elsewhere.iter().copied().collect()).unwrap_or_default();
         let redirected = self.redirected.iter().filter(|((c, _), _)| *c == client).map(|((_, rc), o)| (*rc, *o)).collect();
         (asked, redirected)
@@ -947,7 +948,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the owner told to expect it — [`Reliable::ObserverOrder`], valid for
     /// [`OBSERVER_ORDER_TTL_SECS`] from its receipt there), handed out again while at
     /// least half its life is left (by this host's `now_ms`), then minted anew.
-    fn observer_ticket(&mut self, client: ClientId, owner: u32, now_ms: u64) -> crate::ObserverTicket {
+    fn observer_ticket(&mut self, client: ClientId, owner: HostId, now_ms: u64) -> crate::ObserverTicket {
         let reuse_ms = OBSERVER_ORDER_TTL_SECS * 1000 / 2;
         if let Some(&(nonce, minted)) = self.observer_tickets.get(&(client, owner)) {
             if now_ms.saturating_sub(minted) < reuse_ms {
@@ -973,7 +974,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// `msg` to host `ordinal` (a state message departing after its source answered goes by
     /// [`Self::send_reliable`]): on its session, or kept until it has one.
-    pub(super) fn queue_to_peer(&mut self, ordinal: u32, msg: Reliable) {
+    pub(super) fn queue_to_peer(&mut self, ordinal: HostId, msg: Reliable) {
         self.send_reliable(ordinal, msg, false);
     }
 
@@ -982,7 +983,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// a participant of a world cut goes bare or wrapped ([`Reliable::InCut`]) by who
     /// accounts for it (`world_cut.rs`, [`Self::world_cut_wrap`]); `view` keeps it out of
     /// a one-phase cut's rows.
-    pub(super) fn send_reliable(&mut self, ordinal: u32, msg: Reliable, view: bool) {
+    pub(super) fn send_reliable(&mut self, ordinal: HostId, msg: Reliable, view: bool) {
         let msg = match self.world_cut_wrap(ordinal, msg, view) {
             (msg, Some(cut)) => Reliable::InCut { cut, body: Box::new(msg) },
             (msg, None) => msg,
@@ -997,7 +998,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// `msg` to host `ordinal` now: on its session, or kept until it has one. Its id among
     /// everything queued to that host (`peer_entries`).
-    pub(super) fn queue_now(&mut self, ordinal: u32, msg: Reliable) -> u64 {
+    pub(super) fn queue_now(&mut self, ordinal: HostId, msg: Reliable) -> u64 {
         let count = self.peer_queued.entry(ordinal).or_default();
         let id = *count;
         *count += 1;
@@ -1054,8 +1055,8 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Every reliable message to another host not acknowledged yet (a session's, or
     /// waiting for one), with its host and id ([`Self::peer_entries_of`]).
-    fn peer_entries(&self) -> Vec<(u32, u64, &Reliable)> {
-        let ordinals: BTreeSet<u32> = self.peers.keys().chain(self.peer_waiting.keys()).copied().collect();
+    fn peer_entries(&self) -> Vec<(HostId, u64, &Reliable)> {
+        let ordinals: BTreeSet<HostId> = self.peers.keys().chain(self.peer_waiting.keys()).copied().collect();
         ordinals.into_iter().flat_map(|o| self.peer_entries_of(o).into_iter().map(move |(id, r)| (o, id, r))).collect()
     }
 
@@ -1064,7 +1065,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// host. A session's entries (and a waiting list) leave only from the front —
     /// acknowledged, or forgotten through a cut mark or count — and a session is never
     /// replaced, so they are always the LAST ones queued to that host.
-    fn peer_entries_of(&self, ordinal: u32) -> Vec<(u64, &Reliable)> {
+    fn peer_entries_of(&self, ordinal: HostId) -> Vec<(u64, &Reliable)> {
         let mut list: Vec<&Reliable> = self.peers.get(&ordinal).map(|p| p.session.unreceived().collect()).unwrap_or_default();
         list.extend(self.peer_waiting.get(&ordinal).into_iter().flatten());
         let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
@@ -1293,7 +1294,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         for &(sr, _) in &rows {
             self.forget_claim_need(sr);
         }
-        let peers: Vec<u32> = self.peers.keys().copied().collect();
+        let peers: Vec<HostId> = self.peers.keys().copied().collect();
         for p in peers {
             self.queue_to_peer(p, Reliable::Owns { rows: rows.clone() });
         }
@@ -1305,10 +1306,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `TERRAIN_POLL_SECS` as a backstop, and when [`Self::take_directory_wanted`] asked.
     /// A row older than what a peer already said is kept as said ([`crate::Directory::replace`]).
     /// What waited for a super-region that has an owner now goes on.
-    pub fn directory_read(&mut self, rows: Vec<(crate::SuperRegion, i64, u64)>, mut live: BTreeSet<u32>) {
+    pub fn directory_read(&mut self, rows: Vec<(crate::SuperRegion, i64, u64)>, mut live: BTreeSet<HostId>) {
         live.insert(self.ordinal());
         let Some(directory) = self.ownership.0.directory_mut() else { return };
-        directory.replace(rows.into_iter().map(|(sr, owner, epoch)| (sr, u32::try_from(owner).ok(), epoch)));
+        directory.replace(rows.into_iter().map(|(sr, owner, epoch)| (sr, u64::try_from(owner).ok().map(HostId), epoch)));
         directory.set_live(live);
         self.directory_wanted = false;
         self.left_land_read();
@@ -1323,7 +1324,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Host `from` holds `rows` (`(super-region, epoch)`, its [`Reliable::Owns`]): its
     /// directory says so unless it knows a newer epoch; what waited for them goes on.
-    fn peer_owns(&mut self, from: u32, rows: Vec<(crate::SuperRegion, u64)>) {
+    fn peer_owns(&mut self, from: HostId, rows: Vec<(crate::SuperRegion, u64)>) {
         let Some(directory) = self.ownership.0.directory_mut() else {
             log::warn!("[server] host {from} claims {} super-region(s), but this host keeps no directory: ignored", rows.len());
             return;
@@ -1397,7 +1398,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// cut counts with across a down link, what is above its count is written by
     /// [`Self::cut_counted`]. (A one-phase cut's peer may also hold an entry it received
     /// and has not acknowledged yet.)
-    pub(super) fn cut_peer_rows(&self, participants: &BTreeSet<u32>) -> Vec<InFlightRow> {
+    pub(super) fn cut_peer_rows(&self, participants: &BTreeSet<HostId>) -> Vec<InFlightRow> {
         let to_peers = self
             .peer_entries()
             .into_iter()
@@ -1424,7 +1425,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// intent's due raised to at least `tick` (no receiver region applies it before its
     /// snapshot); and the ids of everything owed above the count (the journal's
     /// `kept_sent`). What waits for a session counts as above any count.
-    pub(super) fn cut_counted(&self, ordinal: u32, count: u64, cut: CutId, tick: crate::Tick) -> CountedPart {
+    pub(super) fn cut_counted(&self, ordinal: HostId, count: u64, cut: CutId, tick: crate::Tick) -> CountedPart {
         let mut out = CountedPart::default();
         let mut entries = self.peer_entries_of(ordinal);
         let above = self.peers.get(&ordinal).map_or(0, |p| p.session.owed_above(count).count())
@@ -1456,7 +1457,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A player handed to a participant follows the same rule as every state message
     /// (`world_cut.rs`): bare, its record is the receiver's; wrapped, this host's snapshot
     /// holds the body or this part wrote its record when it was sent.
-    pub(super) fn cut_peer_players(&self, participants: &BTreeSet<u32>) -> Vec<(PlayerId, PlayerRecord)> {
+    pub(super) fn cut_peer_players(&self, participants: &BTreeSet<HostId>) -> Vec<(PlayerId, PlayerRecord)> {
         self.peer_entries()
             .into_iter()
             .filter(|(ordinal, _, _)| !participants.contains(ordinal))
@@ -1505,14 +1506,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Whether `rc` borders a region host `peer` owns (one of its 8 neighbours).
-    fn borders(&self, rc: RegionCoords, peer: u32) -> bool {
+    fn borders(&self, rc: RegionCoords, peer: HostId) -> bool {
         crate::halo::neighbours(rc).any(|n| self.foreign_host(n) == Some(peer))
     }
 
     /// This host's region `rc` started (`Volatile::RegionUp`), parked (`RegionParked`) or
     /// was lost (`RegionDown`): `what(rc)` told to every host owning one of its neighbours.
     pub(super) fn announce_region(&mut self, rc: RegionCoords, what: fn(RegionCoords) -> Volatile) {
-        let ordinals: Vec<u32> = self.peers.keys().copied().filter(|&p| self.borders(rc, p)).collect();
+        let ordinals: Vec<HostId> = self.peers.keys().copied().filter(|&p| self.borders(rc, p)).collect();
         for ordinal in ordinals {
             let Some(peer) = self.peers.get_mut(&ordinal).filter(|p| !p.stale) else { continue };
             peer.session.send_volatile(what(rc));
@@ -1542,7 +1543,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The link to host `from` is gone (or it runs a newer generation): every region of
     /// it is gone for this host's halos.
-    pub(super) fn peer_lost(&mut self, from: u32) {
+    pub(super) fn peer_lost(&mut self, from: HostId) {
         let gone: Vec<RegionCoords> =
             self.foreign_running.iter().filter(|(_, &h)| h == from).map(|(rc, _)| *rc).collect();
         for n in gone {
@@ -1555,7 +1556,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.regions.get(&rc).is_some_and(|l| !l.stopping)
     }
 
-    fn peer_volatile(&mut self, from: u32, v: Volatile) {
+    fn peer_volatile(&mut self, from: HostId, v: Volatile) {
         match v {
             Volatile::Running(list) => {
                 // Sent on our hello, behind everything it had queued for us: its first sync
@@ -1644,7 +1645,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    fn peer_event(&mut self, from: u32, ev: PeerEvent) {
+    fn peer_event(&mut self, from: HostId, ev: PeerEvent) {
         match ev {
             PeerEvent::Up(hello) => {
                 log::info!("[server] peer host {from} up (boot {})", hello.boot);
@@ -1710,7 +1711,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A participant of the pending world cut runs a newer generation: this host is stale —
     /// its part fails. (A link that merely went down is counted across instead,
     /// `world_cut.rs`.)
-    fn world_cut_peer_stale(&mut self, from: u32) {
+    fn world_cut_peer_stale(&mut self, from: HostId) {
         if self.world_cut.as_ref().is_some_and(|r| r.state == super::world_cut::PartState::Pending && r.peers.contains(&from)) {
             log::warn!("[server] world cut: host {from} runs a newer generation while the cut was pending");
             self.world_cut_fail(crate::CutFailure::Aborted);
@@ -1722,7 +1723,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// accounted for by its sender in that cut; a bare state message after `from`'s mark of
     /// the pending world cut is a protocol violation — applied all the same (state is never
     /// dropped), and the cut fails.
-    pub(super) fn peer_reliable(&mut self, from: u32, msg: Reliable) {
+    pub(super) fn peer_reliable(&mut self, from: HostId, msg: Reliable) {
         match msg {
             Reliable::CutMark { cut } => self.peer_cut_mark(from, cut),
             Reliable::InCut { cut, body } => {
@@ -1767,7 +1768,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Apply host `from`'s reliable message; `after`: its sender accounts for it in the
     /// pending cut (what it creates here is in no part of this host's).
-    pub(super) fn peer_reliable_in(&mut self, from: u32, msg: Reliable, after: bool) {
+    pub(super) fn peer_reliable_in(&mut self, from: HostId, msg: Reliable, after: bool) {
         match msg {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
                 if !self.owns(target) && !self.is_foreign(target) {
@@ -1983,7 +1984,7 @@ pub(super) struct CountedPart {
 /// What [`WorldManager::redirect`] did with a subscribe.
 enum Redirect {
     /// The client was sent to this host (`RegionElsewhere`).
-    Sent(u32),
+    Sent(HostId),
     /// Not now (the owner's endpoint is not known yet): it may be later.
     Later,
     /// Never from here (no player for the session, no nonce source, not another host's).

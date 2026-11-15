@@ -6,6 +6,7 @@
 //! server without the coordinator thread) dialing it through a [`QuicWorldLink`]. The
 //! split roles need a Postgres world store: several processes write it.
 
+use game::HostId;
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
@@ -420,14 +421,14 @@ pub const ALL_ROLE_BESIDE_HOSTS: &str = "VOXEL_ROLE=all (one process running eve
 /// fence them. Refused ([`ALL_ROLE_BESIDE_HOSTS`]), naming the rows and the remedies. A row of
 /// an older generation (the world rolled back since: it holds nothing of this world) or a
 /// clean one is no obstacle. A store whose rows cannot be read is refused too.
-pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle, me: u32) -> Result<(), String> {
+pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle, me: HostId) -> Result<(), String> {
     if role != Role::All {
         return Ok(());
     }
     let rows = store.hosts().map_err(|e| format!("{ALL_ROLE_BESIDE_HOSTS}: the hosts rows could not be read ({e})"))?;
     let generation = store.world_generation().map_err(|e| format!("{ALL_ROLE_BESIDE_HOSTS}: the world generation could not be read ({e})"))?;
-    let others: Vec<u32> =
-        rows.iter().filter(|r| r.ordinal != me && !r.clean && r.generation == generation).map(|r| r.ordinal).collect();
+    let others: Vec<u64> =
+        rows.iter().filter(|r| r.id != me && !r.clean && r.generation == generation).map(|r| r.id.0).collect();
     if others.is_empty() {
         return Ok(());
     }
@@ -443,8 +444,8 @@ pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle,
 /// not serve (`>= hosts`): a mis-set-up world (started with more hosts before, stopped
 /// uncleanly). Never ignored — such a host may hold state no cut would save — so world cuts
 /// stay blocked until it starts (or its row is retired). `None`: none.
-pub fn hosts_beyond_count(rows: &[(u32, bool)], hosts: u32) -> Option<String> {
-    let beyond: Vec<u32> = rows.iter().filter(|(o, clean)| !clean && *o >= hosts).map(|(o, _)| *o).collect();
+pub fn hosts_beyond_count(rows: &[(HostId, bool)], hosts: u32) -> Option<String> {
+    let beyond: Vec<u64> = rows.iter().filter(|(o, clean)| !clean && o.0 >= u64::from(hosts)).map(|(o, _)| o.0).collect();
     (!beyond.is_empty()).then(|| {
         format!(
             "the world has dirty `hosts` rows of hosts {beyond:?}, but {}={hosts}: they ran before and did not \
@@ -456,7 +457,7 @@ pub fn hosts_beyond_count(rows: &[(u32, bool)], hosts: u32) -> Option<String> {
              its land is given to a live host at once when a host needs a region of it",
             game::ownership::HOSTS_ENV,
             game::ownership::HOSTS_ENV,
-            beyond.iter().max().map_or(hosts, |m| m + 1)
+            beyond.iter().max().map_or(u64::from(hosts), |m| m + 1)
         )
     })
 }
@@ -492,7 +493,7 @@ pub fn run_coordinator() -> ServerExit {
     recover_staged_cuts(&store, hosts).unwrap_or_else(|e| fatal(e));
     match store.hosts() {
         Ok(rows) => {
-            let rows: Vec<(u32, bool)> = rows.iter().map(|r| (r.ordinal, r.clean)).collect();
+            let rows: Vec<(HostId, bool)> = rows.iter().map(|r| (r.id, r.clean)).collect();
             if let Some(w) = hosts_beyond_count(&rows, hosts) {
                 log::warn!("[coordinator] {w}");
             }
@@ -578,6 +579,15 @@ pub fn coordinator_crash_policy(ownership: Option<&str>, hosts: u32) -> Result<g
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use game::HostId;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use super::*;
 
     /// The coordinator's crash-policy gate: only `claim` with several hosts declares
@@ -621,9 +631,9 @@ mod tests {
     /// a clean one or one within the count is not.
     #[test]
     fn dirty_rows_beyond_the_host_count_are_warned() {
-        assert_eq!(hosts_beyond_count(&[(0, false), (1, false)], 2), None);
-        assert_eq!(hosts_beyond_count(&[(0, false), (2, true)], 2), None, "a clean row left");
-        let w = hosts_beyond_count(&[(0, false), (1, false), (2, false)], 2).expect("warned");
+        assert_eq!(hosts_beyond_count(&[(h(0), false), (h(1), false)], 2), None);
+        assert_eq!(hosts_beyond_count(&[(h(0), false), (h(2), true)], 2), None, "a clean row left");
+        let w = hosts_beyond_count(&[(h(0), false), (h(1), false), (h(2), false)], 2).expect("warned");
         assert!(w.contains("[2]") && w.contains("NOT saved") && w.contains("VOXEL_HOSTS=3"), "{w}");
     }
 
@@ -639,7 +649,7 @@ mod tests {
     }
 
     fn hello() -> LinkHello {
-        LinkHello::new("t".into(), svc_link::PeerRole::Host { ordinal: 0, boot: 1, reg: 1 })
+        LinkHello::new("t".into(), svc_link::PeerRole::Host { id: HostId::SOLO, boot: 1, reg: 1 })
     }
 
     fn calendar(t: u64) -> CoordMsg {

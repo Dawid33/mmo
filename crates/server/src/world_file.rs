@@ -559,6 +559,15 @@ pub fn install_world(opened: &mut OpenedWorld) -> Option<game::WorldMap> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use game::HostId;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
@@ -759,7 +768,7 @@ mod tests {
     /// An R1 history row, as an R1 cut wrote it.
     fn store_history(store: &StoreHandle, bytes: Vec<u8>) {
         let cut = game::WorldCut {
-            host: 0,
+            host: h(0),
             id: game::CutId(1),
             tick: 1,
             regions: Vec::new(),

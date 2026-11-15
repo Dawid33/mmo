@@ -78,8 +78,8 @@ fn successions(db: &PgDb) -> Vec<[i64; 6]> {
 }
 
 /// `(boot, clean, state)` of host `h`'s row.
-fn host_row(db: &PgDb, h: u32) -> (i64, i64, i64) {
-    let one = |c: &str| count(db, &format!("SELECT {c} FROM hosts WHERE ordinal = {h}"));
+fn host_row(db: &PgDb, h: HostId) -> (i64, i64, i64) {
+    let one = |c: &str| count(db, &format!("SELECT {c} FROM hosts WHERE ordinal = {}", h.0));
     (one("boot"), one("clean"), one("state"))
 }
 
@@ -89,13 +89,13 @@ fn host_row(db: &PgDb, h: u32) -> (i64, i64, i64) {
 /// predecessor's succession: run it on its own thread then): registered with an empty
 /// fence, then its own rows re-claimed — `server::run`'s order.
 struct Booted {
-    ordinal: u32,
+    ordinal: HostId,
     boot: u64,
     links: PeerLinks,
     claims: HostClaims,
 }
 
-fn register(db: &PgDb, dir: &std::path::Path, n: u32, ordinal: u32, boot: u64) -> Booted {
+fn register(db: &PgDb, dir: &std::path::Path, n: u32, ordinal: HostId, boot: u64) -> Booted {
     let store = open(db);
     let claims = HostClaims::none(store.clone(), ordinal);
     let config = PeerLinkConfig {
@@ -154,7 +154,7 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     if let Some(login) = &t.login {
         sim.login = Some(login.host_side(ordinal));
     }
-    let i = ordinal as usize;
+    let i = ordinal.0 as usize;
     t.w.switches[i] = switch;
     t.w.generations[i] = generation;
     if let Some(old) = t.w.links[i].replace(links) {
@@ -200,7 +200,7 @@ fn start_coordinator_every(
 }
 
 /// The entry host of the login side.
-const ENTRY: u32 = 0;
+const ENTRY: HostId = HostId(0);
 
 // ---- the login service (rejoins after a takeover) -----------------------------------------
 
@@ -228,7 +228,7 @@ impl PlayerStore for RosterThenStore {
 struct LoginSide {
     link: LoginLink,
     players: server::player_store::SharedPlayerStore,
-    events_of: std::collections::BTreeMap<u32, (Arc<SpawnOrders>, crossbeam::channel::Sender<ServerEvent>, Receiver<ServerEvent>)>,
+    events_of: std::collections::BTreeMap<HostId, (Arc<SpawnOrders>, crossbeam::channel::Sender<ServerEvent>, Receiver<ServerEvent>)>,
     tx: crossbeam::channel::Sender<LoginToHost>,
     events: Receiver<svc_link::LinkEvent<HostToLogin>>,
     seen: Vec<HostToLogin>,
@@ -236,7 +236,7 @@ struct LoginSide {
 }
 
 impl LoginSide {
-    fn host_side(&self, ordinal: u32) -> SimLogin {
+    fn host_side(&self, ordinal: HostId) -> SimLogin {
         let (orders, events_tx, events) = self.events_of.get(&ordinal).cloned().unwrap_or_else(|| {
             let (tx, rx) = unbounded();
             (Arc::new(SpawnOrders::new(server::auth_edge::system_clock())), tx, rx)
@@ -270,7 +270,8 @@ struct Takeover {
 /// out): for each host the first region of its own (by z, then x) next to another host's.
 fn seam_regions(s: u32, n: u32) -> Vec<RegionCoords> {
     let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), n);
-    (0..n)
+    (0..u64::from(n))
+        .map(HostId)
         .map(|h| {
             (4..44)
                 .flat_map(|z| (4..44).map(move |x| RegionCoords::new(x, z)))
@@ -292,7 +293,7 @@ impl Takeover {
 
     /// [`Takeover::start`] with world cuts every `every`.
     fn start_every(db: &PgDb, dir: &std::path::Path, n: u32, policy: CrashPolicy, login: bool, every: Duration) -> Takeover {
-        let booted: Vec<Booted> = (0..n).map(|h| register(db, dir, n, h, 2000 + u64::from(h))).collect();
+        let booted: Vec<Booted> = (0..u64::from(n)).map(HostId).map(|h| register(db, dir, n, h, 2000 + h.0)).collect();
         let store = open(db);
         let tick = Arc::new(AtomicU64::new(0));
         let cert = dir.join("coordinator.cert-sha256");
@@ -313,7 +314,7 @@ impl Takeover {
         let seams = if n == 2 {
             let (a, b) = host_seam(s);
             let first = game::rendezvous_owner(game::super_region_of(a, s), n);
-            if first == 0 { vec![a, b] } else { vec![b, a] }
+            if first == h(0) { vec![a, b] } else { vec![b, a] }
         } else {
             seam_regions(s, n)
         };
@@ -331,8 +332,8 @@ impl Takeover {
         let seams = t.seams.clone();
         t.until("every host owns its seam region", WAIT, |t| {
             let mut all = true;
-            for h in 0..t.n {
-                let rc = seams[h as usize];
+            for h in (0..u64::from(t.n)).map(HostId) {
+                let rc = seams[h.0 as usize];
                 if t.sim(h).manager.owner_of(rc) != game::Owner::Me {
                     all = false;
                     t.watch(h, rc);
@@ -341,27 +342,27 @@ impl Takeover {
             all
         });
         let now = t.w.pair.now();
-        for h in 0..n {
-            let rc = t.seams[h as usize];
-            let (player, _) = t.w.claims[h as usize].store().resolve_player(&format!("takeover-keeper-{h}")).unwrap();
+        for h in (0..u64::from(n)).map(HostId) {
+            let rc = t.seams[h.0 as usize];
+            let (player, _) = t.w.claims[h.0 as usize].store().resolve_player(&format!("takeover-keeper-{}", h.0)).unwrap();
             t.sim(h).keep(player, rc, now);
         }
         t.until("every keeper region running on its host, every peer synced and reachable", WAIT, |t| {
             t.w.pair.sims.iter().all(|sim| {
                 sim.manager.world_attached()
                     && sim.manager.peers_synced()
-                    && sim.manager.running_regions().contains(&seams[sim.ordinal as usize])
+                    && sim.manager.running_regions().contains(&seams[sim.ordinal.0 as usize])
                     && seams.iter().all(|rc| sim.manager.reaches(*rc))
             })
         });
         t
     }
 
-    fn sim(&mut self, h: u32) -> &mut Sim {
+    fn sim(&mut self, h: HostId) -> &mut Sim {
         self.w.pair.sims.iter_mut().find(|s| s.ordinal == h).unwrap_or_else(|| panic!("host {h} is up"))
     }
 
-    fn up(&self, h: u32) -> bool {
+    fn up(&self, h: HostId) -> bool {
         self.w.pair.sims.iter().any(|s| s.ordinal == h)
     }
 
@@ -371,7 +372,7 @@ impl Takeover {
         self.w.pair.round();
         for sim in &mut self.w.pair.sims {
             if let Some(g) = sim.manager.take_higher_generation() {
-                self.w.generations[sim.ordinal as usize].note(g);
+                self.w.generations[sim.ordinal.0 as usize].note(g);
             }
         }
         if let Some(login) = self.login.as_mut() {
@@ -411,18 +412,18 @@ impl Takeover {
     }
 
     /// Host `h` crashes: its manager, peer listener, coordinator link and lease go at once.
-    fn kill(&mut self, h: u32) {
+    fn kill(&mut self, h: HostId) {
         kill_host(&mut self.w, h);
     }
 
     /// Rounds until a succession of `pred` is settled; the row.
-    fn until_settled(&mut self, db: &PgDb, pred: u32) -> [i64; 6] {
+    fn until_settled(&mut self, db: &PgDb, pred: HostId) -> [i64; 6] {
         self.until(&format!("a succession of host {pred} settled"), LONG, |_| {
-            successions(db).iter().any(|r| r[1] == i64::from(pred) && r[4] >= 0)
+            successions(db).iter().any(|r| r[1] == (pred.0 as i64) && r[4] >= 0)
         });
-        let row = successions(db).into_iter().find(|r| r[1] == i64::from(pred) && r[4] >= 0).unwrap();
+        let row = successions(db).into_iter().find(|r| r[1] == (pred.0 as i64) && r[4] >= 0).unwrap();
         // The heir's own view: nothing held, nothing pinned any more.
-        let heir = row[2] as u32;
+        let heir = HostId(row[2] as u64);
         self.until("the heir forgot the succession", WAIT, |t| {
             let m = &t.sim(heir).manager;
             m.inheriting().is_empty() && m.succession_pinned().is_empty() && m.successions().is_empty()
@@ -431,7 +432,7 @@ impl Takeover {
     }
 
     /// Host `h` boots again as `boot` (its registration on this thread: it may wait).
-    fn restart(&mut self, db: &PgDb, dir: &std::path::Path, h: u32, boot: u64) {
+    fn restart(&mut self, db: &PgDb, dir: &std::path::Path, h: HostId, boot: u64) {
         let b = register(db, dir, self.n, h, boot);
         let sim = build(self, b, true);
         let i = self.w.pair.sims.iter().position(|s| s.ordinal > h).unwrap_or(self.w.pair.sims.len());
@@ -439,8 +440,8 @@ impl Takeover {
     }
 
     /// `rc` runs on its owner `h` (an observer client of host `h` subscribes to it).
-    fn watch(&mut self, h: u32, rc: RegionCoords) {
-        let (visitor, player) = (90 + rc.x as u64 * 7 + rc.z as u64, PlayerId(9000 + u64::from(h)));
+    fn watch(&mut self, h: HostId, rc: RegionCoords) {
+        let (visitor, player) = (90 + rc.x as u64 * 7 + rc.z as u64, PlayerId(9000 + h.0));
         let now = self.w.pair.now();
         let sim = self.sim(h);
         let _ = sim.manager.handle_server_event(ServerEvent::ObserverConnected { client: visitor, player }, now);
@@ -448,7 +449,7 @@ impl Takeover {
     }
 
     /// Every running region of every host up that holds `id`.
-    fn live(&mut self, id: EntityId) -> Vec<(u32, RegionCoords)> {
+    fn live(&mut self, id: EntityId) -> Vec<(HostId, RegionCoords)> {
         holders_all(&mut self.w, id)
     }
 }
@@ -458,7 +459,7 @@ fn start_login(db: &PgDb, dir: &std::path::Path, n: u32) -> LoginSide {
     let roster: Roster = Arc::default();
     let players = server::player_store::shared(RosterThenStore { roster: roster.clone(), store: open(db) });
     let mut events_of = std::collections::BTreeMap::new();
-    for h in 0..n {
+    for h in (0..u64::from(n)).map(HostId) {
         let (tx, rx) = unbounded();
         events_of.insert(h, (Arc::new(SpawnOrders::new(server::auth_edge::system_clock())), tx, rx));
     }
@@ -504,7 +505,7 @@ impl Takeover {
 
     /// The login service orders a spawn of `token` at `epoch` (a `POST /v1/join`) and waits
     /// for the ack: `(ok, the host it names)`.
-    fn join(&mut self, token: &str, epoch: u64) -> (bool, Option<u32>) {
+    fn join(&mut self, token: &str, epoch: u64) -> (bool, Option<HostId>) {
         let from = self.login.as_ref().unwrap().seen.len();
         let login = self.login.as_ref().unwrap();
         login.tx.send(LoginToHost::SpawnPlayer { player_token: token.into(), session_epoch: epoch }).unwrap();
@@ -522,12 +523,12 @@ impl Takeover {
             found.is_some()
         });
         let (ok, quic) = found.unwrap();
-        let host = quic.and_then(|q| (0..self.n).find(|h| endpoint(*h).quic.as_deref() == Some(q.as_str())));
+        let host = quic.and_then(|q| (0..u64::from(self.n)).map(HostId).find(|h| endpoint(*h).quic.as_deref() == Some(q.as_str())));
         (ok, host)
     }
 
     /// The client of (`token`, `epoch`) connects to host `h`; its session id.
-    fn connect(&mut self, h: u32, token: &str, epoch: u64) -> ClientId {
+    fn connect(&mut self, h: HostId, token: &str, epoch: u64) -> ClientId {
         let mut players = self.login.as_ref().unwrap().players.lock().unwrap();
         let (player, record) =
             players.resolve(&PlayerKey::Online(game::PlayerToken(token.to_string()))).expect("a known token");
@@ -543,7 +544,7 @@ impl Takeover {
     }
 
     /// Where `client`'s body is: `(host, region)` of every running region holding it.
-    fn bodies(&mut self, client: ClientId) -> Vec<(u32, RegionCoords)> {
+    fn bodies(&mut self, client: ClientId) -> Vec<(HostId, RegionCoords)> {
         let mut out = Vec::new();
         for sim in &mut self.w.pair.sims {
             for rc in sim.manager.running_regions() {
@@ -558,18 +559,18 @@ impl Takeover {
     }
 
     /// Hosts up holding a parked record of `player`.
-    fn parked(&mut self, player: PlayerId) -> Vec<u32> {
+    fn parked(&mut self, player: PlayerId) -> Vec<HostId> {
         self.w.pair.sims.iter().filter(|s| s.manager.parked_record(player).is_some()).map(|s| s.ordinal).collect()
     }
 }
 
 /// A slime in the middle of `rc` (host `h`'s), `dx` metres off its centre along x.
-fn slime(t: &mut Takeover, h: u32, rc: RegionCoords, dx: f32) -> EntityId {
+fn slime(t: &mut Takeover, h: HostId, rc: RegionCoords, dx: f32) -> EntityId {
     spawn_slime_in(&mut t.w, h, rc, REGION_SIZE / 2.0 + dx)
 }
 
 /// Pushes `id` (in `from`, on host `h`) past the seam into `to` (one step along x or z).
-fn push(t: &mut Takeover, h: u32, id: EntityId, from: RegionCoords, to: RegionCoords) -> bool {
+fn push(t: &mut Takeover, h: HostId, id: EntityId, from: RegionCoords, to: RegionCoords) -> bool {
     let y = above_ground_y();
     let past = |d: i32| match d {
         1 => REGION_SIZE + game::FLIP_HYSTERESIS + 2.0,
@@ -588,7 +589,7 @@ fn push(t: &mut Takeover, h: u32, id: EntityId, from: RegionCoords, to: RegionCo
 }
 
 /// Moves `id` (in `rc`, on host `h`) to the middle of `rc`.
-fn centre(t: &mut Takeover, h: u32, id: EntityId, rc: RegionCoords) {
+fn centre(t: &mut Takeover, h: HostId, id: EntityId, rc: RegionCoords) {
     let at = game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, above_ground_y(), REGION_SIZE / 2.0);
     let mut moved = false;
     t.sim(h).manager.spawner_mut().with_region(rc, |region| {
@@ -625,25 +626,25 @@ fn host_killed_between_cuts_is_succeeded_and_nobody_restarts() {
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, true);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let on_0 = slime(&mut t, 0, a0, -3.0);
-    let on_1 = slime(&mut t, 1, b1, -3.0);
-    let also_1 = slime(&mut t, 1, b1, 3.0);
+    let on_0 = slime(&mut t, h(0), a0, -3.0);
+    let on_1 = slime(&mut t, h(1), b1, -3.0);
+    let also_1 = slime(&mut t, h(1), b1, 3.0);
     // A player of host 1, playing there.
     let (token, player) = t.player(1, b1);
-    assert_eq!(t.join(&token, 1), (true, Some(1)), "placed on host 1, which owns its record's region");
-    let client = t.connect(1, &token, 1);
-    t.until("the player has a body on host 1", WAIT, |t| t.bodies(client) == [(1, b1)]);
+    assert_eq!(t.join(&token, 1), (true, Some(h(1))), "placed on host 1, which owns its record's region");
+    let client = t.connect(h(1), &token, 1);
+    t.until("the player has a body on host 1", WAIT, |t| t.bodies(client) == [(h(1), b1)]);
     let k = t.until_committed_after(&db, 0);
     let k = t.until_committed_after(&db, k);
     // Between cuts: none running anywhere.
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
-    t.kill(1);
+    t.kill(h(1));
     let killed = Instant::now();
     // The heir's hold window: from applying the succession (its mask up) to its adoption.
     let mut applied_at: Option<Instant> = None;
     let mut window: Option<Duration> = None;
     t.until("host 0 applied and adopted", LONG, |t| {
-        let inheriting = !t.sim(0).manager.inheriting().is_empty();
+        let inheriting = !t.sim(h(0)).manager.inheriting().is_empty();
         if inheriting && applied_at.is_none() {
             applied_at = Some(Instant::now());
         }
@@ -657,21 +658,21 @@ fn host_killed_between_cuts_is_succeeded_and_nobody_restarts() {
         window.unwrap().as_millis(),
         applied_at.unwrap().duration_since(killed).as_millis()
     );
-    let row = t.until_settled(&db, 1);
+    let row = t.until_settled(&db, h(1));
     assert_eq!((row[2], row[5]), (0, 0), "host 0 is the heir, nothing abandoned: {row:?}");
     assert!(row[3] >= k, "based on the last committed cut ({row:?}, K = {k})");
     // Nobody restarted.
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "the generation is unchanged");
     assert!(!t.w.generations[0].is_set(), "host 0 never saw a newer generation");
-    assert!(!t.sim(0).fenced.is_set(), "host 0 is not fenced");
-    assert_eq!(host_row(&db, 0).0, 2000, "host 0's boot is unchanged");
-    let (_, clean, state) = host_row(&db, 1);
+    assert!(!t.sim(h(0)).fenced.is_set(), "host 0 is not fenced");
+    assert_eq!(host_row(&db, h(0)).0, 2000, "host 0's boot is unchanged");
+    let (_, clean, state) = host_row(&db, h(1));
     assert_eq!((clean, state), (1, game::HOST_DEAD), "host 1's row: settled clean, dead");
     let owners = t.w.store.owners().unwrap();
     assert!(!owners.is_empty() && owners.iter().all(|(_, o, _)| *o == 0), "every super-region is host 0's: {owners:?}");
     // Each slime once: by the store after a later cut, and live where it runs.
-    t.watch(0, b1);
-    t.until("b1 runs on the heir", WAIT, |t| t.sim(0).manager.running_regions().contains(&b1));
+    t.watch(h(0), b1);
+    t.until("b1 runs on the heir", WAIT, |t| t.sim(h(0)).manager.running_regions().contains(&b1));
     let after = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, after);
     for id in [on_0, on_1, also_1] {
@@ -680,11 +681,11 @@ fn host_killed_between_cuts_is_succeeded_and_nobody_restarts() {
     }
     // The player joins again: the heir places it, once.
     let (ok, host) = t.join(&token, 2);
-    assert_eq!((ok, host), (true, Some(0)), "the rejoin lands on the heir");
-    let again = t.connect(0, &token, 2);
+    assert_eq!((ok, host), (true, Some(h(0))), "the rejoin lands on the heir");
+    let again = t.connect(h(0), &token, 2);
     t.until("the rejoined player has a body", WAIT, |t| !t.bodies(again).is_empty());
     t.rounds(20);
-    assert_eq!(t.bodies(again), [(0, b1)], "one body, on the heir");
+    assert_eq!(t.bodies(again), [(h(0), b1)], "one body, on the heir");
     assert!(t.parked(player).is_empty(), "no parked copy left");
     t.stop(&db, &dir);
 }
@@ -730,8 +731,8 @@ fn host_killed_mid_crossing_keeps_every_id_once() {
         let (a0, b1) = (t.seams[0], t.seams[1]);
         let mut ids = Vec::new();
         for dx in [-4.0, 4.0] {
-            ids.push(slime(&mut t, 0, a0, dx));
-            ids.push(slime(&mut t, 1, b1, dx));
+            ids.push(slime(&mut t, h(0), a0, dx));
+            ids.push(slime(&mut t, h(1), b1, dx));
         }
         let (player, _) = t.w.store.resolve_player("takeover-traveller").unwrap();
         let record = PlayerRecord {
@@ -742,7 +743,7 @@ fn host_killed_mid_crossing_keeps_every_id_once() {
             adventure: None,
         };
         let now = t.w.pair.now();
-        assert!(t.sim(0).manager.handle_server_event(ServerEvent::ClientConnected { client: TRAVELLER, player, record: Some(record) }, now));
+        assert!(t.sim(h(0)).manager.handle_server_event(ServerEvent::ClientConnected { client: TRAVELLER, player, record: Some(record) }, now));
         t.until("the traveller has a body", WAIT, |t| !t.bodies(TRAVELLER).is_empty());
         let _ = t.until_committed_after(&db, 0);
         let traveller_crosses_at = rng.below(kill_at as u64) as usize;
@@ -778,7 +779,7 @@ fn host_killed_mid_crossing_keeps_every_id_once() {
             }
             assert!(t.bodies(TRAVELLER).len() <= 1, "{replay}: two bodies of the traveller: {:?}", t.bodies(TRAVELLER));
         }
-        t.kill(1);
+        t.kill(h(1));
         let deadline = Instant::now() + LONG;
         while !successions(&db).iter().any(|r| r[1] == 1 && r[4] >= 0) {
             assert!(Instant::now() < deadline, "{replay}: the succession never settled: {:?}", successions(&db));
@@ -789,7 +790,7 @@ fn host_killed_mid_crossing_keeps_every_id_once() {
             }
             assert!(t.bodies(TRAVELLER).len() <= 1, "{replay}: two bodies of the traveller: {:?}", t.bodies(TRAVELLER));
         }
-        let row = t.until_settled(&db, 1);
+        let row = t.until_settled(&db, h(1));
         assert_eq!(t.w.store.world_generation().unwrap(), t.w.generations[0].mine(), "{replay}: nobody restarted");
         let k1 = t.until_committed_after(&db, row[4]);
         let _ = t.until_committed_after(&db, k1);
@@ -826,32 +827,32 @@ fn host_killed_before_prepare_is_succeeded_from_the_previous_cut() {
     let mut t = Takeover::start_every(&db, &dir, 2, CrashPolicy::Succession, false, Duration::from_secs(3));
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let crosser = slime(&mut t, 1, b1, 0.0);
-    let stays = slime(&mut t, 1, b1, -5.0);
+    let crosser = slime(&mut t, h(1), b1, 0.0);
+    let stays = slime(&mut t, h(1), b1, -5.0);
     let k = t.until_committed_after(&db, 0);
     let k = t.until_committed_after(&db, k);
     // Over the seam to host 0 after K (its journal entries are then the only record of it).
-    assert!(push(&mut t, 1, crosser, b1, a0));
-    t.until("the crosser lives on host 0", WAIT, |t| t.live(crosser) == [(0, a0)]);
+    assert!(push(&mut t, h(1), crosser, b1, a0));
+    t.until("the crosser lives on host 0", WAIT, |t| t.live(crosser) == [(h(0), a0)]);
     // Away from the seam: it stays in a0 (a copy of it restored in b1 would be a second body,
     // not one collapsing onto the same id in one region).
-    centre(&mut t, 0, crosser, a0);
+    centre(&mut t, h(0), crosser, a0);
     let landed_after = decisions(&db).into_iter().filter(|(_, _, k)| *k).map(|(c, _, _)| c).max().unwrap();
     let cut = until_part(&mut t.w, 1, &["pending", "marked"]);
     let before = decisions(&db).into_iter().filter(|(c, _, k)| *k && *c < cut.0 as i64).map(|(c, _, _)| c).max().unwrap();
     assert!(before >= k);
     assert_eq!(before, landed_after, "the crossing is after the last committed cut (the case under test)");
-    t.kill(1);
+    t.kill(h(1));
     t.until("the cut decided", LONG, |_| decision_of(&db, cut).is_some());
     assert_eq!(decision_of(&db, cut), Some(false), "a part never staged: the cut is aborted");
-    let row = t.until_settled(&db, 1);
+    let row = t.until_settled(&db, h(1));
     assert_eq!(row[3], before, "the succession is based on the cut before the aborted one: {row:?}");
     assert!(row[4] > cut.0 as i64, "settled by a later cut");
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "nobody restarted");
-    assert_eq!(host_row(&db, 0).0, 2000, "host 0's boot is unchanged");
-    assert!(!t.w.generations[0].is_set() && !t.sim(0).fenced.is_set(), "host 0 runs on");
-    t.watch(0, b1);
-    t.until("b1 runs on the heir", WAIT, |t| t.sim(0).manager.running_regions().contains(&b1));
+    assert_eq!(host_row(&db, h(0)).0, 2000, "host 0's boot is unchanged");
+    assert!(!t.w.generations[0].is_set() && !t.sim(h(0)).fenced.is_set(), "host 0 runs on");
+    t.watch(h(0), b1);
+    t.until("b1 runs on the heir", WAIT, |t| t.sim(h(0)).manager.running_regions().contains(&b1));
     let k2 = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k2);
     for id in [crosser, stays] {
@@ -874,15 +875,15 @@ fn host_killed_after_prepare_is_succeeded_from_that_cut() {
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0), slime(&mut t, 1, b1, 5.0)];
+    let ids = [slime(&mut t, h(0), a0, 0.0), slime(&mut t, h(1), b1, 0.0), slime(&mut t, h(1), b1, 5.0)];
     let _ = t.until_committed_after(&db, 0);
     let mut cut = None;
     let deadline = Instant::now() + WAIT;
     while cut.is_none() {
         assert!(Instant::now() < deadline, "no cut had every part staged");
-        if let Some((c, "prepared")) = t.sim(1).manager.world_cut_state() {
+        if let Some((c, "prepared")) = t.sim(h(1)).manager.world_cut_state() {
             let progress = t.w.coordinator.as_ref().unwrap().thread.inspect(|c| c.world_cut_progress(), WAIT).flatten();
-            if progress.is_some_and(|(r, prepared, _)| r == c && prepared == [0, 1]) || decision_of(&db, c) == Some(true) {
+            if progress.is_some_and(|(r, prepared, _)| r == c && prepared == [h(0), h(1)]) || decision_of(&db, c) == Some(true) {
                 cut = Some(c);
                 break;
             }
@@ -890,18 +891,18 @@ fn host_killed_after_prepare_is_succeeded_from_that_cut() {
         t.round();
     }
     let cut = cut.unwrap();
-    t.kill(1);
+    t.kill(h(1));
     t.until("the cut decided", LONG, |_| decision_of(&db, cut).is_some());
     assert_eq!(decision_of(&db, cut), Some(true), "every part was staged: committed");
     let tick = decisions(&db).into_iter().find(|(c, _, _)| *c as u64 == cut.0).unwrap().1;
-    let row = t.until_settled(&db, 1);
+    let row = t.until_settled(&db, h(1));
     assert_eq!(row[3], cut.0 as i64, "the succession is based on the cut host 1 helped to stage: {row:?}");
     assert_eq!(saved_tick(&db, b1), tick, "host 1's region is as of that cut");
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "nobody restarted");
-    assert_eq!(host_row(&db, 0).0, 2000, "host 0's boot is unchanged");
-    assert!(!t.w.generations[0].is_set() && !t.sim(0).fenced.is_set(), "host 0 runs on");
-    t.watch(0, b1);
-    t.until("b1 runs on the heir", WAIT, |t| t.sim(0).manager.running_regions().contains(&b1));
+    assert_eq!(host_row(&db, h(0)).0, 2000, "host 0's boot is unchanged");
+    assert!(!t.w.generations[0].is_set() && !t.sim(h(0)).fenced.is_set(), "host 0 runs on");
+    t.watch(h(0), b1);
+    t.until("b1 runs on the heir", WAIT, |t| t.sim(h(0)).manager.running_regions().contains(&b1));
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
     for id in ids {
@@ -925,11 +926,11 @@ fn heir_killed_before_the_settle_rolls_the_world_back_once() {
     let dir = scratch("tk_heirdies");
     let mut t = Takeover::start(&db, &dir, 3, CrashPolicy::Succession, false);
     let generation = t.w.store.world_generation().unwrap();
-    let pred = 2;
-    let heir = game::heir_of(pred, &[0, 1].into_iter().collect()).expect("an heir");
-    let other = 1 - heir;
+    let pred = h(2);
+    let heir = game::heir_of(pred, &[0, 1].into_iter().map(HostId).collect()).expect("an heir");
+    let other = HostId(1 - heir.0);
     let seams = t.seams.clone();
-    let ids: Vec<EntityId> = (0..3).map(|h| slime(&mut t, h, seams[h as usize], 0.0)).collect();
+    let ids: Vec<EntityId> = (0..3u64).map(HostId).map(|h| slime(&mut t, h, seams[h.0 as usize], 0.0)).collect();
     let _ = t.until_committed_after(&db, 0);
     let k = t.until_committed_after(&db, 0);
     // The heir will never adopt: its adoption reads are off.
@@ -938,9 +939,9 @@ fn heir_killed_before_the_settle_rolls_the_world_back_once() {
     t.kill(pred);
     t.until("the heir applied the succession", LONG, |t| !t.sim(heir).manager.inheriting().is_empty());
     let row = successions(&db)[0];
-    assert_eq!((row[1], row[2]), (i64::from(pred), i64::from(heir)), "{row:?}");
+    assert_eq!((row[1], row[2]), (pred.0 as i64, heir.0 as i64), "{row:?}");
     t.kill(heir);
-    t.until("the other host saw the rollback", LONG, |t| t.w.generations[other as usize].is_set());
+    t.until("the other host saw the rollback", LONG, |t| t.w.generations[other.0 as usize].is_set());
     assert_eq!(exit_host(&mut t.w, other), server::claims::ServerExit::WorldRolledBack, "host {other} rolls back");
     assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "the generation raised once");
     let row = successions(&db)[0];
@@ -950,18 +951,18 @@ fn heir_killed_before_the_settle_rolls_the_world_back_once() {
     assert_eq!(last, row[3], "nothing committed after the base cut: the world restarts from it");
     let s = t.w.store.super_region_regions();
     let owners = t.w.store.owners().unwrap();
-    let pred_sr = game::super_region_of(seams[pred as usize], s);
+    let pred_sr = game::super_region_of(seams[pred.0 as usize], s);
     assert_eq!(
         owners.iter().find(|(sr, _, _)| *sr == pred_sr).map(|(_, o, _)| *o),
-        Some(i64::from(heir)),
+        Some(heir.0 as i64),
         "the dead host's land stays with the heir: {owners:?}"
     );
     // Every host starts again, at the new generation; none raises it again.
     for h in [other, heir, pred] {
-        t.restart(&db, &dir, h, 4000 + u64::from(h));
+        t.restart(&db, &dir, h, 4000 + h.0);
     }
     t.until("every host attached", WAIT, |t| t.w.pair.sims.len() == 3 && t.w.pair.sims.iter().all(|s| s.manager.world_attached()));
-    for (h, rc) in [(other, seams[other as usize]), (heir, seams[heir as usize]), (heir, seams[pred as usize])] {
+    for (h, rc) in [(other, seams[other.0 as usize]), (heir, seams[heir.0 as usize]), (heir, seams[pred.0 as usize])] {
         t.watch(h, rc);
     }
     t.until("every slime's region runs", WAIT, |t| {
@@ -992,13 +993,13 @@ fn coordinator_killed_mid_succession_finishes_it_after_its_restart() {
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0)];
+    let ids = [slime(&mut t, h(0), a0, 0.0), slime(&mut t, h(1), b1, 0.0)];
     let _ = t.until_committed_after(&db, 0);
     // The heir holds its adoption until the coordinator is back.
-    let adopter = t.sim(0).adopter.take();
+    let adopter = t.sim(h(0)).adopter.take();
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
-    t.kill(1);
-    t.until("host 0 applied the succession", LONG, |t| !t.sim(0).manager.inheriting().is_empty());
+    t.kill(h(1));
+    t.until("host 0 applied the succession", LONG, |t| !t.sim(h(0)).manager.inheriting().is_empty());
     t.rounds(20);
     let declared = successions(&db)[0];
     kill_coordinator(&mut t.w);
@@ -1009,19 +1010,19 @@ fn coordinator_killed_mid_succession_finishes_it_after_its_restart() {
     let old = std::mem::replace(&mut t.w.store, store);
     old.shutdown();
     for sim in &t.w.pair.sims {
-        t.w.switches[sim.ordinal as usize].replace(quic_world_link(c.addr, t.w.cert.clone(), sim.ordinal, sim.boot, sim.reg));
+        t.w.switches[sim.ordinal.0 as usize].replace(quic_world_link(c.addr, t.w.cert.clone(), sim.ordinal, sim.boot, sim.reg));
     }
     t.w.coordinator = Some(c);
-    t.until("host 0 attached to the new coordinator", WAIT, |t| t.sim(0).manager.world_attached());
+    t.until("host 0 attached to the new coordinator", WAIT, |t| t.sim(h(0)).manager.world_attached());
     t.rounds(20);
-    t.sim(0).adopter = adopter;
-    let row = t.until_settled(&db, 1);
+    t.sim(h(0)).adopter = adopter;
+    let row = t.until_settled(&db, h(1));
     assert_eq!(row[0], declared[0], "the succession declared before the crash is the one settled");
     let first_after = decisions(&db).into_iter().filter(|(c, _, k)| *k && *c > row[3]).map(|(c, _, _)| c).min();
     assert_eq!(first_after, Some(row[4]), "no cut committed between the declaration and the settle");
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "no rollback");
-    t.watch(0, b1);
-    t.until("b1 runs on the heir", WAIT, |t| t.sim(0).manager.running_regions().contains(&b1));
+    t.watch(h(0), b1);
+    t.until("b1 runs on the heir", WAIT, |t| t.sim(h(0)).manager.running_regions().contains(&b1));
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
     for id in ids {
@@ -1044,11 +1045,11 @@ fn coordinator_killed_before_declaring_observes_a_whole_lease_again() {
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0)];
+    let ids = [slime(&mut t, h(0), a0, 0.0), slime(&mut t, h(1), b1, 0.0)];
     let _ = t.until_committed_after(&db, 0);
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
     // Host 1 dies and the coordinator with it, before any lapse could be seen.
-    t.kill(1);
+    t.kill(h(1));
     kill_coordinator(&mut t.w);
     // Host 1's row lapses with nobody to declare it.
     let dead = Instant::now();
@@ -1062,8 +1063,8 @@ fn coordinator_killed_before_declaring_observes_a_whole_lease_again() {
     let c = start_coordinator(store.clone(), t.w.cert.clone(), t.w.pair.tick.clone(), CrashPolicy::Succession);
     let old = std::mem::replace(&mut t.w.store, store);
     old.shutdown();
-    let (o, boot, reg) = (0, t.sim(0).boot, t.sim(0).reg);
-    t.w.switches[o].replace(quic_world_link(c.addr, t.w.cert.clone(), 0, boot, reg));
+    let (o, boot, reg) = (0, t.sim(h(0)).boot, t.sim(h(0)).reg);
+    t.w.switches[o].replace(quic_world_link(c.addr, t.w.cert.clone(), h(0), boot, reg));
     t.w.coordinator = Some(c);
     t.until("the succession declared", LONG, |_| !successions(&db).is_empty());
     let declared_after = restarted.elapsed();
@@ -1073,12 +1074,12 @@ fn coordinator_killed_before_declaring_observes_a_whole_lease_again() {
         "the restart observed a whole lease of its own before declaring ({} ms)",
         declared_after.as_millis()
     );
-    let row = t.until_settled(&db, 1);
+    let row = t.until_settled(&db, h(1));
     assert_eq!((row[2], row[5]), (0, 0), "{row:?}");
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "no rollback");
-    assert_eq!(host_row(&db, 0).0, 2000, "host 0 never restarted");
+    assert_eq!(host_row(&db, h(0)).0, 2000, "host 0 never restarted");
     assert!(!t.w.generations[0].is_set());
-    t.watch(0, b1);
+    t.watch(h(0), b1);
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
     for id in ids {
@@ -1095,7 +1096,7 @@ fn coordinator_killed_before_declaring_observes_a_whole_lease_again() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
 fn restarted_process_of_a_dead_ordinal_waits_then_returns_owning_nothing() {
-    reboot_of_a_dead_ordinal(1, "tk_reboot");
+    reboot_of_a_dead_ordinal(h(1), "tk_reboot");
 }
 
 /// Row 8 with the LOWER ordinal dead: host 0 dies and host 1 inherits. Host 1 dials host 0
@@ -1106,19 +1107,19 @@ fn restarted_process_of_a_dead_ordinal_waits_then_returns_owning_nothing() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-r4"]
 fn restarted_process_of_dead_host_0_waits_then_returns_owning_nothing() {
-    reboot_of_a_dead_ordinal(0, "tk_reboot0");
+    reboot_of_a_dead_ordinal(h(0), "tk_reboot0");
 }
 
-fn reboot_of_a_dead_ordinal(dead: u32, tag: &str) {
+fn reboot_of_a_dead_ordinal(dead: HostId, tag: &str) {
     install_props();
     let Some(db) = PgDb::create(tag) else { return };
     let dir = scratch(tag);
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
-    let heir = 1 - dead;
+    let heir = HostId(1 - dead.0);
     let generation = t.w.store.world_generation().unwrap();
     let heir_boot = host_row(&db, heir).0;
     let (s0, s1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, s0, 0.0), slime(&mut t, 1, s1, 0.0)];
+    let ids = [slime(&mut t, h(0), s0, 0.0), slime(&mut t, h(1), s1, 0.0)];
     let _ = t.until_committed_after(&db, 0);
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
     // The heir adopts only once the test has seen its dialer let go of a dead lower host.
@@ -1127,7 +1128,7 @@ fn reboot_of_a_dead_ordinal(dead: u32, tag: &str) {
     let killed = Instant::now();
     let (booted, declared_after, settled_when_registered) = std::thread::scope(|scope| {
         let (db, dir) = (&db, &dir);
-        let boot = scope.spawn(move || register(db, dir, 2, dead, 3000 + u64::from(dead)));
+        let boot = scope.spawn(move || register(db, dir, 2, dead, 3000 + dead.0));
         let mut declared_after = None;
         let mut adopter = adopter;
         let mut idle_since: Option<Instant> = None;
@@ -1140,7 +1141,7 @@ fn reboot_of_a_dead_ordinal(dead: u32, tag: &str) {
             if declared_after.is_some() && adopter.is_some() {
                 // Host 0 dead: host 1's dialer must drop the dead boot (and stay idle) before
                 // the adoption lets the new boot register. Host 1 dead: nothing dials it.
-                let dialing = t.w.links[heir as usize].as_ref().unwrap().dialing(dead);
+                let dialing = t.w.links[heir.0 as usize].as_ref().unwrap().dialing(dead);
                 match dialing {
                     Some(true) => idle_since = None,
                     Some(false) => {
@@ -1158,7 +1159,7 @@ fn reboot_of_a_dead_ordinal(dead: u32, tag: &str) {
                 }
             }
         }
-        let settled = successions(db).iter().any(|r| r[1] == i64::from(dead) && r[4] >= 0);
+        let settled = successions(db).iter().any(|r| r[1] == (dead.0 as i64) && r[4] >= 0);
         (boot.join().expect("the boot thread"), declared_after, settled)
     });
     let declared_after = declared_after.expect("declared before the boot registered");
@@ -1177,16 +1178,16 @@ fn reboot_of_a_dead_ordinal(dead: u32, tag: &str) {
             && t.sim(dead).manager.peer_is_reachable(heir)
             && t.sim(heir).manager.peer_is_reachable(dead)
     });
-    if dead == 0 {
-        assert_eq!(t.w.links[1].as_ref().unwrap().dialing(0), Some(true), "host 1 dials host 0's new boot");
+    if dead == h(0) {
+        assert_eq!(t.w.links[1].as_ref().unwrap().dialing(h(0)), Some(true), "host 1 dials host 0's new boot");
     }
     let owners = t.w.store.owners().unwrap();
-    assert!(owners.iter().all(|(_, o, _)| *o == i64::from(heir)), "every super-region is host {heir}'s: {owners:?}");
+    assert!(owners.iter().all(|(_, o, _)| *o == (heir.0 as i64)), "every super-region is host {heir}'s: {owners:?}");
     assert_eq!(host_row(&db, heir).0, heir_boot, "host {heir} never restarted");
-    assert!(!t.w.generations[heir as usize].is_set());
-    t.watch(heir, t.seams[dead as usize]);
+    assert!(!t.w.generations[heir.0 as usize].is_set());
+    t.watch(heir, t.seams[dead.0 as usize]);
     let row = successions(&db)[0];
-    assert_eq!((row[1], row[2]), (i64::from(dead), i64::from(heir)), "{row:?}");
+    assert_eq!((row[1], row[2]), (dead.0 as i64, heir.0 as i64), "{row:?}");
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
     for id in ids {
@@ -1209,16 +1210,16 @@ fn hung_host_is_replaced_and_exits_fenced_when_it_wakes() {
     let dir = scratch("tk_hung");
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, true);
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0), slime(&mut t, 1, b1, 4.0)];
+    let ids = [slime(&mut t, h(0), a0, 0.0), slime(&mut t, h(1), b1, 0.0), slime(&mut t, h(1), b1, 4.0)];
     let (token, _player) = t.player(2, b1);
-    assert_eq!(t.join(&token, 1), (true, Some(1)));
-    let client = t.connect(1, &token, 1);
-    t.until("the player has a body on host 1", WAIT, |t| t.bodies(client) == [(1, b1)]);
+    assert_eq!(t.join(&token, 1), (true, Some(h(1))));
+    let client = t.connect(h(1), &token, 1);
+    t.until("the player has a body on host 1", WAIT, |t| t.bodies(client) == [(h(1), b1)]);
     let k = t.until_committed_after(&db, 0);
     let _ = t.until_committed_after(&db, k);
     let hang = Duration::from_millis(LEASE_MS + 3_000);
     let woke_at = Instant::now() + hang;
-    t.sim(1).frozen_until = Some(woke_at);
+    t.sim(h(1)).frozen_until = Some(woke_at);
     let mut checked = Instant::now();
     let strict = |db: &PgDb| assert_eq!(entities_stored_twice(db), 0, "an entity is stored twice: {:?}", entity_rows_stored_twice(db));
     t.until("the succession of the hung host settled", LONG, |_| {
@@ -1232,19 +1233,19 @@ fn hung_host_is_replaced_and_exits_fenced_when_it_wakes() {
     // It wakes: its next beat says it was replaced.
     t.until("host 1 woke and knows it was replaced", LONG, |t| {
         strict(&db);
-        Instant::now() >= woke_at && t.sim(1).fenced.is_set()
+        Instant::now() >= woke_at && t.sim(h(1)).fenced.is_set()
     });
     let replaced_after = woke_at.elapsed();
     assert!(replaced_after < Duration::from_secs(5), "fenced {} ms after it woke", replaced_after.as_millis());
-    assert!(!t.sim(0).manager.peer_is_reachable(1), "host 0 refuses the zombie's boot");
-    assert_eq!(exit_host(&mut t.w, 1), server::claims::ServerExit::Fenced, "the zombie exits fenced");
+    assert!(!t.sim(h(0)).manager.peer_is_reachable(h(1)), "host 0 refuses the zombie's boot");
+    assert_eq!(exit_host(&mut t.w, h(1)), server::claims::ServerExit::Fenced, "the zombie exits fenced");
     strict(&db);
     // Nothing wrote b1 since the settle: not the zombie (fenced), not the heir (it does not
     // run b1 until watched below).
-    assert!(!t.sim(0).manager.running_regions().contains(&b1), "the heir does not run b1 yet");
+    assert!(!t.sim(h(0)).manager.running_regions().contains(&b1), "the heir does not run b1 yet");
     assert_eq!(saved_tick(&db, b1), b1_saved, "the zombie saved nothing of b1 after it woke");
-    let row = t.until_settled(&db, 1);
-    t.watch(0, b1);
+    let row = t.until_settled(&db, h(1));
+    t.watch(h(0), b1);
     let k = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, k);
     strict(&db);
@@ -1254,8 +1255,8 @@ fn hung_host_is_replaced_and_exits_fenced_when_it_wakes() {
     }
     // Its client joins again: the heir.
     let (ok, host) = t.join(&token, 2);
-    assert_eq!((ok, host), (true, Some(0)), "the rejoin lands on the heir");
-    let again = t.connect(0, &token, 2);
+    assert_eq!((ok, host), (true, Some(h(0))), "the rejoin lands on the heir");
+    let again = t.connect(h(0), &token, 2);
     t.until("the rejoined player has a body", WAIT, |t| !t.bodies(again).is_empty());
     t.rounds(20);
     assert_eq!(t.bodies(again).len(), 1, "one body: {:?}", t.bodies(again));
@@ -1277,12 +1278,12 @@ fn every_host_killed_restarts_from_the_cut_with_its_own_land() {
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, a0, 0.0), slime(&mut t, 1, b1, 0.0)];
+    let ids = [slime(&mut t, h(0), a0, 0.0), slime(&mut t, h(1), b1, 0.0)];
     let k = t.until_committed_after(&db, 0);
     let k = t.until_committed_after(&db, k);
     let owners_before = t.w.store.owners().unwrap();
-    t.kill(0);
-    t.kill(1);
+    t.kill(h(0));
+    t.kill(h(1));
     // Past every lease: nobody is alive.
     let dead = Instant::now();
     while dead.elapsed() < Duration::from_millis(LEASE_MS + 1_500) {
@@ -1290,18 +1291,18 @@ fn every_host_killed_restarts_from_the_cut_with_its_own_land() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(successions(&db).is_empty(), "nobody alive to inherit: nothing declared");
-    t.restart(&db, &dir, 0, 5000);
+    t.restart(&db, &dir, h(0), 5000);
     assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "the first boot raised the generation");
-    t.restart(&db, &dir, 1, 5001);
+    t.restart(&db, &dir, h(1), 5001);
     assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "the second did not raise it again");
     t.until("both hosts attached", WAIT, |t| t.w.pair.sims.len() == 2 && t.w.pair.sims.iter().all(|s| s.manager.world_attached()));
     let owners_after = t.w.store.owners().unwrap();
     let who = |o: &[(game::SuperRegion, i64, u64)]| o.iter().map(|(sr, h, _)| (*sr, *h)).collect::<Vec<_>>();
     assert_eq!(who(&owners_after), who(&owners_before), "each host has its own land back");
-    t.watch(0, a0);
-    t.watch(1, b1);
+    t.watch(h(0), a0);
+    t.watch(h(1), b1);
     t.until("both seam regions run", WAIT, |t| {
-        t.sim(0).manager.running_regions().contains(&a0) && t.sim(1).manager.running_regions().contains(&b1)
+        t.sim(h(0)).manager.running_regions().contains(&a0) && t.sim(h(1)).manager.running_regions().contains(&b1)
     });
     let after = t.until_committed_after(&db, k);
     let _ = t.until_committed_after(&db, after);
@@ -1331,7 +1332,7 @@ fn outage_longer_than_the_lease_declares_nobody() {
     coordinator.hold_hosts_reads(true);
     t.w.store.fail_next_writes(u32::MAX);
     t.w.store.fail_next_decisions(u32::MAX);
-    let beats: Vec<(u32, Option<server::lease::Heartbeat>)> =
+    let beats: Vec<(HostId, Option<server::lease::Heartbeat>)> =
         t.w.pair.sims.iter_mut().map(|s| (s.ordinal, s.heartbeat.take())).collect();
     let down = Instant::now();
     while down.elapsed() < Duration::from_secs(15) {
@@ -1348,9 +1349,9 @@ fn outage_longer_than_the_lease_declares_nobody() {
         t.round();
         assert!(successions(&db).is_empty(), "an outage declared somebody: {:?}", successions(&db));
     }
-    for h in 0..2 {
+    for h in (0..2u64).map(HostId) {
         assert!(!t.sim(h).fenced.is_set(), "host {h} is not fenced");
-        assert!(!t.w.generations[h as usize].is_set(), "host {h} saw no rollback");
+        assert!(!t.w.generations[h.0 as usize].is_set(), "host {h} saw no rollback");
     }
     assert_eq!(t.w.store.world_generation().unwrap(), generation);
     let _ = t.until_committed_after(&db, k);
@@ -1365,7 +1366,7 @@ fn static_world(db: &PgDb, dir: &std::path::Path, policy: CrashPolicy) -> World 
     let (mut pair, seam, links, claims) = two_hosts(db, dir);
     for (i, sim) in pair.sims.iter_mut().enumerate() {
         claims[i].store().set_host_lease_ms(LEASE_MS);
-        let mut beat = server::lease::Heartbeat::new(claims[i].store().clone(), i as u32, sim.boot);
+        let mut beat = server::lease::Heartbeat::new(claims[i].store().clone(), HostId(i as u64), sim.boot);
         beat.set_period(Duration::from_millis(BEAT_MS));
         sim.heartbeat = Some(beat);
         sim.fenced = claims[i].fenced().clone();
@@ -1376,7 +1377,7 @@ fn static_world(db: &PgDb, dir: &std::path::Path, policy: CrashPolicy) -> World 
     let mut switches = Vec::new();
     let mut generations = Vec::new();
     for (ordinal, sim) in pair.sims.iter_mut().enumerate() {
-        let link = quic_world_link(coordinator.addr, cert.clone(), ordinal as u32, sim.boot, sim.reg);
+        let link = quic_world_link(coordinator.addr, cert.clone(), HostId(ordinal as u64), sim.boot, sim.reg);
         let switch = SwitchLink(Arc::new(std::sync::Mutex::new((Some(link), 0))));
         switches.push(switch.clone());
         sim.manager.set_world_link(Box::new(switch), sim.boot, 0);
@@ -1405,12 +1406,12 @@ fn static_ownership_still_rolls_the_world_back() {
     let policy = server::roles::coordinator_crash_policy(Some("static"), 2).expect("a valid ownership");
     let mut w = static_world(&db, &dir, policy);
     let generation = w.claims[0].store().world_generation().unwrap();
-    let a0 = seam_of(&w, 0);
-    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    let a0 = seam_of(&w, h(0));
+    let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
     w.until_committed_after(&db, 0);
     let (first, _) = last_committed(&db);
     w.until_committed_after(&db, first);
-    kill_host(&mut w, 1);
+    kill_host(&mut w, h(1));
     // Past the (shortened) lease with host 1 gone and host 0 beating: a `Succession`
     // coordinator would have declared by now.
     let dead = Instant::now();
@@ -1418,9 +1419,9 @@ fn static_ownership_still_rolls_the_world_back() {
         w.pair.round();
     }
     assert_eq!(count(&db, "SELECT COUNT(*) FROM successions"), 0, "static never declares a succession");
-    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
     assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty: + 1");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, 1, generation + 1);
+    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
     w.pair.until("the slime back in a running region", |p| p.sims.iter_mut().map(|s| s.holders(id).len()).sum::<usize>() > 0);
     for _ in 0..40 {
         w.pair.round();
@@ -1442,15 +1443,15 @@ fn thread_spawner_leaves_the_drop_set_out_of_a_store_load() {
     let dir = scratch("tk_forget");
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let b1 = t.seams[1];
-    let dropped = slime(&mut t, 1, b1, -4.0);
-    let kept = slime(&mut t, 1, b1, 4.0);
+    let dropped = slime(&mut t, h(1), b1, -4.0);
+    let kept = slime(&mut t, h(1), b1, 4.0);
     let k = t.until_committed_after(&db, 0);
     let _ = t.until_committed_after(&db, k);
     assert_eq!(stored_rows(&db, dropped), [b1]);
     assert_eq!(stored_rows(&db, kept), [b1]);
     // A reader with host 1's fence (a read writes nothing).
-    let claims = HostClaims::none(open(&db), 1);
-    claims.grow_to(claims.store().owned_by(1).unwrap());
+    let claims = HostClaims::none(open(&db), h(1));
+    claims.grow_to(claims.store().owned_by(h(1)).unwrap());
     let mut spawner = server::region_threads::ThreadRegionSpawner::default().with_store(claims.clone());
     spawner.forget_entities(&[dropped].into_iter().collect());
     let (out, outputs) = unbounded();
@@ -1489,7 +1490,7 @@ impl Takeover {
     /// beating meanwhile, every other host running round by round; its outcome and the
     /// packets its manager sent its clients on the way out. Its peer listener and
     /// coordinator link go with it.
-    fn leave(&mut self, h: u32) -> (server::claims::ServerExit, Vec<(Option<ClientId>, ServerPacket)>) {
+    fn leave(&mut self, h: HostId) -> (server::claims::ServerExit, Vec<(Option<ClientId>, ServerPacket)>) {
         self.leave_with(h, None, |_, _, _| {})
     }
 
@@ -1497,7 +1498,7 @@ impl Takeover {
     /// round with the exiting process's fenced flag, world generation and the round number.
     fn leave_with(
         &mut self,
-        h: u32,
+        h: HostId,
         leave_timeout: Option<Duration>,
         mut each: impl FnMut(&server::claims::Fenced, &server::claims::WorldGeneration, usize),
     ) -> (server::claims::ServerExit, Vec<(Option<ClientId>, ServerPacket)>) {
@@ -1505,7 +1506,7 @@ impl Takeover {
         let mut sim = self.w.pair.sims.remove(i);
         for _ in sim.packets.try_iter() {}
         let fenced = sim.fenced.clone();
-        let generation = self.w.generations[h as usize].clone();
+        let generation = self.w.generations[h.0 as usize].clone();
         let started = self.w.pair.started;
         let region_out = sim.region_out.clone();
         let mut cuts = sim.cuts.take();
@@ -1537,8 +1538,8 @@ impl Takeover {
                 each(&fenced, &generation, round);
             },
         );
-        self.w.switches[h as usize].drop_link();
-        self.w.links[h as usize] = None;
+        self.w.switches[h.0 as usize].drop_link();
+        self.w.links[h.0 as usize] = None;
         let packets = sim.packets.try_iter().collect();
         (exit, packets)
     }
@@ -1561,7 +1562,7 @@ fn items_reply(from: RegionCoords, to: RegionCoords, due: u64, count: u32) -> ga
 }
 
 /// Items in the piles of running `rc` on host `h`.
-fn pile_items(t: &mut Takeover, h: u32, rc: RegionCoords) -> u32 {
+fn pile_items(t: &mut Takeover, h: HostId, rc: RegionCoords) -> u32 {
     let mut n = 0;
     t.sim(h).manager.spawner_mut().with_region(rc, |r| {
         n = r.data().item_piles().values().flat_map(|p| &p.stacks).map(|s| s.count).sum();
@@ -1592,20 +1593,20 @@ fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
     t.heir_wait(HEIR_WAIT_TEST_MS);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let stayed = slime(&mut t, 1, b1, -3.0);
+    let stayed = slime(&mut t, h(1), b1, -3.0);
     let (token, player) = t.player(11, b1);
-    assert_eq!(t.join(&token, 1), (true, Some(1)), "placed on host 1, which owns its record's region");
-    let client = t.connect(1, &token, 1);
-    t.until("the player has a body on host 1", WAIT, |t| t.bodies(client) == [(1, b1)]);
+    assert_eq!(t.join(&token, 1), (true, Some(h(1))), "placed on host 1, which owns its record's region");
+    let client = t.connect(h(1), &token, 1);
+    t.until("the player has a body on host 1", WAIT, |t| t.bodies(client) == [(h(1), b1)]);
     let _ = t.until_committed_after(&db, 0);
-    let boot1 = host_row(&db, 1).0;
-    let (exit, packets) = t.leave(1);
+    let boot1 = host_row(&db, h(1)).0;
+    let (exit, packets) = t.leave(h(1));
     assert_eq!(exit, server::claims::ServerExit::Clean, "host 1 left");
     assert!(
         packets.iter().any(|(c, p)| *c == Some(client) && matches!(p, ServerPacket::Refused(why) if why == server::claims::LEAVING_REFUSAL)),
         "the player's client is told the server is stopping: {packets:?}"
     );
-    assert_eq!(host_row(&db, 1), (boot1, 1, game::HOST_LIVE), "host 1's row: clean, live, the boot that left");
+    assert_eq!(host_row(&db, h(1)), (boot1, 1, game::HOST_LIVE), "host 1's row: clean, live, the boot that left");
     let (left_in, _) = last_committed(&db);
     let key = PlayerKey::Online(game::PlayerToken(token.clone())).store_key();
     let parked = t.w.store.resolve_player(&key).unwrap().1.expect("the leave cut saved the player");
@@ -1613,14 +1614,14 @@ fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
     t.rounds(20);
     assert!(successions(&db).is_empty(), "nothing is given away while nobody needs it");
     // A slime toward host 1's region: it waits in host 0's session.
-    let crosser = slime(&mut t, 0, a0, 0.0);
-    assert!(push(&mut t, 0, crosser, a0, b1));
-    t.until("the slime waits for host 1", WAIT, |t| t.sim(0).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == 1 && *i == crosser));
+    let crosser = slime(&mut t, h(0), a0, 0.0);
+    assert!(push(&mut t, h(0), crosser, a0, b1));
+    t.until("the slime waits for host 1", WAIT, |t| t.sim(h(0)).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == h(1) && *i == crosser));
     // Items for host 1's region, sent after the leave: held with the slime (a `Leave`
     // succession has no item window: they must arrive exactly).
     const ITEMS: u32 = 7;
-    let due = t.sim(0).manager.spawner_mut().world_tick() + 5;
-    t.sim(0).manager.send_reliable_for_test(1, game::Reliable::Intent(items_reply(a0, b1, due, ITEMS)), false);
+    let due = t.sim(h(0)).manager.spawner_mut().world_tick() + 5;
+    t.sim(h(0)).manager.send_reliable_for_test(h(1), game::Reliable::Intent(items_reply(a0, b1, due, ITEMS)), false);
     // The player logs in again; refused while the land waits for its heir, retried.
     let asked = Instant::now();
     let mut epoch = 2;
@@ -1637,23 +1638,23 @@ fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
         }
     };
     eprintln!("[takeover] the login on departed land was placed after {refused} refusal(s), {} ms", asked.elapsed().as_millis());
-    assert_eq!(host, Some(0), "placed on the heir");
+    assert_eq!(host, Some(h(0)), "placed on the heir");
     assert_eq!(succession_kinds(&db), [game::SuccessionKind::Leave.code()], "one Leave succession");
     let row = successions(&db)[0];
     assert_eq!((row[1], row[2], row[5]), (1, 0, 0), "host 1's land to host 0: {row:?}");
     assert!(row[3] >= left_in, "based on the leave cut or a later one: {row:?}, left in {left_in}");
-    let again = t.connect(0, &token, epoch);
+    let again = t.connect(h(0), &token, epoch);
     t.until("the player has a body on the heir", WAIT, |t| !t.bodies(again).is_empty());
     t.rounds(20);
-    assert_eq!(t.bodies(again), [(0, parked.region)], "one body, where the leave cut parked the player");
+    assert_eq!(t.bodies(again), [(h(0), parked.region)], "one body, where the leave cut parked the player");
     assert!(t.parked(player).is_empty(), "no parked copy left");
-    let row = t.until_settled(&db, 1);
+    let row = t.until_settled(&db, h(1));
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "nobody restarted");
-    assert!(!t.w.generations[0].is_set() && !t.sim(0).fenced.is_set());
-    assert_eq!(host_row(&db, 1), (boot1, 1, game::HOST_LIVE), "a leave marks no row dead");
+    assert!(!t.w.generations[0].is_set() && !t.sim(h(0)).fenced.is_set());
+    assert_eq!(host_row(&db, h(1)), (boot1, 1, game::HOST_LIVE), "a leave marks no row dead");
     let owners = t.w.store.owners().unwrap();
     assert!(!owners.is_empty() && owners.iter().all(|(_, o, _)| *o == 0), "every super-region is host 0's: {owners:?}");
-    t.until("the slime arrived once", WAIT, |t| t.live(crosser).len() == 1 && t.sim(0).manager.peer_unreceived() == 0);
+    t.until("the slime arrived once", WAIT, |t| t.live(crosser).len() == 1 && t.sim(h(0)).manager.peer_unreceived() == 0);
     let after = t.until_committed_after(&db, row[4]);
     let _ = t.until_committed_after(&db, after);
     for id in [stayed, crosser] {
@@ -1661,8 +1662,8 @@ fn drained_host_is_inherited_on_demand_and_nothing_is_lost() {
         stored_once(&t, &db, id, "after the drain");
     }
     assert_eq!(t.bodies(again).len(), 1, "the player once");
-    assert_eq!(pile_items(&mut t, 0, b1), ITEMS, "the held items lie in host 1's region on the heir, exactly");
-    assert_eq!(pile_items(&mut t, 0, a0), 0, "none came back to their sender");
+    assert_eq!(pile_items(&mut t, h(0), b1), ITEMS, "the held items lie in host 1's region on the heir, exactly");
+    assert_eq!(pile_items(&mut t, h(0), a0), 0, "none came back to their sender");
     t.stop(&db, &dir);
 }
 
@@ -1684,18 +1685,18 @@ fn a_leaver_that_returns_in_time_keeps_its_land() {
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
     let _ = t.until_committed_after(&db, 0);
-    let own_before: BTreeSet<game::SuperRegion> = t.w.store.owned_by(1).unwrap().epochs.keys().copied().collect();
+    let own_before: BTreeSet<game::SuperRegion> = t.w.store.owned_by(h(1)).unwrap().epochs.keys().copied().collect();
     assert!(!own_before.is_empty());
-    assert_eq!(t.leave(1).0, server::claims::ServerExit::Clean, "host 1 left");
-    assert_eq!(host_row(&db, 1).1, 1, "its row is clean");
-    let id = slime(&mut t, 0, a0, 0.0);
-    assert!(push(&mut t, 0, id, a0, b1));
-    t.until("the slime waits for host 1", WAIT, |t| t.sim(0).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == 1 && *i == id));
+    assert_eq!(t.leave(h(1)).0, server::claims::ServerExit::Clean, "host 1 left");
+    assert_eq!(host_row(&db, h(1)).1, 1, "its row is clean");
+    let id = slime(&mut t, h(0), a0, 0.0);
+    assert!(push(&mut t, h(0), id, a0, b1));
+    t.until("the slime waits for host 1", WAIT, |t| t.sim(h(0)).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == h(1) && *i == id));
     // Host 0 asked for the land and the coordinator recorded the request (a return below
     // must cancel a REAL wait).
     t.until("the coordinator records host 0's request for host 1's land", WAIT, |t| {
         let c = t.w.coordinator.as_ref().unwrap();
-        c.thread.with_core(|core| core.lands_wanted(), WAIT).expect("the core answers") == [1]
+        c.thread.with_core(|core| core.lands_wanted(), WAIT).expect("the core answers") == [h(1)]
     });
     let (left_in, _) = last_committed(&db);
     let _ = t.until_committed_after(&db, left_in);
@@ -1703,24 +1704,24 @@ fn a_leaver_that_returns_in_time_keeps_its_land() {
     assert_eq!(rows, 1, "host 0's cut holds the waiting slime as a row");
     // Host 1 returns before the heir wait ran out.
     let back = Instant::now();
-    t.restart(&db, &dir, 1, 3001);
-    let own_after: BTreeSet<game::SuperRegion> = t.w.store.owned_by(1).unwrap().epochs.keys().copied().collect();
+    t.restart(&db, &dir, h(1), 3001);
+    let own_after: BTreeSet<game::SuperRegion> = t.w.store.owned_by(h(1)).unwrap().epochs.keys().copied().collect();
     assert_eq!(own_after, own_before, "it re-claimed its land");
     // Its region runs again (a visitor, as host 1's keeper made it run before it left).
-    t.watch(1, b1);
-    t.until("the slime arrived on host 1", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.peer_unreceived() == 0) && t.sim(1).holders(id) == [b1]);
+    t.watch(h(1), b1);
+    t.until("the slime arrived on host 1", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.peer_unreceived() == 0) && t.sim(h(1)).holders(id) == [b1]);
     // Past the heir wait (from the return, so past it from any request too): nothing given away.
     t.until("the heir wait ran out", LONG, |_| back.elapsed() > Duration::from_millis(WAIT_MS + 2_000));
     assert!(successions(&db).is_empty(), "the return cancelled the wait: {:?}", successions(&db));
-    let own_now: BTreeSet<game::SuperRegion> = t.w.store.owned_by(1).unwrap().epochs.keys().copied().collect();
+    let own_now: BTreeSet<game::SuperRegion> = t.w.store.owned_by(h(1)).unwrap().epochs.keys().copied().collect();
     assert_eq!(own_now, own_before, "host 1 keeps its land");
     let k = t.until_committed_after(&db, last_committed(&db).0);
     let _ = t.until_committed_after(&db, k);
     assert_eq!(t.live(id).len(), 1, "once: {:?}", t.live(id));
     stored_once(&t, &db, id, "after the return");
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "a clean return keeps the generation");
-    for h in 0..2 {
-        assert!(!t.w.generations[h].is_set(), "no rollback");
+    for h in (0..2u64).map(HostId) {
+        assert!(!t.w.generations[h.0 as usize].is_set(), "no rollback");
     }
     t.stop(&db, &dir);
 }
@@ -1745,7 +1746,7 @@ fn stopping_host_tells(case: &str) {
         }
     };
     let generation = t.w.store.world_generation().unwrap();
-    let (exit, packets) = t.leave_with(1, timeout, |fenced, world, round| {
+    let (exit, packets) = t.leave_with(h(1), timeout, |fenced, world, round| {
         if round == 5 {
             match case {
                 "fenced" => fenced.set(),
@@ -1803,16 +1804,16 @@ fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let crosser = slime(&mut t, 1, b1, 0.0);
-    assert!(push(&mut t, 1, crosser, b1, a0), "the crosser is pushed toward host 0");
-    t.until("the crosser arrived on host 0", WAIT, |t| t.live(crosser) == [(0, a0)]);
-    centre(&mut t, 0, crosser, a0);
-    let ids = [slime(&mut t, 0, a0, -3.0), slime(&mut t, 1, b1, -3.0), slime(&mut t, 1, b1, 3.0), crosser];
+    let crosser = slime(&mut t, h(1), b1, 0.0);
+    assert!(push(&mut t, h(1), crosser, b1, a0), "the crosser is pushed toward host 0");
+    t.until("the crosser arrived on host 0", WAIT, |t| t.live(crosser) == [(h(0), a0)]);
+    centre(&mut t, h(0), crosser, a0);
+    let ids = [slime(&mut t, h(0), a0, -3.0), slime(&mut t, h(1), b1, -3.0), slime(&mut t, h(1), b1, 3.0), crosser];
     let k = t.until_committed_after(&db, 0);
     let k = t.until_committed_after(&db, k);
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
-    t.kill(0);
-    t.kill(1);
+    t.kill(h(0));
+    t.kill(h(1));
     // Past every lease — the product's, which the command judges by: their last beats lie
     // two leases back (time the test does not wait out).
     let dead = Instant::now();
@@ -1828,7 +1829,7 @@ fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
     let declared = successions(&db);
     assert_eq!(declared.len(), 1);
     assert_eq!(&declared[0][1..], &[1, 0, k, -1, 0], "host 1 → heir 0, based on the last cut, open");
-    assert_eq!(host_row(&db, 1).2, game::HOST_DEAD);
+    assert_eq!(host_row(&db, h(1)).2, game::HOST_DEAD);
     // Fix round 2: the RETIRED host's process starts again before the heir settled — its row
     // is of the generation before the retirement's, yet it waits (an open succession names it)
     // and registers only after the settle, owning and restoring nothing. Meanwhile the heir
@@ -1836,10 +1837,10 @@ fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
     // no survivor) and it adopts.
     let (booted, settled_when_registered) = std::thread::scope(|scope| {
         let (db, dir) = (&db, &dir);
-        let boot = scope.spawn(move || register(db, dir, 2, 1, 6001));
+        let boot = scope.spawn(move || register(db, dir, 2, h(1), 6001));
         t.rounds(20);
         assert!(!boot.is_finished(), "the retired host's boot waits for its succession");
-        t.restart(db, dir, 0, 5000);
+        t.restart(db, dir, h(0), 5000);
         let started = Instant::now();
         while !boot.is_finished() {
             assert!(started.elapsed() < LONG, "the retired host's boot never registered");
@@ -1850,23 +1851,23 @@ fn a_heir_booting_into_a_succession_opened_offline_adopts_and_settles_it() {
     });
     assert!(settled_when_registered, "the retired host registered only after the settle");
     assert!(booted.claims.fence().epochs.is_empty(), "it owns nothing");
-    assert!(t.w.store.load_in_flight(Some(1)).unwrap().is_empty(), "it has no in-flight row to restore");
+    assert!(t.w.store.load_in_flight(Some(h(1))).unwrap().is_empty(), "it has no in-flight row to restore");
     assert_eq!(t.w.store.world_generation().unwrap(), generation + 1, "the retirement raised the generation; no boot raised it again");
-    let row = t.until_settled(&db, 1);
+    let row = t.until_settled(&db, h(1));
     assert_eq!((row[0], row[2], row[3], row[5]), (declared[0][0], 0, k, 0), "the offline succession settled: {row:?}");
     let first_after = decisions(&db).into_iter().filter(|(c, _, ok)| *ok && *c > k).map(|(c, _, _)| c).min();
     assert_eq!(first_after, Some(row[4]), "its first committed cut settled it");
     let sim = build(&mut t, booted, true);
     t.w.pair.sims.push(sim);
-    t.until("host 1's new boot attached", WAIT, |t| t.sim(1).manager.world_attached());
+    t.until("host 1's new boot attached", WAIT, |t| t.sim(h(1)).manager.world_attached());
     let owners = t.w.store.owners().unwrap();
     assert!(!owners.is_empty() && owners.iter().all(|(_, o, _)| *o == 0), "every super-region is host 0's: {owners:?}");
-    assert!(t.w.store.load_in_flight(Some(1)).unwrap().is_empty(), "no row left under host 1");
+    assert!(t.w.store.load_in_flight(Some(h(1))).unwrap().is_empty(), "no row left under host 1");
     // Conservation: every slime live once, and stored once after the settle.
-    t.watch(0, a0);
-    t.watch(0, b1);
+    t.watch(h(0), a0);
+    t.watch(h(0), b1);
     t.until("both seam regions run on the heir", WAIT, |t| {
-        let running = t.sim(0).manager.running_regions();
+        let running = t.sim(h(0)).manager.running_regions();
         running.contains(&a0) && running.contains(&b1)
     });
     let after = t.until_committed_after(&db, row[4]);
@@ -1896,7 +1897,7 @@ fn a_heir_that_reboots_before_the_settle_adopts_again() {
     let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
     let generation = t.w.store.world_generation().unwrap();
     let (a0, b1) = (t.seams[0], t.seams[1]);
-    let ids = [slime(&mut t, 0, a0, -3.0), slime(&mut t, 1, b1, -3.0)];
+    let ids = [slime(&mut t, h(0), a0, -3.0), slime(&mut t, h(1), b1, -3.0)];
     let _ = t.until_committed_after(&db, 0);
     // The crosser leaves b1 for a neighbour of host 1's own land that does not run: it waits
     // there for its region (host 1's mailbox), so every committed cut holds it as an
@@ -1904,19 +1905,19 @@ fn a_heir_that_reboots_before_the_settle_adopts_again() {
     let parked = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .into_iter()
         .map(|(dx, dz)| RegionCoords::new(b1.x + dx, b1.z + dz))
-        .find(|rc| t.sim(1).manager.owner_of(*rc) == game::Owner::Me && !t.sim(1).manager.running_regions().contains(rc))
+        .find(|rc| t.sim(h(1)).manager.owner_of(*rc) == game::Owner::Me && !t.sim(h(1)).manager.running_regions().contains(rc))
         .expect("a neighbour of b1 that host 1 owns and does not run");
-    let crosser = slime(&mut t, 1, b1, 3.0);
+    let crosser = slime(&mut t, h(1), b1, 3.0);
     t.rounds(5);
-    assert!(push(&mut t, 1, crosser, b1, parked), "the crosser is pushed toward {parked:?}");
+    assert!(push(&mut t, h(1), crosser, b1, parked), "the crosser is pushed toward {parked:?}");
     let in_flight_under_1 = |t: &Takeover| {
-        t.w.store.load_in_flight(Some(1)).unwrap().iter().any(|r| matches!(r, game::InFlightRow::Transfer { bundle, .. } if bundle.id == crosser))
+        t.w.store.load_in_flight(Some(h(1))).unwrap().iter().any(|r| matches!(r, game::InFlightRow::Transfer { bundle, .. } if bundle.id == crosser))
     };
     t.until("a committed cut holds the crosser in flight under host 1", LONG, |t| in_flight_under_1(t));
     assert!(t.live(crosser).is_empty(), "in flight, in no running region");
     t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
-    t.kill(0);
-    t.kill(1);
+    t.kill(h(0));
+    t.kill(h(1));
     t.rounds(3);
     assert!(in_flight_under_1(&t), "the last committed cut holds the crosser in flight under host 1");
     let k = decisions(&db).into_iter().filter(|(_, _, ok)| *ok).map(|(c, _, _)| c).max().unwrap();
@@ -1935,24 +1936,24 @@ fn a_heir_that_reboots_before_the_settle_adopts_again() {
         t.w.coordinator.as_ref().unwrap().thread.with_core(move |core| core.set_world_cuts(every_ms), WAIT).expect("the core answers")
     };
     slow(&t, 600_000);
-    t.restart(&db, &dir, 0, 5000);
+    t.restart(&db, &dir, h(0), 5000);
     let adopted = |t: &Takeover| {
         t.w.coordinator.as_ref().unwrap().thread.with_core(|core| core.succession_progress(), WAIT).expect("the core answers")
     };
     t.until("the heir's first boot adopted", LONG, |t| adopted(t).first().is_some_and(|(_, _, a)| *a));
     assert_eq!(successions(&db)[0][4], -1, "not settled yet");
     // It dies before the settle cut and boots again.
-    t.kill(0);
-    t.restart(&db, &dir, 0, 5001);
+    t.kill(h(0));
+    t.restart(&db, &dir, h(0), 5001);
     slow(&t, CUT_EVERY.as_millis() as u64);
-    let row = t.until_settled(&db, 1);
+    let row = t.until_settled(&db, h(1));
     assert_eq!((row[2], row[3], row[5]), (0, k, 0), "settled by the heir: {row:?}");
-    assert!(t.w.store.load_in_flight(Some(1)).unwrap().is_empty(), "no row left under host 1");
-    t.watch(0, a0);
-    t.watch(0, b1);
-    t.watch(0, parked);
+    assert!(t.w.store.load_in_flight(Some(h(1))).unwrap().is_empty(), "no row left under host 1");
+    t.watch(h(0), a0);
+    t.watch(h(0), b1);
+    t.watch(h(0), parked);
     t.until("the seam regions and the crosser's run on the heir", WAIT, |t| {
-        let running = t.sim(0).manager.running_regions();
+        let running = t.sim(h(0)).manager.running_regions();
         running.contains(&a0) && running.contains(&b1) && running.contains(&parked)
     });
     let after = t.until_committed_after(&db, row[4]);

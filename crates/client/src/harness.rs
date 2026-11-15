@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    state_hash, ClientId, ClientPacket, ClientUpdateEvent, Credential, GameEventKind, InputEvent, Key, PlayerId,
+    state_hash, ClientId, ClientPacket, ClientUpdateEvent, Credential, GameEventKind, HostId, InputEvent, Key, PlayerId,
     RegionCoords, ServerPacket,
 };
 
@@ -44,7 +44,7 @@ struct FakeConn {
 /// A connection the client asked for ([`HarnessOpener`]).
 struct Opened {
     key: u32,
-    ordinal: u32,
+    ordinal: HostId,
     credential: Credential,
     out: Receiver<ClientPacket>,
 }
@@ -56,7 +56,7 @@ struct HarnessOpener(Sender<Opened>);
 impl ConnOpener for HarnessOpener {
     fn open(&mut self, key: u32, endpoint: &game::HostEndpoint, credential: Credential) -> ConnHandle {
         let (send, out) = unbounded();
-        let _ = self.0.send(Opened { key, ordinal: endpoint.ordinal, credential, out });
+        let _ = self.0.send(Opened { key, ordinal: endpoint.id, credential, out });
         ConnHandle { send }
     }
 }
@@ -300,13 +300,13 @@ impl SimHarness {
         assert!(hosts >= 1);
         let s = HARNESS_SUPER_REGION_REGIONS;
         let mut h = Self::with_config(&[], 1);
-        let home = game::Static { ordinal: 0, hosts }.owner_of(game::SPAWN_REGION, s) as usize;
+        let home = game::Static { id: HostId::SOLO, hosts }.owner_of(game::SPAWN_REGION, s).0 as usize;
         // Rebuild the servers as `hosts` unconnected hosts: the one-host server
         // `build` made has the local client's session and no peers.
         let mut servers = Vec::new();
         let mut server_out = Vec::new();
         let mut server_in = Vec::new();
-        for ordinal in 0..hosts {
+        for ordinal in (0..u64::from(hosts)).map(HostId) {
             let (to_server, from_client) = unbounded::<ClientPacket>();
             let (to_client, from_server) = unbounded::<ServerPacket>();
             let mut server =
@@ -316,9 +316,9 @@ impl SimHarness {
             if claimed {
                 manager.set_ownership(Box::new(claimed_layout(ordinal, hosts, s)), s);
             } else {
-                manager.set_ownership(Box::new(game::Static { ordinal, hosts }), s);
+                manager.set_ownership(Box::new(game::Static { id: ordinal, hosts }), s);
             }
-            manager.set_endpoints(harness_endpoint(ordinal), game::seeded_nonces(0x5eed + u64::from(ordinal)));
+            manager.set_endpoints(harness_endpoint(ordinal), game::seeded_nonces(0x5eed + ordinal.0));
             server.record_slot_start_hashes();
             servers.push(server);
             server_out.push(from_server);
@@ -327,8 +327,9 @@ impl SimHarness {
         for a in 0..hosts {
             for b in a + 1..hosts {
                 let (ea, eb) = game::InlinePeerLink::pair(0xabcd + u64::from(a * hosts + b), 0);
-                servers[a as usize].manager_mut().set_peer(b, game::PeerSession::new(harness_hello(a), b), Box::new(ea));
-                servers[b as usize].manager_mut().set_peer(a, game::PeerSession::new(harness_hello(b), a), Box::new(eb));
+                let (ha, hb) = (HostId(u64::from(a)), HostId(u64::from(b)));
+                servers[a as usize].manager_mut().set_peer(hb, game::PeerSession::new(harness_hello(ha), hb), Box::new(ea));
+                servers[b as usize].manager_mut().set_peer(ha, game::PeerSession::new(harness_hello(hb), ha), Box::new(eb));
             }
         }
         h.servers = servers;
@@ -362,41 +363,41 @@ impl SimHarness {
     }
 
     /// The host that owns `rc` (index into the harness's hosts).
-    pub fn owner(&mut self, rc: RegionCoords) -> u32 {
+    pub fn owner(&mut self, rc: RegionCoords) -> HostId {
         self.servers[0].manager_mut().owner_host(rc).expect("an owned region")
     }
 
     /// The host the client logged in to.
-    pub fn home_host(&self) -> u32 {
-        self.home_host as u32
+    pub fn home_host(&self) -> HostId {
+        HostId(self.home_host as u64)
     }
 
     /// The host of the client connection `rc`'s traffic counts from (`None` before
     /// the home named itself).
-    pub fn client_region_host(&self, rc: RegionCoords) -> Option<u32> {
+    pub fn client_region_host(&self, rc: RegionCoords) -> Option<HostId> {
         self.client.region_host(rc)
     }
 
     /// The host of the client's home connection.
-    pub fn client_home_host(&self) -> Option<u32> {
+    pub fn client_home_host(&self) -> Option<HostId> {
         self.client.home_host()
     }
 
     /// The hosts the client holds a connection to (as the client has them).
-    pub fn client_connections(&self) -> Vec<u32> {
-        let mut hosts: Vec<u32> = self.client.connection_hosts().into_iter().filter_map(|(_, host)| host).collect();
+    pub fn client_connections(&self) -> Vec<HostId> {
+        let mut hosts: Vec<HostId> = self.client.connection_hosts().into_iter().filter_map(|(_, host)| host).collect();
         hosts.sort();
         hosts
     }
 
     /// The kind of the client's session on host `host`, if it has one there.
-    pub fn server_session(&mut self, host: u32) -> Option<game::SessionKind> {
-        self.servers[host as usize].manager_mut().session_kind(LOCAL_CLIENT_ID)
+    pub fn server_session(&mut self, host: HostId) -> Option<game::SessionKind> {
+        self.servers[host.0 as usize].manager_mut().session_kind(LOCAL_CLIENT_ID)
     }
 
     /// Host `host`'s manager (scenario setup: a world map, ownership).
-    pub fn host_manager(&mut self, host: u32) -> &mut game::WorldManager<game::InlineSpawner> {
-        self.servers[host as usize].manager_mut()
+    pub fn host_manager(&mut self, host: HostId) -> &mut game::WorldManager<game::InlineSpawner> {
+        self.servers[host.0 as usize].manager_mut()
     }
 
     /// A UI request, as the client's UI sends it (handled at the next step).
@@ -415,8 +416,8 @@ impl SimHarness {
     }
 
     /// `(RequestLod, ReleaseLod)` packets host `host` got from the client so far.
-    pub fn lod_traffic(&self, host: u32) -> (usize, usize) {
-        self.lod_traffic[host as usize]
+    pub fn lod_traffic(&self, host: HostId) -> (usize, usize) {
+        self.lod_traffic[host.0 as usize]
     }
 
     /// The LOD keys the client holds subscribed.
@@ -432,14 +433,15 @@ impl SimHarness {
     /// Hold back everything host `host` sends the client (`true`) until released
     /// (`false`: delivered then, in order, behind what other hosts sent meanwhile) —
     /// one connection late against the others.
-    pub fn hold_host(&mut self, host: u32, hold: bool) {
+    pub fn hold_host(&mut self, host: HostId, hold: bool) {
+        let host = host.0 as usize;
         if hold {
-            self.held_hosts.insert(host as usize);
+            self.held_hosts.insert(host);
             return;
         }
-        self.held_hosts.remove(&(host as usize));
+        self.held_hosts.remove(&host);
         let (release, keep): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.held_packets).into_iter().partition(|(h, ..)| *h == host as usize);
+            std::mem::take(&mut self.held_packets).into_iter().partition(|(h, ..)| *h == host);
         self.held_packets = keep;
         for (_, key, packet) in release {
             self.to_client.push_back((self.steps, key, packet));
@@ -455,14 +457,14 @@ impl SimHarness {
     }
 
     /// How many of the client's connections to `host` were refused or closed so far.
-    pub fn observer_closes(&self, host: u32) -> usize {
-        self.closes[host as usize]
+    pub fn observer_closes(&self, host: HostId) -> usize {
+        self.closes[host.0 as usize]
     }
 
     /// Host `host` closes the client's (observer) connection to it, as an edge does:
     /// the session there ends, and the client is told the connection closed.
-    pub fn close_connection(&mut self, host: u32) {
-        let host = host as usize;
+    pub fn close_connection(&mut self, host: HostId) {
+        let host = host.0 as usize;
         assert_ne!(host, self.home_host_now(), "close_connection is for an observer connection");
         let i = self.conns.iter().position(|c| c.host == host).expect("a connection to that host");
         let conn = self.conns.remove(i);
@@ -476,9 +478,9 @@ impl SimHarness {
     /// Host `host` dies (R4): it is never stepped again, sends nothing, and loses what the
     /// client sends it. The client's connection to it stays open — silent, as a dead
     /// host's is until the transport gives up — and its peer links go quiet. Not the home.
-    pub fn kill_host(&mut self, host: u32) {
-        assert_ne!(host as usize, self.home_host_now(), "kill_host is for a host the client only observes");
-        self.dead_hosts.insert(host as usize);
+    pub fn kill_host(&mut self, host: HostId) {
+        assert_ne!(host.0 as usize, self.home_host_now(), "kill_host is for a host the client only observes");
+        self.dead_hosts.insert(host.0 as usize);
     }
 
     /// The coordinator's succession of dead host `dead` ([`Self::kill_host`]; needs
@@ -494,10 +496,10 @@ impl SimHarness {
     /// dead host's lease lapsed (`WorldManager::directory_read`: the rows unchanged, the
     /// dead host no longer live), so `owner_of` / `Directory::preferred` answer as in
     /// production.
-    pub fn run_succession(&mut self, dead: u32) -> u32 {
-        assert!(self.dead_hosts.contains(&(dead as usize)), "host {dead} is not dead");
+    pub fn run_succession(&mut self, dead: HostId) -> HostId {
+        assert!(self.dead_hosts.contains(&(dead.0 as usize)), "host {dead} is not dead");
         let hosts = self.servers.len() as u32;
-        let live: BTreeSet<u32> = (0..hosts).filter(|h| !self.dead_hosts.contains(&(*h as usize))).collect();
+        let live: BTreeSet<HostId> = (0..u64::from(hosts)).map(HostId).filter(|h| !self.dead_hosts.contains(&(h.0 as usize))).collect();
         let heir = game::heir_of(dead, &live).expect("a live host");
         let moved: Vec<(game::SuperRegion, u64)> = claimed_rows(hosts, HARNESS_SUPER_REGION_REGIONS)
             .into_iter()
@@ -506,10 +508,10 @@ impl SimHarness {
             .collect();
         let rows: Vec<(game::SuperRegion, i64, u64)> = claimed_rows(hosts, HARNESS_SUPER_REGION_REGIONS)
             .into_iter()
-            .map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, i64::from), epoch))
+            .map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch))
             .collect();
         for &h in &live {
-            self.servers[h as usize].manager_mut().directory_read(rows.clone(), live.clone());
+            self.servers[h.0 as usize].manager_mut().directory_read(rows.clone(), live.clone());
         }
         self.successions += 1;
         let order = game::CoordMsg::Succession {
@@ -523,25 +525,25 @@ impl SimHarness {
             survivors: live.iter().copied().collect(),
         };
         for h in live {
-            self.servers[h as usize].manager_mut().apply_coordinator_message(order.clone());
+            self.servers[h.0 as usize].manager_mut().apply_coordinator_message(order.clone());
         }
         heir
     }
 
     /// The host the client's home connection is to now (the login host until it moves).
     fn home_host_now(&self) -> usize {
-        self.client.home_host().map_or(self.home_host, |h| h as usize)
+        self.client.home_host().map_or(self.home_host, |h| h.0 as usize)
     }
 
     /// Every `SyncClock` host `host` sends from now on reads `ticks` later than
     /// its world tick (a host whose samples must not steer the client's clock).
-    pub fn skew_clock(&mut self, host: u32, ticks: i64) {
-        self.clock_skew[host as usize] = ticks;
+    pub fn skew_clock(&mut self, host: HostId, ticks: i64) {
+        self.clock_skew[host.0 as usize] = ticks;
     }
 
     /// Host `host`'s tick of its running region `rc` (0 if it does not run it).
-    pub fn server_region_tick(&mut self, host: u32, rc: RegionCoords) -> game::Tick {
-        self.servers[host as usize].region_tick(rc)
+    pub fn server_region_tick(&mut self, host: HostId, rc: RegionCoords) -> game::Tick {
+        self.servers[host.0 as usize].region_tick(rc)
     }
 
     /// The server that runs `rc` (its owner's; the home's when none does).
@@ -561,11 +563,11 @@ impl SimHarness {
                 _ => None,
             };
             assert!(
-                self.conns.iter().all(|c| c.host != ordinal as usize),
+                self.conns.iter().all(|c| c.host != ordinal.0 as usize),
                 "the client opened a second connection to host {ordinal}"
             );
             assert!(self.conns.iter().all(|c| c.key != key), "the client reused connection key {key}");
-            self.conns.push(FakeConn { host: ordinal as usize, key, out, admitted: false, ticket });
+            self.conns.push(FakeConn { host: ordinal.0 as usize, key, out, admitted: false, ticket });
         }
         for (host, server) in self.servers.iter_mut().enumerate() {
             for (client, player, nonce, _ttl) in server.manager_mut().take_observer_orders() {
@@ -1019,7 +1021,7 @@ impl SimHarness {
     /// Server-side state surgery on a running region, e.g. before
     /// `connect()` so the client's snapshot already holds the change.
     pub fn with_server_region(&mut self, rc: RegionCoords, f: impl FnOnce(&mut game::Region)) {
-        let owner = self.servers[0].manager_mut().owner_host(rc).expect("an owned region") as usize;
+        let owner = self.servers[0].manager_mut().owner_host(rc).expect("an owned region").0 as usize;
         self.servers[owner].with_region(rc, f);
     }
 
@@ -1203,20 +1205,20 @@ impl Default for SimHarness {
 
 /// Host `ordinal`'s endpoint in [`SimHarness::with_hosts`] (no addresses: the harness
 /// connects in process).
-fn harness_endpoint(ordinal: u32) -> game::HostEndpoint {
-    game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None }
+fn harness_endpoint(ordinal: HostId) -> game::HostEndpoint {
+    game::HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None }
 }
 
 /// The directory rows of [`SimHarness::with_claimed_hosts`]: every super-region of the
 /// regions within [`CLAIMED_LAYOUT_RADIUS`] of the origin, owned as `game::Static` lays them
 /// out, at [`CLAIMED_LAYOUT_EPOCH`].
-fn claimed_rows(hosts: u32, s: u32) -> Vec<(game::SuperRegion, Option<u32>, u64)> {
+fn claimed_rows(hosts: u32, s: u32) -> Vec<(game::SuperRegion, Option<HostId>, u64)> {
     let r = CLAIMED_LAYOUT_RADIUS;
     let mut rows = std::collections::BTreeMap::new();
     for x in -r..=r {
         for z in -r..=r {
             let rc = RegionCoords::new(x, z);
-            let owner = game::Static { ordinal: 0, hosts }.owner_of(rc, s);
+            let owner = game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
             rows.insert(game::super_region_of(rc, s), owner);
         }
     }
@@ -1225,18 +1227,18 @@ fn claimed_rows(hosts: u32, s: u32) -> Vec<(game::SuperRegion, Option<u32>, u64)
 
 /// Host `ordinal`'s ownership in [`SimHarness::with_claimed_hosts`]: its directory read
 /// whole ([`claimed_rows`]), every host live.
-fn claimed_layout(ordinal: u32, hosts: u32, s: u32) -> game::PgClaim {
+fn claimed_layout(ordinal: HostId, hosts: u32, s: u32) -> game::PgClaim {
     let mut claim = game::PgClaim::new(ordinal, hosts);
     claim.directory.replace(claimed_rows(hosts, s));
-    claim.directory.set_live((0..hosts).collect());
+    claim.directory.set_live((0..u64::from(hosts)).map(HostId).collect());
     claim
 }
 
 /// The hello host `ordinal` of [`SimHarness::with_hosts`] starts its peer sessions with.
-fn harness_hello(ordinal: u32) -> game::PeerHello {
+fn harness_hello(ordinal: HostId) -> game::PeerHello {
     game::PeerHello {
-        ordinal,
-        boot: 1000 + u64::from(ordinal),
+        id: ordinal,
+        boot: 1000 + ordinal.0,
         generation: 1,
         endpoint: harness_endpoint(ordinal),
         received_through: 0,

@@ -8,11 +8,16 @@
 use super::cut_store::CutStore;
 use super::rig::{Rig, CLIENT};
 use game::{
-    ClientId, ClientPacket, CutId, EntityId, HostEndpoint, InFlightRow, Intent, IntentMsg, InlinePeerLink, InlineSchedule,
+    ClientId, ClientPacket, CutId, HostId, EntityId, HostEndpoint, InFlightRow, Intent, IntentMsg, InlinePeerLink, InlineSchedule,
     InlineSpawner, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId, PlayerRecord, RegionCoords,
     RegionSpawner, Reliable, ServerEvent, StoredRegion, WorldCut, REGION_SIZE, TICK_RATE,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The host ids `h(0)..h(n)`.
+pub fn host_ids(n: u32) -> impl Iterator<Item = HostId> + Clone {
+    (0..u64::from(n)).map(HostId)
+}
 use std::sync::{Arc, Mutex};
 
 /// The world generation every host of the rig runs.
@@ -155,19 +160,19 @@ impl PeerLink for SharedEnd {
 }
 
 /// The hello host `ordinal` of the rig starts its sessions with.
-pub fn rig_hello(ordinal: u32) -> PeerHello {
+pub fn rig_hello(ordinal: HostId) -> PeerHello {
     rig_hello_as(ordinal, rig_boot(ordinal))
 }
 
 /// Host `ordinal`'s first boot in the rig.
-pub fn rig_boot(ordinal: u32) -> u64 {
-    1000 + u64::from(ordinal)
+pub fn rig_boot(ordinal: HostId) -> u64 {
+    1000 + ordinal.0
 }
 
 /// [`rig_hello`] of boot `boot` (a host started again, [`MultiRig::start`]).
-pub fn rig_hello_as(ordinal: u32, boot: u64) -> PeerHello {
+pub fn rig_hello_as(ordinal: HostId, boot: u64) -> PeerHello {
     PeerHello {
-        ordinal,
+        id: ordinal,
         boot,
         generation: RIG_GENERATION,
         endpoint: rig_endpoint(ordinal),
@@ -187,7 +192,7 @@ pub const SUCCESSION_DECLARE_ROUNDS: usize = 400;
 /// The adjacent pair of regions nearest the origin whose owners differ (`hosts` hosts,
 /// `s` regions per super-region side): `(a, b)`, `b` one step +x or +z of `a`.
 pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts }.owner_of(rc, s);
     for a in nearest_first(64) {
         for b in [RegionCoords::new(a.x + 1, a.z), RegionCoords::new(a.x, a.z + 1)] {
             if owner(a) != owner(b) {
@@ -202,7 +207,7 @@ pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
 /// regions per super-region side, 4 hosts), as `[a, a+x, a+x+z, a+z]` — a loop round
 /// its corner.
 pub fn four_host_corner(s: u32) -> [RegionCoords; 4] {
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: 4 }.owner_of(rc, s);
+    let owner = |rc: RegionCoords| game::Static { id: HostId::SOLO, hosts: 4 }.owner_of(rc, s);
     for a in nearest_first(64) {
         let block = [
             a,
@@ -210,7 +215,7 @@ pub fn four_host_corner(s: u32) -> [RegionCoords; 4] {
             RegionCoords::new(a.x + 1, a.z + 1),
             RegionCoords::new(a.x, a.z + 1),
         ];
-        let owners: BTreeSet<u32> = block.iter().map(|rc| owner(*rc)).collect();
+        let owners: BTreeSet<HostId> = block.iter().map(|rc| owner(*rc)).collect();
         if owners.len() == 4 {
             return block;
         }
@@ -230,18 +235,18 @@ fn nearest_first(r: i32) -> Vec<RegionCoords> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Place {
     /// Owned by a running region of a host.
-    Region { host: u32, rc: RegionCoords },
+    Region { host: HostId, rc: RegionCoords },
     /// In a host's `in_flight` or `pending_arrivals`.
-    Manager { host: u32 },
+    Manager { host: HostId },
     /// In a host's session to `peer`, never sent.
-    Unsent { host: u32, peer: u32 },
+    Unsent { host: HostId, peer: HostId },
     /// In transit on the link to host `to`.
-    Transit { to: u32 },
+    Transit { to: HostId },
     /// In the state of a region parked on a host (only with [`MultiRig::parked_hold`]).
-    Parked { host: u32, rc: RegionCoords },
+    Parked { host: HostId, rc: RegionCoords },
     /// Waiting on a host for its region's super-region to have an owner it knows
     /// (`unowned_waiting`, [`MultiRig::with_directory`]).
-    Unowned { host: u32, sr: game::SuperRegion },
+    Unowned { host: HostId, sr: game::SuperRegion },
 }
 
 pub struct MultiRig {
@@ -252,7 +257,7 @@ pub struct MultiRig {
     /// by the host, far from the origin, so it never is one a test plays with).
     pub homes: Vec<RegionCoords>,
     /// Each pair of hosts' link `(a, b)` with `a < b`: (end on `a`, end on `b`).
-    pub links: BTreeMap<(u32, u32), (Arc<Mutex<InlinePeerLink>>, Arc<Mutex<InlinePeerLink>>)>,
+    pub links: BTreeMap<(HostId, HostId), (Arc<Mutex<InlinePeerLink>>, Arc<Mutex<InlinePeerLink>>)>,
     /// Every non-person entity seen, and where it was last (`None` = only in a session's
     /// sent and unacknowledged part): it must never vanish.
     pub tracked: BTreeMap<EntityId, Option<Place>>,
@@ -286,47 +291,47 @@ pub struct MultiRig {
     pub lockstep: bool,
     /// The rig's in-memory two-phase store (world cuts, [`Self::drive_world_cuts`]):
     /// staged parts by `(cut, host)`, as Postgres holds prepared transactions.
-    pub parts: BTreeMap<(CutId, u32), WorldCut>,
+    pub parts: BTreeMap<(CutId, HostId), WorldCut>,
     /// The decision of every cut decided (first writer wins).
     pub decided: BTreeMap<CutId, bool>,
     /// What each host's committed parts hold (regions, its in-flight rows).
-    pub committed: BTreeMap<u32, CutStore>,
+    pub committed: BTreeMap<HostId, CutStore>,
     /// The players table, as committed parts wrote it.
     pub committed_players: BTreeMap<PlayerId, PlayerRecord>,
     /// The parts of the last committed cut, by host.
-    pub last_cut: Option<(CutId, BTreeMap<u32, WorldCut>)>,
+    pub last_cut: Option<(CutId, BTreeMap<HostId, WorldCut>)>,
     /// Every part a host staged, in order: `(cut, host)`.
-    pub prepared: Vec<(CutId, u32)>,
+    pub prepared: Vec<(CutId, HostId)>,
     /// Parts of cuts decided aborted, as they were staged.
-    pub aborted_parts: Vec<(CutId, u32, WorldCut)>,
+    pub aborted_parts: Vec<(CutId, HostId, WorldCut)>,
     /// Each direction's [`Strip`] hook, by `(from, to)`.
-    pub strips: BTreeMap<(u32, u32), Arc<Mutex<Strip>>>,
+    pub strips: BTreeMap<(HostId, HostId), Arc<Mutex<Strip>>>,
     /// The entities in every host's parked regions' states count as places too
     /// ([`Place::Parked`], decoded every round — costly, so off by default): a test that
     /// parks whole hosts (every host leaving) turns it on.
     pub parked_hold: bool,
     /// The directory every host answers from ([`Self::with_directory`]); `None` = `Static`.
-    pub directory: Option<Vec<(game::SuperRegion, Option<u32>, u64)>>,
+    pub directory: Option<Vec<(game::SuperRegion, Option<HostId>, u64)>>,
     /// The rig's `super_regions` table while hosts claim on demand ([`Self::with_claims`]):
     /// owner (`None` = a free row) and epoch per super-region.
-    pub claim_store: Option<BTreeMap<game::SuperRegion, (Option<u32>, u64)>>,
+    pub claim_store: Option<BTreeMap<game::SuperRegion, (Option<HostId>, u64)>>,
     /// Claims asked of the store and not answered yet: `(rounds left, host, super-regions)`
     /// (at most one per host, as a server keeps one `claim_free` in flight).
-    pub claims_pending: Vec<(u32, u32, Vec<game::SuperRegion>)>,
+    pub claims_pending: Vec<(u32, HostId, Vec<game::SuperRegion>)>,
     /// Rounds played (the seed of each claim's answer delay).
     pub rounds: u64,
     /// Each host's current boot ([`Self::start`] makes a new one).
     pub boots: Vec<u64>,
     /// Hosts killed ([`Self::kill`]) and not started again: their slot holds an empty
     /// placeholder that only keeps the world tick.
-    pub dead: BTreeSet<u32>,
+    pub dead: BTreeSet<HostId>,
     /// The schedule the hosts' spawners run (a started host's too).
     pub schedule: Option<fn(u64) -> InlineSchedule>,
     /// The rig store's `successions` table ([`Self::run_succession`]), with each one's
     /// settling cut (`None`: open).
     pub successions: Vec<(game::Succession, Option<CutId>)>,
     /// What each committed part adopted (`WorldCut::adopts`, Task 9): `(cut, heir, adopted)`.
-    pub adopts: Vec<(CutId, u32, Vec<u32>)>,
+    pub adopts: Vec<(CutId, HostId, Vec<HostId>)>,
     /// Entities a killed host held, or that were on their way to or from it
     /// ([`Self::kill`]): no longer tracked — the heir's resolution (Task 9) brings them back.
     pub forgiven: BTreeSet<EntityId>,
@@ -336,9 +341,9 @@ pub struct MultiRig {
     /// Whether the rig answers an heir's adoption reads ([`Self::with_adoption`]).
     pub adopting: bool,
     /// Adoption reads asked and not answered yet: `(rounds left, heir, succession, predecessor)`.
-    pub adoptions_pending: Vec<(u32, u32, game::SuccessionId, u32)>,
+    pub adoptions_pending: Vec<(u32, HostId, game::SuccessionId, HostId)>,
     /// Every adoption read answered: `(succession, heir)`, in order.
-    pub adopted: Vec<(game::SuccessionId, u32)>,
+    pub adopted: Vec<(game::SuccessionId, HostId)>,
     /// Test hook: the first start of every region the store answer of an adoption read
     /// hands the heir fails its load (`InlineSpawner::fail_next_start`), as a store read
     /// error on the region's thread would.
@@ -349,7 +354,7 @@ pub struct MultiRig {
     pub generation: u64,
     /// Hosts that left in a committed cut, with the boot that left (their `hosts` row is
     /// clean): until another boot of theirs starts ([`Self::start_as`]).
-    pub left: BTreeMap<u32, u64>,
+    pub left: BTreeMap<HostId, u64>,
     /// Whether the rig coordinator gives a departed host's land away when a host asks for
     /// it ([`Self::with_land_on_demand`], [`Self::drive_land`]).
     pub land_on_demand: bool,
@@ -358,8 +363,8 @@ pub struct MultiRig {
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
-pub fn rig_endpoint(h: u32) -> HostEndpoint {
-    HostEndpoint { ordinal: h, quic: None, webtransport: None, cert_hash: None }
+pub fn rig_endpoint(h: HostId) -> HostEndpoint {
+    HostEndpoint { id: h, quic: None, webtransport: None, cert_hash: None }
 }
 
 impl MultiRig {
@@ -390,17 +395,17 @@ impl MultiRig {
     ) -> MultiRig {
         let mut rigs = Vec::new();
         let mut homes = Vec::new();
-        for h in 0..hosts {
-            let ownership = game::Static { ordinal: h, hosts };
+        for h in host_ids(hosts) {
+            let ownership = game::Static { id: h, hosts };
             let mut spawner = match &stored {
                 Some(regions) => InlineSpawner::with_portable(regions.clone()),
                 None => InlineSpawner::default(),
             };
             if let Some(f) = schedule {
-                spawner.set_schedule(Some(f(mix(seed, u64::from(h)))));
+                spawner.set_schedule(Some(f(mix(seed, h.0))));
             }
             let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, Box::new(ownership), s);
-            rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(seed, 2000 + u64::from(h))));
+            rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(seed, 2000 + h.0)));
             rigs.push(rig);
             let home = nearest_first(64)
                 .into_iter()
@@ -411,13 +416,13 @@ impl MultiRig {
         }
         let mut links = BTreeMap::new();
         let mut strips = BTreeMap::new();
-        for a in 0..hosts {
-            for b in a + 1..hosts {
-                let (ea, eb) = InlinePeerLink::pair(mix(seed, 1000 + u64::from(a * hosts + b)), link_delay_steps);
+        for a in host_ids(hosts) {
+            for b in host_ids(hosts).filter(|b| *b > a) {
+                let (ea, eb) = InlinePeerLink::pair(mix(seed, 1000 + a.0 * u64::from(hosts) + b.0), link_delay_steps);
                 let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
                 let (sa, sb) = (Arc::new(Mutex::new(Strip::default())), Arc::new(Mutex::new(Strip::default())));
-                rigs[a as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone(), sa.clone())));
-                rigs[b as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone(), sb.clone())));
+                rigs[a.0 as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone(), sa.clone())));
+                rigs[b.0 as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone(), sb.clone())));
                 links.insert((a, b), (ea, eb));
                 strips.insert((a, b), sa);
                 strips.insert((b, a), sb);
@@ -456,7 +461,7 @@ impl MultiRig {
                 claim_store: None,
                 claims_pending: Vec::new(),
                 rounds: 0,
-                boots: (0..hosts).map(rig_boot).collect(),
+                boots: host_ids(hosts).map(rig_boot).collect(),
                 dead: BTreeSet::new(),
                 schedule,
                 successions: Vec::new(),
@@ -473,7 +478,7 @@ impl MultiRig {
                 land_on_demand: false,
                 land_declared: Vec::new(),
             };
-        for h in 0..hosts {
+        for h in host_ids(hosts) {
             rig.keep(h);
         }
         rig.connect();
@@ -488,8 +493,8 @@ impl MultiRig {
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         let core = game::coordinator::SharedCore::new(game::Coordinator::new(history, now));
         // Every link before any is installed (an install pumps it): none misses the view.
-        let links: Vec<game::InlineWorldLink> = (0..self.hosts.len() as u32)
-            .map(|h| game::InlineWorldLink::shared(core.clone(), h).with_delay(mix(self.seed, 3000 + u64::from(h)), self.link_delay))
+        let links: Vec<game::InlineWorldLink> = host_ids(self.hosts.len() as u32)
+            .map(|h| game::InlineWorldLink::shared(core.clone(), h).with_delay(mix(self.seed, 3000 + h.0), self.link_delay))
             .collect();
         for (h, inner) in links.into_iter().enumerate() {
             let sent = Arc::new(Mutex::new(Vec::new()));
@@ -516,26 +521,26 @@ impl MultiRig {
     }
 
     /// Arm the [`Strip`] hook of the link `from` → `to`.
-    pub fn strip_next_wrapper(&mut self, from: u32, to: u32) {
+    pub fn strip_next_wrapper(&mut self, from: HostId, to: HostId) {
         let mut strip = self.strips[&(from, to)].lock().unwrap();
         *strip = Strip { armed: true, after_mark: false, stripped: strip.stripped, mute_acks: strip.mute_acks };
     }
 
     /// From now on the acknowledgements host `from` sends host `to` are lost: what `to`
     /// sent stays unacknowledged in its session.
-    pub fn mute_acks(&mut self, from: u32, to: u32) {
+    pub fn mute_acks(&mut self, from: HostId, to: HostId) {
         self.strips[&(from, to)].lock().unwrap().mute_acks = true;
     }
 
     /// Wrappers the `from` → `to` hook stripped so far.
-    pub fn stripped(&self, from: u32, to: u32) -> usize {
+    pub fn stripped(&self, from: HostId, to: HostId) -> usize {
         self.strips[&(from, to)].lock().unwrap().stripped
     }
 
     /// World cuts every `every_ms` (the coordinator's period; its clock is the hosts').
     /// Rounds then go through [`Self::cut_round`].
     pub fn with_world_cuts(&mut self, every_ms: u64) {
-        let hosts: BTreeSet<u32> = (0..self.hosts.len() as u32).collect();
+        let hosts: BTreeSet<HostId> = host_ids(self.hosts.len() as u32).collect();
         let mut core = self.core();
         core.set_cut_epoch(1);
         core.set_expected_hosts(hosts);
@@ -587,19 +592,19 @@ impl MultiRig {
         }
         let n = self.hosts.len() as u32;
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let declared_dead: BTreeSet<(u32, u64)> =
+        let declared_dead: BTreeSet<(HostId, u64)> =
             self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
-        let rows: Vec<game::coordinator::HostSeen> = (0..n)
+        let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
             .filter(|h| !self.dead.contains(h) || self.left.contains_key(h))
             .map(|h| {
-                let boot = self.boots[h as usize];
+                let boot = self.boots[h.0 as usize];
                 let clean = self.left.get(&h) == Some(&boot);
                 let state = if declared_dead.contains(&(h, boot)) && !clean { game::HOST_DEAD } else { game::HOST_LIVE };
                 game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms: now + 1 }
             })
             .collect();
-        let expected: BTreeSet<u32> =
-            (0..n).filter(|h| !self.dead.contains(h) && self.left.get(h) != Some(&self.boots[*h as usize])).collect();
+        let expected: BTreeSet<HostId> =
+            host_ids(n).filter(|h| !self.dead.contains(h) && self.left.get(h) != Some(&self.boots[(*h).0 as usize])).collect();
         let mut core = self.core();
         core.observe_leases(&rows, now, now);
         core.set_expected_hosts(expected);
@@ -627,8 +632,8 @@ impl MultiRig {
     /// undecided cut aborted).
     pub fn drive_world_cuts(&mut self) {
         let Some(core) = self.coordinator.clone() else { return };
-        for h in 0..self.hosts.len() as u32 {
-            let m = &mut self.hosts[h as usize].manager;
+        for h in host_ids(self.hosts.len() as u32) {
+            let m = &mut self.hosts[h.0 as usize].manager;
             // Only a world cut's part (a test's one-phase cut stays for the test to take).
             if m.world_cut().is_none() {
                 continue;
@@ -636,8 +641,8 @@ impl MultiRig {
             if let Some(cut) = m.take_cut() {
                 let id = cut.id;
                 match self.prepare_part(h, cut) {
-                    Ok(()) => self.hosts[h as usize].manager.world_cut_prepared(id),
-                    Err(why) => self.hosts[h as usize].manager.world_cut_failed(id, game::CutFailure::Store(why)),
+                    Ok(()) => self.hosts[h.0 as usize].manager.world_cut_prepared(id),
+                    Err(why) => self.hosts[h.0 as usize].manager.world_cut_failed(id, game::CutFailure::Store(why)),
                 }
             }
         }
@@ -657,7 +662,7 @@ impl MultiRig {
             if stored {
                 // Their `hosts` rows are clean now (`decide_cut`'s `leaving`).
                 for &h in &d.leaving {
-                    self.left.insert(h, self.boots[h as usize]);
+                    self.left.insert(h, self.boots[h.0 as usize]);
                 }
             }
             core.lock().unwrap_or_else(|e| e.into_inner()).decided(d.cut, stored);
@@ -672,7 +677,7 @@ impl MultiRig {
     /// Host `h` stages its part `cut` (as `prepare_cut`): refused with the history in it;
     /// a part of a cut decided already finishes itself (committed or dropped). No two
     /// staged parts of one cut may write one player record or one entity (a test failure).
-    pub fn prepare_part(&mut self, h: u32, cut: WorldCut) -> Result<(), String> {
+    pub fn prepare_part(&mut self, h: HostId, cut: WorldCut) -> Result<(), String> {
         assert!(cut.history.is_none(), "a host's part never carries the history");
         assert_eq!(cut.host, h, "a part is its host's");
         if let Some(&committed) = self.decided.get(&cut.id) {
@@ -692,9 +697,9 @@ impl MultiRig {
                 InFlightRow::Intent { target, msg: IntentMsg::Reply(s) } => (*target, s.due),
             };
             // A region nobody owns (or whose owner is unknown) waits on its sender: its row.
-            let Some(owner) = self.hosts[h as usize].manager.owner_host(target) else { continue };
+            let Some(owner) = self.hosts[h.0 as usize].manager.owner_host(target) else { continue };
             // A host that left (Task 14) takes no part: what waits for it is the sender's row.
-            let absent = self.hosts[h as usize].manager.peer_left(owner);
+            let absent = self.hosts[h.0 as usize].manager.peer_left(owner);
             assert!(
                 owner == h || at >= cut.tick || absent,
                 "cut {}: host {h}'s part has a row for {target:?} (host {owner}'s) due at {at}, before the cut tick {}",
@@ -723,19 +728,19 @@ impl MultiRig {
     /// The decision on `cut` (as `decide_cut` / `abort_cut`): the stored one if any (first
     /// writer wins); else a commit only if asked and exactly `hosts` staged parts, an
     /// abort otherwise. Every staged part is then committed or dropped as it says.
-    pub fn decide(&mut self, cut: CutId, commit: bool, hosts: &[u32]) -> bool {
+    pub fn decide(&mut self, cut: CutId, commit: bool, hosts: &[HostId]) -> bool {
         self.decide_settling(cut, commit, hosts, &[])
     }
 
     /// [`Self::decide`] of a cut that settles `settles` if it commits (as `decide_cut`): a
     /// commit is recorded as an abort unless `settles` is exactly the open successions; the
     /// commit settles them.
-    pub fn decide_settling(&mut self, cut: CutId, commit: bool, hosts: &[u32], settles: &[game::SuccessionId]) -> bool {
+    pub fn decide_settling(&mut self, cut: CutId, commit: bool, hosts: &[HostId], settles: &[game::SuccessionId]) -> bool {
         if let Some(&stored) = self.decided.get(&cut) {
             return stored;
         }
-        let staged: BTreeSet<u32> = self.parts.keys().filter(|(c, _)| *c == cut).map(|(_, h)| *h).collect();
-        let listed: BTreeSet<u32> = hosts.iter().copied().collect();
+        let staged: BTreeSet<HostId> = self.parts.keys().filter(|(c, _)| *c == cut).map(|(_, h)| *h).collect();
+        let listed: BTreeSet<HostId> = hosts.iter().copied().collect();
         let open = self.open_successions();
         let named: BTreeSet<game::SuccessionId> = settles.iter().copied().collect();
         let stored = commit && staged == listed && open == named;
@@ -784,7 +789,7 @@ impl MultiRig {
     /// parts: after a committed cut, every entity is in at most one stored region of the
     /// whole world (every host's committed parts together).
     fn assert_stored_once(&self, cut: CutId) {
-        let mut at: BTreeMap<EntityId, Vec<(u32, RegionCoords)>> = BTreeMap::new();
+        let mut at: BTreeMap<EntityId, Vec<(HostId, RegionCoords)>> = BTreeMap::new();
         for (h, store) in &self.committed {
             for (rc, region) in &store.regions {
                 for b in &region.entities {
@@ -796,7 +801,7 @@ impl MultiRig {
         assert!(twice.is_empty(), "cut {}: entities stored in two regions (host, region): {twice:?}", cut.0);
     }
 
-    fn apply_part(&mut self, h: u32, part: &WorldCut) {
+    fn apply_part(&mut self, h: HostId, part: &WorldCut) {
         if !part.adopts.is_empty() {
             self.adopts.push((part.id, h, part.adopts.clone()));
         }
@@ -816,13 +821,13 @@ impl MultiRig {
     }
 
     /// The last committed cut, or a panic.
-    pub fn last_committed(&self) -> (CutId, &BTreeMap<u32, WorldCut>) {
+    pub fn last_committed(&self) -> (CutId, &BTreeMap<HostId, WorldCut>) {
         let (cut, parts) = self.last_cut.as_ref().expect("a committed world cut");
         (*cut, parts)
     }
 
     /// Where the committed store holds `id`: `(host, region, "state" | "row")`.
-    pub fn stored_places(&self, id: EntityId) -> Vec<(u32, RegionCoords, &'static str)> {
+    pub fn stored_places(&self, id: EntityId) -> Vec<(HostId, RegionCoords, &'static str)> {
         let mut out = Vec::new();
         for (h, store) in &self.committed {
             out.extend(store.places(id).into_iter().map(|(rc, what)| (*h, rc, what)));
@@ -853,15 +858,15 @@ impl MultiRig {
         let cut = *cut;
         let n = self.hosts.len() as u32;
         let (_, parts) = self.last_committed();
-        let participants: BTreeSet<u32> = parts.keys().copied().collect();
+        let participants: BTreeSet<HostId> = parts.keys().copied().collect();
         // (host, peer, sent?) → subjects.
-        let mut journalled: BTreeMap<(u32, u32, bool), BTreeSet<Subject>> = BTreeMap::new();
+        let mut journalled: BTreeMap<(HostId, HostId, bool), BTreeSet<Subject>> = BTreeMap::new();
         let mut counted_checked = 0;
-        for h in 0..n {
-            let journal = self.hosts[h as usize].manager.peer_journal();
+        for h in host_ids(n) {
+            let journal = self.hosts[h.0 as usize].manager.peer_journal();
             let base = journal.base();
             assert!(base <= cut, "host {h}'s journal counts from cut {} past the last committed {}", base.0, cut.0);
-            for p in (0..n).filter(|p| *p != h) {
+            for p in host_ids(n).filter(|p| *p != h) {
                 for (e, _) in journal.entries(p) {
                     let sent = matches!(e.event, JournalEvent::Sent(_));
                     journalled.entry((h, p, sent)).or_default().insert(e.subject);
@@ -937,15 +942,15 @@ impl MultiRig {
             }
         }
         self.counted_pairs_checked += counted_checked;
-        let mut moved: Vec<(Subject, u32, u32)> = Vec::new();
+        let mut moved: Vec<(Subject, HostId, HostId)> = Vec::new();
         let ids: Vec<EntityId> = self.tracked.keys().copied().collect();
         for id in ids {
-            let stored: BTreeSet<u32> = self.stored_places(id).into_iter().map(|(h, _, _)| h).collect();
-            let mut live: BTreeSet<u32> = self.owners_of(id).into_iter().map(|(h, _)| h).collect();
+            let stored: BTreeSet<HostId> = self.stored_places(id).into_iter().map(|(h, _, _)| h).collect();
+            let mut live: BTreeSet<HostId> = self.owners_of(id).into_iter().map(|(h, _)| h).collect();
             for (h, rig) in self.hosts.iter().enumerate() {
                 let m = &rig.manager;
                 if m.in_flight_ids().iter().chain(m.pending_arrival_ids().iter()).any(|(i, _)| *i == id) {
-                    live.insert(h as u32);
+                    live.insert(HostId(h as u64));
                 }
             }
             for &b in &stored {
@@ -953,7 +958,7 @@ impl MultiRig {
             }
         }
         let (_, parts) = self.last_committed();
-        let players: Vec<(ClientId, PlayerId, Vec<u32>)> = self
+        let players: Vec<(ClientId, PlayerId, Vec<HostId>)> = self
             .players
             .iter()
             .map(|(c, p)| (*c, *p, parts.iter().filter(|(_, part)| part.players.iter().any(|(q, _)| q == p)).map(|(h, _)| *h).collect()))
@@ -963,10 +968,10 @@ impl MultiRig {
                 moved.extend(writers.into_iter().filter(|b| *b != a).map(|b| (Subject::Player(player), b, a)));
             }
         }
-        let has = |key: (u32, u32, bool), s: &Subject| journalled.get(&key).is_some_and(|set| set.contains(s));
+        let has = |key: (HostId, HostId, bool), s: &Subject| journalled.get(&key).is_some_and(|set| set.contains(s));
         let mut checked = 0;
         for (subject, b, a) in moved {
-            let through_third = (0..n).any(|c| c != a && c != b && has((c, b, false), &subject) && has((c, a, true), &subject));
+            let through_third = host_ids(self.hosts.len() as u32).any(|c| c != a && c != b && has((c, b, false), &subject) && has((c, a, true), &subject));
             if through_third {
                 continue;
             }
@@ -992,7 +997,7 @@ impl MultiRig {
     }
 
     /// The parts of the last committed cut that write `player`'s record.
-    pub fn last_cut_writers(&self, player: PlayerId) -> Vec<u32> {
+    pub fn last_cut_writers(&self, player: PlayerId) -> Vec<HostId> {
         let (_, parts) = self.last_committed();
         parts.iter().filter(|(_, p)| p.players.iter().any(|(q, _)| *q == player)).map(|(h, _)| *h).collect()
     }
@@ -1002,10 +1007,10 @@ impl MultiRig {
     /// super-region with no row is `Unknown` (the directory is never read whole). The rows
     /// must give every host its keeper's home as `Static` did. Kept by
     /// [`Self::rebuild_from_last_cut`].
-    pub fn with_directory(&mut self, rows: Vec<(game::SuperRegion, Option<u32>, u64)>) {
+    pub fn with_directory(&mut self, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
         let hosts = self.hosts.len() as u32;
         for (h, rig) in self.hosts.iter_mut().enumerate() {
-            let mut claim = game::PgClaim::new(h as u32, hosts);
+            let mut claim = game::PgClaim::new(HostId(h as u64), hosts);
             let directory = game::Ownership::directory_mut(&mut claim).expect("a directory");
             for (sr, owner, epoch) in &rows {
                 directory.set(*sr, *owner, *epoch);
@@ -1025,18 +1030,18 @@ impl MultiRig {
     pub fn with_claims(&mut self) {
         let rows = self.directory.clone().expect("with_directory first");
         self.claim_store = Some(rows.into_iter().map(|(sr, owner, epoch)| (sr, (owner, epoch))).collect());
-        for h in 0..self.hosts.len() as u32 {
+        for h in host_ids(self.hosts.len() as u32) {
             self.read_directory(h);
         }
     }
 
     /// Host `h` reads the rig's `super_regions` table whole, every host live.
-    pub fn read_directory(&mut self, h: u32) {
+    pub fn read_directory(&mut self, h: HostId) {
         let store = self.claim_store.as_ref().expect("with_claims");
         let rows: Vec<(game::SuperRegion, i64, u64)> =
-            store.iter().map(|(sr, (owner, epoch))| (*sr, owner.map_or(game::NO_OWNER, i64::from), *epoch)).collect();
-        let live: BTreeSet<u32> = (0..self.hosts.len() as u32).filter(|h| !self.dead.contains(h)).collect();
-        self.hosts[h as usize].manager.directory_read(rows, live);
+            store.iter().map(|(sr, (owner, epoch))| (*sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), *epoch)).collect();
+        let live: BTreeSet<HostId> = host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h)).collect();
+        self.hosts[h.0 as usize].manager.directory_read(rows, live);
     }
 
     /// One round of every host's claim loop (as the server's): directory reads asked for,
@@ -1046,16 +1051,16 @@ impl MultiRig {
             return;
         }
         self.rounds += 1;
-        for h in 0..self.hosts.len() as u32 {
-            if self.hosts[h as usize].manager.take_directory_wanted() {
+        for h in host_ids(self.hosts.len() as u32) {
+            if self.hosts[h.0 as usize].manager.take_directory_wanted() {
                 self.read_directory(h);
             }
             if self.claims_pending.iter().any(|(_, p, _)| *p == h) {
                 continue;
             }
-            let wanted = self.hosts[h as usize].manager.take_claims_wanted();
+            let wanted = self.hosts[h.0 as usize].manager.take_claims_wanted();
             if !wanted.is_empty() {
-                let delay = (mix(self.seed, self.rounds * 64 + u64::from(h)) % u64::from(self.link_delay + 1)) as u32;
+                let delay = (mix(self.seed, self.rounds * 64 + h.0) % u64::from(self.link_delay + 1)) as u32;
                 self.claims_pending.push((delay, h, wanted));
             }
         }
@@ -1079,7 +1084,7 @@ impl MultiRig {
             }
             let short = won.len() < srs.len();
             if !won.is_empty() {
-                self.hosts[h as usize].manager.claimed(won);
+                self.hosts[h.0 as usize].manager.claimed(won);
             }
             if short {
                 self.read_directory(h);
@@ -1093,7 +1098,7 @@ impl MultiRig {
     /// Host `h` holds no super-region any more: each of its rows in the rig's `super_regions`
     /// table is free (epoch + 1), and every live host's directory is read again — the state
     /// of a host that never claimed anything (claim on demand: an idle host).
-    pub fn free_land_of(&mut self, h: u32) {
+    pub fn free_land_of(&mut self, h: HostId) {
         let store = self.claim_store.as_mut().expect("with_claims");
         for (owner, epoch) in store.values_mut() {
             if *owner == Some(h) {
@@ -1101,7 +1106,7 @@ impl MultiRig {
                 *epoch += 1;
             }
         }
-        for o in 0..self.hosts.len() as u32 {
+        for o in host_ids(self.hosts.len() as u32) {
             if !self.dead.contains(&o) {
                 self.read_directory(o);
             }
@@ -1109,19 +1114,19 @@ impl MultiRig {
     }
 
     /// The owner of `sr` in the rig's `super_regions` table ([`Self::with_claims`]).
-    pub fn stored_owner(&self, sr: game::SuperRegion) -> Option<u32> {
+    pub fn stored_owner(&self, sr: game::SuperRegion) -> Option<HostId> {
         self.claim_store.as_ref().and_then(|s| s.get(&sr)).and_then(|(owner, _)| *owner)
     }
 
     /// Host `h` alone answers from a `PgClaim` directory read whole from `rows`
     /// (`(super-region, owner, epoch)`), every host live; the others keep theirs.
-    pub fn set_directory(&mut self, h: u32, rows: Vec<(game::SuperRegion, Option<u32>, u64)>) {
+    pub fn set_directory(&mut self, h: HostId, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
         let hosts = self.hosts.len() as u32;
-        let m = &mut self.hosts[h as usize].manager;
+        let m = &mut self.hosts[h.0 as usize].manager;
         m.set_ownership(Box::new(game::PgClaim::new(h, hosts)), self.s);
-        let rows = rows.into_iter().map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, i64::from), epoch)).collect();
-        m.directory_read(rows, (0..hosts).collect());
-        assert!(m.owns(self.homes[h as usize]), "the rows give host {h} its keeper's home");
+        let rows = rows.into_iter().map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch)).collect();
+        m.directory_read(rows, host_ids(hosts).collect());
+        assert!(m.owns(self.homes[h.0 as usize]), "the rows give host {h} its keeper's home");
     }
 
     /// The world restarted from the store: every host restored from its committed parts
@@ -1136,7 +1141,7 @@ impl MultiRig {
             rig.with_directory(rows.clone());
         }
         for (h, store) in &self.committed {
-            rig.hosts[*h as usize].manager.restore_in_flight(store.in_flight.clone());
+            rig.hosts[(*h).0 as usize].manager.restore_in_flight(store.in_flight.clone());
         }
         rig
     }
@@ -1146,7 +1151,7 @@ impl MultiRig {
     /// lost), the coordinator sees its link drop, and its parts staged in the rig store stay.
     /// What it held, and what was on its way to or from it, is no longer tracked
     /// ([`Self::forgiven`]): its regions come back from the store with the heir (Task 9).
-    pub fn kill(&mut self, h: u32) {
+    pub fn kill(&mut self, h: HostId) {
         assert!(!self.dead.contains(&h), "host {h} is dead already");
         let n = self.hosts.len() as u32;
         let mut gone: BTreeSet<EntityId> = BTreeSet::new();
@@ -1165,7 +1170,7 @@ impl MultiRig {
         }
         for (r, rig) in self.hosts.iter().enumerate() {
             for (peer, id, _) in rig.manager.peer_unreceived_ids() {
-                if r as u32 == h || peer == h {
+                if HostId(r as u64) == h || peer == h {
                     gone.insert(id);
                 }
             }
@@ -1188,25 +1193,25 @@ impl MultiRig {
             self.tracked.remove(id);
         }
         self.forgiven.extend(gone);
-        for other in (0..n).filter(|o| *o != h) {
+        for other in host_ids(n).filter(|o| *o != h) {
             self.link_down(h, other);
         }
         if self.coordinator.is_some() {
             self.core().host_detached(h);
         }
-        let tick = self.hosts[h as usize].manager.spawner_mut().world_tick();
-        let now = self.hosts[h as usize].now_ms;
+        let tick = self.hosts[h.0 as usize].manager.spawner_mut().world_tick();
+        let now = self.hosts[h.0 as usize].now_ms;
         let mut spawner = InlineSpawner::default();
         spawner.set_world_tick(tick);
         let mut placeholder = Rig::with_spawner(spawner, super::seam_translate::uniform_floor);
         placeholder.now_ms = now;
-        self.hosts[h as usize] = placeholder;
+        self.hosts[h.0 as usize] = placeholder;
         self.dead.insert(h);
     }
 
     /// A dead host `h` starts again as a new boot ([`Self::start_as`]): its boot.
-    pub fn start(&mut self, h: u32) -> u64 {
-        let boot = self.boots[h as usize] + 1_000_000;
+    pub fn start(&mut self, h: HostId) -> u64 {
+        let boot = self.boots[h.0 as usize] + 1_000_000;
         self.start_as(h, boot);
         boot
     }
@@ -1216,59 +1221,59 @@ impl MultiRig {
     /// journal from the last committed cut, a `PgClaim` directory read from the rig's
     /// `super_regions` table — with a new link to every live host (whose sessions with `h`
     /// are kept, only the link swapped) and to the coordinator.
-    pub fn start_as(&mut self, h: u32, boot: u64) {
+    pub fn start_as(&mut self, h: HostId, boot: u64) {
         assert!(self.dead.contains(&h), "host {h} runs");
         let n = self.hosts.len() as u32;
         let regions: BTreeMap<RegionCoords, StoredRegion> =
             self.committed.values().flat_map(|s| s.regions.iter().map(|(rc, r)| (*rc, r.clone()))).collect();
-        let tick = self.hosts[h as usize].manager.spawner_mut().world_tick();
+        let tick = self.hosts[h.0 as usize].manager.spawner_mut().world_tick();
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         let mut spawner = InlineSpawner::with_portable(regions);
         spawner.set_world_tick(tick);
         if let Some(f) = self.schedule {
-            spawner.set_schedule(Some(f(mix(self.seed, u64::from(h) ^ boot))));
+            spawner.set_schedule(Some(f(mix(self.seed, h.0 ^ boot))));
         }
-        let rows: Vec<(game::SuperRegion, Option<u32>, u64)> = match (&self.claim_store, &self.directory) {
+        let rows: Vec<(game::SuperRegion, Option<HostId>, u64)> = match (&self.claim_store, &self.directory) {
             (Some(store), _) => store.iter().map(|(sr, (o, e))| (*sr, *o, *e)).collect(),
             (None, Some(rows)) => rows.clone(),
             (None, None) => panic!("a host starts again only under `claim` (with_directory)"),
         };
         let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, Box::new(game::PgClaim::new(h, n)), self.s);
         rig.now_ms = now;
-        rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(self.seed, 2000 + u64::from(h) + boot)));
+        rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(self.seed, 2000 + h.0 + boot)));
         let base = self.last_cut.as_ref().map_or(CutId(0), |(c, _)| *c);
         rig.manager.start_peer_journal(base);
-        let live: BTreeSet<u32> = (0..n).filter(|o| !self.dead.contains(o) || *o == h).collect();
-        let rows = rows.into_iter().map(|(sr, o, e)| (sr, o.map_or(game::NO_OWNER, i64::from), e)).collect();
+        let live: BTreeSet<HostId> = host_ids(n).filter(|o| !self.dead.contains(o) || *o == h).collect();
+        let rows = rows.into_iter().map(|(sr, o, e)| (sr, o.map_or(game::NO_OWNER, |o| o.0 as i64), e)).collect();
         rig.manager.directory_read(rows, live);
-        self.hosts[h as usize] = rig;
+        self.hosts[h.0 as usize] = rig;
         self.dead.remove(&h);
-        self.boots[h as usize] = boot;
+        self.boots[h.0 as usize] = boot;
         // Registered as another boot: its row is dirty again.
         if self.left.get(&h).is_some_and(|left_as| *left_as != boot) {
             self.left.remove(&h);
         }
-        for other in (0..n).filter(|o| *o != h && !self.dead.contains(o)) {
+        for other in host_ids(n).filter(|o| *o != h && !self.dead.contains(o)) {
             let (a, b) = (h.min(other), h.max(other));
-            let (ea, eb) = InlinePeerLink::pair(mix(self.seed, boot ^ u64::from(a * n + b)), self.link_delay);
+            let (ea, eb) = InlinePeerLink::pair(mix(self.seed, boot ^ a.0 * u64::from(n) + b.0), self.link_delay);
             let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
             let (sa, sb) = (self.strips[&(a, b)].clone(), self.strips[&(b, a)].clone());
-            let (ba, bb) = (self.boots[a as usize], self.boots[b as usize]);
-            self.hosts[a as usize].manager.set_peer(b, PeerSession::new(rig_hello_as(a, ba), b), Box::new(SharedEnd(ea.clone(), sa)));
-            self.hosts[b as usize].manager.set_peer(a, PeerSession::new(rig_hello_as(b, bb), a), Box::new(SharedEnd(eb.clone(), sb)));
+            let (ba, bb) = (self.boots[a.0 as usize], self.boots[b.0 as usize]);
+            self.hosts[a.0 as usize].manager.set_peer(b, PeerSession::new(rig_hello_as(a, ba), b), Box::new(SharedEnd(ea.clone(), sa)));
+            self.hosts[b.0 as usize].manager.set_peer(a, PeerSession::new(rig_hello_as(b, bb), a), Box::new(SharedEnd(eb.clone(), sb)));
             self.links.insert((a, b), (ea, eb));
         }
         if let Some(core) = self.coordinator.clone() {
-            let inner = game::InlineWorldLink::shared(core, h).with_delay(mix(self.seed, 3000 + u64::from(h) ^ boot), self.link_delay);
+            let inner = game::InlineWorldLink::shared(core, h).with_delay(mix(self.seed, 3000 + h.0 ^ boot), self.link_delay);
             let sent = Arc::new(Mutex::new(Vec::new()));
             let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let hop_is = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let hold_orders = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            self.world_hold_orders[h as usize] = hold_orders.clone();
-            self.world_sent[h as usize] = sent.clone();
-            self.world_hold[h as usize] = hold.clone();
-            self.world_hop_is[h as usize] = hop_is.clone();
-            let rig = &mut self.hosts[h as usize];
+            self.world_hold_orders[h.0 as usize] = hold_orders.clone();
+            self.world_sent[h.0 as usize] = sent.clone();
+            self.world_hold[h.0 as usize] = hold.clone();
+            self.world_hop_is[h.0 as usize] = hop_is.clone();
+            let rig = &mut self.hosts[h.0 as usize];
             rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default() }), world_boot(boot), now);
             rig.settle();
         }
@@ -1280,24 +1285,24 @@ impl MultiRig {
     /// rounds while a running cut is first decided aborted), the batch is declared in the
     /// rig store ([`Self::declare_in_store`]) and the store's answer handed back — the orders
     /// go out to the survivors. The successions declared.
-    pub fn run_succession(&mut self, dead: u32) -> Vec<game::Succession> {
+    pub fn run_succession(&mut self, dead: HostId) -> Vec<game::Succession> {
         self.run_successions(&[dead])
     }
 
     /// [`Self::run_succession`] of several killed hosts at once: every one of them vouched
     /// dead in the same lease reads, declared in one batch.
-    pub fn run_successions(&mut self, deads: &[u32]) -> Vec<game::Succession> {
+    pub fn run_successions(&mut self, deads: &[HostId]) -> Vec<game::Succession> {
         let n = self.hosts.len() as u32;
         self.core().set_crash_policy(game::CrashPolicy::Succession);
-        let declared_dead: BTreeSet<(u32, u64)> =
+        let declared_dead: BTreeSet<(HostId, u64)> =
             self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
         let mut d = None;
         for r in 0..SUCCESSION_DECLARE_ROUNDS {
             let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-            let rows: Vec<game::coordinator::HostSeen> = (0..n)
+            let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
                 .filter(|h| !self.dead.contains(h) || deads.contains(h))
                 .map(|h| {
-                    let boot = self.boots[h as usize];
+                    let boot = self.boots[h.0 as usize];
                     let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
                     // Every live host beats every round; the dead ones are vouched.
                     let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
@@ -1317,7 +1322,7 @@ impl MultiRig {
         let d = d.expect("declared");
         let outcome = self.declare_in_store(&d);
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let live: BTreeSet<u32> = (0..n).filter(|h| !self.dead.contains(h) && !d.dead.iter().any(|(p, _)| p == h)).collect();
+        let live: BTreeSet<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && !d.dead.iter().any(|(p, _)| p == h)).collect();
         let mut core = self.core();
         core.declared(outcome.clone(), now);
         // The predecessor's row is dead: not expected by world cuts any more.
@@ -1341,7 +1346,7 @@ impl MultiRig {
             // A leave needs the clean row of that very boot (`declare_succession`): a boot
             // registered since is another host (`Gone`), a dirty one did not leave.
             for &(pred, boot) in &d.dead {
-                if self.boots[pred as usize] != boot || self.successions.iter().any(|(s, _)| (s.predecessor, s.predecessor_boot) == (pred, boot)) {
+                if self.boots[pred.0 as usize] != boot || self.successions.iter().any(|(s, _)| (s.predecessor, s.predecessor_boot) == (pred, boot)) {
                     return game::Declared::Gone(vec![pred]);
                 }
                 if self.left.get(&pred) != Some(&boot) {
@@ -1351,8 +1356,8 @@ impl MultiRig {
         }
         let n = self.hosts.len() as u32;
         let base_cut = self.last_cut.as_ref().map_or(CutId(0), |(c, _)| *c);
-        let predecessors: BTreeSet<u32> = d.dead.iter().map(|(p, _)| *p).collect();
-        let survivors: Vec<u32> = (0..n).filter(|h| !self.dead.contains(h) && !predecessors.contains(h)).collect();
+        let predecessors: BTreeSet<HostId> = d.dead.iter().map(|(p, _)| *p).collect();
+        let survivors: Vec<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && !predecessors.contains(h)).collect();
         let store = self.claim_store.as_mut().expect("with_claims: the rig's super_regions table");
         let mut out = Vec::new();
         for (&(predecessor, predecessor_boot), &heir) in d.dead.iter().zip(&d.heirs) {
@@ -1404,12 +1409,12 @@ impl MultiRig {
         if !self.adopting {
             return;
         }
-        for h in 0..self.hosts.len() as u32 {
+        for h in host_ids(self.hosts.len() as u32) {
             if self.dead.contains(&h) {
                 continue;
             }
-            while let Some((id, pred)) = self.hosts[h as usize].manager.take_adoption_wanted() {
-                let delay = (mix(self.seed, self.rounds * 64 + 7000 + u64::from(h)) % u64::from(self.link_delay + 1)) as u32;
+            while let Some((id, pred)) = self.hosts[h.0 as usize].manager.take_adoption_wanted() {
+                let delay = (mix(self.seed, self.rounds * 64 + 7000 + h.0) % u64::from(self.link_delay + 1)) as u32;
                 self.adoptions_pending.push((delay, h, id, pred));
             }
         }
@@ -1422,7 +1427,7 @@ impl MultiRig {
             let theirs = self.committed.get(&pred);
             let rows = theirs.map(|s| s.in_flight.clone()).unwrap_or_default();
             let regions: BTreeMap<RegionCoords, StoredRegion> = theirs.map(|s| s.regions.clone()).unwrap_or_default();
-            let drop: BTreeSet<EntityId> = self.hosts[h as usize].manager.adoption_drop_set(id).into_iter().collect();
+            let drop: BTreeSet<EntityId> = self.hosts[h.0 as usize].manager.adoption_drop_set(id).into_iter().collect();
             let mut located = Vec::new();
             for id in &drop {
                 for store in self.committed.values() {
@@ -1433,7 +1438,7 @@ impl MultiRig {
                     }
                 }
             }
-            let m = &mut self.hosts[h as usize].manager;
+            let m = &mut self.hosts[h.0 as usize].manager;
             if self.fail_adoption_loads {
                 for rc in regions.keys() {
                     m.spawner_mut().fail_next_start(*rc);
@@ -1442,20 +1447,20 @@ impl MultiRig {
             m.spawner_mut().add_portable(regions);
             m.adopted_rows(id, rows, located);
             self.adopted.push((id, h));
-            self.hosts[h as usize].settle();
+            self.hosts[h.0 as usize].settle();
         }
     }
 
     /// Host `dead` (killed after a committed leave cut it left in) is declared dead as a
     /// LEAVE succession ([`game::SuccessionKind::Leave`]): the rig store moves its land to
     /// its heir and the coordinator sends the orders. The succession declared.
-    pub fn declare_leave(&mut self, dead: u32) -> game::Succession {
+    pub fn declare_leave(&mut self, dead: HostId) -> game::Succession {
         let n = self.hosts.len() as u32;
         self.core().set_crash_policy(game::CrashPolicy::Succession);
-        let live: BTreeSet<u32> = (0..n).filter(|h| !self.dead.contains(h) && *h != dead).collect();
+        let live: BTreeSet<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && *h != dead).collect();
         let heir = game::heir_of(dead, &live).expect("a live host");
         let d = game::coordinator::Declare {
-            dead: vec![(dead, self.boots[dead as usize])],
+            dead: vec![(dead, self.boots[dead.0 as usize])],
             heirs: vec![heir],
             kind: game::SuccessionKind::Leave,
         };
@@ -1478,15 +1483,15 @@ impl MultiRig {
     /// world rolled back (cut rounds while it notices), the rig store abandons every open
     /// succession and raises the world generation, and the coordinator tells every host
     /// ([`game::CoordMsg::Generation`]). The new generation.
-    pub fn roll_back(&mut self, dead: u32) -> u64 {
+    pub fn roll_back(&mut self, dead: HostId) -> u64 {
         let n = self.hosts.len() as u32;
         for r in 0..SUCCESSION_DECLARE_ROUNDS {
             let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-            let rows: Vec<game::coordinator::HostSeen> = (0..n)
+            let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
                 .filter(|h| !self.dead.contains(h) || *h == dead)
                 .map(|h| {
                     let seen_ms = if h == dead { 0 } else { now + 1 };
-                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h as usize], clean: false, state: game::HOST_LIVE, seen_ms }
+                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h.0 as usize], clean: false, state: game::HOST_LIVE, seen_ms }
                 })
                 .collect();
             let mut core = self.core();
@@ -1513,14 +1518,14 @@ impl MultiRig {
     }
 
     /// Hold back (`true`) or release what the coordinator sends host `h`.
-    pub fn hold_world(&mut self, h: u32, hold: bool) {
-        self.world_hold[h as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
+    pub fn hold_world(&mut self, h: HostId, hold: bool) {
+        self.world_hold[h.0 as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Hold back (`true`) or release the succession orders the coordinator sends host `h`
     /// (and whatever follows one): what comes before an order is read as usual.
-    pub fn hold_orders(&mut self, h: u32, hold: bool) {
-        self.world_hold_orders[h as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
+    pub fn hold_orders(&mut self, h: HostId, hold: bool) {
+        self.world_hold_orders[h.0 as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// What host `h` sent its coordinator so far.
@@ -1529,8 +1534,8 @@ impl MultiRig {
         self.world_hop_is.iter().map(|n| n.load(std::sync::atomic::Ordering::SeqCst)).sum()
     }
 
-    pub fn sent_to_coordinator(&self, h: u32) -> Vec<game::HostMsg> {
-        self.world_sent[h as usize].lock().unwrap().clone()
+    pub fn sent_to_coordinator(&self, h: HostId) -> Vec<game::HostMsg> {
+        self.world_sent[h.0 as usize].lock().unwrap().clone()
     }
 
     /// Messages the hosts sent the coordinator that it has not handled yet (its links'
@@ -1544,8 +1549,8 @@ impl MultiRig {
     }
 
     /// Host `h`'s keeper: a client whose body stands in the middle of its home region.
-    fn keep(&mut self, h: u32) {
-        let home = self.homes[h as usize];
+    fn keep(&mut self, h: HostId) {
+        let home = self.homes[h.0 as usize];
         let y = super::standing_y(super::FLOOR_TOP);
         let record = PlayerRecord {
             client: game::Client::default(),
@@ -1554,15 +1559,15 @@ impl MultiRig {
             fortress: None,
             adventure: None,
         };
-        let rig = &mut self.hosts[h as usize];
-        rig.event(ServerEvent::ClientConnected { client: CLIENT, player: PlayerId(u64::from(h)), record: Some(record) });
+        let rig = &mut self.hosts[h.0 as usize];
+        rig.event(ServerEvent::ClientConnected { client: CLIENT, player: PlayerId(h.0), record: Some(record) });
     }
 
     /// `client` (session id) of `player` connects to host `home` as its home session,
     /// restored from `record`; tracked from now on.
-    pub fn connect_home(&mut self, home: u32, client: ClientId, player: PlayerId, record: PlayerRecord) {
+    pub fn connect_home(&mut self, home: HostId, client: ClientId, player: PlayerId, record: PlayerRecord) {
         self.players.insert(client, player);
-        let rig = &mut self.hosts[home as usize];
+        let rig = &mut self.hosts[home.0 as usize];
         rig.event(ServerEvent::ClientConnected { client, player, record: Some(record) });
         // Its body, if the restore already gave it one, is tracked from now on.
         self.assert_conserved_world();
@@ -1570,11 +1575,11 @@ impl MultiRig {
 
     /// [`Self::connect_home`], and an observer session of the same client on every other
     /// host (what a client holds once its home host redirected it there).
-    pub fn connect_everywhere(&mut self, home: u32, client: ClientId, player: PlayerId, record: PlayerRecord) {
+    pub fn connect_everywhere(&mut self, home: HostId, client: ClientId, player: PlayerId, record: PlayerRecord) {
         self.connect_home(home, client, player, record);
-        for h in 0..self.hosts.len() as u32 {
+        for h in host_ids(self.hosts.len() as u32) {
             if h != home {
-                self.hosts[h as usize].event(ServerEvent::ObserverConnected { client, player });
+                self.hosts[h.0 as usize].event(ServerEvent::ObserverConnected { client, player });
             }
         }
     }
@@ -1583,7 +1588,7 @@ impl MultiRig {
     /// ([`ServerEvent::LoginConnected`]), restored from `record`; tracked from now on.
     pub fn connect_login(
         &mut self,
-        h: u32,
+        h: HostId,
         client: ClientId,
         player: PlayerId,
         record: Option<PlayerRecord>,
@@ -1592,7 +1597,7 @@ impl MultiRig {
     ) {
         self.players.insert(client, player);
         let ev = ServerEvent::LoginConnected { client, player, record, player_token: token.into(), session_epoch: epoch };
-        self.hosts[h as usize].event(ev);
+        self.hosts[h.0 as usize].event(ev);
         self.assert_conserved_world();
     }
 
@@ -1600,12 +1605,12 @@ impl MultiRig {
     /// spawn order a host took is recorded — the player's sessions there superseded first
     /// (`Supersede`) — and answered ok; a kick another host relayed is applied and
     /// answered. The orders taken, with the host that took each.
-    pub fn serve_logins(&mut self) -> Vec<(u32, game::SpawnRequest)> {
+    pub fn serve_logins(&mut self) -> Vec<(HostId, game::SpawnRequest)> {
         let mut taken = Vec::new();
         for (h, rig) in self.hosts.iter_mut().enumerate() {
             for order in rig.manager.take_spawn_here() {
                 rig.event(ServerEvent::Supersede { player: order.player, reason: game::LOGGED_IN_ELSEWHERE.into() });
-                taken.push((h as u32, order.clone()));
+                taken.push((HostId(h as u64), order.clone()));
                 rig.manager.spawn_answered(order, true);
             }
             for kick in rig.manager.take_kicks_in() {
@@ -1616,8 +1621,8 @@ impl MultiRig {
     }
 
     /// `client`'s connection to host `h` ends.
-    pub fn disconnect(&mut self, h: u32, client: ClientId) {
-        self.hosts[h as usize].event(ServerEvent::ClientDisconnected(client));
+    pub fn disconnect(&mut self, h: HostId, client: ClientId) {
+        self.hosts[h.0 as usize].event(ServerEvent::ClientDisconnected(client));
     }
 
     /// Every host records the packets its manager sends ([`Rig::packets_seen`]).
@@ -1638,13 +1643,13 @@ impl MultiRig {
     }
 
     /// Where `client`'s body is: `(host, region)` of every running region holding it.
-    pub fn player_owners(&mut self, client: ClientId) -> Vec<(u32, RegionCoords)> {
+    pub fn player_owners(&mut self, client: ClientId) -> Vec<(HostId, RegionCoords)> {
         let mut out = Vec::new();
         for (h, rig) in self.hosts.iter_mut().enumerate() {
             for rc in rig.manager.running_regions() {
                 rig.manager.spawner_mut().with_region(rc, |region| {
                     if region.data().player_entites.contains_key(&client) {
-                        out.push((h as u32, rc));
+                        out.push((HostId(h as u64), rc));
                     }
                 });
             }
@@ -1653,7 +1658,7 @@ impl MultiRig {
     }
 
     /// The `EntityId` of `client`'s body, if a running region holds it.
-    pub fn player_body(&mut self, client: ClientId) -> Option<(u32, RegionCoords, EntityId)> {
+    pub fn player_body(&mut self, client: ClientId) -> Option<(HostId, RegionCoords, EntityId)> {
         let mut out = None;
         for (h, rig) in self.hosts.iter_mut().enumerate() {
             for rc in rig.manager.running_regions() {
@@ -1661,7 +1666,7 @@ impl MultiRig {
                     let data = region.data();
                     if let Some(&e) = data.player_entites.get(&client) {
                         if let Some(id) = *data.ecs.id.try_get(e) {
-                            out = Some((h as u32, rc, id));
+                            out = Some((HostId(h as u64), rc, id));
                         }
                     }
                 });
@@ -1671,8 +1676,8 @@ impl MultiRig {
     }
 
     /// The hosts holding `player`'s parked record.
-    pub fn parked_on(&self, player: PlayerId) -> Vec<u32> {
-        (0..self.hosts.len() as u32).filter(|h| self.hosts[*h as usize].manager.parked_record(player).is_some()).collect()
+    pub fn parked_on(&self, player: PlayerId) -> Vec<HostId> {
+        host_ids(self.hosts.len() as u32).filter(|h| self.hosts[(*h).0 as usize].manager.parked_record(player).is_some()).collect()
     }
 
     /// Rounds until every host reaches every other host's home region.
@@ -1691,15 +1696,15 @@ impl MultiRig {
     }
 
     /// The host that owns `rc`.
-    pub fn owner(&self, rc: RegionCoords) -> u32 {
-        let alive = (0..self.hosts.len()).find(|h| !self.dead.contains(&(*h as u32))).expect("a live host");
+    pub fn owner(&self, rc: RegionCoords) -> HostId {
+        let alive = (0..self.hosts.len()).find(|h| !self.dead.contains(&HostId(*h as u64))).expect("a live host");
         self.hosts[alive].manager.owner_host(rc).expect("an owned region")
     }
 
     /// The rig of the host that owns `rc`.
     pub fn host_of(&mut self, rc: RegionCoords) -> &mut Rig {
         let h = self.owner(rc);
-        &mut self.hosts[h as usize]
+        &mut self.hosts[h.0 as usize]
     }
 
     /// Keep `rc` running on its owner (its keeper subscribes to it).
@@ -1731,30 +1736,30 @@ impl MultiRig {
     }
 
     /// Take the link between hosts `a` and `b` down (what is in transit is lost).
-    pub fn link_down(&mut self, a: u32, b: u32) {
+    pub fn link_down(&mut self, a: HostId, b: HostId) {
         self.link(a, b).lock().unwrap().set_up(false);
     }
 
     /// Bring it back, as a new connection.
-    pub fn link_up(&mut self, a: u32, b: u32) {
+    pub fn link_up(&mut self, a: HostId, b: HostId) {
         self.link(a, b).lock().unwrap().set_up(true);
     }
 
     /// Give hosts `a` and `b` a fresh link pair (its `connection()` the same as a fresh
     /// pair's: 1): `set_peer` on both with a new session each — the managers keep their
     /// sessions and swap only the link. What was in transit on the old link is lost.
-    pub fn replace_link(&mut self, a: u32, b: u32, seed: u64, link_delay_steps: u32) {
+    pub fn replace_link(&mut self, a: HostId, b: HostId, seed: u64, link_delay_steps: u32) {
         let (a, b) = (a.min(b), a.max(b));
         let (ea, eb) = InlinePeerLink::pair(seed, link_delay_steps);
         let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
         let sa = self.strips[&(a, b)].clone();
         let sb = self.strips[&(b, a)].clone();
-        self.hosts[a as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone(), sa)));
-        self.hosts[b as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone(), sb)));
+        self.hosts[a.0 as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone(), sa)));
+        self.hosts[b.0 as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone(), sb)));
         self.links.insert((a, b), (ea, eb));
     }
 
-    fn link(&self, a: u32, b: u32) -> &Arc<Mutex<InlinePeerLink>> {
+    fn link(&self, a: HostId, b: HostId) -> &Arc<Mutex<InlinePeerLink>> {
         &self.links[&(a.min(b), a.max(b))].0
     }
 
@@ -1810,13 +1815,13 @@ impl MultiRig {
     }
 
     /// Where `id` is owned now: `(host, region)` of every running region holding it.
-    pub fn owners_of(&mut self, id: EntityId) -> Vec<(u32, RegionCoords)> {
+    pub fn owners_of(&mut self, id: EntityId) -> Vec<(HostId, RegionCoords)> {
         let mut out = Vec::new();
         for (h, rig) in self.hosts.iter_mut().enumerate() {
             for rc in rig.manager.running_regions() {
                 rig.manager.spawner_mut().with_region(rc, |region| {
                     if region.data().id_index.contains_key(&id) {
-                        out.push((h as u32, rc));
+                        out.push((HostId(h as u64), rc));
                     }
                 });
             }
@@ -1847,7 +1852,7 @@ impl MultiRig {
         let player_bodies = &mut self.player_bodies;
         let parked_hold = self.parked_hold;
         for (h, rig) in self.hosts.iter_mut().enumerate() {
-            let host = h as u32;
+            let host = HostId(h as u64);
             for rc in rig.manager.running_regions() {
                 rig.manager.spawner_mut().with_region(rc, |region| {
                     let data = region.data();
@@ -1987,7 +1992,7 @@ impl MultiRig {
             for held in rig.manager.all_succession_reports().values() {
                 reports.extend(held.values().map(|r| r.entries.clone()));
             }
-            for o in 0..n {
+            for o in host_ids(n) {
                 for msg in rig.manager.peer_owed(o) {
                     if let Reliable::SuccessionReport { entries, .. } = msg {
                         reports.push(entries);
@@ -2070,7 +2075,7 @@ impl MultiRig {
         let players: Vec<(ClientId, PlayerId)> = self.players.iter().map(|(c, p)| (*c, *p)).collect();
         let in_move = self.players_in_move();
         let queued_moves = self.queued_moves();
-        let mut per_player: BTreeMap<PlayerId, (Vec<(ClientId, u32, RegionCoords)>, usize)> = BTreeMap::new();
+        let mut per_player: BTreeMap<PlayerId, (Vec<(ClientId, HostId, RegionCoords)>, usize)> = BTreeMap::new();
         for &(client, player) in &players {
             let entry = per_player.entry(player).or_default();
             entry.0.extend(self.player_owners(client).into_iter().map(|(h, rc)| (client, h, rc)));
@@ -2104,16 +2109,16 @@ impl MultiRig {
                 "player {} is in a queued move and has a body ({bodies:?}) or a parked record (hosts {parked:?})",
                 player.0
             );
-            let homes: Vec<(u32, RegionCoords)> = (0..self.hosts.len() as u32)
-                .filter_map(|h| self.hosts[h as usize].manager.home_of(client).map(|rc| (h, rc)))
+            let homes: Vec<(HostId, RegionCoords)> = host_ids(self.hosts.len() as u32)
+                .filter_map(|h| self.hosts[h.0 as usize].manager.home_of(client).map(|rc| (h, rc)))
                 .collect();
             assert!(homes.len() <= 1, "client {client} has a home on several hosts: {homes:?}");
-            let online: Vec<u32> = (0..self.hosts.len() as u32)
-                .filter(|h| self.hosts[*h as usize].manager.player_of(client) == Some(player))
+            let online: Vec<HostId> = host_ids(self.hosts.len() as u32)
+                .filter(|h| self.hosts[(*h).0 as usize].manager.player_of(client) == Some(player))
                 .collect();
             assert!(online.len() <= 1, "player {} is online on several hosts: {online:?}", player.0);
-            let claims: Vec<(u32, game::Claim)> = (0..self.hosts.len() as u32)
-                .filter_map(|h| self.hosts[h as usize].manager.client_claim(client).map(|c| (h, c)))
+            let claims: Vec<(HostId, game::Claim)> = host_ids(self.hosts.len() as u32)
+                .filter_map(|h| self.hosts[h.0 as usize].manager.client_claim(client).map(|c| (h, c)))
                 .collect();
             assert!(claims.len() <= 1, "player {}'s claim is held on several hosts: {claims:?}", player.0);
         }

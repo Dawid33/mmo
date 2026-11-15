@@ -16,6 +16,7 @@ use game::{
 use crate::codec::*;
 use crate::fence::{CoordinatorFence, Fence, SuperRegion, commit_check_set, load_check};
 use crate::forged::{ForgedHead, TiledRows};
+use game::HostId;
 use game::ClockAnchor;
 use crate::{CutCommitted, HostBoot, HostRow, StoreError, WorldInfo};
 
@@ -290,7 +291,7 @@ macro_rules! engine_rows {
             /// before registration, `AllInOne` / `Static`, tools) checks nothing.
             pub(crate) async fn claim_super_regions(
                 pool: &Pool,
-                owner: u32,
+                owner: HostId,
                 srs: Vec<SuperRegion>,
                 opened: u32,
                 live: Option<u64>,
@@ -308,7 +309,7 @@ macro_rules! engine_rows {
                     )
                     .bind(i64::from(sx))
                     .bind(i64::from(sz))
-                    .bind(i64::from(owner))
+                    .bind(i(owner.0))
                     .fetch_one(&mut *tx)
                     .await;
                     let row = match row {
@@ -338,13 +339,13 @@ macro_rules! engine_rows {
             /// declaration's `FOR NO KEY UPDATE` of the row — a claim that locks first commits
             /// before the declaration moves the predecessor's rows (the newly won ones too); one
             /// that locks after sees the row dead.
-            async fn check_live(pool: &Pool, mut tx: Tx, owner: u32, boot: u64, lock_ms: u64) -> Result<Tx, StoreError> {
+            async fn check_live(pool: &Pool, mut tx: Tx, owner: HostId, boot: u64, lock_ms: u64) -> Result<Tx, StoreError> {
                 let sql = format!(
                     "SELECT 1 FROM hosts WHERE ordinal = $1 AND boot = $2 AND state = {} AND clean = 0{}",
                     crate::HOST_LIVE,
                     $share_lock
                 );
-                let row = sqlx::query(&sql).bind(i64::from(owner)).bind(i(boot)).fetch_optional(&mut *tx).await;
+                let row = sqlx::query(&sql).bind(i(owner.0)).bind(i(boot)).fetch_optional(&mut *tx).await;
                 match row {
                     Ok(Some(_)) => Ok(tx),
                     Ok(None) => {
@@ -379,7 +380,7 @@ macro_rules! engine_rows {
             /// would hold up this host's own cut part).
             pub(crate) async fn claim_free(
                 pool: &Pool,
-                owner: u32,
+                owner: HostId,
                 boot: u64,
                 srs: Vec<SuperRegion>,
                 opened: u32,
@@ -402,7 +403,7 @@ macro_rules! engine_rows {
                         let row = sqlx::query(sql)
                             .bind(i64::from(sx))
                             .bind(i64::from(sz))
-                            .bind(i64::from(owner))
+                            .bind(i(owner.0))
                             .fetch_optional(&mut *tx)
                             .await;
                         match row {
@@ -442,7 +443,7 @@ macro_rules! engine_rows {
                     ))
                     .bind(i64::from(sx))
                     .bind(i64::from(sz))
-                    .bind(i64::from(fence.owner))
+                    .bind(i(fence.owner.0))
                     .execute(&mut *tx)
                     .await;
                     match done {
@@ -492,7 +493,7 @@ macro_rules! engine_rows {
                     for &(sx, sz) in batch {
                         let held = fence.epochs.get(&(sx, sz)).copied();
                         let row = stored.get(&(i64::from(sx), i64::from(sz))).copied();
-                        let ok = matches!((held, row), (Some(e), Some((o, se))) if o == i64::from(fence.owner) && se == e);
+                        let ok = matches!((held, row), (Some(e), Some((o, se))) if o == i(fence.owner.0) && se == e);
                         if !ok {
                             return Err(StoreError::Fenced { sr: Some((sx, sz)) });
                         }
@@ -563,7 +564,7 @@ macro_rules! engine_rows {
                 let named: i64 = sqlx::query(
                     "SELECT COUNT(*) FROM successions WHERE predecessor = $1 AND settled_cut IS NULL AND abandoned = 0",
                 )
-                .bind(i64::from(row.ordinal))
+                .bind(i(row.id.0))
                 .fetch_one(&mut *tx)
                 .await?
                 .try_get(0)?;
@@ -572,7 +573,7 @@ macro_rules! engine_rows {
                     return Ok(crate::BootVerdict::Wait(crate::WaitFor::Succession));
                 }
                 let prior = sqlx::query("SELECT generation, clean, state, boot FROM hosts WHERE ordinal = $1")
-                    .bind(i64::from(row.ordinal))
+                    .bind(i(row.id.0))
                     .fetch_optional(&mut *tx)
                     .await?;
                 let mut generation = world;
@@ -595,7 +596,7 @@ macro_rules! engine_rows {
                                 live = crate::HOST_LIVE,
                             );
                             let alive: i64 = sqlx::query(&sql)
-                                .bind(i64::from(row.ordinal))
+                                .bind(i(row.id.0))
                                 .bind(world)
                                 .bind(i(lease_ms))
                                 .fetch_one(&mut *tx)
@@ -605,7 +606,7 @@ macro_rules! engine_rows {
                                 // Another host runs: it inherits; this boot vouches for the death.
                                 // The boot judged dead above, and only it.
                                 sqlx::query("UPDATE hosts SET seen_ms = 0 WHERE ordinal = $1 AND boot = $2")
-                                    .bind(i64::from(row.ordinal))
+                                    .bind(i(row.id.0))
                                     .bind(prior_boot)
                                     .execute(&mut *tx)
                                     .await?;
@@ -629,7 +630,7 @@ macro_rules! engine_rows {
                                 "UPDATE hosts SET seen_ms = {NOW_MS} WHERE ordinal <> $1 AND clean = 0 AND state = {live}",
                                 live = crate::HOST_LIVE,
                             );
-                            sqlx::query(&sql).bind(i64::from(row.ordinal)).execute(&mut *tx).await?;
+                            sqlx::query(&sql).bind(i(row.id.0)).execute(&mut *tx).await?;
                         }
                         generation = world + 1;
                         bumped = true;
@@ -650,7 +651,7 @@ macro_rules! engine_rows {
                     live = crate::HOST_LIVE,
                 );
                 sqlx::query(&sql)
-                .bind(i64::from(row.ordinal))
+                .bind(i(row.id.0))
                 .bind(i(row.boot))
                 .bind(generation)
                 .bind(reg)
@@ -678,7 +679,7 @@ macro_rules! engine_rows {
                     .map(|r| {
                         let ordinal: i64 = r.try_get(0)?;
                         Ok(HostRow {
-                            ordinal: u32::try_from(ordinal)
+                            id: u64::try_from(ordinal).map(HostId)
                                 .map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {ordinal}")))?,
                             boot: u(r.try_get(1)?),
                             generation: u(r.try_get(2)?),
@@ -701,14 +702,14 @@ macro_rules! engine_rows {
             /// — if a registration or a decision holds the row, the beat FAILS (`Err`: "no beat this
             /// time"), it neither hangs nor answers `false`. It touches neither `world` nor
             /// `super_regions`. `false`: no live row of that boot (the caller was replaced).
-            pub(crate) async fn heartbeat(pool: &Pool, ordinal: u32, boot: u64) -> Result<bool, StoreError> {
+            pub(crate) async fn heartbeat(pool: &Pool, ordinal: HostId, boot: u64) -> Result<bool, StoreError> {
                 let sql = format!(
                     "UPDATE hosts SET seen_ms = {NOW_MS} WHERE ordinal = $1 AND boot = $2 AND state = {}",
                     crate::HOST_LIVE
                 );
                 let mut tx = pool.begin().await?;
                 cut_lock_timeout(&mut *tx, crate::HEARTBEAT_LOCK_TIMEOUT_MS).await?;
-                let done = sqlx::query(&sql).bind(i64::from(ordinal)).bind(i(boot)).execute(&mut *tx).await?;
+                let done = sqlx::query(&sql).bind(i(ordinal.0)).bind(i(boot)).execute(&mut *tx).await?;
                 tx.commit().await?;
                 Ok(done.rows_affected() == 1)
             }
@@ -731,9 +732,9 @@ macro_rules! engine_rows {
             }
 
             /// The rows `owner` holds, as a fence. A plain read, no locks.
-            pub(crate) async fn owned_by(pool: &Pool, owner: u32) -> Result<Fence, StoreError> {
+            pub(crate) async fn owned_by(pool: &Pool, owner: HostId) -> Result<Fence, StoreError> {
                 let rows = sqlx::query("SELECT sx, sz, epoch FROM super_regions WHERE owner = $1")
-                    .bind(i64::from(owner))
+                    .bind(i(owner.0))
                     .fetch_all(pool)
                     .await?;
                 let mut epochs = BTreeMap::new();
@@ -1089,7 +1090,7 @@ macro_rules! engine_rows {
             }
 
             /// The in-flight rows of host `host` (`None`: of every host), in order.
-            pub(crate) async fn load_in_flight(pool: &Pool, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
+            pub(crate) async fn load_in_flight(pool: &Pool, host: Option<HostId>) -> Result<Vec<InFlightRow>, StoreError> {
                 let mut tx = begin_read(pool).await?;
                 let rows = in_flight_rows(&mut tx, host).await?;
                 tx.commit().await?;
@@ -1101,7 +1102,7 @@ macro_rules! engine_rows {
             /// (checked in the same read transaction).
             pub(crate) async fn load_in_flight_of(
                 pool: &Pool,
-                host: u32,
+                host: HostId,
                 fence: &Fence,
             ) -> Result<Vec<InFlightRow>, StoreError> {
                 let mut tx = begin_read(pool).await?;
@@ -1114,14 +1115,14 @@ macro_rules! engine_rows {
             /// Refuses (`Unsupported`) unless, for each of `adopts`, an open succession names
             /// `heir` its heir. A plain read (no row lock): a staged part holding a lock on
             /// `successions` would block the decision that settles it.
-            async fn check_adopts(conn: &mut Conn, heir: u32, adopts: &[u32]) -> Result<(), StoreError> {
+            async fn check_adopts(conn: &mut Conn, heir: HostId, adopts: &[HostId]) -> Result<(), StoreError> {
                 for predecessor in adopts {
                     let open: i64 = sqlx::query(
                         "SELECT COUNT(*) FROM successions WHERE predecessor = $1 AND heir = $2 \
                          AND settled_cut IS NULL AND abandoned = 0",
                     )
-                    .bind(i64::from(*predecessor))
-                    .bind(i64::from(heir))
+                    .bind(i(predecessor.0))
+                    .bind(i(heir.0))
                     .fetch_one(&mut *conn)
                     .await?
                     .try_get(0)?;
@@ -1147,7 +1148,7 @@ macro_rules! engine_rows {
                     .map(|r| {
                         let id = u(r.try_get(0)?);
                         let ordinal = |v: i64| {
-                            u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("successions {id}: ordinal {v}")))
+                            u64::try_from(v).map(HostId).map_err(|_| StoreError::Corrupt(format!("successions {id}: ordinal {v}")))
                         };
                         let kind: i64 = r.try_get(4)?;
                         let survivors: String = r.try_get(6)?;
@@ -1193,12 +1194,12 @@ macro_rules! engine_rows {
                 Ok(out)
             }
 
-            async fn in_flight_rows(tx: &mut Tx, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
+            async fn in_flight_rows(tx: &mut Tx, host: Option<HostId>) -> Result<Vec<InFlightRow>, StoreError> {
                 let rows = sqlx::query(
                     "SELECT seq, kind, target_rx, target_rz, stamp, payload FROM in_flight \
                      WHERE $1 IS NULL OR host = $1 ORDER BY seq",
                 )
-                .bind(host.map(i64::from))
+                .bind(host.map(|h| i(h.0)))
                 .fetch_all(&mut **tx)
                 .await?;
                 let mut out = Vec::with_capacity(rows.len());
@@ -1417,7 +1418,7 @@ macro_rules! engine_rows {
                         q = q.bind(rc.x as i64).bind(rc.z as i64);
                     }
                     if owned {
-                        q = q.bind(i64::from(fence.owner)).bind(i64::from(s));
+                        q = q.bind(i(fence.owner.0)).bind(i64::from(s));
                     }
                     if let Some(r) = q.fetch_optional(&mut *conn).await? {
                         let id = EntityId {
@@ -1558,20 +1559,20 @@ macro_rules! engine_rows {
                 // The rows this process adopted at start ([`Fence::in_flight_scope`]): its
                 // own host's, or (all-in-one) every host's.
                 sqlx::query("DELETE FROM in_flight WHERE $1 IS NULL OR host = $1")
-                    .bind(fence.in_flight_scope().map(|_| cut.host as i64))
+                    .bind(fence.in_flight_scope().map(|_| i(cut.host.0)))
                     .execute(&mut *conn)
                     .await?;
                 // An heir's part also replaces the rows of the predecessors it adopts (checked
                 // above): what it kept of them is in `cut.in_flight`, now under its own host.
                 for predecessor in &cut.adopts {
                     sqlx::query("DELETE FROM in_flight WHERE host = $1")
-                        .bind(i64::from(*predecessor))
+                        .bind(i(predecessor.0))
                         .execute(&mut *conn)
                         .await?;
                 }
                 // `seq` is the table's key across all hosts: each host owns a range
                 // (`host << 32`), so concurrent commits never collide and need no MAX read.
-                let base = (cut.host as i64) << 32;
+                let base = (i(cut.host.0)) << 32;
                 for (seq, row) in cut.in_flight.iter().enumerate() {
                     let (kind, target, stamp, payload) = match row {
                         InFlightRow::Transfer { target, bundle, stamp } => {
@@ -1591,7 +1592,7 @@ macro_rules! engine_rows {
                     .bind(target.z as i64)
                     .bind(i(stamp))
                     .bind(payload)
-                    .bind(cut.host as i64)
+                    .bind(i(cut.host.0))
                     .execute(&mut *conn)
                     .await?;
                 }

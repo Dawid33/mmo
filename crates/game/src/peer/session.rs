@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 
 use super::{PeerHello, PeerLink, PeerMsg, Reliable, Volatile};
+use crate::HostId;
 use crate::CutId;
 
 /// What the session hands its owner from a [`PeerSession::pump`].
@@ -64,7 +65,7 @@ enum Conn {
 /// down link) nothing moves either way and both counts stand still until thawed.
 pub struct PeerSession {
     me: PeerHello,
-    peer: u32,
+    peer: HostId,
     /// Queued or sent and not acknowledged, with their numbers, in order.
     out: VecDeque<(u64, Reliable)>,
     /// The number the next queued message gets.
@@ -102,7 +103,7 @@ pub struct PeerSession {
 impl PeerSession {
     /// The session of host `me` with host `peer`. `me.received_through` and
     /// `me.received_from_boot` are ignored: the session fills them into every hello it sends.
-    pub fn new(me: PeerHello, peer: u32) -> Self {
+    pub fn new(me: PeerHello, peer: HostId) -> Self {
         PeerSession {
             me,
             peer,
@@ -158,7 +159,7 @@ impl PeerSession {
     }
 
     /// The peer host's ordinal.
-    pub fn peer(&self) -> u32 {
+    pub fn peer(&self) -> HostId {
         self.peer
     }
 
@@ -414,8 +415,8 @@ impl PeerSession {
 
     /// The peer's hello of this connection.
     fn hello(&mut self, h: PeerHello, events: &mut Vec<PeerEvent>) {
-        if h.ordinal != self.peer {
-            log::warn!("peer {}: hello from host {} ignored", self.peer, h.ordinal);
+        if h.id != self.peer {
+            log::warn!("peer {}: hello from host {} ignored", self.peer, h.id);
             return;
         }
         if self.refused.contains(&h.boot) {

@@ -12,7 +12,7 @@ use crate::{
 /// with the hash of its pinned self-signed certificate. `None` = not offered.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct HostEndpoint {
-    pub ordinal: u32,
+    pub id: crate::HostId,
     pub quic: Option<String>,
     pub webtransport: Option<String>,
     pub cert_hash: Option<String>,
@@ -21,7 +21,7 @@ pub struct HostEndpoint {
 /// A host's first message on every (re)connected peer link.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PeerHello {
-    pub ordinal: u32,
+    pub id: crate::HostId,
     /// Random per host process start: a new boot voids the old numbering of reliable
     /// messages both ways.
     pub boot: u64,
@@ -82,7 +82,7 @@ pub enum Reliable {
     /// one the login service pushed it to), `hops` how often it was forwarded. `player` and
     /// `record_region` are what `origin` read from the store for the token.
     SpawnOrder {
-        origin: u32,
+        origin: crate::HostId,
         hops: u8,
         player_token: String,
         session_epoch: u64,

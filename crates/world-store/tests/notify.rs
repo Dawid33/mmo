@@ -3,6 +3,7 @@
 //! period), and `stored_regions_since` for what a notice names. Postgres only, except the
 //! SQLite no-ops.
 
+use crate::common::hid;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -44,7 +45,7 @@ fn region(tick: u64, ground: bool) -> PortableRegion {
 }
 
 fn cut(id: u64, tick: u64, regions: Vec<(RegionCoords, PortableRegion)>) -> WorldCut {
-    WorldCut { id: CutId(id), host: 0, tick, regions, in_flight: vec![], players: vec![], history: None, adopts: vec![] }
+    WorldCut { id: CutId(id), host: hid(0), tick, regions, in_flight: vec![], players: vec![], history: None, adopts: vec![] }
 }
 
 /// The next notice that is not a `Resync`, within `within`.

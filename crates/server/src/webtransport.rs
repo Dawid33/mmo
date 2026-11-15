@@ -57,7 +57,7 @@ fn server_config(bind: SocketAddr, cert: &ClientCert) -> ServerConfig {
 pub async fn serve(
     bind: SocketAddr,
     cert: ClientCert,
-    ordinal: u32,
+    ordinal: game::HostId,
     send: Sender<ServerEvent>,
     sinks: Arc<DashMap<ClientId, ClientSink>>,
     next_client_id: Arc<AtomicU64>,
@@ -209,9 +209,9 @@ async fn refuse(session: &wtransport::Connection, why: &str) {
 /// writes it — the one host of a single-host run — so several dev hosts (`just dev-r3`) no
 /// longer overwrite each other's. Every host also writes its own
 /// `webtransport-cert-hash-<ordinal>.json`.
-pub fn cert_hash_file_names(ordinal: u32) -> Vec<String> {
-    let own = format!("webtransport-cert-hash-{ordinal}.json");
-    match ordinal {
+pub fn cert_hash_file_names(ordinal: game::HostId) -> Vec<String> {
+    let own = format!("webtransport-cert-hash-{}.json", ordinal.0);
+    match ordinal.0 {
         0 => vec!["webtransport-cert-hash.json".to_string(), own],
         _ => vec![own],
     }
@@ -220,7 +220,7 @@ pub fn cert_hash_file_names(ordinal: u32) -> Vec<String> {
 /// Dev-mode CA substitute: the page fetches this (wasm-server-runner serves
 /// assets/ over HTTP) and passes the hash to serverCertificateHashes. `Ok(false)`: no
 /// source tree here, nothing written (see [`write_cert_hash_files_into`]).
-fn write_cert_hash_file(hex: &str, port: u16, ordinal: u32) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+fn write_cert_hash_file(hex: &str, port: u16, ordinal: game::HostId) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Resolve the repo-root assets dir from the crate location, not the CWD:
     // the binary is run from the repo root but tests run from crates/server.
     // (env! bakes a build-machine path; acceptable for this localhost-dev file.)
@@ -235,7 +235,7 @@ fn write_cert_hash_files_into(
     assets: &std::path::Path,
     hex: &str,
     port: u16,
-    ordinal: u32,
+    ordinal: game::HostId,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     if !assets.is_dir() {
         return Ok(false);
@@ -255,9 +255,9 @@ mod cert_tests {
     /// pins a typed local address by, so the last host to start no longer wins it.
     #[test]
     fn only_host_zero_writes_the_page_s_hash_file() {
-        assert_eq!(cert_hash_file_names(0), ["webtransport-cert-hash.json", "webtransport-cert-hash-0.json"]);
-        assert_eq!(cert_hash_file_names(1), ["webtransport-cert-hash-1.json"]);
-        assert_eq!(cert_hash_file_names(7), ["webtransport-cert-hash-7.json"]);
+        assert_eq!(cert_hash_file_names(game::HostId(0)), ["webtransport-cert-hash.json", "webtransport-cert-hash-0.json"]);
+        assert_eq!(cert_hash_file_names(game::HostId(1)), ["webtransport-cert-hash-1.json"]);
+        assert_eq!(cert_hash_file_names(game::HostId(7)), ["webtransport-cert-hash-7.json"]);
     }
 
     /// A deployed binary has no `assets/` of its build's source tree: it writes nothing and
@@ -266,7 +266,7 @@ mod cert_tests {
     fn no_assets_directory_writes_nothing() {
         let dir = std::env::temp_dir().join(format!("cert-hash-missing-{}", std::process::id()));
         assert!(!dir.exists());
-        assert!(!write_cert_hash_files_into(&dir, "ab", 6467, 0).expect("a missing directory is not an error"));
+        assert!(!write_cert_hash_files_into(&dir, "ab", 6467, game::HostId(0)).expect("a missing directory is not an error"));
         assert!(!dir.exists(), "nothing created");
     }
 
@@ -274,8 +274,8 @@ mod cert_tests {
     fn an_assets_directory_gets_the_hash_files() {
         let dir = std::env::temp_dir().join(format!("cert-hash-present-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(write_cert_hash_files_into(&dir, "ab", 6467, 0).unwrap());
-        for name in cert_hash_file_names(0) {
+        assert!(write_cert_hash_files_into(&dir, "ab", 6467, game::HostId(0)).unwrap());
+        for name in cert_hash_file_names(game::HostId(0)) {
             assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), r#"{"sha256_hex":"ab","port":6467}"#);
         }
         std::fs::remove_dir_all(&dir).unwrap();

@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::HostId;
 use crate::history::{
     AdventureRefusal, CalendarTick, Directive, EmbarkRefusal, LegendsPage, LegendsQuery, PersonId, SiteId,
 };
@@ -16,7 +17,7 @@ use crate::{
 /// host process start, `seq` counts up within it.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId {
-    pub host: u32,
+    pub host: HostId,
     pub boot: u64,
     pub seq: u64,
 }
@@ -123,7 +124,7 @@ pub enum HostMsg {
     /// old process is gone, so the answers remembered for that host's other boots are
     /// forgotten. `settled_below`: as [`HostMsg::Settled`]'s `below`, for `boot`.
     Attach {
-        host: u32,
+        host: HostId,
         epoch: u64,
         running: Vec<RunningRegion>,
         online: Vec<OnlinePlayer>,
@@ -133,7 +134,7 @@ pub enum HostMsg {
         /// Players this host handed to another host (`to`, the hop they had here) since
         /// the last [`CoordMsg::Attached`] it received: their `PlayerHandedTo` may have been
         /// lost with the old connection.
-        handed: Vec<(PlayerId, u32, u64)>,
+        handed: Vec<(PlayerId, HostId, u64)>,
         /// The world cut this host takes part in and has not heard the outcome of
         /// ([`CoordMsg::CutDone`]): the coordinator answers it (from what it decided, or
         /// the store's decision, an undecided cut aborted).
@@ -188,7 +189,7 @@ pub enum HostMsg {
     /// (`PlayerOnline`, or `PlayerOffline` if it parks there on arrival). Sent instead of
     /// `PlayerOffline`, so nobody takes the fortress of a player crossing hosts. `hop`: the
     /// one it had here (host `to` places it at `hop + 1`).
-    PlayerHandedTo { player: PlayerId, to: u32, hop: u64 },
+    PlayerHandedTo { player: PlayerId, to: HostId, hop: u64 },
     /// Every request of this host's `boot` with `seq < below` has been answered and
     /// applied here, or was never sent: the coordinator forgets their memoised answers
     /// (no copy of them can come any more). Sent whenever the host's lowest outstanding
@@ -223,7 +224,7 @@ pub enum HostMsg {
     /// numbering toward it, counted against `peer`'s process `boot` (0: no hello of `peer`
     /// yet). The coordinator relays it to `peer` ([`CoordMsg::CutPeerCount`]), only between
     /// participants of the running cut.
-    CutPeerCount { cut: CutId, peer: u32, received_through: u64, boot: u64 },
+    CutPeerCount { cut: CutId, peer: HostId, received_through: u64, boot: u64 },
 }
 
 /// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).
@@ -244,7 +245,7 @@ pub enum CutFailure {
 pub enum Target {
     /// One host (by ordinal): a reply or claim answer to the host that asked, a region's
     /// messages to the host that runs it, an attach's echo and view to the host attaching.
-    Host(u32),
+    Host(HostId),
     /// Every host (the world's view, the calendar, the sites).
     Every,
 }
@@ -300,7 +301,7 @@ pub enum CoordMsg {
     /// ([`crate::Reliable::CutMark`]) and stages its part; `leaving` are the hosts that
     /// leave in this cut (among `hosts`; [`HostMsg::LeaveRequest`]). `generation`: the world generation the cut is of — a
     /// host of another generation refuses it.
-    BeginCut { cut: CutId, tick: Tick, hosts: Vec<u32>, leaving: Vec<u32>, generation: u64 },
+    BeginCut { cut: CutId, tick: Tick, hosts: Vec<HostId>, leaving: Vec<HostId>, generation: u64 },
     /// World cut `cut` is decided: `committed` (every part visible) or aborted (none).
     CutDone { cut: CutId, committed: bool },
     /// Host `predecessor` (its process `predecessor_boot`) was declared dead (or left) and
@@ -310,13 +311,13 @@ pub enum CoordMsg {
     /// the predecessor, and answers [`HostMsg::SuccessionApplied`].
     Succession {
         id: SuccessionId,
-        predecessor: u32,
+        predecessor: HostId,
         predecessor_boot: u64,
-        heir: u32,
+        heir: HostId,
         kind: SuccessionKind,
         base_cut: CutId,
         moved: Vec<(SuperRegion, u64)>,
-        survivors: Vec<u32>,
+        survivors: Vec<HostId>,
     },
     /// Succession `id` is over: `settled` by a committed world cut, or abandoned by a world
     /// rollback. The coordinator's OWN rollback is followed by [`CoordMsg::Generation`]; one
@@ -333,7 +334,7 @@ pub enum CoordMsg {
     /// numbering toward it, counted against this host's process `boot` (its
     /// [`HostMsg::CutPeerCount`], relayed): everything numbered above it is this host's in
     /// the cut (a boot that is not this host's own counts 0).
-    CutPeerCount { cut: CutId, from: u32, received_through: u64, boot: u64 },
+    CutPeerCount { cut: CutId, from: HostId, received_through: u64, boot: u64 },
 }
 
 impl CoordMsg {

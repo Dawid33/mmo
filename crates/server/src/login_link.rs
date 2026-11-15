@@ -50,6 +50,7 @@
 //! `KickAck` once every host applied a kick, `SessionEnded` only when a session left the
 //! world, never on a hand-off to another host).
 
+use game::HostId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::SocketAddr;
@@ -78,10 +79,10 @@ pub const ENTRY_HOST_ENV: &str = "VOXEL_ENTRY_HOST";
 
 /// The entry host's ordinal from an env value (unset or empty: 0); it must be one of the
 /// world's `hosts`.
-pub fn entry_host_from(value: Option<&str>, hosts: u32) -> Result<u32, String> {
+pub fn entry_host_from(value: Option<&str>, hosts: u32) -> Result<HostId, String> {
     let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or("0");
-    let entry: u32 = value.parse().map_err(|_| format!("{ENTRY_HOST_ENV}={value:?} is not a host ordinal"))?;
-    if entry >= hosts {
+    let entry: HostId = value.parse::<u64>().map(HostId).map_err(|_| format!("{ENTRY_HOST_ENV}={value:?} is not a host ordinal"))?;
+    if entry.0 >= u64::from(hosts) {
         return Err(format!("{ENTRY_HOST_ENV}={entry} is not a host of this world (VOXEL_HOSTS={hosts})"));
     }
     Ok(entry)
@@ -469,7 +470,7 @@ pub fn start_relaying(
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
-    ordinal: u32,
+    ordinal: HostId,
 ) -> io::Result<LoginLink> {
     if !orders.relays() {
         return Err(io::Error::other("a relaying login link needs relaying spawn orders (LoginRelay::new)"));
@@ -484,7 +485,7 @@ fn start_with(
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
-    relay: Option<u32>,
+    relay: Option<HostId>,
 ) -> io::Result<LoginLink> {
     if let Some(dir) = cert_hash_file.as_deref().and_then(std::path::Path::parent).filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
@@ -506,7 +507,7 @@ fn serve(
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
-    relay: Option<u32>,
+    relay: Option<HostId>,
 ) {
     let login_peers = |f: &mut dyn FnMut(&mut BTreeSet<PeerId>)| {
         if let Some(login) = orders.login.get() {
@@ -731,6 +732,15 @@ impl LoginRelay {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use game::HostId;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -842,8 +852,8 @@ mod tests {
 
     #[test]
     fn entry_host_env() {
-        assert_eq!(entry_host_from(None, 2), Ok(0));
-        assert_eq!(entry_host_from(Some(" 1 "), 2), Ok(1));
+        assert_eq!(entry_host_from(None, 2), Ok(h(0)));
+        assert_eq!(entry_host_from(Some(" 1 "), 2), Ok(h(1)));
         assert!(entry_host_from(Some("2"), 2).is_err());
         assert!(entry_host_from(Some("x"), 2).is_err());
     }

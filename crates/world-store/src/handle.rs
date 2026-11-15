@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use game::{
-    CutId, EntityId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, TerrainSnapshot, Tick,
+    CutId, HostId, EntityId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, TerrainSnapshot, Tick,
     WorldCut,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -40,7 +40,7 @@ pub struct CutCommitted {
 /// as BIGINT by a bit cast (`as i64` / `as u64`, like every u64 of the store).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRow {
-    pub ordinal: u32,
+    pub id: HostId,
     pub boot: u64,
     /// The world generation this boot runs at (set by [`StoreHandle::register_host`]).
     pub generation: u64,
@@ -413,7 +413,7 @@ impl StoreHandle {
 
     /// The in-flight rows the last committed cuts left, in their order: host `host`'s
     /// (`None`: every host's — pass [`crate::Fence::in_flight_scope`]).
-    pub fn load_in_flight(&self, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
+    pub fn load_in_flight(&self, host: Option<HostId>) -> Result<Vec<InFlightRow>, StoreError> {
         self.ask(|r| Request::LoadInFlight(host, r))
     }
 
@@ -543,8 +543,8 @@ impl StoreHandle {
         cut: CutId,
         tick: Tick,
         commit: bool,
-        hosts: Vec<u32>,
-        leaving: Vec<u32>,
+        hosts: Vec<HostId>,
+        leaving: Vec<HostId>,
         fence: CoordinatorFence,
         generation: u64,
         settles: Vec<SuccessionId>,
@@ -564,8 +564,8 @@ impl StoreHandle {
         cut: CutId,
         tick: Tick,
         commit: bool,
-        hosts: Vec<u32>,
-        leaving: Vec<u32>,
+        hosts: Vec<HostId>,
+        leaving: Vec<HostId>,
         fence: CoordinatorFence,
         generation: u64,
         settles: Vec<SuccessionId>,
@@ -653,8 +653,8 @@ impl StoreHandle {
     /// is a retry. Postgres only (`Unsupported` on SQLite). Nothing but `Done` writes.
     pub fn declare_succession(
         &self,
-        dead: Vec<(u32, u64)>,
-        heirs: Vec<u32>,
+        dead: Vec<(HostId, u64)>,
+        heirs: Vec<HostId>,
         kind: SuccessionKind,
         fence: CoordinatorFence,
         generation: u64,
@@ -666,8 +666,8 @@ impl StoreHandle {
     /// [`Self::declare_succession`], answered on the receiver.
     pub fn declare_succession_later(
         &self,
-        dead: Vec<(u32, u64)>,
-        heirs: Vec<u32>,
+        dead: Vec<(HostId, u64)>,
+        heirs: Vec<HostId>,
         kind: SuccessionKind,
         fence: CoordinatorFence,
         generation: u64,
@@ -712,7 +712,7 @@ impl StoreHandle {
     /// with no other row to inherit ([`crate::Retired::NoHeir`]), or for a row that is not a
     /// dirty live one or that an open succession names ([`crate::Retired::Refused`]). The heir
     /// finds it at its next boot: the coordinator sends it the order. Postgres only.
-    pub fn retire_offline(&self, ordinal: u32) -> Result<crate::Retired, StoreError> {
+    pub fn retire_offline(&self, ordinal: HostId) -> Result<crate::Retired, StoreError> {
         self.ask(|r| Request::RetireOffline(ordinal, r))
     }
 
@@ -722,7 +722,7 @@ impl StoreHandle {
     /// either comes first (refused) or overwrites the vouch (the coordinator's declaration
     /// re-checks the lapse: `NotLapsed`, harmless). The coordinator declares a vouched row at
     /// its next read. Postgres only.
-    pub fn vouch_host(&self, ordinal: u32) -> Result<crate::Vouched, StoreError> {
+    pub fn vouch_host(&self, ordinal: HostId) -> Result<crate::Vouched, StoreError> {
         self.ask(|r| Request::VouchHost(ordinal, r))
     }
 
@@ -747,7 +747,7 @@ impl StoreHandle {
     /// The in-flight rows the last committed cuts left for host `host`, read by its heir
     /// `fence.owner`: refused with `Unsupported` unless an open succession makes it the heir
     /// of `host` (as a cut part's [`WorldCut::adopts`]).
-    pub fn load_in_flight_of(&self, host: u32, fence: &Fence) -> Result<Vec<InFlightRow>, StoreError> {
+    pub fn load_in_flight_of(&self, host: HostId, fence: &Fence) -> Result<Vec<InFlightRow>, StoreError> {
         let fence = fence.clone();
         self.ask(|r| Request::LoadInFlightOf(host, fence, r))
     }
@@ -756,7 +756,7 @@ impl StoreHandle {
     /// its main loop).
     pub fn load_in_flight_of_later(
         &self,
-        host: u32,
+        host: HostId,
         fence: &Fence,
     ) -> crossbeam::channel::Receiver<Result<Vec<InFlightRow>, StoreError>> {
         let fence = fence.clone();
@@ -799,7 +799,7 @@ impl StoreHandle {
     /// Claims `srs` for `owner` (one transaction): each super-region's epoch
     /// goes up by one (a new one starts at 1), fencing whoever held it.
     /// Unguarded: a boot's claim before it registered (`AllInOne`, `Static`), tools and tests.
-    pub fn claim_super_regions(&self, owner: u32, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+    pub fn claim_super_regions(&self, owner: HostId, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
         self.ask(|r| Request::ClaimSuperRegions(owner, srs, None, r))
     }
 
@@ -807,7 +807,7 @@ impl StoreHandle {
     /// None }` (nothing claimed) unless host `owner`'s `hosts` row is still that live boot —
     /// a boot declared dead (R4) cannot take its rows back from the heir. What a `claim` host
     /// re-claims its own rows with.
-    pub fn claim_super_regions_live(&self, owner: u32, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+    pub fn claim_super_regions_live(&self, owner: HostId, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
         self.ask(|r| Request::ClaimSuperRegions(owner, srs, Some(boot), r))
     }
 
@@ -817,14 +817,14 @@ impl StoreHandle {
     /// like [`Self::claim_super_regions`]. The fence holds the rows won (possibly none).
     /// Refused with `Fenced { sr: None }` (nothing claimed) unless host `owner`'s `hosts` row
     /// is still the live boot `boot`: a host declared dead (R4) wins nothing.
-    pub fn claim_free(&self, owner: u32, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+    pub fn claim_free(&self, owner: HostId, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
         self.ask(|r| Request::ClaimFree(owner, boot, srs, r))
     }
 
     /// [`Self::claim_free`], answered on the receiver.
     pub fn claim_free_later(
         &self,
-        owner: u32,
+        owner: HostId,
         boot: u64,
         srs: Vec<SuperRegion>,
     ) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
@@ -838,7 +838,7 @@ impl StoreHandle {
     /// `CutPending` (as the handle's other operations) while this handle has an undecided
     /// staged cut part (its rows would be freed under it: release after
     /// [`Self::cut_decided`]). No host calls it on exit; tools and tests do.
-    pub fn release(&self, owner: u32, fence: &Fence) -> Result<(), StoreError> {
+    pub fn release(&self, owner: HostId, fence: &Fence) -> Result<(), StoreError> {
         if fence.owner != owner {
             return Err(StoreError::Unsupported(format!(
                 "releasing host {owner}'s super-regions with host {}'s fence",
@@ -902,7 +902,7 @@ impl StoreHandle {
         self.ask(|r| Request::SetSuperRegionRegions(s, r))
     }
 
-    /// Registers this process's boot as host `row.ordinal` (once per boot, right after its
+    /// Registers this process's boot as host `row.id` (once per boot, right after its
     /// claim): one fence-checked transaction under the world row's lock, decided by the
     /// ordinal's prior row — except that FIRST, under every policy, an open succession naming
     /// this ordinal as its predecessor → [`WaitFor::Succession`] (nothing written), whatever the
@@ -936,14 +936,14 @@ impl StoreHandle {
     /// With Postgres a row lock held by a registration or a decision makes the beat fail with an error
     /// after [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (not `false`). Unfenced on purpose: it writes only the caller's own row and proves nothing but
     /// liveness (ownership is what the fence proves, and every write still checks it).
-    pub fn heartbeat(&self, ordinal: u32, boot: u64) -> Result<bool, StoreError> {
+    pub fn heartbeat(&self, ordinal: HostId, boot: u64) -> Result<bool, StoreError> {
         self.ask(|r| Request::Heartbeat(ordinal, boot, r))
     }
 
     /// [`Self::heartbeat`], answered on the receiver.
     pub fn heartbeat_later(
         &self,
-        ordinal: u32,
+        ordinal: HostId,
         boot: u64,
     ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
         self.ask_later(|r| Request::Heartbeat(ordinal, boot, r))
@@ -961,12 +961,12 @@ impl StoreHandle {
 
     /// The rows `owner` holds now, as a fence (`all_hosts: false`). A plain read: a write
     /// under it still checks the stored epoch.
-    pub fn owned_by(&self, owner: u32) -> Result<Fence, StoreError> {
+    pub fn owned_by(&self, owner: HostId) -> Result<Fence, StoreError> {
         self.ask(|r| Request::OwnedBy(owner, r))
     }
 
     /// [`Self::owned_by`], answered on the receiver.
-    pub fn owned_by_later(&self, owner: u32) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
+    pub fn owned_by_later(&self, owner: HostId) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
         self.ask_later(|r| Request::OwnedBy(owner, r))
     }
 

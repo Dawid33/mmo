@@ -33,6 +33,7 @@
 //! [`crate::claims::EXIT_FENCED`] through `cuts::exit_world` — the link goes down and the
 //! thread ends with [`ServerExit::Fenced`]. Library code never calls `process::exit`.
 
+use game::HostId;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -113,7 +114,7 @@ pub struct HostEnd {
     /// The host dropped its end.
     gone: bool,
     /// The host's ordinal, as its `Attach` names it (0 before one).
-    ordinal: u32,
+    ordinal: HostId,
 }
 
 /// A connected pair: the host's [`ChannelWorldLink`] (up) and the coordinator's [`HostEnd`].
@@ -124,7 +125,7 @@ pub fn channel_link() -> (ChannelWorldLink, HostEnd) {
     let up = Arc::new(AtomicBool::new(true));
     (
         ChannelWorldLink { tx: host_tx, rx: coord_rx, up: up.clone(), wake: wake_rx },
-        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: 0 },
+        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: HostId::SOLO },
     )
 }
 
@@ -168,7 +169,7 @@ impl LinkSet {
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
     /// The live connection of a host ordinal.
-    Host(u32),
+    Host(HostId),
     /// One connection (an attach echo goes to the connection whose `Attach` it answers).
     Peer(PeerId),
     Every,
@@ -305,9 +306,9 @@ struct Routes {
     /// Peers refused or replaced ([`Routes::admit`]); their messages are ignored.
     refused: BTreeSet<PeerId>,
     /// Connected host peers and their ordinals (a reconnect is a new peer).
-    hosts: BTreeMap<PeerId, u32>,
+    hosts: BTreeMap<PeerId, HostId>,
     /// The live connection of each ordinal, with the registration number its hello carried.
-    live: BTreeMap<u32, (PeerId, u64)>,
+    live: BTreeMap<HostId, (PeerId, u64)>,
     /// `Attach`es handled whose echo has not been routed yet: (connection, epoch), in order.
     attaches: VecDeque<(PeerId, u64)>,
     /// The process boot each host peer's hello named: its `Attach` names the same one
@@ -334,7 +335,7 @@ impl Routes {
     /// store, so this holds across a coordinator restart. Otherwise the newer connection of
     /// an ordinal replaces the older. (Registration numbers replace R3's claim epochs: under
     /// `claim` a host's claims change during its life, its registration never does.)
-    fn admit(&mut self, peer: PeerId, ordinal: u32, reg: u64, stored: Option<(u64, i64)>) -> Admit {
+    fn admit(&mut self, peer: PeerId, ordinal: HostId, reg: u64, stored: Option<(u64, i64)>) -> Admit {
         let current = matches!(stored, Some((stored_reg, state)) if stored_reg == reg && state == game::HOST_LIVE);
         if !current {
             log::error!(
@@ -365,7 +366,7 @@ impl Routes {
 
     /// `peer` is refused from now on (replaced, or its `Attach` was refused): its messages
     /// are ignored and its pending attach echo dropped. The ordinal it served, if any.
-    fn refuse(&mut self, peer: PeerId) -> Option<u32> {
+    fn refuse(&mut self, peer: PeerId) -> Option<HostId> {
         self.refused.insert(peer);
         self.attaches.retain(|(p, _)| *p != peer);
         let ordinal = self.hosts.remove(&peer)?;
@@ -376,7 +377,7 @@ impl Routes {
     }
 
     /// `peer`'s connection ended.
-    fn gone(&mut self, peer: PeerId) -> Option<u32> {
+    fn gone(&mut self, peer: PeerId) -> Option<HostId> {
         self.refused.remove(&peer);
         self.boots.remove(&peer);
         let ordinal = self.hosts.remove(&peer)?;
@@ -387,7 +388,7 @@ impl Routes {
     }
 
     /// Note what routes later messages from `msg`, sent by host `ordinal` on `peer`.
-    fn note(&mut self, peer: PeerId, ordinal: u32, msg: &HostMsg) {
+    fn note(&mut self, peer: PeerId, ordinal: HostId, msg: &HostMsg) {
         if let HostMsg::Attach { host, epoch, .. } = msg {
             if *host != ordinal {
                 log::warn!("[coordinator] host {ordinal}'s Attach names host {host}; routed by its link");
@@ -412,7 +413,7 @@ impl Routes {
     }
 
     /// The newest connection of host `ordinal`.
-    fn peer_of(&self, ordinal: u32) -> Option<PeerId> {
+    fn peer_of(&self, ordinal: HostId) -> Option<PeerId> {
         self.hosts.iter().rev().find(|(_, o)| **o == ordinal).map(|(p, _)| *p)
     }
 }
@@ -431,9 +432,9 @@ fn after_store_read<T>(value: T) -> T {
 /// Host `ordinal`'s `hosts` row as stored — `(reg, state)` — for its hello's admission;
 /// `None` (refused: "wait, never guess" — the host redials) when it has no row or the store
 /// cannot be read.
-fn stored_registration(store: &StoreHandle, ordinal: u32) -> Option<(u64, i64)> {
+fn stored_registration(store: &StoreHandle, ordinal: HostId) -> Option<(u64, i64)> {
     match store.hosts() {
-        Ok(rows) => rows.into_iter().find(|r| r.ordinal == ordinal).map(|r| (r.reg, r.state)),
+        Ok(rows) => rows.into_iter().find(|r| r.id == ordinal).map(|r| (r.reg, r.state)),
         Err(e) => {
             log::error!("[coordinator] host {ordinal}'s hosts row could not be read ({e}); its hello is refused");
             None
@@ -447,7 +448,7 @@ fn stored_registration(store: &StoreHandle, ordinal: u32) -> Option<(u64, i64)> 
 /// tell it, e.g. while no peer of the newer generation dials it) and ignored from then on.
 /// A store that cannot be read refuses it too (`Err(None)`: its link is closed, the host
 /// redials and attaches again).
-fn generation_current(store: &StoreHandle, ordinal: u32, generation: u64) -> Result<(), Option<u64>> {
+fn generation_current(store: &StoreHandle, ordinal: HostId, generation: u64) -> Result<(), Option<u64>> {
     match store.world_generation() {
         Ok(stored) if generation < stored => {
             log::error!(
@@ -642,7 +643,7 @@ struct Recording {
 
 /// A host's question about a cut's outcome, being answered from the store.
 struct Lookup {
-    host: u32,
+    host: HostId,
     cut: game::CutId,
     rx: Option<Answer<Option<bool>>>,
     /// The cut was undecided: `abort_cut`'s answer.
@@ -1009,7 +1010,7 @@ impl CoordinatorRuntime {
                 while let Ok((peer, event)) = l.events.try_recv() {
                     match event {
                         LinkEvent::Up(hello) => match hello.role {
-                            PeerRole::Host { ordinal, boot, reg } => match l.routes.admit(
+                            PeerRole::Host { id: ordinal, boot, reg } => match l.routes.admit(
                                 peer,
                                 ordinal,
                                 reg,
@@ -1109,17 +1110,17 @@ impl CoordinatorRuntime {
                 Err(TryRecvError::Empty) => return,
                 Ok(Ok(rows)) => {
                     // A host that left and registered again (another boot) is expected again.
-                    self.core.set_host_boots(rows.iter().map(|r| (r.ordinal, r.boot)).collect());
+                    self.core.set_host_boots(rows.iter().map(|r| (r.id, r.boot)).collect());
                     // A row marked dead (a takeover declared it) runs nothing: not expected
                     // (`decide_cut` reads the same predicate).
-                    let live: BTreeSet<u32> =
-                        rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).map(|r| r.ordinal).collect();
+                    let live: BTreeSet<HostId> =
+                        rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).map(|r| r.id).collect();
                     crate::health::Health::global().hosts_live(live.len() as u64);
                     self.core.set_expected_hosts(live);
                     let seen: Vec<game::coordinator::HostSeen> = rows
                         .iter()
                         .map(|r| game::coordinator::HostSeen {
-                            ordinal: r.ordinal,
+                            ordinal: r.id,
                             boot: r.boot,
                             clean: r.clean,
                             state: r.state,
@@ -1340,8 +1341,8 @@ impl CoordinatorRuntime {
                 match answer {
                     Ok(rows) => {
                         let owners: BTreeMap<game::SuperRegion, i64> = rows.into_iter().map(|(sr, o, _)| (sr, o)).collect();
-                        let wanted: BTreeSet<u32> =
-                            srs.iter().filter_map(|sr| owners.get(sr)).filter_map(|o| u32::try_from(*o).ok()).collect();
+                        let wanted: BTreeSet<HostId> =
+                            srs.iter().filter_map(|sr| owners.get(sr)).filter_map(|o| u64::try_from(*o).ok().map(HostId)).collect();
                         for owner in wanted {
                             self.core.land_wanted(owner, now);
                         }
@@ -1400,7 +1401,7 @@ impl CoordinatorRuntime {
                         for _ in list {
                             crate::health::Health::global().succession_declared();
                         }
-                        let dead: Vec<(u32, u64)> = list.iter().map(|s| (s.predecessor, s.predecessor_boot)).collect();
+                        let dead: Vec<(HostId, u64)> = list.iter().map(|s| (s.predecessor, s.predecessor_boot)).collect();
                         self.close_succeeded(&dead);
                     }
                     self.core.declared(declared, now);
@@ -1440,7 +1441,7 @@ impl CoordinatorRuntime {
     /// boot is still connected (hung, or cut off from the store only): closed, its messages
     /// ignored from now on. A fresh hello of it is refused by [`Routes::admit`] (its `hosts`
     /// row is `HOST_DEAD` now), and the core drops whatever of it is still queued.
-    fn close_succeeded(&mut self, dead: &[(u32, u64)]) {
+    fn close_succeeded(&mut self, dead: &[(HostId, u64)]) {
         let Links::Listener(l) = &mut self.links.links else { return };
         for &(ordinal, boot) in dead {
             let Some(peer) = l.routes.peer_of(ordinal) else { continue };
@@ -1597,10 +1598,19 @@ impl CoordinatorRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use game::HostId;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use super::*;
     use game::RequestId;
 
-    fn attach(host: u32, epoch: u64) -> HostMsg {
+    fn attach(host: HostId, epoch: u64) -> HostMsg {
         HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }
     }
 
@@ -1629,18 +1639,18 @@ mod tests {
     #[test]
     fn two_ordinals_are_served() {
         let mut r = Routes::default();
-        assert_eq!(r.admit(PeerId(2), 4, 1, live(2)), Admit::Refused, "a stale registration is refused, first or not");
-        assert_eq!(r.admit(PeerId(3), 0, 1, live(1)), Admit::Admitted { replaced: None }, "host 0 is served");
-        assert_eq!(r.admit(PeerId(4), 1, 3, live(3)), Admit::Admitted { replaced: None }, "and host 1");
-        assert_eq!(r.admit(PeerId(5), 0, 1, live(1)), Admit::Admitted { replaced: Some(PeerId(3)) }, "host 0 reconnecting");
-        assert_eq!(r.admit(PeerId(6), 7, 1, None), Admit::Refused, "a host with no hosts row");
-        assert_eq!(r.admit(PeerId(7), 8, 2, Some((2, game::HOST_DEAD))), Admit::Refused, "a host declared dead");
-        assert_eq!(r.peer_of(0), Some(PeerId(5)));
-        assert_eq!(r.peer_of(1), Some(PeerId(4)));
-        assert_eq!(r.peer_of(4), None);
-        assert_eq!(r.peer_of(7), None);
+        assert_eq!(r.admit(PeerId(2), h(4), 1, live(2)), Admit::Refused, "a stale registration is refused, first or not");
+        assert_eq!(r.admit(PeerId(3), h(0), 1, live(1)), Admit::Admitted { replaced: None }, "host 0 is served");
+        assert_eq!(r.admit(PeerId(4), h(1), 3, live(3)), Admit::Admitted { replaced: None }, "and host 1");
+        assert_eq!(r.admit(PeerId(5), h(0), 1, live(1)), Admit::Admitted { replaced: Some(PeerId(3)) }, "host 0 reconnecting");
+        assert_eq!(r.admit(PeerId(6), h(7), 1, None), Admit::Refused, "a host with no hosts row");
+        assert_eq!(r.admit(PeerId(7), h(8), 2, Some((2, game::HOST_DEAD))), Admit::Refused, "a host declared dead");
+        assert_eq!(r.peer_of(h(0)), Some(PeerId(5)));
+        assert_eq!(r.peer_of(h(1)), Some(PeerId(4)));
+        assert_eq!(r.peer_of(h(4)), None);
+        assert_eq!(r.peer_of(h(7)), None);
         assert!(r.refused.contains(&PeerId(2)) && r.refused.contains(&PeerId(3)));
-        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 9 }), Route::Nobody, "an unmatched echo goes nowhere");
+        assert_eq!(r.route(Target::Host(h(0)), &CoordMsg::Attached { epoch: 9 }), Route::Nobody, "an unmatched echo goes nowhere");
     }
 
     /// The core names the host; the attach echo goes to the connection that attached.
@@ -1648,21 +1658,21 @@ mod tests {
     fn messages_route_to_the_host_they_are_for() {
         let mut r = Routes::default();
         // Host 3 connected twice (the newer peer wins), host 5 once; neither is peer 0.
-        r.hosts.insert(PeerId(4), 3);
-        r.hosts.insert(PeerId(7), 5);
-        r.hosts.insert(PeerId(9), 3);
-        r.note(PeerId(9), 3, &attach(3, 1));
-        r.note(PeerId(7), 5, &attach(5, 1));
-        assert_eq!(r.peer_of(3), Some(PeerId(9)));
-        assert_eq!(r.peer_of(5), Some(PeerId(7)));
-        assert_eq!(r.peer_of(1), None);
+        r.hosts.insert(PeerId(4), h(3));
+        r.hosts.insert(PeerId(7), h(5));
+        r.hosts.insert(PeerId(9), h(3));
+        r.note(PeerId(9), h(3), &attach(h(3), 1));
+        r.note(PeerId(7), h(5), &attach(h(5), 1));
+        assert_eq!(r.peer_of(h(3)), Some(PeerId(9)));
+        assert_eq!(r.peer_of(h(5)), Some(PeerId(7)));
+        assert_eq!(r.peer_of(h(1)), None);
         // Both attached with epoch 1: the echoes go back in the order handled.
-        assert_eq!(r.route(Target::Host(3), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(9)));
-        assert_eq!(r.route(Target::Host(5), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(7)));
-        let reply = CoordMsg::Reply { id: RequestId { host: 5, boot: 1, seq: 1 }, reply: game::WorldReply::PersonInfo(None) };
-        assert_eq!(r.route(Target::Host(5), &reply), Route::Host(5));
+        assert_eq!(r.route(Target::Host(h(3)), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(9)));
+        assert_eq!(r.route(Target::Host(h(5)), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(7)));
+        let reply = CoordMsg::Reply { id: RequestId { host: h(5), boot: 1, seq: 1 }, reply: game::WorldReply::PersonInfo(None) };
+        assert_eq!(r.route(Target::Host(h(5)), &reply), Route::Host(h(5)));
         let spawn = CoordMsg::SpawnPeople { rc: game::RegionCoords::new(1, 1), incarnation: 1, events: Vec::new() };
-        assert_eq!(r.route(Target::Host(3), &spawn), Route::Host(3));
+        assert_eq!(r.route(Target::Host(h(3)), &spawn), Route::Host(h(3)));
         assert_eq!(r.route(Target::Every, &CoordMsg::Calendar(game::history::CalendarTick(1))), Route::Every);
     }
 
@@ -1673,36 +1683,36 @@ mod tests {
     #[test]
     fn one_live_peer_per_ordinal_by_registration() {
         let mut r = Routes::default();
-        assert_eq!(r.admit(PeerId(1), 0, 5, live(5)), Admit::Admitted { replaced: None });
-        r.note(PeerId(1), 0, &attach(0, 3));
+        assert_eq!(r.admit(PeerId(1), h(0), 5, live(5)), Admit::Admitted { replaced: None });
+        r.note(PeerId(1), h(0), &attach(h(0), 3));
         // The ordinal registered again (registration 6): the old process is stale.
-        assert_eq!(r.admit(PeerId(2), 0, 5, live(6)), Admit::Refused);
+        assert_eq!(r.admit(PeerId(2), h(0), 5, live(6)), Admit::Refused);
         assert!(r.refused.contains(&PeerId(2)));
-        assert_eq!(r.peer_of(0), Some(PeerId(1)));
+        assert_eq!(r.peer_of(h(0)), Some(PeerId(1)));
         // Its replacement takes over: the old connection is refused and its attach echo
         // goes nowhere.
-        assert_eq!(r.admit(PeerId(3), 0, 6, live(6)), Admit::Admitted { replaced: Some(PeerId(1)) });
+        assert_eq!(r.admit(PeerId(3), h(0), 6, live(6)), Admit::Admitted { replaced: Some(PeerId(1)) });
         assert!(r.refused.contains(&PeerId(1)) && !r.hosts.contains_key(&PeerId(1)));
-        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 3 }), Route::Nobody);
-        r.note(PeerId(3), 0, &attach(0, 1));
-        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(3)));
-        assert_eq!(r.peer_of(0), Some(PeerId(3)));
+        assert_eq!(r.route(Target::Host(h(0)), &CoordMsg::Attached { epoch: 3 }), Route::Nobody);
+        r.note(PeerId(3), h(0), &attach(h(0), 1));
+        assert_eq!(r.route(Target::Host(h(0)), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(3)));
+        assert_eq!(r.peer_of(h(0)), Some(PeerId(3)));
         // The same registration reconnecting (a dropped link of the live process): the newer wins.
-        assert_eq!(r.admit(PeerId(4), 0, 6, live(6)), Admit::Admitted { replaced: Some(PeerId(3)) });
+        assert_eq!(r.admit(PeerId(4), h(0), 6, live(6)), Admit::Admitted { replaced: Some(PeerId(3)) });
         // The old connection's Down does not unseat the live one.
         assert_eq!(r.gone(PeerId(3)), None);
-        assert_eq!(r.peer_of(0), Some(PeerId(4)));
-        assert_eq!(r.gone(PeerId(4)), Some(0));
-        assert_eq!(r.peer_of(0), None);
+        assert_eq!(r.peer_of(h(0)), Some(PeerId(4)));
+        assert_eq!(r.gone(PeerId(4)), Some(h(0)));
+        assert_eq!(r.peer_of(h(0)), None);
         // With nobody live, a stale registration is still refused; the stored one is admitted
         // — unless its row is no longer live (declared dead).
-        assert_eq!(r.admit(PeerId(5), 0, 5, live(6)), Admit::Refused);
-        assert_eq!(r.admit(PeerId(9), 0, 6, Some((6, game::HOST_DEAD))), Admit::Refused);
-        assert_eq!(r.admit(PeerId(6), 0, 6, live(6)), Admit::Admitted { replaced: None });
+        assert_eq!(r.admit(PeerId(5), h(0), 5, live(6)), Admit::Refused);
+        assert_eq!(r.admit(PeerId(9), h(0), 6, Some((6, game::HOST_DEAD))), Admit::Refused);
+        assert_eq!(r.admit(PeerId(6), h(0), 6, live(6)), Admit::Admitted { replaced: None });
         // A refused Attach (an old world generation) closes the live connection.
-        r.note(PeerId(6), 0, &attach(0, 2));
-        assert_eq!(r.refuse(PeerId(6)), Some(0));
-        assert_eq!(r.peer_of(0), None);
-        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 2 }), Route::Nobody);
+        r.note(PeerId(6), h(0), &attach(h(0), 2));
+        assert_eq!(r.refuse(PeerId(6)), Some(h(0)));
+        assert_eq!(r.peer_of(h(0)), None);
+        assert_eq!(r.route(Target::Host(h(0)), &CoordMsg::Attached { epoch: 2 }), Route::Nobody);
     }
 }

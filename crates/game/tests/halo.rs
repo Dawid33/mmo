@@ -725,7 +725,7 @@ impl game::RegionSpawner for RecordingSpawner {
 /// and a neighbour `l` it owns itself (never run), and the spawn region's input channel.
 struct TwoHostManager {
     m: game::WorldManager<RecordingSpawner>,
-    mine: u32,
+    mine: game::HostId,
     f: RegionCoords,
     l: RegionCoords,
     spawn_inputs: crossbeam::channel::Receiver<game::RegionInput>,
@@ -734,7 +734,7 @@ struct TwoHostManager {
 fn two_host_manager() -> TwoHostManager {
     let s = 1;
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { ordinal: mine, hosts: 2 };
+    let ownership = game::Static { id: mine, hosts: 2 };
     let f = game::halo::neighbours(SPAWN_REGION).find(|rc| !ownership.owns(*rc, s)).expect("a neighbour of the other host");
     let l = game::halo::neighbours(SPAWN_REGION).find(|rc| ownership.owns(*rc, s)).expect("a neighbour of this host");
     let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -817,12 +817,12 @@ fn two_host_manager_with_a_dropped_link() -> TwoHostManager {
     use game::{HostEndpoint, PeerHello, PeerLink as _, PeerMsg, PeerSession, Volatile};
     let mut t = two_host_manager();
     let (mine, f) = (t.mine, t.f);
-    let other = 1 - mine;
+    let other = game::HostId(1 - mine.0);
     let hello = |ordinal| PeerHello {
-        ordinal,
-        boot: 7 + u64::from(ordinal),
+        id: ordinal,
+        boot: 7 + ordinal.0,
         generation: 1,
-        endpoint: HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None },
+        endpoint: HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None },
         received_through: 0,
         received_from_boot: None,
     };
@@ -880,7 +880,7 @@ fn stored_terrain_change_drops_the_stale_mark_of_a_region_now_owned_here() {
     m.set_ownership(Box::new(game::AllInOne), 1);
     m.stored_terrain_changed([(f, 1)].into());
     assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "this host's own region: nothing");
-    m.set_ownership(Box::new(game::Static { ordinal: mine, hosts: 2 }), 1);
+    m.set_ownership(Box::new(game::Static { id: mine, hosts: 2 }), 1);
     m.stored_terrain_changed([(f, 1)].into());
     assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "the stale mark went with the ownership");
 }
@@ -895,7 +895,7 @@ fn stored_terrain_change_of_a_foreign_region_rebuilds_its_lod() {
     use game::{ClientPacket, ServerEvent, ServerPacket};
     let s = 1;
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { ordinal: mine, hosts: 2 };
+    let ownership = game::Static { id: mine, hosts: 2 };
     let f = (3..64).map(|x| RegionCoords::new(x, 3)).find(|rc| !ownership.owns(*rc, s)).expect("a far region of the other host");
     let (out_send, out) = crossbeam::channel::unbounded();
     let (region_out_send, region_out) = crossbeam::channel::unbounded();

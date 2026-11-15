@@ -12,6 +12,7 @@
 //! [`DirectoryKeeper`] claims free super-regions on demand and reads the directory; an heir's
 //! [`AdoptionReader`] reads what it inherits (R4, a succession).
 
+use game::HostId;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -153,7 +154,7 @@ impl HostClaims {
         let stored = store.super_region_regions();
         let srs: Vec<SuperRegion> = ownership.claim_set(extent, stored).into_iter().collect();
         let mut fence = store
-            .claim_super_regions(ownership.ordinal(), srs)
+            .claim_super_regions(ownership.me(), srs)
             .map_err(|e| format!("claiming the super-regions: {e}"))?;
         // All-in-one runs every host's regions: it adopts (and its cuts replace) every
         // host's in-flight rows.
@@ -176,14 +177,14 @@ impl HostClaims {
     }
 
     /// Claims exactly `srs` as `owner`.
-    pub fn claim_srs(store: StoreHandle, owner: u32, srs: Vec<SuperRegion>) -> Result<HostClaims, StoreError> {
+    pub fn claim_srs(store: StoreHandle, owner: HostId, srs: Vec<SuperRegion>) -> Result<HostClaims, StoreError> {
         let fence = store.claim_super_regions(owner, srs)?;
         Ok(HostClaims::with_fence(store, fence))
     }
 
     /// Host `owner` holding nothing yet: what a host claiming on demand (`claim`) registers
     /// under — a boot told to wait must not have touched its predecessor's rows.
-    pub fn none(store: StoreHandle, owner: u32) -> HostClaims {
+    pub fn none(store: StoreHandle, owner: HostId) -> HostClaims {
         HostClaims::with_fence(store, Fence { owner, epochs: std::collections::BTreeMap::new(), all_hosts: false })
     }
 
@@ -209,7 +210,7 @@ impl HostClaims {
             match self.reclaim_own_once(boot) {
                 Err(e) if e.is_lock_conflict() => {
                     let live =
-                        self.store.hosts()?.iter().any(|r| r.ordinal == owner && r.boot == boot && r.state == game::HOST_LIVE);
+                        self.store.hosts()?.iter().any(|r| r.id == owner && r.boot == boot && r.state == game::HOST_LIVE);
                     if !live {
                         log::error!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}) to its own declaration: fenced");
                         return Err(StoreError::Fenced { sr: None });
@@ -255,7 +256,7 @@ impl HostClaims {
                 srs.insert(game::super_region_of(RegionCoords::new(x, z), s));
             }
         }
-        HostClaims::claim_srs(store, 0, srs.into_iter().collect())
+        HostClaims::claim_srs(store, HostId::SOLO, srs.into_iter().collect())
     }
 
     pub fn store(&self) -> &StoreHandle {
@@ -379,17 +380,17 @@ impl HostClaims {
 
 /// The hosts holding their lease by `rows` at the database clock `now_ms`: live, not left
 /// clean, and beaten within [`game::HOST_LEASE_MS`] (what a booting host counts as alive).
-pub fn live_hosts(rows: &[HostRow], now_ms: u64) -> BTreeSet<u32> {
+pub fn live_hosts(rows: &[HostRow], now_ms: u64) -> BTreeSet<HostId> {
     rows.iter()
         .filter(|r| r.state == game::HOST_LIVE && !r.clean && now_ms.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS)
-        .map(|r| r.ordinal)
+        .map(|r| r.id)
         .collect()
 }
 
 /// The directory read whole, blocking (a boot, before the main loop): every `super_regions`
 /// row (`(super-region, owner or NO_OWNER, epoch)`) and the live hosts ([`live_hosts`]).
 /// Plain reads, no locks.
-pub fn read_directory(store: &StoreHandle, me: u32) -> Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<u32>), StoreError> {
+pub fn read_directory(store: &StoreHandle, me: HostId) -> Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>), StoreError> {
     let rows = store.owners()?;
     let hosts = store.hosts()?;
     let mut live = live_hosts(&hosts, store.db_now_ms()?);
@@ -416,7 +417,7 @@ impl DirectoryRead {
     }
 
     /// The read's rows and live hosts once all three answered; an error as soon as one fails.
-    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<u32>), StoreError>> {
+    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>), StoreError>> {
         fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
             if slot.is_none() {
                 match rx.try_recv() {
@@ -476,7 +477,7 @@ pub struct DirectoryKeeper {
 pub trait ClaimingManager {
     fn take_claims_wanted(&mut self) -> Vec<SuperRegion>;
     fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>);
-    fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<u32>);
+    fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<HostId>);
     fn take_directory_wanted(&mut self) -> bool;
 }
 
@@ -487,7 +488,7 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
     fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>) {
         WorldManager::claimed(self, rows)
     }
-    fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<u32>) {
+    fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<HostId>) {
         WorldManager::directory_read(self, rows, live)
     }
     fn take_directory_wanted(&mut self) -> bool {
@@ -620,14 +621,14 @@ pub const ADOPTION_READ_RETRY_MS: u64 = 1_000;
 
 /// What the [`AdoptionReader`] asks of the manager (a trait so a test can play it).
 pub trait AdoptingManager {
-    fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, u32)>;
+    fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, HostId)>;
     fn adoption_drop_set(&self, id: SuccessionId) -> Vec<EntityId>;
     fn adoption_read_failed(&mut self, id: SuccessionId);
     fn adopted_rows(&mut self, id: SuccessionId, rows: Vec<InFlightRow>, located: Vec<(EntityId, RegionCoords)>);
 }
 
 impl<S: RegionSpawner> AdoptingManager for WorldManager<S> {
-    fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, u32)> {
+    fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, HostId)> {
         WorldManager::take_adoption_wanted(self)
     }
     fn adoption_drop_set(&self, id: SuccessionId) -> Vec<EntityId> {
@@ -644,7 +645,7 @@ impl<S: RegionSpawner> AdoptingManager for WorldManager<S> {
 /// One adoption read in flight.
 struct AdoptionRead {
     id: SuccessionId,
-    predecessor: u32,
+    predecessor: HostId,
     drop: Vec<EntityId>,
     started: Instant,
     /// The fence the reads are made under (grown once `owned_by` answered).
@@ -817,6 +818,15 @@ pub fn super_region_regions_from(value: Option<&str>) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use game::HostId;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use super::*;
 
     fn memory_store() -> StoreHandle {
@@ -824,9 +834,9 @@ mod tests {
     }
 
     /// Registers host `ordinal` as boot `boot` (claims on demand need a live `hosts` row).
-    fn register(store: &StoreHandle, ordinal: u32, boot: u64) {
+    fn register(store: &StoreHandle, ordinal: HostId, boot: u64) {
         let row = HostRow {
-            ordinal,
+            id: ordinal,
             boot,
             generation: 0,
             clean: false,
@@ -849,15 +859,15 @@ mod tests {
         let s = store.super_region_regions();
         let extent = game::MapExtent { origin: RegionCoords::new(-20, -5), width: 40, height: 10 };
         let all = HostClaims::claim(store.clone(), &game::AllInOne, Some(extent), s).unwrap();
-        assert_eq!(all.fence().owner, 0);
+        assert_eq!(all.fence().owner, h(0));
         assert_eq!(all.fence().epochs.len(), 8, "every super-region of the extent");
         let none = HostClaims::claim(store.clone(), &game::AllInOne, None, s).unwrap();
         assert!(none.fence().epochs.is_empty(), "a world with no map claims nothing");
         let hosts = 3;
-        let mine = game::Static { ordinal: 2, hosts };
+        let mine = game::Static { id: h(2), hosts };
         let share = HostClaims::claim(store.clone(), &mine, Some(extent), s).unwrap();
-        assert_eq!(share.fence().owner, 2);
-        assert!(share.fence().epochs.keys().all(|sr| game::rendezvous_owner(*sr, hosts) == 2));
+        assert_eq!(share.fence().owner, h(2));
+        assert!(share.fence().epochs.keys().all(|sr| game::rendezvous_owner(*sr, hosts) == h(2)));
         store.shutdown();
     }
 
@@ -865,7 +875,7 @@ mod tests {
     fn empty_cut(id: u64) -> WorldCut {
         WorldCut {
             id: game::CutId(id),
-            host: 0,
+            host: h(0),
             tick: 100 * id,
             regions: vec![],
             in_flight: vec![],
@@ -879,20 +889,20 @@ mod tests {
     fn added_super_regions_are_checked_by_the_next_commit() {
         let store = memory_store();
         let (x, y) = ((0, 0), (0, -1));
-        let claims = HostClaims::claim_srs(store.clone(), 0, vec![x]).unwrap();
-        register(&store, 0, 10);
-        claims.add(store.claim_free(0, 10, vec![y]).unwrap());
+        let claims = HostClaims::claim_srs(store.clone(), h(0), vec![x]).unwrap();
+        register(&store, h(0), 10);
+        claims.add(store.claim_free(h(0), 10, vec![y]).unwrap());
         assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![y, x]);
         claims.commit_cut(empty_cut(1)).recv().unwrap().expect("both rows are held");
         // Another process takes the added row: the next commit is fenced on it, and that
         // refusal concerns this host (the row is in its current fence).
-        store.claim_super_regions(1, vec![y]).unwrap();
+        store.claim_super_regions(h(1), vec![y]).unwrap();
         let err = claims.commit_cut(empty_cut(2)).recv().unwrap().unwrap_err();
         assert_eq!(err, StoreError::Fenced { sr: Some(y) });
         assert!(claims.clone().note_refusal(&err), "a takeover of an added row fences the host");
         assert!(claims.fenced().is_set());
         // Replaced by what it holds now, the fence commits again.
-        claims.replace(store.owned_by(0).unwrap());
+        claims.replace(store.owned_by(h(0)).unwrap());
         assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![x]);
         claims.commit_cut(empty_cut(3)).recv().unwrap().expect("x alone is still held");
         store.shutdown();
@@ -905,17 +915,17 @@ mod tests {
     fn a_refusal_is_classified_against_the_fence_the_write_used() {
         let store = memory_store();
         let (x, y) = ((0, 0), (0, -1));
-        let claims = HostClaims::claim_srs(store.clone(), 0, vec![x]).unwrap();
+        let claims = HostClaims::claim_srs(store.clone(), h(0), vec![x]).unwrap();
         let used = claims.fence();
         // Since the write: the fence no longer holds `x` (replaced by what holds now).
-        claims.replace(Fence { owner: 0, epochs: [(y, 1)].into_iter().collect(), all_hosts: false });
+        claims.replace(Fence { owner: h(0), epochs: [(y, 1)].into_iter().collect(), all_hosts: false });
         let refusal = StoreError::Fenced { sr: Some(x) };
         assert!(!claims.clone().note_refusal(&refusal), "against the current fence it reads as a stray write");
         assert!(!claims.fenced().is_set());
         assert!(claims.note_refusal_under(&used, &refusal), "against the fence the write used: a takeover");
         assert!(claims.fenced().is_set());
         // A write that never held the row is still a stray write, not a takeover.
-        let other = HostClaims::claim_srs(store.clone(), 1, vec![y]).unwrap();
+        let other = HostClaims::claim_srs(store.clone(), h(1), vec![y]).unwrap();
         let stray = StoreError::Fenced { sr: Some(x) };
         assert!(!other.note_refusal_under(&other.fence(), &stray));
         assert!(!other.fenced().is_set());
@@ -927,9 +937,9 @@ mod tests {
     #[test]
     fn growing_to_what_is_held_keeps_newer_epochs_and_drops_nothing() {
         let store = memory_store();
-        let claims = HostClaims::none(store.clone(), 0);
-        claims.replace(Fence { owner: 0, epochs: [((0, 0), 3), ((1, 0), 2)].into_iter().collect(), all_hosts: false });
-        claims.grow_to(Fence { owner: 0, epochs: [((0, 0), 2), ((2, 0), 5)].into_iter().collect(), all_hosts: false });
+        let claims = HostClaims::none(store.clone(), h(0));
+        claims.replace(Fence { owner: h(0), epochs: [((0, 0), 3), ((1, 0), 2)].into_iter().collect(), all_hosts: false });
+        claims.grow_to(Fence { owner: h(0), epochs: [((0, 0), 2), ((2, 0), 5)].into_iter().collect(), all_hosts: false });
         let epochs: Vec<(SuperRegion, u64)> = claims.fence().epochs.iter().map(|(sr, e)| (*sr, *e)).collect();
         assert_eq!(epochs, [((0, 0), 3), ((1, 0), 2), ((2, 0), 5)]);
         store.shutdown();
@@ -955,7 +965,7 @@ mod tests {
         fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>) {
             panic!("won {rows:?}: the row is another host's");
         }
-        fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<u32>) {
+        fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<HostId>) {
             assert!(rows.iter().any(|(sr, owner, _)| *sr == self.sr && *owner == 1), "the read shows host 1's row: {rows:?}");
             self.events.push("read");
             self.read = true;
@@ -972,9 +982,9 @@ mod tests {
     fn a_lost_claim_waits_for_a_fresh_read_before_claiming_again() {
         let store = memory_store();
         let sr = (0, 3);
-        store.claim_super_regions(1, vec![sr]).unwrap();
-        register(&store, 0, 10);
-        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), 0), 10);
+        store.claim_super_regions(h(1), vec![sr]).unwrap();
+        register(&store, h(0), 10);
+        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), h(0)), 10);
         let mut m = Wanting { sr, read: false, events: Vec::new() };
         let deadline = Instant::now() + Duration::from_secs(10);
         while !m.read {
@@ -995,9 +1005,9 @@ mod tests {
     #[test]
     fn a_claim_by_a_replaced_boot_fences_the_host() {
         let store = memory_store();
-        register(&store, 0, 10);
-        register(&store, 0, 11);
-        let claims = HostClaims::none(store.clone(), 0);
+        register(&store, h(0), 10);
+        register(&store, h(0), 11);
+        let claims = HostClaims::none(store.clone(), h(0));
         let mut keeper = DirectoryKeeper::new(claims.clone(), 10);
         let mut m = Free { sr: (0, 3), asked: 0 };
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1028,7 +1038,7 @@ mod tests {
         fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>) {
             panic!("won {rows:?} as a replaced boot");
         }
-        fn directory_read(&mut self, _rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<u32>) {}
+        fn directory_read(&mut self, _rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<HostId>) {}
         fn take_directory_wanted(&mut self) -> bool {
             false
         }

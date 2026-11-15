@@ -27,11 +27,11 @@ fn two_hosts_find_each_other_through_the_hosts_table_and_exchange_running_sets()
     for (row, links) in rows.iter().zip(&links) {
         assert_eq!(row.peer_addr.as_deref(), Some(links.local_addr().to_string().as_str()), "{row:?}");
         assert_eq!(row.peer_cert.as_deref(), Some(links.cert_sha256()), "{row:?}");
-        assert_eq!(row.quic, endpoint(row.ordinal).quic);
-        assert_eq!(row.webtransport, endpoint(row.ordinal).webtransport);
+        assert_eq!(row.quic, endpoint(row.id).quic);
+        assert_eq!(row.webtransport, endpoint(row.id).webtransport);
     }
 
-    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
+    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region").0 as usize, pair.sims[0].manager.owner_host(b).expect("an owned region").0 as usize);
     pair.until("each host knows the other's seam region runs", |p| {
         p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
     });
@@ -52,7 +52,7 @@ fn slime_crosses_between_real_hosts() {
     let Some(db) = PgDb::create("slime") else { return };
     let dir = scratch("slime");
     let (mut pair, (a, b), links, claims) = two_hosts(&db, &dir);
-    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
+    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region").0 as usize, pair.sims[0].manager.owner_host(b).expect("an owned region").0 as usize);
     // Both know the other's region runs (a transfer is sent only to a running owner's region).
     pair.until("running sets exchanged", |p| {
         p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
@@ -112,7 +112,7 @@ fn a_block_broken_across_a_host_seam_changes_the_owner_and_the_halo() {
     let Some(db) = PgDb::create("seambreak") else { return };
     let dir = scratch("seambreak");
     let (mut pair, (a, b), links, claims) = two_hosts(&db, &dir);
-    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
+    let (ha, hb) = (pair.sims[0].manager.owner_host(a).expect("an owned region").0 as usize, pair.sims[0].manager.owner_host(b).expect("an owned region").0 as usize);
     assert_ne!(ha, hb, "a host seam");
     pair.until("running sets exchanged", |p| {
         p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
@@ -266,13 +266,13 @@ fn a_block_broken_across_a_host_seam_changes_the_owner_and_the_halo() {
 fn peer_with_a_wrong_token_is_refused() {
     let Some(db) = PgDb::create("token") else { return };
     let dir = scratch("token");
-    let (_s0, c0) = claim(&db, 0);
-    let (_s1, c1) = claim(&db, 1);
-    let mut l0 = start_links(&c0, 0, 1, TOKEN, &dir, "127.0.0.1:0");
-    let mut l1 = start_links(&c1, 1, 2, "not-the-token", &dir, "127.0.0.1:0");
+    let (_s0, c0) = claim(&db, h(0));
+    let (_s1, c1) = claim(&db, h(1));
+    let mut l0 = start_links(&c0, h(0), 1, TOKEN, &dir, "127.0.0.1:0");
+    let mut l1 = start_links(&c1, h(1), 2, "not-the-token", &dir, "127.0.0.1:0");
     let (o0, mut to1) = only_link(&mut l0);
     let (o1, mut to0) = only_link(&mut l1);
-    assert_eq!((o0, o1), (1, 0));
+    assert_eq!((o0, o1), (h(1), h(0)));
     // Long enough for the dialer to find the row and try a few times.
     let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline {
@@ -296,10 +296,10 @@ fn peer_with_a_wrong_token_is_refused() {
 fn restarted_listener_is_found_again() {
     let Some(db) = PgDb::create("restart") else { return };
     let dir = scratch("restart");
-    let (_s0, c0) = claim(&db, 0);
-    let (_s1, c1) = claim(&db, 1);
-    let mut l0 = start_links(&c0, 0, 1, TOKEN, &dir, "127.0.0.1:0");
-    let mut l1 = start_links(&c1, 1, 2, TOKEN, &dir, "127.0.0.1:0");
+    let (_s0, c0) = claim(&db, h(0));
+    let (_s1, c1) = claim(&db, h(1));
+    let mut l0 = start_links(&c0, h(0), 1, TOKEN, &dir, "127.0.0.1:0");
+    let mut l1 = start_links(&c1, h(1), 2, TOKEN, &dir, "127.0.0.1:0");
     let old_addr = l0.local_addr();
     let (_, mut to1) = only_link(&mut l0);
     let (_, mut to0) = only_link(&mut l1);
@@ -323,8 +323,8 @@ fn restarted_listener_is_found_again() {
             break addr;
         }
     };
-    let (_s0, c0) = claim(&db, 0);
-    let mut l0 = start_links(&c0, 0, 3, TOKEN, &dir, &new_bind.to_string());
+    let (_s0, c0) = claim(&db, h(0));
+    let mut l0 = start_links(&c0, h(0), 3, TOKEN, &dir, &new_bind.to_string());
     assert_eq!(l0.local_addr(), new_bind);
     let (_, mut to1) = only_link(&mut l0);
     pump_until("found again within 5 s", Duration::from_secs(5), &mut [&mut to1, &mut to0], |l| l.iter().all(|l| l.is_up()));
@@ -419,7 +419,7 @@ fn a_cut_with_one_host_detached_is_aborted_and_leaves_nothing_staged() {
     });
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     // Host 1 back: the next cut commits.
-    switches[1].replace(quic_world_link(coordinator.addr, cert, 1, 1001, pair.sims[1].reg));
+    switches[1].replace(quic_world_link(coordinator.addr, cert, h(1), 1001, pair.sims[1].reg));
     pair.until("a later world cut committed", |_| decisions(&db).iter().any(|(c, _, k)| *k && *c as u64 > running.0 .0));
     pair.until("both hosts settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
@@ -449,13 +449,13 @@ fn a_cut_with_a_peer_link_down_commits() {
     let dir = scratch("wcount");
     let mut w = world(&db, &dir);
     let (a, b) = w.seam;
-    let (ha, hb) = (w.pair.sims[0].manager.owner_host(a).expect("owned") as usize, w.pair.sims[0].manager.owner_host(b).expect("owned") as usize);
+    let (ha, hb) = (w.pair.sims[0].manager.owner_host(a).expect("owned").0 as usize, w.pair.sims[0].manager.owner_host(b).expect("owned").0 as usize);
     w.until_committed_after(&db, 0);
     for sim in &w.pair.sims {
         sim.gate.set_down(true);
     }
-    w.pair.until("the peer link is seen down", |p| !p.sims[0].manager.peer_is_reachable(1) && !p.sims[1].manager.peer_is_reachable(0));
-    let id = spawn_slime_in(&mut w, ha as u32, a, REGION_SIZE + game::FLIP_HYSTERESIS + 2.0);
+    w.pair.until("the peer link is seen down", |p| !p.sims[0].manager.peer_is_reachable(h(1)) && !p.sims[1].manager.peer_is_reachable(h(0)));
+    let id = spawn_slime_in(&mut w, HostId(ha as u64), a, REGION_SIZE + game::FLIP_HYSTERESIS + 2.0);
     w.pair.until("the slime waits for the other host", |p| p.sims[ha].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id));
     let coordinator = w.coordinator.as_ref().unwrap();
     let running = coordinator.thread.inspect(|c| c.world_cut_running(), WAIT).flatten().map_or(0, |(c, _)| c.0 as i64);
@@ -463,7 +463,7 @@ fn a_cut_with_a_peer_link_down_commits() {
     let after = running.max(decided);
     w.until_committed_after(&db, after);
     assert!(w.pair.sims.iter().all(|s| s.gate.is_down()), "the link stayed down");
-    assert!(!w.pair.sims[0].manager.peer_is_reachable(1), "host 0 never reached host 1 meanwhile");
+    assert!(!w.pair.sims[0].manager.peer_is_reachable(h(1)), "host 0 never reached host 1 meanwhile");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     assert_eq!(stored_times(&w, &db, id), (0, 1), "the slime is the sender's in-flight row, once");
     for sim in &w.pair.sims {
@@ -531,7 +531,7 @@ fn host_told_aborted_without_a_stored_decision_aborts_it_itself() {
     w.store.fail_next_decisions(u32::MAX);
     let cut = until_part(&mut w, 0, &["prepared"]);
     assert_eq!(decision_of(&db, cut), None, "undecided");
-    w.coordinator.as_ref().unwrap().thread.with_core(move |c| c.cut_outcome(0, cut, false), WAIT).expect("the core answers");
+    w.coordinator.as_ref().unwrap().thread.with_core(move |c| c.cut_outcome(h(0), cut, false), WAIT).expect("the core answers");
     w.pair.until("host 0 settled its part", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
     assert_eq!(decision_of(&db, cut), Some(false), "host 0 recorded the abort");
     w.pair.until("host 1 settled its part too", |p| p.sims[1].cuts.as_ref().unwrap().world_part().is_none());
@@ -553,7 +553,7 @@ fn cut_pending_on_a_host_settles_that_cut_first() {
     let mut w = world(&db, &dir);
     let other = game::CutId(77);
     let generation = w.generations[0].mine();
-    let empty = game::WorldCut { id: other, host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
+    let empty = game::WorldCut { id: other, host: h(0), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
     let staged = w.claims[0].store().prepare_cut(empty, (*w.claims[0].fence()).clone(), generation).recv().unwrap();
     assert!(staged.is_ok(), "the other cut's part is staged: {staged:?}");
     w.pair.until("a world cut decided", |_| decisions(&db).iter().any(|(c, _, _)| *c as u64 != other.0));
@@ -640,7 +640,7 @@ fn lost_cut_done_is_settled_from_the_store() {
     w.pair.until("host 1 settled its part with its link down", |p| p.sims[1].cuts.as_ref().unwrap().world_part().is_none());
     assert!(!w.pair.sims[1].manager.world_attached(), "host 1's link is still down");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    let link = quic_world_link(w.coordinator.as_ref().unwrap().addr, w.cert.clone(), 1, 1001, w.pair.sims[1].reg);
+    let link = quic_world_link(w.coordinator.as_ref().unwrap().addr, w.cert.clone(), h(1), 1001, w.pair.sims[1].reg);
     w.switches[1].replace(link);
     w.until_committed_after(&db, cut.0 as i64);
     w.stop(&dir);
@@ -688,9 +688,9 @@ fn host_killed_after_prepare_cut_commits_and_world_restarts_from_it() {
     let deadline = Instant::now() + WAIT;
     while cut.is_none() {
         assert!(Instant::now() < deadline, "no cut had every part staged");
-        if let Some((c, "prepared")) = sim(&mut w, 1).manager.world_cut_state() {
+        if let Some((c, "prepared")) = sim(&mut w, h(1)).manager.world_cut_state() {
             let progress = w.coordinator.as_ref().unwrap().thread.inspect(|c| c.world_cut_progress(), WAIT).flatten();
-            let all_at_core = progress.is_some_and(|(r, prepared, _)| r == c && prepared == [0, 1]);
+            let all_at_core = progress.is_some_and(|(r, prepared, _)| r == c && prepared == [h(0), h(1)]);
             if all_at_core || decision_of(&db, c) == Some(true) {
                 cut = Some(c);
                 break;
@@ -699,15 +699,15 @@ fn host_killed_after_prepare_cut_commits_and_world_restarts_from_it() {
         w.pair.round();
     }
     let cut = cut.unwrap();
-    kill_host(&mut w, 1);
+    kill_host(&mut w, h(1));
     w.pair.until("the cut decided", |_| decision_of(&db, cut).is_some());
     assert_eq!(decision_of(&db, cut), Some(true), "every part was staged: committed");
     let (_, tick) = last_committed(&db);
     w.pair.until("host 0 settled it", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
     assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, 1, generation + 1);
+    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
     let (a, b) = w.seam;
     let (last, _) = last_committed(&db);
     if last as u64 == cut.0 {
@@ -733,15 +733,15 @@ fn host_killed_before_prepare_cut_is_absent_and_the_world_rolls_back() {
     let generation = w.claims[0].store().world_generation().unwrap();
     w.until_committed_after(&db, 0);
     let cut = until_part(&mut w, 1, &["pending", "marked"]);
-    kill_host(&mut w, 1);
+    kill_host(&mut w, h(1));
     w.pair.until("the cut decided", |_| decision_of(&db, cut).is_some());
     assert_eq!(decision_of(&db, cut), Some(false), "a part never staged: aborted");
     w.pair.until("host 0 settled it", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     let (last, tick) = last_committed(&db);
-    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
     assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, 1, generation + 1);
+    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
     if last_committed(&db).0 == last {
         let (a, b) = w.seam;
         for rc in [a, b] {
@@ -845,17 +845,17 @@ fn dirty_restart_rolls_every_host_back_once() {
     let dir = scratch("kdirty");
     let mut w = world(&db, &dir);
     let generation = w.claims[0].store().world_generation().unwrap();
-    let a0 = seam_of(&w, 0);
-    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    let a0 = seam_of(&w, h(0));
+    let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
     // A cut with the slime in host 0's region.
     w.until_committed_after(&db, 0);
     let (first, _) = last_committed(&db);
     w.until_committed_after(&db, first);
     // Over the seam to host 1, then host 1 dies between cuts.
-    let b1 = seam_of(&w, 1);
+    let b1 = seam_of(&w, h(1));
     let past = if b1.x > a0.x { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
     let along_x = b1.x != a0.x;
-    sim(&mut w, 0).manager.spawner_mut().with_region(a0, |region| {
+    sim(&mut w, h(0)).manager.spawner_mut().with_region(a0, |region| {
         let key = region.data().id_index[&id];
         let y = above_ground_y();
         let at = if along_x {
@@ -869,10 +869,10 @@ fn dirty_restart_rolls_every_host_back_once() {
         let on_1 = p.sims[1].holders(id) == [b1];
         on_1 && p.sims.iter().all(|s| s.manager.world_cut().is_none() && s.manager.peer_unreceived() == 0)
     });
-    kill_host(&mut w, 1);
-    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    kill_host(&mut w, h(1));
+    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
     assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty: + 1");
-    roll_back_and_restart_the_other(&mut w, &db, &dir, 1, generation + 1);
+    roll_back_and_restart_the_other(&mut w, &db, &dir, h(1), generation + 1);
     w.pair.until("the slime back in a running region", |p| {
         p.sims.iter_mut().map(|s| s.holders(id).len()).sum::<usize>() > 0
     });
@@ -900,7 +900,7 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     w.until_committed_after(&db, 0);
     // Host 1's main-loop lease step, as `server::run` takes it every pass.
     let fenced = w.claims[1].fenced().clone();
-    let mut beat = Some(Heartbeat::new(w.claims[1].store().clone(), 1, 1001));
+    let mut beat = Some(Heartbeat::new(w.claims[1].store().clone(), h(1), 1001));
     let live_until = Instant::now() + Duration::from_millis(game::HOST_HEARTBEAT_MS + 500);
     while Instant::now() < live_until {
         w.pair.round();
@@ -918,10 +918,10 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     }
     assert!(marked.elapsed() < Duration::from_secs(3));
     assert!(fenced.is_set(), "the lease step fenced the process");
-    let b1 = seam_of(&w, 1);
+    let b1 = seam_of(&w, h(1));
     let saved = |db: &PgDb| query_i64s(db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", b1.x, b1.z));
     let before = saved(&db);
-    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Fenced);
+    assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Fenced);
     assert_eq!(saved(&db), before, "a replaced host saves nothing on its way out");
     // Host 0's cuts go on: host 1's dead row is no longer expected in a cut.
     let (last, _) = last_committed(&db);
@@ -940,17 +940,17 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     let s = w.claims[0].store().super_region_regions();
     let owner = |rx: i64, rz: i64| {
         let rc = RegionCoords::new(rx as i32, rz as i32);
-        (0..HOSTS).find(|&h| game::Static { ordinal: h, hosts: HOSTS }.owns(rc, s)).expect("an owned region")
+        (0..u64::from(HOSTS)).map(HostId).find(|&h| game::Static { id: h, hosts: HOSTS }.owns(rc, s)).expect("an owned region")
     };
     let host1_last = before.iter().copied().max().expect("host 1's region was saved");
     let twice = entity_rows_stored_twice(&db);
     for rows in twice.chunk_by(|a, b| a[..3] == b[..3]) {
-        let mut owners: Vec<u32> = rows.iter().map(|r| owner(r[3], r[4])).collect();
+        let mut owners: Vec<HostId> = rows.iter().map(|r| owner(r[3], r[4])).collect();
         owners.sort();
-        assert_eq!(owners, [0, 1], "an entity stored twice is one row of host 0's and one of host 1's: {twice:?}");
-        let stale = rows.iter().find(|r| owner(r[3], r[4]) == 1).unwrap();
+        assert_eq!(owners, [h(0), h(1)], "an entity stored twice is one row of host 0's and one of host 1's: {twice:?}");
+        let stale = rows.iter().find(|r| owner(r[3], r[4]) == h(1)).unwrap();
         assert!(stale[5] <= host1_last, "host 1's copy is from its last committed part (tick {host1_last}): {twice:?}");
-        let fresh = rows.iter().find(|r| owner(r[3], r[4]) == 0).unwrap();
+        let fresh = rows.iter().find(|r| owner(r[3], r[4]) == h(0)).unwrap();
         assert!(fresh[5] > host1_last, "host 0's copy is from a cut it took alone: {twice:?}");
     }
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
@@ -970,20 +970,20 @@ fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() 
     let mut w = world(&db, &dir);
     let generation = w.claims[0].store().world_generation().unwrap();
     w.until_committed_after(&db, 0);
-    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Clean, "host 1 left");
+    assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Clean, "host 1 left");
     let clean: Vec<i64> = query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1");
     assert_eq!(clean, [1], "host 1's row is clean");
     let (left_in, _) = last_committed(&db);
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     // A slime toward host 1's region: it waits on host 0, a row of host 0's next cut.
-    let (a0, b1) = (seam_of(&w, 0), seam_of(&w, 1));
+    let (a0, b1) = (seam_of(&w, h(0)), seam_of(&w, h(1)));
     let past = if b1.x != a0.x {
         if b1.x > a0.x { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 }
     } else {
         REGION_SIZE / 2.0
     };
-    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
-    sim(&mut w, 0).manager.spawner_mut().with_region(a0, |region| {
+    let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
+    sim(&mut w, h(0)).manager.spawner_mut().with_region(a0, |region| {
         let key = region.data().id_index[&id];
         let y = above_ground_y();
         let at = if b1.x != a0.x {
@@ -1002,7 +1002,7 @@ fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() 
     );
     assert_eq!(rows, [1], "host 0's cut holds the waiting slime as a row");
     // Host 1 returns.
-    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
     assert_eq!((again.generation, again.bumped), (generation, false), "a clean return keeps the generation");
     w.pair.until("the slime arrived on host 1", |p| {
         p.sims.iter().all(|s| s.manager.peer_unreceived() == 0) && p.sims[1].holders(id) == [b1]
@@ -1012,8 +1012,8 @@ fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() 
     }
     // It arrived on host 1 (above); slimes wander, so only once is asserted now.
     assert_eq!(holders_all(&mut w, id).len(), 1, "once: {:?}", holders_all(&mut w, id));
-    for h in 0..HOSTS {
-        assert!(!w.generations[h as usize].is_set(), "no rollback");
+    for h in (0..u64::from(HOSTS)).map(HostId) {
+        assert!(!w.generations[h.0 as usize].is_set(), "no rollback");
     }
     w.until_committed_after(&db, last_committed(&db).0);
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
@@ -1033,14 +1033,14 @@ fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
     let mut w = world(&db, &dir);
     let generation = w.claims[0].store().world_generation().unwrap();
     w.until_committed_after(&db, 0);
-    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Clean, "host 1 left");
+    assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Clean, "host 1 left");
     assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [1]);
-    let a0 = seam_of(&w, 0);
-    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    let a0 = seam_of(&w, h(0));
+    let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
     // A cut of host 0 alone begins; nothing of host 0 runs from here until host 1 is back.
     let cut = until_part(&mut w, 0, &["pending", "marked"]);
     assert_eq!(decision_of(&db, cut), None);
-    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
     assert_eq!((again.generation, again.bumped), (generation, false), "a clean return");
     w.pair.until("the cut that excludes host 1 is decided", |_| decision_of(&db, cut).is_some());
     assert_eq!(decision_of(&db, cut), Some(false), "the cut of host 0 alone is aborted");
@@ -1052,8 +1052,8 @@ fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
         &format!("SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {serial}", birth.x, birth.z),
     );
     assert_eq!(stored, [1], "stored once");
-    for h in 0..HOSTS {
-        assert!(!w.generations[h as usize].is_set(), "no rollback");
+    for h in (0..u64::from(HOSTS)).map(HostId) {
+        assert!(!w.generations[h.0 as usize].is_set(), "no rollback");
     }
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
@@ -1067,10 +1067,10 @@ fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
 fn role_all_on_postgres_resolves_an_orphan_part_before_its_claim() {
     install_props();
     let Some(db) = PgDb::create("allorph") else { return };
-    let (store, claims) = claim(&db, 0);
+    let (store, claims) = claim(&db, h(0));
     let generation = store.world_generation().unwrap();
     let srs: Vec<_> = claims.fence().epochs.keys().copied().collect();
-    let orphan = game::WorldCut { id: game::CutId(9), host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
+    let orphan = game::WorldCut { id: game::CutId(9), host: h(0), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
     store.prepare_cut(orphan, (*claims.fence()).clone(), generation).recv().unwrap().expect("staged");
     // The host process dies: the part stays prepared.
     drop(claims);
@@ -1083,7 +1083,7 @@ fn role_all_on_postgres_resolves_an_orphan_part_before_its_claim() {
     let claimer = {
         let all = all.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(all.claim_super_regions(0, srs));
+            let _ = tx.send(all.claim_super_regions(h(0), srs));
         })
     };
     let claimed = rx.recv_timeout(Duration::from_secs(10));
@@ -1140,8 +1140,8 @@ fn leave_without_a_coordinator_exits_dirty() {
     drop(host1);
     links.remove(1);
     // Its return raises the generation.
-    let (_, c1) = claim(&db, 1);
-    let back = start_links(&c1, 1, 4001, TOKEN, &dir, "127.0.0.1:0");
+    let (_, c1) = claim(&db, h(1));
+    let back = start_links(&c1, h(1), 4001, TOKEN, &dir, "127.0.0.1:0");
     assert_eq!((back.registered().generation, back.registered().bumped), (generation + 1, true));
     drop(back);
     drop(pair);
@@ -1165,7 +1165,7 @@ fn aborted_leave_cut_is_asked_for_again_and_commits() {
     let mut w = world(&db, &dir);
     w.until_committed_after(&db, 0);
     let mut first = None;
-    let exit = exit_host_with(&mut w, 1, None, |m, claims| {
+    let exit = exit_host_with(&mut w, h(1), None, |m, claims| {
         if first.is_none() {
             if let Some(c) = m.leaving_cut() {
                 first = Some(c);
@@ -1202,7 +1202,7 @@ fn aborted_leave_cut_past_the_leave_timeout_exits_dirty() {
     let mut first = None;
     // The first idle step runs right after the leave request: no earlier than it.
     let mut asked: Option<Instant> = None;
-    let exit = exit_host_with(&mut w, 1, Some(PAST_LEAVE_TIMEOUT), |m, claims| {
+    let exit = exit_host_with(&mut w, h(1), Some(PAST_LEAVE_TIMEOUT), |m, claims| {
         let asked = *asked.get_or_insert_with(Instant::now);
         if first.is_none() {
             if let Some(c) = m.leaving_cut() {
@@ -1227,7 +1227,7 @@ fn aborted_leave_cut_past_the_leave_timeout_exits_dirty() {
 const BOTH_LEAVE_WITHIN: Duration = Duration::from_secs(15);
 
 /// Slime `id` in host `h`'s seam region, put just past the seam toward the other host's.
-fn push_over_the_seam(w: &mut World, h: u32, id: EntityId) {
+fn push_over_the_seam(w: &mut World, h: HostId, id: EntityId) {
     let (a, _) = w.seam;
     let from = seam_of(w, h);
     // The seam is `b = a + x`: from `a` over +x, from `b` over -x.
@@ -1258,7 +1258,7 @@ fn exit_every_host_at_once(w: &mut World) -> Vec<Exited> {
     let tick = w.pair.tick.clone();
     let stop = std::sync::Barrier::new(sims.len());
     let params: Vec<(server::claims::Fenced, server::claims::WorldGeneration)> =
-        sims.iter().map(|s| (w.claims[s.ordinal as usize].fenced().clone(), w.generations[s.ordinal as usize].clone())).collect();
+        sims.iter().map(|s| (w.claims[s.ordinal.0 as usize].fenced().clone(), w.generations[s.ordinal.0 as usize].clone())).collect();
     let exited = std::thread::scope(|scope| {
         let handles: Vec<_> = sims
             .iter_mut()
@@ -1299,8 +1299,8 @@ fn exit_every_host_at_once(w: &mut World) -> Vec<Exited> {
     for sim in sims {
         let h = sim.ordinal;
         drop(sim);
-        w.switches[h as usize].drop_link();
-        w.links[h as usize] = None;
+        w.switches[h.0 as usize].drop_link();
+        w.links[h.0 as usize] = None;
     }
     exited
 }
@@ -1321,15 +1321,16 @@ fn both_hosts_stopped_together_leave_cleanly() {
     let generation = w.claims[0].store().world_generation().unwrap();
     w.until_committed_after(&db, 0);
     let (before, _) = last_committed(&db);
-    let slimes: Vec<EntityId> = (0..HOSTS)
+    let slimes: Vec<EntityId> = (0..u64::from(HOSTS))
+        .map(HostId)
         .map(|h| {
             let rc = seam_of(&w, h);
             spawn_slime_in(&mut w, h, rc, REGION_SIZE / 2.0)
         })
         .collect();
     w.pair.round();
-    for h in 0..HOSTS {
-        push_over_the_seam(&mut w, h, slimes[h as usize]);
+    for h in (0..u64::from(HOSTS)).map(HostId) {
+        push_over_the_seam(&mut w, h, slimes[h.0 as usize]);
     }
     let exited = exit_every_host_at_once(&mut w);
     for (h, e) in exited.iter().enumerate() {
@@ -1347,8 +1348,8 @@ fn both_hosts_stopped_together_leave_cleanly() {
     assert_eq!(query_i64s(&db, "SELECT clean FROM hosts ORDER BY ordinal"), [1, 1], "both rows are clean");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     // Both return: no generation bump, no rollback, each slime once.
-    for h in 0..HOSTS {
-        let again = restart_host(&mut w, &db, &dir, h, 3000 + u64::from(h));
+    for h in (0..u64::from(HOSTS)).map(HostId) {
+        let again = restart_host(&mut w, &db, &dir, h, 3000 + h.0);
         assert_eq!((again.generation, again.bumped), (generation, false), "host {h}'s clean return keeps the generation");
     }
     w.pair.until("both hosts attached again", |p| p.sims.len() == 2 && p.sims.iter().all(|s| s.manager.world_attached()));
@@ -1362,8 +1363,8 @@ fn both_hosts_stopped_together_leave_cleanly() {
     for id in &slimes {
         assert_eq!(holders_all(&mut w, *id).len(), 1, "{id:?} once: {:?}", holders_all(&mut w, *id));
     }
-    for h in 0..HOSTS {
-        assert!(!w.generations[h as usize].is_set(), "host {h}: no rollback");
+    for h in (0..u64::from(HOSTS)).map(HostId) {
+        assert!(!w.generations[h.0 as usize].is_set(), "host {h}: no rollback");
         assert_eq!(sim(&mut w, h).manager.take_higher_generation(), None, "host {h} sees no newer generation");
     }
     assert_eq!(w.claims[0].store().world_generation().unwrap(), generation, "the generation is unchanged");
@@ -1386,14 +1387,14 @@ fn entity_crossing_hosts_between_cuts_does_not_stall_saving() {
     let Some(db) = PgDb::create("xcross") else { return };
     let dir = scratch("xcross");
     let mut w = world(&db, &dir);
-    let a0 = seam_of(&w, 0);
-    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    let a0 = seam_of(&w, h(0));
+    let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
     w.until_committed_after(&db, 0);
     let (first, _) = last_committed(&db);
     w.until_committed_after(&db, first);
     let (stored, _) = last_committed(&db);
-    let b1 = seam_of(&w, 1);
-    push_over_the_seam(&mut w, 0, id);
+    let b1 = seam_of(&w, h(1));
+    push_over_the_seam(&mut w, h(0), id);
     w.pair.until("the slime on host 1", |p| p.sims[1].holders(id) == [b1]);
     w.until_committed_after(&db, stored);
     let rows = |column: &str| {
@@ -1455,7 +1456,7 @@ struct LoginWorld {
 }
 
 /// The entry host of the login tests.
-const ENTRY: u32 = 0;
+const ENTRY: HostId = HostId(0);
 
 fn login_hosts(db: &PgDb, dir: &std::path::Path) -> LoginWorld {
     let (mut pair, seam, links, claims) = two_hosts(db, dir);
@@ -1527,11 +1528,11 @@ impl LoginWorld {
         token
     }
 
-    fn sim(&mut self, h: u32) -> &mut Sim {
+    fn sim(&mut self, h: HostId) -> &mut Sim {
         self.pair.sims.iter_mut().find(|s| s.ordinal == h).expect("the host is up")
     }
 
-    fn orders(&mut self, h: u32) -> Arc<SpawnOrders> {
+    fn orders(&mut self, h: HostId) -> Arc<SpawnOrders> {
         self.sim(h).login.as_ref().unwrap().orders.clone()
     }
 
@@ -1569,7 +1570,7 @@ impl LoginWorld {
 
     /// The client of the ticket (`token`, `epoch`) connects to host `h`, as its edge admits
     /// and announces it; its session id.
-    fn connect(&mut self, h: u32, token: &str, epoch: u64) -> ClientId {
+    fn connect(&mut self, h: HostId, token: &str, epoch: u64) -> ClientId {
         let (player, record) = self.roster.lock().unwrap()[token].clone();
         let orders = self.orders(h);
         orders.admit(token, epoch).expect("the ticket is admitted");
@@ -1582,14 +1583,14 @@ impl LoginWorld {
     }
 
     /// The client's connection to host `h` closes, as its edge reports it.
-    fn disconnect(&mut self, h: u32, client: ClientId, token: &str, epoch: u64) {
+    fn disconnect(&mut self, h: HostId, client: ClientId, token: &str, epoch: u64) {
         let now = self.pair.now();
         assert!(self.sim(h).manager.handle_server_event(ServerEvent::ClientDisconnected(client), now));
         self.orders(h).closed(token, epoch);
     }
 
     /// Where `client`'s body is: `(host, region)` of every running region holding it.
-    fn bodies(&mut self, client: ClientId) -> Vec<(u32, RegionCoords)> {
+    fn bodies(&mut self, client: ClientId) -> Vec<(HostId, RegionCoords)> {
         let mut out = Vec::new();
         for sim in &mut self.pair.sims {
             for rc in sim.manager.running_regions() {
@@ -1604,7 +1605,7 @@ impl LoginWorld {
     }
 
     /// Push `client`'s body (in `from`, on host `h`) past the seam into `to`.
-    fn push_across(&mut self, h: u32, client: ClientId, from: RegionCoords, to: RegionCoords) {
+    fn push_across(&mut self, h: HostId, client: ClientId, from: RegionCoords, to: RegionCoords) {
         let y = above_ground_y();
         let past = |d: i32| match d {
             1 => REGION_SIZE + game::FLIP_HYSTERESIS + 2.0,
@@ -1630,7 +1631,7 @@ impl LoginWorld {
 }
 
 /// `(the region host h owns, the other)` of the seam.
-fn sides(seam: (RegionCoords, RegionCoords), h: u32, w: &LoginWorld) -> (RegionCoords, RegionCoords) {
+fn sides(seam: (RegionCoords, RegionCoords), h: HostId, w: &LoginWorld) -> (RegionCoords, RegionCoords) {
     if w.pair.sims[0].manager.owner_host(seam.0) == Some(h) { (seam.0, seam.1) } else { (seam.1, seam.0) }
 }
 
@@ -1650,20 +1651,20 @@ fn join_places_the_player_on_the_host_owning_its_record_region() {
     let Some(db) = PgDb::create("ljoin") else { return };
     let dir = scratch("ljoin");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, 1, &w);
+    let (b1, _) = sides(w.seam, h(1), &w);
     let token = w.player(1, PlayerId(900), Some(b1));
     let ack = w.join(&token, 1);
-    assert_eq!(ack_quic(&ack), (true, endpoint(1).quic), "host 1 took it");
-    assert!(w.orders(1).pending().by_token.contains_key(&token), "host 1 holds the pending spawn");
-    assert!(w.orders(0).pending().by_token.is_empty(), "host 0 holds none");
+    assert_eq!(ack_quic(&ack), (true, endpoint(h(1)).quic), "host 1 took it");
+    assert!(w.orders(h(1)).pending().by_token.contains_key(&token), "host 1 holds the pending spawn");
+    assert!(w.orders(h(0)).pending().by_token.is_empty(), "host 0 holds none");
     // The client connects there and plays there.
-    let client = w.connect(1, &token, 1);
+    let client = w.connect(h(1), &token, 1);
     let deadline = Instant::now() + WAIT;
     while w.bodies(client).is_empty() {
         assert!(Instant::now() < deadline, "the player never got a body");
         w.rounds(1);
     }
-    assert_eq!(w.bodies(client), [(1, b1)]);
+    assert_eq!(w.bodies(client), [(h(1), b1)]);
     w.stop(&dir);
 }
 
@@ -1677,35 +1678,35 @@ fn rejoin_within_a_cut_follows_the_departed_pointer() {
     let Some(db) = PgDb::create("lrejoin") else { return };
     let dir = scratch("lrejoin");
     let mut w = login_hosts(&db, &dir);
-    let (a0, b1) = sides(w.seam, 0, &w);
+    let (a0, b1) = sides(w.seam, h(0), &w);
     let token = w.player(2, PlayerId(901), Some(a0));
-    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(0).quic));
-    let c1 = w.connect(0, &token, 1);
+    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(0)).quic));
+    let c1 = w.connect(h(0), &token, 1);
     let deadline = Instant::now() + WAIT;
     while w.bodies(c1).is_empty() {
         assert!(Instant::now() < deadline, "the player never got a body");
         w.rounds(1);
     }
-    w.push_across(0, c1, a0, b1);
+    w.push_across(h(0), c1, a0, b1);
     let deadline = Instant::now() + WAIT;
-    while w.bodies(c1) != [(1, b1)] || w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
+    while w.bodies(c1) != [(h(1), b1)] || w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
         assert!(Instant::now() < deadline, "the player never crossed: {:?}", w.bodies(c1));
         w.rounds(1);
     }
-    assert_eq!(w.sim(0).manager.departed().get(&PlayerId(901)), Some(&1));
-    w.disconnect(0, c1, &token, 1);
+    assert_eq!(w.sim(h(0)).manager.departed().get(&PlayerId(901)), Some(&h(1)));
+    w.disconnect(h(0), c1, &token, 1);
     let ack = w.join(&token, 2);
-    assert_eq!(ack_quic(&ack), (true, endpoint(1).quic), "the login lands on host 1");
-    let c2 = w.connect(1, &token, 2);
+    assert_eq!(ack_quic(&ack), (true, endpoint(h(1)).quic), "the login lands on host 1");
+    let c2 = w.connect(h(1), &token, 2);
     let deadline = Instant::now() + WAIT;
     while w.bodies(c2).is_empty() {
         assert!(Instant::now() < deadline, "the new login never got a body");
         w.rounds(1);
     }
     w.rounds(20);
-    assert_eq!(w.bodies(c2), [(1, b1)], "one body, on host 1");
+    assert_eq!(w.bodies(c2), [(h(1), b1)], "one body, on host 1");
     assert!(w.bodies(c1).is_empty(), "the old session's body is gone");
-    for h in 0..HOSTS {
+    for h in (0..u64::from(HOSTS)).map(HostId) {
         assert!(w.sim(h).manager.parked_record(PlayerId(901)).is_none(), "no parked copy on host {h}");
     }
     w.stop(&dir);
@@ -1720,10 +1721,10 @@ fn kick_reaches_a_session_on_a_non_entry_host_and_is_acked_once() {
     let Some(db) = PgDb::create("lkick") else { return };
     let dir = scratch("lkick");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, 1, &w);
+    let (b1, _) = sides(w.seam, h(1), &w);
     let token = w.player(3, PlayerId(902), Some(b1));
-    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(1).quic));
-    let client = w.connect(1, &token, 1);
+    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(1)).quic));
+    let client = w.connect(h(1), &token, 1);
     let deadline = Instant::now() + WAIT;
     while w.bodies(client).is_empty() {
         assert!(Instant::now() < deadline, "the player never got a body");
@@ -1736,8 +1737,8 @@ fn kick_reaches_a_session_on_a_non_entry_host_and_is_acked_once() {
     w.rounds(20);
     assert_eq!(w.login.seen[from..].iter().filter(|m| **m == ack).count(), 1, "acknowledged once");
     assert!(w.bodies(client).is_empty(), "the session's body is gone");
-    assert!(w.sim(1).manager.parked_record(PlayerId(902)).is_some(), "parked on host 1");
-    assert_eq!(w.orders(1).revoked(&token, 1).as_deref(), Some("signed out"), "host 1 revoked the login");
+    assert!(w.sim(h(1)).manager.parked_record(PlayerId(902)).is_some(), "parked on host 1");
+    assert_eq!(w.orders(h(1)).revoked(&token, 1).as_deref(), Some("signed out"), "host 1 revoked the login");
     assert_eq!(w.ended(&token, 1), 1, "the kicked session's end reached the login service once");
     w.stop(&dir);
 }
@@ -1751,21 +1752,21 @@ fn spawn_for_an_unreachable_owner_is_refused() {
     let Some(db) = PgDb::create("lunreach") else { return };
     let dir = scratch("lunreach");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, 1, &w);
+    let (b1, _) = sides(w.seam, h(1), &w);
     let token = w.player(4, PlayerId(903), Some(b1));
     // Host 1 is gone: its manager and its links.
-    let i = w.pair.sims.iter().position(|s| s.ordinal == 1).unwrap();
+    let i = w.pair.sims.iter().position(|s| s.ordinal == h(1)).unwrap();
     drop(w.pair.sims.remove(i));
     drop(w.links.remove(1));
     w.pair.until("host 0 no longer reaches host 1", |p| !p.sims[0].manager.reaches(b1));
     let ack = w.join(&token, 1);
     assert_eq!(ack_quic(&ack), (false, None), "refused");
-    assert!(w.orders(0).pending().by_token.is_empty(), "nothing ordered on host 0");
+    assert!(w.orders(h(0)).pending().by_token.is_empty(), "nothing ordered on host 0");
     // The login service itself, over its own link to host 0: the join answers 503.
     let (status, code) = login_join(&mut w, &token);
     assert_eq!(status, 503);
     assert_eq!(code, login_api::ApiErrorCode::WorldUnavailable);
-    assert!(w.orders(0).pending().by_token.is_empty(), "nothing ordered on host 0");
+    assert!(w.orders(h(0)).pending().by_token.is_empty(), "nothing ordered on host 0");
     w.stop(&dir);
 }
 
@@ -1842,15 +1843,15 @@ fn hosts_that_left_cleanly_are_read_at_boot() {
     let dir = scratch("lclean");
     let mut w = world(&db, &dir);
     let store0 = w.claims[0].store().clone();
-    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [], "both run");
+    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [], "both run");
     w.until_committed_after(&db, 0);
-    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Clean, "host 1 left");
-    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [(1, 1001)], "host 1 left as boot 1001");
-    assert_eq!(server::peer_link::left_cleanly(&store0, 1).unwrap(), [], "its own row is not a peer's");
-    restart_host(&mut w, &db, &dir, 1, 3001);
-    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [], "back: its new boot cleared the row");
-    kill_host(&mut w, 1);
-    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [], "crashed: its row stays dirty");
+    assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Clean, "host 1 left");
+    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [(h(1), 1001)], "host 1 left as boot 1001");
+    assert_eq!(server::peer_link::left_cleanly(&store0, h(1)).unwrap(), [], "its own row is not a peer's");
+    restart_host(&mut w, &db, &dir, h(1), 3001);
+    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [], "back: its new boot cleared the row");
+    kill_host(&mut w, h(1));
+    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [], "crashed: its row stays dirty");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }
@@ -1863,17 +1864,17 @@ fn session_ended_on_a_non_entry_host_reaches_login() {
     let Some(db) = PgDb::create("lended") else { return };
     let dir = scratch("lended");
     let mut w = login_hosts(&db, &dir);
-    let (b1, _) = sides(w.seam, 1, &w);
+    let (b1, _) = sides(w.seam, h(1), &w);
     let token = w.player(5, PlayerId(904), Some(b1));
-    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(1).quic));
-    let client = w.connect(1, &token, 1);
+    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(1)).quic));
+    let client = w.connect(h(1), &token, 1);
     let deadline = Instant::now() + WAIT;
     while w.bodies(client).is_empty() {
         assert!(Instant::now() < deadline, "the player never got a body");
         w.rounds(1);
     }
     assert_eq!(w.ended(&token, 1), 0);
-    w.disconnect(1, client, &token, 1);
+    w.disconnect(h(1), client, &token, 1);
     let want = HostToLogin::SessionEnded { player_token: token.clone(), session_epoch: 1 };
     w.until_login("the session's end", 0, |m| *m == want);
     w.rounds(20);
@@ -1893,22 +1894,22 @@ fn handoff_does_not_end_the_login_session() {
     let Some(db) = PgDb::create("lhandoff") else { return };
     let dir = scratch("lhandoff");
     let mut w = login_hosts(&db, &dir);
-    let (a0, b1) = sides(w.seam, 0, &w);
+    let (a0, b1) = sides(w.seam, h(0), &w);
     let token = w.player(6, PlayerId(905), Some(a0));
-    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(0).quic));
-    let client = w.connect(0, &token, 1);
+    assert_eq!(ack_quic(&w.join(&token, 1)), (true, endpoint(h(0)).quic));
+    let client = w.connect(h(0), &token, 1);
     let deadline = Instant::now() + WAIT;
     while w.bodies(client).is_empty() {
         assert!(Instant::now() < deadline, "the player never got a body");
         w.rounds(1);
     }
-    w.push_across(0, client, a0, b1);
+    w.push_across(h(0), client, a0, b1);
     let deadline = Instant::now() + WAIT;
-    while w.bodies(client) != [(1, b1)] || w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
+    while w.bodies(client) != [(h(1), b1)] || w.pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0) {
         assert!(Instant::now() < deadline, "the player never crossed: {:?}", w.bodies(client));
         w.rounds(1);
     }
-    w.disconnect(0, client, &token, 1);
+    w.disconnect(h(0), client, &token, 1);
     w.rounds(10);
     assert_eq!(w.ended(&token, 1), 0, "a hand-off and a closed connection to the host it left end nothing");
     let from = w.login.seen.len();
@@ -1917,7 +1918,7 @@ fn handoff_does_not_end_the_login_session() {
     w.until_login("the kick ack", from, |m| *m == ack);
     w.rounds(20);
     assert!(w.bodies(client).is_empty(), "the kick parked the player");
-    assert!(w.sim(1).manager.parked_record(PlayerId(905)).is_some(), "on host 1");
+    assert!(w.sim(h(1)).manager.parked_record(PlayerId(905)).is_some(), "on host 1");
     assert_eq!(w.ended(&token, 1), 1, "its end reported once, by the park");
     w.stop(&dir);
 }
@@ -1948,9 +1949,9 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     let dir = scratch("terrain");
     let mut w = world(&db, &dir);
     let (a, b) = w.seam;
-    let (ha, hb) = (w.pair.sims[0].manager.owner_host(a).expect("an owned region") as usize, w.pair.sims[0].manager.owner_host(b).expect("an owned region") as usize);
+    let (ha, hb) = (w.pair.sims[0].manager.owner_host(a).expect("an owned region").0 as usize, w.pair.sims[0].manager.owner_host(b).expect("an owned region").0 as usize);
     for sim in &mut w.pair.sims {
-        let store = w.claims[sim.ordinal as usize].store().clone();
+        let store = w.claims[sim.ordinal.0 as usize].store().clone();
         sim.terrain = Some(server::cuts::TerrainWatch::start(store, world_store::NotifyMode::Listen));
     }
     w.pair.until("running sets exchanged", |p| {
@@ -2027,8 +2028,8 @@ fn fresh_world_under_claim_lays_out_like_static() {
     let mut sims = Vec::new();
     let mut links = Vec::new();
     let mut claims = Vec::new();
-    for ordinal in 0..HOSTS {
-        let (sim, l, c) = claim_host(&db, &dir, ordinal, 2000 + u64::from(ordinal));
+    for ordinal in (0..u64::from(HOSTS)).map(HostId) {
+        let (sim, l, c) = claim_host(&db, &dir, ordinal, 2000 + ordinal.0);
         sims.push(sim);
         links.push(l);
         claims.push(c);
@@ -2054,7 +2055,7 @@ fn fresh_world_under_claim_lays_out_like_static() {
     let owners = store.owners().unwrap();
     for (sr, rc) in &visits {
         let row = owners.iter().find(|(o, _, _)| o == sr).expect("a row");
-        assert_eq!(row.1, i64::from(game::rendezvous_owner(*sr, HOSTS)), "{sr:?} is claimed as static lays it out");
+        assert_eq!(row.1, (game::rendezvous_owner(*sr, HOSTS).0 as i64), "{sr:?} is claimed as static lays it out");
         pair.until("both directories know it", |p| {
             p.sims.iter().all(|sim| sim.manager.owner_host(*rc) == Some(game::rendezvous_owner(*sr, HOSTS)))
         });
@@ -2084,16 +2085,16 @@ fn a_host_restarted_cleanly_reclaims_its_own_rows() {
     install_props();
     let Some(db) = PgDb::create("claimrestart") else { return };
     let dir = scratch("claimrestart");
-    let (first, first_links, first_claims) = claim_host(&db, &dir, 1, 3001);
+    let (first, first_links, first_claims) = claim_host(&db, &dir, h(1), 3001);
     let store = first_claims.store().clone();
     let mine = vec![(0, 1), (2, 2)];
-    first_claims.add(store.claim_free(1, 3001, mine.clone()).unwrap());
+    first_claims.add(store.claim_free(h(1), 3001, mine.clone()).unwrap());
     let before = store.owners().unwrap();
     drop(first);
     drop(first_links);
     // Its leave cut committed (as `two_phase` marks it).
     exec(&db, "UPDATE hosts SET clean = 1 WHERE ordinal = 1");
-    let (second, second_links, second_claims) = claim_host(&db, &dir, 1, 3002);
+    let (second, second_links, second_claims) = claim_host(&db, &dir, h(1), 3002);
     let after = store.owners().unwrap();
     for sr in &mine {
         let old = before.iter().find(|(o, _, _)| o == sr).expect("claimed before");
@@ -2104,7 +2105,7 @@ fn a_host_restarted_cleanly_reclaims_its_own_rows() {
         let rc = RegionCoords::new(sr.0 * store.super_region_regions() as i32, sr.1 * store.super_region_regions() as i32);
         assert_eq!(second.manager.owner_of(rc), game::Owner::Me, "{sr:?}: the new boot's directory says Me");
     }
-    let cut = game::WorldCut { id: game::CutId(1), host: 1, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
+    let cut = game::WorldCut { id: game::CutId(1), host: h(1), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
     let refused = first_claims.commit_cut(cut).recv().unwrap();
     assert!(matches!(refused, Err(world_store::StoreError::Fenced { .. })), "the old boot is fenced: {refused:?}");
     drop(second);

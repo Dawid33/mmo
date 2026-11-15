@@ -44,6 +44,23 @@ pub const HOST_DEAD: i64 = 1;
 /// `super_regions.owner` of a free row (no host holds it).
 pub const NO_OWNER: i64 = -1;
 
+/// A region host's identity: what the store's `hosts` / `super_regions` rows, the peer links
+/// and the coordinator name a host by. Today the number is the configured ordinal
+/// (`VOXEL_HOST_ORDINAL`); it prints as `h7`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct HostId(pub u64);
+
+impl HostId {
+    /// The one host of a process that runs the whole world (`AllInOne`).
+    pub const SOLO: HostId = HostId(0);
+}
+
+impl std::fmt::Display for HostId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "h{}", self.0)
+    }
+}
+
 /// A succession's id (R4, the store's `successions.id`): one host's land given to one heir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SuccessionId(pub u64);
@@ -90,9 +107,9 @@ pub const HEIR_WAIT_MS: u64 = 30_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Succession {
     pub id: SuccessionId,
-    pub predecessor: u32,
+    pub predecessor: HostId,
     pub predecessor_boot: u64,
-    pub heir: u32,
+    pub heir: HostId,
     pub kind: SuccessionKind,
     /// The last committed world cut at the declaration (`CutId(0)`: none): what the heir
     /// starts the predecessor's regions from.
@@ -101,7 +118,7 @@ pub struct Succession {
     pub moved: Vec<(SuperRegion, u64)>,
     /// Every other live dirty host at the declaration (the heir among them), by ordinal:
     /// the hosts that report their journals to the heir.
-    pub survivors: Vec<u32>,
+    pub survivors: Vec<HostId>,
 }
 
 /// What a declaration of successions did (the store's answer). Anything but `Done` wrote
@@ -112,7 +129,7 @@ pub enum Declared {
     Done(Vec<Succession>),
     /// Crash: these predecessors' rows beat within [`HOST_LEASE_MS`] (and were not
     /// vouched), or left clean meanwhile; leave: these rows are not clean.
-    NotLapsed(Vec<u32>),
+    NotLapsed(Vec<HostId>),
     /// Another succession is open: a second failure before the first is settled — the
     /// caller rolls the world back.
     SuccessionOpen,
@@ -120,7 +137,7 @@ pub enum Declared {
     /// named as heirs, not live with a fresh lease any more. The list mixes predecessor and
     /// heir ordinals (sorted): the caller does not tell them apart — it forgets the whole
     /// declaration and re-observes (its next lease read gives a new lapsed set and new heirs).
-    Gone(Vec<u32>),
+    Gone(Vec<HostId>),
 }
 
 /// Environment: `allinone` (default), `static` or `claim`.
@@ -141,13 +158,13 @@ fn splitmix64(mut z: u64) -> u64 {
 /// The host (`0..hosts`) that owns super-region `sr`: rendezvous hashing — the
 /// host with the highest weight for it, ties to the lower ordinal. Growing
 /// the host count moves only the super-regions the new host wins.
-pub fn rendezvous_owner(sr: (i32, i32), hosts: u32) -> u32 {
-    rendezvous_among(sr, 0..hosts.max(1)).unwrap_or(0)
+pub fn rendezvous_owner(sr: (i32, i32), hosts: u32) -> HostId {
+    rendezvous_among(sr, (0..hosts.max(1)).map(|n| HostId(u64::from(n)))).unwrap_or(HostId::SOLO)
 }
 
 /// [`rendezvous_owner`] over `ordinals` (ascending): the one with the highest weight for
 /// `sr`, ties to the lower ordinal; `None` for no ordinal.
-fn rendezvous_among(sr: SuperRegion, ordinals: impl IntoIterator<Item = u32>) -> Option<u32> {
+fn rendezvous_among(sr: SuperRegion, ordinals: impl IntoIterator<Item = HostId>) -> Option<HostId> {
     // Each coordinate in its own 32 bits (no sign extension: `(-1, 0)` and `(0, -1)`
     // must not share a key), mixed, then mixed again with the ordinal.
     let (sx, sz) = sr;
@@ -157,10 +174,10 @@ fn rendezvous_among(sr: SuperRegion, ordinals: impl IntoIterator<Item = u32>) ->
 
 /// The ordinal of `ordinals` (ascending) with the highest `splitmix64(key ^ ordinal)`,
 /// ties to the lower ordinal.
-fn highest_weight(key: u64, ordinals: impl IntoIterator<Item = u32>) -> Option<u32> {
-    let mut best: Option<(u32, u64)> = None;
+fn highest_weight(key: u64, ordinals: impl IntoIterator<Item = HostId>) -> Option<HostId> {
+    let mut best: Option<(HostId, u64)> = None;
     for ordinal in ordinals {
-        let w = splitmix64(key ^ u64::from(ordinal));
+        let w = splitmix64(key ^ ordinal.0);
         if best.is_none_or(|(_, b)| w > b) {
             best = Some((ordinal, w));
         }
@@ -175,8 +192,8 @@ const HEIR_KEY_SALT: u64 = 0x4845_4952_0000_0000;
 /// a rendezvous pick over `live` without the predecessor, keyed by the predecessor — the
 /// same live set always gives the same heir, and another host leaving the set moves the
 /// heirship only if it was the heir. `None` with no other live host.
-pub fn heir_of(predecessor: u32, live: &BTreeSet<u32>) -> Option<u32> {
-    let key = splitmix64(HEIR_KEY_SALT ^ u64::from(predecessor));
+pub fn heir_of(predecessor: HostId, live: &BTreeSet<HostId>) -> Option<HostId> {
+    let key = splitmix64(HEIR_KEY_SALT ^ predecessor.0);
     highest_weight(key, live.iter().copied().filter(|&o| o != predecessor))
 }
 
@@ -191,7 +208,7 @@ pub enum Owner {
     /// This process.
     Me,
     /// Another host, by ordinal.
-    Host(u32),
+    Host(HostId),
     /// Nobody holds it (a free directory row, or none at all).
     Free,
     /// This process does not know (its directory was never read).
@@ -200,8 +217,8 @@ pub enum Owner {
 
 /// Which regions this process simulates: a policy over the super-regions.
 pub trait Ownership: Send + std::fmt::Debug {
-    /// The host ordinal claims are made as (`AllInOne` is host 0).
-    fn ordinal(&self) -> u32;
+    /// The host id claims are made as (`AllInOne` is [`HostId::SOLO`]).
+    fn me(&self) -> HostId;
     /// Who simulates super-region `sr`.
     fn owner_of(&self, sr: SuperRegion) -> Owner;
     /// What a crash of this host costs the world.
@@ -252,8 +269,8 @@ impl AllInOne {
 }
 
 impl Ownership for AllInOne {
-    fn ordinal(&self) -> u32 {
-        0
+    fn me(&self) -> HostId {
+        HostId::SOLO
     }
     fn owner_of(&self, _sr: SuperRegion) -> Owner {
         Owner::Me
@@ -273,10 +290,10 @@ impl Ownership for AllInOne {
 }
 
 /// A fixed set of `hosts` processes share the world by rendezvous hashing of its
-/// super-regions; this one is `ordinal` (R3 as built: never `Free` / `Unknown`).
+/// super-regions; this one is `id` (R3 as built: never `Free` / `Unknown`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Static {
-    pub ordinal: u32,
+    pub id: HostId,
     pub hosts: u32,
 }
 
@@ -284,23 +301,23 @@ impl Static {
     /// Whether this process owns (simulates) region `rc`, with `s` regions per
     /// super-region side.
     pub fn owns(&self, rc: RegionCoords, s: u32) -> bool {
-        rendezvous_owner(super_region_of(rc, s), self.hosts) == self.ordinal
+        rendezvous_owner(super_region_of(rc, s), self.hosts) == self.id
     }
 
     /// The host that owns region `rc`, with `s` regions per super-region side, as a
     /// number (the trait's [`Ownership::owner_of`] answers per super-region).
-    pub fn owner_of(&self, rc: RegionCoords, s: u32) -> u32 {
+    pub fn owner_of(&self, rc: RegionCoords, s: u32) -> HostId {
         rendezvous_owner(super_region_of(rc, s), self.hosts)
     }
 }
 
 impl Ownership for Static {
-    fn ordinal(&self) -> u32 {
-        self.ordinal
+    fn me(&self) -> HostId {
+        self.id
     }
     fn owner_of(&self, sr: SuperRegion) -> Owner {
         match rendezvous_owner(sr, self.hosts) {
-            o if o == self.ordinal => Owner::Me,
+            o if o == self.id => Owner::Me,
             o => Owner::Host(o),
         }
     }
@@ -321,16 +338,16 @@ impl Ownership for Static {
 /// ([`Directory::replace`]), `Free` after it (nobody ever claimed it).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Directory {
-    rows: BTreeMap<SuperRegion, (Option<u32>, u64)>,
+    rows: BTreeMap<SuperRegion, (Option<HostId>, u64)>,
     /// Read whole at least once.
     read: bool,
-    live: BTreeSet<u32>,
+    live: BTreeSet<HostId>,
 }
 
 impl Directory {
     /// Row `sr` is `owner` (`None`: free) at `epoch`; ignored when `epoch` is lower than
     /// the stored one (a late message never undoes a newer claim).
-    pub fn set(&mut self, sr: SuperRegion, owner: Option<u32>, epoch: u64) {
+    pub fn set(&mut self, sr: SuperRegion, owner: Option<HostId>, epoch: u64) {
         if self.rows.get(&sr).is_some_and(|&(_, stored)| epoch < stored) {
             return;
         }
@@ -341,7 +358,7 @@ impl Directory {
     /// [`Self::set`] (a row read older than what a peer already said is kept as said), and
     /// from now on a super-region with no row is `Free`. A row is never deleted in the
     /// store, so one known here and missing from the read stays.
-    pub fn replace(&mut self, rows: impl IntoIterator<Item = (SuperRegion, Option<u32>, u64)>) {
+    pub fn replace(&mut self, rows: impl IntoIterator<Item = (SuperRegion, Option<HostId>, u64)>) {
         self.read = true;
         for (sr, owner, epoch) in rows {
             self.set(sr, owner, epoch);
@@ -349,7 +366,7 @@ impl Directory {
     }
 
     /// Who simulates `sr`, as host `me` sees it.
-    pub fn get(&self, sr: SuperRegion, me: u32) -> Owner {
+    pub fn get(&self, sr: SuperRegion, me: HostId) -> Owner {
         match self.rows.get(&sr) {
             Some(&(Some(owner), _)) if owner == me => Owner::Me,
             Some(&(Some(owner), _)) => Owner::Host(owner),
@@ -371,24 +388,24 @@ impl Directory {
     }
 
     /// The super-regions host `ordinal` holds, in order.
-    pub fn owned_by(&self, ordinal: u32) -> Vec<SuperRegion> {
+    pub fn owned_by(&self, ordinal: HostId) -> Vec<SuperRegion> {
         self.rows.iter().filter(|(_, (owner, _))| *owner == Some(ordinal)).map(|(sr, _)| *sr).collect()
     }
 
     /// The hosts that hold their lease now.
-    pub fn set_live(&mut self, live: BTreeSet<u32>) {
+    pub fn set_live(&mut self, live: BTreeSet<HostId>) {
         self.live = live;
     }
 
     /// Host `ordinal` is live too (its peer link said hello: it registered and runs) until
     /// the next [`Self::set_live`].
-    pub fn note_live(&mut self, ordinal: u32) {
+    pub fn note_live(&mut self, ordinal: HostId) {
         self.live.insert(ordinal);
     }
 
     /// Host `ordinal` was declared dead (a succession): not live until the next
     /// [`Self::set_live`] or a hello of another boot of it ([`Self::note_live`]).
-    pub fn note_dead(&mut self, ordinal: u32) {
+    pub fn note_dead(&mut self, ordinal: HostId) {
         self.live.remove(&ordinal);
     }
 
@@ -396,7 +413,7 @@ impl Directory {
     /// restricted to the live hosts (with every host of `VOXEL_HOSTS` live, exactly
     /// `rendezvous_owner(sr, hosts)`; a dead host's share moves, nobody else's). `None`
     /// while no host is known live.
-    pub fn preferred(&self, sr: SuperRegion) -> Option<u32> {
+    pub fn preferred(&self, sr: SuperRegion) -> Option<HostId> {
         rendezvous_among(sr, self.live.iter().copied())
     }
 }
@@ -406,24 +423,24 @@ impl Directory {
 /// are never assumed to be anyone's). A crash is inherited by one heir (`Succession`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PgClaim {
-    pub ordinal: u32,
+    pub id: HostId,
     pub hosts: u32,
     pub directory: Directory,
 }
 
 impl PgClaim {
     /// Host `ordinal` of `hosts`, its directory not read yet (everything `Unknown`).
-    pub fn new(ordinal: u32, hosts: u32) -> PgClaim {
-        PgClaim { ordinal, hosts, directory: Directory::default() }
+    pub fn new(id: HostId, hosts: u32) -> PgClaim {
+        PgClaim { id, hosts, directory: Directory::default() }
     }
 }
 
 impl Ownership for PgClaim {
-    fn ordinal(&self) -> u32 {
-        self.ordinal
+    fn me(&self) -> HostId {
+        self.id
     }
     fn owner_of(&self, sr: SuperRegion) -> Owner {
-        self.directory.get(sr, self.ordinal)
+        self.directory.get(sr, self.id)
     }
     fn policy(&self) -> CrashPolicy {
         CrashPolicy::Succession
@@ -480,9 +497,9 @@ pub fn ownership_from_values(
                 return Err(format!("{HOST_ORDINAL_ENV}={ordinal} must be below {HOSTS_ENV}={hosts} (at least 1)"));
             }
             if kind == "claim" {
-                return Ok(Box::new(PgClaim::new(ordinal, hosts)));
+                return Ok(Box::new(PgClaim::new(HostId(u64::from(ordinal)), hosts)));
             }
-            Ok(Box::new(Static { ordinal, hosts }))
+            Ok(Box::new(Static { id: HostId(u64::from(ordinal)), hosts }))
         }
         other => Err(format!("{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim")),
     }
@@ -492,4 +509,20 @@ pub fn ownership_from_values(
 pub fn ownership_from_env() -> Result<Box<dyn Ownership>, String> {
     let get = |name: &str| std::env::var(name).ok();
     ownership_from_values(get(OWNERSHIP_ENV).as_deref(), get(HOST_ORDINAL_ENV).as_deref(), get(HOSTS_ENV).as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_host_id_orders_and_prints_by_its_number() {
+        assert!(HostId(2) < HostId(10));
+        assert_eq!(format!("{}", HostId(7)), "h7");
+        let endpoint = crate::HostEndpoint { id: HostId(9), quic: Some("127.0.0.1:1".into()), webtransport: None, cert_hash: None };
+        let bytes = bincode::serialize(&endpoint).unwrap();
+        let back: crate::HostEndpoint = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.id, HostId(9));
+        assert_eq!(back, endpoint);
+    }
 }

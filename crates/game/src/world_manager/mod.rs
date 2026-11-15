@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
+use crate::HostId;
 use crate::coordinator::{
     Claim, CoordMsg, HostMsg, OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest,
 };
@@ -155,7 +156,7 @@ pub enum ServerEvent {
     /// Entered at host `origin`, forwarded `hops` times so far. The manager places it
     /// ([`WorldManager::place_spawn`]): here, or relayed to the host that holds the player.
     SpawnOrder {
-        origin: u32,
+        origin: HostId,
         hops: u8,
         player_token: String,
         session_epoch: u64,
@@ -1027,7 +1028,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// already confirmed: the player then counts in transit to `to` — denial only (another
     /// player's return to its fortress is refused) — until `to` attaches without it or the
     /// player's next report (higher hop) anywhere.
-    handed: BTreeMap<PlayerId, (u32, u64, u64)>,
+    handed: BTreeMap<PlayerId, (HostId, u64, u64)>,
     /// Renumberings on `CoordMsg::HopIs` per player, counted per placement here (a login
     /// or an arrival starts the count over).
     hop_renumbers: crate::coordinator::RenumberBudget,
@@ -1244,7 +1245,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Free super-regions a peer asked this host to claim ([`crate::Volatile::ClaimWanted`]).
     claim_asks: BTreeSet<crate::SuperRegion>,
     /// The last `ClaimWanted` sent per super-region: to which host, at which `clock_ms`.
-    claim_wanted_sent: BTreeMap<crate::SuperRegion, (u32, u64)>,
+    claim_wanted_sent: BTreeMap<crate::SuperRegion, (HostId, u64)>,
     /// Super-regions of a host that left cleanly (`left_peers`) that a spawn placement here
     /// needs (`placement.rs`): asked for with what waits in a held session
     /// ([`crate::HostMsg::LandWanted`], `peers.rs`), forgotten once their owner is no
@@ -1261,10 +1262,10 @@ pub struct WorldManager<S: RegionSpawner> {
     directory_wanted: bool,
     /// The session with each other host of the world (`peers.rs`, [`Self::set_peer`]).
     /// Empty for a single host.
-    peers: BTreeMap<u32, peers::Peer>,
+    peers: BTreeMap<HostId, peers::Peer>,
     /// Reliable messages for a host that has no session yet, in order: queued into its
     /// session by [`Self::set_peer`]. Carried by cuts like a session's unreceived ones.
-    peer_waiting: BTreeMap<u32, Vec<crate::Reliable>>,
+    peer_waiting: BTreeMap<HostId, Vec<crate::Reliable>>,
     /// The state messages exchanged with each peer since the last committed world cut
     /// (R4, `peer/journal.rs`): never saved, never hashed. Fed where messages are queued
     /// (`queue_now`) and received (`peer_reliable`), truncated when a cut is decided.
@@ -1275,16 +1276,16 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Reliable messages queued to each host so far (`queue_to_peer`): the ids of what a
     /// session (or `peer_waiting`) still holds are the last of these, in order — entries
     /// leave only from the front (`peers.rs`, `peer_entries`).
-    peer_queued: BTreeMap<u32, u64>,
+    peer_queued: BTreeMap<HostId, u64>,
     /// Transfers, intents and replies to other hosts — `(host, id)` — sent after their
     /// source answered the pending cut (its snapshot still holds them): not rows of that
     /// cut. Cleared by every `begin_cut`, like [`InFlight::in_source_view`].
-    peer_in_source_view: BTreeSet<(u32, u64)>,
+    peer_in_source_view: BTreeSet<(HostId, u64)>,
     /// The regions of other hosts that border one of this host's and run, by their host
     /// (`peers.rs`): what halo traffic to another host is sent to (halo never wakes a
     /// region). Replaced by each [`crate::Volatile::Running`] of that host, kept by its
     /// `RegionUp` / `RegionDown`, emptied when its link goes down.
-    foreign_running: BTreeMap<RegionCoords, u32>,
+    foreign_running: BTreeMap<RegionCoords, HostId>,
     /// Other hosts' regions whose halo stopped being live by a loss (their link went down,
     /// their `RegionDown`, a `Running` without them): what they sent last may have been
     /// lost, so the next [`Self::stored_terrain_changed`] that lists one re-seeds its
@@ -1304,24 +1305,24 @@ pub struct WorldManager<S: RegionSpawner> {
     /// session ([`ServerPacket::Host`]). Ordinal 0, no addresses until set.
     endpoint: crate::HostEndpoint,
     /// Where clients reach each other host, from its latest [`crate::PeerHello`].
-    peer_endpoints: BTreeMap<u32, crate::HostEndpoint>,
+    peer_endpoints: BTreeMap<HostId, crate::HostEndpoint>,
     /// "I handed this player to host N" (`peers.rs`): set when a player's body leaves for
     /// another host, cleared when it comes back. Kept for the manager's lifetime: input
     /// a client still sends here follows it, and a login placement asks it.
-    departed: BTreeMap<PlayerId, u32>,
+    departed: BTreeMap<PlayerId, HostId>,
     /// Players handed to this host with no session here yet, by client, with the `now_ms`
     /// they arrived at and the host they came from: treated as disconnected after
     /// [`HANDOFF_SESSION_GRACE_MS`] (that host told: [`crate::Reliable::PlayerParked`]).
-    awaiting_session: BTreeMap<ClientId, (u64, u32)>,
+    awaiting_session: BTreeMap<ClientId, (u64, HostId)>,
     /// Observer tickets handed out, per `(client, owner host)`: the nonce and the `now_ms`
     /// it was minted at (`peers.rs`, `observer_ticket`).
-    observer_tickets: BTreeMap<(ClientId, u32), (u64, u64)>,
+    observer_tickets: BTreeMap<(ClientId, HostId), (u64, u64)>,
     /// Every region a home session here was sent to another host for (`RegionElsewhere`),
     /// with that host — as far as this host knows, the connection the client takes the
     /// region from (R4). After a succession of that host the region is answered again
     /// (`succession.rs`); a subscribe or release of it here, a hop of the home, and the
     /// session's end drop the entry (bounded by the client's window).
-    redirected: BTreeMap<(ClientId, RegionCoords), u32>,
+    redirected: BTreeMap<(ClientId, RegionCoords), HostId>,
     /// When the remembered subscribes were last gone over ([`ASKED_ELSEWHERE_ANSWER_MS`]).
     asked_elsewhere_answered_ms: u64,
     /// Observer orders other hosts sent, for the server edge
@@ -1344,7 +1345,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// below it is stale.
     world_cut_seen: Option<CutId>,
     /// Per peer: its mark of a world cut this host has not begun yet (counted when it does).
-    early_marks: BTreeMap<u32, CutId>,
+    early_marks: BTreeMap<HostId, CutId>,
     /// The highest world cut a wrapped message ([`crate::Reliable::InCut`]) of arrived for
     /// while that cut was not pending here: this host is too late for it — a `BeginCut` of
     /// it (or an earlier one) is answered `Missed` (`world_cut.rs`).
@@ -1365,32 +1366,32 @@ pub struct WorldManager<S: RegionSpawner> {
     leave_parked: bool,
     /// Per peer: a leave of the pending world cut joins this host and it (either leaves);
     /// what this host sends it meanwhile waits here (`world_cut.rs`, leave cuts).
-    leave_pairs: BTreeMap<u32, world_cut::LeavePair>,
+    leave_pairs: BTreeMap<HostId, world_cut::LeavePair>,
     /// Per peer: the pending world cut runs with it in count mode — their link is down, the
     /// session frozen until the cut's `CutDone` (`world_cut.rs`, the fourth case).
-    count_pairs: BTreeMap<u32, world_cut::CountPair>,
+    count_pairs: BTreeMap<HostId, world_cut::CountPair>,
     /// Peers that left in a committed cut, with the boot they left as: their session is
     /// held until a hello of another boot.
-    left_peers: BTreeMap<u32, Option<u64>>,
+    left_peers: BTreeMap<HostId, Option<u64>>,
     /// Under `claim` (R4 drain): peers in `left_peers` whose NEW boot said hello, with that
     /// boot. Their held session is released only once the new boot shows it holds the land
     /// it left with ([`crate::Reliable::Owns`] of a super-region this host's directory gives
     /// it): a new boot that owns nothing registered after a `Leave` succession of its old
     /// boot — what was held goes to the heir in this host's report instead.
-    returning_peers: BTreeMap<u32, u64>,
+    returning_peers: BTreeMap<HostId, u64>,
     /// Under `claim`: for each peer in `left_peers`, the super-regions this host's directory
     /// gave it when its leave was noted (`None`: the directory was not read yet — filled at
     /// the first read). Empty: it held no land, so no `Leave` succession can owe an heir
     /// anything of it — its next boot's hello releases the held session at once.
-    left_land: BTreeMap<u32, Option<BTreeSet<crate::SuperRegion>>>,
+    left_land: BTreeMap<HostId, Option<BTreeSet<crate::SuperRegion>>>,
     /// Peers whose `left_land` the boot path noted before any directory read: filled at the
     /// first one (`world_cut.rs` `left_land_read`).
-    left_land_unread: BTreeSet<u32>,
+    left_land_unread: BTreeSet<HostId>,
     /// Peers leaving in a cut not decided here whose NEXT boot already showed it holds land
     /// it left with (its `Owns` came before the late `CutDone`): released at the decision.
-    pair_owns_seen: BTreeSet<u32>,
+    pair_owns_seen: BTreeSet<HostId>,
     /// Each peer's boot as its latest hello named it.
-    peer_boots: BTreeMap<u32, u64>,
+    peer_boots: BTreeMap<HostId, u64>,
     /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
     world_cut_done: Vec<(CutId, bool)>,
     /// While a wrapped peer message ([`crate::Reliable::InCut`]) is applied: its cut. What
@@ -1398,12 +1399,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// wrapped the same way (`world_cut.rs`).
     inbound_accounted: Option<CutId>,
     /// The host the login service is linked to ([`Self::set_entry_host`]; `None`: this one).
-    entry_host: Option<u32>,
+    entry_host: Option<HostId>,
     /// The login (token, session epoch) of each session whose player this host holds, from
     /// [`ServerEvent::LoginConnected`] or a hand-off (`placement.rs`).
     logins: BTreeMap<ClientId, (String, u64)>,
     /// Peers whose first sync of their current connection came (`placement.rs`).
-    peer_synced: BTreeSet<u32>,
+    peer_synced: BTreeSet<HostId>,
     /// Spawn orders waiting for every peer's first sync, with when they were first seen.
     spawn_held: Vec<(u64, SpawnRequest)>,
     /// Spawn orders this host takes, for the server ([`Self::take_spawn_here`]).
@@ -1411,7 +1412,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Kicks other hosts relayed, for the server ([`Self::take_kicks_in`]).
     kicks_in: Vec<KickIn>,
     /// Kicks relayed to every peer, by (token, epoch): the peers yet to acknowledge.
-    kicks_pending: BTreeMap<(String, u64), BTreeSet<u32>>,
+    kicks_pending: BTreeMap<(String, u64), BTreeSet<HostId>>,
     /// Kicks applied here, by token (`placement.rs`, [`KICK_MEMORY_MS`]).
     kicked: BTreeMap<String, placement::Kicked>,
     /// For the login service ([`Self::take_login_out`]).
@@ -1425,12 +1426,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// coordinator says they are over.
     successions: BTreeMap<crate::SuccessionId, succession::SurvivorRun>,
     /// Peer boots declared dead (`(ordinal, boot)`, a succession): their hello is refused.
-    dead_boots: BTreeSet<(u32, u64)>,
+    dead_boots: BTreeSet<(HostId, u64)>,
     /// Peers whose current boot was succeeded, with that boot: they hold nobody and are
     /// awaited by nothing until a hello of another boot.
-    succeeded_peers: BTreeMap<u32, u64>,
+    succeeded_peers: BTreeMap<HostId, u64>,
     /// The heir's: every survivor's report per succession (Task 9 resolves them).
-    succession_reports: BTreeMap<crate::SuccessionId, BTreeMap<u32, SuccessionReportIn>>,
+    succession_reports: BTreeMap<crate::SuccessionId, BTreeMap<HostId, SuccessionReportIn>>,
     /// When a succession waiting for its base cut was last logged.
     succession_wait_logged_ms: Option<u64>,
     /// The heir's: the super-regions it inherits by a succession it has not adopted yet
@@ -1568,7 +1569,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             foreign_running: BTreeMap::new(),
             foreign_halo_stale: BTreeSet::new(),
             higher_generation: None,
-            endpoint: crate::HostEndpoint { ordinal: 0, quic: None, webtransport: None, cert_hash: None },
+            endpoint: crate::HostEndpoint { id: HostId::SOLO, quic: None, webtransport: None, cert_hash: None },
             peer_endpoints: BTreeMap::new(),
             departed: BTreeMap::new(),
             awaiting_session: BTreeMap::new(),

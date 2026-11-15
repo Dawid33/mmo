@@ -3,9 +3,10 @@
 //! and the inline link's seeded delays. Pure `Coordinator` — the host is played by sending
 //! `HostMsg`s directly.
 
+use crate::common::h;
 use game::coordinator::*;
 use game::history::*;
-use game::{EmbarkRequest, GameEventKind, InlineSchedule, PlayerId, RegionCoords};
+use game::{EmbarkRequest, HostId, GameEventKind, InlineSchedule, PlayerId, RegionCoords};
 
 use crate::history_handover::{land_map, start, years_before};
 
@@ -22,7 +23,7 @@ fn rc(x: i32, z: i32) -> RegionCoords {
 }
 
 fn rid(seq: u64) -> RequestId {
-    RequestId { host: 0, boot: 7, seq }
+    RequestId { host: h(0), boot: 7, seq }
 }
 
 /// The messages free to leave, whatever host each is for (one host in most tests).
@@ -114,8 +115,8 @@ fn events_about(msgs: &[CoordMsg], person: PersonId) -> Vec<GameEventKind> {
 fn embark_validates_and_claims_once() {
     let (mut c, civ, people) = coordinator();
     let sites = c.history().sites().count();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
-    c.handle(0, embark(2, B, civ, &people[2..4], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(2, B, civ, &people[2..4], rc(8, 0)), 0);
     let out = commit(&mut c);
     let WorldReply::Embarked { site, region } = reply_to(&out, 1) else { panic!("A's embark founds: {out:?}") };
     assert_eq!(region, rc(8, 0));
@@ -131,10 +132,10 @@ fn embark_validates_and_claims_once() {
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
     assert_eq!(c.claim_of(B), None);
     // One claim per player.
-    c.handle(0, embark(3, A, civ, &people[4..6], rc(14, 0)), 0);
+    c.handle(h(0), embark(3, A, civ, &people[4..6], rc(14, 0)), 0);
     let out = commit(&mut c);
     assert_eq!(reply_to(&out, 3), WorldReply::EmbarkRefused(EmbarkRefusal::AlreadyHasFortress));
-    c.handle(0, request(4, A, WorldRequest::StartAdventure(SiteId(0))), 0);
+    c.handle(h(0), request(4, A, WorldRequest::StartAdventure(SiteId(0))), 0);
     let out = commit(&mut c);
     assert_eq!(reply_to(&out, 4), WorldReply::AdventureRefused(AdventureRefusal::AlreadyPlaying));
 }
@@ -143,13 +144,13 @@ fn embark_validates_and_claims_once() {
 fn embark_reply_waits_for_save() {
     let (mut c, civ, people) = coordinator();
     // A refusal grants nothing: it leaves at once.
-    c.handle(0, embark(1, B, civ, &people[0..2], rc(0, 0)), 0);
+    c.handle(h(0), embark(1, B, civ, &people[0..2], rc(0, 0)), 0);
     assert_eq!(reply_to(&c.take_msgs(), 1), WorldReply::EmbarkRefused(EmbarkRefusal::Occupied));
-    c.handle(0, embark(2, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(2, A, civ, &people[0..2], rc(8, 0)), 0);
     c.maintain(0);
     assert!(replies(&c.take_msgs()).is_empty(), "no claim-granting reply before a save");
     // Anything decided after it waits behind it, in order.
-    c.handle(0, request(3, B, WorldRequest::PersonInfo(people[3])), 0);
+    c.handle(h(0), request(3, B, WorldRequest::PersonInfo(people[3])), 0);
     assert!(c.take_msgs().is_empty(), "later messages keep their place behind the waiting reply");
     let state = c.take_save().expect("a save is due while a reply waits");
     let saved = game::history::persist::decode(&state.history, grid()).expect("the saved history loads");
@@ -168,7 +169,7 @@ fn embark_reply_waits_for_save() {
 #[test]
 fn failed_save_keeps_reply_waiting() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     assert!(c.take_save().is_some());
     c.save_failed();
     assert!(c.take_msgs().is_empty(), "a failed save releases nothing");
@@ -180,11 +181,11 @@ fn failed_save_keeps_reply_waiting() {
 #[test]
 fn request_replay_answers_from_memo() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let first = reply_to(&commit(&mut c), 1);
     assert!(matches!(first, WorldReply::Embarked { .. }), "{first:?}");
     let sites = c.history().sites().count();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     assert_eq!(reply_to(&commit(&mut c), 1), first, "the replay is answered identically");
     assert_eq!(c.history().sites().count(), sites, "and founds nothing");
     // The memo is saved with the state: a restarted coordinator answers the replay too.
@@ -193,7 +194,7 @@ fn request_replay_answers_from_memo() {
     c.saved();
     let mut c2 = Coordinator::from_state(state, grid(), 5_000).expect("state loads");
     c2.take_msgs();
-    c2.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 5_000);
+    c2.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 5_000);
     assert_eq!(reply_to(&commit(&mut c2), 1), first, "the restarted coordinator answers from its memo");
     assert_eq!(c2.history().sites().count(), sites, "and founds nothing");
 }
@@ -201,34 +202,34 @@ fn request_replay_answers_from_memo() {
 #[test]
 fn return_in_use_only_while_online() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
-    c.handle(0, request(3, B, WorldRequest::ReturnTo(SiteId(0))), 0);
+    c.handle(h(0), request(3, B, WorldRequest::ReturnTo(SiteId(0))), 0);
     assert_eq!(
         reply_to(&commit(&mut c), 3),
         WorldReply::EmbarkRefused(EmbarkRefusal::NotPlayerFounded),
         "only player-founded sites"
     );
-    c.handle(0, HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
-    c.handle(0, request(4, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
+    c.handle(h(0), request(4, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 4), WorldReply::Returned { site, region });
     assert_eq!(c.claim_of(B), Some(Claim::Fortress(site)));
     assert_eq!(c.claim_of(A), None, "the offline claimant lost it");
     // A comes back holding the old claim in its record: it is B's now. (Its placement is
     // numbered 2, and its requests from here carry that.)
-    c.handle(0, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
+    c.handle(h(0), online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
     assert_eq!(c.claim_of(A), None);
     assert!(
         c.take_msgs().iter().any(|m| matches!(m, CoordMsg::ClaimIs { player: A, claim: None, .. })),
         "A's host is told to drop the fortress B plays"
     );
-    c.handle(0, HostMsg::Request { id: rid(5), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
+    c.handle(h(0), HostMsg::Request { id: rid(5), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
     assert_eq!(reply_to(&commit(&mut c), 5), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
     // B retires: the site is free again.
-    c.handle(0, HostMsg::ReleaseClaim { player: B }, 0);
-    c.handle(0, HostMsg::Request { id: rid(6), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
+    c.handle(h(0), HostMsg::ReleaseClaim { player: B }, 0);
+    c.handle(h(0), HostMsg::Request { id: rid(6), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
     assert_eq!(reply_to(&commit(&mut c), 6), WorldReply::Returned { site, region });
 }
 
@@ -236,12 +237,12 @@ fn return_in_use_only_while_online() {
 fn directive_bounce_is_redelivered_once() {
     let (mut c, civ, people) = coordinator();
     let r = rc(8, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     let out = commit(&mut c);
     assert!(matches!(out.as_slice(), [CoordMsg::SpawnPeople { incarnation: 1, events, .. }] if events.is_empty()));
     // An embark into the running region: its party spawns there by directive.
     let party = &people[0..2];
-    c.handle(0, embark(1, A, civ, party, r), 0);
+    c.handle(h(0), embark(1, A, civ, party, r), 0);
     let out = commit(&mut c);
     let spawns: Vec<_> = out
         .iter()
@@ -256,21 +257,21 @@ fn directive_bounce_is_redelivered_once() {
     assert_eq!(spawns.len(), party.len(), "{out:?}");
 
     // The host was stopping `r`: the first spawn bounces, `r` starts again before parking.
-    c.handle(0, HostMsg::RegionStopping { rc: r }, 0);
-    c.handle(0, HostMsg::DirectiveBounced { directive: spawns[0].clone(), incarnation: 1 }, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(h(0), HostMsg::DirectiveBounced { directive: spawns[0].clone(), incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
     let out = commit(&mut c);
     assert_eq!(events_about(&out, party[0]).len(), 1, "the bounced spawn is delivered once: {out:?}");
     assert!(matches!(events_about(&out, party[0])[0], GameEventKind::SpawnPerson(_)));
     assert!(events_about(&out, party[1]).is_empty(), "the delivered one is left alone: {out:?}");
 
     // Now both spawns bounce and `r` parks before it starts again: the catch-up is the one body.
-    c.handle(0, HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r }, 0);
     for d in &spawns {
-        c.handle(0, HostMsg::DirectiveBounced { directive: d.clone(), incarnation: 2 }, 0);
+        c.handle(h(0), HostMsg::DirectiveBounced { directive: d.clone(), incarnation: 2 }, 0);
     }
-    c.handle(0, HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 3 }, 0);
+    c.handle(h(0), HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 3 }, 0);
     c.maintain(0);
     let out = commit(&mut c);
     for p in party {
@@ -285,17 +286,17 @@ fn directive_bounce_is_redelivered_once() {
 
 #[test]
 fn reattach_keeps_bodies_and_despawns_the_dead() {
-    let (mut h, _civ, people) = world();
+    let (mut hist, _civ, people) = world();
     let q = people[0];
     // A 170-year-old member of site 0: dies on the first advance.
-    let p = h.add_founder(Sex::Male, years_before(start(), 170));
-    h.sites.get_mut(&SiteId(0)).unwrap().members.insert(p);
-    let pr = h.people.get_mut(&p).unwrap();
+    let p = hist.add_founder(Sex::Male, years_before(start(), 170));
+    hist.sites.get_mut(&SiteId(0)).unwrap().members.insert(p);
+    let pr = hist.people.get_mut(&p).unwrap();
     pr.site = Some(SiteId(0));
     pr.location = Location::AtSite(SiteId(0));
     let r = rc(0, 0);
-    let mut c = Coordinator::new(h, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    let mut c = Coordinator::new(hist, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     let out = commit(&mut c);
     assert_eq!(events_about(&out, p).len(), 1, "P has a body");
     assert_eq!(events_about(&out, q).len(), 1, "Q has a body");
@@ -310,7 +311,7 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     let mut c = Coordinator::from_state(state, grid(), 60_000).expect("state loads");
     assert!(matches!(c.take_msgs().as_slice(), [CoordMsg::View { .. }]));
     let running = RunningRegion { rc: r, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0]), (q, [4.0, 5.0, 6.0])] };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 60_000);
+    c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 60_000);
     let out = commit(&mut c);
     assert!(!out.iter().any(|m| matches!(m, CoordMsg::SpawnPeople { .. })), "a reattach spawns nothing: {out:?}");
     assert_eq!(events_about(&out, q), Vec::<GameEventKind>::new(), "Q's body stands");
@@ -321,16 +322,16 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     assert_eq!(qr.abstract_location(), Location::AtSite(SiteId(0)));
     assert_eq!(c.history().noted_position(q), Some((r, [4.0, 5.0, 6.0])));
     // `r` runs again: a park returns Q to the abstract history.
-    c.handle(0, HostMsg::RegionStopping { rc: r }, 60_000);
-    c.handle(0, HostMsg::RegionParked { rc: r, people: vec![(q, [4.0, 5.0, 6.0])] }, 60_000);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r }, 60_000);
+    c.handle(h(0), HostMsg::RegionParked { rc: r, people: vec![(q, [4.0, 5.0, 6.0])] }, 60_000);
     assert_eq!(c.history().person(q).unwrap().location, Location::AtSite(SiteId(0)));
 }
 
 #[test]
 fn state_round_trips() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
-    c.handle(0, request(2, B, WorldRequest::StartAdventure(SiteId(0))), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), request(2, B, WorldRequest::StartAdventure(SiteId(0))), 0);
     let out = commit(&mut c);
     let WorldReply::Embarked { site, region } = reply_to(&out, 1) else { panic!("embarks") };
     c.request_save();
@@ -353,7 +354,7 @@ fn state_round_trips() {
     assert_eq!(c2.claim_of(B), Some(Claim::Adventure(SiteId(0))));
     // Claimants load offline: another player may return to A's fortress.
     let p3 = PlayerId(3);
-    c2.handle(0, request(3, p3, WorldRequest::ReturnTo(site)), 0);
+    c2.handle(h(0), request(3, p3, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c2), 3), WorldReply::Returned { site, region });
 }
 
@@ -475,27 +476,27 @@ fn directives_for(msgs: &[CoordMsg], r: RegionCoords) -> Vec<(Directive, u64)> {
 fn stale_bounce_is_dropped() {
     let (mut c, civ, people) = coordinator();
     let r = rc(8, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     commit(&mut c);
     let p = people[0];
-    c.handle(0, embark(1, A, civ, &[p], r), 0);
+    c.handle(h(0), embark(1, A, civ, &[p], r), 0);
     let out = commit(&mut c);
     let spawn = directives_for(&out, r);
     assert_eq!(spawn.len(), 1, "{out:?}");
     assert_eq!(spawn[0].1, 1);
     let mut bodies = 0; // P's bodies on the host: the spawn has not been applied yet
     // The host parks `r` (no body of P in it) and starts it again before the spawn lands.
-    c.handle(0, HostMsg::RegionStopping { rc: r }, 0);
-    c.handle(0, HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(h(0), HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
     let out = commit(&mut c);
     bodies += body_delta(&out, p);
     assert_eq!(bodies, 1, "incarnation 2's catch-up spawns P: {out:?}");
     // The delayed incarnation-1 spawn is bounced by the host (wrong incarnation).
-    c.handle(0, HostMsg::DirectiveBounced { directive: spawn[0].0.clone(), incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::DirectiveBounced { directive: spawn[0].0.clone(), incarnation: 1 }, 0);
     // Stop and start again without a park (P's body stays).
-    c.handle(0, HostMsg::RegionStopping { rc: r }, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 3 }, 0);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 3 }, 0);
     c.maintain(0);
     let out = commit(&mut c);
     bodies += body_delta(&out, p);
@@ -512,20 +513,20 @@ fn stale_bounce_is_dropped() {
 fn a_region_started_on_another_host_takes_its_people_over() {
     let (mut c, _, people) = coordinator();
     let r = rc(0, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     let out = commit(&mut c);
     for p in &people {
         assert_eq!(body_delta(&out, *p), 1, "{p:?} spawned on host 0: {out:?}");
     }
-    c.handle(1, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(1), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     let out = commit_routed(&mut c);
-    let for_host_1: Vec<CoordMsg> = out.iter().filter(|(to, _)| *to == Target::Host(1)).map(|(_, m)| m.clone()).collect();
+    let for_host_1: Vec<CoordMsg> = out.iter().filter(|(to, _)| *to == Target::Host(h(1))).map(|(_, m)| m.clone()).collect();
     for p in &people {
         assert_eq!(body_delta(&for_host_1, *p), 1, "{p:?} spawned again for host 1's start: {out:?}");
         assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r));
     }
     // Host 0's late park of its dead incarnation changes nothing (the region runs elsewhere).
-    c.handle(0, HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    c.handle(h(0), HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
     for p in &people {
         assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r), "{p:?} stays embodied on host 1");
     }
@@ -540,7 +541,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     let (mut c, _, people) = coordinator();
     let r = rc(0, 0);
     let running = |bodies: Vec<(PersonId, [f32; 3])>| RunningRegion { rc: r, incarnation: 1, people: bodies };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
+    c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     for p in &people {
@@ -549,7 +550,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     }
     // Re-attached with every body there: nothing more.
     let bodies: Vec<(PersonId, [f32; 3])> = people.iter().map(|p| (*p, [0.0; 3])).collect();
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
+    c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     assert!(directives_for(&out, r).is_empty(), "{out:?}");
 }
@@ -563,8 +564,8 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
 fn crossing_held_behind_the_attach_keeps_one_body() {
     let (mut c, _, people) = coordinator();
     let (a, b, x) = (rc(0, 0), rc(1, 0), rc(2, 0));
-    c.handle(0, HostMsg::RegionStarted { rc: a, incarnation: 1 }, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: b, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: a, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: b, incarnation: 1 }, 0);
     let out = commit(&mut c);
     let (p, q) = (people[0], people[1]);
     // Bodies on the host: everyone spawned into A once.
@@ -582,14 +583,14 @@ fn crossing_held_behind_the_attach_keeps_one_body() {
         RunningRegion { rc: a, incarnation: 1, people: a_list },
         RunningRegion { rc: b, incarnation: 1, people: vec![(p, at)] },
     ];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
+    c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     count(p, &out, &mut p_bodies);
     count(q, &out, &mut q_bodies);
     assert_eq!((p_bodies, q_bodies), (1, 0), "nobody spawned beside a crossing: {out:?}");
     assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(b));
-    c.handle(0, HostMsg::PersonCrossed { person: p, to: b, delivered: true }, 0);
-    c.handle(0, HostMsg::PersonCrossed { person: q, to: x, delivered: false }, 0);
+    c.handle(h(0), HostMsg::PersonCrossed { person: p, to: b, delivered: true }, 0);
+    c.handle(h(0), HostMsg::PersonCrossed { person: q, to: x, delivered: false }, 0);
     c.maintain(0);
     let out = commit(&mut c);
     count(p, &out, &mut p_bodies);
@@ -607,17 +608,17 @@ fn crossing_held_behind_the_attach_keeps_one_body() {
 fn attach_supersedes_unsent_directives() {
     let (mut c, civ, people) = coordinator();
     let r = rc(8, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     commit(&mut c);
     let p = people[0];
-    c.handle(0, embark(1, A, civ, &[p], r), 0);
+    c.handle(h(0), embark(1, A, civ, &[p], r), 0);
     // A later ungated message waits behind the spawn.
-    c.handle(0, request(2, B, WorldRequest::PersonInfo(people[3])), 0);
+    c.handle(h(0), request(2, B, WorldRequest::PersonInfo(people[3])), 0);
     assert!(c.take_msgs().is_empty());
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
     let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1, hop: 1 }];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
+    c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     assert!(directives_for(&out[..attached], r).is_empty(), "the stale spawn is dropped: {out:?}");
@@ -627,9 +628,9 @@ fn attach_supersedes_unsent_directives() {
     assert_eq!(directives_for(&out[attached..], r).iter().map(|d| d.1).collect::<Vec<_>>(), vec![1]);
     assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r), "P is embodied in r");
     // `r` parks with P's body and starts again: P is spawned once by its catch-up.
-    c.handle(0, HostMsg::RegionStopping { rc: r }, 0);
-    c.handle(0, HostMsg::RegionParked { rc: r, people: vec![(p, [0.0; 3])] }, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(h(0), HostMsg::RegionParked { rc: r, people: vec![(p, [0.0; 3])] }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
     assert_eq!(body_delta(&commit(&mut c), p), 1);
 }
 
@@ -640,8 +641,8 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
     for order in [false, true] {
         let (mut c, _civ, people) = coordinator();
         let (r0, r1) = (rc(0, 0), rc(1, 0));
-        c.handle(0, HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
-        c.handle(0, HostMsg::RegionStarted { rc: r1, incarnation: 1 }, 0);
+        c.handle(h(0), HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
+        c.handle(h(0), HostMsg::RegionStarted { rc: r1, incarnation: 1 }, 0);
         commit(&mut c);
         let p = people[0];
         assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r0));
@@ -653,7 +654,7 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
         if order {
             running.reverse();
         }
-        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
+        c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
         let out = commit(&mut c);
         assert_eq!(body_delta(&out, p), 0, "order {order}: no despawn of P's only body: {out:?}");
         assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r1), "order {order}");
@@ -666,17 +667,17 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
 fn delivered_crossing_is_adopted() {
     let (mut c, _civ, people) = coordinator();
     let (r0, r1) = (rc(0, 0), rc(1, 0));
-    c.handle(0, HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
     commit(&mut c);
     let p = people[0];
-    c.handle(0, HostMsg::PersonCrossed { person: p, to: r1, delivered: true }, 0);
+    c.handle(h(0), HostMsg::PersonCrossed { person: p, to: r1, delivered: true }, 0);
     let out = commit(&mut c);
     assert_eq!(body_delta(&out, p), 0, "{out:?}");
     let pr = c.history().person(p).unwrap();
     assert_eq!(pr.location, Location::InRegion(r1));
     // Parking `r1` hands P back to the abstract history.
-    c.handle(0, HostMsg::RegionStopping { rc: r1 }, 0);
-    c.handle(0, HostMsg::RegionParked { rc: r1, people: vec![(p, [0.0; 3])] }, 0);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r1 }, 0);
+    c.handle(h(0), HostMsg::RegionParked { rc: r1, people: vec![(p, [0.0; 3])] }, 0);
     assert_ne!(c.history().person(p).unwrap().location, Location::InRegion(r1));
 }
 
@@ -686,17 +687,17 @@ fn delivered_crossing_is_adopted() {
 fn duplicated_bounce_is_redelivered_once() {
     let (mut c, civ, people) = coordinator();
     let r = rc(8, 0);
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     commit(&mut c);
     let p = people[0];
-    c.handle(0, embark(1, A, civ, &[p], r), 0);
+    c.handle(h(0), embark(1, A, civ, &[p], r), 0);
     let spawn = directives_for(&commit(&mut c), r);
     assert_eq!(spawn.len(), 1);
-    c.handle(0, HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(h(0), HostMsg::RegionStopping { rc: r }, 0);
     for _ in 0..2 {
-        c.handle(0, HostMsg::DirectiveBounced { directive: spawn[0].0.clone(), incarnation: 1 }, 0);
+        c.handle(h(0), HostMsg::DirectiveBounced { directive: spawn[0].0.clone(), incarnation: 1 }, 0);
     }
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
     let out = commit(&mut c);
     assert_eq!(body_delta(&out, p), 1, "one spawn of P: {out:?}");
 }
@@ -718,28 +719,28 @@ fn online_at(player: PlayerId, claim: Option<Claim>, claim_pending: bool, hop: u
 #[test]
 fn host_report_reconciles_claims() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
     // A request of A unsettled on the host: the claim stands.
-    c.handle(0, online(A, None, true), 0);
+    c.handle(h(0), online(A, None, true), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
     // Settled, and the host holds nothing: the claim goes (and is saved at once).
     commit(&mut c);
-    c.handle(0, online(A, None, false), 0);
+    c.handle(h(0), online(A, None, false), 0);
     assert_eq!(c.claim_of(A), None);
     assert!(c.save_due(), "a dropped claim is saved at once");
     commit(&mut c);
     // The host holds the fortress the coordinator lost: taken back.
-    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(h(0), online(A, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
     // B's host claims the same fortress while A plays it: refused, never two holders.
-    c.handle(0, online(B, Some(Claim::Fortress(site)), false), 0);
+    c.handle(h(0), online(B, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.claim_of(B), None);
     assert!(commit(&mut c).iter().any(|m| matches!(m, CoordMsg::ClaimIs { player: B, claim: None, .. })));
     // A's host reports an adventure instead: the fortress is freed, the adventure taken.
-    c.handle(0, online(A, Some(Claim::Adventure(SiteId(0))), false), 0);
+    c.handle(h(0), online(A, Some(Claim::Adventure(SiteId(0))), false), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Adventure(SiteId(0))));
-    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert!(matches!(reply_to(&commit(&mut c), 2), WorldReply::Returned { .. }), "the fortress is free");
 }
 
@@ -747,10 +748,10 @@ fn host_report_reconciles_claims() {
 #[test]
 fn release_claim_forces_a_save() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     commit(&mut c);
     assert!(!c.save_due());
-    c.handle(0, HostMsg::ReleaseClaim { player: A }, 0);
+    c.handle(h(0), HostMsg::ReleaseClaim { player: A }, 0);
     let state = c.take_save().expect("a release forces a save");
     assert!(state.claims.is_empty(), "{:?}", state.claims);
 }
@@ -763,17 +764,17 @@ fn settle_answers_without_executing() {
     let (mut c, civ, people) = coordinator();
     let sites = c.history().sites().count();
     let req = WorldRequest::Embark(EmbarkRequest { civ, people: people[0..2].to_vec(), region: rc(8, 0) });
-    c.handle(0, HostMsg::Settle { id: rid(1), req: req.clone() }, 0);
+    c.handle(h(0), HostMsg::Settle { id: rid(1), req: req.clone() }, 0);
     assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
-    c.handle(0, request(1, A, req.clone()), 0);
+    c.handle(h(0), request(1, A, req.clone()), 0);
     assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
     assert_eq!(c.history().sites().count(), sites, "nothing founded");
     assert_eq!(c.claim_of(A), None);
     // Applied before the settle: the memo answers.
-    c.handle(0, request(2, A, req.clone()), 0);
+    c.handle(h(0), request(2, A, req.clone()), 0);
     let first = reply_to(&commit(&mut c), 2);
     assert!(matches!(first, WorldReply::Embarked { .. }));
-    c.handle(0, HostMsg::Settle { id: rid(2), req }, 0);
+    c.handle(h(0), HostMsg::Settle { id: rid(2), req }, 0);
     assert_eq!(reply_to(&commit(&mut c), 2), first);
     assert_eq!(c.history().sites().count(), sites + 1);
 }
@@ -785,12 +786,21 @@ mod state {
     /// A small real state: one claim, one memo entry.
     fn small_state() -> CoordinatorState {
         let (mut c, civ, people) = coordinator();
-        c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+        c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
         commit(&mut c);
         c.request_save();
         let state = c.take_save().expect("asked for");
         c.saved();
         state
+    }
+
+    /// Format 2 (the host of a `RequestId` is a `HostId`, `u64`): the current format round-trips.
+    #[test]
+    fn v2_blob_round_trips() {
+        let state = small_state();
+        let bytes = state.encode();
+        assert_eq!(bytes[0], 2);
+        assert_eq!(CoordinatorState::decode(&bytes).expect("a v2 blob decodes"), state);
     }
 
     // The fixture was made by `small_state().encode()` at commit b46a6aee; never regenerate it.
@@ -820,7 +830,7 @@ fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
     c.take_out()
 }
 
-fn attach(host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
+fn attach(host: HostId, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
     HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }
 }
 
@@ -837,18 +847,18 @@ fn report(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> Online
 fn attach_from_host_1_keeps_host_0_regions_and_players() {
     let (mut c, civ, people) = coordinator();
     let (r0, r1) = (rc(0, 0), rc(14, 0));
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
     let here: Vec<(PersonId, [f32; 3])> = people[2..].iter().map(|p| (*p, [0.0; 3])).collect();
     let running0 = vec![RunningRegion { rc: r0, incarnation: 1, people: here }];
-    c.handle(0, attach(0, 1, running0, vec![report(A, Some(Claim::Fortress(site)), false)]), 0);
+    c.handle(h(0), attach(h(0), 1, running0, vec![report(A, Some(Claim::Fortress(site)), false)]), 0);
     commit(&mut c);
     let running1 = vec![RunningRegion { rc: r1, incarnation: 1, people: Vec::new() }];
-    c.handle(1, attach(1, 1, running1, vec![report(B, None, false)]), 0);
+    c.handle(h(1), attach(h(1), 1, running1, vec![report(B, None, false)]), 0);
     let out = commit_routed(&mut c);
     for (to, m) in &out {
         if matches!(m, CoordMsg::Attached { .. } | CoordMsg::View { .. }) {
-            assert_eq!(*to, Target::Host(1), "host 1's echo and view go to host 1: {m:?}");
+            assert_eq!(*to, Target::Host(h(1)), "host 1's echo and view go to host 1: {m:?}");
         }
         if let CoordMsg::Directive { directive, .. } = m {
             assert_ne!(directive.region, r0, "host 0's region is not re-decided: {m:?}");
@@ -857,19 +867,19 @@ fn attach_from_host_1_keeps_host_0_regions_and_players() {
     for p in &people[2..] {
         assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r0), "{p:?} keeps its body");
     }
-    assert_eq!((c.region_host(r0), c.region_host(r1)), (Some(0), Some(1)));
-    assert_eq!((c.online_on(A), c.online_on(B)), (Some(0), Some(1)));
-    c.handle(1, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!((c.region_host(r0), c.region_host(r1)), (Some(h(0)), Some(h(1))));
+    assert_eq!((c.online_on(A), c.online_on(B)), (Some(h(0)), Some(h(1))));
+    c.handle(h(1), request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse), "A is still online");
     // Host 1 re-attaches running nothing, B gone: only its region parks, only B goes offline.
-    c.handle(1, attach(1, 2, Vec::new(), Vec::new()), 0);
+    c.handle(h(1), attach(h(1), 2, Vec::new(), Vec::new()), 0);
     commit(&mut c);
-    assert_eq!((c.region_host(r0), c.region_host(r1)), (Some(0), None), "only host 1's region parked");
+    assert_eq!((c.region_host(r0), c.region_host(r1)), (Some(h(0)), None), "only host 1's region parked");
     for p in &people[2..] {
         assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r0), "{p:?} keeps its body");
     }
-    assert_eq!((c.online_on(A), c.online_on(B)), (Some(0), None));
-    c.handle(1, request(3, B, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!((c.online_on(A), c.online_on(B)), (Some(h(0)), None));
+    c.handle(h(1), request(3, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 3), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
 }
 
@@ -879,19 +889,19 @@ fn attach_from_host_1_keeps_host_0_regions_and_players() {
 #[test]
 fn player_offline_from_the_old_host_after_online_on_the_new_is_ignored() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
-    assert_eq!(c.online_on(A), Some(0));
-    c.handle(1, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
-    c.handle(0, HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
-    assert_eq!(c.online_on(A), Some(1), "online on the new host");
+    c.handle(h(0), online(A, Some(Claim::Fortress(site)), false), 0);
+    assert_eq!(c.online_on(A), Some(h(0)));
+    c.handle(h(1), online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
+    c.handle(h(0), HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
+    assert_eq!(c.online_on(A), Some(h(1)), "online on the new host");
     assert!(!commit(&mut c).iter().any(|m| matches!(m, CoordMsg::ClaimIs { .. })), "nothing to correct");
-    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
-    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
+    c.handle(h(1), HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
     assert_eq!(c.online_on(A), None);
-    c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), request(3, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 3), WorldReply::Returned { site, region });
 }
 
@@ -917,34 +927,34 @@ fn claim_is_answers_a_differing_report() {
     let c_player = PlayerId(3);
     // (1) Another online player (on host 9) plays the fortress A's host reports.
     let (mut c, civ, people) = coordinator();
-    c.handle(9, embark(1, c_player, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(9), embark(1, c_player, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(2, online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(h(2), online(A, Some(Claim::Fortress(site)), false), 0);
     let out = commit_routed(&mut c);
     assert_eq!(c.claim_of(A), None);
-    assert_eq!(claim_is(&out, A), vec![(Target::Host(2), None)], "{out:?}");
+    assert_eq!(claim_is(&out, A), vec![(Target::Host(h(2)), None)], "{out:?}");
 
     // (2) A holds fortress s1; its host reports s2 with a request unsettled: s1 stands.
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site: s1, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, embark(2, B, civ, &people[2..4], rc(14, 0)), 0);
+    c.handle(h(0), embark(2, B, civ, &people[2..4], rc(14, 0)), 0);
     let WorldReply::Embarked { site: s2, .. } = reply_to(&commit(&mut c), 2) else { panic!("embarks") };
-    c.handle(0, HostMsg::ReleaseClaim { player: B }, 0);
-    c.handle(1, online(A, Some(Claim::Fortress(s2)), true), 0);
+    c.handle(h(0), HostMsg::ReleaseClaim { player: B }, 0);
+    c.handle(h(1), online(A, Some(Claim::Fortress(s2)), true), 0);
     let out = commit_routed(&mut c);
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(s1)));
-    assert_eq!(claim_is(&out, A), vec![(Target::Host(1), Some(Claim::Fortress(s1)))], "{out:?}");
+    assert_eq!(claim_is(&out, A), vec![(Target::Host(h(1)), Some(Claim::Fortress(s1)))], "{out:?}");
 
     // (3) The embark is granted; the host still reports nothing with it unsettled.
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, online(A, None, true), 0);
+    c.handle(h(0), online(A, None, true), 0);
     let out = commit_routed(&mut c);
-    assert_eq!(claim_is(&out, A), vec![(Target::Host(0), Some(Claim::Fortress(site)))], "{out:?}");
+    assert_eq!(claim_is(&out, A), vec![(Target::Host(h(0)), Some(Claim::Fortress(site)))], "{out:?}");
     // A report that agrees: nothing.
-    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(h(0), online(A, Some(Claim::Fortress(site)), false), 0);
     assert!(claim_is(&commit_routed(&mut c), A).is_empty());
 }
 
@@ -954,28 +964,28 @@ fn claim_is_answers_a_differing_report() {
 fn directive_for_an_unannounced_region_is_deferred_not_broadcast() {
     let (mut c, civ, people) = coordinator();
     let r = rc(8, 0);
-    c.handle(1, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(1), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     commit(&mut c);
     // Host 1 parks `r` (gone from the coordinator's view) while an embark into it founds a
     // site whose party would spawn there.
     let party = &people[0..2];
-    c.handle(1, HostMsg::RegionStopping { rc: r }, 0);
-    c.handle(1, HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    c.handle(h(1), HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(h(1), HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
     assert_eq!(c.region_host(r), None);
     c.history_mut().region_started(r); // the history alone believes `r` runs
-    c.handle(0, embark(1, A, civ, party, r), 0);
+    c.handle(h(0), embark(1, A, civ, party, r), 0);
     let out = commit_routed(&mut c);
     assert!(
         !out.iter().any(|(_, m)| matches!(m, CoordMsg::Directive { directive, .. } if directive.region == r)),
         "no directive for an unannounced region leaves: {out:?}"
     );
     // Host 0 starts `r`: the held spawns come with its catch-up, to host 0.
-    c.handle(0, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     let out = commit_routed(&mut c);
     let spawns: Vec<&(Target, CoordMsg)> =
         out.iter().filter(|(_, m)| matches!(m, CoordMsg::SpawnPeople { rc, .. } if *rc == r)).collect();
     assert_eq!(spawns.len(), 1, "{out:?}");
-    assert_eq!(spawns[0].0, Target::Host(0));
+    assert_eq!(spawns[0].0, Target::Host(h(0)));
     let msgs: Vec<CoordMsg> = out.into_iter().map(|(_, m)| m).collect();
     for p in party {
         assert_eq!(body_delta(&msgs, *p), 1, "{p:?} spawns once, on host 0: {msgs:?}");
@@ -988,19 +998,19 @@ fn directive_for_an_unannounced_region_is_deferred_not_broadcast() {
 #[test]
 fn handed_player_stays_online_until_the_new_host_reports() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 1 }, 0);
-    assert_eq!(c.online_on(A), Some(1), "in transit to host 1");
-    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), HostMsg::PlayerHandedTo { player: A, to: h(1), hop: 1 }, 0);
+    assert_eq!(c.online_on(A), Some(h(1)), "in transit to host 1");
+    c.handle(h(0), request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse), "in use while in transit");
-    c.handle(1, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
+    c.handle(h(1), online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
     assert!(claim_is(&commit_routed(&mut c), A).is_empty(), "nothing to correct");
-    assert_eq!((c.online_on(A), c.claim_of(A)), (Some(1), Some(Claim::Fortress(site))));
-    c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!((c.online_on(A), c.claim_of(A)), (Some(h(1)), Some(Claim::Fortress(site))));
+    c.handle(h(0), request(3, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 3), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
-    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
-    c.handle(0, request(4, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(1), HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
+    c.handle(h(0), request(4, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 4), WorldReply::Returned { site, region });
 }
 
@@ -1011,16 +1021,16 @@ fn handed_player_stays_online_until_the_new_host_reports() {
 #[test]
 fn handed_to_from_a_host_that_does_not_have_the_player_is_ignored() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
-    c.handle(2, HostMsg::PlayerHandedTo { player: A, to: 3, hop: 1 }, 0);
-    assert_eq!(c.online_on(A), Some(0));
-    c.handle(0, HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
+    c.handle(h(0), online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(h(2), HostMsg::PlayerHandedTo { player: A, to: h(3), hop: 1 }, 0);
+    assert_eq!(c.online_on(A), Some(h(0)));
+    c.handle(h(0), HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
     assert_eq!(c.online_on(A), None);
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 1 }, 0);
+    c.handle(h(0), HostMsg::PlayerHandedTo { player: A, to: h(1), hop: 1 }, 0);
     assert_eq!(c.online_on(A), None, "online nowhere: nothing to hand");
-    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::Returned { site, region });
 }
 
@@ -1031,23 +1041,23 @@ fn handed_to_from_a_host_that_does_not_have_the_player_is_ignored() {
 #[test]
 fn attach_of_the_new_host_without_the_player_ends_the_transit() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 1 }, 0);
-    c.handle(1, attach(1, 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(0), HostMsg::PlayerHandedTo { player: A, to: h(1), hop: 1 }, 0);
+    c.handle(h(1), attach(h(1), 1, Vec::new(), Vec::new()), 0);
     assert_eq!(c.online_on(A), None);
-    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert!(matches!(reply_to(&commit(&mut c), 2), WorldReply::Returned { .. }));
-    c.handle(0, HostMsg::ReleaseClaim { player: B }, 0);
+    c.handle(h(0), HostMsg::ReleaseClaim { player: B }, 0);
     // A, online again on host 0 with the fortress, is handed to host 1 — whose park on
     // arrival is heard first.
-    c.handle(0, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
+    c.handle(h(0), online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
-    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 3 }, 0);
+    c.handle(h(1), HostMsg::PlayerOffline { player: A, hop: 3 }, 0);
     assert_eq!(c.online_on(A), None, "parked on arrival: offline");
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 2 }, 0);
+    c.handle(h(0), HostMsg::PlayerHandedTo { player: A, to: h(1), hop: 2 }, 0);
     assert_eq!(c.online_on(A), None, "the older hand-over changes nothing");
-    c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
+    c.handle(h(0), request(3, B, WorldRequest::ReturnTo(site)), 0);
     assert!(matches!(reply_to(&commit(&mut c), 3), WorldReply::Returned { .. }));
 }
 
@@ -1058,19 +1068,19 @@ fn attach_of_the_new_host_without_the_player_ends_the_transit() {
 fn notice_and_directive_go_to_the_regions_host() {
     let (mut c, civ, people) = coordinator();
     let r = rc(8, 0);
-    c.handle(1, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    c.handle(h(1), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
     commit(&mut c);
-    c.handle(0, embark(1, A, civ, &people[0..2], r), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], r), 0);
     c.maintain(0);
     let out = commit_routed(&mut c);
     let to_of = |want: fn(&CoordMsg) -> bool| -> Vec<Target> { out.iter().filter(|(_, m)| want(m)).map(|(t, _)| *t).collect() };
     let directives = to_of(|m| matches!(m, CoordMsg::Directive { .. }));
-    assert!(!directives.is_empty() && directives.iter().all(|t| *t == Target::Host(1)), "{out:?}");
-    assert_eq!(to_of(|m| matches!(m, CoordMsg::Reply { .. })), vec![Target::Host(0)]);
+    assert!(!directives.is_empty() && directives.iter().all(|t| *t == Target::Host(h(1))), "{out:?}");
+    assert_eq!(to_of(|m| matches!(m, CoordMsg::Reply { .. })), vec![Target::Host(h(0))]);
     let notices = to_of(|m| matches!(m, CoordMsg::Notice { .. }));
-    assert!(!notices.is_empty() && notices.iter().all(|t| *t == Target::Host(1)), "{out:?}");
+    assert!(!notices.is_empty() && notices.iter().all(|t| *t == Target::Host(h(1))), "{out:?}");
     // Into a region nobody runs: its notice (the founding, for the player) to every host.
-    c.handle(0, embark(2, B, civ, &people[2..4], rc(14, 0)), 0);
+    c.handle(h(0), embark(2, B, civ, &people[2..4], rc(14, 0)), 0);
     c.maintain(0);
     let out = commit_routed(&mut c);
     let notices: Vec<Target> =
@@ -1094,17 +1104,17 @@ fn request_as(id: RequestId, player: PlayerId, req: WorldRequest) -> HostMsg {
 #[test]
 fn memo_keeps_unsettled_answers_past_the_old_cap() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let first = reply_to(&commit(&mut c), 1);
     assert!(matches!(first, WorldReply::Embarked { .. }), "{first:?}");
     let sites = c.history().sites().count();
     for seq in 2..=ANSWERED_MEMO_MAX as u64 + 1 {
-        c.handle(0, embark(seq, A, civ, &people[2..4], rc(14, 0)), 0);
+        c.handle(h(0), embark(seq, A, civ, &people[2..4], rc(14, 0)), 0);
         c.take_out();
     }
     commit(&mut c);
     assert_eq!(memo_ids(&c).len(), ANSWERED_MEMO_MAX + 1, "nothing unsettled is forgotten");
-    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     assert_eq!(reply_to(&commit(&mut c), 1), first, "the first answer is replayed");
     assert_eq!(c.history().sites().count(), sites, "and founds nothing");
 }
@@ -1115,22 +1125,22 @@ fn memo_keeps_unsettled_answers_past_the_old_cap() {
 fn settled_watermark_prunes_exactly_below() {
     let (mut c, civ, people) = coordinator();
     for seq in 1..=4 {
-        c.handle(0, embark(seq, A, civ, &people[0..2], rc(8, 0)), 0);
+        c.handle(h(0), embark(seq, A, civ, &people[0..2], rc(8, 0)), 0);
     }
-    let other_host = RequestId { host: 1, boot: 7, seq: 1 };
-    c.handle(1, request_as(other_host, B, WorldRequest::StartAdventure(SiteId(0))), 0);
+    let other_host = RequestId { host: h(1), boot: 7, seq: 1 };
+    c.handle(h(1), request_as(other_host, B, WorldRequest::StartAdventure(SiteId(0))), 0);
     commit(&mut c);
     assert_eq!(memo_ids(&c).len(), 5);
-    c.handle(0, HostMsg::Settled { boot: 7, below: 3 }, 0);
+    c.handle(h(0), HostMsg::Settled { boot: 7, below: 3 }, 0);
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host], "seq 1 and 2 of host 0 go");
     // From host 1: its own entries only (none of boot 7 below 1 … then all of them).
-    c.handle(1, HostMsg::Settled { boot: 7, below: 1 }, 0);
+    c.handle(h(1), HostMsg::Settled { boot: 7, below: 1 }, 0);
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host]);
-    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), 0);
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host], "an attach watermark of 0 prunes nothing");
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
+    c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4), other_host], "the attach's watermark prunes below it");
-    c.handle(1, HostMsg::Settled { boot: 7, below: 2 }, 0);
+    c.handle(h(1), HostMsg::Settled { boot: 7, below: 2 }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4)]);
 }
 
@@ -1140,16 +1150,16 @@ fn settled_watermark_prunes_exactly_below() {
 #[test]
 fn new_boot_attach_drops_the_old_boots_memo() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), 0);
     for seq in 1..=2 {
-        c.handle(0, embark(seq, A, civ, &people[0..2], rc(8, 0)), 0);
+        c.handle(h(0), embark(seq, A, civ, &people[0..2], rc(8, 0)), 0);
     }
-    let other_host = RequestId { host: 1, boot: 7, seq: 1 };
-    c.handle(1, request_as(other_host, B, WorldRequest::StartAdventure(SiteId(0))), 0);
+    let other_host = RequestId { host: h(1), boot: 7, seq: 1 };
+    c.handle(h(1), request_as(other_host, B, WorldRequest::StartAdventure(SiteId(0))), 0);
     commit(&mut c);
-    let boot = |seq| RequestId { host: 0, boot: 9, seq };
+    let boot = |seq| RequestId { host: h(0), boot: 9, seq };
     let attach_boot_9 = |epoch| HostMsg::Attach {
-        host: 0,
+        host: h(0),
         epoch,
         running: Vec::new(),
         online: Vec::new(),
@@ -1161,18 +1171,18 @@ fn new_boot_attach_drops_the_old_boots_memo() {
         successions: Vec::new(),
         policy: game::CrashPolicy::Rollback,
     };
-    c.handle(0, attach_boot_9(2), 0);
+    c.handle(h(0), attach_boot_9(2), 0);
     assert_eq!(memo_ids(&c), vec![other_host], "boot 7 of host 0 is gone");
-    c.handle(0, request_as(boot(0), B, WorldRequest::ReturnTo(SiteId(0))), 0);
+    c.handle(h(0), request_as(boot(0), B, WorldRequest::ReturnTo(SiteId(0))), 0);
     commit(&mut c);
-    c.handle(0, attach_boot_9(3), 0);
+    c.handle(h(0), attach_boot_9(3), 0);
     assert_eq!(memo_ids(&c), vec![other_host, boot(0)], "a re-attach of the same boot keeps its answers");
 }
 
 // ---- Player hops order presence across hosts (R3 Task 11) ----------------------------
 
-const HOST_A: u32 = 0;
-const HOST_B: u32 = 1;
+const HOST_A: game::HostId = game::HostId(0);
+const HOST_B: game::HostId = game::HostId(1);
 
 /// A coordinator where player A has embarked (fortress `site`, its region) and is online
 /// on host A at hop 1.
@@ -1351,13 +1361,13 @@ fn claim_is_queued_for_a_host_is_dropped_at_its_attach() {
         let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
         if gated {
             // A grant waits for its save: everything after it waits too.
-            c.handle(2, embark(2, c_player, civ, &people[2..4], rc(14, 0)), 0);
+            c.handle(h(2), embark(2, c_player, civ, &people[2..4], rc(14, 0)), 0);
         }
         // Host B reports B with A's fortress, which A plays online: `ClaimIs(None)` for B,
         // and a stale report of C on host 2: `HopIs` for host 2… after a higher hop.
         c.handle(HOST_B, online(B, Some(Claim::Fortress(site)), false), 0);
-        c.handle(2, online_at(PlayerId(4), None, false, 5), 0);
-        c.handle(2, online_at(PlayerId(4), None, false, 4), 0);
+        c.handle(h(2), online_at(PlayerId(4), None, false, 5), 0);
+        c.handle(h(2), online_at(PlayerId(4), None, false, 4), 0);
         c.handle(HOST_B, online_at(PlayerId(4), None, false, 3), 0);
         c.handle(HOST_B, attach(HOST_B, 1, Vec::new(), Vec::new()), 0);
         let out = commit_routed(&mut c);
@@ -1404,8 +1414,8 @@ fn higher_generation_attach_resets_hops() {
 
 // ---- Fix round 1: a displaced host is told (R3 Task 11) ------------------------------
 
-const HOST_G: u32 = 2;
-const HOST_H: u32 = 3;
+const HOST_G: game::HostId = game::HostId(2);
+const HOST_H: game::HostId = game::HostId(3);
 
 /// One run of the login race, driven by `choices` (0: deliver G's next in-flight
 /// message, 1: deliver H's next message, 2: deliver the coordinator's next message to
@@ -1596,17 +1606,17 @@ const CUT_EVERY_MS: u64 = 1_000;
 fn cutting() -> Coordinator {
     let (mut c, _, _) = coordinator();
     c.set_cut_epoch(3);
-    c.set_expected_hosts([0, 1].into_iter().collect());
+    c.set_expected_hosts([0, 1].into_iter().map(h).collect());
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_world_tick(100);
-    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
-    c.handle(1, attach(1, 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(1), attach(h(1), 1, Vec::new(), Vec::new()), 0);
     commit_routed(&mut c);
     c
 }
 
 /// The `BeginCut` each host got: `(host, cut, tick)`.
-fn begun(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::CutId, u64)> {
+fn begun(out: &[(Target, CoordMsg)]) -> Vec<(HostId, game::CutId, u64)> {
     out.iter()
         .filter_map(|(to, m)| match (to, m) {
             (Target::Host(h), CoordMsg::BeginCut { cut, tick, .. }) => Some((*h, *cut, *tick)),
@@ -1616,7 +1626,7 @@ fn begun(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::CutId, u64)> {
 }
 
 /// The `CutDone` each host got: `(host, cut, committed)`.
-fn done(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::CutId, bool)> {
+fn done(out: &[(Target, CoordMsg)]) -> Vec<(HostId, game::CutId, bool)> {
     out.iter()
         .filter_map(|(to, m)| match (to, m) {
             (Target::Host(h), CoordMsg::CutDone { cut, committed }) => Some((*h, *cut, *committed)),
@@ -1636,17 +1646,17 @@ fn world_cut_begins_and_commits_with_every_part() {
     c.maintain(CUT_EVERY_MS);
     let out = commit_routed(&mut c);
     let cut = game::CutId((3 << 32) | 1);
-    assert_eq!(begun(&out), [(0, cut, 100 + game::WORLD_CUT_LEAD_TICKS), (1, cut, 100 + game::WORLD_CUT_LEAD_TICKS)]);
+    assert_eq!(begun(&out), [(h(0), cut, 100 + game::WORLD_CUT_LEAD_TICKS), (h(1), cut, 100 + game::WORLD_CUT_LEAD_TICKS)]);
     c.maintain(3 * CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "one cut at a time");
-    c.handle(0, HostMsg::CutPrepared { cut }, 2 * CUT_EVERY_MS);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, 2 * CUT_EVERY_MS);
     assert_eq!(c.take_decision(), None, "host 1's part is missing");
-    c.handle(1, HostMsg::CutPrepared { cut }, 2 * CUT_EVERY_MS);
+    c.handle(h(1), HostMsg::CutPrepared { cut }, 2 * CUT_EVERY_MS);
     let d = c.take_decision().expect("decided");
-    assert_eq!((d.cut, d.commit, d.hosts.clone()), (cut, true, vec![0, 1]));
+    assert_eq!((d.cut, d.commit, d.hosts.clone()), (cut, true, vec![h(0), h(1)]));
     assert_eq!(c.take_decision(), None, "handed out once");
     c.decided(cut, true);
-    assert_eq!(done(&commit_routed(&mut c)), [(0, cut, true), (1, cut, true)]);
+    assert_eq!(done(&commit_routed(&mut c)), [(h(0), cut, true), (h(1), cut, true)]);
     assert_eq!(c.world_cut_running(), None);
 }
 
@@ -1657,7 +1667,7 @@ fn no_second_world_cut_while_one_is_undecided() {
     let mut c = cutting();
     c.maintain(CUT_EVERY_MS);
     let (_, cut, _) = begun(&commit_routed(&mut c))[0];
-    c.handle(0, HostMsg::CutFailed { cut, why: CutFailure::Aborted }, CUT_EVERY_MS);
+    c.handle(h(0), HostMsg::CutFailed { cut, why: CutFailure::Aborted }, CUT_EVERY_MS);
     assert!(!c.take_decision().expect("an abort").commit);
     c.maintain(10 * CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "the decision is not recorded yet");
@@ -1676,15 +1686,15 @@ fn reattach_with_a_pending_cut_gets_its_outcome() {
     let mut c = cutting();
     c.maintain(CUT_EVERY_MS);
     let (_, cut, _) = begun(&commit_routed(&mut c))[0];
-    c.handle(0, HostMsg::CutPrepared { cut }, CUT_EVERY_MS);
-    c.host_detached(1);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, CUT_EVERY_MS);
+    c.host_detached(h(1));
     let d = c.take_decision().expect("the detach decides");
     assert!(!d.commit, "a detached participant aborts the cut");
     c.decided(cut, false);
-    assert_eq!(done(&commit_routed(&mut c)), [(0, cut, false), (1, cut, false)]);
+    assert_eq!(done(&commit_routed(&mut c)), [(h(0), cut, false), (h(1), cut, false)]);
     // Host 1 never read that: it re-attaches naming the cut.
     let reattach = HostMsg::Attach {
-        host: 1,
+        host: h(1),
         epoch: 2,
         running: Vec::new(),
         online: Vec::new(),
@@ -1696,19 +1706,19 @@ fn reattach_with_a_pending_cut_gets_its_outcome() {
         successions: Vec::new(),
         policy: game::CrashPolicy::Rollback,
     };
-    c.handle(1, reattach, CUT_EVERY_MS);
-    assert_eq!(done(&commit_routed(&mut c)), [(1, cut, false)], "answered from the outcome remembered");
+    c.handle(h(1), reattach, CUT_EVERY_MS);
+    assert_eq!(done(&commit_routed(&mut c)), [(h(1), cut, false)], "answered from the outcome remembered");
     // A cut of an earlier coordinator run: the runtime looks it up.
     let old = game::CutId((2 << 32) | 9);
-    c.handle(0, HostMsg::CutPrepared { cut: old }, CUT_EVERY_MS);
+    c.handle(h(0), HostMsg::CutPrepared { cut: old }, CUT_EVERY_MS);
     assert!(done(&commit_routed(&mut c)).is_empty());
-    assert_eq!(c.take_cut_lookups(), [(0, old)]);
-    c.cut_outcome(0, old, true);
-    assert_eq!(done(&commit_routed(&mut c)), [(0, old, true)]);
+    assert_eq!(c.take_cut_lookups(), [(h(0), old)]);
+    c.cut_outcome(h(0), old, true);
+    assert_eq!(done(&commit_routed(&mut c)), [(h(0), old, true)]);
     // A participant re-attaching mid-cut aborts it (its link dropped: marks may be lost).
     c.maintain(5 * CUT_EVERY_MS);
     let (_, next, _) = begun(&commit_routed(&mut c))[0];
-    c.handle(1, attach(1, 3, Vec::new(), Vec::new()), 5 * CUT_EVERY_MS);
+    c.handle(h(1), attach(h(1), 3, Vec::new(), Vec::new()), 5 * CUT_EVERY_MS);
     assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((next, false)));
 }
 
@@ -1724,7 +1734,7 @@ fn missed_world_cut_doubles_the_lead_and_the_deadline_aborts() {
         c.maintain(now);
         let (_, cut, tick) = begun(&commit_routed(&mut c))[0];
         leads.push(tick - 100);
-        c.handle(1, HostMsg::CutFailed { cut, why: CutFailure::Missed }, now);
+        c.handle(h(1), HostMsg::CutFailed { cut, why: CutFailure::Missed }, now);
         c.take_decision().expect("aborted");
         c.decided(cut, false);
         commit_routed(&mut c);
@@ -1733,8 +1743,8 @@ fn missed_world_cut_doubles_the_lead_and_the_deadline_aborts() {
     now += CUT_EVERY_MS;
     c.maintain(now);
     let (_, cut, _) = begun(&commit_routed(&mut c))[0];
-    c.handle(0, HostMsg::CutPrepared { cut }, now);
-    c.handle(1, HostMsg::CutPrepared { cut }, now);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, now);
+    c.handle(h(1), HostMsg::CutPrepared { cut }, now);
     c.take_decision().expect("commit");
     c.decided(cut, true);
     assert_eq!(c.world_cut_lead(), game::WORLD_CUT_LEAD_TICKS);
@@ -1752,15 +1762,15 @@ fn missed_world_cut_doubles_the_lead_and_the_deadline_aborts() {
 #[test]
 fn no_cut_while_an_attached_host_is_not_expected() {
     let mut c = cutting();
-    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(2), attach(h(2), 1, Vec::new(), Vec::new()), 0);
     commit_routed(&mut c);
     c.maintain(CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "host 2 is attached and not expected");
-    c.set_expected_hosts([0, 1, 2].into_iter().collect());
+    c.set_expected_hosts([0, 1, 2].into_iter().map(h).collect());
     c.expected_hosts_unknown();
     c.maintain(2 * CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "the hosts could not be read");
-    c.set_expected_hosts([0, 1, 2].into_iter().collect());
+    c.set_expected_hosts([0, 1, 2].into_iter().map(h).collect());
     c.maintain(3 * CUT_EVERY_MS);
     assert_eq!(begun(&commit_routed(&mut c)).len(), 3, "all three take part");
 }
@@ -1772,40 +1782,40 @@ fn no_cut_while_an_attached_host_is_not_expected() {
 #[test]
 fn leave_requests_begin_one_cut_and_a_leaver_is_not_expected_until_its_next_boot() {
     let mut c = cutting();
-    c.handle(1, HostMsg::LeaveRequest, 100);
+    c.handle(h(1), HostMsg::LeaveRequest, 100);
     c.maintain(100 + game::LEAVE_BATCH_MS - 1);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "collected for the batch");
     c.maintain(100 + game::LEAVE_BATCH_MS);
     let out = commit_routed(&mut c);
-    let begins: Vec<(Vec<u32>, Vec<u32>)> = out
+    let begins: Vec<(Vec<HostId>, Vec<HostId>)> = out
         .iter()
         .filter_map(|(_, m)| match m {
             CoordMsg::BeginCut { hosts, leaving, .. } => Some((hosts.clone(), leaving.clone())),
             _ => None,
         })
         .collect();
-    assert_eq!(begins, vec![(vec![0, 1], vec![1]); 2], "both hosts, host 1 leaving, before the period");
+    assert_eq!(begins, vec![(vec![h(0), h(1)], vec![h(1)]); 2], "both hosts, host 1 leaving, before the period");
     let cut = begun(&out)[0].1;
-    c.handle(0, HostMsg::CutPrepared { cut }, 700);
-    c.handle(1, HostMsg::CutPrepared { cut }, 700);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, 700);
+    c.handle(h(1), HostMsg::CutPrepared { cut }, 700);
     let d = c.take_decision().expect("decided");
-    assert!(d.commit && d.hosts == vec![0, 1] && d.leaving == vec![1], "{d:?}");
+    assert!(d.commit && d.hosts == vec![h(0), h(1)] && d.leaving == vec![h(1)], "{d:?}");
     c.decided(cut, true);
     assert_eq!(done(&commit_routed(&mut c)).len(), 2, "one CutDone per host");
-    assert_eq!(c.left_hosts(), vec![1]);
+    assert_eq!(c.left_hosts(), vec![h(1)]);
     // Its stale row (same boot) does not bring it back.
-    c.set_host_boots([(0, 7), (1, 7)].into_iter().collect());
+    c.set_host_boots([(h(0), 7), (h(1), 7)].into_iter().collect());
     c.maintain(700 + CUT_EVERY_MS);
     let next = begun(&commit_routed(&mut c));
-    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0], "host 0 alone");
+    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(0)], "host 0 alone");
     let cut = next[0].1;
-    c.handle(0, HostMsg::CutPrepared { cut }, 1800);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, 1800);
     let d = c.take_decision().expect("decided");
-    assert!(d.commit && d.hosts == vec![0] && d.leaving.is_empty(), "{d:?}");
+    assert!(d.commit && d.hosts == vec![h(0)] && d.leaving.is_empty(), "{d:?}");
     c.decided(cut, true);
     commit_routed(&mut c);
     // Another boot of it attaches: expected again.
-    c.handle(1, HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 1900);
+    c.handle(h(1), HostMsg::Attach { host: h(1), epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 1900);
     assert!(c.left_hosts().is_empty());
     commit_routed(&mut c);
     c.maintain(1900 + CUT_EVERY_MS);
@@ -1819,24 +1829,24 @@ fn leave_requests_begin_one_cut_and_a_leaver_is_not_expected_until_its_next_boot
 fn attach_of_a_host_outside_the_running_cut_aborts_it() {
     let mut c = cutting();
     // Host 1 leaves in a committed cut.
-    c.handle(1, HostMsg::LeaveRequest, 100);
+    c.handle(h(1), HostMsg::LeaveRequest, 100);
     c.maintain(100 + game::LEAVE_BATCH_MS);
     let cut = begun(&commit_routed(&mut c))[0].1;
-    c.handle(0, HostMsg::CutPrepared { cut }, 700);
-    c.handle(1, HostMsg::CutPrepared { cut }, 700);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, 700);
+    c.handle(h(1), HostMsg::CutPrepared { cut }, 700);
     assert!(c.take_decision().expect("decided").commit);
     c.decided(cut, true);
     commit_routed(&mut c);
     // A cut of host 0 alone begins; host 1 comes back (another boot) before it is decided.
     c.maintain(700 + CUT_EVERY_MS);
     let alone = begun(&commit_routed(&mut c));
-    assert_eq!(alone.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0]);
+    assert_eq!(alone.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(0)]);
     let cut = alone[0].1;
-    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
-    c.handle(1, back, 1800);
+    let back = HostMsg::Attach { host: h(1), epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
+    c.handle(h(1), back, 1800);
     assert!(c.left_hosts().is_empty(), "another boot: back");
     commit_routed(&mut c);
-    c.handle(0, HostMsg::CutPrepared { cut }, 1800);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, 1800);
     let d = c.take_decision().expect("the attach decides");
     assert_eq!((d.cut, d.commit), (cut, false), "the cut that excludes host 1 is aborted");
     c.decided(cut, false);
@@ -1846,7 +1856,7 @@ fn attach_of_a_host_outside_the_running_cut_aborts_it() {
     assert_eq!(begun(&commit_routed(&mut c)).len(), 2, "both take part");
     // A host never seen before attaching mid-cut aborts it too.
     let cut = c.world_cut_running().expect("running").0;
-    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), 1900);
+    c.handle(h(2), attach(h(2), 1, Vec::new(), Vec::new()), 1900);
     assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)));
 }
 
@@ -1856,14 +1866,14 @@ fn attach_of_a_host_outside_the_running_cut_aborts_it() {
 #[test]
 fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
     let mut c = cutting();
-    c.set_expected_hosts([0, 1, 2].into_iter().collect());
+    c.set_expected_hosts([0, 1, 2].into_iter().map(h).collect());
     c.maintain(CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "host 2 is expected and not attached");
     assert_eq!(c.take_cuts_blocked(), None, "within the grace");
     let first = CUT_EVERY_MS + game::WORLD_CUT_BLOCKED_GRACE_MS;
     c.maintain(first);
     let blocked = c.take_cuts_blocked().expect("reported");
-    assert_eq!(blocked, game::CutsBlocked { missing: vec![2], unexpected: vec![], successions: vec![], awaiting_heir: vec![] });
+    assert_eq!(blocked, game::CutsBlocked { missing: vec![h(2)], unexpected: vec![], successions: vec![], awaiting_heir: vec![] });
     let text = blocked.to_string();
     assert!(text.contains("NOT being saved") && text.contains("[2]") && text.contains("worldctl"), "{text}");
     c.maintain(first + CUT_EVERY_MS - 1);
@@ -1871,7 +1881,7 @@ fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
     c.maintain(first + CUT_EVERY_MS);
     assert!(c.take_cuts_blocked().is_some(), "again a period later");
     assert!(begun(&commit_routed(&mut c)).is_empty());
-    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), first + CUT_EVERY_MS + 1);
+    c.handle(h(2), attach(h(2), 1, Vec::new(), Vec::new()), first + CUT_EVERY_MS + 1);
     commit_routed(&mut c);
     c.maintain(first + CUT_EVERY_MS + 2);
     assert_eq!(begun(&commit_routed(&mut c)).len(), 3, "at once, all three");
@@ -1881,8 +1891,8 @@ fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
 // ---- the lease watch (R4) ----------------------------------------------------------------
 
 /// Host `ordinal`'s row as the coordinator reads it: dirty and live, last seen at `seen_ms`.
-fn seen(ordinal: u32, seen_ms: u64) -> HostSeen {
-    HostSeen { ordinal, boot: 100 + u64::from(ordinal), clean: false, state: game::HOST_LIVE, seen_ms }
+fn seen(ordinal: HostId, seen_ms: u64) -> HostSeen {
+    HostSeen { ordinal, boot: 100 + ordinal.0, clean: false, state: game::HOST_LIVE, seen_ms }
 }
 
 /// A host is lapsed only once the coordinator itself read one `seen_ms` over a whole lease
@@ -1890,27 +1900,27 @@ fn seen(ordinal: u32, seen_ms: u64) -> HostSeen {
 #[test]
 fn lease_watch_needs_a_full_lease_of_unchanged_reads() {
     let mut w = LeaseWatch::default();
-    let mut clean = seen(2, 7);
+    let mut clean = seen(h(2), 7);
     clean.clean = true;
-    let mut dead = seen(3, 7);
+    let mut dead = seen(h(3), 7);
     dead.state = game::HOST_DEAD;
     for t in (0..game::HOST_LEASE_MS).step_by(1_000) {
-        w.observe(&[seen(1, 500), clean.clone(), dead.clone()], t, t);
+        w.observe(&[seen(h(1), 500), clean.clone(), dead.clone()], t, t);
         assert!(w.lapsed(t).is_empty(), "lapsed at {t} ms: {:?}", w.lapsed(t));
     }
-    w.observe(&[seen(1, 500), clean.clone(), dead.clone()], game::HOST_LEASE_MS, game::HOST_LEASE_MS);
-    assert_eq!(w.lapsed(game::HOST_LEASE_MS), vec![(1, 101)]);
+    w.observe(&[seen(h(1), 500), clean.clone(), dead.clone()], game::HOST_LEASE_MS, game::HOST_LEASE_MS);
+    assert_eq!(w.lapsed(game::HOST_LEASE_MS), vec![(h(1), 101)]);
     // It beat: the count starts again from this read.
     let t0 = game::HOST_LEASE_MS + 1_000;
-    w.observe(&[seen(1, 2_000)], t0, t0);
+    w.observe(&[seen(h(1), 2_000)], t0, t0);
     assert!(w.lapsed(t0).is_empty());
-    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS - 1, t0 + game::HOST_LEASE_MS - 1);
+    w.observe(&[seen(h(1), 2_000)], t0 + game::HOST_LEASE_MS - 1, t0 + game::HOST_LEASE_MS - 1);
     assert!(w.lapsed(t0 + game::HOST_LEASE_MS - 1).is_empty());
-    w.observe(&[seen(1, 2_000)], t0 + game::HOST_LEASE_MS, t0 + game::HOST_LEASE_MS);
-    assert_eq!(w.lapsed(t0 + game::HOST_LEASE_MS), vec![(1, 101)]);
+    w.observe(&[seen(h(1), 2_000)], t0 + game::HOST_LEASE_MS, t0 + game::HOST_LEASE_MS);
+    assert_eq!(w.lapsed(t0 + game::HOST_LEASE_MS), vec![(h(1), 101)]);
     // Time alone, without a read, lapses nobody new.
     let mut fresh = LeaseWatch::default();
-    fresh.observe(&[seen(1, 2_000)], 0, 0);
+    fresh.observe(&[seen(h(1), 2_000)], 0, 0);
     assert!(fresh.lapsed(10 * game::HOST_LEASE_MS).is_empty());
 }
 
@@ -1919,27 +1929,27 @@ fn lease_watch_needs_a_full_lease_of_unchanged_reads() {
 #[test]
 fn outage_longer_than_the_lease_declares_nobody() {
     let mut w = LeaseWatch::default();
-    w.observe(&[seen(0, 500), seen(1, 500)], 0, 0);
+    w.observe(&[seen(h(0), 500), seen(h(1), 500)], 0, 0);
     for _ in 0..20 {
         w.observe_failed();
     }
     let back = 20_000;
-    w.observe(&[seen(0, 500), seen(1, 500)], back, back);
+    w.observe(&[seen(h(0), 500), seen(h(1), 500)], back, back);
     assert!(w.lapsed(back).is_empty(), "{:?}", w.lapsed(back));
-    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS - 1, back + game::HOST_LEASE_MS - 1);
+    w.observe(&[seen(h(0), 500), seen(h(1), 500)], back + game::HOST_LEASE_MS - 1, back + game::HOST_LEASE_MS - 1);
     assert!(w.lapsed(back + game::HOST_LEASE_MS - 1).is_empty());
-    w.observe(&[seen(0, 500), seen(1, 500)], back + game::HOST_LEASE_MS, back + game::HOST_LEASE_MS);
-    assert_eq!(w.lapsed(back + game::HOST_LEASE_MS), vec![(0, 100), (1, 101)]);
+    w.observe(&[seen(h(0), 500), seen(h(1), 500)], back + game::HOST_LEASE_MS, back + game::HOST_LEASE_MS);
+    assert_eq!(w.lapsed(back + game::HOST_LEASE_MS), vec![(h(0), 100), (h(1), 101)]);
 }
 
 /// A row a booting host of the same ordinal vouched for (`seen_ms = 0`) is lapsed at once.
 #[test]
 fn a_vouched_row_is_lapsed_at_once() {
     let mut w = LeaseWatch::default();
-    w.observe(&[seen(0, 500), seen(1, 0)], 42, 42);
-    assert_eq!(w.lapsed(42), vec![(1, 101)]);
+    w.observe(&[seen(h(0), 500), seen(h(1), 0)], 42, 42);
+    assert_eq!(w.lapsed(42), vec![(h(1), 101)]);
     // Unless it is clean (it left) or dead (already declared).
-    let mut clean = seen(1, 0);
+    let mut clean = seen(h(1), 0);
     clean.clean = true;
     w.observe(&[clean], 43, 43);
     assert!(w.lapsed(43).is_empty());
@@ -1951,15 +1961,15 @@ fn a_vouched_row_is_lapsed_at_once() {
 #[test]
 fn a_late_answer_does_not_stretch_the_lease() {
     let mut w = LeaseWatch::default();
-    w.observe(&[seen(1, 500)], 0, 0);
-    w.observe(&[seen(1, 500)], 1_000, 12_000);
+    w.observe(&[seen(h(1), 500)], 0, 0);
+    w.observe(&[seen(h(1), 500)], 1_000, 12_000);
     assert!(w.lapsed(12_000).is_empty(), "{:?}", w.lapsed(12_000));
     // A read issued a whole lease after the first one was received still shows it: lapsed.
-    w.observe(&[seen(1, 500)], game::HOST_LEASE_MS, game::HOST_LEASE_MS + 50);
-    assert_eq!(w.lapsed(game::HOST_LEASE_MS + 50), vec![(1, 101)]);
+    w.observe(&[seen(h(1), 500)], game::HOST_LEASE_MS, game::HOST_LEASE_MS + 50);
+    assert_eq!(w.lapsed(game::HOST_LEASE_MS + 50), vec![(h(1), 101)]);
     // A changed value counts from its first read's RECEIVE.
-    w.observe(&[seen(1, 900)], 20_000, 21_000);
-    w.observe(&[seen(1, 900)], 21_000 + game::HOST_LEASE_MS - 1, 40_000);
+    w.observe(&[seen(h(1), 900)], 20_000, 21_000);
+    w.observe(&[seen(h(1), 900)], 21_000 + game::HOST_LEASE_MS - 1, 40_000);
     assert!(w.lapsed(40_000).is_empty());
 }
 
@@ -1969,10 +1979,10 @@ fn a_late_answer_does_not_stretch_the_lease() {
 /// `Succession`, every output drained.
 fn succeeding(n: u32) -> Coordinator {
     let mut c = cutting();
-    for h in 2..n {
-        c.handle(h, attach(h, 1, Vec::new(), Vec::new()), 0);
+    for n in 2..u64::from(n) {
+        c.handle(h(n), attach(h(n), 1, Vec::new(), Vec::new()), 0);
     }
-    c.set_expected_hosts((0..n).collect());
+    c.set_expected_hosts((0..u64::from(n)).map(h).collect());
     c.set_crash_policy(game::CrashPolicy::Succession);
     commit_routed(&mut c);
     c
@@ -1980,8 +1990,8 @@ fn succeeding(n: u32) -> Coordinator {
 
 /// A read of hosts `0..n` at `now`: `dead` vouched dead by a boot of their ordinal
 /// (`seen_ms = 0`: lapsed at once), every other one beating; `declared` rows are dead.
-fn read_leases(c: &mut Coordinator, n: u32, dead: &[u32], declared: &[u32], now: u64) {
-    let rows: Vec<HostSeen> = (0..n)
+fn read_leases(c: &mut Coordinator, n: u32, dead: &[HostId], declared: &[HostId], now: u64) {
+    let rows: Vec<HostSeen> = (0..u64::from(n)).map(h)
         .map(|h| {
             let mut row = seen(h, if dead.contains(&h) { 0 } else { now + 1 });
             if declared.contains(&h) {
@@ -1996,7 +2006,7 @@ fn read_leases(c: &mut Coordinator, n: u32, dead: &[u32], declared: &[u32], now:
 /// What the store answers a declaration of `d` (ids from `first`): survivors every host of
 /// `0..n` but the dead, one super-region moved per predecessor, from cut `base`.
 fn store_declares(d: &Declare, n: u32, first: u64, base: game::CutId) -> Vec<game::Succession> {
-    let dead: Vec<u32> = d.dead.iter().map(|(h, _)| *h).collect();
+    let dead: Vec<HostId> = d.dead.iter().map(|(h, _)| *h).collect();
     d.dead
         .iter()
         .zip(&d.heirs)
@@ -2008,14 +2018,14 @@ fn store_declares(d: &Declare, n: u32, first: u64, base: game::CutId) -> Vec<gam
             heir,
             kind: d.kind,
             base_cut: base,
-            moved: vec![((predecessor as i32, 0), 2)],
-            survivors: (0..n).filter(|h| !dead.contains(h)).collect(),
+            moved: vec![((predecessor.0 as i32, 0), 2)],
+            survivors: (0..u64::from(n)).map(h).filter(|h| !dead.contains(h)).collect(),
         })
         .collect()
 }
 
 /// The succession orders in `out`: `(host, id)`.
-fn orders(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::SuccessionId)> {
+fn orders(out: &[(Target, CoordMsg)]) -> Vec<(HostId, game::SuccessionId)> {
     out.iter()
         .filter_map(|(to, m)| match (to, m) {
             (Target::Host(h), CoordMsg::Succession { id, .. }) => Some((*h, *id)),
@@ -2035,12 +2045,12 @@ fn succession_done(out: &[(Target, CoordMsg)]) -> Vec<(Target, game::SuccessionI
 }
 
 /// Host `dead` of `0..n` lapses and is declared at `now`: the succession, its orders out.
-fn declare_one(c: &mut Coordinator, n: u32, dead: u32, now: u64) -> game::Succession {
+fn declare_one(c: &mut Coordinator, n: u32, dead: HostId, now: u64) -> game::Succession {
     read_leases(c, n, &[dead], &[], now);
     let d = c.declare_wanted(now).expect("a lapsed host is declared");
     let list = store_declares(&d, n, 1, game::CutId(0));
     c.declared(game::Declared::Done(list.clone()), now);
-    c.set_expected_hosts((0..n).filter(|h| *h != dead).collect());
+    c.set_expected_hosts((0..u64::from(n)).map(h).filter(|o| *o != dead).collect());
     list.into_iter().next().unwrap()
 }
 
@@ -2052,33 +2062,33 @@ fn lapsed_hosts_are_declared_in_one_batch_between_cuts() {
     let mut c = succeeding(4);
     read_leases(&mut c, 4, &[], &[], 10);
     assert_eq!(c.declare_wanted(10), None, "nobody lapsed");
-    read_leases(&mut c, 4, &[2, 3], &[], 20);
+    read_leases(&mut c, 4, &[h(2), h(3)], &[], 20);
     let d = c.declare_wanted(20).expect("two lapsed hosts");
-    let live: std::collections::BTreeSet<u32> = [0, 1].into_iter().collect();
-    assert_eq!(d.dead, vec![(2, 102), (3, 103)], "both, in one batch");
-    assert_eq!(d.heirs, vec![game::heir_of(2, &live).unwrap(), game::heir_of(3, &live).unwrap()]);
+    let live: std::collections::BTreeSet<HostId> = [0, 1].into_iter().map(h).collect();
+    assert_eq!(d.dead, vec![(h(2), 102), (h(3), 103)], "both, in one batch");
+    assert_eq!(d.heirs, vec![game::heir_of(h(2), &live).unwrap(), game::heir_of(h(3), &live).unwrap()]);
     assert_eq!(d.kind, game::SuccessionKind::Crash);
     assert_eq!(c.declare_wanted(21), None, "one declaration in flight at a time");
     // The store found them beating again: forgotten — not declared again before a NEWER
     // read of the rows (the watch's same observation would loop every runtime pass).
-    c.declared(game::Declared::NotLapsed(vec![2, 3]), 22);
+    c.declared(game::Declared::NotLapsed(vec![h(2), h(3)]), 22);
     assert_eq!(c.declare_wanted(23), None, "no second declaration without a fresh read");
     assert_eq!(c.declare_wanted(500), None, "time alone is no fresh read");
-    read_leases(&mut c, 4, &[2, 3], &[], 1_000);
-    assert_eq!(c.declare_wanted(1_000).map(|d| d.dead), Some(vec![(2, 102), (3, 103)]), "a fresh read: asked again");
-    c.declared(game::Declared::Gone(vec![2]), 1_001);
+    read_leases(&mut c, 4, &[h(2), h(3)], &[], 1_000);
+    assert_eq!(c.declare_wanted(1_000).map(|d| d.dead), Some(vec![(h(2), 102), (h(3), 103)]), "a fresh read: asked again");
+    c.declared(game::Declared::Gone(vec![h(2)]), 1_001);
     assert_eq!(c.declare_wanted(1_002), None, "`Gone` waits for a fresh read too");
-    read_leases(&mut c, 4, &[2, 3], &[], 2_000);
+    read_leases(&mut c, 4, &[h(2), h(3)], &[], 2_000);
     assert!(c.declare_wanted(2_000).is_some(), "a vouched row is lapsed at once on the next read");
     c.declare_failed();
     // Under `Rollback` (`Static`) nothing is ever declared.
     let mut r = succeeding(4);
     r.set_crash_policy(game::CrashPolicy::Rollback);
-    read_leases(&mut r, 4, &[2, 3], &[], 20);
+    read_leases(&mut r, 4, &[h(2), h(3)], &[], 20);
     assert_eq!(r.declare_wanted(20), None, "Static never declares");
     // A total crash (no live host attached) is the boots' business.
     let mut t = succeeding(2);
-    read_leases(&mut t, 2, &[0, 1], &[], 20);
+    read_leases(&mut t, 2, &[h(0), h(1)], &[], 20);
     assert_eq!(t.declare_wanted(20), None, "no live attached host");
 }
 
@@ -2091,8 +2101,8 @@ fn a_running_cut_with_a_lapsed_participant_is_aborted_first() {
     let begun_now = begun(&commit_routed(&mut c));
     assert_eq!(begun_now.len(), 3, "a cut of every host runs");
     let cut = begun_now[0].1;
-    c.handle(0, HostMsg::CutPrepared { cut }, CUT_EVERY_MS);
-    read_leases(&mut c, 3, &[2], &[], CUT_EVERY_MS + 1);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, CUT_EVERY_MS);
+    read_leases(&mut c, 3, &[h(2)], &[], CUT_EVERY_MS + 1);
     assert_eq!(c.declare_wanted(CUT_EVERY_MS + 1), None, "not while the cut runs");
     let d = c.take_decision().expect("the lapse decides the cut");
     assert_eq!((d.cut, d.commit), (cut, false), "aborted");
@@ -2100,7 +2110,7 @@ fn a_running_cut_with_a_lapsed_participant_is_aborted_first() {
     c.decided(cut, false);
     commit_routed(&mut c);
     let d = c.declare_wanted(CUT_EVERY_MS + 3).expect("between cuts now");
-    assert_eq!(d.dead, vec![(2, 102)]);
+    assert_eq!(d.dead, vec![(h(2), 102)]);
 }
 
 /// After a declaration no world cut begins — however long the period passed — until every
@@ -2109,9 +2119,9 @@ fn a_running_cut_with_a_lapsed_participant_is_aborted_first() {
 #[test]
 fn no_cut_begins_until_every_survivor_applied_and_the_heir_adopted() {
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
     let out = commit_routed(&mut c);
-    assert_eq!(orders(&out), vec![(0, s.id), (1, s.id)], "the order goes to every survivor");
+    assert_eq!(orders(&out), vec![(h(0), s.id), (h(1), s.id)], "the order goes to every survivor");
     let mut now = 100 + CUT_EVERY_MS;
     c.maintain(now);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "nobody answered");
@@ -2120,19 +2130,19 @@ fn no_cut_begins_until_every_survivor_applied_and_the_heir_adopted() {
     let blocked = c.take_cuts_blocked().expect("reported after the grace");
     assert_eq!(blocked.successions, vec![s.id]);
     assert!(blocked.to_string().contains("successions"), "{blocked}");
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, now);
-    c.handle(1, HostMsg::SuccessionApplied { id: s.id }, now);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, now);
+    c.handle(h(1), HostMsg::SuccessionApplied { id: s.id }, now);
     c.maintain(now + 1);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "every survivor applied; the heir has not adopted");
     // An adoption from a host that is not the heir counts for nothing.
-    let other = 1 - s.heir;
+    let other = h(1 - s.heir.0);
     c.handle(other, HostMsg::SuccessionAdopted { id: s.id }, now + 2);
     c.maintain(now + 3);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "only the heir adopts");
     c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, now + 4);
     c.maintain(now + 5);
     let next = begun(&commit_routed(&mut c));
-    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0, 1], "the survivors' cut begins");
+    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(0), h(1)], "the survivors' cut begins");
 }
 
 /// The first cut after every answer names the succession in its decision; an abort keeps
@@ -2141,9 +2151,9 @@ fn no_cut_begins_until_every_survivor_applied_and_the_heir_adopted() {
 #[test]
 fn the_commit_after_a_succession_names_it() {
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
-    for h in [0, 1] {
-        c.handle(h, HostMsg::SuccessionApplied { id: s.id }, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
+    for hn in [0, 1] {
+        c.handle(h(hn), HostMsg::SuccessionApplied { id: s.id }, 100);
     }
     c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 100);
     commit_routed(&mut c);
@@ -2152,10 +2162,10 @@ fn the_commit_after_a_succession_names_it() {
         c.maintain(now);
         let (_, cut, _) = begun(&commit_routed(c))[0];
         if commit {
-            c.handle(0, HostMsg::CutPrepared { cut }, now);
-            c.handle(1, HostMsg::CutPrepared { cut }, now);
+            c.handle(h(0), HostMsg::CutPrepared { cut }, now);
+            c.handle(h(1), HostMsg::CutPrepared { cut }, now);
         } else {
-            c.handle(1, HostMsg::CutFailed { cut, why: CutFailure::Aborted }, now);
+            c.handle(h(1), HostMsg::CutFailed { cut, why: CutFailure::Aborted }, now);
         }
         let d = c.take_decision().expect("decided");
         c.decided(cut, d.commit);
@@ -2169,7 +2179,7 @@ fn the_commit_after_a_succession_names_it() {
     let d = run_cut(&mut c, now, true);
     assert_eq!((d.commit, d.settles.clone()), (true, vec![s.id]));
     let done = succession_done(&commit_routed(&mut c));
-    assert_eq!(done, vec![(Target::Host(0), s.id, true), (Target::Host(1), s.id, true)], "every survivor is told");
+    assert_eq!(done, vec![(Target::Host(h(0)), s.id, true), (Target::Host(h(1)), s.id, true)], "every survivor is told");
     assert!(c.succession_progress().is_empty(), "settled");
     now += CUT_EVERY_MS;
     assert!(run_cut(&mut c, now, true).settles.is_empty(), "the next cut settles nothing");
@@ -2181,17 +2191,17 @@ fn the_commit_after_a_succession_names_it() {
 #[test]
 fn a_second_lapse_before_the_settle_asks_for_a_rollback() {
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
-    for h in [0, 1] {
-        c.handle(h, HostMsg::SuccessionApplied { id: s.id }, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
+    for hn in [0, 1] {
+        c.handle(h(hn), HostMsg::SuccessionApplied { id: s.id }, 100);
     }
     c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 100);
     commit_routed(&mut c);
     // The predecessor's own row (dead now, then lapsed in the watch) is no second lapse.
-    read_leases(&mut c, 3, &[2], &[], 150);
+    read_leases(&mut c, 3, &[h(2)], &[], 150);
     c.maintain(150);
     assert!(!c.rollback_wanted(), "the declared predecessor is not a second lapse");
-    read_leases(&mut c, 3, &[1], &[2], 200);
+    read_leases(&mut c, 3, &[h(1)], &[h(2)], 200);
     c.maintain(200);
     assert!(c.rollback_wanted(), "host 1 lapsed before the settle");
     assert_eq!(c.declare_wanted(200), None, "nothing more is declared");
@@ -2204,7 +2214,7 @@ fn a_second_lapse_before_the_settle_asks_for_a_rollback() {
     assert!(!c.rollback_wanted());
     // The store answering `SuccessionOpen` (another coordinator's, or a lost answer's) too.
     let mut c = succeeding(3);
-    read_leases(&mut c, 3, &[2], &[], 10);
+    read_leases(&mut c, 3, &[h(2)], &[], 10);
     c.declare_wanted(10).expect("declared");
     c.declared(game::Declared::SuccessionOpen, 11);
     assert!(c.rollback_wanted());
@@ -2216,19 +2226,19 @@ fn a_second_lapse_before_the_settle_asks_for_a_rollback() {
 #[test]
 fn a_silent_survivor_past_the_deadline_asks_for_a_rollback() {
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
     c.handle(s.heir, HostMsg::SuccessionApplied { id: s.id }, 100);
     c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 100);
-    let silent = 1 - s.heir;
+    let silent = h(1 - s.heir.0);
     c.maintain(100 + game::SUCCESSION_DEADLINE_MS - 1);
     assert!(!c.rollback_wanted(), "within the deadline");
     c.maintain(100 + game::SUCCESSION_DEADLINE_MS);
     assert!(c.rollback_wanted(), "host {silent} stayed silent past the deadline");
     // Everyone answered: the deadline does not matter (the settle cut may take its time).
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
-    for h in [0, 1] {
-        c.handle(h, HostMsg::SuccessionApplied { id: s.id }, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
+    for hn in [0, 1] {
+        c.handle(h(hn), HostMsg::SuccessionApplied { id: s.id }, 100);
     }
     c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 100);
     c.maintain(100 + 2 * game::SUCCESSION_DEADLINE_MS);
@@ -2247,20 +2257,20 @@ fn restart_resends_open_successions_and_hosts_answer_again() {
     c.set_world_tick(100);
     c.set_crash_policy(game::CrashPolicy::Succession);
     c.successions_unknown();
-    c.set_expected_hosts([0, 1].into_iter().collect());
-    let live: std::collections::BTreeSet<u32> = [0, 1].into_iter().collect();
-    let heir = game::heir_of(2, &live).unwrap();
+    c.set_expected_hosts([0, 1].into_iter().map(h).collect());
+    let live: std::collections::BTreeSet<HostId> = [0, 1].into_iter().map(h).collect();
+    let heir = game::heir_of(h(2), &live).unwrap();
     let s = game::Succession {
         id: game::SuccessionId(7),
-        predecessor: 2,
+        predecessor: h(2),
         predecessor_boot: 102,
         heir,
         kind: game::SuccessionKind::Crash,
         base_cut: game::CutId(3),
         moved: vec![((2, 0), 2)],
-        survivors: vec![0, 1],
+        survivors: vec![h(0), h(1)],
     };
-    let attach_listing = |host: u32, epoch: u64, successions: Vec<(game::SuccessionId, bool)>| HostMsg::Attach {
+    let attach_listing = |host: HostId, epoch: u64, successions: Vec<(game::SuccessionId, bool)>| HostMsg::Attach {
         host,
         epoch,
         running: Vec::new(),
@@ -2273,14 +2283,14 @@ fn restart_resends_open_successions_and_hosts_answer_again() {
         successions,
         policy: game::CrashPolicy::Rollback,
     };
-    let other = 1 - heir;
+    let other = h(1 - heir.0);
     c.handle(other, attach_listing(other, 1, Vec::new()), 0);
     assert!(orders(&commit_routed(&mut c)).is_empty(), "not read yet");
     c.handle(heir, attach_listing(heir, 1, vec![(s.id, true)]), 0);
     c.maintain(CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut before the open successions are read");
     c.successions_open(vec![s.clone()], CUT_EVERY_MS);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id), (1, s.id)], "re-sent to the survivors attached");
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id), (h(1), s.id)], "re-sent to the survivors attached");
     // The heir attached listing it applied and adopted before the read came: re-sent all
     // the same, and its next attach (from memory) counts.
     c.handle(heir, attach_listing(heir, 2, vec![(s.id, true)]), CUT_EVERY_MS);
@@ -2294,8 +2304,8 @@ fn restart_resends_open_successions_and_hosts_answer_again() {
     let next = begun(&commit_routed(&mut c));
     assert_eq!(next.len(), 2, "every answer in: the settle cut begins");
     let cut = next[0].1;
-    c.handle(0, HostMsg::CutPrepared { cut }, 3 * CUT_EVERY_MS);
-    c.handle(1, HostMsg::CutPrepared { cut }, 3 * CUT_EVERY_MS);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, 3 * CUT_EVERY_MS);
+    c.handle(h(1), HostMsg::CutPrepared { cut }, 3 * CUT_EVERY_MS);
     assert_eq!(c.take_decision().expect("decided").settles, vec![s.id]);
     c.decided(cut, true);
     commit_routed(&mut c);
@@ -2316,22 +2326,22 @@ fn host_succeeded_parks_its_regions_and_takes_its_players_offline() {
     c.set_cut_epoch(3);
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
-    c.set_expected_hosts([0, 1].into_iter().collect());
+    c.set_expected_hosts([0, 1].into_iter().map(h).collect());
     let (r0, r1) = (rc(0, 0), rc(14, 0));
-    c.handle(1, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(1), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
     let here: Vec<(PersonId, [f32; 3])> = people[2..].iter().map(|p| (*p, [0.0; 3])).collect();
-    c.handle(1, attach(1, 1, vec![RunningRegion { rc: r0, incarnation: 1, people: here }], vec![report(A, Some(Claim::Fortress(site)), false)]), 0);
-    c.handle(0, attach(0, 1, vec![RunningRegion { rc: r1, incarnation: 1, people: Vec::new() }], vec![report(B, None, false)]), 0);
+    c.handle(h(1), attach(h(1), 1, vec![RunningRegion { rc: r0, incarnation: 1, people: here }], vec![report(A, Some(Claim::Fortress(site)), false)]), 0);
+    c.handle(h(0), attach(h(0), 1, vec![RunningRegion { rc: r1, incarnation: 1, people: Vec::new() }], vec![report(B, None, false)]), 0);
     commit(&mut c);
-    assert_eq!((c.region_host(r0), c.online_on(A)), (Some(1), Some(1)));
-    c.handle(0, HostMsg::Request { id: RequestId { host: 0, boot: 7, seq: 2 }, player: B, hop: PLACED, req: WorldRequest::ReturnTo(site) }, 0);
+    assert_eq!((c.region_host(r0), c.online_on(A)), (Some(h(1)), Some(h(1))));
+    c.handle(h(0), HostMsg::Request { id: RequestId { host: h(0), boot: 7, seq: 2 }, player: B, hop: PLACED, req: WorldRequest::ReturnTo(site) }, 0);
     let out = commit(&mut c);
     assert!(replies(&out).iter().any(|(_, r)| *r == WorldReply::EmbarkRefused(EmbarkRefusal::InUse)), "A plays it: {out:?}");
     // Host 1 lapses and is succeeded by host 0.
-    read_leases(&mut c, 2, &[1], &[], 10);
+    read_leases(&mut c, 2, &[h(1)], &[], 10);
     let d = c.declare_wanted(10).expect("declared");
-    assert_eq!(d.heirs, vec![0]);
+    assert_eq!(d.heirs, vec![h(0)]);
     c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(0))), 10);
     commit(&mut c);
     assert_eq!(c.region_host(r0), None, "host 1's region is no longer its");
@@ -2339,8 +2349,8 @@ fn host_succeeded_parks_its_regions_and_takes_its_players_offline() {
         assert_ne!(c.history().person(*p).unwrap().location, Location::InRegion(r0), "{p:?}'s body is back in the history");
     }
     assert_eq!(c.online_on(A), None, "A went offline with its host");
-    assert_eq!((c.region_host(r1), c.online_on(B)), (Some(0), Some(0)), "host 0's stand");
-    c.handle(0, HostMsg::Request { id: RequestId { host: 0, boot: 7, seq: 3 }, player: B, hop: PLACED, req: WorldRequest::ReturnTo(site) }, 20);
+    assert_eq!((c.region_host(r1), c.online_on(B)), (Some(h(0)), Some(h(0))), "host 0's stand");
+    c.handle(h(0), HostMsg::Request { id: RequestId { host: h(0), boot: 7, seq: 3 }, player: B, hop: PLACED, req: WorldRequest::ReturnTo(site) }, 20);
     let out = commit(&mut c);
     assert!(
         replies(&out).iter().any(|(_, r)| *r == WorldReply::Returned { site, region }),
@@ -2357,8 +2367,8 @@ fn a_succeeded_boots_messages_are_dropped() {
     c.set_cut_epoch(3);
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
-    c.set_expected_hosts([0, 1].into_iter().collect());
-    let attach_as = |host: u32, epoch: u64, boot: u64, online: Vec<OnlinePlayer>| HostMsg::Attach {
+    c.set_expected_hosts([0, 1].into_iter().map(h).collect());
+    let attach_as = |host: HostId, epoch: u64, boot: u64, online: Vec<OnlinePlayer>| HostMsg::Attach {
         host,
         epoch,
         running: Vec::new(),
@@ -2371,20 +2381,20 @@ fn a_succeeded_boots_messages_are_dropped() {
         successions: Vec::new(),
         policy: game::CrashPolicy::Rollback,
     };
-    c.handle(0, attach_as(0, 1, 100, Vec::new()), 0);
-    c.handle(1, attach_as(1, 1, 101, Vec::new()), 0);
+    c.handle(h(0), attach_as(h(0), 1, 100, Vec::new()), 0);
+    c.handle(h(1), attach_as(h(1), 1, 101, Vec::new()), 0);
     commit(&mut c);
-    read_leases(&mut c, 2, &[1], &[], 10);
+    read_leases(&mut c, 2, &[h(1)], &[], 10);
     let d = c.declare_wanted(10).expect("declared");
     c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(0))), 10);
     commit(&mut c);
     let r = rc(14, 0);
-    c.handle(1, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 20);
-    c.handle(1, online(A, None, false), 20);
-    c.handle(1, attach_as(1, 2, 101, vec![report(B, None, false)]), 20);
-    let id = RequestId { host: 1, boot: 101, seq: 1 };
+    c.handle(h(1), HostMsg::RegionStarted { rc: r, incarnation: 1 }, 20);
+    c.handle(h(1), online(A, None, false), 20);
+    c.handle(h(1), attach_as(h(1), 2, 101, vec![report(B, None, false)]), 20);
+    let id = RequestId { host: h(1), boot: 101, seq: 1 };
     let req = WorldRequest::Embark(EmbarkRequest { civ, people: people[0..2].to_vec(), region: rc(8, 0) });
-    c.handle(1, HostMsg::Request { id, player: A, hop: PLACED, req: req.clone() }, 20);
+    c.handle(h(1), HostMsg::Request { id, player: A, hop: PLACED, req: req.clone() }, 20);
     let out = commit_routed(&mut c);
     assert_eq!(c.region_host(r), None, "the zombie's region start is dropped");
     assert_eq!((c.online_on(A), c.online_on(B)), (None, None), "its players are not online");
@@ -2393,7 +2403,7 @@ fn a_succeeded_boots_messages_are_dropped() {
         .iter()
         .filter_map(|(to, m)| match m {
             CoordMsg::Reply { id: i, reply } if *i == id => {
-                assert_eq!(*to, Target::Host(1));
+                assert_eq!(*to, Target::Host(h(1)));
                 Some(reply)
             }
             _ => None,
@@ -2401,12 +2411,12 @@ fn a_succeeded_boots_messages_are_dropped() {
         .collect();
     assert_eq!(refused, vec![&WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)], "{out:?}");
     // Memoised: a resend gets the same refusal, never an embark.
-    c.handle(1, HostMsg::Request { id, player: A, hop: PLACED, req }, 21);
+    c.handle(h(1), HostMsg::Request { id, player: A, hop: PLACED, req }, 21);
     assert!(replies(&commit(&mut c)).iter().all(|(_, r)| *r == WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)));
     // Another boot of the ordinal is a new host.
-    c.handle(1, attach_as(1, 3, 999, vec![report(B, None, false)]), 30);
+    c.handle(h(1), attach_as(h(1), 3, 999, vec![report(B, None, false)]), 30);
     commit(&mut c);
-    assert_eq!(c.online_on(B), Some(1), "a new boot is applied");
+    assert_eq!(c.online_on(B), Some(h(1)), "a new boot is applied");
 }
 
 /// After a rollback the coordinator runs the new generation: a host attaching with an
@@ -2419,7 +2429,7 @@ fn a_host_attaching_after_a_rollback_is_told_the_generation() {
     commit_routed(&mut c);
     assert_eq!(c.world_generation(), 4);
     let stale = HostMsg::Attach {
-        host: 2,
+        host: h(2),
         epoch: 9,
         running: Vec::new(),
         online: vec![report(A, None, false)],
@@ -2431,9 +2441,9 @@ fn a_host_attaching_after_a_rollback_is_told_the_generation() {
         successions: Vec::new(),
         policy: game::CrashPolicy::Rollback,
     };
-    c.handle(2, stale, 50);
+    c.handle(h(2), stale, 50);
     let out = commit_routed(&mut c);
-    assert!(out.contains(&(Target::Host(2), CoordMsg::Generation(4))), "{out:?}");
+    assert!(out.contains(&(Target::Host(h(2)), CoordMsg::Generation(4))), "{out:?}");
     assert_eq!(c.online_on(A), None, "the stale attach is not applied");
 }
 
@@ -2449,27 +2459,27 @@ fn a_crossing_reported_delivered_then_absorbed_by_the_heir_is_one_person() {
     c.set_cut_epoch(3);
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
-    c.set_expected_hosts([0, 1].into_iter().collect());
+    c.set_expected_hosts([0, 1].into_iter().map(h).collect());
     let (a, b) = (rc(0, 0), rc(1, 0));
-    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
-    c.handle(1, attach(1, 1, Vec::new(), Vec::new()), 0);
-    c.handle(0, HostMsg::RegionStarted { rc: a, incarnation: 1 }, 0);
-    c.handle(1, HostMsg::RegionStarted { rc: b, incarnation: 1 }, 0);
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(1), attach(h(1), 1, Vec::new(), Vec::new()), 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: a, incarnation: 1 }, 0);
+    c.handle(h(1), HostMsg::RegionStarted { rc: b, incarnation: 1 }, 0);
     let out = commit(&mut c);
     let p = people[0];
     assert_eq!(body_delta(&out, p), 1, "P's body in a: {out:?}");
     // P walks from host 0's `a` into host 1's `b`, which reports it delivered.
-    c.handle(1, HostMsg::PersonCrossed { person: p, to: b, delivered: true }, 0);
+    c.handle(h(1), HostMsg::PersonCrossed { person: p, to: b, delivered: true }, 0);
     assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(b));
     // Host 1 dies and host 0 succeeds it: `b` parks in the history with nobody.
-    read_leases(&mut c, 2, &[1], &[], 10);
+    read_leases(&mut c, 2, &[h(1)], &[], 10);
     let d = c.declare_wanted(10).expect("declared");
     c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(0))), 10);
     let mut spawned = body_delta(&commit(&mut c), p);
     assert!(!matches!(c.history().person(p).unwrap().location, Location::InRegion(_)), "P is abstract");
     let before = c.history().person(p).unwrap().location;
     // The heir reports the same crossing absorbed.
-    c.handle(0, HostMsg::PersonCrossed { person: p, to: b, delivered: false }, 20);
+    c.handle(h(0), HostMsg::PersonCrossed { person: p, to: b, delivered: false }, 20);
     c.maintain(20);
     spawned += body_delta(&commit(&mut c), p);
     let after = c.history().person(p).unwrap().location;
@@ -2484,14 +2494,14 @@ const WANTED: game::SuperRegion = (4, 4);
 
 /// Hosts `0..n` succeeding; host `leaver` asks to leave, leaves in a committed cut and its
 /// process is gone (detached). Every output drained; the clock at the leave's decision.
-fn departed(n: u32, leaver: u32) -> (Coordinator, u64) {
+fn departed(n: u32, leaver: HostId) -> (Coordinator, u64) {
     let mut c = succeeding(n);
     c.handle(leaver, HostMsg::LeaveRequest, 100);
     c.maintain(100 + game::LEAVE_BATCH_MS);
     let cut = begun(&commit_routed(&mut c))[0].1;
     let now = 100 + game::LEAVE_BATCH_MS + 1;
-    for h in 0..n {
-        c.handle(h, HostMsg::CutPrepared { cut }, now);
+    for hn in 0..u64::from(n) {
+        c.handle(h(hn), HostMsg::CutPrepared { cut }, now);
     }
     assert!(c.take_decision().expect("decided").commit);
     c.decided(cut, true);
@@ -2502,8 +2512,8 @@ fn departed(n: u32, leaver: u32) -> (Coordinator, u64) {
 
 /// A read of hosts `0..n` at `now`: every host beating, `left` clean (its `hosts` row after
 /// its leave cut), `back` (another boot of `left`) dirty again.
-fn read_departed(c: &mut Coordinator, n: u32, left: u32, back: Option<u64>, now: u64) {
-    let rows: Vec<HostSeen> = (0..n)
+fn read_departed(c: &mut Coordinator, n: u32, left: HostId, back: Option<u64>, now: u64) {
+    let rows: Vec<HostSeen> = (0..u64::from(n)).map(h)
         .map(|h| {
             let mut row = seen(h, now + 1);
             if h == left {
@@ -2519,8 +2529,8 @@ fn read_departed(c: &mut Coordinator, n: u32, left: u32, back: Option<u64>, now:
 }
 
 /// Host 0 asks for `WANTED` at `now`; the runtime looks it up (`owner`'s) and says so.
-fn land_asked(c: &mut Coordinator, owner: u32, now: u64) {
-    c.handle(0, HostMsg::LandWanted { sr: WANTED }, now);
+fn land_asked(c: &mut Coordinator, owner: HostId, now: u64) {
+    c.handle(h(0), HostMsg::LandWanted { sr: WANTED }, now);
     assert_eq!(c.take_land_lookups(), vec![WANTED], "the runtime looks the super-region up");
     c.land_wanted(owner, now);
 }
@@ -2531,38 +2541,38 @@ fn land_asked(c: &mut Coordinator, owner: u32, now: u64) {
 /// and its order goes to the survivors. Nothing under `Rollback` (`Static`).
 #[test]
 fn land_of_a_departed_host_waits_heir_wait_ms_then_is_inherited() {
-    let (mut c, t) = departed(3, 1);
-    read_departed(&mut c, 3, 1, None, t);
-    land_asked(&mut c, 1, t);
+    let (mut c, t) = departed(3, h(1));
+    read_departed(&mut c, 3, h(1), None, t);
+    land_asked(&mut c, h(1), t);
     assert_eq!(c.declare_wanted(t), None, "it may come back: waited for");
     let half = t + game::HEIR_WAIT_MS / 2;
-    read_departed(&mut c, 3, 1, None, half);
-    land_asked(&mut c, 1, half);
+    read_departed(&mut c, 3, h(1), None, half);
+    land_asked(&mut c, h(1), half);
     assert_eq!(c.take_land_lookups(), Vec::<game::SuperRegion>::new(), "each request looked up once");
     let last = t + game::HEIR_WAIT_MS - 1;
-    read_departed(&mut c, 3, 1, None, last);
+    read_departed(&mut c, 3, h(1), None, last);
     assert_eq!(c.declare_wanted(last), None, "not before HEIR_WAIT_MS from the FIRST request");
     let due = t + game::HEIR_WAIT_MS;
-    read_departed(&mut c, 3, 1, None, due);
+    read_departed(&mut c, 3, h(1), None, due);
     let d = c.declare_wanted(due).expect("its land is given away");
-    let live: std::collections::BTreeSet<u32> = [0, 2].into_iter().collect();
-    assert_eq!(d.dead, vec![(1, 101)], "the boot that left");
-    assert_eq!(d.heirs, vec![game::heir_of(1, &live).unwrap()]);
+    let live: std::collections::BTreeSet<HostId> = [0, 2].into_iter().map(h).collect();
+    assert_eq!(d.dead, vec![(h(1), 101)], "the boot that left");
+    assert_eq!(d.heirs, vec![game::heir_of(h(1), &live).unwrap()]);
     assert_eq!(d.kind, game::SuccessionKind::Leave);
     assert_eq!(c.declare_wanted(due), None, "one declaration in flight");
     let list = store_declares(&d, 3, 1, game::CutId(5));
     c.declared(game::Declared::Done(list.clone()), due);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, list[0].id), (2, list[0].id)], "the order goes to the survivors");
-    read_departed(&mut c, 3, 1, None, due + 1);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), list[0].id), (h(2), list[0].id)], "the order goes to the survivors");
+    read_departed(&mut c, 3, h(1), None, due + 1);
     assert_eq!(c.declare_wanted(due + 1), None, "declared once");
     // Under `Rollback` (`Static`) a request is ignored.
-    let (mut r, t) = departed(3, 1);
+    let (mut r, t) = departed(3, h(1));
     r.set_crash_policy(game::CrashPolicy::Rollback);
-    read_departed(&mut r, 3, 1, None, t);
-    r.handle(0, HostMsg::LandWanted { sr: WANTED }, t);
+    read_departed(&mut r, 3, h(1), None, t);
+    r.handle(h(0), HostMsg::LandWanted { sr: WANTED }, t);
     assert!(r.take_land_lookups().is_empty(), "Static looks nothing up");
-    r.land_wanted(1, t);
-    read_departed(&mut r, 3, 1, None, t + game::HEIR_WAIT_MS);
+    r.land_wanted(h(1), t);
+    read_departed(&mut r, 3, h(1), None, t + game::HEIR_WAIT_MS);
     assert_eq!(r.declare_wanted(t + game::HEIR_WAIT_MS), None, "Static never declares");
 }
 
@@ -2570,19 +2580,19 @@ fn land_of_a_departed_host_waits_heir_wait_ms_then_is_inherited() {
 /// its land is given away at the first request; one below the count waits.
 #[test]
 fn land_of_an_ordinal_beyond_the_host_count_is_inherited_at_once() {
-    let (mut c, t) = departed(3, 2);
+    let (mut c, t) = departed(3, h(2));
     c.set_host_count(2);
-    read_departed(&mut c, 3, 2, None, t);
-    land_asked(&mut c, 2, t);
+    read_departed(&mut c, 3, h(2), None, t);
+    land_asked(&mut c, h(2), t);
     let d = c.declare_wanted(t).expect("at once");
-    assert_eq!((d.dead.clone(), d.kind), (vec![(2, 102)], game::SuccessionKind::Leave));
-    let live: std::collections::BTreeSet<u32> = [0, 1].into_iter().collect();
-    assert_eq!(d.heirs, vec![game::heir_of(2, &live).unwrap()]);
+    assert_eq!((d.dead.clone(), d.kind), (vec![(h(2), 102)], game::SuccessionKind::Leave));
+    let live: std::collections::BTreeSet<HostId> = [0, 1].into_iter().map(h).collect();
+    assert_eq!(d.heirs, vec![game::heir_of(h(2), &live).unwrap()]);
     // Within the count: waited for.
-    let (mut w, t) = departed(3, 1);
+    let (mut w, t) = departed(3, h(1));
     w.set_host_count(2);
-    read_departed(&mut w, 3, 1, None, t);
-    land_asked(&mut w, 1, t);
+    read_departed(&mut w, 3, h(1), None, t);
+    land_asked(&mut w, h(1), t);
     assert_eq!(w.declare_wanted(t), None, "ordinal 1 of 2 may come back");
 }
 
@@ -2591,37 +2601,37 @@ fn land_of_an_ordinal_beyond_the_host_count_is_inherited_at_once() {
 /// refusing a declaration that raced the registration (`Gone`) declares nothing either.
 #[test]
 fn a_returning_host_cancels_the_wait() {
-    let (mut c, t) = departed(2, 1);
-    read_departed(&mut c, 2, 1, None, t);
-    land_asked(&mut c, 1, t);
+    let (mut c, t) = departed(2, h(1));
+    read_departed(&mut c, 2, h(1), None, t);
+    land_asked(&mut c, h(1), t);
     // Its next boot registers: the hosts read shows it dirty.
     let mid = t + game::HEIR_WAIT_MS / 2;
-    read_departed(&mut c, 2, 1, Some(901), mid);
+    read_departed(&mut c, 2, h(1), Some(901), mid);
     assert_eq!(c.declare_wanted(mid), None);
     for at in [t + game::HEIR_WAIT_MS, t + 3 * game::HEIR_WAIT_MS] {
-        read_departed(&mut c, 2, 1, Some(901), at);
+        read_departed(&mut c, 2, h(1), Some(901), at);
         assert_eq!(c.declare_wanted(at), None, "forgotten: never declared ({at} ms)");
     }
     // Its next boot attaches before the hosts are read again: forgotten too.
-    let (mut a, t) = departed(2, 1);
-    read_departed(&mut a, 2, 1, None, t);
-    land_asked(&mut a, 1, t);
-    let back = HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 902, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
-    a.handle(1, back, t + 10);
+    let (mut a, t) = departed(2, h(1));
+    read_departed(&mut a, 2, h(1), None, t);
+    land_asked(&mut a, h(1), t);
+    let back = HostMsg::Attach { host: h(1), epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 902, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback };
+    a.handle(h(1), back, t + 10);
     commit_routed(&mut a);
     // The read still shows the clean row of the boot that left (it lags the attach).
-    read_departed(&mut a, 2, 1, None, t + game::HEIR_WAIT_MS);
+    read_departed(&mut a, 2, h(1), None, t + game::HEIR_WAIT_MS);
     assert_eq!(a.declare_wanted(t + game::HEIR_WAIT_MS), None, "it is back: never declared");
     // It registered just as the wait ran out: the store refuses the declaration (`Gone`)
     // and the next read, showing the new boot, forgets the request.
-    let (mut g, t) = departed(2, 1);
-    read_departed(&mut g, 2, 1, None, t);
-    land_asked(&mut g, 1, t);
-    read_departed(&mut g, 2, 1, None, t + game::HEIR_WAIT_MS);
+    let (mut g, t) = departed(2, h(1));
+    read_departed(&mut g, 2, h(1), None, t);
+    land_asked(&mut g, h(1), t);
+    read_departed(&mut g, 2, h(1), None, t + game::HEIR_WAIT_MS);
     assert!(g.declare_wanted(t + game::HEIR_WAIT_MS).is_some());
-    g.declared(game::Declared::Gone(vec![1]), t + game::HEIR_WAIT_MS);
+    g.declared(game::Declared::Gone(vec![h(1)]), t + game::HEIR_WAIT_MS);
     assert!(orders(&commit_routed(&mut g)).is_empty(), "nothing declared");
-    read_departed(&mut g, 2, 1, Some(903), t + game::HEIR_WAIT_MS + 1_000);
+    read_departed(&mut g, 2, h(1), Some(903), t + game::HEIR_WAIT_MS + 1_000);
     assert_eq!(g.declare_wanted(t + game::HEIR_WAIT_MS + 1_000), None, "forgotten once the new boot is read");
 }
 
@@ -2629,23 +2639,23 @@ fn a_returning_host_cancels_the_wait() {
 /// records the request again; it is pruned (the owner is declared), never kept for ever.
 #[test]
 fn a_request_for_land_already_declared_is_pruned() {
-    let (mut c, t) = departed(2, 1);
-    read_departed(&mut c, 2, 1, None, t);
-    land_asked(&mut c, 1, t);
+    let (mut c, t) = departed(2, h(1));
+    read_departed(&mut c, 2, h(1), None, t);
+    land_asked(&mut c, h(1), t);
     let due = t + game::HEIR_WAIT_MS;
-    read_departed(&mut c, 2, 1, None, due);
+    read_departed(&mut c, 2, h(1), None, due);
     let d = c.declare_wanted(due).expect("declared");
     c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(5))), due);
     assert!(c.lands_wanted().is_empty(), "the declared owner's request is done");
     // A late lookup answer for the same owner: not recorded again.
-    c.land_wanted(1, due + 1);
+    c.land_wanted(h(1), due + 1);
     assert!(c.lands_wanted().is_empty(), "pruned");
-    read_departed(&mut c, 2, 1, None, due + 2);
+    read_departed(&mut c, 2, h(1), None, due + 2);
     assert_eq!(c.declare_wanted(due + 2), None, "declared once");
 }
 
 /// The counts relayed between participants of a running world cut.
-fn counts(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::CutId, u32, u64, u64)> {
+fn counts(out: &[(Target, CoordMsg)]) -> Vec<(HostId, game::CutId, HostId, u64, u64)> {
     out.iter()
         .filter_map(|(to, m)| match (to, m) {
             (Target::Host(h), CoordMsg::CutPeerCount { cut, from, received_through, boot }) => {
@@ -2669,25 +2679,25 @@ fn cut_peer_counts_are_relayed_between_participants_only() {
     assert_eq!(begun_now.len(), 3, "a cut of every host runs");
     let cut = begun_now[0].1;
     let now = CUT_EVERY_MS;
-    c.handle(0, HostMsg::CutPeerCount { cut, peer: 1, received_through: 7, boot: 101 }, now);
-    c.handle(1, HostMsg::CutPeerCount { cut, peer: 0, received_through: 0, boot: 0 }, now);
-    assert_eq!(counts(&commit_routed(&mut c)), [(1, cut, 0, 7, 101), (0, cut, 1, 0, 0)], "relayed to the peer, as from the reporter");
-    c.handle(0, HostMsg::CutPeerCount { cut, peer: 0, received_through: 3, boot: 100 }, now);
-    c.handle(0, HostMsg::CutPeerCount { cut, peer: 5, received_through: 3, boot: 105 }, now);
-    c.handle(5, HostMsg::CutPeerCount { cut, peer: 0, received_through: 3, boot: 100 }, now);
-    c.handle(0, HostMsg::CutPeerCount { cut: game::CutId(cut.0 + 1), peer: 2, received_through: 3, boot: 102 }, now);
+    c.handle(h(0), HostMsg::CutPeerCount { cut, peer: h(1), received_through: 7, boot: 101 }, now);
+    c.handle(h(1), HostMsg::CutPeerCount { cut, peer: h(0), received_through: 0, boot: 0 }, now);
+    assert_eq!(counts(&commit_routed(&mut c)), [(h(1), cut, h(0), 7, 101), (h(0), cut, h(1), 0, 0)], "relayed to the peer, as from the reporter");
+    c.handle(h(0), HostMsg::CutPeerCount { cut, peer: h(0), received_through: 3, boot: 100 }, now);
+    c.handle(h(0), HostMsg::CutPeerCount { cut, peer: h(5), received_through: 3, boot: 105 }, now);
+    c.handle(h(5), HostMsg::CutPeerCount { cut, peer: h(0), received_through: 3, boot: 100 }, now);
+    c.handle(h(0), HostMsg::CutPeerCount { cut: game::CutId(cut.0 + 1), peer: h(2), received_through: 3, boot: 102 }, now);
     assert!(counts(&commit_routed(&mut c)).is_empty(), "nothing relayed outside the cut's participants");
     // Host 2 lapses: the cut is decided aborted before anything is declared, and a count
     // sent after that is not relayed.
-    read_leases(&mut c, 3, &[2], &[], now + 1);
+    read_leases(&mut c, 3, &[h(2)], &[], now + 1);
     assert_eq!(c.declare_wanted(now + 1), None, "not while the cut runs");
     assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)), "aborted first");
-    c.handle(0, HostMsg::CutPeerCount { cut, peer: 2, received_through: 4, boot: 102 }, now + 1);
-    c.handle(2, HostMsg::CutPeerCount { cut, peer: 0, received_through: 4, boot: 100 }, now + 1);
+    c.handle(h(0), HostMsg::CutPeerCount { cut, peer: h(2), received_through: 4, boot: 102 }, now + 1);
+    c.handle(h(2), HostMsg::CutPeerCount { cut, peer: h(0), received_through: 4, boot: 100 }, now + 1);
     assert!(counts(&commit_routed(&mut c)).is_empty(), "no count of a decided cut is relayed");
     c.decided(cut, false);
     commit_routed(&mut c);
-    c.handle(1, HostMsg::CutPeerCount { cut, peer: 0, received_through: 4, boot: 100 }, now + 2);
+    c.handle(h(1), HostMsg::CutPeerCount { cut, peer: h(0), received_through: 4, boot: 100 }, now + 2);
     assert!(counts(&commit_routed(&mut c)).is_empty(), "nor once it is over");
 }
 
@@ -2707,26 +2717,26 @@ fn embark_at(id: u64, player: PlayerId, hop: u64, civ: CivId, people: &[PersonId
 #[test]
 fn a_request_from_an_older_placement_is_refused_not_granted() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, online_at(A, None, false, 3), 0);
-    c.handle(1, online_at(A, None, false, 4), 0);
-    assert_eq!((c.online_on(A), c.hop_of(A)), (Some(1), 4));
+    c.handle(h(0), online_at(A, None, false, 3), 0);
+    c.handle(h(1), online_at(A, None, false, 4), 0);
+    assert_eq!((c.online_on(A), c.hop_of(A)), (Some(h(1)), 4));
     let sites = c.history().sites().count();
-    c.handle(0, embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
     assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
     assert_eq!(c.history().sites().count(), sites, "no site is founded");
     assert_eq!(c.claim_of(A), None, "the claim is unchanged");
-    assert_eq!(c.online_on(A), Some(1), "A stays on host 1");
+    assert_eq!(c.online_on(A), Some(h(1)), "A stays on host 1");
     // At the same hop as the known one, from a host A is not on: refused as well.
-    c.handle(0, embark_at(2, A, 4, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), embark_at(2, A, 4, civ, &people[0..2], rc(8, 0)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
     assert_eq!(c.claim_of(A), None);
     // A query of the old placement is no state change: answered.
-    c.handle(0, request(3, A, WorldRequest::EmbarkOptions), 0);
+    c.handle(h(0), request(3, A, WorldRequest::EmbarkOptions), 0);
     assert!(matches!(reply_to(&commit(&mut c), 3), WorldReply::EmbarkOptions(_)));
     // Memoised: A is offline again at a higher hop, and the first request's id still
     // gets the refusal, never a grant.
-    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 5 }, 0);
-    c.handle(0, embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(1), HostMsg::PlayerOffline { player: A, hop: 5 }, 0);
+    c.handle(h(0), embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
     assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
     assert_eq!(c.claim_of(A), None);
 }
@@ -2735,8 +2745,8 @@ fn a_request_from_an_older_placement_is_refused_not_granted() {
 #[test]
 fn a_request_at_the_current_hop_is_granted() {
     let (mut c, civ, people) = coordinator();
-    c.handle(0, online_at(A, None, false, 3), 0);
-    c.handle(0, embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
+    c.handle(h(0), online_at(A, None, false, 3), 0);
+    c.handle(h(0), embark_at(1, A, 3, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("granted") };
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
 }
@@ -2751,8 +2761,8 @@ fn heir_alone() -> Coordinator {
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_world_tick(100);
     c.set_crash_policy(game::CrashPolicy::Succession);
-    c.set_expected_hosts([0].into_iter().collect());
-    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    c.set_expected_hosts([0].into_iter().map(h).collect());
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), 0);
     commit_routed(&mut c);
     c
 }
@@ -2762,9 +2772,9 @@ fn heir_alone() -> Coordinator {
 fn offline_succession() -> game::Succession {
     game::Succession {
         id: game::SuccessionId(9),
-        predecessor: 1,
+        predecessor: h(1),
         predecessor_boot: 101,
-        heir: 0,
+        heir: h(0),
         kind: game::SuccessionKind::Crash,
         base_cut: game::CutId(3),
         moved: vec![((1, 0), 2)],
@@ -2781,37 +2791,37 @@ fn offline_succession() -> game::Succession {
 fn an_offline_succession_goes_to_its_heir_and_its_settle_tells_it() {
     let mut c = heir_alone();
     let s = offline_succession();
-    let mut dead = seen(1, 50);
+    let mut dead = seen(h(1), 50);
     dead.state = game::HOST_DEAD;
-    c.observe_leases(&[seen(0, 60), dead.clone()], 60, 60);
+    c.observe_leases(&[seen(h(0), 60), dead.clone()], 60, 60);
     assert!(c.take_successions_reread(), "a dead row nobody here declared: the open successions are read again");
     assert!(!c.take_successions_reread(), "asked once");
-    c.observe_leases(&[seen(0, 70), dead.clone()], 70, 70);
+    c.observe_leases(&[seen(h(0), 70), dead.clone()], 70, 70);
     assert!(!c.take_successions_reread(), "the same dead row asks once");
     c.maintain(2 * CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut until the open successions are read");
     c.successions_open(vec![s.clone()], 2 * CUT_EVERY_MS);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to the heir, no survivor");
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id)], "the order goes to the heir, no survivor");
     let mut now = 3 * CUT_EVERY_MS;
     c.maintain(now);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "the heir has not answered");
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, now);
-    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, now);
-    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], true)]);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, now);
+    c.handle(h(0), HostMsg::SuccessionAdopted { id: s.id }, now);
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![h(0)], true)]);
     now += CUT_EVERY_MS;
     c.maintain(now);
     let next = begun(&commit_routed(&mut c));
-    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0], "the heir's cut begins");
+    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(0)], "the heir's cut begins");
     let cut = next[0].1;
-    c.handle(0, HostMsg::CutPrepared { cut }, now);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, now);
     let d = c.take_decision().expect("decided");
     assert_eq!((d.commit, d.settles.clone()), (true, vec![s.id]), "the cut settles it");
     c.decided(cut, true);
-    assert_eq!(succession_done(&commit_routed(&mut c)), vec![(Target::Host(0), s.id, true)], "the heir is told");
+    assert_eq!(succession_done(&commit_routed(&mut c)), vec![(Target::Host(h(0)), s.id, true)], "the heir is told");
     assert!(c.succession_progress().is_empty());
     // A later read of the settled row (clean now) asks nothing.
     dead.clean = true;
-    c.observe_leases(&[seen(0, 90), dead], 90, 90);
+    c.observe_leases(&[seen(h(0), 90), dead], 90, 90);
     assert!(!c.take_successions_reread());
     // Read before the heir attached: the order comes with its attach.
     let (mut c, _, _) = coordinator();
@@ -2821,12 +2831,12 @@ fn an_offline_succession_goes_to_its_heir_and_its_settle_tells_it() {
     c.successions_unknown();
     c.successions_open(vec![s.clone()], 0);
     assert!(orders(&commit_routed(&mut c)).is_empty(), "the heir is not attached");
-    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 10);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "sent at its attach");
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), 10);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id)], "sent at its attach");
     // An heir that answered from memory (its next attach) is not ordered again.
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 20);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, 20);
     let listing = HostMsg::Attach {
-        host: 0,
+        host: h(0),
         epoch: 2,
         running: Vec::new(),
         online: Vec::new(),
@@ -2838,7 +2848,7 @@ fn an_offline_succession_goes_to_its_heir_and_its_settle_tells_it() {
         successions: vec![(s.id, false)],
         policy: game::CrashPolicy::Rollback,
     };
-    c.handle(0, listing, 30);
+    c.handle(h(0), listing, 30);
     assert!(orders(&commit_routed(&mut c)).is_empty(), "applied already");
 }
 
@@ -2849,11 +2859,11 @@ fn an_offline_succession_goes_to_its_heir_and_its_settle_tells_it() {
 #[test]
 fn a_rollback_elsewhere_drops_the_abandoned_runs() {
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
     commit_routed(&mut c);
     assert!(!c.take_successions_reread());
     let newer = HostMsg::Attach {
-        host: 0,
+        host: h(0),
         epoch: 2,
         running: Vec::new(),
         online: Vec::new(),
@@ -2865,7 +2875,7 @@ fn a_rollback_elsewhere_drops_the_abandoned_runs() {
         successions: Vec::new(),
         policy: game::CrashPolicy::Rollback,
     };
-    c.handle(0, newer, 200);
+    c.handle(h(0), newer, 200);
     assert!(c.take_successions_reread(), "a newer generation: the open successions are read again");
     c.maintain(200 + CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut until they are read");
@@ -2890,33 +2900,33 @@ fn an_offline_run_waits_for_its_heir_and_ignores_the_dead_already() {
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
     let s = offline_succession();
-    let mut dead = seen(1, 50);
+    let mut dead = seen(h(1), 50);
     dead.state = game::HOST_DEAD;
     // Hosts 0 (the heir's old boot) and 2 died with host 1; the coordinator lives on.
-    c.observe_leases(&[seen(0, 40), dead.clone(), seen(2, 40)], 0, 0);
+    c.observe_leases(&[seen(h(0), 40), dead.clone(), seen(h(2), 40)], 0, 0);
     c.successions_open(vec![s.clone()], 0);
     let long = 10 * game::SUCCESSION_DEADLINE_MS;
     for now in [game::HOST_LEASE_MS, long] {
-        c.observe_leases(&[seen(0, 40), dead.clone(), seen(2, 40)], now, now);
+        c.observe_leases(&[seen(h(0), 40), dead.clone(), seen(h(2), 40)], now, now);
         c.maintain(now);
         assert!(!c.rollback_wanted(), "at {now}: no heir booted yet, the dead were dead already");
     }
-    assert_eq!(c.leases().lapsed(long), vec![(0, 100), (2, 102)], "both lapsed");
+    assert_eq!(c.leases().lapsed(long), vec![(h(0), 100), (h(2), 102)], "both lapsed");
     // The heir boots (a new boot), attaches, beats; host 2 stays down.
-    let heir_row = |seen_ms: u64| HostSeen { boot: 900, ..seen(0, seen_ms) };
-    c.handle(0, attach_as(0, 1, 900), long);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)]);
-    c.observe_leases(&[heir_row(long), dead.clone(), seen(2, 40)], long, long);
-    c.observe_leases(&[heir_row(long + 500), dead.clone(), seen(2, 40)], long + 500, long + 500);
+    let heir_row = |seen_ms: u64| HostSeen { boot: 900, ..seen(h(0), seen_ms) };
+    c.handle(h(0), attach_as(h(0), 1, 900), long);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id)]);
+    c.observe_leases(&[heir_row(long), dead.clone(), seen(h(2), 40)], long, long);
+    c.observe_leases(&[heir_row(long + 500), dead.clone(), seen(h(2), 40)], long + 500, long + 500);
     c.maintain(long + game::SUCCESSION_DEADLINE_MS - 1);
     assert!(!c.rollback_wanted(), "within the deadline from the heir's order");
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, long + 600);
-    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, long + 600);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, long + 600);
+    c.handle(h(0), HostMsg::SuccessionAdopted { id: s.id }, long + 600);
     c.maintain(long + 2 * game::SUCCESSION_DEADLINE_MS);
     assert!(!c.rollback_wanted(), "answered: the deadline no longer matters");
     // The heir's new boot, seen beating since the run opened, dies before the settle.
     let late = long + 2 * game::SUCCESSION_DEADLINE_MS + game::HOST_LEASE_MS;
-    c.observe_leases(&[heir_row(long + 500), dead.clone(), seen(2, 40)], late, late);
+    c.observe_leases(&[heir_row(long + 500), dead.clone(), seen(h(2), 40)], late, late);
     c.maintain(late);
     assert!(c.rollback_wanted(), "a death during the succession");
     // Unanswered past the deadline counted from the heir's order: a rollback too.
@@ -2925,7 +2935,7 @@ fn an_offline_run_waits_for_its_heir_and_ignores_the_dead_already() {
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
     c.successions_open(vec![s.clone()], 0);
-    c.handle(0, attach_as(0, 1, 7), 100);
+    c.handle(h(0), attach_as(h(0), 1, 7), 100);
     commit_routed(&mut c);
     c.maintain(100 + game::SUCCESSION_DEADLINE_MS - 1);
     assert!(!c.rollback_wanted());
@@ -2934,7 +2944,7 @@ fn an_offline_run_waits_for_its_heir_and_ignores_the_dead_already() {
 }
 
 /// Host `host`'s `Attach` of boot `boot` (epoch `epoch`, nothing running or online).
-fn attach_as(host: u32, epoch: u64, boot: u64) -> HostMsg {
+fn attach_as(host: HostId, epoch: u64, boot: u64) -> HostMsg {
     HostMsg::Attach {
         host,
         epoch,
@@ -2963,13 +2973,13 @@ fn an_answered_succession_makes_its_settle_cut_due_at_once() {
     assert!(retry < PERIOD);
     let mut c = succeeding(3);
     c.set_world_cuts(PERIOD);
-    let s = declare_one(&mut c, 3, 2, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
     commit_routed(&mut c);
     let mut now = 100 + retry;
     c.maintain(now);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "not answered: no cut");
-    for h in [0, 1] {
-        c.handle(h, HostMsg::SuccessionApplied { id: s.id }, now);
+    for hn in [0, 1] {
+        c.handle(h(hn), HostMsg::SuccessionApplied { id: s.id }, now);
     }
     c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, now);
     c.maintain(now);
@@ -2977,7 +2987,7 @@ fn an_answered_succession_makes_its_settle_cut_due_at_once() {
     assert_eq!(first.len(), 2, "answered: the settle cut begins at once, {} ms into a {PERIOD} ms period", now);
     let cut = first[0].1;
     // It aborts (a pinned region not loaded yet): tried again after the retry wait, not at once.
-    c.handle(1, HostMsg::CutFailed { cut, why: CutFailure::Aborted }, now);
+    c.handle(h(1), HostMsg::CutFailed { cut, why: CutFailure::Aborted }, now);
     let d = c.take_decision().expect("decided");
     assert_eq!((d.commit, d.settles.clone()), (false, vec![s.id]));
     c.decided(cut, false);
@@ -2989,8 +2999,8 @@ fn an_answered_succession_makes_its_settle_cut_due_at_once() {
     let again = begun(&commit_routed(&mut c));
     assert_eq!(again.len(), 2, "tried again after the retry wait");
     let cut = again[0].1;
-    for h in [0, 1] {
-        c.handle(h, HostMsg::CutPrepared { cut }, now);
+    for hn in [0, 1] {
+        c.handle(h(hn), HostMsg::CutPrepared { cut }, now);
     }
     let d = c.take_decision().expect("decided");
     assert_eq!((d.commit, d.settles.clone()), (true, vec![s.id]));
@@ -3017,21 +3027,21 @@ fn a_vouched_lapse_counts_while_only_an_offline_run_is_open() {
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
     let s = offline_succession();
-    let mut dead = seen(1, 50);
+    let mut dead = seen(h(1), 50);
     dead.state = game::HOST_DEAD;
-    c.observe_leases(&[seen(0, 40), dead.clone(), seen(2, 40)], 0, 0);
+    c.observe_leases(&[seen(h(0), 40), dead.clone(), seen(h(2), 40)], 0, 0);
     c.successions_open(vec![s.clone()], 0);
     let t = 10 * game::HOST_LEASE_MS;
-    let heir_row = |seen_ms: u64| HostSeen { boot: 900, ..seen(0, seen_ms) };
-    c.handle(0, attach_as(0, 1, 900), t);
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, t);
-    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, t);
+    let heir_row = |seen_ms: u64| HostSeen { boot: 900, ..seen(h(0), seen_ms) };
+    c.handle(h(0), attach_as(h(0), 1, 900), t);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, t);
+    c.handle(h(0), HostMsg::SuccessionAdopted { id: s.id }, t);
     commit_routed(&mut c);
-    c.observe_leases(&[heir_row(t), dead.clone(), seen(2, 40)], t, t);
+    c.observe_leases(&[heir_row(t), dead.clone(), seen(h(2), 40)], t, t);
     c.maintain(t);
     assert!(!c.rollback_wanted(), "host 2 was dead already when the world was retired: no second death");
     // The operator vouches host 2 dead.
-    c.observe_leases(&[heir_row(t + 500), dead.clone(), seen(2, 0)], t + 500, t + 500);
+    c.observe_leases(&[heir_row(t + 500), dead.clone(), seen(h(2), 0)], t + 500, t + 500);
     c.maintain(t + 500);
     assert!(c.rollback_wanted(), "a vouched row counts for an offline run too");
 }
@@ -3046,8 +3056,8 @@ fn blocked_cuts_name_an_offline_runs_absent_heir() {
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_world_tick(100);
     c.set_crash_policy(game::CrashPolicy::Succession);
-    c.set_expected_hosts([2].into_iter().collect());
-    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), 0);
+    c.set_expected_hosts([2].into_iter().map(h).collect());
+    c.handle(h(2), attach(h(2), 1, Vec::new(), Vec::new()), 0);
     let s = offline_succession();
     c.successions_open(vec![s.clone()], 0);
     commit_routed(&mut c);
@@ -3075,7 +3085,7 @@ fn a_rollback_ordered_here_starts_the_hops_over() {
     let mut c = succeeding(3);
     let mut online = report(A, None, false);
     online.hop = 5;
-    c.handle(0, attach(0, 2, Vec::new(), vec![online]), 10);
+    c.handle(h(0), attach(h(0), 2, Vec::new(), vec![online]), 10);
     commit_routed(&mut c);
     assert_eq!(c.hop_of(A), 5);
     c.rolled_back(7);
@@ -3088,12 +3098,12 @@ fn a_rollback_ordered_here_starts_the_hops_over() {
 #[test]
 fn a_player_handed_to_a_succeeded_host_is_offline() {
     let mut c = succeeding(3);
-    c.handle(0, attach(0, 2, Vec::new(), vec![report(A, None, false)]), 10);
+    c.handle(h(0), attach(h(0), 2, Vec::new(), vec![report(A, None, false)]), 10);
     commit_routed(&mut c);
-    assert_eq!(c.online_on(A), Some(0));
-    let s = declare_one(&mut c, 3, 2, 100);
-    assert_eq!(s.predecessor, 2);
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 2, hop: PLACED }, 110);
+    assert_eq!(c.online_on(A), Some(h(0)));
+    let s = declare_one(&mut c, 3, h(2), 100);
+    assert_eq!(s.predecessor, h(2));
+    c.handle(h(0), HostMsg::PlayerHandedTo { player: A, to: h(2), hop: PLACED }, 110);
     assert_eq!(c.online_on(A), None, "handed to the dead host: offline, not online on it");
     assert_eq!(c.hop_of(A), PLACED);
 }
@@ -3103,7 +3113,7 @@ fn a_player_handed_to_a_succeeded_host_is_offline() {
 #[test]
 fn a_declaration_answered_after_a_rollback_opens_no_run() {
     let mut c = succeeding(3);
-    read_leases(&mut c, 3, &[2], &[], 100);
+    read_leases(&mut c, 3, &[h(2)], &[], 100);
     let d = c.declare_wanted(100).expect("a lapsed host is declared");
     let list = store_declares(&d, 3, 1, game::CutId(0));
     c.rolled_back(5);
@@ -3124,13 +3134,13 @@ fn an_offline_runs_deadline_starts_again_with_a_rebooted_heirs_order() {
     c.set_crash_policy(game::CrashPolicy::Succession);
     let s = offline_succession();
     c.successions_open(vec![s.clone()], 0);
-    c.handle(0, attach_as(0, 1, 7), 100);
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 110);
-    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 110);
+    c.handle(h(0), attach_as(h(0), 1, 7), 100);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, 110);
+    c.handle(h(0), HostMsg::SuccessionAdopted { id: s.id }, 110);
     commit_routed(&mut c);
     let later = 100 + 5 * game::SUCCESSION_DEADLINE_MS;
-    c.handle(0, attach_as(0, 1, 8), later);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to the new boot");
+    c.handle(h(0), attach_as(h(0), 1, 8), later);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id)], "the order goes to the new boot");
     c.maintain(later + game::SUCCESSION_DEADLINE_MS - 1);
     assert!(!c.rollback_wanted(), "the new boot has a whole deadline from its order");
     c.maintain(later + game::SUCCESSION_DEADLINE_MS);
@@ -3149,44 +3159,44 @@ fn an_heir_that_reboots_after_adopting_must_adopt_again_before_any_settle() {
     let s = offline_succession();
     c.successions_unknown();
     c.successions_open(vec![s.clone()], 10);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)]);
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 20);
-    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 20);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id)]);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, 20);
+    c.handle(h(0), HostMsg::SuccessionAdopted { id: s.id }, 20);
     // The heir's process dies before any cut began and boots again.
-    c.handle(0, attach_as(0, 2, 900), 30);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to the new boot");
+    c.handle(h(0), attach_as(h(0), 2, 900), 30);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id)], "the order goes to the new boot");
     for now in [2 * CUT_EVERY_MS, 3 * CUT_EVERY_MS] {
         c.maintain(now);
         assert!(begun(&commit_routed(&mut c)).is_empty(), "at {now}: the new boot has not adopted");
         assert!(c.take_decision().is_none());
     }
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 3 * CUT_EVERY_MS);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, 3 * CUT_EVERY_MS);
     c.maintain(4 * CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "applied, not adopted");
-    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 4 * CUT_EVERY_MS);
+    c.handle(h(0), HostMsg::SuccessionAdopted { id: s.id }, 4 * CUT_EVERY_MS);
     c.maintain(5 * CUT_EVERY_MS);
     let next = begun(&commit_routed(&mut c));
     assert_eq!(next.len(), 1, "the new boot adopted: the settle cut begins");
     let cut = next[0].1;
-    c.handle(0, HostMsg::CutPrepared { cut }, 5 * CUT_EVERY_MS);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, 5 * CUT_EVERY_MS);
     assert_eq!(c.take_decision().expect("decided").settles, vec![s.id]);
     // An attach of the SAME boot listing it (a reconnect) keeps its answers: no order again.
     let (mut c, _, _) = coordinator();
     c.set_cut_epoch(4);
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
-    c.handle(0, attach_as(0, 1, 900), 0);
+    c.handle(h(0), attach_as(h(0), 1, 900), 0);
     c.successions_open(vec![s.clone()], 0);
     commit_routed(&mut c);
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 1);
-    c.handle(0, HostMsg::SuccessionAdopted { id: s.id }, 1);
-    let mut again = attach_as(0, 2, 900);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, 1);
+    c.handle(h(0), HostMsg::SuccessionAdopted { id: s.id }, 1);
+    let mut again = attach_as(h(0), 2, 900);
     if let HostMsg::Attach { successions, .. } = &mut again {
         *successions = vec![(s.id, true)];
     }
-    c.handle(0, again, 2);
+    c.handle(h(0), again, 2);
     assert!(orders(&commit_routed(&mut c)).is_empty(), "the same boot answered already");
-    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], true)]);
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![h(0)], true)]);
 }
 
 /// A survivor of a declared succession attaches as ANOTHER boot before the settle: its journal
@@ -3195,9 +3205,9 @@ fn an_heir_that_reboots_after_adopting_must_adopt_again_before_any_settle() {
 #[test]
 fn a_survivor_that_reboots_during_a_declared_run_rolls_the_world_back() {
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
     commit_routed(&mut c);
-    let other = 1 - s.heir;
+    let other = h(1 - s.heir.0);
     c.handle(other, HostMsg::SuccessionApplied { id: s.id }, 150);
     c.handle(other, attach_as(other, 2, 900), 200);
     assert!(orders(&commit_routed(&mut c)).is_empty(), "no order to a boot that lost the journal");
@@ -3211,20 +3221,20 @@ fn a_survivor_that_reboots_during_a_declared_run_rolls_the_world_back() {
 #[test]
 fn a_declared_run_learned_twice_is_opened_once() {
     let mut c = succeeding(3);
-    read_leases(&mut c, 3, &[2], &[], 100);
+    read_leases(&mut c, 3, &[h(2)], &[], 100);
     let d = c.declare_wanted(100).expect("declared");
     let list = store_declares(&d, 3, 1, game::CutId(0));
     let s = list[0].clone();
-    read_leases(&mut c, 3, &[], &[2], 110);
+    read_leases(&mut c, 3, &[], &[h(2)], 110);
     assert!(!c.take_successions_reread(), "the declaration in flight explains the dead row");
     c.declared(game::Declared::Done(list.clone()), 113);
     assert_eq!(orders(&commit_routed(&mut c)).len(), 2, "one order per survivor");
-    c.handle(0, HostMsg::SuccessionApplied { id: s.id }, 114);
+    c.handle(h(0), HostMsg::SuccessionApplied { id: s.id }, 114);
     c.successions_reread();
     assert!(c.take_successions_reread());
     c.successions_open(list, 115);
     assert!(orders(&commit_routed(&mut c)).is_empty(), "not re-opened: no second order");
-    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], false)], "host 0's answer kept");
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![h(0)], false)], "host 0's answer kept");
 }
 
 /// A run a decision in flight settles is no "abandoned" run: a re-read that no longer lists it
@@ -3232,17 +3242,17 @@ fn a_declared_run_learned_twice_is_opened_once() {
 #[test]
 fn a_run_settling_is_not_dropped_as_abandoned() {
     let mut c = succeeding(3);
-    let s = declare_one(&mut c, 3, 2, 100);
-    for h in [0, 1] {
-        c.handle(h, HostMsg::SuccessionApplied { id: s.id }, 100);
+    let s = declare_one(&mut c, 3, h(2), 100);
+    for hn in [0, 1] {
+        c.handle(h(hn), HostMsg::SuccessionApplied { id: s.id }, 100);
     }
     c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 100);
     commit_routed(&mut c);
     let now = 100 + CUT_EVERY_MS;
     c.maintain(now);
     let (_, cut, _) = begun(&commit_routed(&mut c))[0];
-    c.handle(0, HostMsg::CutPrepared { cut }, now);
-    c.handle(1, HostMsg::CutPrepared { cut }, now);
+    c.handle(h(0), HostMsg::CutPrepared { cut }, now);
+    c.handle(h(1), HostMsg::CutPrepared { cut }, now);
     let d = c.take_decision().expect("decided");
     assert_eq!(d.settles, vec![s.id]);
     // The store committed it; before its answer is handled a re-read comes back without it.
@@ -3268,18 +3278,18 @@ fn an_early_listing_of_a_replaced_boot_is_not_credited() {
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_world_tick(100);
     c.set_crash_policy(game::CrashPolicy::Succession);
-    c.set_expected_hosts([0].into_iter().collect());
+    c.set_expected_hosts([0].into_iter().map(h).collect());
     c.successions_unknown();
     let s = offline_succession();
-    let mut listing = attach_as(0, 1, 7);
+    let mut listing = attach_as(h(0), 1, 7);
     if let HostMsg::Attach { successions, .. } = &mut listing {
         *successions = vec![(s.id, true)];
     }
-    c.handle(0, listing, 0);
-    c.handle(0, attach_as(0, 2, 900), 10);
+    c.handle(h(0), listing, 0);
+    c.handle(h(0), attach_as(h(0), 2, 900), 10);
     commit_routed(&mut c);
     c.successions_open(vec![s.clone()], 20);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(0, s.id)], "the order goes to boot B");
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), s.id)], "the order goes to boot B");
     assert_eq!(c.succession_progress(), vec![(s.id, Vec::new(), false)], "boot A's listing is not B's answer");
     c.maintain(2 * CUT_EVERY_MS);
     assert!(begun(&commit_routed(&mut c)).is_empty(), "no cut before boot B adopted");
@@ -3289,14 +3299,14 @@ fn an_early_listing_of_a_replaced_boot_is_not_credited() {
     c.set_world_cuts(CUT_EVERY_MS);
     c.set_crash_policy(game::CrashPolicy::Succession);
     c.successions_unknown();
-    let mut listing = attach_as(0, 1, 900);
+    let mut listing = attach_as(h(0), 1, 900);
     if let HostMsg::Attach { successions, .. } = &mut listing {
         *successions = vec![(s.id, true)];
     }
-    c.handle(0, listing, 0);
+    c.handle(h(0), listing, 0);
     c.successions_open(vec![s.clone()], 20);
     commit_routed(&mut c);
-    assert_eq!(c.succession_progress(), vec![(s.id, vec![0], true)], "the listing boot's answers count");
+    assert_eq!(c.succession_progress(), vec![(s.id, vec![h(0)], true)], "the listing boot's answers count");
 }
 
 /// A survivor detached when the run is declared (its next boot registered, not attached yet):
@@ -3305,13 +3315,13 @@ fn an_early_listing_of_a_replaced_boot_is_not_credited() {
 #[test]
 fn a_survivor_detached_at_the_declaration_is_recorded_at_its_attach() {
     let mut c = succeeding(3);
-    c.host_detached(1);
+    c.host_detached(h(1));
     commit_routed(&mut c);
-    let s = declare_one(&mut c, 3, 2, 100);
-    assert!(s.survivors.contains(&1));
+    let s = declare_one(&mut c, 3, h(2), 100);
+    assert!(s.survivors.contains(&h(1)));
     commit_routed(&mut c);
-    c.handle(1, attach_as(1, 2, 900), 200);
-    assert_eq!(orders(&commit_routed(&mut c)), vec![(1, s.id)], "its new boot gets the order");
+    c.handle(h(1), attach_as(h(1), 2, 900), 200);
+    assert_eq!(orders(&commit_routed(&mut c)), vec![(h(1), s.id)], "its new boot gets the order");
     c.maintain(201);
     assert!(!c.rollback_wanted(), "no journal was counted on from a boot that was not attached");
 }

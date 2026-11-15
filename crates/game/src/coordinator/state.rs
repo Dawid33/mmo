@@ -13,9 +13,9 @@ use crate::PlayerId;
 /// world's people, claims and replies, so it is never replaced. Bumping it needs a frozen
 /// copy of the old layout (`CoordinatorStateV<n>`), a `migrate_v<n>`, a rung in
 /// [`CoordinatorState::decode`] and a committed fixture of the old blob.
-pub const COORDINATOR_STATE_VERSION: u8 = 1;
+pub const COORDINATOR_STATE_VERSION: u8 = 2;
 const _: () = assert!(
-    COORDINATOR_STATE_VERSION == 1,
+    COORDINATOR_STATE_VERSION == 2,
     "add the current-format arm to CoordinatorState::decode and a migrate step"
 );
 
@@ -43,8 +43,9 @@ impl CoordinatorState {
         let corrupt = |e: bincode::Error| HistoryLoadError::Corrupt(e.to_string());
         match bytes.split_first() {
             None => Err(HistoryLoadError::Corrupt("empty coordinator state".into())),
+            Some((&2, body)) => bincode::deserialize::<CoordinatorState>(body).map_err(corrupt),
             Some((&1, body)) => bincode::deserialize::<CoordinatorStateV1>(body).map(migrate_v1).map_err(corrupt),
-            // At the first bump: add `COORDINATOR_STATE_VERSION => decode_current(body)` and keep `1 => … migrate_v1`.
+            // At the next bump: add `COORDINATOR_STATE_VERSION => decode_current(body)` and keep `2 => … `, `1 => … migrate_v1`.
             Some((v, _)) => Err(HistoryLoadError::Corrupt(format!(
                 "coordinator state format {v}; this build reads 1..={COORDINATOR_STATE_VERSION}"
             ))),
@@ -54,16 +55,29 @@ impl CoordinatorState {
 
 /// Format 1, frozen: a copy of the layout, not an alias of [`CoordinatorState`] (which may
 /// change). Pinned by `tests/fixtures/coordinator_state_v1.bin`. Only the top level is frozen:
-/// a layout change to `PlayerId`, `Claim`, `RequestId` or `WorldReply` is a format bump and
-/// needs frozen copies of those types here.
+/// a layout change to `PlayerId`, `Claim` or `WorldReply` is a format bump and needs frozen
+/// copies of those types here. Format 2 widened the host in a [`RequestId`] from `u32` to
+/// [`crate::HostId`] (`u64`): [`RequestIdV1`] is the old one.
 #[derive(Deserialize)]
 struct CoordinatorStateV1 {
     history: Vec<u8>,
     claims: Vec<(PlayerId, Claim)>,
-    memo: Vec<(RequestId, WorldReply)>,
+    memo: Vec<(RequestIdV1, WorldReply)>,
+}
+
+/// [`RequestId`] as format 1 wrote it (the host a bare `u32`).
+#[derive(Deserialize)]
+struct RequestIdV1 {
+    host: u32,
+    boot: u64,
+    seq: u64,
 }
 
 fn migrate_v1(v1: CoordinatorStateV1) -> CoordinatorState {
     let CoordinatorStateV1 { history, claims, memo } = v1;
+    let memo = memo
+        .into_iter()
+        .map(|(id, reply)| (RequestId { host: crate::HostId(u64::from(id.host)), boot: id.boot, seq: id.seq }, reply))
+        .collect();
     CoordinatorState { history, claims, memo }
 }

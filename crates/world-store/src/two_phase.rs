@@ -27,9 +27,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use game::HostId;
 use game::{CutId, Tick};
 use sqlx::PgPool;
 
+use crate::rows::i;
 use crate::rows::pg::cut_decision;
 use crate::{CoordinatorFence, StoreError, SuccessionId};
 
@@ -50,8 +52,8 @@ const SWEEP_ABORT_TICK: Tick = 0;
 
 /// The gid of host `host`'s prepared part of `cut`. `world_tag` tells the worlds of
 /// one Postgres cluster apart (gids are cluster-wide): the database's OID.
-pub fn cut_gid(world_tag: u32, cut: CutId, host: u32) -> String {
-    format!("{GID_PREFIX}{world_tag}-{}-{host}", cut.0)
+pub fn cut_gid(world_tag: u32, cut: CutId, host: HostId) -> String {
+    format!("{GID_PREFIX}{world_tag}-{}-{}", cut.0, host.0)
 }
 
 /// Whether `gid` has the shape [`cut_gid`] gives: it is formatted into SQL (a gid
@@ -78,7 +80,7 @@ pub(crate) fn prepare_sql(gid: &str) -> String {
 #[derive(Debug, PartialEq, Eq)]
 enum Gid {
     /// A part of this world: `(cut, host)`.
-    Ours(CutId, u32),
+    Ours(CutId, HostId),
     /// A well-formed part of another world.
     Foreign,
     /// Not of [`cut_gid`]'s shape (or out of range).
@@ -93,8 +95,8 @@ fn parse_gid(world_tag: u32, gid: &str) -> Gid {
     let (Some(tag), Some(cut), Some(host)) = (parts.next(), parts.next(), parts.next()) else {
         return Gid::Malformed;
     };
-    match (tag.parse::<u32>(), cut.parse::<u64>(), host.parse::<u32>()) {
-        (Ok(t), Ok(c), Ok(h)) if t == world_tag => Gid::Ours(CutId(c), h),
+    match (tag.parse::<u32>(), cut.parse::<u64>(), host.parse::<u64>()) {
+        (Ok(t), Ok(c), Ok(h)) if t == world_tag => Gid::Ours(CutId(c), HostId(h)),
         (Ok(_), Ok(_), Ok(_)) => Gid::Foreign,
         _ => Gid::Malformed,
     }
@@ -106,7 +108,7 @@ async fn staged_parts<'c>(
     e: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
     world_tag: u32,
     cut: Option<CutId>,
-) -> Result<BTreeMap<CutId, BTreeMap<u32, String>>, StoreError> {
+) -> Result<BTreeMap<CutId, BTreeMap<HostId, String>>, StoreError> {
     let pattern = match cut {
         Some(c) => format!("{GID_PREFIX}{world_tag}-{}-%", c.0),
         None => format!("{GID_PREFIX}%"),
@@ -116,7 +118,7 @@ async fn staged_parts<'c>(
             .bind(pattern)
             .fetch_all(e)
             .await?;
-    let mut out: BTreeMap<CutId, BTreeMap<u32, String>> = BTreeMap::new();
+    let mut out: BTreeMap<CutId, BTreeMap<HostId, String>> = BTreeMap::new();
     for gid in gids {
         match parse_gid(world_tag, &gid) {
             Gid::Ours(c, h) if cut.is_none_or(|want| want == c) => {
@@ -179,8 +181,8 @@ pub(crate) async fn decide_cut(
     cut: CutId,
     tick: Tick,
     commit: bool,
-    hosts: Vec<u32>,
-    leaving: Vec<u32>,
+    hosts: Vec<HostId>,
+    leaving: Vec<HostId>,
     fence: CoordinatorFence,
     generation: u64,
     settles: Vec<SuccessionId>,
@@ -216,13 +218,13 @@ pub(crate) async fn decide_cut(
                 // A commit needs exactly the listed parts staged: a part still queued,
                 // mid-PREPARE or never prepared would otherwise be skipped (the cut
                 // half-visible) and could commit later over newer data.
-                let staged: BTreeSet<u32> = staged_parts(&mut *tx, world_tag, Some(cut))
+                let staged: BTreeSet<HostId> = staged_parts(&mut *tx, world_tag, Some(cut))
                     .await?
                     .remove(&cut)
                     .unwrap_or_default()
                     .into_keys()
                     .collect();
-                let listed: BTreeSet<u32> = hosts.iter().copied().collect();
+                let listed: BTreeSet<HostId> = hosts.iter().copied().collect();
                 // Every live host whose row is not clean must be listed: one that registered
                 // while the cut was pending (back from a clean leave, or new) runs beside
                 // the cut, and an entity it acked from a listed host — or sent to one —
@@ -237,7 +239,7 @@ pub(crate) async fn decide_cut(
                 ))
                 .fetch_all(&mut *tx)
                 .await?;
-                let unlisted: Vec<i64> = dirty.into_iter().filter(|h| u32::try_from(*h).map_or(true, |h| !listed.contains(&h))).collect();
+                let unlisted: Vec<i64> = dirty.into_iter().filter(|h| u64::try_from(*h).map_or(true, |h| !listed.contains(&HostId(h)))).collect();
                 if !unlisted.is_empty() {
                     log::warn!(
                         "[world-store] cut {} cannot commit: a host registered while the cut was pending (hosts \
@@ -246,8 +248,8 @@ pub(crate) async fn decide_cut(
                     );
                     commit = false;
                 } else if staged != listed {
-                    let missing: Vec<u32> = listed.difference(&staged).copied().collect();
-                    let unexpected: Vec<u32> = staged.difference(&listed).copied().collect();
+                    let missing: Vec<HostId> = listed.difference(&staged).copied().collect();
+                    let unexpected: Vec<HostId> = staged.difference(&listed).copied().collect();
                     log::warn!(
                         "[world-store] cut {} cannot commit: parts missing from hosts {missing:?}, unlisted parts \
                          from hosts {unexpected:?}; recording an abort",
@@ -280,7 +282,7 @@ pub(crate) async fn decide_cut(
                     .bind(tick as i64)
                     .execute(&mut *tx)
                     .await?;
-                let leaving: Vec<i64> = leaving.iter().map(|h| i64::from(*h)).collect();
+                let leaving: Vec<i64> = leaving.iter().map(|h| i(h.0)).collect();
                 sqlx::query("UPDATE hosts SET clean = 1 WHERE ordinal = ANY($1)")
                     .bind(leaving)
                     .execute(&mut *tx)
@@ -494,13 +496,13 @@ mod tests {
 
     #[test]
     fn gids_round_trip_and_stay_in_their_world() {
-        let gid = cut_gid(4242, CutId(u64::MAX), u32::MAX);
+        let gid = cut_gid(4242, CutId(u64::MAX), HostId(u64::MAX));
         assert!(gid_ok(&gid) && gid.len() <= GID_MAX_BYTES);
-        assert_eq!(parse_gid(4242, &gid), Gid::Ours(CutId(u64::MAX), u32::MAX));
+        assert_eq!(parse_gid(4242, &gid), Gid::Ours(CutId(u64::MAX), HostId(u64::MAX)));
         assert_eq!(parse_gid(4243, &gid), Gid::Foreign, "another world's");
         assert_eq!(parse_gid(4242, "mmo-cut-4242-1"), Gid::Malformed);
         assert_eq!(parse_gid(4242, "mmo-cut-4242-1-2-3"), Gid::Malformed);
-        assert_eq!(parse_gid(4242, "mmo-cut-4242-1-99999999999"), Gid::Malformed, "host out of range");
+        assert_eq!(parse_gid(4242, "mmo-cut-4242-1-99999999999999999999999"), Gid::Malformed, "host out of range");
         assert!(!gid_ok("mmo-cut-1'; DROP TABLE world; --"));
         assert!(!gid_ok("mmo-cut-"));
         assert!(!gid_ok("mmo-cut-+4242-1-2"), "a sign is not a digit");

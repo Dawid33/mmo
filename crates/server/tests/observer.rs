@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    ClientId, ClientPacket, Credential, HostEndpoint, InlinePeerLink, InlineSpawner, PeerHello, PeerSession,
+    ClientId, HostId, ClientPacket, Credential, HostEndpoint, InlinePeerLink, InlineSpawner, PeerHello, PeerSession,
     PlayerId, PlayerRecord, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager, OBSERVER_IDLE_CLOSE_MS,
     OBSERVER_IDLE_REFUSAL, REGION_SIZE,
 };
@@ -107,13 +107,13 @@ fn land_map() -> game::WorldMap {
 /// The adjacent pair of regions nearest the origin whose owners differ: `(a, b)`, `a` host
 /// 0's (A), `b` host 1's (B).
 fn host_seam() -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| game::Static { ordinal: 0, hosts: HOSTS }.owner_of(rc, S);
+    let owner = |rc: RegionCoords| game::Static { id: h(0), hosts: HOSTS }.owner_of(rc, S);
     for z in 1..15 {
         for x in 1..14 {
             let (p, q) = (RegionCoords::new(x, z), RegionCoords::new(x + 1, z));
             match (owner(p), owner(q)) {
-                (0, 1) => return (p, q),
-                (1, 0) => return (q, p),
+                (HostId(0), HostId(1)) => return (p, q),
+                (HostId(1), HostId(0)) => return (q, p),
                 _ => {}
             }
         }
@@ -122,19 +122,19 @@ fn host_seam() -> (RegionCoords, RegionCoords) {
 }
 
 /// Where host `ordinal` says players reach it.
-fn endpoint(ordinal: u32, port: u16) -> HostEndpoint {
+fn endpoint(ordinal: HostId, port: u16) -> HostEndpoint {
     HostEndpoint {
-        ordinal,
+        id: ordinal,
         quic: Some(format!("127.0.0.1:{port}")),
         webtransport: None,
-        cert_hash: Some(format!("{ordinal:064x}")),
+        cert_hash: Some(format!("{:064x}", ordinal.0)),
     }
 }
 
-fn hello(ordinal: u32, port: u16) -> PeerHello {
+fn hello(ordinal: HostId, port: u16) -> PeerHello {
     PeerHello {
-        ordinal,
-        boot: 100 + u64::from(ordinal),
+        id: ordinal,
+        boot: 100 + ordinal.0,
         generation: 0,
         endpoint: endpoint(ordinal, port),
         received_through: 0,
@@ -152,7 +152,7 @@ struct Host {
 }
 
 impl Host {
-    fn new(ordinal: u32, port: u16) -> Host {
+    fn new(ordinal: HostId, port: u16) -> Host {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
@@ -169,8 +169,8 @@ impl Host {
             lod_builder,
             lod_result_recv,
         );
-        manager.set_ownership(Box::new(game::Static { ordinal, hosts: HOSTS }), S);
-        manager.set_endpoints(endpoint(ordinal, port), game::seeded_nonces(0x5EED + u64::from(ordinal)));
+        manager.set_ownership(Box::new(game::Static { id: ordinal, hosts: HOSTS }), S);
+        manager.set_endpoints(endpoint(ordinal, port), game::seeded_nonces(0x5EED + ordinal.0));
         manager.set_world_map(land_map());
         Host { manager, region_out, packets, log: Vec::new() }
     }
@@ -227,11 +227,11 @@ impl World {
         install_props();
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut a = Host::new(0, 1);
-        let mut b = Host::new(1, port);
+        let mut a = Host::new(h(0), 1);
+        let mut b = Host::new(h(1), port);
         let (to_a, to_b) = InlinePeerLink::pair(7, 0);
-        a.manager.set_peer(1, PeerSession::new(hello(0, 1), 1), Box::new(to_a));
-        b.manager.set_peer(0, PeerSession::new(hello(1, port), 0), Box::new(to_b));
+        a.manager.set_peer(h(1), PeerSession::new(hello(h(0), 1), h(1)), Box::new(to_a));
+        b.manager.set_peer(h(0), PeerSession::new(hello(h(1), port), h(0)), Box::new(to_b));
         // One coordinator over a history with nobody in it.
         let start = game::history::CalendarTick::from_days(
             game::history::rules::HISTORY_START_YEAR * game::history::DAYS_PER_YEAR,
@@ -239,7 +239,7 @@ impl World {
         let history =
             game::history::History::new(9, start, game::history::SocietyGrid::from_world_map(&land_map()));
         let core = game::coordinator::SharedCore::new(game::Coordinator::new(history, 0));
-        let links: Vec<_> = (0..HOSTS).map(|h| game::InlineWorldLink::shared(core.clone(), h)).collect();
+        let links: Vec<_> = (0..u64::from(HOSTS)).map(|n| game::InlineWorldLink::shared(core.clone(), h(n))).collect();
         for (h, link) in links.into_iter().enumerate() {
             let host = if h == 0 { &mut a } else { &mut b };
             host.manager.set_world_link(Box::new(link), 4000 + h as u64, 0);
@@ -351,7 +351,7 @@ impl World {
             .iter()
             .find_map(|p| match p {
                 ServerPacket::RegionElsewhere { region, endpoint, ticket } => {
-                    assert_eq!((*region, endpoint.ordinal), (b, 1), "B's region, B's endpoint");
+                    assert_eq!((*region, endpoint.id), (b, h(1)), "B's region, B's endpoint");
                     Some(game::ObserverTicket { client: ticket.client, nonce: ticket.nonce })
                 }
                 _ => None,
@@ -486,7 +486,7 @@ fn observer_ticket_admits_without_placing_a_body() {
     w.rounds(20);
     client.drain();
     assert!(
-        matches!(&client.seen[0], ServerPacket::Host(e) if *e == endpoint(1, w.edge.port)),
+        matches!(&client.seen[0], ServerPacket::Host(e) if *e == endpoint(h(1), w.edge.port)),
         "the first packet is B's Host: {:?}",
         names(&client.seen)
     );
@@ -898,4 +898,10 @@ mod quic {
             .await
             .expect("connect")
     }
+}
+
+/// A host id from its number.
+#[allow(dead_code)]
+fn h(n: u64) -> game::HostId {
+    game::HostId(n)
 }

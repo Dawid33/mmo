@@ -40,6 +40,7 @@
 //! parts a crash left staged (as their cut's decision says; an undecided cut is aborted) before it
 //! claims, registers or loads anything.
 
+use game::HostId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -190,7 +191,7 @@ pub struct AbsentCause {
     /// Successions this host answers or adopts that are not over (no cut begins meanwhile).
     pub successions: Vec<u64>,
     /// Other hosts with a dirty live `hosts` row that this host cannot reach either.
-    pub dirty_unattached: Vec<u32>,
+    pub dirty_unattached: Vec<HostId>,
 }
 
 /// The host's "no world cut in N periods" warning: `stalled` without a commit, cuts expected
@@ -217,8 +218,9 @@ pub fn absent_cut_warning(stalled: Duration, every: Duration, cause: &AbsentCaus
     for h in &cause.dirty_unattached {
         named = true;
         out.push_str(&format!(
-            "; host {h} has a dirty row and is not attached (it may hold unsaved state): start it, or retire it for good \
-             with `worldctl retire-host <url> {h}`"
+            "; host {0} has a dirty row and is not attached (it may hold unsaved state): start it, or retire it for good \
+             with `worldctl retire-host <url> {0}`",
+            h.0
         ));
     }
     if !named {
@@ -511,9 +513,9 @@ impl CutWriter {
             successions: manager.successions().into_iter().map(|(id, _)| id.0).collect(),
             dirty_unattached: rows
                 .iter()
-                .filter(|r| r.ordinal != me && !r.clean && r.state == world_store::HOST_LIVE)
-                .filter(|r| !manager.peer_is_reachable(r.ordinal))
-                .map(|r| r.ordinal)
+                .filter(|r| r.id != me && !r.clean && r.state == world_store::HOST_LIVE)
+                .filter(|r| !manager.peer_is_reachable(r.id))
+                .map(|r| r.id)
                 .collect(),
         };
         log::error!("{}", absent_cut_warning(self.world_saved.elapsed(), every, &cause));
@@ -1014,6 +1016,15 @@ impl TerrainWatch {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use game::HostId;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use super::*;
 
     /// The host's absent-cut warning names each cause it can see, apart: the coordinator not
@@ -1024,7 +1035,7 @@ mod tests {
         let (stalled, every) = (Duration::from_secs(240), Duration::from_secs(60));
         let detached = absent_cut_warning(stalled, every, &AbsentCause { coordinator_detached: true, ..AbsentCause::default() });
         let succession = absent_cut_warning(stalled, every, &AbsentCause { successions: vec![4], ..AbsentCause::default() });
-        let dirty = absent_cut_warning(stalled, every, &AbsentCause { dirty_unattached: vec![2], ..AbsentCause::default() });
+        let dirty = absent_cut_warning(stalled, every, &AbsentCause { dirty_unattached: vec![h(2)], ..AbsentCause::default() });
         let unknown = absent_cut_warning(stalled, every, &AbsentCause::default());
         for w in [&detached, &succession, &dirty, &unknown] {
             assert!(w.contains("no world cut has committed in 240 s") && w.contains("about every 60 s"), "{w}");

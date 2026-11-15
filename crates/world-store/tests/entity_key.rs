@@ -3,6 +3,7 @@
 //! entity twice in one part of a cut is still refused before anything is written (the
 //! database no longer refuses an entity in two regions).
 
+use crate::common::hid;
 use game::{CutId, EntityBundle, EntityId, PortableRegion, RegionCoords, StoredRegion, WorldCut};
 use world_store::{
     Dials, FORMAT_ENTITY_BUNDLE, FORMAT_REGION_GROUND, FORMAT_REGION_META, FormatKind, OpenMode, StoreError, StoreHandle,
@@ -88,7 +89,7 @@ fn world_keyed_entities_migrate_unchanged() {
         let region = |entities: Vec<EntityBundle>| PortableRegion { meta: meta(), entities, ..Default::default() };
         let cut = WorldCut {
             id: CutId(1),
-            host: 0,
+            host: hid(0),
             tick: 800,
             regions: vec![(A, region(vec![entity(5)])), (B, region(vec![entity(7), entity(9)]))],
             in_flight: vec![],
@@ -126,7 +127,7 @@ fn entity_twice_in_one_part_is_refused() {
         for (n, regions) in twice.into_iter().enumerate() {
             let cut = WorldCut {
                 id: CutId(n as u64 + 1),
-                host: 0,
+                host: hid(0),
                 tick: 100,
                 regions,
                 in_flight: vec![],
@@ -164,7 +165,7 @@ fn entity_saved_while_a_region_outside_the_cut_still_holds_it_is_refused() {
         };
         let cut = |id: u64, regions: Vec<(RegionCoords, PortableRegion)>| WorldCut {
             id: CutId(id),
-            host: 0,
+            host: hid(0),
             tick: 100 * id,
             regions,
             in_flight: vec![],

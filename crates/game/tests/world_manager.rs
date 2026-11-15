@@ -1,3 +1,4 @@
+use crate::common::h;
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
     Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
@@ -1390,7 +1391,7 @@ fn non_owned_region_is_unavailable() {
     crate::common::install_real_block_props();
     let s = 1; // every region its own super-region
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { ordinal: mine, hosts: 2 };
+    let ownership = game::Static { id: mine, hosts: 2 };
     let target = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
         .find(|rc| !ownership.owns(*rc, s))
@@ -1433,17 +1434,17 @@ fn foreign_region_play_moves_and_login_is_still_refused() {
     crate::common::install_real_block_props();
     let s = 1; // every region its own super-region
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let other = 1 - mine;
-    let ownership = game::Static { ordinal: mine, hosts: 2 };
+    let other = game::HostId(1 - mine.0);
+    let ownership = game::Static { id: mine, hosts: 2 };
     let target = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
         .find(|rc| !ownership.owns(*rc, s))
         .expect("a 3x3 block has a region the other of two hosts owns");
     let hello = |ordinal| PeerHello {
-        ordinal,
-        boot: 7 + u64::from(ordinal),
+        id: ordinal,
+        boot: 7 + ordinal.0,
         generation: 1,
-        endpoint: HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None },
+        endpoint: HostEndpoint { id: ordinal, quic: None, webtransport: None, cert_hash: None },
         received_through: 0,
         received_from_boot: None,
     };
@@ -1562,7 +1563,7 @@ fn claim_is_sets_the_host_claim() {
         if taken_by_other {
             // Player 50, online on host 9, plays site 0.
             let other = OnlinePlayer { player: PlayerId(50), claim: Some(Claim::Fortress(SiteId(0))), claim_pending: false, report: 1, hop: 1 };
-            core.handle(9, HostMsg::PlayerOnline(other), 0);
+            core.handle(h(9), HostMsg::PlayerOnline(other), 0);
         }
         let mut h = floored_harness();
         h.manager.set_world_map(map.clone());
@@ -1602,9 +1603,9 @@ fn claim_is_sets_the_host_claim() {
     h.event(ServerEvent::ClientPacket(ClientPacket::Embark(req), 0), 10);
     let link = h.manager.world_link_mut().and_then(|l| l.as_inline_mut()).unwrap();
     let grant = game::EmbarkRequest { civ, people: people[0..2].to_vec(), region: RegionCoords::new(2, 0) };
-    let id = RequestId { host: 0, boot: 99, seq: 0 };
+    let id = RequestId { host: crate::common::h(0), boot: 99, seq: 0 };
     let hop = link.coordinator().hop_of(a);
-    link.coordinator_mut().handle(0, HostMsg::Request { id, player: a, hop, req: WorldRequest::Embark(grant) }, 10);
+    link.coordinator_mut().handle(crate::common::h(0), HostMsg::Request { id, player: a, hop, req: WorldRequest::Embark(grant) }, 10);
     let Some(Claim::Fortress(site)) = link.coordinator().claim_of(a) else { panic!("the coordinator granted A a fortress") };
     link.set_up(true);
     h.drain_packets();
@@ -1638,8 +1639,8 @@ fn login_below_the_known_hop_is_numbered_above_it() {
     let a = PlayerId(1);
     let mut core = Coordinator::new(History::new(5, start(), SocietyGrid::from_world_map(&map)), 0);
     let elsewhere = OnlinePlayer { player: a, claim: None, claim_pending: false, report: 1, hop: 5 };
-    core.handle(9, HostMsg::PlayerOnline(elsewhere), 0);
-    core.handle(9, HostMsg::PlayerOffline { player: a, hop: 5 }, 0);
+    core.handle(h(9), HostMsg::PlayerOnline(elsewhere), 0);
+    core.handle(h(9), HostMsg::PlayerOffline { player: a, hop: 5 }, 0);
     let mut h = floored_harness();
     h.manager.set_world_map(map);
     h.manager.set_world_link(Box::new(InlineWorldLink::new(core)), 1, 0);
@@ -1649,7 +1650,7 @@ fn login_below_the_known_hop_is_numbered_above_it() {
         h.settle(t * 10);
     }
     let core = h.manager.world_link().and_then(|l| l.as_inline()).unwrap().coordinator();
-    assert_eq!((core.online_on(a), core.hop_of(a)), (Some(0), 6), "online here, numbered above the known hop");
+    assert_eq!((core.online_on(a), core.hop_of(a)), (Some(crate::common::h(0)), 6), "online here, numbered above the known hop");
     h.event(ServerEvent::ClientDisconnected(0), 50);
     for t in 6..9 {
         h.manager.maintain(t * 10);

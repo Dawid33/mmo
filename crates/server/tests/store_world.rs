@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    BlockId, ClientId, InlineLodBuilder, InlineSpawner, LodBuilder, RegionCoords, RegionOutput, RegionSpawner,
+    BlockId, HostId, ClientId, InlineLodBuilder, InlineSpawner, LodBuilder, RegionCoords, RegionOutput, RegionSpawner,
     ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
 };
 use server::claims::HostClaims;
@@ -381,7 +381,7 @@ fn stale_world_map_is_rebuilt_at_start() {
     let store = opened.store.unwrap();
     let history = b"history bytes of the last cut".to_vec();
     let cut = game::WorldCut {
-        host: 0,
+        host: h(0),
         id: game::CutId(1),
         tick: 77,
         regions: Vec::new(),
@@ -511,7 +511,7 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
         .with_store(
             HostClaims::claim_srs(
                 store.clone(),
-                0,
+                h(0),
                 [failing, healthy].map(|rc| game::super_region_of(rc, store.super_region_regions())).to_vec(),
             )
             .unwrap(),
@@ -915,7 +915,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
     let (store, token, player) = bare_store(&dir);
     let s = store.super_region_regions();
     let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
-    let ownership = game::Static { ordinal: mine, hosts: 2 };
+    let ownership = game::Static { id: mine, hosts: 2 };
     let foreign = (2..64)
         .map(|k| RegionCoords::new(k * s as i32, 0))
         .find(|rc| !ownership.owns(*rc, s))
@@ -930,7 +930,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
         adventure: None,
     };
     let cut = game::WorldCut {
-        host: 1 - mine,
+        host: HostId(1 - mine.0),
         id: game::CutId(1),
         tick: 5,
         regions: Vec::new(),
@@ -939,7 +939,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
         history: None,
         adopts: vec![],
     };
-    let other = HostClaims::claim_srs(store.clone(), 1 - mine, vec![foreign_sr]).unwrap();
+    let other = HostClaims::claim_srs(store.clone(), HostId(1 - mine.0), vec![foreign_sr]).unwrap();
     other.commit_cut(cut).recv().unwrap().expect("the other host's cut commits");
     let (_, stored) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(stored.as_ref(), Some(&record));
@@ -1010,9 +1010,9 @@ fn role_all_beside_other_hosts_dirty_rows_is_refused() {
     use server::roles::{check_all_role_beside_hosts, Role, ALL_ROLE_BESIDE_HOSTS};
     let dir = scratch("role_all_beside");
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
-    let row = |ordinal: u32| world_store::HostRow {
-        ordinal,
-        boot: 10 + u64::from(ordinal),
+    let row = |ordinal: HostId| world_store::HostRow {
+        id: ordinal,
+        boot: 10 + ordinal.0,
         generation: 0,
         clean: false,
         state: world_store::HOST_LIVE,
@@ -1027,24 +1027,30 @@ fn role_all_beside_other_hosts_dirty_rows_is_refused() {
     let open = || world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let store = open();
     let none = world_store::Fence::default();
-    store.register_host(row(0), &none, game::CrashPolicy::Rollback).unwrap();
-    assert_eq!(check_all_role_beside_hosts(Role::All, &store, 0), Ok(()), "only its own ordinal's row");
-    store.register_host(row(1), &none, game::CrashPolicy::Rollback).unwrap();
-    store.register_host(row(2), &none, game::CrashPolicy::Rollback).unwrap();
-    let err = check_all_role_beside_hosts(Role::All, &store, 0).expect_err("hosts 1 and 2 ran and did not leave");
+    store.register_host(row(h(0)), &none, game::CrashPolicy::Rollback).unwrap();
+    assert_eq!(check_all_role_beside_hosts(Role::All, &store, h(0)), Ok(()), "only its own ordinal's row");
+    store.register_host(row(h(1)), &none, game::CrashPolicy::Rollback).unwrap();
+    store.register_host(row(h(2)), &none, game::CrashPolicy::Rollback).unwrap();
+    let err = check_all_role_beside_hosts(Role::All, &store, h(0)).expect_err("hosts 1 and 2 ran and did not leave");
     assert!(err.starts_with(ALL_ROLE_BESIDE_HOSTS), "{err}");
     assert!(err.contains("[1, 2]") && err.contains("worldctl retire-host") && err.contains("worldctl rollback"), "{err}");
-    assert_eq!(check_all_role_beside_hosts(Role::Host, &store, 0), Ok(()), "a host of several runs beside them");
+    assert_eq!(check_all_role_beside_hosts(Role::Host, &store, h(0)), Ok(()), "a host of several runs beside them");
     store.shutdown();
     // Host 1 left cleanly; host 2's row is of a generation the world rolled back from.
     raw_exec(&url, "UPDATE hosts SET clean = 1 WHERE ordinal = 1");
     let store = open();
-    let err = check_all_role_beside_hosts(Role::All, &store, 0).expect_err("host 2 still");
+    let err = check_all_role_beside_hosts(Role::All, &store, h(0)).expect_err("host 2 still");
     assert!(err.contains("[2]") && !err.contains("[1, 2]"), "{err}");
     store.shutdown();
     raw_exec(&url, "UPDATE world SET generation = 1");
     let store = open();
-    assert_eq!(check_all_role_beside_hosts(Role::All, &store, 0), Ok(()), "rolled back: its row holds nothing of this world");
+    assert_eq!(check_all_role_beside_hosts(Role::All, &store, h(0)), Ok(()), "rolled back: its row holds nothing of this world");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host id from its number.
+#[allow(dead_code)]
+fn h(n: u64) -> game::HostId {
+    game::HostId(n)
 }

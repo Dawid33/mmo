@@ -633,8 +633,8 @@ pub fn pick_seam(home: RegionCoords, hosts: u32, s: u32, want_host_seam: bool) -
 mod tests {
     use super::*;
 
-    fn owner(rc: RegionCoords, hosts: u32, s: u32) -> u32 {
-        game::rendezvous_owner(game::super_region_of(rc, s), hosts)
+    fn owner(rc: RegionCoords, hosts: u32, s: u32) -> u64 {
+        game::rendezvous_owner(game::super_region_of(rc, s), hosts).0
     }
 
     fn adjacent(a: RegionCoords, b: RegionCoords) -> bool {

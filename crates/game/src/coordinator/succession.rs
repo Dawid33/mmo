@@ -69,6 +69,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CoordMsg, Target};
+use crate::HostId;
 use crate::{
     CrashPolicy, Declared, Succession, SuccessionId, SuccessionKind, HEIR_WAIT_MS, HOST_LEASE_MS, HOST_LIVE, SUCCESSION_DEADLINE_MS,
 };
@@ -76,7 +77,7 @@ use crate::{
 /// One `hosts` row as the lease watch needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostSeen {
-    pub ordinal: u32,
+    pub ordinal: HostId,
     pub boot: u64,
     pub clean: bool,
     /// `HOST_LIVE` or `HOST_DEAD`.
@@ -107,7 +108,7 @@ struct Watched {
 /// stretch two ordinary reads of one beat over a whole lease.
 #[derive(Clone, Debug, Default)]
 pub struct LeaseWatch {
-    rows: BTreeMap<u32, Watched>,
+    rows: BTreeMap<HostId, Watched>,
     /// The lease a row lapses after, ms: [`HOST_LEASE_MS`] unless a real-time test shortened
     /// it ([`Coordinator::set_lease_dials`]).
     lease_ms: Option<u64>,
@@ -134,7 +135,7 @@ impl LeaseWatch {
     }
 
     /// Host `ordinal`'s row as the latest successful read showed it.
-    pub fn row(&self, ordinal: u32) -> Option<&HostSeen> {
+    pub fn row(&self, ordinal: HostId) -> Option<&HostSeen> {
         self.rows.get(&ordinal).map(|w| &w.row)
     }
 
@@ -153,7 +154,7 @@ impl LeaseWatch {
     /// `now_ms`: vouched (`seen_ms == 0`), or showing one `seen_ms` from a read received at
     /// `first` to a later read issued at least [`HOST_LEASE_MS`] after `first`. Time without
     /// a read counts for nothing (`now_ms` never extends the span). By ordinal.
-    pub fn lapsed(&self, now_ms: u64) -> Vec<(u32, u64)> {
+    pub fn lapsed(&self, now_ms: u64) -> Vec<(HostId, u64)> {
         self.rows
             .values()
             .filter(|w| !w.row.clean && w.row.state == HOST_LIVE)
@@ -170,8 +171,8 @@ impl LeaseWatch {
 /// ([`Coordinator::declare_wanted`]): `dead[i]` (ordinal, boot) to heir `heirs[i]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declare {
-    pub dead: Vec<(u32, u64)>,
-    pub heirs: Vec<u32>,
+    pub dead: Vec<(HostId, u64)>,
+    pub heirs: Vec<HostId>,
     pub kind: SuccessionKind,
 }
 
@@ -181,13 +182,13 @@ struct Run {
     s: Succession,
     /// Recipients that answered `SuccessionApplied` (or listed it in an `Attach`), each with
     /// the boot that answered: an answer counts only while that boot is the host's current one.
-    applied: BTreeMap<u32, u64>,
+    applied: BTreeMap<HostId, u64>,
     /// The boot of the heir that answered `SuccessionAdopted`.
     adopted: Option<u64>,
     /// A declared run's (survivors): each recipient's boot when the run opened (or at its first
     /// `Attach` after): the boot whose journal the run counts on. Another boot of it means that
     /// journal is gone — the run can never be answered: a rollback.
-    boots: BTreeMap<u32, u64>,
+    boots: BTreeMap<HostId, u64>,
     /// `clock_ms` past which a run not answered by everyone rolls the world back. An offline
     /// run's (no survivors) counts from when its order first went to the heir: `u64::MAX`
     /// until then — the heir may boot long after the operator retired the host.
@@ -196,15 +197,15 @@ struct Run {
     /// later lapse of one of them is a death during the succession (a rollback); a boot that
     /// was dead already when the world was retired is not — the retirement raised the
     /// generation, so it is refused at its next write, and its next boot resumes from the cut.
-    beat: BTreeSet<(u32, u64)>,
+    beat: BTreeSet<(HostId, u64)>,
 }
 
 impl Run {
     /// Every survivor applied it and the heir adopted it, each by its CURRENT boot (`current`:
     /// a host's boot as its latest `Attach` named it): a cut may settle it. An answer of a boot
     /// that died since counts for nothing — the new boot holds nothing of what it adopted.
-    fn answered(&self, current: impl Fn(u32) -> Option<u64>) -> bool {
-        let by_current = |h: u32, boot: Option<u64>| boot.is_some() && boot == current(h);
+    fn answered(&self, current: impl Fn(HostId) -> Option<u64>) -> bool {
+        let by_current = |h: HostId, boot: Option<u64>| boot.is_some() && boot == current(h);
         by_current(self.s.heir, self.adopted) && self.s.survivors.iter().all(|h| by_current(*h, self.applied.get(h).copied()))
     }
 }
@@ -212,12 +213,12 @@ impl Run {
 /// Whether host `host` gets succession `s`'s order (and its `SuccessionDone`): a survivor,
 /// or the heir — which is no survivor only in a succession `worldctl retire-host` opened while
 /// no host ran.
-fn recipient(s: &Succession, host: u32) -> bool {
+fn recipient(s: &Succession, host: HostId) -> bool {
     s.heir == host || s.survivors.contains(&host)
 }
 
 /// `s`'s recipients ([`recipient`]), by ordinal.
-fn recipients(s: &Succession) -> BTreeSet<u32> {
+fn recipients(s: &Succession) -> BTreeSet<HostId> {
     s.survivors.iter().copied().chain(std::iter::once(s.heir)).collect()
 }
 
@@ -236,7 +237,7 @@ pub(super) struct SuccessionRuns {
     /// A world rollback is wanted ([`Coordinator::rollback_wanted`]).
     rollback: bool,
     /// The predecessors declared, `(ordinal, boot)`: never lapsed or declared again.
-    declared: BTreeSet<(u32, u64)>,
+    declared: BTreeSet<(HostId, u64)>,
     /// [`LeaseWatch::reads`] when the declaration in flight was handed out.
     declared_at_read: u64,
     /// The deadline of a run, ms: [`SUCCESSION_DEADLINE_MS`] unless a real-time test changed
@@ -248,19 +249,19 @@ pub(super) struct SuccessionRuns {
     refused_at_read: Option<u64>,
     /// Ids an `Attach` listed before the open successions were known, with the listing boot:
     /// answered then — only if that boot is still the host's current one.
-    listed_early: Vec<(u32, u64, SuccessionId, bool)>,
+    listed_early: Vec<(HostId, u64, SuccessionId, bool)>,
     /// The open successions are to be read again ([`Coordinator::take_successions_reread`]).
     reread: bool,
     /// The read asked for is a RE-read (not a start's): runs it does not list are dropped.
     rereading: bool,
     /// Dead rows nobody here declared that already asked for a re-read (asked once each).
-    reread_for: BTreeSet<(u32, u64)>,
+    reread_for: BTreeSet<(HostId, u64)>,
     /// Super-regions hosts asked for ([`crate::HostMsg::LandWanted`]) that the runtime is to
     /// look up in the store ([`Coordinator::take_land_lookups`]).
     land_lookups: BTreeSet<crate::SuperRegion>,
     /// Hosts that left cleanly whose land is wanted ([`Coordinator::land_wanted`]), each with
     /// the `clock_ms` of its FIRST request (asking again does not restart the wait).
-    land_wanted: BTreeMap<u32, u64>,
+    land_wanted: BTreeMap<HostId, u64>,
     /// The configured host count (`VOXEL_HOSTS`, [`Coordinator::set_host_count`]): the land
     /// of an ordinal at or beyond it is given away at once. Unknown: every ordinal waits.
     host_count: Option<u32>,
@@ -386,7 +387,7 @@ impl super::Coordinator {
     /// came with a world rollback, and a host of the older generation is refused (the
     /// runtime) or told the generation (`rolled_back_to`) before its `Attach` is applied — so
     /// an id a host of the current generation holds and that is not open was settled.
-    fn answer_closed(&mut self, host: u32, id: SuccessionId) {
+    fn answer_closed(&mut self, host: HostId, id: SuccessionId) {
         log::info!("coordinator: host {host} holds succession {}, which is over: told it settled", id.0);
         self.push(Target::Host(host), CoordMsg::SuccessionDone { id, settled: true });
     }
@@ -418,13 +419,13 @@ impl super::Coordinator {
             }
             return None;
         }
-        let gone: BTreeSet<u32> = lapsed.iter().map(|(h, _)| *h).collect();
-        let live: BTreeSet<u32> = self.attached_live().into_iter().filter(|h| !gone.contains(h)).collect();
+        let gone: BTreeSet<HostId> = lapsed.iter().map(|(h, _)| *h).collect();
+        let live: BTreeSet<HostId> = self.attached_live().into_iter().filter(|h| !gone.contains(h)).collect();
         if live.is_empty() {
             log::debug!("coordinator: hosts {gone:?} lapsed and no live host is attached: nothing to declare");
             return None;
         }
-        let heirs: Vec<u32> =
+        let heirs: Vec<HostId> =
             lapsed.iter().map(|(h, _)| crate::heir_of(*h, &live).expect("a live host other than the predecessor")).collect();
         log::warn!("coordinator: hosts {lapsed:?} lost their lease: declaring them dead, heirs {heirs:?}");
         self.successions.declaring = true;
@@ -560,12 +561,12 @@ impl super::Coordinator {
     /// Test support: every open succession with the survivors that applied it and whether
     /// the heir adopted it.
     #[doc(hidden)]
-    pub fn succession_progress(&self) -> Vec<(SuccessionId, Vec<u32>, bool)> {
+    pub fn succession_progress(&self) -> Vec<(SuccessionId, Vec<HostId>, bool)> {
         self.successions.open.iter().map(|(id, r)| (*id, r.applied.keys().copied().collect(), r.adopted.is_some())).collect()
     }
 
     /// Survivor (or heir) `host` applied succession `id` — as the boot its latest `Attach` named.
-    pub(super) fn succession_applied(&mut self, host: u32, id: SuccessionId) {
+    pub(super) fn succession_applied(&mut self, host: HostId, id: SuccessionId) {
         let boot = self.attached_boot(host).unwrap_or_default();
         match self.successions.open.get_mut(&id) {
             Some(run) if recipient(&run.s, host) => {
@@ -577,7 +578,7 @@ impl super::Coordinator {
     }
 
     /// The heir `host` adopted succession `id` — as the boot its latest `Attach` named.
-    pub(super) fn succession_adopted(&mut self, host: u32, id: SuccessionId) {
+    pub(super) fn succession_adopted(&mut self, host: HostId, id: SuccessionId) {
         let boot = self.attached_boot(host).unwrap_or_default();
         match self.successions.open.get_mut(&id) {
             Some(run) if run.s.heir == host => run.adopted = Some(boot),
@@ -592,7 +593,7 @@ impl super::Coordinator {
     /// another boot of `host` are forgotten (its new boot adopts again); a declared run's
     /// recipient attaching as another boot than the one it counts on lost its journal — no
     /// order goes to that boot and the world rolls back.
-    pub(super) fn succession_attach(&mut self, host: u32, answered: Vec<(SuccessionId, bool)>) {
+    pub(super) fn succession_attach(&mut self, host: HostId, answered: Vec<(SuccessionId, bool)>) {
         let boot = self.attached_boot(host);
         // Listings buffered from another boot of this host are that boot's: dropped.
         self.successions.listed_early.retain(|(h, b, _, _)| *h != host || Some(*b) == boot);
@@ -669,8 +670,8 @@ impl super::Coordinator {
         if !r.enabled || r.rollback || r.open.is_empty() {
             return;
         }
-        let current = |h: u32| self.attached_boot(h);
-        let late: Vec<(SuccessionId, Vec<u32>, bool)> = r
+        let current = |h: HostId| self.attached_boot(h);
+        let late: Vec<(SuccessionId, Vec<HostId>, bool)> = r
             .open
             .values()
             .filter(|run| !run.answered(current) && now_ms >= run.deadline_ms)
@@ -694,10 +695,10 @@ impl super::Coordinator {
         // of that ordinal) is a statement made NOW, whatever the run: it counts for offline
         // runs too — else that host's dirty row blocks every cut (so the run never settles)
         // while the open run blocks its declaration, with no exit but the operator's rollback.
-        let vouched = |d: &(u32, u64)| self.leases.row(d.0).is_some_and(|r| r.boot == d.1 && r.seen_ms == 0);
+        let vouched = |d: &(HostId, u64)| self.leases.row(d.0).is_some_and(|r| r.boot == d.1 && r.seen_ms == 0);
         let counts =
-            |d: &(u32, u64)| vouched(d) || open.values().any(|run| !run.s.survivors.is_empty() || run.beat.contains(d));
-        let lapsed: Vec<(u32, u64)> = self.lapsed_undeclared(now_ms).into_iter().filter(|d| counts(d)).collect();
+            |d: &(HostId, u64)| vouched(d) || open.values().any(|run| !run.s.survivors.is_empty() || run.beat.contains(d));
+        let lapsed: Vec<(HostId, u64)> = self.lapsed_undeclared(now_ms).into_iter().filter(|d| counts(d)).collect();
         if !lapsed.is_empty() {
             log::error!("coordinator: hosts {lapsed:?} lost their lease while a succession is open: the world rolls back");
             self.successions.rollback = true;
@@ -712,7 +713,7 @@ impl super::Coordinator {
         if !r.enabled {
             return None;
         }
-        let current = |h: u32| self.attached_boot(h);
+        let current = |h: HostId| self.attached_boot(h);
         let waiting: Vec<SuccessionId> = r.open.values().filter(|run| !run.answered(current)).map(|run| run.s.id).collect();
         (!r.known || r.declaring || r.rollback || !waiting.is_empty()).then_some(waiting)
     }
@@ -726,7 +727,7 @@ impl super::Coordinator {
 
     /// Those of `waiting` (open, unanswered) that were opened while no host ran and whose
     /// heir has not been sent the order yet — it never attached: no deadline runs for them.
-    pub(super) fn successions_awaiting_heir(&self, waiting: &[SuccessionId]) -> Vec<(SuccessionId, u32)> {
+    pub(super) fn successions_awaiting_heir(&self, waiting: &[SuccessionId]) -> Vec<(SuccessionId, HostId)> {
         waiting
             .iter()
             .filter_map(|id| self.successions.open.get(id))
@@ -754,7 +755,7 @@ impl super::Coordinator {
     }
 
     /// The lapsed rows, `(ordinal, boot)`, but those already declared.
-    fn lapsed_undeclared(&self, now_ms: u64) -> Vec<(u32, u64)> {
+    fn lapsed_undeclared(&self, now_ms: u64) -> Vec<(HostId, u64)> {
         let declared = &self.successions.declared;
         self.leases.lapsed(now_ms).into_iter().filter(|d| !declared.contains(d)).collect()
     }
@@ -767,14 +768,14 @@ impl super::Coordinator {
         }
         self.successions.declared.insert((s.predecessor, s.predecessor_boot));
         self.note_succeeded(s.predecessor, s.predecessor_boot);
-        let attached: Vec<u32> = recipients(&s).into_iter().filter(|h| self.is_attached(*h)).collect();
+        let attached: Vec<HostId> = recipients(&s).into_iter().filter(|h| self.is_attached(*h)).collect();
         let deadline = self.successions.deadline_ms.unwrap_or(SUCCESSION_DEADLINE_MS);
         // An offline run (no survivors) waits for its heir to boot: its deadline starts with
         // the heir's order.
         let deadline_ms = if s.survivors.is_empty() { u64::MAX } else { now_ms + deadline };
         // A declared run counts on each recipient's boot of now (one not attached: its first
         // `Attach`, [`Self::succession_attach`]).
-        let boots: BTreeMap<u32, u64> = if s.survivors.is_empty() {
+        let boots: BTreeMap<HostId, u64> = if s.survivors.is_empty() {
             BTreeMap::new()
         } else {
             // Only an ATTACHED host's boot: a detached one's last boot may be stale (its next
@@ -791,7 +792,7 @@ impl super::Coordinator {
 
     /// Succession `s`'s order goes to `host` now: an offline run's deadline starts at its
     /// heir's first order.
-    fn order_sent(&mut self, s: &Succession, host: u32) {
+    fn order_sent(&mut self, s: &Succession, host: HostId) {
         let deadline = self.successions.deadline_ms.unwrap_or(SUCCESSION_DEADLINE_MS);
         let now = self.clock_ms;
         if let Some(run) = self.successions.open.get_mut(&s.id).filter(|r| r.deadline_ms == u64::MAX && r.s.heir == host) {
@@ -804,7 +805,7 @@ impl super::Coordinator {
     /// its online players (and those in transit to it) go offline, and what the
     /// coordinator knew of it (`region_host`, `online_on`) and still meant to send it (its
     /// directives and claim answers) is dropped.
-    fn host_succeeded(&mut self, host: u32) {
+    fn host_succeeded(&mut self, host: HostId) {
         self.drop_unsent_directives(host);
         self.drop_unsent(host, "claim answers", |m| matches!(m, CoordMsg::ClaimIs { .. } | CoordMsg::HopIs { .. }));
         let parked: Vec<crate::RegionCoords> =
@@ -857,7 +858,7 @@ impl super::Coordinator {
     /// ([`crate::HostMsg::LandWanted`]): looked up by the runtime
     /// ([`Self::take_land_lookups`]). Ignored unless successions run (`Static` never gives
     /// land away: its leaver gets it back when it returns, R3).
-    pub(super) fn land_asked(&mut self, host: u32, sr: crate::SuperRegion) {
+    pub(super) fn land_asked(&mut self, host: HostId, sr: crate::SuperRegion) {
         if !self.successions.enabled {
             log::debug!("coordinator: host {host} wants super-region {sr:?}, but successions are off; ignored");
             return;
@@ -875,7 +876,7 @@ impl super::Coordinator {
     /// cleanly, ALL its land goes to one heir — at once if `owner` is at or beyond the
     /// configured host count, else [`HEIR_WAIT_MS`] after the first such request — unless
     /// that ordinal comes back first ([`Self::declare_wanted`] decides; the module docs).
-    pub fn land_wanted(&mut self, owner: u32, now_ms: u64) {
+    pub fn land_wanted(&mut self, owner: HostId, now_ms: u64) {
         if !self.successions.enabled {
             return;
         }
@@ -900,13 +901,13 @@ impl super::Coordinator {
 
     /// Test support: the departed hosts whose land is wanted now (requests not forgotten).
     #[doc(hidden)]
-    pub fn lands_wanted(&self) -> Vec<u32> {
+    pub fn lands_wanted(&self) -> Vec<HostId> {
         self.successions.land_wanted.keys().copied().collect()
     }
 
     /// How long the land of departed host `owner` waits for it.
-    fn heir_wait_for(&self, owner: u32) -> u64 {
-        if self.successions.host_count.is_some_and(|n| owner >= n) {
+    fn heir_wait_for(&self, owner: HostId) -> u64 {
+        if self.successions.host_count.is_some_and(|n| owner.0 >= u64::from(n)) {
             0
         } else {
             self.successions.heir_wait_ms.unwrap_or(HEIR_WAIT_MS)
@@ -923,7 +924,7 @@ impl super::Coordinator {
         if self.successions.land_wanted.is_empty() {
             return None;
         }
-        let attached: BTreeSet<u32> = self.attached_live().into_iter().collect();
+        let attached: BTreeSet<HostId> = self.attached_live().into_iter().collect();
         let (leases, declared) = (&self.leases, &self.successions.declared);
         self.successions.land_wanted.retain(|owner, _| {
             let row = leases.row(*owner);
@@ -951,7 +952,7 @@ impl super::Coordinator {
             // Only between cuts: the store's base cut is the one every survivor counts from.
             return None;
         }
-        let live: BTreeSet<u32> = attached.into_iter().filter(|h| *h != owner).collect();
+        let live: BTreeSet<HostId> = attached.into_iter().filter(|h| *h != owner).collect();
         let Some(heir) = crate::heir_of(owner, &live) else {
             log::debug!("coordinator: host {owner}'s land is wanted and no live host is attached to inherit it");
             return None;
@@ -968,7 +969,7 @@ impl super::Coordinator {
     /// read again ([`Self::successions_reread`]).
     pub fn observe_leases(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
         // Beats since the last read (a boot's `seen_ms` moved): what an offline run counts.
-        let beating: Vec<(u32, u64)> = rows
+        let beating: Vec<(HostId, u64)> = rows
             .iter()
             .filter(|r| r.seen_ms != 0 && self.leases.row(r.ordinal).is_some_and(|w| w.boot == r.boot && w.seen_ms != r.seen_ms))
             .map(|r| (r.ordinal, r.boot))
@@ -982,7 +983,7 @@ impl super::Coordinator {
         if !self.successions.enabled || !self.successions.known || self.successions.declaring {
             return;
         }
-        let unknown: Vec<(u32, u64)> = rows
+        let unknown: Vec<(HostId, u64)> = rows
             .iter()
             .filter(|r| !r.clean && r.state != HOST_LIVE)
             .map(|r| (r.ordinal, r.boot))

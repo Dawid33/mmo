@@ -253,6 +253,11 @@ pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
     (fixed.len(), massive)
 }
 
+/// A host id from its number (the tests name hosts `h(0)`, `h(1)`, ...).
+pub fn h(n: u64) -> game::HostId {
+    game::HostId(n)
+}
+
 pub mod cut_store;
 pub mod multi_rig;
 pub mod rig;

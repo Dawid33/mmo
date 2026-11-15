@@ -125,6 +125,7 @@
 //! the held messages to the heir instead (`succession.rs`). Under `Static` nothing changes.
 
 use super::*;
+use crate::HostId;
 use crate::{CutFailure, Reliable};
 
 /// Where this host's part of a world cut stands.
@@ -148,9 +149,9 @@ pub(super) struct WorldCutRun {
     pub cut: CutId,
     pub tick: crate::Tick,
     /// The other participants (the leaving ones too).
-    pub peers: BTreeSet<u32>,
+    pub peers: BTreeSet<HostId>,
     /// The participants whose mark arrived.
-    pub marks_in: BTreeSet<u32>,
+    pub marks_in: BTreeSet<HostId>,
     /// This host's marks are queued.
     pub mark_sent: bool,
     pub state: PartState,
@@ -210,8 +211,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         &mut self,
         cut: CutId,
         tick: crate::Tick,
-        hosts: &[u32],
-        leaving: &[u32],
+        hosts: &[HostId],
+        leaving: &[HostId],
     ) -> Result<(), CutFailure> {
         let me = self.ordinal();
         if leaving.contains(&me) && self.leave_requested {
@@ -238,7 +239,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("world cut {}: a peer's wrapped message of it came before its BeginCut; missed", cut.0);
             return Err(CutFailure::Missed);
         }
-        let all: BTreeSet<u32> = hosts.iter().chain(leaving).copied().collect();
+        let all: BTreeSet<HostId> = hosts.iter().chain(leaving).copied().collect();
         if !all.contains(&me) {
             log::error!("world cut {}: host {me} is not among its hosts {hosts:?}; refused", cut.0);
             return Err(CutFailure::Aborted);
@@ -248,10 +249,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::error!("world cut {}: names host {me} leaving, which it never asked; refused", cut.0);
             return Err(CutFailure::Aborted);
         }
-        let peers: BTreeSet<u32> = all.into_iter().filter(|h| *h != me).collect();
+        let peers: BTreeSet<HostId> = all.into_iter().filter(|h| *h != me).collect();
         // A participant this host cannot reach now would never bring its mark: the pair
         // counts instead (the fourth case), once the part is begun.
-        let unreachable: Vec<u32> = peers.iter().copied().filter(|p| !self.peer_reachable(*p)).collect();
+        let unreachable: Vec<HostId> = peers.iter().copied().filter(|p| !self.peer_reachable(*p)).collect();
         // Count pairs end with their cut's `CutDone`, and no cut begins before that: one still
         // here is a lost `CutDone` — it thaws and what it held goes out (as for an abort).
         let stale: BTreeSet<CutId> = self.count_pairs.values().map(|c| c.cut).filter(|c| *c != cut).collect();
@@ -260,7 +261,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.end_counts(c);
         }
         // Marks of this cut that came before its `BeginCut`.
-        let marks_in: BTreeSet<u32> = self.early_marks.iter().filter(|(p, c)| **c == cut && peers.contains(p)).map(|(p, _)| *p).collect();
+        let marks_in: BTreeSet<HostId> = self.early_marks.iter().filter(|(p, c)| **c == cut && peers.contains(p)).map(|(p, _)| *p).collect();
         self.early_marks.retain(|_, c| *c > cut);
         self.world_cut =
             Some(WorldCutRun { cut, tick, peers, marks_in, mark_sent: false, state: PartState::Pending, beginning: true });
@@ -281,7 +282,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // A leave joins this host and a peer when either leaves: everything this host sends
         // that peer from now until the cut is decided waits here, in this host's part.
-        let peers: Vec<u32> = self.world_cut_peers(cut).into_iter().collect();
+        let peers: Vec<HostId> = self.world_cut_peers(cut).into_iter().collect();
         for p in peers.into_iter().filter(|p| i_leave || leaving.contains(p)) {
             let leaver = leaving.contains(&p).then(|| (self.peer_boots.get(&p).copied(), self.land_of(p)));
             if leaver.is_some() {
@@ -377,7 +378,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Whether `ordinal` is out of reach for a leave: joined by the pending world cut's
     /// leave, or left (until its next boot). Nothing new is handed to it.
-    pub(super) fn leave_blocks(&self, ordinal: u32) -> bool {
+    pub(super) fn leave_blocks(&self, ordinal: HostId) -> bool {
         self.leave_pairs.contains_key(&ordinal) || self.left_peers.contains_key(&ordinal)
     }
 
@@ -385,7 +386,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// held back (`None`) until the cut is decided — by the leave pair when there is one
     /// (the hold-composition table: it decides what the held messages become) — anything
     /// else is given back to be queued.
-    pub(super) fn hold_for_leave(&mut self, ordinal: u32, msg: Reliable) -> Option<Reliable> {
+    pub(super) fn hold_for_leave(&mut self, ordinal: HostId, msg: Reliable) -> Option<Reliable> {
         if let Some(pair) = self.leave_pairs.get_mut(&ordinal) {
             pair.held.push(msg);
             return None;
@@ -405,7 +406,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// part needed the mark) and what was held back follows, owed to the leaver's next boot
     /// (this host's rows meanwhile). Aborted: what was held back goes out now.
     fn end_leaves(&mut self, cut: CutId, committed: bool) {
-        let pairs: Vec<u32> = self.leave_pairs.iter().filter(|(_, p)| p.cut == cut).map(|(o, _)| *o).collect();
+        let pairs: Vec<HostId> = self.leave_pairs.iter().filter(|(_, p)| p.cut == cut).map(|(o, _)| *o).collect();
         let me_leaving = self.leaving_cut == Some(cut);
         for ordinal in pairs {
             let pair = self.leave_pairs.remove(&ordinal).expect("listed");
@@ -458,7 +459,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Under `claim`: the land host `ordinal` holds as this host's directory gives it now
     /// (`None`: the directory was not read whole yet).
-    fn land_of(&self, ordinal: u32) -> Option<BTreeSet<crate::SuperRegion>> {
+    fn land_of(&self, ordinal: HostId) -> Option<BTreeSet<crate::SuperRegion>> {
         let directory = self.ownership.0.directory()?;
         directory.is_read().then(|| directory.owned_by(ordinal).into_iter().collect())
     }
@@ -472,7 +473,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// expected again from then on — a clean row read at boot is never the row of a boot
     /// that runs: every boot clears its row before it dials or listens. Called before the
     /// first [`Self::maintain`] (no hello read yet).
-    pub fn note_left_peers(&mut self, left: impl IntoIterator<Item = (u32, u64)>) {
+    pub fn note_left_peers(&mut self, left: impl IntoIterator<Item = (HostId, u64)>) {
         let me = self.ordinal();
         for (ordinal, boot) in left {
             if ordinal == me {
@@ -512,7 +513,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.left_land.insert(o, land);
             }
         }
-        let back: Vec<u32> = self.returning_peers.keys().copied().collect();
+        let back: Vec<HostId> = self.returning_peers.keys().copied().collect();
         for o in back {
             if self.left_land.get(&o).is_some_and(|l| l.as_ref().is_some_and(|l| l.is_empty())) {
                 log::info!("[server] host {o} left holding no land: what waited for its new boot goes out");
@@ -529,7 +530,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// - it left holding land: once that boot shows it re-claimed some of it
     ///   ([`Self::returning_owns`]). A boot registered after a `Leave` succession of the one
     ///   that left owns nothing, and what waited goes to the heir (`succession.rs`).
-    pub(super) fn peer_hello_boot(&mut self, from: u32, boot: u64) {
+    pub(super) fn peer_hello_boot(&mut self, from: HostId, boot: u64) {
         self.peer_boots.insert(from, boot);
         if let Some(pair) = self.leave_pairs.get(&from) {
             if pair.leaver.as_ref().is_some_and(|(left_as, _)| *left_as != Some(boot)) {
@@ -564,7 +565,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Host `from`, back from a leave, holds `reclaimed` super-regions of the land it left
     /// with (its [`Reliable::Owns`], under `claim`): its held session goes out.
-    pub(super) fn returning_owns(&mut self, from: u32, reclaimed: bool) {
+    pub(super) fn returning_owns(&mut self, from: HostId, reclaimed: bool) {
         if let Some((left_as, _)) = self.leave_pairs.get(&from).and_then(|p| p.leaver.as_ref()) {
             // Its leave is not decided here yet: `end_leaves` releases it then — but only for
             // an `Owns` of its NEXT boot (`peer_boots` names that boot once its hello came;
@@ -581,7 +582,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Host `from`, back as another boot, gets what waited for it.
-    fn release_left(&mut self, from: u32) {
+    fn release_left(&mut self, from: HostId) {
         self.left_peers.remove(&from);
         self.returning_peers.remove(&from);
         self.left_land.remove(&from);
@@ -594,14 +595,14 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: whether this host's session with `ordinal` is held for a leave.
     #[doc(hidden)]
-    pub fn peer_left(&self, ordinal: u32) -> bool {
+    pub fn peer_left(&self, ordinal: HostId) -> bool {
         self.left_peers.contains_key(&ordinal)
     }
 
     /// Test support: the reliable messages this host owes `ordinal` (its session's and the
     /// ones a leave holds back), in order.
     #[doc(hidden)]
-    pub fn peer_owed(&self, ordinal: u32) -> Vec<Reliable> {
+    pub fn peer_owed(&self, ordinal: HostId) -> Vec<Reliable> {
         let mut out: Vec<Reliable> =
             self.peers.get(&ordinal).map(|p| p.session.unreceived().cloned().collect()).unwrap_or_default();
         out.extend(self.peer_waiting.get(&ordinal).into_iter().flatten().cloned());
@@ -648,7 +649,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The coordinator's `BeginCut`: begun, or refused with `CutFailed`.
-    pub(super) fn world_begin_cut(&mut self, cut: CutId, tick: crate::Tick, hosts: &[u32], leaving: &[u32], generation: u64) {
+    pub(super) fn world_begin_cut(&mut self, cut: CutId, tick: crate::Tick, hosts: &[HostId], leaving: &[HostId], generation: u64) {
         if !self.world_attached() {
             // Sent before the coordinator applied our latest `Attach`, which aborted it.
             log::debug!("world cut {}: begun before our latest attach; dropped", cut.0);
@@ -751,7 +752,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         if !run.mark_sent {
             run.mark_sent = true;
-            let peers: Vec<u32> = run.peers.iter().copied().collect();
+            let peers: Vec<HostId> = run.peers.iter().copied().collect();
             log::debug!("[server] world cut {}: every region answered; marks to {peers:?}", id.0);
             let now = self.spawner.world_tick();
             self.marks_queued.push((id, now));
@@ -759,7 +760,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.marks_queued.remove(0);
             }
             // A pair counted with gets no mark: its relayed count stands for it.
-            let marked: Vec<u32> = peers.into_iter().filter(|p| !self.count_pairs.contains_key(p)).collect();
+            let marked: Vec<HostId> = peers.into_iter().filter(|p| !self.count_pairs.contains_key(p)).collect();
             for p in marked {
                 self.queue_now(p, Reliable::CutMark { cut: id });
             }
@@ -778,7 +779,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// docs' fourth case; `why`, for the log): the session is frozen until the cut's
     /// `CutDone`, and this host's count of `p`'s numbering goes to the coordinator, relayed
     /// to `p`. Only while this part is pending; once per pair.
-    pub(super) fn world_cut_count_mode(&mut self, p: u32, why: &str) {
+    pub(super) fn world_cut_count_mode(&mut self, p: HostId, why: &str) {
         let Some(run) = self.world_cut.as_ref().filter(|r| r.state == PartState::Pending && r.peers.contains(&p)) else { return };
         let cut = run.cut;
         if self.count_pairs.contains_key(&p) {
@@ -804,7 +805,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// hold of a leave stays: the hold-composition table) and what was held back for it is
     /// queued.
     fn end_counts(&mut self, cut: CutId) {
-        let pairs: Vec<u32> = self.count_pairs.iter().filter(|(_, c)| c.cut == cut).map(|(o, _)| *o).collect();
+        let pairs: Vec<HostId> = self.count_pairs.iter().filter(|(_, c)| c.cut == cut).map(|(o, _)| *o).collect();
         for ordinal in pairs {
             let pair = self.count_pairs.remove(&ordinal).expect("listed");
             if let Some(peer) = self.peers.get_mut(&ordinal) {
@@ -817,7 +818,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The other participants of world cut `id` (empty for a one-phase cut).
-    pub(super) fn world_cut_peers(&self, id: CutId) -> BTreeSet<u32> {
+    pub(super) fn world_cut_peers(&self, id: CutId) -> BTreeSet<HostId> {
         self.world_cut.as_ref().filter(|r| r.cut == id).map(|r| r.peers.clone()).unwrap_or_default()
     }
 
@@ -833,7 +834,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// and raises its stamp / due to the cut tick; case 2 notes a player as the
     /// receiver's. To a host outside the cut, or a non-state message: bare (the lineage of
     /// a wrapped message being applied aside).
-    pub(super) fn world_cut_wrap(&mut self, ordinal: u32, mut msg: Reliable, view: bool) -> (Reliable, Option<CutId>) {
+    pub(super) fn world_cut_wrap(&mut self, ordinal: HostId, mut msg: Reliable, view: bool) -> (Reliable, Option<CutId>) {
         if !msg.is_state() || matches!(msg, Reliable::InCut { .. }) {
             return (msg, None);
         }
@@ -944,17 +945,17 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Whether `from`'s mark of this host's world cut came in while the part has failed
     /// here (a bare message after it is expected then: the cut is dead).
-    pub(super) fn after_mark_failed(&self, from: u32) -> bool {
+    pub(super) fn after_mark_failed(&self, from: HostId) -> bool {
         self.world_cut.as_ref().is_some_and(|r| r.state == PartState::Failed && r.marks_in.contains(&from))
     }
 
     /// Whether `from`'s mark of the pending world cut came in (and the part is not complete).
-    pub(super) fn after_mark(&self, from: u32) -> bool {
+    pub(super) fn after_mark(&self, from: HostId) -> bool {
         self.world_cut.as_ref().is_some_and(|r| r.state == PartState::Pending && r.marks_in.contains(&from))
     }
 
     /// Host `from`'s mark of world cut `cut`.
-    pub(super) fn peer_cut_mark(&mut self, from: u32, cut: CutId) {
+    pub(super) fn peer_cut_mark(&mut self, from: HostId, cut: CutId) {
         self.journal.mark_in(from, cut);
         if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
             if run.peers.contains(&from) {
@@ -975,7 +976,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Participant `from`'s count of this host's numbering toward it in world cut `cut`,
     /// relayed by the coordinator ([`crate::CoordMsg::CutPeerCount`]).
-    pub(super) fn world_cut_peer_count(&mut self, cut: CutId, from: u32, received_through: u64, boot: u64) {
+    pub(super) fn world_cut_peer_count(&mut self, cut: CutId, from: HostId, received_through: u64, boot: u64) {
         let Some(run) = self.world_cut.as_ref().filter(|r| r.cut == cut && r.peers.contains(&from)) else {
             log::debug!("world cut {}: host {from}'s count of a cut not pending here; ignored", cut.0);
             return;
@@ -1014,7 +1015,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The pairs the pending world cut `id` counts with and their relayed counts, for the
     /// part's rows (`try_complete_cut`).
-    pub(super) fn world_cut_counts(&self, id: CutId) -> Vec<(u32, u64)> {
+    pub(super) fn world_cut_counts(&self, id: CutId) -> Vec<(HostId, u64)> {
         self.count_pairs.iter().filter(|(_, c)| c.cut == id).filter_map(|(o, c)| c.theirs.map(|t| (*o, t))).collect()
     }
 
@@ -1026,7 +1027,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Test support: apply `msg` as if host `from` had sent it on its peer session (the
     /// inbound path a session's `Reliable` event takes).
     #[doc(hidden)]
-    pub fn apply_peer_reliable(&mut self, from: u32, msg: Reliable) {
+    pub fn apply_peer_reliable(&mut self, from: HostId, msg: Reliable) {
         self.peer_reliable(from, msg);
         self.flush_world();
     }
@@ -1035,14 +1036,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (`view`: departed after its source answered the pending cut) — through the world
     /// cut's wrapper rule.
     #[doc(hidden)]
-    pub fn send_reliable_for_test(&mut self, ordinal: u32, msg: Reliable, view: bool) {
+    pub fn send_reliable_for_test(&mut self, ordinal: HostId, msg: Reliable, view: bool) {
         self.send_reliable(ordinal, msg, view);
     }
 
     /// Test support: `msg` waits for a session with host `ordinal` (`peer_waiting`), as if
     /// that host had none yet.
     #[doc(hidden)]
-    pub fn wait_for_session_for_test(&mut self, ordinal: u32, msg: Reliable) {
+    pub fn wait_for_session_for_test(&mut self, ordinal: HostId, msg: Reliable) {
         *self.peer_queued.entry(ordinal).or_default() += 1;
         self.peer_waiting.entry(ordinal).or_default().push(msg);
     }
@@ -1050,7 +1051,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Test support: `msg` is held back for host `ordinal` as a leave of cut `cut` holds it
     /// (`leave_pairs`), never queued.
     #[doc(hidden)]
-    pub fn hold_for_leave_for_test(&mut self, ordinal: u32, cut: CutId, msg: Reliable) {
+    pub fn hold_for_leave_for_test(&mut self, ordinal: HostId, cut: CutId, msg: Reliable) {
         self.leave_pairs.entry(ordinal).or_insert_with(|| LeavePair { cut, held: Vec::new(), leaver: None }).held.push(msg);
     }
 
@@ -1071,14 +1072,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Test support: what this host's session with `ordinal` has received from it, and the
     /// peer boot that count is of ([`crate::PeerSession::received_through`]).
     #[doc(hidden)]
-    pub fn peer_received_through(&self, ordinal: u32) -> Option<(u64, Option<u64>)> {
+    pub fn peer_received_through(&self, ordinal: HostId) -> Option<(u64, Option<u64>)> {
         self.peers.get(&ordinal).map(|p| p.session.received_through())
     }
 
     /// Test support: whether this host's session with `ordinal` is frozen for a world cut in
     /// count mode (`world_cut.rs`).
     #[doc(hidden)]
-    pub fn peer_frozen(&self, ordinal: u32) -> bool {
+    pub fn peer_frozen(&self, ordinal: HostId) -> bool {
         self.peers.get(&ordinal).is_some_and(|p| p.session.is_frozen())
     }
 

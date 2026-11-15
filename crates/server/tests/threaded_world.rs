@@ -844,7 +844,7 @@ fn body_crosses_seam_on_real_threads() {
     let id = (*region.data().ecs.id.try_get(key.unwrap())).expect("the body has an EntityId");
     let (portable, _) = region.data().portable_snapshot(&Default::default());
     let cut = game::WorldCut {
-        host: 0,
+        host: h(0),
         id: game::CutId(1),
         tick: *region.data().tick,
         regions: vec![(SPAWN_REGION, portable)],
@@ -967,4 +967,10 @@ fn store_read_failure_stops_the_region_on_real_threads() {
     assert_eq!(generated.load(std::sync::atomic::Ordering::SeqCst), 0, "never generated over stored data");
     assert_eq!(rig.manager.depths().sessions, 0);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host id from its number.
+#[allow(dead_code)]
+fn h(n: u64) -> game::HostId {
+    game::HostId(n)
 }

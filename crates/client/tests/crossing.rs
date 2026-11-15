@@ -597,7 +597,7 @@ mod two_hosts {
         let mut h = SimHarness::with_hosts(2);
         h.connect();
         let window = load_window(&mut h);
-        let owners: BTreeSet<u32> = window.iter().map(|rc| h.owner(*rc)).collect();
+        let owners: BTreeSet<game::HostId> = window.iter().map(|rc| h.owner(*rc)).collect();
         assert_eq!(owners.len(), 2, "the spawn window spans a host seam");
         for rc in &window {
             let owner = h.owner(*rc);
@@ -606,7 +606,7 @@ mod two_hosts {
         }
         let mut hosts = h.client_connections();
         hosts.sort();
-        assert_eq!(hosts, vec![0, 1], "one connection per host");
+        assert_eq!(hosts, vec![game::HostId(0), game::HostId(1)], "one connection per host");
         h.assert_regions_in_step();
         h.assert_converged();
     }
@@ -620,7 +620,7 @@ mod two_hosts {
     /// The client's lead over host `host`'s region `rc` after each of `steps` steps,
     /// with host `skewed`'s samples read [`SKEW_TICKS`] ahead from the start (`None`:
     /// no skew).
-    fn leads(h: &mut SimHarness, skewed: Option<u32>, host: u32, rc: game::RegionCoords, steps: usize) -> Vec<i64> {
+    fn leads(h: &mut SimHarness, skewed: Option<game::HostId>, host: game::HostId, rc: game::RegionCoords, steps: usize) -> Vec<i64> {
         if let Some(skewed) = skewed {
             h.skew_clock(skewed, SKEW_TICKS);
         }
@@ -655,7 +655,7 @@ mod two_hosts {
             h.connect();
             let window = load_window(&mut h);
             let home = h.home_host();
-            let other = 1 - home;
+            let other = game::HostId(1 - home.0);
             assert!(window.iter().any(|rc| h.owner(*rc) == other), "the window reaches the other host");
             leads(&mut h, skew.then_some(other), home, game::SPAWN_REGION, SKEW_TICKS as usize)
         };
@@ -726,7 +726,7 @@ mod two_hosts {
         h.connect();
         let window = load_window(&mut h);
         let home = h.home_host();
-        let other = 1 - home;
+        let other = game::HostId(1 - home.0);
         let observed: Vec<game::RegionCoords> = window.iter().copied().filter(|rc| h.owner(*rc) == other).collect();
         assert!(!observed.is_empty(), "the window reaches the other host");
         for rc in &observed {
@@ -855,7 +855,7 @@ fn walk_over_a_seam(h: &mut SimHarness, dir: Dir) -> game::RegionCoords {
 
 /// The same walk from the spawn over its `dir` seam — a thread seam in a one-host
 /// world, a host seam with two hosts — and the home corrections it caused.
-fn walk_and_count(mut h: SimHarness, dir: Dir) -> (u32, f32, u32) {
+fn walk_and_count(mut h: SimHarness, dir: Dir) -> (u32, f32, game::HostId) {
     h.connect();
     let waited = (0..HOSTS_LOAD_STEPS)
         .take_while(|_| {
@@ -885,7 +885,7 @@ fn walk_and_count(mut h: SimHarness, dir: Dir) -> (u32, f32, u32) {
 fn host_flip_matches_thread_flip_without_delay() {
     let mut probe = SimHarness::with_hosts(2);
     let dir = foreign_dir(&mut probe).expect("a cardinal neighbour on the other host");
-    let other = 1 - probe.home_host();
+    let other = game::HostId(1 - probe.home_host().0);
     drop(probe);
     let (thread_n, thread_max, _) = walk_and_count(SimHarness::with_near_radius(1), dir);
     let (host_n, host_max, home) = walk_and_count(SimHarness::with_hosts(2), dir);
@@ -910,7 +910,7 @@ fn held_key_across_a_host_seam_no_rubber_band() {
     for period in SPRINT_TOGGLE_PERIODS {
         let mut h = SimHarness::with_hosts(2);
         let dir = foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
-        let other = 1 - h.home_host();
+        let other = game::HostId(1 - h.home_host().0);
         h.connect();
         load_spawn_window(&mut h);
         h.set_latency(RUBBER_BAND_LATENCY_STEPS);
@@ -964,7 +964,7 @@ fn held_key_across_a_host_seam_no_rubber_band() {
 fn home_follows_player_region_from_the_new_connection() {
     let mut h = SimHarness::with_hosts(2);
     let dir = foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
-    let (old, other) = (h.home_host(), 1 - h.home_host());
+    let (old, other) = (h.home_host(), game::HostId(1 - h.home_host().0));
     h.connect();
     load_spawn_window(&mut h);
     assert_eq!(h.client_home_host(), Some(old));
@@ -972,7 +972,7 @@ fn home_follows_player_region_from_the_new_connection() {
     assert_eq!(h.client_home_host(), Some(other), "the home followed the body to host {other}");
     assert_eq!(h.server_session(other), Some(game::SessionKind::Home));
     assert_eq!(h.server_session(old), Some(game::SessionKind::Observer));
-    assert_eq!(h.client_connections(), vec![0, 1], "the old home's connection stays");
+    assert_eq!(h.client_connections(), vec![game::HostId(0), game::HostId(1)], "the old home's connection stays");
     assert_eq!(h.client_region_host(game::SPAWN_REGION), Some(old), "it serves the regions it served");
     h.assert_progresses(game::Key::KeyW);
     h.assert_converged();
@@ -992,7 +992,7 @@ fn late_player_region_after_a_ping_pong_keeps_the_home() {
         Dir::North => Dir::South,
         Dir::South => Dir::North,
     };
-    let (a, b) = (h.home_host(), 1 - h.home_host());
+    let (a, b) = (h.home_host(), game::HostId(1 - h.home_host().0));
     h.connect();
     load_spawn_window(&mut h);
     take_off(&mut h);
@@ -1037,13 +1037,13 @@ fn late_player_region_after_a_ping_pong_keeps_the_home() {
 fn teleport_to_a_foreign_host_switches_home() {
     const MAP_RADIUS: i32 = 4;
     let mut h = SimHarness::with_hosts(2);
-    let other = 1 - h.home_host();
+    let other = game::HostId(1 - h.home_host().0);
     let target = (2..=MAP_RADIUS)
         .flat_map(|x| [game::RegionCoords::new(x, 0), game::RegionCoords::new(-x, 0)])
         .find(|rc| h.owner(*rc) == other)
         .expect("a region of the other host on the map, outside the window");
     let side = 2 * MAP_RADIUS as u32 + 1;
-    for host in 0..2 {
+    for host in (0..2u64).map(game::HostId) {
         h.host_manager(host).set_world_map(game::WorldMap {
             origin: game::RegionCoords::new(-MAP_RADIUS, -MAP_RADIUS),
             width: side,
@@ -1106,13 +1106,13 @@ fn play_tile() -> game::TileSummary {
 fn idle_observer_connection_is_closed() {
     let idle_steps = (client::connections::CONN_IDLE_CLOSE_MS / game::TICK_RATE) as usize;
     let mut h = SimHarness::with_hosts(2);
-    let (home, other) = (h.home_host(), 1 - h.home_host());
+    let (home, other) = (h.home_host(), game::HostId(1 - h.home_host().0));
     h.connect();
     load_spawn_window(&mut h);
-    assert_eq!(h.client_connections(), vec![0, 1]);
+    assert_eq!(h.client_connections(), vec![game::HostId(0), game::HostId(1)]);
     h.set_client_near_radius(0);
     h.step_n(idle_steps / 2);
-    assert_eq!(h.client_connections(), vec![0, 1], "not idle long enough yet");
+    assert_eq!(h.client_connections(), vec![game::HostId(0), game::HostId(1)], "not idle long enough yet");
     h.step_n(idle_steps / 2 + 4);
     assert_eq!(h.client_connections(), vec![home], "the idle connection to host {other} closed");
     assert_eq!(h.server_session(other), None, "its session there ended");
@@ -1121,7 +1121,7 @@ fn idle_observer_connection_is_closed() {
     load_spawn_window(&mut h);
     let mut hosts = h.client_connections();
     hosts.sort();
-    assert_eq!(hosts, vec![0, 1], "a new connection to host {other}");
+    assert_eq!(hosts, vec![game::HostId(0), game::HostId(1)], "a new connection to host {other}");
     for rc in game::SPAWN_REGION.window_3x3() {
         assert_eq!(h.client_region_host(rc), Some(h.owner(rc)));
     }
@@ -1137,7 +1137,7 @@ fn idle_observer_connection_is_closed() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn refused_and_closed_observer_connections_reload_their_regions() {
     let mut h = SimHarness::with_hosts(2);
-    let other = 1 - h.home_host();
+    let other = game::HostId(1 - h.home_host().0);
     let theirs: Vec<game::RegionCoords> =
         game::SPAWN_REGION.window_3x3().into_iter().filter(|rc| h.owner(*rc) == other).collect();
     h.orders_late(4);
@@ -1168,7 +1168,7 @@ const LOD_TABLE: &[(i32, u32)] = &[(2, 2)];
 fn lod_subscriptions_follow_the_home() {
     let mut h = SimHarness::with_hosts(2);
     let dir = foreign_dir(&mut h).expect("a cardinal neighbour on the other host");
-    let (old, other) = (h.home_host(), 1 - h.home_host());
+    let (old, other) = (h.home_host(), game::HostId(1 - h.home_host().0));
     h.set_client_lod_table(LOD_TABLE);
     h.connect();
     load_spawn_window(&mut h);

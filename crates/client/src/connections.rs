@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use crossbeam::channel::Sender;
-use game::{ClientPacket, Credential, HostEndpoint, ObserverTicket, RegionId, ServerPacket};
+use game::{ClientPacket, Credential, HostEndpoint, HostId, ObserverTicket, RegionId, ServerPacket};
 
 /// How long after an observer connection closed its regions are asked for again,
 /// through the home (which answers with a fresh `RegionElsewhere`), the first time in
@@ -81,7 +81,7 @@ pub enum ConnEvent {
 
 /// Opens a connection to another host of the world (the transport's side).
 pub trait ConnOpener {
-    /// Connect to the host at `endpoint` (`endpoint.ordinal`), presenting `credential`
+    /// Connect to the host at `endpoint` (`endpoint.id`), presenting `credential`
     /// as the Hello. The connection's events arrive keyed by `key` (new for every
     /// connection: a reopened one to the same host gets another).
     fn open(&mut self, key: u32, endpoint: &HostEndpoint, credential: Credential) -> ConnHandle;
@@ -111,7 +111,7 @@ pub enum Closed {
 struct Conn {
     handle: ConnHandle,
     /// The host it is to (`None` for the login connection until its `Host` packet).
-    ordinal: Option<u32>,
+    ordinal: Option<HostId>,
     /// Since when (session ms) it is not the home and serves no region
     /// ([`ConnectionSet::close_idle`]).
     idle_since: Option<u64>,
@@ -153,7 +153,7 @@ impl ConnectionSet {
     }
 
     /// The home's host, once its `Host` packet came.
-    pub fn home_ordinal(&self) -> Option<u32> {
+    pub fn home_ordinal(&self) -> Option<HostId> {
         self.ordinal_of(self.home)
     }
 
@@ -168,12 +168,12 @@ impl ConnectionSet {
     }
 
     /// The host connection `conn` is to, if it is open and its host known.
-    pub fn ordinal_of(&self, conn: u32) -> Option<u32> {
+    pub fn ordinal_of(&self, conn: u32) -> Option<HostId> {
         self.conns.get(&conn)?.ordinal
     }
 
     /// The open connection to host `ordinal`, if any.
-    pub fn conn_to(&self, ordinal: u32) -> Option<u32> {
+    pub fn conn_to(&self, ordinal: HostId) -> Option<u32> {
         self.conns.iter().find(|(_, c)| c.ordinal == Some(ordinal)).map(|(key, _)| *key)
     }
 
@@ -190,7 +190,7 @@ impl ConnectionSet {
     /// Connection `conn`'s `Host` packet named host `ordinal`: the login connection learns
     /// its host. `false` = the packet does not fit the connection (another host than the
     /// one dialled, or a host another open connection is to): the caller closes it.
-    pub fn on_host(&mut self, conn: u32, ordinal: u32) -> bool {
+    pub fn on_host(&mut self, conn: u32, ordinal: HostId) -> bool {
         let taken = self.conn_to(ordinal).is_some_and(|other| other != conn);
         let Some(c) = self.conns.get_mut(&conn) else { return false };
         match c.ordinal {
@@ -250,7 +250,7 @@ impl ConnectionSet {
     /// - the home itself (R4: it inherited the region from the host that served it): the
     ///   region is served by the home connection ([`Self::remap_to_home`]) and subscribed
     ///   there — never dialled (an observer ticket must not replace the home session);
-    /// - another host: a connection to `endpoint.ordinal` is opened unless one is live (one
+    /// - another host: a connection to `endpoint.id` is opened unless one is live (one
     ///   connection per host, however many regions; after the home moved, the old home's
     ///   connection serves as this one), the region is served from it and subscribed there.
     ///   A region another connection served is released there first (re-mapped: its owner
@@ -265,7 +265,7 @@ impl ConnectionSet {
         ticket: ObserverTicket,
         opener: Option<&mut dyn ConnOpener>,
     ) -> Named {
-        let ordinal = endpoint.ordinal;
+        let ordinal = endpoint.id;
         let Some(home) = self.home_ordinal() else {
             log::warn!("[client] {region:?} is said to be host {ordinal}'s before the home named itself: ignored");
             return Named::Unrouted;
@@ -408,6 +408,13 @@ impl ConnectionSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host id from its number.
+    #[allow(dead_code)]
+    fn h(n: u64) -> HostId {
+        HostId(n)
+    }
+
     use crossbeam::channel::{unbounded, Receiver};
     use game::RegionCoords;
 
@@ -427,8 +434,8 @@ mod tests {
 
     impl FakeOpener {
         /// What was sent on host `ordinal`'s connections since the last call ([`dbg`]).
-        fn packets(&self, ordinal: u32) -> Vec<String> {
-            self.opened.iter().filter(|o| o.1.ordinal == ordinal).flat_map(|o| o.3.try_iter()).map(|p| dbg(&p)).collect()
+        fn packets(&self, ordinal: HostId) -> Vec<String> {
+            self.opened.iter().filter(|o| o.1.id == ordinal).flat_map(|o| o.3.try_iter()).map(|p| dbg(&p)).collect()
         }
     }
 
@@ -441,8 +448,8 @@ mod tests {
         recv.try_iter().map(|p| dbg(&p)).collect()
     }
 
-    fn endpoint(ordinal: u32) -> HostEndpoint {
-        HostEndpoint { ordinal, quic: Some(format!("127.0.0.1:{}", 7000 + ordinal)), webtransport: None, cert_hash: None }
+    fn endpoint(ordinal: HostId) -> HostEndpoint {
+        HostEndpoint { id: ordinal, quic: Some(format!("127.0.0.1:{}", 7000 + ordinal.0)), webtransport: None, cert_hash: None }
     }
 
     fn ticket() -> ObserverTicket {
@@ -455,8 +462,8 @@ mod tests {
         let mut set = ConnectionSet::new(ConnHandle { send });
         assert_eq!(set.home(), LOGIN_CONN);
         assert_eq!(set.home_ordinal(), None);
-        assert!(set.on_host(LOGIN_CONN, 0));
-        assert_eq!((set.home(), set.home_ordinal()), (LOGIN_CONN, Some(0)));
+        assert!(set.on_host(LOGIN_CONN, h(0)));
+        assert_eq!((set.home(), set.home_ordinal()), (LOGIN_CONN, Some(h(0))));
         (set, recv)
     }
 
@@ -465,7 +472,7 @@ mod tests {
     }
 
     /// The host of the connection that serves `region`.
-    fn host_of(set: &ConnectionSet, region: RegionCoords) -> Option<u32> {
+    fn host_of(set: &ConnectionSet, region: RegionCoords) -> Option<HostId> {
         set.ordinal_of(set.connection_of(region))
     }
 
@@ -473,46 +480,46 @@ mod tests {
     fn region_elsewhere_opens_one_connection_per_host() {
         let (mut set, home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        set.on_region_elsewhere(rc(1, 1), endpoint(1), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(1, 1), endpoint(h(1)), ticket(), &mut opener);
         assert_eq!(opener.opened.len(), 1, "two regions of one host: one connection");
         let (key, ep, credential, _) = &opener.opened[0];
         assert_ne!(*key, LOGIN_CONN);
-        assert_eq!(ep, &endpoint(1));
+        assert_eq!(ep, &endpoint(h(1)));
         assert_eq!(credential, &Credential::Observer { client: 7, nonce: 0xfeed });
         assert_eq!(
-            opener.packets(1),
+            opener.packets(h(1)),
             vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0))), dbg(&ClientPacket::RequestRegionConnection(rc(1, 1)))]
         );
         assert!(home.try_recv().is_err(), "nothing about them goes home");
-        set.on_region_elsewhere(rc(2, 0), endpoint(2), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(2, 0), endpoint(h(2)), ticket(), &mut opener);
         assert_eq!(opener.opened.len(), 2, "another host: its own connection");
-        assert_eq!((host_of(&set, rc(1, 1)), host_of(&set, rc(2, 0))), (Some(1), Some(2)));
+        assert_eq!((host_of(&set, rc(1, 1)), host_of(&set, rc(2, 0))), (Some(h(1)), Some(h(2))));
     }
 
     #[test]
     fn subscribe_and_release_go_to_the_owning_connection() {
         let (mut set, home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let _ = opener.packets(1);
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let _ = opener.packets(h(1));
         set.route(Outgoing::Region(rc(1, 0), ClientPacket::ReleaseRegionConnection(rc(1, 0))));
         set.release(rc(1, 0));
         set.route(Outgoing::Region(rc(0, 0), ClientPacket::RequestRegionConnection(rc(0, 0))));
-        assert_eq!(opener.packets(1), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
+        assert_eq!(opener.packets(h(1)), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
         assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(0, 0)))]);
         // Released: the next subscribe goes home, which says again who owns it.
         set.route(Outgoing::Region(rc(1, 0), ClientPacket::RequestRegionConnection(rc(1, 0))));
         assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))]);
-        assert!(opener.packets(1).is_empty());
+        assert!(opener.packets(h(1)).is_empty());
     }
 
     #[test]
     fn predictions_and_ui_requests_go_home_only() {
         let (mut set, home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let _ = opener.packets(1);
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let _ = opener.packets(h(1));
         let input = game::GameEvent::new(
             game::GameEventKind::PlayerInput(7, game::InputEvent::Key { key: game::Key::KeyW, pressed: true }),
             0,
@@ -522,7 +529,7 @@ mod tests {
         set.route(Outgoing::Home(ClientPacket::RequestEmbarkOptions));
         set.route(Outgoing::Home(ClientPacket::RequestLod(game::lod::LodKey::for_region(2, rc(1, 0)))));
         assert_eq!(home.try_iter().count(), 3, "input, UI and LOD go home, whatever region they are about");
-        assert!(opener.packets(1).is_empty());
+        assert!(opener.packets(h(1)).is_empty());
         set.route(Outgoing::Conn(5, ClientPacket::Leave));
         assert!(home.try_recv().is_err(), "a packet for a connection that is gone is dropped");
     }
@@ -531,8 +538,8 @@ mod tests {
     fn traffic_from_the_wrong_connection_is_not_accepted() {
         let (mut set, _home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let one = set.conn_to(1).expect("a connection to host 1");
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).expect("a connection to host 1");
         assert!(set.accepts(one, rc(1, 0)));
         assert!(!set.accepts(LOGIN_CONN, rc(1, 0)), "the home no longer serves a region another host does");
         assert!(set.accepts(LOGIN_CONN, rc(0, 0)));
@@ -544,14 +551,14 @@ mod tests {
     fn observer_close_returns_its_regions_home_close_ends_the_session() {
         let (mut set, _home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        set.on_region_elsewhere(rc(1, 1), endpoint(1), ticket(), &mut opener);
-        set.on_region_elsewhere(rc(2, 0), endpoint(2), ticket(), &mut opener);
-        let one = set.conn_to(1).unwrap();
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(1, 1), endpoint(h(1)), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(2, 0), endpoint(h(2)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).unwrap();
         assert_eq!(set.on_closed(one), Closed::Observer { regions: vec![rc(1, 0), rc(1, 1)] });
         assert!(!set.is_live(one));
         assert!(set.accepts(LOGIN_CONN, rc(1, 0)), "unmapped again: the home's");
-        assert_eq!(host_of(&set, rc(2, 0)), Some(2), "another host's regions stay");
+        assert_eq!(host_of(&set, rc(2, 0)), Some(h(2)), "another host's regions stay");
         assert_eq!(set.on_closed(one), Closed::Observer { regions: Vec::new() }, "closed twice: nothing more");
         assert_eq!(set.on_closed(LOGIN_CONN), Closed::Home);
     }
@@ -562,13 +569,13 @@ mod tests {
     fn never_opens_an_observer_connection_to_the_home_host() {
         let (mut set, _home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(0), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(0)), ticket(), &mut opener);
         assert!(opener.opened.is_empty());
         assert_eq!(set.connection_of(rc(1, 0)), LOGIN_CONN);
         // Nor before the home's own host is known.
         let (send, _recv) = unbounded();
         let mut fresh = ConnectionSet::new(ConnHandle { send });
-        fresh.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
+        fresh.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
         assert!(opener.opened.is_empty());
     }
 
@@ -576,11 +583,11 @@ mod tests {
     fn login_connection_learns_its_host() {
         let (send, _recv) = unbounded();
         let mut set = ConnectionSet::new(ConnHandle { send });
-        assert!(!set.on_host(5, 3), "an unknown connection");
-        assert!(set.on_host(LOGIN_CONN, 3));
-        assert_eq!((set.home(), set.home_ordinal()), (LOGIN_CONN, Some(3)), "the key never changes");
-        assert!(set.on_host(LOGIN_CONN, 3), "the same host again");
-        assert!(!set.on_host(LOGIN_CONN, 4), "another host than the one it named");
+        assert!(!set.on_host(5, h(3)), "an unknown connection");
+        assert!(set.on_host(LOGIN_CONN, h(3)));
+        assert_eq!((set.home(), set.home_ordinal()), (LOGIN_CONN, Some(h(3))), "the key never changes");
+        assert!(set.on_host(LOGIN_CONN, h(3)), "the same host again");
+        assert!(!set.on_host(LOGIN_CONN, h(4)), "another host than the one it named");
     }
 
     /// Carry (Task 17 review): a reopened connection to a host is a new connection with
@@ -590,11 +597,11 @@ mod tests {
     fn a_reopened_connection_gets_a_new_key() {
         let (mut set, _home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let first = set.conn_to(1).unwrap();
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let first = set.conn_to(h(1)).unwrap();
         assert_eq!(set.on_closed(first), Closed::Observer { regions: vec![rc(1, 0)] });
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let second = set.conn_to(1).unwrap();
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let second = set.conn_to(h(1)).unwrap();
         assert_ne!(first, second, "a reopened connection has a key of its own");
         assert_eq!(opener.opened.iter().map(|o| o.0).collect::<Vec<_>>(), vec![first, second]);
         assert!(!set.is_live(first), "the old key stays dead");
@@ -612,22 +619,22 @@ mod tests {
         let (mut set, home) = home_on_0();
         let mut opener = FakeOpener::default();
         set.route(Outgoing::Region(rc(0, 0), ClientPacket::RequestRegionConnection(rc(0, 0))));
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let one = set.conn_to(1).unwrap();
-        let _ = (sent(&home), opener.packets(1));
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).unwrap();
+        let _ = (sent(&home), opener.packets(h(1)));
         assert!(!set.on_player_region(one), "no hop: not a hand-off's");
         assert_eq!(set.home(), LOGIN_CONN);
         set.on_home_hop(one, 1);
         assert!(set.on_player_region(one));
-        assert_eq!((set.home(), set.home_ordinal()), (one, Some(1)));
-        assert_eq!(host_of(&set, rc(0, 0)), Some(0), "the old home still serves its region");
+        assert_eq!((set.home(), set.home_ordinal()), (one, Some(h(1))));
+        assert_eq!(host_of(&set, rc(0, 0)), Some(h(0)), "the old home still serves its region");
         assert!(set.accepts(LOGIN_CONN, rc(0, 0)));
         set.route(Outgoing::Home(ClientPacket::RequestEmbarkOptions));
-        assert_eq!(opener.packets(1), vec![dbg(&ClientPacket::RequestEmbarkOptions)], "home packets follow the home");
+        assert_eq!(opener.packets(h(1)), vec![dbg(&ClientPacket::RequestEmbarkOptions)], "home packets follow the home");
         assert!(sent(&home).is_empty());
         // The old home's host is an observer's now: a region of it found through the new
         // home reuses the connection there.
-        set.on_region_elsewhere(rc(0, 1), endpoint(0), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(0, 1), endpoint(h(0)), ticket(), &mut opener);
         assert_eq!(opener.opened.len(), 1, "no second connection to host 0");
         assert_eq!(set.connection_of(rc(0, 1)), LOGIN_CONN);
         assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(0, 1)))]);
@@ -639,8 +646,8 @@ mod tests {
     fn a_late_player_region_from_the_host_left_again_is_ignored() {
         let (mut set, _home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let one = set.conn_to(1).unwrap();
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).unwrap();
         // A (the home) took the body back at hop 2: its packets came first.
         set.on_home_hop(LOGIN_CONN, 2);
         assert!(set.on_player_region(LOGIN_CONN), "the home's PlayerRegion always counts");
@@ -650,8 +657,8 @@ mod tests {
         assert_eq!(set.home(), LOGIN_CONN);
         // In order this time: B at 1, then A at 2.
         let (mut set, _home) = home_on_0();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let one = set.conn_to(1).unwrap();
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).unwrap();
         set.on_home_hop(one, 1);
         assert!(set.on_player_region(one));
         assert_eq!(set.home(), one);
@@ -664,8 +671,8 @@ mod tests {
     fn idle_connection_closes_after_conn_idle_close_ms() {
         let (mut set, _home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let one = set.conn_to(1).unwrap();
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).unwrap();
         assert!(set.close_idle(0).is_empty(), "it serves a region");
         set.release(rc(1, 0));
         assert!(set.close_idle(100).is_empty(), "idle from now");
@@ -684,17 +691,17 @@ mod tests {
     fn region_elsewhere_naming_the_home_subscribes_at_home() {
         let (mut set, home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(0), ticket(), &mut opener);
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(0)), ticket(), &mut opener);
         assert!(opener.opened.is_empty(), "no connection to the home host");
         assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))], "subscribed at home");
         assert_eq!(set.connection_of(rc(1, 0)), LOGIN_CONN);
         assert!(set.accepts(LOGIN_CONN, rc(1, 0)));
         // One another host served until now.
-        set.on_region_elsewhere(rc(2, 0), endpoint(1), ticket(), &mut opener);
-        let one = set.conn_to(1).expect("a connection to host 1");
-        let _ = (opener.packets(1), sent(&home));
-        set.on_region_elsewhere(rc(2, 0), endpoint(0), ticket(), &mut opener);
-        assert_eq!(opener.packets(1), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(2, 0)))], "released where it was served");
+        set.on_region_elsewhere(rc(2, 0), endpoint(h(1)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).expect("a connection to host 1");
+        let _ = (opener.packets(h(1)), sent(&home));
+        set.on_region_elsewhere(rc(2, 0), endpoint(h(0)), ticket(), &mut opener);
+        assert_eq!(opener.packets(h(1)), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(2, 0)))], "released where it was served");
         assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(2, 0)))]);
         assert!(set.accepts(LOGIN_CONN, rc(2, 0)), "the home's traffic counts");
         assert!(!set.accepts(one, rc(2, 0)), "host 1's no longer does");
@@ -709,24 +716,24 @@ mod tests {
     fn a_second_region_elsewhere_remaps_the_region() {
         let (mut set, home) = home_on_0();
         let mut opener = FakeOpener::default();
-        set.on_region_elsewhere(rc(1, 0), endpoint(1), ticket(), &mut opener);
-        let one = set.conn_to(1).expect("a connection to host 1");
-        let _ = opener.packets(1);
-        set.on_region_elsewhere(rc(1, 0), endpoint(2), ticket(), &mut opener);
-        let two = set.conn_to(2).expect("a connection to host 2");
-        assert_eq!(opener.packets(1), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
-        assert_eq!(opener.packets(2), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))]);
-        assert_eq!(host_of(&set, rc(1, 0)), Some(2));
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(1)), ticket(), &mut opener);
+        let one = set.conn_to(h(1)).expect("a connection to host 1");
+        let _ = opener.packets(h(1));
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(2)), ticket(), &mut opener);
+        let two = set.conn_to(h(2)).expect("a connection to host 2");
+        assert_eq!(opener.packets(h(1)), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
+        assert_eq!(opener.packets(h(2)), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))]);
+        assert_eq!(host_of(&set, rc(1, 0)), Some(h(2)));
         assert!(set.accepts(two, rc(1, 0)));
         assert!(!set.accepts(one, rc(1, 0)) && !set.accepts(LOGIN_CONN, rc(1, 0)), "one connection serves it");
         assert!(sent(&home).is_empty(), "nothing about it goes home");
         // Its owner dies too and the home inherits it.
-        set.on_region_elsewhere(rc(1, 0), endpoint(0), ticket(), &mut opener);
-        assert_eq!(opener.packets(2), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
+        set.on_region_elsewhere(rc(1, 0), endpoint(h(0)), ticket(), &mut opener);
+        assert_eq!(opener.packets(h(2)), vec![dbg(&ClientPacket::ReleaseRegionConnection(rc(1, 0)))]);
         assert_eq!(sent(&home), vec![dbg(&ClientPacket::RequestRegionConnection(rc(1, 0)))]);
-        assert_eq!(host_of(&set, rc(1, 0)), Some(0));
+        assert_eq!(host_of(&set, rc(1, 0)), Some(h(0)));
         assert!(set.accepts(LOGIN_CONN, rc(1, 0)) && !set.accepts(two, rc(1, 0)));
-        assert!(opener.packets(1).is_empty());
+        assert!(opener.packets(h(1)).is_empty());
     }
 
     #[test]

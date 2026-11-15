@@ -2,12 +2,13 @@
 //! each peer since the last committed world cut, truncated by cut ownership read
 //! backwards. The seeded property over real hosts is
 //! `peer_schedule::journal_explains_every_difference_from_the_last_cut`.
+use crate::common::h;
 use std::collections::BTreeSet;
 
 use game::{CutId, EntityId, JournalEvent, PeerJournal, PlayerId, RegionCoords, Reliable, Subject};
 
-const A: u32 = 1;
-const B: u32 = 2;
+const A: game::HostId = game::HostId(1);
+const B: game::HostId = game::HostId(2);
 const K: CutId = CutId(5);
 const NOW: u64 = 900;
 
@@ -54,12 +55,12 @@ fn wrapped(cut: CutId, msg: Reliable) -> Reliable {
     Reliable::InCut { cut, body: Box::new(msg) }
 }
 
-fn participants(hosts: &[u32]) -> BTreeSet<u32> {
+fn participants(hosts: &[game::HostId]) -> BTreeSet<game::HostId> {
     hosts.iter().copied().collect()
 }
 
 /// `(subject, sent?)` of every entry with `peer`, in order.
-fn kept(j: &PeerJournal, peer: u32) -> Vec<(Subject, bool)> {
+fn kept(j: &PeerJournal, peer: game::HostId) -> Vec<(Subject, bool)> {
     j.entries(peer).map(|(e, _)| (e.subject, matches!(e.event, JournalEvent::Sent(_)))).collect()
 }
 
@@ -187,8 +188,8 @@ fn an_abort_forgets_nothing() {
 fn entries_toward_an_absent_host_survive() {
     let mut j = PeerJournal::new(CutId(0));
     for peer in [A, B] {
-        j.sent(peer, 0, &transfer(u64::from(peer) * 10, 10), None, NOW);
-        j.received(peer, &transfer(u64::from(peer) * 10 + 1, 10), None, NOW);
+        j.sent(peer, 0, &transfer(peer.0 * 10, 10), None, NOW);
+        j.received(peer, &transfer(peer.0 * 10 + 1, 10), None, NOW);
         j.mark_out(peer, K);
         j.mark_in(peer, K);
     }
@@ -224,7 +225,7 @@ fn intents_and_orders_are_never_journalled() {
         Reliable::Intent(game::IntentMsg::Reply(reply.clone())),
         wrapped(K, Reliable::Intent(game::IntentMsg::Reply(reply))),
         Reliable::SpawnOrder {
-            origin: 0,
+            origin: h(0),
             hops: 0,
             player_token: "t".into(),
             session_epoch: 1,
