@@ -897,13 +897,11 @@ fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
     w.coordinator = Some(coordinator);
 }
 
-/// A host process starts again as boot `boot`, in `server::run`'s order: the parts a crash
-/// left staged resolved, REGISTERED (a new id: the next one — never the id of a host before),
-/// its share of the fixed table claimed under it as host `as_slot`'s (R3's layout: the
-/// replacement takes the dead host's place in the table; the store moved nothing to it), its
-/// regions and in-flight rows from the store, its clock joining the live hosts', a link to the
-/// coordinator (if one is up), its cut writer, its keeper. Its registration. With no host up
-/// its clock starts where the world's stopped.
+/// A host process named after `as_slot` starts again as boot `boot`, in `server::run`'s order:
+/// the parts a crash left staged resolved, REGISTERED — a new id, the next one, never the id of
+/// a host before — owning nothing: it is in no fixed table (the table of `h(0)..h(HOSTS)` names
+/// every owner), so it claims nothing and runs no region of its own; a link to every live host
+/// and to the coordinator (if one is up), its cut writer. Its registration.
 fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, as_slot: HostId, boot: u64) -> world_store::Registered {
     let first = db.open();
     server::roles::resolve_before_claim(true, &first).expect("the staged parts are resolved");
@@ -913,29 +911,15 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, as_slot: HostId
     let (mut links, registered) = boot_links(&store, want, &format!("host-{}", as_slot.0), boot, TOKEN, dir, "127.0.0.1:0");
     let h = registered.id;
     let s = store.super_region_regions();
-    let share = fixed(as_slot);
-    let srs: Vec<game::SuperRegion> = game::Ownership::claim_set(&share, Some(extent()), s).into_iter().collect();
-    let claims = HostClaims::claim_srs(store.clone(), h, srs).unwrap();
-    let stored = store.stored_regions().unwrap();
-    let regions: std::collections::BTreeMap<RegionCoords, game::StoredRegion> = stored
-        .keys()
-        .filter(|rc| share.owns(**rc, s))
-        .filter_map(|rc| claims.load_region(*rc).unwrap().map(|r| (*rc, r)))
-        .collect();
-    let mut spawner = InlineSpawner::with_portable(regions);
-    // With no host up (every host left), the world tick they left at.
+    let claims = HostClaims::none(store.clone(), h);
+    let mut spawner = InlineSpawner::default();
     let target = live_tick(w).max(w.pair.tick.load(std::sync::atomic::Ordering::SeqCst));
     while spawner.world_tick() < target {
         spawner.tick_all();
     }
     let mut sim = Sim::with_spawner(h, s, boot, registered.generation, &mut links, spawner);
-    // A new id is in no fixed table: it answers from the directory (what it claimed above,
-    // the other hosts' rows as stored).
-    sim.manager.set_ownership(Box::new(game::PgClaim::new(h)), s);
-    let (rows, live) = server::claims::read_directory(&store, h).expect("the directory is read");
-    sim.manager.directory_read(rows, live);
-    sim.manager.set_stored_regions(stored);
-    sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
+    sim.manager.set_ownership(Box::new(game::Static { me: h, layout: (0..u64::from(HOSTS)).map(HostId).collect() }), s);
+    sim.manager.set_stored_regions(store.stored_regions().unwrap());
     let switch = SwitchLink(Arc::new(std::sync::Mutex::new((None, 0))));
     if let Some(c) = &w.coordinator {
         switch.replace(quic_world_link(c.addr, w.cert.clone(), h, boot, registered.id.0));
@@ -946,10 +930,6 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, as_slot: HostId
     let generation = server::claims::WorldGeneration::new(registered.generation);
     *slot(&mut w.generations, h, Default::default()) = generation.clone();
     sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(claims.clone(), generation));
-    let rc = seam_of(w, as_slot);
-    let (player, _) = store.resolve_player(&format!("hosts-test-keeper-{as_slot}")).unwrap();
-    let now = w.pair.now();
-    sim.keep(player, rc, now);
     let i = w.pair.sims.iter().position(|s| s.ordinal > h).unwrap_or(w.pair.sims.len());
     w.pair.sims.insert(i, sim);
     while w.links.len() <= h.0 as usize {
@@ -984,7 +964,11 @@ fn restart_alone(w: &mut World, db: &PgDb, dir: &std::path::Path, boot: u64) -> 
     let me = registered.id;
     let s = store.super_region_regions();
     let alone = game::Static { me, layout: vec![me] };
-    let claims = HostClaims::claim(store.clone(), &alone, Some(extent()), s).unwrap();
+    // Its whole extent under a per-host fence (this rig's coordinator runs two-phase world
+    // cuts, which an all-hosts fence cannot stage); the total crash moved every dirty row's
+    // in-flight rows to it.
+    let srs: Vec<game::SuperRegion> = game::Ownership::claim_set(&alone, Some(extent()), s).into_iter().collect();
+    let claims = HostClaims::claim_srs(store.clone(), me, srs).unwrap();
     let stored = store.stored_regions().unwrap();
     let regions: std::collections::BTreeMap<RegionCoords, game::StoredRegion> =
         stored.keys().filter_map(|rc| claims.load_region(*rc).unwrap().map(|r| (*rc, r))).collect();
@@ -1160,4 +1144,92 @@ fn super_region_corners(s: u32, n: usize) -> Vec<(game::SuperRegion, RegionCoord
         .collect();
     assert!(all.len() >= n, "the map has {} super-regions, not {n}", all.len());
     all.into_iter().take(n).collect()
+}
+
+/// The bound on both hosts' clean leave when they are stopped together: well inside the
+/// supervisor's 95 s deadline (the leave batch, a cut's lead and its decision take ~3 s).
+const BOTH_LEAVE_WITHIN: Duration = Duration::from_secs(15);
+
+/// Slime `id` in host `h`'s seam region, put just past the seam toward the other host's.
+fn push_over_the_seam(w: &mut World, h: HostId, id: EntityId) {
+    let (a, _) = w.seam;
+    let from = seam_of(w, h);
+    // The seam is `b = a + x`: from `a` over +x, from `b` over -x.
+    let x = if from == a { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
+    sim(w, h).manager.spawner_mut().with_region(from, |region| {
+        let key = region.data().id_index[&id];
+        let at = game::rapier3d::math::Vector::new(x, above_ground_y(), REGION_SIZE / 2.0);
+        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
+    });
+}
+
+/// What one host's `exit_world` came to: its outcome, how long it took from the shared
+/// stop signal, and the leave cut that named it (`leaving_cut`).
+struct Exited {
+    exit: server::claims::ServerExit,
+    took: Duration,
+    leaving_cut: Option<game::CutId>,
+}
+
+/// Every host gets the stop signal at the same moment (as the dev stack's supervisor
+/// TERMs them all): each runs the real `exit_world` on its own thread, its regions ticking
+/// at its own pace, the coordinator reading the highest world tick. Their outcomes, by
+/// ordinal; their peer listeners and coordinator links go with them.
+fn exit_every_host_at_once(w: &mut World) -> Vec<Exited> {
+    let mut sims: Vec<Sim> = std::mem::take(&mut w.pair.sims);
+    sims.sort_by_key(|s| s.ordinal);
+    let started = w.pair.started;
+    let tick = w.pair.tick.clone();
+    let stop = std::sync::Barrier::new(sims.len());
+    let params: Vec<(server::claims::Fenced, server::claims::WorldGeneration)> =
+        sims.iter().map(|s| (w.claims[s.ordinal.0 as usize].fenced().clone(), w.generations[s.ordinal.0 as usize].clone())).collect();
+    let exited = std::thread::scope(|scope| {
+        let handles: Vec<_> = sims
+            .iter_mut()
+            .zip(&params)
+            .map(|(sim, (fenced, generation))| {
+                let (tick, stop) = (tick.clone(), &stop);
+                scope.spawn(move || {
+                    let region_out = sim.region_out.clone();
+                    let cuts = sim.cuts.take();
+                    // Under `claim` the lease is beaten while the host waits for its leave cut
+                    // (`server::run`'s exit does so); the R3 rig's hosts beat nothing.
+                    let mut beat = sim.heartbeat.take();
+                    let beat_fenced = fenced.clone();
+                    stop.wait();
+                    let at = Instant::now();
+                    let exit = server::cuts::exit_world(
+                        &mut sim.manager,
+                        server::cuts::ExitParams {
+                            region_out: &region_out,
+                            now_ms: || started.elapsed().as_millis() as u64,
+                            cuts,
+                            coordinator: None,
+                            fenced,
+                            world_generation: generation,
+                            park_timeout: server::cuts::EXIT_PARK_TIMEOUT,
+                            save_timeout: Duration::from_secs(10),
+                            now_tick: || 0,
+                        },
+                        |m| {
+                            let _ = server::lease::pump_or_fence(&mut beat, &beat_fenced, Instant::now());
+                            m.spawner_mut().tick_all();
+                            m.spawner_mut().pump();
+                            tick.fetch_max(m.spawner_mut().world_tick(), std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(5));
+                        },
+                    );
+                    Exited { exit, took: at.elapsed(), leaving_cut: sim.manager.leaving_cut() }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("an exit thread panicked")).collect::<Vec<_>>()
+    });
+    for sim in sims {
+        let h = sim.ordinal;
+        drop(sim);
+        w.switches[h.0 as usize].drop_link();
+        w.links[h.0 as usize] = None;
+    }
+    exited
 }

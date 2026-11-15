@@ -163,6 +163,13 @@ pub fn register(
     store.register_host(host, policy).map(Some)
 }
 
+/// The start-up error `server::run` stops with (exit 1) when this process's registration is
+/// refused: a `static` host beside a live row (`StoreError::NotAlone`) names
+/// `VOXEL_OWNERSHIP=claim` through the store's message.
+pub fn registration_refusal(e: &StoreError) -> String {
+    format!("registering this host: {e}")
+}
+
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]

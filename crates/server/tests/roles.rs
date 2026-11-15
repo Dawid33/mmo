@@ -500,8 +500,15 @@ fn a_second_static_host_is_refused_at_registration() {
     let stop = std::sync::atomic::AtomicBool::new(false);
     let err = server::lease::register(&store, host, game::CrashPolicy::Rollback, &stop).expect_err("refused");
     assert!(matches!(&err, world_store::StoreError::NotAlone { live } if *live == vec![first.id]), "{err:?}");
-    let message = format!("registering this host: {err}");
-    assert!(message.contains("VOXEL_OWNERSHIP=claim"), "{message}");
+    assert_eq!(
+        server::lease::registration_refusal(&err),
+        format!(
+            "registering this host: a static host registers only when no other host runs, but hosts {} hold live rows; \
+             several hosts need VOXEL_OWNERSHIP=claim",
+            first.id
+        ),
+        "the start-up error `server::run` exits 1 with"
+    );
     assert_eq!(store.hosts().unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![first.id], "nothing written");
     store.shutdown();
 }

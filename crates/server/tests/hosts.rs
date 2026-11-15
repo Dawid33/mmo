@@ -1002,76 +1002,19 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     w.stop(&dir);
 }
 
-/// Host 1 leaves cleanly (`exit_world` with several hosts: a leave cut): it exits 0 with
-/// its row clean. A slime sent toward it meanwhile waits in host 0's session and is host
-/// 0's row in its next cut. Host 1 returns: the generation is unchanged, and the slime
-/// arrives there once.
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() {
-    install_props();
-    let Some(db) = PgDb::create("leave") else { return };
-    let dir = scratch("leave");
-    let mut w = world(&db, &dir);
-    let generation = w.claims[0].store().world_generation().unwrap();
-    w.until_committed_after(&db, 0);
-    assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Clean, "host 1 left");
-    let clean: Vec<i64> = query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1");
-    assert_eq!(clean, [1], "host 1's row is clean");
-    let (left_in, _) = last_committed(&db);
-    assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    // A slime toward host 1's region: it waits on host 0, a row of host 0's next cut.
-    let (a0, b1) = (seam_of(&w, h(0)), seam_of(&w, h(1)));
-    let past = if b1.x != a0.x {
-        if b1.x > a0.x { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 }
-    } else {
-        REGION_SIZE / 2.0
-    };
-    let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
-    sim(&mut w, h(0)).manager.spawner_mut().with_region(a0, |region| {
-        let key = region.data().id_index[&id];
-        let y = above_ground_y();
-        let at = if b1.x != a0.x {
-            game::rapier3d::math::Vector::new(past, y, REGION_SIZE / 2.0)
-        } else {
-            let z = if b1.z > a0.z { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
-            game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, z)
-        };
-        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
-    });
-    w.pair.until("the slime waits in host 0's session", |p| p.sims[0].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id));
-    w.until_committed_after(&db, left_in);
-    let rows = query_i64s(
-        &db,
-        &format!("SELECT COUNT(*) FROM in_flight WHERE host = 0 AND kind = 0 AND target_rx = {} AND target_rz = {}", b1.x, b1.z),
-    );
-    assert_eq!(rows, [1], "host 0's cut holds the waiting slime as a row");
-    // Host 1 returns.
-    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
-    assert_eq!((again.generation, again.bumped), (generation, false), "a clean return keeps the generation");
-    w.pair.until("the slime arrived on host 1", |p| {
-        p.sims.iter().all(|s| s.manager.peer_unreceived() == 0) && p.sims[1].holders(id) == [b1]
-    });
-    for _ in 0..40 {
-        w.pair.round();
-    }
-    // It arrived on host 1 (above); slimes wander, so only once is asserted now.
-    assert_eq!(holders_all(&mut w, id).len(), 1, "once: {:?}", holders_all(&mut w, id));
-    for h in (0..u64::from(HOSTS)).map(HostId) {
-        assert!(!w.generations[h.0 as usize].is_set(), "no rollback");
-    }
-    w.until_committed_after(&db, last_committed(&db).0);
-    assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    w.stop(&dir);
-}
+// `clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers` moved (Elastic 1) to `takeover.rs` as `a_clean_leave_keeps_the_generation_and_its_waiting_transfers_reach_the_heir`: a cleanly
+// departed host never returns, its land and the transfers waiting for it reach a new host only
+// through a `Leave` succession, which this rig's `Rollback` coordinator never declares.
 
-/// Final review I1: host 1 returns from a clean leave while a cut of host 0 alone is
-/// pending (begun, host 0's part not staged yet): that cut is aborted — by the coordinator
-/// on host 1's attach, or by the store's decision (host 1's row is dirty and unlisted) —
-/// the next cut takes both and commits, and a slime of host 0's is held and stored once.
+/// Final review I1, Elastic 1: host 1 leaves cleanly and its process starts again — a NEW
+/// host owning nothing — while a cut of host 0 alone is pending (begun, host 0's part not
+/// staged yet). What the code does today: that cut is ABORTED (by the coordinator on the new
+/// host's attach, or by the store's decision: the new host's row is dirty and unlisted); the
+/// next cut takes host 0 and the new host and commits, and a slime of host 0's is held and
+/// stored once. (Task 4's `a_host_joining_during_a_cut_is_in_the_next_one` replaces the abort.)
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
+fn a_new_host_registering_beside_a_cut_that_excludes_it_aborts_that_cut() {
     install_props();
     let Some(db) = PgDb::create("lback") else { return };
     let dir = scratch("lback");
@@ -1085,10 +1028,14 @@ fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
     // A cut of host 0 alone begins; nothing of host 0 runs from here until host 1 is back.
     let cut = until_part(&mut w, 0, &["pending", "marked"]);
     assert_eq!(decision_of(&db, cut), None);
+    // Elastic 1: host 1's process starts again as a NEW host (owning nothing) while the cut of
+    // host 0 alone is pending. Today that cut is ABORTED: the decision lists every live dirty
+    // row, and the new host's is not in it (Task 4: a host joining mid-cut is in the next cut).
     let again = restart_host(&mut w, &db, &dir, h(1), 3001);
-    assert_eq!((again.generation, again.bumped), (generation, false), "a clean return");
-    w.pair.until("the cut that excludes host 1 is decided", |_| decision_of(&db, cut).is_some());
+    assert_eq!((again.generation, again.bumped), (generation, false), "a new host: the generation kept");
+    w.pair.until("the cut that excludes the new host is decided", |_| decision_of(&db, cut).is_some());
     assert_eq!(decision_of(&db, cut), Some(false), "the cut of host 0 alone is aborted");
+    w.pair.until("the new host attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
     w.until_committed_after(&db, cut.0 as i64);
     assert_eq!(holders_all(&mut w, id).len(), 1, "held once: {:?}", holders_all(&mut w, id));
     let (birth, serial) = (id.birth_region, id.serial);
@@ -1271,156 +1218,10 @@ fn aborted_leave_cut_past_the_leave_timeout_exits_dirty() {
     w.stop(&dir);
 }
 
-/// The bound on both hosts' clean leave when they are stopped together: well inside the
-/// supervisor's 95 s deadline (the leave batch, a cut's lead and its decision take ~3 s).
-const BOTH_LEAVE_WITHIN: Duration = Duration::from_secs(15);
 
-/// Slime `id` in host `h`'s seam region, put just past the seam toward the other host's.
-fn push_over_the_seam(w: &mut World, h: HostId, id: EntityId) {
-    let (a, _) = w.seam;
-    let from = seam_of(w, h);
-    // The seam is `b = a + x`: from `a` over +x, from `b` over -x.
-    let x = if from == a { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
-    sim(w, h).manager.spawner_mut().with_region(from, |region| {
-        let key = region.data().id_index[&id];
-        let at = game::rapier3d::math::Vector::new(x, above_ground_y(), REGION_SIZE / 2.0);
-        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
-    });
-}
-
-/// What one host's `exit_world` came to: its outcome, how long it took from the shared
-/// stop signal, and the leave cut that named it (`leaving_cut`).
-struct Exited {
-    exit: server::claims::ServerExit,
-    took: Duration,
-    leaving_cut: Option<game::CutId>,
-}
-
-/// Every host gets the stop signal at the same moment (as the dev stack's supervisor
-/// TERMs them all): each runs the real `exit_world` on its own thread, its regions ticking
-/// at its own pace, the coordinator reading the highest world tick. Their outcomes, by
-/// ordinal; their peer listeners and coordinator links go with them.
-fn exit_every_host_at_once(w: &mut World) -> Vec<Exited> {
-    let mut sims: Vec<Sim> = std::mem::take(&mut w.pair.sims);
-    sims.sort_by_key(|s| s.ordinal);
-    let started = w.pair.started;
-    let tick = w.pair.tick.clone();
-    let stop = std::sync::Barrier::new(sims.len());
-    let params: Vec<(server::claims::Fenced, server::claims::WorldGeneration)> =
-        sims.iter().map(|s| (w.claims[s.ordinal.0 as usize].fenced().clone(), w.generations[s.ordinal.0 as usize].clone())).collect();
-    let exited = std::thread::scope(|scope| {
-        let handles: Vec<_> = sims
-            .iter_mut()
-            .zip(&params)
-            .map(|(sim, (fenced, generation))| {
-                let (tick, stop) = (tick.clone(), &stop);
-                scope.spawn(move || {
-                    let region_out = sim.region_out.clone();
-                    let cuts = sim.cuts.take();
-                    stop.wait();
-                    let at = Instant::now();
-                    let exit = server::cuts::exit_world(
-                        &mut sim.manager,
-                        server::cuts::ExitParams {
-                            region_out: &region_out,
-                            now_ms: || started.elapsed().as_millis() as u64,
-                            cuts,
-                            coordinator: None,
-                            fenced,
-                            world_generation: generation,
-                            park_timeout: server::cuts::EXIT_PARK_TIMEOUT,
-                            save_timeout: Duration::from_secs(10),
-                            now_tick: || 0,
-                        },
-                        |m| {
-                            m.spawner_mut().tick_all();
-                            m.spawner_mut().pump();
-                            tick.fetch_max(m.spawner_mut().world_tick(), std::sync::atomic::Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(5));
-                        },
-                    );
-                    Exited { exit, took: at.elapsed(), leaving_cut: sim.manager.leaving_cut() }
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("an exit thread panicked")).collect::<Vec<_>>()
-    });
-    for sim in sims {
-        let h = sim.ordinal;
-        drop(sim);
-        w.switches[h.0 as usize].drop_link();
-        w.links[h.0 as usize] = None;
-    }
-    exited
-}
-
-/// Task 14b: both hosts are stopped at the same moment with the coordinator up (the dev
-/// stack's shutdown), slimes crossing the seam both ways as they go. Their leave requests
-/// fall in one batch, so the design yields ONE leave cut naming both leaving (there is no
-/// stayer): both exit clean well inside the supervisor's deadline, that cut is committed,
-/// both `hosts` rows are clean and nothing stays prepared. Restarting both keeps the world
-/// generation (no rollback), and each slime is in the world exactly once.
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn both_hosts_stopped_together_leave_cleanly() {
-    install_props();
-    let Some(db) = PgDb::create("bothleave") else { return };
-    let dir = scratch("bothleave");
-    let mut w = world(&db, &dir);
-    let generation = w.claims[0].store().world_generation().unwrap();
-    w.until_committed_after(&db, 0);
-    let (before, _) = last_committed(&db);
-    let slimes: Vec<EntityId> = (0..u64::from(HOSTS))
-        .map(HostId)
-        .map(|h| {
-            let rc = seam_of(&w, h);
-            spawn_slime_in(&mut w, h, rc, REGION_SIZE / 2.0)
-        })
-        .collect();
-    w.pair.round();
-    for h in (0..u64::from(HOSTS)).map(HostId) {
-        push_over_the_seam(&mut w, h, slimes[h.0 as usize]);
-    }
-    let exited = exit_every_host_at_once(&mut w);
-    for (h, e) in exited.iter().enumerate() {
-        assert_eq!(e.exit, server::claims::ServerExit::Clean, "host {h} exits 0");
-        assert!(e.took < BOTH_LEAVE_WITHIN, "host {h} left in {:?}", e.took);
-    }
-    let cut = exited[0].leaving_cut.expect("a leave cut named host 0");
-    assert_eq!(exited[1].leaving_cut, Some(cut), "one leave cut named both hosts leaving");
-    assert_eq!(decision_of(&db, cut), Some(true), "it committed");
-    // A periodic cut running at the stop signal may commit before it; none after it, and
-    // no leave cut was aborted (asked for again).
-    let since: Vec<(i64, i64, bool)> = decisions(&db).into_iter().filter(|(c, _, _)| *c > before).collect();
-    assert!(since.iter().all(|(_, _, k)| *k), "no cut aborted since the stop: {since:?}");
-    assert_eq!(since.last().map(|(c, _, _)| *c as u64), Some(cut.0), "the leave cut is the last decided: {since:?}");
-    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts ORDER BY id"), [1, 1], "both rows are clean");
-    assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    // Both return: no generation bump, no rollback, each slime once.
-    for h in (0..u64::from(HOSTS)).map(HostId) {
-        let again = restart_host(&mut w, &db, &dir, h, 3000 + h.0);
-        assert_eq!((again.generation, again.bumped), (generation, false), "host {h}'s clean return keeps the generation");
-    }
-    w.pair.until("both hosts attached again", |p| p.sims.len() == 2 && p.sims.iter().all(|s| s.manager.world_attached()));
-    w.pair.until("every slime back in a running region, nothing owed", |p| {
-        p.sims.iter().all(|s| s.manager.peer_unreceived() == 0)
-            && slimes.iter().all(|id| p.sims.iter_mut().map(|s| s.holders(*id).len()).sum::<usize>() > 0)
-    });
-    for _ in 0..40 {
-        w.pair.round();
-    }
-    for id in &slimes {
-        assert_eq!(holders_all(&mut w, *id).len(), 1, "{id:?} once: {:?}", holders_all(&mut w, *id));
-    }
-    for h in (0..u64::from(HOSTS)).map(HostId) {
-        assert!(!w.generations[h.0 as usize].is_set(), "host {h}: no rollback");
-        assert_eq!(sim(&mut w, h).manager.take_higher_generation(), None, "host {h} sees no newer generation");
-    }
-    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation, "the generation is unchanged");
-    w.until_committed_after(&db, cut.0 as i64);
-    assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    w.stop(&dir);
-}
+// `both_hosts_stopped_together_leave_cleanly` moved (Elastic 1) to `takeover.rs` as `both_hosts_stopped_together_leave_cleanly_and_new_hosts_inherit_by_leave_successions`: a cleanly
+// departed host never returns, its land and the transfers waiting for it reach a new host only
+// through a `Leave` succession, which this rig's `Rollback` coordinator never declares.
 
 /// Task 14b finding (fixed by Task 12b): a slime stored in host 0's seam region by one
 /// committed cut crosses into host 1's region before the next. Host 0's part deletes its
@@ -1882,8 +1683,9 @@ fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode)
 }
 
 /// A host that left cleanly (a committed leave cut, its row clean) is what a booting host
-/// reads as left (`peer_link::left_cleanly`, seeding `note_left_peers`); once it is back
-/// (its new boot registered) it is not, and a crashed host (its row dirty) never is.
+/// reads as left (`peer_link::left_cleanly`, seeding `note_left_peers`). Elastic 1: it never
+/// comes back — its restarted process is a new host, which reads the clean row too; a crashed
+/// host (its row dirty) is never left.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn hosts_that_left_cleanly_are_read_at_boot() {
@@ -1897,10 +1699,14 @@ fn hosts_that_left_cleanly_are_read_at_boot() {
     assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Clean, "host 1 left");
     assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [(h(1), 1001)], "host 1 left as boot 1001");
     assert_eq!(server::peer_link::left_cleanly(&store0, h(1)).unwrap(), [], "its own row is not a peer's");
-    restart_host(&mut w, &db, &dir, h(1), 3001);
-    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [], "back: its new boot cleared the row");
-    kill_host(&mut w, h(1));
-    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [], "crashed: its row stays dirty");
+    // Elastic 1: a leaver never returns — its process starts again as a NEW host, the clean row
+    // stays, and the new host reads it at its start; the new host's own row is dirty.
+    let again = restart_host(&mut w, &db, &dir, h(1), 3001);
+    assert_eq!(again.generation, w.claims[0].store().world_generation().unwrap(), "the generation kept");
+    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [(h(1), 1001)], "the clean row stays");
+    assert_eq!(server::peer_link::left_cleanly(&store0, again.id).unwrap(), [(h(1), 1001)], "the new host reads it");
+    kill_host(&mut w, again.id);
+    assert_eq!(server::peer_link::left_cleanly(&store0, h(0)).unwrap(), [(h(1), 1001)], "a crashed host's row is dirty: not left");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }

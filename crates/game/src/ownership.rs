@@ -324,6 +324,13 @@ impl Ownership for Static {
     fn directory_mut(&mut self) -> Option<&mut Directory> {
         None
     }
+    /// A `static` host ALONE (its table is itself) runs every region of the world: it adopts
+    /// every host's in-flight rows and its (one-phase) cuts replace them all. Since Elastic 1
+    /// its restart is a new id, so the rows an earlier process of the world left (under its old
+    /// id, e.g. after a clean leave) are its to deliver — none would ever be loaded otherwise.
+    fn runs_every_host(&self) -> bool {
+        self.layout == [self.me]
+    }
 }
 
 /// The ownership directory as one host mirrors it (`super_regions.owner`): per super-region

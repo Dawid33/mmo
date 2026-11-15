@@ -103,7 +103,7 @@ fn static_and_all_in_one_answer_as_before() {
     let built = |o: &str| ownership_for(o, h(7)).map(|p| (p.me(), p.runs_every_host(), p.policy()));
     assert_eq!(built(""), Ok((h(0), true, CrashPolicy::Rollback)), "allinone by default: SOLO, every host");
     assert_eq!(built(" allinone "), Ok((h(0), true, CrashPolicy::Rollback)));
-    assert_eq!(built("static"), Ok((h(7), false, CrashPolicy::Rollback)));
+    assert_eq!(built("static"), Ok((h(7), true, CrashPolicy::Rollback)), "a static host is alone: it runs every host's rows");
     let alone = ownership_for("static", h(7)).unwrap();
     for sx in -8..8 {
         assert_eq!(alone.owner_of((sx, 2)), Owner::Me, "a static host is alone: it owns everything");

@@ -874,7 +874,7 @@ pub fn run() -> claims::ServerExit {
             let registered = match lease::register(store, new_host, crash_policy, &stop_signal) {
                 Ok(Some(registered)) => registered,
                 Ok(None) => return claims::ServerExit::Clean,
-                Err(e) => fatal(&format!("registering this host: {e}")),
+                Err(e) => fatal(&lease::registration_refusal(&e)),
             };
             heartbeat = Some(lease::Heartbeat::new(store.clone(), registered.id, boot));
             info!(

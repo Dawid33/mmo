@@ -322,6 +322,9 @@ pub struct MultiRig {
     pub rounds: u64,
     /// Each host's current boot ([`Self::start`] makes a new one).
     pub boots: Vec<u64>,
+    /// The hosts the rig was made with (`h(0)..h(founders)`, each with a keeper); hosts
+    /// [`Self::start`] adds later have none.
+    pub founders: u32,
     /// Hosts killed ([`Self::kill`]) and not started again: their slot holds an empty
     /// placeholder that only keeps the world tick.
     pub dead: BTreeSet<HostId>,
@@ -353,7 +356,7 @@ pub struct MultiRig {
     /// The rig store's world generation (raised by [`Self::roll_back`]).
     pub generation: u64,
     /// Hosts that left in a committed cut, with the boot that left (their `hosts` row is
-    /// clean): until another boot of theirs starts ([`Self::start_as`]).
+    /// clean). A leaver never comes back: a restarted process is a new host ([`Self::start`]).
     pub left: BTreeMap<HostId, u64>,
     /// Whether the rig coordinator gives a departed host's land away when a host asks for
     /// it ([`Self::with_land_on_demand`], [`Self::drive_land`]).
@@ -380,7 +383,7 @@ impl MultiRig {
         seed: u64,
         link_delay_steps: u32,
     ) -> MultiRig {
-        Self::new_from(hosts, s, schedule, seed, link_delay_steps, None)
+        Self::new_from(hosts, s, schedule, seed, link_delay_steps, None, hosts)
     }
 
     /// [`Self::new`], every host's regions starting from `stored` where it holds them (a
@@ -392,6 +395,7 @@ impl MultiRig {
         seed: u64,
         link_delay_steps: u32,
         stored: Option<BTreeMap<RegionCoords, StoredRegion>>,
+        keepers: u32,
     ) -> MultiRig {
         let mut rigs = Vec::new();
         let mut homes = Vec::new();
@@ -412,7 +416,8 @@ impl MultiRig {
                 .map(|rc| RegionCoords::new(rc.x + 32, rc.z + 32))
                 .find(|rc| ownership.owns(*rc, s))
                 .expect("a host owns a region near (32, 32)");
-            homes.push(home);
+            // A host started later (no keeper) keeps no home of its own: a slot only.
+            homes.push(if h.0 < u64::from(keepers) { home } else { homes[0] });
         }
         let mut links = BTreeMap::new();
         let mut strips = BTreeMap::new();
@@ -462,6 +467,7 @@ impl MultiRig {
                 claims_pending: Vec::new(),
                 rounds: 0,
                 boots: host_ids(hosts).map(rig_boot).collect(),
+                founders: keepers,
                 dead: BTreeSet::new(),
                 schedule,
                 successions: Vec::new(),
@@ -478,7 +484,7 @@ impl MultiRig {
                 land_on_demand: false,
                 land_declared: Vec::new(),
             };
-        for h in host_ids(hosts) {
+        for h in host_ids(keepers) {
             rig.keep(h);
         }
         rig.connect();
@@ -1016,7 +1022,9 @@ impl MultiRig {
                 directory.set(*sr, *owner, *epoch);
             }
             rig.manager.set_ownership(Box::new(claim), self.s);
-            assert!(rig.manager.owns(self.homes[h]), "the rows give host {h} its keeper's home");
+            if h < self.founders as usize {
+                assert!(rig.manager.owns(self.homes[h]), "the rows give host {h} its keeper's home");
+            }
         }
         self.directory = Some(rows);
     }
@@ -1136,7 +1144,7 @@ impl MultiRig {
         let regions: BTreeMap<RegionCoords, StoredRegion> =
             self.committed.values().flat_map(|s| s.regions.iter().map(|(rc, r)| (*rc, r.clone()))).collect();
         let hosts = self.hosts.len() as u32;
-        let mut rig = MultiRig::new_from(hosts, self.s, None, 0, 0, Some(regions));
+        let mut rig = MultiRig::new_from(hosts, self.s, None, 0, 0, Some(regions), self.founders);
         if let Some(rows) = &self.directory {
             rig.with_directory(rows.clone());
         }
@@ -1209,19 +1217,55 @@ impl MultiRig {
         self.dead.insert(h);
     }
 
-    /// A dead host `h` starts again as a new boot ([`Self::start_as`]): its boot.
-    pub fn start(&mut self, h: HostId) -> u64 {
-        let boot = self.boots[h.0 as usize] + 1_000_000;
-        self.start_as(h, boot);
-        boot
+    /// A host process named `name` starts (Elastic 1: a restarted process is a NEW host): the
+    /// rig issues it the next id — its own counter standing in for the store's `next_host_id`,
+    /// never an id a host had before — with exactly one boot. It owns nothing (a `PgClaim`
+    /// directory read from the rig's `super_regions` table: what it holds is what the table
+    /// says, i.e. nothing until a succession or a claim gives it land), no keeper; a link to
+    /// every live host and to the coordinator. Its id.
+    pub fn start(&mut self, name: &str) -> HostId {
+        let h = HostId(self.hosts.len() as u64);
+        let boot = 7_000_000 + h.0;
+        let tick = self.hosts.iter_mut().map(|r| r.manager.spawner_mut().world_tick()).max().unwrap_or(0);
+        let mut spawner = InlineSpawner::default();
+        spawner.set_world_tick(tick);
+        self.hosts.push(Rig::with_spawner(spawner, super::seam_translate::uniform_floor));
+        // No keeper: its "home" is never kept (a slot so every table stays indexed by id).
+        self.homes.push(self.homes[0]);
+        self.boots.push(boot);
+        if self.coordinator.is_some() {
+            self.world_sent.push(Arc::default());
+            self.world_hold.push(Arc::default());
+            self.world_hop_is.push(Arc::default());
+            self.world_hold_orders.push(Arc::default());
+        }
+        self.dead.insert(h);
+        // The name labels a process for people (`VOXEL_HOST_NAME`); it is never a key.
+        let _ = name;
+        self.start_process(h, boot);
+        // Every live host learns the new one is live at its next directory read (claim on demand).
+        if self.claim_store.is_some() {
+            let live: Vec<HostId> = host_ids(self.hosts.len() as u32).filter(|o| !self.dead.contains(o) && *o != h).collect();
+            for o in live {
+                self.read_directory(o);
+            }
+        }
+        h
     }
 
-    /// A dead host `h` starts again as process `boot` (its dead boot again: a zombie of it):
-    /// a fresh manager on the rig store's committed state — its regions as stored, its
-    /// journal from the last committed cut, a `PgClaim` directory read from the rig's
-    /// `super_regions` table — with a new link to every live host (whose sessions with `h`
-    /// are kept, only the link swapped) and to the coordinator.
-    pub fn start_as(&mut self, h: HostId, boot: u64) {
+    /// The process of the dead host `h` wakes (a zombie: the SAME id and boot — a hung
+    /// process, never a restart): a fresh manager as [`Self::start`]'s, linked to every live
+    /// host and to the coordinator, whose hellos the others must refuse.
+    pub fn revive(&mut self, h: HostId) {
+        let boot = self.boots[h.0 as usize];
+        self.start_process(h, boot);
+    }
+
+    /// Host slot `h` (dead, see [`Self::start`]) runs as process `boot`: a fresh manager on the
+    /// rig store's committed state — its regions as stored, its journal from the last
+    /// committed cut, a `PgClaim` directory read from the rig's `super_regions` table — with a
+    /// new link to every live host and to the coordinator.
+    fn start_process(&mut self, h: HostId, boot: u64) {
         assert!(self.dead.contains(&h), "host {h} runs");
         let n = self.hosts.len() as u32;
         let regions: BTreeMap<RegionCoords, StoredRegion> =
@@ -1257,7 +1301,8 @@ impl MultiRig {
             let (a, b) = (h.min(other), h.max(other));
             let (ea, eb) = InlinePeerLink::pair(mix(self.seed, boot ^ a.0 * u64::from(n) + b.0), self.link_delay);
             let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
-            let (sa, sb) = (self.strips[&(a, b)].clone(), self.strips[&(b, a)].clone());
+            let sa = self.strips.entry((a, b)).or_default().clone();
+            let sb = self.strips.entry((b, a)).or_default().clone();
             let (ba, bb) = (self.boots[a.0 as usize], self.boots[b.0 as usize]);
             self.hosts[a.0 as usize].manager.set_peer(b, PeerSession::new(rig_hello_as(a, ba), b), Box::new(SharedEnd(ea.clone(), sa)));
             self.hosts[b.0 as usize].manager.set_peer(a, PeerSession::new(rig_hello_as(b, bb), a), Box::new(SharedEnd(eb.clone(), sb)));

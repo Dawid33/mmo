@@ -3634,13 +3634,12 @@ fn a_link_returning_mid_cut_stays_held_until_cut_done() {
     sweep("a_link_returning_mid_cut_stays_held_until_cut_done", 2, 1, SEEDS, returning_link_held);
 }
 
-/// R4 Task 12: B leaves in a committed cut (A holds its session: A received B's messages
-/// up to some count, of B's leaving boot) and comes back as a new boot whose link to A is
-/// down from the start. The new boot sends a slime toward A (its session's first entries,
-/// numbered from 1). A world cut with both commits by counts: A's count is of the boot
-/// that left, not of the new one — the new boot treats it as 0, so everything it owes A is
-/// its own (the slime stored once, as its row), never "received" by A. The restarted world
-/// holds it once; when the link returns it lands once.
+/// R4 Task 12, Elastic 1: B leaves in a committed cut (A holds its session: A received B's
+/// messages up to some count) and its process starts again — a NEW host C (a new id; it owns
+/// nothing) whose link to A is down from the start. A world cut with A and C commits by
+/// counts: A's count of C is of C's own boot and 0 — nothing counted against B is ever applied
+/// to C — and the slime B sent A before it left is stored once (A's row), restored once, and
+/// live once when the link returns.
 fn other_boot_counts(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
@@ -3662,21 +3661,11 @@ fn other_boot_counts(rig: &mut MultiRig) {
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
-    rig.start(hb);
-    rig.link_down(ha, hb);
-    rig.core().set_expected_hosts([ha, hb].into_iter().collect());
-    // A player of the new boot keeps `b` running there (the restarted host has no keeper).
-    rig.connect_home(hb, P2_CLIENT, P2_PLAYER, centre_of(b));
-    assert!(until(rig, BODY_ROUNDS, |rig| rig.hosts[hb.0 as usize].manager.running_regions().contains(&b)), "b runs on the new boot");
-    let late = slime_in(rig, b, 1);
-    assert!(push_over(rig, late, b, a), "the late slime stands in {b:?}");
-    assert!(
-        (0..CROSS_ROUNDS).any(|_| {
-            rig.cut_round();
-            rig.hosts[hb.0 as usize].manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == ha && *i == late)
-        }),
-        "the late slime waits in the new boot's session"
-    );
+    let hc = rig.start("b");
+    assert!(hc != hb && hc != ha, "a new id: {hc}");
+    let c_boot = rig.boots[hc.0 as usize];
+    rig.link_down(ha, hc);
+    rig.core().set_expected_hosts([ha, hc].into_iter().collect());
     let after = latest_cut(rig);
     let mut decided = None;
     for _ in 0..WORLD_CUT_ROUNDS {
@@ -3686,29 +3675,31 @@ fn other_boot_counts(rig: &mut MultiRig) {
         }
         rig.cut_round();
     }
-    let (cut, committed) = decided.expect("a cut with the new boot was decided");
-    assert!(committed, "cut {} with the new boot commits by counts (seed {}, link delay {})", cut.0, rig.seed, rig.link_delay);
-    assert!(rig.last_committed().1.contains_key(&hb), "the new boot took part");
+    let (cut, committed) = decided.expect("a cut with the new host was decided");
+    assert!(committed, "cut {} with the new host commits by counts (seed {}, link delay {})", cut.0, rig.seed, rig.link_delay);
+    assert!(rig.last_committed().1.contains_key(&hc), "the new host took part");
     let counted = rig.sent_to_coordinator(ha).into_iter().find_map(|m| match m {
-        game::HostMsg::CutPeerCount { cut: c, peer, received_through, boot } if c == cut && peer == hb => Some((received_through, boot)),
+        game::HostMsg::CutPeerCount { cut: c, peer, received_through, boot } if c == cut && peer == hc => Some((received_through, boot)),
         _ => None,
     });
-    let (count, boot) = counted.expect("A reported its count of B");
-    assert!(count > 0 && boot == left_boot, "A's count is of the boot that left: {count} of {boot:#x} (left as {left_boot:#x})");
-    let places = rig.stored_places(late);
-    assert_eq!(places.len(), 1, "{late:?} stored once: {places:?} (seed {}, link delay {})", rig.seed, rig.link_delay);
-    assert_eq!(places[0].0, hb, "the new boot's own row: {places:?}");
-    assert_restored_once(rig, &[early, late]);
-    rig.link_up(ha, hb);
-    assert!(until_landed(rig, late), "the late slime lands");
-    until_quiet(rig);
-    assert_eq!((live_count(rig, early), live_count(rig, late)), (1, 1), "each once");
+    let (count, boot) = counted.expect("A reported its count of C");
+    assert!(count == 0 && boot != left_boot, "A's count of C is 0 and never of B's boot ({count} of {boot:#x}, B left as {left_boot:#x}, C is {c_boot:#x})");
+    let places = rig.stored_places(early);
+    assert_eq!(places.len(), 1, "{early:?} stored once: {places:?} (seed {}, link delay {})", rig.seed, rig.link_delay);
+    assert_eq!(places[0].0, ha, "A's row: {places:?}");
+    assert_restored_once(rig, &[early]);
+    rig.link_up(ha, hc);
+    // (A's session with the dead B keeps what B never acknowledged: B is gone for good.)
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(live_count(rig, early), 1, "once");
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn counts_from_another_boot_mean_everything_is_owed() {
-    sweep("counts_from_another_boot_mean_everything_is_owed", 2, 1, SEEDS / 2, other_boot_counts);
+fn counts_of_a_new_host_start_at_zero() {
+    sweep("counts_of_a_new_host_start_at_zero", 2, 1, SEEDS / 2, other_boot_counts);
 }
 
 /// R4 Task 12 × leave cuts (the hold-composition table's first row): the link between A
@@ -6634,46 +6625,49 @@ fn departed_pointers_follow_the_report_or_are_dropped() {
 /// A super-region nobody claims in the rig's layout.
 const FAR_SR: game::SuperRegion = (90, 90);
 
-/// After the succession a process of the dead boot comes back (a zombie): every survivor
-/// refuses its hello — it is never reachable and gets nothing, not even what waits for its
-/// ordinal. Then a NEW boot of that ordinal starts: it is welcome — its session numbering
-/// starts fresh and what waited for the ordinal is delivered to it.
+/// After the succession a process of the dead boot comes back (a zombie: the same id and
+/// boot): every survivor refuses its hello — it is never reachable and gets nothing, not even
+/// what waits for its id. Then the process starts again (Elastic 1): a NEW host with a new id —
+/// it is welcome, a new peer session, and nothing that waited for the dead id is delivered to it.
 fn zombie_refused(rig: &mut MultiRig) {
     let chain = succession_world(rig);
     let dead = rig.owner(chain[1]);
     let (heir, _) = heir_and_survivor(rig, dead);
-    let old_boot = rig.boots[dead.0 as usize];
     rig.kill(dead);
     let succession = rig.run_succession(dead).remove(0);
     until_applied(rig, &succession);
     // The heir tells the dead ordinal of a claim: it waits for that ordinal's next boot.
     rig.hosts[heir.0 as usize].manager.send_reliable_for_test(dead, game::Reliable::Owns { rows: vec![(FAR_SR, 9)] }, false);
     let far = RegionCoords::new(FAR_SR.0, FAR_SR.1);
-    rig.start_as(dead, old_boot);
+    rig.revive(dead);
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
         assert!(!rig.hosts[heir.0 as usize].manager.peer_is_reachable(dead), "the dead boot is never reachable");
         assert_eq!(rig.hosts[dead.0 as usize].manager.owner_of(far), game::Owner::Free, "the zombie learns nothing");
     }
     rig.kill(dead);
-    let boot = rig.start(dead);
-    assert_ne!(boot, old_boot);
+    let new = rig.start("dead");
+    assert!(new != dead, "a new id");
     for _ in 0..CROSS_ROUNDS {
         let m = &rig.hosts[heir.0 as usize].manager;
-        if m.peer_is_reachable(dead) && m.peers_synced() && rig.hosts[dead.0 as usize].manager.owner_of(far) == game::Owner::Host(heir) {
+        if m.peer_is_reachable(new) && m.peers_synced() {
             break;
         }
         rig.cut_round();
     }
-    assert!(rig.hosts[heir.0 as usize].manager.peer_is_reachable(dead), "the new boot is welcome");
-    assert_eq!(rig.hosts[dead.0 as usize].manager.owner_of(far), game::Owner::Host(heir), "and gets what waited for its ordinal");
-    assert!(rig.hosts[heir.0 as usize].manager.peers_synced(), "the new boot synced: a store placement waits for nobody");
+    assert!(rig.hosts[heir.0 as usize].manager.peer_is_reachable(new), "the new host is welcome");
+    assert!(rig.hosts[heir.0 as usize].manager.peers_synced(), "the new host synced: a store placement waits for nobody");
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    assert_eq!(rig.hosts[new.0 as usize].manager.owner_of(far), game::Owner::Free, "what waited for the dead id never reaches the new one");
+    assert!(!rig.hosts[heir.0 as usize].manager.peer_is_reachable(dead), "the dead id stays unreachable");
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_boot_is_welcome() {
-    sweep("a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_boot_is_welcome", 2, 1, SEEDS / 4, zombie_refused);
+fn a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_host_is_welcome() {
+    sweep("a_zombie_hello_of_the_dead_boot_is_refused_and_a_new_host_is_welcome", 2, 1, SEEDS / 4, zombie_refused);
 }
 
 /// The heir's inherited land is held until it adopts: after the succession (every survivor
@@ -6774,9 +6768,9 @@ fn an_heir_masks_inherited_land_from_the_order_on() {
 }
 
 /// A host crashes inside its own leave cut and its succession's order is applied on the
-/// survivor BEFORE that cut's (abort) decision arrives: the leave pair ends with the order —
-/// the session no longer holds a next boot's hello for the leave (nothing would ever
-/// release it), so the host's next boot is reachable again.
+/// survivor BEFORE that cut's (abort) decision arrives: the leave pair ends with the order.
+/// Its process starts again as a NEW host (Elastic 1), which is reachable and synced at once —
+/// nothing of the dead id's leave holds it.
 fn order_before_the_leave_cuts_decision(rig: &mut MultiRig) {
     let chain = succession_world(rig);
     let (ha, hb) = (rig.owner(chain[0]), rig.owner(chain[1]));
@@ -6815,17 +6809,17 @@ fn order_before_the_leave_cuts_decision(rig: &mut MultiRig) {
     };
     m.apply_coordinator_message(order_of(&order));
     assert_eq!(m.successions(), [(order.id, true)], "applied before the leave cut's decision");
-    rig.start(hb);
+    let hc = rig.start("b");
     let mut reachable = false;
     for _ in 0..WORLD_CUT_ROUNDS {
-        // The next boot hears host A's first sync only if A's session to it is not held.
-        if rig.hosts[ha.0 as usize].manager.peer_is_reachable(hb) && rig.hosts[hb.0 as usize].manager.peers_synced() {
+        if rig.hosts[ha.0 as usize].manager.peer_is_reachable(hc) && rig.hosts[hc.0 as usize].manager.peers_synced() {
             reachable = true;
             break;
         }
         rig.cut_round();
     }
-    assert!(reachable, "host {hb}'s next boot is held at its hello for a leave that is over (seed {})", rig.seed);
+    assert!(reachable, "the new host {hc} is held at its hello (seed {})", rig.seed);
+    assert!(!rig.hosts[ha.0 as usize].manager.peer_is_reachable(hb), "the dead id stays unreachable");
 }
 
 #[test]
@@ -8282,8 +8276,8 @@ fn player_logging_in_on_a_departed_hosts_land_is_placed_on_the_heir() {
 }
 
 /// Carried requirement 2: host L left (a slime held for it on the survivor S), its land is
-/// declared a `Leave` succession of the boot that left, and L comes back as another boot
-/// right then — after the declaration in the store, so it owns nothing. S sees the two in
+/// declared a `Leave` succession of the boot that left, and L's process starts again right then
+/// — a NEW host (Elastic 1), owning nothing. S sees the two in
 /// either order (`hello_first`: L's new hello reaches S before the coordinator's order,
 /// which is held back meanwhile). The hello alone releases nothing (the new boot shows no
 /// claim of the land it left with); the order hands what was held to the heir — the held
@@ -8310,12 +8304,12 @@ fn leaver_back_at_its_declaration(rig: &mut MultiRig, hello_first: bool) {
         let applied = |rig: &mut MultiRig| rig.core().succession_progress().iter().any(|(i, a, _)| *i == succession.id && a.contains(&s));
         assert!(until(rig, SUCCESSION_ROUNDS, applied), "S applied the succession");
     }
-    // Another boot of L registers after the declaration: it owns nothing.
-    rig.start(leaver);
+    // L's process starts again after the declaration: a NEW host, owning nothing.
+    let back = rig.start("L");
     let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
     if hello_first {
-        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver.0 as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+        assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[back.0 as usize].manager.peer_is_reachable(s)), "the new host is linked to S");
         for _ in 0..WAIT_ROUNDS {
             rig.round();
         }
@@ -8378,10 +8372,9 @@ fn a_leaver_whose_hello_beats_the_leave_order_gets_nothing_twice() {
 
 /// A host that holds no super-region (an idle host under claim on demand: its land freed
 /// here, every directory read again) leaves in a committed cut and exits; every survivor
-/// holds its session. Its next boot returns owning nothing: the survivors release what they
-/// held at its hello (their directory gives it no land, so no `Leave` succession can owe
-/// anything to an heir) — reliable traffic reaches it, a world cut with it COMMITS, and a
-/// login on land it then claims is placed on it, once.
+/// holds its session. Its process starts again as a NEW host owning nothing (Elastic 1): every
+/// survivor reaches it (a new session; the left id's stays as it was), a world cut with it
+/// COMMITS, and a login on the free land is placed once on the host that claims it.
 fn ownerless_returns(rig: &mut MultiRig) {
     let chain = heir_world(rig);
     let (rs, rd) = (chain[0], chain[1]);
@@ -8404,29 +8397,26 @@ fn ownerless_returns(rig: &mut MultiRig) {
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
-    rig.start(leaver);
-    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
+    let back = rig.start("L");
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| {
-            let m = &rig.hosts[(*h).0 as usize].manager;
-            !m.peer_left(leaver) && m.peer_is_reachable(leaver)
-        })),
-        "every survivor released its session at the new boot's hello (seed {}, link delay {})",
+        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|h| rig.hosts[(*h).0 as usize].manager.peer_is_reachable(back))),
+        "every survivor reaches the new host (seed {}, link delay {})",
         rig.seed,
         rig.link_delay
     );
-    // A world cut with the new boot in it commits.
+    // A world cut with the new host in it commits.
     let before = rig.last_committed().0;
     for _ in 0..WORLD_CUT_ROUNDS {
-        if rig.last_committed().0 > before && rig.last_committed().1.contains_key(&leaver) {
+        if rig.last_committed().0 > before && rig.last_committed().1.contains_key(&back) {
             break;
         }
         rig.cut_round();
     }
     let (after, parts) = rig.last_committed();
-    assert!(after > before && parts.contains_key(&leaver), "a cut with host {leaver} committed: {:?}", rig.decided);
-    // A login on land the new boot then claims (its preferred claimer) is placed there.
+    assert!(after > before && parts.contains_key(&back), "a cut with host {back} committed: {:?}", rig.decided);
+    // A login on the free land is placed on the host that claims it, once.
     spawn_order_at(rig, s, P_PLAYER, rd, 1);
     let (mut taken, mut out) = (Vec::new(), Vec::new());
     for _ in 0..SUCCESSION_ROUNDS {
@@ -8437,18 +8427,19 @@ fn ownerless_returns(rig: &mut MultiRig) {
             break;
         }
     }
-    assert_eq!(rig.stored_owner(sr_of(rig, rd)), Some(leaver), "the new boot claimed it");
-    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [leaver], "placed on the new boot, once");
-    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1, ok: true, endpoint: Some(rig_endpoint(leaver)) };
+    let claimer = rig.stored_owner(sr_of(rig, rd)).expect("the free land was claimed");
+    assert_ne!(claimer, leaver, "never by the left id");
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [claimer], "placed on its claimer, once");
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1, ok: true, endpoint: Some(rig_endpoint(claimer)) };
     assert_eq!(out, [(s, ack)]);
-    rig.connect_login(leaver, NEW_LOGIN_CLIENT, P_PLAYER, Some(centre_of(rd)), LOGIN_TOKEN, 1);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT) == [(leaver, rd)]), "one body, on the new boot");
+    rig.connect_login(claimer, NEW_LOGIN_CLIENT, P_PLAYER, Some(centre_of(rd)), LOGIN_TOKEN, 1);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT) == [(claimer, rd)]), "one body, on its claimer");
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn an_ownerless_leaver_returns_and_a_cut_with_it_commits() {
-    sweep_hosts("an_ownerless_leaver_returns_and_a_cut_with_it_commits", ownerless_returns);
+fn an_ownerless_leavers_restart_is_a_new_host_and_a_cut_with_it_commits() {
+    sweep_hosts("an_ownerless_leavers_restart_is_a_new_host_and_a_cut_with_it_commits", ownerless_returns);
 }
 
 // --- Task 11 fix round 2 -----------------------------------------------------------
@@ -8518,10 +8509,10 @@ fn late_leave_note(rig: &mut MultiRig, hello_first: bool, stale_owns: bool) {
         rig.hold_world(s, false);
         assert!(until(rig, CROSS_ROUNDS, |r| s_left(r)), "S noted the leave");
     }
-    rig.start(leaver);
-    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
+    let back = rig.start("L");
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver.0 as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[back.0 as usize].manager.peer_is_reachable(s)), "the new host is linked to S");
     for _ in 0..WAIT_ROUNDS {
         rig.round();
         if !hello_first {
@@ -8581,12 +8572,12 @@ fn a_survivor_that_learns_the_leave_late_still_reports_what_it_held() {
     sweep("a_survivor_that_learns_the_leave_late_still_reports_what_it_held (note first)", 3, 1, HEIR_SWEEP_SEEDS, late_note_then_hello);
 }
 
-/// Fix round 2 (minor 3): a rolling restart that S learns late. L leaves; S's coordinator
+/// Fix round 2 (minor 3), Elastic 1: a restart that S learns late. L leaves; S's coordinator
 /// link is held from its `CutPrepared` on (its `CutDone` comes late); S sends a slime into
-/// L's region meanwhile (held by the leave pair); L's next boot comes back holding its land
-/// (no declaration) and says hello to S BEFORE S learns the commit. S notes the boot that
-/// LEFT (not the one that said hello), treats the new boot as back at the late `CutDone`
-/// and, its land shown again, releases: the slime reaches L's region once.
+/// L's region meanwhile (held by the leave pair); L's process starts again — a NEW host owning
+/// nothing — and says hello to S BEFORE S learns the commit. S notes the id that LEFT; nothing
+/// held for it goes to the new host. The left id's land is given at once to the host that
+/// needs it (a `Leave` succession: no item window), and the slime reaches L's region once.
 fn back_before_the_late_cut_done(rig: &mut MultiRig) {
     let chain = heir_world(rig);
     let (rs, rd) = (chain[0], chain[1]);
@@ -8609,27 +8600,26 @@ fn back_before_the_late_cut_done(rig: &mut MultiRig) {
     assert!(push_over(rig, id, rs, rd));
     assert!(until_decided(rig, cut), "the leave cut commits");
     rig.kill(leaver);
-    rig.start(leaver);
-    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
+    let back = rig.start("L");
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[leaver.0 as usize].manager.peer_is_reachable(s)), "the new boot is linked to S");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[back.0 as usize].manager.peer_is_reachable(s)), "the new host is linked to S");
     for _ in 0..WAIT_ROUNDS {
         rig.round();
+        assert!(!rig.owners_of(id).iter().any(|(h, _)| *h == back), "nothing held for the left id goes to the new host");
     }
-    assert!(!rig.hosts[s.0 as usize].manager.peer_is_reachable(leaver), "nothing goes to the new boot before S learns the leave");
     rig.hold_world(s, false);
-    assert!(
-        until(rig, CROSS_ROUNDS, |rig| !rig.hosts[s.0 as usize].manager.peer_left(leaver) && rig.hosts[s.0 as usize].manager.peer_is_reachable(leaver)),
-        "S released its session to the new boot at the late CutDone (seed {}, link delay {})",
-        rig.seed,
-        rig.link_delay
-    );
-    // The new boot has no keeper: an observer of it subscribes to L's region.
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.peer_left(leaver)), "S noted the left id at the late CutDone");
+    rig.with_land_on_demand(0);
+    let succession = until_land_declared(rig);
+    assert_eq!((succession.predecessor, succession.kind), (leaver, game::SuccessionKind::Leave));
+    assert_settled_whole(rig, &succession, &[id]);
+    // An observer of the heir (which may be the new host: it has no keeper) subscribes to it.
     let watcher = 31;
-    rig.hosts[leaver.0 as usize].event(game::ServerEvent::ObserverConnected { client: watcher, player: game::PlayerId(310) });
-    rig.hosts[leaver.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), watcher));
+    rig.hosts[succession.heir.0 as usize].event(game::ServerEvent::ObserverConnected { client: watcher, player: game::PlayerId(310) });
+    rig.hosts[succession.heir.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rd), watcher));
     assert!(until_landed(rig, id), "the slime landed");
-    assert_eq!(rig.owners_of(id), [(leaver, rd)], "in L's region, on its new boot");
+    assert_eq!(rig.owners_of(id), [(succession.heir, rd)], "in L's region, on its heir");
     assert_eq!(live_count(rig, id), 1);
     until_committed(rig, 1);
     assert_restored_once(rig, &[id]);
@@ -8637,18 +8627,17 @@ fn back_before_the_late_cut_done(rig: &mut MultiRig) {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_leaver_back_before_its_leave_is_learned_gets_what_waited_once() {
-    sweep_hosts("a_leaver_back_before_its_leave_is_learned_gets_what_waited_once", back_before_the_late_cut_done);
+fn a_leavers_restart_before_its_leave_is_learned_gets_nothing_and_the_heir_gets_it_once() {
+    sweep_hosts("a_leavers_restart_before_its_leave_is_learned_gets_nothing_and_the_heir_gets_it_once", back_before_the_late_cut_done);
 }
 
-/// Fix round 2 (boot path): survivor S leaves and stops; L leaves; T needs L's land and the
-/// `Leave` succession is declared (T the heir and only survivor); S boots again — after the
-/// declaration, the succession still open — and notes L as left from the store
-/// (`note_left_peers`). S's new boot is no survivor (it registered after the declaration),
-/// so no order ever comes to it, and it holds nothing of L's time: its directory, read
-/// first, gives L no land (the heir's now), so L's next boot is released at its hello —
-/// not held for an order that never comes. A cut with all three commits, the succession
-/// settles, and the slime T held for L lands once.
+/// Fix round 2 (boot path), Elastic 1: survivor S leaves and stops; L leaves; T needs L's land
+/// and the `Leave` succession is declared (T the heir and only survivor); S's process starts
+/// again — a NEW host S' — after the declaration, the succession still open, and notes L as
+/// left from the store (`note_left_peers`). S' is no survivor, so no order ever comes to it.
+/// L's process starts again too — a NEW host L' — and S' reaches it at once (it holds nothing
+/// for L'). A cut with T, S' and L' commits, the succession settles, and the slime T held for
+/// L lands once.
 fn boot_after_the_declaration(rig: &mut MultiRig) {
     let chain = heir_world(rig);
     let (rs, rd, rt) = (chain[0], chain[1], chain[2]);
@@ -8669,23 +8658,20 @@ fn boot_after_the_declaration(rig: &mut MultiRig) {
     assert!(push_over(rig, from_t, rt, rd));
     let succession = until_land_declared(rig);
     assert_eq!((succession.predecessor, succession.heir, succession.survivors.clone()), (leaver, t, vec![t]));
-    // S boots again, the succession open.
-    rig.start(s);
-    rig.hosts[s.0 as usize].manager.note_left_peers([(leaver, left_as)]);
-    assert!(rig.hosts[s.0 as usize].manager.peer_left(leaver), "S's new boot holds L's session");
-    rig.start(leaver);
-    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
+    // S's process starts again, the succession open: a new host S'.
+    let s2 = rig.start("S");
+    rig.hosts[s2.0 as usize].manager.note_left_peers([(leaver, left_as)]);
+    assert!(rig.hosts[s2.0 as usize].manager.peer_left(leaver), "S' holds L's session");
+    let back = rig.start("L");
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| {
-            let m = &rig.hosts[s.0 as usize].manager;
-            !m.peer_left(leaver) && m.peer_is_reachable(leaver)
-        }),
-        "S's new boot released L's new boot at its hello (seed {}, link delay {})",
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s2.0 as usize].manager.peer_is_reachable(back)),
+        "S' reaches L's restart, a new host (seed {}, link delay {})",
         rig.seed,
         rig.link_delay
     );
-    assert!(rig.hosts[s.0 as usize].manager.successions().is_empty(), "no order comes to a host that is no survivor");
+    assert!(rig.hosts[s2.0 as usize].manager.successions().is_empty(), "no order comes to a host that is no survivor");
     assert_settled_whole(rig, &succession, &[from_t]);
     let (_, parts) = rig.last_committed();
     assert_eq!(parts.len(), 3, "a cut of all three committed");
@@ -8696,16 +8682,15 @@ fn boot_after_the_declaration(rig: &mut MultiRig) {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_host_booted_after_a_leave_declaration_releases_the_leavers_next_boot() {
-    sweep("a_host_booted_after_a_leave_declaration_releases_the_leavers_next_boot", 3, 1, HEIR_SWEEP_SEEDS, boot_after_the_declaration);
+fn a_host_started_after_a_leave_declaration_reaches_the_leavers_restart() {
+    sweep("a_host_started_after_a_leave_declaration_reaches_the_leavers_restart", 3, 1, HEIR_SWEEP_SEEDS, boot_after_the_declaration);
 }
 
-/// Fix round 3: survivor S boots again after L's leave and BEFORE the declaration (so it is
-/// a survivor of it), but notes L as left only from a directory read AFTER the declaration
-/// (its boot-time read: modelled by noting the leave once the read shows the heir). L's next
-/// boot (owning nothing) says hello to S first: S releases it at once (no land noted), and
-/// then S's order takes `apply_leave_overtaken` — an empty report, the new boot's link left
-/// alone. Nothing is lost or duplicated: the settle is whole, T's held slime lands once.
+/// Fix round 3, Elastic 1: S's process starts again after L's leave and BEFORE the
+/// declaration — a new host S', a survivor of it — but notes L as left only from a directory
+/// read AFTER the declaration. L's process starts again too (a new host L', owning nothing)
+/// and S' reaches it at once; S' then applies the order, the new host's link left alone. Nothing is lost
+/// or duplicated: the settle is whole, T's held slime lands once.
 fn survivor_booted_between(rig: &mut MultiRig) {
     let chain = heir_world(rig);
     let (rs, rd, rt) = (chain[0], chain[1], chain[2]);
@@ -8722,34 +8707,29 @@ fn survivor_booted_between(rig: &mut MultiRig) {
         rig.kill(h);
     }
     let left_as = rig.boots[leaver.0 as usize];
-    // S boots again before the declaration: a survivor of it. Its order is held back.
-    rig.start(s);
-    let live: std::collections::BTreeSet<HostId> = [s, t].into_iter().collect();
+    // S's process starts again before the declaration: a new host S', a survivor of it. Its
+    // order is held back.
+    let s2 = rig.start("S");
+    let live: std::collections::BTreeSet<HostId> = [s2, t].into_iter().collect();
     rig.core().set_expected_hosts(live);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.world_attached()), "S attached");
-    rig.hold_world(s, true);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s2.0 as usize].manager.world_attached()), "S' attached");
+    rig.hold_world(s2, true);
     rig.with_land_on_demand(0);
     assert!(push_over(rig, from_t, rt, rd));
     let succession = until_land_declared(rig);
-    assert!(succession.survivors.contains(&s), "S is a survivor: {succession:?}");
-    rig.read_directory(s);
-    rig.hosts[s.0 as usize].manager.note_left_peers([(leaver, left_as)]);
-    rig.start(leaver);
-    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).collect();
+    assert!(succession.survivors.contains(&s2), "S' is a survivor: {succession:?}");
+    rig.read_directory(s2);
+    rig.hosts[s2.0 as usize].manager.note_left_peers([(leaver, left_as)]);
+    let back = rig.start("L");
+    let live: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
     rig.core().set_expected_hosts(live);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s2.0 as usize].manager.peer_is_reachable(back)), "S' reaches L's restart");
+    rig.hold_world(s2, false);
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| {
-            let m = &rig.hosts[s.0 as usize].manager;
-            !m.peer_left(leaver) && m.peer_is_reachable(leaver)
-        }),
-        "S released L's next boot at its hello"
+        until(rig, SUCCESSION_ROUNDS, |rig| rig.core().succession_progress().iter().any(|(i, a, _)| *i == succession.id && a.contains(&s2))),
+        "S' applied the order"
     );
-    rig.hold_world(s, false);
-    assert!(
-        until(rig, SUCCESSION_ROUNDS, |rig| rig.core().succession_progress().iter().any(|(i, a, _)| *i == succession.id && a.contains(&s))),
-        "S applied the order"
-    );
-    assert!(rig.hosts[s.0 as usize].manager.peer_is_reachable(leaver), "the new boot's link is left alone");
+    assert!(rig.hosts[s2.0 as usize].manager.peer_is_reachable(back), "the new host's link is left alone");
     assert_settled_whole(rig, &succession, &[from_t]);
     rig.run(rd);
     assert!(until_landed(rig, from_t), "the slime landed");

@@ -864,6 +864,8 @@ mod tests {
         assert!(share.fence().epochs.keys().all(|sr| game::rendezvous_among(*sr, layout.iter().copied()) == Some(h(5))));
         let alone = HostClaims::claim(store.clone(), &game::Static { me: h(7), layout: vec![h(7)] }, Some(extent), s).unwrap();
         assert_eq!((alone.fence().owner, alone.fence().epochs.len()), (h(7), 8), "a static host alone claims the extent");
+        assert_eq!(alone.fence().in_flight_scope(), None, "and adopts every host's in-flight rows (its restart is a new id)");
+        assert_eq!(share.fence().in_flight_scope(), Some(h(5)), "a host of a table only its own");
         store.shutdown();
     }
 
