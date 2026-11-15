@@ -378,6 +378,16 @@ fn rejoining(world: &World) -> bool {
 /// on the starting screen.
 pub(crate) fn leave_for_rejoin(world: &mut World) {
     leave_session(world);
+    // The session's first `SetPlayer` may have queued `InWorld` in this very frame
+    // (`enter_world_on_player`) — the frame its connect bound ran out, or it ended for a
+    // reason the rejoin goes on from. With the session gone that transition would strand
+    // the app in the world with no session, and `OnEnter(InWorld)` would end the rejoin
+    // (`rejoin_arrived`): it is taken back. The rejoin waits on the starting screen.
+    if let Some(mut next) = world.get_resource_mut::<NextState<AppState>>() {
+        if matches!(*next, NextState::Pending(AppState::InWorld) | NextState::PendingIfNeq(AppState::InWorld)) {
+            next.reset();
+        }
+    }
     world.get_resource_or_init::<StartingStatus>().0 = crate::login::flow::REJOIN_STATUS.into();
 }
 
@@ -1409,6 +1419,56 @@ mod tests {
     /// A session whose home host was replaced (a fence) is torn down like any
     /// other — every scoped tree despawned, every registered resource reset,
     /// the old channels told to leave — and a rejoin, kept by the login across
+    /// Final review C minor 7: the rejoined session's first `SetPlayer` and its loss
+    /// (a refusal in the same packet batch) land in ONE frame. The `InWorld` that
+    /// `SetPlayer` queued is taken back with the session: the app stays on the
+    /// starting screen and the rejoin goes on — it is not stranded in the world with
+    /// no session.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_set_player_in_the_frame_the_rejoined_session_is_lost_does_not_strand_the_app() {
+        use crate::login::flow::LoginSession;
+        let mut app = app(false);
+        let (command_send, _command_recv) = crossbeam::channel::unbounded();
+        app.add_session_reset::<crate::renderer::LocalPlayer>()
+            .insert_resource(crate::renderer::collider_debug::DebugFlagsRes(game::DebugFlags::default()))
+            .insert_resource(crate::world_scale::WorldScale::TINY)
+            .insert_resource(GameThread(command_send))
+            .add_plugins(SessionFlowPlugin)
+            .add_systems(OnEnter(AppState::InWorld), crate::login::flow::rejoin_arrived);
+        let mut login = LoginSession::new(crate::login::LoginApi::new("http://127.0.0.1:1"));
+        login.account = Some("a@b.c".into());
+        login.refresh = Some("r1".into());
+        login.playing_online = true;
+        login.joined_world = Some("alpha".into());
+        app.insert_resource(login);
+        SessionChannels::new().install(app.world_mut());
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InWorld);
+        app.update();
+        app.world_mut().resource_mut::<crate::renderer::LocalPlayer>().0 = Some(1);
+        let fenced = format!("{}{}", crate::instance::REFUSED_PREFIX, game::FENCED_REFUSAL);
+        app.world_mut().write_message(SessionEnded { reason: Some(fenced.clone()) });
+        app.update(); // Update: the rejoin starts, the teardown is queued
+        app.update(); // StateTransition: the starting screen
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting);
+        assert!(app.world().resource::<LoginSession>().rejoining());
+
+        // One frame: the new session's `SetPlayer`, and its end for a rejoinable reason.
+        app.world_mut().resource_mut::<crate::renderer::LocalPlayer>().0 = Some(1);
+        app.world_mut().write_message(SessionEnded { reason: Some(fenced) });
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::Starting,
+            "the app went into the world with no session"
+        );
+        assert_eq!(app.world().resource::<crate::renderer::LocalPlayer>().0, None);
+        assert!(app.world().resource::<LoginSession>().rejoining(), "the rejoin was ended by a world it never reached");
+    }
+
     /// the teardown, waits on the starting screen; its ticket builds a new
     /// session the usual way, and arriving in the world ends the rejoin. Back
     /// from the starting screen stops a rejoin.

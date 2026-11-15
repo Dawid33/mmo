@@ -160,7 +160,8 @@ pub struct Rejoin {
     /// A join call is on its way: no second one until it answers.
     pub calling: bool,
     /// The last call's answer may have been lost after the service rotated
-    /// the token: the next call adopts the kept one first.
+    /// the token. Every call adopts the kept token first (`tick_rejoin`); this
+    /// only says why it may differ, for the log.
     pub adopt_first: bool,
     /// A ticket came: its session is connecting (no more calls unless it is
     /// lost again, or takes longer than [`REJOIN_CONNECT_MS`]).
@@ -1070,8 +1071,20 @@ impl LoginSession {
             return Step::none();
         }
         let world = rejoin.world.clone();
-        if std::mem::take(&mut rejoin.adopt_first) {
-            self.adopt_kept(kept());
+        // The store is re-read before EVERY join call, as before any other call that
+        // presents the refresh token (`start_login`): clients on one machine share the
+        // kept token — browser tabs share `localStorage`, and a tab refreshes it at its
+        // start — so another one may have rotated it since this session last did.
+        // Presenting the rotated-away token is reuse: the service revokes the login, for
+        // every client of it. (`adopt_first` only says why, for the log.)
+        let after_lost_answer = std::mem::take(&mut rejoin.adopt_first);
+        let presented = self.refresh.clone();
+        self.adopt_kept(kept());
+        if self.refresh != presented {
+            info!(
+                "[login] rejoin: the kept refresh token is not the one this session last used ({}); presenting the kept one",
+                if after_lost_answer { "the last answer was lost" } else { "another client on this machine rotated it" }
+            );
         }
         let Some(token) = self.refresh.clone() else {
             // Nothing to present: sign in again.
@@ -1851,9 +1864,17 @@ mod tests {
         format!("{}{why}", crate::instance::REFUSED_PREFIX)
     }
 
-    /// The store is read only after an answer that may have been lost.
+    /// The store as read before a rejoin's join call when no other client rotated
+    /// the token: nothing newer is kept, the session presents its own
+    /// ([`adopt`]). (The store is read before EVERY such call:
+    /// `every_rejoin_join_presents_the_token_the_store_keeps`.)
     fn store_untouched() -> Option<String> {
-        panic!("the kept token was read without a lost answer")
+        None
+    }
+
+    /// A tick that makes no join call never reads the store.
+    fn store_unread() -> Option<String> {
+        panic!("the kept token was read by a tick that makes no join call")
     }
 
     /// The join a step sends: (token, world).
@@ -1926,7 +1947,7 @@ mod tests {
         let start = 100.0;
         assert_eq!(login.session_lost(Some(&refused(game::FENCED_REFUSAL)), AppState::InWorld, start), AfterSession::Rejoin);
         // The frame the lost world is left: nothing yet.
-        assert!(join_call(&login.tick_rejoin(start, AppState::InWorld, store_untouched)).is_none());
+        assert!(join_call(&login.tick_rejoin(start, AppState::InWorld, store_unread)).is_none());
         assert!(login.rejoining());
 
         let (retry, max) = (REJOIN_RETRY_MS as f64 / 1000.0, REJOIN_MAX_MS as f64 / 1000.0);
@@ -1944,7 +1965,7 @@ mod tests {
             calls += 1;
             // A 503 can take the service's spawn-ack timeout: nothing more meanwhile.
             for wait in [0.5, 1.5, 2.9] {
-                assert!(join_call(&login.tick_rejoin(now + wait, AppState::Starting, store_untouched)).is_none(), "one at a time");
+                assert!(join_call(&login.tick_rejoin(now + wait, AppState::Starting, store_unread)).is_none(), "one at a time");
             }
             now += 3.0;
             let _ = login.tick_rejoin(now, AppState::Starting, store_untouched);
@@ -1953,7 +1974,7 @@ mod tests {
             assert_eq!(step.store, StoreOp::Keep, "a 503 spent nothing");
             assert_eq!(login.refresh.as_deref(), Some("rotated"));
             // The next one REJOIN_RETRY_MS after the answer, not before.
-            assert!(join_call(&login.tick_rejoin(now + retry * 0.5, AppState::Starting, store_untouched)).is_none());
+            assert!(join_call(&login.tick_rejoin(now + retry * 0.5, AppState::Starting, store_unread)).is_none());
             now += retry;
         };
         // Every 4 s (3 s answer + 1 s) over 60 s.
@@ -1967,7 +1988,7 @@ mod tests {
         assert!(login.logged_in(), "still signed in");
         assert!(!login.busy(), "nothing was on its way");
         assert!(matches!(login.rejoin_ended, Some(RejoinEnd::GaveUp(_))));
-        assert!(join_call(&login.tick_rejoin(now + 10.0, AppState::Worlds, store_untouched)).is_none());
+        assert!(join_call(&login.tick_rejoin(now + 10.0, AppState::Worlds, store_unread)).is_none());
 
         // Given up with a call on its way: its late ticket only keeps its token.
         let mut login = online();
@@ -1997,7 +2018,7 @@ mod tests {
         let step = login.receive(login.generation, lost, AppState::Starting);
         assert!(step.goto.is_none() && step.calls.is_empty());
         assert_eq!(step.store, StoreOp::Keep);
-        assert!(join_call(&login.tick_rejoin(15.5, AppState::Starting, store_untouched)).is_none(), "the retry wait first");
+        assert!(join_call(&login.tick_rejoin(15.5, AppState::Starting, store_unread)).is_none(), "the retry wait first");
         // The next call re-reads the store and presents what is kept there.
         let mut read = false;
         let step = login.tick_rejoin(16.0, AppState::Starting, || {
@@ -2006,7 +2027,8 @@ mod tests {
         });
         assert!(read, "the store was read before the next call");
         assert_eq!(join_call(&step).map(|c| c.0).as_deref(), Some("kept-elsewhere"));
-        // That one is answered 503: the one after presents it unchanged, without a read.
+        // That one is answered 503: the one after presents it unchanged (the store, read
+        // again, keeps nothing newer).
         let step = login.receive(login.generation, LoginReply::Joined(Err(api(ApiErrorCode::WorldUnavailable))), AppState::Starting);
         assert_eq!(step.store, StoreOp::Keep);
         let step = login.tick_rejoin(17.0, AppState::Starting, store_untouched);
@@ -2035,7 +2057,7 @@ mod tests {
         };
         // (i) Its session does not reach the world within REJOIN_CONNECT_MS
         // (the ticket came at 18 s): torn down, and a new join with the kept
-        // (rotated) token, without a store read (the ticket's join answered).
+        // (rotated) token (the ticket's join answered; the store keeps nothing newer).
         let bound = REJOIN_CONNECT_MS as f64 / 1000.0;
         let step = login.tick_rejoin(18.0 + bound - 0.5, AppState::Starting, store_untouched);
         assert!(!step.leave && step.calls.is_empty(), "not before the bound");
@@ -2047,7 +2069,7 @@ mod tests {
         let closed = format!("{}could not connect", crate::instance::HOME_CLOSED_PREFIX);
         assert_eq!(login.session_lost(Some(&closed), AppState::Starting, 34.0), AfterSession::Rejoin);
         assert!(login.rejoin.as_ref().is_some_and(|r| r.calling));
-        assert!(join_call(&login.tick_rejoin(36.0, AppState::Starting, store_untouched)).is_none(), "one join at a time");
+        assert!(join_call(&login.tick_rejoin(36.0, AppState::Starting, store_unread)).is_none(), "one join at a time");
         // Its session is lost before it is in the world: the same rejoin goes on.
         ticketed(&mut login, 36.0);
         assert_eq!(login.session_lost(Some(&closed), AppState::Starting, 37.0), AfterSession::Rejoin);
@@ -2071,6 +2093,41 @@ mod tests {
         assert_eq!(login.rejoin_ended, Some(RejoinEnd::GaveUp(closed)));
     }
 
+    /// Final review C-I5: the store is re-read before EVERY rejoin join call — the
+    /// first one too — and never by a tick that makes none. Another client on this
+    /// machine (a second browser tab refreshing at its start) may have rotated the
+    /// kept token since this session last used it; presenting the old one is reuse,
+    /// and the service revokes the login for both.
+    #[test]
+    fn every_rejoin_join_presents_the_token_the_store_keeps() {
+        let mut login = online();
+        assert_eq!(login.session_lost(Some(&refused(game::FENCED_REFUSAL)), AppState::InWorld, 0.0), AfterSession::Rejoin);
+        // The frame the lost world is left: no call, no read.
+        assert!(join_call(&login.tick_rejoin(0.0, AppState::InWorld, store_unread)).is_none());
+        // The FIRST join: the kept token, which another tab rotated meanwhile.
+        let mut reads = 0;
+        let step = login.tick_rejoin(0.0, AppState::Starting, || {
+            reads += 1;
+            Some("rotated-by-another-tab".into())
+        });
+        assert_eq!(reads, 1, "the store is read before the first join");
+        assert_eq!(join_call(&step), Some(("rotated-by-another-tab".into(), "alpha".into())));
+        assert_eq!(step.store, StoreOp::Keep, "adopting writes nothing");
+        // While that join is on its way: no call, no read.
+        assert!(join_call(&login.tick_rejoin(1.0, AppState::Starting, store_unread)).is_none());
+        // 503 (the service spent nothing): the next call reads the store again.
+        let step = login.receive(login.generation, LoginReply::Joined(Err(api(ApiErrorCode::WorldUnavailable))), AppState::Starting);
+        assert!(step.calls.is_empty());
+        let retry = REJOIN_RETRY_MS as f64 / 1000.0;
+        assert!(join_call(&login.tick_rejoin(1.0 + retry * 0.5, AppState::Starting, store_unread)).is_none(), "the retry wait first");
+        let step = login.tick_rejoin(1.0 + retry, AppState::Starting, || Some("rotated-again".into()));
+        assert_eq!(join_call(&step).map(|c| c.0).as_deref(), Some("rotated-again"));
+        // Nothing kept (a cleared store): the session's own.
+        let _ = login.receive(login.generation, LoginReply::Joined(Err(api(ApiErrorCode::WorldUnavailable))), AppState::Starting);
+        let step = login.tick_rejoin(1.0 + 2.0 * retry, AppState::Starting, || None);
+        assert_eq!(join_call(&step).map(|c| c.0).as_deref(), Some("rotated-again"));
+    }
+
     /// The login worker died with a rejoin's join on its way: the answer is
     /// unknown (as after a transport error), so the rejoin asks again after
     /// the retry wait, adopting the kept token first — it does not idle to
@@ -2083,7 +2140,7 @@ mod tests {
         let _ = login.tick_rejoin(2.0, AppState::Starting, store_untouched);
         login.worker_lost();
         assert!(login.rejoin.as_ref().is_some_and(|r| !r.calling && r.adopt_first));
-        assert!(join_call(&login.tick_rejoin(2.5, AppState::Starting, store_untouched)).is_none(), "the retry wait first");
+        assert!(join_call(&login.tick_rejoin(2.5, AppState::Starting, store_unread)).is_none(), "the retry wait first");
         let mut read = false;
         let step = login.tick_rejoin(3.0, AppState::Starting, || {
             read = true;

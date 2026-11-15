@@ -2262,6 +2262,14 @@ impl GameInstanceManager {
             game::ServerPacket::Region(id, raw_game_data) => {
                 self.answered_home(id);
                 if conn != self.conns.home() {
+        if self.conns.connection_of(rc) != self.conns.home() {
+            // Subscribed on another host's connection the region is already mapped to (no
+            // fresh `RegionElsewhere` names it): tracked like one just named, so that host
+            // not serving it is healed too (`ask_unanswered_again`). The first ask's time
+            // stands — asking again must not push the retry out.
+            let now = self.conn_clock_ms;
+            self.asked_observer.entry(rc).or_insert(now);
+        }
                     // That host serves again: its next connection end waits the
                     // shortest retry.
                     if let Some(o) = self.conns.ordinal_of(conn) {
@@ -3427,6 +3435,61 @@ mod manager_tests {
             .world_ref()
             .regions
             .get(&neighbour)
+    /// Final review C minor 8: a subscribe that goes to another host's connection because
+    /// the region is ALREADY mapped there (no `RegionElsewhere` precedes it) is tracked too:
+    /// if that host does not serve it within `OBSERVER_RETRY_MAX_MS` it is let go there and
+    /// asked of the home, like one a `RegionElsewhere` just named.
+    #[test]
+    fn a_region_asked_again_on_its_observer_connection_is_tracked() {
+        let (mut manager, server_send, server_recv, opener, _kept) = manager_on_host_0();
+        let (r, served) = (RegionCoords::new(5, 0), RegionCoords::new(5, 1));
+        for rc in [r, served] {
+            manager.subscribed.insert(rc);
+            manager.request_region(rc);
+            server_send.send(elsewhere(rc, 1)).unwrap();
+        }
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let one = manager.conns.conn_to(1).expect("a connection to host 1");
+        assert_eq!(manager.conns.connection_of(r), one);
+        let on_one = opener.0.lock().unwrap()[0].clone();
+        let _ = on_one.try_iter().count();
+        let _ = manager_packets(&manager);
+        // Host 1 serves `served` (its connection is in use), never `r`.
+        let mut world = game::World::new();
+        world.load(&served, Region::from_chunks(served, Vec::new()));
+        let (events, incoming) = crossbeam::channel::unbounded();
+        events.send((one, ConnEvent::Packet(world.build_region_server_packet(&served)))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        assert!(manager.loaded_regions().contains(&served));
+        // The tracking of the `RegionElsewhere` is gone (as after the region was held and
+        // dropped again); the region, still mapped to host 1, is asked for again — there.
+        manager.asked_observer.clear();
+        let t1 = manager.conn_clock_ms + 5_000;
+        manager.conn_clock_ms = t1;
+        manager.request_region(r);
+        assert!(has(&on_one.try_iter().collect::<Vec<_>>(), r, true), "the subscribe goes to host 1");
+        assert_eq!(manager.asked_observer.get(&r), Some(&t1), "and is tracked from now");
+        assert!(!manager.asked_home.contains_key(&r));
+        // Asked once more a little later: the first time stands.
+        manager.conn_clock_ms = t1 + 100;
+        manager.request_region(r);
+        let _ = on_one.try_iter().count();
+        assert_eq!(manager.asked_observer.get(&r), Some(&t1));
+        // Host 1 never serves it.
+        let max = crate::connections::OBSERVER_RETRY_MAX_MS;
+        manager.conn_clock_ms = t1 + max - 1;
+        manager.maintain_connections();
+        assert!(on_one.try_iter().next().is_none() && manager_packets(&manager).is_empty(), "not before OBSERVER_RETRY_MAX_MS");
+        manager.conn_clock_ms = t1 + max;
+        manager.maintain_connections();
+        let sent_one: Vec<ClientPacket> = on_one.try_iter().collect();
+        let sent_home = manager_packets(&manager);
+        assert!(has(&sent_one, r, false), "let go on host 1: {sent_one:?}");
+        assert!(has(&sent_home, r, true), "asked of the home: {sent_home:?}");
+        assert_eq!(manager.region_host(r), Some(0));
+        assert_eq!(manager.region_host(served), Some(1), "a served region is left alone");
+    }
+
             .unwrap()
             .pending_event_ids();
         assert!(
