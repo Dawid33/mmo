@@ -180,6 +180,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   `VOXEL_HOSTS`, `VOXEL_SUPER_REGION_REGIONS` (16; checked against the world row). `just dev-r2` runs
   login + coordinator + host 0 (state in git-ignored `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
 - **Many hosts (R3 + R4 takeover, `VOXEL_HOSTS` > 1; plans `docs/superpowers/plans/2026-11-12-r3-multi-host.md`,
+  **The coordinator takes the same `VOXEL_OWNERSHIP` as its hosts**: its own environment decides whether it
+  declares successions (`roles::coordinator_crash_policy`); a host's `Attach` carries its crash policy, and a
+  coordinator of several hosts refuses one that is not its own (the error names `VOXEL_OWNERSHIP`).
   `2026-11-13-r4-takeover.md` — R4 built; whole-branch review and the owner's hand checks pending, see
   `TODO.md`)**: needs role `host`, Postgres and the login link (`jwt`), else refused.
   - Hosts talk directly over peer links (`game::peer`: one `PeerSession` per other ordinal, `Reliable` /
@@ -188,20 +191,26 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     (`register_host`: addresses, pins, `clean`); peers find each other there.
   - One tick numbering for all hosts from the world clock anchor (`world_clock.rs`; `worldctl clock-reset`).
   - **Ownership** (`VOXEL_OWNERSHIP`, `game::ownership`): `static` = R3's fixed layout, a host crash raises
-    the world generation and EVERY host exits `EXIT_WORLD_ROLLBACK` (5); `claim` (default of `just host` /
-    `dev-r3` / `go-nogo-r3`; `dev-r2` stays `static`) = super-regions claimed on demand, a dead host's land
+    the world generation and EVERY host exits `EXIT_WORLD_ROLLBACK` (5); `claim` (default of `dev-r3` /
+    `go-nogo-r3`, and of `just host` / `just coordinator` with several hosts; one host and `dev-r2` stay
+    `static`) = super-regions claimed on demand, a dead host's land
     given to one heir while the others run on (`roles::coordinator_crash_policy`: only with several hosts).
     A claim needs the claimer's live, dirty `hosts` row (a declared-dead or cleanly-left boot wins nothing).
   - **Lease**: a host stamps `hosts.seen_ms` every `HOST_HEARTBEAT_MS` (2 s) from its MAIN loop — never a
-    timer thread (a hung loop must stop beating); the coordinator declares it dead after `HOST_LEASE_MS`
+    timer thread (a hung loop must stop beating) — on a connection of its own (never the store's shared
+    pool), each beat under a client-side deadline (`HEARTBEAT_DEADLINE_MS`), and once after each long boot
+    step (`lease::beat_at_boot`); the coordinator declares it dead after `HOST_LEASE_MS`
     (10 s) of its own unchanged reads (`LeaseWatch`: a database outage declares nobody). The Postgres lease
-    clock is `clock_timestamp()`, never `now()`.
+    clock is `clock_timestamp()`, never `now()`. A fenced transaction (a cut part, a region load) idle longer
+    than the lease loses its session (`FENCED_TX_IDLE_MS`, set by the fence check): a frozen host's row
+    locks do not outlive it.
   - **Succession** (`coordinator/succession.rs`, `world_manager/succession.rs`; migrations `0012_host_lease`,
     `0013_successions`): one fenced transaction marks the dead row and moves ALL its land to one heir per
     predecessor. Survivors report their peer journal against the dead host; the heir masks the inherited
-    land (`inheriting`) until it resolved every report and adopted, holds every login order until then, pins
-    the affected regions, and its parts carry `adopts` until the settle. No cut begins until every survivor
-    applied and the heir adopted (answers count per BOOT); the next commit decision names the open
+    land (`inheriting`, from the order on) until it resolved every report and adopted, holds every login order
+    until then, pins the affected regions, and its parts carry `adopts` until the settle. No cut begins until
+    every survivor applied and the heir adopted (answers count per BOOT); then one is due at once
+    (`SETTLE_CUT_RETRY_MS` after the last cut ended, not a save period), and its commit decision names the open
     successions (`settles`) — the store records any other set as an abort. Conserved: identities (entities,
     players, people) exactly once; items and terrain edits that crossed the dead host's seams within one
     save interval are not guaranteed (`succession_seam_events=` on the `[server]` line); a leave or an
@@ -212,8 +221,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   - **Boots** (`register_host`, `server/src/lease.rs`): a boot WAITS while an open succession names its
     ordinal as predecessor (crash, offline retirement or leave) and registers after the settle owning
     nothing — if the heir never returns, only `worldctl rollback --yes` gets it out; a dirty boot beside a
-    live host vouches its old row dead and waits. A registration stuck behind a lock exits 1 after
-    `CLAIM_LOCK_TIMEOUT_MS` (60 s).
+    live host vouches its old row dead and waits; with nobody alive (a total crash) the first boot raises the
+    generation and gives every other dirty row a fresh lease (the others boot seconds apart and keep their
+    land). A registration stuck behind a lock exits 1 after `CLAIM_LOCK_TIMEOUT_MS` (60 s).
   - Saves are coordinated world cuts in two phases (each host `prepare_cut`s its part, the coordinator
     decides; Postgres needs `max_prepared_transactions > 0`, the dev compose sets it); parts a crash left
     staged are resolved at start before anything else (`resolve_staged_cuts`). An exiting host asks for a
@@ -237,8 +247,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     (measurement only); `worldctl super-region <url> <n>` (only before the first claim) + hosts run with
     `VOXEL_SUPER_REGION_REGIONS=n`.
   - `just dev-r3 <hosts> [delay]` (positional, 2..6): login + coordinator + every host under
-    `scripts/dev_r3.sh` (restarts a host on exit 5 or 137, at most 3 per 60 s; `DEV_R3_*` knobs in its
-    header; state `target/dev-r3/`); `just host <ordinal> <hosts> <delay> [static]`; `just go-nogo-r3 <delay>
+    `scripts/dev_r3.sh` (restarts a host on exit 5 or 137 — and on 3, a replaced host, when it runs `claim` —
+    at most 3 per 60 s; `DEV_R3_*` knobs in its header; state `target/dev-r3/`); `just host <ordinal> <hosts>
+    <delay> [static]`, `just coordinator <hosts> [static]` (the same word); `just go-nogo-r3 <delay>
     [seconds]` (own database and `target/go-nogo-r3/`; exit 0 GO, 1 NO-GO, 2 INVALID, 3 no verdict).
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
   with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
@@ -251,7 +262,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   `pump_or_fence`) or write. A new `hosts` / `super_regions` / `successions` statement needs its lock walk
   (lock order and the two safe deadlock cycles: the module notes of `world-store/src/succession.rs`; the
   operator's in `operator.rs`, the one unfenced `successions` writer). The settles↔adopts pairing (a settled
-  succession's heir part carried `adopts`) is a coordinator-side invariant the store does not enforce.
+  succession's heir part carried `adopts`) is a coordinator-side invariant the store does not enforce — it
+  only detects a breach after the commit (`two_phase::report_settled_unadopted`, `cuts_settled_unadopted`).
 - **Link rules**: a re-`Attach` after any reconnect rebuilds the coordinator's view; requests are memoised by
   `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
   beats latency). Login pushes `SpawnPlayer`/`Kick` to the host's link; kicks are durable until acked
@@ -267,8 +279,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   drops mid-cut puts that pair in count mode (`PeerSession::freeze` / `thaw`, `HostMsg::CutPeerCount`
   relayed by the coordinator) and the cut can still commit; one that drops after a side's part is complete
   by marks still aborts it. The coordinator down means no cuts and no takeover until it is back.
-- **Peer journal** (`game/src/peer/journal.rs`): every host journals the state messages it exchanged with
-  each peer since the last committed cut — a succession's reports. Truncation rests on every
+- **Peer journal** (`game/src/peer/journal.rs`): every host under `claim` (a `static` host records nothing)
+  journals the state messages it exchanged with each peer since the last committed cut — a succession's
+  reports; an entity's events are ordered by its transfer stamp, a player's by the hand-off's hop, never by a
+  host's own tick. Truncation rests on every
   world-cut participant calling `PeerJournal::cut_begun`: any new path that joins a cut must call it. A new
   state-bearing `Reliable` must be journalled or argued out. A new per-ordinal `WorldManager` field must be
   handled in `world_manager/succession.rs`.
@@ -289,10 +303,11 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   (`web_endpoint::web_server_for_host`; page → worker framing in `web_frame.rs`). A home host remembers
   subscribes it cannot answer yet and answers again after a succession; the client re-maps regions whose
   owner changed (an observer connection never redirects: a region it cannot serve is asked of the home after
-  `OBSERVER_RETRY_MAX_MS`). A session whose home connection closed without a refusal, or was refused with
+  `OBSERVER_RETRY_MAX_MS`). A session whose home connection closed without a refusal (ANY such close), or was refused with
   `FENCED_REFUSAL` / `ROLLBACK_REFUSAL` / `LEAVING_REFUSAL` / `PLAYER_PARKED_ELSEWHERE`, rejoins by itself
-  with its kept refresh token (`login::flow::rejoinable`; one join call at a time, `REJOIN_RETRY_MS` apart;
-  a 503 = not yet; gives up after `REJOIN_MAX_MS`; revoked → the sign-in screen). Native QUIC keep-alive
+  with its kept refresh token, re-read from the store before every join call (`login::flow::rejoinable`; one
+  join call at a time, `REJOIN_RETRY_MS` apart; a 503 = not yet; a ticket's connect is bounded by
+  `REJOIN_CONNECT_MS` (15 s), then a new join; gives up after `REJOIN_MAX_MS`; revoked → the sign-in screen). Native QUIC keep-alive
   3 s / idle 10 s (`netcode.rs`, as WebTransport).
 - **Session lifecycle** (`session.rs`): any new per-world resource, system `Local` or entity root must be
   registered (`add_session_reset`, `SessionLocal`) or tagged `SessionScoped`, or it leaks into the next world.
