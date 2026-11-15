@@ -1,0 +1,31 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg
+spec:
+  instances: 1
+  imageName: {{ .Values.image | quote }}
+  postgresql:
+    parameters:
+      max_prepared_transactions: {{ .Values.maxPreparedTransactions | quote }}
+  storage:
+    size: {{ .Values.storageSize | quote }}
+    {{- if .Values.storageClass }}
+    storageClass: {{ .Values.storageClass | quote }}
+    {{- end }}
+  {{- with .Values.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  managed:
+    roles:
+      {{- range .Values.worlds }}
+      - name: world_{{ . }}
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: pg-world-{{ . }}
+      {{- end }}

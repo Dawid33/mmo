@@ -1,0 +1,13 @@
+{{- range .Values.worlds }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: world-{{ . }}
+spec:
+  name: world_{{ . }}
+  owner: world_{{ . }}
+  cluster:
+    name: pg
+  databaseReclaimPolicy: retain
+{{- end }}
