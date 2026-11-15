@@ -833,24 +833,18 @@ mod tests {
         StoreHandle::open(&world_store::StoreUrl::Memory, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap()
     }
 
-    /// Registers host `ordinal` as boot `boot` (claims on demand need a live `hosts` row).
-    fn register(store: &StoreHandle, ordinal: HostId, boot: u64) {
-        let row = HostRow {
-            id: ordinal,
+    /// Registers a host as boot `boot` (claims on demand need a live `hosts` row): its id.
+    fn register(store: &StoreHandle, boot: u64) -> HostId {
+        let host = world_store::NewHost {
+            name: String::new(),
             boot,
-            generation: 0,
-            clean: false,
-            state: game::HOST_LIVE,
-            seen_ms: 0,
-            reg: 0,
             peer_addr: None,
             peer_cert: None,
             quic: None,
             webtransport: None,
             wt_cert_hash: None,
         };
-        let verdict = store.register_host(row, &Fence::default(), game::CrashPolicy::Rollback).unwrap();
-        assert!(matches!(verdict, world_store::BootVerdict::Registered(_)), "{verdict:?}");
+        store.register_host(host, game::CrashPolicy::Succession).unwrap().id
     }
 
     #[test]
@@ -889,20 +883,20 @@ mod tests {
     fn added_super_regions_are_checked_by_the_next_commit() {
         let store = memory_store();
         let (x, y) = ((0, 0), (0, -1));
-        let claims = HostClaims::claim_srs(store.clone(), h(0), vec![x]).unwrap();
-        register(&store, h(0), 10);
-        claims.add(store.claim_free(h(0), 10, vec![y]).unwrap());
+        let me = register(&store, 10);
+        let claims = HostClaims::claim_srs(store.clone(), me, vec![x]).unwrap();
+        claims.add(store.claim_free(me, 10, vec![y]).unwrap());
         assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![y, x]);
         claims.commit_cut(empty_cut(1)).recv().unwrap().expect("both rows are held");
         // Another process takes the added row: the next commit is fenced on it, and that
         // refusal concerns this host (the row is in its current fence).
-        store.claim_super_regions(h(1), vec![y]).unwrap();
+        store.claim_super_regions(HostId(me.0 + 1), vec![y]).unwrap();
         let err = claims.commit_cut(empty_cut(2)).recv().unwrap().unwrap_err();
         assert_eq!(err, StoreError::Fenced { sr: Some(y) });
         assert!(claims.clone().note_refusal(&err), "a takeover of an added row fences the host");
         assert!(claims.fenced().is_set());
         // Replaced by what it holds now, the fence commits again.
-        claims.replace(store.owned_by(h(0)).unwrap());
+        claims.replace(store.owned_by(me).unwrap());
         assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![x]);
         claims.commit_cut(empty_cut(3)).recv().unwrap().expect("x alone is still held");
         store.shutdown();
@@ -982,9 +976,11 @@ mod tests {
     fn a_lost_claim_waits_for_a_fresh_read_before_claiming_again() {
         let store = memory_store();
         let sr = (0, 3);
+        // Host 1 (registered first) holds the row; this host is host 2.
+        assert_eq!(register(&store, 9), h(1));
+        let me = register(&store, 10);
         store.claim_super_regions(h(1), vec![sr]).unwrap();
-        register(&store, h(0), 10);
-        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), h(0)), 10);
+        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), me), 10);
         let mut m = Wanting { sr, read: false, events: Vec::new() };
         let deadline = Instant::now() + Duration::from_secs(10);
         while !m.read {
@@ -1005,9 +1001,14 @@ mod tests {
     #[test]
     fn a_claim_by_a_replaced_boot_fences_the_host() {
         let store = memory_store();
-        register(&store, h(0), 10);
-        register(&store, h(0), 11);
-        let claims = HostClaims::none(store.clone(), h(0));
+        let me = register(&store, 10);
+        // Every lease lapses at once: the next registration is a total crash, which marks
+        // this host's row dead (and prunes it) — the boot is replaced.
+        store.set_host_lease_ms(0);
+        std::thread::sleep(Duration::from_millis(5));
+        register(&store, 11);
+        store.set_host_lease_ms(game::HOST_LEASE_MS);
+        let claims = HostClaims::none(store.clone(), me);
         let mut keeper = DirectoryKeeper::new(claims.clone(), 10);
         let mut m = Free { sr: (0, 3), asked: 0 };
         let deadline = Instant::now() + Duration::from_secs(10);

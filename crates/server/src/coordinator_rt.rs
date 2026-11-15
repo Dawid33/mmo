@@ -431,10 +431,11 @@ fn after_store_read<T>(value: T) -> T {
 
 /// Host `ordinal`'s `hosts` row as stored — `(reg, state)` — for its hello's admission;
 /// `None` (refused: "wait, never guess" — the host redials) when it has no row or the store
-/// cannot be read.
+/// cannot be read. Since Elastic 1 the id is the registration number (issued once, never
+/// again), so `reg` is the row's id.
 fn stored_registration(store: &StoreHandle, ordinal: HostId) -> Option<(u64, i64)> {
     match store.hosts() {
-        Ok(rows) => rows.into_iter().find(|r| r.id == ordinal).map(|r| (r.reg, r.state)),
+        Ok(rows) => rows.into_iter().find(|r| r.id == ordinal).map(|r| (r.id.0, r.state)),
         Err(e) => {
             log::error!("[coordinator] host {ordinal}'s hosts row could not be read ({e}); its hello is refused");
             None

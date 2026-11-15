@@ -1010,41 +1010,38 @@ fn role_all_beside_other_hosts_dirty_rows_is_refused() {
     use server::roles::{check_all_role_beside_hosts, Role, ALL_ROLE_BESIDE_HOSTS};
     let dir = scratch("role_all_beside");
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
-    let row = |ordinal: HostId| world_store::HostRow {
-        id: ordinal,
-        boot: 10 + ordinal.0,
-        generation: 0,
-        clean: false,
-        state: world_store::HOST_LIVE,
-        seen_ms: 0,
-        reg: 0,
-        peer_addr: None,
-        peer_cert: None,
-        quic: None,
-        webtransport: None,
-        wt_cert_hash: None,
-    };
     let open = || world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let store = open();
-    let none = world_store::Fence::default();
-    store.register_host(row(h(0)), &none, game::CrashPolicy::Rollback).unwrap();
-    assert_eq!(check_all_role_beside_hosts(Role::All, &store, h(0)), Ok(()), "only its own ordinal's row");
-    store.register_host(row(h(1)), &none, game::CrashPolicy::Rollback).unwrap();
-    store.register_host(row(h(2)), &none, game::CrashPolicy::Rollback).unwrap();
-    let err = check_all_role_beside_hosts(Role::All, &store, h(0)).expect_err("hosts 1 and 2 ran and did not leave");
+    // Elastic 1 task 2: the store issues the ids (1, 2, 3); "its own" row is host 1's here.
+    let register = |boot: u64| {
+        let host = world_store::NewHost {
+            name: String::new(),
+            boot,
+            peer_addr: None,
+            peer_cert: None,
+            quic: None,
+            webtransport: None,
+            wt_cert_hash: None,
+        };
+        store.register_host(host, game::CrashPolicy::Succession).unwrap().id
+    };
+    assert_eq!(register(10), h(1));
+    assert_eq!(check_all_role_beside_hosts(Role::All, &store, h(1)), Ok(()), "only its own row");
+    assert_eq!((register(11), register(12)), (h(2), h(3)));
+    let err = check_all_role_beside_hosts(Role::All, &store, h(1)).expect_err("hosts 2 and 3 ran and did not leave");
     assert!(err.starts_with(ALL_ROLE_BESIDE_HOSTS), "{err}");
-    assert!(err.contains("[1, 2]") && err.contains("worldctl retire-host") && err.contains("worldctl rollback"), "{err}");
-    assert_eq!(check_all_role_beside_hosts(Role::Host, &store, h(0)), Ok(()), "a host of several runs beside them");
+    assert!(err.contains("[2, 3]") && err.contains("worldctl retire-host") && err.contains("worldctl rollback"), "{err}");
+    assert_eq!(check_all_role_beside_hosts(Role::Host, &store, h(1)), Ok(()), "a host of several runs beside them");
     store.shutdown();
-    // Host 1 left cleanly; host 2's row is of a generation the world rolled back from.
-    raw_exec(&url, "UPDATE hosts SET clean = 1 WHERE ordinal = 1");
+    // Host 2 left cleanly; host 3's row is of a generation the world rolled back from.
+    raw_exec(&url, "UPDATE hosts SET clean = 1 WHERE id = 2");
     let store = open();
-    let err = check_all_role_beside_hosts(Role::All, &store, h(0)).expect_err("host 2 still");
-    assert!(err.contains("[2]") && !err.contains("[1, 2]"), "{err}");
+    let err = check_all_role_beside_hosts(Role::All, &store, h(1)).expect_err("host 3 still");
+    assert!(err.contains("[3]") && !err.contains("[2, 3]"), "{err}");
     store.shutdown();
     raw_exec(&url, "UPDATE world SET generation = 1");
     let store = open();
-    assert_eq!(check_all_role_beside_hosts(Role::All, &store, h(0)), Ok(()), "rolled back: its row holds nothing of this world");
+    assert_eq!(check_all_role_beside_hosts(Role::All, &store, h(1)), Ok(()), "rolled back: its row holds nothing of this world");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }

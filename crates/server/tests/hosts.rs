@@ -907,7 +907,7 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
         assert!(!pump_or_fence(&mut beat, &fenced, Instant::now()), "a live row holds its lease");
     }
     assert!(!fenced.is_set());
-    exec(&db, "UPDATE hosts SET state = 1 WHERE ordinal = 1");
+    exec(&db, "UPDATE hosts SET state = 1 WHERE id = 1");
     let marked = Instant::now();
     loop {
         w.pair.round();
@@ -971,7 +971,7 @@ fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() 
     let generation = w.claims[0].store().world_generation().unwrap();
     w.until_committed_after(&db, 0);
     assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Clean, "host 1 left");
-    let clean: Vec<i64> = query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1");
+    let clean: Vec<i64> = query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1");
     assert_eq!(clean, [1], "host 1's row is clean");
     let (left_in, _) = last_committed(&db);
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
@@ -1034,7 +1034,7 @@ fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
     let generation = w.claims[0].store().world_generation().unwrap();
     w.until_committed_after(&db, 0);
     assert_eq!(exit_host(&mut w, h(1)), server::claims::ServerExit::Clean, "host 1 left");
-    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [1]);
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [1]);
     let a0 = seam_of(&w, h(0));
     let id = spawn_slime_in(&mut w, h(0), a0, REGION_SIZE / 2.0);
     // A cut of host 0 alone begins; nothing of host 0 runs from here until host 1 is back.
@@ -1136,7 +1136,7 @@ fn leave_without_a_coordinator_exits_dirty() {
     );
     assert_eq!(exit, server::claims::ServerExit::Clean, "exits 0");
     assert!(begun.elapsed() >= Duration::from_secs(2), "after its leave timeout");
-    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [0], "its row stays dirty");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [0], "its row stays dirty");
     drop(host1);
     links.remove(1);
     // Its return raises the generation.
@@ -1177,7 +1177,7 @@ fn aborted_leave_cut_is_asked_for_again_and_commits() {
     let first = first.expect("a leave cut began");
     assert_eq!(decision_of(&db, first), Some(false), "the first leave cut was aborted");
     assert!(decisions(&db).iter().any(|(c, _, k)| *k && *c as u64 > first.0), "a later leave cut committed");
-    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [1], "host 1's row is clean");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [1], "host 1's row is clean");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }
@@ -1217,7 +1217,7 @@ fn aborted_leave_cut_past_the_leave_timeout_exits_dirty() {
     let first = first.expect("a leave cut began within the timeout");
     assert_eq!(decision_of(&db, first), Some(false), "the leave cut was aborted");
     assert!(!decisions(&db).iter().any(|(c, _, k)| *k && *c as u64 > first.0), "no later cut");
-    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [0], "its row stays dirty");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [0], "its row stays dirty");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }
@@ -1345,7 +1345,7 @@ fn both_hosts_stopped_together_leave_cleanly() {
     let since: Vec<(i64, i64, bool)> = decisions(&db).into_iter().filter(|(c, _, _)| *c > before).collect();
     assert!(since.iter().all(|(_, _, k)| *k), "no cut aborted since the stop: {since:?}");
     assert_eq!(since.last().map(|(c, _, _)| *c as u64), Some(cut.0), "the leave cut is the last decided: {since:?}");
-    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts ORDER BY ordinal"), [1, 1], "both rows are clean");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts ORDER BY id"), [1, 1], "both rows are clean");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     // Both return: no generation bump, no rollback, each slime once.
     for h in (0..u64::from(HOSTS)).map(HostId) {
@@ -2093,7 +2093,7 @@ fn a_host_restarted_cleanly_reclaims_its_own_rows() {
     drop(first);
     drop(first_links);
     // Its leave cut committed (as `two_phase` marks it).
-    exec(&db, "UPDATE hosts SET clean = 1 WHERE ordinal = 1");
+    exec(&db, "UPDATE hosts SET clean = 1 WHERE id = 1");
     let (second, second_links, second_claims) = claim_host(&db, &dir, h(1), 3002);
     let after = store.owners().unwrap();
     for sr in &mine {

@@ -177,28 +177,20 @@ fn quic_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, bo
     QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file), hello)
 }
 
-/// Registers boot `boot` as host `ordinal` (as a `host` process does once per boot, with
-/// no claims): its registration.
-fn register_host(store: &StoreHandle, ordinal: HostId, boot: u64) -> world_store::HostBoot {
-    let row = world_store::HostRow {
-        id: ordinal,
+/// Registers boot `boot` as a host named after `ordinal` (as a `host` process does once per
+/// boot): its registration. Elastic 1 task 2: the store issues the id (Task 3 keys the rest of
+/// these tests by it).
+fn register_host(store: &StoreHandle, ordinal: HostId, boot: u64) -> world_store::Registered {
+    let host = world_store::NewHost {
+        name: format!("host-{}", ordinal.0),
         boot,
-        generation: 0,
-        clean: false,
-        state: game::HOST_LIVE,
-        seen_ms: 0,
-        reg: 0,
         peer_addr: None,
         peer_cert: None,
         quic: None,
         webtransport: None,
         wt_cert_hash: None,
     };
-    let fence = world_store::Fence { owner: ordinal, epochs: BTreeMap::new(), all_hosts: false };
-    match store.register_host(row, &fence, game::CrashPolicy::Rollback).unwrap() {
-        world_store::BootVerdict::Registered(boot) => boot,
-        other => panic!("host {ordinal} not registered: {other:?}"),
-    }
+    store.register_host(host, game::CrashPolicy::Rollback).unwrap_or_else(|e| panic!("host {ordinal} not registered: {e}"))
 }
 
 /// A localhost UDP port nobody holds right now.
@@ -255,7 +247,7 @@ impl Host {
         // hello by the registration number); it runs the generation it registered at.
         let registered = register_host(store, ownership.me(), boot);
         manager.set_host_generation(registered.generation);
-        manager.set_world_link(link(registered.reg), boot, 0);
+        manager.set_world_link(link(registered.id.0), boot, 0);
         manager.set_world_map(map.clone());
         Host { manager, claims, coordinator, region_out, packets, inbox: Vec::new(), started: Instant::now() }
     }
@@ -654,7 +646,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
     // Both Attach at the world's generation now (the second registration raised it: R3's
     // rule for a dirty predecessor): only the registration tells them apart.
     let generation = second.generation;
-    let (first, second) = (first.reg, second.reg);
+    let (first, second) = (first.id.0, second.id.0);
     assert!(second > first, "a second registration has the higher number: {first} then {second}");
     // A coordinator that ran before is gone; this one starts fresh.
     let (c1, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
@@ -759,7 +751,7 @@ fn a_host_under_another_crash_policy_is_refused_by_the_coordinator() {
         game::CrashPolicy::Rollback,
     )
     .expect("the coordinator listens");
-    let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.reg);
+    let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.id.0);
     link.send(bare_attach(registered.generation, 1, game::CrashPolicy::Succession)).unwrap();
     let deadline = Instant::now() + WAIT;
     loop {
@@ -773,7 +765,7 @@ fn a_host_under_another_crash_policy_is_refused_by_the_coordinator() {
     }
     drop(link);
     // The coordinator's own policy attaches.
-    let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.reg);
+    let (link, events) = raw_host_link(listening.addr, &cert_file, 1, registered.id.0);
     link.send(bare_attach(registered.generation, 1, game::CrashPolicy::Rollback)).unwrap();
     let deadline = Instant::now() + WAIT;
     loop {
@@ -804,7 +796,7 @@ fn a_host_of_an_older_generation_is_told_the_generation() {
     let (first, second) = (register_host(&store, h(0), 1), register_host(&store, h(0), 2));
     assert!(second.generation > first.generation);
     let (coordinator, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
-    let (link, events) = raw_host_link(addr, &cert_file, 2, second.reg);
+    let (link, events) = raw_host_link(addr, &cert_file, 2, second.id.0);
     link.send(bare_attach(first.generation, 2, game::CrashPolicy::Rollback)).unwrap();
     let deadline = Instant::now() + WAIT;
     loop {

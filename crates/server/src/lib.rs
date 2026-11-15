@@ -1003,8 +1003,10 @@ pub fn run() -> claims::ServerExit {
     let mut peer_links: Option<peer_link::PeerLinks> = None;
     // A registered host's lease, beaten by the main loop.
     let mut heartbeat: Option<lease::Heartbeat> = None;
-    // This boot's registration number (`hosts.reg`): its coordinator hello carries it.
+    // This boot's registration number (its issued id): its coordinator hello carries it.
     let mut host_reg = 0u64;
+    // The id the store issued at registration (role `host`; the configured ordinal otherwise).
+    let mut host_id = ownership.me();
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
         let claimed = if claim_on_demand {
@@ -1074,15 +1076,19 @@ pub fn run() -> claims::ServerExit {
                     Err(e) => fatal(&e.to_string()),
                 }
             };
-            heartbeat = Some(lease::Heartbeat::new(claimed.store().clone(), ownership.me(), boot));
+            // Elastic 1 task 2 adapter (Task 3 reorders the start so that everything is keyed by
+            // the issued id): the lease beats the issued id's row, the hellos carry it; the
+            // claims made above and the peer links still use the configured ordinal.
+            heartbeat = Some(lease::Heartbeat::new(claimed.store().clone(), registered.id, boot));
             info!(
-                "[server] registered host {} at world generation {} (registration {}){}",
+                "[server] registered as host {} (configured ordinal {}) at world generation {}{}",
+                registered.id,
                 ownership.me(),
                 registered.generation,
-                registered.reg,
-                if registered.bumped { " (raised: the previous boot did not exit clean)" } else { "" }
+                if registered.bumped { " (raised: a total crash, this host took every dirty host's land)" } else { "" }
             );
-            host_reg = registered.reg;
+            host_reg = registered.id.0;
+            host_id = registered.id;
             world_generation = claims::WorldGeneration::new(registered.generation);
             health::Health::global().world_generation(registered.generation);
             health::Health::global().set_registered(true);
@@ -1179,7 +1185,7 @@ pub fn run() -> claims::ServerExit {
         // `coordinator` thread joined by a channel link (`all`), or is its own
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
-            let link = host_world_link(host_ordinal, boot, host_reg).unwrap_or_else(|e| fatal(&e));
+            let link = host_world_link(host_id, boot, host_reg).unwrap_or_else(|e| fatal(&e));
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {

@@ -234,7 +234,7 @@ pub(crate) async fn decide_cut(
                 // A row marked dead (R4: declared, its land inherited) runs nothing and is
                 // not expected — the coordinator's expected set reads the same predicate.
                 let dirty: Vec<i64> = sqlx::query_scalar(&format!(
-                    "SELECT ordinal FROM hosts WHERE clean = 0 AND state = {} ORDER BY ordinal",
+                    "SELECT id FROM hosts WHERE clean = 0 AND state = {} ORDER BY id",
                     crate::HOST_LIVE
                 ))
                 .fetch_all(&mut *tx)
@@ -283,7 +283,7 @@ pub(crate) async fn decide_cut(
                     .execute(&mut *tx)
                     .await?;
                 let leaving: Vec<i64> = leaving.iter().map(|h| i(h.0)).collect();
-                sqlx::query("UPDATE hosts SET clean = 1 WHERE ordinal = ANY($1)")
+                sqlx::query("UPDATE hosts SET clean = 1 WHERE id = ANY($1)")
                     .bind(leaving)
                     .execute(&mut *tx)
                     .await?;

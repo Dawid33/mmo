@@ -363,7 +363,7 @@ fn retire_offline_opens_a_succession_to_the_lowest_other_host() {
 fn retire_offline_with_no_other_host_is_refused() {
     let Some(w) = World::new(2) else { return };
     let url = url_of(&w);
-    exec(&w.w, "DELETE FROM hosts WHERE ordinal = 0");
+    exec(&w.w, "DELETE FROM hosts WHERE id = 0");
     lapse_all(&w);
     let err = said(&url, &["retire-host", &url, "1"]).expect_err("nobody to inherit");
     assert!(
@@ -429,15 +429,14 @@ fn rollback_needs_yes_and_bumps_once() {
 
 /// An offline retirement raises the world generation itself (in its transaction), whatever
 /// the heir's row looks like — dirty (it crashed) or clean (it left): every process of the old
-/// generation is refused at its next write (a zombie that wakes, a coordinator still running),
-/// and the heir's next boot registers at the new generation without raising it again.
+/// generation is refused at its next write (a zombie that wakes, a coordinator still running).
 #[test]
 fn retire_offline_bumps_the_generation_whatever_the_heirs_row() {
     for heir_clean in [false, true] {
         let Some(w) = World::new(3) else { return };
         let url = url_of(&w);
         if heir_clean {
-            exec(&w.w, "UPDATE hosts SET clean = 1 WHERE ordinal = 0");
+            exec(&w.w, "UPDATE hosts SET clean = 1 WHERE id = 0");
         }
         lapse_all(&w);
         said(&url, &["retire-host", &url, "1"]).expect("retired offline");
@@ -447,15 +446,11 @@ fn retire_offline_bumps_the_generation_whatever_the_heirs_row() {
         assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 }, "heir clean {heir_clean}");
         let err = w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(2)], vec![], w.c, 0, vec![]).unwrap_err();
         assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
-        // The heir boots: registered at the new generation, not raised again.
-        let next = w.hosts[0]
-            .register_host(world_store::HostRow { boot: 7000, ..crate::succession::row(hid(0)) }, &world_store::Fence::default(), game::CrashPolicy::Succession)
-            .unwrap();
-        assert!(
-            matches!(next, world_store::BootVerdict::Registered(world_store::HostBoot { generation: 1, bumped: false, .. })),
-            "heir clean {heir_clean}: {next:?}"
-        );
-        assert_eq!(w.h.world_generation().unwrap(), 1);
+        // Elastic 1: the heir's next process is a NEW host; nobody is live, so its registration is
+        // a total crash — it raises the generation once more and takes the land (`hosts.rs`).
+        let next = w.hosts[0].register_host(crate::hosts::new_host("host-0", 7000), game::CrashPolicy::Succession).unwrap();
+        assert_eq!((next.generation, next.bumped), (2, true), "heir clean {heir_clean}");
+        assert_eq!(w.h.world_generation().unwrap(), 2);
         assert_eq!(prepared(&w.w), 0);
         w.shutdown();
     }

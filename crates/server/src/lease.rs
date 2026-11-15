@@ -1,5 +1,5 @@
-//! A host's lease on its `hosts` row (R4): the boot's registration, which may have to wait
-//! ([`register_or_wait`]), and the heartbeat its MAIN loop pumps ([`Heartbeat`]). The
+//! A host's lease on its `hosts` row (R4): the process's registration ([`register_or_wait`]),
+//! and the heartbeat its MAIN loop pumps ([`Heartbeat`]). The
 //! coordinator declares a host dead from the beats it stops reading (`game::LeaseWatch`).
 
 use game::HostId;
@@ -9,16 +9,10 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CrashPolicy, HOST_HEARTBEAT_MS};
 use crate::claims::Fenced;
-use world_store::{BootVerdict, Fence, HostBoot, HostRow, StoreError, StoreHandle, WaitFor};
+use world_store::{NewHost, Registered, StoreError, StoreHandle};
 
 /// At most one warning per this many ms about heartbeats that fail.
 pub const HEARTBEAT_WARN_MS: u64 = 10_000;
-/// How long a waiting boot waits between two registrations.
-pub const REGISTER_RETRY_MS: u64 = 1_000;
-/// At most one log line per this many ms about why a boot waits.
-pub const REGISTER_WAIT_LOG_MS: u64 = 5_000;
-/// How often a waiting boot looks at the stop signal.
-const STOP_POLL_MS: u64 = 100;
 
 /// What a heartbeat pump knows of the lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,56 +144,21 @@ pub fn beat_at_boot(heartbeat: &mut Option<Heartbeat>, what: &str) {
     }
 }
 
-/// Registers `row` (the boot's ONE successful `register_host`) under `policy`, asking again
-/// every [`REGISTER_RETRY_MS`] while the verdict is `Wait` and logging (at most once per
-/// [`REGISTER_WAIT_LOG_MS`]) why. `Ok(None)`: `stop` was set while waiting — the caller exits 0.
-/// A store error (a fence refusal among them) ends the wait. `stop` is only looked at between
-/// attempts: one attempt can block up to [`world_store::CLAIM_LOCK_TIMEOUT_MS`] (its lock timeout).
+/// Registers `host` (the process's ONE `register_host`) under `policy`. Elastic 1 task 2: the
+/// store issues a new id and never makes a boot wait, so this is one call; `stop` is looked at
+/// once before it (`Ok(None)`: the caller exits 0). Task 3 replaces this adapter.
 pub fn register_or_wait(
     store: &StoreHandle,
-    row: HostRow,
-    fence: &Fence,
+    host: NewHost,
     policy: CrashPolicy,
     stop: &AtomicBool,
-) -> Result<Option<HostBoot>, StoreError> {
-    let ordinal = row.id;
-    let mut logged_at: Option<Instant> = None;
-    let health = crate::health::Health::global();
-    loop {
-        let verdict = store.register_host(row.clone(), fence, policy);
-        let why = match verdict {
-            Ok(BootVerdict::Registered(boot)) => {
-                health.set_waiting(None);
-                return Ok(Some(boot));
-            }
-            Err(e) => {
-                health.set_waiting(None);
-                return Err(e);
-            }
-            Ok(BootVerdict::Wait(WaitFor::Succession)) => {
-                health.set_waiting(Some("succession"));
-                "an open succession is inheriting this ordinal's land; waiting for it to settle"
-            }
-            Ok(BootVerdict::Wait(WaitFor::Vouched)) => {
-                health.set_waiting(Some("vouched"));
-                "the previous process of this ordinal has not been declared dead yet; waiting for the coordinator"
-            }
-        };
-        let now = Instant::now();
-        if logged_at.is_none_or(|at| now >= at + Duration::from_millis(REGISTER_WAIT_LOG_MS)) {
-            logged_at = Some(now);
-            log::warn!("[lease] host {ordinal}: {why}");
-        }
-        let retry_at = now + Duration::from_millis(REGISTER_RETRY_MS);
-        while Instant::now() < retry_at {
-            if stop.load(Ordering::SeqCst) {
-                health.set_waiting(None);
-                log::info!("[lease] host {ordinal}: stop signal while waiting to register; exiting");
-                return Ok(None);
-            }
-            std::thread::sleep(Duration::from_millis(STOP_POLL_MS));
-        }
+) -> Result<Option<Registered>, StoreError> {
+    if stop.load(Ordering::SeqCst) {
+        log::info!("[lease] host {:?}: stop signal before registering; exiting", host.name);
+        return Ok(None);
     }
+    crate::health::Health::global().set_waiting(None);
+    store.register_host(host, policy).map(Some)
 }
 
 #[cfg(test)]
@@ -215,21 +174,8 @@ mod tests {
 
     use super::*;
 
-    fn row(ordinal: HostId, boot: u64) -> HostRow {
-        HostRow {
-            id: ordinal,
-            boot,
-            generation: 0,
-            clean: false,
-            state: game::HOST_LIVE,
-            seen_ms: 0,
-            reg: 0,
-            peer_addr: None,
-            peer_cert: None,
-            quic: None,
-            webtransport: None,
-            wt_cert_hash: None,
-        }
+    fn host(boot: u64) -> NewHost {
+        NewHost { name: "host".into(), boot, peer_addr: None, peer_cert: None, quic: None, webtransport: None, wt_cert_hash: None }
     }
 
     /// Final review A-M5: a boot beats its lease between its long start-up steps — a waited
@@ -238,16 +184,19 @@ mod tests {
     #[test]
     fn a_boot_beats_between_its_start_up_steps() {
         let store = StoreHandle::open(&world_store::StoreUrl::Memory, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
-        let verdict = store.register_host(row(h(0), 10), &Fence::default(), CrashPolicy::Rollback).unwrap();
-        assert!(matches!(verdict, BootVerdict::Registered(_)), "{verdict:?}");
+        let me = store.register_host(host(10), CrashPolicy::Succession).unwrap().id;
+        assert_eq!(me, h(1));
         let seen = || store.hosts().unwrap()[0].seen_ms;
         let first = seen();
         std::thread::sleep(Duration::from_millis(5));
-        let mut beat = Heartbeat::new(store.clone(), h(0), 10);
+        let mut beat = Heartbeat::new(store.clone(), me, 10);
         assert_eq!(beat.beat_now("a step"), LeaseState::Held);
         assert!(seen() > first, "the waited beat moved seen_ms");
-        // Another boot of the ordinal registered meanwhile: replaced, and it stays so.
-        store.register_host(row(h(0), 11), &Fence::default(), CrashPolicy::Rollback).unwrap();
+        // Every lease lapses at once and another process registers: a total crash takes this
+        // host's row (dead, pruned) — replaced, and it stays so.
+        store.set_host_lease_ms(0);
+        std::thread::sleep(Duration::from_millis(5));
+        store.register_host(host(11), CrashPolicy::Succession).unwrap();
         assert_eq!(beat.beat_now("a later step"), LeaseState::Replaced);
         assert_eq!(beat.pump(Instant::now()), LeaseState::Replaced);
         store.shutdown();

@@ -16,14 +16,14 @@
 //! Locks (the declaration): `coordinator` `FOR SHARE`, then `world` `FOR NO KEY UPDATE`
 //! (it serialises with `decide_cut`, `register_host` and `rollback_world`, which take the
 //! same lock in the same order, and never waits for a claim's `FOR KEY SHARE`), then the
-//! predecessors' `hosts` rows `FOR NO KEY UPDATE` in ordinal order (a heartbeat waits for
+//! predecessors' `hosts` rows `FOR NO KEY UPDATE` in id order (a heartbeat waits for
 //! the declaration, so a beat between the lapse check and the update cannot be lost), then
 //! each predecessor's `super_regions` rows `FOR NO KEY UPDATE` in key order. A staged cut
 //! part of the predecessor holds those rows `FOR SHARE` until its cut is decided: the
 //! declaration waits for it, at most `lock_timeout` (the caller declares only between
 //! cuts; a timeout is a retry). It never locks a row a staged part could be waiting for.
 //!
-//! Two deadlock cycles with a CLAIM are possible, and both are safe (Postgres aborts one
+//! One deadlock cycle with a CLAIM is possible, and it is safe (Postgres aborts one
 //! transaction with `40P01`, which writes nothing; each side treats that as a retry or a
 //! fence, never as a start-up error):
 //! 1. **A boot's re-claim of its own rows vs the declaration of that boot**
@@ -35,40 +35,79 @@
 //!    fenced exit (3); still live → it re-claims once more. If the declaration is aborted,
 //!    the coordinator declares again after a fresh lease read (the re-claimed rows then move
 //!    to the heir, or the row is no longer lapsed).
-//! 2. **A zombie's `claim_free` vs a declaration of several predecessors**: the zombie B's
-//!    upsert `ON CONFLICT` locks a row of another predecessor A (the row stays A's: its
-//!    `WHERE owner = NO_OWNER` fails, but the conflict lock is taken), then waits for B's
-//!    `hosts` row `FOR SHARE`; the declaration holds A's and B's `hosts` rows and waits for
-//!    A's `super_regions` rows. An aborted claim is a failed claim (`DirectoryKeeper`: a
-//!    retry after `CLAIM_RETRY_MS`, then refused `Fenced` once B is dead); an aborted
-//!    declaration is retried as above.
 //!
-//! **A registration's lease refresh** (`rows.rs` `register_host`, the "nobody alive" branch
-//! under `Succession`): one `UPDATE hosts SET seen_ms = <now> WHERE ordinal <> $me AND clean = 0
-//! AND state = live` — row locks on SEVERAL other hosts' rows, in no fixed order. Safe: it runs
-//! under the `world` row's `FOR NO KEY UPDATE`, which every other statement that locks more
-//! than one `hosts` row takes first (the declaration, the settle in `decide_cut`,
-//! `retire_offline`, another registration), so two of them never interleave. The one-row
-//! lockers cannot close a cycle: a heartbeat holds only its own row (and fails after its 1 s
-//! lock timeout: "no beat this time"); `vouch_host` is one guarded `UPDATE`; a claim takes its
-//! own `hosts` row `FOR SHARE` as its LAST statement and commits — the registration waits for
-//! that commit, or the claim waits for the registration's, and neither then wants anything the
-//! other holds (the registration's fence check came first, and a claim blocked on one of those
-//! `super_regions` rows has not locked its `hosts` row yet). A cut part locks no `hosts` row.
+//! (Corrected, Elastic 1: the R4 notes listed a second cycle, "a zombie's `claim_free` vs a
+//! declaration of several predecessors", in which the zombie's upsert `ON CONFLICT` locked a
+//! row of another predecessor. `claim_free` no longer upserts: its `INSERT … ON CONFLICT DO
+//! NOTHING` takes no lock on an existing row, and its `UPDATE … WHERE owner = NO_OWNER` locks
+//! only a FREE row, which no declaration, retirement or registration locks. That cycle cannot
+//! form any more.)
 //!
+//! **A registration** (`rows.rs` `register_host`, Elastic 1) — ONE transaction, UNFENCED: it
+//! creates the identity a fence is built from; it writes no row a cut part writes except the
+//! `in_flight` and `super_regions` rows of a total crash, which it takes at `epoch + 1` (so every
+//! part or load fenced on the old epochs is refused). The lock walk, in this order:
+//! `world` → `successions` → `hosts` (several rows) → `super_regions` → `in_flight`:
+//! - `world` `FOR NO KEY UPDATE` first (SQLite: the writer lock): serialises the counter
+//!   `next_host_id`, the generation and every statement below with every other registration,
+//!   declaration, retirement, rollback and decision, which all take it first too. It never
+//!   waits for a claim's `FOR KEY SHARE` (`check_side`), and the claim never waits for it.
+//!   `UPDATE world SET next_host_id` (and, a total crash, `generation`) is the same row. A
+//!   refused registration (`NotAlone`, the id bound, any error) rolls back: no id is issued.
+//! - The live read (`live_ids`) and the dirty count take no lock.
+//! - A total crash only: the open `successions` rows `FOR UPDATE` (every other writer of them
+//!   holds `world` first; a staged heir part reads them without a lock), then EVERY dirty
+//!   `hosts` row `FOR NO KEY UPDATE` in id order — the live read is repeated under these locks,
+//!   so a beat that landed in between makes its row live after all (no total crash; `static`
+//!   is then `NotAlone`), and no beat lands from here on (a heartbeat holds only its own row
+//!   and fails after its 1 s lock timeout: "no beat this time" — the row is lapsed already).
+//!   Then every dirty row's `super_regions` rows `FOR NO KEY UPDATE` in key order (a
+//!   declaration's order), the abandon (`UPDATE successions`, rows already locked; each
+//!   predecessor's `in_flight` rows to its heir, [`rollback_in`]'s statements), the
+//!   `super_regions` update, the dirty rows' `in_flight` rows, the dirty rows marked dead (rows
+//!   already locked), the generation. A staged part of a dead host holds its
+//!   `super_regions` rows `FOR SHARE` (and the `in_flight` rows it wrote or deleted) until its
+//!   cut is decided: the registration waits for it at most its `lock_timeout`
+//!   (`CLAIM_LOCK_TIMEOUT_MS`) and fails naming the staged gids, nothing written — every start
+//!   resolves staged parts before it registers. A part being written locks `super_regions`
+//!   first and `in_flight` after, as the registration does: no cycle. Nothing else here waits
+//!   for a row a part could be waiting for.
+//! - The name vouch (not a total crash): one `UPDATE hosts SET seen_ms = 0` over the dirty live
+//!   rows of one name — several rows, under `world`; against the one-row lockers as below.
+//! - The prune: one `DELETE` of clean or dead `hosts` rows that own no `super_regions` /
+//!   `in_flight` row and that no open succession names (the subqueries read without locks).
+//!   The rows it can lock are clean or dead: a heartbeat matches only a live row (a clean live
+//!   leaver's beat may wait for the delete and then answers `false` — it has left), a claim's
+//!   `check_live` locks only a live dirty row, `vouch_host` only a live dirty row; a cut part
+//!   locks no `hosts` row; every statement that locks SEVERAL `hosts` rows (a declaration, a
+//!   settle, a retirement, another registration) holds `world` first. In a total crash the
+//!   dirty rows it deletes were locked above (`FOR NO KEY UPDATE`, upgraded by the delete —
+//!   no other transaction can hold a lock on them that conflicts).
+//! - The `INSERT` of the new row: a key nobody holds (never issued before).
+//!
+//! Against the cycle above: a registration takes `hosts` rows before `super_regions` rows, as a
+//! declaration does — so the one cycle it can join is cycle 1's shape: a ZOMBIE's re-claim of
+//! its own rows (`claim_super_regions_live`: `super_regions`, then its `hosts` row `FOR SHARE`)
+//! while a total-crash registration holds that zombie's dirty `hosts` row and waits for those
+//! `super_regions` rows. `40P01` aborts one: an aborted re-claim is a fenced re-read (the row is
+//! dead once the registration commits); an aborted registration wrote nothing and its process
+//! exits and starts again. It extends no other cycle: `claim_free` locks no row a registration
+//! locks (free rows only), a boot claim (`claim_super_regions` with no live check) locks no
+//! `hosts` row, and the declaration, retirement, rollback and decision all wait for `world`
+//! before anything a registration holds.
+
 //! **After a world rollback** (the coordinator's [`rollback_world`] or the operator's
 //! [`rollback_world_operator`], both through [`rollback_in`]): every host restarts from the
 //! last committed cut K — no cut commits between a declaration and its settle, so that is the
 //! abandoned succession's base. The land stays with the heir, and so do the predecessor's
 //! in-flight rows of K: they are re-keyed to the heir (`in_flight.host`) in the same
-//! transaction. Left under the predecessor's ordinal they would have no reader: a host reads
-//! the rows of its own ordinal at boot (`load_in_flight(Some(own))`) and an heir reads a
-//! predecessor's only while an open succession names it (`load_in_flight_of`), so they would
-//! be stranded for ever if that ordinal never boots again, and restored by a boot that owns
-//! none of their land if it does. Re-keyed, the heir restores each exactly once at its boot
+//! transaction. Left under the predecessor's id they would have no reader: a host reads
+//! the rows of its own id at boot (`load_in_flight(Some(own))`) and an heir reads a
+//! predecessor's only while an open succession names it (`load_in_flight_of`), and an id is
+//! never issued again. Re-keyed, the heir restores each exactly once at its boot
 //! (forwarding a row whose target another host owns, as any boot does), and its first part
-//! replaces them (it deletes every row of its ordinal); the predecessor's next boot, owning
-//! nothing, reads none.
+//! replaces them (it deletes every row of its id). A total crash at registration abandons the
+//! same way and then re-keys every dirty row's rows (the heirs' among them) to the new host.
 //!
 //! The operator's commands (`worldctl retire-host`, `worldctl rollback`) are in `operator.rs`.
 
@@ -257,7 +296,7 @@ async fn declare_in(
     if open > 0 {
         return Ok(Declared::SuccessionOpen);
     }
-    // The predecessors' rows, locked in ordinal order: a heartbeat waits for this transaction.
+    // The predecessors' rows, locked in id order: a heartbeat waits for this transaction.
     let mut sorted: Vec<(HostId, u64)> = dead.to_vec();
     sorted.sort();
     let (mut gone, mut not_lapsed) = (Vec::new(), Vec::new());
@@ -265,7 +304,7 @@ async fn declare_in(
         let row = sqlx::query(&format!(
             "SELECT boot, clean, state, seen_ms = 0 OR {PG_NOW_MS} - seen_ms > $2, \
              EXISTS (SELECT 1 FROM successions WHERE predecessor = $1 AND predecessor_boot = hosts.boot AND abandoned = 0) \
-             FROM hosts WHERE ordinal = $1 FOR NO KEY UPDATE"
+             FROM hosts WHERE id = $1 FOR NO KEY UPDATE"
         ))
         .bind(i((*ordinal).0))
         .bind(i(lease_ms))
@@ -293,7 +332,7 @@ async fn declare_in(
     for heir in heirs {
         let fresh: Option<bool> = sqlx::query_scalar(&format!(
             "SELECT seen_ms <> 0 AND {PG_NOW_MS} - seen_ms <= $2 FROM hosts \
-             WHERE ordinal = $1 AND clean = 0 AND state = {HOST_LIVE}"
+             WHERE id = $1 AND clean = 0 AND state = {HOST_LIVE}"
         ))
         .bind(i(heir.0))
         .bind(i(lease_ms))
@@ -313,13 +352,13 @@ async fn declare_in(
     // Read under the world row's lock, which `register_host` takes: a host registering
     // later never met the dead boot; a live one the coordinator is not attached to is listed.
     let live: Vec<i64> = sqlx::query_scalar(&format!(
-        "SELECT ordinal FROM hosts WHERE clean = 0 AND state = {HOST_LIVE} ORDER BY ordinal"
+        "SELECT id FROM hosts WHERE clean = 0 AND state = {HOST_LIVE} ORDER BY id"
     ))
     .fetch_all(&mut *tx)
     .await?;
     let mut survivors = Vec::with_capacity(live.len());
     for o in live {
-        let o = u64::try_from(o).map(HostId).map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {o}")))?;
+        let o = u64::try_from(o).map(HostId).map_err(|_| StoreError::Corrupt(format!("hosts.id {o}")))?;
         if !predecessors.contains(&o) {
             survivors.push(o);
         }
@@ -330,7 +369,7 @@ async fn declare_in(
     let mut out = Vec::with_capacity(dead.len());
     for ((predecessor, boot), heir) in dead.iter().zip(heirs) {
         if kind == SuccessionKind::Crash {
-            sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE ordinal = $1 AND boot = $2"))
+            sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"))
                 .bind(i(predecessor.0))
                 .bind(i(*boot))
                 .execute(&mut *tx)
@@ -480,7 +519,7 @@ pub(crate) async fn settle(tx: &mut sqlx::PgConnection, cut: CutId, settles: &[S
         .await?;
     sqlx::query(
         "UPDATE hosts SET clean = 1 FROM successions s \
-         WHERE s.id = ANY($1) AND hosts.ordinal = s.predecessor AND hosts.boot = s.predecessor_boot",
+         WHERE s.id = ANY($1) AND hosts.id = s.predecessor AND hosts.boot = s.predecessor_boot",
     )
     .bind(&ids)
     .execute(&mut *tx)

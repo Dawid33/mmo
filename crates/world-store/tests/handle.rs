@@ -53,12 +53,9 @@ pub(crate) fn fence(h: &StoreHandle) -> Fence {
     h.claim_super_regions(hid(0), TEST_SUPER_REGIONS.to_vec()).unwrap()
 }
 
-/// `h.register_host` under R3's rule (`CrashPolicy::Rollback`, which never waits): the boot.
-pub(crate) fn register(h: &StoreHandle, row: world_store::HostRow, fence: &Fence) -> Result<world_store::HostBoot, StoreError> {
-    match h.register_host(row, fence, game::CrashPolicy::Rollback)? {
-        world_store::BootVerdict::Registered(boot) => Ok(boot),
-        other => panic!("CrashPolicy::Rollback never waits: {other:?}"),
-    }
+/// `h.register_host` of a `claim` host (several may run) named `name`, boot `boot`.
+pub(crate) fn register(h: &StoreHandle, name: &str, boot: u64) -> Result<world_store::Registered, StoreError> {
+    h.register_host(crate::hosts::new_host(name, boot), game::CrashPolicy::Succession)
 }
 
 /// Runs raw SQL against a closed store (the handle must have shut down).

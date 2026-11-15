@@ -79,7 +79,7 @@ fn successions(db: &PgDb) -> Vec<[i64; 6]> {
 
 /// `(boot, clean, state)` of host `h`'s row.
 fn host_row(db: &PgDb, h: HostId) -> (i64, i64, i64) {
-    let one = |c: &str| count(db, &format!("SELECT {c} FROM hosts WHERE ordinal = {}", h.0));
+    let one = |c: &str| count(db, &format!("SELECT {c} FROM hosts WHERE id = {}", h.0));
     (one("boot"), one("clean"), one("state"))
 }
 
@@ -118,7 +118,7 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     let store = claims.store().clone();
     let s = store.super_region_regions();
     let generation = links.registered().generation;
-    let reg = links.registered().reg;
+    let reg = links.registered().id.0;
     let c = claims.clone();
     let read: game::RegionStoreRead = Arc::new(move |rc| c.load_region(rc).map_err(|e| e.to_string()));
     // The drop set reaches the claims, whose `load_region` filters it: the server's filter.

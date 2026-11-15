@@ -36,23 +36,29 @@ pub struct CutCommitted {
     pub versions: Vec<(RegionCoords, u64)>,
 }
 
-/// One host's row in `hosts` (R3). `boot` is a random per-process-start number, stored
-/// as BIGINT by a bit cast (`as i64` / `as u64`, like every u64 of the store).
+/// One host's row in `hosts` (R3; ids issued since migration 0014). `boot` is a random
+/// per-process-start number, stored as BIGINT by a bit cast (`as i64` / `as u64`, like every
+/// u64 of the store).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRow {
+    /// Issued by [`StoreHandle::register_host`] and never issued again (a row of a world saved
+    /// before migration 0014 keeps its old ordinal as its id).
     pub id: HostId,
+    /// What people call the process (`VOXEL_HOST_NAME`); never a key. Empty: none.
+    pub name: String,
     pub boot: u64,
-    /// The world generation this boot runs at (set by [`StoreHandle::register_host`]).
+    /// The world generation this host runs at (set by [`StoreHandle::register_host`]).
     pub generation: u64,
-    /// The host's last save cut left it clean (cleared by every boot).
+    /// The host's last save cut left it clean.
     pub clean: bool,
-    /// [`HOST_LIVE`] or [`HOST_DEAD`] (a takeover marks a host dead). Set by `register_host`.
+    /// [`HOST_LIVE`] or [`HOST_DEAD`] (a takeover, or the first registration after a total
+    /// crash, marks a host dead).
     pub state: i64,
-    /// The database clock (ms since the epoch) at the host's last registration or heartbeat.
+    /// The database clock (ms since the epoch) at the host's registration or last heartbeat.
     pub seen_ms: u64,
-    /// The registration number: one more than every other row's at the host's last
-    /// registration (higher = registered later). Set by `register_host`.
-    pub reg: u64,
+    /// `drain_at_ms` minus the database clock at the read: ms until a draining host leaves
+    /// (negative: past due). `None`: not draining.
+    pub drain_in_ms: Option<i64>,
     pub peer_addr: Option<String>,
     pub peer_cert: Option<String>,
     pub quic: Option<String>,
@@ -60,45 +66,41 @@ pub struct HostRow {
     pub wt_cert_hash: Option<String>,
 }
 
-/// What [`StoreHandle::register_host`] decided: the generation this boot runs at, and
-/// whether the boot raised the world's (its previous boot died without a clean save,
-/// so every other host must restart from the same save).
+/// What a process registers as ([`StoreHandle::register_host`]): everything of its row but
+/// what the store decides (the id, the generation, `clean`, `state`, `seen_ms`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewHost {
+    /// [`HostRow::name`]: a label; a non-empty one also lapses other dirty live rows of the
+    /// same name (a restarted process's old id is declared at the coordinator's next read).
+    pub name: String,
+    pub boot: u64,
+    pub peer_addr: Option<String>,
+    pub peer_cert: Option<String>,
+    pub quic: Option<String>,
+    pub webtransport: Option<String>,
+    pub wt_cert_hash: Option<String>,
+}
+
+/// What [`StoreHandle::register_host`] decided: the id issued, the generation the host runs
+/// at, and whether this registration raised the world's (a total crash: it took every dirty
+/// row's land and in-flight rows, and every process of the old generation is refused).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HostBoot {
+pub struct Registered {
+    pub id: HostId,
     pub generation: u64,
     pub bumped: bool,
-    /// The registration number the boot's row was stored with ([`HostRow::reg`]).
-    pub reg: u64,
 }
+
+/// The highest id [`StoreHandle::register_host`] issues: the in-flight rows' key packs the
+/// host into the high 32 bits of a signed 64-bit `seq` (`rows.rs`), so a larger id would
+/// overflow it. A registration that would issue more is refused (`Corrupt`), nothing written.
+pub const HOST_ID_MAX: u64 = (1 << 31) - 1;
 
 /// [`HostRow::state`]: [`HOST_LIVE`] (the host holds its lease) or [`HOST_DEAD`] (its lease
 /// lapsed and a takeover marked it dead). Defined in `game` (the coordinator's lease watch
 /// reads them too).
 pub use game::{HOST_DEAD, HOST_LIVE};
 
-/// What [`StoreHandle::register_host`] answered a boot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BootVerdict {
-    /// The boot is registered: run.
-    Registered(HostBoot),
-    /// Not registered, nothing of this boot's written: ask again later.
-    Wait(WaitFor),
-}
-
-/// Why a boot under [`game::CrashPolicy::Succession`] waits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaitFor {
-    /// An OPEN succession names this ordinal as its predecessor — a crash's, a leave's or an
-    /// offline retirement's, whatever the generations — or (a hand-made row only) its previous
-    /// boot is marked dead: its land and its in-flight rows are being inherited. The boot
-    /// registers once the succession is settled (or abandoned by a world rollback), owning
-    /// nothing.
-    Succession,
-    /// The previous boot of this ordinal never left clean while another host is alive: this
-    /// boot vouched for its death (its row's `seen_ms = 0`) and waits for the coordinator to
-    /// declare it.
-    Vouched,
-}
 /// `super_regions.owner` of a free row (no host holds it); defined in `game` (its
 /// directory mirrors the column).
 pub use game::NO_OWNER;
@@ -902,26 +904,26 @@ impl StoreHandle {
         self.ask(|r| Request::SetSuperRegionRegions(s, r))
     }
 
-    /// Registers this process's boot as host `row.id` (once per boot, right after its
-    /// claim): one fence-checked transaction under the world row's lock, decided by the
-    /// ordinal's prior row — except that FIRST, under every policy, an open succession naming
-    /// this ordinal as its predecessor → [`WaitFor::Succession`] (nothing written), whatever the
-    /// generations (an offline retirement raises the world's as it marks the row dead; only
-    /// `Succession` worlds hold succession rows, so `Rollback` meets none and keeps R3's
-    /// verdicts). `Rollback` (R3): a prior boot that never left clean at the world's
-    /// generation bumps `world.generation` (see [`HostBoot`]). `Succession`: a clean, absent or
-    /// older-generation prior row registers; a dirty one at the world's generation marked dead
-    /// → [`WaitFor::Succession`] (nothing written); one still live while another dirty live
-    /// host beat within [`game::HOST_LEASE_MS`] → its `seen_ms = 0` (vouched),
-    /// [`WaitFor::Vouched`]; with nobody alive it bumps the generation as `Rollback` does.
-    /// `row.generation` and `row.clean` are ignored; the row is stored with the world's
-    /// generation and `clean = false`; `state`, `seen_ms` and `reg` are ignored too: it is
-    /// stored live, seen now (database clock), with the next registration number.
-    pub fn register_host(&self, row: HostRow, fence: &Fence, policy: game::CrashPolicy) -> Result<BootVerdict, StoreError> {
-        self.ask(|r| Request::RegisterHost(row, fence.clone(), policy, r))
+    /// Registers a new host (once per process start): ONE transaction under the world row's
+    /// lock (`rows.rs` `register_host`; its locks in the module notes of `succession.rs`) that
+    /// issues the next id from `world.next_host_id` — never one issued before — and stores the
+    /// row dirty, live and seen now. A new host owns nothing and never waits:
+    /// - `Rollback` (`static`, one host) beside another live row → [`StoreError::NotAlone`],
+    ///   nothing written;
+    /// - no other live row and at least one dirty one (a total crash): every open succession
+    ///   is abandoned (as a world rollback does), every dirty row's `super_regions` rows (at
+    ///   `epoch + 1`) and `in_flight` rows become the new host's, those rows are marked dead
+    ///   and `world.generation` goes up (`bumped`) — under every policy;
+    /// - otherwise other dirty live rows of the same non-empty `name` get `seen_ms = 0`
+    ///   (vouched: the coordinator declares them at its next read).
+    ///
+    /// Then every clean or dead row that owns no `super_regions` and no `in_flight` row and
+    /// that no open succession names is deleted (its id is never issued again).
+    pub fn register_host(&self, host: NewHost, policy: game::CrashPolicy) -> Result<Registered, StoreError> {
+        self.ask(|r| Request::RegisterHost(host, policy, r))
     }
 
-    /// Every registered host, by ordinal.
+    /// Every registered host, by id.
     pub fn hosts(&self) -> Result<Vec<HostRow>, StoreError> {
         self.ask(Request::Hosts)
     }

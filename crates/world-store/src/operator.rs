@@ -3,22 +3,16 @@
 //! transactions write `successions`" (and, for the rollback, `world.generation`):
 //! - [`retire_offline`] (`retire-host` with no host alive) — locks: `world` `FOR NO KEY
 //!   UPDATE` first (the declaration's second lock; it holds no `coordinator` lock), then EVERY
-//!   `hosts` row `FOR NO KEY UPDATE` in ordinal order, then the retired host's `super_regions`
+//!   `hosts` row `FOR NO KEY UPDATE` in id order, then the retired host's `super_regions`
 //!   rows `FOR NO KEY UPDATE` in key order; `lock_timeout` the cut lock timeout. It refuses
 //!   (nothing written) while any dirty live row beat within the lease, read under those locks.
 //!   Against a host REGISTERING at the same moment: `register_host` takes `world` too, so the
 //!   two serialise — a registration first leaves a fresh row (refused: `Running`); a
-//!   retirement first makes the retired ordinal's next boot wait (`Wait(Succession)`: an open
-//!   succession names it as predecessor — `register_host` checks that first, whatever the
-//!   generations, since this retirement made its row old-generation) until the settle (then it
-//!   registers owning nothing) or a rollback (its in-flight rows went to the heir: it registers
-//!   owning and restoring nothing); the heir's boot finds its own row of the older generation
-//!   and registers at the new one (the retirement raised it: every process of the old one — a
-//!   zombie that wakes included — is refused at its next write or hello). A
-//!   `claim` boot registers with an empty fence (its `check_fence` locks nothing); a `static`
-//!   boot's fence rows are held `FOR SHARE` while it waits for `world` — a boot of the retired
-//!   ordinal itself could then deadlock with the retirement's `super_regions` lock (`40P01`
-//!   aborts one, nothing written; `static` has no use for `retire-host`, see `ctl.rs`).
+//!   retirement first leaves no live row, so the next registration is a total crash (Elastic
+//!   1, `rows.rs` `register_host`): it abandons the retirement's succession (the retired
+//!   host's in-flight rows go to the heir) and takes every dirty row's land and in-flight rows
+//!   at `epoch + 1`, raising the generation once more. A registration locks nothing before it
+//!   holds `world`, so it closes no cycle with a retirement.
 //!   Against a COORDINATOR starting: claiming its row writes only `coordinator`, which the
 //!   retirement never touches; its declarations and decisions take `world` after
 //!   `coordinator` and serialise on `world` — a declaration first is refused here (an open
@@ -28,10 +22,11 @@
 //!   waits for it at most `lock_timeout`, then fails naming the staged gids (`ctl.rs` resolves
 //!   staged parts first, as every start does). Against a CLAIM: a claim takes the claimer's
 //!   `hosts` row `FOR SHARE` as its LAST statement, after upserting `super_regions` rows; only a
-//!   zombie claims here (no host is alive), and its cycle with the retirement (it holds a row
-//!   of the retired host and waits for its `hosts` row; the retirement holds that and waits
-//!   for the row) is the declaration's cycle 2: `40P01` aborts one — a failed claim, or a
-//!   retirement the operator runs again. A heartbeat waits for the retirement (its short lock
+//!   zombie claims here (no host is alive), and only the retired host's own re-claim
+//!   (`claim_super_regions_live`: its rows, then its `hosts` row) can close a cycle with the
+//!   retirement (which holds that `hosts` row and waits for those rows) — the declaration's
+//!   cycle 1: `40P01` aborts one — a failed claim, or a retirement the operator runs again
+//!   (`claim_free` locks only free rows: no cycle, see `succession.rs`). A heartbeat waits for the retirement (its short lock
 //!   timeout fails that beat).
 //! - [`vouch_host`] (`retire-host` while hosts live): ONE `UPDATE` of the retired host's row
 //!   (its row lock only), guarded by the lapse — see the function.
@@ -50,9 +45,9 @@
 //! every process of the old generation (a partitioned host that only looked lapsed, a running
 //! coordinator) is refused at its next write or hello (`StaleGeneration` /
 //! `HigherGeneration`: a host exits 5; the coordinator's next decision is recorded aborted and
-//! it re-reads the open successions), whatever the heir's row looks like. The heir's next boot
-//! finds its own row (dirty or clean) of an older generation and registers at the new one
-//! without raising it again; so do the other hosts dead at retirement time.
+//! it re-reads the open successions), whatever the heir's row looks like. (Since Elastic 1 a
+//! restarted process is a new host: the first registration after a retirement finds nobody
+//! live and is a total crash, see above.)
 
 use game::HostId;
 use game::{CutId, HOST_DEAD, HOST_LIVE};
@@ -209,11 +204,11 @@ pub(crate) async fn retire_offline(pool: &PgPool, ordinal: HostId, lock_timeout_
 async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) -> Result<Retired, DeclareError> {
     // 1. The world row: serialised with every declaration, registration, rollback, decision.
     let stored = lock_world(&mut *tx).await?;
-    // 2. Every `hosts` row, in ordinal order (the declaration's order): a beat waits for this
+    // 2. Every `hosts` row, in id order (the declaration's order): a beat waits for this
     // transaction, so none lands between the lapse check and the commit.
     let rows = sqlx::query(&format!(
-        "SELECT ordinal, boot, clean, state, seen_ms <> 0 AND {PG_NOW_MS} - seen_ms <= $1 FROM hosts \
-         ORDER BY ordinal FOR NO KEY UPDATE"
+        "SELECT id, boot, clean, state, seen_ms <> 0 AND {PG_NOW_MS} - seen_ms <= $1 FROM hosts \
+         ORDER BY id FOR NO KEY UPDATE"
     ))
     .bind(i(lease_ms))
     .fetch_all(&mut *tx)
@@ -222,7 +217,7 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
     for r in rows {
         let (o, boot, clean, state, fresh): (i64, i64, i64, i64, bool) =
             (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?, r.try_get(3)?, r.try_get(4)?);
-        let o = u64::try_from(o).map(HostId).map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {o}")))?;
+        let o = u64::try_from(o).map(HostId).map_err(|_| StoreError::Corrupt(format!("hosts.id {o}")))?;
         hosts.push((o, boot as u64, clean != 0, state, fresh));
     }
     let running: Vec<HostId> =
@@ -266,7 +261,7 @@ async fn retire_in(tx: &mut sqlx::PgConnection, ordinal: HostId, lease_ms: u64) 
     // refused from now on (see the module docs).
     sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(i(stored + 1)).execute(&mut *tx).await?;
     // 6. As a declaration: the row dead, the land moved (key order, then the claim itself).
-    sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE ordinal = $1 AND boot = $2"))
+    sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"))
         .bind(i(ordinal.0))
         .bind(i(boot))
         .execute(&mut *tx)
@@ -324,7 +319,7 @@ pub(crate) async fn vouch_host(pool: &PgPool, ordinal: HostId, lease_ms: u64, lo
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
     let done = sqlx::query(&format!(
-        "UPDATE hosts SET seen_ms = 0 WHERE ordinal = $1 AND clean = 0 AND state = {HOST_LIVE} \
+        "UPDATE hosts SET seen_ms = 0 WHERE id = $1 AND clean = 0 AND state = {HOST_LIVE} \
          AND (seen_ms = 0 OR {PG_NOW_MS} - seen_ms > $2)"
     ))
     .bind(i(ordinal.0))
@@ -337,7 +332,7 @@ pub(crate) async fn vouch_host(pool: &PgPool, ordinal: HostId, lease_ms: u64, lo
         log::warn!("[world-store] the operator vouched for host {ordinal}'s death (seen_ms = 0)");
         return Ok(Vouched::Vouched);
     }
-    let row = sqlx::query("SELECT clean, state FROM hosts WHERE ordinal = $1")
+    let row = sqlx::query("SELECT clean, state FROM hosts WHERE id = $1")
         .bind(i(ordinal.0))
         .fetch_optional(&mut *tx)
         .await?;

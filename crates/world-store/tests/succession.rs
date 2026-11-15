@@ -10,7 +10,7 @@ use game::{
     ChunkCoords, CrashPolicy, CutId, EntityBundle, EntityId, InFlightRow, PortableRegion, RegionCoords, WorldCut,
 };
 use world_store::{
-    CoordinatorFence, Declared, Fence, HOST_DEAD, HOST_LIVE, HostRow, StoreError, StoreHandle, StoreUrl, Succession,
+    CoordinatorFence, Declared, Fence, HOST_DEAD, HOST_LIVE, StoreError, StoreHandle, StoreUrl, Succession,
     SuccessionKind,
 };
 
@@ -29,23 +29,6 @@ const FAR: (i32, i32) = (5, 5);
 
 pub(crate) fn boot_of(ordinal: game::HostId) -> u64 {
     100 + ordinal.0
-}
-
-pub(crate) fn row(ordinal: game::HostId) -> HostRow {
-    HostRow {
-        id: ordinal,
-        boot: boot_of(ordinal),
-        generation: 0,
-        clean: false,
-        state: 0,
-        seen_ms: 0,
-        reg: 0,
-        peer_addr: None,
-        peer_cert: None,
-        quic: None,
-        webtransport: None,
-        wt_cert_hash: None,
-    }
 }
 
 fn region_of_host(host: game::HostId) -> RegionCoords {
@@ -86,8 +69,11 @@ pub(crate) fn in_flight(rc: RegionCoords) -> InFlightRow {
     InFlightRow::Intent { target: rc, msg: intent() }
 }
 
-/// A world of `n` hosts (0..n), each registered with its own fence (host 1 also holds
-/// [`FAR`]), and a claimed coordinator. Each host gets its own store handle.
+/// A world of `n` hosts (0..n), each registered (named `host-<o>`, boot [`boot_of`]) after
+/// claiming its own fence (host 1 also holds [`FAR`]), and a claimed coordinator. Each host
+/// gets its own store handle. The ids are issued from 0 (`world.next_host_id` set to 0
+/// first, as a world migrated from fixed ordinals continues): these tests are about
+/// successions and cuts, not about how ids are issued (`hosts.rs`).
 pub(crate) struct World {
     pub(crate) w: PgWorld,
     /// The coordinator's handle.
@@ -101,6 +87,7 @@ impl World {
     pub(crate) fn new(n: u32) -> Option<World> {
         let w = pg_world()?;
         let h = open(&w.url);
+        exec(&w, "UPDATE world SET next_host_id = 0");
         let s = h.super_region_regions();
         let mut hosts = Vec::new();
         let mut fences = Vec::new();
@@ -111,10 +98,9 @@ impl World {
             }
             let hh = open(&w.url);
             let f = hh.claim_super_regions(o, srs).unwrap();
-            match hh.register_host(row(o), &f, CrashPolicy::Succession).unwrap() {
-                world_store::BootVerdict::Registered(_) => {}
-                other => panic!("host {o} registers: {other:?}"),
-            }
+            let registered =
+                hh.register_host(crate::hosts::new_host(&format!("host-{}", o.0), boot_of(o)), CrashPolicy::Succession).unwrap();
+            assert_eq!(registered.id, o, "issued in order");
             hosts.push(hh);
             fences.push(f);
         }
@@ -124,12 +110,12 @@ impl World {
 
     /// Host `o`'s row looks lapsed: its last beat lies two leases back.
     pub(crate) fn lapse(&self, o: game::HostId) {
-        exec(&self.w, &format!("UPDATE hosts SET seen_ms = seen_ms - {} WHERE ordinal = {}", 2 * game::HOST_LEASE_MS, o.0));
+        exec(&self.w, &format!("UPDATE hosts SET seen_ms = seen_ms - {} WHERE id = {}", 2 * game::HOST_LEASE_MS, o.0));
     }
 
     /// Host `o`'s row is vouched dead (its next boot found it dirty while others ran).
     pub(crate) fn vouch(&self, o: game::HostId) {
-        exec(&self.w, &format!("UPDATE hosts SET seen_ms = 0 WHERE ordinal = {}", o.0));
+        exec(&self.w, &format!("UPDATE hosts SET seen_ms = 0 WHERE id = {}", o.0));
     }
 
     pub(crate) fn declare(&self, dead: game::HostId, heir: game::HostId, kind: SuccessionKind) -> Result<Declared, StoreError> {
@@ -409,9 +395,12 @@ fn commit_settles_and_cleans_the_predecessor() {
     assert!(w.h.open_successions().unwrap().is_empty());
     assert_eq!(scalar_i64(&w.w, &format!("SELECT settled_cut FROM successions WHERE id = {}", s.id.0)), 2);
     assert_eq!(w.state_of(hid(1)), (HOST_DEAD, true), "the predecessor's row is clean");
-    // A new boot of the ordinal registers at once.
-    let back = w.hosts[1].register_host(HostRow { boot: 555, ..row(hid(1)) }, &Fence::default(), CrashPolicy::Succession);
-    assert!(matches!(back, Ok(world_store::BootVerdict::Registered(_))), "{back:?}");
+    // A restarted process of host 1 is a new host: it registers at once, owning nothing, and
+    // host 1's row (clean, landless, its succession settled) is pruned.
+    let back = w.hosts[1].register_host(crate::hosts::new_host("host-1", 555), CrashPolicy::Succession).unwrap();
+    assert_eq!((back.id, back.bumped), (hid(2), false));
+    assert!(w.h.owned_by(back.id).unwrap().epochs.is_empty());
+    assert_eq!(w.h.hosts().unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![hid(0), hid(2)]);
     w.shutdown();
 }
 
@@ -625,7 +614,7 @@ fn several_predecessors_in_one_call() {
     w.shutdown();
 
     let Some(w) = World::new(4) else { return };
-    exec(&w.w, "UPDATE hosts SET seen_ms = 0 WHERE ordinal IN (1, 2)");
+    exec(&w.w, "UPDATE hosts SET seen_ms = 0 WHERE id IN (1, 2)");
     let done = w.h.declare_succession(vec![(hid(1), boot_of(hid(1))), (hid(2), boot_of(hid(2)))], vec![hid(0), hid(3)], SuccessionKind::Crash, w.c, 0).unwrap();
     let Declared::Done(s) = done else { panic!("{done:?}") };
     assert_eq!(s.iter().map(|s| (s.predecessor, s.heir)).collect::<Vec<_>>(), vec![(hid(1), hid(0)), (hid(2), hid(3))]);
@@ -647,7 +636,7 @@ fn a_stale_heir_or_a_dead_predecessor_is_gone() {
     assert_eq!(w.declare(hid(1), hid(2), SuccessionKind::Crash).unwrap(), Declared::Gone(vec![hid(2)]), "a vouched heir");
     assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
     assert_eq!(w.h.owned_by(hid(1)).unwrap(), w.fences[1]);
-    exec(&w.w, &format!("UPDATE hosts SET state = {HOST_DEAD} WHERE ordinal = 1"));
+    exec(&w.w, &format!("UPDATE hosts SET state = {HOST_DEAD} WHERE id = 1"));
     assert_eq!(w.declare(hid(1), hid(0), SuccessionKind::Crash).unwrap(), Declared::Gone(vec![hid(1)]), "already dead");
     assert!(w.h.open_successions().unwrap().is_empty());
     w.shutdown();
@@ -674,9 +663,7 @@ fn malformed_declarations_are_unsupported() {
 /// Host 1 leaves clean (its leave cut committed): from then on a claim by THAT boot — of a
 /// free row, or a re-claim of its own — is refused as fenced and writes nothing, before and
 /// after its `Leave` succession is declared (the declaration does not mark the row dead).
-/// Another boot of host 1 first WAITS (`Wait(Succession)`: an open succession names its
-/// ordinal as predecessor) until the heir's cut settles that succession, then registers
-/// normally (dirty, live) and claims normally.
+/// Another process of host 1 is a new host with a new id: it claims normally.
 #[test]
 fn a_cleanly_left_boot_claims_nothing() {
     let Some(w) = World::new(2) else { return };
@@ -703,22 +690,19 @@ fn a_cleanly_left_boot_claims_nothing() {
     refused(&w);
     assert!(w.h.owned_by(hid(1)).unwrap().epochs.is_empty(), "every row is the heir's");
     assert_eq!(s.moved.len(), 2);
-    // Fix round 2 of Task 14: while the `Leave` succession naming it is open its next boot
-    // waits (the heir adopts the in-flight rows its leave cut left under its ordinal); once a
-    // cut settles it, the next boot registers (dirty, live) and claims normally.
-    let none = Fence { owner: hid(1), epochs: Default::default(), all_hosts: false };
-    let waits = w.hosts[1].register_host(HostRow { boot: 9001, ..row(hid(1)) }, &none, CrashPolicy::Succession).unwrap();
-    assert_eq!(waits, world_store::BootVerdict::Wait(world_store::WaitFor::Succession));
-    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, true), "nothing written");
+    // The heir's cut settles the `Leave` succession (it adopts the in-flight rows host 1's leave
+    // cut left). Elastic 1: another process of host 1 is a NEW host — it registers at once under
+    // a new id, owns nothing and claims normally; host 1's row (clean, landless, named by no open
+    // succession) is pruned at that registration.
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
     let heir = w.h.owned_by(hid(0)).unwrap();
     w.hosts[0].prepare_cut(WorldCut { adopts: vec![hid(1)], ..part(2, hid(0), vec![]) }, heir, 0).recv().unwrap().unwrap();
     assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![s.id]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(2)).unwrap(), Some(true));
-    let next = w.hosts[1].register_host(HostRow { boot: 9001, ..row(hid(1)) }, &none, CrashPolicy::Succession).unwrap();
-    assert!(matches!(next, world_store::BootVerdict::Registered(_)), "{next:?}");
-    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
-    let won = w.hosts[1].claim_free(hid(1), 9001, vec![free]).unwrap();
+    let next = w.hosts[1].register_host(crate::hosts::new_host("host-1", 9001), CrashPolicy::Succession).unwrap();
+    assert_eq!((next.id, next.bumped), (hid(2), false));
+    assert_eq!(w.h.hosts().unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![hid(0), hid(2)]);
+    let won = w.hosts[1].claim_free(next.id, 9001, vec![free]).unwrap();
     assert_eq!(won.epochs.keys().copied().collect::<Vec<_>>(), vec![free]);
     w.shutdown();
 }

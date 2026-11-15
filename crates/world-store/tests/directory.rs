@@ -42,28 +42,21 @@ fn owned_by_is_the_claimed_fence() {
     });
 }
 
-/// Host `owner`'s live boot, registering one (boot `7000 + owner`) if it has no row: a
-/// `claim_free` is refused unless its claimer's `hosts` row is that live boot.
+/// Host `owner`'s live boot, registering hosts (boot `7000 + id`) until `owner` is issued if
+/// it has no live row: a `claim_free` is refused unless its claimer's `hosts` row is that
+/// live boot. `owner` must not have been issued yet (ids are never issued twice).
 pub(crate) fn live_boot(h: &StoreHandle, owner: game::HostId) -> u64 {
     if let Some(r) = h.hosts().unwrap().into_iter().find(|r| r.id == owner && r.state == world_store::HOST_LIVE) {
         return r.boot;
     }
-    let row = world_store::HostRow {
-        id: owner,
-        boot: 7000 + owner.0,
-        generation: 0,
-        clean: false,
-        state: 0,
-        seen_ms: 0,
-        reg: 0,
-        peer_addr: None,
-        peer_cert: None,
-        quic: None,
-        webtransport: None,
-        wt_cert_hash: None,
-    };
-    crate::handle::register(h, row, &Fence::default()).unwrap();
-    7000 + owner.0
+    loop {
+        let boot = 7000 + h.hosts().unwrap().iter().map(|r| r.id.0 + 1).max().unwrap_or(1);
+        let issued = crate::handle::register(h, "", boot).unwrap().id;
+        assert!(issued <= owner, "host {owner} can no longer be issued (issued {issued})");
+        if issued == owner {
+            return boot;
+        }
+    }
 }
 
 /// A cut that writes nothing but the world tick: fenced by every super-region of its fence.
@@ -128,7 +121,7 @@ fn two_claimers_of_one_free_row_one_wins() {
                 h.claim_free(owner, boot, vec![sr]).unwrap()
             })
         };
-        let (ta, tb) = (claim(&a, hid(2 * round)), claim(&b, hid(2 * round + 1)));
+        let (ta, tb) = (claim(&a, hid(2 * round + 1)), claim(&b, hid(2 * round + 2)));
         let (fa, fb) = (ta.join().unwrap(), tb.join().unwrap());
         let mut won: Vec<Fence> = [fa, fb].into_iter().filter(|f| !f.epochs.is_empty()).collect();
         assert_eq!(won.len(), 1, "round {round}: exactly one claimer wins: {won:?}");

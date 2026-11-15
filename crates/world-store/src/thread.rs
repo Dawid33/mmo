@@ -116,7 +116,7 @@ pub(crate) enum Request {
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
     SetSuperRegionRegions(u32, Reply<bool>),
-    RegisterHost(crate::HostRow, Fence, game::CrashPolicy, Reply<crate::BootVerdict>),
+    RegisterHost(crate::NewHost, game::CrashPolicy, Reply<crate::Registered>),
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
     Heartbeat(HostId, u64, Reply<bool>),
@@ -613,12 +613,12 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, set_super_region_regions(n)))
             }),
-            Request::RegisterHost(row, fence, policy, r) => {
+            Request::RegisterHost(host, policy, r) => {
                 let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
                 let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     let _w = writer.lock().await;
-                    r.send(on_pool!(&pool, register_host(row, &fence, policy, lease_ms, lock_ms)))
+                    r.send(on_pool!(&pool, register_host(host, policy, lease_ms, lock_ms)))
                 })
             }
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
@@ -726,7 +726,7 @@ async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::Unbounde
     use sqlx::{ConnectOptions, Connection};
     let deadline = std::time::Duration::from_millis(crate::HEARTBEAT_DEADLINE_MS);
     let sql = format!(
-        "UPDATE hosts SET seen_ms = {} WHERE ordinal = $1 AND boot = $2 AND state = {}",
+        "UPDATE hosts SET seen_ms = {} WHERE id = $1 AND boot = $2 AND state = {}",
         crate::succession::PG_NOW_MS,
         crate::HOST_LIVE
     );
@@ -825,7 +825,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SetSuperRegionRegions(_, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::RegisterHost(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RegisterHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PrepareCut(c, _, _, r) => {
             cuts.settle(c.id);
             r.send(Err(StoreError::ReadOnly))

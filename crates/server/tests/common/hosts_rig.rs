@@ -309,7 +309,7 @@ impl Sim {
             manager.set_peer(other, PeerSession::new(hello, other), link);
         }
         manager.set_host_generation(generation);
-        let reg = links.registered().reg;
+        let reg = links.registered().id.0;
         Sim { ordinal, boot, reg, manager, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None, keeper: None, heartbeat: None, fenced: Default::default(), adopter: None, frozen_until: None }
     }
 
@@ -813,7 +813,7 @@ fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
 /// listener), its regions and in-flight rows from the store, its clock joining the live
 /// hosts', a link to the coordinator (if one is up), its cut writer, its keeper. Its
 /// registration. With no host up its clock starts where the world's stopped.
-fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: HostId, boot: u64) -> world_store::HostBoot {
+fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: HostId, boot: u64) -> world_store::Registered {
     let first = db.open();
     server::roles::recover_staged_cuts(&first, HOSTS).expect("the staged parts are resolved");
     first.shutdown();
@@ -839,7 +839,7 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: HostId, boot
     sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
     let switch = SwitchLink(Arc::new(std::sync::Mutex::new((None, 0))));
     if let Some(c) = &w.coordinator {
-        switch.replace(quic_world_link(c.addr, w.cert.clone(), h, boot, registered.reg));
+        switch.replace(quic_world_link(c.addr, w.cert.clone(), h, boot, registered.id.0));
     }
     w.switches[h.0 as usize] = switch.clone();
     sim.manager.set_world_link(Box::new(switch), boot, 0);

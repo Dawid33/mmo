@@ -18,7 +18,7 @@ use crate::fence::{CoordinatorFence, Fence, SuperRegion, commit_check_set, load_
 use crate::forged::{ForgedHead, TiledRows};
 use game::HostId;
 use game::ClockAnchor;
-use crate::{CutCommitted, HostBoot, HostRow, StoreError, WorldInfo};
+use crate::{CutCommitted, HostRow, StoreError, WorldInfo};
 
 /// Super-regions checked per fence query (two binds each).
 const FENCE_CHECK_BATCH: usize = 200;
@@ -341,7 +341,7 @@ macro_rules! engine_rows {
             /// that locks after sees the row dead.
             async fn check_live(pool: &Pool, mut tx: Tx, owner: HostId, boot: u64, lock_ms: u64) -> Result<Tx, StoreError> {
                 let sql = format!(
-                    "SELECT 1 FROM hosts WHERE ordinal = $1 AND boot = $2 AND state = {} AND clean = 0{}",
+                    "SELECT 1 FROM hosts WHERE id = $1 AND boot = $2 AND state = {} AND clean = 0{}",
                     crate::HOST_LIVE,
                     $share_lock
                 );
@@ -516,171 +516,273 @@ macro_rules! engine_rows {
             /// The database clock in ms since the epoch (the one expression per engine).
             const NOW_MS: &str = $now_ms;
 
-            /// Registers a host boot (R3, R4): in one transaction (Postgres: `lock_timeout` `lock_ms`,
-            /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] — it waits for what a claim waits for), with the fence
-            /// checked over the fence's own super-regions first and then the world row locked
-            /// (Postgres: `FOR NO KEY UPDATE`; SQLite has one writer) — the lock order of `commit_cut`.
-            /// The ordinal's prior row decides, if it is dirty and holds the world's generation (its
-            /// boot died without a clean save): `Rollback` → `world.generation` goes up (`bumped`);
-            /// `Succession` → marked dead: `Wait(Succession)`, nothing written; live while another
-            /// dirty live row beat within [`game::HOST_LEASE_MS`] (database clock): the prior row's
-            /// `seen_ms = 0` (vouched), `Wait(Vouched)`; nobody alive: bumped as `Rollback`, and every
-            /// other dirty live row's `seen_ms` set to now (a fresh lease: the others of a total
-            /// crash boot seconds apart and must not be inherited at once). Otherwise
-            /// (no prior row, a clean one, an older generation) it registers at the world's
-            /// generation. Registering upserts the row with the new boot, the generation, `clean = 0`,
-            /// `state` live, `seen_ms` now and `reg` one more than the highest of any row (safe: the
-            /// world-row lock serialises registrations). `row.generation`, `row.clean`, `row.state`,
-            /// `row.seen_ms` and `row.reg` are ignored. Callers hold the writer lock.
+            /// Registers a new host (Elastic 1): ONE transaction (Postgres: `lock_timeout` `lock_ms`,
+            /// [`crate::CLAIM_LOCK_TIMEOUT_MS`] — a total crash's take waits for what a claim waits
+            /// for, a staged part's rows; a timeout is explained as a claim's, worded for a
+            /// registration) that issues the next id and never waits for anything else to happen.
+            /// UNFENCED: it is what creates the identity a fence is built from; each statement's
+            /// safety and the lock walk are in the module notes of `succession.rs`. In order:
+            /// 1. the world row (Postgres `FOR NO KEY UPDATE`, as every declaration, retirement,
+            ///    rollback and decision; SQLite has one writer): `id = next_host_id`, refused above
+            ///    [`crate::HOST_ID_MAX`]; `next_host_id = id + 1`;
+            /// 2. `Rollback` (`static`) and another row live → [`StoreError::NotAlone`];
+            /// 3. no live row and some dirty one (a total crash) → [`total_crash`];
+            /// 4. otherwise, a non-empty `name`: other dirty live rows of that name get `seen_ms = 0`;
+            /// 5. [`prune_hosts`];
+            /// 6. the new row: dirty, live, seen now, at the world's generation.
+            ///
+            /// "Live" is [`live_ids`]. Nothing of a refused registration is written: the
+            /// transaction rolls back, `next_host_id` with it. Callers hold the writer lock.
             pub(crate) async fn register_host(
                 pool: &Pool,
-                row: HostRow,
-                fence: &Fence,
+                host: crate::NewHost,
                 policy: game::CrashPolicy,
                 lease_ms: u64,
                 lock_ms: u64,
-            ) -> Result<crate::BootVerdict, StoreError> {
+            ) -> Result<crate::Registered, StoreError> {
                 let mut tx = pool.begin().await?;
                 cut_lock_timeout(&mut *tx, lock_ms).await?;
-                let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
-                check_fence(&mut *tx, fence, &srs).await?;
-                // Postgres `FOR NO KEY UPDATE` (as `decide_cut`): serialises the generation
-                // with a decision and another boot, never waits for a claim's `FOR KEY SHARE`.
-                // A lock timeout here gets the claims' explanation, worded for a registration
-                // ([`claim_error_as`] with [`crate::open::REGISTERING`]).
-                let no_key = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
-                let sql = format!("SELECT generation FROM world WHERE id = 1{no_key}");
-                let world_row = match sqlx::query(&sql).fetch_optional(&mut *tx).await {
-                    Ok(found) => found,
-                    Err(e) => return Err(claim_error_as(pool, tx, e, lock_ms, crate::open::REGISTERING).await),
-                };
-                let world: i64 = world_row.ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?.try_get(0)?;
-                // An OPEN succession names this ordinal as its predecessor: its land and its
-                // in-flight rows of the base cut are being inherited — whatever the generations
-                // (an offline retirement raises the world's in the transaction that marks the row
-                // dead) and whatever the policy (only `Succession` worlds have such rows). Wait,
-                // nothing written. Read under the world row's lock above, which every declaration,
-                // retirement, rollback and settle takes: the answer is never stale.
-                let named: i64 = sqlx::query(
-                    "SELECT COUNT(*) FROM successions WHERE predecessor = $1 AND settled_cut IS NULL AND abandoned = 0",
-                )
-                .bind(i(row.id.0))
-                .fetch_one(&mut *tx)
-                .await?
-                .try_get(0)?;
-                if named > 0 {
-                    tx.rollback().await?;
-                    return Ok(crate::BootVerdict::Wait(crate::WaitFor::Succession));
-                }
-                let prior = sqlx::query("SELECT generation, clean, state, boot FROM hosts WHERE ordinal = $1")
-                    .bind(i(row.id.0))
-                    .fetch_optional(&mut *tx)
-                    .await?;
-                let mut generation = world;
-                let mut bumped = false;
-                if let Some(prior) = prior {
-                    let (prior_generation, prior_clean, prior_state, prior_boot): (i64, i64, i64, i64) =
-                        (prior.try_get(0)?, prior.try_get(1)?, prior.try_get(2)?, prior.try_get(3)?);
-                    if prior_clean == 0 && prior_generation == world {
-                        if policy == game::CrashPolicy::Succession {
-                            if prior_state != crate::HOST_LIVE {
-                                // Declared dead: its land is being inherited. Nothing written.
-                                tx.rollback().await?;
-                                return Ok(crate::BootVerdict::Wait(crate::WaitFor::Succession));
-                            }
-                            // Alive: dirty, live, of this generation (a stale row of an older one
-                            // that beat lately runs a world that is gone) and beaten within a lease.
-                            let sql = format!(
-                                "SELECT COUNT(*) FROM hosts WHERE ordinal <> $1 AND clean = 0 AND state = {live} \
-                                 AND generation = $2 AND {NOW_MS} - seen_ms <= $3",
-                                live = crate::HOST_LIVE,
-                            );
-                            let alive: i64 = sqlx::query(&sql)
-                                .bind(i(row.id.0))
-                                .bind(world)
-                                .bind(i(lease_ms))
-                                .fetch_one(&mut *tx)
-                                .await?
-                                .try_get(0)?;
-                            if alive > 0 {
-                                // Another host runs: it inherits; this boot vouches for the death.
-                                // The boot judged dead above, and only it.
-                                sqlx::query("UPDATE hosts SET seen_ms = 0 WHERE ordinal = $1 AND boot = $2")
-                                    .bind(i(row.id.0))
-                                    .bind(prior_boot)
-                                    .execute(&mut *tx)
-                                    .await?;
-                                tx.commit().await?;
-                                return Ok(crate::BootVerdict::Wait(crate::WaitFor::Vouched));
-                            }
-                            // Nobody alive: a total crash restarts the world from its last cut.
-                            // The other hosts come back seconds apart: every other dirty live
-                            // row gets a fresh lease (a vouch is undone), so the coordinator —
-                            // which may have watched those rows stand still for longer than a
-                            // lease already — starts its count again instead of declaring them
-                            // dead the moment this boot attaches (their land would be this
-                            // host's for good). One that is really gone lapses one lease later.
-                            // `clock_timestamp()`, the lease clock. Lock walk: under the `world`
-                            // row lock taken above, which every other statement locking SEVERAL
-                            // `hosts` rows takes first (a declaration, a retirement, a settle);
-                            // a heartbeat and a vouch hold one row and want nothing else; a
-                            // claim takes its own `hosts` row last and wants nothing after it
-                            // (the module notes of `succession.rs`).
-                            let sql = format!(
-                                "UPDATE hosts SET seen_ms = {NOW_MS} WHERE ordinal <> $1 AND clean = 0 AND state = {live}",
-                                live = crate::HOST_LIVE,
-                            );
-                            sqlx::query(&sql).bind(i(row.id.0)).execute(&mut *tx).await?;
-                        }
-                        generation = world + 1;
-                        bumped = true;
-                        sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(generation).execute(&mut *tx).await?;
+                let done = register_in(&mut tx, &host, policy, lease_ms).await;
+                match done {
+                    Ok(Ok(registered)) => {
+                        tx.commit().await?;
+                        log::info!(
+                            "[world-store] registered host {} ({:?}, boot {}) at world generation {}{}",
+                            registered.id,
+                            host.name,
+                            host.boot,
+                            registered.generation,
+                            if registered.bumped { " (raised: a total crash; it took every dirty host's land)" } else { "" }
+                        );
+                        Ok(registered)
+                    }
+                    Ok(Err(live)) => {
+                        tx.rollback().await?;
+                        Err(StoreError::NotAlone { live })
+                    }
+                    Err(crate::succession::DeclareError::Store(e)) => Err(e),
+                    Err(crate::succession::DeclareError::Sql(e)) => {
+                        Err(claim_error_as(pool, tx, e, lock_ms, crate::open::REGISTERING).await)
                     }
                 }
-                let reg: i64 = sqlx::query("SELECT COALESCE(MAX(reg), 0) + 1 FROM hosts")
-                    .fetch_one(&mut *tx)
-                    .await?
-                    .try_get(0)?;
+            }
+
+            /// A `hosts.id` (or a column holding one) as a [`HostId`].
+            fn host_id(v: i64) -> Result<HostId, StoreError> {
+                u64::try_from(v).map(HostId).map_err(|_| StoreError::Corrupt(format!("host id {v}")))
+            }
+
+            /// The ids of the live rows, by id: dirty, `state` live, at the world's generation
+            /// `world` (a row of an older one runs a world that is gone) and beaten within
+            /// `lease_ms` by the database clock ([`NOW_MS`]; a vouched row, `seen_ms = 0`, is not).
+            async fn live_ids(tx: &mut Tx, world: i64, lease_ms: u64) -> Result<Vec<HostId>, crate::succession::DeclareError> {
                 let sql = format!(
-                    "INSERT INTO hosts (ordinal, boot, generation, clean, state, seen_ms, reg, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, updated_utc) \
-                     VALUES ($1, $2, $3, 0, {live}, {NOW_MS}, $4, $5, $6, $7, $8, $9, $10) \
-                     ON CONFLICT (ordinal) DO UPDATE SET boot = excluded.boot, generation = excluded.generation, clean = 0, \
-                     state = excluded.state, seen_ms = excluded.seen_ms, reg = excluded.reg, \
-                     peer_addr = excluded.peer_addr, peer_cert = excluded.peer_cert, quic = excluded.quic, \
-                     webtransport = excluded.webtransport, wt_cert_hash = excluded.wt_cert_hash, updated_utc = excluded.updated_utc",
+                    "SELECT id FROM hosts WHERE clean = 0 AND state = {live} AND generation = $1 \
+                     AND {NOW_MS} - seen_ms <= $2 ORDER BY id",
+                    live = crate::HOST_LIVE,
+                );
+                let ids: Vec<i64> = sqlx::query_scalar(&sql).bind(world).bind(i(lease_ms)).fetch_all(&mut **tx).await?;
+                Ok(ids.into_iter().map(host_id).collect::<Result<_, _>>()?)
+            }
+
+            /// [`register_host`]'s statements; `Ok(Err(live))`: refused, `NotAlone`.
+            async fn register_in(
+                tx: &mut Tx,
+                host: &crate::NewHost,
+                policy: game::CrashPolicy,
+                lease_ms: u64,
+            ) -> Result<Result<crate::Registered, Vec<HostId>>, crate::succession::DeclareError> {
+                // 1. The world row: serialises the counter, the generation and every statement
+                // below with every other registration, declaration, retirement, rollback and
+                // decision. `FOR NO KEY UPDATE` never waits for a claim's `FOR KEY SHARE`.
+                let no_key = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
+                let sql = format!("SELECT generation, next_host_id FROM world WHERE id = 1{no_key}");
+                let row = sqlx::query(&sql)
+                    .fetch_optional(&mut **tx)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
+                let (world, next): (i64, i64) = (row.try_get(0)?, row.try_get(1)?);
+                let id = u64::try_from(next)
+                    .ok()
+                    .filter(|id| *id <= crate::HOST_ID_MAX)
+                    .map(HostId)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "world.next_host_id is {next}: above the highest host id {} (the in-flight rows' key packs \
+                             the host into 32 bits); no id issued",
+                            crate::HOST_ID_MAX
+                        ))
+                    })?;
+                sqlx::query("UPDATE world SET next_host_id = $1 WHERE id = 1").bind(next + 1).execute(&mut **tx).await?;
+                // 2. `static` runs one host: refused beside another live row.
+                let mut live = live_ids(tx, world, lease_ms).await?;
+                if policy == game::CrashPolicy::Rollback && !live.is_empty() {
+                    return Ok(Err(live));
+                }
+                // 3. A total crash: nobody live, somebody dirty. Lock the open successions, then
+                // every dirty row (id order), and judge again under those locks — a beat that
+                // landed meanwhile makes its row live after all (a beat waits for these locks
+                // from here on).
+                let mut generation = world;
+                let mut bumped = false;
+                let dirty: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hosts WHERE clean = 0").fetch_one(&mut **tx).await?;
+                if live.is_empty() && dirty > 0 {
+                    if !$update_lock.is_empty() {
+                        sqlx::query(
+                            "SELECT id FROM successions WHERE settled_cut IS NULL AND abandoned = 0 ORDER BY id FOR UPDATE",
+                        )
+                        .execute(&mut **tx)
+                        .await?;
+                        sqlx::query("SELECT id FROM hosts WHERE clean = 0 ORDER BY id FOR NO KEY UPDATE")
+                            .execute(&mut **tx)
+                            .await?;
+                    }
+                    live = live_ids(tx, world, lease_ms).await?;
+                    if live.is_empty() {
+                        total_crash(tx, id, world).await?;
+                        generation = world + 1;
+                        bumped = true;
+                    } else if policy == game::CrashPolicy::Rollback {
+                        return Ok(Err(live));
+                    }
+                }
+                // 4. A restarted process's old id, by name: lapsed now, declared at the
+                // coordinator's next read instead of a lease later (a wrongly vouched live
+                // host is fenced by its succession, never duplicated).
+                if !bumped && !host.name.is_empty() {
+                    let sql = format!(
+                        "UPDATE hosts SET seen_ms = 0 WHERE name = $1 AND clean = 0 AND state = {live}",
+                        live = crate::HOST_LIVE,
+                    );
+                    let vouched = sqlx::query(&sql).bind(&host.name).execute(&mut **tx).await?.rows_affected();
+                    if vouched > 0 {
+                        log::warn!(
+                            "[world-store] host {id} registers as {:?}: {vouched} older dirty row(s) of that name lapsed \
+                             (seen_ms = 0) — the coordinator declares them at its next read",
+                            host.name
+                        );
+                    }
+                }
+                // 5. Rows nothing needs any more.
+                prune_hosts(tx).await?;
+                // 6. The new row. `reg` (no longer read) gets the id: also a registration number.
+                let sql = format!(
+                    "INSERT INTO hosts (id, name, boot, generation, clean, state, seen_ms, reg, drain_at_ms, peer_addr, \
+                     peer_cert, quic, webtransport, wt_cert_hash, updated_utc) \
+                     VALUES ($1, $2, $3, $4, 0, {live}, {NOW_MS}, $1, NULL, $5, $6, $7, $8, $9, $10)",
                     live = crate::HOST_LIVE,
                 );
                 sqlx::query(&sql)
-                .bind(i(row.id.0))
-                .bind(i(row.boot))
-                .bind(generation)
-                .bind(reg)
-                .bind(&row.peer_addr)
-                .bind(&row.peer_cert)
-                .bind(&row.quic)
-                .bind(&row.webtransport)
-                .bind(&row.wt_cert_hash)
-                .bind(crate::open::utc_now())
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                Ok(crate::BootVerdict::Registered(HostBoot { generation: u(generation), bumped, reg: u(reg) }))
+                    .bind(i(id.0))
+                    .bind(&host.name)
+                    .bind(i(host.boot))
+                    .bind(generation)
+                    .bind(&host.peer_addr)
+                    .bind(&host.peer_cert)
+                    .bind(&host.quic)
+                    .bind(&host.webtransport)
+                    .bind(&host.wt_cert_hash)
+                    .bind(crate::open::utc_now())
+                    .execute(&mut **tx)
+                    .await?;
+                Ok(Ok(crate::Registered { id, generation: u(generation), bumped }))
             }
 
-            /// Every host row, by ordinal.
-            pub(crate) async fn hosts(pool: &Pool) -> Result<Vec<HostRow>, StoreError> {
-                let rows = sqlx::query(
-                    "SELECT ordinal, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, seen_ms, reg \
-                     FROM hosts ORDER BY ordinal",
+            /// A total crash at registration (decision 4; [`register_host`] step 3, the dirty rows
+            /// and the open successions already locked): every dirty row's `super_regions` rows
+            /// locked in key order (as a declaration does); every open succession abandoned as a
+            /// world rollback abandons it ([`crate::succession::rollback_in`]'s statements: each
+            /// predecessor's in-flight rows to its heir); then every dirty row's `super_regions`
+            /// and `in_flight` rows are `me`'s — the super-regions at `epoch + 1`, so every old
+            /// process is fenced — those rows marked dead, and `world.generation` = `world + 1`.
+            async fn total_crash(tx: &mut Tx, me: HostId, world: i64) -> Result<(), crate::succession::DeclareError> {
+                // The dirty rows' land first (key order, as a declaration), then everything in
+                // `in_flight`: the walk's order (`succession.rs`), the one a cut part takes too.
+                let dirty = "SELECT id FROM hosts WHERE clean = 0";
+                let lock = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
+                sqlx::query(&format!("SELECT 1 FROM super_regions WHERE owner IN ({dirty}) ORDER BY sx, sz{lock}"))
+                    .execute(&mut **tx)
+                    .await?;
+                // Ordered by id: a predecessor's rows end with the heir of its LAST open succession.
+                let mut abandoned: Vec<(i64, i64, i64)> = sqlx::query_as(
+                    "UPDATE successions SET abandoned = 1 WHERE settled_cut IS NULL AND abandoned = 0 \
+                     RETURNING id, predecessor, heir",
                 )
-                .fetch_all(pool)
+                .fetch_all(&mut **tx)
                 .await?;
+                abandoned.sort();
+                for (_, predecessor, heir) in &abandoned {
+                    sqlx::query("UPDATE in_flight SET host = $1 WHERE host = $2")
+                        .bind(heir)
+                        .bind(predecessor)
+                        .execute(&mut **tx)
+                        .await?;
+                }
+                let land = sqlx::query(&format!(
+                    "UPDATE super_regions SET owner = $1, epoch = epoch + 1 WHERE owner IN ({dirty})"
+                ))
+                .bind(i(me.0))
+                .execute(&mut **tx)
+                .await?
+                .rows_affected();
+                let rows = sqlx::query(&format!("UPDATE in_flight SET host = $1 WHERE host IN ({dirty})"))
+                    .bind(i(me.0))
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected();
+                let dead: Vec<i64> = sqlx::query_scalar(&format!(
+                    "UPDATE hosts SET state = {dead} WHERE clean = 0 AND state = {live} RETURNING id",
+                    dead = crate::HOST_DEAD,
+                    live = crate::HOST_LIVE,
+                ))
+                .fetch_all(&mut **tx)
+                .await?;
+                sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(world + 1).execute(&mut **tx).await?;
+                log::warn!(
+                    "[world-store] total crash: host {me} takes {land} super-region(s) and {rows} in-flight row(s) of every \
+                     dirty host, marks hosts {dead:?} dead, abandons {} open succession(s); world generation {} → {}",
+                    abandoned.len(),
+                    world,
+                    world + 1
+                );
+                Ok(())
+            }
+
+            /// Deletes every `hosts` row nothing refers to any more: clean or dead, owning no
+            /// `super_regions` row and no `in_flight` row, and named by no open succession (as
+            /// predecessor, heir or survivor). Its id is never issued again (`world.next_host_id`
+            /// only grows), so nothing that still carries it — a coordinator's saved state, a
+            /// journal, a prepared part's gid — can ever match a new host.
+            async fn prune_hosts(tx: &mut Tx) -> Result<(), crate::succession::DeclareError> {
+                let sql = format!(
+                    "DELETE FROM hosts WHERE (clean = 1 OR state = {dead}) \
+                     AND NOT EXISTS (SELECT 1 FROM super_regions sr WHERE sr.owner = hosts.id) \
+                     AND NOT EXISTS (SELECT 1 FROM in_flight f WHERE f.host = hosts.id) \
+                     AND NOT EXISTS (SELECT 1 FROM successions s WHERE s.settled_cut IS NULL AND s.abandoned = 0 \
+                     AND (s.predecessor = hosts.id OR s.heir = hosts.id \
+                     OR (',' || s.survivors || ',') LIKE ('%,' || CAST(hosts.id AS TEXT) || ',%'))) \
+                     RETURNING id",
+                    dead = crate::HOST_DEAD,
+                );
+                let mut pruned: Vec<i64> = sqlx::query_scalar(&sql).fetch_all(&mut **tx).await?;
+                if !pruned.is_empty() {
+                    pruned.sort();
+                    log::info!("[world-store] pruned the rows of hosts {pruned:?} (clean or dead, owning nothing)");
+                }
+                Ok(())
+            }
+
+            /// Every host row, by id.
+            pub(crate) async fn hosts(pool: &Pool) -> Result<Vec<HostRow>, StoreError> {
+                let sql = format!(
+                    "SELECT id, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, \
+                     seen_ms, name, drain_at_ms - {NOW_MS} FROM hosts ORDER BY id"
+                );
+                let rows = sqlx::query(&sql).fetch_all(pool).await?;
                 rows.into_iter()
                     .map(|r| {
-                        let ordinal: i64 = r.try_get(0)?;
                         Ok(HostRow {
-                            id: u64::try_from(ordinal).map(HostId)
-                                .map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {ordinal}")))?,
+                            id: host_id(r.try_get(0)?)?,
                             boot: u(r.try_get(1)?),
                             generation: u(r.try_get(2)?),
                             clean: r.try_get::<i64, _>(3)? != 0,
@@ -691,7 +793,8 @@ macro_rules! engine_rows {
                             wt_cert_hash: r.try_get(8)?,
                             state: r.try_get(9)?,
                             seen_ms: u(r.try_get(10)?),
-                            reg: u(r.try_get(11)?),
+                            name: r.try_get(11)?,
+                            drain_in_ms: r.try_get(12)?,
                         })
                     })
                     .collect()
@@ -704,7 +807,7 @@ macro_rules! engine_rows {
             /// `super_regions`. `false`: no live row of that boot (the caller was replaced).
             pub(crate) async fn heartbeat(pool: &Pool, ordinal: HostId, boot: u64) -> Result<bool, StoreError> {
                 let sql = format!(
-                    "UPDATE hosts SET seen_ms = {NOW_MS} WHERE ordinal = $1 AND boot = $2 AND state = {}",
+                    "UPDATE hosts SET seen_ms = {NOW_MS} WHERE id = $1 AND boot = $2 AND state = {}",
                     crate::HOST_LIVE
                 );
                 let mut tx = pool.begin().await?;

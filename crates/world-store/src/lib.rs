@@ -27,7 +27,7 @@ pub use counters::StoreCounters;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{
-    BootVerdict, CutCommitted, HOST_DEAD, HOST_LIVE, HostBoot, HostRow, NO_OWNER, StoreHandle, WaitFor, WorldInfo,
+    CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, NO_OWNER, NewHost, Registered, StoreHandle, WorldInfo,
 };
 pub use listen::{
     CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
@@ -223,6 +223,10 @@ pub enum StoreError {
     /// (`sqlstate` `40P01`) or its `lock_timeout` ran out (`55P03`). Nothing was written;
     /// asking again may succeed ([`StoreError::is_lock_conflict`]). `detail` says what waited.
     LockConflict { sqlstate: String, detail: String },
+    /// A registration under [`game::CrashPolicy::Rollback`] (`static`: one host) while other
+    /// hosts' rows are live (dirty, live, of the world's generation, beaten within the lease):
+    /// `live`, by id. Nothing was written — no id issued.
+    NotAlone { live: Vec<game::HostId> },
 }
 
 impl StoreError {
@@ -335,6 +339,12 @@ impl fmt::Display for StoreError {
             ),
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
+            StoreError::NotAlone { live } => write!(
+                f,
+                "a static host registers only when no other host runs, but hosts {} hold live rows; \
+                 several hosts need VOXEL_OWNERSHIP=claim",
+                live.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(", ")
+            ),
         }
     }
 }

@@ -97,7 +97,7 @@ pub(crate) fn old_store(url: &StoreUrl, schema: i64, terrain: &str, rows: &[Stri
 }
 
 /// The first column of `sql`'s only row on the store, as an integer (`None`: NULL or no row).
-fn scalar(url: &StoreUrl, sql: &str) -> Option<i64> {
+pub(crate) fn scalar(url: &StoreUrl, sql: &str) -> Option<i64> {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let pool = raw_pool(url).await;

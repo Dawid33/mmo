@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use game::{ChunkCoords, CutId, InFlightRow, PortableRegion, RegionCoords, WorldCut};
 use sqlx::Connection;
-use world_store::{Dials, Fence, HostRow, OpenMode, StoreError, StoreHandle, StoreUrl, cut_gid};
+use world_store::{Dials, Fence, OpenMode, StoreError, StoreHandle, StoreUrl, cut_gid};
 
 use crate::codec::{chunk, intent, meta, region_ground};
 use crate::common;
@@ -131,20 +131,12 @@ fn fences(h: &StoreHandle) -> (Fence, Fence) {
     (f0, f1)
 }
 
-fn host_row(ordinal: game::HostId) -> HostRow {
-    HostRow {
-        id: ordinal,
-        boot: 1,
-        generation: 0,
-        clean: false,
-        state: 0,
-        seen_ms: 0,
-        reg: 0,
-        peer_addr: None,
-        peer_cert: None,
-        quic: None,
-        webtransport: None,
-        wt_cert_hash: None,
+/// Registers hosts `0..n` in order (ids issued from 0: `world.next_host_id` set to 0 first, as
+/// a world migrated from fixed ordinals continues) — these tests are about cuts, not ids.
+fn register_from_zero(w: &PgWorld, h: &StoreHandle, n: u64) {
+    exec(w, "UPDATE world SET next_host_id = 0");
+    for o in 0..n {
+        assert_eq!(register(h, &format!("host-{o}"), 1).unwrap().id, hid(o), "issued in order");
     }
 }
 
@@ -476,8 +468,7 @@ fn leaving_host_is_clean_only_if_committed() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    register(&h, host_row(hid(0)), &f0).unwrap();
-    register(&h, host_row(hid(1)), &f1).unwrap();
+    register_from_zero(&w, &h, 2);
     let c = h.claim_coordinator().unwrap();
     let clean = |h: &StoreHandle| h.hosts().unwrap().iter().map(|r| (r.id, r.clean)).collect::<Vec<_>>();
     let h1 = open(&w.url);
@@ -502,10 +493,8 @@ fn commit_beside_a_dirty_unlisted_host_becomes_an_abort() {
     let h = open(&w.url);
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
-    let f2 = h.claim_super_regions(hid(2), vec![(7, 7)]).unwrap();
-    register(&h, host_row(hid(0)), &f0).unwrap();
-    register(&h, host_row(hid(1)), &f1).unwrap();
-    register(&h, host_row(hid(2)), &f2).unwrap();
+    h.claim_super_regions(hid(2), vec![(7, 7)]).unwrap();
+    register_from_zero(&w, &h, 3);
     let c = h.claim_coordinator().unwrap();
     prepare_both(&h, &h1, 40, &f0, &f1);
     assert!(!h.decide_cut(CutId(40), 4000, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
@@ -517,17 +506,16 @@ fn commit_beside_a_dirty_unlisted_host_becomes_an_abort() {
     h.shutdown();
 }
 
-/// A host returning from a clean leave (its row dirty again) aborts a commit that does
-/// not list it; listing every dirty host commits, and a leave cut (the leaver listed,
-/// dirty until this very decision) commits.
+/// A leave cut (the leaver listed, dirty until this very decision) commits; a host that
+/// registers while a cut is pending (a restarted leaver is a new host) aborts a commit that
+/// does not list it; listing every dirty host commits.
 #[test]
 fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
-    register(&h, host_row(hid(0)), &f0).unwrap();
-    register(&h, host_row(hid(1)), &f1).unwrap();
+    register_from_zero(&w, &h, 2);
     let c = h.claim_coordinator().unwrap();
     let settle = |cut: u64| {
         h.cut_decided(CutId(cut)).unwrap();
@@ -541,16 +529,19 @@ fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
     h.prepare_cut(part(51, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
     assert!(h.decide_cut(CutId(51), 5100, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap(), "a clean row need not be listed");
     settle(51);
-    // Host 1 returns (clean row: no generation bump) while cut 52 of host 0 is pending.
+    // Host 1's process comes back — a new host, id 2 — while cut 52 of host 0 is pending.
     h.prepare_cut(part(52, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
-    let boot = register(&h1, host_row(hid(1)), &f1).unwrap();
-    assert!(!boot.bumped);
-    assert!(!h.decide_cut(CutId(52), 5200, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap(), "host 1 is dirty and unlisted");
+    let back = register(&h1, "host-1", 2).unwrap();
+    assert_eq!((back.id, back.bumped), (hid(2), false));
+    assert!(!h.decide_cut(CutId(52), 5200, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap(), "host 2 is dirty and unlisted");
     settle(52);
     assert_eq!(h.world_info().unwrap().world_tick, 5100, "cut 52 is not visible");
-    // The next cut lists it: commits.
-    prepare_both(&h, &h1, 53, &f0, &f1);
-    assert!(h.decide_cut(CutId(53), 5300, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    // The next cut lists it (its part saves no region: it owns no land): commits.
+    h.prepare_cut(part(53, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
+    let landless = Fence { owner: back.id, epochs: Default::default(), all_hosts: false };
+    let empty = WorldCut { regions: vec![], in_flight: vec![], ..part(53, back.id) };
+    h1.prepare_cut(empty, landless, 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(53), 5300, true, vec![hid(0), back.id], vec![], c, 0, vec![]).unwrap());
     settle(53);
     assert_eq!(prepared(&w), 0);
     h1.shutdown();
@@ -869,6 +860,8 @@ fn prepared_part_with_an_entity_twice_is_refused() {
 fn claim_holding_the_world_row_does_not_block_a_decision() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
+    // The boot below is host 0, whose part the decisions list.
+    exec(&w, "UPDATE world SET next_host_id = 0");
     let (f0, _) = fences(&h);
     let c = h.claim_coordinator().unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -889,9 +882,9 @@ fn claim_holding_the_world_row_does_not_block_a_decision() {
             // A host boot (its generation check) does not wait either.
             let (tx_boot, rx_boot) = crossbeam::channel::bounded(1);
             let booter = {
-                let (h, f0) = (h.clone(), f0.clone());
+                let h = h.clone();
                 std::thread::spawn(move || {
-                    let _ = tx_boot.send(register(&h, host_row(hid(0)), &f0));
+                    let _ = tx_boot.send(register(&h, "host-0", 1));
                 })
             };
             rx_boot.recv_timeout(Duration::from_secs(5)).expect("the boot does not wait").unwrap();
@@ -1126,7 +1119,7 @@ fn claim_behind_a_staged_part_times_out_with_the_remedy() {
     locked_rx.recv().unwrap();
     let err = other.claim_super_regions(hid(2), srs).unwrap_err();
     // A registration's read of the world row (`FOR NO KEY UPDATE`) behind it: its own words.
-    let reg = other.register_host(host_row(hid(5)), &Fence::default(), game::CrashPolicy::Rollback).unwrap_err();
+    let reg = other.register_host(crate::hosts::new_host("x", 1), game::CrashPolicy::Succession).unwrap_err();
     release_tx.send(()).unwrap();
     holder.join().unwrap();
     let StoreError::LockConflict { sqlstate, detail } = &err else { panic!("a lock conflict: {err}") };

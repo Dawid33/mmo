@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{Receiver, Sender};
 use game::{HostEndpoint, PeerLink, PeerMsg};
 use svc_link::{LinkDialer, LinkEvent, LinkHello, LinkListener, PeerId, PeerRole, PeerSenders};
-use world_store::{Fence, HostBoot, HostRow, StoreError, StoreHandle};
+use world_store::{Fence, NewHost, Registered, StoreError, StoreHandle};
 
 /// Environment: where a host's peer listener binds (default `127.0.0.1:{6500 + ordinal}`).
 pub const PEER_BIND_ENV: &str = "VOXEL_PEER_BIND";
@@ -146,38 +146,34 @@ impl PeerLinkConfig {
     }
 }
 
-/// Registers this boot as host `ordinal` — the boot's ONE successful `register_host` (a
-/// second in the same boot would raise the world generation) — with where players reach it
-/// (`endpoint`) and, with `peer`, its peer listener's address and pin; under `policy` it may
-/// wait for its predecessor's succession first ([`crate::lease::register_or_wait`]).
-/// `Ok(None)`: `stop` was set while it waited.
+/// Registers this process — the boot's ONE `register_host` — with where players reach it
+/// (`endpoint`) and, with `peer`, its peer listener's address and pin. Elastic 1 task 2 adapter
+/// (Task 3 deletes it): the store issues the id; the process is named `host-<ordinal>` after
+/// its configured `ordinal` (so a restart lapses its old row by name), and the caller uses the
+/// returned id only where it is cheap (the heartbeat, its hellos). `fence` is no longer part of
+/// a registration. `Ok(None)`: `stop` was set before it.
 #[allow(clippy::too_many_arguments)]
 pub fn register(
     store: &StoreHandle,
-    fence: &Fence,
+    _fence: &Fence,
     ordinal: HostId,
     boot: u64,
     endpoint: &HostEndpoint,
     peer: Option<(String, String)>,
     policy: game::CrashPolicy,
     stop: &AtomicBool,
-) -> Result<Option<HostBoot>, StoreError> {
+) -> Result<Option<Registered>, StoreError> {
     let (peer_addr, peer_cert) = peer.unzip();
-    let row = HostRow {
-        id: ordinal,
+    let host = NewHost {
+        name: format!("host-{}", ordinal.0),
         boot,
-        generation: 0,
-        clean: false,
-        state: 0,
-        seen_ms: 0,
-        reg: 0,
         peer_addr,
         peer_cert,
         quic: endpoint.quic.clone(),
         webtransport: endpoint.webtransport.clone(),
         wt_cert_hash: endpoint.cert_hash.clone(),
     };
-    crate::lease::register_or_wait(store, row, fence, policy, stop)
+    crate::lease::register_or_wait(store, host, policy, stop)
 }
 
 /// The other hosts that left the world cleanly in a committed leave cut, each with the boot
@@ -695,7 +691,7 @@ fn dial_peer(
 pub struct PeerLinks {
     listener: LinkListener,
     links: Vec<(HostId, Box<dyn PeerLink + Send>)>,
-    registered: HostBoot,
+    registered: Registered,
     wake: Receiver<()>,
     /// Per lower ordinal: whether its dialing thread holds a dialer now.
     dialing: BTreeMap<HostId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -735,10 +731,13 @@ impl PeerLinks {
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other(StoppedWhileRegistering))?;
         log::info!(
-            "[peers] host {ordinal} of {hosts}: peers dial {advertised} (bound {bound}, pin {})",
+            "[peers] host {ordinal} of {hosts} (registered as {}): peers dial {advertised} (bound {bound}, pin {})",
+            registered.id,
             listener.cert_sha256()
         );
-        let hello = LinkHello::new(token, PeerRole::Host { id: ordinal, boot, reg: registered.reg });
+        // Task 2 adapter: the hello names the issued id (the registration number too), the
+        // links below still the configured ordinals (Task 3 makes them one).
+        let hello = LinkHello::new(token, PeerRole::Host { id: registered.id, boot, reg: registered.id.0 });
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
         let mut links: Vec<(HostId, Box<dyn PeerLink + Send>)> = Vec::new();
         let mut routes = BTreeMap::new();
@@ -773,7 +772,7 @@ impl PeerLinks {
     }
 
     /// What this boot's registration decided (its world generation).
-    pub fn registered(&self) -> HostBoot {
+    pub fn registered(&self) -> Registered {
         self.registered
     }
 
