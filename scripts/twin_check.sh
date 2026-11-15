@@ -273,8 +273,11 @@ memory_snapshot "after the forge (toolbox peak = the forge)"
 # ---------------------------------------------------------------------------------
 step "3. register the world in the twin's login service"
 reg=$(wjust world-register Twin) || fail "world-register failed: $reg"
-line=$(printf '%s\n' "$reg" | grep '^just orion-login world add ' || true)
-args="${line#just orion-login }"
+# Not orion: world-register prints the kubectl form for the twin's own login service.
+prefix="kubectl --context $ctx -n login exec deploy/login -- login "
+line=$(printf '%s\n' "$reg" | grep -F "$prefix" || true)
+case "$line" in "$prefix"world\ add\ *) ;; *) fail "world-register printed no '${prefix}world add' command: $reg" ;; esac
+args="${line#"$prefix"}"
 # The only command this script runs from text: checked word by word first.
 printf '%s\n' "$args" | grep -Eq "^world add twin --name 'Twin' --quic 127\.0\.0\.1:30466 --wt https://127\.0\.0\.1:30467/ --link hosts-0\.hosts\.$ns\.svc\.cluster\.local:6490 --link-cert [0-9a-f]{64}$" ||
     fail "world-register printed an unexpected command: $line"

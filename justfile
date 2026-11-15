@@ -1903,9 +1903,11 @@ world-images-build:
 orion-world-push: world-images-build
     TOFU={{tofu}} scripts/orion_world_push.sh
 
-# Stop-update-start release of a world (scripts/world_update.sh): hosts to 0, new images by digest on
-# coordinator, toolbox, hosts and web, hosts back. e.g. `just orion-world-update <server-ref> <web-ref>`
-# with the refs `orion-world-push` printed; `namespace=` picks the world's namespace.
+# Stop-update-start release of a world (scripts/world_update.sh): hosts to 0 (each host's leave line is
+# printed; a host that left without a cut is WARNED about), new images by digest on coordinator, toolbox,
+# hosts and web, hosts back. The refs it replaces are recorded first in the world's ConfigMap
+# release-history (what orion-world-rollback goes back to). e.g. `just orion-world-update <server-ref>
+# <web-ref>` with the refs `orion-world-push` printed; `namespace=` picks the world's namespace.
 orion-world-update server-digest web-digest namespace="world-errantry":
     scripts/world_update.sh {{orion_context}} {{namespace}} {{server-digest}} {{web-digest}}
 
@@ -1966,7 +1968,9 @@ world-logs pod:
     kubectl --context {{world_ctx}} -n {{world_ns}} logs -f --tail 200 {{pod}}
 
 # Stop the world: hosts to 0 (each asks for a leave cut and exits, bounded by about 90 s), wait until
-# no host pod is left, then the coordinator to 0. Waits up to WORLD_STOP_TIMEOUT s (default 150).
+# no host pod is left, print each host's leave line (WARNS when one left without a committed cut: the
+# next start raises the world generation), then the coordinator to 0. Waits up to WORLD_STOP_TIMEOUT s
+# (default 150).
 world-stop:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1998,9 +2002,46 @@ world-stop:
         echo "world-stop: the coordinator is at 0 replicas but host pods still exist; they cannot leave cleanly. Run \`just world-start\` first, or delete the host pods knowingly. Nothing changed." >&2
         exit 2
     fi
+    # Each host pod's log is followed until the pod ends: its leave line is read after it is gone.
+    follow_dir=$(mktemp -d)
+    follow_pids=()
+    trap 'for p in "${follow_pids[@]}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$follow_dir"' EXIT
+    for pod in $(printf '%s\n' "$hostpods" | sed -n 's#^pod/\(hosts-[0-9][0-9]*\)$#\1#p'); do
+        k logs -f --tail=20 "$pod" > "$follow_dir/$pod.log" 2>&1 &
+        follow_pids+=("$!")
+    done
+    sleep 1
     echo "world-stop: hosts to 0, waiting until no host pod is left ($timeout s)"
     k scale statefulset/hosts --replicas=0
     wait_gone 'hosts-[0-9]'
+    sleep 1
+    for p in "${follow_pids[@]}"; do kill "$p" 2>/dev/null || true; done
+    # The leave of each host (the same lines scripts/world_update.sh reads): WARN, never abort.
+    echo "world-stop: the hosts' leave:"
+    [ "$(ls "$follow_dir")" ] || echo "    (no host pod was running)"
+    no_cut='' unknown=''
+    for f in "$follow_dir"/*.log; do
+        [ -e "$f" ] || continue
+        pod=$(basename "$f" .log)
+        if grep -qF "left without a cut" "$f"; then
+            echo "    $pod: LEFT WITHOUT A CUT: $(grep -F 'left without a cut' "$f" | tail -1 | sed 's/.*\(\[server\]\)/\1/')"
+            no_cut="$no_cut $pod"
+        elif grep -qF "[server] left the world in cut" "$f"; then
+            echo "    $pod: $(grep -F '[server] left the world in cut' "$f" | tail -1 | sed 's/.*\(\[server\] left the world in cut\)/\1/')"
+        else
+            echo "    $pod: no leave line seen in its log"
+            unknown="$unknown $pod"
+        fi
+    done
+    if [ -n "$no_cut" ]; then
+        echo "world-stop: ************************************************************************" >&2
+        echo "world-stop: WARNING: host(s)$no_cut left WITHOUT a committed cut. The next start raises the" >&2
+        echo "world-stop: world generation: the world rolls back to its last committed cut. Going on." >&2
+        echo "world-stop: ************************************************************************" >&2
+    fi
+    if [ -n "$unknown" ]; then
+        echo "world-stop: WARNING: no leave line seen for$unknown (its log could not be followed to the end); whether it left with a cut is not known. Going on." >&2
+    fi
     echo "world-stop: coordinator to 0"
     k scale deploy/coordinator --replicas=0
     wait_gone 'coordinator-'
@@ -2043,8 +2084,10 @@ world-start:
     done
     echo "world-start: the world is up ($count hosts)"
 
-# Print (never run) the `just orion-login world add …` command that registers this world with the login
-# service. `world add` REPLACES the world's row: run it with every option, or the omitted ones are lost.
+# Print (never run) the command that registers this world with the login service of `world_ctx`'s
+# cluster: `just orion-login world add …` on orion, `kubectl --context <ctx> -n login exec deploy/login --
+# login world add …` on any other context (the twin's own login). `world add` REPLACES the world's row:
+# run it with every option, or the omitted ones are lost.
 # The world id is the namespace without its `world-` prefix; `name=` sets the displayed name.
 # --quic / --wt are host 0's VOXEL_ADVERTISE_QUIC / _WT from the ConfigMap host-endpoints; the link pin is the
 # SHA-256 of the public certificate in Secret host-link-identity. A name with a single quote is refused.
@@ -2071,24 +2114,21 @@ world-register $name="Errantry":
     [ "${#pin}" -eq 64 ] || { echo "world-register: link pin is not 64 hex digits" >&2; exit 1; }
     echo "Run this (it replaces the row of world '$id'; nothing was changed by this recipe):"
     echo
-    echo "just orion-login world add $id --name '$name' --quic $quic --wt $wt --link hosts-0.hosts.$ns.svc.cluster.local:6490 --link-cert $pin"
+    args="world add $id --name '$name' --quic $quic --wt $wt --link hosts-0.hosts.$ns.svc.cluster.local:6490 --link-cert $pin"
+    if [ "{{world_ctx}}" = "{{orion_context}}" ]; then
+        echo "just orion-login $args"
+    else
+        echo "kubectl --context {{world_ctx}} -n login exec deploy/login -- login $args"
+    fi
 
-# Roll the world's four workloads back one revision, hosts stopped meanwhile: stop (world-stop), `rollout undo`
-# on coordinator, toolbox, web and hosts, start (world-start). A database migration made by the newer
-# build is NOT undone. Only the last revision of each workload is kept.
-orion-world-rollback: _world-rollback-warning world-stop _world-rollback-undo && world-start
-
-_world-rollback-warning:
+# Back to the release before the last `orion-world-update` (scripts/world_update.sh --rollback): the server
+# and web refs that update recorded in the world's ConfigMap release-history, through the same stop →
+# set images → start path, all four workloads to the same build. Refused (nothing changed) when no
+# previous release is recorded or a recorded ref is not a digest. A rollback records what it replaced:
+# a second one goes forward again. A database migration made by the newer build is NOT undone.
+orion-world-rollback namespace="world-errantry":
     @echo "orion-world-rollback: a schema migration made by the newer build is NOT undone by this; if the older build cannot read the database, restore it: just orion-pg-restore <world> <object>"
-
-_world-rollback-undo:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "orion-world-rollback: the world is DOWN; if an undo fails, fix it and run \`just world-start\`" >&2
-    for obj in deploy/coordinator deploy/toolbox deploy/web statefulset/hosts; do
-        echo "  + kubectl --context {{world_ctx}} -n {{world_ns}} rollout undo $obj"
-        kubectl --context {{world_ctx}} -n {{world_ns}} rollout undo "$obj"
-    done
+    scripts/world_update.sh {{orion_context}} {{namespace}} --rollback
 
 # Run the nightly database dump now (a Job from the CronJob pg-dump in the postgres namespace).
 # This writes to the cluster. Watch it: `kubectl --context orion -n postgres logs -f job/<the printed name>`.
