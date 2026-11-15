@@ -84,25 +84,38 @@ the OLD compose game on the box, `just deploy` (`scripts/web_release.sh` — use
 print secrets.
 
 **The world on k8s (R5, built 2026-11-15; plan `docs/superpowers/plans/2026-11-15-r5-k8s.md`, "As built"; the
-hand steps are its Phase D)**: apply order `registry` (+ `just orion-world-push`) → `platform` (carries the
-CloudNativePG operator) → `garage-buckets` (bucket `world-backups`) → `postgres` (cluster `pg`, a database and
-role per world, a nightly dump CronJob to `world-backups` — same disk as the data, no off-box copy) → `dns` →
-`login` → `monitoring` → `world` (`deploy/modules/world`, namespace `world-<id>`: Deployment `coordinator`, StatefulSet
-`hosts`, a UDP NodePort pair per host, Deployment `toolbox` holding `worldctl`, Deployment `web` = page + `/login`
-proxy to the login service, the cert-manager Certificate `client-tls` for `game.errantry.renownandruin.com`, the
-`ecr-pull` secret). Pods never forge (`VOXEL_EMPTY_STORE=wait`): the forge runs in the toolbox (`just world-ctl forge
---preset …`), then the pods turn Ready. Hosts are `Parallel` + **`OnDelete`**: `kubectl rollout status` never completes
-on them — wait on `status.readyReplicas`, as the recipes do. A release is **stop → replace images → start, never a
-rolling update** (`just orion-world-push` builds and pushes both images and prints digests; `orion-world-update
-<server> <web>` = `scripts/world_update.sh`; `orion-world-rollback`; `world-stop` / `world-start` leave every host
-through its leave cut first). Operator recipes (context `world_ctx`, namespace `world_ns`, default orion /
-`world-errantry`): `world-ctl <worldctl args>`, `world-status` (pods, node ports, each `/readyz` body),
-`world-logs|world-metrics <pod>`, `world-register` (prints the `just orion-login world add …` line, pins read from
-Secret `host-link-identity`), `orion-pg-backup-now`, `orion-pg-restore` (prints the restore into a scratch database,
-runs nothing). The twin runs the same module on k3d with the same recipes (`world_ctx=k3d-mmo world_ns=world-twin`):
-`twin-check` proves forge-wait, a killed host (a landless one: a Crash succession that settles), a clean leave, a
-coordinator restart, stop/start; it does NOT prove a takeover of OWNED land, a player, a browser pin, cert-manager,
-backups or load.
+hand steps are its Phase D) — the deployment chain**: apply order `registry` (+ `just orion-world-push`) →
+`platform` (carries the CloudNativePG operator) → `garage-buckets` (bucket `world-backups`) → `postgres` (cluster
+`pg`, a database and role per world, a nightly dump CronJob to `world-backups` — same disk as the data, no off-box
+copy) → `dns` → `login` → `monitoring` → `world` (`deploy/modules/world`, namespace `world-<id>`: Deployment
+`coordinator`, StatefulSet `hosts`, a UDP NodePort pair per host, Deployment `toolbox` holding `worldctl`, Deployment
+`web` = page + a `/login` proxy that forwards ONLY login's `/v1/` and `/.well-known/jwks.json` (never its `/healthz`
+or `/metrics`), the cert-manager Certificate `client-tls` for `game.errantry.renownandruin.com`, the `ecr-pull`
+secret). Pods never forge (`VOXEL_EMPTY_STORE=wait`): the forge runs in the toolbox, then the pods turn Ready. Hosts
+are `Parallel` + **`OnDelete`**: `kubectl rollout status` never completes on them — wait on `status.readyReplicas`,
+as the recipes do. A release is **stop → replace images → start, never a rolling update**. An `orion-apply world`
+owns the replica counts: applied while the world is stopped or mid-update it STARTS the world on whatever images are
+set — apply only with the world running and no update under way (images are never changed by an apply).
+
+**The world's operator recipes** (context `world_ctx`, namespace `world_ns`, default orion / `world-errantry`; the
+twin reuses them with `world_ctx=k3d-mmo world_ns=world-twin`): `world-ctl <worldctl args>` (e.g. `forge --preset …`),
+`world-status` (pods, node ports, each `/readyz` body), `world-logs|world-metrics <pod>`, `world-stop` / `world-start`
+(every host leaves through its leave cut first; each host's leave line is printed, a host that left WITHOUT a cut is
+warned about: the next start raises the world generation), `world-register` (prints the `just orion-login world add …`
+line on orion, the `kubectl … -n login exec deploy/login -- login world add …` form elsewhere; pins read from Secret
+`host-link-identity`). Releases: `just orion-world-push` builds and pushes both images and prints digests;
+`orion-world-update <server> <web>` = `scripts/world_update.sh` (records the refs it replaces in the world's ConfigMap
+`release-history` first, prints the leave lines, and after a failure once images began to change offers only a re-run
+with `HOSTS_REPLICAS`); `orion-world-rollback` = `world_update.sh --rollback` (back to the recorded previous release,
+all four workloads to one build, same stop → set → start; refused when none is recorded or a ref is a tag; a second
+rollback goes forward again; a migration is NOT undone). Backups: `orion-pg-backup-now`; `orion-pg-restore <world>
+<object>` PRINTS a drill into a scratch database and the live restore (world stopped, database renamed aside and
+recreated owned by `world_<id>`, `pg_restore --no-owner --role=world_<id>`, owners checked) — it runs nothing. The
+twin (`twin-up|twin-images|twin-apply|twin-check|twin-down`) runs the same module on k3d: `twin-check` proves
+forge-wait, a killed host (a landless one: a Crash succession that settles), a clean leave, a coordinator restart,
+stop/start, the `/login` proxy's scope; it does NOT prove a takeover of OWNED land, a player, a browser pin,
+cert-manager, the nightly dump or load (`world_update.sh`, its rollback and both restore sequences were run on it by
+hand once, 2026-11-15).
 
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
