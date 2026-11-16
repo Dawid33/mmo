@@ -59,10 +59,21 @@ pub const H_CMD_LEN: u32 = 28;
 pub const H_SEGMENT_OPEN: u32 = 29;
 pub const H_TRACE_LEN: u32 = 30;
 pub const H_INIT_CURSOR: u32 = 31;
+/// Error-trace entries pushed past `ERR_TRACE_MAX` (counted, not stored).
+pub const H_TRACE_DROPPED: u32 = 32;
+
+/// `H_STATUS`: nothing is running.
+pub const STATUS_IDLE: u64 = 0;
+/// `H_STATUS`: a function is running; `H_PC` / `H_CURRENT_FN` say where.
+pub const STATUS_RUNNING: u64 = 1;
+
+/// The return link of a function started from outside: its `Ret` ends the run. Never a valid link
+/// (`return pc | caller fn id << 32` has a 16-bit fn id).
+pub const LINK_SENTINEL: u64 = u64::MAX;
 
 /// Every header field; a new `H_*` const must be added here, which checks it fits (words past
 /// the last field up to `HEADER_WORDS` stay zero and reserved).
-const H_ALL: [u32; 32] = [
+const H_ALL: [u32; 33] = [
     H_MAGIC,
     H_BYTECODE_VERSION,
     H_HOST_API_VERSION,
@@ -95,6 +106,7 @@ const H_ALL: [u32; 32] = [
     H_SEGMENT_OPEN,
     H_TRACE_LEN,
     H_INIT_CURSOR,
+    H_TRACE_DROPPED,
 ];
 
 const _: () = {

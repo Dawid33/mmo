@@ -37,3 +37,26 @@ impl From<AllocError> for FaultKind {
         FaultKind::HeapFull
     }
 }
+
+impl FaultKind {
+    /// A short human text for the kind (a fault's default message).
+    pub fn describe(self) -> &'static str {
+        match self {
+            FaultKind::IndexOutOfRange => "index out of range",
+            FaultKind::MissingKey => "missing key",
+            FaultKind::IntOverflow => "integer overflow",
+            FaultKind::DivByZero => "division by zero",
+            FaultKind::BadRef => "reference no longer resolves",
+            FaultKind::HeapFull => "heap full",
+            FaultKind::ValueTooLarge => "value too large",
+            FaultKind::BadFloatToInt => "float is NaN or out of the int range",
+            FaultKind::AssertFailed => "assertion failed",
+            FaultKind::TooManyCommands => "too many commands",
+            FaultKind::TooManyPromises => "too many promises",
+            FaultKind::TooManyParked => "too many parked handlers",
+            FaultKind::PromiseAlreadyAwaited => "promise already awaited",
+            FaultKind::HostFault => "host fault",
+            FaultKind::Corrupt => "corrupt memory",
+        }
+    }
+}
