@@ -117,37 +117,42 @@ or `/metrics`), the cert-manager Certificate `client-tls` for `game.errantry.ren
 secret). Pods never forge (`VOXEL_EMPTY_STORE=wait`): the forge runs in the toolbox, then the pods turn Ready. Each
 host Deployment is 1 replica, `Recreate`; never `kubectl rollout status` a host — poll each Deployment's
 `status.readyReplicas` and skip a drained one (unready for good), as the recipes do. A host is removed by
-`world-drain <name>` → remove its key from `var.hosts` → apply; a PodDisruptionBudget of 0 makes `kubectl drain` of a
-node wait until its hosts are drained and removed. A release is **stop → replace images → start, never a rolling
-update**; it (and `world-stop` / `world-start`) brings a drained host back as a NEW host. An `orion-apply world`
+`world-drain <name>` → remove its key from `var.hosts` → apply. **Emptying a node**: a PodDisruptionBudget of 0
+holds each host pod, but the coordinator, toolbox, web and login have none and go at once — on ONE node `world-stop`
+first, then `kubectl drain`; with more nodes drain and remove that node's hosts first. **An apply that changes
+anything the coordinator and the hosts share** (`database_url`, `service_token`, the coordinator certificate,
+`save_secs`, `super_region_regions`, `ownership`) restarts them ALL at once — the hosts likely leave without a cut,
+a total crash, the generation raised: such a change is `world-stop` → apply (which starts it); only a host-only
+change (a `var.hosts` key, host resources) goes through cuts on a running world. **A host added after a release**
+starts on `var.images.server` (`:latest`) beside the released digest: right after the apply, `kubectl set image
+deploy/host-<k> host=<the coordinator's image>` (TODO.md, Elastic 1) — else the next release finds mixed images and
+records no previous release. A host pod that crash-loops AFTER registering can roll the world back again and again
+(each restart is a new id, at once a recipient of its predecessor's succession); every check that needs no id runs
+before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
+rolling update**; it (and `world-stop` / `world-start`) brings a drained or marked host back as a NEW host. An `orion-apply world`
 owns the replica counts: applied while the world is stopped or mid-update it STARTS the world on whatever images are
 set — apply only with the world running and no update under way (images are never changed by an apply).
 
 **The world's operator recipes** (context `world_ctx`, namespace `world_ns`, default orion / `world-errantry`; the
 twin reuses them with `world_ctx=k3d-mmo world_ns=world-twin`): `world-ctl <worldctl args>` (e.g. `forge --preset …`),
-`world-status` (pods, host Deployments, node ports, each `/readyz` body), `world-logs|world-metrics
-<host-<name>|coordinator|pod>`, `world-hosts` (the `hosts` rows: id, name, live, clean, land, drain), `world-drain
-<name> [secs]` (`worldctl drain` of that name's live row, then follows its log to the leave line), `world-stop` /
-`world-start` (hosts by label; every host leaves through its leave cut first; each host's leave line is printed, a
-host that left WITHOUT a cut is warned about: the next start raises the world generation; start waits per
-Deployment, never on a drained host), `world-register` (prints the `just orion-login world add …`
-line on orion, the `kubectl … -n login exec deploy/login -- login world add …` form elsewhere; the link is
-`coordinator.<ns>.svc.cluster.local:6490`, its pin read from Secret `login-link-identity`). Releases: `just
+`world-status` (pods, host Deployments, node ports, each `/readyz` body), `world-logs|world-metrics <target>`,
+`world-hosts` (the `hosts` rows), `world-drain <name> [secs]` (`claim` worlds only; marks that name's live row,
+follows its log to the leave line), `world-stop` / `world-start` (hosts by label; drained and marked hosts warned
+about before acting; every host leaves through its leave cut, a host that left WITHOUT one is warned about; start
+waits per Deployment, never on a drained host), `world-register` (prints the login service's `world add …` line;
+the link is `coordinator.<ns>.svc.cluster.local:6490`, pin from Secret `login-link-identity`). Releases: `just
 orion-world-push` builds and pushes both images and prints digests;
 `orion-world-update <server> <web>` = `scripts/world_update.sh` (records the refs it replaces in the world's ConfigMap
 `release-history` first, prints the leave lines, refuses a world whose coordinator is at 0 (`world-start` first), and
 after a failure once images began to change offers only a re-run with the same two refs); `orion-world-rollback` =
 `world_update.sh --rollback` (back to the recorded previous release,
-all four workloads to one build, same stop → set → start; refused when none is recorded or a ref is a tag; a second
+every workload — coordinator, toolbox, web, each host Deployment — to one build, same stop → set → start; refused when none is recorded or a ref is a tag; a second
 rollback goes forward again; a migration is NOT undone). Backups: `orion-pg-backup-now`; `orion-pg-restore <world>
 <object>` PRINTS a drill into a scratch database and the live restore (world stopped, database renamed aside and
 recreated owned by `world_<id>`, `pg_restore --no-owner --role=world_<id>`, owners checked) — it runs nothing. The
-twin (`twin-up|twin-images|twin-apply|twin-check|twin-down`) runs the same module on k3d: `twin-check` proves
-forge-wait, the budgets (`disruptionsAllowed` 0), a killed host (a landless one: back at once as a NEW id, a Crash
-succession that settles), a clean leave, a coordinator restart, a drain (`world-drain`: stays up `drained`, no new
-row), stop/start, the `/login` proxy's scope; it does NOT prove a takeover of OWNED land, a player (no join through
-the coordinator's login relay), a browser pin, cert-manager, a real node drain, the nightly dump or load
-(`world_update.sh` and its rollback were run on it by hand, last 2026-11-16; both restore sequences once, 2026-11-15).
+twin (`twin-up|twin-images|twin-apply|twin-check|twin-down`) runs the same module on k3d: `twin-check` proves the
+start, failure, leave, drain and stop/start paths (`scripts/twin_check.sh`'s header lists them); NOT owned land, a
+player, a browser pin, cert-manager, a real node drain, the nightly dump or load.
 
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
@@ -326,7 +331,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     the deadline (`ServerPacket::HostDraining { at_tick }`), stops being the gate, and at the deadline (its
     coordinator attached) leaves through its leave cut and stays up **drained** (`/readyz` 503 `drained`, no
     heartbeat, NO store call — it must survive its row being pruned) until removed; SIGTERM still means leave
-    now; a drain leave that does not commit ends the process (exit 0, dirty row). A stopping host tells its
+    now; a drain leave that does not commit ends the process (exit 0, dirty row). A `static` host warns once and
+    ignores a mark; `worldctl drain` refuses a row not beaten within the lease and warns when it marks the last
+    host not draining (no gate host: joins 503; no claimer). A stopping host tells its
     sessions why on every exit branch (`LEAVING_REFUSAL`, `FENCED_REFUSAL`, `ROLLBACK_REFUSAL`).
   - `worldctl hosts <url>` lists the rows; `worldctl retire-host <url> <host id>` (`world-store/src/operator.rs`):
     hosts alive → only vouches the row dead; none → a succession to the lowest other live-row id, generation
@@ -335,7 +342,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   - Login links to the COORDINATOR, which relays each order (`CoordMsg::Login(LoginOrder)`) to the **gate
     host** — the lowest attached, live, not leaving, not draining id (`Coordinator::gate_host`) — and each
     answer (`HostMsg::Login`) back, keeping no per-order state (a gate that dies holding an order costs a 503
-    and the client's retry). The gate resolves the player (a store read on its main loop) and places them on
+    and the client's retry). The gate resolves the player — a store read its main loop never waits on
+    (`login_link::OrderResolver`, at most `LOGIN_ORDERS_IN_FLIGHT_MAX` waiting, one more is dropped) — and places them on
     the host that holds them (`world_manager/placement.rs`, relayed `SpawnOrder`s); a world request carries its
     player's hop (`HostMsg::Request { hop }`, an older placement's is refused). Regions of another host reach a
     client through an observer session: `RegionElsewhere { endpoint, ticket }` → a second connection with
@@ -347,12 +355,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     `VOXEL_ADVERTISE_QUIC`/`_WT` (what clients are told), `VOXEL_WT_PORT`, `VOXEL_PEER_LINK_DELAY_MS`
     (measurement only); `worldctl super-region <url> <n>` (only before the first claim) + hosts run with
     `VOXEL_SUPER_REGION_REGIONS=n`.
-  - `just dev-r3 <hosts> [delay]` (positional, 2..6): login + coordinator + every host (named `h<i>`) under
-    `scripts/dev_r3.sh` (restarts a host — as a NEW host — on exit 5 or 137, and on 3, a replaced host, when
-    it runs `claim`; at most 3 per 60 s; `DEV_R3_*` knobs in its header; state `target/dev-r3/`); `just host
-    <index> [delay] [ownership]`, `just coordinator [ownership]` (default `claim`; `static` = the `dev-r2`
-    layout; the same word on both), `just world-hosts-dev`, `just drain-dev <id> [secs]`; `just go-nogo-r3
-    <delay> [seconds]` (own database and `target/go-nogo-r3/`; exit 0 GO, 1 NO-GO, 2 INVALID, 3 no verdict).
+  - `just dev-r3 <hosts> [delay]`: login + coordinator + every host under `scripts/dev_r3.sh` (restarts a host as
+    a NEW host on exit 5, 137, and 3 under `claim`; knobs in its header; state `target/dev-r3/`); `just host`,
+    `coordinator`, `world-hosts-dev`, `drain-dev` (arguments: `just --list`; `host` and `coordinator` take the
+    same ownership word). `just go-nogo-r3` is NOT VALID AS BUILT (its probe assumes ids 0 and 1: TODO.md).
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
   with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
   process stops writing and exits `EXIT_FENCED` (3, also when fenced at `register_host`); a dead coordinator

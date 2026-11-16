@@ -591,9 +591,13 @@ pub fn pick_loaded_seam(
     best.map(|(_, _, seam)| seam)
 }
 
-// The static hash is right for the probe: `just go-nogo-r3` forges a fresh database and starts both
-// hosts, so under `claim` ownership the claims lay out exactly like `rendezvous_owner` (a succession
-// during the run moves the seam; `crossing_summary.py --go-nogo` marks such a run INVALID).
+// NOT VALID AS BUILT (Elastic 1 final review C-I1): this hash lays seams out over host ids
+// `0..hosts`, but a fresh world issues ids from 1 (and every restart a new one), so under `claim`
+// the real claims are a rendezvous over OTHER ids — many "host" seams are thread seams and the
+// reverse, and `just go-nogo-r3`'s numbers do not measure what they say. The fix (not made): pick
+// the seam from the client's own region → host map (`pick_loaded_seam`), or give the probe the
+// real ids (`worldctl hosts`). A succession during the run moves the seam too;
+// `crossing_summary.py --go-nogo` marks such a run INVALID.
 pub fn pick_seam(home: RegionCoords, hosts: u32, s: u32, want_host_seam: bool) -> (RegionCoords, RegionCoords) {
     let owner = |rc: RegionCoords| rendezvous_owner(game::super_region_of(rc, s), hosts);
     let mut radius = PICK_SEAM_RADIUS;
