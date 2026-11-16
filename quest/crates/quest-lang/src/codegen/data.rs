@@ -14,6 +14,7 @@ use super::{Emit, Val};
 use crate::ast::Span;
 use crate::hir::{Arg, DefId, Expr, ExprKind};
 use crate::infer::BuiltinMethod;
+use crate::infer::Shape;
 use crate::ty::{Ty, TyId};
 use quest_vm::asm::SlotRef;
 use quest_vm::{Builtin, Op};
@@ -60,6 +61,26 @@ impl Emit<'_, '_, '_> {
         let Some(shape) = shapes.get(variant.unwrap_or(0) as usize) else {
             return self.not_yet("this construction", e.span);
         };
+        self.construct_shape(e, shape, variant, args, dst);
+    }
+
+    /// `Name(fields…)` of a host struct or host event (`ty`).
+    pub(super) fn construct_host(&mut self, e: &Expr, ty: Ty, args: &[Arg], dst: SlotRef) {
+        match self.g.struct_shape(ty) {
+            Some(shape) => self.construct_shape(e, shape, None, args, dst),
+            None => self.not_yet("this construction", e.span),
+        }
+    }
+
+    /// An object of `shape` (a variant's when `variant` is one) from `args`.
+    fn construct_shape(
+        &mut self,
+        e: &Expr,
+        shape: &Shape,
+        variant: Option<u32>,
+        args: &[Arg],
+        dst: SlotRef,
+    ) {
         let tag = variant.unwrap_or(0);
         if variant.is_some() && shape.tys.is_empty() {
             return self.immediate(dst, true, (i64::from(tag) << 1) | 1);
@@ -178,18 +199,12 @@ impl Emit<'_, '_, '_> {
         self.free(d);
     }
 
-    /// The index of field `name` of a struct or event type, `None` if it is not one.
+    /// The index of field `name` of a struct, event, host struct or host event type, `None` if it is not
+    /// one.
     pub(super) fn field_index(&self, ty: Ty, name: &str) -> Option<u16> {
-        let Ty::Adt(d) = ty else {
-            return None;
-        };
-        if self.g.is_enum(d) {
-            return None;
-        }
         let i = self
             .g
-            .shapes(d)
-            .first()?
+            .struct_shape(ty)?
             .names
             .iter()
             .position(|n| n == name)?;

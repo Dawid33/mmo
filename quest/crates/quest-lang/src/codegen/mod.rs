@@ -6,8 +6,9 @@
 //! statements, blocks, loops and function bodies, `expr.rs` expressions and calls, `data.rs`
 //! constructions, collections, fields and the built-in methods, `place.rs` writes into places (take →
 //! mutate → put back), `refs.rs` references and `&self` receivers, `matching.rs` `match`, `errors.rs` `raise`, `?`, `else` and the program's `$Error`
-//! enum (declared first in the type table). A struct or enum type takes its VM type id before its
-//! fields are lowered, so a type that contains itself names its own id. A construct a later task
+//! enum (declared first in the type table), `handlers.rs` the handler table, host calls, `await` and
+//! detached promises. A struct or enum type (a host struct or event too: the host's names) takes its VM
+//! type id before its fields are lowered, so a type that contains itself names its own id. A construct a later task
 //! compiles is the error `not-yet` at its span ([`Emit::not_yet`]), so the code generator grows by
 //! adding cases.
 //!
@@ -33,6 +34,7 @@
 mod data;
 mod errors;
 mod expr;
+mod handlers;
 mod matching;
 mod place;
 mod refs;
@@ -71,8 +73,10 @@ pub(crate) fn generate(
         typed,
         fns: BTreeMap::new(),
         globals: BTreeMap::new(),
+        host,
         type_ids: BTreeMap::new(),
         error_ty: None,
+        sites: BTreeMap::new(),
         diags: Vec::new(),
     };
     g.declare_errors(&mut pb);
@@ -123,6 +127,7 @@ pub(crate) fn generate(
     if let Some(m) = plan.main.and_then(|m| g.fns.get(&m)) {
         pb.main(*m);
     }
+    g.handlers(&mut pb);
 
     // Frame sizes, for `too-many-slots`: (words, the function's index in `plan.fns`).
     let mut frames: Vec<(u32, usize)> = Vec::with_capacity(plan.fns.len());
@@ -193,10 +198,13 @@ pub(crate) struct Gen<'a> {
     /// Every function and initialiser, by its def.
     fns: BTreeMap<DefId, FnRef>,
     globals: BTreeMap<DefId, GlobalRef>,
+    host: &'a HostApi,
     /// The VM type of each type lowered so far.
     type_ids: BTreeMap<TyId, TypeId>,
     /// The program's `$Error` enum (`None`: the program has no error names).
     error_ty: Option<TypeId>,
+    /// The host sites made so far: one per (host fn, kind, parameter types, result type).
+    sites: BTreeMap<handlers::SiteKey, u16>,
     diags: Vec<Diagnostic>,
 }
 
@@ -255,6 +263,31 @@ impl<'a> Gen<'a> {
         typed.adts.get(&d).map_or(&[], Vec::as_slice)
     }
 
+    /// The name and fields of a host struct or host event type.
+    fn host_shape(&self, ty: Ty) -> Option<(&'a str, &'a Shape)> {
+        let (typed, host): (&'a Typed, &'a HostApi) = (self.typed, self.host);
+        let (decl, shape) = match ty {
+            Ty::HostStruct(i) => (
+                host.structs.get(i as usize)?,
+                typed.host_structs.get(i as usize)?,
+            ),
+            Ty::HostEvent(i) => (
+                host.events.get(i as usize)?,
+                typed.host_events.get(i as usize)?,
+            ),
+            _ => return None,
+        };
+        Some((decl.name.as_str(), shape))
+    }
+
+    /// The fields of a struct, event, host struct or host event type (`None`: not one).
+    fn struct_shape(&self, ty: Ty) -> Option<&'a Shape> {
+        match ty {
+            Ty::Adt(d) if !self.is_enum(d) => self.shapes(d).first(),
+            _ => self.host_shape(ty).map(|(_, s)| s),
+        }
+    }
+
     /// Whether `d` is an enum (else a struct or an event).
     fn is_enum(&self, d: DefId) -> bool {
         matches!(
@@ -304,19 +337,22 @@ impl<'a> Gen<'a> {
             let children = match shape {
                 Ty::List(_) | Ty::Dict(_, _) | Ty::Option(_) | Ty::Promise(_) => shape.children(),
                 Ty::Unit | Ty::Never | Ty::Int | Ty::Float | Ty::Bool | Ty::Str => Vec::new(),
-                Ty::Adt(d) => {
+                Ty::Adt(_) | Ty::HostStruct(_) | Ty::HostEvent(_) => {
                     if let std::collections::btree_map::Entry::Vacant(slot) = self.type_ids.entry(t)
                     {
                         slot.insert(out.reserve_ty());
                         pending.insert(t);
                     }
-                    self.shapes(d)
-                        .iter()
-                        .flat_map(|s| s.tys.iter().copied())
-                        .collect()
+                    let shapes = match shape {
+                        Ty::Adt(d) => self.shapes(d),
+                        _ => self
+                            .host_shape(shape)
+                            .map_or(&[][..], |(_, s)| std::slice::from_ref(s)),
+                    };
+                    shapes.iter().flat_map(|s| s.tys.iter().copied()).collect()
                 }
                 _ => {
-                    self.not_yet("a value of an error, host or reference type", file, at);
+                    self.not_yet("a value of an error or reference type", file, at);
                     return None;
                 }
             };
@@ -372,6 +408,14 @@ impl<'a> Gen<'a> {
                         },
                     }
                 }
+                // A host struct or event carries the host's names: the VM converts it by them.
+                Ty::HostStruct(_) | Ty::HostEvent(_) => match self.host_shape(shape) {
+                    Some((name, s)) => TypeDesc::Struct {
+                        name: name.to_string(),
+                        fields: fields(s),
+                    },
+                    None => TypeDesc::Unit,
+                },
                 _ => TypeDesc::Unit,
             };
             match self.type_ids.get(&t).copied() {

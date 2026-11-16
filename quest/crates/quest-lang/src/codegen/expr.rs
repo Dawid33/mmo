@@ -8,7 +8,7 @@
 
 use super::{Emit, Val};
 use crate::ast::{BinOp, Span, UnOp};
-use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, Prelude};
+use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, HostItem, Prelude};
 use crate::infer::Method;
 use crate::layout::each_expr;
 use crate::ty::{Ty, TyId};
@@ -520,7 +520,20 @@ impl Emit<'_, '_, '_> {
             }
             ExprKind::Prelude(p) => self.prelude(e, *p, args, dst),
             ExprKind::Field(recv, _) => self.method_call(e, recv, args, dst),
-            ExprKind::Host(_) => self.not_yet("a host call", e.span),
+            ExprKind::Host(HostItem::Fn(f)) => self.host_call(e, *f, None, args, dst),
+            ExprKind::Host(HostItem::Struct(_) | HostItem::Event(_)) => {
+                let ty = self.ty_kind(e);
+                match dst {
+                    Some(dst) => self.construct_host(e, ty, args, dst),
+                    None => {
+                        let t = self.temp(true);
+                        let w = self.word(t);
+                        self.construct_host(e, ty, args, w);
+                        self.fb.emit(Op::Drop, w, 0u16, 0u16);
+                        self.free(t);
+                    }
+                }
+            }
             _ => match self.constructor(callee) {
                 Some((d, variant)) => match dst {
                     Some(dst) => self.construct(e, d, variant, args, dst),
@@ -547,7 +560,7 @@ impl Emit<'_, '_, '_> {
                 self.call_fn(e, m, &cargs, dst)
             }
             Some(Method::Builtin(b)) => self.builtin_method(e, b, recv, args, dst),
-            Some(Method::Host(_)) => self.not_yet("a host method call", e.span),
+            Some(Method::Host(f)) => self.host_call(e, f, Some(recv), args, dst),
             None => self.not_yet("this call", e.span),
         }
     }

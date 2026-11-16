@@ -106,6 +106,7 @@ impl Emit<'_, '_, '_> {
                 let i = self.slots.fresh(heap);
                 let slot = self.word(i);
                 self.eval_into(value, slot);
+                self.detach_discarded(*local, slot);
                 self.locals.insert(*local, slot);
                 if heap && let Some(scope) = self.scopes.last_mut() {
                     scope.push(slot);

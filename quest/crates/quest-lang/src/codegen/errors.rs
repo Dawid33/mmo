@@ -8,8 +8,9 @@
 //! frame word 2 (0: none); a function that cannot fail never writes it.
 //!
 //! **Fallible results.** A fallible expression leaves an [`Outcome`]: the word holding its value and the
-//! word holding its error (0 when it succeeded) — a callee's words 1 and 2 right after its `Call`. The
-//! outcome is consumed at once, before anything else can call that callee:
+//! word holding its error (0 when it succeeded) — a callee's words 1 and 2 right after its `Call`, or an
+//! `await`'s two temporaries (`handlers.rs`). The outcome is consumed at once, before anything else can
+//! call that callee:
 //! - `x?`: `JmpIfNot err, ok`; `Move own.err, err`; `TracePush 0` at the `?`; drops; `Ret`. On an
 //!   `Option`, `None` returns `None` (no trace: it is not an error).
 //! - `x else v`, `x else return | break | continue | raise …`: the error is dropped, then the fallback is
@@ -48,6 +49,9 @@ pub(super) struct Outcome {
     /// Whether the value is a heap kind.
     pub(super) heap: bool,
     pub(super) err: SlotRef,
+    /// An `await`'s two temporaries (the value's index; the error's is the next), given back by
+    /// [`Emit::end_outcome`] once consumed. `None` for a call's (its callee's words).
+    pub(super) temps: Option<u32>,
 }
 
 impl Gen<'_> {
@@ -91,9 +95,12 @@ impl Gen<'_> {
 }
 
 impl Emit<'_, '_, '_> {
-    /// Calls the fallible `x` (a script function or method), leaving its result in the callee's words;
-    /// `None` when it was reported.
+    /// Calls the fallible `x` (a script function or method), leaving its result in the callee's words, or
+    /// awaits it (`handlers.rs`); `None` when it was reported.
     pub(super) fn outcome(&mut self, x: &Expr) -> Option<Outcome> {
+        if let ExprKind::Await(p) = &x.kind {
+            return self.await_outcome(x, p);
+        }
         let ExprKind::Call(callee, args) = &x.kind else {
             self.not_yet("this fallible expression", x.span);
             return None;
@@ -123,6 +130,7 @@ impl Emit<'_, '_, '_> {
             value: frame.ret(),
             heap: self.heap_ty(ret),
             err: frame.err(),
+            temps: None,
         })
     }
 
@@ -140,6 +148,7 @@ impl Emit<'_, '_, '_> {
         let e = self.temp(true);
         let es = self.word(e);
         self.fb.emit(Op::Move, es, o.err, 0u16);
+        self.end_outcome(o);
         (
             Val {
                 slot: vs,
@@ -178,6 +187,7 @@ impl Emit<'_, '_, '_> {
         self.fb.bind(ok);
         self.at_line();
         self.take_value(o, dst);
+        self.end_outcome(o);
     }
 
     /// `x?` on an `Option`: the value of `Some`, else `None` returned.
@@ -213,6 +223,7 @@ impl Emit<'_, '_, '_> {
         self.at_line();
         self.take_value(o, dst);
         self.fb.bind(end);
+        self.end_outcome(o);
     }
 
     /// An `else`'s fallback, on the failure path, into `dst`: `err` is the word holding the error (`None`
