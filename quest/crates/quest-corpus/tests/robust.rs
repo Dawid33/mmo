@@ -3,7 +3,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use proptest::prelude::*;
-use quest_corpus::r#gen;
+use quest_corpus::generate;
 use quest_lang::{SourceTree, compile, render};
 
 /// The most bytes of one random source.
@@ -182,7 +182,7 @@ fn lossy_bytes() -> impl Strategy<Value = String> {
 /// rather than stopping in the lexer or parser.
 fn near_miss() -> impl Strategy<Value = String> {
     let base = prop_oneof![
-        r#gen::program(),
+        generate::program(),
         proptest::sample::select(quest_corpus::RUN).prop_map(|c| {
             c.files
                 .iter()
@@ -226,7 +226,7 @@ fn near_miss() -> impl Strategy<Value = String> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(r#gen::cases()))]
+    #![proptest_config(ProptestConfig::with_cases(generate::cases()))]
 
     #[test]
     fn compiler_never_panics(text in prop_oneof![3 => token_soup(), 1 => lossy_bytes(), 3 => near_miss()]) {
@@ -235,7 +235,7 @@ proptest! {
     }
 
     #[test]
-    fn generated_programs_compile(text in r#gen::program()) {
+    fn generated_programs_compile(text in generate::program()) {
         let t = tree(&text);
         match compile(&t, &quest_stub::stub_api()) {
             Ok(c) => {

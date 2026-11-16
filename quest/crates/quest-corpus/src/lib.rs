@@ -11,7 +11,7 @@ mod harness;
 
 /// Well-typed programs by construction, for the property suites (native only: proptest).
 #[cfg(not(target_arch = "wasm32"))]
-pub mod r#gen;
+pub mod generate;
 
 pub use harness::{
     CaseConfig, Trace, config_of, diagnostics_of, expect_text_of, golden_of, report_line, trace_of,

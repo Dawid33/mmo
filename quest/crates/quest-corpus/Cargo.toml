@@ -14,6 +14,6 @@ quest-lang = { path = "../quest-lang" }
 quest-vm = { path = "../quest-vm" }
 quest-stub = { path = "../quest-stub" }
 
-# The program generator (`gen`) is native-only, as proptest is.
+# The program generator (`generate`) is native-only, as proptest is.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 proptest.workspace = true
