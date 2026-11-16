@@ -3,7 +3,10 @@
 //! (`Typed::patterns`: the matched type, the constructor, the field each sub-pattern matches), never by
 //! resolving names again.
 //!
-//! - The scrutinee is evaluated once, into a temporary.
+//! - The scrutinee is evaluated once, into a temporary. A fallible scrutinee (`match f():`) leaves two:
+//!   its value and its error (`errors.rs`); `Ok(…)` matches when the error word is 0 and tests the value,
+//!   `Err(…)` and a bare error name otherwise and test the error. An error name tests the tag of the
+//!   program's `Error` enum.
 //! - A constructor tests the tag (`GetTag`: an object's tag, or a field-less variant's immediate), then its
 //!   fields: a binding is written straight from the field (`GetField`), any other sub-pattern tests the
 //!   field in a temporary, dropped on both ways out.
@@ -33,13 +36,18 @@ type Bindings = BTreeMap<LocalId, SlotRef>;
 impl Emit<'_, '_, '_> {
     /// `match scrutinee:` and its cases.
     pub(super) fn match_stmt(&mut self, at: Span, scrutinee: &Expr, cases: &[Case]) {
-        if matches!(
-            self.ty_kind(scrutinee),
-            Ty::Ref(_) | Ty::Fallible(_, _) | Ty::Caught(_)
-        ) {
-            return self.not_yet("a `match` on a reference or an error", at);
-        }
-        let s = self.val_copy(scrutinee);
+        let (s, err) = match self.ty_kind(scrutinee) {
+            Ty::Ref(_) => return self.not_yet("a `match` on a reference", at),
+            Ty::Fallible(_, _) => {
+                let Some(o) = self.outcome(scrutinee) else {
+                    return;
+                };
+                let (v, e) = self.hold_outcome(o);
+                (v, Some(e))
+            }
+            _ => (self.val_copy(scrutinee), None),
+        };
+        let err_word = err.map(|e| e.slot);
         let end = self.fb.label();
         for case in cases {
             self.line = (case.span.line, case.span.col);
@@ -47,7 +55,7 @@ impl Emit<'_, '_, '_> {
             let fail = self.fb.label();
             let mut bound = Bindings::new();
             self.scopes.push(Vec::new());
-            self.pattern(&case.pattern, s.slot, s.heap, fail, &mut bound);
+            self.pattern(&case.pattern, s.slot, s.heap, err_word, fail, &mut bound);
             if let Some(g) = &case.guard {
                 let v = self.val(g);
                 self.fb.jump(Op::JmpIfNot, v.slot, fail);
@@ -79,6 +87,9 @@ impl Emit<'_, '_, '_> {
             );
         }
         self.fb.bind(end);
+        if let Some(e) = err {
+            self.done(e);
+        }
         self.done(s);
     }
 
@@ -108,12 +119,13 @@ impl Emit<'_, '_, '_> {
     }
 
     /// Tests `p` against the value in `word` (a heap kind: `heap`), binding as it goes; jumps to `fail`
-    /// when it does not match.
+    /// when it does not match. `err`: the error word of a fallible scrutinee (`word` holds its value).
     fn pattern(
         &mut self,
         p: &Pattern,
         word: SlotRef,
         heap: bool,
+        err: Option<SlotRef>,
         fail: Label,
         bound: &mut Bindings,
     ) {
@@ -130,7 +142,7 @@ impl Emit<'_, '_, '_> {
                 for (i, alt) in alts.iter().enumerate() {
                     let last = i + 1 == alts.len();
                     let next = if last { fail } else { self.fb.label() };
-                    self.pattern(alt, word, heap, next, bound);
+                    self.pattern(alt, word, heap, err, next, bound);
                     self.fb.jump(Op::Jmp, 0u16, ok);
                     if !last {
                         self.fb.bind(next);
@@ -142,13 +154,41 @@ impl Emit<'_, '_, '_> {
                 let Some(info) = self.g.typed.patterns.get(&p.id).cloned() else {
                     return self.not_yet("this pattern", p.span);
                 };
-                let tag = match &info.ctor {
-                    Some(PatCtor::None) => Some(0),
-                    Some(PatCtor::Some) => Some(1),
-                    Some(PatCtor::Variant(i)) => Some(*i),
-                    Some(PatCtor::Struct) => None,
-                    _ => return self.not_yet("matching an error", p.span),
+                // The word the constructor is tested on, and the tag it needs.
+                let (word, tag) = match &info.ctor {
+                    Some(PatCtor::None) => (word, Some(0)),
+                    Some(PatCtor::Some) => (word, Some(1)),
+                    Some(PatCtor::Variant(i)) => (word, Some(*i)),
+                    Some(PatCtor::Struct) => (word, None),
+                    Some(PatCtor::Error(name)) => (word, self.g.error_tag(name)),
+                    Some(PatCtor::ErrName(name)) => {
+                        let Some(e) = err else {
+                            return self.not_yet("this pattern", p.span);
+                        };
+                        // `Err(name)`: an error, of this name.
+                        self.fb.jump(Op::JmpIfNot, e, fail);
+                        (e, self.g.error_tag(name))
+                    }
+                    Some(c @ (PatCtor::Ok | PatCtor::Err)) => {
+                        let Some(e) = err else {
+                            return self.not_yet("this pattern", p.span);
+                        };
+                        let ok = *c == PatCtor::Ok;
+                        self.fb
+                            .jump(if ok { Op::JmpIf } else { Op::JmpIfNot }, e, fail);
+                        if let Some(f) = fields.first() {
+                            let (w, h) = if ok { (word, heap) } else { (e, true) };
+                            self.pattern(&f.pattern, w, h, None, fail, bound);
+                        }
+                        return;
+                    }
+                    None => return self.not_yet("this pattern", p.span),
                 };
+                if matches!(info.ctor, Some(PatCtor::Error(_) | PatCtor::ErrName(_)))
+                    && tag.is_none()
+                {
+                    return self.not_yet("this error name", p.span);
+                }
                 if let Some(tag) = tag {
                     self.test_tag(word, tag, fail);
                 }
@@ -185,7 +225,7 @@ impl Emit<'_, '_, '_> {
                 self.fb.emit(Op::GetField, w, word, index);
                 if heap {
                     let (inner_fail, cont) = (self.fb.label(), self.fb.label());
-                    self.pattern(sub, w, true, inner_fail, bound);
+                    self.pattern(sub, w, true, None, inner_fail, bound);
                     self.fb.emit(Op::Drop, w, 0u16, 0u16);
                     self.fb.jump(Op::Jmp, 0u16, cont);
                     self.fb.bind(inner_fail);
@@ -193,7 +233,7 @@ impl Emit<'_, '_, '_> {
                     self.fb.jump(Op::Jmp, 0u16, fail);
                     self.fb.bind(cont);
                 } else {
-                    self.pattern(sub, w, false, fail, bound);
+                    self.pattern(sub, w, false, None, fail, bound);
                 }
                 self.free(t);
             }

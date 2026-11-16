@@ -3,7 +3,8 @@
 //! `42`, `1.5`, `2.0`, `NaN`, `inf`, `-inf`, `true`, `()`; a string raw at the top level and quoted when
 //! nested (`"` `\` and newlines, tabs and carriage returns escaped); `[1, 2]`; `{"a": 1}`;
 //! `Ledger(owner="ana", entries=[])`; `Stage::Accepted(tick=5)`; `Stage::Asked`; `Option` as `Some(3)` /
-//! `None`. Floats print as Rust's `{:?}` (shortest round-trip).
+//! `None`; an error (a variant of the program's enum named `Error`) by its name alone: `NotEnough(have=3)`,
+//! `ChestEmpty`. Floats print as Rust's `{:?}` (shortest round-trip).
 //!
 //! The heap value is read through [`to_wire`] (same walk budget, same reported work) and the result is
 //! written by type, so the two cannot disagree on what a value contains.
@@ -157,7 +158,8 @@ fn write_value(
                     && variants.len() == 2
                     && variants[0].0 == "None"
                     && variants[1].0 == "Some";
-                if is_option {
+                // The program's errors (codegen carry-over 9) print by their name alone.
+                if is_option || name == "Error" {
                     out.push_str(vname);
                 } else {
                     out.push_str(name);

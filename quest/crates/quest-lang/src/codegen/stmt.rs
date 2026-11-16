@@ -74,7 +74,7 @@ impl Emit<'_, '_, '_> {
     }
 
     /// Drops what the function holds and returns.
-    fn ret_now(&mut self) {
+    pub(super) fn ret_now(&mut self) {
         let mut drops: Vec<SlotRef> = self.scopes.iter().flatten().rev().copied().collect();
         drops.extend(self.live.iter().rev().map(|&t| self.word(t)));
         drops.extend(self.heap_params.iter().copied());
@@ -97,7 +97,7 @@ impl Emit<'_, '_, '_> {
         }
     }
 
-    fn stmt(&mut self, s: &Stmt) {
+    pub(super) fn stmt(&mut self, s: &Stmt) {
         self.line = (s.span.line, s.span.col);
         self.at(s.span);
         match &s.kind {
@@ -155,7 +155,7 @@ impl Emit<'_, '_, '_> {
             StmtKind::Break => self.leave_loop(true),
             StmtKind::Continue => self.leave_loop(false),
             StmtKind::Return(value) => self.ret(value.as_ref()),
-            StmtKind::Raise(_) => self.not_yet("`raise`", s.span),
+            StmtKind::Raise(x) => self.raise(s.span, x),
         }
     }
 

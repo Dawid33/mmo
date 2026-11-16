@@ -12,7 +12,7 @@ use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, Prelude};
 use crate::infer::Method;
 use crate::layout::each_expr;
 use crate::ty::{Ty, TyId};
-use quest_vm::asm::SlotRef;
+use quest_vm::asm::{FrameRef, SlotRef};
 use quest_vm::{Builtin, Op};
 
 /// The fault message of a failed `assert`.
@@ -193,16 +193,13 @@ impl Emit<'_, '_, '_> {
             ExprKind::Prelude(Prelude::None) => self.none(dst),
             ExprKind::Prelude(_) => self.not_yet("this item as a value", e.span),
             ExprKind::Await(_) => self.not_yet("`await`", e.span),
-            ExprKind::Else(x, fallback)
-                if self.is_option(x) && !matches!(fallback.kind, ExprKind::FallbackBlock(_, _)) =>
-            {
-                self.option_else(x, fallback, dst)
+            ExprKind::Try(x) => self.try_op(e, x, dst),
+            ExprKind::Else(x, fallback) => self.else_op(x, fallback, dst),
+            ExprKind::Raise(x) => self.raise(e.span, x),
+            // Only met inside a `raise` and an `else`.
+            ExprKind::ErrorName(_) | ExprKind::FallbackBlock(_, _) => {
+                self.not_yet("error handling", e.span)
             }
-            ExprKind::Try(_)
-            | ExprKind::Else(_, _)
-            | ExprKind::Raise(_)
-            | ExprKind::ErrorName(_)
-            | ExprKind::FallbackBlock(_, _) => self.not_yet("error handling", e.span),
             // Never met: the checker reported it, or it is not a value (and was reported).
             ExprKind::Error | ExprKind::Host(_) => self.not_yet("this expression", e.span),
         }
@@ -541,13 +538,35 @@ impl Emit<'_, '_, '_> {
         }
     }
 
-    /// A call of a script function: the arguments are evaluated left to right, then written into the
-    /// callee's parameter words (literals straight there), then `Call`, then the result is moved out of
+    /// A call of a script function that cannot fail: [`Self::call_raw`], then the result is moved out of
     /// the callee's word 1.
     fn call_fn(&mut self, e: &Expr, d: DefId, exprs: &[&Expr], dst: Option<SlotRef>) {
+        let Some(callee) = self.call_raw(e, d, exprs) else {
+            return;
+        };
+        let ret_ty = self.g.typed.sigs.get(&d).map_or(TyId::UNIT, |s| s.ret);
+        let heap = self.heap_ty(ret_ty);
+        match dst {
+            Some(d) if heap => {
+                self.fb.emit(Op::Move, d, callee.ret(), 0u16);
+            }
+            Some(d) => {
+                self.fb.emit(Op::Copy, d, callee.ret(), 0u16);
+            }
+            None if heap => {
+                self.fb.emit(Op::Drop, callee.ret(), 0u16, 0u16);
+            }
+            None => {}
+        }
+    }
+
+    /// A call of a script function: the arguments are evaluated left to right, then written into the
+    /// callee's parameter words (literals straight there), then `Call`. The result is left in the
+    /// callee's words 1 (value) and 2 (error); `None` when the call was reported.
+    pub(super) fn call_raw(&mut self, e: &Expr, d: DefId, exprs: &[&Expr]) -> Option<FrameRef> {
         let Some(&f) = self.g.fns.get(&d) else {
             self.not_yet("this call", e.span);
-            return;
+            return None;
         };
         let callee = self.fb.of(f);
         let mut vals: Vec<Option<Val>> = Vec::with_capacity(exprs.len());
@@ -584,24 +603,11 @@ impl Emit<'_, '_, '_> {
         self.at(e.span);
         self.fb.call(f);
         self.at_line();
-        let ret_ty = self.g.typed.sigs.get(&d).map_or(TyId::UNIT, |s| s.ret);
-        let heap = self.heap_ty(ret_ty);
-        match dst {
-            Some(d) if heap => {
-                self.fb.emit(Op::Move, d, callee.ret(), 0u16);
-            }
-            Some(d) => {
-                self.fb.emit(Op::Copy, d, callee.ret(), 0u16);
-            }
-            None if heap => {
-                self.fb.emit(Op::Drop, callee.ret(), 0u16, 0u16);
-            }
-            None => {}
-        }
+        Some(callee)
     }
 
     /// Back to the statement's line after a call's own entry.
-    fn at_line(&mut self) {
+    pub(super) fn at_line(&mut self) {
         let (line, col) = self.line;
         self.fb.line_col(line, col);
     }

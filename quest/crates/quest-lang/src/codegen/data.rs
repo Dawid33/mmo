@@ -1,5 +1,6 @@
 //! Data: constructions (structs, events, enum variants, `Some` / `None`), list and dict literals, fields,
-//! indexing, slices, `in`, the built-in methods of `list`, `dict` and `str`, and an `Option`'s `else`.
+//! indexing, slices, `in`, the built-in methods of `list`, `dict` and `str`, and an `Option`'s `else`
+//! (its fallback: `errors.rs`).
 //!
 //! **Values** (design D4). A struct or event is an `Obj` of tag 0, its fields in declaration order; a
 //! variant with fields an `Obj` whose tag is the variant's index; a variant without fields the immediate
@@ -20,7 +21,7 @@ use quest_vm::{Builtin, Op};
 use super::expr::BArg;
 
 /// `None`: the variant 0 without fields, as an immediate.
-const NONE_IMMEDIATE: i64 = 1;
+pub(super) const NONE_IMMEDIATE: i64 = 1;
 /// The variant tag of `Some`.
 const SOME_TAG: u16 = 1;
 /// `NewList`'s flag: the elements are heap kinds.
@@ -92,7 +93,7 @@ impl Emit<'_, '_, '_> {
     }
 
     /// Evaluates `value` and moves it into field `index` of the object in `obj`.
-    fn set_field_from(&mut self, obj: SlotRef, index: usize, value: &Expr, heap: bool) {
+    pub(super) fn set_field_from(&mut self, obj: SlotRef, index: usize, value: &Expr, heap: bool) {
         let t = self.temp(heap);
         let w = self.word(t);
         self.eval_into(value, w);
@@ -313,7 +314,8 @@ impl Emit<'_, '_, '_> {
         }
     }
 
-    /// `x else fallback` on an `Option`: the value of `Some`, else the fallback.
+    /// `x else fallback` on an `Option`: the value of `Some`, else the fallback (a value, a way out, or an
+    /// `else err:` block whose `err` is `()`).
     pub(super) fn option_else(&mut self, x: &Expr, fallback: &Expr, dst: SlotRef) {
         let o = self.val_copy(x);
         let tag = self.temp(false);
@@ -325,7 +327,7 @@ impl Emit<'_, '_, '_> {
         self.fb.emit(Op::GetField, dst, o.slot, 0u16);
         self.fb.jump(Op::Jmp, 0u16, end);
         self.fb.bind(none);
-        self.eval_into(fallback, dst);
+        self.fallback(fallback, None, dst);
         self.fb.bind(end);
         self.done(o);
     }

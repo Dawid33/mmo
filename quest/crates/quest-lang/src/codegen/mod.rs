@@ -5,7 +5,8 @@
 //! top-level `let`s in initialisation order, then emits each body through an [`Emit`]: `stmt.rs` lowers
 //! statements, blocks, loops and function bodies, `expr.rs` expressions and calls, `data.rs`
 //! constructions, collections, fields and the built-in methods, `place.rs` writes into places (take →
-//! mutate → put back), `matching.rs` `match`. A struct or enum type takes its VM type id before its
+//! mutate → put back), `matching.rs` `match`, `errors.rs` `raise`, `?`, `else` and the program's `Error`
+//! enum (declared first in the type table). A struct or enum type takes its VM type id before its
 //! fields are lowered, so a type that contains itself names its own id. A construct a later task
 //! compiles is the error `not-yet` at its span ([`Emit::not_yet`]), so the code generator grows by
 //! adding cases.
@@ -30,6 +31,7 @@
 //! temporary first.
 
 mod data;
+mod errors;
 mod expr;
 mod matching;
 mod place;
@@ -69,8 +71,10 @@ pub(crate) fn generate(
         fns: BTreeMap::new(),
         globals: BTreeMap::new(),
         type_ids: BTreeMap::new(),
+        error_ty: None,
         diags: Vec::new(),
     };
+    g.declare_errors(&mut pb);
 
     let mut refs = Vec::with_capacity(plan.fns.len());
     for item in &plan.fns {
@@ -190,6 +194,8 @@ pub(crate) struct Gen<'a> {
     globals: BTreeMap<DefId, GlobalRef>,
     /// The VM type of each type lowered so far.
     type_ids: BTreeMap<TyId, TypeId>,
+    /// The program's `Error` enum (`None`: the program has no error names).
+    error_ty: Option<TypeId>,
     diags: Vec<Diagnostic>,
 }
 
@@ -288,6 +294,12 @@ impl<'a> Gen<'a> {
                 continue;
             }
             let shape = self.typed.types.get(t);
+            // A caught error is a value of the program's `Error` enum.
+            if let (Ty::Caught(_), Some(e)) = (shape, self.error_ty) {
+                self.type_ids.insert(t, e);
+                stack.pop();
+                continue;
+            }
             let children = match shape {
                 Ty::List(_) | Ty::Dict(_, _) | Ty::Option(_) | Ty::Promise(_) => shape.children(),
                 Ty::Unit | Ty::Never | Ty::Int | Ty::Float | Ty::Bool | Ty::Str => Vec::new(),
@@ -507,6 +519,8 @@ pub(crate) struct Emit<'g, 'a, 'p> {
     loops: Vec<Loop>,
     /// The line of the statement being emitted.
     line: (u32, u32),
+    /// Whether the function writes its error word (a `raise` or a `?` on a fallible result).
+    fails: bool,
 }
 
 impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
@@ -523,6 +537,7 @@ impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
             live: Vec::new(),
             loops: Vec::new(),
             line: (0, 0),
+            fails: false,
         }
     }
 
@@ -582,6 +597,10 @@ impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
         }
         for p in self.heap_params.clone() {
             self.fb.mark_ref(p);
+        }
+        if self.fails {
+            let err = self.fb.err();
+            self.fb.mark_ref(err);
         }
         let locals = u32::try_from(self.slots.heap.len()).unwrap_or(u32::MAX);
         self.fb.end();
