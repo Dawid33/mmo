@@ -212,8 +212,8 @@ fn list_grows_across_classes_and_keeps_order() {
     let l = list::insert(&mut st, h, l, 0, (-1i64) as u64).unwrap().0;
     assert_eq!(list::remove(&mut st, h, l, 1).unwrap().0, 0);
     assert_eq!(list::get(&st, h, l, 0).unwrap() as i64, -1);
-    assert!(list::contains(&st, h, l, 199).unwrap());
-    assert!(!list::contains(&st, h, l, 200).unwrap());
+    assert!(list::contains(&st, h, l, 199).unwrap().0);
+    assert!(!list::contains(&st, h, l, 200).unwrap().0);
 }
 
 #[test]

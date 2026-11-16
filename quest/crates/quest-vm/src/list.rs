@@ -8,13 +8,12 @@
 //! (possibly new) pointer.
 
 use crate::alloc::{Heap, Kind, ObjHeader};
+use crate::eq::deep_eq;
 use crate::fault::{FaultKind, VmResult};
 use crate::object::{
-    alloc, capacity, hdr, incref, is_ptr, read_slot, release, require_unique, write_header,
-    write_slot,
+    alloc, capacity, hdr, incref, read_slot, release, require_unique, write_header, write_slot,
 };
 use crate::store::Store;
-use crate::string::same_text;
 
 /// Payload words of an empty list (capacity grows by doubling the block).
 const INITIAL_WORDS: u32 = 4;
@@ -181,16 +180,18 @@ pub fn slice(st: &mut Store, heap: Heap, l: u64, a: i64, b: i64) -> VmResult<(u6
     Ok((u64::from(q), n))
 }
 
-/// Whether an element equals `v`: identical slots, or (in a `ListRef`) two strings with the same text.
-pub fn contains(st: &Store, heap: Heap, l: u64, v: u64) -> VmResult<bool> {
+/// Whether an element equals `v` structurally ([`deep_eq`]; plain bits in a `ListImm`). Also returns the
+/// words compared.
+pub fn contains(st: &Store, heap: Heap, l: u64, v: u64) -> VmResult<(bool, u32)> {
     let (p, h) = list(st, heap, l)?;
+    let mut work = 0u32;
     for i in 0..h.len {
         let w = read_slot(st, p, &h, i)?;
-        if w == v
-            || (h.kind == Kind::ListRef && is_ptr(w) && is_ptr(v) && same_text(st, heap, w, v)?)
-        {
-            return Ok(true);
+        let (eq, n) = deep_eq(st, heap, w, v, h.kind == Kind::ListRef)?;
+        work = work.saturating_add(n);
+        if eq {
+            return Ok((true, work));
         }
     }
-    Ok(false)
+    Ok((false, work))
 }

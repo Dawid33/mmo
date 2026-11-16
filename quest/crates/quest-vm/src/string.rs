@@ -14,7 +14,7 @@ fn string(st: &Store, heap: Heap, v: u64) -> VmResult<(u32, ObjHeader)> {
     Ok((p, h))
 }
 
-fn bytes_of(st: &Store, heap: Heap, v: u64) -> VmResult<Vec<u8>> {
+pub(crate) fn bytes_of(st: &Store, heap: Heap, v: u64) -> VmResult<Vec<u8>> {
     let (p, h) = string(st, heap, v)?;
     let mut out = Vec::new();
     for i in 0..h.len.div_ceil(8) {

@@ -27,7 +27,9 @@
 //! offset of the next zombie, 0 = end). Nothing else in the header changes: the reaper's cursor is the
 //! object's own state, consumed as the children are released:
 //! * `ListRef`: `len` shrinks as the last element is released (children `payload[0..len]`);
-//! * `Obj`: the bits of `aux` are cleared as the fields are released.
+//! * `Obj`: the bits of `aux` are cleared as the fields are released;
+//! * `Dict`: `used` (payload word 2) and `len` shrink as the last positions are released (see `dict`); the
+//!   entries and index blocks are freed with the last one.
 //!
 //! A reap step pops the head, releases at most `REAP_CHILDREN_MAX` children (they become zombies in turn and
 //! are linked ahead of it), then either frees the block or pushes it back at the head with its advanced
@@ -37,6 +39,7 @@
 
 use crate::alloc::{Heap, Kind, ObjHeader};
 use crate::consts::{REAP_CHILDREN_MAX, STRUCT_FIELDS_MAX};
+use crate::dict;
 use crate::fault::{FaultKind, VmResult};
 use crate::store::Store;
 
@@ -179,7 +182,8 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<O
     match h.kind {
         Kind::Str | Kind::ListImm | Kind::Raw | Kind::ListRef => {}
         Kind::Obj => check_obj_shape(&h)?,
-        Kind::Dict | Kind::RefPath | Kind::Parked => {
+        Kind::Dict => {}
+        Kind::RefPath | Kind::Parked => {
             let _ = maps;
             return Err(FaultKind::Corrupt);
         }
@@ -189,6 +193,7 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<O
     heap.set_zombie_head(st, u64::from(h.refcount))?;
     let mut budget = REAP_CHILDREN_MAX;
     let mut work = 0u32;
+    let mut dict_done = false;
     match h.kind {
         Kind::ListRef => {
             while budget > 0 && h.len > 0 {
@@ -212,11 +217,13 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<O
                 work += 1;
             }
         }
+        Kind::Dict => dict_done = dict::reap(st, heap, p, &mut h, &mut budget, &mut work)?,
         _ => {}
     }
     let done = match h.kind {
         Kind::ListRef => h.len == 0,
         Kind::Obj => h.aux == 0,
+        Kind::Dict => dict_done,
         _ => true,
     };
     if done {
@@ -245,7 +252,14 @@ pub fn make_unique(st: &mut Store, heap: Heap, v: u64) -> VmResult<(u64, u32)> {
         1 => return Ok((v, 0)),
         _ => {}
     }
-    // Words in use, and whether they are references (`Dict`, `RefPath`, `Parked`: later tasks).
+    if h.kind == Kind::Dict {
+        let (q, words) = dict::clone(st, heap, p, h)?;
+        let mut old = h;
+        old.refcount -= 1;
+        write_header(st, heap, p, old)?;
+        return Ok((q, words));
+    }
+    // Words in use, and whether they are references (`RefPath`, `Parked`: later tasks).
     let words = match h.kind {
         Kind::Str => h.len.div_ceil(WORD),
         Kind::ListImm | Kind::ListRef | Kind::Raw => h.len,

@@ -2,6 +2,8 @@
 
 pub mod alloc;
 pub mod consts;
+pub mod dict;
+pub mod eq;
 pub mod fault;
 pub mod hash;
 pub mod layout;
