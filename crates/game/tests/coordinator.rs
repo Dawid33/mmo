@@ -26,15 +26,30 @@ fn rid(seq: u64) -> RequestId {
     RequestId { host: h(0), boot: 7, seq }
 }
 
-/// The messages free to leave, whatever host each is for (one host in most tests).
+/// What leaves once a store that commits at once wrote the pending transition (if any):
+/// whatever host each message is for (one host in most tests).
 trait TakeMsgs {
     fn take_msgs(&mut self) -> Vec<CoordMsg>;
 }
 
 impl TakeMsgs for Coordinator {
     fn take_msgs(&mut self) -> Vec<CoordMsg> {
-        self.take_out().into_iter().map(|(_, m)| m).collect()
+        commit_routed(self).into_iter().map(|(_, m)| m).collect()
     }
+}
+
+/// The pending transition written by a store that commits at once, then what may leave,
+/// with targets.
+fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
+    let mut out = c.take_transition().map(|t| t.out).unwrap_or_default();
+    out.extend(c.take_out());
+    out
+}
+
+/// A core restarted from transition `t` (`history`: the history the store holds, when `t`
+/// carried none) as process boot `process`, at store time `now_ms`.
+fn reload(t: &Transition, history: &[u8], process: ProcessBoot, now_ms: u64) -> Coordinator {
+    Coordinator::load(&t.core, t.history.as_deref().unwrap_or(history), grid(), process, now_ms).expect("the projection loads")
 }
 
 fn grid() -> SocietyGrid {
@@ -70,11 +85,8 @@ fn request(id: u64, player: PlayerId, req: WorldRequest) -> HostMsg {
     HostMsg::Request { id: rid(id), player, hop: PLACED, req }
 }
 
-/// Save as a store that commits at once would, then take what may leave.
+/// Write as a store that commits at once would, then take what may leave.
 fn commit(c: &mut Coordinator) -> Vec<CoordMsg> {
-    if c.take_save().is_some() {
-        c.saved();
-    }
     c.take_msgs()
 }
 
@@ -140,42 +152,53 @@ fn embark_validates_and_claims_once() {
     assert_eq!(reply_to(&out, 4), WorldReply::AdventureRefused(AdventureRefusal::AlreadyPlaying));
 }
 
+/// Elastic 2a: nothing a durable change decided leaves before its transition — not even what
+/// was decided with it that changes nothing durable (the order is kept) — and the transition
+/// holds the state that decided it. A query decided while nothing durable changed leaves at
+/// once ([`Coordinator::take_out`]).
 #[test]
-fn embark_reply_waits_for_save() {
+fn no_output_is_released_without_its_transition() {
     let (mut c, civ, people) = coordinator();
-    // A refusal grants nothing: it leaves at once.
-    c.handle(h(0), embark(1, B, civ, &people[0..2], rc(0, 0)), 0);
-    assert_eq!(reply_to(&c.take_msgs(), 1), WorldReply::EmbarkRefused(EmbarkRefusal::Occupied));
+    // A query changes nothing durable: its answer leaves at once.
+    c.handle(h(0), request(1, B, WorldRequest::PersonInfo(people[2])), 0);
+    assert!(c.take_transition().is_none(), "nothing durable changed");
+    assert!(matches!(reply_to(&c.take_out().into_iter().map(|(_, m)| m).collect::<Vec<_>>(), 1), WorldReply::PersonInfo(Some(_))));
     c.handle(h(0), embark(2, A, civ, &people[0..2], rc(8, 0)), 0);
     c.maintain(0);
-    assert!(replies(&c.take_msgs()).is_empty(), "no claim-granting reply before a save");
+    assert!(c.take_out().is_empty(), "no message leaves before the transition holding its state");
     // Anything decided after it waits behind it, in order.
     c.handle(h(0), request(3, B, WorldRequest::PersonInfo(people[3])), 0);
-    assert!(c.take_msgs().is_empty(), "later messages keep their place behind the waiting reply");
-    let state = c.take_save().expect("a save is due while a reply waits");
-    let saved = game::history::persist::decode(&state.history, grid()).expect("the saved history loads");
-    assert_eq!(saved.sites().count(), 2, "the save holds the founded site");
-    assert_eq!(state.claims, vec![(A, Claim::Fortress(SiteId(1)))], "and the claim");
-    assert!(c.take_save().is_none(), "one save at a time");
-    assert!(c.take_msgs().is_empty(), "nothing leaves before the save commits");
-    c.saved();
-    let out = c.take_msgs();
+    assert!(c.take_out().is_empty(), "later messages keep their place behind the transition");
+    let t = c.take_transition().expect("a durable change is pending");
+    let saved = Coordinator::load(&t.core, t.history.as_deref().expect("the history changed"), grid(), ProcessBoot(1), 0)
+        .expect("the transition loads");
+    assert_eq!(saved.history().sites().count(), 2, "the transition holds the founded site");
+    assert_eq!(saved.claims(), vec![(A, Claim::Fortress(SiteId(1)))], "and the claim");
+    assert!(c.take_transition().is_none(), "nothing changed since");
+    assert!(c.take_out().is_empty(), "the transition's messages are its own");
+    let out: Vec<CoordMsg> = t.out.into_iter().map(|(_, m)| m).collect();
     let r = replies(&out);
     assert_eq!(r.len(), 2, "{out:?}");
     assert!(matches!(r[0], (id, WorldReply::Embarked { .. }) if id == rid(2)), "{r:?}");
     assert!(matches!(r[1], (id, WorldReply::PersonInfo(Some(_))) if id == rid(3)), "{r:?}");
 }
 
+/// A transition whose write failed is handed back: its messages wait (none is lost or
+/// doubled), and the next transition writes everything again, the history included.
 #[test]
-fn failed_save_keeps_reply_waiting() {
+fn a_failed_write_keeps_its_messages_and_writes_again() {
     let (mut c, civ, people) = coordinator();
+    c.take_transition();
     c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
-    assert!(c.take_save().is_some());
-    c.save_failed();
-    assert!(c.take_msgs().is_empty(), "a failed save releases nothing");
-    assert!(c.take_save().is_some(), "and the next take_save retries");
-    c.saved();
-    assert!(matches!(reply_to(&c.take_msgs(), 1), WorldReply::Embarked { .. }));
+    let t = c.take_transition().expect("pending");
+    assert!(t.history.is_some());
+    c.handle(h(0), request(2, B, WorldRequest::PersonInfo(people[3])), 0);
+    c.transition_failed(t);
+    assert!(c.take_out().is_empty(), "a failed write releases nothing");
+    let again = c.take_transition().expect("and the next transition writes again");
+    assert!(again.history.is_some(), "the history with it");
+    let r = replies(&again.out.into_iter().map(|(_, m)| m).collect::<Vec<_>>());
+    assert!(matches!(r.as_slice(), [(a, WorldReply::Embarked { .. }), (b, WorldReply::PersonInfo(_))] if *a == rid(1) && *b == rid(2)), "once each, in order: {r:?}");
 }
 
 #[test]
@@ -188,12 +211,10 @@ fn request_replay_answers_from_memo() {
     c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     assert_eq!(reply_to(&commit(&mut c), 1), first, "the replay is answered identically");
     assert_eq!(c.history().sites().count(), sites, "and founds nothing");
-    // The memo is saved with the state: a restarted coordinator answers the replay too.
-    c.request_save();
-    let state = c.take_save().expect("asked for");
-    c.saved();
-    let mut c2 = Coordinator::from_state(state, grid(), 5_000).expect("state loads");
-    c2.take_msgs();
+    // The memo is in the projection: a restarted coordinator answers the replay too.
+    let (core, history) = c.encode_projection();
+    let mut c2 = Coordinator::load(&core, &history, grid(), ProcessBoot(1), 5_000).expect("the projection loads");
+    assert!(c2.take_msgs().is_empty(), "a load sends nothing");
     c2.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 5_000);
     assert_eq!(reply_to(&commit(&mut c2), 1), first, "the restarted coordinator answers from its memo");
     assert_eq!(c2.history().sites().count(), sites, "and founds nothing");
@@ -300,16 +321,17 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     let out = commit(&mut c);
     assert_eq!(events_about(&out, p).len(), 1, "P has a body");
     assert_eq!(events_about(&out, q).len(), 1, "Q has a body");
-    // P dies: the despawn waits for a save; the save commits, then the coordinator crashes
-    // before the despawn leaves.
+    // P dies: the despawn waits for its transition; the write commits, then the coordinator
+    // crashes before the despawn leaves.
     c.maintain(0);
     assert!(!c.history().person(p).unwrap().alive());
-    assert!(events_about(&c.take_msgs(), p).is_empty());
-    let state = c.take_save().expect("the despawn waits on a save");
+    assert!(c.take_out().is_empty());
+    let t = c.take_transition().expect("the despawn waits on a transition");
+    assert!(!events_about(&t.out.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>(), p).is_empty(), "it holds the despawn");
     drop(c);
 
-    let mut c = Coordinator::from_state(state, grid(), 60_000).expect("state loads");
-    assert!(matches!(c.take_msgs().as_slice(), [CoordMsg::View { .. }]));
+    let mut c = reload(&t, &[], ProcessBoot(1), 60_000);
+    assert!(c.take_msgs().is_empty(), "a load sends nothing");
     let running = RunningRegion { rc: r, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0]), (q, [4.0, 5.0, 6.0])] };
     c.handle(h(0), HostMsg::Attach { host: h(0), epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 60_000);
     let out = commit(&mut c);
@@ -327,47 +349,56 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     assert_eq!(c.history().person(q).unwrap().location, Location::AtSite(SiteId(0)));
 }
 
+/// The projection round-trips: a core loaded from a transition holds the claims, the memo and
+/// the presence as written (a claimant online stays online until its host's `Attach` says
+/// otherwise), writes nothing until something changes, and the format is checked.
 #[test]
 fn state_round_trips() {
     let (mut c, civ, people) = coordinator();
     c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     c.handle(h(0), request(2, B, WorldRequest::StartAdventure(SiteId(0))), 0);
-    let out = commit(&mut c);
-    let WorldReply::Embarked { site, region } = reply_to(&out, 1) else { panic!("embarks") };
-    c.request_save();
-    let state = c.take_save().expect("asked for");
-    c.saved();
-    assert_eq!(state.claims, vec![(A, Claim::Fortress(site)), (B, Claim::Adventure(SiteId(0)))]);
-    assert_eq!(state.memo.len(), 2);
-    let bytes = state.encode();
-    assert_eq!(bytes[0], COORDINATOR_STATE_VERSION);
-    let back = CoordinatorState::decode(&bytes).expect("decodes");
-    assert_eq!(back, state);
-    assert!(CoordinatorState::decode(&[COORDINATOR_STATE_VERSION + 1]).is_err(), "an unknown format is refused");
-    assert!(CoordinatorState::decode(&[]).is_err());
-
-    let mut c2 = Coordinator::from_state(back, grid(), 0).expect("loads");
-    c2.request_save();
-    assert_eq!(c2.take_save().expect("asked for"), state, "a loaded state saves back unchanged");
-    c2.saved();
-    assert_eq!(c2.claim_of(A), Some(Claim::Fortress(site)));
-    assert_eq!(c2.claim_of(B), Some(Claim::Adventure(SiteId(0))));
-    // Claimants load offline: another player may return to A's fortress.
+    let t = c.take_transition().expect("pending");
+    let WorldReply::Embarked { site, region } = reply_to(&t.out.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>(), 1) else {
+        panic!("embarks")
+    };
+    assert_eq!(t.core[0], COORDINATOR_STATE_VERSION);
+    let mut c2 = reload(&t, &[], ProcessBoot(1), 0);
+    assert_eq!(c2.claims(), vec![(A, Claim::Fortress(site)), (B, Claim::Adventure(SiteId(0)))]);
+    assert_eq!(c2.memo_ids().len(), 2);
+    assert!(c2.take_transition().is_none(), "a loaded projection writes nothing until something changes");
+    let refuse = |bytes: &[u8]| Coordinator::load(bytes, t.history.as_deref().unwrap(), grid(), ProcessBoot(1), 0).err();
+    assert!(matches!(refuse(&[COORDINATOR_STATE_VERSION + 1]), Some(game::history::persist::HistoryLoadError::Corrupt(_))), "an unknown format is refused");
+    assert!(matches!(refuse(&[]), Some(game::history::persist::HistoryLoadError::Corrupt(_))));
+    for old in [1, 2] {
+        assert!(
+            matches!(refuse(&[old, 0, 0]), Some(game::history::persist::HistoryLoadError::OldVersion { found }) if found == u32::from(old)),
+            "format {old} is refused as old: re-forge"
+        );
+    }
+    // A's claim loads online on host 0 (its presence is in the projection): another player
+    // may not return to A's fortress until host 0's Attach says A is not there.
     let p3 = PlayerId(3);
     c2.handle(h(0), request(3, p3, WorldRequest::ReturnTo(site)), 0);
-    assert_eq!(reply_to(&commit(&mut c2), 3), WorldReply::Returned { site, region });
+    assert_eq!(reply_to(&commit(&mut c2), 3), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
+    c2.handle(h(0), HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }, 0);
+    commit(&mut c2);
+    c2.handle(h(0), request(4, p3, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!(reply_to(&commit(&mut c2), 4), WorldReply::Returned { site, region });
 }
 
+/// Advancing the clock with no step due changes nothing durable: no transition. A day's turn
+/// is a transition.
 #[test]
-fn periodic_save_after_changes() {
-    let (mut c, _civ, _people) = coordinator();
-    assert!(c.take_save().is_none(), "nothing changed, nothing waits");
+fn advancing_with_nothing_due_writes_nothing() {
+    let (hist, _, _) = world();
+    let mut c = Coordinator::new(hist, 0);
+    assert!(c.take_transition().is_some_and(|t| t.history.is_some()), "a new core writes itself first, history and all");
+    assert!(c.take_transition().is_none(), "nothing changed, nothing waits");
     c.maintain(1_000);
-    assert!(c.take_save().is_none(), "a change saves only once the period passed");
-    c.maintain(COORDINATOR_SAVE_SECS * 1000);
-    assert!(c.take_save().is_some(), "the period passed with the state changed");
-    c.saved();
-    assert!(c.take_save().is_none());
+    assert!(c.take_transition().is_none(), "the clock moved, nothing durable changed");
+    c.maintain(game::history::calendar::DAY_MS);
+    assert!(c.take_transition().is_some(), "a day turned");
+    assert!(c.take_transition().is_none());
 }
 
 #[test]
@@ -612,9 +643,9 @@ fn attach_supersedes_unsent_directives() {
     commit(&mut c);
     let p = people[0];
     c.handle(h(0), embark(1, A, civ, &[p], r), 0);
-    // A later ungated message waits behind the spawn.
+    // A later message waits behind the spawn (no transition taken yet).
     c.handle(h(0), request(2, B, WorldRequest::PersonInfo(people[3])), 0);
-    assert!(c.take_msgs().is_empty());
+    assert!(c.take_out().is_empty());
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
     let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1, hop: 1 }];
@@ -728,8 +759,7 @@ fn host_report_reconciles_claims() {
     commit(&mut c);
     c.handle(h(0), online(A, None, false), 0);
     assert_eq!(c.claim_of(A), None);
-    assert!(c.save_due(), "a dropped claim is saved at once");
-    commit(&mut c);
+    assert!(c.take_transition().is_some_and(|t| t.out.is_empty()), "a dropped claim is a transition of its own");
     // The host holds the fortress the coordinator lost: taken back.
     c.handle(h(0), online(A, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
@@ -744,16 +774,17 @@ fn host_report_reconciles_claims() {
     assert!(matches!(reply_to(&commit(&mut c), 2), WorldReply::Returned { .. }), "the fortress is free");
 }
 
-/// A release is saved at once: the state saved right after it holds no claim.
+/// A release is a transition: the projection right after it holds no claim.
 #[test]
 fn release_claim_forces_a_save() {
     let (mut c, civ, people) = coordinator();
     c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     commit(&mut c);
-    assert!(!c.save_due());
+    assert!(c.take_transition().is_none());
     c.handle(h(0), HostMsg::ReleaseClaim { player: A }, 0);
-    let state = c.take_save().expect("a release forces a save");
-    assert!(state.claims.is_empty(), "{:?}", state.claims);
+    let t = c.take_transition().expect("a release is a transition");
+    let loaded = reload(&t, &c.encode_projection().1, ProcessBoot(1), 0);
+    assert!(loaded.claims().is_empty(), "{:?}", loaded.claims());
 }
 
 /// A timed-out request is settled, never executed: unapplied, it is refused (and the
@@ -779,59 +810,7 @@ fn settle_answers_without_executing() {
     assert_eq!(c.history().sites().count(), sites + 1);
 }
 
-/// The saved state's format ladder: a blob of every older format still loads.
-mod state {
-    use super::*;
-
-    /// A small real state: one claim, one memo entry.
-    fn small_state() -> CoordinatorState {
-        let (mut c, civ, people) = coordinator();
-        c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
-        commit(&mut c);
-        c.request_save();
-        let state = c.take_save().expect("asked for");
-        c.saved();
-        state
-    }
-
-    /// Format 2 (the host of a `RequestId` is a `HostId`, `u64`): the current format round-trips.
-    #[test]
-    fn v2_blob_round_trips() {
-        let state = small_state();
-        let bytes = state.encode();
-        assert_eq!(bytes[0], 2);
-        assert_eq!(CoordinatorState::decode(&bytes).expect("a v2 blob decodes"), state);
-    }
-
-    // The fixture was made by `small_state().encode()` at commit b46a6aee; never regenerate it.
-    #[test]
-    fn v1_blob_still_decodes() {
-        let state = CoordinatorState::decode(include_bytes!("fixtures/coordinator_state_v1.bin")).expect("a v1 blob decodes");
-        let expected = small_state();
-        assert_eq!(state.claims, expected.claims);
-        assert_eq!(state.memo, expected.memo);
-        // Its history is a v3 file: refused since history v4 (worlds are re-forged, and
-        // `ensure_coordinator_state` replaces a state whose history is `OldVersion`).
-        let err = game::history::persist::decode(&state.history, grid()).expect_err("a v3 history is refused");
-        assert!(matches!(err, game::history::persist::HistoryLoadError::OldVersion { found: 3 }), "{err:?}");
-    }
-
-    #[test]
-    fn unknown_version_is_refused() {
-        let err = CoordinatorState::decode(&[200, 0, 0]).expect_err("an unknown format is refused");
-        assert!(matches!(err, game::history::persist::HistoryLoadError::Corrupt(ref m) if m.contains("200")), "{err:?}");
-    }
-}
-
 // ---- Many hosts (R3 Task 10) ----------------------------------------------------------
-
-/// Save as a store that commits at once would, then take what may leave, with targets.
-fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
-    if c.take_save().is_some() {
-        c.saved();
-    }
-    c.take_out()
-}
 
 fn attach(host: HostId, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
     HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }
@@ -1095,7 +1074,7 @@ fn notice_and_directive_go_to_the_regions_host() {
 
 /// The memoised request ids, oldest first.
 fn memo_ids(c: &Coordinator) -> Vec<RequestId> {
-    c.state().memo.into_iter().map(|(id, _)| id).collect()
+    c.memo_ids()
 }
 
 fn request_as(id: RequestId, player: PlayerId, req: WorldRequest) -> HostMsg {
@@ -3737,9 +3716,8 @@ fn downtime_is_not_caught_up() {
         now += 1_000;
         c.maintain(now);
     }
-    c.request_save();
-    let state = c.take_save().expect("asked for");
-    c.saved();
+    let written = c.take_transition().expect("days turned");
+    let history = written.history.clone().expect("the history advanced");
     c.take_msgs();
     let at_save = c.history().now();
     let later = now + 3_600_000;
@@ -3760,11 +3738,423 @@ fn downtime_is_not_caught_up() {
     }
     assert!(t - later <= DAY_MS + 1_000, "the next day turns within a day of the re-anchor");
 
-    // Rebuilt from the saved state, the hour later: today the state holds no calendar anchor,
-    // so `from_state` anchors at `later` and this holds without the gap rule. The restart case
-    // proper (an anchor loaded from the store) is Task 5's test.
-    let mut c2 = Coordinator::from_state(state, grid(), later).expect("state loads");
+    // Rebuilt from the written projection, the hour later: its stored anchor is an hour old —
+    // the gap rule re-anchors it, nothing is caught up.
+    let mut c2 = reload(&written, &history, ProcessBoot(1), later);
     let loaded = c2.history().now();
     c2.maintain(later);
     assert!(c2.history().now().0 - loaded.0 <= 1, "a rebuilt core does not catch up either");
+}
+
+/// Elastic 2a (moved here from Task 3): a coordinator rebuilt from its written projection two
+/// seconds after the write runs its calendar on from the STORED anchor — the ticks of those two
+/// seconds are there at once (no skip back to the history's own `now`, no re-anchor), and the
+/// day turn the dead process broadcast is not broadcast again.
+#[test]
+fn the_calendar_continues_across_a_quick_restart() {
+    use game::history::calendar::DAY_MS;
+    const T0: u64 = 1_763_000_000_000;
+    let (hist, _, _) = world();
+    let mut c = Coordinator::new(hist, T0);
+    let mut now = T0;
+    let mut history = Vec::new();
+    let mut last = None;
+    // Two days, every transition written.
+    let start = c.history().now().0;
+    while c.history().now().0 < start + 2 * TICKS_PER_DAY + 2 {
+        now += 250;
+        c.maintain(now);
+        if let Some(t) = c.take_transition() {
+            if let Some(h) = &t.history {
+                history = h.clone();
+            }
+            last = Some((t, now));
+        }
+    }
+    let (t, written_at) = last.expect("written");
+    let day = c.history().now().0 / TICKS_PER_DAY;
+    let restart = now + 2_000;
+    let mut c2 = reload(&t, &history, ProcessBoot(1), restart);
+    assert_eq!(c2.calendar_anchor(), c.calendar_anchor(), "the anchor is the stored one");
+    let expected = c.calendar_now(restart);
+    assert_eq!(c2.calendar_now(restart), expected, "the calendar continues from the stored anchor");
+    assert!(expected.0 >= c.history().now().0 + 2_000 / game::TICK_RATE, "two seconds on: no skip");
+    c2.maintain(restart);
+    assert_eq!(c2.history().now(), expected, "one step brings the history there");
+    let out = c2.take_msgs();
+    assert!(
+        !out.iter().any(|m| matches!(m, CoordMsg::Calendar(_))),
+        "the day turn written at {written_at} is not broadcast again: {out:?}"
+    );
+    // The next day turns once, a day after the last.
+    let mut t2 = restart;
+    let mut turns = 0;
+    while c2.history().now().0 / TICKS_PER_DAY <= day {
+        t2 += 250;
+        c2.maintain(t2);
+        turns += c2.take_msgs().iter().filter(|m| matches!(m, CoordMsg::Calendar(_))).count();
+    }
+    assert_eq!(turns, 1, "the next day's turn, once");
+    assert!(t2 - written_at <= DAY_MS + 1_000, "within a day of the last turn");
+}
+
+/// Elastic 2a (moved here from Task 3): a world cut running when the projection was written,
+/// its deadline more than [`CALENDAR_GAP_MS`] past when the core is loaded, restarts its count
+/// at the load (never earlier than stored); one within the gap stands and fires as it would have.
+#[test]
+fn a_cut_deadline_older_than_the_gap_restarts_its_count() {
+    const T0: u64 = 1_763_000_000_000;
+    let begin = |c: &mut Coordinator| -> game::CutId {
+        let attach = |o: u64| HostMsg::Attach { host: h(o), epoch: 1, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Succession };
+        c.set_cut_epoch(1);
+        c.set_world_cuts(1_000);
+        c.set_expected_hosts([h(0), h(1)].into_iter().collect());
+        c.handle(h(0), attach(0), T0);
+        c.handle(h(1), attach(1), T0);
+        c.maintain(T0 + 1_000);
+        c.world_cut_running().expect("a cut begins").0
+    };
+    let (hist, _, _) = world();
+    let mut c = Coordinator::new(hist, T0);
+    let cut = begin(&mut c);
+    let t = c.take_transition().expect("the cut began");
+    let history = t.history.clone().expect("a new core writes its history");
+    // Loaded an hour on: the deadline is far past — its count starts over at the load.
+    let later = T0 + 3_600_000;
+    let mut late = reload(&t, &history, ProcessBoot(1), later);
+    late.set_world_cuts(1_000);
+    late.maintain(later + game::WORLD_CUT_DEADLINE_MS - 1);
+    assert_eq!(late.world_cut_progress().map(|(id, _, v)| (id, v)), Some((cut, None)), "not aborted at once");
+    late.maintain(later + game::WORLD_CUT_DEADLINE_MS);
+    assert_eq!(late.world_cut_progress().map(|(id, _, v)| (id, v)), Some((cut, Some(false))), "aborted a whole deadline after the load");
+    // Loaded within the gap past its deadline: it stands, and the first upkeep aborts the cut.
+    let soon = T0 + 1_000 + game::WORLD_CUT_DEADLINE_MS + CALENDAR_GAP_MS;
+    let mut quick = reload(&t, &history, ProcessBoot(1), soon);
+    quick.set_world_cuts(1_000);
+    quick.maintain(soon);
+    assert_eq!(quick.world_cut_progress().map(|(id, _, v)| (id, v)), Some((cut, Some(false))), "the stored deadline fired");
+}
+
+// ---- The durable projection (Elastic 2a Task 5) ---------------------------------------
+
+/// What one input does to a core, at store time `now`.
+type Input = Box<dyn Fn(&mut Coordinator, u64)>;
+
+/// A host's `Attach` under `claim` (boot 7 unless given), running `running`, `online` online.
+fn claim_attach(host: HostId, boot: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
+    HostMsg::Attach { host, epoch: 1, running, online, generation: 0, boot, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Succession }
+}
+
+/// The coordinator inputs of a short world life over [`world`] — three hosts attach, regions
+/// start and park, people cross and bounce, requests (state-changing and queries), presence
+/// (online, a hand-off, offline), the calendar across day turns, a world cut decided, a
+/// succession declared, answered and settled by the next cut — each with its store time.
+/// `gone` is set once host 2 is no longer expected by the cuts (the runtime's next read after
+/// its declaration): what a reloaded core is configured with.
+fn a_world_life(gone: std::rc::Rc<std::cell::Cell<bool>>) -> Vec<(u64, Input)> {
+    const T0: u64 = 1_763_000_000_000;
+    let (r0, r1, r2) = (rc(0, 0), rc(1, 0), rc(8, 0));
+    let mut life: Vec<(u64, Input)> = Vec::new();
+    let mut t = T0;
+    let mut at = |life: &mut Vec<(u64, Input)>, dt: u64, f: Input| {
+        t += dt;
+        life.push((t, f));
+    };
+    for o in 0..3 {
+        at(&mut life, 10, Box::new(move |c, now| c.handle(h(o), claim_attach(h(o), 7, Vec::new(), Vec::new()), now)));
+    }
+    at(&mut life, 10, Box::new(|c, now| {
+        let (civ, people) = (CivId(0), c.history().site(SiteId(0)).unwrap().members.iter().copied().take(2).collect::<Vec<_>>());
+        c.handle(h(0), HostMsg::Request { id: rid(1), player: A, hop: PLACED, req: WorldRequest::Embark(EmbarkRequest { civ, people, region: rc(8, 0) }) }, now)
+    }));
+    at(&mut life, 10, Box::new(move |c, now| c.handle(h(0), HostMsg::RegionStarted { rc: r0, incarnation: 1 }, now)));
+    at(&mut life, 10, Box::new(move |c, now| c.handle(h(1), HostMsg::RegionStarted { rc: r1, incarnation: 1 }, now)));
+    at(&mut life, 10, Box::new(|c, now| {
+        let p = *c.history().site(SiteId(0)).unwrap().members.iter().nth(3).unwrap();
+        c.handle(h(1), HostMsg::Request { id: RequestId { host: h(1), boot: 7, seq: 1 }, player: B, hop: PLACED, req: WorldRequest::PersonInfo(p) }, now)
+    }));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), online(A, Some(Claim::Fortress(SiteId(1))), false), now)));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::PlayerHandedTo { player: A, to: h(1), hop: PLACED }, now)));
+    at(&mut life, 10, Box::new(|c, now| {
+        c.handle(h(1), HostMsg::PlayerOnline(OnlinePlayer { player: A, claim: Some(Claim::Fortress(SiteId(1))), claim_pending: false, report: 2, hop: PLACED + 1 }), now)
+    }));
+    // A stale end of A's older placement on host 0 (its hop is below A's): ignored.
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::PlayerOffline { player: A, hop: PLACED }, now)));
+    at(&mut life, 10, Box::new(|c, now| assert_eq!(c.online_on(A), Some(h(1)), "A stays online on host 1 at {now}")));
+    at(&mut life, 10, Box::new(move |c, now| {
+        let p = *c.history().site(SiteId(0)).unwrap().members.iter().next().unwrap();
+        c.handle(h(0), HostMsg::PersonCrossed { person: p, to: r1, delivered: false }, now)
+    }));
+    at(&mut life, 10, Box::new(move |c, now| c.handle(h(2), HostMsg::RegionStarted { rc: r2, incarnation: 1 }, now)));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::Settled { boot: 7, below: 1 }, now)));
+    // The calendar runs (day turns), a world cut of all three begins.
+    for _ in 0..30 {
+        at(&mut life, 1_000, Box::new(|c, now| c.maintain(now)));
+    }
+    // Every part staged; the decision handed out, then recorded.
+    for o in 0..3 {
+        at(&mut life, 10, Box::new(move |c, now| {
+            if let Some((cut, _)) = c.world_cut_running() {
+                c.handle(h(o), HostMsg::CutPrepared { cut }, now);
+            }
+        }));
+    }
+    at(&mut life, 10, Box::new(|c, _| {
+        let d = c.take_decision().expect("every part staged: a decision");
+        assert!(d.commit, "{d:?}");
+    }));
+    at(&mut life, 10, Box::new(|c, _| {
+        let (cut, _) = c.world_cut_running().expect("still running until recorded");
+        c.decided(cut, true);
+    }));
+    // Host 2 is declared dead: host 0 its heir, host 1 a survivor.
+    at(&mut life, 10, Box::new(|c, _| c.declaring_by_hand()));
+    at(&mut life, 10, Box::new(|c, now| {
+        let s = game::Succession {
+            id: game::SuccessionId(1),
+            predecessor: h(2),
+            predecessor_boot: 7,
+            heir: h(0),
+            kind: game::SuccessionKind::Crash,
+            base_cut: game::CutId((3 << 32) | 1),
+            moved: vec![((0, 0), 2)],
+            survivors: vec![h(0), h(1)],
+        };
+        c.declared(game::Declared::Done(vec![s]), now);
+    }));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(1), HostMsg::SuccessionApplied { id: game::SuccessionId(1) }, now)));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::SuccessionApplied { id: game::SuccessionId(1) }, now)));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::SuccessionAdopted { id: game::SuccessionId(1) }, now)));
+    at(&mut life, 10, Box::new(move |c, _| {
+        gone.set(true);
+        c.set_expected_hosts([h(0), h(1)].into_iter().collect());
+    }));
+    for _ in 0..4 {
+        at(&mut life, 1_000, Box::new(|c, now| c.maintain(now)));
+    }
+    for o in 0..2 {
+        at(&mut life, 10, Box::new(move |c, now| {
+            if let Some((cut, _)) = c.world_cut_running() {
+                c.handle(h(o), HostMsg::CutPrepared { cut }, now);
+            }
+        }));
+    }
+    at(&mut life, 10, Box::new(|c, _| {
+        let d = c.take_decision().expect("the settle cut's decision");
+        assert_eq!(d.settles, vec![game::SuccessionId(1)]);
+    }));
+    at(&mut life, 10, Box::new(|c, _| {
+        let (cut, _) = c.world_cut_running().expect("recorded next");
+        c.decided(cut, true);
+    }));
+    at(&mut life, 10, Box::new(move |c, now| c.handle(h(1), HostMsg::RegionStopping { rc: r1 }, now)));
+    at(&mut life, 10, Box::new(move |c, now| c.handle(h(1), HostMsg::RegionParked { rc: r1, people: Vec::new() }, now)));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(1), HostMsg::PlayerOffline { player: A, hop: PLACED + 1 }, now)));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::ReleaseClaim { player: A }, now)));
+    for _ in 0..12 {
+        at(&mut life, 1_000, Box::new(|c, now| c.maintain(now)));
+    }
+    life
+}
+
+/// The configuration a runtime sets on every core it starts or loads (not in the projection):
+/// cuts of hosts 0..3 every 20 s, or of hosts 0 and 1 once host 2 is `gone`.
+fn configure(c: &mut Coordinator, gone: bool) {
+    c.set_cut_epoch(3);
+    c.set_world_cuts(CUT_EVERY_MS * 20);
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.set_expected_hosts((0..if gone { 2 } else { 3 }).map(h).collect());
+    c.set_world_tick(100);
+}
+
+/// Elastic 2a: the whole core is its projection. A world's inputs run into core A, and into
+/// core B, which is loaded again from its own last transition after EVERY input (the same
+/// process boot: a cache reloaded) — each input as one runtime pass (the input, then the
+/// upkeep): their outputs are equal, in order, input by input, and so are their final bytes.
+#[test]
+fn a_core_reloaded_after_every_input_is_identical() {
+    let (hist, _, _) = world();
+    let gone = std::rc::Rc::new(std::cell::Cell::new(false));
+    let life = a_world_life(gone.clone());
+    let start = life[0].0 - 10;
+    let process = ProcessBoot(0x5EED);
+    let mut a = Coordinator::new_for(hist, start, process);
+    configure(&mut a, false);
+    let t0 = a.take_transition().expect("a new core writes itself");
+    let mut history = t0.history.clone().expect("with its history");
+    let load = |t: &Transition, history: &[u8], now: u64| {
+        let mut b = Coordinator::load(&t.core, history, grid(), process, now).expect("the projection loads");
+        configure(&mut b, gone.get());
+        b
+    };
+    let mut b = load(&t0, &history, start);
+    let (mut sent, mut transitions) = (Vec::new(), 0usize);
+    // One runtime pass per input: the input, then the upkeep at the pass's store time.
+    for (i, (now, input)) in life.iter().enumerate() {
+        for c in [&mut a, &mut b] {
+            input(c, *now);
+            c.maintain(*now);
+        }
+        let (ta, tb) = (a.take_transition(), b.take_transition());
+        assert_eq!(ta.is_some(), tb.is_some(), "input {i}: a transition in one core only");
+        let mut out_a = ta.as_ref().map(|t| t.out.clone()).unwrap_or_default();
+        out_a.extend(a.take_out());
+        let mut out_b = tb.as_ref().map(|t| t.out.clone()).unwrap_or_default();
+        out_b.extend(b.take_out());
+        assert_eq!(out_a, out_b, "input {i}: the outputs differ");
+        sent.extend(out_a.into_iter().map(|(_, m)| m));
+        if let (Some(ta), Some(tb)) = (ta, tb) {
+            transitions += 1;
+            if ta.core != tb.core {
+                let (da, db) = (a.projection_debug(), b.projection_debug());
+                let diff: Vec<(usize, &str, &str)> =
+                    da.lines().zip(db.lines()).enumerate().filter(|(_, (x, y))| x != y).map(|(n, (x, y))| (n, x, y)).collect();
+                panic!("input {i}: the projections differ: {diff:#?}");
+            }
+            assert_eq!(ta.history, tb.history, "input {i}: the histories differ");
+            if let Some(hb) = &tb.history {
+                history = hb.clone();
+            }
+            b = load(&tb, &history, *now);
+        }
+    }
+    let kinds = |f: fn(&CoordMsg) -> bool| sent.iter().filter(|m| f(m)).count();
+    assert!(transitions > 20, "a life worth comparing: {transitions} transitions");
+    assert!(kinds(|m| matches!(m, CoordMsg::SpawnPeople { .. })) >= 3, "regions started: {sent:?}");
+    assert!(kinds(|m| matches!(m, CoordMsg::Reply { reply: WorldReply::Embarked { .. }, .. })) == 1, "the embark granted once: {:?}", replies(&sent));
+    assert!(kinds(|m| matches!(m, CoordMsg::Calendar(_))) >= 3, "days turned");
+    assert_eq!(kinds(|m| matches!(m, CoordMsg::CutDone { committed: true, .. })), 5, "two cuts committed (3 + 2 participants)");
+    assert_eq!(kinds(|m| matches!(m, CoordMsg::Succession { .. })), 2, "the order to both recipients");
+    assert_eq!(kinds(|m| matches!(m, CoordMsg::SuccessionDone { settled: true, .. })), 2, "settled, both told");
+    assert_eq!(a.encode_projection(), b.encode_projection(), "the final bytes");
+    assert_eq!(a.successions_open_count(), 0, "the succession settled");
+}
+
+/// Elastic 2a: an attachment stamped with another process boot counts as detached — a core
+/// loaded by a new process has no host attached (no gate host, no cut begins, no order goes
+/// out) until each host attaches again, and each `Attach` corrects what the projection holds
+/// of that host alone: its live regions it does not list park, another host's stand until
+/// that host attaches. A decision handed to the dead process is handed out again. Loaded by
+/// the same process boot (a cache reloaded) every attachment stands.
+#[test]
+fn an_attachment_of_another_process_boot_is_detached() {
+    let (hist, _, people) = world();
+    let (old, new) = (ProcessBoot(11), ProcessBoot(12));
+    let mut c = Coordinator::new_for(hist, 0, old);
+    configure(&mut c, true);
+    let (r0, r1) = (rc(0, 0), rc(1, 0));
+    c.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 0);
+    c.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 0);
+    c.handle(h(0), HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
+    c.handle(h(1), HostMsg::RegionStarted { rc: r1, incarnation: 1 }, 0);
+    c.maintain(20 * CUT_EVERY_MS);
+    let (cut, _) = c.world_cut_running().expect("both attached: a cut begins");
+    for o in 0..2 {
+        c.handle(h(o), HostMsg::CutPrepared { cut }, 20 * CUT_EVERY_MS);
+    }
+    assert!(c.take_decision().is_some_and(|d| d.commit), "handed to the old process");
+    assert_eq!(c.gate_host(), Some(h(0)));
+    let t = c.take_transition().expect("pending");
+    let history = t.history.clone().expect("a new core writes its history");
+    assert!(c.history().live_regions().contains(&r0));
+
+    // The same process boot: the attachments and the handed decision stand.
+    let mut same = reload(&t, &history, old, 20 * CUT_EVERY_MS);
+    assert_eq!(same.gate_host(), Some(h(0)), "a cache reloaded keeps its hosts attached");
+    assert!(same.take_decision().is_none(), "the decision is in flight in this process");
+
+    // A new process boot: nobody is attached, the decision is handed out again.
+    let mut c = reload(&t, &history, new, 20 * CUT_EVERY_MS);
+    configure(&mut c, true);
+    assert_eq!(c.gate_host(), None, "no host attached to the new process");
+    assert!(c.take_decision().is_some_and(|d| d.cut == cut && d.commit), "handed out again by the new process");
+    c.decided(cut, true);
+    c.maintain(60 * CUT_EVERY_MS);
+    assert!(c.world_cut_running().is_none(), "no cut begins with no host attached");
+    // Host 1 attaches again running nothing: ITS region parks; host 0's stands.
+    c.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 60 * CUT_EVERY_MS);
+    let live = c.history().live_regions();
+    assert!(!live.contains(&r1), "host 1 does not run {r1:?}: parked");
+    assert!(live.contains(&r0), "host 0's region stands until host 0 attaches");
+    assert_eq!(c.region_host(r0), Some(h(0)));
+    assert_eq!(c.gate_host(), Some(h(1)), "host 1 is attached to the new process");
+    // Host 0 attaches again as a NEW boot listing r0 with one body: kept exactly, nothing spawned.
+    let p = people[0];
+    let running = RunningRegion { rc: r0, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0])] };
+    c.handle(h(0), claim_attach(h(0), 70, vec![running], Vec::new()), 60 * CUT_EVERY_MS);
+    let out = commit(&mut c);
+    assert!(!out.iter().any(|m| matches!(m, CoordMsg::SpawnPeople { .. })), "a reattach spawns nothing: {out:?}");
+    assert!(events_about(&out, p).is_empty(), "P's body stands: {out:?}");
+    assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r0));
+    assert_eq!(c.gate_host(), Some(h(0)));
+}
+
+/// Elastic 2a (found by r4 `heir_killed_before_the_settle_rolls_the_world_back_once`, once every
+/// output waits for its transition): after the rollback it ordered, no host of the old
+/// generation counts as attached — while its `Generation` is still on its way, a lapse is not
+/// declared (no old host inherits land it is about to drop), no host is the gate and no cut
+/// begins. A host of the new generation attaching counts again.
+#[test]
+fn after_a_rollback_no_old_host_inherits_or_takes_logins() {
+    let mut c = succeeding(3);
+    let _ = declare_one(&mut c, 3, h(2), 100);
+    commit_routed(&mut c);
+    // The heir lapses with the run open: a second failure, the world rolls back.
+    read_leases(&mut c, 3, &[h(0)], &[h(2)], 200);
+    c.maintain(200);
+    assert!(c.rollback_wanted());
+    c.rolled_back(9);
+    assert_eq!(c.gate_host(), None, "no old host takes logins");
+    read_leases(&mut c, 3, &[h(0)], &[h(2)], 300);
+    assert_eq!(c.declare_wanted(300), None, "no old host inherits the lapsed one's land");
+    c.maintain(300 + 10 * CUT_EVERY_MS);
+    assert!(c.world_cut_running().is_none(), "no cut begins");
+    // A new process (a new host id) attaches at the new generation.
+    c.handle(h(5), HostMsg::Attach { host: h(5), epoch: 1, running: Vec::new(), online: Vec::new(), generation: 9, boot: 50, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Succession }, 400);
+    assert_eq!(c.gate_host(), Some(h(5)));
+}
+
+/// Elastic 2a (the restart undo, WATCH): the first host to attach at a higher world generation
+/// (the world restarted from a cut: a rollback, a total crash) finds every host of an older
+/// generation gone — a restarted process is a new host, so those ids never attach again. What
+/// the projection still holds of them is undone as a predecessor's is: their live regions park
+/// (the people return to the abstract history), their players go offline. Before Elastic 2a a
+/// restart of the coordinator forgot every host; now the generation says so, restarted or not.
+#[test]
+fn the_first_attach_of_a_new_generation_parks_every_older_hosts_regions() {
+    let (hist, _, people) = world();
+    for restarted in [false, true] {
+        let mut c = Coordinator::new_for(hist.clone(), 0, ProcessBoot(1));
+        let r0 = rc(0, 0);
+        c.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 0);
+        c.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 0);
+        c.handle(h(0), HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
+        c.handle(h(1), online(A, None, false), 0);
+        commit(&mut c);
+        assert_eq!(c.history().person(people[0]).unwrap().location, Location::InRegion(r0));
+        assert_eq!(c.online_on(A), Some(h(1)));
+        if restarted {
+            let (core, history) = c.encode_projection();
+            c = Coordinator::load(&core, &history, grid(), ProcessBoot(2), 10).expect("loads");
+        }
+        // Host 5, a new process, attaches at generation 1, running nothing.
+        let mut attach = claim_attach(h(5), 50, Vec::new(), Vec::new());
+        if let HostMsg::Attach { generation, .. } = &mut attach {
+            *generation = 1;
+        }
+        c.handle(h(5), attach, 20);
+        commit(&mut c);
+        assert!(!c.history().live_regions().contains(&r0), "restarted {restarted}: {r0:?} parks");
+        assert_eq!(c.region_host(r0), None);
+        assert_ne!(c.history().person(people[0]).unwrap().location, Location::InRegion(r0), "the people are abstract again");
+        assert_eq!(c.online_on(A), None, "A is offline until a host of the new generation reports it");
+        // A second host of the new generation attaching changes nothing of the first's.
+        c.handle(h(5), HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 30);
+        let mut attach = claim_attach(h(6), 60, Vec::new(), Vec::new());
+        if let HostMsg::Attach { generation, .. } = &mut attach {
+            *generation = 1;
+        }
+        c.handle(h(6), attach, 40);
+        assert_eq!(c.region_host(r0), Some(h(5)), "host 5's region stands");
+    }
 }

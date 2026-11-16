@@ -27,7 +27,7 @@ pub use counters::StoreCounters;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{
-    Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost, Registered, StoreHandle, WorldInfo,
+    Beat, CoordinatorWritten, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost, Registered, StoreHandle, StoredCoordinator, WorldInfo,
 };
 pub use listen::{
     CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
@@ -233,6 +233,10 @@ pub enum StoreError {
     /// A drain mark ([`StoreHandle::drain_host`]) for a row that is not a dirty live one —
     /// absent, dead or left cleanly: why, naming the host by its bare number. Nothing written.
     NotDrainable(String),
+    /// A coordinator write ([`StoreHandle::write_coordinator_later`]) whose epoch still holds
+    /// the row but whose version moved since it was read: a second writer (Elastic 2a has one
+    /// coordinator, so a bug or a takeover in progress). Nothing was written.
+    Conflict,
 }
 
 impl StoreError {
@@ -346,6 +350,11 @@ impl fmt::Display for StoreError {
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
             StoreError::NotDrainable(why) => write!(f, "{why}"),
+            StoreError::Conflict => write!(
+                f,
+                "the world coordinator's row changed since this process read it (its version moved under the same \
+                 claim: a second writer); nothing was written"
+            ),
             StoreError::NotAlone { live } => write!(
                 f,
                 "a static host registers only when no other host runs, but hosts {} hold live rows; \

@@ -531,12 +531,13 @@ fn resident_in_a_stopping_neighbour_keeps_one_body_across_the_attach() {
         // Down; (2, 0) released and stopping, its Shutdown left unread for a while.
         w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(false);
         if roll(seed, 6, 2) == 0 {
-            // The coordinator restarts meanwhile (from its state as saved): everyone is
-            // abstract to it until the attach.
+            // The coordinator restarts meanwhile (from its projection as written, as a new
+            // process boot): what it holds of the host stands until the host's attach.
             let link = w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline");
-            let state = link.coordinator().state();
+            let (core, history) = link.coordinator().encode_projection();
             let grid = SocietyGrid::from_world_map(&strip());
-            *link.coordinator_mut() = game::Coordinator::from_state(state, grid, w.now_ms).expect("the state loads");
+            let restarted = game::Coordinator::load(&core, &history, grid, game::coordinator::ProcessBoot(1), w.now_ms);
+            *link.coordinator_mut() = restarted.expect("the projection loads");
         }
         w.packet(ClientPacket::ReleaseRegionConnection(rc(2, 0)));
         let unread = 6 + roll(seed, 5, 6) as u32;

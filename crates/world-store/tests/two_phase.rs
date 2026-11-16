@@ -619,6 +619,39 @@ fn a_host_registered_after_the_cuts_begin_need_not_be_listed() {
     h.shutdown();
 }
 
+/// Elastic 2a: a decision prunes every `cut_begins` row of an OLDER cut (never read again) and
+/// keeps its own and newer ones; every `cut_decisions` row is kept.
+#[test]
+fn a_decision_prunes_older_begins_and_keeps_every_decision() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let h1 = open(&w.url);
+    let (f0, f1) = fences(&h);
+    register_from_zero(&w, &h, 2);
+    let c = h.claim_coordinator().unwrap();
+    for cut in [70, 71] {
+        h.record_cut_begin(CutId(cut), c).unwrap();
+        prepare_both(&h, &h1, cut, &f0, &f1);
+        assert!(h.decide_cut(CutId(cut), 100 * cut, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+        h.cut_decided(CutId(cut)).unwrap();
+        h1.cut_decided(CutId(cut)).unwrap();
+    }
+    // A begin recorded for a later cut is not touched by an older decision.
+    h.record_cut_begin(CutId(73), c).unwrap();
+    h.record_cut_begin(CutId(72), c).unwrap();
+    prepare_both(&h, &h1, 72, &f0, &f1);
+    assert!(h.decide_cut(CutId(72), 7200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    h.cut_decided(CutId(72)).unwrap();
+    h1.cut_decided(CutId(72)).unwrap();
+    let begins = |cut: u64| scalar_i64(&w, &format!("SELECT COUNT(*) FROM cut_begins WHERE cut_id = {cut}"));
+    assert_eq!((begins(70), begins(71)), (0, 0), "older begins are pruned");
+    assert_eq!((begins(72), begins(73)), (1, 1), "the decided cut's own begin and a newer one stay");
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM cut_decisions WHERE cut_id IN (70, 71, 72)"), 3, "every decision is kept");
+    assert_eq!(prepared(&w), 0);
+    h1.shutdown();
+    h.shutdown();
+}
+
 #[test]
 fn sqlite_is_not_two_phase_ready() {
     let h = open(&StoreUrl::Memory);

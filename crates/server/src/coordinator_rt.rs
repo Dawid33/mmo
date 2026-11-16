@@ -1,11 +1,13 @@
 //! The world coordinator's runtime: the threadless core ([`game::Coordinator`]) on its own
 //! `coordinator` thread, persisting its state into the world store under its own fence
 //! ([`CoordinatorFence`]) — the **only writer** of history state. *Durable before
-//! visible*: the core holds back every directive and claim-granting reply until a save
-//! holding the state that produced it is committed ([`Coordinator::take_save`] →
-//! [`StoreHandle::save_coordinator`] → [`Coordinator::saved`]), one save in flight at a
-//! time; a failed save is retried ([`COORDINATOR_SAVE_RETRY_MS`]) and nothing gated leaves
-//! meanwhile.
+//! visible* (Elastic 2a): every pass takes the core's transition
+//! ([`Coordinator::take_transition`]: its whole projection when anything durable changed) and
+//! writes it with a compare-and-set on the row's version
+//! ([`StoreHandle::write_coordinator_later`]); the messages it released are sent only once
+//! that write committed. One write in flight at a time: whatever is decided meanwhile waits
+//! for the next transition. A failed write hands its transition back to the core (its
+//! messages wait) and is retried after [`COORDINATOR_SAVE_RETRY_MS`].
 //!
 //! In `AllInOne` the host's `WorldManager` reaches it over a crossbeam
 //! [`ChannelWorldLink`] ([`start_all_in_one`]); as its own process
@@ -44,7 +46,7 @@ use game::coordinator::Target;
 use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
 use login_api::{HostToLogin, LoginToHost};
 use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
-use world_store::{CoordinatorFence, StoreError, StoreHandle};
+use world_store::{CoordinatorFence, CoordinatorWritten, StoreError, StoreHandle};
 
 use crate::claims::{Fenced, ServerExit};
 use crate::world_file::CoordinatorStart;
@@ -53,8 +55,8 @@ use crate::world_file::CoordinatorStart;
 /// upkeep (the calendar, the history's directives, a due save) anyway.
 pub const COORDINATOR_TICK_MS: u64 = 50;
 
-/// How long the coordinator waits after a failed save before it tries again (the
-/// state stays waiting: nothing gated leaves until a save commits).
+/// How long the coordinator waits after a failed write before it tries again (the
+/// transition is handed back to the core: nothing it decided leaves until a write commits).
 pub const COORDINATOR_SAVE_RETRY_MS: u64 = 250;
 
 /// Failed saves in a row after which the coordinator reports saving stuck (once, at
@@ -709,8 +711,8 @@ impl CoordinatorThread {
     }
 
     /// Test hook: `f` of the core, to change it (a test forcing history — the core's
-    /// `history_mut`); what it decides goes out as the core's own decisions do (gated
-    /// directives after their save). `None` if the thread does not answer within `timeout`.
+    /// `history_mut`); what it decides goes out as the core's own decisions do (after the
+    /// transition holding it is written). `None` if the thread does not answer within `timeout`.
     #[doc(hidden)]
     #[cfg(feature = "test-hooks")]
     pub fn with_core<R: Send + 'static>(
@@ -910,8 +912,10 @@ pub struct CoordinatorRuntime {
     core: Coordinator,
     store: StoreHandle,
     fence: CoordinatorFence,
-    /// The answer of the save in flight.
-    pending_save: Option<Receiver<Result<(), StoreError>>>,
+    /// The transition being written and the store's answer on its way (one at a time).
+    writing: Option<(game::coordinator::Transition, Receiver<Result<CoordinatorWritten, StoreError>>)>,
+    /// The coordinator row's version as last read or written: what the next write names.
+    version: u64,
     links: LinkSet,
     fenced: Fenced,
     /// Test hook ([`CoordinatorThread::crash_before_claim_reply`]).
@@ -929,7 +933,7 @@ pub struct CoordinatorRuntime {
     /// The core's clock: store ms, extrapolated by the monotonic clock between samples (the
     /// start's, then each `hosts` read's), never backwards (Elastic 2a, decision 6).
     clock: game::coordinator::StoreClock,
-    /// No save is taken before this `now_ms` (after a failure).
+    /// No transition is written before this `now_ms` (after a failed write).
     retry_at_ms: u64,
     failed_in_a_row: u32,
     /// World cuts of the `claim` hosts (`None`: off).
@@ -979,7 +983,7 @@ struct SuccessionPump {
 
 impl CoordinatorRuntime {
     /// Runs `start`'s coordinator on a new `coordinator` thread serving `links`, saving
-    /// into `store` under its fence. A migrated or bootstrapped state is saved at once.
+    /// into `store` under its fence. A migrated or bootstrapped state is written by its first transition.
     pub fn spawn(
         store: StoreHandle,
         start: CoordinatorStart,
@@ -1017,10 +1021,9 @@ impl CoordinatorRuntime {
         let (store_ms, started) = start.store_time;
         let mut clock = game::coordinator::StoreClock::default();
         clock.sample(store_ms, 0);
+        // A migrated or bootstrapped core is wholly unwritten: its first transition writes it.
         let mut core = start.coordinator;
-        if start.source.needs_save() {
-            core.request_save();
-        }
+        let version = start.version;
         if let Some(c) = &cuts {
             core.set_cut_epoch(fence.epoch);
             core.set_world_cuts(c.every.as_millis() as u64);
@@ -1035,7 +1038,8 @@ impl CoordinatorRuntime {
             core,
             store,
             fence,
-            pending_save: None,
+            writing: None,
+            version,
             links,
             fenced,
             #[cfg(feature = "test-hooks")]
@@ -1131,17 +1135,21 @@ impl CoordinatorRuntime {
             if let Some(blocked) = self.core.take_cuts_blocked() {
                 self.warn_cuts(now, &blocked.to_string());
             }
-            if self.pump_save(now).is_err() || self.pump_cuts(now).is_err() || self.pump_successions(now).is_err() {
+            if self.pump_cuts(now).is_err() || self.pump_successions(now).is_err() {
                 return self.fence_out();
             }
+            // Last: what this pass decided (the cuts' and successions' answers too) is in this
+            // pass's transition.
+            let Ok(out) = self.pump_transition(now) else {
+                return self.fence_out();
+            };
             health.world_generation(self.core.world_generation());
             health.successions_open(self.core.successions_open_count() as u64);
-            let out = self.core.take_out();
             #[cfg(feature = "test-hooks")]
             if self.crash_before_claim_reply.load(Ordering::SeqCst)
                 && out.iter().any(|(_, m)| matches!(m, CoordMsg::Reply { reply, .. } if reply.grants_claim()))
             {
-                // Its save committed (the reply is gated); it never leaves.
+                // Its transition was written; it never leaves.
                 log::warn!("[coordinator] test crash before a claim-granting reply left");
                 self.down();
                 return ServerExit::CoordinatorFailed;
@@ -1154,7 +1162,7 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// Block until a host message, the save's answer or a stop arrives, at most
+    /// Block until a host message, the write's answer or a stop arrives, at most
     /// [`COORDINATOR_TICK_MS`]. Nothing is taken off the channels here.
     fn wait(&self, stop: &Receiver<Stop>, #[cfg(feature = "test-hooks")] inspect: &Receiver<Inspect>) {
         let mut sel = Select::new();
@@ -1174,8 +1182,8 @@ impl CoordinatorRuntime {
         if let Some(login) = &self.links.login {
             sel.recv(&login.events);
         }
-        if let Some(save) = &self.pending_save {
-            sel.recv(save);
+        if let Some((_, written)) = &self.writing {
+            sel.recv(written);
         }
         let _ = sel.ready_timeout(Duration::from_millis(COORDINATOR_TICK_MS));
     }
@@ -1778,59 +1786,71 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// Settle the save in flight (if answered) and start the next one when due. `Err`:
-    /// fenced.
-    fn pump_save(&mut self, now: u64) -> Result<(), ()> {
-        if let Some(reply) = &self.pending_save {
-            let answer = match reply.try_recv() {
-                Err(TryRecvError::Empty) => return Ok(()),
+    /// The transitions (R-T5, the minimal write-before-send loop; Task 6 shapes the rest): the
+    /// write in flight, if answered, releases its messages (or, failed, hands the transition
+    /// back to the core); with no write in flight the core's next transition is written. With
+    /// nothing durable pending, what the core decided leaves at once. Returns what may be sent
+    /// now, in order. `Err`: fenced.
+    fn pump_transition(&mut self, now: u64) -> Result<Vec<(Target, CoordMsg)>, ()> {
+        let mut out = Vec::new();
+        if let Some((_, written)) = &self.writing {
+            let answer = match written.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(out),
                 Ok(answer) => answer,
                 Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
             };
-            self.pending_save = None;
-            self.settle(answer, now)?;
+            let (t, _) = self.writing.take().expect("checked");
+            out = self.settle(t, answer, now)?;
         }
-        if now < self.retry_at_ms {
-            return Ok(());
+        if self.writing.is_some() || now < self.retry_at_ms {
+            return Ok(out);
         }
-        if let Some(state) = self.core.take_save() {
-            self.pending_save = Some(self.store.save_coordinator(state.encode(), self.fence));
+        match self.core.take_transition() {
+            Some(t) => {
+                let written = self.store.write_coordinator_later(self.fence, self.version, t.core.clone(), t.history.clone());
+                self.writing = Some((t, written));
+            }
+            None => out.extend(self.core.take_out()),
         }
-        Ok(())
+        Ok(out)
     }
 
-    /// The answer of the save in flight. `Err`: fenced.
-    fn settle(&mut self, answer: Result<(), StoreError>, now: u64) -> Result<(), ()> {
+    /// The answer of the write of transition `t`: committed, its messages to send. `Err`:
+    /// fenced. Any other failure (a store error; a `Conflict`, which Task 6 answers with a
+    /// reload) hands `t` back to the core — its messages wait — and the next write is tried
+    /// after [`COORDINATOR_SAVE_RETRY_MS`].
+    fn settle(
+        &mut self,
+        t: game::coordinator::Transition,
+        answer: Result<CoordinatorWritten, StoreError>,
+        now: u64,
+    ) -> Result<Vec<(Target, CoordMsg)>, ()> {
         match answer {
-            Ok(()) => {
-                self.core.saved();
+            Ok(w) => {
+                self.version = w.version;
                 self.failed_in_a_row = 0;
-                Ok(())
+                let mono = self.mono_ms();
+                self.clock.sample(w.store_ms, mono);
+                Ok(t.out)
             }
             Err(StoreError::Fenced { .. }) => Err(()),
             Err(e) => {
-                self.core.save_failed();
+                self.core.transition_failed(t);
                 self.failed_in_a_row += 1;
                 self.retry_at_ms = now + COORDINATOR_SAVE_RETRY_MS;
                 if self.failed_in_a_row == COORDINATOR_FAILURES_BEFORE_STUCK {
                     log::error!(
-                        "[coordinator] saving is stuck: {} saves in a row failed, the last with: {e} \
-                         (directives and claim replies wait until one commits)",
+                        "[coordinator] writing is stuck: {} writes in a row failed, the last with: {e} \
+                         (nothing the coordinator decided leaves until one commits)",
                         self.failed_in_a_row
                     );
                     game::perf_event!("coordinator_save_stuck", "failed={}", self.failed_in_a_row);
                 } else {
-                    log::warn!("[coordinator] save failed ({} in a row): {e}; retrying", self.failed_in_a_row);
+                    log::warn!("[coordinator] write failed ({} in a row): {e}; retrying", self.failed_in_a_row);
                 }
-                Ok(())
+                Ok(Vec::new())
             }
         }
-    }
-
-    /// What the core lets out, to every host, in order.
-    fn send_out(&mut self) {
-        let out = self.core.take_out();
-        self.send(out);
     }
 
     fn send(&mut self, out: Vec<(Target, CoordMsg)>) {
@@ -1855,48 +1875,45 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// The orderly stop's save: the save in flight is settled, then one more (forced)
-    /// holding everything handled, each waited for until `timeout` runs out.
+    /// The orderly stop: the write in flight is settled, then the last transition (whatever
+    /// was handled since) is written, each waited for until `timeout` runs out; what they
+    /// released is sent (the hosts may still read it while they stop).
     fn finish(mut self, timeout: Duration) -> ServerExit {
         let deadline = Instant::now() + timeout;
-        let mut forced = false;
-        loop {
-            if let Some(reply) = self.pending_save.take() {
-                let left = deadline.saturating_duration_since(Instant::now());
-                let answer = match reply.recv_timeout(left) {
-                    Ok(answer) => answer,
-                    Err(RecvTimeoutError::Timeout) => {
-                        log::error!("[coordinator] the world store did not answer the save at exit within {timeout:?}");
-                        break;
+        let mut out = Vec::new();
+        for _ in 0..2 {
+            if self.writing.is_none() {
+                match self.core.take_transition() {
+                    Some(t) => {
+                        let written = self.store.write_coordinator_later(self.fence, self.version, t.core.clone(), t.history.clone());
+                        self.writing = Some((t, written));
                     }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        Err(StoreError::Backend("the world-store thread has stopped".into()))
-                    }
-                };
-                let failed = answer.is_err();
-                if self.settle(answer, 0).is_err() {
-                    return self.fence_out();
+                    None => break,
                 }
-                if forced {
-                    if failed {
-                        log::error!("[coordinator] the coordinator state was not saved at exit; it restarts from its last save");
-                    } else {
-                        log::info!("[coordinator] coordinator state saved");
-                    }
+            }
+            let (t, written) = self.writing.take().expect("a write in flight");
+            let left = deadline.saturating_duration_since(Instant::now());
+            let answer = match written.recv_timeout(left) {
+                Ok(answer) => answer,
+                Err(RecvTimeoutError::Timeout) => {
+                    log::error!("[coordinator] the world store did not answer the write at exit within {timeout:?}");
                     break;
                 }
+                Err(RecvTimeoutError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            let failed = answer.is_err();
+            match self.settle(t, answer, 0) {
+                Ok(released) => out.extend(released),
+                Err(()) => return self.fence_out(),
             }
-            self.core.request_save();
-            match self.core.take_save() {
-                Some(state) => {
-                    self.pending_save = Some(self.store.save_coordinator(state.encode(), self.fence));
-                    forced = true;
-                }
-                None => break,
+            if failed {
+                log::error!("[coordinator] the coordinator state was not written at exit; it restarts from its last write");
+                break;
             }
         }
-        // Whatever the last save released (the hosts may still read it while they stop).
-        self.send_out();
+        // Nothing durable pending (all written): what was decided with no durable change leaves too.
+        out.extend(self.core.take_out());
+        self.send(out);
         self.down();
         ServerExit::Clean
     }

@@ -55,7 +55,8 @@ pub enum WorldReply {
 }
 
 impl WorldReply {
-    /// A reply that hands out a claim: sent only once the state granting it is saved.
+    /// A reply that hands out a claim (like every output, sent only once the state deciding it
+    /// is written: `Coordinator::take_transition`).
     pub fn grants_claim(&self) -> bool {
         matches!(self, Self::Embarked { .. } | Self::Returned { .. } | Self::AdventureStarted { .. })
     }
@@ -345,16 +346,4 @@ pub enum CoordMsg {
     /// spawn (here or on the host holding the player) or applies and relays a kick; the
     /// answers come back as [`HostMsg::Login`].
     Login(crate::LoginOrder),
-}
-
-impl CoordMsg {
-    /// Durable before visible: a directive or a claim-granting reply leaves only after
-    /// the state that produced it is saved.
-    pub fn is_gated(&self) -> bool {
-        match self {
-            Self::Directive { .. } => true,
-            Self::Reply { reply, .. } => reply.grants_claim(),
-            _ => false,
-        }
-    }
 }

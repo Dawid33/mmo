@@ -102,7 +102,7 @@ impl SuccessionKind {
 pub const SUCCESSION_DEADLINE_MS: u64 = 30_000;
 
 /// One host's land given to one heir (the store's `successions` row as declared; R4).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Succession {
     pub id: SuccessionId,
     pub predecessor: HostId,

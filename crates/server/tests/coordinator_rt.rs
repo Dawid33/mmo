@@ -107,11 +107,20 @@ fn player_sites(h: &History) -> Vec<SiteId> {
 
 /// The coordinator's state as the store holds it, decoded (`None` before its first save).
 fn stored_state(store: &StoreHandle, map: &WorldMap) -> Option<(History, Vec<(PlayerId, Claim)>)> {
-    let bytes = store.load_coordinator().unwrap()?;
-    let state = game::CoordinatorState::decode(&bytes).expect("the saved state decodes");
+    let row = store.load_coordinator().unwrap()?;
     let grid = game::history::SocietyGrid::from_world_map(map);
-    let history = game::history::persist::decode(&state.history, grid).expect("its history decodes");
-    Some((history, state.claims))
+    let c = game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ProcessBoot(0), 0).expect("the projection loads");
+    Some((c.history().clone(), c.claims()))
+}
+
+/// A directive or a claim-granting reply: what must never leave before the state that decided
+/// it is written (since Elastic 2a no message does).
+fn gated(msg: &CoordMsg) -> bool {
+    match msg {
+        CoordMsg::Directive { .. } => true,
+        CoordMsg::Reply { reply, .. } => reply.grants_claim(),
+        _ => false,
+    }
 }
 
 /// One `AllInOne` server life, as `server::run` wires it: inline regions, the store's
@@ -377,10 +386,10 @@ fn r1_world_migrates_history_row() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Saves that fail (`StoreHandle::fail_next_writes`) hold back every directive and
-/// claim-granting reply: none reaches the host before a save holding the founding has
-/// committed; once one commits they all arrive. Ungated messages (the attach echo, the
-/// view, the region's people) are not held while nothing gated is ahead of them.
+/// Writes that fail (`StoreHandle::fail_next_writes`) hold back every message (Elastic 2a:
+/// nothing leaves before its transition is written): no directive or claim-granting reply
+/// reaches the host before a write holding the founding has committed; once one commits they
+/// all arrive, the attach echo with them.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn directive_not_sent_before_save() {
@@ -409,7 +418,8 @@ fn directive_not_sent_before_save() {
             std::thread::sleep(Duration::from_millis(2));
             continue;
         };
-        if msg.is_gated() {
+        assert_eq!(store.failing_writes_left(), 0, "{msg:?} left while writes were still failing");
+        if gated(&msg) {
             assert_eq!(store.failing_writes_left(), 0, "{msg:?} left while saves were still failing");
             let (saved, _) = stored_state(&store, &map).expect("a save committed");
             assert_eq!(player_sites(&saved).len(), 1, "{msg:?} left before the founding was durable");

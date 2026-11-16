@@ -1006,31 +1006,56 @@ macro_rules! engine_rows {
                 Ok(CoordinatorFence { epoch: u(epoch) })
             }
 
-            /// Writes the coordinator's state if `fence` still holds its row (the
-            /// check is the update's own `WHERE`). Callers hold the writer lock.
-            pub(crate) async fn save_coordinator(
+            /// Writes the coordinator's projection (Elastic 2a): `core`, and `history` unless
+            /// `None` (the stored one is kept), if `fence` still holds the row AND it is at
+            /// `version` — the compare-and-set is the update's own `WHERE`; the version goes up by
+            /// one. Returns the new version and the database clock. No row: the epoch is read
+            /// again — another one is [`StoreError::Fenced`], the same one
+            /// [`StoreError::Conflict`] (the version moved: a second writer). One statement on
+            /// the one `coordinator` row; it wants nothing else (lock notes: `succession.rs`).
+            /// Callers hold the writer lock.
+            pub(crate) async fn write_coordinator(
                 pool: &Pool,
-                state: Vec<u8>,
                 fence: CoordinatorFence,
-            ) -> Result<(), StoreError> {
-                let done = sqlx::query("UPDATE coordinator SET state = $1, saved_utc = $2 WHERE id = 1 AND epoch = $3")
-                    .bind(state)
+                version: u64,
+                core: Vec<u8>,
+                history: Option<Vec<u8>>,
+            ) -> Result<crate::CoordinatorWritten, StoreError> {
+                let sql = format!(
+                    "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, \
+                     saved_utc = $3 WHERE id = 1 AND epoch = $4 AND version = $5 RETURNING version, {NOW_MS}"
+                );
+                let row = sqlx::query(&sql)
+                    .bind(core)
+                    .bind(history)
                     .bind(crate::open::utc_now())
                     .bind(i(fence.epoch))
-                    .execute(pool)
+                    .bind(i(version))
+                    .fetch_optional(pool)
                     .await?;
-                if done.rows_affected() == 0 {
-                    return Err(StoreError::Fenced { sr: None });
+                if let Some(r) = row {
+                    return Ok(crate::CoordinatorWritten { version: u(r.try_get(0)?), store_ms: u(r.try_get(1)?) });
                 }
-                Ok(())
+                let epoch: Option<i64> =
+                    sqlx::query_scalar("SELECT epoch FROM coordinator WHERE id = 1").fetch_optional(pool).await?;
+                if epoch.map(u) == Some(fence.epoch) {
+                    Err(StoreError::Conflict)
+                } else {
+                    Err(StoreError::Fenced { sr: None })
+                }
             }
 
-            pub(crate) async fn load_coordinator(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {
-                let row = sqlx::query("SELECT state FROM coordinator WHERE id = 1").fetch_optional(pool).await?;
-                Ok(match row {
-                    Some(r) => r.try_get(0)?,
-                    None => None,
-                })
+            /// The coordinator row's projection; `None` when there is no row or its `core` was
+            /// never written (a claimed row before its first write).
+            pub(crate) async fn load_coordinator(pool: &Pool) -> Result<Option<crate::StoredCoordinator>, StoreError> {
+                let row = sqlx::query("SELECT version, core, history FROM coordinator WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await?;
+                let Some(r) = row else { return Ok(None) };
+                let core: Option<Vec<u8>> = r.try_get(1)?;
+                let Some(core) = core else { return Ok(None) };
+                let history: Option<Vec<u8>> = r.try_get(2)?;
+                Ok(Some(crate::StoredCoordinator { version: u(r.try_get(0)?), core, history: history.unwrap_or_default() }))
             }
 
             pub(crate) async fn forged_archive(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {

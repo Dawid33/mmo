@@ -84,6 +84,23 @@ pub struct HostsRead {
     pub store_ms: u64,
 }
 
+/// The world coordinator's row as stored ([`StoreHandle::load_coordinator`], Elastic 2a): its
+/// projection, `core` and `history`, at `version` (what the next write must name).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredCoordinator {
+    pub version: u64,
+    pub core: Vec<u8>,
+    pub history: Vec<u8>,
+}
+
+/// A coordinator write committed ([`StoreHandle::write_coordinator_later`]): the row's new
+/// version and the database clock at the write (ms since the epoch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoordinatorWritten {
+    pub version: u64,
+    pub store_ms: u64,
+}
+
 /// What one lease beat ([`StoreHandle::heartbeat`]) found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Beat {
@@ -184,7 +201,7 @@ impl StoreHandle {
     }
 
     /// Test hook: the next `n` queued writes — cut commits ([`StoreHandle::commit_cut`])
-    /// and coordinator saves ([`StoreHandle::save_coordinator`]), whichever come first —
+    /// and coordinator writes ([`StoreHandle::write_coordinator_later`]), whichever come first —
     /// fail with a `Backend` error (not `Fenced`) and write nothing. Shared by every clone.
     #[doc(hidden)]
     pub fn fail_next_writes(&self, n: u32) {
@@ -935,29 +952,33 @@ impl StoreHandle {
         self.ask(Request::ClaimCoordinator)
     }
 
-    /// Queues a write of the coordinator's state and returns at once; the
-    /// answer (`Fenced` when another coordinator claimed the row since)
-    /// arrives on the receiver.
-    pub fn save_coordinator(
+    /// Queues a write of the coordinator's projection (Elastic 2a) and returns at once: `core`,
+    /// and `history` unless `None` (the stored one stays), if `fence` still holds the row and it
+    /// is at `version`. The answer arrives on the receiver: the new version and the database
+    /// clock, `Fenced` when another coordinator claimed the row since, `Conflict` when the
+    /// epoch is ours but the version moved (a second writer).
+    pub fn write_coordinator_later(
         &self,
-        state: Vec<u8>,
         fence: CoordinatorFence,
-    ) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
+        version: u64,
+        core: Vec<u8>,
+        history: Option<Vec<u8>>,
+    ) -> crossbeam::channel::Receiver<Result<CoordinatorWritten, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
         if let Some(e) = self.injected_failure() {
             let _ = tx.send(Err(e));
             return rx;
         }
-        if let Err(req) = self.send(Request::SaveCoordinator(state, fence, Reply::sync(tx))) {
-            if let Request::SaveCoordinator(_, _, reply) = req {
+        if let Err(req) = self.send(Request::WriteCoordinator { fence, version, core, history, reply: Reply::sync(tx) }) {
+            if let Request::WriteCoordinator { reply, .. } = req {
                 reply.send(Err(stopped()));
             }
         }
         rx
     }
 
-    /// The coordinator's last saved state; `None` before the first save.
-    pub fn load_coordinator(&self) -> Result<Option<Vec<u8>>, StoreError> {
+    /// The coordinator's last written projection; `None` before the first write.
+    pub fn load_coordinator(&self) -> Result<Option<StoredCoordinator>, StoreError> {
         self.ask(Request::LoadCoordinator)
     }
 

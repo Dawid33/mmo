@@ -4,6 +4,7 @@
 mod clock;
 mod counters;
 mod codec;
+mod coordinator_rows;
 mod cut;
 mod entity_key;
 mod fence;

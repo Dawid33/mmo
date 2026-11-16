@@ -412,7 +412,7 @@ impl History {
     }
 
     /// Regions running or stopping (holding bodies), in order.
-    pub(crate) fn live_regions(&self) -> Vec<RegionCoords> {
+    pub fn live_regions(&self) -> Vec<RegionCoords> {
         self.running.union(&self.stopping).copied().collect()
     }
 

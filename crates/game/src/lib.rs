@@ -93,7 +93,7 @@ pub use buoyancy::*;
 pub use camera::*;
 pub use containers::*;
 pub use coordinator::{
-    Claim, CoordMsg, Coordinator, CoordinatorState, CutDecide, CutFailure, CutsBlocked, HostMsg, InlineWorldLink,
+    Claim, CoordMsg, Coordinator, CutDecide, CutFailure, CutsBlocked, HostMsg, InlineWorldLink,
     OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest, LEAVE_BATCH_MS, LEAVE_CUT_TIMEOUT_SECS,
     SETTLE_CUT_RETRY_MS, WORLD_CUT_BLOCKED_GRACE_MS, WORLD_CUT_DEADLINE_MS, WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS,
 };

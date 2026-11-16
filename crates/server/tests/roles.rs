@@ -145,18 +145,16 @@ fn embark_request(h: &History) -> EmbarkRequest {
 
 /// The coordinator's saved history.
 fn stored_history(store: &StoreHandle, map: &WorldMap) -> History {
-    let bytes = store.load_coordinator().unwrap().expect("a saved coordinator state");
-    let state = game::CoordinatorState::decode(&bytes).expect("the saved state decodes");
+    let row = store.load_coordinator().unwrap().expect("a saved coordinator state");
     let grid = game::history::SocietyGrid::from_world_map(map);
-    game::history::persist::decode(&state.history, grid).expect("its history decodes")
+    game::history::persist::decode(&row.history, grid).expect("its history decodes")
 }
 
 /// The player-founded sites in the coordinator's saved state.
 fn stored_player_sites(store: &StoreHandle, map: &WorldMap) -> Vec<SiteId> {
-    let Some(bytes) = store.load_coordinator().unwrap() else { return Vec::new() };
-    let state = game::CoordinatorState::decode(&bytes).expect("the saved state decodes");
+    let Some(row) = store.load_coordinator().unwrap() else { return Vec::new() };
     let grid = game::history::SocietyGrid::from_world_map(map);
-    let history = game::history::persist::decode(&state.history, grid).expect("its history decodes");
+    let history = game::history::persist::decode(&row.history, grid).expect("its history decodes");
     history.sites().filter(|s| s.player_founded).map(|s| s.id).collect()
 }
 

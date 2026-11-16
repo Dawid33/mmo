@@ -45,20 +45,78 @@ fn mix(seed: u64, i: u64) -> u64 {
 
 /// One [`Coordinator`] several hosts' inline links share ([`InlineWorldLink::shared`]),
 /// with each host's messages not read by its link yet. Derefs to the coordinator.
+///
+/// With a store ([`SharedCore::with_store`], the seeded rig) every pump drives the core's
+/// transitions ([`Coordinator::take_transition`]): the projection of each is kept as the
+/// store's row would hold it ([`SharedCore::stored`]) — committed at once, as a store that never
+/// fails — before its messages are routed. Without one the core is unstored
+/// ([`Coordinator::commit_unstored`]).
 pub struct SharedCore {
     coordinator: Coordinator,
     boxes: BTreeMap<HostId, VecDeque<CoordMsg>>,
+    /// The last projection written, `(core, history)`, when a store stands behind the core.
+    stored: Option<(Vec<u8>, Vec<u8>)>,
+    /// Transitions written so far.
+    written: u64,
 }
 
 impl SharedCore {
     pub fn new(coordinator: Coordinator) -> Arc<Mutex<SharedCore>> {
-        Arc::new(Mutex::new(SharedCore { coordinator, boxes: BTreeMap::new() }))
+        Arc::new(Mutex::new(SharedCore { coordinator, boxes: BTreeMap::new(), stored: None, written: 0 }))
+    }
+
+    /// [`Self::new`] with a store behind the core: every transition is kept as the store's
+    /// row would hold it, and a message leaves only with (or after) its transition.
+    pub fn with_store(coordinator: Coordinator) -> Arc<Mutex<SharedCore>> {
+        let core = Self::new(coordinator);
+        lock(&core).stored = Some((Vec::new(), Vec::new()));
+        core
+    }
+
+    /// The projection as the store holds it: `(core, history)` of the last transition (`None`
+    /// without a store, or before the first transition).
+    pub fn stored(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.stored.clone().filter(|(core, _)| !core.is_empty())
+    }
+
+    /// Transitions written so far (with a store).
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// A restart of the coordinator process: the core is replaced by `coordinator` (loaded
+    /// from [`Self::stored`]), and whatever the old process had not handed to a link yet —
+    /// its outgoing queue, the hosts' mailboxes — is lost with it.
+    pub fn restart(&mut self, coordinator: Coordinator) {
+        self.coordinator = coordinator;
+        for b in self.boxes.values_mut() {
+            b.clear();
+        }
     }
 
     /// What may leave goes to the mailboxes of the hosts it is for (a message for a host
     /// with no link is lost, as on a real link).
     fn route(&mut self) {
-        for (to, msg) in self.coordinator.take_out() {
+        let out = match self.stored.as_mut() {
+            Some(stored) => {
+                let mut out = Vec::new();
+                if let Some(t) = self.coordinator.take_transition() {
+                    stored.0 = t.core;
+                    if let Some(h) = t.history {
+                        stored.1 = h;
+                    }
+                    self.written += 1;
+                    out = t.out;
+                }
+                out.extend(self.coordinator.take_out());
+                out
+            }
+            None => {
+                self.coordinator.commit_unstored();
+                self.coordinator.take_out()
+            }
+        };
+        for (to, msg) in out {
             match to {
                 Target::Host(h) => match self.boxes.get_mut(&h) {
                     Some(b) => b.push_back(msg),
@@ -238,6 +296,12 @@ impl InlineWorldLink {
     pub fn lose_in_transit(&mut self) {
         self.out_q.clear();
     }
+
+    /// Test hook: lose every message sent and not handed to the coordinator yet (a shared
+    /// link's delay), as a coordinator process that died loses what it had not read.
+    pub fn lose_unhandled(&mut self) {
+        self.in_q.clear();
+    }
 }
 
 fn lock(core: &Mutex<SharedCore>) -> std::sync::MutexGuard<'_, SharedCore> {
@@ -297,7 +361,6 @@ impl WorldLink for InlineWorldLink {
                     coord.handle(self.host, msg, now_ms);
                 }
                 coord.maintain(now_ms);
-                coord.commit_unstored();
                 coord.route();
                 coord.boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
             }

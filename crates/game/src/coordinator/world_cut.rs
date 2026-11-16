@@ -24,7 +24,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{CoordMsg, Coordinator, CutFailure, Target};
+use serde::{Deserialize, Serialize};
+
+use super::{CoordMsg, Coordinator, CutFailure, ProcessBoot, Target};
 use crate::HostId;
 use crate::{CutId, SuccessionId, Tick};
 
@@ -137,7 +139,7 @@ pub struct CutDecide {
 }
 
 /// The world cut running.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CutRun {
     cut: CutId,
     tick: Tick,
@@ -152,8 +154,10 @@ struct CutRun {
     deadline_ms: u64,
     /// Decided here (`Some(commit)`), waiting for the runtime.
     verdict: Option<bool>,
-    /// The decision was handed to the runtime ([`Coordinator::take_decision`]).
-    taken: bool,
+    /// The decision was handed to the runtime ([`Coordinator::take_decision`]) by this process
+    /// boot: one handed out by another (a restart) is handed out again — the store's
+    /// `decide_cut` keeps its first decision, so a repeated record answers the stored one.
+    taken: Option<ProcessBoot>,
 }
 
 impl CutRun {
@@ -167,26 +171,34 @@ impl CutRun {
     }
 }
 
-/// The world-cut state of the coordinator (never saved: a restarted coordinator starts
-/// over; a part left staged is decided by the store's recovery, and a host asks again
-/// with its `Attach`).
-#[derive(Debug)]
+/// The world-cut state of the coordinator, in its projection (Elastic 2a) but for the
+/// runtime's configuration and observations (`#[serde(skip)]`: set again by every runtime that
+/// loads it). A restarted coordinator runs on: an undecided cut aborts at its participants'
+/// `Attach`es (their links dropped), a decision handed to the dead process is recorded again.
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct WorldCuts {
-    /// The period between cuts (`None`: world cuts off).
+    /// The period between cuts (`None`: world cuts off). Kept in the projection so a loaded
+    /// core's period runs on ([`Coordinator::set_world_cuts`] restarts it only on a change).
     every_ms: Option<u64>,
-    /// The coordinator's claim epoch: the high half of every cut id it makes.
+    /// The coordinator's claim epoch: the high half of every cut id it makes (configuration).
+    #[serde(skip)]
     epoch: u64,
     /// The low half of the last cut id made.
     next: u64,
     /// The hosts whose part every cut needs (the runtime: those whose `hosts` row is not
-    /// clean).
+    /// clean). An observation of the runtime's reads.
+    #[serde(skip)]
     expected: BTreeSet<HostId>,
     /// `expected` is as last read ([`Coordinator::expected_hosts_unknown`] clears it: a
     /// failed read, no cut until the next good one).
+    #[serde(skip)]
     expected_known: bool,
-    /// The hosts attached (an `Attach` handled, no detach since).
-    attached: BTreeSet<HostId>,
+    /// The hosts attached (an `Attach` handled, no detach since), each with the boot that
+    /// attached and the coordinator process boot it attached to: an attachment of another
+    /// process boot counts as detached ([`Coordinator::is_attached`]).
+    attached: BTreeMap<HostId, (u64, ProcessBoot)>,
     /// The world tick as the runtime last set it.
+    #[serde(skip)]
     world_tick: Tick,
     lead: Tick,
     /// `clock_ms` the period runs from (the last cut's end, or when cuts were turned on).
@@ -203,11 +215,14 @@ pub(super) struct WorldCuts {
     left: BTreeMap<HostId, Option<u64>>,
     /// Each host's boot as its latest `Attach` named it.
     boots: BTreeMap<HostId, u64>,
-    /// `clock_ms` since which a due cut has been blocked by a host mismatch.
+    /// `clock_ms` since which a due cut has been blocked by a host mismatch (report pacing).
+    #[serde(skip)]
     blocked_since: Option<u64>,
     /// `clock_ms` the mismatch was last reported at.
+    #[serde(skip)]
     blocked_noted: Option<u64>,
     /// The report not taken yet ([`Coordinator::take_cuts_blocked`]).
+    #[serde(skip)]
     blocked: Option<CutsBlocked>,
     /// Hosts succeeded (R4), with the boot that died: not expected (nor counted attached)
     /// until another boot of theirs attaches or registers, as for `left`.
@@ -222,7 +237,7 @@ impl Default for WorldCuts {
             next: 0,
             expected: BTreeSet::new(),
             expected_known: false,
-            attached: BTreeSet::new(),
+            attached: BTreeMap::new(),
             world_tick: 0,
             lead: WORLD_CUT_LEAD_TICKS,
             last_ms: 0,
@@ -241,11 +256,31 @@ impl Default for WorldCuts {
 }
 
 impl Coordinator {
+    /// A loaded core's cut deadlines at store time `now_ms` ([`super::rebase_deadline`]):
+    /// the period's start (only between cuts: while one runs nothing reads it, and its decision
+    /// sets it anew), each leave request's first ask, the running cut's deadline.
+    pub(super) fn rebase_cut_deadlines(&mut self, now_ms: u64) {
+        if self.cuts.run.is_none() {
+            self.cuts.last_ms = super::rebase_since(self.cuts.last_ms, now_ms);
+        }
+        for since in self.cuts.leave_requests.values_mut() {
+            *since = super::rebase_since(*since, now_ms);
+        }
+        if let Some(run) = self.cuts.run.as_mut() {
+            run.deadline_ms = super::rebase_deadline(run.deadline_ms, WORLD_CUT_DEADLINE_MS, now_ms);
+        }
+    }
+
     /// World cuts every `every_ms` (0: off). Only under `claim` (any number of hosts): a lone
     /// `static` host saves on its own (the one-phase cut) and never gets a `BeginCut`.
+    /// A loaded core whose period is the same runs on from its stored last cut; a changed
+    /// period (or cuts turned on) counts from now.
     pub fn set_world_cuts(&mut self, every_ms: u64) {
-        self.cuts.every_ms = (every_ms > 0).then_some(every_ms);
-        self.cuts.last_ms = self.clock_ms;
+        let every = (every_ms > 0).then_some(every_ms);
+        if self.cuts.every_ms != every {
+            self.cuts.every_ms = every;
+            self.cuts.last_ms = self.clock_ms;
+        }
     }
 
     /// The coordinator's claim epoch: the high half of its cut ids, so a restarted
@@ -279,6 +314,15 @@ impl Coordinator {
         self.abort_for(host, "detached");
     }
 
+    /// Every host counts as detached (a world rollback: every host exits): a running cut not
+    /// decided yet is aborted, leave requests are forgotten.
+    pub(super) fn detach_all(&mut self) {
+        let hosts: Vec<HostId> = self.cuts.attached.keys().copied().collect();
+        for h in hosts {
+            self.host_detached(h);
+        }
+    }
+
     /// The boot each host's `hosts` row names: a host that left as another boot has
     /// registered again, and is expected again.
     pub fn set_host_boots(&mut self, boots: BTreeMap<HostId, u64>) {
@@ -304,7 +348,7 @@ impl Coordinator {
     /// before the next read shows it (its answers count per boot), and a zombie still attached
     /// stays marked until its link drops.
     pub(super) fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>) {
-        let attached = &self.cuts.attached;
+        let attached: BTreeSet<HostId> = self.attached_hosts().collect();
         let keep = |h: &HostId| present.contains(h) || attached.contains(h);
         self.cuts.left.retain(|h, _| keep(h));
         self.cuts.succeeded.retain(|h, _| keep(h));
@@ -367,9 +411,10 @@ impl Coordinator {
     /// a failure, a detach or the deadline: abort). Record it in the store and call
     /// [`Self::decided`] with the stored decision.
     pub fn take_decision(&mut self) -> Option<CutDecide> {
-        let run = self.cuts.run.as_mut().filter(|r| !r.taken)?;
+        let process = self.process;
+        let run = self.cuts.run.as_mut().filter(|r| r.taken != Some(process))?;
         let commit = run.verdict?;
-        run.taken = true;
+        run.taken = Some(process);
         Some(CutDecide {
             cut: run.cut,
             tick: run.tick,
@@ -451,7 +496,7 @@ impl Coordinator {
     /// decision leave out only a host registered after the cut's begin was recorded
     /// (`world_store` `record_cut_begin`). It is in the next cut.
     pub(super) fn cut_attach(&mut self, host: HostId, pending: Option<CutId>, boot: u64) {
-        self.cuts.attached.insert(host);
+        self.cuts.attached.insert(host, (boot, self.process));
         self.cuts.boots.insert(host, boot);
         if self.cuts.left.get(&host).is_some_and(|left_as| *left_as != Some(boot)) {
             log::info!("coordinator: host {host} is back (boot {boot}): expected again");
@@ -536,7 +581,7 @@ impl Coordinator {
         let (left, succeeded) = (&self.cuts.left, &self.cuts.succeeded);
         let out = |h: &HostId| !left.contains_key(h) && !succeeded.contains_key(h);
         let expected: BTreeSet<HostId> = self.cuts.expected.iter().copied().filter(out).collect();
-        let attached: BTreeSet<HostId> = self.cuts.attached.iter().copied().filter(out).collect();
+        let attached: BTreeSet<HostId> = self.attached_hosts().filter(out).collect();
         // R4: no cut while a succession is open and not answered by everyone (nor while one
         // is being declared, a rollback is wanted, or the open ones are not known yet).
         let waiting = self.successions_block_cuts();
@@ -604,7 +649,7 @@ impl Coordinator {
             prepared: BTreeSet::new(),
             deadline_ms: now_ms + WORLD_CUT_DEADLINE_MS,
             verdict: None,
-            taken: false,
+            taken: None,
         });
     }
 
@@ -641,12 +686,13 @@ impl Coordinator {
 
     /// The hosts attached now that neither left nor were succeeded.
     pub(super) fn attached_live(&self) -> Vec<HostId> {
-        self.cuts
-            .attached
-            .iter()
-            .copied()
-            .filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h))
-            .collect()
+        self.attached_hosts().filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h)).collect()
+    }
+
+    /// The hosts attached to THIS process boot, by id (an attachment of another process boot
+    /// — a restart's projection — counts as detached).
+    fn attached_hosts(&self) -> impl Iterator<Item = HostId> + '_ {
+        self.cuts.attached.iter().filter(|(_, (_, p))| *p == self.process).map(|(h, _)| *h)
     }
 
     /// Whether a message of `host` comes from a succeeded boot of it (`boot`: the boot an
@@ -657,7 +703,7 @@ impl Coordinator {
     }
 
     pub(super) fn is_attached(&self, host: HostId) -> bool {
-        self.cuts.attached.contains(&host)
+        self.cuts.attached.get(&host).is_some_and(|(_, p)| *p == self.process)
     }
 
     /// The boot host `host`'s latest `Attach` named (`None`: it never attached).

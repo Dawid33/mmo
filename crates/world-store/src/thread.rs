@@ -111,8 +111,15 @@ pub(crate) enum Request {
     /// Free the fence's super-regions.
     Release(Fence, Reply<()>),
     ClaimCoordinator(Reply<CoordinatorFence>),
-    SaveCoordinator(Vec<u8>, CoordinatorFence, Reply<()>),
-    LoadCoordinator(Reply<Option<Vec<u8>>>),
+    /// Elastic 2a: the coordinator's projection, compare-and-set on `version`.
+    WriteCoordinator {
+        fence: CoordinatorFence,
+        version: u64,
+        core: Vec<u8>,
+        history: Option<Vec<u8>>,
+        reply: Reply<crate::CoordinatorWritten>,
+    },
+    LoadCoordinator(Reply<Option<crate::StoredCoordinator>>),
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
     SetSuperRegionRegions(u32, Reply<bool>),
@@ -626,9 +633,9 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, claim_coordinator()))
             }),
-            Request::SaveCoordinator(state, fence, r) => tokio::spawn(async move {
+            Request::WriteCoordinator { fence, version, core, history, reply } => tokio::spawn(async move {
                 let _w = writer.lock().await;
-                r.send(on_pool!(&pool, save_coordinator(state, fence)))
+                reply.send(on_pool!(&pool, write_coordinator(fence, version, core, history)))
             }),
             Request::LoadCoordinator(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) }),
             Request::EnsureClockAnchor(proposed, r) => tokio::spawn(async move {
@@ -847,7 +854,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::ClaimFree(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::Release(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimCoordinator(r) => r.send(Err(StoreError::ReadOnly)),
-        Request::SaveCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::WriteCoordinator { reply, .. } => reply.send(Err(StoreError::ReadOnly)),
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SetSuperRegionRegions(_, r) => r.send(Err(StoreError::ReadOnly)),

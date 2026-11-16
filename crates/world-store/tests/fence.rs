@@ -171,15 +171,18 @@ fn stale_coordinator_save_is_refused() {
         assert_eq!(h.load_coordinator().unwrap(), None);
         let first = h.claim_coordinator().unwrap();
         assert_eq!(first.epoch, 1);
-        h.save_coordinator(vec![1, 2, 3], first).recv().unwrap().unwrap();
-        assert_eq!(h.load_coordinator().unwrap(), Some(vec![1, 2, 3]));
+        assert_eq!(h.load_coordinator().unwrap(), None, "a claimed row holds no projection before its first write");
+        let w = h.write_coordinator_later(first, 0, vec![1, 2, 3], Some(vec![7])).recv().unwrap().unwrap();
+        assert_eq!(w.version, 1);
+        let stored = |core: Vec<u8>, history: Vec<u8>, version: u64| Some(world_store::StoredCoordinator { version, core, history });
+        assert_eq!(h.load_coordinator().unwrap(), stored(vec![1, 2, 3], vec![7], 1));
         let second = h.claim_coordinator().unwrap();
         assert_eq!(second.epoch, 2);
-        let err = h.save_coordinator(vec![9], first).recv().unwrap().unwrap_err();
+        let err = h.write_coordinator_later(first, 1, vec![9], None).recv().unwrap().unwrap_err();
         assert_eq!(err, StoreError::Fenced { sr: None });
-        assert_eq!(h.load_coordinator().unwrap(), Some(vec![1, 2, 3]), "the stale save wrote nothing");
-        h.save_coordinator(vec![4, 5], second).recv().unwrap().unwrap();
-        assert_eq!(h.load_coordinator().unwrap(), Some(vec![4, 5]));
+        assert_eq!(h.load_coordinator().unwrap(), stored(vec![1, 2, 3], vec![7], 1), "the stale write wrote nothing");
+        h.write_coordinator_later(second, 1, vec![4, 5], None).recv().unwrap().unwrap();
+        assert_eq!(h.load_coordinator().unwrap(), stored(vec![4, 5], vec![7], 2));
         h.shutdown();
     });
 }
@@ -253,7 +256,7 @@ fn read_only_refuses_writes_and_unknown_schema() {
         assert_eq!(r.commit_cut(cut(&w, 2), fence.clone()).recv().unwrap().unwrap_err(), StoreError::ReadOnly);
         assert_eq!(r.claim_super_regions(hid(0), vec![(0, 0)]).unwrap_err(), StoreError::ReadOnly);
         assert_eq!(r.claim_coordinator().unwrap_err(), StoreError::ReadOnly);
-        let err = r.save_coordinator(vec![1], world_store::CoordinatorFence { epoch: 1 }).recv().unwrap().unwrap_err();
+        let err = r.write_coordinator_later(world_store::CoordinatorFence { epoch: 1 }, 0, vec![1], None).recv().unwrap().unwrap_err();
         assert_eq!(err, StoreError::ReadOnly);
         assert!(w.load_region(A, &fence).unwrap().is_some(), "the refused writes changed nothing");
         r.shutdown();

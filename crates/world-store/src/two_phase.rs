@@ -302,6 +302,10 @@ pub(crate) async fn decide_cut(
                 }
             }
             let inserted = insert_decision(&mut *tx, cut, tick, commit).await?;
+            // Elastic 2a: a begin below the cut being decided is never read again (only this
+            // cut's commit path reads `cut_begins`, for its own row; `resolve_prepared` reads
+            // none): pruned. `cut_decisions` is kept. Lock walk: `succession.rs` module notes.
+            sqlx::query("DELETE FROM cut_begins WHERE cut_id < $1").bind(cut.0 as i64).execute(&mut *tx).await?;
             // A host's abort may have won the insert meanwhile.
             let d = cut_decision(&mut *tx, cut).await?.ok_or_else(|| no_decision(cut))?;
             if inserted && d {

@@ -7211,6 +7211,69 @@ fn entity_that_ping_ponged_is_resolved_by_its_last_crossing() {
     sweep_hosts_hits("entity_that_ping_ponged_is_resolved_by_its_last_crossing", ping_ponged);
 }
 
+/// Elastic 2a: three hosts whose slimes shuttle across host seams while world cuts run. At a
+/// seeded round the coordinator process crashes and a new one starts from the LAST TRANSITION
+/// written ([`MultiRig::restart_coordinator_from_store`]: a new process boot, every world link
+/// down for a round — whatever was not written, or not handed to a link, is lost); at another
+/// seeded round a landed host dies and its succession runs to the settle on the restarted
+/// coordinator. Every round the world is conserved and the journals explain every difference
+/// from the last committed cut; a cut commits after the restart; the succession is declared
+/// once and its settle leaves the world whole; every live host's directory names one owner for
+/// each region of the chain (each claim held once).
+fn coordinator_restart_at_any_round(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let slimes: Vec<game::EntityId> = (0..4).map(|i| slime_in(rig, chain[i % chain.len()], i)).collect();
+    let roll = crate::common::multi_rig::mix(rig.seed, 0xC0_0D);
+    let restart_at = 3 + (roll % 80) as usize;
+    let kill_at = restart_at + 5 + ((roll >> 16) % 80) as usize;
+    let mut committed_before = None;
+    for r in 0..kill_at {
+        let roll = crate::common::multi_rig::mix(rig.seed, r as u64);
+        if r % 3 == 0 {
+            let i = ((roll >> 16) % (chain.len() as u64 - 1)) as usize;
+            push_over(rig, slimes[(roll % slimes.len() as u64) as usize], chain[i], chain[i + 1]);
+        }
+        if r == restart_at {
+            committed_before = Some(committed(rig));
+            let written = rig.core().written();
+            assert!(written > 0, "the coordinator wrote transitions before its crash");
+            rig.restart_coordinator_from_store();
+        }
+        rig.cut_round();
+        rig.assert_conserved_world();
+        rig.assert_journals_explain_the_cut();
+    }
+    let before = committed_before.expect("restarted");
+    if committed(rig) == before {
+        until_committed(rig, 1);
+    }
+    assert_eq!(rig.core().process(), game::coordinator::ProcessBoot(2), "the restarted process runs");
+    assert!(rig.core().gate_host().is_some(), "the hosts attached to the restarted process");
+    let epochs: std::collections::BTreeSet<u64> = rig.decided.keys().map(|c| c.0 >> 32).collect();
+    assert!(epochs.contains(&2), "a cut of the restarted coordinator (epoch 2) was decided: {:?}", rig.decided);
+    // A landed host dies; its succession runs to the settle on the restarted coordinator.
+    let dead = rig.owner(chain[1]);
+    let live: Vec<game::EntityId> =
+        slimes.iter().copied().filter(|id| matches!(rig.owners_of(*id).as_slice(), [(h, _)] if *h != dead)).collect();
+    rig.kill(dead);
+    let succession = rig.run_succession(dead).remove(0);
+    assert_settled_whole(rig, &succession, &live);
+    assert_eq!(rig.successions.iter().filter(|(s, _)| s.predecessor == dead).count(), 1, "declared once");
+    let alive: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    for rc in &chain {
+        let owners: std::collections::BTreeSet<Option<HostId>> =
+            alive.iter().map(|h| rig.hosts[h.0 as usize].manager.owner_host(*rc)).collect();
+        assert_eq!(owners.len(), 1, "every live host names one owner of {rc:?}: {owners:?}");
+        assert!(owners.iter().all(|o| o.is_some_and(|o| alive.contains(&o))), "{rc:?} is held by a live host: {owners:?}");
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_coordinator_restart_at_any_round_conserves_everything() {
+    sweep("a_coordinator_restart_at_any_round_conserves_everything", 3, 1, SEEDS, coordinator_restart_at_any_round);
+}
+
 /// Three hosts: a slime walks S1→D→S2 after the last committed cut, then D dies. S1's
 /// `Sent` entry is older than S2's `Received` one: nothing is replayed — the slime is on
 /// S2, once.

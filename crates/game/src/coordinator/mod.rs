@@ -3,20 +3,26 @@
 //! adventure validation, embark options, legends, person info, the daily calendar / site
 //! broadcasts and notices. A host talks to it only through [`HostMsg`] / [`CoordMsg`] over a
 //! [`WorldLink`]. Threadless and IO-free: time arrives as `now_ms` — the store's clock in
-//! milliseconds (`clock.rs`: [`StoreClock`], [`CALENDAR_GAP_MS`]) — and saving is the caller's
-//! ([`Coordinator::take_save`] / [`Coordinator::saved`]).
+//! milliseconds (`clock.rs`: [`StoreClock`], [`CALENDAR_GAP_MS`]) — and writing is the caller's
+//! ([`Coordinator::take_transition`]).
 //!
-//! **Durable before visible:** a directive, or a reply granting a claim, leaves
-//! ([`Coordinator::take_out`]) only after a save holding the state that produced it is
-//! committed. The outgoing stream keeps its order: once a gated message waits, everything
-//! after it waits too, so a host sees the coordinator's messages in the order they were
-//! decided (a later `SpawnPeople` never overtakes an earlier directive for that region).
+//! **One durable projection (Elastic 2a, `state.rs`):** everything the core holds but its
+//! observations and its outgoing messages is the projection the runtime writes with a
+//! compare-and-set; a core [`Coordinator::load`]ed from it behaves as the one that wrote it.
+//! **Every output is durable before it leaves:** a message the core decides waits in its
+//! outgoing queue until [`Coordinator::take_transition`] hands it out with the projection that
+//! decided it (the runtime sends it once that write committed), or — when nothing durable
+//! changed — [`Coordinator::take_out`] releases it. The outgoing stream keeps its order, so a
+//! host sees the coordinator's messages in the order they were decided (a later `SpawnPeople`
+//! never overtakes an earlier directive for that region).
 //!
 //! **Many hosts:** every outgoing message carries its [`Target`]: a region's messages go to
 //! the host that announced the region (`RegionStarted`, its `Attach`, a delivered
 //! `PersonCrossed`), a reply or claim answer to the host that asked, the world's view to
 //! every host. Which host runs which region (`region_host`) and where each player is
-//! online (`online_on`) are rebuilt by the hosts' `Attach`es, never saved.
+//! online (`online_on`) are part of the projection; after a restart every host's `Attach`
+//! corrects them (its unlisted regions park, its unlisted players go offline), and a host that
+//! never comes back is ended by its succession.
 
 mod clock;
 mod link;
@@ -33,6 +39,10 @@ pub use succession::*;
 pub use world_cut::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use serde::{Deserialize, Serialize};
+
+use state::{decode_core, raw_core, seal_core};
 
 use crate::HostId;
 use crate::history::persist::HistoryLoadError;
@@ -92,9 +102,6 @@ impl RenumberBudget {
         self.errors
     }
 }
-/// Seconds between periodic saves of a coordinator whose state changed.
-pub const COORDINATOR_SAVE_SECS: u64 = 60;
-
 /// The sites as last broadcast, bucketed: a broadcast goes out when a site is founded or
 /// abandoned, or a population crosses a multiple of 10.
 fn sites_key(history: &History) -> Vec<(SiteId, bool, u32, bool)> {
@@ -102,6 +109,11 @@ fn sites_key(history: &History) -> Vec<(SiteId, bool, u32, bool)> {
 }
 
 /// The world coordinator's core.
+///
+/// Every field is classified in [`projection!`] (below): durable — in the projection the
+/// runtime writes (`state.rs`) — or the process's own. The struct literals of
+/// [`Coordinator::new_for`] and [`Coordinator::load`] name every field, so a new one does not
+/// compile until it is classified.
 pub struct Coordinator {
     history: History,
     /// Fortress claims: site → (its player, whether that player is online). A return to a
@@ -114,51 +126,47 @@ pub struct Coordinator {
     incarnations: BTreeMap<RegionCoords, u64>,
     /// Answers of state-changing requests, replayed for a repeated id.
     memo: BTreeMap<RequestId, WorldReply>,
-    /// `memo`'s ids, oldest first (the saved order).
+    /// `memo`'s ids, oldest first.
     memo_order: VecDeque<RequestId>,
     /// Per host, the boots its `Attach`es named: a new one forgets the host's answers of
-    /// every other boot. Never saved (an unknown boot after a restart forgets nothing the
-    /// host could still ask about: its process is the one attaching).
+    /// every other boot.
     boots_seen: BTreeMap<HostId, BTreeSet<u64>>,
-    /// `clock_ms` of the last error about an oversized memo.
+    /// `clock_ms` of the last error about an oversized memo (the process's: a log rate limit).
     memo_warned_ms: Option<u64>,
-    /// Waiting for a save: the first gated message and everything after it, in order.
-    gated: VecDeque<(Target, CoordMsg)>,
-    /// Free to leave, in order.
+    /// Decided and not handed out yet, in order: they leave with the transition that holds
+    /// the state deciding them ([`Self::take_transition`]), or with [`Self::take_out`] when
+    /// nothing durable changed.
     out: Vec<(Target, CoordMsg)>,
     /// Which host runs each region, as announced (`RegionStarted`, `Attach`, a delivered
-    /// `PersonCrossed`); a park forgets it. Rebuilt by every `Attach`, never saved.
+    /// `PersonCrossed`); a park forgets it. Kept beside the history's running set: it also
+    /// names the host of a region a delivered crossing announced before the history runs it,
+    /// and the history's set is the people's truth while this one routes (Ruling, Elastic 2a
+    /// Task 5). After a restart a host's `Attach` corrects it (`attach`).
     region_host: BTreeMap<RegionCoords, HostId>,
     /// The host each online player is online on (`PlayerOnline`, an `Attach`'s online
-    /// list, the host that was granted its claim). Rebuilt by every `Attach`, never saved.
-    /// A player in transit to a host (`PlayerHandedTo`) stays online on that host until it
-    /// reports. Never saved.
+    /// list, the host that was granted its claim). A player in transit to a host
+    /// (`PlayerHandedTo`) stays online on that host until it reports.
     online_on: BTreeMap<PlayerId, HostId>,
     /// The highest hop ([`HostMsg`]'s hop rule) of each player's presence messages
-    /// applied: a message with a lower one is stale. Unknown = 0 (a restart loses it and
-    /// the next reports set it again); cleared by an `Attach` of a newer world
-    /// generation (every host starts its hops over). Never saved.
+    /// applied: a message with a lower one is stale. Unknown = 0; cleared by an `Attach` of
+    /// a newer world generation (every host starts its hops over).
     hop_of: BTreeMap<PlayerId, u64>,
     /// The highest world generation an `Attach` named.
     generation_seen: u64,
+    /// The world generation of the latest `Attach` that was the first of its generation
+    /// ([`Self::first_of_generation`]): the first host attaching at a higher one finds every
+    /// host of the older generation gone.
+    attached_generation: u64,
     /// For a player online on a host by that host's own report (not in transit to it):
     /// the host and the hop it reported. A message of another host that moves the player
     /// away from it tells it ([`CoordMsg::HopIs`]): if it still holds the player it
-    /// re-asserts above the new hop. Never saved.
+    /// re-asserts above the new hop.
     online_reported: BTreeMap<PlayerId, (HostId, u64)>,
     /// Displaced-host notifications sent, `(player, host, reported hop)`: at most one each.
     /// A player's go when it goes offline on its host; all go at a newer generation.
     displaced_told: BTreeSet<(PlayerId, HostId, u64)>,
-    /// `Some(n)`: a save was taken ([`Self::take_save`]) holding the state behind the
-    /// first `n` messages of `gated`; [`Self::saved`] releases them.
-    save_in_flight: Option<usize>,
-    /// The state changed since the last save was taken.
-    dirty_since_save: bool,
-    /// A save was asked for ([`Self::request_save`]).
-    force_save: bool,
-    /// `now_ms` of the last save taken (or of the start).
-    last_save_ms: u64,
-    /// The latest `now_ms` seen (store ms, `clock.rs`).
+    /// The latest `now_ms` seen (store ms, `clock.rs`). The process's: a loaded core starts
+    /// at the store time it was loaded at.
     clock_ms: u64,
     /// `(now_ms, calendar tick)` the calendar was anchored at (store ms).
     calendar_anchor: (u64, CalendarTick),
@@ -173,6 +181,7 @@ pub struct Coordinator {
     /// The world cuts of the `claim` hosts, any number (`world_cut.rs`).
     cuts: WorldCuts,
     /// Which hosts lost their lease (`succession.rs`), fed by the runtime's `hosts` reads.
+    /// An observation: a restart counts every lease from zero again.
     leases: LeaseWatch,
     /// The successions declared and not settled yet (`succession.rs`).
     successions: SuccessionRuns,
@@ -182,12 +191,97 @@ pub struct Coordinator {
     /// What the hosts told the login service ([`HostMsg::Login`]), in arrival order, for the
     /// runtime to forward ([`Self::take_login_out`]). Nothing about an order is kept.
     login_out: Vec<crate::LoginOut>,
+    /// This process's boot: what its attachments and store calls are stamped with.
+    process: ProcessBoot,
+    /// The bincode of the projection as last handed out ([`Self::take_transition`]) or
+    /// loaded: a transition is due when the projection's bytes differ from it (or the history
+    /// changed).
+    committed_raw: Vec<u8>,
+    /// No store stands behind this core ([`Self::commit_unstored`], the inline link): its
+    /// outputs are free at once, nothing is encoded.
+    unstored: bool,
+}
+
+/// The classification of every [`Coordinator`] field: the projection's (durable, written by
+/// the runtime, `state.rs`) with their types — the `history` travels as its own blob — and
+/// the process's own, with what a loaded core starts them at.
+macro_rules! projection {
+    (durable { $($d:ident: $dty:ty,)* } process($proc:ident, $now:ident) { $($p:ident = $pinit:expr,)* }) => {
+        /// The projection, borrowed for encoding.
+        #[derive(Serialize, Debug)]
+        struct ProjectionRef<'a> {
+            $($d: &'a $dty,)*
+        }
+
+        /// The projection, decoded.
+        #[derive(Deserialize)]
+        struct Projection {
+            $($d: $dty,)*
+        }
+
+        impl Coordinator {
+            fn projection(&self) -> ProjectionRef<'_> {
+                ProjectionRef { $($d: &self.$d,)* }
+            }
+
+            /// A core from a decoded projection and history: the process's own fields as a
+            /// loaded core of process boot `$proc` starts them at store time `$now`.
+            fn from_projection(p: Projection, history: History, $proc: ProcessBoot, $now: u64) -> Self {
+                Coordinator { history, $($d: p.$d,)* $($p: $pinit,)* }
+            }
+        }
+    };
+}
+
+projection! {
+    durable {
+        claims: BTreeMap<SiteId, (PlayerId, bool)>,
+        player_claims: BTreeMap<PlayerId, Claim>,
+        incarnations: BTreeMap<RegionCoords, u64>,
+        memo: BTreeMap<RequestId, WorldReply>,
+        memo_order: VecDeque<RequestId>,
+        boots_seen: BTreeMap<HostId, BTreeSet<u64>>,
+        region_host: BTreeMap<RegionCoords, HostId>,
+        online_on: BTreeMap<PlayerId, HostId>,
+        hop_of: BTreeMap<PlayerId, u64>,
+        generation_seen: u64,
+        attached_generation: u64,
+        online_reported: BTreeMap<PlayerId, (HostId, u64)>,
+        displaced_told: BTreeSet<(PlayerId, HostId, u64)>,
+        calendar_anchor: (u64, CalendarTick),
+        calendar_seen_ms: u64,
+        calendar_day: u64,
+        sites_key: Vec<(SiteId, bool, u32, bool)>,
+        cuts: WorldCuts,
+        successions: SuccessionRuns,
+        rolled_back_to: Option<u64>,
+    }
+    process(process, now_ms) {
+        memo_warned_ms = None,
+        out = Vec::new(),
+        clock_ms = now_ms,
+        leases = LeaseWatch::default(),
+        login_out = Vec::new(),
+        process = process,
+        committed_raw = Vec::new(),
+        unstored = false,
+    }
 }
 
 impl Coordinator {
     /// A coordinator over `history`, its calendar running from `history.now()` at
-    /// `now_ms`. Its first outgoing message is a [`CoordMsg::View`].
+    /// `now_ms`, of process boot 0 (tests, tools, the inline link: [`Self::new_for`] names
+    /// one). Its first outgoing message is a [`CoordMsg::View`].
     pub fn new(history: History, now_ms: u64) -> Self {
+        Self::new_for(history, now_ms, ProcessBoot::default())
+    }
+
+    /// A new coordinator (a bootstrap: nothing of it is stored yet — its first transition
+    /// writes all of it, the history included) over `history`, its calendar anchored at
+    /// store time `now_ms` at `history.now()`, of process boot `process`. Its first outgoing
+    /// message is a [`CoordMsg::View`].
+    pub fn new_for(mut history: History, now_ms: u64, process: ProcessBoot) -> Self {
+        history.mark_content_dirty();
         let calendar_anchor = (now_ms, history.now());
         let mut c = Coordinator {
             calendar_day: history.now().0 / TICKS_PER_DAY,
@@ -200,18 +294,14 @@ impl Coordinator {
             memo_order: VecDeque::new(),
             boots_seen: BTreeMap::new(),
             memo_warned_ms: None,
-            gated: VecDeque::new(),
             out: Vec::new(),
             region_host: BTreeMap::new(),
             online_on: BTreeMap::new(),
             hop_of: BTreeMap::new(),
             generation_seen: 0,
+            attached_generation: 0,
             online_reported: BTreeMap::new(),
             displaced_told: BTreeSet::new(),
-            save_in_flight: None,
-            dirty_since_save: false,
-            force_save: false,
-            last_save_ms: now_ms,
             clock_ms: now_ms,
             calendar_anchor,
             calendar_seen_ms: now_ms,
@@ -220,41 +310,48 @@ impl Coordinator {
             successions: SuccessionRuns::default(),
             rolled_back_to: None,
             login_out: Vec::new(),
+            process,
+            committed_raw: Vec::new(),
+            unstored: false,
         };
         c.push_view(Target::Every);
         c
     }
 
-    /// A coordinator restarted from its saved state: the history loaded exactly as saved
-    /// (live regions stay live until a host's [`HostMsg::Attach`] lists or parks them, or a
-    /// succession ends the host that ran them), every claimant
-    /// offline until its host says otherwise, the memo as saved. Its calendar and every
-    /// count run from store time `now_ms` (the state holds no anchor or deadline yet; once it
-    /// does, a stored one goes through [`rebase_deadline`] / [`rebase_since`]).
-    pub fn from_state(state: CoordinatorState, grid: SocietyGrid, now_ms: u64) -> Result<Self, HistoryLoadError> {
-        let history = crate::history::persist::decode(&state.history, grid)?;
-        let mut c = Coordinator::new(history, now_ms);
-        for (player, claim) in state.claims {
-            if let Claim::Fortress(site) = claim {
-                c.claims.insert(site, (player, false));
-            }
-            c.player_claims.insert(player, claim);
-        }
-        for (id, reply) in state.memo {
-            c.remember(id, reply);
-        }
+    /// A coordinator restarted (or a cache reloaded) from its written projection: `core` and
+    /// `history` as [`Self::take_transition`] made them, for process boot `process`, at store
+    /// time `now_ms` — everything exactly as written (the calendar continues from its stored
+    /// anchor: a quick restart skips no day and repeats no day turn; a longer silence than
+    /// [`CALENDAR_GAP_MS`] is downtime, re-anchored at the next [`Self::maintain`]), but:
+    /// - an attachment, and a store call handed out, of another process boot count as
+    ///   detached / not in flight ([`ProcessBoot`]): every host attaches again, and its
+    ///   `Attach` corrects what the projection holds of it (its unlisted regions park, its
+    ///   unlisted players go offline); a host that never comes back is ended by its succession;
+    /// - a stored deadline more than [`CALENDAR_GAP_MS`] in the past restarts its count
+    ///   ([`rebase_deadline`] / [`rebase_since`]): never earlier than stored.
+    ///
+    /// Nothing goes out at a load (the hosts get the view with their `Attach`). The runtime
+    /// sets its configuration again (the cut period and epoch, the crash policy, …). An older
+    /// core format is `OldVersion` (worlds are re-forged).
+    pub fn load(
+        core: &[u8],
+        history: &[u8],
+        grid: SocietyGrid,
+        process: ProcessBoot,
+        now_ms: u64,
+    ) -> Result<Self, HistoryLoadError> {
+        let p: Projection = decode_core(core)?;
+        let history = crate::history::persist::decode(history, grid)?;
+        let mut c = Coordinator::from_projection(p, history, process, now_ms);
+        c.committed_raw = raw_core(&c.projection());
+        c.rebase_deadlines(now_ms);
         Ok(c)
     }
 
-    /// Start the clock at store time `now_ms`, before the core's first pass (a runtime that
-    /// sampled the store's clock only once the state was loaded): the calendar anchors here at
-    /// the history's `now`, and the save period counts from here. Never moves the clock back.
-    pub fn start_clock(&mut self, now_ms: u64) {
-        let now_ms = now_ms.max(self.clock_ms);
-        self.clock_ms = now_ms;
-        self.last_save_ms = now_ms;
-        self.calendar_anchor = (now_ms, self.history.now());
-        self.calendar_seen_ms = now_ms;
+    /// [`Self::load`]'s re-base of every stored deadline and period start at store time `now_ms`.
+    fn rebase_deadlines(&mut self, now_ms: u64) {
+        self.rebase_cut_deadlines(now_ms);
+        self.rebase_succession_deadlines(now_ms);
     }
 
     pub fn history(&self) -> &History {
@@ -265,7 +362,6 @@ impl Coordinator {
     /// next [`Self::handle`] / [`Self::maintain`]. Never call its region lifecycle methods
     /// through it: the hosts' messages own them.
     pub fn history_mut(&mut self) -> &mut History {
-        self.dirty_since_save = true;
         self.history.mark_content_dirty();
         &mut self.history
     }
@@ -310,10 +406,6 @@ impl Coordinator {
     /// Apply one message of host `host` (the ordinal its link is for).
     pub fn handle(&mut self, host: HostId, msg: HostMsg, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
-        // An answer for the login service changes nothing of the coordinator's (no save).
-        if !matches!(msg, HostMsg::Login(_)) {
-            self.dirty_since_save = true;
-        }
         // A zombie of a succeeded boot (R4) changes nothing: its state-changing requests are
         // refused (memoised), everything else is dropped.
         let attach_boot = match &msg {
@@ -367,6 +459,9 @@ impl Coordinator {
                     self.successions_reread();
                 }
                 self.forget_settled(host, boot, settled_below, true);
+                if generation > self.attached_generation {
+                    self.first_of_generation(host, generation);
+                }
                 self.attach(host, epoch, running, online, handed);
                 self.cut_attach(host, pending_cut, boot);
                 self.succession_attach(host, successions);
@@ -495,9 +590,6 @@ impl Coordinator {
             self.calendar_seen_ms = now_ms;
         }
         let to = self.calendar_now(now_ms);
-        if to > self.history.now() {
-            self.dirty_since_save = true;
-        }
         self.history.advance(to);
         self.push_directives();
         self.broadcast_daily(to, now_ms);
@@ -509,8 +601,15 @@ impl Coordinator {
         self.maintain_cuts(now_ms);
     }
 
-    /// The messages free to leave now, in order, each with the host(s) it is for.
+    /// The messages free to leave now, in order, each with the host(s) it is for: everything
+    /// decided while nothing durable changed since the last transition (a query's answer) —
+    /// or, with a durable change pending, nothing: those wait for [`Self::take_transition`],
+    /// which hands them out with the projection that decided them. A core with no store
+    /// ([`Self::commit_unstored`]) frees them at once.
     pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
+        if !self.unstored && self.durable_pending() {
+            return Vec::new();
+        }
         std::mem::take(&mut self.out)
     }
 
@@ -546,99 +645,94 @@ impl Coordinator {
         std::mem::take(&mut self.login_out)
     }
 
-
-    /// Ask for a save at the next [`Self::take_save`] (an orderly exit).
-    pub fn request_save(&mut self) {
-        self.force_save = true;
+    /// Whether the projection differs from the one last handed out (or loaded), or the
+    /// history changed since.
+    fn durable_pending(&self) -> bool {
+        self.history.content_dirty() || raw_core(&self.projection()) != self.committed_raw
     }
 
-    /// Whether [`Self::take_save`] would take one now: gated messages wait, the periodic
-    /// [`COORDINATOR_SAVE_SECS`] passed with the state changed, or one was asked for — and
-    /// no save is in flight.
-    pub fn save_due(&self) -> bool {
-        self.save_in_flight.is_none()
-            && (!self.gated.is_empty()
-                || self.force_save
-                || (self.dirty_since_save
-                    && self.clock_ms.saturating_sub(self.last_save_ms) >= COORDINATOR_SAVE_SECS * 1000))
-    }
-
-    /// The state to save, when one is due ([`Self::save_due`]). Commit it, then call
-    /// [`Self::saved`] (or [`Self::save_failed`]). One save at a time: `None` while one is
-    /// in flight.
-    pub fn take_save(&mut self) -> Option<CoordinatorState> {
-        if !self.save_due() {
+    /// The pending change as bytes plus the messages it releases; `None` when nothing durable
+    /// changed (what was decided then leaves with [`Self::take_out`]). The runtime writes
+    /// `core` (and `history`, present only when the history changed) in one compare-and-set
+    /// and sends `out` only after that write committed — or hands the transition back
+    /// ([`Self::transition_failed`]). One at a time: the next is taken only once this one is
+    /// answered, so whatever is decided meanwhile waits for it.
+    ///
+    /// The history's directives are always drained into the outgoing queue by the step that
+    /// made them ([`Self::handle`], [`Self::maintain`]), so a projection never holds one
+    /// undrained: a restart cannot re-send a directive outside the truth check of the hosts'
+    /// `Attach` (`reattach_regions`).
+    pub fn take_transition(&mut self) -> Option<Transition> {
+        let raw = raw_core(&self.projection());
+        let history_changed = self.history.content_dirty();
+        if !history_changed && raw == self.committed_raw {
             return None;
         }
-        self.begin_save();
-        Some(self.state())
+        let history = history_changed.then(|| crate::history::persist::encode(&self.history));
+        self.history.clear_content_dirty();
+        let core = seal_core(&raw);
+        self.committed_raw = raw;
+        Some(Transition { core, history, out: std::mem::take(&mut self.out) })
     }
 
-    /// The save taken by [`Self::take_save`] is committed: the messages it made durable
-    /// leave, in order.
-    pub fn saved(&mut self) {
-        let Some(n) = self.save_in_flight.take() else {
-            log::error!("coordinator: saved() with no save in flight");
-            return;
-        };
-        self.release(n);
-    }
-
-    /// The save taken by [`Self::take_save`] failed: what it held stays waiting, and the
-    /// next [`Self::take_save`] tries again. While saves keep failing nothing behind the
-    /// first waiting message leaves either — ungated ones included (the order is kept).
-    pub fn save_failed(&mut self) {
-        if self.save_in_flight.take().is_some() {
-            self.dirty_since_save = true;
-            self.force_save = true;
+    /// The write of transition `t` failed (not committed, not fenced): its messages go back to
+    /// the head of the outgoing queue, in order, and the next [`Self::take_transition`] writes
+    /// the whole projection again (the history too if `t` carried it). Nothing is decided
+    /// twice: the inputs were applied once, and their state is in the next transition.
+    pub fn transition_failed(&mut self, t: Transition) {
+        if t.history.is_some() {
+            self.history.mark_content_dirty();
         }
+        self.committed_raw.clear();
+        let later = std::mem::replace(&mut self.out, t.out);
+        self.out.extend(later);
     }
 
-    /// For a link with no store behind it (the inline link): the state as it stands
-    /// counts as committed, without encoding a save — the same as [`Self::take_save`] +
-    /// [`Self::saved`] for a store that cannot fail.
+    /// For a link with no store behind it (the inline link): the state as it stands counts as
+    /// committed — nothing is encoded, and every output is free at once ([`Self::take_out`]),
+    /// from now on.
     pub fn commit_unstored(&mut self) {
-        debug_assert!(self.save_in_flight.is_none(), "commit_unstored with a stored save in flight");
-        if self.save_due() {
-            self.begin_save();
-            self.saved();
-        }
+        self.unstored = true;
+        self.history.clear_content_dirty();
     }
 
-    /// The state as it stands, for a save.
-    pub fn state(&self) -> CoordinatorState {
-        CoordinatorState {
-            history: crate::history::persist::encode(&self.history),
-            claims: self.player_claims.iter().map(|(p, c)| (*p, *c)).collect(),
-            memo: self.memo_order.iter().map(|id| (*id, self.memo[id].clone())).collect(),
-        }
+    /// Test support (and tools): the projection as it stands, `(core, history)`, encoded as a
+    /// transition would encode it — nothing is taken or marked.
+    #[doc(hidden)]
+    pub fn encode_projection(&self) -> (Vec<u8>, Vec<u8>) {
+        (seal_core(&raw_core(&self.projection())), crate::history::persist::encode(&self.history))
     }
 
-    fn begin_save(&mut self) {
-        self.save_in_flight = Some(self.gated.len());
-        self.dirty_since_save = false;
-        self.force_save = false;
-        self.last_save_ms = self.clock_ms;
+    /// Test support: the projection as it stands, in `Debug` form (a failing comparison of two
+    /// projections names what differs).
+    #[doc(hidden)]
+    pub fn projection_debug(&self) -> String {
+        format!("{:#?}", self.projection())
     }
 
-    /// Move the first `n` gated messages to `out`, then any ungated ones up to the next
-    /// gated message (they waited only to keep the order).
-    fn release(&mut self, n: usize) {
-        for _ in 0..n.min(self.gated.len()) {
-            self.out.push(self.gated.pop_front().expect("counted"));
-        }
-        while self.gated.front().is_some_and(|(_, m)| !m.is_gated()) {
-            self.out.push(self.gated.pop_front().expect("checked"));
-        }
+    /// This core's process boot ([`ProcessBoot`]).
+    pub fn process(&self) -> ProcessBoot {
+        self.process
     }
 
-    /// Queue an outgoing message for `to`: behind any waiting one, or gated itself.
+    /// The claims as the projection holds them, by player.
+    pub fn claims(&self) -> Vec<(PlayerId, Claim)> {
+        self.player_claims.iter().map(|(p, c)| (*p, *c)).collect()
+    }
+
+    /// The memoised answers' ids, oldest first.
+    pub fn memo_ids(&self) -> Vec<RequestId> {
+        self.memo_order.iter().copied().collect()
+    }
+
+    /// The calendar's anchor `(store ms, tick)` and its last day turn (store ms), as held.
+    pub fn calendar_anchor(&self) -> ((u64, CalendarTick), u64) {
+        (self.calendar_anchor, self.calendar_seen_ms)
+    }
+
+    /// Queue an outgoing message for `to`, behind every message decided before it.
     fn push(&mut self, to: Target, msg: CoordMsg) {
-        if !self.gated.is_empty() || msg.is_gated() {
-            self.gated.push_back((to, msg));
-        } else {
-            self.out.push((to, msg));
-        }
+        self.out.push((to, msg));
     }
 
     fn push_directives(&mut self) {
@@ -671,19 +765,9 @@ impl Coordinator {
     /// Forget every message for `host` matching `drops` not yet handed out (waiting or
     /// free to leave), superseded by its attach (`what` names them in the log).
     fn drop_unsent(&mut self, host: HostId, what: &str, drops: impl Fn(&CoordMsg) -> bool) {
-        let dropped_here = |(to, m): &(Target, CoordMsg)| *to == Target::Host(host) && drops(m);
-        let before = self.gated.len() + self.out.len();
-        if let Some(n) = self.save_in_flight.as_mut() {
-            let covered_dropped = self.gated.iter().take(*n).filter(|m| dropped_here(m)).count();
-            *n -= covered_dropped;
-        }
-        self.gated.retain(|m| !dropped_here(m));
-        self.out.retain(|m| !dropped_here(m));
-        if self.save_in_flight.is_none() {
-            // What waited only behind a dropped message may leave.
-            self.release(0);
-        }
-        let dropped = before - self.gated.len() - self.out.len();
+        let before = self.out.len();
+        self.out.retain(|(to, m)| !(*to == Target::Host(host) && drops(m)));
+        let dropped = before - self.out.len();
         if dropped > 0 {
             log::info!("coordinator: {dropped} unsent {what} for host {host} superseded by its attach");
         }
@@ -712,6 +796,23 @@ impl Coordinator {
         if key != self.sites_key {
             self.sites_key = key;
             self.push(Target::Every, CoordMsg::Sites(self.history.site_markers()));
+        }
+    }
+
+    /// `host` is the first to attach at world generation `generation`, higher than any before:
+    /// the world restarted from a cut (a rollback, a total crash), so every host of an older
+    /// generation is gone — its processes are fenced and exit, and a restarted process is a
+    /// new host. Each one the projection still names (running a region, holding a player) is
+    /// taken out as a predecessor is: its regions park, its players go offline. What a restart
+    /// of this coordinator used to undo by forgetting every host (before Elastic 2a its view of
+    /// the hosts was never saved) is undone here, where the hosts' generation says so.
+    fn first_of_generation(&mut self, host: HostId, generation: u64) {
+        self.attached_generation = generation;
+        let gone: BTreeSet<HostId> =
+            self.region_host.values().chain(self.online_on.values()).copied().filter(|h| *h != host).collect();
+        for h in gone {
+            log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is gone");
+            self.host_succeeded(h);
         }
     }
 
@@ -938,8 +1039,8 @@ impl Coordinator {
         }
     }
 
-    /// `player` gives up what it plays. Saved at once ([`Self::request_save`]): a release
-    /// lost to a crash would leave a claim the host no longer knows of.
+    /// `player` gives up what it plays (durable with the transition of the message that
+    /// released it).
     fn release_claim(&mut self, player: PlayerId) {
         let Some(claim) = self.player_claims.remove(&player) else { return };
         if let Claim::Fortress(site) = claim {
@@ -947,7 +1048,6 @@ impl Coordinator {
                 self.claims.remove(&site);
             }
         }
-        self.request_save();
     }
 
     /// Settle a timed-out state-changing request ([`HostMsg::Settle`]): its memoised

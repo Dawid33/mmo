@@ -851,13 +851,17 @@ fn coordinator_claim_older_than_the_host_never_locks_out() {
         let a = PlayerId(A as u64);
         let mut w = World::with(seed, &[A, B]);
         let site = w.ask(A, ClientPacket::Embark(w.embark_request())).expect("embarked");
-        let embarked = w.coordinator().state();
+        let embarked = w.coordinator().encode_projection();
+        let load = |now_ms: u64| {
+            let grid = SocietyGrid::from_world_map(&strip());
+            Coordinator::load(&embarked.0, &embarked.1, grid, game::coordinator::ProcessBoot(1), now_ms)
+        };
         // (a) A retires; the coordinator then restarts from the save before the release.
         w.packet(A, ClientPacket::Retire);
         w.drain();
         assert_eq!(w.coordinator().claim_of(a), None, "seed {seed}: released");
         let now_ms = w.now_ms;
-        let older = Coordinator::from_state(embarked.clone(), SocietyGrid::from_world_map(&strip()), now_ms);
+        let older = load(now_ms);
         *w.link().coordinator_mut() = older.expect("the state loads");
         assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Fortress(site)), "seed {seed}: the old claim");
         w.reconnect_between_looks();
@@ -868,7 +872,7 @@ fn coordinator_claim_older_than_the_host_never_locks_out() {
         assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed} (a): A is not locked out");
         // (b) A new host (no record of A) over the coordinator as saved with the embark.
         let mut w = World::new(seed);
-        let restarted = Coordinator::from_state(embarked, SocietyGrid::from_world_map(&strip()), 0);
+        let restarted = load(0);
         *w.link().coordinator_mut() = restarted.expect("the state loads");
         w.send(ServerEvent::connected(A));
         w.send(ServerEvent::connected(B));
@@ -1122,7 +1126,7 @@ fn host_sends_settled_as_requests_complete() {
             })
             .collect();
         assert!(!settled.is_empty() && settled.windows(2).all(|p| p[0] < p[1]), "seed {seed}: rising: {settled:?}");
-        let memo = w.coordinator().state().memo;
+        let memo = w.coordinator().memo_ids();
         assert!(memo.is_empty(), "seed {seed}: every answer acknowledged: {memo:?}");
     });
 }

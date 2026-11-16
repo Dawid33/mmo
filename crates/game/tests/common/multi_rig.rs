@@ -379,6 +379,9 @@ pub struct MultiRig {
     /// Rows the rig store ended (Elastic 2a, [`Self::end_landless_in_store`]): `(host, boot)`,
     /// dead with no succession.
     pub ended: BTreeSet<(HostId, u64)>,
+    /// Coordinator processes started so far ([`Self::with_coordinator`], then one per
+    /// [`Self::restart_coordinator_from_store`]): each one's process boot and claim epoch.
+    pub coordinator_starts: u64,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -504,6 +507,7 @@ impl MultiRig {
                 land_declared: Vec::new(),
                 begins: BTreeMap::new(),
                 ended: BTreeSet::new(),
+                coordinator_starts: 0,
             };
         for h in host_ids(keepers) {
             rig.keep(h);
@@ -518,7 +522,11 @@ impl MultiRig {
     /// differently per seed). Rounds until every host is attached.
     pub fn with_coordinator(&mut self, history: game::history::History) {
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let core = game::coordinator::SharedCore::new(game::Coordinator::new(history, now));
+        self.coordinator_starts = 1;
+        let process = game::coordinator::ProcessBoot(self.coordinator_starts);
+        // A store stands behind it (Elastic 2a): every output leaves with its transition, and
+        // the last transition is what a restarted coordinator loads.
+        let core = game::coordinator::SharedCore::with_store(game::Coordinator::new_for(history, now, process));
         // Every link before any is installed (an install pumps it): none misses the view.
         let links: Vec<game::InlineWorldLink> = host_ids(self.hosts.len() as u32)
             .map(|h| game::InlineWorldLink::shared(core.clone(), h).with_delay(mix(self.seed, 3000 + h.0), self.link_delay))
@@ -569,9 +577,68 @@ impl MultiRig {
     pub fn with_world_cuts(&mut self, every_ms: u64) {
         let hosts: BTreeSet<HostId> = host_ids(self.hosts.len() as u32).collect();
         let mut core = self.core();
-        core.set_cut_epoch(1);
+        core.set_cut_epoch(self.coordinator_starts);
         core.set_expected_hosts(hosts);
         core.set_world_cuts(every_ms);
+    }
+
+    /// The coordinator process crashes and a new one starts (Elastic 2a): it claims the row
+    /// (the next epoch), loads the LAST TRANSITION written ([`game::coordinator::SharedCore::stored`])
+    /// as a new process boot, is configured as the runtime configures it (the cut period
+    /// continues from the projection, the crash policy, the hosts a cut expects — every live
+    /// host whose row is not clean — and the store's open successions read again), and
+    /// replaces the old core. Whatever the old process had not written or handed to a link is
+    /// lost: its outgoing queue, the messages on every world link both ways. Every host's world
+    /// link is down for one round, then up: each host attaches again.
+    pub fn restart_coordinator_from_store(&mut self) {
+        let shared = self.coordinator.clone().expect("a coordinator");
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        self.coordinator_starts += 1;
+        let process = game::coordinator::ProcessBoot(self.coordinator_starts);
+        let open: Vec<game::Succession> = self
+            .successions
+            .iter()
+            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
+            .map(|(s, _)| s.clone())
+            .collect();
+        let expected: BTreeSet<HostId> = host_ids(self.hosts.len() as u32)
+            .filter(|h| !self.dead.contains(h) && self.left.get(h) != Some(&self.boots[h.0 as usize]))
+            .collect();
+        {
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let (core, history) = guard.stored().expect("the coordinator wrote a transition");
+            let grid = guard.history().grid().clone();
+            let policy = guard.crash_policy();
+            let mut loaded = game::Coordinator::load(&core, &history, grid, process, now).expect("the projection loads");
+            loaded.set_cut_epoch(self.coordinator_starts);
+            loaded.set_crash_policy(policy);
+            loaded.set_expected_hosts(expected);
+            if policy == game::CrashPolicy::Succession {
+                loaded.successions_unknown();
+                loaded.successions_open(open, now);
+            }
+            guard.restart(loaded);
+        }
+        let n = self.hosts.len();
+        for h in 0..n {
+            if self.dead.contains(&HostId(h as u64)) {
+                continue;
+            }
+            if let Some(link) = self.hosts[h].manager.world_link_mut().and_then(|l| l.as_inline_mut()) {
+                link.lose_unhandled();
+                link.lose_in_transit();
+                link.set_up(false);
+            }
+        }
+        self.round();
+        for h in 0..n {
+            if self.dead.contains(&HostId(h as u64)) {
+                continue;
+            }
+            if let Some(link) = self.hosts[h].manager.world_link_mut().and_then(|l| l.as_inline_mut()) {
+                link.set_up(true);
+            }
+        }
     }
 
     /// A round ([`Self::round`]) with every host's upkeep ([`game::WorldManager::maintain`],

@@ -108,6 +108,25 @@
 //! after its `world` lock (it was committed before the decision began, or is absent: the
 //! stricter rule then).
 //!
+//! **The prune of older begins** (Elastic 2a, `two_phase::decide_cut`): right after a decision
+//! row is inserted, in the decision's transaction, `DELETE FROM cut_begins WHERE cut_id < $cut`.
+//! It locks only `cut_begins` rows of OLDER cuts — rows nothing reads or writes again (a cut
+//! runs one at a time; only the cut being decided reads its own row, `record_cut_begin` inserts
+//! only the newer cut's row, `resolve_prepared` reads none) — after every lock the decision
+//! already holds (`coordinator`, `world`, …) and wants nothing after them: it joins no cycle.
+//! `cut_decisions` is never pruned.
+//!
+//! **The coordinator's write** (Elastic 2a, `rows.rs` `write_coordinator`): ONE statement,
+//! `UPDATE coordinator SET core, history = COALESCE($h, history), version = version + 1 …
+//! WHERE id = 1 AND epoch = $e AND version = $v`, autocommitted — the one `coordinator` row
+//! `FOR UPDATE` for that statement and nothing else. Every other statement on that row takes it
+//! `FOR SHARE` as its FIRST lock (`decide_cut`, `record_cut_begin`, a declaration, an end of a
+//! landless host, `rollback_world`): the write waits for such a transaction to commit (at most
+//! that transaction's length) and none of them waits for the write while holding something the
+//! write wants — it wants nothing else: no cycle. A claim (`claim_coordinator`: `epoch + 1`)
+//! serialises with it on the row: after the claim the write finds another epoch (`Fenced`). With
+//! no row matched it reads the epoch again (a plain read): the same epoch is `Conflict`.
+//!
 //! **A registration** (`rows.rs` `register_host`, Elastic 1) — ONE transaction, UNFENCED: it
 //! creates the identity a fence is built from; it writes no row a cut part writes except the
 //! `in_flight` and `super_regions` rows of a total crash, which it takes at `epoch + 1` (so every
