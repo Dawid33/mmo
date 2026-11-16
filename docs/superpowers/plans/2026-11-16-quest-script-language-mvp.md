@@ -254,7 +254,7 @@ slot release what the slot held.
   drops; `Ret`.
 - **Builtins** (`builtins.rs`, ids fixed by declaration order, part of the bytecode version): `ListPush`,
   `ListPop`, `ListInsert`, `ListRemove`, `ListSlice`, `ListContains`, `DictGet`, `DictRemove`, `DictContains`,
-  `DictKeys`, `DictValues`, `DictLen`, `DictNext`, `DictKeyAt`, `DictValAt`, `StrLen`, `StrConcatN`, `StrSplit`,
+  `DictKeys`, `DictValues`, `DictLen`, `DictNext`, `DictKeyAt`, `DictValAt`, `StrLen`, `StrConcat`, `StrSplit`,
   `StrStartsWith`, `StrEndsWith`, `StrContains`, `StrTrim`, `StrUpper`, `StrLower`, `ParseInt`, `Fmt`, `AbsI`,
   `MinI`, `MaxI`, `AbsF`, `MinF`, `MaxF`, `Sqrt`, `Floor`, `Ceil`, `Round`, `Sin`, `Cos`, `Pow`, `Assert`,
   `Print`. A mutating builtin works on the object held in its first argument slot (the compiler takes the
@@ -892,7 +892,7 @@ Tests:
 - `index_and_key_faults` — `GetIndex` out of range → `IndexOutOfRange`; `GetKey` missing → `MissingKey`.
 - `str_builtins` — `split("a,b,,c", ",") == ["a","b","","c"]`; `trim("  x \n") == "x"`; `to_upper("aż") == "Aż"`;
   `starts_with`, `ends_with`, `contains`; `"zażółć".len() == 6`; `parse_int("42") == Some(42)`, `"4x"` and
-  `"9223372036854775808"` → `None`; `StrConcatN` of 3 parts.
+  `"9223372036854775808"` → `None`; `StrConcat` of 3 parts.
 - `math_builtins` — `sqrt(2.0)` bits `0x3FF6A09E667F3BCD`; `sin`, `cos`, `pow` equal the `libm` call bit for bit;
   `floor(-0.5) == -1.0`; `round(2.5) == 3.0`; `min`/`max`/`abs` for both number types (`abs(i64::MIN)` → `IntOverflow`).
 - `assert_builtin_faults` — `AssertFailed` carrying the message string.
