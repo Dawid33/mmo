@@ -844,6 +844,7 @@ impl<'k> Infer<'k> {
         let mut passed = Vec::new();
         // Bindings never form a cycle (occurs check); the bound is a guard.
         for _ in 0..=self.subst.len() {
+            crate::work::add_type_visit();
             let Ty::Var(n) = self.types.get(end) else {
                 break;
             };
@@ -911,6 +912,7 @@ impl<'k> Infer<'k> {
         let mut seen = BTreeSet::new();
         let mut stack = vec![ty];
         while let Some(t) = stack.pop() {
+            crate::work::add_type_visit();
             let t = self.shallow(t);
             if self.types.is_ground(t) || self.finals.contains_key(&t) || !seen.insert(t) {
                 continue;
@@ -941,6 +943,7 @@ impl<'k> Infer<'k> {
         let mut done: BTreeMap<TyId, TyId> = BTreeMap::new();
         let mut stack = vec![(ty, false)];
         while let Some((t, expanded)) = stack.pop() {
+            crate::work::add_type_visit();
             if done.contains_key(&t) {
                 continue;
             }

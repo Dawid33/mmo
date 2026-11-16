@@ -309,6 +309,7 @@ fn scan_number(full: &str) -> (usize, Num) {
         }
         bad.get_or_insert("a number cannot be followed by letters");
     }
+    crate::work::add_lex_bytes(i);
     // `i` only ever stops on ASCII bytes, so this slice is on a char boundary.
     let text = &full[..i];
     if let Some(message) = bad {

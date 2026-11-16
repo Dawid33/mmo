@@ -298,23 +298,28 @@ fn annotations_are_checked() {
 }
 
 /// Regression: a type built step by step through bindings (`let x1 = [x0]`, …) was re-walked in full at
-/// every step — quadratic, 17 s for 4000 steps. It is linear now; the bound is generous.
+/// every step — quadratic, 17 s for 4000 steps. Counts the type nodes inference visits (not time, which
+/// a loaded machine inflates): doubling the steps must at most about double the visits (quadratic: 4x).
 #[test]
 fn deep_inferred_types_are_linear() {
-    let steps = 4000;
-    for first in ["[1]", "[]"] {
+    let visits = |first: &str, steps: usize| -> u64 {
         let mut main = format!("fn f():\n    let x0 = {first}\n");
         for i in 1..steps {
             main.push_str(&format!("    let x{i} = [x{}]\n", i - 1));
         }
-        let start = std::time::Instant::now();
+        quest_lang::work::reset();
         let found = diags(&[("main.qs", &main)]);
-        let unknown = usize::from(first == "[]");
-        assert_eq!(found.len(), unknown, "{found:?}");
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "{first}: {:?}",
-            start.elapsed()
-        );
-    }
+        assert_eq!(found.len(), usize::from(first == "[]"), "{found:?}");
+        quest_lang::work::type_visits()
+    };
+    // Ground element type: every step's type is final at once, so the work is linear.
+    let (small, large) = (visits("[1]", 1000), visits("[1]", 2000));
+    // 2x plus slack for fixed costs.
+    assert!(large <= 2 * small + 1000, "[1]: {small} -> {large}");
+    // An unresolved element type (a variable until the end): each step's occurs check still walks the
+    // type built so far, 2n^2 nodes in all and cheap. Known; the budget pins that constant, so a return
+    // to re-walking with the old cost (or worse) fails.
+    let n = 1000;
+    let work = visits("[]", n as usize);
+    assert!(work <= 3 * n * n, "[]: {work} visits for {n} steps");
 }
