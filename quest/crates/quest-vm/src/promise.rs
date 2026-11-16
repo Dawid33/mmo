@@ -627,6 +627,20 @@ impl Vm {
 
     /// [`Vm::resolve`]: `Unknown` leaves the memory as it was.
     pub(crate) fn promise_resolve(&mut self, id: u64, outcome: Outcome) -> Resolved {
+        // Bound the host's value before anything else, early returns included: a value nested too deep
+        // is dismantled here (its derived drop would recurse) and stands in as a bounded `lost` (an `Err`
+        // that is not an error variant is stored as `lost`).
+        let too_deep = match &outcome {
+            Ok(w) | Err(w) => !w.depth_at_most(WIRE_DEPTH_MAX as u32),
+        };
+        let outcome = if too_deep {
+            match outcome {
+                Ok(w) | Err(w) => w.dismantle(),
+            }
+            Err(WireValue::Unit)
+        } else {
+            outcome
+        };
         let cp = self.store.mem.checkpoint();
         match self.try_resolve(id, outcome) {
             Ok(true) => Resolved::Accepted,
@@ -654,16 +668,6 @@ impl Vm {
                     .error_ty
                     .is_some_and(|t| fits(&self.program.types, t, w))
         };
-        let too_deep = match &outcome {
-            Ok(w) | Err(w) => !w.depth_at_most(WIRE_DEPTH_MAX as u32),
-        };
-        if too_deep {
-            match outcome {
-                Ok(w) | Err(w) => w.dismantle(),
-            }
-            self.settle(i, O_LOST, None)?;
-            return Ok(true);
-        }
         let (o, answer) = match outcome {
             Ok(w) => (O_OK, Some(w)),
             Err(w) if known_error(&w) => (O_ERR, Some(w)),

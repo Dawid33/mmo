@@ -971,6 +971,33 @@ fn too_deep_answer_becomes_lost() {
             "depth {depth}"
         );
     }
-    assert_eq!(logs(&host), [1, 1]);
+    // an unknown id, and an id already resolved: `Unknown`, the value still dropped without recursion
+    assert_eq!(
+        vm.resolve(id(999), Ok(nested(1_000_000))),
+        Resolved::Unknown
+    );
+    vm.deliver("Ping", &ping(1));
+    settle(&mut vm, &mut host, 4);
+    let pid = last_request(&host);
+    assert_eq!(vm.resolve(pid, Ok(WireValue::Int(5))), Resolved::Accepted);
+    assert_eq!(vm.resolve(pid, Err(nested(1_000_000))), Resolved::Unknown);
+    settle(&mut vm, &mut host, 5);
+    assert_eq!(logs(&host), [1, 1, 1]);
+    assert!(host.reports.is_empty());
+
+    // exactly `WIRE_DEPTH_MAX` deep: accepted and stored as it is, so it decodes at resume (no program
+    // can await a type that deep, `Promise` adds a level): the int handler gets `WrongType`
+    vm.deliver("Ping", &ping(1));
+    settle(&mut vm, &mut host, 6);
+    assert_eq!(
+        vm.resolve(last_request(&host), Ok(nested(WIRE_DEPTH_MAX))),
+        Resolved::Accepted
+    );
+    settle(&mut vm, &mut host, 7);
+    assert_eq!(vm.status(), Status::Idle);
+    assert_eq!(
+        vm.debug_value(slot(&p, e), err_ty),
+        Ok(variant("WrongType"))
+    );
     assert!(host.reports.is_empty());
 }
