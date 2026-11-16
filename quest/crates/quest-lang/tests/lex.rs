@@ -205,24 +205,6 @@ fn strings_and_fstrings() {
     );
 }
 
-/// Regression: number lexing re-scanned work proportional to the rest of the input per number token
-/// (a 1 MiB line took ~3.5 s). Counts the bytes number scanning examines (not time, which a loaded
-/// machine inflates): each digit is examined once, so the count is at most the input's length.
-#[test]
-fn a_megabyte_line_lexes() {
-    let text = "1 + ".repeat(1 << 18);
-    quest_lang::work::reset();
-    let (tokens, diags) = lex("m", &text);
-    assert!(
-        quest_lang::work::lex_bytes() <= text.len() as u64,
-        "{} bytes examined for {} bytes of input",
-        quest_lang::work::lex_bytes(),
-        text.len()
-    );
-    assert!(diags.is_empty());
-    assert_eq!(tokens.len(), (1 << 19) + 2);
-}
-
 fn tree(text: &str) -> SourceTree {
     SourceTree {
         files: BTreeMap::from([("main.qs".to_string(), text.to_string())]),

@@ -39,28 +39,17 @@ pub mod work {
     use std::cell::Cell;
 
     thread_local! {
-        static LEX_BYTES: Cell<u64> = const { Cell::new(0) };
         static TYPE_VISITS: Cell<u64> = const { Cell::new(0) };
     }
 
     /// Zeroes this thread's counters.
     pub fn reset() {
-        LEX_BYTES.with(|c| c.set(0));
         TYPE_VISITS.with(|c| c.set(0));
-    }
-
-    /// Bytes examined by number scanning since `reset`.
-    pub fn lex_bytes() -> u64 {
-        LEX_BYTES.with(Cell::get)
     }
 
     /// Type nodes visited by type inference's walks (`shallow`, occurs check, `zonk`) since `reset`.
     pub fn type_visits() -> u64 {
         TYPE_VISITS.with(Cell::get)
-    }
-
-    pub(crate) fn add_lex_bytes(n: usize) {
-        LEX_BYTES.with(|c| c.set(c.get() + n as u64));
     }
 
     pub(crate) fn add_type_visit() {

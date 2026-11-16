@@ -18,3 +18,6 @@ lalrpop = { workspace = true }
 
 [dev-dependencies]
 quest-stub = { path = "../quest-stub" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+stats_alloc = "0.1.10"
