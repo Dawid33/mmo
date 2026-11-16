@@ -6,7 +6,7 @@
 //! mistake was already reported is wild (no cascade), and one that can never match (an error that cannot
 //! occur there) is the empty alternative `Or([])`.
 //!
-//! A type's constructors come from a [`Space`]: `bool` {true, false}, `()` one, an enum its variants,
+//! A type's constructors come from a [`Space`]: `bool` {true, false}, an enum its variants,
 //! `Option` {Some, None}, a fallible result {Ok, Err}, a caught error one per name of its set, a struct or an
 //! event one. Every other type (`int`, `float`, `str`, collections, an unknown or already-wrong type) has
 //! infinitely many: only a wildcard or a binding covers it, and a literal pattern is a constructor of its
@@ -42,7 +42,7 @@ pub(crate) enum Key {
     Str(String),
     /// An enum's variant, by index.
     Variant(u32),
-    /// The only constructor of a struct, an event or `()`.
+    /// The only constructor of a struct or an event.
     Single,
     Some,
     None,

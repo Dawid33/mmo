@@ -331,6 +331,30 @@ impl<'k> Infer<'k> {
             .cloned()
     }
 
+    /// The shape of `name` for a pattern that matches its data. A generic field not fixed yet is fixed here
+    /// (a pattern is a use, as in `instantiate`): to a fresh type the pattern and its bindings decide, which
+    /// becomes the program's when the body finishes (`commit_errors`; still undecided then, it stays open).
+    pub(super) fn shape_for_pattern(
+        &mut self,
+        b: &mut Body,
+        name: &str,
+        at: Span,
+    ) -> Option<ErrShape> {
+        let mut shape = self.shape_of(b, name)?;
+        let mut changed = false;
+        for f in &mut shape.fields {
+            if f.ty.is_none() {
+                f.ty = Some(self.fresh());
+                changed = true;
+            }
+        }
+        if changed {
+            shape.origin = format!("its data's type was fixed at {}:{}", b.file, at.line);
+            b.shapes.insert(name.to_string(), shape.clone());
+        }
+        Some(shape)
+    }
+
     // `raise`.
 
     /// `raise x`: an error name, with or without data, or a caught error.
@@ -677,8 +701,22 @@ impl<'k> Infer<'k> {
         for (name, mut shape) in std::mem::take(&mut b.shapes) {
             for f in &mut shape.fields {
                 f.ty = f.ty.map(|t| self.zonk(t));
+                // A generic field a pattern met but did not decide (`Changed(_)`) stays open.
+                if f.generic && f.ty.is_some_and(|t| self.has_var(t)) {
+                    f.ty = None;
+                }
             }
-            self.errors.insert(name, shape);
+            let unchanged = self.errors.get(&name).is_some_and(|known| {
+                known.fields.len() == shape.fields.len()
+                    && known
+                        .fields
+                        .iter()
+                        .zip(&shape.fields)
+                        .all(|(x, y)| x.ty == y.ty)
+            });
+            if !unchanged {
+                self.errors.insert(name, shape);
+            }
         }
         for (name, at) in std::mem::take(&mut b.raised) {
             self.raised.push((name, b.file.to_string(), at));

@@ -170,6 +170,36 @@ fn give(c: int) -> int:
         vec![d("impossible-arm", 22), d("non-exhaustive", 19)]
     );
 
+    // A pattern is a use of a generic host error field (`Changed(current: Infer)`): it fixes its type.
+    let main = "fn take(c: int) -> int raises Changed:
+    return c
+
+fn give(c: int):
+    match take(c):
+        case Ok(_):
+            pass
+        case Err(Changed(x)):
+            let s: str = x
+            let n: int = x
+";
+    assert_eq!(main_diags(main), vec![d("type-mismatch", 10)]);
+    let main = "fn take(c: int) -> int raises Changed:
+    return c
+
+fn give(c: int):
+    match take(c):
+        case Ok(_):
+            pass
+        case Err(Changed(true)):
+            pass
+";
+    assert_eq!(main_diags(main), vec![d("non-exhaustive", 5)]);
+    assert!(
+        missing(main).contains("`Err(Changed(false))`"),
+        "{}",
+        missing(main)
+    );
+
     // Against anything else, a name that names nothing is `unresolved`, with its suggestion.
     let main = format!(
         "{STAGE}

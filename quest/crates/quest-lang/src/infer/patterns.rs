@@ -585,7 +585,7 @@ impl Infer<'_> {
             // It matches nothing.
             return Pat::Or(Vec::new());
         }
-        let shape = self.shape_of(b, name);
+        let shape = self.shape_for_pattern(b, name, p.span);
         let (field_names, tys): (Vec<String>, Vec<TyId>) = shape
             .map(|s| {
                 s.fields
