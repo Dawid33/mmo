@@ -35,6 +35,12 @@ pub struct Mem {
     base: u64,
 }
 
+/// Whether the word at `off` lies inside `len` bytes. Computed in `u64` so it cannot
+/// overflow on a 32-bit `usize` (wasm32).
+fn word_in_range(off: u32, len: u64) -> bool {
+    u64::from(off) + u64::from(WORD) <= len
+}
+
 impl Mem {
     /// Zero-filled; `bytes` is rounded down to a multiple of 8.
     pub fn new(bytes: u32) -> Mem {
@@ -58,11 +64,10 @@ impl Mem {
         if !off.is_multiple_of(WORD) {
             return Err(MemError::Unaligned { off });
         }
-        let i = off as usize;
-        if i + WORD as usize > self.bytes.len() {
+        if !word_in_range(off, self.bytes.len() as u64) {
             return Err(MemError::OutOfRange { off });
         }
-        Ok(i)
+        Ok(off as usize)
     }
 
     fn read_at(&self, i: usize) -> u64 {
@@ -129,5 +134,19 @@ impl StateHash for Mem {
     fn state_hash<H: Hasher>(&self, h: &mut H) {
         hash_len(self.bytes.len(), h);
         h.write(&self.bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_in_range;
+
+    #[test]
+    fn range_check_does_not_overflow_at_the_top_of_u32() {
+        assert!(!word_in_range(0xFFFF_FFF8, 64));
+        assert!(!word_in_range(0xFFFF_FFF8, 0xFFFF_FFF8));
+        assert!(word_in_range(0xFFFF_FFF8, 0x1_0000_0000));
+        assert!(word_in_range(56, 64));
+        assert!(!word_in_range(64, 64));
     }
 }
