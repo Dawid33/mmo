@@ -14,8 +14,10 @@
 //!   commands (so the host sees both in issue order). The commit makes it `SENT` with the deadline
 //!   `now + PROMISE_TIMEOUT_TICKS`; an abort frees it and gives its serial back.
 //! * `SENT`: the host has the request. [`Vm::resolve`], or `tick` once the deadline is reached
-//!   (`Timeout`), makes it `RESOLVED`. An `err` answer must be a variant of the program's error enum and
-//!   any other is stored as `lost`, as is an answer the inbox has no room for.
+//!   (`Timeout`), makes it `RESOLVED`. An answer nested deeper than `WIRE_DEPTH_MAX` is stored as `lost`
+//!   before anything walks it; an `err` answer must be a variant of the program's error enum and any
+//!   other is stored as `lost`, as is an answer the inbox has no room for. So the stored bytes always
+//!   decode: a decode failure at resume is corrupt memory.
 //! * `RESOLVED`: the answer waits for the task awaiting it, which frees the record when it resumes.
 //! * `PromiseDetach` flags the record `DETACHING` in the open segment: `DETACHED` at its commit (and
 //!   freed then when already resolved), cleared at its abort. A detached record is freed when it
@@ -26,7 +28,9 @@
 //! object, word 2 the arrival number (once ready), word 3 `pc | fn id << 32` of the await. `WAITING`
 //! until every promise it awaits is resolved, then `READY` with the next arrival number: the counter
 //! events take theirs from (decision 5), so the scheduler resumes continuations and dispatches events
-//! in one order, but a continuation takes no queue slot (the parked cap bounds them).
+//! in one order, but a continuation takes no queue slot (the parked cap bounds them). A resumed task
+//! runs as the task that parked (its kind and identity come back from the record; there is no separate
+//! resume kind), so its end, its reports and its handler's event release are those of that task.
 //!
 //! # The `Parked` object (script heap)
 //! The frames of the parked call chain, each as its frame words followed by a trailer word
@@ -54,7 +58,7 @@ use std::sync::Arc;
 
 use crate::alloc::{Heap, Kind, ObjHeader};
 use crate::bytecode::{Instr, Op};
-use crate::consts::{PARKED_MAX, PROMISE_MAX, PROMISE_TIMEOUT_TICKS};
+use crate::consts::{PARKED_MAX, PROMISE_MAX, PROMISE_TIMEOUT_TICKS, WIRE_DEPTH_MAX};
 use crate::fault::{FaultKind, VmResult};
 use crate::fuel::FUEL_RESUME;
 use crate::host::{AbortCause, Host};
@@ -650,6 +654,16 @@ impl Vm {
                     .error_ty
                     .is_some_and(|t| fits(&self.program.types, t, w))
         };
+        let too_deep = match &outcome {
+            Ok(w) | Err(w) => !w.depth_at_most(WIRE_DEPTH_MAX as u32),
+        };
+        if too_deep {
+            match outcome {
+                Ok(w) | Err(w) => w.dismantle(),
+            }
+            self.settle(i, O_LOST, None)?;
+            return Ok(true);
+        }
         let (o, answer) = match outcome {
             Ok(w) => (O_OK, Some(w)),
             Err(w) if known_error(&w) => (O_ERR, Some(w)),

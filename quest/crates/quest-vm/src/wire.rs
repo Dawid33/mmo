@@ -235,6 +235,64 @@ impl WireValue {
         }
     }
 
+    /// Whether the value nests at most `max` containers (`List`, `Dict`, `Struct`, `Variant`) deep: a
+    /// scalar is 0, `[1]` is 1. Walked with an explicit stack, so any depth is safe to ask about; it stops
+    /// at the first container past `max`. Every value a host builds passes this check against
+    /// `WIRE_DEPTH_MAX` before anything recursive (`encode`, `fits`, `from_wire`) walks it.
+    pub fn depth_at_most(&self, max: u32) -> bool {
+        let mut stack: Vec<(&WireValue, u32)> = vec![(self, 0)];
+        while let Some((v, above)) = stack.pop() {
+            let scalar = matches!(
+                v,
+                WireValue::Unit
+                    | WireValue::Bool(_)
+                    | WireValue::Int(_)
+                    | WireValue::Float(_)
+                    | WireValue::Str(_)
+            );
+            if scalar {
+                continue;
+            }
+            // `v` is a container `above + 1` deep
+            if above >= max {
+                return false;
+            }
+            let d = above + 1;
+            match v {
+                WireValue::List(items) => stack.extend(items.iter().map(|x| (x, d))),
+                WireValue::Dict(pairs) => {
+                    stack.extend(pairs.iter().flat_map(|(k, x)| [(k, d), (x, d)]));
+                }
+                WireValue::Struct { fields, .. } | WireValue::Variant { fields, .. } => {
+                    stack.extend(fields.iter().map(|(_, x)| (x, d)));
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Drops the value without recursion (a value nested a million deep would overflow the stack in
+    /// the derived drop): its containers are emptied one by one onto an explicit stack.
+    pub fn dismantle(self) {
+        let mut stack = vec![self];
+        while let Some(mut v) = stack.pop() {
+            match &mut v {
+                WireValue::List(items) => stack.append(items),
+                WireValue::Dict(pairs) => {
+                    for (k, x) in std::mem::take(pairs) {
+                        stack.push(k);
+                        stack.push(x);
+                    }
+                }
+                WireValue::Struct { fields, .. } | WireValue::Variant { fields, .. } => {
+                    stack.extend(std::mem::take(fields).into_iter().map(|(_, x)| x));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Parses exactly one value; never panics, never allocates by an untrusted count, nesting is capped
     /// at `WIRE_DEPTH_MAX` containers.
     pub fn decode(bytes: &[u8]) -> Result<WireValue, WireError> {

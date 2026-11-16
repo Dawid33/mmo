@@ -153,7 +153,8 @@ impl Vm {
 
     /// Runs tasks for up to `fuel` (less any debt an earlier tick left). `now` smaller than the latest
     /// `now` counts as the latest. Reports go to `host.report`; buffered commands and prints reach the
-    /// host when their segment commits. With `fuel` 0 nothing changes.
+    /// host when their segment commits. With `fuel` 0 nothing changes. Promise timeouts fire only on
+    /// ticks, so a host must keep ticking an instance that has parked handlers, even when it is idle.
     pub fn tick(&mut self, now: u64, fuel: u64, host: &mut dyn Host) -> TickReport {
         self.sched_tick(now, fuel, host)
     }

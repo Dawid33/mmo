@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use crate::alloc::Kind;
 use crate::bytecode::Instr;
-use crate::consts::{ERR_TRACE_MAX, QUEUE_LEN};
+use crate::consts::{ERR_TRACE_MAX, QUEUE_LEN, WIRE_DEPTH_MAX};
 use crate::fault::FaultKind;
 use crate::fuel::FUEL_DISPATCH;
 use crate::host::{AbortCause, DropReason, Host, HostFnKind, PromiseId, Report, SrcLoc};
@@ -232,7 +232,9 @@ impl Vm {
         let Some(first) = p.handlers.iter().position(|h| h.event == event) else {
             return drop(DropReason::NoHandler);
         };
-        if !wire::fits(&p.types, p.handlers[first].event_ty, payload) {
+        if !payload.depth_at_most(WIRE_DEPTH_MAX as u32)
+            || !wire::fits(&p.types, p.handlers[first].event_ty, payload)
+        {
             return drop(DropReason::WrongShape);
         }
         if self.failed() {
@@ -794,6 +796,13 @@ impl Vm {
             kind: FaultKind::HostFault,
             message,
         })?;
+        if !answer.depth_at_most(WIRE_DEPTH_MAX as u32) {
+            answer.dismantle();
+            return Err(Fault {
+                kind: FaultKind::HostFault,
+                message: "answer nested too deep".into(),
+            });
+        }
         match from_wire(&mut self.store, self.heap, &p.types, site.ret, &answer) {
             Ok((v, words)) => {
                 m.words(words);

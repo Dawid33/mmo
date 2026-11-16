@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use common::*;
 use quest_vm::asm::{FnBuilder, FnRef, GlobalRef, ProgramBuilder, SlotRef};
-use quest_vm::consts::{PARKED_MAX, PROMISE_TIMEOUT_TICKS};
+use quest_vm::consts::{PARKED_MAX, PROMISE_TIMEOUT_TICKS, WIRE_DEPTH_MAX};
 use quest_vm::host::{AbortCause, HostFnKind, PromiseId, Report};
 use quest_vm::layout::{Layout, LoadError, PARKED_REC_WORDS};
 use quest_vm::program::Program;
@@ -934,5 +934,43 @@ fn await_in_a_nested_call_restores_every_frame() {
         vm.debug_value(slot(&p, s2), str_ty),
         Ok(WireValue::Str("mid".into()))
     );
+    assert!(host.reports.is_empty());
+}
+
+/// `depth` lists nested in one another around `Int(0)`, built without recursion.
+fn nested(depth: usize) -> WireValue {
+    let mut v = WireValue::Int(0);
+    for _ in 0..depth {
+        v = WireValue::List(vec![v]);
+    }
+    v
+}
+
+#[test]
+fn too_deep_answer_becomes_lost() {
+    let mut b = builder();
+    let (_, e) = await_one(&mut b);
+    let err_ty = b.t.err;
+    let p = finish(b);
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    settle(&mut vm, &mut host, 1);
+    for depth in [WIRE_DEPTH_MAX + 1, 1_000_000] {
+        vm.deliver("Ping", &ping(1));
+        settle(&mut vm, &mut host, 2);
+        // `resolve` drops the value it is given without recursion
+        assert_eq!(
+            vm.resolve(last_request(&host), Ok(nested(depth))),
+            Resolved::Accepted
+        );
+        settle(&mut vm, &mut host, 3);
+        assert_eq!(vm.status(), Status::Idle, "depth {depth}");
+        assert_eq!(
+            vm.debug_value(slot(&p, e), err_ty),
+            Ok(variant("Lost")),
+            "depth {depth}"
+        );
+    }
+    assert_eq!(logs(&host), [1, 1]);
     assert!(host.reports.is_empty());
 }
