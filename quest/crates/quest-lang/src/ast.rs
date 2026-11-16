@@ -72,7 +72,8 @@ pub enum FStrPart {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     /// Stands where an expression failed to parse (an f-string's `{…}` part); the parse that made it
-    /// reported a diagnostic.
+    /// reported a diagnostic. Resolution and every later pass skip it silently: no diagnostic, and its type
+    /// is "unknown, already wrong", so no follow-on error cascades from it.
     Error,
     /// `()`.
     Unit,
@@ -335,6 +336,22 @@ impl Let {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct File {
     pub items: Vec<Item>,
+}
+
+/// A program's module tree, as `load_modules` reads it: every module reached from the crate root
+/// `main.qs` by `mod` items, sorted by path (the root, whose path is empty, first).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Crate {
+    pub modules: Vec<Module>,
+}
+
+/// One module: its path from the crate root (`["npc", "dialogue"]`), the file it was read from and that
+/// file's items.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Module {
+    pub path: Vec<String>,
+    pub file: String,
+    pub ast: File,
 }
 
 /// An item: a top-level definition, a member of an `impl`, a quest or a stage. `span` starts at the item's

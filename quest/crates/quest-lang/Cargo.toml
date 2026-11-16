@@ -15,3 +15,6 @@ quest-vm = { path = "../quest-vm" }
 
 [build-dependencies]
 lalrpop = { workspace = true }
+
+[dev-dependencies]
+quest-stub = { path = "../quest-stub" }
