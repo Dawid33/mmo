@@ -16,12 +16,14 @@
 //! (`FUEL_REAP` + its reported work) instead of an instruction. So the zombie list is always empty when an
 //! instruction starts, and every free the program causes is paid for, a bounded step at a time.
 //!
-//! # A full heap
+//! # A full heap, a broken reference
 //! An instruction that fails with `HeapFull` is undone through the undo log (back to the checkpoint taken
 //! just before it), so it leaves no partial effect, and the run faults `HeapFull` at it. It is never
 //! retried after a reap step: the instruction began with an empty zombie list (above), and undoing it
 //! also undoes any release it made, so after the undo there is nothing a reap step could give back. The
-//! fuel it was charged stands.
+//! reference instructions (`refs`) are undone the same way on EVERY fault: a `RefTake` / `RefStore` that
+//! made part of a path unique before meeting a step that no longer resolves leaves nothing behind. The
+//! fuel charged stands.
 
 use crate::bytecode::{Instr, Op};
 use crate::consts::ERR_TRACE_MAX;
@@ -148,6 +150,22 @@ pub(crate) fn base_fuel(p: &Program, ins: Instr) -> u64 {
         },
         Await | AwaitAll => FUEL_AWAIT,
     }
+}
+
+/// Whether a fault of `op` is undone back to the checkpoint taken just before it (module docs): every
+/// `HeapFull`, and every fault of the reference instructions, whose walk may have cloned part of a path.
+fn undone_on_fault(op: Op, kind: FaultKind) -> bool {
+    kind == FaultKind::HeapFull
+        || matches!(
+            op,
+            Op::RefMake
+                | Op::RefField
+                | Op::RefIndex
+                | Op::RefKey
+                | Op::RefLoad
+                | Op::RefTake
+                | Op::RefStore
+        )
 }
 
 /// `-2^63` and `2^63` as f64: an int-convertible float lies in `[-2^63, 2^63)`.
@@ -318,7 +336,7 @@ impl Vm {
                 Ok(Flow::Enter { fn_id: f, pc: p }) => (fn_id, pc) = (f, p),
                 Ok(Flow::Done) => break Stop::Returned,
                 Err(f) => {
-                    if f.kind == FaultKind::HeapFull {
+                    if undone_on_fault(ins.op, f.kind) {
                         // No partial effect (module docs). The checkpoint was taken a moment ago, so
                         // its history cannot have been dropped.
                         let _ = self.store.mem.rollback_to(before);
@@ -473,19 +491,18 @@ impl Vm {
             | Op::TakeKey
             | Op::SetKey => self.exec_heap(ins, m)?,
             Op::CallBuiltin => self.call_builtin(ins, m)?,
-
-            // ---- Not implemented yet: Tasks 11–13 replace this arm with their groups. ----
             Op::RefMake
             | Op::RefField
             | Op::RefIndex
             | Op::RefKey
             | Op::RefLoad
             | Op::RefTake
-            | Op::RefStore
-            | Op::CallHost
-            | Op::Await
-            | Op::AwaitAll
-            | Op::PromiseDetach => return Err(Fault::corrupt("unsupported instruction")),
+            | Op::RefStore => self.exec_ref(ins, m)?,
+
+            // ---- Not implemented yet: Tasks 12–13 replace this arm with their groups. ----
+            Op::CallHost | Op::Await | Op::AwaitAll | Op::PromiseDetach => {
+                return Err(Fault::corrupt("unsupported instruction"));
+            }
         }
         Ok(Flow::Next)
     }

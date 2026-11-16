@@ -312,6 +312,27 @@ pub fn take(st: &mut Store, heap: Heap, d: u64, key: u64) -> VmResult<(Option<u6
     Ok((Some(v), work))
 }
 
+/// Writes `val` in place of the value under an EXISTING `key` and hands the old value back, touching no
+/// refcount (the caller owns both sides); `None` when the key is absent (nothing written). Needs a unique
+/// dict. References use it to write through a path (`refs`).
+pub(crate) fn replace(
+    st: &mut Store,
+    heap: Heap,
+    d: u64,
+    key: u64,
+    val: u64,
+) -> VmResult<(Option<u64>, u32)> {
+    let dd = open(st, heap, d)?;
+    require_unique(&dd.h)?;
+    let (pos, work) = dd.lookup(st, heap, key)?;
+    let Some(pos) = pos else {
+        return Ok((None, work));
+    };
+    let old = dd.eread(st, pos, E_VAL)?;
+    dd.ewrite(st, heap, pos, E_VAL, val)?;
+    Ok((Some(old), work))
+}
+
 /// Stores `val` under `key`, taking both. A key that exists keeps its position and stored key: the passed
 /// key and the old value are released. A new key goes last, growing the blocks when they are full.
 /// Returns the dict pointer (it never moves) and the work.

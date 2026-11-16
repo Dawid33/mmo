@@ -29,7 +29,8 @@
 //! * `ListRef`: `len` shrinks as the last element is released (children `payload[0..len]`);
 //! * `Obj`: the bits of `aux` are cleared as the fields are released;
 //! * `Dict`: `used` (payload word 2) and `len` shrink as the last positions are released (see `dict`); the
-//!   entries and index blocks are freed with the last one.
+//!   entries and index blocks are freed with the last one;
+//! * `RefPath`: `len` shrinks as the last steps are dropped (their heap-kind keys released, see `refs`).
 //!
 //! A reap step pops the head, releases at most `REAP_CHILDREN_MAX` children (they become zombies in turn and
 //! are linked ahead of it), then either frees the block or pushes it back at the head with its advanced
@@ -41,6 +42,7 @@ use crate::alloc::{Heap, Kind, ObjHeader};
 use crate::consts::{REAP_CHILDREN_MAX, STRUCT_FIELDS_MAX};
 use crate::dict;
 use crate::fault::{FaultKind, VmResult};
+use crate::refs;
 use crate::store::Store;
 
 const WORD: u32 = 8;
@@ -179,11 +181,12 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<O
     let p = ptr_of(head)?;
     let mut h = heap.header(st, p)?;
     // The one place later tasks extend: a kind with children of its own (`Dict`, `RefPath`, `Parked`).
+    // `RefPath`'s shape is checked by `refs::reap`.
     match h.kind {
         Kind::Str | Kind::ListImm | Kind::Raw | Kind::ListRef => {}
         Kind::Obj => check_obj_shape(&h)?,
-        Kind::Dict => {}
-        Kind::RefPath | Kind::Parked => {
+        Kind::Dict | Kind::RefPath => {}
+        Kind::Parked => {
             let _ = maps;
             return Err(FaultKind::Corrupt);
         }
@@ -218,10 +221,13 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<O
             }
         }
         Kind::Dict => dict_done = dict::reap(st, heap, p, &mut h, &mut budget, &mut work)?,
+        Kind::RefPath => {
+            refs::reap(st, heap, p, &mut h, &mut budget, &mut work)?;
+        }
         _ => {}
     }
     let done = match h.kind {
-        Kind::ListRef => h.len == 0,
+        Kind::ListRef | Kind::RefPath => h.len == 0,
         Kind::Obj => h.aux == 0,
         Kind::Dict => dict_done,
         _ => true,
@@ -259,7 +265,8 @@ pub fn make_unique(st: &mut Store, heap: Heap, v: u64) -> VmResult<(u64, u32)> {
         write_header(st, heap, p, old)?;
         return Ok((q, words));
     }
-    // Words in use, and whether they are references (`RefPath`, `Parked`: later tasks).
+    // Words in use, and whether they are references. A `RefPath` is immutable and never made unique;
+    // `Parked`: a later task.
     let words = match h.kind {
         Kind::Str => h.len.div_ceil(WORD),
         Kind::ListImm | Kind::ListRef | Kind::Raw => h.len,
