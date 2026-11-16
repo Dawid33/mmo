@@ -349,6 +349,27 @@ fn contextual_words() {
         toks("emit(x)"),
         vec![ident("emit"), LParen, ident("x"), RParen, Newline, Eof]
     );
+    assert_eq!(
+        toks("objective f\"Find\" at dog")[..3],
+        [Objective, FString(vec![FPart::Text("Find".into())]), AtKw]
+    );
+    let header = toks("dialogue d(p: Player, npc: Person) for f topic \"Dog?\" priority 2:");
+    assert_eq!(
+        header[header.len() - 7..],
+        [
+            Topic,
+            Str("Dog?".into()),
+            Priority,
+            Int(2),
+            Colon,
+            Newline,
+            Eof
+        ]
+    );
+    assert_eq!(
+        toks("let topic = 1"),
+        vec![Let, ident("topic"), Assign, Int(1), Newline, Eof]
+    );
     // First on a line after a dedent counts, too.
     assert_eq!(
         toks("a:\n  b\nnode x:\n"),

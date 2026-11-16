@@ -6,7 +6,7 @@ use crate::diag::Diagnostic;
 use crate::indent::Layout;
 use logos::{Lexer, Logos};
 
-/// A token kind. The contextual words (`Node` … `AtKw`) are produced only by the layout pass, where the
+/// A token kind. The contextual words (`Node` … `Priority`) are produced only by the layout pass, where the
 /// grammar allows them; elsewhere those words stay `Ident`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
@@ -66,6 +66,8 @@ pub enum Tok {
     Per,
     /// The word `at` on an `objective` line (`At` is the `@` token).
     AtKw,
+    Topic,
+    Priority,
     // Punctuation.
     LParen,
     RParen,

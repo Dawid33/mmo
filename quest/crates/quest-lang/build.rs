@@ -2,6 +2,9 @@
 //! grammar conflict.
 
 fn main() {
+    // Only the grammar feeds the generated parser; without this, cargo reruns the script on any change
+    // in the package.
+    println!("cargo:rerun-if-changed=src/grammar.lalrpop");
     if let Err(e) = lalrpop::process_src() {
         panic!("lalrpop: {e}");
     }

@@ -6,17 +6,32 @@
 // through a helper of `parse.rs` that records the node's span and depth and refuses a node deeper than
 // `PARSE_DEPTH_MAX` (`too-deep`).
 //
+// Recovery (plan D11): every indented block (and the file's top level) is a list of entries; an entry
+// that fails to parse becomes the error token `!`, which takes the rest of its line and the indented
+// block under it (`Skipped`), or stands before the block's `DEDENT`. Only line ends and block edges
+// follow a `!`, so LALRPOP drops the tokens of the broken line and recovers in the innermost block — never
+// by popping an enclosing one. The error is recorded in `errs` and the parse goes on.
+//
 // Expression precedence, one tier per level, loosest first:
 //   Expr (`else` fallback) · OrExpr · AndExpr · NotExpr · CmpExpr (not chainable) · SumExpr · ProdExpr ·
 //   Unary (`-` `&` `*`) · PostExpr (`await`) · Plain / Tried (call, `.name`, `[i]`, `[a:b]`; `?`).
 // `::` is part of a path (a primary), not an operator. Types and patterns are separate nonterminals,
 // reached only from their own positions, so `list[int]` never meets indexing.
 
-use crate::ast::{Arg, BinOp, Expr, ExprKind, Path, PatField, PatLit, Pattern, PatternKind, Type, TypeKind, UnOp};
+use crate::ast::{
+    Arg, BinOp, Case, ChoiceOption, Cond, Decorator, Dialogue, DialogueEntry, Expr, ExprKind, Field, File,
+    FnDef, GroupMember, Item, ItemKind, Let, LineId, Node, OptionMark, Param, Path, PatField, PatLit,
+    Pattern, PatternKind, Receiver, Step, StepKind, Stmt, StmtKind, Topic, Type, TypeKind, UnOp, UseImport,
+    Variant,
+};
+use crate::diag::Diagnostic;
 use crate::lex::{FPart, Tok, Token};
-use crate::parse::{binary, chained, expr, fstring, lit_pat, paren, pat, path_pat, suffix, ty, unary, ParseFail, Suffix};
+use crate::parse::{
+    binary, chained, expr, fstring, group_entries, group_steps, item, line, lit_pat, paren, pat, path_pat,
+    raises, recovered, span, step, stmt, suffix, ty, unary, Ctx, ParseFail, Suffix,
+};
 
-grammar<'t>(toks: &'t [Token], file: &'t str);
+grammar<'t, 'e>(toks: &'t [Token], file: &'t str, errs: &'e mut Vec<Diagnostic>);
 
 extern {
     type Location = usize;
@@ -75,6 +90,8 @@ extern {
         "default" => Tok::Default,
         "per" => Tok::Per,
         "at" => Tok::AtKw,
+        "topic" => Tok::Topic,
+        "priority" => Tok::Priority,
         "(" => Tok::LParen,
         ")" => Tok::RParen,
         "[" => Tok::LBracket,
@@ -113,6 +130,12 @@ extern {
 
 // Entry points.
 
+pub FileEntry: File = {
+    EOF => File::default(),
+    TopErr EOF => File::default(),
+    <items:Entries<TopItem, TopErr>> EOF => File { items },
+    <items:Entries<TopItem, TopErr>> TopErr EOF => File { items },
+};
 pub ExprEntry: Expr = Expr;
 pub TypeEntry: Type = Type;
 pub PatternEntry: Pattern = Pattern;
@@ -145,10 +168,9 @@ PathSeg: String = {
     "super" => "super".to_string(),
 };
 
-/// A segment after `::`: the dialogue keywords of spec 5.13 (reserved after the module examples of
-/// 5.10 were written: `npc::dialogue`) are names there, where nothing else can follow.
-PathTail: String = {
-    PathSeg,
+/// The dialogue keywords of spec 5.13, reserved after the module examples of 5.10 were written
+/// (`npc::dialogue`): a path may still name a module so — after `::`, or first when `::` follows.
+Reserved: String = {
     "dialogue" => "dialogue".to_string(),
     "quest" => "quest".to_string(),
     "choice" => "choice".to_string(),
@@ -157,8 +179,15 @@ PathTail: String = {
     "where" => "where".to_string(),
 };
 
+/// A segment after `::`, where nothing but a segment can follow.
+PathTail: String = {
+    PathSeg,
+    Reserved,
+};
+
 Path: Path = {
     PathSeg => vec![<>],
+    <h:Reserved> "::" <s:PathTail> => vec![h, s],
     <mut p:Path> "::" <s:PathTail> => {
         p.push(s);
         p
@@ -198,11 +227,17 @@ NotExpr: Expr = {
     CmpExpr,
 };
 
-/// One comparison at most: a second operator after a comparison is `chained-comparison`.
+/// One comparison at most: each further operator is `chained-comparison` (recorded; the parse goes on
+/// with the first comparison).
 CmpExpr: Expr = {
     SumExpr,
     Comparison,
-    Comparison <at:@L> CmpOp SumExpr =>? chained(at),
+    Chain,
+};
+
+Chain: Expr = {
+    <c:Comparison> <at:@L> CmpOp SumExpr => chained(errs, toks, file, at, c),
+    <c:Chain> <at:@L> CmpOp SumExpr => chained(errs, toks, file, at, c),
 };
 
 Comparison: Expr = {
@@ -291,6 +326,7 @@ Primary: Expr = {
     <l:@L> "true" <r:@R> =>? expr(toks, l, r, ExprKind::Bool(true)),
     <l:@L> "false" <r:@R> =>? expr(toks, l, r, ExprKind::Bool(false)),
     <l:@L> <p:Path> <r:@R> =>? expr(toks, l, r, ExprKind::Path(p)),
+    <l:@L> "(" ")" <r:@R> =>? expr(toks, l, r, ExprKind::Unit),
     <l:@L> "(" <e:Expr> ")" =>? paren(e, l),
     <l:@L> "[" <items:Comma<Expr>> "]" <r:@R> =>? expr(toks, l, r, ExprKind::List(items)),
     <l:@L> "{" <entries:Comma<DictEntry>> "}" <r:@R> =>? expr(toks, l, r, ExprKind::Dict(entries)),
@@ -304,6 +340,7 @@ DictEntry: (Expr, Expr) = {
 
 Type: Type = {
     <l:@L> "(" ")" <r:@R> =>? ty(toks, l, r, TypeKind::Unit),
+    <l:@L> "&" <t:Type> <r:@R> =>? ty(toks, l, r, TypeKind::Ref(Box::new(t))),
     <l:@L> <p:Path> <r:@R> =>? ty(toks, l, r, TypeKind::Named(p, Vec::new())),
     <l:@L> <p:Path> "[" <args:Comma1<Type>> "]" <r:@R> =>? ty(toks, l, r, TypeKind::Named(p, args)),
 };
@@ -335,4 +372,549 @@ PatSingle: Pattern = {
 PatField: PatField = {
     <pattern:Pattern> => PatField { name: None, pattern },
     <n:NAME> "=" <pattern:Pattern> => PatField { name: Some(n), pattern },
+};
+
+// Blocks and recovery.
+
+/// The error token in context `Top`, `Stmt`, `Step` or `Other` (see `parse::Ctx`): records the error.
+TopErr: () = <e:!> => recovered(errs, toks, file, e, Ctx::Top);
+StmtErr: () = <e:!> => recovered(errs, toks, file, e, Ctx::Stmt);
+StepErr: () = <e:!> => recovered(errs, toks, file, e, Ctx::Step);
+OtherErr: () = <e:!> => recovered(errs, toks, file, e, Ctx::Other);
+
+/// What a broken line leaves: its end, and the indented block under it.
+Skipped: () = {
+    NEWLINE,
+    NEWLINE Skip,
+    Skip,
+};
+
+/// An indented block taken whole, unparsed.
+Skip: () = INDENT SkipTok* DEDENT;
+
+SkipTok: () = {
+    Skip,
+    NEWLINE,
+    "fn",
+    "let",
+    "if",
+    "elif",
+    "else",
+    "while",
+    "for",
+    "in",
+    "not",
+    "and",
+    "or",
+    "return",
+    "break",
+    "continue",
+    "pass",
+    "match",
+    "case",
+    "struct",
+    "impl",
+    "enum",
+    "error",
+    "mod",
+    "use",
+    "pub",
+    "as",
+    "raise",
+    "await",
+    "self",
+    "crate",
+    "super",
+    "true",
+    "false",
+    "dialogue",
+    "quest",
+    "choice",
+    "once",
+    "when",
+    "where",
+    "node",
+    "stage",
+    "role",
+    "objective",
+    "event",
+    "emit",
+    "detour",
+    "default",
+    "per",
+    "at",
+    "topic",
+    "priority",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    ",",
+    ":",
+    "::",
+    ".",
+    "@",
+    "=",
+    "==",
+    "!=",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "+",
+    "-",
+    "*",
+    "/",
+    "%",
+    "&",
+    "|",
+    "?",
+    "->",
+    "=>",
+    NAME,
+    INT,
+    FLOAT,
+    STRING,
+    FSTRING,
+};
+
+/// One or more `T`s, each a line (or a line and its block); a line that fails is `E` and is skipped.
+Entries<T, E>: Vec<T> = {
+    <t:T> => vec![t],
+    E Skipped => Vec::new(),
+    <mut v:Entries<T, E>> <t:T> => {
+        v.push(t);
+        v
+    },
+    <v:Entries<T, E>> E Skipped => v,
+};
+
+/// An indented block of `T`s. An error right before its end (a missing block, a line cut short by the
+/// dedent) is recovered here too.
+Block<T, E>: Vec<T> = {
+    INDENT <Entries<T, E>> DEDENT,
+    INDENT <Entries<T, E>> E DEDENT,
+    INDENT E DEDENT => Vec::new(),
+};
+
+/// `:` and an indented block of statements.
+Suite: Vec<Stmt> = ":" NEWLINE <Block<Stmt, StmtErr>>;
+
+// Statements.
+
+Stmt: Stmt = {
+    <l:@L> <k:SimpleStmt> <r:@R> NEWLINE =>? stmt(toks, l, r, k),
+    <l:@L> <k:BlockStmt> <r:@R> =>? stmt(toks, l, r, k),
+};
+
+LetHead: (String, Option<Type>) = "let" <NAME> <(":" <Type>)?> "=";
+
+/// A statement on one line.
+SimpleStmt: StmtKind = {
+    <h:LetHead> <value:Expr> => StmtKind::Let(Let { name: h.0, ty: h.1, value }),
+    <place:Unary> "=" <value:Expr> => StmtKind::Assign(place, value),
+    <Expr> => StmtKind::Expr(<>),
+    "pass" => StmtKind::Pass,
+    "break" => StmtKind::Break,
+    "continue" => StmtKind::Continue,
+    "return" <Expr?> => StmtKind::Return(<>),
+    "raise" <Expr> => StmtKind::Raise(<>),
+    "->" <NAME> => StmtKind::Jump(<>),
+};
+
+/// A statement that ends with an indented block.
+BlockStmt: StmtKind = {
+    <h:LetHead> <value:BlockFallback> => StmtKind::Let(Let { name: h.0, ty: h.1, value }),
+    <place:Unary> "=" <value:BlockFallback> => StmtKind::Assign(place, value),
+    <BlockFallback> => StmtKind::Expr(<>),
+    "if" <c:Expr> <b:Suite> <elifs:("elif" <Expr> <Suite>)*> <other:("else" <Suite>)?> => {
+        let mut branches = vec![(c, b)];
+        branches.extend(elifs);
+        StmtKind::If(branches, other)
+    },
+    "while" <c:Expr> <b:Suite> => StmtKind::While(c, b),
+    "for" <first:NAME> <second:("," <NAME>)?> "in" <e:Expr> <b:Suite> => {
+        let mut vars = vec![first];
+        vars.extend(second);
+        StmtKind::For(vars, e, b)
+    },
+    "match" <e:Expr> ":" NEWLINE <cases:Block<Case, OtherErr>> => StmtKind::Match(e, cases),
+};
+
+Case: Case = {
+    <l:@L> "case" <pattern:Pattern> <guard:("if" <Expr>)?> <r:@R> <body:Suite> => Case {
+        pattern,
+        guard,
+        body,
+        span: span(toks, l, r),
+    },
+};
+
+/// `e else err:` + block, possibly at the end of a chain: `a else b else err:` is
+/// `a else (b else err: …)`.
+BlockFallback: Expr = {
+    <l:@L> <e:OrExpr> "else" <f:BlockFallbackTail> <r:@R> =>? expr(toks, l, r, ExprKind::Else(Box::new(e), Box::new(f))),
+};
+
+BlockFallbackTail: Expr = {
+    <l:@L> <n:NAME> ":" NEWLINE <b:Block<Stmt, StmtErr>> <r:@R> =>? expr(toks, l, r, ExprKind::FallbackBlock(n, b)),
+    BlockFallback,
+};
+
+// Items.
+
+/// An item at the top level of a file. `role`, `stage` and `objective` parse here too, so resolution can
+/// say they belong in a quest (`quest-only`).
+TopItem: Item = {
+    <l:@L> <p:"pub"?> <k:ItemBody> <r:@R> =>? item(toks, l, r, Vec::new(), p.is_some(), k),
+    <d:Decorator+> <l:@L> <p:"pub"?> <k:DecoratedBody> <r:@R> =>? item(toks, l, r, d, p.is_some(), k),
+};
+
+ItemBody: ItemKind = {
+    FnItem,
+    DialogueItem,
+    StructItem,
+    ImplItem,
+    EnumItem,
+    ErrorItem,
+    ModItem,
+    UseItem,
+    LetItem,
+    EventItem,
+    QuestItem,
+    RoleItem,
+    StageItem,
+    ObjectiveItem,
+};
+
+DecoratedBody: ItemKind = {
+    FnItem,
+    DialogueItem,
+};
+
+Decorator: Decorator = {
+    <l:@L> "@" <name:NAME> <args:("(" <Comma<Arg>> ")")?> <r:@R> NEWLINE => Decorator {
+        name,
+        args: args.unwrap_or_default(),
+        span: span(toks, l, r),
+    },
+};
+
+FnItem: ItemKind = {
+    "fn" <name:NAME> "(" <ps:ParamList> ")" <ret:("->" <Type>)?> <raises:Raises?> ":" NEWLINE <body:Block<Stmt, StmtErr>> => {
+        ItemKind::Fn(FnDef { name, receiver: ps.0, params: ps.1, ret, raises, body })
+    },
+};
+
+/// `raises Set` (`raises` is not a keyword: the action checks the word).
+Raises: Path = {
+    <at:@L> <word:NAME> <set:Path> => raises(errs, toks, file, at, &word, set),
+};
+
+ParamList: (Option<Receiver>, Vec<Param>) = {
+    <Comma<Param>> => (None, <>),
+    <Receiver> => (Some(<>), Vec::new()),
+    <r:Receiver> "," <ps:Comma<Param>> => (Some(r), ps),
+};
+
+Receiver: Receiver = {
+    "self" => Receiver::Value,
+    "&" "self" => Receiver::Ref,
+};
+
+Param: Param = {
+    <l:@L> <name:NAME> <ty:(":" <Type>)?> <r:@R> => Param { name, ty, span: span(toks, l, r) },
+};
+
+FieldDecl: Field = {
+    <l:@L> <name:NAME> ":" <ty:Type> <r:@R> => Field { name, ty, span: span(toks, l, r) },
+};
+
+FieldLine: Field = <FieldDecl> NEWLINE;
+
+StructItem: ItemKind = {
+    "struct" <name:NAME> ":" NEWLINE <fields:Block<FieldLine, OtherErr>> => ItemKind::Struct(name, fields),
+};
+
+EventItem: ItemKind = {
+    "event" <name:NAME> ":" NEWLINE <fields:Block<FieldLine, OtherErr>> => ItemKind::Event(name, fields),
+};
+
+ImplItem: ItemKind = {
+    "impl" <name:NAME> ":" NEWLINE <fns:Block<Method, OtherErr>> => ItemKind::Impl(name, fns),
+};
+
+Method: Item = {
+    <l:@L> <p:"pub"?> <k:FnItem> <r:@R> =>? item(toks, l, r, Vec::new(), p.is_some(), k),
+    <d:Decorator+> <l:@L> <p:"pub"?> <k:FnItem> <r:@R> =>? item(toks, l, r, d, p.is_some(), k),
+};
+
+/// A variant or an error-set member: a name, with fields when it carries data.
+Variant: Variant = {
+    <l:@L> <name:NAME> <fields:("(" <Comma1<FieldDecl>> ")")?> <r:@R> => Variant {
+        name,
+        fields: fields.unwrap_or_default(),
+        span: span(toks, l, r),
+    },
+};
+
+VariantLine: Variant = <Variant> NEWLINE;
+
+EnumItem: ItemKind = {
+    "enum" <name:NAME> ":" NEWLINE <vs:Block<VariantLine, OtherErr>> => ItemKind::Enum(name, vs),
+};
+
+ErrorItem: ItemKind = {
+    "error" <name:NAME> "=" <first:Variant> <rest:("|" <Variant>)*> NEWLINE => {
+        let mut members = vec![first];
+        members.extend(rest);
+        ItemKind::ErrorSet(name, members)
+    },
+};
+
+ModItem: ItemKind = {
+    "mod" <PathTail> NEWLINE => ItemKind::Mod(<>),
+};
+
+UseItem: ItemKind = {
+    "use" <UseTree> NEWLINE => ItemKind::Use(<>),
+};
+
+UseTree: Vec<UseImport> = {
+    <l:@L> <path:UsePath> <alias:("as" <NAME>)?> <r:@R> => vec![UseImport { path, alias, span: span(toks, l, r) }],
+    <prefix:UsePath> "::" "{" <leaves:Comma1<UseLeaf>> "}" => leaves
+        .into_iter()
+        .map(|mut u| {
+            let mut path = prefix.clone();
+            path.append(&mut u.path);
+            u.path = path;
+            u
+        })
+        .collect(),
+};
+
+/// A `use` path: any segment may be a reserved dialogue word (`use dialogue::x`).
+UsePath: Path = {
+    PathTail => vec![<>],
+    <mut p:UsePath> "::" <s:PathTail> => {
+        p.push(s);
+        p
+    },
+};
+
+UseLeaf: UseImport = {
+    <l:@L> <s:PathTail> <alias:("as" <NAME>)?> <r:@R> => UseImport { path: vec![s], alias, span: span(toks, l, r) },
+};
+
+LetItem: ItemKind = {
+    <h:LetHead> <value:Expr> NEWLINE => ItemKind::Let(Let { name: h.0, ty: h.1, value }),
+    <h:LetHead> <value:BlockFallback> => ItemKind::Let(Let { name: h.0, ty: h.1, value }),
+};
+
+// Quests (spec 5.12).
+
+QuestItem: ItemKind = {
+    "quest" <name:NAME> ":" NEWLINE <members:Block<QuestMember, OtherErr>> => ItemKind::Quest(name, members),
+};
+
+/// A member of a quest. An `objective` parses here too, so resolution can say it belongs in a stage.
+QuestMember: Item = {
+    <l:@L> <k:QuestOnly> <r:@R> =>? item(toks, l, r, Vec::new(), false, k),
+    <d:Decorator*> <l:@L> <k:DialogueItem> <r:@R> =>? item(toks, l, r, d, false, k),
+    <d:Decorator+> <l:@L> <k:FnItem> <r:@R> =>? item(toks, l, r, d, false, k),
+};
+
+QuestOnly: ItemKind = {
+    RoleItem,
+    LetItem,
+    EventItem,
+    StageItem,
+    ObjectiveItem,
+};
+
+RoleItem: ItemKind = {
+    "role" <name:NAME> ":" <t:Type> <req:("where" <Expr>)?> NEWLINE => ItemKind::Role(name, t, req),
+};
+
+StageItem: ItemKind = {
+    "stage" <name:NAME> ":" NEWLINE <members:Block<StageMember, OtherErr>> => ItemKind::Stage(name, members),
+};
+
+StageMember: Item = {
+    <l:@L> <k:ObjectiveItem> <r:@R> =>? item(toks, l, r, Vec::new(), false, k),
+    <d:Decorator*> <l:@L> <k:DialogueItem> <r:@R> =>? item(toks, l, r, d, false, k),
+    <d:Decorator+> <l:@L> <k:FnItem> <r:@R> =>? item(toks, l, r, d, false, k),
+};
+
+ObjectiveItem: ItemKind = {
+    "objective" <text:LineText> <id:LineId?> <at:("at" <Expr>)?> NEWLINE => ItemKind::Objective(text, id, at),
+};
+
+// Dialogue (spec 5.11): a body of nodes or steps, never statements.
+
+DialogueItem: ItemKind = {
+    "dialogue" <name:NAME> "(" <params:Comma<Param>> ")" <target:("for" <Expr>)?> <topic:Topic?> ":" NEWLINE <body:Block<DialogueEntry, StepErr>> => {
+        ItemKind::Dialogue(Dialogue { name, params, target, topic, body: group_entries(body) })
+    },
+};
+
+Topic: Topic = {
+    <l:@L> "topic" <text:LineText> <id:LineId?> <cond:("if" <Expr>)?> <priority:("priority" <INT>)?> <r:@R> => Topic {
+        text,
+        id,
+        cond,
+        priority,
+        span: span(toks, l, r),
+    },
+};
+
+DialogueEntry: DialogueEntry = {
+    <l:@L> "node" <name:NAME> <cond:("when" <Cond>)?> <r:@R> ":" NEWLINE <steps:StepBlock> => DialogueEntry::Node(Node {
+        name,
+        cond,
+        steps,
+        span: span(toks, l, r),
+    }),
+    Step => DialogueEntry::Step(<>),
+};
+
+StepBlock: Vec<Step> = <Block<Step, StepErr>> => group_steps(<>);
+
+Step: Step = {
+    <l:@L> <line:Line> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Line(line)),
+    <l:@L> "choice" <args:("(" <Comma<Arg>> ")")?> <r:@R> ":" NEWLINE <options:Block<ChoiceOption, OtherErr>> =>? {
+        step(toks, l, r, StepKind::Choice(args.unwrap_or_default(), options))
+    },
+    <l:@L> "=>" <line:Line> <r:@R> NEWLINE =>? {
+        let member = GroupMember { line, steps: Vec::new(), span: span(toks, l, r) };
+        step(toks, l, r, StepKind::Group(vec![member]))
+    },
+    <l:@L> "=>" <line:Line> <r:@R> ":" NEWLINE <steps:StepBlock> =>? {
+        let member = GroupMember { line, steps, span: span(toks, l, r) };
+        step(toks, l, r, StepKind::Group(vec![member]))
+    },
+    <l:@L> "when" <c:Cond> <r:@R> ":" NEWLINE <steps:StepBlock> =>? step(toks, l, r, StepKind::When(c, steps)),
+    <l:@L> "once" <per:("per" <Expr>)?> <r:@R> ":" NEWLINE <steps:StepBlock> =>? step(toks, l, r, StepKind::Once(per, steps)),
+    <l:@L> "->" <n:NAME> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Jump(n)),
+    <l:@L> "detour" <n:NAME> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Detour(n)),
+    <l:@L> "emit" <p:Path> "(" <args:Comma<Arg>> ")" <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Emit(p, args)),
+    <l:@L> "return" <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Return),
+};
+
+/// `[speaker:] "text" [@id] [when cond]`.
+Line: crate::ast::Line = {
+    <l:@L> <speaker:(<NAME> ":")?> <text:LineText> <id:LineId?> <cond:("when" <Cond>)?> <r:@R> => line(toks, l, r, speaker, text, id, cond),
+};
+
+/// A string or f-string literal: the text of a line, an option, an objective or a topic.
+LineText: Expr = {
+    <l:@L> <v:STRING> <r:@R> =>? expr(toks, l, r, ExprKind::Str(v)),
+    <l:@L> <v:FSTRING> <r:@R> =>? {
+        let kind = fstring(toks, file, l, v)?;
+        expr(toks, l, r, kind)
+    },
+};
+
+LineId: LineId = {
+    <l:@L> "@" <first:IdSeg> <rest:("." <IdSeg>)*> <r:@R> => {
+        let mut path = vec![first];
+        path.extend(rest);
+        LineId { path, span: span(toks, l, r) }
+    },
+};
+
+/// A segment of a line id: a name or any word (`@lostdog.return`).
+IdSeg: String = {
+    NAME,
+    "fn" => "fn".to_string(),
+    "let" => "let".to_string(),
+    "if" => "if".to_string(),
+    "elif" => "elif".to_string(),
+    "else" => "else".to_string(),
+    "while" => "while".to_string(),
+    "for" => "for".to_string(),
+    "in" => "in".to_string(),
+    "not" => "not".to_string(),
+    "and" => "and".to_string(),
+    "or" => "or".to_string(),
+    "return" => "return".to_string(),
+    "break" => "break".to_string(),
+    "continue" => "continue".to_string(),
+    "pass" => "pass".to_string(),
+    "match" => "match".to_string(),
+    "case" => "case".to_string(),
+    "struct" => "struct".to_string(),
+    "impl" => "impl".to_string(),
+    "enum" => "enum".to_string(),
+    "error" => "error".to_string(),
+    "mod" => "mod".to_string(),
+    "use" => "use".to_string(),
+    "pub" => "pub".to_string(),
+    "as" => "as".to_string(),
+    "raise" => "raise".to_string(),
+    "await" => "await".to_string(),
+    "self" => "self".to_string(),
+    "crate" => "crate".to_string(),
+    "super" => "super".to_string(),
+    "true" => "true".to_string(),
+    "false" => "false".to_string(),
+    "dialogue" => "dialogue".to_string(),
+    "quest" => "quest".to_string(),
+    "choice" => "choice".to_string(),
+    "once" => "once".to_string(),
+    "when" => "when".to_string(),
+    "where" => "where".to_string(),
+    "node" => "node".to_string(),
+    "stage" => "stage".to_string(),
+    "role" => "role".to_string(),
+    "objective" => "objective".to_string(),
+    "event" => "event".to_string(),
+    "emit" => "emit".to_string(),
+    "detour" => "detour".to_string(),
+    "default" => "default".to_string(),
+    "per" => "per".to_string(),
+    "at" => "at".to_string(),
+    "topic" => "topic".to_string(),
+    "priority" => "priority".to_string(),
+};
+
+/// `once [per e] [if e]`, or an expression. The language has no conditional expression, so `if` ends
+/// the `per` expression.
+Cond: Cond = {
+    "once" <per:("per" <Expr>)?> <guard:("if" <Expr>)?> => Cond::Once { per, guard },
+    Expr => Cond::Expr(<>),
+};
+
+ChoiceOption: ChoiceOption = {
+    <l:@L> <mark:OptionMark?> <text:LineText> <id:LineId?> <guard:("if" <Expr>)?> <r:@R> NEWLINE => ChoiceOption {
+        mark,
+        text: Some(text),
+        id,
+        guard,
+        steps: Vec::new(),
+        span: span(toks, l, r),
+    },
+    <l:@L> <mark:OptionMark?> <text:LineText> <id:LineId?> <guard:("if" <Expr>)?> <r:@R> ":" NEWLINE <steps:StepBlock> => ChoiceOption {
+        mark,
+        text: Some(text),
+        id,
+        guard,
+        steps,
+        span: span(toks, l, r),
+    },
+    <l:@L> "default" <r:@R> ":" NEWLINE <steps:StepBlock> => ChoiceOption {
+        mark: Some(OptionMark::Default),
+        text: None,
+        id: None,
+        guard: None,
+        steps,
+        span: span(toks, l, r),
+    },
+};
+
+OptionMark: OptionMark = {
+    "once" => OptionMark::Once,
+    "default" => OptionMark::Default,
 };

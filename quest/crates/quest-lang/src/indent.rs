@@ -120,12 +120,20 @@ fn contextual_words(out: &mut [Token]) {
         if out[i].kind == Tok::Once && is_ident(out.get(i + 1), "per") {
             out[i + 1].kind = Tok::Per;
         }
+        // A dialogue header: `dialogue …` or `pub dialogue …` first on its line.
+        if at_line_start
+            && (out[i].kind == Tok::Dialogue
+                || (out[i].kind == Tok::Pub
+                    && out.get(i + 1).is_some_and(|t| t.kind == Tok::Dialogue)))
+        {
+            dialogue_header(&mut out[i..]);
+        }
         if at_line_start {
             let Tok::Ident(word) = &out[i].kind else {
                 continue;
             };
             let next = out.get(i + 1).map(|t| &t.kind);
-            let operand = matches!(next, Some(Tok::Ident(_) | Tok::Str(_)));
+            let operand = matches!(next, Some(Tok::Ident(_) | Tok::Str(_) | Tok::FString(_)));
             let kind = match word.as_str() {
                 "node" if operand => Tok::Node,
                 "stage" if operand => Tok::Stage,
@@ -135,7 +143,7 @@ fn contextual_words(out: &mut [Token]) {
                 "emit" if operand => Tok::Emit,
                 "detour" if operand => Tok::Detour,
                 "default"
-                    if matches!(next, Some(Tok::Str(_)))
+                    if matches!(next, Some(Tok::Str(_) | Tok::FString(_)))
                         || (matches!(next, Some(Tok::Colon))
                             && matches!(out.get(i + 2).map(|t| &t.kind), Some(Tok::Newline))) =>
                 {
@@ -153,6 +161,41 @@ fn contextual_words(out: &mut [Token]) {
                     out[at].kind = Tok::AtKw;
                 }
             }
+        }
+    }
+}
+
+/// On a line begun by `dialogue` (or `pub dialogue`), after the parameter list: `topic` before a string or an f-string and
+/// `priority` before a number become their own tokens (spec 5.13).
+fn dialogue_header(line: &mut [Token]) {
+    let end = line
+        .iter()
+        .position(|t| matches!(t.kind, Tok::Newline | Tok::Indent | Tok::Dedent))
+        .unwrap_or(line.len());
+    let Some(params) = line[..end].iter().position(|t| t.kind == Tok::LParen) else {
+        return;
+    };
+    let mut depth = 0u32;
+    let mut after = end;
+    for (j, t) in line[..end].iter().enumerate().skip(params) {
+        match t.kind {
+            Tok::LParen | Tok::LBracket | Tok::LBrace => depth = depth.saturating_add(1),
+            Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    after = j + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    for j in after..end {
+        let next = line.get(j + 1).map(|t| &t.kind);
+        if is_ident(line.get(j), "topic") && matches!(next, Some(Tok::Str(_) | Tok::FString(_))) {
+            line[j].kind = Tok::Topic;
+        } else if is_ident(line.get(j), "priority") && matches!(next, Some(Tok::Int(_))) {
+            line[j].kind = Tok::Priority;
         }
     }
 }

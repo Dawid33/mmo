@@ -43,6 +43,7 @@ fn precedence() {
 #[test]
 fn comparisons() {
     assert_eq!(expr_codes("a < b < c"), vec!["chained-comparison"]);
+    assert_eq!(expr_codes("a < b < c < d"), vec!["chained-comparison"]);
     assert_eq!(expr("x in xs"), "(in x xs)");
     assert_eq!(expr("x not in xs"), "(not-in x xs)");
     let diags = parse_expr_str("a < b == c").unwrap_err();
@@ -146,6 +147,13 @@ fn syntax_errors_name_the_expected_tokens() {
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, "syntax");
     assert!(diags[0].message.contains("`)`"), "{}", diags[0].message);
+    // A found operator that cannot follow is not "expected an operator".
+    let diags = parse_expr_str("a.b::c").unwrap_err();
+    assert!(
+        diags[0].message.starts_with("`::` cannot follow here"),
+        "{}",
+        diags[0].message
+    );
     let diags = parse_expr_str("1 +").unwrap_err();
     assert!(
         diags[0].message.contains("an expression"),
