@@ -74,6 +74,16 @@ pub struct HostRow {
     pub succeeding: bool,
 }
 
+/// A read of every `hosts` row ([`StoreHandle::hosts_later`]) with the database clock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostsRead {
+    /// Every host row, by id.
+    pub rows: Vec<HostRow>,
+    /// The database clock (ms since the epoch, the lease's clock) right after the rows were
+    /// read: the world coordinator's clock is re-sampled from it (`game::coordinator::StoreClock`).
+    pub store_ms: u64,
+}
+
 /// What one lease beat ([`StoreHandle::heartbeat`]) found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Beat {
@@ -994,11 +1004,11 @@ impl StoreHandle {
 
     /// Every registered host, by id.
     pub fn hosts(&self) -> Result<Vec<HostRow>, StoreError> {
-        self.ask(Request::Hosts)
+        self.ask(Request::Hosts).map(|read: HostsRead| read.rows)
     }
 
-    /// [`Self::hosts`], answered on the receiver.
-    pub fn hosts_later(&self) -> crossbeam::channel::Receiver<Result<Vec<HostRow>, StoreError>> {
+    /// [`Self::hosts`] with the database clock, answered on the receiver.
+    pub fn hosts_later(&self) -> crossbeam::channel::Receiver<Result<HostsRead, StoreError>> {
         self.ask_later(Request::Hosts)
     }
 

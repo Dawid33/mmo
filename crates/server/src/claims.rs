@@ -429,9 +429,9 @@ pub const DIRECTORY_WARN_MS: u64 = 10_000;
 /// A directory read in flight: its three plain reads, each answered on its own receiver.
 struct DirectoryRead {
     owners: Receiver<Result<Vec<(SuperRegion, i64, u64)>, StoreError>>,
-    hosts: Receiver<Result<Vec<HostRow>, StoreError>>,
+    hosts: Receiver<Result<world_store::HostsRead, StoreError>>,
     now: Receiver<Result<u64, StoreError>>,
-    got: (Option<Vec<(SuperRegion, i64, u64)>>, Option<Vec<HostRow>>, Option<u64>),
+    got: (Option<Vec<(SuperRegion, i64, u64)>>, Option<world_store::HostsRead>, Option<u64>),
 }
 
 impl DirectoryRead {
@@ -459,8 +459,8 @@ impl DirectoryRead {
         }
         match &mut self.got {
             (rows @ Some(_), hosts @ Some(_), Some(now)) => {
-                let live = live_hosts(hosts.as_ref().expect("matched"), *now);
-                Some(Ok((rows.take().expect("matched"), live, hosts.take().expect("matched"))))
+                let live = live_hosts(&hosts.as_ref().expect("matched").rows, *now);
+                Some(Ok((rows.take().expect("matched"), live, hosts.take().expect("matched").rows)))
             }
             _ => None,
         }

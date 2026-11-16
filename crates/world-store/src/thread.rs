@@ -117,7 +117,7 @@ pub(crate) enum Request {
     ClearClockAnchor(Reply<()>),
     SetSuperRegionRegions(u32, Reply<bool>),
     RegisterHost(crate::NewHost, game::CrashPolicy, Reply<crate::Registered>),
-    Hosts(Reply<Vec<crate::HostRow>>),
+    Hosts(Reply<crate::HostsRead>),
     WorldGeneration(Reply<u64>),
     Heartbeat(HostId, u64, Reply<crate::Beat>),
     DrainHost(HostId, u64, Reply<()>),

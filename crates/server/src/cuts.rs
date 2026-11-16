@@ -190,7 +190,7 @@ pub struct CutWriter {
     /// When absent world cuts were last reported.
     absent_warned: Option<Instant>,
     /// The `hosts` read an absent-cut warning waits for (who has a dirty row).
-    absent_read: Option<Answer<Vec<world_store::HostRow>>>,
+    absent_read: Option<Answer<world_store::HostsRead>>,
 }
 
 /// Why no world cut commits, as far as a host can tell (the coordinator's log says more).
@@ -511,7 +511,7 @@ impl CutWriter {
                 return;
             }
             Some(Err(TryRecvError::Empty)) => return,
-            Some(Ok(Ok(rows))) => rows,
+            Some(Ok(Ok(read))) => read.rows,
             // Unread: warned without the rows.
             Some(Ok(Err(_)) | Err(TryRecvError::Disconnected)) => Vec::new(),
         };

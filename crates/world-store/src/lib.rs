@@ -27,7 +27,7 @@ pub use counters::StoreCounters;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{
-    Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, NO_OWNER, NewHost, Registered, StoreHandle, WorldInfo,
+    Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost, Registered, StoreHandle, WorldInfo,
 };
 pub use listen::{
     CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,

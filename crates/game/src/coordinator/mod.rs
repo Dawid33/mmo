@@ -2,7 +2,8 @@
 //! its calendar, site claims (fortress / adventure exclusivity per player), embark / return /
 //! adventure validation, embark options, legends, person info, the daily calendar / site
 //! broadcasts and notices. A host talks to it only through [`HostMsg`] / [`CoordMsg`] over a
-//! [`WorldLink`]. Threadless and IO-free: time arrives as `now_ms`, saving is the caller's
+//! [`WorldLink`]. Threadless and IO-free: time arrives as `now_ms` — the store's clock in
+//! milliseconds (`clock.rs`: [`StoreClock`], [`CALENDAR_GAP_MS`]) — and saving is the caller's
 //! ([`Coordinator::take_save`] / [`Coordinator::saved`]).
 //!
 //! **Durable before visible:** a directive, or a reply granting a claim, leaves
@@ -17,12 +18,14 @@
 //! every host. Which host runs which region (`region_host`) and where each player is
 //! online (`online_on`) are rebuilt by the hosts' `Attach`es, never saved.
 
+mod clock;
 mod link;
 mod msg;
 mod state;
 mod succession;
 mod world_cut;
 
+pub use clock::*;
 pub use link::*;
 pub use msg::*;
 pub use state::*;
@@ -155,10 +158,14 @@ pub struct Coordinator {
     force_save: bool,
     /// `now_ms` of the last save taken (or of the start).
     last_save_ms: u64,
-    /// The latest `now_ms` seen.
+    /// The latest `now_ms` seen (store ms, `clock.rs`).
     clock_ms: u64,
-    /// `(now_ms, calendar tick)` the calendar was anchored at.
+    /// `(now_ms, calendar tick)` the calendar was anchored at (store ms).
     calendar_anchor: (u64, CalendarTick),
+    /// `now_ms` of the calendar's last day turn (or anchor): a `now_ms` more than
+    /// [`CALENDAR_GAP_MS`] past it is downtime, and re-anchors the calendar
+    /// ([`Self::calendar_now`]).
+    calendar_seen_ms: u64,
     /// The calendar day last broadcast.
     calendar_day: u64,
     /// The sites as last broadcast ([`sites_key`]).
@@ -207,6 +214,7 @@ impl Coordinator {
             last_save_ms: now_ms,
             clock_ms: now_ms,
             calendar_anchor,
+            calendar_seen_ms: now_ms,
             cuts: WorldCuts::default(),
             leases: LeaseWatch::default(),
             successions: SuccessionRuns::default(),
@@ -219,7 +227,9 @@ impl Coordinator {
 
     /// A coordinator restarted from its saved state: the history loaded (everyone embodied
     /// back in the abstract history until a host's [`HostMsg::Attach`]), every claimant
-    /// offline until its host says otherwise, the memo as saved.
+    /// offline until its host says otherwise, the memo as saved. Its calendar and every
+    /// count run from store time `now_ms` (the state holds no anchor or deadline yet; once it
+    /// does, a stored one goes through [`rebase_deadline`] / [`rebase_since`]).
     pub fn from_state(state: CoordinatorState, grid: SocietyGrid, now_ms: u64) -> Result<Self, HistoryLoadError> {
         let history = crate::history::persist::decode(&state.history, grid)?;
         let mut c = Coordinator::new(history, now_ms);
@@ -267,10 +277,21 @@ impl Coordinator {
         self.region_host.get(&rc).copied()
     }
 
-    /// The calendar at `now_ms`: the anchor's tick plus one per `TICK_RATE` ms since.
+    /// The calendar at `now_ms` (store ms): the anchor's tick plus one per `TICK_RATE` ms
+    /// since — unless `now_ms` is more than [`CALENDAR_GAP_MS`] past the last day turn
+    /// (`calendar_seen_ms`): that was downtime, not play, and is not caught up — the calendar
+    /// stands at the history's own `now` (where the next [`Self::maintain`] re-anchors it).
     pub fn calendar_now(&self, now_ms: u64) -> CalendarTick {
+        if self.calendar_gap(now_ms) {
+            return self.history.now();
+        }
         let (ms, tick) = self.calendar_anchor;
         CalendarTick(tick.0 + now_ms.saturating_sub(ms) / crate::TICK_RATE)
+    }
+
+    /// Whether `now_ms` lies more than [`CALENDAR_GAP_MS`] past the calendar's last day turn.
+    fn calendar_gap(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.calendar_seen_ms) > CALENDAR_GAP_MS
     }
 
     /// Apply one message of host `host` (the ordinal its link is for).
@@ -451,13 +472,22 @@ impl Coordinator {
     /// services, moved here.
     pub fn maintain(&mut self, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
+        if self.calendar_gap(now_ms) {
+            // Downtime: the calendar goes on from where the history stands.
+            log::info!(
+                "coordinator: the calendar was silent {} ms (over {CALENDAR_GAP_MS}): re-anchored, not caught up",
+                now_ms.saturating_sub(self.calendar_seen_ms)
+            );
+            self.calendar_anchor = (now_ms, self.history.now());
+            self.calendar_seen_ms = now_ms;
+        }
         let to = self.calendar_now(now_ms);
         if to > self.history.now() {
             self.dirty_since_save = true;
         }
         self.history.advance(to);
         self.push_directives();
-        self.broadcast_daily(to);
+        self.broadcast_daily(to, now_ms);
         for (region, line) in self.history.take_notices() {
             let to = self.region_host.get(&region).map_or(Target::Every, |h| Target::Host(*h));
             self.push(to, CoordMsg::Notice { region, line });
@@ -655,13 +685,15 @@ impl Coordinator {
         });
     }
 
-    /// At a calendar day's turn: the calendar, and the sites if they changed.
-    fn broadcast_daily(&mut self, now: CalendarTick) {
+    /// At a calendar day's turn (at store `now_ms`): the calendar, and the sites if they
+    /// changed. The turn is the calendar's sign of life ([`Self::calendar_now`]'s gap).
+    fn broadcast_daily(&mut self, now: CalendarTick, now_ms: u64) {
         let day = now.0 / TICKS_PER_DAY;
         if self.calendar_day == day {
             return;
         }
         self.calendar_day = day;
+        self.calendar_seen_ms = self.calendar_seen_ms.max(now_ms);
         self.push(Target::Every, CoordMsg::Calendar(now));
         let key = sites_key(&self.history);
         if key != self.sites_key {

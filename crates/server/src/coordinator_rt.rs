@@ -923,8 +923,12 @@ pub struct CoordinatorRuntime {
     /// Test hook ([`CoordinatorThread::hold_hosts_reads`]).
     #[cfg(feature = "test-hooks")]
     hold_hosts_reads: Arc<AtomicBool>,
-    /// The core's `now_ms` 0 (its calendar was anchored there).
+    /// The monotonic clock's zero: the instant of the start's store-clock sample
+    /// ([`CoordinatorStart::store_time`]).
     started: Instant,
+    /// The core's clock: store ms, extrapolated by the monotonic clock between samples (the
+    /// start's, then each `hosts` read's), never backwards (Elastic 2a, decision 6).
+    clock: game::coordinator::StoreClock,
     /// No save is taken before this `now_ms` (after a failure).
     retry_at_ms: u64,
     failed_in_a_row: u32,
@@ -932,8 +936,8 @@ pub struct CoordinatorRuntime {
     cuts: Option<WorldCuts>,
     /// `now_ms` the expected hosts were last read at.
     hosts_read_ms: Option<u64>,
-    /// The hosts read in flight, with the `now_ms` it was issued at.
-    hosts_rx: Option<(u64, Answer<Vec<world_store::HostRow>>)>,
+    /// The hosts read in flight, with the `now_ms` and the monotonic ms it was issued at.
+    hosts_rx: Option<(u64, u64, Answer<world_store::HostsRead>)>,
     /// The decision being recorded (one at a time: the core runs one cut at a time).
     recording: Option<Recording>,
     /// The world cut whose begin was last sent to the store (`record_cut_begin`, Elastic 1
@@ -1010,6 +1014,9 @@ impl CoordinatorRuntime {
         #[cfg(feature = "test-hooks")]
         let hold_hosts_reads = Arc::new(AtomicBool::new(false));
         let fence = start.fence;
+        let (store_ms, started) = start.store_time;
+        let mut clock = game::coordinator::StoreClock::default();
+        clock.sample(store_ms, 0);
         let mut core = start.coordinator;
         if start.source.needs_save() {
             core.request_save();
@@ -1037,7 +1044,8 @@ impl CoordinatorRuntime {
             hold_decision_retries: hold_decision_retries.clone(),
             #[cfg(feature = "test-hooks")]
             hold_hosts_reads: hold_hosts_reads.clone(),
-            started: Instant::now(),
+            started,
+            clock,
             retry_at_ms: 0,
             failed_in_a_row: 0,
             cuts,
@@ -1074,8 +1082,14 @@ impl CoordinatorRuntime {
         }
     }
 
-    fn now_ms(&self) -> u64 {
+    /// The process's monotonic clock, ms since [`Self::started`].
+    fn mono_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
+    }
+
+    /// The core's `now_ms`: store time ([`game::coordinator::StoreClock`]).
+    fn now_ms(&self) -> u64 {
+        self.clock.now(self.mono_ms())
     }
 
     fn run(mut self, stop: Receiver<Stop>, #[cfg(feature = "test-hooks")] inspect: Receiver<Inspect>) -> ServerExit {
@@ -1347,11 +1361,16 @@ impl CoordinatorRuntime {
         if self.hold_hosts_reads.load(Ordering::SeqCst) && self.hosts_rx.is_some() {
             return;
         }
-        if let Some((issued_ms, rx)) = &self.hosts_rx {
-            let issued_ms = *issued_ms;
+        if let Some((issued_ms, issued_mono, rx)) = &self.hosts_rx {
+            let (issued_ms, issued_mono) = (*issued_ms, *issued_mono);
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok(rows)) => {
+                Ok(Ok(world_store::HostsRead { rows, store_ms })) => {
+                    // The store's clock, taken as read halfway between the issue and now, so
+                    // now is half the round trip later (sampled at this moment: nothing handed
+                    // out before it is undercut). The core's `now` follows from the next pass.
+                    let mono = self.mono_ms();
+                    self.clock.sample(store_ms + mono.saturating_sub(issued_mono) / 2, mono);
                     // A host that left and registered again (another boot) is expected again.
                     self.core.set_host_boots(rows.iter().map(|r| (r.id, r.boot)).collect());
                     // A row marked dead (a takeover declared it) runs nothing: not expected
@@ -1391,7 +1410,7 @@ impl CoordinatorRuntime {
         }
         if self.hosts_read_ms.is_none_or(|at| now >= at + WORLD_CUT_HOSTS_REFRESH_MS) {
             self.hosts_read_ms = Some(now);
-            self.hosts_rx = Some((now, self.store.hosts_later()));
+            self.hosts_rx = Some((now, self.mono_ms(), self.store.hosts_later()));
         }
     }
 

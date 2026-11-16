@@ -831,8 +831,9 @@ macro_rules! engine_rows {
 
             /// Every host row, by id, each with whether it holds land ([`HostRow::owns_land`]) and
             /// whether an open succession has it as predecessor ([`HostRow::succeeding`]); the
-            /// subqueries read without locks.
-            pub(crate) async fn hosts(pool: &Pool) -> Result<Vec<HostRow>, StoreError> {
+            /// subqueries read without locks. With the database clock read right after the rows
+            /// ([`crate::HostsRead::store_ms`]: the coordinator's clock is the store's).
+            pub(crate) async fn hosts(pool: &Pool) -> Result<crate::HostsRead, StoreError> {
                 let sql = format!(
                     "SELECT id, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, \
                      seen_ms, name, drain_at_ms - {NOW_MS}, \
@@ -843,7 +844,8 @@ macro_rules! engine_rows {
                      FROM hosts ORDER BY id"
                 );
                 let rows = sqlx::query(&sql).fetch_all(pool).await?;
-                rows.into_iter()
+                let rows = rows
+                    .into_iter()
                     .map(|r| {
                         Ok(HostRow {
                             id: host_id(r.try_get(0)?)?,
@@ -863,7 +865,9 @@ macro_rules! engine_rows {
                             succeeding: r.try_get(14)?,
                         })
                     })
-                    .collect()
+                    .collect::<Result<Vec<HostRow>, StoreError>>()?;
+                let store_ms = db_now_ms(pool).await?;
+                Ok(crate::HostsRead { rows, store_ms })
             }
 
             /// One lease beat. UNFENCED on purpose: one statement over the caller's own `hosts` row.

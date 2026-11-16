@@ -844,9 +844,14 @@ impl World {
     }
 
     /// `ms` of wall time pass with no region tick: the calendar and the unload grace move.
+    /// The clock moves a calendar day at a time — one jump past `CALENDAR_GAP_MS` would be
+    /// downtime, which the coordinator does not catch up.
     fn wait(&mut self, ms: u64) {
-        self.now_ms += ms;
-        self.manager.maintain(self.now_ms);
+        let end = self.now_ms + ms;
+        while self.now_ms < end {
+            self.now_ms = (self.now_ms + DAY_MS).min(end);
+            self.manager.maintain(self.now_ms);
+        }
         self.settle();
     }
 

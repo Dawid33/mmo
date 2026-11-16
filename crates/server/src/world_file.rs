@@ -372,8 +372,13 @@ impl CoordinatorSource {
 
 /// The world coordinator to start ([`crate::coordinator_rt::CoordinatorRuntime`]).
 pub struct CoordinatorStart {
-    /// Its calendar anchored at `now_ms` 0: the runtime's clock starts with it.
+    /// Its calendar anchored at [`Self::store_time`]'s store ms: the runtime's clock
+    /// (`game::coordinator::StoreClock`) starts there.
     pub coordinator: game::Coordinator,
+    /// The database clock sampled right after the claim (ms since the epoch), and when: the
+    /// core's clock is the store's (Elastic 2a); the runtime extrapolates it by the
+    /// monotonic clock from that instant until its first `hosts` read re-samples it.
+    pub store_time: (u64, Instant),
     pub source: CoordinatorSource,
     /// The coordinator row's fence, claimed BEFORE the state was loaded: a coordinator
     /// still running can commit nothing after that load, so the state loaded is the
@@ -410,11 +415,15 @@ pub fn ensure_coordinator_state(
     // Claim first, then load (see `CoordinatorStart::fence`).
     let fence = store.claim_coordinator().map_err(|e| format!("claiming the world coordinator: {e}"))?;
     log::info!("[coordinator] claimed the world coordinator (epoch {})", fence.epoch);
+    let store_ms = store.db_now_ms().map_err(|e| format!("reading the world store's clock: {e}"))?;
+    let store_time = (store_ms, Instant::now());
     if let Some(bytes) = store.load_coordinator().map_err(|e| e.to_string())? {
         let state = game::CoordinatorState::decode(&bytes)
             .map_err(|e| format!("the world store's coordinator state does not load: {e}"))?;
-        match game::Coordinator::from_state(state, grid.clone(), 0) {
-            Ok(coordinator) => return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Stored, fence })),
+        match game::Coordinator::from_state(state, grid.clone(), store_ms) {
+            Ok(coordinator) => {
+                return Ok(Some(CoordinatorStart { coordinator, store_time, source: CoordinatorSource::Stored, fence }));
+            }
             Err(e) if replaceable(&e) => {
                 keep_replaced("coordinator state", &e, &bytes, sqlite_db.map(coordinator_backup_path))?
             }
@@ -424,17 +433,18 @@ pub fn ensure_coordinator_state(
         match persist::decode(&bytes, grid.clone()) {
             Ok(_) => {
                 let state = game::CoordinatorState { history: bytes, claims: Vec::new(), memo: Vec::new() };
-                let coordinator = game::Coordinator::from_state(state, grid, 0)
+                let coordinator = game::Coordinator::from_state(state, grid, store_ms)
                     .map_err(|e| format!("the world store's history does not load: {e}"))?;
                 log::info!("[server] migrating the world's history row into the coordinator's state");
-                return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Migrated, fence }));
+                return Ok(Some(CoordinatorStart { coordinator, store_time, source: CoordinatorSource::Migrated, fence }));
             }
             Err(e) if replaceable(&e) => keep_replaced("history", &e, &bytes, sqlite_db.map(history_backup_path))?,
             Err(e) => return Err(format!("the world store's history does not load: {e}")),
         }
     }
     Ok(bootstrap_history(map, grid).map(|history| CoordinatorStart {
-        coordinator: game::Coordinator::new(history, 0),
+        coordinator: game::Coordinator::new(history, store_ms),
+        store_time,
         source: CoordinatorSource::Bootstrapped,
         fence,
     }))

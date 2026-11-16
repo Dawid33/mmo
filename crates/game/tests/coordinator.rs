@@ -3716,3 +3716,50 @@ fn an_id_pruned_from_the_read_is_forgotten() {
     c.observe_leases(&rows, 400, 400);
     assert!(c.host_mentions(h(0)).contains(&"boots"), "attached: kept");
 }
+
+/// Elastic 2a Task 3: the core's clock is the store's, and downtime is not caught up. A core run
+/// to day 3 on store time, then fed a store clock an hour later (the coordinator was paused, or
+/// gone and rebuilt): the calendar re-anchors at the history's own `now` instead of running the
+/// hour's 72 000 ticks at once — at most one `maintain` step moves it. Afterwards it runs on as
+/// before: one tick per `TICK_RATE`, a day's turn every `DAY_MS`.
+#[test]
+fn downtime_is_not_caught_up() {
+    use game::history::calendar::DAY_MS;
+    const T0: u64 = 1_763_000_000_000;
+    let (hist, _, _) = world();
+    let mut c = Coordinator::new(hist, T0);
+    let start = c.history().now();
+    let mut now = T0;
+    while c.history().now().0 < start.0 + 3 * TICKS_PER_DAY {
+        now += 1_000;
+        c.maintain(now);
+    }
+    c.request_save();
+    let state = c.take_save().expect("asked for");
+    c.saved();
+    c.take_msgs();
+    let at_save = c.history().now();
+    let later = now + 3_600_000;
+
+    // The same core, its store clock an hour on.
+    c.maintain(later);
+    let moved = c.history().now().0 - at_save.0;
+    assert!(moved <= 1, "an hour of downtime is not caught up: the calendar moved {moved} ticks");
+    assert!(c.calendar_now(later).0 - at_save.0 <= 1);
+    // It runs on from there.
+    c.maintain(later + 7 * game::TICK_RATE);
+    assert_eq!(c.history().now().0, at_save.0 + moved + 7, "one tick per TICK_RATE after the re-anchor");
+    let day = c.history().now().0 / TICKS_PER_DAY;
+    let mut t = later + 7 * game::TICK_RATE;
+    while c.history().now().0 / TICKS_PER_DAY == day {
+        t += 1_000;
+        c.maintain(t);
+    }
+    assert!(t - later <= DAY_MS + 1_000, "the next day turns within a day of the re-anchor");
+
+    // Rebuilt from the saved state, the hour later.
+    let mut c2 = Coordinator::from_state(state, grid(), later).expect("state loads");
+    let loaded = c2.history().now();
+    c2.maintain(later);
+    assert!(c2.history().now().0 - loaded.0 <= 1, "a rebuilt core does not catch up either");
+}
