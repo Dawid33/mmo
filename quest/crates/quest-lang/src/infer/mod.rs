@@ -736,8 +736,7 @@ impl<'k> Infer<'k> {
                 .host
                 .events
                 .get(i as usize)
-                .cloned()
-                .unwrap_or_default(),
+                .map_or(String::new(), |e| e.name.clone()),
         }
     }
 

@@ -49,7 +49,7 @@ impl HostNames {
         }
         for (i, e) in host.events.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else { break };
-            names.events.entry(e.clone()).or_insert(i);
+            names.events.entry(e.name.clone()).or_insert(i);
         }
         names
     }

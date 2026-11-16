@@ -40,7 +40,7 @@ impl Runner {
                 mem_bytes,
                 epoch: 1,
                 host_api_version: api.version,
-                events: api.events,
+                events: api.events.into_iter().map(|e| e.name).collect(),
             },
         )?;
         Ok(Runner {

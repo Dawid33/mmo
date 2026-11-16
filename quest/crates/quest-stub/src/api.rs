@@ -83,9 +83,9 @@ pub fn stub_api() -> HostApi {
             event("Item", &[("kind", Str), ("count", Int)]),
         ],
         events: vec![
-            "PlayerClicked".into(),
-            "PlayerEntered".into(),
-            "ItemDelivered".into(),
+            event("PlayerClicked", &[("player", player())]),
+            event("PlayerEntered", &[("player", player())]),
+            event("ItemDelivered", &[("player", player()), ("item", item())]),
         ],
         fns: vec![
             f(

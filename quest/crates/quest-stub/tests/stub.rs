@@ -70,7 +70,7 @@ fn stub_api_is_pinned() {
     assert_eq!(api.version, 1);
     let mut names: Vec<String> = Vec::new();
     names.extend(api.structs.iter().map(|x| format!("struct {}", x.name)));
-    names.extend(api.events.iter().map(|x| format!("event {x}")));
+    names.extend(api.events.iter().map(|x| format!("event {}", x.name)));
     names.extend(api.errors.iter().map(|x| format!("error {}", x.name)));
     for f in &api.fns {
         let owner = f

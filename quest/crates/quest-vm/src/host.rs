@@ -31,7 +31,8 @@ pub trait Host {
 pub struct HostApi {
     pub version: u32,
     pub structs: Vec<HostStruct>,
-    pub events: Vec<String>,
+    /// The events the host delivers, with their fields (a handler's parameter, `emit`'s argument).
+    pub events: Vec<HostStruct>,
     pub fns: Vec<HostFn>,
     pub errors: Vec<HostError>,
 }

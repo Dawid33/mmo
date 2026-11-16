@@ -198,9 +198,12 @@ impl Printer<'_> {
                     .get(i as usize)
                     .map_or("?", |s| s.name.as_str()),
             ),
-            Ty::HostEvent(i) => {
-                out.push_str(self.host.events.get(i as usize).map_or("?", String::as_str))
-            }
+            Ty::HostEvent(i) => out.push_str(
+                self.host
+                    .events
+                    .get(i as usize)
+                    .map_or("?", |e| e.name.as_str()),
+            ),
             Ty::Var(_) => out.push('_'),
         }
     }
