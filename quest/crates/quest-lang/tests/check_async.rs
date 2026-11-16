@@ -135,6 +135,18 @@ fn unused_promise() {
     );
 }
 
+/// Regression (final review M1): `let _ = p` of a promise already held would detach it, and a later
+/// `await p` faulted; a promise is detached only where it is created.
+#[test]
+fn discarding_a_held_promise() {
+    let main = r#"fn main():
+    let p = world.set("k", 1)
+    let _ = p
+    await p else ()
+"#;
+    assert_eq!(main_diags(main), vec![d("unused-promise", "main.qs", 3)]);
+}
+
 #[test]
 fn get_needs_a_type() {
     let main = r#"fn a():

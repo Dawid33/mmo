@@ -32,6 +32,9 @@ impl Infer<'_> {
                     }
                     None => found,
                 };
+                if self.is_discard(*local) && self.is_place(value) {
+                    self.held_promise(b, ty, value.span);
+                }
                 self.set_local(*local, ty);
                 b.bindings.push(*local);
                 false

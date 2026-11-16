@@ -252,6 +252,8 @@ enum Class {
     Unused,
     /// The type of a local assigned with `=`: not a reference (`ref-reassign`).
     NotRefLocal,
+    /// A place bound to `_`: not a promise (`unused-promise`; a promise is detached where it is created).
+    HeldPromise,
 }
 
 /// A requirement on a type checked at the end of the body, once inference had every chance to decide it.
@@ -800,6 +802,21 @@ impl<'k> Infer<'k> {
                     "ref-reassign",
                     "a reference cannot be reassigned; bind a new one with `let`".to_string(),
                 )
+            }
+            Class::HeldPromise => {
+                if !matches!(shape, Ty::Promise(_)) {
+                    return None;
+                }
+                let mut d = error(
+                    "unused-promise",
+                    "a promise already held cannot be detached: `await` it".to_string(),
+                    file,
+                    c.at,
+                );
+                d.notes.push(
+                    "detach a promise where it is created: `let _ = world.set(…)`".to_string(),
+                );
+                return Some(d);
             }
             Class::Unused => {
                 if !matches!(shape, Ty::Promise(_)) {

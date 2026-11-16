@@ -86,7 +86,9 @@ queues an event (the queue holds 4: a warning while busy, then the newest is dro
 **Promises.** Host reads and writes that answer later (`world.get`, `world.set`, `world.compare_and_set`,
 `chest.take`, ...) return a promise; `await p` parks the handler until it resolves (other events run
 meanwhile) and yields a result you handle like any fallible call (`await p?`, `await p else 0`, `match await p:`).
-Hold a promise in a local to await it later; `await all([a, b])` awaits a list. A promise that is not a
+Hold a promise in a local to await it later; `await all([a, b])` awaits a list. `let _ = world.set(…)`
+lets a promise run detached; only a promise being created can be detached (`let _ = p` of one already held
+is `unused-promise`). A promise that is not a
 direct host call (a parameter, field, list element, global, a function's return) carries the union of
 **every** host error (decision 21): handle `Err(_)` there. Every awaited result (and `await all`) can also
 fail with the **base promise errors** `Timeout`, `Lost` and `WrongType`, which the VM makes itself whatever

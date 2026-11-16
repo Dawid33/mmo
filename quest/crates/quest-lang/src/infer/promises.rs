@@ -26,8 +26,10 @@
 //! and is the fallible `T raises S`, `S` as above (always fallible). `await all([a, b])` is `list[T]`,
 //! fallible with U. Every `await` is kept for code generation (`Typed::awaits`).
 //!
-//! **Unused promises** (decision 3): a `Promise` as an expression statement is `unused-promise`; `let _ = p`
-//! lets it run detached.
+//! **Unused promises** (decision 3): a `Promise` as an expression statement is `unused-promise`;
+//! `let _ = world.set(…)` lets it run detached. Only a promise being created is detached: `let _ = p` of a
+//! place (a local, field, element or global already holding it) is `unused-promise` too, else a later
+//! `await p` would fault.
 //!
 //! **Handlers** (spec §7): an `@on(E)` function takes exactly one parameter, the event (typed by the
 //! decorator, or annotated `E`), and returns nothing; else `handler-signature`. Several handlers may take one
@@ -287,6 +289,25 @@ impl Infer<'_> {
     }
 
     /// An expression statement: a promise there is dropped (`unused-promise`, checked once its type is known).
+    /// `let _ = x` of a place `x`: `x` is not a promise (`unused-promise`). Only a promise just created
+    /// (`let _ = world.set(…)`) is detached; one already held would be detached under its holder.
+    pub(super) fn held_promise(&mut self, b: &mut Body, ty: TyId, at: Span) {
+        b.checks.push(Check {
+            ty,
+            class: Class::HeldPromise,
+            op: "",
+            at,
+        });
+    }
+
+    /// Whether `l` is `_`.
+    pub(super) fn is_discard(&self, l: LocalId) -> bool {
+        self.krate
+            .locals
+            .get(l.0 as usize)
+            .is_some_and(|x| x.name == "_")
+    }
+
     pub(super) fn unused(&mut self, b: &mut Body, ty: TyId, at: Span) {
         b.checks.push(Check {
             ty,
