@@ -295,7 +295,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 /// The candidate nearest to `name` within [`SUGGEST_DISTANCE_MAX`] edits: smallest distance, then
 /// alphabetical.
-fn suggest<'n>(name: &str, candidates: impl IntoIterator<Item = &'n str>) -> Option<&'n str> {
+pub(crate) fn suggest<'n>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'n str>,
+) -> Option<&'n str> {
     if name.len() > SUGGEST_LEN_MAX {
         return None;
     }

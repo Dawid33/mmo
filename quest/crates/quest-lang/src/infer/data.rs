@@ -339,7 +339,9 @@ impl Infer<'_> {
                 | Ty::List(_)
                 | Ty::Dict(_, _)
                 | Ty::Promise(_)
-                | Ty::Ref(_) => {
+                | Ty::Ref(_)
+                | Ty::Fallible(_, _)
+                | Ty::Caught(_) => {
                     return false;
                 }
             }

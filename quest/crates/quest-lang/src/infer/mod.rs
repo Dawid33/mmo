@@ -43,16 +43,20 @@
 //!   it applies to; if that is still unknown there, it is `needs-annotation` (at the parameter when it is
 //!   one).
 //!
+//! - **Errors** (`errors.rs`): error names and their one data shape, error sets (inferred callee-first,
+//!   or pinned), the must-handle rule, `raise`, `?`, `else`, the `error-typo` warning.
+//!
 //! **Not typed here yet** (each such node's operands are typed, then joined to the error type, so they
-//! produce no diagnostic of their own): `raise`, `?`, `else`, `Ok`, `Err` and error names (Task 22);
-//! patterns, whose bindings have the error type (Task 23); `await` (Task 24).
+//! produce no diagnostic of their own): patterns, whose bindings have the error type, and the `match`
+//! scrutinee's relation to them (Task 23); `await` (Task 24).
 //!
 //! Files: `expr.rs` (expressions and operators), `stmt.rs` (statements, blocks, reachability), `call.rs`
 //! (calls: functions, methods, the prelude, the host), `data.rs` (user types, constructions, fields,
-//! collections); this file holds the driver, unification and the end of a body.
+//! collections), `errors.rs` (errors); this file holds the driver, unification and the end of a body.
 
 mod call;
 mod data;
+mod errors;
 mod expr;
 mod stmt;
 
@@ -73,6 +77,8 @@ pub struct Sig {
     pub receiver: Option<(Receiver, TyId)>,
     pub params: Vec<TyId>,
     pub ret: TyId,
+    /// The error set callers see (sorted names; empty: it cannot fail): the pinned set, or the inferred one.
+    pub raises: Vec<String>,
 }
 
 /// The typed program: what code generation reads. Every type here is final (no [`Ty::Var`]); something
@@ -92,6 +98,9 @@ pub struct Typed {
     pub methods: BTreeMap<ExprId, Method>,
     /// Functions and top-level `let`s, callee-first.
     pub order: Vec<DefId>,
+    /// Every error name of the program, sorted (the VM's one `Error` enum: a name's variant is its index
+    /// here), with its data fields in order (none for a data-less error).
+    pub errors: BTreeMap<String, Vec<(String, TyId)>>,
 }
 
 impl Typed {
@@ -124,8 +133,12 @@ impl Typed {
             });
         }
         params.extend(sig.params.iter().map(|t| p.print(*t)));
-        // Task 22 appends ` raises A | B` here.
-        format!("fn({}) -> {}", params.join(", "), p.print(sig.ret))
+        let mut out = format!("fn({}) -> {}", params.join(", "), p.print(sig.ret));
+        if !sig.raises.is_empty() {
+            out.push_str(" raises ");
+            out.push_str(&sig.raises.join(" | "));
+        }
+        out
     }
 }
 
@@ -149,13 +162,20 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         host_events: Vec::new(),
         early_keys: None,
         bad_keys: BTreeSet::new(),
+        errors: BTreeMap::new(),
+        named: BTreeSet::new(),
+        raised: Vec::new(),
         diags,
     };
     inf.user_types();
+    inf.declared_errors();
     inf.annotated_globals();
     inf.self_typed_globals(&plan.cycles);
     inf.in_cycle.extend(plan.cycles.iter().flatten());
     let order = inf.run(plan.order);
+    inf.typos();
+    let sets: Vec<Vec<String>> = inf.sigs.values().map(|s| s.raises.clone()).collect();
+    let errors = inf.error_table(&sets);
     let typed = Typed {
         types: inf.types,
         exprs: inf.exprs,
@@ -164,6 +184,7 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         globals: inf.globals,
         methods: inf.methods,
         order,
+        errors,
     };
     (typed, inf.diags)
 }
@@ -219,6 +240,14 @@ struct Body<'k> {
     /// The functions and unannotated top-level `let`s this body reached before they were typed, with the
     /// earliest site: the body is stopped and typed again after them.
     waits: BTreeMap<DefId, Span>,
+    /// The error names this body raises or propagates, each with its first site.
+    raises: BTreeMap<String, Span>,
+    /// Error shapes this body fixed (new names, generic fields used), kept when it finishes.
+    shapes: BTreeMap<String, errors::ErrShape>,
+    /// The error names raised by name here, and where (for `error-typo`).
+    raised: Vec<(String, Span)>,
+    /// The error names this body's patterns match.
+    matched: Vec<String>,
 }
 
 impl<'k> Body<'k> {
@@ -236,6 +265,10 @@ impl<'k> Body<'k> {
             conflicted: BTreeSet::new(),
             diags: Vec::new(),
             waits: BTreeMap::new(),
+            raises: BTreeMap::new(),
+            shapes: BTreeMap::new(),
+            raised: Vec::new(),
+            matched: Vec::new(),
         }
     }
 }
@@ -265,6 +298,12 @@ struct Infer<'k> {
     early_keys: Option<Vec<(TyId, String, Span)>>,
     /// The key types reported as `bad-dict-key` in the body being typed.
     bad_keys: BTreeSet<TyId>,
+    /// Every error name's data shape (see `errors.rs`).
+    errors: BTreeMap<String, errors::ErrShape>,
+    /// The error names matched in a pattern or declared (set members, pinned names, the host's).
+    named: BTreeSet<String>,
+    /// Every raise of an error by name: the name, the file, the site.
+    raised: Vec<(String, String, Span)>,
     diags: Vec<Diagnostic>,
 }
 
@@ -458,6 +497,8 @@ impl<'k> Infer<'k> {
             self.bind(n, TyId::NEVER);
         }
         self.finish(&mut b, Some(d));
+        let raised = std::mem::take(&mut b.raises);
+        let raises = self.fn_raises(&mut b, f.raises.as_ref(), raised);
         let ret = self.zonk(b.ret);
         let receiver = receiver.map(|(r, t)| (r, self.zonk(t)));
         let params = params.into_iter().map(|t| self.zonk(t)).collect();
@@ -467,6 +508,7 @@ impl<'k> Infer<'k> {
                 receiver,
                 params,
                 ret,
+                raises,
             },
         );
         self.diags.append(&mut b.diags);
@@ -576,6 +618,7 @@ impl<'k> Infer<'k> {
                 *slot = ty;
             }
         }
+        self.commit_errors(b);
     }
 
     /// A deferred check of `c.ty` (now `ty`): its diagnostic, if it fails. An unknown type passes (it is
@@ -728,7 +771,9 @@ impl<'k> Infer<'k> {
                 (Ty::Never, _) | (_, Ty::Never) => {}
                 (Ty::Var(n), _) => ok &= self.bind_checked(n, b),
                 (_, Ty::Var(n)) => ok &= self.bind_checked(n, a),
-                (x, y) if std::mem::discriminant(&x) == std::mem::discriminant(&y) => {
+                // The same head (constructor and any data that is not a child type: a fallible result's
+                // error set) with children: unify the children.
+                (x, y) if x.with_children(&[]) == y.with_children(&[]) => {
                     let (xs, ys) = (x.children(), y.children());
                     if xs.is_empty() || xs.len() != ys.len() {
                         ok = false;

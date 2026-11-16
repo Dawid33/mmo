@@ -10,6 +10,13 @@
 //!   Compatible with every type, like `Error`, but it is not a mistake.
 //!
 //! [`Ty::Var`] is an inference variable; no final type holds one (see `infer`).
+//!
+//! Errors (spec §5.7) add two types. An **error set** is a sorted, deduplicated list of error names, interned
+//! as a [`SetId`] (never empty where a type holds one).
+//! - [`Ty::Fallible`]: the result of a fallible expression — a call of a function with a non-empty error set,
+//!   an awaited host promise that raises. It is never a value (plan decision 2): it exists only where it is
+//!   produced and is consumed there by `?`, `else` or a `match`.
+//! - [`Ty::Caught`]: a caught error (`else err:`), one of the set's names with its data.
 
 use crate::hir::{Crate, DefId};
 use quest_vm::host::HostApi;
@@ -28,6 +35,10 @@ impl TyId {
     pub const BOOL: TyId = TyId(5);
     pub const STR: TyId = TyId(6);
 }
+
+/// An interned error set: an index into [`Types`]' sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SetId(pub u32);
 
 /// The simple types, in the order of their fixed ids.
 const FIXED: [Ty; 7] = [
@@ -64,13 +75,19 @@ pub enum Ty {
     HostEvent(u32),
     /// An inference variable.
     Var(u32),
+    /// A fallible result: a `T`, or one of the set's errors.
+    Fallible(TyId, SetId),
+    /// A caught error: one of the set's errors.
+    Caught(SetId),
 }
 
 impl Ty {
     /// The types this one is made of, in order.
     pub fn children(self) -> Vec<TyId> {
         match self {
-            Ty::List(t) | Ty::Option(t) | Ty::Promise(t) | Ty::Ref(t) => vec![t],
+            Ty::List(t) | Ty::Option(t) | Ty::Promise(t) | Ty::Ref(t) | Ty::Fallible(t, _) => {
+                vec![t]
+            }
             Ty::Dict(k, v) => vec![k, v],
             _ => Vec::new(),
         }
@@ -85,6 +102,7 @@ impl Ty {
             Ty::Promise(_) => Ty::Promise(at(0)),
             Ty::Ref(_) => Ty::Ref(at(0)),
             Ty::Dict(_, _) => Ty::Dict(at(0), at(1)),
+            Ty::Fallible(_, set) => Ty::Fallible(at(0), set),
             other => other,
         }
     }
@@ -97,6 +115,9 @@ pub struct Types {
     ids: BTreeMap<Ty, TyId>,
     /// By id: whether the type holds no variable, so walks over types stop there.
     ground: Vec<bool>,
+    /// The error sets, by [`SetId`].
+    sets: Vec<Vec<String>>,
+    set_ids: BTreeMap<Vec<String>, SetId>,
 }
 
 impl Default for Types {
@@ -111,6 +132,8 @@ impl Types {
             tys: Vec::new(),
             ids: BTreeMap::new(),
             ground: Vec::new(),
+            sets: Vec::new(),
+            set_ids: BTreeMap::new(),
         };
         for ty in FIXED {
             types.intern(ty);
@@ -135,6 +158,27 @@ impl Types {
         self.ground.get(id.0 as usize).copied().unwrap_or(true)
     }
 
+    /// Interns an error set (any order, duplicates allowed).
+    pub fn set(&mut self, names: impl IntoIterator<Item = String>) -> SetId {
+        let names: Vec<String> = names
+            .into_iter()
+            .collect::<std::collections::BTreeSet<String>>()
+            .into_iter()
+            .collect();
+        if let Some(id) = self.set_ids.get(&names) {
+            return *id;
+        }
+        let id = SetId(u32::try_from(self.sets.len()).unwrap_or(u32::MAX));
+        self.sets.push(names.clone());
+        self.set_ids.insert(names, id);
+        id
+    }
+
+    /// An error set's names, sorted; an unknown id is empty.
+    pub fn names(&self, id: SetId) -> &[String] {
+        self.sets.get(id.0 as usize).map_or(&[], Vec::as_slice)
+    }
+
     /// What `id` is; an unknown id is the error type.
     pub fn get(&self, id: TyId) -> Ty {
         self.tys.get(id.0 as usize).copied().unwrap_or(Ty::Error)
@@ -145,7 +189,8 @@ impl Types {
 const PRINT_DEPTH_MAX: u32 = 16;
 
 /// Prints types as source writes them (`int`, `list[int]`, `dict[str, int]`, `Option[int]`, `&Ledger`,
-/// `npc::Ledger`); the checker's own types print as `{error}`, `!` (never) and `_` (unknown).
+/// `npc::Ledger`); the checker's own types print as `{error}`, `!` (never) and `_` (unknown); a fallible result
+/// as `int raises A | B`, a caught error as `error[A | B]`.
 pub struct Printer<'a> {
     pub types: &'a Types,
     pub krate: &'a Crate,
@@ -205,6 +250,16 @@ impl Printer<'_> {
                     .map_or("?", |e| e.name.as_str()),
             ),
             Ty::Var(_) => out.push('_'),
+            Ty::Fallible(t, set) => {
+                self.write(t, depth.saturating_add(1), out);
+                out.push_str(" raises ");
+                out.push_str(&self.types.names(set).join(" | "));
+            }
+            Ty::Caught(set) => {
+                out.push_str("error[");
+                out.push_str(&self.types.names(set).join(" | "));
+                out.push(']');
+            }
         }
     }
 }

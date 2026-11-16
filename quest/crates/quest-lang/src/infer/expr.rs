@@ -6,8 +6,16 @@ use crate::hir::{DefKind, Expr, ExprKind, FStrPart, HostItem, PRELUDE, Prelude};
 use crate::ty::{Ty, TyId};
 
 impl Infer<'_> {
-    /// Types an expression and records its type.
+    /// Types an expression and records its type. A fallible result met here is not handled
+    /// (`unhandled-fallible`); its value type is returned.
     pub(super) fn expr(&mut self, b: &mut Body, e: &Expr) -> TyId {
+        let ty = self.expr_fallible(b, e);
+        self.handled(b, ty, e.span)
+    }
+
+    /// Types an expression in a position that consumes a fallible result (`?`, `else`, a `match`
+    /// scrutinee): its type may be `T raises S`.
+    pub(super) fn expr_fallible(&mut self, b: &mut Body, e: &Expr) -> TyId {
         let ty = self.expr_kind(b, e);
         self.record(b, e, ty);
         ty
@@ -144,8 +152,7 @@ impl Infer<'_> {
                     let t = self.fresh();
                     self.types.intern(Ty::Option(t))
                 }
-                // Results exist only in `match` (Task 22).
-                Prelude::Ok | Prelude::Err => TyId::ERROR,
+                Prelude::Ok | Prelude::Err => self.no_result(b, e.span, *p),
                 Prelude::Option => self.not_a_value(
                     b,
                     e,
@@ -160,7 +167,7 @@ impl Infer<'_> {
                     )
                 }
             },
-            // Error names (Task 22).
+            // Only the head of a `raise` (typed there).
             ExprKind::ErrorName(_) => TyId::ERROR,
             ExprKind::List(items) => {
                 // The first element's type (a variable only for `[]`): no variable to follow later.
@@ -207,16 +214,14 @@ impl Infer<'_> {
             ExprKind::Field(x, name) => self.field(b, e, x, name),
             ExprKind::Index(x, i) => self.index(b, e, x, i),
             ExprKind::Slice(x, from, to) => self.slice(b, e, x, [from.as_deref(), to.as_deref()]),
-            // `?` and `else` (Task 22); `await` (Task 24).
-            ExprKind::Try(x) | ExprKind::Await(x) => {
+            ExprKind::Try(x) => self.try_op(b, e, x),
+            ExprKind::Else(x, fallback) => self.else_op(b, x, fallback),
+            // `await` (Task 24).
+            ExprKind::Await(x) => {
                 self.sink(b, x);
                 TyId::ERROR
             }
-            ExprKind::Else(x, i) => {
-                self.sink(b, x);
-                self.sink(b, i);
-                TyId::ERROR
-            }
+            // Only the fallback of an `else` (typed there).
             ExprKind::FallbackBlock(local, body) => {
                 self.set_local(*local, TyId::ERROR);
                 self.block(b, body);
@@ -234,10 +239,23 @@ impl Infer<'_> {
             }
             ExprKind::Continue => TyId::NEVER,
             ExprKind::Raise(x) => {
-                self.sink(b, x);
+                self.raise(b, x);
                 TyId::NEVER
             }
         }
+    }
+
+    /// `Ok` / `Err` outside a pattern: there are no result values (plan decision 2).
+    pub(super) fn no_result(&mut self, b: &mut Body, at: Span, p: Prelude) -> TyId {
+        let name = if p == Prelude::Ok { "Ok" } else { "Err" };
+        self.mismatch(
+            b,
+            at,
+            format!(
+                "`{name}` is only a pattern in a `match` on something that can fail: there are no result values"
+            ),
+        );
+        TyId::ERROR
     }
 
     /// `return` with its value (`()` without one).

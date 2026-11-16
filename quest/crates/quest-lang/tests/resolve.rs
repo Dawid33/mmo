@@ -235,7 +235,7 @@ fn m(p: Pair):
 fn host_names() {
     let main = r#"@on(PlayerClicked)
 fn h(e: PlayerClicked):
-    let v: Promise[int] = world.get("k")
+    let v: int = await world.get("k") else 0
     say(e.player, "hi")
 
 fn no_such():
@@ -277,17 +277,21 @@ fn main():
 fn f() -> int:
     raise Ledger
 fn g() -> int:
-    let n = 1 else err:
+    let n = f() else err:
         raise er
     return n
 fn h() -> int:
-    let n = 1 else err:
+    let n = take() else err:
         match err:
             case NotEnough(have):
                 return have
             case ChestEmpty:
                 return 0
     return n
+fn take() -> int:
+    if true:
+        raise NotEnough(have=1)
+    raise ChestEmpty
 "#;
     let all = diagnostics(&[("main.qs", main)]);
     assert_eq!(all.len(), 1, "{all:#?}");

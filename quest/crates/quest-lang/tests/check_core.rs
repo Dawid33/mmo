@@ -227,8 +227,9 @@ fn missing_return() {
         ]
     );
 
-    // A call to a function that never returns ends the block, as `raise` does.
-    let main = "fn fail():\n    raise Oops\n\nfn g() -> int:\n    fail()\n";
+    // A call to a function that never returns ends the block, as `raise` does (it can fail, so it is
+    // handled: Task 22).
+    let main = "fn fail():\n    raise Oops\n\nfn g() -> int:\n    fail()?\n";
     assert_eq!(diags(&[("main.qs", main)]), vec![]);
 }
 

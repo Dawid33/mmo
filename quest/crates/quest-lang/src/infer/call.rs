@@ -12,7 +12,7 @@ use super::{Body, Check, Class, Infer};
 use crate::ast::Receiver;
 use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, HostItem, Prelude};
 use crate::ty::{Ty, TyId};
-use quest_vm::host::{HostFnKind, HostTy};
+use quest_vm::host::HostTy;
 
 /// What a method call `x.m(…)` calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +69,7 @@ impl Infer<'_> {
                             sig.receiver.map(|(_, t)| t).into_iter().collect();
                         params.extend(sig.params);
                         self.args(b, &name, &params, args, e, None);
-                        sig.ret
+                        self.fallible(sig.ret, &sig.raises)
                     }
                     // A member of a reported cycle, or one this body waits for.
                     None => {
@@ -145,7 +145,7 @@ impl Infer<'_> {
                 self.method(b, e, x, name, args)
             }
             _ => {
-                // Error names (Task 22) have the error type here. Anything else is not callable.
+                // Error names are called only as a `raise`'s head (typed there). Anything else is not callable.
                 let ty = self.expr(b, callee);
                 let ty = self.shallow(ty);
                 if !matches!(self.types.get(ty), Ty::Error | Ty::Never) {
@@ -223,7 +223,7 @@ impl Infer<'_> {
                 }
                 self.methods.insert(e.id, Method::Script(m));
                 self.args(b, &qualified, &sig.params, args, e, None);
-                sig.ret
+                self.fallible(sig.ret, &sig.raises)
             }
             Ty::HostStruct(i) => {
                 let host = self.host;
@@ -354,10 +354,8 @@ impl Infer<'_> {
             }
         }
         let ret = self.host_ty(&hf.ret, &mut |inf, _| inf.fresh());
-        match hf.kind {
-            HostFnKind::Promise => self.types.intern(Ty::Promise(ret)),
-            HostFnKind::Query | HostFnKind::Command => ret,
-        }
+        // A promise's errors come with its value (`await` yields `T raises S`).
+        self.host_fallible(b, e, f, &params, ret)
     }
 
     // The prelude.
@@ -440,10 +438,9 @@ impl Infer<'_> {
                 self.sink_args(b, args);
                 return TyId::ERROR;
             }
-            // Results exist only in `match` (Task 22).
             Prelude::Ok | Prelude::Err => {
                 self.sink_args(b, args);
-                return TyId::ERROR;
+                return self.no_result(b, e.span, p);
             }
         };
         // A call with the wrong count was reported; its result (often a variable) is not asked about again.

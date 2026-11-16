@@ -74,9 +74,12 @@ impl Infer<'_> {
             }
             StmtKind::Match(scrutinee, cases) => {
                 // Patterns (Task 23): the scrutinee is not constrained by them yet, their bindings have the error type.
-                self.sink(b, scrutinee);
+                // A fallible scrutinee is consumed here.
+                let ty = self.expr_fallible(b, scrutinee);
+                self.unify(ty, TyId::ERROR);
                 let mut all = !cases.is_empty();
                 for c in cases {
+                    self.matched_names(b, &c.pattern);
                     self.pattern_bindings(&c.pattern);
                     if let Some(g) = &c.guard {
                         self.cond(b, g);
@@ -98,8 +101,7 @@ impl Infer<'_> {
                 true
             }
             StmtKind::Raise(e) => {
-                // Error values (Task 22).
-                self.sink(b, e);
+                self.raise(b, e);
                 true
             }
         }
