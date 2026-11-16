@@ -64,9 +64,12 @@ impl Walk {
 }
 
 /// Runs `f` one heap level deeper; past `WIRE_DEPTH_MAX` levels it fails `Corrupt`.
-fn nested<T>(walk: &mut Walk, f: impl FnOnce(&mut Walk) -> VmResult<T>) -> VmResult<T> {
+pub(crate) fn nested<T, E: From<FaultKind>>(
+    walk: &mut Walk,
+    f: impl FnOnce(&mut Walk) -> Result<T, E>,
+) -> Result<T, E> {
     if walk.depth >= WIRE_DEPTH_MAX {
-        return Err(FaultKind::Corrupt);
+        return Err(FaultKind::Corrupt.into());
     }
     walk.depth += 1;
     let r = f(walk);

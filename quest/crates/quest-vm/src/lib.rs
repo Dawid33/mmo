@@ -5,6 +5,7 @@ pub mod consts;
 pub mod dict;
 pub mod eq;
 pub mod fault;
+pub mod fmt;
 pub mod hash;
 pub mod layout;
 pub mod list;
@@ -12,6 +13,8 @@ pub mod mem;
 pub mod object;
 pub mod store;
 pub mod string;
+pub mod types;
+pub mod wire;
 
 pub use fault::{FaultKind, VmResult};
 pub use hash::Fnv64;
