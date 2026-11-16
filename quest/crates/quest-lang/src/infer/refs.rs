@@ -11,6 +11,10 @@
 //! `append` / `insert`, an assignment to a field, element or top-level variable, a `raise`'s data, a
 //! `return`, a top-level initialiser) once their type is known; annotations where they are written (a
 //! reference inside another type, `-> &T`, a field `&T`, `let g: &T`).
+//!
+//! **Never rebound.** A local or parameter of reference type cannot be reassigned (`r = &b` is
+//! `ref-reassign`): its new target could be a binding of an inner block that dies first. Assigning through
+//! it (`*r = v`, `r.f = v`) is fine, and `let r = &b` binds a new reference whose scope ends with its block.
 
 use super::{Body, Check, Class, Infer, error};
 use crate::ast::{Span, UnOp};
@@ -117,6 +121,16 @@ impl Infer<'_> {
             ty,
             class: Class::NoRef,
             op: what,
+            at,
+        });
+    }
+
+    /// `l = …` of a local `l`: a reference local cannot be reassigned (`ref-reassign`).
+    pub(super) fn not_ref_local(&mut self, b: &mut Body, ty: TyId, at: Span) {
+        b.checks.push(Check {
+            ty,
+            class: Class::NotRefLocal,
+            op: "",
             at,
         });
     }

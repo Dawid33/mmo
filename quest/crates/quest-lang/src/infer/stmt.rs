@@ -48,6 +48,9 @@ impl Infer<'_> {
                     ExprKind::Def(_) => {
                         self.no_ref(b, wanted, value.span, "kept in a top-level variable");
                     }
+                    // A reference local (or parameter) is never rebound: its new target could be a binding
+                    // of an inner block that dies before it (spec §5.3, "no dangling").
+                    ExprKind::Local(_) => self.not_ref_local(b, wanted, place.span),
                     _ => {}
                 }
                 false

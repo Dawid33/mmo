@@ -23,7 +23,9 @@ loop and a list.
 **Values are copied.** `let b = a` copies (cheaply, copy on write); changing `b` never changes `a`. A
 reference is the exception: `&x` (also into a place: `&quest.rewards[2]`), written in a type as `&T`,
 auto-dereferenced (`r.count = 1`), assigned through with `*r = v`. A reference may be passed down to a
-callee; it may not be stored or returned (`ref-stored`, `ref-returned`).
+callee; it may not be stored or returned (`ref-escapes`). A reference local or parameter cannot be
+reassigned (`r = &b` is `ref-reassign`: `b` could die before `r`); bind a new one with `let r = &b`, whose scope
+ends with its block.
 
 **Structs, impl, enums, match.**
 

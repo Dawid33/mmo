@@ -250,6 +250,8 @@ enum Class {
     NoRef,
     /// An expression statement's value: not a promise (`unused-promise`).
     Unused,
+    /// The type of a local assigned with `=`: not a reference (`ref-reassign`).
+    NotRefLocal,
 }
 
 /// A requirement on a type checked at the end of the body, once inference had every chance to decide it.
@@ -789,6 +791,15 @@ impl<'k> Infer<'k> {
                     return None;
                 }
                 return Some(refs::escapes(c.op, file, c.at));
+            }
+            Class::NotRefLocal => {
+                if !matches!(shape, Ty::Ref(_)) {
+                    return None;
+                }
+                (
+                    "ref-reassign",
+                    "a reference cannot be reassigned; bind a new one with `let`".to_string(),
+                )
             }
             Class::Unused => {
                 if !matches!(shape, Ty::Promise(_)) {

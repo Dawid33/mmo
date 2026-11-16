@@ -1,0 +1,5 @@
+error[ref-reassign]: a reference cannot be reassigned; bind a new one with `let`
+ --> main.qs:6:9
+  |
+6 |         r = &b
+  |         ^
