@@ -206,6 +206,17 @@ impl Vm {
         }
     }
 
+    /// [`Vm::restart_main`]: asks for `main` again when it already ran and nothing is in progress.
+    pub(crate) fn sched_restart_main(&mut self) -> bool {
+        if self.program.main_fn.is_none() || self.failed() || self.status() != Status::Idle {
+            return false;
+        }
+        match self.header(H_MAIN) {
+            Ok(MAIN_STARTED) => self.set_header(H_MAIN, MAIN_WANTED).is_ok(),
+            _ => false,
+        }
+    }
+
     // ---- deliver -------------------------------------------------------------------------------------
 
     /// [`Vm::deliver`]: a drop, or memory that does not parse, leaves the memory as it was.

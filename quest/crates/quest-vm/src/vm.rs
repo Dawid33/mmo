@@ -168,6 +168,13 @@ impl Vm {
         self.sched_start_main()
     }
 
+    /// Asks for `main` again once it ran: `true` when the program has a `main`, the instance is idle (a
+    /// loaded save that finished its `main`, say) and it had started one. [`Vm::start_main`] stays
+    /// once-only.
+    pub fn restart_main(&mut self) -> bool {
+        self.sched_restart_main()
+    }
+
     /// Queues an event for its handlers (design D7). `Queued` is `Accepted` delivered while a task was in
     /// progress (the owner's warning). A dropped delivery changes nothing.
     pub fn deliver(&mut self, event: &str, payload: &WireValue) -> Delivery {

@@ -1,0 +1,18 @@
+[package]
+name = "quest-cli"
+description = "The `quest` command: check and run quest script directories."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "quest"
+path = "src/main.rs"
+
+[dependencies]
+quest-lang = { path = "../quest-lang" }
+quest-vm = { path = "../quest-vm" }
+quest-stub = { path = "../quest-stub" }
