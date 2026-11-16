@@ -47,6 +47,9 @@ section N). Handoff: `docs/superpowers/plans/2026-11-16-quest-script-language-pl
   `Co-Authored-By` line.
 - All of this workspace's tests run in `just quest-test` (no `#[ignore]` tier: the workspace is small and separate
   from the game's suites). Property tests run 64 cases by default (`PROPTEST_CASES` raises it).
+- **After this plan (owner's rule, 2026-11-16):** the tests listed here belong to the initial implementation. Once
+  the MVP is built, tests in `quest/` are written only as regressions for bugs actually found, never
+  pre-emptively; fuzzing comes later. Task 35 writes this rule into `quest/README.md`.
 - The `justfile` is touched three times in the whole plan (Tasks 1, 30, 34), `CLAUDE.md` and root `Cargo.toml` once.
 
 ## Review Focus
@@ -134,7 +137,7 @@ and the tests pin behaviour.
 | const | value | meaning |
 |---|---|---|
 | `MEM_BYTES_DEFAULT` | 262_144 | instance memory (256 KiB) |
-| `HEADER_WORDS` | 32 | header size in words |
+| `HEADER_WORDS` | 64 | header size in words (half is reserved room for later fields) |
 | `INBOX_BYTES` | 8_192 | runtime heap for queued event payloads and promise answers |
 | `CMD_BYTES` | 8_192 | command buffer of one segment |
 | `HEAP_MIN_BYTES` | 4_096 | below this `Layout::plan` fails `MemTooSmall` |
@@ -1706,7 +1709,8 @@ Tests (`determinism.rs`, each `#[cfg_attr(target_arch = "wasm32", wasm_bindgen_t
 - [ ] **Step 3:** Walk spec §11 line by line and name, in "As built", the test that covers each bullet; anything
   uncovered gets its test now.
 - [ ] **Step 4:** `quest/README.md`: the language in one page (D11 and "Decisions to review" item 12 — what an author must know), the CLI,
-  the tunables, how to bless goldens.
+  the tunables, how to bless goldens, and the testing rule (after the MVP: regression tests only, never
+  pre-emptive ones; fuzzing later).
 - [ ] **Step 5:** Commit `docs(quest): README, as-built notes`; ask Dawid for the whole-branch review.
 
 ---
