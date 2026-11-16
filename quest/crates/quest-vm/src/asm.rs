@@ -578,6 +578,17 @@ impl FnBuilder<'_> {
         self.pb.define_ty(id, d)
     }
 
+    /// [`ProgramBuilder::host_site`], while this body is open.
+    pub fn host_site(
+        &mut self,
+        host_fn: u16,
+        kind: HostFnKind,
+        params: Vec<TypeId>,
+        ret: TypeId,
+    ) -> u16 {
+        self.pb.host_site(host_fn, kind, params, ret)
+    }
+
     /// This function's own frame.
     pub fn frame(&self) -> FrameRef {
         self.of(self.func)

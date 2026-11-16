@@ -129,6 +129,10 @@ pub struct Typed {
     pub handlers: BTreeMap<DefId, TyId>,
     /// The fields of every struct and event (one shape) and enum (one per variant, in order).
     pub adts: BTreeMap<DefId, Vec<Shape>>,
+    /// The fields of every host struct, by its index in `HostApi::structs` (the host's field names).
+    pub host_structs: Vec<Shape>,
+    /// The fields of every host event, by its index in `HostApi::events`.
+    pub host_events: Vec<Shape>,
 }
 
 impl Typed {
@@ -223,6 +227,8 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         refs: inf.refs,
         handlers: inf.handlers,
         adts: inf.adts,
+        host_structs: inf.host_structs,
+        host_events: inf.host_events,
     };
     (typed, inf.diags)
 }
