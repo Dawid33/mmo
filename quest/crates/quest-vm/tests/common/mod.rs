@@ -14,6 +14,9 @@ use quest_vm::wire::WireValue;
 /// The host-API version every test program is built against.
 pub const API: u32 = 1;
 
+/// The host's event names every test instance is configured with.
+pub const EVENTS: &[&str] = &["Ping", "Pong", "Big", "Quiet"];
+
 type QueryFn = Box<dyn FnMut(u16, &[WireValue]) -> Result<WireValue, String>>;
 
 /// Records every call; `query` is answered by `answer` (default `Ok(Unit)`).
@@ -54,6 +57,7 @@ pub fn cfg() -> VmConfig {
         mem_bytes: MEM_BYTES_DEFAULT,
         epoch: 1,
         host_api_version: API,
+        events: EVENTS.iter().map(|e| e.to_string()).collect(),
     }
 }
 

@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use common::*;
 use quest_vm::asm::{FnBuilder, ProgramBuilder, SlotRef};
+use quest_vm::consts::WORK_WORDS_MAX;
 use quest_vm::host::{AbortCause, DropReason, HostFnKind, Report};
 use quest_vm::program::Program;
 use quest_vm::types::{TypeDesc, TypeId};
-use quest_vm::vm::{Delivery, Status, Vm};
+use quest_vm::vm::{Delivery, Status, Vm, VmConfig};
 use quest_vm::wire::WireValue;
 use quest_vm::{Builtin, FaultKind, Op};
 
@@ -528,9 +529,9 @@ fn two_handlers_of_one_event_run_in_table_order() {
 fn bad_deliveries_are_dropped() {
     let mut pb = ProgramBuilder::new(API);
     let t = tys(&mut pb);
-    // a known event (its struct is in the program) without a handler
+    // a user struct: its name is not an event of the host's
     pb.ty(TypeDesc::Struct {
-        name: "Quiet".into(),
+        name: "Ledger".into(),
         fields: vec![],
     });
     let big = pb.ty(TypeDesc::Struct {
@@ -555,6 +556,14 @@ fn bad_deliveries_are_dropped() {
     let bytes = vm.mem_bytes().to_vec();
     let cases = [
         ("Nope", ping(1), DropReason::UnknownEvent),
+        (
+            "Ledger",
+            WireValue::Struct {
+                name: "Ledger".into(),
+                fields: vec![],
+            },
+            DropReason::UnknownEvent,
+        ),
         (
             "Quiet",
             WireValue::Struct {
@@ -794,4 +803,79 @@ fn rollback_mid_handler_is_bit_exact() {
     second.push(vm.mem_bytes().to_vec());
     assert!(first == second, "the replay differs");
     assert_eq!(again.commands, calls);
+}
+
+/// Regression: an escaping error whose data is too large to convert for the report used to fail the
+/// whole instance. It aborts the handler with that fault, and the block keeps running.
+#[test]
+fn oversized_error_data_aborts_the_handler() {
+    let mut pb = ProgramBuilder::new(API);
+    let t = tys(&mut pb);
+    pb.ty(TypeDesc::Enum {
+        name: "Error".into(),
+        variants: vec![("Big".into(), vec![("blob".into(), t.str)])],
+    });
+    let shape = pb.shape(1, 1);
+    // more bytes than one walk may visit words
+    let blob = pb.string(&"z".repeat(WORK_WORDS_MAX as usize * 8 + 8));
+    let big = pb.ty(TypeDesc::Struct {
+        name: "Big".into(),
+        fields: vec![],
+    });
+    let hb = pb.declare("on_big", 1);
+    {
+        // raise Big(blob=<the string>)
+        let mut f = pb.body(hb);
+        let (ev, err, tmp) = (f.param(0), f.err(), f.local(0));
+        f.mark_ref(ev);
+        f.mark_ref(err);
+        f.mark_ref(tmp);
+        f.emit(Op::NewObj, err, shape, 0u16);
+        f.emit_t(Op::LoadStr, tmp, blob);
+        f.emit(Op::SetField, err, 0u16, tmp);
+        f.line(30);
+        f.emit(Op::TracePush, 1u16, 0u16, 0u16);
+        ret(&mut f);
+        f.end();
+    }
+    pb.handler("Big", big, hb);
+    let h = ping_logger(&mut pb, &t, "on_ping", 1, 0);
+    pb.handler("Ping", t.ping, h);
+    let p = Arc::new(pb.finish().expect("program"));
+    let cfg = VmConfig {
+        mem_bytes: 4 << 20,
+        ..cfg()
+    };
+    let mut vm = Vm::new(p.clone(), cfg).expect("loads");
+    let mut host = RecordingHost::default();
+    let empty = WireValue::Struct {
+        name: "Big".into(),
+        fields: vec![],
+    };
+    assert_eq!(vm.deliver("Big", &empty), Delivery::Accepted);
+    run_idle(&mut vm, &mut host, 100_000);
+    match host.reports.as_slice() {
+        [
+            Report::HandlerAborted {
+                task,
+                cause:
+                    AbortCause::Fault {
+                        kind,
+                        message,
+                        stack,
+                    },
+            },
+        ] => {
+            assert_eq!(task, "on_big");
+            assert_eq!(*kind, FaultKind::ValueTooLarge);
+            assert_eq!(message, "error Big carries data too large to report");
+            let lines: Vec<u32> = stack.iter().map(|l| l.line).collect();
+            assert_eq!(lines, [30]);
+        }
+        other => panic!("unexpected reports {other:?}"),
+    }
+    assert_eq!(vm.status(), Status::Idle);
+    assert_eq!(vm.deliver("Ping", &ping(5)), Delivery::Accepted);
+    run_idle(&mut vm, &mut host, 1_000);
+    assert_eq!(logged(&host), [(5, 0)]);
 }

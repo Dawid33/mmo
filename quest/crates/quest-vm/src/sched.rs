@@ -26,11 +26,13 @@
 //! queued events by arrival (each handler of an event its own task, in table order). Every task opens a
 //! segment when it starts. At its end the function's error word (frame word 2) is checked: non-zero is an
 //! escaping error. Otherwise the task's result is stored (an initialiser's return value is moved into its
-//! global; a handler's event parameter is released), the buffered commands are handed to the host in
-//! order, the segment commits and the buffer is cleared. A fault or an escaping error aborts the segment
-//! (the script regions return to the task's start), clears the buffer and reports
-//! `Report::HandlerAborted` (`Report::InitFailed` for an initialiser, which also fails the instance). A
-//! `Corrupt` fault fails the instance without an abort.
+//! global; a handler's event parameter is released), the buffered records are read out, the segment
+//! commits, the buffer and the task are cleared, and only then are the commands and prints handed to the
+//! host in order (the host never sees an effect the memory has not committed). A fault or an escaping
+//! error aborts the segment (the script regions return to the task's start), clears the buffer and
+//! reports `Report::HandlerAborted` (`Report::InitFailed` for an initialiser, which also fails the
+//! instance); error data too large to convert for the report turns the cause into that fault. Only a
+//! `Corrupt` fault (memory that does not parse) fails the instance without an abort.
 //!
 //! # Idle
 //! An instance is idle when no task is in progress, nothing is runnable (no pending initialiser, no
@@ -53,7 +55,7 @@ use crate::layout::{
     H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL, QUEUE_REC_WORDS, STATUS_IDLE,
     STATUS_RUNNING,
 };
-use crate::object::{capacity, hdr, ptr_of, read_slot, write_slot};
+use crate::object::{capacity, hdr, obj, ptr_of, read_slot, write_slot};
 use crate::types::{TypeDesc, TypeId, TypeTable};
 use crate::vm::{RunEnd, Vm};
 use crate::wire::{self, FromWire, WireValue, from_wire, to_wire};
@@ -214,18 +216,11 @@ impl Vm {
     fn try_deliver(&mut self, event: &str, payload: &WireValue) -> Exec<Delivery> {
         let p = Arc::clone(&self.program);
         let drop = |r| Ok(Delivery::Dropped(r));
+        if !self.events.iter().any(|e| e == event) {
+            return drop(DropReason::UnknownEvent);
+        }
         let Some(first) = p.handlers.iter().position(|h| h.event == event) else {
-            // A known event is one whose struct the program has (the events are host structs).
-            let known = p
-                .types
-                .0
-                .iter()
-                .any(|d| matches!(d, TypeDesc::Struct { name, .. } if name == event));
-            return drop(if known {
-                DropReason::NoHandler
-            } else {
-                DropReason::UnknownEvent
-            });
+            return drop(DropReason::NoHandler);
         };
         if !wire::fits(&p.types, p.handlers[first].event_ty, payload) {
             return drop(DropReason::WrongShape);
@@ -308,14 +303,32 @@ impl Vm {
         if fuel > 0
             && let Err(f) = self.tick_run(now, fuel, host, &mut m)
         {
-            self.fail(
-                AbortCause::Fault {
-                    kind: f.kind,
-                    message: f.message,
-                    stack: Vec::new(),
-                },
-                host,
-            );
+            let cause = AbortCause::Fault {
+                kind: f.kind,
+                message: f.message,
+                stack: Vec::new(),
+            };
+            // Only memory that does not parse fails the instance. Anything else that escapes the
+            // scheduler aborts the task in progress (no task: it is only reported).
+            if f.kind == FaultKind::Corrupt {
+                self.fail(cause, host);
+            } else if self.task_in_progress() == Ok(true) {
+                if let Err(f) = self.abort_task(cause, host) {
+                    self.fail(
+                        AbortCause::Fault {
+                            kind: f.kind,
+                            message: f.message,
+                            stack: Vec::new(),
+                        },
+                        host,
+                    );
+                }
+            } else {
+                host.report(Report::HandlerAborted {
+                    task: "?".into(),
+                    cause,
+                });
+            }
         }
         TickReport {
             fuel_used: m.used(),
@@ -323,7 +336,8 @@ impl Vm {
         }
     }
 
-    /// `Err` only for memory that does not parse (the caller fails the instance).
+    /// `Err` for memory that does not parse (the caller fails the instance), or a failure the scheduler
+    /// did not route itself (the caller aborts the task in progress).
     fn tick_run(&mut self, now: u64, fuel: u64, host: &mut dyn Host, m: &mut Meter) -> Exec<()> {
         if self.failed() {
             return Ok(());
@@ -559,14 +573,17 @@ impl Vm {
             }
             _ => {}
         }
-        for b in self.read_cmds()? {
+        // The memory is final (committed, the task cleared) before the host sees anything.
+        let buffered = self.read_cmds()?;
+        self.store.segment_commit();
+        self.clear_task()?;
+        for b in buffered {
             match b {
                 Buffered::Command(f, args) => host.command(f, &args),
                 Buffered::Print(text) => host.print(&text),
             }
         }
-        self.store.segment_commit();
-        self.clear_task()
+        Ok(())
     }
 
     /// The task failed with `cause`: the segment is undone, the buffer cleared and the failure reported;
@@ -630,19 +647,48 @@ impl Vm {
         Report::HandlerAborted { task, cause }
     }
 
-    /// The escaping error `err` (still in the frame, before the abort) with its trace.
+    /// The escaping error `err` (still in the frame, before the abort) with its trace. Data that cannot
+    /// be converted for the report (too large to walk) makes the cause a fault of that kind instead, its
+    /// stack the error's trace; only `Corrupt` is an `Err`.
     fn error_cause(&self, err: u64, m: &mut Meter) -> Exec<AbortCause> {
-        let (name, data) = match self.error_ty {
-            Some(t) => {
-                let (w, words) = to_wire(&self.store, self.heap, &self.program.types, t, err)?;
-                m.words(words);
-                match &w {
-                    WireValue::Variant { name, .. } => (name.clone(), w.clone()),
-                    _ => return corrupt("an error that is not a variant"),
-                }
-            }
-            None => ("?".into(), WireValue::Unit),
+        let (trace, trace_dropped) = self.error_trace()?;
+        let Some(t) = self.error_ty else {
+            return Ok(AbortCause::Error {
+                name: "?".into(),
+                data: WireValue::Unit,
+                trace,
+                trace_dropped,
+            });
         };
+        let tag = obj::tag(&self.store, self.heap, err)?;
+        let name = match self.program.types.desc(t)? {
+            TypeDesc::Enum { variants, .. } => variants.get(usize::from(tag)).map(|v| v.0.clone()),
+            _ => None,
+        };
+        let Some(name) = name else {
+            return corrupt("an error whose tag is not a variant");
+        };
+        match to_wire(&self.store, self.heap, &self.program.types, t, err) {
+            Ok((data, words)) => {
+                m.words(words);
+                Ok(AbortCause::Error {
+                    name,
+                    data,
+                    trace,
+                    trace_dropped,
+                })
+            }
+            Err(FaultKind::Corrupt) => corrupt("an error value does not parse"),
+            Err(kind) => Ok(AbortCause::Fault {
+                kind,
+                message: format!("error {name} carries data too large to report"),
+                stack: trace,
+            }),
+        }
+    }
+
+    /// The error return trace: its locations and how many entries were dropped.
+    fn error_trace(&self) -> Exec<(Vec<SrcLoc>, u32)> {
         let len = self.header(H_TRACE_LEN)?;
         if len > ERR_TRACE_MAX as u64 {
             return corrupt("error trace length out of range");
@@ -654,12 +700,7 @@ impl Vm {
             trace.push(self.program.loc(pc));
         }
         let trace_dropped = u32::try_from(self.header(H_TRACE_DROPPED)?).unwrap_or(u32::MAX);
-        Ok(AbortCause::Error {
-            name,
-            data,
-            trace,
-            trace_dropped,
-        })
+        Ok((trace, trace_dropped))
     }
 
     // ---- host calls and the command buffer -----------------------------------------------------------

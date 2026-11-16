@@ -27,13 +27,16 @@ use crate::types::TypeId;
 use crate::wire::{WireValue, to_wire};
 
 /// What an instance is created with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VmConfig {
     pub mem_bytes: u32,
     /// The instance epoch (promise ids carry it).
     pub epoch: u32,
     /// The host-API version the HOST implements; a program built against another is refused.
     pub host_api_version: u32,
+    /// The host API's event names (`HostApi::events`): `deliver` of any other name is `UnknownEvent`.
+    /// Configuration, like the host-API version: nothing about it is kept in memory.
+    pub events: Vec<String>,
 }
 
 pub struct Vm {
@@ -45,6 +48,8 @@ pub struct Vm {
     pub(crate) inbox: Heap,
     /// The program's error enum (derived from the program at `new`).
     pub(crate) error_ty: Option<TypeId>,
+    /// The host's event names (`VmConfig::events`).
+    pub(crate) events: Vec<String>,
 }
 
 /// The result of one [`Vm::debug_run`].
@@ -127,6 +132,7 @@ impl Vm {
             heap,
             inbox,
             error_ty,
+            events: cfg.events,
         })
     }
 
