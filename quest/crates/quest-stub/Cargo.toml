@@ -1,0 +1,12 @@
+[package]
+name = "quest-stub"
+description = "The quest script language's in-memory standalone host and runner."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+quest-vm = { path = "../quest-vm" }
