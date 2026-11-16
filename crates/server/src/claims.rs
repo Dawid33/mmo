@@ -505,9 +505,15 @@ pub trait ClaimingManager {
     fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<HostId>);
     fn set_draining(&mut self, draining: BTreeSet<HostId>);
     fn take_directory_wanted(&mut self) -> bool;
+    /// The clean `hosts` rows of a read, `(id, boot)` ([`WorldManager::note_clean_rows`]).
+    /// The tests' fakes keep no peers: nothing to note.
+    fn note_clean_rows(&mut self, _clean: Vec<(HostId, u64)>) {}
 }
 
 impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
+    fn note_clean_rows(&mut self, clean: Vec<(HostId, u64)>) {
+        WorldManager::note_clean_rows(self, clean)
+    }
     fn take_claims_wanted(&mut self) -> Vec<SuperRegion> {
         WorldManager::take_claims_wanted(self)
     }
@@ -629,6 +635,10 @@ impl DirectoryKeeper {
                     Ok((rows, live, hosts)) => {
                         manager.set_draining(draining_hosts(&hosts));
                         manager.directory_read(rows, live);
+                        // Hosts that left in a committed leave cut: one this host missed (it
+                        // registered while that cut ran, outside it; or its boot's read of the
+                        // clean rows failed) is noted now — the manager skips the known ones.
+                        manager.note_clean_rows(hosts.iter().filter(|r| r.clean).map(|r| (r.id, r.boot)).collect());
                         self.hosts_read = Some(hosts);
                         if self.claims_wait_for_read.is_some_and(|after| n > after) {
                             self.claims_wait_for_read = None;

@@ -43,7 +43,9 @@
 //! service. The login service links to the COORDINATOR (`coordinator_rt`'s login listener,
 //! [`LOGIN_LINK_BIND_ENV`]), which converts each order ([`order_from`]) and relays it to one
 //! live host, the gate host (`game::CoordMsg::Login`). There the main loop plays the server's
-//! half ([`LoginRelay::pump`]): it resolves the order ([`resolve_order`]) into a
+//! half ([`LoginRelay::pump`]): it resolves the order ([`OrderResolver`]: the player's store
+//! read never waited on — the main loop beats the lease — and at most
+//! [`LOGIN_ORDERS_IN_FLIGHT_MAX`] waiting) into a
 //! [`ServerEvent::SpawnOrder`] the manager places — here, or on the host that holds the player,
 //! over the peer stream (`game`'s `placement.rs`) — or a `Kick`, applied here first and then
 //! relayed to every host. Every host records the spawn orders its manager takes (as above: the
@@ -67,7 +69,7 @@ use login_api::{HostToLogin, LoginToHost, SPAWN_PENDING_TTL_SECS};
 use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
 
 use crate::auth_edge::{Clock, REFUSE_SUPERSEDED};
-use crate::player_store::{PlayerKey, SharedPlayerStore};
+use crate::player_store::{PlayerKey, Resolving, SharedPlayerStore};
 
 /// Where a role-`all` server listens for the login service (`ip:port`).
 pub const HOST_LINK_BIND_ENV: &str = "VOXEL_HOST_LINK_BIND";
@@ -188,29 +190,177 @@ pub fn answer_from(out: game::LoginOut) -> HostToLogin {
     }
 }
 
-/// The gate host's server resolves an order the coordinator relayed (`me`: this host, the
-/// order's origin): a spawn → [`ServerEvent::SpawnOrder`] for the manager to place (`None`: its
-/// player could not be resolved — refused, [`game::WorldManager::login_order_refused`]); a kick
-/// → applied to this host's admission state first (a revoked session's supersede sent on
-/// `events`), then [`ServerEvent::Kick`] for the manager to relay (`None`: not applied — a
-/// player store failure — so not answered: the login service resends it).
-pub fn resolve_order(
-    order: game::LoginOrder,
-    orders: &SpawnOrders,
-    players: &SharedPlayerStore,
-    events: &Sender<ServerEvent>,
-    me: HostId,
-) -> Option<ServerEvent> {
-    match order {
-        game::LoginOrder::Spawn { player_token, session_epoch } => {
-            let (player, record) = resolve(players, &player_token)?;
-            let record_region = record.map(|r| r.region);
-            Some(ServerEvent::SpawnOrder { origin: me, hops: 0, player_token, session_epoch, player, record_region })
+/// At most this many of the coordinator's login orders wait at the gate host for their
+/// player's store read ([`OrderResolver`]); one beyond is dropped and counted (unanswered: the
+/// login service answers 503 at its timeout and the client retries; a kick is resent). A join
+/// burst — every player of the world rejoining after a restart, all through this one host —
+/// cannot queue without limit.
+pub const LOGIN_ORDERS_IN_FLIGHT_MAX: usize = 256;
+
+/// What one of the coordinator's orders became at the gate host ([`OrderResolver::poll`]).
+#[derive(Debug)]
+pub enum OrderOutcome {
+    /// For the manager, on its event channel: a spawn to place ([`ServerEvent::SpawnOrder`]),
+    /// or a kick applied here and to be relayed ([`ServerEvent::Kick`]; a revoked session's
+    /// supersede went on the channel first).
+    Event(ServerEvent),
+    /// A spawn whose player could not be resolved: refused
+    /// ([`game::WorldManager::login_order_refused`]).
+    Refused { player_token: String, session_epoch: u64 },
+    /// A kick not applied (a player store failure): unanswered, the login service resends it.
+    Unapplied,
+}
+
+/// One order in [`OrderResolver`]'s queue.
+enum Waiting {
+    /// A spawn whose player is being read (`None`: a malformed token, refused).
+    Spawn { player_token: String, session_epoch: u64, read: Option<Resolving> },
+    /// A kick: applied to the admission state when it reaches the front of the queue; a
+    /// session it revoked then reads its player before its supersede goes out.
+    Kick { player_token: String, session_epoch: u64, reason: String, step: KickStep },
+}
+
+/// Where a kick at the front of [`OrderResolver`]'s queue stands.
+enum KickStep {
+    /// Not applied yet.
+    Due,
+    /// It revoked a session whose player is being read.
+    Reading(Resolving),
+    /// It revoked a session whose token is malformed: not applied.
+    Unreadable,
+}
+
+/// The gate host's resolution of the orders the coordinator relays (A-I1 of Elastic 1's final
+/// review): each spawn's player is read from the player store WITHOUT waiting
+/// ([`crate::player_store::PlayerStore::resolve_later`]) — the main loop beats the host's
+/// lease and must never sit on a store read — and the orders come out in the order they came,
+/// each once its read answered (one still reading holds back those behind it, so a player's
+/// orders keep their order; a kick's supersede goes out before its `Kick`). At most
+/// [`LOGIN_ORDERS_IN_FLIGHT_MAX`] wait.
+pub struct OrderResolver {
+    queue: std::collections::VecDeque<Waiting>,
+    /// Orders dropped because [`LOGIN_ORDERS_IN_FLIGHT_MAX`] were waiting, since start.
+    dropped: u64,
+}
+
+impl Default for OrderResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OrderResolver {
+    pub fn new() -> OrderResolver {
+        OrderResolver { queue: std::collections::VecDeque::new(), dropped: 0 }
+    }
+
+    /// Orders waiting for their player's read (or behind one that is).
+    pub fn waiting(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Orders dropped at the bound, since start.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// `order` joins the queue — a spawn's player read asked of `players` at once — or, with
+    /// [`LOGIN_ORDERS_IN_FLIGHT_MAX`] waiting, is dropped (`false`, counted).
+    pub fn push(&mut self, order: game::LoginOrder, players: &SharedPlayerStore) -> bool {
+        if self.queue.len() >= LOGIN_ORDERS_IN_FLIGHT_MAX {
+            self.dropped += 1;
+            return false;
         }
-        game::LoginOrder::Kick { player_token, session_epoch, reason } => {
-            kick(orders, players, events, &player_token, session_epoch, reason.clone())
-                .then_some(ServerEvent::Kick { player_token, session_epoch, reason })
+        self.queue.push_back(match order {
+            game::LoginOrder::Spawn { player_token, session_epoch } => {
+                let read = resolve_later(players, &player_token);
+                Waiting::Spawn { player_token, session_epoch, read }
+            }
+            game::LoginOrder::Kick { player_token, session_epoch, reason } => {
+                Waiting::Kick { player_token, session_epoch, reason, step: KickStep::Due }
+            }
+        });
+        true
+    }
+
+    /// The orders at the front of the queue whose reads have answered, in order (never
+    /// waits): a spawn as its [`ServerEvent::SpawnOrder`] from `me`; a kick applied to
+    /// `orders` when it reaches the front — a revoked session's player read without waiting,
+    /// its supersede sent on `events` once that read answered — then its [`ServerEvent::Kick`].
+    pub fn poll(
+        &mut self,
+        orders: &SpawnOrders,
+        players: &SharedPlayerStore,
+        events: &Sender<ServerEvent>,
+        me: HostId,
+    ) -> Vec<OrderOutcome> {
+        let mut out = Vec::new();
+        while let Some(front) = self.queue.front_mut() {
+            let outcome = match front {
+                Waiting::Spawn { player_token, session_epoch, read } => match read.as_mut().map(Resolving::poll) {
+                    None => Some(OrderOutcome::Refused { player_token: std::mem::take(player_token), session_epoch: *session_epoch }),
+                    Some(None) => None,
+                    Some(Some(Ok((player, record)))) => Some(OrderOutcome::Event(ServerEvent::SpawnOrder {
+                        origin: me,
+                        hops: 0,
+                        player_token: std::mem::take(player_token),
+                        session_epoch: *session_epoch,
+                        player,
+                        record_region: record.map(|r| r.region),
+                    })),
+                    Some(Some(Err(e))) => {
+                        log::error!("[login-link] player store: {e}");
+                        Some(OrderOutcome::Refused { player_token: std::mem::take(player_token), session_epoch: *session_epoch })
+                    }
+                },
+                Waiting::Kick { player_token, session_epoch, reason, step } => {
+                    let up_to = *session_epoch;
+                    let kicked = |token: &mut String, reason: &mut String| {
+                        let (player_token, reason) = (std::mem::take(token), std::mem::take(reason));
+                        OrderOutcome::Event(ServerEvent::Kick { player_token, session_epoch: up_to, reason })
+                    };
+                    if matches!(step, KickStep::Due) {
+                        match orders.kick(player_token, up_to, reason) {
+                            KickApplied::NoSession => {}
+                            KickApplied::NewerKept => {
+                                log::info!("[login-link] kick up to epoch {up_to}: the live session is a newer login; kept")
+                            }
+                            KickApplied::Revoked => {
+                                *step = resolve_later(players, player_token).map_or(KickStep::Unreadable, KickStep::Reading)
+                            }
+                        }
+                    }
+                    let unapplied = || {
+                        log::warn!("[login-link] kick up to epoch {up_to}: its session's player is unknown now; not acked");
+                        Some(OrderOutcome::Unapplied)
+                    };
+                    match step {
+                        // Nothing revoked: applied as it stands.
+                        KickStep::Due => Some(kicked(player_token, reason)),
+                        KickStep::Unreadable => unapplied(),
+                        KickStep::Reading(read) => match read.poll() {
+                            None => None,
+                            Some(Ok((player, _))) => {
+                                park_revoked(orders, events, player_token, up_to, reason, player);
+                                Some(kicked(player_token, reason))
+                            }
+                            Some(Err(e)) => {
+                                log::error!("[login-link] player store: {e}");
+                                unapplied()
+                            }
+                        },
+                    }
+                }
+            };
+            match outcome {
+                Some(o) => {
+                    out.push(o);
+                    self.queue.pop_front();
+                }
+                None => break,
+            }
         }
+        out
     }
 }
 
@@ -641,6 +791,17 @@ fn resolve(players: &SharedPlayerStore, token: &str) -> Option<(game::PlayerId, 
     }
 }
 
+/// [`resolve`] without waiting for the store ([`crate::player_store::PlayerStore::resolve_later`]);
+/// `None` (logged) for a malformed token.
+fn resolve_later(players: &SharedPlayerStore, token: &str) -> Option<Resolving> {
+    let token = PlayerToken(token.to_string());
+    if !token.is_valid() {
+        log::warn!("[login-link] a malformed player token");
+        return None;
+    }
+    Some(players.lock().unwrap_or_else(|p| p.into_inner()).resolve_later(&PlayerKey::Online(token)))
+}
+
 /// The player of a login token ([`resolve`]).
 fn player_of(players: &SharedPlayerStore, token: &str) -> Option<game::PlayerId> {
     resolve(players, token).map(|(player, _)| player)
@@ -702,26 +863,34 @@ fn kick(
                 log::warn!("[login-link] kick up to epoch {up_to}: its session's player is unknown now; not acked");
                 return false;
             };
-            let parked = orders.supersede_revoked(token, up_to, || {
-                let _ = events.send(ServerEvent::Supersede { player, reason: reason.clone() });
-            });
-            if parked {
-                log::info!("[login-link] kick of player {} (up to epoch {up_to}): {reason}", player.0);
-            }
+            park_revoked(orders, events, token, up_to, &reason, player);
             true
         }
     }
 }
 
+/// A kick revoked `player`'s session (`token`, up to `up_to`): its supersede goes on `events`,
+/// unless a newer login took the session over meanwhile ([`SpawnOrders::supersede_revoked`]).
+fn park_revoked(orders: &SpawnOrders, events: &Sender<ServerEvent>, token: &str, up_to: u64, reason: &str, player: game::PlayerId) {
+    let parked = orders.supersede_revoked(token, up_to, || {
+        let _ = events.send(ServerEvent::Supersede { player, reason: reason.to_string() });
+    });
+    if parked {
+        log::info!("[login-link] kick of player {} (up to epoch {up_to}): {reason}", player.0);
+    }
+}
+
 /// The server's half of the login relay on every role-`host` process (any number of hosts):
 /// the login service's orders the coordinator gave this host (the gate host) are resolved
-/// ([`resolve_order`]), the spawn orders its manager takes are recorded (the player's sessions
-/// superseded first, as one host does), the kicks relayed to it applied, and what its manager
-/// answered goes up its own coordinator link (`game::HostMsg::Login`).
+/// without waiting on the store ([`OrderResolver`]), the spawn orders its manager takes are
+/// recorded (the player's sessions superseded first, as one host does), the kicks relayed to it
+/// applied, and what its manager answered goes up its own coordinator link
+/// (`game::HostMsg::Login`).
 pub struct LoginRelay {
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
+    resolver: OrderResolver,
 }
 
 impl LoginRelay {
@@ -731,32 +900,41 @@ impl LoginRelay {
         if !orders.relay_through(events.clone()) {
             log::warn!("[login-link] these spawn orders relay already");
         }
-        LoginRelay { orders, players, events }
+        LoginRelay { orders, players, events, resolver: OrderResolver::new() }
     }
 
-    /// After the manager's upkeep: the coordinator's orders resolved (they reach the manager on
-    /// its event channel, with the supersedes a kick sent first), what it took and was relayed
-    /// handled, and what it answered sent up its coordinator link.
-    pub fn pump<S: game::RegionSpawner>(&self, manager: &mut game::WorldManager<S>) {
+    /// Orders waiting for their player's store read, and orders dropped at the bound since
+    /// start ([`LOGIN_ORDERS_IN_FLIGHT_MAX`]).
+    pub fn resolving(&self) -> (usize, u64) {
+        (self.resolver.waiting(), self.resolver.dropped())
+    }
+
+    /// After the manager's upkeep: the coordinator's orders queued for resolution and those
+    /// resolved handed on (they reach the manager on its event channel, with the supersedes a
+    /// kick sent first) — never waiting on the store —, what it took and was relayed handled,
+    /// and what it answered sent up its coordinator link.
+    pub fn pump<S: game::RegionSpawner>(&mut self, manager: &mut game::WorldManager<S>) {
         let me = manager.host_id();
+        let dropped_before = self.resolver.dropped();
         for order in manager.take_login_orders() {
-            let epoch = order.session_epoch();
-            let spawn_token = match &order {
-                game::LoginOrder::Spawn { player_token, .. } => Some(player_token.clone()),
-                game::LoginOrder::Kick { .. } => None,
-            };
-            match resolve_order(order, &self.orders, &self.players, &self.events, me) {
-                Some(ev) => {
+            self.resolver.push(order, &self.players);
+        }
+        let dropped = self.resolver.dropped() - dropped_before;
+        if dropped > 0 {
+            log::warn!(
+                "[login-link] {dropped} login order(s) dropped: {LOGIN_ORDERS_IN_FLIGHT_MAX} wait for their player's store read \
+                 (the login service answers 503 at its timeout; the client retries)"
+            );
+        }
+        for outcome in self.resolver.poll(&self.orders, &self.players, &self.events, me) {
+            match outcome {
+                OrderOutcome::Event(ev) => {
                     let _ = self.events.send(ev);
                 }
-                None => match spawn_token {
-                    Some(token) => manager.login_order_refused(token, epoch),
-                    // `kick` said why (logged without the token); unanswered, resent.
-                    None => {}
-                },
+                OrderOutcome::Refused { player_token, session_epoch } => manager.login_order_refused(player_token, session_epoch),
+                // Logged without the token; unanswered, the login service resends it.
+                OrderOutcome::Unapplied => {}
             }
-            // A kick or a spawn resolves its player with a synchronous store read: see below.
-            crate::health::Health::global().loop_beat();
         }
         for order in manager.take_spawn_here() {
             let ok = order_player(&self.orders, &self.events, &order.player_token, order.session_epoch, order.player);
@@ -893,6 +1071,95 @@ mod tests {
         assert_eq!(o.kick("t", 2, "bye"), KickApplied::Revoked);
         assert!(o.supersede_revoked("t", 2, || tx.send("kick supersede").unwrap()));
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec!["kick supersede"]);
+    }
+
+    type StoreAnswer = Result<(game::PlayerId, Option<game::PlayerRecord>), world_store::StoreError>;
+
+    /// A player store whose reads answer only when the test says (Elastic 1 final review A-I1:
+    /// the gate host's resolution never waits on one).
+    struct GatedPlayers(Arc<Mutex<Vec<(String, Sender<StoreAnswer>)>>>);
+
+    impl crate::player_store::PlayerStore for GatedPlayers {
+        fn resolve(&mut self, _: &PlayerKey) -> io::Result<(game::PlayerId, Option<game::PlayerRecord>)> {
+            panic!("the gate host never reads a player synchronously")
+        }
+
+        fn resolve_later(&mut self, key: &PlayerKey) -> Resolving {
+            let (tx, rx) = crossbeam::channel::bounded(1);
+            self.0.lock().unwrap().push((key.store_key(), tx));
+            Resolving::Store(rx)
+        }
+    }
+
+    fn spawn_of(token: &str, epoch: u64) -> game::LoginOrder {
+        game::LoginOrder::Spawn { player_token: token.into(), session_epoch: epoch }
+    }
+
+    /// The `(token, epoch)` of each outcome that is a spawn order or a kick, in order.
+    fn order_keys(out: &[OrderOutcome]) -> Vec<(String, u64, &'static str)> {
+        out.iter()
+            .map(|o| match o {
+                OrderOutcome::Event(ServerEvent::SpawnOrder { player_token, session_epoch, .. }) => (player_token.clone(), *session_epoch, "spawn"),
+                OrderOutcome::Event(ServerEvent::Kick { player_token, session_epoch, .. }) => (player_token.clone(), *session_epoch, "kick"),
+                OrderOutcome::Refused { player_token, session_epoch } => (player_token.clone(), *session_epoch, "refused"),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    /// N queued orders never block the pump: with every read outstanding the resolver hands
+    /// out nothing and returns; answers that arrive out of order come out in the order the
+    /// orders came (a later order never overtakes an earlier one still reading — a player's
+    /// kick waits behind its spawn and is applied only when it reaches the front); a failed
+    /// read is a refusal; one order beyond the bound is dropped and counted.
+    #[test]
+    fn queued_orders_never_block_and_come_out_in_order() {
+        let (_clock, orders) = orders_at(1000);
+        let asked: Arc<Mutex<Vec<(String, Sender<StoreAnswer>)>>> = Arc::default();
+        let players = crate::player_store::shared(GatedPlayers(asked.clone()));
+        let (events, _rx) = crossbeam::channel::unbounded();
+        let tokens: Vec<String> = (1..=4u8).map(|n| PlayerToken::generate([n; 16]).0).collect();
+        let mut r = OrderResolver::new();
+        for (i, t) in tokens.iter().enumerate() {
+            assert!(r.push(spawn_of(t, i as u64 + 1), &players));
+        }
+        // Player 0's kick, behind its spawn.
+        assert!(r.push(game::LoginOrder::Kick { player_token: tokens[0].clone(), session_epoch: 1, reason: "bye".into() }, &players));
+        assert_eq!(asked.lock().unwrap().len(), 4, "every spawn's read asked at once; the kick reads nothing yet");
+        assert!(r.poll(&orders, &players, &events, h(3)).is_empty(), "nothing answered: nothing out, no wait");
+        assert_eq!(r.waiting(), 5);
+        let answer = |i: usize| {
+            let (_, tx) = &asked.lock().unwrap()[i];
+            tx.send(Ok((game::PlayerId(100 + i as u64), None))).unwrap();
+        };
+        // The later reads answer first: still nothing (the first order is reading).
+        answer(3);
+        answer(2);
+        assert!(r.poll(&orders, &players, &events, h(3)).is_empty(), "held behind the first order");
+        assert_eq!(orders.revoked(&tokens[0], 1), None, "the kick is not applied before it reaches the front");
+        answer(0);
+        assert_eq!(order_keys(&r.poll(&orders, &players, &events, h(3))), [(tokens[0].clone(), 1, "spawn")], "only the first");
+        // A store failure: a refusal, in its place.
+        asked.lock().unwrap()[1].1.send(Err(world_store::StoreError::Backend("down".into()))).unwrap();
+        let out = r.poll(&orders, &players, &events, h(3));
+        assert_eq!(
+            order_keys(&out),
+            [
+                (tokens[1].clone(), 2, "refused"),
+                (tokens[2].clone(), 3, "spawn"),
+                (tokens[3].clone(), 4, "spawn"),
+                (tokens[0].clone(), 1, "kick")
+            ],
+            "in the order they came"
+        );
+        assert_eq!(orders.revoked(&tokens[0], 1).as_deref(), Some("bye"), "the kick applied at the front");
+        assert_eq!(r.waiting(), 0);
+        // The bound.
+        for _ in 0..LOGIN_ORDERS_IN_FLIGHT_MAX {
+            assert!(r.push(spawn_of(&tokens[0], 9), &players));
+        }
+        assert!(!r.push(spawn_of(&tokens[1], 9), &players), "one beyond the bound is dropped");
+        assert_eq!((r.waiting(), r.dropped()), (LOGIN_ORDERS_IN_FLIGHT_MAX, 1));
     }
 
     #[test]

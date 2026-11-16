@@ -834,6 +834,28 @@ pub fn run() -> claims::ServerExit {
         roles::resolve_before_claim(postgres, store, &host_name).unwrap_or_else(|e| fatal(&e));
         roles::check_two_phase(crash_policy, store).unwrap_or_else(|e| fatal(&e));
     }
+    // Every check and setting that needs no host id, BEFORE the registration (Elastic 1 final
+    // review A-I2): a start-up failure after it leaves a dirty `hosts` row — a succession for a
+    // configuration error, and a crash-looping pod's restarts can roll the world back.
+    roles::check_before_registration(
+        role,
+        store.as_ref(),
+        postgres,
+        &ownership_word,
+        claim_on_demand,
+        super_region_regions,
+        opened.world_tick,
+    )
+    .unwrap_or_else(|e| fatal(&e));
+    let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
+    let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
+    let configured_lod_threads = std::env::var("LOD_BUILD_THREADS").ok();
+    let lod_threads = lod_workers::lod_build_threads(configured_lod_threads.as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
+    let mut notify_mode = (claim_on_demand && store.is_some())
+        .then(|| world_store::NotifyMode::from_env().unwrap_or_else(|e| fatal(&e)));
+    let mut world_link_config = (role == roles::Role::Host).then(|| world_link_config().unwrap_or_else(|e| fatal(&e)));
     // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main loop like a last
     // client leaving does, so the world is saved on the way out; a stop before a host
     // registered exits at once.
@@ -896,7 +918,7 @@ pub fn run() -> claims::ServerExit {
     // relay resolves the orders it is given, places spawns here or on the host holding the
     // player, and sends its answers up its own coordinator link (`login_link`). It never listens
     // for the login service itself.
-    let login_relay = match (&spawn_orders, role) {
+    let mut login_relay = match (&spawn_orders, role) {
         (Some((orders, _)), roles::Role::Host) => {
             info!("[server] login relay: the login service is linked to the coordinator, which relays its orders here");
             Some(login_link::LoginRelay::new(orders.clone(), players.clone(), client_packet_send.clone()))
@@ -921,9 +943,6 @@ pub fn run() -> claims::ServerExit {
         .with_webtransport_port(wt_port)
         .with_host_name(&host_name);
     let sinks = rgi.sinks();
-    let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
-    let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
-        .unwrap_or_else(|message| panic!("{message}"));
     let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
     // The login service's push: a listener (dropped at the end of `run`, sync code) — role
@@ -1011,9 +1030,6 @@ pub fn run() -> claims::ServerExit {
         worldgen::cache::WorldgenCache::from_env(world_seed, &manifest)
     };
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
-    let configured_lod_threads = std::env::var("LOD_BUILD_THREADS").ok();
-    let lod_threads = lod_workers::lod_build_threads(configured_lod_threads.as_deref())
-        .unwrap_or_else(|message| panic!("{message}"));
     info!(
         "[server] lod workers: {lod_threads} ({})",
         if configured_lod_threads.is_some() { "LOD_BUILD_THREADS" } else { "default: cores / 4, clamped 2..=6" }
@@ -1080,8 +1096,7 @@ pub fn run() -> claims::ServerExit {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
         let claimed = if claim_on_demand {
             // `claim` claims nothing at start: free land is claimed on demand (the directory
-            // keeper below).
-            claims::HostClaims::check_side(&store, super_region_regions).unwrap_or_else(|e| fatal(&e));
+            // keeper below). Its super-region side was checked before the registration.
             claims::HostClaims::none(store, host_id)
         } else {
             claims::HostClaims::claim(store, ownership.as_ref(), extent, super_region_regions).unwrap_or_else(|e| fatal(&e))
@@ -1152,7 +1167,7 @@ pub fn run() -> claims::ServerExit {
         lease::beat_at_boot(&mut heartbeat, "reading the ownership directory");
         directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone(), boot));
     }
-    // `claim` with several hosts: an heir's adoption reads (R4, a succession) — what it
+    // `claim`: an heir's adoption reads (R4, a succession) — what it
     // inherits, read on the store thread while this loop (and its heartbeat) runs on.
     let mut adoption_reader =
         claims.as_ref().filter(|_| claim_on_demand).map(|claims| claims::AdoptionReader::new(claims.clone()));
@@ -1179,7 +1194,9 @@ pub fn run() -> claims::ServerExit {
         if let Some(store) = &store {
             match peer_link::left_cleanly(store, host_id) {
                 Ok(left) => manager.note_left_peers(left),
-                Err(e) => log::warn!("[server] reading which hosts left cleanly: {e}; every host is awaited"),
+                Err(e) => log::warn!(
+                    "[server] reading which hosts left cleanly: {e}; every host is awaited until the next directory read"
+                ),
             }
         }
     }
@@ -1196,7 +1213,8 @@ pub fn run() -> claims::ServerExit {
         // `coordinator` thread joined by a channel link (`all`), or is its own
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
-            let link = host_world_link(host_id, boot, host_id.0).unwrap_or_else(|e| fatal(&e));
+            let config = world_link_config.take().expect("a host's world link was configured before its registration");
+            let link = host_world_link(config, host_id, boot, host_id.0);
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {
@@ -1251,7 +1269,7 @@ pub fn run() -> claims::ServerExit {
     // this host's (`VOXEL_TERRAIN_NOTIFY`, `VOXEL_WORLD_DB_DIRECT`; one host: nothing to learn).
     let mut terrain_watch = match (&cuts, claim_on_demand) {
         (Some(cuts), true) => {
-            let mode = world_store::NotifyMode::from_env().unwrap_or_else(|e| fatal(&e));
+            let mode = notify_mode.take().expect("parsed before the registration");
             info!("[server] stored terrain of other hosts: {mode:?} (a resync every {} s)", world_store::TERRAIN_POLL_SECS);
             Some(cuts::TerrainWatch::start(cuts.store().clone(), mode))
         }
@@ -1277,6 +1295,8 @@ pub fn run() -> claims::ServerExit {
     // The loop ended for a drain's deadline (`drain.rs`): after a committed leave the process
     // stays up drained instead of exiting.
     let mut drain_due = false;
+    // A `static` host told the operator once that it ignores a drain mark.
+    let mut static_drain_warned = false;
     'main: loop {
         health::Health::global().loop_beat();
         let now_ms = start.elapsed().as_millis() as u64;
@@ -1334,6 +1354,8 @@ pub fn run() -> claims::ServerExit {
         if claim_on_demand {
             let now_tick = world_clock.tick_at(start.elapsed().as_millis() as u64);
             drain::note_drain(&mut manager, heartbeat.as_ref().and_then(lease::Heartbeat::drain_in_ms), now_tick);
+        } else if drain::static_mark_first_seen(&mut static_drain_warned, heartbeat.as_ref().and_then(lease::Heartbeat::drain_in_ms)) {
+            log::warn!("{}", drain::STATIC_HOST_IGNORES_DRAIN);
         }
         // A newer host dialed in: its session, over the link made for it.
         if let Some(links) = &peer_links {
@@ -1364,7 +1386,7 @@ pub fn run() -> claims::ServerExit {
         observer_pass(&mut manager, observer_orders.as_deref(), &sinks);
         // The login relay (role `host`): the coordinator's orders resolved, spawn orders taken,
         // kicks relayed, answers up the coordinator link.
-        match &login_relay {
+        match login_relay.as_mut() {
             Some(relay) => relay.pump(&mut manager),
             None => {
                 // No spawn orders here (no service token, or role `all`, whose login link answers
@@ -1381,8 +1403,8 @@ pub fn run() -> claims::ServerExit {
         }
         manager.pump_lod_results();
         if let Some(cuts) = cuts.as_mut() {
-            // Backpressure: no new cut while the store still commits one. With several hosts
-            // only the coordinator starts cuts (`BeginCut`); while it is down there are none.
+            // Backpressure: no new cut while the store still commits one. Under `claim` only
+            // the coordinator starts cuts (`BeginCut`); while it is down there are none.
             if !cuts.world_cuts() && last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 && !fenced.is_set() {
                 last_world_save = std::time::Instant::now();
                 // Regions, players and what is in flight, at one
@@ -1511,7 +1533,7 @@ fn host_endpoint(
 }
 
 /// The main loop's pass over the manager's observer bookkeeping (after `maintain`): the
-/// orders other hosts sent go to the edge's book (several hosts: `orders`), and the
+/// orders other hosts sent go to the edge's book (`claim`: `orders`), and the
 /// sessions that became (or started as) their home are revoked there — their tickets admit
 /// nothing more — and marked on their connection, which no observer connection replaces.
 pub fn observer_pass<S: game::RegionSpawner>(
@@ -1797,7 +1819,24 @@ mod tests {
 /// if the coordinator has not written it yet).
 /// `reg`: the host's registration number (`hosts.reg`), in its hello: the coordinator admits
 /// only its `hosts` row's, while that row is live.
-fn host_world_link(ordinal: HostId, boot: u64, reg: u64) -> Result<roles::QuicWorldLink, String> {
+fn host_world_link(config: WorldLinkConfig, ordinal: HostId, boot: u64, reg: u64) -> roles::QuicWorldLink {
+    let WorldLinkConfig { addr, token, cert_file, world } = config;
+    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { id: ordinal, boot, reg }, world);
+    info!("[server] the world coordinator is a separate process at {addr} (pin from {})", cert_file.display());
+    roles::QuicWorldLink::connect(addr, move || svc_link::read_cert_hash(roles::COORDINATOR_CERT_SHA256_ENV, &cert_file), hello)
+}
+
+/// What a host's link to its coordinator needs that no host id is part of, read before the
+/// registration (a bad setting fails the start without a `hosts` row): the coordinator's
+/// address (`VOXEL_COORDINATOR_ADDR`), the service token, the pin file and the world id.
+struct WorldLinkConfig {
+    addr: svc_link::LinkTarget,
+    token: String,
+    cert_file: std::path::PathBuf,
+    world: String,
+}
+
+fn world_link_config() -> Result<WorldLinkConfig, String> {
     let addr = roles::coordinator_dial_target_from(
         roles::COORDINATOR_ADDR_ENV,
         std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref(),
@@ -1805,13 +1844,7 @@ fn host_world_link(ordinal: HostId, boot: u64, reg: u64) -> Result<roles::QuicWo
     let token = svc_link::service_token_from_env().map_err(|e| format!("the service link's token: {e}"))?;
     let cert_file = roles::cert_hash_file_from(std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
     let world = login_link::link_world_from(std::env::var(auth_edge::WORLD_ID_ENV).ok().as_deref());
-    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { id: ordinal, boot, reg }, world);
-    info!("[server] the world coordinator is a separate process at {addr} (pin from {})", cert_file.display());
-    Ok(roles::QuicWorldLink::connect(
-        addr,
-        move || svc_link::read_cert_hash(roles::COORDINATOR_CERT_SHA256_ENV, &cert_file),
-        hello,
-    ))
+    Ok(WorldLinkConfig { addr, token, cert_file, world })
 }
 
 /// This host's observer nonces: each one fresh from the OS's randomness (ring's

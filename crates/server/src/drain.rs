@@ -58,6 +58,20 @@ pub fn note_drain<S: RegionSpawner>(manager: &mut WorldManager<S>, drain_in_ms: 
     }
 }
 
+/// A `static` host (the world's only one) never acts on a drain mark; the first time its beat
+/// shows one (`drain_in_ms`), it says so — once (`warned` remembers). Whether to warn now.
+pub fn static_mark_first_seen(warned: &mut bool, drain_in_ms: Option<i64>) -> bool {
+    if *warned || drain_in_ms.is_none() {
+        return false;
+    }
+    *warned = true;
+    true
+}
+
+/// What a `static` host logs (once) when it is marked draining.
+pub const STATIC_HOST_IGNORES_DRAIN: &str = "[server] this host is marked draining (`worldctl drain`), but a static host \
+     is its world's only one and is never drained: the mark is ignored (stop the world instead, `just world-stop`)";
+
 /// Whether the process stays up drained after its exit: the loop ended for the drain's
 /// deadline (not a stop signal, a fence or a rollback), the exit was clean and the leave cut
 /// committed (`WorldManager::leave_outcome`). Otherwise the process ends with `outcome`.
@@ -75,6 +89,8 @@ pub fn idle_drained(
     out: &Sender<(Option<ClientId>, ServerPacket)>,
     health: &Health,
 ) -> ServerExit {
+    // The beat first (the leave may have outlasted `LIVEZ_STALL_MS`; `set_drained` beats too).
+    health.loop_beat();
     health.set_drained();
     log::info!("[server] drained: this host left the world; idle and unready until it is stopped");
     loop {
@@ -116,6 +132,17 @@ mod tests {
         assert_eq!(drain_deadline(100, 1_049), 120, "rounded down: never later than the mark");
         assert_eq!(drain_deadline(100, 0), 100);
         assert_eq!(drain_deadline(100, -5_000), 100, "past due: now");
+    }
+
+    /// A `static` host warns about a drain mark once, the first time a beat shows it.
+    #[test]
+    fn a_static_host_warns_about_a_mark_once() {
+        let mut warned = false;
+        assert!(!static_mark_first_seen(&mut warned, None), "no mark: nothing");
+        assert!(static_mark_first_seen(&mut warned, Some(60_000)), "the first mark seen");
+        assert!(!static_mark_first_seen(&mut warned, Some(59_000)), "once");
+        assert!(!static_mark_first_seen(&mut warned, None));
+        assert!(!static_mark_first_seen(&mut warned, Some(1_000)), "still once");
     }
 
     #[test]

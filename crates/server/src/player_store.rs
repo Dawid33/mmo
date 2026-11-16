@@ -61,6 +61,41 @@ pub trait PlayerStore: Send {
     /// The player of `key` and its record (if one was stored). An unknown
     /// key becomes a new player with a fresh id, never reused.
     fn resolve(&mut self, key: &PlayerKey) -> io::Result<(PlayerId, Option<PlayerRecord>)>;
+
+    /// [`Self::resolve`] without waiting for the store: the answer is polled
+    /// ([`Resolving::poll`]). A store that answers at once (memory, a test's)
+    /// answers before this returns — the default.
+    fn resolve_later(&mut self, key: &PlayerKey) -> Resolving {
+        Resolving::Done(Some(self.resolve(key)))
+    }
+}
+
+/// The answer [`PlayerStore::resolve`] gives.
+pub type Resolved = io::Result<(PlayerId, Option<PlayerRecord>)>;
+
+/// A resolution under way ([`PlayerStore::resolve_later`]).
+pub enum Resolving {
+    /// Answered already (taken by the first [`Resolving::poll`] that sees it).
+    Done(Option<Resolved>),
+    /// Asked of the world store's thread.
+    Store(crossbeam::channel::Receiver<Result<(PlayerId, Option<PlayerRecord>), world_store::StoreError>>),
+}
+
+impl Resolving {
+    /// The answer once it came (`None`: not yet, or taken already). A store thread that
+    /// stopped answers an error.
+    pub fn poll(&mut self) -> Option<Resolved> {
+        match self {
+            Resolving::Done(answer) => answer.take(),
+            Resolving::Store(rx) => match rx.try_recv() {
+                Ok(answer) => Some(answer.map_err(io::Error::other)),
+                Err(crossbeam::channel::TryRecvError::Empty) => None,
+                Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    Some(Err(io::Error::other("the world store stopped before it answered")))
+                }
+            },
+        }
+    }
 }
 
 /// The store as the network edge shares it between connection tasks.
@@ -326,5 +361,9 @@ pub struct StorePlayers(pub world_store::StoreHandle);
 impl PlayerStore for StorePlayers {
     fn resolve(&mut self, key: &PlayerKey) -> io::Result<(PlayerId, Option<PlayerRecord>)> {
         self.0.resolve_player(&key.store_key()).map_err(io::Error::other)
+    }
+
+    fn resolve_later(&mut self, key: &PlayerKey) -> Resolving {
+        Resolving::Store(self.0.resolve_player_later(&key.store_key()))
     }
 }

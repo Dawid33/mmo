@@ -35,9 +35,11 @@ pub const LIVEZ_STALL_MS: u64 = 30_000;
 const _: () = assert!(LIVEZ_STALL_MS == 3 * game::HOST_LEASE_MS);
 
 /// What a process not yet registered waits for ([`Health::set_waiting`]); the index + 1 is
-/// stored, 0 = nothing. `drained`: a host that left the world after a drain (Elastic 1 Task 8)
-/// and waits to be removed ([`Health::set_drained`]).
-const WAITING: [&str; 4] = ["succession", "vouched", "forge", DRAINED];
+/// stored, 0 = nothing. `forge`: an empty world store under `VOXEL_EMPTY_STORE=wait`;
+/// `drained`: a host that left the world after a drain (Elastic 1 Task 8) and waits to be
+/// removed ([`Health::set_drained`]). (Elastic 1 removed `succession` and `vouched`: a host no
+/// longer waits at its registration — a restarted process is a new host.)
+const WAITING: [&str; 2] = ["forge", DRAINED];
 
 /// [`WAITING`]'s word for a drained host: `/readyz`'s body, `mmo_waiting{why="drained"}`.
 pub const DRAINED: &str = "drained";
@@ -113,8 +115,8 @@ impl Health {
         self.registered.store(yes, Ordering::Relaxed);
     }
 
-    /// Why the process is not registered yet: `"succession"`, `"vouched"`, `"forge"` or
-    /// [`DRAINED`] (anything else is taken as `None`); `None`: not waiting.
+    /// Why the process is not registered yet: `"forge"` or [`DRAINED`] (anything else is taken
+    /// as `None`); `None`: not waiting.
     pub fn set_waiting(&self, why: Option<&'static str>) {
         let code = why.and_then(|w| WAITING.iter().position(|&x| x == w)).map_or(0, |i| i as u8 + 1);
         self.waiting.store(code, Ordering::Relaxed);
@@ -122,8 +124,11 @@ impl Health {
 
     /// A host left the world after a drain and idles until it is removed (Elastic 1 Task 8):
     /// not ready (`/readyz` 503 [`DRAINED`], `mmo_waiting{why="drained"}`, `mmo_registered` 0),
-    /// still judged alive by its idle loop's beat ([`Self::loop_beat`]).
+    /// still judged alive by its idle loop's beat ([`Self::loop_beat`]). It beats first: the
+    /// leave before it may have outlasted [`LIVEZ_STALL_MS`] (unregistered, nothing judged it),
+    /// and being drained must not inherit that loop age for an instant.
     pub fn set_drained(&self) {
+        self.loop_beat();
         self.set_registered(false);
         self.set_waiting(Some(DRAINED));
     }
@@ -415,8 +420,8 @@ mod tests {
     #[test]
     fn readyz_follows_registration() {
         let health = fresh();
-        health.set_waiting(Some("succession"));
-        assert_eq!(get(health, "/readyz"), (503, "succession".to_string()));
+        health.set_waiting(Some("forge"));
+        assert_eq!(get(health, "/readyz"), (503, "forge".to_string()));
         health.set_waiting(None);
         health.set_registered(true);
         assert_eq!(get(health, "/readyz").0, 200);
@@ -437,6 +442,23 @@ mod tests {
         assert!(text.contains("mmo_registered{role=\"host\"} 0"), "{text}");
         health.set_last_beat_ago(Duration::from_millis(LIVEZ_STALL_MS + 1));
         assert_eq!(get(health, "/livez").0, 503, "a drained loop that stalled");
+    }
+
+    /// Elastic 1 final review A-M1: a leave that took longer than `LIVEZ_STALL_MS` (the loop's
+    /// last beat that old: the process was unregistered meanwhile, so nothing judged it) turns
+    /// into drained: `/livez` is 200 at that very instant — being drained never inherits the
+    /// leave's loop age.
+    #[test]
+    fn a_long_leave_turning_drained_is_alive_at_once() {
+        let health = fresh();
+        health.set_registered(true);
+        health.loop_beat();
+        health.set_registered(false);
+        health.set_last_beat_ago(Duration::from_millis(LIVEZ_STALL_MS + 5_000));
+        assert_eq!(get(health, "/livez").0, 200, "unregistered during its leave: not judged");
+        health.set_drained();
+        assert_eq!(get(health, "/livez").0, 200, "drained after a long leave: alive at once");
+        assert_eq!(get(health, "/readyz"), (503, "drained".to_string()));
     }
 
     #[test]
@@ -464,8 +486,6 @@ mod tests {
         for sample in [
             "outcome=\"committed\"",
             "outcome=\"aborted\"",
-            "why=\"succession\"",
-            "why=\"vouched\"",
             "why=\"forge\"",
             "why=\"drained\"",
             "role=\"host\"",

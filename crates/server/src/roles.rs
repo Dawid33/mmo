@@ -176,6 +176,36 @@ pub fn start_clock(
     }
 }
 
+/// The start-up checks of a process that need no host id, made BEFORE a host registers
+/// (Elastic 1 final review A-I2): a host that fails after its registration leaves a dirty
+/// `hosts` row, which the next start vouches dead and the coordinator declares — a succession
+/// for a configuration error, and with a crash-looping pod one on every restart, which can roll
+/// the world back. Checked: the ownership word (`VOXEL_OWNERSHIP`); under `claim` the
+/// super-region side against the world row (`VOXEL_SUPER_REGION_REGIONS`); a split role's world
+/// clock against the saved `world_tick` ([`CLOCK_BEHIND_WORLD_TICK`] — the clock anchor is
+/// ensured, i.e. written if the world has none, and the clock is started again after the
+/// registration, its phase taken then). `run` also parses every id-free setting it uses later
+/// before registering (thread counts, `VOXEL_TERRAIN_NOTIFY`, the coordinator's address, token
+/// and pin file).
+pub fn check_before_registration(
+    role: Role,
+    store: Option<&world_store::StoreHandle>,
+    postgres: bool,
+    ownership_word: &str,
+    claim_on_demand: bool,
+    super_region_regions: u32,
+    world_tick: game::Tick,
+) -> Result<(), String> {
+    game::ownership_for(ownership_word, HostId::SOLO)?;
+    if let (Some(store), true) = (store, claim_on_demand) {
+        crate::claims::HostClaims::check_side(store, super_region_regions)?;
+    }
+    if role == Role::Host {
+        start_clock(role, store, postgres, world_tick)?;
+    }
+    Ok(())
+}
+
 /// Role `all` on Postgres forgets the world's clock anchor so a later split start writes a
 /// fresh one. Call it only AFTER the super-region claim succeeded: an all-in-one claim bumps
 /// every epoch, so any split host still running is fenced and exits; clearing earlier (or
@@ -383,9 +413,10 @@ impl WorldLink for QuicWorldLink {
     }
 }
 
-/// Why several hosts refuse a Postgres without two-phase commit.
-pub const SEVERAL_HOSTS_NEED_TWO_PHASE: &str =
-    "several hosts (VOXEL_OWNERSHIP=claim, on the hosts and on their coordinator) need Postgres with max_prepared_transactions > 0 (their world cuts are staged in two phases)";
+/// Why a `claim` host refuses a Postgres without two-phase commit (however many hosts run:
+/// its saves are world cuts).
+pub const CLAIM_NEEDS_TWO_PHASE: &str =
+    "a claim host (VOXEL_OWNERSHIP=claim, on the hosts and on their coordinator; any number of hosts) needs Postgres with max_prepared_transactions > 0 (its world cuts are staged in two phases)";
 
 /// A coordinator's start-up on Postgres, before it claims its row: EVERY world cut part a
 /// crash left staged is finished ([`crate::cuts::resolve_staged_cuts`]) — the cuts of a
@@ -463,10 +494,10 @@ pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, na
 }
 
 /// A `claim` host (`policy` `Succession`: any number of hosts, its saves world cuts in two
-/// phases) needs two-phase commit ([`SEVERAL_HOSTS_NEED_TWO_PHASE`]); any other: nothing.
+/// phases) needs two-phase commit ([`CLAIM_NEEDS_TWO_PHASE`]); any other: nothing.
 pub fn check_two_phase(policy: game::CrashPolicy, store: &world_store::StoreHandle) -> Result<(), String> {
     if policy == game::CrashPolicy::Succession {
-        store.two_phase_ready().map_err(|e| format!("{SEVERAL_HOSTS_NEED_TWO_PHASE}: {e}"))?;
+        store.two_phase_ready().map_err(|e| format!("{CLAIM_NEEDS_TWO_PHASE}: {e}"))?;
     }
     Ok(())
 }

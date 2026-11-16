@@ -515,6 +515,30 @@ fn a_second_static_host_is_refused_at_registration() {
     store.shutdown();
 }
 
+/// Elastic 1 final review A-I2: the checks a host needs no id for fail BEFORE it registers — a
+/// wrong `VOXEL_SUPER_REGION_REGIONS` or a bad `VOXEL_OWNERSHIP` word is refused naming the
+/// variable, and nothing is issued or written: no `hosts` row, `next_host_id` unchanged (`run`
+/// calls this right before `lease::register`). The right settings pass.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_misconfigured_host_fails_before_it_registers() {
+    let Some(db) = PgDb::create("preflight") else { return };
+    let store = db.open();
+    let next = scalar(&db, "SELECT next_host_id FROM world");
+    let side = store.super_region_regions();
+    let check = |word: &str, side: u32| {
+        server::roles::check_before_registration(server::roles::Role::Host, Some(&store), true, word, true, side, 0)
+    };
+    let err = check("claim", side + 1).expect_err("a wrong super-region side");
+    assert!(err.contains(server::claims::SUPER_REGION_REGIONS_ENV), "{err}");
+    let err = check("claimz", side).expect_err("a bad ownership word");
+    assert!(err.contains(game::ownership::OWNERSHIP_ENV), "{err}");
+    assert!(store.hosts().unwrap().is_empty(), "no hosts row");
+    assert_eq!(scalar(&db, "SELECT next_host_id FROM world"), next, "no id issued");
+    check("claim", side).expect("the right settings pass");
+    store.shutdown();
+}
+
 /// Runs `sql` on its own connection: the first column of the first row.
 fn scalar(db: &PgDb, sql: &str) -> i64 {
     let (url, sql) = (db.0.url.clone(), sql.to_string());

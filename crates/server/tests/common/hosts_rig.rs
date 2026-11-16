@@ -493,7 +493,7 @@ impl Pair {
             if let Some(adopter) = sim.adopter.as_mut() {
                 adopter.pump(&mut sim.manager);
             }
-            if let Some(login) = &sim.login {
+            if let Some(login) = sim.login.as_mut() {
                 login.relay.pump(&mut sim.manager);
             }
             sim.settle(now);

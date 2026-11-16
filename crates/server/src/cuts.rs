@@ -5,7 +5,7 @@
 //! Commits are fenced ([`HostClaims`]): a refusal as fenced makes the whole
 //! process fenced (`Fenced`), and nothing more is written.
 //!
-//! **World cuts** (several hosts, R3 Task 13; [`CutWriter::with_world_cuts`]): the
+//! **World cuts** (`claim`, any number of hosts, R3 Task 13; [`CutWriter::with_world_cuts`]): the
 //! manager's part of a world cut is staged, not committed (`StoreHandle::prepare_cut`,
 //! at this process's world generation): staged → the manager tells the coordinator
 //! (`CutPrepared`); refused or failed → `CutFailed { Store }`. The part waits for the
@@ -20,17 +20,20 @@
 //! settle. A `StaleGeneration` notes the newer generation (the host exits for a world
 //! rollback); `CutAborted` needs no settling. Every store call here is answered on a
 //! receiver: the main loop never waits. A part that keeps the next cuts from being staged
-//! counts toward [`CUT_FAILURES_BEFORE_STUCK`]. With one host nothing of this runs.
+//! counts toward [`CUT_FAILURES_BEFORE_STUCK`]. A `static` host (alone) runs none of this.
 //!
-//! **Leaving** (several hosts, R3 Task 14; [`exit_world`]): an exiting host asks for a leave
+//! **Leaving** (`claim`, R3 Task 14; [`exit_world`]): an exiting host asks for a leave
 //! cut (`LeaveRequest`); on the `BeginCut` naming it leaving its manager parks everything
 //! (the regions' `Stopped` answers are the cut's) and the part is staged like any other.
-//! Committed: its `hosts` row is clean, it exits 0 and its return keeps the world
-//! generation. An aborted leave cut is asked for again; no committed one within
-//! [`game::LEAVE_CUT_TIMEOUT_SECS`] of the first request: it exits 0 without a cut ([`LEFT_WITHOUT_A_CUT`]) — its row stays dirty, so its return
-//! raises the generation and the world rolls back to the last cut.
+//! Committed: its `hosts` row is clean and it exits 0 (after a drain it stays up, drained);
+//! its land waits for a `Leave` succession — it never returns as itself (Elastic 1: a restarted
+//! process is a new host). An aborted leave cut is asked for again; no committed one within
+//! [`game::LEAVE_CUT_TIMEOUT_SECS`] of the first request: it exits 0 without a cut
+//! ([`LEFT_WITHOUT_A_CUT`]) — its row stays dirty, a crash to the world: its land goes to an
+//! heir from the last committed cut, or, with no other host alive, the next registration
+//! raises the world generation.
 //!
-//! **Other hosts' saves** (several hosts, R3 Task 19; [`TerrainWatch`]): every committed
+//! **Other hosts' saves** (`claim`, R3 Task 19; [`TerrainWatch`]): every committed
 //! cut is announced (`StoreHandle::notify_cut`: the one-phase commit here, the world cut's
 //! decision in the coordinator runtime); each host listens (`StoreHandle::listen_cuts`) and
 //! hands the versions the store then holds to `WorldManager::stored_terrain_changed`, which
@@ -86,8 +89,10 @@ pub const WORLD_PART_POLL: Duration = Duration::from_secs(1);
 /// At most one warning per this long about failing reads of a world part's decision.
 pub const WORLD_PART_WARN: Duration = Duration::from_secs(10);
 
-/// What an exiting host of several logs when it leaves with no committed cut.
-pub const LEFT_WITHOUT_A_CUT: &str = "left without a cut: the world rolls back to the last cut when this host returns";
+/// What an exiting `claim` host logs when it leaves with no committed cut.
+pub const LEFT_WITHOUT_A_CUT: &str = "left without a cut: this host's row stays dirty, a crash to the world — its \
+     land goes to an heir from the last committed cut (with no other host alive, the next registration raises the world \
+     generation)";
 
 /// Start-up recovery of a coordinator process on Postgres (`roles::recover_staged_cuts`):
 /// EVERY world cut part left staged is finished as its cut's decision says, an undecided cut
@@ -159,7 +164,7 @@ pub struct CutWriter {
     pending: Vec<Pending>,
     /// Commits failed in a row (reset by one that commits).
     failed_in_a_row: u32,
-    /// World cuts (several hosts): this process's world generation.
+    /// World cuts (`claim`): this process's world generation.
     world: Option<WorldGeneration>,
     /// The world part not settled yet (one at a time: the store refuses another meanwhile).
     part: Option<WorldPart>,
@@ -266,7 +271,7 @@ impl CutWriter {
         CutWriter { world: Some(generation), ..CutWriter::new(claims) }
     }
 
-    /// Whether this writer stages world cut parts (several hosts).
+    /// Whether this writer stages world cut parts (`claim`).
     pub fn world_cuts(&self) -> bool {
         self.world.is_some()
     }
@@ -339,7 +344,7 @@ impl CutWriter {
     /// answer waited for (at most `timeout`); then the store is shut down.
     /// Returns whether the last cut committed.
     ///
-    /// With several hosts the exit's save is the leave cut instead ([`exit_world`]).
+    /// Under `claim` the exit's save is the leave cut instead ([`exit_world`]).
     pub fn finish<S: RegionSpawner>(mut self, manager: &mut WorldManager<S>, now: Tick, timeout: Duration) -> bool {
         // A cut still pending (waiting for a region that never answered) is
         // given up by the manager at its deadline; a complete one goes first.
@@ -961,7 +966,7 @@ impl TerrainRead {
     }
 }
 
-/// A host's view of the other hosts' saves (several hosts): the store's cut notices
+/// A host's view of the other hosts' saves (`claim`): the store's cut notices
 /// ([`StoreHandle::listen_cuts`], its own `terrain-listener` thread) become reads of the
 /// stored regions' terrain versions — `stored_regions_since(tick)` for a `Cut`,
 /// `stored_regions()` for a `Resync` — answered on receivers (the main loop never waits;
