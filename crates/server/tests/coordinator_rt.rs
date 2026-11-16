@@ -571,6 +571,204 @@ fn coordinator_panic_skips_the_exit_cut() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What a restart must resume exactly: the calendar (history tick and the calendar's anchor),
+/// the site markers, the legends' length.
+#[derive(Debug, PartialEq)]
+struct Resumed {
+    now: game::history::CalendarTick,
+    anchor: ((u64, game::history::CalendarTick), u64),
+    sites: Vec<game::SiteMarker>,
+    legends: usize,
+}
+
+fn resumed(c: &game::Coordinator) -> Resumed {
+    Resumed { now: c.history().now(), anchor: c.calendar_anchor(), sites: c.history().site_markers(), legends: c.history().log().len() }
+}
+
+/// Elastic 2a, single player (role `all`, SQLite): the bootstrap's first transition writes the
+/// row's version 1; a founding and years of history are written moments before the coordinator
+/// dies (after the commit, before its sends), and the restart resumes from exactly that
+/// transition — calendar, site markers, legends' length — not from a periodic save.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn single_player_restart_resumes_history_where_it_was() {
+    let dir = scratch("resume");
+    let map = land_map();
+    let store = open_store(&dir);
+    let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
+    assert_eq!(start.source, CoordinatorSource::Bootstrapped);
+    let req = embark_request(start.coordinator.history());
+    let fenced = server::claims::Fenced::default();
+    let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    let first = loop {
+        if let Some(row) = store.load_coordinator().unwrap() {
+            break row;
+        }
+        assert!(Instant::now() < deadline, "the bootstrap was never written");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(first.version, 1, "the bootstrap's first transition writes version 1");
+    let player = PlayerId(1);
+    let id = RequestId { host: h(0), boot: 1, seq: 1 };
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
+    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
+    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req.clone()) });
+    loop {
+        assert!(Instant::now() < deadline, "the embark was never answered");
+        match link.recv() {
+            Some(CoordMsg::Reply { id: got, .. }) if got == id => break,
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+
+    // The next transition: years of history, decided while writes fail; once it commits the
+    // thread dies before sending what it released.
+    thread.fail_coordinator_writes(true);
+    let changed_at = Instant::now();
+    let target = thread
+        .with_core(
+            |c| {
+                let h = c.history_mut();
+                h.advance(game::history::CalendarTick(h.now().0 + 3 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY));
+                h.now()
+            },
+            WAIT,
+        )
+        .expect("the coordinator answers");
+    let decided = thread.inspect(resumed, WAIT).expect("the coordinator answers");
+    thread.kill_after_commit_before_send();
+    thread.fail_coordinator_writes(false);
+    while !thread.is_finished() {
+        assert!(Instant::now() < deadline, "the transition never committed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::CoordinatorFailed);
+    assert!(changed_at.elapsed() < Duration::from_secs(20), "written within seconds");
+    assert!(!fenced.is_set());
+
+    let row = store.load_coordinator().unwrap().expect("written");
+    let grid = game::history::SocietyGrid::from_world_map(&map);
+    let last = resumed(&game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ProcessBoot(0), 0).unwrap());
+    // The change made just before the crash is in it (and whatever the core decided after it,
+    // before the write: a day's turn at most).
+    assert!(last.now >= target && last.now >= decided.now && last.legends >= decided.legends, "{last:?} vs {decided:?}");
+    assert_eq!(last.sites, decided.sites);
+    assert_eq!(player_sites(&stored_state(&store, &map).unwrap().0).len(), 1, "the founding is in it");
+    store.shutdown();
+
+    // The restart runs from exactly that transition.
+    let store = open_store(&dir);
+    let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
+    assert_eq!(start.source, CoordinatorSource::Stored);
+    assert_eq!(start.version, row.version);
+    assert_eq!(resumed(&start.coordinator), last);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Elastic 2a: the attach and an embark for a channel link's host `h(0)`; the request's id.
+fn attach_and_embark(link: &mut coordinator_rt::ChannelWorldLink, req: &EmbarkRequest) -> RequestId {
+    let player = PlayerId(1);
+    let id = RequestId { host: h(0), boot: 1, seq: 1 };
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
+    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
+    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req.clone()) });
+    id
+}
+
+/// Waits for the coordinator's first write (the bootstrap): its row.
+fn first_write(store: &StoreHandle) -> world_store::StoredCoordinator {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(row) = store.load_coordinator().unwrap() {
+            return row;
+        }
+        assert!(Instant::now() < deadline, "the bootstrap was never written");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Elastic 2a: a write that committed but whose answer was lost (the runtime took it as failed)
+/// makes the next write a `Conflict`; the row holds the runtime's own write, so it takes its
+/// version and writes again — once. The founding is written, its reply leaves exactly once, the
+/// coordinator runs on.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_conflict_with_its_own_lost_commit_is_written_over_once() {
+    let dir = scratch("lostanswer");
+    let map = land_map();
+    let store = open_store(&dir);
+    let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
+    let req = embark_request(start.coordinator.history());
+    let fenced = server::claims::Fenced::default();
+    let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
+    assert_eq!(first_write(&store).version, 1);
+    thread.lose_next_write_answer();
+    let id = attach_and_embark(&mut link, &req);
+    let deadline = Instant::now() + WAIT;
+    let mut replies = 0;
+    let quiet_from = loop {
+        assert!(Instant::now() < deadline, "the reply never left");
+        match link.recv() {
+            Some(CoordMsg::Reply { id: got, .. }) if got == id => {
+                replies += 1;
+                break Instant::now();
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(2)),
+        }
+    };
+    while quiet_from.elapsed() < Duration::from_millis(700) {
+        match link.recv() {
+            Some(CoordMsg::Reply { id: got, .. }) if got == id => replies += 1,
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    assert_eq!(replies, 1, "the reply left once");
+    assert!(!thread.is_finished() && !fenced.is_set(), "the coordinator runs on");
+    let row = store.load_coordinator().unwrap().unwrap();
+    assert!(row.version >= 3, "the lost commit (2) was written over (3): {}", row.version);
+    assert_eq!(player_sites(&stored_state(&store, &map).unwrap().0).len(), 1, "one founding");
+    assert_eq!(thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Elastic 2a: another writer moved the coordinator row under this coordinator's epoch (a bug in
+/// one-process E2a): its next write is a `Conflict` the row does not explain, and it stops as
+/// fenced without sending what it decided.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_conflict_with_another_writer_stops_the_coordinator_as_fenced() {
+    let dir = scratch("otherwriter");
+    let map = land_map();
+    let store = open_store(&dir);
+    let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
+    let (fence, req) = (start.fence, embark_request(start.coordinator.history()));
+    let fenced = server::claims::Fenced::default();
+    let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
+    let row = first_write(&store);
+    let other = store.write_coordinator_later(fence, row.version, row.core.clone(), None).recv().unwrap().expect("the other write commits");
+    assert_eq!(other.version, row.version + 1);
+    let id = attach_and_embark(&mut link, &req);
+    let deadline = Instant::now() + WAIT;
+    while !thread.is_finished() {
+        assert!(Instant::now() < deadline, "the coordinator ran on beside another writer");
+        if let Some(CoordMsg::Reply { id: got, .. }) = link.recv() {
+            assert_ne!(got, id, "the reply left");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(fenced.is_set(), "the process is fenced");
+    assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
+    assert_eq!(store.load_coordinator().unwrap().unwrap().version, other.version, "nothing written over the other writer");
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A host id from its number.
 #[allow(dead_code)]
 fn h(n: u64) -> game::HostId {

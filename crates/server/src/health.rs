@@ -66,6 +66,10 @@ pub struct Health {
     successions_open: AtomicU64,
     world_generation: AtomicU64,
     hosts_live: AtomicU64,
+    coordinator_transitions: AtomicU64,
+    coordinator_core_bytes: AtomicU64,
+    coordinator_history_bytes: AtomicU64,
+    coordinator_conflicts: AtomicU64,
 }
 
 impl Health {
@@ -84,6 +88,10 @@ impl Health {
             successions_open: AtomicU64::new(0),
             world_generation: AtomicU64::new(0),
             hosts_live: AtomicU64::new(0),
+            coordinator_transitions: AtomicU64::new(0),
+            coordinator_core_bytes: AtomicU64::new(0),
+            coordinator_history_bytes: AtomicU64::new(0),
+            coordinator_conflicts: AtomicU64::new(0),
         }
     }
 
@@ -185,6 +193,19 @@ impl Health {
         self.hosts_live.store(n, Ordering::Relaxed);
     }
 
+    /// The coordinator committed a transition: its row's `core` and `history` (0: not written)
+    /// bytes (Elastic 2a, decision 8).
+    pub fn coordinator_written(&self, core_bytes: u64, history_bytes: u64) {
+        self.coordinator_transitions.fetch_add(1, Ordering::Relaxed);
+        self.coordinator_core_bytes.fetch_add(core_bytes, Ordering::Relaxed);
+        self.coordinator_history_bytes.fetch_add(history_bytes, Ordering::Relaxed);
+    }
+
+    /// A coordinator write was refused as a `Conflict` (the row's version moved under its epoch).
+    pub fn coordinator_conflict(&self) {
+        self.coordinator_conflicts.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Milliseconds since the last loop pass; `None` before the first.
     fn loop_age_ms(&self) -> Option<u64> {
         match self.last_beat_ms.load(Ordering::Relaxed) {
@@ -258,6 +279,24 @@ impl Health {
         gauge("mmo_successions_open", "Successions open now, as the coordinator knows them.", load(&self.successions_open));
         gauge("mmo_world_generation", "The world generation this process runs.", load(&self.world_generation));
         gauge("mmo_hosts_live", "Hosts whose `hosts` row is dirty and live at the coordinator's last read.", load(&self.hosts_live));
+        counter(
+            "mmo_coordinator_transitions_total",
+            "Coordinator transitions written (each one compare-and-set of the coordinator row).",
+            load(&self.coordinator_transitions),
+        );
+        let written = IntCounterVec::new(
+            opts("mmo_coordinator_written_bytes_total", "Bytes of the coordinator row's blobs written, by part."),
+            &["part"],
+        )
+        .expect("valid metric");
+        written.with_label_values(&["core"]).inc_by(load(&self.coordinator_core_bytes));
+        written.with_label_values(&["history"]).inc_by(load(&self.coordinator_history_bytes));
+        register(Box::new(written));
+        counter(
+            "mmo_coordinator_conflicts_total",
+            "Coordinator writes refused as a conflict (the row's version moved under its epoch).",
+            load(&self.coordinator_conflicts),
+        );
         let build = IntGaugeVec::new(
             opts("mmo_build_info", "The running build (always 1)."),
             &["region_blocks", "chunk_blocks", "revision"],
@@ -479,6 +518,9 @@ mod tests {
             "mmo_successions_open",
             "mmo_world_generation",
             "mmo_hosts_live",
+            "mmo_coordinator_transitions_total",
+            "mmo_coordinator_written_bytes_total",
+            "mmo_coordinator_conflicts_total",
             "mmo_build_info",
         ] {
             assert!(text.lines().any(|l| l.starts_with(&format!("# TYPE {name} "))), "{name} is missing:\n{text}");

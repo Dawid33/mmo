@@ -1590,6 +1590,388 @@ fn request_timeout_answers_world_unavailable() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- Elastic 2a Task 6: every change is written before anything it decided is sent -------
+
+/// The player a raw host reports online, and the placement hop it reports it at.
+const RAW_PLAYER: PlayerId = PlayerId(1);
+const RAW_HOP: u64 = 1;
+
+/// A raw host's `Attach` of `epoch`: its player online, a claim-changing request of it
+/// unsettled when `pending` (a host that sent one and has no answer yet keeps it pending),
+/// `pending_cut` as the host's last unanswered cut.
+fn raw_attach(host: &world_store::Registered, epoch: u64, pending: bool, pending_cut: Option<game::CutId>) -> game::HostMsg {
+    let online = vec![game::OnlinePlayer { player: RAW_PLAYER, claim: None, claim_pending: pending, report: epoch, hop: RAW_HOP }];
+    game::HostMsg::Attach {
+        host: host.id,
+        epoch,
+        running: Vec::new(),
+        online,
+        generation: host.generation,
+        boot: 1,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut,
+        successions: Vec::new(),
+        policy: game::CrashPolicy::Rollback,
+    }
+}
+
+/// The raw host's embark request `seq`.
+fn raw_embark(host: &world_store::Registered, seq: u64, req: &EmbarkRequest) -> (game::RequestId, game::HostMsg) {
+    let id = game::RequestId { host: host.id, boot: 1, seq };
+    (id, game::HostMsg::Request { id, player: RAW_PLAYER, hop: RAW_HOP, req: game::WorldRequest::Embark(req.clone()) })
+}
+
+/// The coordinator state the store holds, loaded as a restart loads it.
+fn stored_core(store: &StoreHandle, map: &WorldMap) -> game::Coordinator {
+    let row = store.load_coordinator().unwrap().expect("a written coordinator state");
+    let grid = game::history::SocietyGrid::from_world_map(map);
+    game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ProcessBoot(0), 0).expect("the projection loads")
+}
+
+/// What a restart must resume exactly: the calendar (history tick and the calendar's anchor),
+/// the site markers, the legends' length.
+#[derive(Debug, PartialEq)]
+struct Resumed {
+    now: CalendarTick,
+    anchor: ((u64, CalendarTick), u64),
+    sites: Vec<game::SiteMarker>,
+    legends: usize,
+}
+
+fn resumed(c: &game::Coordinator) -> Resumed {
+    Resumed { now: c.history().now(), anchor: c.calendar_anchor(), sites: c.history().site_markers(), legends: c.history().log().len() }
+}
+
+/// A coordinator listening for one host whose link is read raw: no `WorldManager`, so what
+/// the coordinator sends — and when — is seen as it is. Registered `static` (no lease is
+/// beaten, no succession is ever declared). With `cuts` the coordinator runs world cuts every
+/// 300 ms on a world tick that continues across its restarts.
+struct RawWorld {
+    db: PgDb,
+    map: WorldMap,
+    dir: PathBuf,
+    cert_file: PathBuf,
+    addr: std::net::SocketAddr,
+    cuts: Option<Instant>,
+    coordinator: Option<Coordinator>,
+    host: world_store::Registered,
+    link: crossbeam::channel::Sender<game::HostMsg>,
+    events: Receiver<svc_link::LinkEvent<game::CoordMsg>>,
+    /// Every message read since the start (or the last restart).
+    seen: Vec<game::CoordMsg>,
+}
+
+impl RawWorld {
+    fn new(tag: &str, cuts: bool) -> Option<RawWorld> {
+        install_props();
+        let db = PgDb::create(tag)?;
+        let map = land_map();
+        let dir = scratch(tag);
+        let cert_file = dir.join("coordinator.cert-sha256");
+        let store = db.open();
+        let host = register_host(&store, h(0), 1);
+        store.shutdown();
+        let cuts = cuts.then(Instant::now);
+        let (coordinator, addr) = Self::start(&db, &map, "127.0.0.1:0".parse().unwrap(), &cert_file, cuts);
+        let (link, events) = raw_host_link(addr, &cert_file, 1, host.id.0);
+        let mut w = RawWorld { db, map, dir, cert_file, addr, cuts, coordinator: Some(coordinator), host, link, events, seen: Vec::new() };
+        let attach = raw_attach(&w.host, 1, false, None);
+        w.attach(attach);
+        Some(w)
+    }
+
+    fn start(
+        db: &PgDb,
+        map: &WorldMap,
+        bind: std::net::SocketAddr,
+        cert_file: &std::path::Path,
+        cuts: Option<Instant>,
+    ) -> (Coordinator, std::net::SocketAddr) {
+        let store = db.open();
+        let start = ensure_coordinator_state(&store, map, None).unwrap().expect("a history");
+        let cuts = cuts.map(|t0| coordinator_rt::WorldCuts {
+            every: Duration::from_millis(300),
+            tick: Box::new(move || t0.elapsed().as_millis() as u64 / game::TICK_RATE),
+        });
+        let listening = coordinator_rt::start_listening_as(
+            store.clone(),
+            start,
+            bind,
+            TOKEN.into(),
+            Some(cert_file.to_path_buf()),
+            Fenced::default(),
+            cuts,
+            game::CrashPolicy::Rollback,
+            "",
+            None,
+        )
+        .expect("the coordinator listens");
+        (Coordinator { thread: listening.thread, store }, listening.addr)
+    }
+
+    fn thread(&self) -> &CoordinatorThread {
+        &self.coordinator.as_ref().expect("the coordinator runs").thread
+    }
+
+    /// Sends `attach` and reads until its echo.
+    fn attach(&mut self, attach: game::HostMsg) {
+        let game::HostMsg::Attach { epoch, .. } = attach else { unreachable!("an Attach") };
+        self.link.send(attach).unwrap();
+        self.read_until("the attach echo", |m| matches!(m, game::CoordMsg::Attached { epoch: e } if *e == epoch));
+    }
+
+    /// Reads whatever arrives for `d`.
+    fn read_for(&mut self, d: Duration) {
+        let until = Instant::now() + d;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            match self.events.recv_timeout(left) {
+                Ok(svc_link::LinkEvent::Msg(m)) => self.seen.push(m),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Reads until a message `pred` holds of arrives (at most [`WAIT`]); that message.
+    fn read_until(&mut self, what: &str, pred: impl Fn(&game::CoordMsg) -> bool) -> game::CoordMsg {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let left = deadline.checked_duration_since(Instant::now()).unwrap_or_else(|| panic!("timed out waiting: {what}"));
+            if let Ok(svc_link::LinkEvent::Msg(m)) = self.events.recv_timeout(left) {
+                self.seen.push(m.clone());
+                if pred(&m) {
+                    return m;
+                }
+            }
+        }
+    }
+
+    fn replies(&self, id: game::RequestId) -> Vec<game::WorldReply> {
+        self.seen
+            .iter()
+            .filter_map(|m| match m {
+                game::CoordMsg::Reply { id: got, reply } if *got == id => Some(reply.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Until `done` of the running core holds (at most [`WAIT`]).
+    fn until_core(&self, what: &str, done: impl Fn(&game::Coordinator) -> bool + Send + Clone + 'static) {
+        let deadline = Instant::now() + WAIT;
+        while !self.thread().inspect(done.clone(), WAIT).expect("the coordinator answers") {
+            assert!(Instant::now() < deadline, "timed out waiting: {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The coordinator's next transition is the last thing it does: it commits, and the thread
+    /// ends before anything that transition released leaves. Writes fail while `prepare` runs
+    /// (it decides what that transition holds), then resume.
+    fn kill_after_the_commit(&mut self, prepare: impl FnOnce(&mut RawWorld)) {
+        self.thread().fail_coordinator_writes(true);
+        prepare(self);
+        self.thread().kill_after_commit_before_send();
+        self.thread().fail_coordinator_writes(false);
+        let deadline = Instant::now() + WAIT;
+        while !self.thread().is_finished() {
+            assert!(Instant::now() < deadline, "the coordinator never committed its transition");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.coordinator.take().expect("it ran").kill();
+    }
+
+    /// The coordinator starts again on the same address and pin; the raw link comes up again.
+    fn restart(&mut self) {
+        let (c, _) = Self::start(&self.db, &self.map, self.addr, &self.cert_file, self.cuts);
+        self.coordinator = Some(c);
+        self.seen.clear();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let left = deadline.checked_duration_since(Instant::now()).expect("the raw link never came up again");
+            if let Ok(svc_link::LinkEvent::Up(_)) = self.events.recv_timeout(left) {
+                break;
+            }
+        }
+    }
+
+    fn stop(mut self) {
+        self.coordinator.take().expect("the coordinator runs").stop();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Elastic 2a: with the coordinator's writes failing, nothing it decides leaves — a host's
+/// `Request` gets no `Reply`, a `RegionStarted` no `SpawnPeople`, though the core decided both.
+/// Once writes commit again exactly one `Reply` arrives, and the stored memo holds it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn no_output_leaves_before_its_state_is_written() {
+    let Some(mut w) = RawWorld::new("e2aheld", false) else { return };
+    let req = w.thread().inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let (id, ask) = raw_embark(&w.host, 1, &req);
+    w.thread().fail_coordinator_writes(true);
+    w.link.send(game::HostMsg::RegionStarted { rc: req.region, incarnation: 1 }).unwrap();
+    w.link.send(ask).unwrap();
+    w.until_core("the grant decided", move |c| c.memo_ids().contains(&id));
+    w.read_for(Duration::from_millis(1_500));
+    assert!(w.replies(id).is_empty(), "a Reply left before its state was written: {:?}", w.seen);
+    assert!(
+        !w.seen.iter().any(|m| matches!(m, game::CoordMsg::SpawnPeople { .. })),
+        "SpawnPeople left before its state was written: {:?}",
+        w.seen
+    );
+    assert!(!stored_core(&w.coordinator.as_ref().unwrap().store, &w.map).memo_ids().contains(&id), "nothing was written");
+
+    w.thread().fail_coordinator_writes(false);
+    w.read_until("the reply", |m| matches!(m, game::CoordMsg::Reply { id: got, .. } if *got == id));
+    let spawn = move |m: &game::CoordMsg| matches!(m, game::CoordMsg::SpawnPeople { rc, .. } if *rc == req.region);
+    if !w.seen.iter().any(spawn) {
+        w.read_until("the region's people", spawn);
+    }
+    w.read_for(Duration::from_millis(500));
+    let replies = w.replies(id);
+    assert_eq!(replies.len(), 1, "exactly one Reply: {replies:?}");
+    assert!(matches!(replies[0], game::WorldReply::Embarked { region, .. } if region == req.region), "{replies:?}");
+    assert!(stored_core(&w.coordinator.as_ref().unwrap().store, &w.map).memo_ids().contains(&id), "the stored memo holds it");
+    w.stop();
+}
+
+/// Elastic 2a: the coordinator dies right after the commit of a transition that granted a
+/// claim and recorded a world cut's decision, before either message left. After the restart
+/// the host re-attaches (its cut unanswered); its resent `Request` is answered from the memo,
+/// the same reply, with no second grant, and the lost `CutDone` is answered as the store
+/// decided it. Nobody is lost or doubled: every person the history had is still there, each
+/// in at most one site.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_coordinator_killed_after_the_commit_before_the_sends_loses_nothing() {
+    let Some(mut w) = RawWorld::new("e2akill", true) else { return };
+    let req = w.thread().inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let people_before: BTreeSet<PersonId> =
+        w.thread().inspect(|c| c.history().people().map(|p| p.id).collect(), WAIT).expect("the coordinator answers");
+    let cut = match w.read_until("a world cut begins", |m| matches!(m, game::CoordMsg::BeginCut { .. })) {
+        game::CoordMsg::BeginCut { cut, .. } => cut,
+        _ => unreachable!(),
+    };
+    let (id, ask) = raw_embark(&w.host, 1, &req);
+    w.kill_after_the_commit(|w| {
+        // Its part "prepared" (none is staged: the store records an abort), and the embark.
+        w.link.send(game::HostMsg::CutPrepared { cut }).unwrap();
+        w.link.send(ask.clone()).unwrap();
+        w.until_core("the grant decided", move |c| c.memo_ids().contains(&id));
+        let deadline = Instant::now() + WAIT;
+        while scalar(&w.db, &format!("SELECT COUNT(*) FROM cut_decisions WHERE cut_id = {}", cut.0)) == 0 {
+            assert!(Instant::now() < deadline, "the cut was never decided");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The decision reached the core (its CutDone queued behind the failing writes).
+        w.read_for(Duration::from_millis(600));
+    });
+    w.read_for(Duration::from_millis(300));
+    assert!(w.replies(id).is_empty(), "the reply never left: {:?}", w.seen);
+    assert!(
+        !w.seen.iter().any(|m| matches!(m, game::CoordMsg::CutDone { cut: c, .. } if *c == cut)),
+        "the CutDone never left: {:?}",
+        w.seen
+    );
+    let decided = scalar(&w.db, &format!("SELECT committed::bigint FROM cut_decisions WHERE cut_id = {}", cut.0)) != 0;
+    let (site, memo) = {
+        let store = w.db.open();
+        let c = stored_core(&store, &w.map);
+        store.shutdown();
+        (player_sites(c.history()), c.memo_ids())
+    };
+    assert_eq!(site.len(), 1, "the founding was committed: {site:?}");
+    assert!(memo.contains(&id), "with its reply memoised");
+
+    w.restart();
+    w.attach(raw_attach(&w.host, 2, true, Some(cut)));
+    w.link.send(ask).unwrap();
+    let done = w.read_until("the lost CutDone", |m| matches!(m, game::CoordMsg::CutDone { cut: c, .. } if *c == cut));
+    assert!(matches!(done, game::CoordMsg::CutDone { committed, .. } if committed == decided), "{done:?} vs the store's {decided}");
+    w.read_until("the replayed reply", |m| matches!(m, game::CoordMsg::Reply { id: got, .. } if *got == id));
+    w.read_for(Duration::from_millis(1_000));
+    assert_eq!(w.replies(id), vec![game::WorldReply::Embarked { site: site[0], region: req.region }], "one reply, from the memo");
+    let (sites, people, twice) = w
+        .thread()
+        .inspect(
+            |c| {
+                let h = c.history();
+                let mut member: BTreeMap<PersonId, usize> = BTreeMap::new();
+                for s in h.sites() {
+                    for p in &s.members {
+                        *member.entry(*p).or_default() += 1;
+                    }
+                }
+                let twice: Vec<PersonId> = member.into_iter().filter(|(_, n)| *n > 1).map(|(p, _)| p).collect();
+                (player_sites(h), h.people().map(|p| p.id).collect::<BTreeSet<PersonId>>(), twice)
+            },
+            WAIT,
+        )
+        .expect("the coordinator answers");
+    assert_eq!(sites, site, "no second grant: one site");
+    assert!(people_before.is_subset(&people), "nobody lost: {:?}", people_before.difference(&people).collect::<Vec<_>>());
+    assert!(twice.is_empty(), "in two sites: {twice:?}");
+    for p in &req.people {
+        assert!(
+            w.thread().inspect({
+                let (p, s) = (*p, site[0]);
+                move |c| c.history().site(s).is_some_and(|s| s.members.contains(&p))
+            }, WAIT)
+            .unwrap(),
+            "{p:?} embarked into the founded site"
+        );
+    }
+    w.stop();
+}
+
+/// Elastic 2a: a restart resumes from the last committed transition — the calendar tick (and
+/// anchor), the site markers and the legends' length are those of the transition written
+/// moments before the crash (a founding, then years of history), not of a periodic save.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_restart_resumes_exactly_where_the_last_transition_left() {
+    let Some(mut w) = RawWorld::new("e2aresume", false) else { return };
+    let req = w.thread().inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let (id, ask) = raw_embark(&w.host, 1, &req);
+    w.link.send(ask).unwrap();
+    w.read_until("the reply", |m| matches!(m, game::CoordMsg::Reply { id: got, .. } if *got == id));
+    let changed_at = Instant::now();
+    let mut decided = None;
+    w.kill_after_the_commit(|w| {
+        let target = w
+            .thread()
+            .with_core(
+                |c| {
+                    let h = c.history_mut();
+                    h.advance(CalendarTick(h.now().0 + 3 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY));
+                    h.now()
+                },
+                WAIT,
+            )
+            .expect("the coordinator answers");
+        decided = Some((target, w.thread().inspect(resumed, WAIT).expect("the coordinator answers")));
+    });
+    let (target, decided) = decided.expect("prepared");
+    assert!(changed_at.elapsed() < Duration::from_secs(20), "the change was written within seconds");
+
+    let store = w.db.open();
+    let last = resumed(&stored_core(&store, &w.map));
+    // The transition holds the change made just before the crash (and anything the core decided
+    // after it, before its write: a day's turn at most).
+    assert!(last.now >= target && last.legends >= decided.legends && last.now >= decided.now, "{last:?} vs {decided:?}");
+    assert_eq!(last.sites, decided.sites);
+    // What a restart runs from is exactly that transition.
+    let start = ensure_coordinator_state(&store, &w.map, None).unwrap().expect("a history");
+    assert_eq!(resumed(&start.coordinator), last);
+    drop(start);
+    store.shutdown();
+    w.restart();
+    w.attach(raw_attach(&w.host, 2, false, None));
+    w.stop();
+}
 
 /// A host id from its number.
 #[allow(dead_code)]

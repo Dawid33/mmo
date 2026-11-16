@@ -7,7 +7,15 @@
 //! ([`StoreHandle::write_coordinator_later`]); the messages it released are sent only once
 //! that write committed. One write in flight at a time: whatever is decided meanwhile waits
 //! for the next transition. A failed write hands its transition back to the core (its
-//! messages wait) and is retried after [`COORDINATOR_SAVE_RETRY_MS`].
+//! messages wait; the inputs stay applied once, never again) and is retried after
+//! [`COORDINATOR_SAVE_RETRY_MS`]. A write refused as a `Conflict` (the row's version moved, its
+//! epoch did not) re-reads the row: if it holds this process's own last unacknowledged write (its
+//! commit's answer was lost), the version is taken from it and the cached core — that write plus
+//! every input applied since, each once — is written again at once; anything else, or a second
+//! conflict before a write commits, ends the process as fenced (another writer under the same
+//! epoch is a bug: the next start loads the row). Counted (`mmo_coordinator_*` in
+//! `/metrics`, the periodic `[coordinator] window=…` line): transitions written, their bytes,
+//! conflicts.
 //! Login orders are the exception (decision 1: a process-local relay of the login service's
 //! own state): each is relayed at once to the gate host chosen from the core's attachment state,
 //! which may not be written yet — a host takes orders in any attach state, and a lost order is
@@ -66,6 +74,12 @@ pub const COORDINATOR_SAVE_RETRY_MS: u64 = 250;
 /// Failed saves in a row after which the coordinator reports saving stuck (once, at
 /// error level, plus a `coordinator_save_stuck` perf event).
 pub const COORDINATOR_FAILURES_BEFORE_STUCK: u32 = 3;
+
+/// At most this many failed writes since the last commit are remembered (by their core's
+/// hash) to recognise one whose commit's answer was lost when the next write meets a
+/// `Conflict`. Older ones are forgotten: such a conflict then ends the process as fenced
+/// (a restart, never a guess).
+pub const COORDINATOR_UNACKED_MAX: usize = 64;
 
 /// The host's end of an in-process link to the coordinator thread. FIFO each way. Down
 /// once the coordinator thread stops (fenced, or its orderly stop): sends are then lost
@@ -623,8 +637,8 @@ fn policy_agrees(coordinator: game::CrashPolicy, host: game::CrashPolicy) -> Res
 
 /// How the coordinator thread is asked to stop.
 enum Stop {
-    /// Handle what the hosts sent before the stop, save once more (forced), and wait for
-    /// the save at most this long.
+    /// Handle what the hosts sent before the stop, write the last transition, and wait for
+    /// the write at most this long.
     Save(Duration),
     /// Stop at once, before handling, saving or sending anything more (a fenced process;
     /// a test's crash): the next start loads the last committed save.
@@ -650,9 +664,46 @@ pub struct CoordinatorThread {
     /// [`CoordinatorThread::hold_hosts_reads`] is armed.
     #[cfg(feature = "test-hooks")]
     hold_hosts_reads: Arc<AtomicBool>,
+    #[cfg(feature = "test-hooks")]
+    hooks: WriteHooks,
+}
+
+/// The test hooks of the coordinator's writes ([`CoordinatorThread::fail_coordinator_writes`],
+/// [`CoordinatorThread::kill_after_commit_before_send`]).
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Default)]
+struct WriteHooks {
+    fail: Arc<AtomicBool>,
+    kill_after_commit: Arc<AtomicBool>,
+    lose_answer: Arc<AtomicBool>,
 }
 
 impl CoordinatorThread {
+    /// Test hook: while `fail`, every coordinator write is answered with a store error without
+    /// reaching the store (a database that refuses them): nothing the coordinator decides leaves.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn fail_coordinator_writes(&self, fail: bool) {
+        self.hooks.fail.store(fail, Ordering::SeqCst);
+    }
+
+    /// Test hook: the next transition taken from now on is the coordinator's last act — once its
+    /// write commits, the thread ends ([`ServerExit::CoordinatorFailed`], its links down) before
+    /// anything that transition released is sent. Wait for it with [`Self::is_finished`].
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn kill_after_commit_before_send(&self) {
+        self.hooks.kill_after_commit.store(true, Ordering::SeqCst);
+    }
+
+    /// Test hook: the next write that commits is answered as failed (its commit's answer lost on
+    /// the way back): the coordinator's next write meets a `Conflict` with its own write.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn lose_next_write_answer(&self) {
+        self.hooks.lose_answer.store(true, Ordering::SeqCst);
+    }
+
     /// Test hook: while `held`, the `hosts` read in flight is not answered (one is issued if
     /// none is) — a database that hangs: the lease watch sees nothing until it is released,
     /// and the answer then counts from when that read was issued.
@@ -670,17 +721,17 @@ impl CoordinatorThread {
         self.hold_decision_retries.store(true, Ordering::SeqCst);
     }
 
-    /// The orderly stop: every host message sent before this call is handled, the state
-    /// is saved once more (waiting at most `timeout` for it), and the link goes down.
-    /// [`ServerExit::Fenced`] if a save was refused as fenced (now or earlier).
+    /// The orderly stop: every host message sent before this call is handled, the last
+    /// transition is written (waiting at most `timeout` for it), and the link goes down.
+    /// [`ServerExit::Fenced`] if a write was refused as fenced (now or earlier).
     pub fn shutdown(self, timeout: Duration) -> ServerExit {
         let _ = self.stop.send(Stop::Save(timeout));
         self.join()
     }
 
-    /// Stop without a final save (the process was fenced): the thread returns as soon as
-    /// it sees the stop, before it handles, saves or sends anything more; the store keeps
-    /// its last committed save (a save already handed to the store may still commit).
+    /// Stop without writing the last transition (the process was fenced): the thread returns as
+    /// soon as it sees the stop, before it handles, writes or sends anything more; the store keeps
+    /// the last committed transition (a write already handed to the store may still commit).
     pub fn stop_without_save(self) -> ServerExit {
         let _ = self.stop.send(Stop::WithoutSave);
         self.join()
@@ -920,6 +971,19 @@ pub struct CoordinatorRuntime {
     writing: Option<(game::coordinator::Transition, Receiver<Result<CoordinatorWritten, StoreError>>)>,
     /// The coordinator row's version as last read or written: what the next write names.
     version: u64,
+    /// The hashes of the cores of the writes that failed since the last commit (at most
+    /// [`COORDINATOR_UNACKED_MAX`]): one of them may have committed with its answer lost.
+    unacked: VecDeque<u64>,
+    /// A `Conflict` was taken as this process's own lost commit and the write retried; another
+    /// before a write commits ends the process.
+    conflict_retried: bool,
+    /// The writes' counts since the last `[coordinator] window=…` line.
+    tally: WriteTally,
+    #[cfg(feature = "test-hooks")]
+    hooks: WriteHooks,
+    /// The write in flight was taken with [`CoordinatorThread::kill_after_commit_before_send`] armed.
+    #[cfg(feature = "test-hooks")]
+    kill_at_commit: bool,
     links: LinkSet,
     fenced: Fenced,
     /// Test hook ([`CoordinatorThread::crash_before_claim_reply`]).
@@ -985,6 +1049,51 @@ struct SuccessionPump {
     end_retry_at: u64,
 }
 
+/// The coordinator's writes in the window of its periodic line ([`CoordinatorRuntime::report_writes`]).
+struct WriteTally {
+    since: Instant,
+    transitions: u64,
+    core_bytes: u64,
+    history_bytes: u64,
+    conflicts: u64,
+    failures: u64,
+}
+
+impl WriteTally {
+    fn new() -> Self {
+        WriteTally { since: Instant::now(), transitions: 0, core_bytes: 0, history_bytes: 0, conflicts: 0, failures: 0 }
+    }
+}
+
+/// Why the coordinator thread ends from inside a pass.
+enum End {
+    /// A write (or another fenced store call) was refused as fenced.
+    Fenced,
+    /// A `Conflict` this process cannot explain as its own lost commit, or a second one.
+    Conflict,
+    /// Test hook: [`CoordinatorThread::kill_after_commit_before_send`].
+    #[cfg(feature = "test-hooks")]
+    Killed,
+}
+
+/// The answer of a transition's write, as the runtime takes it ([`CoordinatorRuntime::settle`]).
+enum Settled {
+    /// Committed: what it released, to send now.
+    Released(Vec<(Target, CoordMsg)>),
+    /// Not committed: the transition is back in the core; `now` = retry at once (a `Conflict`
+    /// with this process's own lost commit), else after [`COORDINATOR_SAVE_RETRY_MS`].
+    Held { now: bool },
+    End(End),
+}
+
+/// A hash of a written core: what a re-read row is compared with ([`CoordinatorRuntime::unacked`]).
+fn core_hash(core: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    core.hash(&mut h);
+    h.finish()
+}
+
 impl CoordinatorRuntime {
     /// Runs `start`'s coordinator on a new `coordinator` thread serving `links`, saving
     /// into `store` under its fence. A migrated or bootstrapped state is written by its first transition.
@@ -1021,6 +1130,8 @@ impl CoordinatorRuntime {
         let hold_decision_retries = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "test-hooks")]
         let hold_hosts_reads = Arc::new(AtomicBool::new(false));
+        #[cfg(feature = "test-hooks")]
+        let hooks = WriteHooks::default();
         let fence = start.fence;
         let (store_ms, started) = start.store_time;
         let mut clock = game::coordinator::StoreClock::default();
@@ -1044,6 +1155,13 @@ impl CoordinatorRuntime {
             fence,
             writing: None,
             version,
+            unacked: VecDeque::new(),
+            conflict_retried: false,
+            tally: WriteTally::new(),
+            #[cfg(feature = "test-hooks")]
+            hooks: hooks.clone(),
+            #[cfg(feature = "test-hooks")]
+            kill_at_commit: false,
             links,
             fenced,
             #[cfg(feature = "test-hooks")]
@@ -1087,6 +1205,8 @@ impl CoordinatorRuntime {
             hold_decision_retries,
             #[cfg(feature = "test-hooks")]
             hold_hosts_reads,
+            #[cfg(feature = "test-hooks")]
+            hooks,
         }
     }
 
@@ -1111,8 +1231,8 @@ impl CoordinatorRuntime {
             // before asking to stop is already queued and is handled below.
             let stopping = match stop.try_recv() {
                 Ok(Stop::WithoutSave) => {
-                    // Nothing more is handled, saved or sent.
-                    log::info!("[coordinator] stopped without a final save");
+                    // Nothing more is handled, written or sent.
+                    log::info!("[coordinator] stopped without writing its last transition");
                     self.down();
                     return ServerExit::Clean;
                 }
@@ -1144,9 +1264,11 @@ impl CoordinatorRuntime {
             }
             // Last: what this pass decided (the cuts' and successions' answers too) is in this
             // pass's transition.
-            let Ok(out) = self.pump_transition(now) else {
-                return self.fence_out();
+            let out = match self.pump_transition(now) {
+                Ok(out) => out,
+                Err(end) => return self.end(end),
             };
+            self.report_writes();
             health.world_generation(self.core.world_generation());
             health.successions_open(self.core.successions_open_count() as u64);
             #[cfg(feature = "test-hooks")]
@@ -1791,12 +1913,11 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// The transitions (R-T5, the minimal write-before-send loop; Task 6 shapes the rest): the
-    /// write in flight, if answered, releases its messages (or, failed, hands the transition
-    /// back to the core); with no write in flight the core's next transition is written. With
-    /// nothing durable pending, what the core decided leaves at once. Returns what may be sent
-    /// now, in order. `Err`: fenced.
-    fn pump_transition(&mut self, now: u64) -> Result<Vec<(Target, CoordMsg)>, ()> {
+    /// The transitions (Elastic 2a, decision 2): the write in flight, if answered, releases its
+    /// messages (or, failed, hands the transition back to the core); with no write in flight the
+    /// core's next transition is written. With nothing durable pending, what the core decided
+    /// leaves at once. Returns what may be sent now, in order; `Err`: the thread ends.
+    fn pump_transition(&mut self, now: u64) -> Result<Vec<(Target, CoordMsg)>, End> {
         let mut out = Vec::new();
         if let Some((_, written)) = &self.writing {
             let answer = match written.try_recv() {
@@ -1805,58 +1926,163 @@ impl CoordinatorRuntime {
                 Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
             };
             let (t, _) = self.writing.take().expect("checked");
-            out = self.settle(t, answer, now)?;
+            match self.settle(t, answer, now) {
+                Settled::Released(released) => out = released,
+                Settled::Held { .. } => {}
+                Settled::End(end) => return Err(end),
+            }
         }
         if self.writing.is_some() || now < self.retry_at_ms {
             return Ok(out);
         }
-        match self.core.take_transition() {
-            Some(t) => {
-                let written = self.store.write_coordinator_later(self.fence, self.version, t.core.clone(), t.history.clone());
-                self.writing = Some((t, written));
-            }
-            None => out.extend(self.core.take_out()),
+        if !self.write_next() {
+            out.extend(self.core.take_out());
         }
         Ok(out)
     }
 
-    /// The answer of the write of transition `t`: committed, its messages to send. `Err`:
-    /// fenced. Any other failure (a store error; a `Conflict`, which Task 6 answers with a
-    /// reload) hands `t` back to the core — its messages wait — and the next write is tried
-    /// after [`COORDINATOR_SAVE_RETRY_MS`].
-    fn settle(
-        &mut self,
-        t: game::coordinator::Transition,
-        answer: Result<CoordinatorWritten, StoreError>,
-        now: u64,
-    ) -> Result<Vec<(Target, CoordMsg)>, ()> {
+    /// Hands the core's next transition to the store (one at a time: none may be in flight);
+    /// `false` when nothing durable changed.
+    fn write_next(&mut self) -> bool {
+        debug_assert!(self.writing.is_none());
+        let Some(t) = self.core.take_transition() else { return false };
+        #[cfg(feature = "test-hooks")]
+        {
+            self.kill_at_commit = self.hooks.kill_after_commit.load(Ordering::SeqCst);
+            if self.hooks.fail.load(Ordering::SeqCst) {
+                let (tx, rx) = crossbeam::channel::bounded(1);
+                let _ = tx.send(Err(StoreError::Backend("test hook: coordinator writes fail".into())));
+                self.writing = Some((t, rx));
+                return true;
+            }
+        }
+        let written = self.store.write_coordinator_later(self.fence, self.version, t.core.clone(), t.history.clone());
+        self.writing = Some((t, written));
+        true
+    }
+
+    /// The answer of the write of transition `t` (decision 2): committed → its messages, the
+    /// store clock sampled from the commit; `Fenced` → the end; `Conflict` → the row re-read: this
+    /// process's own lost commit is written over at once (once), anything else is the end; any
+    /// other failure hands `t` back to the core — its messages wait, its inputs stay applied
+    /// once — and the next write is tried after [`COORDINATOR_SAVE_RETRY_MS`].
+    fn settle(&mut self, t: game::coordinator::Transition, answer: Result<CoordinatorWritten, StoreError>, now: u64) -> Settled {
+        #[cfg(feature = "test-hooks")]
+        let answer = match answer {
+            Ok(_) if self.hooks.lose_answer.swap(false, Ordering::SeqCst) => {
+                Err(StoreError::Backend("test hook: the commit's answer was lost".into()))
+            }
+            answer => answer,
+        };
         match answer {
             Ok(w) => {
                 self.core.transition_written();
                 self.version = w.version;
                 self.failed_in_a_row = 0;
+                self.unacked.clear();
+                self.conflict_retried = false;
                 let mono = self.mono_ms();
                 self.clock.sample(w.store_ms, mono);
-                Ok(t.out)
-            }
-            Err(StoreError::Fenced { .. }) => Err(()),
-            Err(e) => {
-                self.core.transition_failed(t);
-                self.failed_in_a_row += 1;
-                self.retry_at_ms = now + COORDINATOR_SAVE_RETRY_MS;
-                if self.failed_in_a_row == COORDINATOR_FAILURES_BEFORE_STUCK {
-                    log::error!(
-                        "[coordinator] writing is stuck: {} writes in a row failed, the last with: {e} \
-                         (nothing the coordinator decided leaves until one commits)",
-                        self.failed_in_a_row
-                    );
-                    game::perf_event!("coordinator_save_stuck", "failed={}", self.failed_in_a_row);
-                } else {
-                    log::warn!("[coordinator] write failed ({} in a row): {e}; retrying", self.failed_in_a_row);
+                let (core, history) = (t.core.len() as u64, t.history.as_ref().map_or(0, |h| h.len() as u64));
+                self.tally.transitions += 1;
+                self.tally.core_bytes += core;
+                self.tally.history_bytes += history;
+                crate::health::Health::global().coordinator_written(core, history);
+                #[cfg(feature = "test-hooks")]
+                if std::mem::take(&mut self.kill_at_commit) {
+                    return Settled::End(End::Killed);
                 }
-                Ok(Vec::new())
+                Settled::Released(t.out)
             }
+            Err(StoreError::Fenced { .. }) => Settled::End(End::Fenced),
+            Err(StoreError::Conflict) => {
+                self.tally.conflicts += 1;
+                crate::health::Health::global().coordinator_conflict();
+                if self.conflict_retried {
+                    log::error!(
+                        "[coordinator] a second write conflict (version {}) before any write committed: another writer \
+                         holds the coordinator row under this epoch; stopping as fenced",
+                        self.version
+                    );
+                    return Settled::End(End::Conflict);
+                }
+                match self.store.load_coordinator() {
+                    Ok(Some(row)) if row.version == self.version + 1 && self.unacked.contains(&core_hash(&row.core)) => {
+                        log::warn!(
+                            "[coordinator] write conflict: the row holds this process's own write at version {} (its \
+                             commit's answer was lost); writing again over it",
+                            row.version
+                        );
+                        self.version = row.version;
+                        self.conflict_retried = true;
+                        self.core.transition_failed(t);
+                        self.retry_at_ms = now;
+                        Settled::Held { now: true }
+                    }
+                    Ok(row) => {
+                        log::error!(
+                            "[coordinator] write conflict: the row is at version {:?}, written by another writer under \
+                             this epoch (this process wrote version {}); stopping as fenced — the next start loads it",
+                            row.map(|r| r.version),
+                            self.version
+                        );
+                        Settled::End(End::Conflict)
+                    }
+                    // Not known yet: as any failed write (the next one meets the conflict again).
+                    Err(e) => self.failed(t, &format!("a conflict, and the row could not be re-read: {e}"), now),
+                }
+            }
+            Err(e) => self.failed(t, &e.to_string(), now),
         }
+    }
+
+    /// A write of `t` that failed with `why` (not fenced): `t` back in the core, the next write
+    /// after [`COORDINATOR_SAVE_RETRY_MS`], saving reported stuck after
+    /// [`COORDINATOR_FAILURES_BEFORE_STUCK`] in a row.
+    fn failed(&mut self, t: game::coordinator::Transition, why: &str, now: u64) -> Settled {
+        if self.unacked.len() == COORDINATOR_UNACKED_MAX {
+            self.unacked.pop_front();
+        }
+        self.unacked.push_back(core_hash(&t.core));
+        self.core.transition_failed(t);
+        self.failed_in_a_row += 1;
+        self.tally.failures += 1;
+        self.retry_at_ms = now + COORDINATOR_SAVE_RETRY_MS;
+        if self.failed_in_a_row == COORDINATOR_FAILURES_BEFORE_STUCK {
+            log::error!(
+                "[coordinator] writing is stuck: {} writes in a row failed, the last with: {why} \
+                 (nothing the coordinator decided leaves until one commits)",
+                self.failed_in_a_row
+            );
+            game::perf_event!("coordinator_save_stuck", "failed={}", self.failed_in_a_row);
+        } else {
+            log::warn!("[coordinator] write failed ({} in a row): {why}; retrying", self.failed_in_a_row);
+        }
+        Settled::Held { now: false }
+    }
+
+    /// The periodic `[coordinator] window=…` line (every [`game::METRICS_REPORT_INTERVAL`], only
+    /// when anything was written or failed): the transitions written in the window, their core
+    /// and history bytes, the conflicts and failed writes (Elastic 2a, decision 8: E2b's measure).
+    fn report_writes(&mut self) {
+        let window = self.tally.since.elapsed();
+        if window < game::METRICS_REPORT_INTERVAL {
+            return;
+        }
+        let t = std::mem::replace(&mut self.tally, WriteTally::new());
+        if t.transitions == 0 && t.conflicts == 0 && t.failures == 0 {
+            return;
+        }
+        log::info!(
+            "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={}",
+            window.as_secs_f32(),
+            t.transitions,
+            t.core_bytes,
+            t.history_bytes,
+            t.conflicts,
+            t.failures,
+            self.version
+        );
     }
 
     fn send(&mut self, out: Vec<(Target, CoordMsg)>) {
@@ -1882,20 +2108,15 @@ impl CoordinatorRuntime {
     }
 
     /// The orderly stop: the write in flight is settled, then the last transition (whatever
-    /// was handled since) is written, each waited for until `timeout` runs out; what they
-    /// released is sent (the hosts may still read it while they stop).
+    /// was handled since) is written, all within `timeout`; what the commits released is sent
+    /// (the hosts may still read it while they stop). There is no other "final save".
     fn finish(mut self, timeout: Duration) -> ServerExit {
         let deadline = Instant::now() + timeout;
         let mut out = Vec::new();
-        for _ in 0..2 {
-            if self.writing.is_none() {
-                match self.core.take_transition() {
-                    Some(t) => {
-                        let written = self.store.write_coordinator_later(self.fence, self.version, t.core.clone(), t.history.clone());
-                        self.writing = Some((t, written));
-                    }
-                    None => break,
-                }
+        // Bounded: the write in flight, the last transition, and one retry after a lost commit.
+        for _ in 0..4 {
+            if self.writing.is_none() && !self.write_next() {
+                break;
             }
             let (t, written) = self.writing.take().expect("a write in flight");
             let left = deadline.saturating_duration_since(Instant::now());
@@ -1909,14 +2130,14 @@ impl CoordinatorRuntime {
                 }
                 Err(RecvTimeoutError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
             };
-            let failed = answer.is_err();
             match self.settle(t, answer, 0) {
-                Ok(released) => out.extend(released),
-                Err(()) => return self.fence_out(),
-            }
-            if failed {
-                log::error!("[coordinator] the coordinator state was not written at exit; it restarts from its last write");
-                break;
+                Settled::Released(released) => out.extend(released),
+                Settled::Held { now: true } => {}
+                Settled::Held { now: false } => {
+                    log::error!("[coordinator] the coordinator state was not written at exit; it restarts from its last write");
+                    break;
+                }
+                Settled::End(end) => return self.end(end),
             }
         }
         // Nothing durable pending (all written): what was decided with no durable change leaves too.
@@ -1926,8 +2147,27 @@ impl CoordinatorRuntime {
         ServerExit::Clean
     }
 
+    /// The thread ends for `end`: fenced (also a conflict it cannot explain — another writer
+    /// under its epoch; the process exits [`crate::claims::EXIT_FENCED`]), or a test's kill.
+    fn end(&mut self, end: End) -> ServerExit {
+        match end {
+            End::Fenced => self.fence_out(),
+            End::Conflict => {
+                self.fenced.set();
+                self.down();
+                ServerExit::Fenced
+            }
+            #[cfg(feature = "test-hooks")]
+            End::Killed => {
+                log::warn!("[coordinator] test kill: the transition committed, nothing it released leaves");
+                self.down();
+                ServerExit::CoordinatorFailed
+            }
+        }
+    }
+
     fn fence_out(&mut self) -> ServerExit {
-        log::error!("[coordinator] the coordinator's save was refused as fenced: another coordinator took over; stopping");
+        log::error!("[coordinator] the coordinator's write was refused as fenced: another coordinator took over; stopping");
         self.fenced.set();
         self.down();
         ServerExit::Fenced
