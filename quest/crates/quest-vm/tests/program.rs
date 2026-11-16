@@ -620,23 +620,25 @@ fn from_bytes_rejects_bad_input() {
 }
 
 #[test]
-fn from_bytes_rejects_cyclic_and_too_deep_type_tables() {
+fn from_bytes_accepts_cyclic_and_deep_type_tables() {
+    // Recursive data is allowed (decision 17): cycles and any nesting load; ids must be in range.
     let mut p = full();
     p.types.0.push(TypeDesc::List(p.types.0.len() as u16)); // itself
-    let b = p.to_bytes();
-    assert!(Program::from_bytes(&b).is_err());
+    assert!(Program::from_bytes(&p.to_bytes()).is_ok());
     let mut p = full();
     let n = p.types.0.len() as u16;
     p.types.0.push(TypeDesc::List(n + 1));
     p.types.0.push(TypeDesc::List(n)); // two-cycle
-    assert!(Program::from_bytes(&p.to_bytes()).is_err());
-    // deeper than WIRE_DEPTH_MAX
+    assert!(Program::from_bytes(&p.to_bytes()).is_ok());
     let mut p = full();
     let n = p.types.0.len() as u16;
     p.types.0.push(TypeDesc::Int);
     for i in 0..40 {
         p.types.0.push(TypeDesc::List(n + i));
     }
+    assert!(Program::from_bytes(&p.to_bytes()).is_ok());
+    let mut p = full();
+    p.types.0.push(TypeDesc::List(u16::MAX)); // out of range
     assert!(Program::from_bytes(&p.to_bytes()).is_err());
 }
 

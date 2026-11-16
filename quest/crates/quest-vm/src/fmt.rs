@@ -46,30 +46,38 @@ fn quoted(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// What is still to be written, last first: a value, or text.
+enum Item<'a> {
+    Value(TypeId, &'a WireValue, bool),
+    Text(&'a str),
+}
+
 /// `(f=v, g=w)` for the declared `types` of the wire `fields`, matched by position (`to_wire` writes them
-/// in declaration order).
-fn write_fields(
-    types: &TypeTable,
-    declared: &[(String, TypeId)],
-    fields: &[(String, WireValue)],
+/// in declaration order): writes the `(` and pushes the rest.
+fn write_fields<'a>(
+    declared: &'a [(String, TypeId)],
+    fields: &'a [(String, WireValue)],
     out: &mut String,
+    stack: &mut Vec<Item<'a>>,
 ) -> VmResult<()> {
     if declared.len() != fields.len() {
         return Err(FaultKind::Corrupt);
     }
     out.push('(');
-    for (i, ((name, ft), (_, w))) in declared.iter().zip(fields).enumerate() {
+    stack.push(Item::Text(")"));
+    for (i, ((name, ft), (_, w))) in declared.iter().zip(fields).enumerate().rev() {
+        stack.push(Item::Value(*ft, w, false));
+        stack.push(Item::Text("="));
+        stack.push(Item::Text(name));
         if i > 0 {
-            out.push_str(", ");
+            stack.push(Item::Text(", "));
         }
-        out.push_str(name);
-        out.push('=');
-        write_value(types, *ft, w, false, out)?;
     }
-    out.push(')');
     Ok(())
 }
 
+/// Writes in the order a recursive walk would (a value can nest arbitrarily deep, decision 17): each
+/// value's own text at once, its parts pushed onto the stack last first.
 fn write_value(
     types: &TypeTable,
     t: TypeId,
@@ -77,85 +85,95 @@ fn write_value(
     top_level: bool,
     out: &mut String,
 ) -> VmResult<()> {
-    match (types.desc(t)?, w) {
-        (TypeDesc::Unit, WireValue::Unit) => out.push_str("()"),
-        (TypeDesc::Bool, WireValue::Bool(b)) => out.push_str(if *b { "true" } else { "false" }),
-        (TypeDesc::Int, WireValue::Int(i)) => {
-            let _ = write!(out, "{i}");
-        }
-        (TypeDesc::Float, WireValue::Float(f)) => {
-            let _ = write!(out, "{f:?}");
-        }
-        (TypeDesc::Str, WireValue::Str(s)) => {
-            if top_level {
+    let mut stack = vec![Item::Value(t, w, top_level)];
+    while let Some(item) = stack.pop() {
+        let (t, w, top_level) = match item {
+            Item::Text(s) => {
                 out.push_str(s);
-            } else {
-                quoted(s, out);
+                continue;
             }
-        }
-        (TypeDesc::List(e), WireValue::List(items)) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
+            Item::Value(t, w, top_level) => (t, w, top_level),
+        };
+        match (types.desc(t)?, w) {
+            (TypeDesc::Unit, WireValue::Unit) => out.push_str("()"),
+            (TypeDesc::Bool, WireValue::Bool(b)) => out.push_str(if *b { "true" } else { "false" }),
+            (TypeDesc::Int, WireValue::Int(i)) => {
+                let _ = write!(out, "{i}");
+            }
+            (TypeDesc::Float, WireValue::Float(f)) => {
+                let _ = write!(out, "{f:?}");
+            }
+            (TypeDesc::Str, WireValue::Str(s)) => {
+                if top_level {
+                    out.push_str(s);
+                } else {
+                    quoted(s, out);
                 }
-                write_value(types, *e, item, false, out)?;
             }
-            out.push(']');
-        }
-        (TypeDesc::Dict(kt, vt), WireValue::Dict(pairs)) => {
-            out.push('{');
-            for (i, (k, v)) in pairs.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
+            (TypeDesc::List(e), WireValue::List(items)) => {
+                out.push('[');
+                stack.push(Item::Text("]"));
+                for (i, item) in items.iter().enumerate().rev() {
+                    stack.push(Item::Value(*e, item, false));
+                    if i > 0 {
+                        stack.push(Item::Text(", "));
+                    }
                 }
-                write_value(types, *kt, k, false, out)?;
-                out.push_str(": ");
-                write_value(types, *vt, v, false, out)?;
             }
-            out.push('}');
-        }
-        (
-            TypeDesc::Struct {
-                name,
-                fields: declared,
-            },
-            WireValue::Struct { fields, .. },
-        ) => {
-            out.push_str(name);
-            write_fields(types, declared, fields, out)?;
-        }
-        (
-            TypeDesc::Enum { name, variants },
-            WireValue::Variant {
-                name: vname,
-                fields,
-            },
-        ) => {
-            let (_, declared) = variants
-                .iter()
-                .find(|(n, _)| n == vname)
-                .ok_or(FaultKind::Corrupt)?;
-            let is_option = name == "Option"
-                && variants.len() == 2
-                && variants[0].0 == "None"
-                && variants[1].0 == "Some";
-            if is_option {
-                out.push_str(vname);
-            } else {
+            (TypeDesc::Dict(kt, vt), WireValue::Dict(pairs)) => {
+                out.push('{');
+                stack.push(Item::Text("}"));
+                for (i, (k, v)) in pairs.iter().enumerate().rev() {
+                    stack.push(Item::Value(*vt, v, false));
+                    stack.push(Item::Text(": "));
+                    stack.push(Item::Value(*kt, k, false));
+                    if i > 0 {
+                        stack.push(Item::Text(", "));
+                    }
+                }
+            }
+            (
+                TypeDesc::Struct {
+                    name,
+                    fields: declared,
+                },
+                WireValue::Struct { fields, .. },
+            ) => {
                 out.push_str(name);
-                out.push_str("::");
-                out.push_str(vname);
+                write_fields(declared, fields, out, &mut stack)?;
             }
-            if is_option && vname == "Some" && declared.len() == 1 && fields.len() == 1 {
-                out.push('(');
-                write_value(types, declared[0].1, &fields[0].1, false, out)?;
-                out.push(')');
-            } else if !declared.is_empty() || !fields.is_empty() {
-                write_fields(types, declared, fields, out)?;
+            (
+                TypeDesc::Enum { name, variants },
+                WireValue::Variant {
+                    name: vname,
+                    fields,
+                },
+            ) => {
+                let (_, declared) = variants
+                    .iter()
+                    .find(|(n, _)| n == vname)
+                    .ok_or(FaultKind::Corrupt)?;
+                let is_option = name == "Option"
+                    && variants.len() == 2
+                    && variants[0].0 == "None"
+                    && variants[1].0 == "Some";
+                if is_option {
+                    out.push_str(vname);
+                } else {
+                    out.push_str(name);
+                    out.push_str("::");
+                    out.push_str(vname);
+                }
+                if is_option && vname == "Some" && declared.len() == 1 && fields.len() == 1 {
+                    out.push('(');
+                    stack.push(Item::Text(")"));
+                    stack.push(Item::Value(declared[0].1, &fields[0].1, false));
+                } else if !declared.is_empty() || !fields.is_empty() {
+                    write_fields(declared, fields, out, &mut stack)?;
+                }
             }
+            _ => return Err(FaultKind::Corrupt),
         }
-        _ => return Err(FaultKind::Corrupt),
     }
     Ok(())
 }

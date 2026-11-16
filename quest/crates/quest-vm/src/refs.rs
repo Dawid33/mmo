@@ -5,7 +5,7 @@
 //! A reference is a path, never an address: a root static slot plus the steps from it, re-resolved on
 //! every use, so a reference never dangles; it only stops resolving (the fault `BadRef`).
 //! * Header: `tag` = the root slot, `aux` bit 0 = the root slot holds a heap kind (`RefMake`'s `c`; the
-//!   other bits are 0), `len` = the number of steps, at most `WIRE_DEPTH_MAX`.
+//!   other bits are 0), `len` = the number of steps, at most `REF_PATH_MAX`.
 //! * Payload: `STEP_WORDS` words per step, in order: a step code, then its value:
 //!   * `STEP_FIELD`: a field index;
 //!   * `STEP_INDEX`: a list index (an `i64`'s bits, checked when resolved, so it may be negative);
@@ -47,7 +47,7 @@
 
 use crate::alloc::{Heap, Kind, ObjHeader};
 use crate::bytecode::{Instr, Op};
-use crate::consts::WIRE_DEPTH_MAX;
+use crate::consts::REF_PATH_MAX;
 use crate::dict;
 use crate::fault::{FaultKind, VmResult};
 use crate::interp::{Exec, Fault, Meter};
@@ -116,15 +116,11 @@ impl Step {
     }
 }
 
-/// A `RefPath` header read from memory: no stray `aux` bits, at most `WIRE_DEPTH_MAX` steps, all inside
+/// A `RefPath` header read from memory: no stray `aux` bits, at most `REF_PATH_MAX` steps, all inside
 /// the block.
 fn check_shape(h: &ObjHeader) -> VmResult<()> {
     let steps_fit = u64::from(h.len) * u64::from(STEP_WORDS) <= u64::from(capacity(h));
-    if h.kind != Kind::RefPath
-        || h.aux & !ROOT_REF != 0
-        || h.len as usize > WIRE_DEPTH_MAX
-        || !steps_fit
-    {
+    if h.kind != Kind::RefPath || h.aux & !ROOT_REF != 0 || h.len > REF_PATH_MAX || !steps_fit {
         return Err(FaultKind::Corrupt);
     }
     Ok(())
@@ -254,10 +250,8 @@ impl Vm {
         let heap = self.heap;
         let (p, h) = path(&self.store, heap, self.rd(base)?)?;
         let n = h.len + 1;
-        if n as usize > WIRE_DEPTH_MAX {
-            return Err(Fault::corrupt(
-                "a reference path deeper than WIRE_DEPTH_MAX",
-            ));
+        if n > REF_PATH_MAX {
+            return Err(Fault::corrupt("a reference path deeper than REF_PATH_MAX"));
         }
         m.charge(u64::from(h.len));
         let q = alloc(&mut self.store, heap, Kind::RefPath, n * STEP_WORDS)?;

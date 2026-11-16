@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 use quest_vm::alloc::Heap;
+use quest_vm::eq::{deep_eq, key_hash};
 use quest_vm::fault::FaultKind;
 use quest_vm::fmt::fmt_value;
 use quest_vm::object::{FrameMaps, incref, obj, reap_step};
@@ -194,7 +195,7 @@ fn decode_rejects_bad_input() {
             "tag {tag}"
         );
     }
-    // 32 nested lists decode, 33 do not.
+    // Nesting has no cap: 33 nested lists decode.
     let nest = |n: usize| {
         let mut b = vec![];
         for _ in 0..n {
@@ -203,8 +204,7 @@ fn decode_rejects_bad_input() {
         b.push(0);
         b
     };
-    assert!(WireValue::decode(&nest(32)).is_ok());
-    assert_eq!(WireValue::decode(&nest(33)), Err(WireError::TooDeep));
+    assert!(WireValue::decode(&nest(33)).is_ok());
 }
 
 proptest! {
@@ -525,7 +525,7 @@ fn type_table_queries() {
     assert!(!t.is_ref(999));
     assert!(t.storable(ITEMS) && t.storable(BAG) && t.storable(INT));
     assert!(!t.storable(PROMISE));
-    // A type that contains a promise, or a cycle, or a bad id is not storable.
+    // A type that contains a promise, or a bad id is not storable; a cycle without a promise is.
     let nested = TypeTable(vec![
         TypeDesc::Promise(1),
         TypeDesc::Int,
@@ -537,11 +537,92 @@ fn type_table_queries() {
         TypeDesc::List(4),
     ]);
     assert!(!nested.storable(2) && !nested.storable(3));
-    assert!(!nested.storable(4), "a cycle");
+    assert!(nested.storable(4), "a cycle");
     assert!(!nested.storable(99));
     // Malformed descriptors never panic.
     let (mut st, h) = setup();
     assert!(to_wire(&st, h, &nested, 99, 0).is_err());
     assert!(from_wire(&mut st, h, &nested, 99, &WireValue::Unit).is_err());
     let _ = obj::new(&mut st, h, 0, 0, 0);
+}
+
+// ---- recursive data ----------------------------------------------------------------------------------
+
+/// `struct Node { v: int, next: Option[Node] }`: 0 `Int`, 1 `Node`, 2 `Option[Node]`.
+fn linked() -> TypeTable {
+    TypeTable(vec![
+        TypeDesc::Int,
+        TypeDesc::Struct {
+            name: s("Node"),
+            fields: vec![(s("v"), 0), (s("next"), 2)],
+        },
+        TypeDesc::Enum {
+            name: s("Option"),
+            variants: vec![(s("None"), vec![]), (s("Some"), vec![(s("value"), 1)])],
+        },
+    ])
+}
+
+/// An `n`-node list on the heap, built tail first (no recursion): the head `Node`.
+fn heap_list(st: &mut Store, h: Heap, n: i64) -> u64 {
+    let mut next = 1; // `None`
+    let mut node = 0;
+    for v in (0..n).rev() {
+        node = obj::new(st, h, 2, 0b10, 0).unwrap();
+        obj::set_field(st, h, node, 0, v as u64).unwrap();
+        obj::set_field(st, h, node, 1, next).unwrap();
+        next = obj::new(st, h, 1, 0b1, 1).unwrap();
+        obj::set_field(st, h, next, 0, node).unwrap();
+    }
+    node
+}
+
+/// The same list as a wire value (no recursion).
+fn wire_list(n: i64) -> WireValue {
+    let node = |v: i64, next: WireValue| WireValue::Struct {
+        name: s("Node"),
+        fields: vec![field("v", WireValue::Int(v)), field("next", next)],
+    };
+    let mut next = none();
+    for v in (1..n).rev() {
+        next = WireValue::Variant {
+            name: s("Some"),
+            fields: vec![field("value", node(v, next))],
+        };
+    }
+    node(0, next)
+}
+
+#[test]
+fn deep_linked_list_walks() {
+    let t = linked();
+    let (mut st, h) = setup_sized(4 << 20);
+    let a = heap_list(&mut st, h, 5_000);
+    let b = heap_list(&mut st, h, 5_000);
+    assert!(deep_eq(&st, h, a, b, true).unwrap().0);
+    assert_eq!(
+        key_hash(&st, h, a, true).unwrap().0,
+        key_hash(&st, h, b, true).unwrap().0
+    );
+    let (w, _) = to_wire(&st, h, &t, 1, a).unwrap();
+    let mut bytes = vec![];
+    w.encode(&mut bytes);
+    let back = WireValue::decode(&bytes).unwrap();
+    assert!(back == w);
+    let (c, _) = from_wire(&mut st, h, &t, 1, &back).unwrap();
+    assert!(deep_eq(&st, h, a, c, true).unwrap().0);
+    let mut text = String::new();
+    fmt_value(&st, h, &t, 1, a, true, &mut text).unwrap();
+    assert!(text.starts_with("Node(v=0, next=Some(Node(v=1, next=Some("));
+    assert!(text.ends_with(&format!("Node(v=4999, next=None){}", "))".repeat(4_999))));
+
+    // 100 000 nodes as a wire value only: encode, decode, clone, compare, drop.
+    let w = wire_list(100_000);
+    let mut bytes = vec![];
+    w.encode(&mut bytes);
+    let back = WireValue::decode(&bytes).unwrap();
+    let copy = back.clone();
+    assert!(copy == w && back == w);
+    assert!(wire_list(99_999) != w);
+    drop((w, back, copy));
 }

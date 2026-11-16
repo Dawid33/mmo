@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use common::*;
 use quest_vm::asm::{FnBuilder, FnRef, GlobalRef, ProgramBuilder, SlotRef};
-use quest_vm::consts::{PARKED_MAX, PROMISE_TIMEOUT_TICKS, WIRE_DEPTH_MAX};
+use quest_vm::consts::{PARKED_MAX, PROMISE_TIMEOUT_TICKS};
 use quest_vm::host::{AbortCause, HostFnKind, PromiseId, Report};
 use quest_vm::layout::{Layout, LoadError, PARKED_REC_WORDS};
 use quest_vm::program::Program;
@@ -947,7 +947,7 @@ fn nested(depth: usize) -> WireValue {
 }
 
 #[test]
-fn too_deep_answer_becomes_lost() {
+fn deep_answers_have_no_depth_cap() {
     let mut b = builder();
     let (_, e) = await_one(&mut b);
     let err_ty = b.t.err;
@@ -955,23 +955,17 @@ fn too_deep_answer_becomes_lost() {
     let mut vm = vm(&p);
     let mut host = RecordingHost::default();
     settle(&mut vm, &mut host, 1);
-    for depth in [WIRE_DEPTH_MAX + 1, 1_000_000] {
-        vm.deliver("Ping", &ping(1));
-        settle(&mut vm, &mut host, 2);
-        // `resolve` drops the value it is given without recursion
-        assert_eq!(
-            vm.resolve(last_request(&host), Ok(nested(depth))),
-            Resolved::Accepted
-        );
-        settle(&mut vm, &mut host, 3);
-        assert_eq!(vm.status(), Status::Idle, "depth {depth}");
-        assert_eq!(
-            vm.debug_value(slot(&p, e), err_ty),
-            Ok(variant("Lost")),
-            "depth {depth}"
-        );
-    }
-    // an unknown id, and an id already resolved: `Unknown`, the value still dropped without recursion
+    // a million deep: walked and dropped without recursion; its bytes do not fit the inbox, so `Lost`
+    vm.deliver("Ping", &ping(1));
+    settle(&mut vm, &mut host, 2);
+    assert_eq!(
+        vm.resolve(last_request(&host), Ok(nested(1_000_000))),
+        Resolved::Accepted
+    );
+    settle(&mut vm, &mut host, 3);
+    assert_eq!(vm.status(), Status::Idle);
+    assert_eq!(vm.debug_value(slot(&p, e), err_ty), Ok(variant("Lost")));
+    // an unknown id, and an id already resolved: `Unknown`, the value dropped without recursion
     assert_eq!(
         vm.resolve(id(999), Ok(nested(1_000_000))),
         Resolved::Unknown
@@ -982,15 +976,15 @@ fn too_deep_answer_becomes_lost() {
     assert_eq!(vm.resolve(pid, Ok(WireValue::Int(5))), Resolved::Accepted);
     assert_eq!(vm.resolve(pid, Err(nested(1_000_000))), Resolved::Unknown);
     settle(&mut vm, &mut host, 5);
-    assert_eq!(logs(&host), [1, 1, 1]);
+    assert_eq!(logs(&host), [1, 1]);
     assert!(host.reports.is_empty());
 
-    // exactly `WIRE_DEPTH_MAX` deep: accepted and stored as it is, so it decodes at resume (no program
-    // can await a type that deep, `Promise` adds a level): the int handler gets `WrongType`
+    // 33 deep (past the old cap): stored as it is and decoded at resume, where the int handler gets
+    // `WrongType`
     vm.deliver("Ping", &ping(1));
     settle(&mut vm, &mut host, 6);
     assert_eq!(
-        vm.resolve(last_request(&host), Ok(nested(WIRE_DEPTH_MAX))),
+        vm.resolve(last_request(&host), Ok(nested(33))),
         Resolved::Accepted
     );
     settle(&mut vm, &mut host, 7);

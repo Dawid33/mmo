@@ -34,7 +34,7 @@
 //! count as a `u32` next to its result (design D6); lookups include hashing and comparing the key.
 
 use crate::alloc::{Heap, Kind, ObjHeader};
-use crate::eq::{Walk, deep_eq_in, key_hash_in};
+use crate::eq::{Walk, key_eq_in, key_hash_in};
 use crate::fault::{FaultKind, VmResult};
 use crate::list;
 use crate::object::{
@@ -202,7 +202,7 @@ impl Dict {
             let pos = u32::try_from(v - 1).map_err(|_| FaultKind::Corrupt)?;
             if self.eread(st, pos, E_HASH)? == hw {
                 let stored = self.eread(st, pos, E_KEY)?;
-                if deep_eq_in(st, heap, stored, key, self.keys_ref(), walk)? {
+                if key_eq_in(st, heap, stored, key, self.keys_ref(), walk)? {
                     return Ok(Some(pos));
                 }
             }
@@ -489,37 +489,56 @@ fn collect(st: &mut Store, heap: Heap, d: u64, field: u32) -> VmResult<(u64, u32
     Ok((l, work))
 }
 
-/// Order-insensitive equality: the same live count, and every key of `a` found in `b` (by the stored hash
-/// and `deep_eq`) with a value `val_eq` accepts (called as `(a's value, b's value, values are heap kinds)`).
-/// Everything charges the caller's `walk`.
-pub(crate) fn equal(
-    st: &Store,
-    heap: Heap,
-    a: u64,
-    b: u64,
-    walk: &mut Walk,
-    val_eq: &mut dyn FnMut(u64, u64, bool, &mut Walk) -> VmResult<bool>,
-) -> VmResult<bool> {
-    let (da, db) = (open(st, heap, a)?, open(st, heap, b)?);
-    if da.h.len != db.h.len || da.h.aux != db.h.aux {
-        return Ok(false);
-    }
-    for pos in 0..da.used {
-        walk.charge(1)?;
-        let hw = da.eread(st, pos, E_HASH)?;
-        if hw == 0 {
-            continue;
+/// One step of [`EqCursor::step`].
+pub(crate) enum EqStep {
+    /// Every entry matched.
+    Done,
+    /// A key of `a` is missing from `b`.
+    Differs,
+    /// The values of the next matching key: `(a's value, b's value, values are heap kinds)`; the caller
+    /// compares them (stopping at a difference) before the next step.
+    Values(u64, u64, bool),
+}
+
+/// Order-insensitive equality of two dicts, an entry at a time so the caller's walk compares the values
+/// without recursion: the same live count, and every key of `a` found in `b` (by the stored hash and a key
+/// comparison) with an equal value. Everything charges the caller's `walk`.
+pub(crate) struct EqCursor {
+    a: Dict,
+    b: Dict,
+    pos: u32,
+}
+
+impl EqCursor {
+    /// `None` when the two cannot be equal (live counts or flags differ).
+    pub(crate) fn open(st: &Store, heap: Heap, a: u64, b: u64) -> VmResult<Option<EqCursor>> {
+        let (a, b) = (open(st, heap, a)?, open(st, heap, b)?);
+        if a.h.len != b.h.len || a.h.aux != b.h.aux {
+            return Ok(None);
         }
-        let key = da.eread(st, pos, E_KEY)?;
-        let Some(q) = db.find(st, heap, key, hw, walk)? else {
-            return Ok(false);
-        };
-        let (x, y) = (da.eread(st, pos, E_VAL)?, db.eread(st, q, E_VAL)?);
-        if !val_eq(x, y, da.vals_ref(), walk)? {
-            return Ok(false);
-        }
+        Ok(Some(EqCursor { a, b, pos: 0 }))
     }
-    Ok(true)
+
+    /// Finds the next live key of `a` in `b`.
+    pub(crate) fn step(&mut self, st: &Store, heap: Heap, walk: &mut Walk) -> VmResult<EqStep> {
+        let (da, db) = (&self.a, &self.b);
+        while self.pos < da.used {
+            let pos = self.pos;
+            self.pos += 1;
+            walk.charge(1)?;
+            let hw = da.eread(st, pos, E_HASH)?;
+            if hw == 0 {
+                continue;
+            }
+            let key = da.eread(st, pos, E_KEY)?;
+            let Some(q) = db.find(st, heap, key, hw, walk)? else {
+                return Ok(EqStep::Differs);
+            };
+            let (x, y) = (da.eread(st, pos, E_VAL)?, db.eread(st, q, E_VAL)?);
+            return Ok(EqStep::Values(x, y, da.vals_ref()));
+        }
+        Ok(EqStep::Done)
+    }
 }
 
 /// A new list of the keys in iteration order (heap-kind keys get a reference); also the work.

@@ -410,7 +410,7 @@ fn deep_eq_cases() {
 }
 
 #[test]
-fn deep_eq_depth_is_capped() {
+fn deep_eq_and_key_hash_have_no_depth_cap() {
     let (mut st, h) = setup();
     let chain = |st: &mut Store, depth: usize| {
         let mut v = list::new(st, h, false).unwrap();
@@ -423,15 +423,18 @@ fn deep_eq_depth_is_capped() {
     let (a, b) = (chain(&mut st, 30), chain(&mut st, 30));
     assert!(deep_eq(&st, h, a, b, true).unwrap().0);
     let (a, b) = (chain(&mut st, 40), chain(&mut st, 40));
-    assert_eq!(deep_eq(&st, h, a, b, true).unwrap_err(), FaultKind::Corrupt);
-    assert_eq!(key_hash(&st, h, a, true).unwrap_err(), FaultKind::Corrupt);
+    assert!(deep_eq(&st, h, a, b, true).unwrap().0);
+    assert_eq!(
+        key_hash(&st, h, a, true).unwrap().0,
+        key_hash(&st, h, b, true).unwrap().0
+    );
 }
 
 #[test]
-fn cyclic_memory_in_dict_keys_is_corrupt_not_a_stack_overflow() {
+fn cyclic_memory_is_bounded() {
     let (mut st, h) = setup();
     // Two dicts whose only key is a list that holds the dict itself (a cycle no valid program makes):
-    // comparing them goes dict -> key list -> dict -> ... and must hit the nesting cap.
+    // comparing them goes dict -> key list -> dict -> ... and must stop with an error, never overflow.
     let mut cyc = || {
         let d = dict::new(&mut st, h, true, false).unwrap();
         let key = list::new(&mut st, h, true).unwrap();
@@ -440,7 +443,11 @@ fn cyclic_memory_in_dict_keys_is_corrupt_not_a_stack_overflow() {
         d
     };
     let (a, b) = (cyc(), cyc());
-    assert_eq!(deep_eq(&st, h, a, b, true).unwrap_err(), FaultKind::Corrupt);
+    let err = deep_eq(&st, h, a, b, true).unwrap_err();
+    assert!(
+        matches!(err, FaultKind::ValueTooLarge | FaultKind::Corrupt),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -476,7 +483,7 @@ fn shared_chain(st: &mut Store, h: Heap, depth: usize) -> u64 {
 #[test]
 fn shared_sublists_cannot_stall_a_walk() {
     let (mut st, h) = setup();
-    // Depth 30 is within WIRE_DEPTH_MAX: 2^30 leaves as a tree.
+    // Depth 30: 2^30 leaves as a tree.
     let a = shared_chain(&mut st, h, 30);
     let b = shared_chain(&mut st, h, 30);
     let t = std::time::Instant::now();

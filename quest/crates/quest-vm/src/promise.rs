@@ -14,9 +14,8 @@
 //!   commands (so the host sees both in issue order). The commit makes it `SENT` with the deadline
 //!   `now + PROMISE_TIMEOUT_TICKS`; an abort frees it and gives its serial back.
 //! * `SENT`: the host has the request. [`Vm::resolve`], or `tick` once the deadline is reached
-//!   (`Timeout`), makes it `RESOLVED`. An answer nested deeper than `WIRE_DEPTH_MAX` is stored as `lost`
-//!   before anything walks it; an `err` answer must be a variant of the program's error enum and any
-//!   other is stored as `lost`, as is an answer the inbox has no room for. So the stored bytes always
+//!   (`Timeout`), makes it `RESOLVED`. An `err` answer must be a variant of the program's error enum and
+//!   any other is stored as `lost`, as is an answer the inbox has no room for. So the stored bytes always
 //!   decode: a decode failure at resume is corrupt memory.
 //! * `RESOLVED`: the answer waits for the task awaiting it, which frees the record when it resumes.
 //! * `PromiseDetach` flags the record `DETACHING` in the open segment: `DETACHED` at its commit (and
@@ -58,7 +57,7 @@ use std::sync::Arc;
 
 use crate::alloc::{Heap, Kind, ObjHeader};
 use crate::bytecode::{Instr, Op};
-use crate::consts::{PARKED_MAX, PROMISE_MAX, PROMISE_TIMEOUT_TICKS, WIRE_DEPTH_MAX};
+use crate::consts::{PARKED_MAX, PROMISE_MAX, PROMISE_TIMEOUT_TICKS};
 use crate::fault::{FaultKind, VmResult};
 use crate::fuel::FUEL_RESUME;
 use crate::host::{AbortCause, Host};
@@ -627,20 +626,6 @@ impl Vm {
 
     /// [`Vm::resolve`]: `Unknown` leaves the memory as it was.
     pub(crate) fn promise_resolve(&mut self, id: u64, outcome: Outcome) -> Resolved {
-        // Bound the host's value before anything else, early returns included: a value nested too deep
-        // is dismantled here (its derived drop would recurse) and stands in as a bounded `lost` (an `Err`
-        // that is not an error variant is stored as `lost`).
-        let too_deep = match &outcome {
-            Ok(w) | Err(w) => !w.depth_at_most(WIRE_DEPTH_MAX as u32),
-        };
-        let outcome = if too_deep {
-            match outcome {
-                Ok(w) | Err(w) => w.dismantle(),
-            }
-            Err(WireValue::Unit)
-        } else {
-            outcome
-        };
         let cp = self.store.mem.checkpoint();
         match self.try_resolve(id, outcome) {
             Ok(true) => Resolved::Accepted,

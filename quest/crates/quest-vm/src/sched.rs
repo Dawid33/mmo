@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use crate::alloc::Kind;
 use crate::bytecode::Instr;
-use crate::consts::{ERR_TRACE_MAX, QUEUE_LEN, WIRE_DEPTH_MAX};
+use crate::consts::{ERR_TRACE_MAX, QUEUE_LEN};
 use crate::fault::FaultKind;
 use crate::fuel::FUEL_DISPATCH;
 use crate::host::{AbortCause, DropReason, Host, HostFnKind, PromiseId, Report, SrcLoc};
@@ -232,9 +232,7 @@ impl Vm {
         let Some(first) = p.handlers.iter().position(|h| h.event == event) else {
             return drop(DropReason::NoHandler);
         };
-        if !payload.depth_at_most(WIRE_DEPTH_MAX as u32)
-            || !wire::fits(&p.types, p.handlers[first].event_ty, payload)
-        {
+        if !wire::fits(&p.types, p.handlers[first].event_ty, payload) {
             return drop(DropReason::WrongShape);
         }
         if self.failed() {
@@ -796,13 +794,6 @@ impl Vm {
             kind: FaultKind::HostFault,
             message,
         })?;
-        if !answer.depth_at_most(WIRE_DEPTH_MAX as u32) {
-            answer.dismantle();
-            return Err(Fault {
-                kind: FaultKind::HostFault,
-                message: "answer nested too deep".into(),
-            });
-        }
         match from_wire(&mut self.store, self.heap, &p.types, site.ret, &answer) {
             Ok((v, words)) => {
                 m.words(words);
@@ -873,9 +864,12 @@ impl Vm {
             // blen <= len <= cap, which fits a u32
             bytes.truncate(blen as usize);
             out.push(match kind {
-                CMD_COMMAND => match WireValue::decode(&bytes) {
-                    Ok(WireValue::List(args)) => Buffered::Command(f, args),
-                    _ => return corrupt("a command's arguments do not decode"),
+                CMD_COMMAND => match WireValue::decode(&bytes)
+                    .ok()
+                    .and_then(WireValue::into_list)
+                {
+                    Some(args) => Buffered::Command(f, args),
+                    None => return corrupt("a command's arguments do not decode"),
                 },
                 CMD_PRINT => match String::from_utf8(bytes) {
                     Ok(t) => Buffered::Print(t),
@@ -885,11 +879,9 @@ impl Vm {
                     let Some((id, rest)) = bytes.split_first_chunk::<8>() else {
                         return corrupt("a request record has no id");
                     };
-                    match WireValue::decode(rest) {
-                        Ok(WireValue::List(args)) => {
-                            Buffered::Request(u64::from_le_bytes(*id), f, args)
-                        }
-                        _ => return corrupt("a request's arguments do not decode"),
+                    match WireValue::decode(rest).ok().and_then(WireValue::into_list) {
+                        Some(args) => Buffered::Request(u64::from_le_bytes(*id), f, args),
+                        None => return corrupt("a request's arguments do not decode"),
                     }
                 }
                 _ => return corrupt("unknown command record"),

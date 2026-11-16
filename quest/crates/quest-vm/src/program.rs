@@ -13,7 +13,7 @@
 //! that validates can be handed to the interpreter.
 
 use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand, Wide};
-use crate::consts::{STRUCT_FIELDS_MAX, WIRE_DEPTH_MAX};
+use crate::consts::STRUCT_FIELDS_MAX;
 use crate::hash::Fnv64;
 use crate::host::{HostFnKind, SrcLoc};
 use crate::object::FrameMaps;
@@ -796,16 +796,15 @@ fn type_children(d: &TypeDesc) -> Vec<TypeId> {
     }
 }
 
-/// Every id in range, field counts within `STRUCT_FIELDS_MAX`, no cycle (user types cannot be
-/// recursive), nesting at most `WIRE_DEPTH_MAX`.
+/// Every id in range and field counts within `STRUCT_FIELDS_MAX`. Cycles and any nesting are allowed:
+/// recursive data types are (decision 17).
 fn validate_types(t: &TypeTable) -> Result<(), ProgramError> {
     let n = t.0.len();
     if n > usize::from(u16::MAX) + 1 {
         return invalid("too many types");
     }
-    let kids: Vec<Vec<TypeId>> = t.0.iter().map(type_children).collect();
     for (i, d) in t.0.iter().enumerate() {
-        if kids[i].iter().any(|&c| usize::from(c) >= n) {
+        if type_children(d).iter().any(|&c| usize::from(c) >= n) {
             return invalid(format!("type {i} names a type out of range"));
         }
         let too_many = match d {
@@ -817,42 +816,6 @@ fn validate_types(t: &TypeTable) -> Result<(), ProgramError> {
         };
         if too_many {
             return invalid(format!("type {i} has too many fields"));
-        }
-    }
-    // post-order; height = nesting below
-    let mut state = vec![0u8; n];
-    let mut height = vec![0usize; n];
-    for start in 0..n {
-        if state[start] != 0 {
-            continue;
-        }
-        state[start] = 1;
-        let mut stack = vec![(start, 0usize)];
-        while let Some(&mut (x, ref mut next)) = stack.last_mut() {
-            if let Some(&c) = kids[x].get(*next) {
-                *next += 1;
-                let c = usize::from(c);
-                match state[c] {
-                    1 => return invalid("the type table has a cycle"),
-                    0 => {
-                        state[c] = 1;
-                        stack.push((c, 0));
-                    }
-                    _ => {}
-                }
-            } else {
-                let h = kids[x]
-                    .iter()
-                    .map(|&c| height[usize::from(c)] + 1)
-                    .max()
-                    .unwrap_or(0);
-                if h > WIRE_DEPTH_MAX {
-                    return invalid("a type nests deeper than WIRE_DEPTH_MAX");
-                }
-                height[x] = h;
-                state[x] = 2;
-                stack.pop();
-            }
         }
     }
     Ok(())

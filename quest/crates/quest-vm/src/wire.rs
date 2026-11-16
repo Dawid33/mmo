@@ -17,13 +17,19 @@
 //! # Memory
 //! [`to_wire`] and [`from_wire`] are structural walks over heap memory or over a value that came from
 //! outside, so both run under the same [`Walk`] budget as equality (`WORK_WORDS_MAX` words, then
-//! `ValueTooLarge`; nesting past `WIRE_DEPTH_MAX`, `Corrupt`) and report the words they visited. A
-//! `from_wire` that fails halfway releases what it built (the caller reaps).
+//! `ValueTooLarge`) and report the words they visited. A `from_wire` that fails halfway releases what it
+//! built (the caller reaps).
+//!
+//! # No recursion
+//! Values have no nesting cap (recursive data types are allowed, decision 17). Every walk here — encode,
+//! decode, clone, compare, drop, [`to_wire`], [`from_wire`], [`fits`] — is a loop over an explicit stack
+//! that visits in the order a recursive pre-order walk would (the same bytes, the same charges, the same
+//! allocation order). Untrusted bytes are bounded by their length, heap walks by the budget.
 
 use crate::alloc::{Heap, Kind};
-use crate::consts::{STRUCT_FIELDS_MAX, WIRE_DEPTH_MAX};
+use crate::consts::STRUCT_FIELDS_MAX;
 use crate::dict;
-use crate::eq::{Walk, nested};
+use crate::eq::Walk;
 use crate::fault::{FaultKind, VmResult};
 use crate::list;
 use crate::object::{check_obj_shape, hdr, obj, release};
@@ -43,7 +49,10 @@ const T_DICT: u8 = 6;
 const T_STRUCT: u8 = 7;
 const T_VARIANT: u8 = 8;
 
-#[derive(Clone, Debug, PartialEq)]
+/// A self-describing value. `Clone`, `PartialEq` (floats by `f64` `==`) and `Drop` are written by hand
+/// as loops: a value can nest arbitrarily deep, and the derived ones would recurse. `Debug` stays derived
+/// (recursive): only tests print values.
+#[derive(Debug)]
 pub enum WireValue {
     Unit,
     Bool(bool),
@@ -68,12 +77,156 @@ pub enum WireError {
     Trailing,
     BadTag(u8),
     BadUtf8,
-    TooDeep,
 }
 
 /// Any NaN becomes the one canonical NaN.
 pub(crate) fn canonical_bits(f: f64) -> u64 {
     if f.is_nan() { NAN_BITS } else { f.to_bits() }
+}
+
+// ---- tree plumbing -----------------------------------------------------------------------------------
+
+impl WireValue {
+    /// The `i`-th child: a list's items, a dict's keys and values alternating, a struct's or variant's
+    /// field values; `None` past the last (and always for a scalar).
+    fn child(&self, i: usize) -> Option<&WireValue> {
+        match self {
+            WireValue::List(items) => items.get(i),
+            WireValue::Dict(pairs) => pairs
+                .get(i / 2)
+                .map(|(k, v)| if i.is_multiple_of(2) { k } else { v }),
+            WireValue::Struct { fields, .. } | WireValue::Variant { fields, .. } => {
+                fields.get(i).map(|(_, v)| v)
+            }
+            _ => None,
+        }
+    }
+
+    /// This value with `kids` (in [`WireValue::child`] order) in place of its children.
+    fn rebuild(&self, kids: Vec<WireValue>) -> WireValue {
+        let named = |fields: &[(String, WireValue)], kids: Vec<WireValue>| {
+            fields.iter().map(|(n, _)| n.clone()).zip(kids).collect()
+        };
+        match self {
+            WireValue::Unit => WireValue::Unit,
+            WireValue::Bool(b) => WireValue::Bool(*b),
+            WireValue::Int(i) => WireValue::Int(*i),
+            WireValue::Float(f) => WireValue::Float(*f),
+            WireValue::Str(s) => WireValue::Str(s.clone()),
+            WireValue::List(_) => WireValue::List(kids),
+            WireValue::Dict(_) => {
+                let mut pairs = Vec::with_capacity(kids.len() / 2);
+                let mut it = kids.into_iter();
+                while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    pairs.push((k, v));
+                }
+                WireValue::Dict(pairs)
+            }
+            WireValue::Struct { name, fields } => WireValue::Struct {
+                name: name.clone(),
+                fields: named(fields, kids),
+            },
+            WireValue::Variant { name, fields } => WireValue::Variant {
+                name: name.clone(),
+                fields: named(fields, kids),
+            },
+        }
+    }
+
+    /// The items of a `List` (`Drop` forbids moving them out by a pattern).
+    pub(crate) fn into_list(mut self) -> Option<Vec<WireValue>> {
+        match &mut self {
+            WireValue::List(items) => Some(std::mem::take(items)),
+            _ => None,
+        }
+    }
+
+    /// Moves this value's children onto `out`, leaving it without any.
+    fn take_children(&mut self, out: &mut Vec<WireValue>) {
+        match self {
+            WireValue::List(items) => out.append(items),
+            WireValue::Dict(pairs) => {
+                for (k, v) in std::mem::take(pairs) {
+                    out.push(k);
+                    out.push(v);
+                }
+            }
+            WireValue::Struct { fields, .. } | WireValue::Variant { fields, .. } => {
+                out.extend(std::mem::take(fields).into_iter().map(|(_, v)| v));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for WireValue {
+    /// Flat: the children are emptied onto a local stack one container at a time, so every value dropped
+    /// here has no children left and nothing recurses.
+    fn drop(&mut self) {
+        let mut stack = Vec::new();
+        self.take_children(&mut stack);
+        while let Some(mut v) = stack.pop() {
+            v.take_children(&mut stack);
+        }
+    }
+}
+
+impl Clone for WireValue {
+    fn clone(&self) -> WireValue {
+        // Each frame: a source container and the copies of its children so far.
+        let mut stack: Vec<(&WireValue, Vec<WireValue>)> = vec![(self, Vec::new())];
+        let mut done = WireValue::Unit;
+        while let Some((src, kids)) = stack.last_mut() {
+            let src: &WireValue = src;
+            if let Some(c) = src.child(kids.len()) {
+                stack.push((c, Vec::new()));
+                continue;
+            }
+            let kids = std::mem::take(kids);
+            stack.pop();
+            let copy = src.rebuild(kids);
+            match stack.last_mut() {
+                Some((_, parent)) => parent.push(copy),
+                None => done = copy,
+            }
+        }
+        done
+    }
+}
+
+impl PartialEq for WireValue {
+    fn eq(&self, other: &WireValue) -> bool {
+        let mut stack = vec![(self, other)];
+        while let Some((a, b)) = stack.pop() {
+            let same_shape = match (a, b) {
+                (WireValue::Unit, WireValue::Unit) => true,
+                (WireValue::Bool(x), WireValue::Bool(y)) => x == y,
+                (WireValue::Int(x), WireValue::Int(y)) => x == y,
+                (WireValue::Float(x), WireValue::Float(y)) => x == y,
+                (WireValue::Str(x), WireValue::Str(y)) => x == y,
+                (WireValue::List(x), WireValue::List(y)) => x.len() == y.len(),
+                (WireValue::Dict(x), WireValue::Dict(y)) => x.len() == y.len(),
+                (
+                    WireValue::Struct { name: n, fields: f },
+                    WireValue::Struct { name: m, fields: g },
+                )
+                | (
+                    WireValue::Variant { name: n, fields: f },
+                    WireValue::Variant { name: m, fields: g },
+                ) => n == m && f.len() == g.len() && f.iter().zip(g).all(|((x, _), (y, _))| x == y),
+                _ => false,
+            };
+            if !same_shape {
+                return false;
+            }
+            let mut i = 0;
+            while let (Some(x), Some(y)) = (a.child(i), b.child(i)) {
+                stack.push((x, y));
+                i += 1;
+            }
+        }
+        true
+    }
 }
 
 // ---- bytes -------------------------------------------------------------------------------------------
@@ -87,18 +240,72 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn put_fields(out: &mut Vec<u8>, name: &str, fields: &[(String, WireValue)]) {
-    put_str(out, name);
-    put_len(out, fields.len());
-    for (n, v) in fields {
-        put_str(out, n);
-        v.encode(out);
-    }
-}
-
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
+}
+
+/// A container being decoded: what it holds so far and how many values it still needs (at least one).
+enum Open {
+    List {
+        left: u32,
+        items: Vec<WireValue>,
+    },
+    Dict {
+        left: u32,
+        pairs: Vec<(WireValue, WireValue)>,
+        key: Option<WireValue>,
+    },
+    Fields {
+        variant: bool,
+        name: String,
+        left: u32,
+        fields: Vec<(String, WireValue)>,
+        /// The name of the field whose value is read next.
+        field: String,
+    },
+}
+
+impl Open {
+    /// Takes the next value; returns the container once it is complete.
+    fn accept(&mut self, v: WireValue) -> Option<WireValue> {
+        use std::mem::take;
+        match self {
+            Open::List { left, items } => {
+                items.push(v);
+                *left -= 1;
+                (*left == 0).then(|| WireValue::List(take(items)))
+            }
+            Open::Dict { left, pairs, key } => {
+                let Some(k) = key.take() else {
+                    *key = Some(v);
+                    return None;
+                };
+                pairs.push((k, v));
+                *left -= 1;
+                (*left == 0).then(|| WireValue::Dict(take(pairs)))
+            }
+            Open::Fields {
+                variant,
+                name,
+                left,
+                fields,
+                field,
+            } => {
+                fields.push((take(field), v));
+                *left -= 1;
+                (*left == 0).then(|| fields_value(*variant, take(name), take(fields)))
+            }
+        }
+    }
+}
+
+fn fields_value(variant: bool, name: String, fields: Vec<(String, WireValue)>) -> WireValue {
+    if variant {
+        WireValue::Variant { name, fields }
+    } else {
+        WireValue::Struct { name, fields }
+    }
 }
 
 impl<'a> Reader<'a> {
@@ -131,173 +338,149 @@ impl<'a> Reader<'a> {
         String::from_utf8(b.to_vec()).map_err(|_| WireError::BadUtf8)
     }
 
-    fn fields(&mut self, depth: usize) -> Result<(String, Vec<(String, WireValue)>), WireError> {
-        let name = self.string()?;
-        let n = self.u32()?;
-        // Never sized by the count: it is untrusted, and every field takes bytes, so the loop ends.
-        let mut fields = Vec::new();
-        for _ in 0..n {
-            let fname = self.string()?;
-            fields.push((fname, self.value(depth)?));
-        }
-        Ok((name, fields))
-    }
-
-    /// `depth`: containers entered so far.
-    fn value(&mut self, depth: usize) -> Result<WireValue, WireError> {
-        let tag = self.u8()?;
-        if matches!(tag, T_LIST | T_DICT | T_STRUCT | T_VARIANT) && depth >= WIRE_DEPTH_MAX {
-            return Err(WireError::TooDeep);
-        }
-        Ok(match tag {
-            T_UNIT => WireValue::Unit,
-            T_BOOL => match self.u8()? {
-                0 => WireValue::Bool(false),
-                1 => WireValue::Bool(true),
-                b => return Err(WireError::BadTag(b)),
-            },
-            T_INT => WireValue::Int(self.u64()? as i64),
-            T_FLOAT => {
-                WireValue::Float(f64::from_bits(canonical_bits(f64::from_bits(self.u64()?))))
+    /// One value. Containers are never sized by their untrusted counts, and every value takes bytes, so
+    /// both the loop and the stack of open containers are bounded by the input's length.
+    fn value(&mut self) -> Result<WireValue, WireError> {
+        let mut stack: Vec<Open> = Vec::new();
+        loop {
+            if let Some(Open::Fields { field, .. }) = stack.last_mut() {
+                *field = self.string()?;
             }
-            T_STR => WireValue::Str(self.string()?),
-            T_LIST => {
-                let n = self.u32()?;
-                let mut items = Vec::new();
-                for _ in 0..n {
-                    items.push(self.value(depth + 1)?);
+            let mut done = match self.u8()? {
+                T_UNIT => WireValue::Unit,
+                T_BOOL => match self.u8()? {
+                    0 => WireValue::Bool(false),
+                    1 => WireValue::Bool(true),
+                    b => return Err(WireError::BadTag(b)),
+                },
+                T_INT => WireValue::Int(self.u64()? as i64),
+                T_FLOAT => {
+                    WireValue::Float(f64::from_bits(canonical_bits(f64::from_bits(self.u64()?))))
                 }
-                WireValue::List(items)
-            }
-            T_DICT => {
-                let n = self.u32()?;
-                let mut pairs = Vec::new();
-                for _ in 0..n {
-                    let k = self.value(depth + 1)?;
-                    pairs.push((k, self.value(depth + 1)?));
+                T_STR => WireValue::Str(self.string()?),
+                T_LIST => match self.u32()? {
+                    0 => WireValue::List(Vec::new()),
+                    left => {
+                        stack.push(Open::List {
+                            left,
+                            items: Vec::new(),
+                        });
+                        continue;
+                    }
+                },
+                T_DICT => match self.u32()? {
+                    0 => WireValue::Dict(Vec::new()),
+                    left => {
+                        stack.push(Open::Dict {
+                            left,
+                            pairs: Vec::new(),
+                            key: None,
+                        });
+                        continue;
+                    }
+                },
+                tag @ (T_STRUCT | T_VARIANT) => {
+                    let variant = tag == T_VARIANT;
+                    let name = self.string()?;
+                    match self.u32()? {
+                        0 => fields_value(variant, name, Vec::new()),
+                        left => {
+                            stack.push(Open::Fields {
+                                variant,
+                                name,
+                                left,
+                                fields: Vec::new(),
+                                field: String::new(),
+                            });
+                            continue;
+                        }
+                    }
                 }
-                WireValue::Dict(pairs)
+                t => return Err(WireError::BadTag(t)),
+            };
+            // Hand the finished value up through every container it completes.
+            loop {
+                let Some(top) = stack.last_mut() else {
+                    return Ok(done);
+                };
+                match top.accept(done) {
+                    None => break,
+                    Some(full) => {
+                        stack.pop();
+                        done = full;
+                    }
+                }
             }
-            T_STRUCT => {
-                let (name, fields) = self.fields(depth + 1)?;
-                WireValue::Struct { name, fields }
-            }
-            T_VARIANT => {
-                let (name, fields) = self.fields(depth + 1)?;
-                WireValue::Variant { name, fields }
-            }
-            t => return Err(WireError::BadTag(t)),
-        })
+        }
     }
 }
 
 impl WireValue {
     /// Appends the bytes of this value (floats canonicalised).
     pub fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            WireValue::Unit => out.push(T_UNIT),
-            WireValue::Bool(b) => out.extend_from_slice(&[T_BOOL, u8::from(*b)]),
-            WireValue::Int(i) => {
-                out.push(T_INT);
-                out.extend_from_slice(&i.to_le_bytes());
-            }
-            WireValue::Float(f) => {
-                out.push(T_FLOAT);
-                out.extend_from_slice(&canonical_bits(*f).to_le_bytes());
-            }
-            WireValue::Str(s) => {
-                out.push(T_STR);
-                put_str(out, s);
-            }
-            WireValue::List(items) => {
-                out.push(T_LIST);
-                put_len(out, items.len());
-                for v in items {
-                    v.encode(out);
-                }
-            }
-            WireValue::Dict(pairs) => {
-                out.push(T_DICT);
-                put_len(out, pairs.len());
-                for (k, v) in pairs {
-                    k.encode(out);
-                    v.encode(out);
-                }
-            }
-            WireValue::Struct { name, fields } => {
-                out.push(T_STRUCT);
-                put_fields(out, name, fields);
-            }
-            WireValue::Variant { name, fields } => {
-                out.push(T_VARIANT);
-                put_fields(out, name, fields);
-            }
+        enum Item<'a> {
+            Value(&'a WireValue),
+            Name(&'a str),
         }
-    }
-
-    /// Whether the value nests at most `max` containers (`List`, `Dict`, `Struct`, `Variant`) deep: a
-    /// scalar is 0, `[1]` is 1. Walked with an explicit stack, so any depth is safe to ask about; it stops
-    /// at the first container past `max`. Every value a host builds passes this check against
-    /// `WIRE_DEPTH_MAX` before anything recursive (`encode`, `fits`, `from_wire`) walks it.
-    pub fn depth_at_most(&self, max: u32) -> bool {
-        let mut stack: Vec<(&WireValue, u32)> = vec![(self, 0)];
-        while let Some((v, above)) = stack.pop() {
-            let scalar = matches!(
-                v,
-                WireValue::Unit
-                    | WireValue::Bool(_)
-                    | WireValue::Int(_)
-                    | WireValue::Float(_)
-                    | WireValue::Str(_)
-            );
-            if scalar {
-                continue;
-            }
-            // `v` is a container `above + 1` deep
-            if above >= max {
-                return false;
-            }
-            let d = above + 1;
+        let mut stack = vec![Item::Value(self)];
+        while let Some(item) = stack.pop() {
+            let v = match item {
+                Item::Name(n) => {
+                    put_str(out, n);
+                    continue;
+                }
+                Item::Value(v) => v,
+            };
             match v {
-                WireValue::List(items) => stack.extend(items.iter().map(|x| (x, d))),
-                WireValue::Dict(pairs) => {
-                    stack.extend(pairs.iter().flat_map(|(k, x)| [(k, d), (x, d)]));
+                WireValue::Unit => out.push(T_UNIT),
+                WireValue::Bool(b) => out.extend_from_slice(&[T_BOOL, u8::from(*b)]),
+                WireValue::Int(i) => {
+                    out.push(T_INT);
+                    out.extend_from_slice(&i.to_le_bytes());
                 }
-                WireValue::Struct { fields, .. } | WireValue::Variant { fields, .. } => {
-                    stack.extend(fields.iter().map(|(_, x)| (x, d)));
+                WireValue::Float(f) => {
+                    out.push(T_FLOAT);
+                    out.extend_from_slice(&canonical_bits(*f).to_le_bytes());
                 }
-                _ => {}
-            }
-        }
-        true
-    }
-
-    /// Drops the value without recursion (a value nested a million deep would overflow the stack in
-    /// the derived drop): its containers are emptied one by one onto an explicit stack.
-    pub fn dismantle(self) {
-        let mut stack = vec![self];
-        while let Some(mut v) = stack.pop() {
-            match &mut v {
-                WireValue::List(items) => stack.append(items),
+                WireValue::Str(s) => {
+                    out.push(T_STR);
+                    put_str(out, s);
+                }
+                WireValue::List(items) => {
+                    out.push(T_LIST);
+                    put_len(out, items.len());
+                    stack.extend(items.iter().rev().map(Item::Value));
+                }
                 WireValue::Dict(pairs) => {
-                    for (k, x) in std::mem::take(pairs) {
-                        stack.push(k);
-                        stack.push(x);
+                    out.push(T_DICT);
+                    put_len(out, pairs.len());
+                    for (k, v) in pairs.iter().rev() {
+                        stack.push(Item::Value(v));
+                        stack.push(Item::Value(k));
                     }
                 }
-                WireValue::Struct { fields, .. } | WireValue::Variant { fields, .. } => {
-                    stack.extend(std::mem::take(fields).into_iter().map(|(_, x)| x));
+                WireValue::Struct { name, fields } | WireValue::Variant { name, fields } => {
+                    let tag = if matches!(v, WireValue::Struct { .. }) {
+                        T_STRUCT
+                    } else {
+                        T_VARIANT
+                    };
+                    out.push(tag);
+                    put_str(out, name);
+                    put_len(out, fields.len());
+                    for (n, v) in fields.iter().rev() {
+                        stack.push(Item::Value(v));
+                        stack.push(Item::Name(n));
+                    }
                 }
-                _ => {}
             }
         }
     }
 
-    /// Parses exactly one value; never panics, never allocates by an untrusted count, nesting is capped
-    /// at `WIRE_DEPTH_MAX` containers.
+    /// Parses exactly one value; never panics, never allocates by an untrusted count, never recurses.
     pub fn decode(bytes: &[u8]) -> Result<WireValue, WireError> {
         let mut r = Reader { bytes, pos: 0 };
-        let v = r.value(0)?;
+        let v = r.value()?;
         if r.pos != bytes.len() {
             return Err(WireError::Trailing);
         }
@@ -306,6 +489,110 @@ impl WireValue {
 }
 
 // ---- heap -> wire ------------------------------------------------------------------------------------
+
+/// A container being read out of the heap by [`to_wire`], innermost last.
+enum ToFrame<'t> {
+    List {
+        v: u64,
+        e: TypeId,
+        len: u32,
+        items: Vec<WireValue>,
+    },
+    Dict {
+        v: u64,
+        kt: TypeId,
+        vt: TypeId,
+        /// Where the next `dict::next` starts.
+        pos: i64,
+        /// The value of the entry whose key was handed out last, and that key once read.
+        val: u64,
+        key: Option<WireValue>,
+        pairs: Vec<(WireValue, WireValue)>,
+    },
+    Obj {
+        v: u64,
+        name: &'t str,
+        variant: bool,
+        fields: &'t [(String, TypeId)],
+        out: Vec<(String, WireValue)>,
+    },
+}
+
+/// What opening a slot gives: a finished value, or a container whose children are read next.
+enum Opened<V, F> {
+    Leaf(V),
+    Frame(F),
+}
+
+impl ToFrame<'_> {
+    /// The next child to read (its type and slot), or `None` when the container is complete.
+    fn next(&mut self, st: &Store, heap: Heap, walk: &mut Walk) -> VmResult<Option<(TypeId, u64)>> {
+        Ok(match self {
+            ToFrame::List { v, e, len, items } => {
+                let i = u32::try_from(items.len()).map_err(|_| FaultKind::Corrupt)?;
+                if i >= *len {
+                    return Ok(None);
+                }
+                Some((*e, list::get(st, heap, *v, i64::from(i))?))
+            }
+            ToFrame::Dict {
+                v,
+                kt,
+                vt,
+                pos,
+                val,
+                key,
+                ..
+            } => {
+                if key.is_some() {
+                    return Ok(Some((*vt, *val)));
+                }
+                let (serial, work) = dict::next(st, heap, *v, *pos)?;
+                walk.charge(work)?;
+                if serial < 0 {
+                    return Ok(None);
+                }
+                let k = dict::key_at(st, heap, *v, serial)?;
+                *val = dict::val_at(st, heap, *v, serial)?;
+                *pos = serial + 1;
+                Some((*kt, k))
+            }
+            ToFrame::Obj { v, fields, out, .. } => {
+                let Some((_, ft)) = fields.get(out.len()) else {
+                    return Ok(None);
+                };
+                let i = u32::try_from(out.len()).map_err(|_| FaultKind::Corrupt)?;
+                Some((*ft, obj::get_field(st, heap, *v, i)?))
+            }
+        })
+    }
+
+    /// Takes the wire form of the child [`ToFrame::next`] handed out last.
+    fn accept(&mut self, w: WireValue) {
+        match self {
+            ToFrame::List { items, .. } => items.push(w),
+            ToFrame::Dict { key, pairs, .. } => match key.take() {
+                None => *key = Some(w),
+                Some(k) => pairs.push((k, w)),
+            },
+            ToFrame::Obj { fields, out, .. } => {
+                if let Some((name, _)) = fields.get(out.len()) {
+                    out.push((name.clone(), w));
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> WireValue {
+        match self {
+            ToFrame::List { items, .. } => WireValue::List(items),
+            ToFrame::Dict { pairs, .. } => WireValue::Dict(pairs),
+            ToFrame::Obj {
+                name, variant, out, ..
+            } => fields_value(variant, name.to_owned(), out),
+        }
+    }
+}
 
 /// The wire form of the heap value `v` of type `t`, and the words visited.
 pub fn to_wire(
@@ -316,20 +603,40 @@ pub fn to_wire(
     v: u64,
 ) -> VmResult<(WireValue, u32)> {
     let mut walk = Walk::default();
-    let w = to_w(st, heap, types, t, v, &mut walk)?;
-    Ok((w, walk.used))
+    let mut stack = match to_open(st, heap, types, t, v, &mut walk)? {
+        Opened::Leaf(w) => return Ok((w, walk.used)),
+        Opened::Frame(f) => vec![f],
+    };
+    let mut done = WireValue::Unit;
+    while let Some(top) = stack.last_mut() {
+        if let Some((t, v)) = top.next(st, heap, &mut walk)? {
+            match to_open(st, heap, types, t, v, &mut walk)? {
+                Opened::Leaf(w) => top.accept(w),
+                Opened::Frame(f) => stack.push(f),
+            }
+        } else if let Some(f) = stack.pop() {
+            let w = f.finish();
+            match stack.last_mut() {
+                Some(parent) => parent.accept(w),
+                None => done = w,
+            }
+        }
+    }
+    Ok((done, walk.used))
 }
 
-fn to_w(
+/// One slot of [`to_wire`]: charges it, checks the heap object against the type and reads a scalar
+/// whole; a container becomes a frame.
+fn to_open<'t>(
     st: &Store,
     heap: Heap,
-    types: &TypeTable,
+    types: &'t TypeTable,
     t: TypeId,
     v: u64,
     walk: &mut Walk,
-) -> VmResult<WireValue> {
+) -> VmResult<Opened<WireValue, ToFrame<'t>>> {
     walk.charge(1)?;
-    Ok(match types.desc(t)? {
+    let leaf = match types.desc(t)? {
         TypeDesc::Unit => WireValue::Unit,
         TypeDesc::Bool => match v {
             0 => WireValue::Bool(false),
@@ -339,11 +646,11 @@ fn to_w(
         TypeDesc::Int => WireValue::Int(v as i64),
         TypeDesc::Float => WireValue::Float(f64::from_bits(canonical_bits(f64::from_bits(v)))),
         TypeDesc::Promise(_) => return Err(FaultKind::Corrupt),
-        TypeDesc::Str => nested(walk, |walk| -> VmResult<WireValue> {
+        TypeDesc::Str => {
             walk.charge(string::byte_len(st, heap, v)?.div_ceil(8))?;
-            Ok(WireValue::Str(string::read(st, heap, v)?))
-        })?,
-        TypeDesc::List(e) => nested(walk, |walk| -> VmResult<WireValue> {
+            WireValue::Str(string::read(st, heap, v)?)
+        }
+        TypeDesc::List(e) => {
             let (_, h) = hdr(st, heap, v)?;
             let want = if types.is_ref(*e) {
                 Kind::ListRef
@@ -353,72 +660,72 @@ fn to_w(
             if h.kind != want {
                 return Err(FaultKind::Corrupt);
             }
-            let mut items = Vec::new();
-            for i in 0..h.len {
-                let slot = list::get(st, heap, v, i64::from(i))?;
-                items.push(to_w(st, heap, types, *e, slot, walk)?);
-            }
-            Ok(WireValue::List(items))
-        })?,
-        TypeDesc::Dict(kt, vt) => nested(walk, |walk| -> VmResult<WireValue> {
+            return Ok(Opened::Frame(ToFrame::List {
+                v,
+                e: *e,
+                len: h.len,
+                items: Vec::new(),
+            }));
+        }
+        TypeDesc::Dict(kt, vt) => {
             let (_, h) = hdr(st, heap, v)?;
             if h.kind != Kind::Dict {
                 return Err(FaultKind::Corrupt);
             }
-            let mut pairs = Vec::new();
-            let mut pos = 0i64;
-            loop {
-                let (serial, work) = dict::next(st, heap, v, pos)?;
-                walk.charge(work)?;
-                if serial < 0 {
-                    break;
-                }
-                let k = dict::key_at(st, heap, v, serial)?;
-                let val = dict::val_at(st, heap, v, serial)?;
-                let k = to_w(st, heap, types, *kt, k, walk)?;
-                pairs.push((k, to_w(st, heap, types, *vt, val, walk)?));
-                pos = serial + 1;
-            }
-            Ok(WireValue::Dict(pairs))
-        })?,
-        TypeDesc::Struct { name, fields } => nested(walk, |walk| -> VmResult<WireValue> {
-            let names = obj_fields(st, heap, types, v, 0, fields, walk)?;
-            Ok(WireValue::Struct {
-                name: name.clone(),
-                fields: names,
-            })
-        })?,
+            return Ok(Opened::Frame(ToFrame::Dict {
+                v,
+                kt: *kt,
+                vt: *vt,
+                pos: 0,
+                val: 0,
+                key: None,
+                pairs: Vec::new(),
+            }));
+        }
+        TypeDesc::Struct { name, fields } => {
+            check_obj(st, heap, v, 0, fields)?;
+            return Ok(Opened::Frame(ToFrame::Obj {
+                v,
+                name,
+                variant: false,
+                fields,
+                out: Vec::new(),
+            }));
+        }
         TypeDesc::Enum { variants, .. } => {
             let tag = obj::tag(st, heap, v)?;
             let (vname, vfields) = variants.get(usize::from(tag)).ok_or(FaultKind::Corrupt)?;
-            let fields = if v & 1 == 1 {
+            if v & 1 == 1 {
                 if !vfields.is_empty() {
                     return Err(FaultKind::Corrupt);
                 }
-                vec![]
+                WireValue::Variant {
+                    name: vname.clone(),
+                    fields: vec![],
+                }
             } else {
-                nested(walk, |walk| -> VmResult<_> {
-                    obj_fields(st, heap, types, v, tag, vfields, walk)
-                })?
-            };
-            WireValue::Variant {
-                name: vname.clone(),
-                fields,
+                check_obj(st, heap, v, tag, vfields)?;
+                return Ok(Opened::Frame(ToFrame::Obj {
+                    v,
+                    name: vname,
+                    variant: true,
+                    fields: vfields,
+                    out: Vec::new(),
+                }));
             }
         }
-    })
+    };
+    Ok(Opened::Leaf(leaf))
 }
 
-/// The fields of the object `v` (tag `tag`, the declared `fields`) as wire fields.
-fn obj_fields(
+/// The object `v` has tag `tag` and the declared `fields`' count.
+fn check_obj(
     st: &Store,
     heap: Heap,
-    types: &TypeTable,
     v: u64,
     tag: u16,
     fields: &[(String, TypeId)],
-    walk: &mut Walk,
-) -> VmResult<Vec<(String, WireValue)>> {
+) -> VmResult<()> {
     let (_, h) = hdr(st, heap, v)?;
     if h.kind != Kind::Obj {
         return Err(FaultKind::Corrupt);
@@ -427,12 +734,7 @@ fn obj_fields(
     if h.tag != tag || usize::try_from(h.len).ok() != Some(fields.len()) {
         return Err(FaultKind::Corrupt);
     }
-    let mut out = Vec::new();
-    for (i, (name, ft)) in (0u32..).zip(fields) {
-        let slot = obj::get_field(st, heap, v, i)?;
-        out.push((name.clone(), to_w(st, heap, types, *ft, slot, walk)?));
-    }
-    Ok(out)
+    Ok(())
 }
 
 // ---- wire -> heap ------------------------------------------------------------------------------------
@@ -462,127 +764,225 @@ pub fn from_wire(
     w: &WireValue,
 ) -> Result<(u64, u32), FromWire> {
     let mut walk = Walk::default();
-    let v = from_w(st, heap, types, t, w, &mut walk)?;
-    Ok((v, walk.used))
-}
-
-/// Whether [`from_wire`] of `w` into type `t` would find the shapes matching, decided without building
-/// anything (a dry run of its structural checks: the same field matching, variant lookup, duplicate dict
-/// keys and container nesting limit). It does not check that the heap has room or that the walk stays
-/// under `WORK_WORDS_MAX`. Duplicate dict keys are found by their encoded bytes.
-pub fn fits(types: &TypeTable, t: TypeId, w: &WireValue) -> bool {
-    fits_in(types, t, w, 0)
-}
-
-/// `depth`: the containers entered so far (`from_wire` refuses a container at `WIRE_DEPTH_MAX`).
-fn fits_in(types: &TypeTable, t: TypeId, w: &WireValue, depth: usize) -> bool {
-    let Ok(d) = types.desc(t) else {
-        return false;
-    };
-    let room = depth < WIRE_DEPTH_MAX;
-    match (d, w) {
-        (TypeDesc::Unit, WireValue::Unit)
-        | (TypeDesc::Bool, WireValue::Bool(_))
-        | (TypeDesc::Int, WireValue::Int(_))
-        | (TypeDesc::Float, WireValue::Float(_))
-        | (TypeDesc::Str, WireValue::Str(_)) => true,
-        (TypeDesc::List(e), WireValue::List(items)) => {
-            room && items.iter().all(|i| fits_in(types, *e, i, depth + 1))
-        }
-        (TypeDesc::Dict(kt, vt), WireValue::Dict(pairs)) => {
-            let mut keys = std::collections::BTreeSet::new();
-            room && pairs.iter().all(|(k, v)| {
-                let mut bytes = Vec::new();
-                k.encode(&mut bytes);
-                fits_in(types, *kt, k, depth + 1)
-                    && fits_in(types, *vt, v, depth + 1)
-                    && keys.insert(bytes)
-            })
-        }
-        (TypeDesc::Struct { fields, .. }, WireValue::Struct { fields: wf, .. }) => {
-            room && fields_fit(types, fields, wf, depth + 1)
-        }
-        (TypeDesc::Enum { variants, .. }, WireValue::Variant { name, fields: wf }) => {
-            match variants.iter().find(|(n, _)| n == name) {
-                Some((_, fields)) if fields.is_empty() && wf.is_empty() => true,
-                Some((_, fields)) => room && fields_fit(types, fields, wf, depth + 1),
-                None => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-/// `build_obj`'s matching: the same number of fields, each declared name found in a wire field of its
-/// own, each value fitting its declared type.
-fn fields_fit(
-    types: &TypeTable,
-    fields: &[(String, TypeId)],
-    wf: &[(String, WireValue)],
-    depth: usize,
-) -> bool {
-    if fields.len() != wf.len() || fields.len() > STRUCT_FIELDS_MAX {
-        return false;
-    }
-    let mut used = vec![false; wf.len()];
-    fields
-        .iter()
-        .all(|(name, ft)| match wf.iter().position(|(n, _)| n == name) {
-            Some(j) if !std::mem::replace(&mut used[j], true) => {
-                fits_in(types, *ft, &wf[j].1, depth)
-            }
-            _ => false,
-        })
-}
-
-/// Releases `v` when it is a heap-kind value of type `t` (a plain immediate looks like a pointer).
-fn drop_value(st: &mut Store, heap: Heap, types: &TypeTable, t: TypeId, v: u64) {
-    if types.is_ref(t) {
-        let _ = release(st, heap, v);
-    }
-}
-
-/// `r` of filling the new container `c`: on an error `c` (with whatever it already holds) is released.
-fn finish(st: &mut Store, heap: Heap, c: u64, r: Built<()>) -> Built<u64> {
-    match r {
-        Ok(()) => Ok(c),
+    let mut stack = Vec::new();
+    match build(st, heap, types, t, w, &mut walk, &mut stack) {
+        Ok(v) => Ok((v, walk.used)),
         Err(e) => {
-            let _ = release(st, heap, c);
+            // innermost first, as each level of the recursive build released its own on the way out
+            while let Some(f) = stack.pop() {
+                f.release(st, heap, types);
+            }
             Err(e)
         }
     }
 }
 
-fn from_w(
+/// A container being built by [`from_wire`], innermost last. Its heap object exists before its children
+/// are built; on an error the caller releases every frame's.
+enum FromFrame<'w, 't> {
+    List {
+        l: u64,
+        e: TypeId,
+        items: &'w [WireValue],
+        i: usize,
+    },
+    Dict {
+        d: u64,
+        kt: TypeId,
+        vt: TypeId,
+        pairs: &'w [(WireValue, WireValue)],
+        i: usize,
+        /// The key of pair `i`, built, while its value is built.
+        key: Option<u64>,
+    },
+    Obj {
+        o: u64,
+        fields: &'t [(String, TypeId)],
+        wf: &'w [(String, WireValue)],
+        /// Which wire field fills each declared one.
+        order: Vec<usize>,
+        i: usize,
+    },
+}
+
+impl<'w> FromFrame<'w, '_> {
+    /// The next child to build (its type and wire value), or `None` when the container is complete.
+    fn next(&self) -> Option<(TypeId, &'w WireValue)> {
+        match self {
+            FromFrame::List { e, items, i, .. } => items.get(*i).map(|w| (*e, w)),
+            FromFrame::Dict {
+                kt,
+                vt,
+                pairs,
+                i,
+                key,
+                ..
+            } => pairs
+                .get(*i)
+                .map(|(k, v)| if key.is_none() { (*kt, k) } else { (*vt, v) }),
+            FromFrame::Obj {
+                fields,
+                wf,
+                order,
+                i,
+                ..
+            } => {
+                let (_, ft) = fields.get(*i)?;
+                let (_, w) = wf.get(*order.get(*i)?)?;
+                Some((*ft, w))
+            }
+        }
+    }
+
+    /// Takes the child [`FromFrame::next`] handed out last (the frame owns it from here, also on an
+    /// error).
+    fn accept(
+        &mut self,
+        st: &mut Store,
+        heap: Heap,
+        types: &TypeTable,
+        v: u64,
+        walk: &mut Walk,
+    ) -> Built<()> {
+        match self {
+            FromFrame::List { l, e, i, .. } => {
+                *i += 1;
+                match list::push(st, heap, *l, v) {
+                    Ok((nl, work)) => {
+                        *l = nl;
+                        walk.charge(work)?;
+                    }
+                    Err(f) => {
+                        drop_value(st, heap, types, *e, v);
+                        return Err(f.into());
+                    }
+                }
+            }
+            FromFrame::Dict {
+                d, kt, vt, i, key, ..
+            } => {
+                let Some(k) = key.take() else {
+                    *key = Some(v);
+                    return Ok(());
+                };
+                *i += 1;
+                let before = dict::len(st, heap, *d)?;
+                match dict::set(st, heap, *d, k, v) {
+                    Ok((_, work)) => walk.charge(work)?,
+                    Err(f) => {
+                        drop_value(st, heap, types, *kt, k);
+                        drop_value(st, heap, types, *vt, v);
+                        return Err(f.into());
+                    }
+                }
+                if dict::len(st, heap, *d)? == before {
+                    return Err(FromWire::WrongType); // the key was there already
+                }
+            }
+            FromFrame::Obj { o, fields, i, .. } => {
+                let ft = fields.get(*i).map(|(_, ft)| *ft);
+                let at = u32::try_from(*i).map_err(|_| FaultKind::Corrupt)?;
+                *i += 1;
+                if let Err(f) = obj::set_field(st, heap, *o, at, v) {
+                    if let Some(ft) = ft {
+                        drop_value(st, heap, types, ft, v);
+                    }
+                    return Err(f.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The finished container.
+    fn value(&self) -> u64 {
+        match self {
+            FromFrame::List { l, .. } => *l,
+            FromFrame::Dict { d, .. } => *d,
+            FromFrame::Obj { o, .. } => *o,
+        }
+    }
+
+    /// After an error: a key held for its value, then the container with whatever it already holds.
+    fn release(self, st: &mut Store, heap: Heap, types: &TypeTable) {
+        if let FromFrame::Dict {
+            kt, key: Some(k), ..
+        } = self
+        {
+            drop_value(st, heap, types, kt, k);
+        }
+        let _ = release(st, heap, self.value());
+    }
+}
+
+/// [`from_wire`]'s walk; on an error the frames left on `stack` hold what was built.
+fn build<'w, 't>(
     st: &mut Store,
     heap: Heap,
-    types: &TypeTable,
+    types: &'t TypeTable,
     t: TypeId,
-    w: &WireValue,
+    w: &'w WireValue,
     walk: &mut Walk,
+    stack: &mut Vec<FromFrame<'w, 't>>,
 ) -> Built<u64> {
+    match from_open(st, heap, types, t, w, walk)? {
+        Opened::Leaf(v) => return Ok(v),
+        Opened::Frame(f) => stack.push(f),
+    }
+    let mut done = 0;
+    while let Some(top) = stack.last_mut() {
+        if let Some((t, w)) = top.next() {
+            match from_open(st, heap, types, t, w, walk)? {
+                Opened::Leaf(v) => top.accept(st, heap, types, v, walk)?,
+                Opened::Frame(f) => stack.push(f),
+            }
+        } else if let Some(f) = stack.pop() {
+            let v = f.value();
+            match stack.last_mut() {
+                Some(parent) => parent.accept(st, heap, types, v, walk)?,
+                None => done = v,
+            }
+        }
+    }
+    Ok(done)
+}
+
+/// One wire value of [`from_wire`]: charges it, matches it against the type and builds a scalar or a
+/// string whole; a container is allocated (before its children, as before) and becomes a frame.
+fn from_open<'w, 't>(
+    st: &mut Store,
+    heap: Heap,
+    types: &'t TypeTable,
+    t: TypeId,
+    w: &'w WireValue,
+    walk: &mut Walk,
+) -> Built<Opened<u64, FromFrame<'w, 't>>> {
     walk.charge(1)?;
-    match (types.desc(t)?, w) {
-        (TypeDesc::Unit, WireValue::Unit) => Ok(0),
-        (TypeDesc::Bool, WireValue::Bool(b)) => Ok(u64::from(*b)),
-        (TypeDesc::Int, WireValue::Int(i)) => Ok(*i as u64),
-        (TypeDesc::Float, WireValue::Float(f)) => Ok(canonical_bits(*f)),
+    let frame = match (types.desc(t)?, w) {
+        (TypeDesc::Unit, WireValue::Unit) => return Ok(Opened::Leaf(0)),
+        (TypeDesc::Bool, WireValue::Bool(b)) => return Ok(Opened::Leaf(u64::from(*b))),
+        (TypeDesc::Int, WireValue::Int(i)) => return Ok(Opened::Leaf(*i as u64)),
+        (TypeDesc::Float, WireValue::Float(f)) => return Ok(Opened::Leaf(canonical_bits(*f))),
         (TypeDesc::Str, WireValue::Str(s)) => {
             walk.charge(u32::try_from(s.len().div_ceil(8)).unwrap_or(u32::MAX))?;
-            Ok(string::new(st, heap, s)?)
+            return Ok(Opened::Leaf(string::new(st, heap, s)?));
         }
-        (TypeDesc::List(e), WireValue::List(items)) => nested(walk, |walk| {
-            let mut l = list::new(st, heap, types.is_ref(*e))?;
-            let r = fill_list(st, heap, types, *e, items, &mut l, walk);
-            finish(st, heap, l, r)
-        }),
-        (TypeDesc::Dict(kt, vt), WireValue::Dict(pairs)) => nested(walk, |walk| {
-            let d = dict::new(st, heap, types.is_ref(*kt), types.is_ref(*vt))?;
-            let r = fill_dict(st, heap, types, (*kt, *vt), pairs, d, walk);
-            finish(st, heap, d, r)
-        }),
+        (TypeDesc::List(e), WireValue::List(items)) => FromFrame::List {
+            l: list::new(st, heap, types.is_ref(*e))?,
+            e: *e,
+            items,
+            i: 0,
+        },
+        (TypeDesc::Dict(kt, vt), WireValue::Dict(pairs)) => FromFrame::Dict {
+            d: dict::new(st, heap, types.is_ref(*kt), types.is_ref(*vt))?,
+            kt: *kt,
+            vt: *vt,
+            pairs,
+            i: 0,
+            key: None,
+        },
         (TypeDesc::Struct { fields, .. }, WireValue::Struct { fields: wf, .. }) => {
-            nested(walk, |walk| build_obj(st, heap, types, 0, fields, wf, walk))
+            obj_frame(st, heap, types, 0, fields, wf)?
         }
         (TypeDesc::Enum { variants, .. }, WireValue::Variant { name, fields: wf }) => {
             let idx = variants
@@ -592,85 +992,24 @@ fn from_w(
             let tag = u16::try_from(idx).map_err(|_| FaultKind::Corrupt)?;
             let fields = &variants[idx].1;
             if fields.is_empty() && wf.is_empty() {
-                return Ok((u64::from(tag) << 1) | 1);
+                return Ok(Opened::Leaf((u64::from(tag) << 1) | 1));
             }
-            nested(walk, |walk| {
-                build_obj(st, heap, types, tag, fields, wf, walk)
-            })
+            obj_frame(st, heap, types, tag, fields, wf)?
         }
-        _ => Err(FromWire::WrongType),
-    }
-}
-
-fn fill_list(
-    st: &mut Store,
-    heap: Heap,
-    types: &TypeTable,
-    e: TypeId,
-    items: &[WireValue],
-    l: &mut u64,
-    walk: &mut Walk,
-) -> Built<()> {
-    for item in items {
-        let v = from_w(st, heap, types, e, item, walk)?;
-        match list::push(st, heap, *l, v) {
-            Ok((nl, work)) => {
-                *l = nl;
-                walk.charge(work)?;
-            }
-            Err(f) => {
-                drop_value(st, heap, types, e, v);
-                return Err(f.into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn fill_dict(
-    st: &mut Store,
-    heap: Heap,
-    types: &TypeTable,
-    (kt, vt): (TypeId, TypeId),
-    pairs: &[(WireValue, WireValue)],
-    d: u64,
-    walk: &mut Walk,
-) -> Built<()> {
-    for (kw, vw) in pairs {
-        let k = from_w(st, heap, types, kt, kw, walk)?;
-        let v = match from_w(st, heap, types, vt, vw, walk) {
-            Ok(v) => v,
-            Err(e) => {
-                drop_value(st, heap, types, kt, k);
-                return Err(e);
-            }
-        };
-        let before = dict::len(st, heap, d)?;
-        match dict::set(st, heap, d, k, v) {
-            Ok((_, work)) => walk.charge(work)?,
-            Err(f) => {
-                drop_value(st, heap, types, kt, k);
-                drop_value(st, heap, types, vt, v);
-                return Err(f.into());
-            }
-        }
-        if dict::len(st, heap, d)? == before {
-            return Err(FromWire::WrongType); // the key was there already
-        }
-    }
-    Ok(())
+        _ => return Err(FromWire::WrongType),
+    };
+    Ok(Opened::Frame(frame))
 }
 
 /// A struct (`tag` 0) or a variant with fields: `wf` must name exactly the declared `fields`.
-fn build_obj(
+fn obj_frame<'w, 't>(
     st: &mut Store,
     heap: Heap,
     types: &TypeTable,
     tag: u16,
-    fields: &[(String, TypeId)],
-    wf: &[(String, WireValue)],
-    walk: &mut Walk,
-) -> Built<u64> {
+    fields: &'t [(String, TypeId)],
+    wf: &'w [(String, WireValue)],
+) -> Built<FromFrame<'w, 't>> {
     if fields.len() != wf.len() {
         return Err(FromWire::WrongType);
     }
@@ -695,28 +1034,89 @@ fn build_obj(
         ref_bits |= u32::from(types.is_ref(*ft)) << i;
     }
     let n = u8::try_from(fields.len()).map_err(|_| FaultKind::Corrupt)?;
-    let o = obj::new(st, heap, n, ref_bits, tag)?;
-    let r = fill_obj(st, heap, types, o, fields, wf, &order, walk);
-    finish(st, heap, o, r)
+    Ok(FromFrame::Obj {
+        o: obj::new(st, heap, n, ref_bits, tag)?,
+        fields,
+        wf,
+        order,
+        i: 0,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn fill_obj(
-    st: &mut Store,
-    heap: Heap,
-    types: &TypeTable,
-    o: u64,
-    fields: &[(String, TypeId)],
-    wf: &[(String, WireValue)],
-    order: &[usize],
-    walk: &mut Walk,
-) -> Built<()> {
-    for (i, ((_, ft), &j)) in (0u32..).zip(fields.iter().zip(order)) {
-        let v = from_w(st, heap, types, *ft, &wf[j].1, walk)?;
-        if let Err(f) = obj::set_field(st, heap, o, i, v) {
-            drop_value(st, heap, types, *ft, v);
-            return Err(f.into());
+/// Whether [`from_wire`] of `w` into type `t` would find the shapes matching, decided without building
+/// anything (a dry run of its structural checks: the same field matching, variant lookup and duplicate
+/// dict keys). It does not check that the heap has room or that the walk stays under `WORK_WORDS_MAX`.
+/// Duplicate dict keys are found by their encoded bytes.
+pub fn fits(types: &TypeTable, t: TypeId, w: &WireValue) -> bool {
+    let mut stack = vec![(t, w)];
+    while let Some((t, w)) = stack.pop() {
+        let Ok(d) = types.desc(t) else {
+            return false;
+        };
+        let ok = match (d, w) {
+            (TypeDesc::Unit, WireValue::Unit)
+            | (TypeDesc::Bool, WireValue::Bool(_))
+            | (TypeDesc::Int, WireValue::Int(_))
+            | (TypeDesc::Float, WireValue::Float(_))
+            | (TypeDesc::Str, WireValue::Str(_)) => true,
+            (TypeDesc::List(e), WireValue::List(items)) => {
+                stack.extend(items.iter().map(|i| (*e, i)));
+                true
+            }
+            (TypeDesc::Dict(kt, vt), WireValue::Dict(pairs)) => {
+                let mut keys = std::collections::BTreeSet::new();
+                pairs.iter().all(|(k, v)| {
+                    let mut bytes = Vec::new();
+                    k.encode(&mut bytes);
+                    stack.push((*kt, k));
+                    stack.push((*vt, v));
+                    keys.insert(bytes)
+                })
+            }
+            (TypeDesc::Struct { fields, .. }, WireValue::Struct { fields: wf, .. }) => {
+                fields_fit(fields, wf, &mut stack)
+            }
+            (TypeDesc::Enum { variants, .. }, WireValue::Variant { name, fields: wf }) => {
+                match variants.iter().find(|(n, _)| n == name) {
+                    Some((_, fields)) if fields.is_empty() && wf.is_empty() => true,
+                    Some((_, fields)) => fields_fit(fields, wf, &mut stack),
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !ok {
+            return false;
         }
     }
-    Ok(())
+    true
+}
+
+/// `obj_frame`'s matching: the same number of fields, each declared name found in a wire field of its
+/// own; each value is pushed onto `stack` to fit its declared type.
+fn fields_fit<'w>(
+    fields: &[(String, TypeId)],
+    wf: &'w [(String, WireValue)],
+    stack: &mut Vec<(TypeId, &'w WireValue)>,
+) -> bool {
+    if fields.len() != wf.len() || fields.len() > STRUCT_FIELDS_MAX {
+        return false;
+    }
+    let mut used = vec![false; wf.len()];
+    fields
+        .iter()
+        .all(|(name, ft)| match wf.iter().position(|(n, _)| n == name) {
+            Some(j) if !std::mem::replace(&mut used[j], true) => {
+                stack.push((*ft, &wf[j].1));
+                true
+            }
+            _ => false,
+        })
+}
+
+/// Releases `v` when it is a heap-kind value of type `t` (a plain immediate looks like a pointer).
+fn drop_value(st: &mut Store, heap: Heap, types: &TypeTable, t: TypeId, v: u64) {
+    if types.is_ref(t) {
+        let _ = release(st, heap, v);
+    }
 }
