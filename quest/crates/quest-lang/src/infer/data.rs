@@ -90,7 +90,7 @@ impl Infer<'_> {
         let mut found = Vec::new();
         let tys = fields
             .iter()
-            .map(|f| self.lower(&f.ty, file, &mut found))
+            .map(|f| self.lower_kept(&f.ty, file, &mut found, "stored in a field"))
             .collect();
         self.diags.append(&mut found);
         Shape {
@@ -343,7 +343,8 @@ impl Infer<'_> {
                 | Ty::Fallible(_, _)
                 | Ty::Caught(_)
                 | Ty::Set(_)
-                | Ty::SetVar(_) => {
+                | Ty::SetVar(_)
+                | Ty::AnySet => {
                     return false;
                 }
             }

@@ -552,14 +552,14 @@ impl<'a> Resolver<'a> {
         is_method: bool,
         cx: &mut Cx,
     ) -> hir::Fn {
-        let handler = self.fn_decorators(item, is_method, cx);
+        let (handler, unknown_event) = self.fn_decorators(item, is_method, cx);
         cx.push();
         let receiver = f
             .receiver
             .map(|r| (r, self.bind_local(cx, "self", item.span)));
         let mut seen = BTreeSet::new();
         let mut params = Vec::new();
-        for p in &f.params {
+        for (i, p) in f.params.iter().enumerate() {
             if !seen.insert(p.name.as_str()) {
                 self.diags.push(error(
                     "duplicate-def",
@@ -568,7 +568,14 @@ impl<'a> Resolver<'a> {
                     p.span,
                 ));
             }
-            let ty = p.ty.as_ref().map(|t| self.ty(t, cx));
+            let mut ty = p.ty.as_ref().map(|t| self.ty(t, cx));
+            if unknown_event && i == 0 && ty.is_none() {
+                // The `@on` was reported: its event parameter is not asked about again.
+                ty = Some(hir::Type {
+                    kind: hir::TypeKind::Error,
+                    span: p.span,
+                });
+            }
             let local = self.bind_local(cx, &p.name, p.span);
             params.push(hir::Param {
                 local,
@@ -621,14 +628,16 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Checks a function's decorators; returns the event of its `@on`.
+    /// Checks a function's decorators; returns the event of its `@on`, and whether an `@on` named no event
+    /// (reported here).
     fn fn_decorators(
         &mut self,
         item: &ast::Item,
         is_method: bool,
         cx: &mut Cx,
-    ) -> Option<EventRef> {
+    ) -> (Option<EventRef>, bool) {
         let mut handler = None;
+        let mut unknown = false;
         let mut seen_on = false;
         for dec in &item.decorators {
             match dec.name.as_str() {
@@ -647,6 +656,7 @@ impl<'a> Resolver<'a> {
                 "on" => {
                     seen_on = true;
                     handler = self.handler_event(dec, cx);
+                    unknown = handler.is_none();
                 }
                 "pick" => self.diags.push(error(
                     "bad-decorator",
@@ -662,7 +672,7 @@ impl<'a> Resolver<'a> {
                 )),
             }
         }
-        handler
+        (handler, unknown)
     }
 
     /// The event `@on(…)` names, or `unknown-event`.

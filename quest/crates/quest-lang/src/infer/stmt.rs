@@ -40,11 +40,21 @@ impl Infer<'_> {
                 let wanted = self.expr(b, place);
                 let found = self.expr(b, value);
                 self.expect(b, wanted, found, value.span);
+                match &place.kind {
+                    ExprKind::Field(_, _) | ExprKind::Index(_, _) => {
+                        self.no_ref(b, found, value.span, "stored in a field or an element");
+                    }
+                    ExprKind::Def(_) => {
+                        self.no_ref(b, found, value.span, "kept in a top-level variable");
+                    }
+                    _ => {}
+                }
                 false
             }
             // `return`, `break`, `continue`, `raise`, or a call that never returns.
             StmtKind::Expr(e) => {
                 let ty = self.expr(b, e);
+                self.unused(b, ty, e.span);
                 self.shallow(ty) == TyId::NEVER
             }
             StmtKind::If(branches, other) => {

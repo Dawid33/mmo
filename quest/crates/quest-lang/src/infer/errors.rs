@@ -29,7 +29,7 @@
 //! command, has the type `T raises S` ([`Ty::Fallible`]). A promise's set is the second child of
 //! `Promise[T raises S]` and is open (see `ty.rs`): a raising host promise starts with the host's list, a
 //! written `Promise[T]` with none, and promises that meet (a list, an argument, `all`) share the union; `await`
-//! (Task 24) turns it into the fallible result. A fallible value is consumed where it is produced: by `?`,
+//! turns it into the fallible result (`promises.rs`). A fallible value is consumed where it is produced: by `?`,
 //! by `else`, or as a `match` scrutinee (`Infer::expr_fallible`); anywhere else (`Infer::expr`) it is
 //! `unhandled-fallible`, and its value type is used from there on. `let _ = f()` is no exception. An error
 //! escaping `main`, a handler or a top-level initialiser is allowed (it is reported at run time).
@@ -128,7 +128,12 @@ impl<'k> Infer<'k> {
                             .iter()
                             .map(|f| ErrField {
                                 name: f.name.clone(),
-                                ty: Some(self.lower(&f.ty, file, &mut found)),
+                                ty: Some(self.lower_kept(
+                                    &f.ty,
+                                    file,
+                                    &mut found,
+                                    "carried by an error",
+                                )),
                                 generic: false,
                             })
                             .collect();
@@ -415,6 +420,9 @@ impl<'k> Infer<'k> {
             .iter()
             .map(|a| (a.name.as_deref(), self.expr(b, &a.value), a.value.span))
             .collect();
+        for (_, ty, at) in &found {
+            self.no_ref(b, *ty, *at, "carried by an error");
+        }
         let shape_err = |b: &mut Body, why: String| {
             b.diags.push(error(
                 "error-shape",
@@ -526,6 +534,7 @@ impl<'k> Infer<'k> {
     /// `x?`.
     pub(super) fn try_op(&mut self, b: &mut Body, e: &Expr, x: &Expr) -> TyId {
         let ty = self.expr_fallible(b, x);
+        self.close_awaited(b, x);
         let ty = self.shallow(ty);
         match self.types.get(ty) {
             Ty::Fallible(value, set) => {
@@ -592,6 +601,8 @@ impl<'k> Infer<'k> {
         };
         let found = match &fallback.kind {
             ExprKind::FallbackBlock(local, body) => {
+                // The block reads the caught error.
+                self.close_awaited(b, x);
                 self.set_local(*local, caught);
                 let ty = self.fallback_block(b, body, value);
                 self.record(b, fallback, ty);
@@ -662,11 +673,14 @@ impl<'k> Infer<'k> {
         let Ty::Fallible(value, set) = self.types.get(end) else {
             return ty;
         };
-        let names = self.types.names(set).join(" | ");
+        let names = match self.types.names(set) {
+            [] => String::new(),
+            names => format!(" ({})", names.join(" | ")),
+        };
         b.diags.push(error(
             "unhandled-fallible",
             format!(
-                "this can fail ({names}) and the failure must be handled: `?` to pass it on, `else` for a fallback, or `match`"
+                "this can fail{names} and the failure must be handled: `?` to pass it on, `else` for a fallback, or `match`"
             ),
             b.file,
             at,

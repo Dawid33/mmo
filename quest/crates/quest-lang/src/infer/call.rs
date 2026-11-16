@@ -65,11 +65,14 @@ impl Infer<'_> {
                 let name = self.krate.qualified_name(*d);
                 match self.sig_of(b, *d, e.span) {
                     Some(sig) => {
+                        self.called(b, *d, e.span);
                         let mut params: Vec<TyId> =
                             sig.receiver.map(|(_, t)| t).into_iter().collect();
                         params.extend(sig.params);
+                        let params = self.open_params(b, &name, &params, args);
                         self.args(b, &name, &params, args, e, None);
-                        self.fallible(sig.ret, &sig.raises)
+                        let ret = self.open_result(sig.ret);
+                        self.fallible(ret, &sig.raises)
                     }
                     // A member of a reported cycle, or one this body waits for.
                     None => {
@@ -219,11 +222,16 @@ impl Infer<'_> {
                             x.span,
                         ));
                     }
+                    // Passed as `&x`.
+                    Some((Receiver::Ref, _)) if !through_ref => self.keep_place(x.id, x),
                     Some(_) => {}
                 }
                 self.methods.insert(e.id, Method::Script(m));
-                self.args(b, &qualified, &sig.params, args, e, None);
-                self.fallible(sig.ret, &sig.raises)
+                self.called(b, m, e.span);
+                let params = self.open_params(b, &qualified, &sig.params, args);
+                self.args(b, &qualified, &params, args, e, None);
+                let ret = self.open_result(sig.ret);
+                self.fallible(ret, &sig.raises)
             }
             Ty::HostStruct(i) => {
                 let host = self.host;
@@ -301,7 +309,18 @@ impl Infer<'_> {
             _ => return self.no_method(b, e, ty, name, args),
         };
         self.methods.insert(e.id, Method::Builtin(m));
-        self.args(b, name, &params, args, e, None);
+        if self.args(b, name, &params, args, e, None) {
+            // The value a list keeps.
+            let kept = match m {
+                BuiltinMethod::Append => args.first(),
+                BuiltinMethod::Insert => args.get(1),
+                _ => None,
+            };
+            if let Some(a) = kept {
+                let ty = self.expr_ty(a.value.id);
+                self.no_ref(b, ty, a.value.span, "put in a list");
+            }
+        }
         ret
     }
 
@@ -448,6 +467,12 @@ impl Infer<'_> {
         // A call with the wrong count was reported; its result (often a variable) is not asked about again.
         if !self.args(b, name, &params, args, e, arity) {
             return TyId::ERROR;
+        }
+        if p == Prelude::Some
+            && let Some(a) = args.first()
+        {
+            let ty = self.expr_ty(a.value.id);
+            self.no_ref(b, ty, a.value.span, "put in an `Option`");
         }
         ret
     }

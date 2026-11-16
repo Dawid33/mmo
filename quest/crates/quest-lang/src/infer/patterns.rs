@@ -95,8 +95,10 @@ impl Infer<'_> {
         scrutinee: &Expr,
         cases: &[Case],
     ) -> bool {
-        // A fallible scrutinee is consumed here.
+        // A fallible scrutinee is consumed here; an awaited one's errors are read (its set closes before
+        // any arm, so exhaustiveness sees final names).
         let ty = self.expr_fallible(b, scrutinee);
+        self.close_awaited(b, scrutinee);
         let mut arms = Vec::with_capacity(cases.len());
         let mut failed = Vec::with_capacity(cases.len());
         let mut all = !cases.is_empty();

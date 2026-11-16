@@ -513,7 +513,7 @@ fn counts():
     return chest.count("gold")
 
 fn store():
-    world.set("k", world.get("k"))
+    let _ = world.set("k", world.get("k"))
 
 fn takes(p: Promise[int]):
     pass

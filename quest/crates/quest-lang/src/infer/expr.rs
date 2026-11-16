@@ -174,6 +174,7 @@ impl Infer<'_> {
                 let mut elem = None;
                 for x in items {
                     let ty = self.expr(b, x);
+                    self.no_ref(b, ty, x.span, "put in a list");
                     let Some(elem) = elem else {
                         elem = Some(ty);
                         continue;
@@ -193,6 +194,8 @@ impl Infer<'_> {
                 let mut types: Option<(TyId, TyId)> = None;
                 for (k, v) in entries {
                     let (kt, vt) = (self.expr(b, k), self.expr(b, v));
+                    self.no_ref(b, kt, k.span, "put in a dict");
+                    self.no_ref(b, vt, v.span, "put in a dict");
                     let Some((key, value)) = types else {
                         types = Some((kt, vt));
                         continue;
@@ -208,6 +211,7 @@ impl Infer<'_> {
                 self.check_key(b, key, at);
                 self.types.intern(Ty::Dict(key, value))
             }
+            ExprKind::Unary(UnOp::Ref, x) => self.ref_op(b, e, x),
             ExprKind::Unary(op, x) => self.unary(b, *op, x, e.span),
             ExprKind::Binary(op, l, r) => self.binary(b, *op, l, r, e.span),
             ExprKind::Call(callee, args) => self.call(b, e, callee, args),
@@ -216,11 +220,7 @@ impl Infer<'_> {
             ExprKind::Slice(x, from, to) => self.slice(b, e, x, [from.as_deref(), to.as_deref()]),
             ExprKind::Try(x) => self.try_op(b, e, x),
             ExprKind::Else(x, fallback) => self.else_op(b, x, fallback),
-            // `await` (Task 24).
-            ExprKind::Await(x) => {
-                self.sink(b, x);
-                TyId::ERROR
-            }
+            ExprKind::Await(x) => self.await_op(b, e, x),
             // Only the fallback of an `else` (typed there).
             ExprKind::FallbackBlock(local, body) => {
                 self.set_local(*local, TyId::ERROR);
@@ -268,6 +268,10 @@ impl Infer<'_> {
             Some(x) => (self.expr(b, x), x.span),
             None => (TyId::UNIT, at),
         };
+        // A `-> &T` was reported at the annotation (the error type now).
+        if self.shallow(b.ret) != TyId::ERROR {
+            self.no_ref(b, ty, at, "returned");
+        }
         if !self.unify(b.ret, ty) {
             let (want, found) = (self.show(b.ret), self.show(ty));
             let message = format!("this function returns `{want}`, not `{found}`");
@@ -296,7 +300,8 @@ impl Infer<'_> {
                 }
                 TyId::BOOL
             }
-            UnOp::Ref => self.types.intern(Ty::Ref(ty)),
+            // Typed by `ref_op`.
+            UnOp::Ref => TyId::ERROR,
             UnOp::Deref => {
                 let target = self.fresh();
                 let reference = self.types.intern(Ty::Ref(target));

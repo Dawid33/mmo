@@ -15,7 +15,9 @@ pub mod source;
 pub mod ty;
 
 pub use diag::{Diagnostic, Severity, render};
-pub use infer::{BuiltinMethod, Method, PatCtor, PatInfo, Sig, Typed, infer};
+pub use infer::{
+    Await, BuiltinMethod, Method, PatCtor, PatInfo, Place, PlaceRoot, PlaceStep, Sig, Typed, infer,
+};
 pub use lex::{FPart, Tok, Token, lex};
 pub use modules::load_modules;
 pub use parse::parse_file;

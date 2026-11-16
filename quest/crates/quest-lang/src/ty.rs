@@ -12,16 +12,20 @@
 //! [`Ty::Var`] is an inference variable; no final type holds one (see `infer`).
 //!
 //! Errors (spec §5.7) add two types. An **error set** is a sorted, deduplicated list of error names, interned
-//! as a [`SetId`] (never empty where a type holds one).
+//! as a [`SetId`].
 //! - [`Ty::Fallible`]: the result of a fallible expression — a call of a function with a non-empty error set,
-//!   an awaited host promise that raises. It is never a value (plan decision 2): it exists only where it is
-//!   produced and is consumed there by `?`, `else` or a `match`.
+//!   an awaited promise (always fallible, its set possibly empty: a promise parameter's errors are what its
+//!   callers pass). It is never a value (plan decision 2): it exists only where it is produced and is
+//!   consumed there by `?`, `else` or a `match`.
 //! - [`Ty::Caught`]: a caught error (`else err:`), one of the set's names with its data.
 //!
 //! A **promise's error set is open**: `Promise[T]` is [`Ty::Promise`]`(T, set)`, whose second child is the set
-//! as a type — a fixed [`Ty::Set`] or an open [`Ty::SetVar`] (a raising host promise's call, an annotation
-//! `Promise[T]`, `all`). Unifying two promises unifies their values and makes their sets the union: an open
-//! set grows by union (it is never "bound"), two fixed sets always agree. A final type holds only fixed sets.
+//! as a type — a fixed [`Ty::Set`], an open [`Ty::SetVar`] (a raising host promise's call, an annotation
+//! `Promise[T]`, `all`), or [`Ty::AnySet`] (a parameter that accepts any errors). Unifying two promises
+//! unifies their values and makes their sets the union: an open set grows by union (it is never "bound")
+//! unless an `await` closed it; a fixed set cannot grow, so it meets only an equal set (inference opens the
+//! fixed sets of a signature's result where it is used, so two calls' promises still unite; see
+//! `infer/promises.rs`). A final type holds no [`Ty::SetVar`].
 
 use crate::hir::{Crate, DefId};
 use quest_vm::host::HostApi;
@@ -89,6 +93,9 @@ pub enum Ty {
     Set(SetId),
     /// A promise's open error set: grows by union during inference (only as a child of [`Ty::Promise`]).
     SetVar(u32),
+    /// The error set of a `Promise` parameter whose function handles any error it fails with (only as a
+    /// child of [`Ty::Promise`], in a signature's parameter): a caller may pass a promise with any set.
+    AnySet,
 }
 
 impl Ty {
@@ -271,11 +278,14 @@ impl Printer<'_> {
             Ty::Var(_) => out.push('_'),
             Ty::Fallible(t, set) => {
                 self.write(t, depth.saturating_add(1), out);
-                out.push_str(" raises ");
-                out.push_str(&self.types.names(set).join(" | "));
+                if !self.types.names(set).is_empty() {
+                    out.push_str(" raises ");
+                    out.push_str(&self.types.names(set).join(" | "));
+                }
             }
             Ty::Set(set) => out.push_str(&self.types.names(set).join(" | ")),
             Ty::SetVar(_) => out.push('_'),
+            Ty::AnySet => out.push_str("any"),
             Ty::Caught(set) => {
                 out.push_str("error[");
                 out.push_str(&self.types.names(set).join(" | "));
