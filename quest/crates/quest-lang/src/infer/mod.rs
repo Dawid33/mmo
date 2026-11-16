@@ -46,26 +46,33 @@
 //! - **Errors** (`errors.rs`): error names and their one data shape, error sets (inferred callee-first,
 //!   or pinned), the must-handle rule, `raise`, `?`, `else`, the `error-typo` warning.
 //!
+//! - **Patterns and `match`** (`patterns.rs`): pattern typing, exhaustiveness, impossible and unreachable
+//!   arms.
+//!
 //! **Not typed here yet** (each such node's operands are typed, then joined to the error type, so they
-//! produce no diagnostic of their own): patterns, whose bindings have the error type, and the `match`
-//! scrutinee's relation to them (Task 23); `await` (Task 24).
+//! produce no diagnostic of their own): `await` (Task 24).
 //!
 //! Files: `expr.rs` (expressions and operators), `stmt.rs` (statements, blocks, reachability), `call.rs`
 //! (calls: functions, methods, the prelude, the host), `data.rs` (user types, constructions, fields,
-//! collections), `errors.rs` (errors); this file holds the driver, unification and the end of a body.
+//! collections), `errors.rs` (errors), `patterns.rs` (patterns and `match`); this file holds the driver,
+//! unification and the end of a body.
 
 mod call;
 mod data;
 mod errors;
 mod expr;
+mod patterns;
 mod stmt;
 
 pub use call::{BuiltinMethod, Method};
+pub use patterns::{PatCtor, PatInfo};
 
 use crate::ast::{Receiver, Span};
 use crate::callgraph;
 use crate::diag::Diagnostic;
-use crate::hir::{self, Builtin, Crate, DefId, DefKind, EventRef, ExprId, LocalId, TypeName};
+use crate::hir::{
+    self, Builtin, Crate, DefId, DefKind, EventRef, ExprId, LocalId, PatId, TypeName,
+};
 use crate::ty::{Printer, Ty, TyId, Types};
 use quest_vm::host::HostApi;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -101,6 +108,8 @@ pub struct Typed {
     /// Every error name of the program, sorted (the VM's one `Error` enum: a name's variant is its index
     /// here), with its data fields in order (none for a data-less error).
     pub errors: BTreeMap<String, Vec<(String, TyId)>>,
+    /// What each pattern node matches.
+    pub patterns: BTreeMap<PatId, PatInfo>,
 }
 
 impl Typed {
@@ -166,6 +175,7 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         errors: BTreeMap::new(),
         named: BTreeSet::new(),
         raised: Vec::new(),
+        patterns: BTreeMap::new(),
         diags,
     };
     inf.user_types();
@@ -186,6 +196,7 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         methods: inf.methods,
         order,
         errors,
+        patterns: inf.patterns,
     };
     (typed, inf.diags)
 }
@@ -249,6 +260,8 @@ struct Body<'k> {
     raised: Vec<(String, Span)>,
     /// The error names this body's patterns match.
     matched: Vec<String>,
+    /// What this body's pattern nodes match, kept when it finishes.
+    patterns: Vec<(PatId, PatInfo)>,
 }
 
 impl<'k> Body<'k> {
@@ -270,6 +283,7 @@ impl<'k> Body<'k> {
             shapes: BTreeMap::new(),
             raised: Vec::new(),
             matched: Vec::new(),
+            patterns: Vec::new(),
         }
     }
 }
@@ -307,6 +321,8 @@ struct Infer<'k> {
     named: BTreeSet<String>,
     /// Every raise of an error by name: the name, the file, the site.
     raised: Vec<(String, String, Span)>,
+    /// What every finished body's pattern nodes match.
+    patterns: BTreeMap<PatId, PatInfo>,
     diags: Vec<Diagnostic>,
 }
 
@@ -620,6 +636,10 @@ impl<'k> Infer<'k> {
             if let Some(slot) = self.exprs.get_mut(id.0 as usize) {
                 *slot = ty;
             }
+        }
+        for (id, mut info) in std::mem::take(&mut b.patterns) {
+            info.ty = self.zonk(info.ty);
+            self.patterns.insert(id, info);
         }
         self.commit_errors(b);
     }

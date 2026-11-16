@@ -324,7 +324,7 @@ impl<'k> Infer<'k> {
     }
 
     /// The shape of `name` as the body sees it: its own new shapes first.
-    fn shape_of(&self, b: &Body, name: &str) -> Option<ErrShape> {
+    pub(super) fn shape_of(&self, b: &Body, name: &str) -> Option<ErrShape> {
         b.shapes
             .get(name)
             .or_else(|| self.errors.get(name))
@@ -658,7 +658,7 @@ impl<'k> Infer<'k> {
         while let Some(p) = stack.pop() {
             match &p.kind {
                 PatternKind::Ctor(c, fields) => {
-                    if let Ctor::Error(name) | Ctor::ErrorOrUnknown(name) = c {
+                    if let Ctor::Error(name) | Ctor::ErrorOrUnknown(name, _) = c {
                         b.matched.push(name.clone());
                     }
                     stack.extend(fields.iter().map(|f| &f.pattern));

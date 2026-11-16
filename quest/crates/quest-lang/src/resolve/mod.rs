@@ -80,6 +80,7 @@ pub fn resolve(krate: &ast::Crate, host: &HostApi) -> (hir::Crate, Vec<Diagnosti
         methods: r.methods,
         deferred: r.deferred,
         expr_count: r.expr_count,
+        pat_count: r.pat_count,
     };
     (out, r.diags)
 }
@@ -259,6 +260,8 @@ struct Resolver<'a> {
     root_quest_seen: bool,
     /// The next [`hir::ExprId`].
     expr_count: u32,
+    /// The next [`hir::PatId`].
+    pat_count: u32,
 }
 
 fn index_u32(i: usize) -> u32 {
@@ -355,6 +358,7 @@ impl<'a> Resolver<'a> {
             line_ids: BTreeMap::new(),
             root_quest_seen: false,
             expr_count: 0,
+            pat_count: 0,
         }
     }
 
@@ -1124,7 +1128,13 @@ impl<'a> Resolver<'a> {
                 H::Or(out)
             }
         };
-        hir::Pattern { kind, span: p.span }
+        let id = hir::PatId(self.pat_count);
+        self.pat_count = self.pat_count.saturating_add(1);
+        hir::Pattern {
+            id,
+            kind,
+            span: p.span,
+        }
     }
 
     /// What a constructor pattern's path names. Inside `Err(…)` an upper-case single name is always an
@@ -1136,7 +1146,11 @@ impl<'a> Resolver<'a> {
             }
             match self.lookup(cx, name) {
                 // Maybe an error name: the type checker decides, knowing the scrutinee's type.
-                None if !is_binding_name(name) => return Some(Ctor::ErrorOrUnknown(name.clone())),
+                None if !is_binding_name(name) => {
+                    let names = self.value_names(cx);
+                    let near = suggest(name, names.iter().map(String::as_str)).map(str::to_string);
+                    return Some(Ctor::ErrorOrUnknown(name.clone(), near));
+                }
                 None => {
                     let names = self.value_names(cx);
                     self.diags.push(unresolved(

@@ -32,6 +32,11 @@ pub struct DefId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExprId(pub u32);
 
+/// A pattern node: unique in the crate, assigned by resolution in construction order (children before their
+/// parent), below [`Crate::pat_count`]. Inference records what each one matches by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PatId(pub u32);
+
 /// A binding: an index into [`Crate::locals`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocalId(pub u32);
@@ -49,6 +54,8 @@ pub struct Crate {
     pub deferred: Vec<DefId>,
     /// Every [`ExprId`] is below this (the ids inside dropped dialogues and quests are unused).
     pub expr_count: u32,
+    /// Every [`PatId`] is below this.
+    pub pat_count: u32,
 }
 
 impl Crate {
@@ -422,6 +429,7 @@ pub enum StmtKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pattern {
+    pub id: PatId,
     pub kind: PatternKind,
     pub span: Span,
 }
@@ -459,6 +467,7 @@ pub enum Ctor {
     /// An upper-case name that names nothing, outside `raise` / `Err(…)` (e.g. `match err: case
     /// NotEnough(have):` in an `else err:` block). Resolution does not report it; the type checker does:
     /// against an error or a fallible scrutinee it is that error name, otherwise it reports `unresolved`
-    /// (with its "did you mean" note) at the pattern's span. Its sub-patterns are the `Ctor`'s fields.
-    ErrorOrUnknown(String),
+    /// (with its "did you mean" note, the second field: the nearest name in scope, computed by resolution) at
+    /// the pattern's span. Its sub-patterns are the `Ctor`'s fields.
+    ErrorOrUnknown(String, Option<String>),
 }

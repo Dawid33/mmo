@@ -3,6 +3,7 @@
 pub mod ast;
 mod callgraph;
 pub mod diag;
+mod exhaust;
 pub mod hir;
 mod indent;
 pub mod infer;
@@ -14,7 +15,7 @@ pub mod source;
 pub mod ty;
 
 pub use diag::{Diagnostic, Severity, render};
-pub use infer::{BuiltinMethod, Method, Sig, Typed, infer};
+pub use infer::{BuiltinMethod, Method, PatCtor, PatInfo, Sig, Typed, infer};
 pub use lex::{FPart, Tok, Token, lex};
 pub use modules::load_modules;
 pub use parse::parse_file;

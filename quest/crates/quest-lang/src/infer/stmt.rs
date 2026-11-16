@@ -3,11 +3,11 @@
 //! A statement **diverges** when the code after it cannot run: `return`, `raise`, `break`, `continue`
 //! (statements, or the same as an expression statement), a call of a function that never returns (`-> !`);
 //! an `if` with an `else` whose branches all diverge;
-//! a `match` whose arms all do (it is exhaustive, Task 23); `while true` that no `break` leaves. A `for`
-//! loop never diverges.
+//! a `match` whose arms all do (it is exhaustive: `non-exhaustive` otherwise); `while true` that no `break`
+//! leaves. A `for` loop never diverges.
 
 use super::{Body, BuiltinMethod, Infer, Method};
-use crate::hir::{Expr, ExprKind, LocalId, Pattern, PatternKind, Stmt, StmtKind};
+use crate::hir::{Expr, ExprKind, LocalId, Stmt, StmtKind};
 use crate::ty::{Ty, TyId};
 
 impl Infer<'_> {
@@ -72,22 +72,7 @@ impl Infer<'_> {
                 b.loops.pop();
                 false
             }
-            StmtKind::Match(scrutinee, cases) => {
-                // Patterns (Task 23): the scrutinee is not constrained by them yet, their bindings have the error type.
-                // A fallible scrutinee is consumed here.
-                let ty = self.expr_fallible(b, scrutinee);
-                self.unify(ty, TyId::ERROR);
-                let mut all = !cases.is_empty();
-                for c in cases {
-                    self.matched_names(b, &c.pattern);
-                    self.pattern_bindings(&c.pattern);
-                    if let Some(g) = &c.guard {
-                        self.cond(b, g);
-                    }
-                    all &= self.block(b, &c.body);
-                }
-                all
-            }
+            StmtKind::Match(scrutinee, cases) => self.match_stmt(b, s.span, scrutinee, cases),
             StmtKind::Pass => false,
             StmtKind::Break => {
                 if let Some(seen) = b.loops.last_mut() {
@@ -192,24 +177,6 @@ impl Infer<'_> {
                 );
                 (TyId::ERROR, TyId::ERROR)
             }
-        }
-    }
-
-    /// Gives every binding of a pattern the error type (patterns are typed in Task 23).
-    fn pattern_bindings(&mut self, p: &Pattern) {
-        match &p.kind {
-            PatternKind::Bind(local) => self.set_local(*local, TyId::ERROR),
-            PatternKind::Ctor(_, fields) => {
-                for f in fields {
-                    self.pattern_bindings(&f.pattern);
-                }
-            }
-            PatternKind::Or(alts) => {
-                for a in alts {
-                    self.pattern_bindings(a);
-                }
-            }
-            PatternKind::Error | PatternKind::Wild | PatternKind::Lit(_) => {}
         }
     }
 }
