@@ -11,11 +11,21 @@
 # An apply owns the replica counts (coordinator 1, each host Deployment host-<name> 1):
 # an `orion-apply world` while the world is stopped (`just world-stop`) or in the
 # middle of an update STARTS it again on whatever images are set then (an interrupted
-# update's half-set images included). An apply that changes the host pod template
-# restarts EVERY host at once (each leaves through its cut). Apply only with the world
-# running and no update under way, or stopped on purpose; images are never changed by
-# an apply (ignore_changes). Removing a host: `worldctl drain` it, then drop its key
-# from `hosts` below and apply (modules/world/hosts.tf).
+# update's half-set images included); images are never changed by an apply
+# (ignore_changes). An apply that changes anything the coordinator AND the hosts share
+# (database_url, service_token, the coordinator's certificate, save_secs,
+# super_region_regions, ownership) restarts them all at the same moment: the hosts most
+# likely leave WITHOUT a cut, the next start raises the world generation and loses up to
+# a save interval. Make such a change with the world STOPPED: `just world-stop`, then
+# apply (the apply starts it). Only a change that touches hosts alone (a key of `hosts`,
+# a host's node ports or resources) restarts hosts on a running world, each through its
+# cut; apply that only with the world running and no update under way. Removing a host:
+# `just world-drain <name>`, then drop its key from `hosts` below and apply. A host added
+# after a release starts on var.images.server (the tag), the rest of the world on the
+# released digest: after the apply run `kubectl set image deploy/host-<k> host=<the
+# coordinator's image>`; until then the new host runs the tag's build (no race-free
+# recipe yet), and mixed builds leave the next release no previous release to record.
+# Emptying a node: modules/world/hosts.tf.
 variable "state_bucket" {
   description = "The orion state bucket (../backend.s3.tfbackend), to read other roots' outputs."
   type        = string

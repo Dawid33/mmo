@@ -6,9 +6,14 @@
 # requests. Needs ../postgres and ../login applied (their local state is read here).
 # Forge it from the toolbox: `just world_ctx=k3d-mmo world_ns=world-twin world-ctl forge`.
 # An apply owns the replica counts (coordinator 1, each host Deployment 1: applied to a
-# stopped world it starts it), and an apply that changes the host pod template restarts
-# every host at once (each leaves through its cut): apply with the world running and
-# no update under way, or stopped on purpose.
+# stopped world it starts it). An apply that changes anything the coordinator and the
+# hosts share (database_url, service_token, the coordinator's certificate, save_secs,
+# super_region_regions, ownership) restarts them all at once, the hosts likely leave
+# without a cut and the next start raises the world generation: make such a change with
+# the world stopped (`just world_ctx=k3d-mmo world_ns=world-twin world-stop`, then
+# apply). Only a host-only change (a key of `hosts`, a host's resources) restarts hosts
+# through their cuts on a running world with no update under way. A host added after a
+# release starts on the tag, not the released digest: see ../../orion/world/main.tf.
 data "terraform_remote_state" "postgres" {
   backend = "local"
   config = {

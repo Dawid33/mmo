@@ -15,10 +15,26 @@
 #
 # Each Deployment has 1 replica and strategy Recreate: a template change stops the old
 # pod (SIGTERM: it asks for a leave cut, ≤ ~90 s) before the new one starts. An apply
-# that changes the host pod template therefore restarts EVERY host at once. Hosts are
+# that changes the host pod template therefore restarts EVERY host at once. A change to
+# anything the coordinator and the hosts share (database_url, service_token, the
+# coordinator's certificate, save_secs, super_region_regions, ownership: local.server_env
+# and the checksum annotation) restarts the coordinator in the same moment: the hosts'
+# leave cuts then most likely fail, the next start is a total crash (generation raised,
+# up to a save interval lost). Make such a change with the world STOPPED (`just
+# world-stop`, then apply: the apply sets the replica counts and so starts it). Only a
+# host-only change (a key of var.hosts, a host's node ports or resources) restarts hosts
+# on a running world, each through its cut (see the roots' headers). Hosts are
 # independent Deployments: a boot waiting on a succession (unready, maybe for minutes)
 # holds back no other host. No CPU limit: a throttled main loop is a missed lease
 # heartbeat.
+#
+# A host added through var.hosts after a release starts on var.images.server (the tag,
+# e.g. :latest) while the rest of the world runs the digest the last release set (images
+# are set by digest outside OpenTofu: ignore_changes). Until its image is the
+# coordinator's the world runs mixed builds, and the next release finds differing server
+# images and records no previous release (no rollback). So: apply, then at once
+# `kubectl set image deploy/host-<k> host=<the coordinator's image>`. Between the two the
+# new host runs the tag's build for a short time; there is no race-free recipe yet.
 #
 # Draining and removing a host: `worldctl drain` marks it; at its deadline it leaves
 # through a leave cut and stays up, unready (/readyz 503 `drained`, /livez 200), until
@@ -27,11 +43,16 @@
 # PodDisruptionBudget go.
 #
 # Emptying a node (a kernel update, a move): the PodDisruptionBudget (max_unavailable 0)
-# makes `kubectl drain` wait on every host pod of the node. Drain each of those hosts
-# with `worldctl drain`, remove them from var.hosts (adding new keys to take their
-# place, on another node, if wanted) and apply; then the node drains. The budget is an
-# operations guard against an eviction that would turn a host into a crash; it is not
-# what keeps two writers apart (the store's fencing is).
+# makes `kubectl drain` wait on every host pod of the node. The coordinator, toolbox and
+# web have NO budget: a drain evicts them at once. On ONE node the coordinator cannot
+# reschedule, so the hosts would run with no saves and no logins and could not even be
+# drained (that needs the coordinator and the toolbox): `just world-stop` FIRST, then
+# drain the node (a host Deployment at 0 replicas has no pod to block it). With several
+# nodes: drain and remove the node's hosts (`just world-drain <name>`, remove the key
+# from var.hosts (adding new keys to take their place, on another node, if wanted),
+# apply) before `kubectl drain`. The budget is an operations guard against an eviction
+# that would turn a host into a crash; it is not what keeps two writers apart (the
+# store's fencing is).
 
 locals {
   # Per host: its pods' labels (the Deployment's selector); the Service and the budget
