@@ -166,6 +166,36 @@ numbered!(
     ]
 );
 
+/// How many argument slots a builtin reads, starting at the call's `b`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arity {
+    Fixed(u8),
+    /// `StrConcatN`: slot `b` holds the count N (an immediate int), the N strings follow in
+    /// `b + 1 ..= b + N`. The interpreter range-checks N at run time.
+    Counted,
+}
+
+impl Builtin {
+    /// Convention for every builtin: arguments in consecutive slots from `b`, the result in `c`.
+    /// Mutating builtins (`ListPush`, `ListPop`, `ListInsert`, `ListRemove`, `DictRemove`) work on the
+    /// container in the first argument slot and leave it (possibly moved) there. `Fmt`'s second argument
+    /// is the type id as an immediate int; `Assert`'s is the message string.
+    pub fn arity(self) -> Arity {
+        use Builtin::*;
+        match self {
+            StrConcatN => Arity::Counted,
+            ListPop | DictKeys | DictValues | DictLen | StrLen | StrTrim | StrUpper | StrLower
+            | ParseInt | AbsI | AbsF | Sqrt | Floor | Ceil | Round | Sin | Cos | Print => {
+                Arity::Fixed(1)
+            }
+            ListPush | ListRemove | ListContains | DictGet | DictRemove | DictContains
+            | DictNext | DictKeyAt | DictValAt | StrSplit | StrStartsWith | StrEndsWith
+            | StrContains | Fmt | MinI | MaxI | MinF | MaxF | Pow | Assert => Arity::Fixed(2),
+            ListInsert | ListSlice => Arity::Fixed(3),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Instr {
     pub op: Op,

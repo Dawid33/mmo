@@ -12,7 +12,7 @@
 //! count larger than the input runs out of bytes first) and ends with [`Program::validate`]; a program
 //! that validates can be handed to the interpreter.
 
-use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand, Wide};
+use crate::bytecode::{Arity, BYTECODE_VERSION, Builtin, Instr, Op, Operand, Wide};
 use crate::consts::{STRUCT_FIELDS_MAX, WIRE_DEPTH_MAX};
 use crate::hash::Fnv64;
 use crate::host::{HostFnKind, SrcLoc};
@@ -20,6 +20,9 @@ use crate::object::FrameMaps;
 use std::hash::Hasher;
 
 use crate::types::{TypeDesc, TypeId, TypeTable};
+
+/// Most elements of a table indexed by a `u16` id.
+const ID_TABLE_MAX: u32 = 65_536;
 
 pub const MAGIC: [u8; 8] = *b"QSPROG01";
 
@@ -63,6 +66,8 @@ pub struct FnInfo {
     pub entry: u32,
     /// One past the last instruction.
     pub end: u32,
+    /// Parameter slots, at frame words `3 .. 3 + params`.
+    pub params: u8,
     pub frame_base: u16,
     pub frame_words: u16,
     /// Frame-relative words holding heap kinds.
@@ -199,13 +204,24 @@ impl<'a> Reader<'a> {
         String::from_utf8(b.to_vec()).or_else(|_| invalid("a string is not UTF-8"))
     }
     /// `n` elements read by `f`. No capacity is reserved from `n`.
-    fn vec<T>(&mut self, mut f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
+    fn vec<T>(&mut self, f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
         let n = self.count()?;
+        self.vec_n(n, f)
+    }
+    fn vec_n<T>(&mut self, n: u32, mut f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
         let mut v = Vec::new();
         for _ in 0..n {
             v.push(f(self)?);
         }
         Ok(v)
+    }
+    /// Like `vec`, for tables whose ids are 16 bits wide: a longer table is refused before it is read.
+    fn vec_ids<T>(&mut self, f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
+        let n = self.u32()?;
+        if n > ID_TABLE_MAX {
+            return invalid("a table is longer than its ids can address");
+        }
+        self.vec_n(n, f)
     }
     fn named_ids(&mut self) -> Parse<Vec<(String, TypeId)>> {
         self.vec(|r| Ok((r.str()?, r.u16()?)))
@@ -331,6 +347,7 @@ impl Program {
             w.str(&f.name);
             w.u32(f.entry);
             w.u32(f.end);
+            w.u8(f.params);
             w.u16(f.frame_base);
             w.u16(f.frame_words);
             w.count(f.ref_slots.len());
@@ -396,24 +413,25 @@ impl Program {
             r.vec(|r| Instr::decode(r.array()?).map_or_else(|| invalid("not an instruction"), Ok))?;
         let consts = r.vec(|r| r.u64())?;
         let strings = r.vec(|r| r.str())?;
-        let shapes = r.vec(|r| {
+        let shapes = r.vec_ids(|r| {
             Ok(Shape {
                 fields: r.u8()?,
                 ref_bits: r.u32()?,
             })
         })?;
-        let types = TypeTable(r.vec(read_type)?);
-        let fns = r.vec(|r| {
+        let types = TypeTable(r.vec_ids(read_type)?);
+        let fns = r.vec_ids(|r| {
             Ok(FnInfo {
                 name: r.str()?,
                 entry: r.u32()?,
                 end: r.u32()?,
+                params: r.u8()?,
                 frame_base: r.u16()?,
                 frame_words: r.u16()?,
                 ref_slots: r.vec(|r| r.u16())?,
             })
         })?;
-        let globals = r.vec(|r| {
+        let globals = r.vec_ids(|r| {
             Ok(GlobalInfo {
                 name: r.str()?,
                 slot: r.u16()?,
@@ -428,7 +446,7 @@ impl Program {
                 fn_id: r.u16()?,
             })
         })?;
-        let host_sites = r.vec(|r| {
+        let host_sites = r.vec_ids(|r| {
             let host_fn = r.u16()?;
             let kind = match r.u8()? {
                 0 => HostFnKind::Query,
@@ -519,6 +537,17 @@ impl Program {
         if self.bytecode_version != BYTECODE_VERSION {
             return Err(ProgramError::Version(self.bytecode_version));
         }
+        // Cheap bounds first: every table indexed by a 16-bit id, and the static region's size.
+        let id_tables = [
+            self.types.0.len(),
+            self.fns.len(),
+            self.shapes.len(),
+            self.host_sites.len(),
+            self.globals.len(),
+        ];
+        if id_tables.iter().any(|&n| n > ID_TABLE_MAX as usize) {
+            return invalid("a table is longer than its ids can address");
+        }
         validate_types(&self.types)?;
         let ntypes = self.types.0.len();
         let static_words = u32::from(self.static_words);
@@ -540,7 +569,7 @@ impl Program {
                 return invalid(format!("fn {i} has no code range inside the code"));
             }
             covered += u64::from(f.end - f.entry);
-            if f.frame_words < 3
+            if u32::from(f.frame_words) < 3 + u32::from(f.params)
                 || u32::from(f.frame_base) + u32::from(f.frame_words) > static_words
             {
                 return invalid(format!("fn {i} has a frame outside the static region"));
@@ -572,20 +601,26 @@ impl Program {
             return invalid("frames overlap");
         }
 
-        // tables that name other tables
+        // Frames are the first words of the static region, then the globals (the interpreter treats
+        // `[0, frames_end)` as the frames): every global lies at or above the end of the last frame.
+        let frames_end = by_frame.last().map_or(0, |f| f.1);
+        let mut slots = Vec::with_capacity(self.globals.len());
         for g in &self.globals {
             if u32::from(g.slot) >= static_words
+                || u32::from(g.slot) < frames_end
                 || usize::from(g.ty) >= ntypes
                 || usize::from(g.init_fn) >= nfns
             {
-                return invalid(format!("global {} is out of range", g.name));
+                return invalid(format!(
+                    "global {} is out of range or below the frames",
+                    g.name
+                ));
             }
-            let s = u32::from(g.slot);
-            if by_frame.iter().any(|&(a, b)| a <= s && s < b) {
-                return invalid(format!("global {} lies inside a frame", g.name));
+            if self.fns[usize::from(g.init_fn)].params != 0 {
+                return invalid(format!("the initialiser of {} takes parameters", g.name));
             }
+            slots.push(g.slot);
         }
-        let mut slots: Vec<u16> = self.globals.iter().map(|g| g.slot).collect();
         slots.sort_unstable();
         if slots.windows(2).any(|w| w[0] == w[1]) {
             return invalid("two globals share a slot");
@@ -594,9 +629,26 @@ impl Program {
             if usize::from(h.event_ty) >= ntypes || usize::from(h.fn_id) >= nfns {
                 return invalid(format!("handler {} is out of range", h.event));
             }
+            // Dispatch writes the event into parameter 0 (frame word 3).
+            let f = &self.fns[usize::from(h.fn_id)];
+            if f.params != 1 {
+                return invalid(format!(
+                    "handler {} must take exactly one parameter",
+                    h.event
+                ));
+            }
+            if f.ref_slots.contains(&3) != self.types.is_ref(h.event_ty) {
+                return invalid(format!(
+                    "handler {}: its event parameter's ref slot disagrees with the event type",
+                    h.event
+                ));
+            }
         }
-        if self.main_fn.is_some_and(|m| usize::from(m) >= nfns) {
-            return invalid("main_fn is out of range");
+        if let Some(m) = self.main_fn {
+            match self.fns.get(usize::from(m)) {
+                Some(f) if f.params == 0 => {}
+                _ => return invalid("main_fn is out of range or takes parameters"),
+            }
         }
         for (i, s) in self.host_sites.iter().enumerate() {
             if usize::from(s.ret) >= ntypes || s.params.iter().any(|&p| usize::from(p) >= ntypes) {
@@ -622,7 +674,7 @@ impl Program {
             let (lo, hi) = (f.entry as usize, f.end as usize);
             for (off, ins) in self.code[lo..hi].iter().enumerate() {
                 let pc = lo + off;
-                self.check_instr(pc, ins, f)
+                self.check_instr(ins, f)
                     .or_else(|why| invalid(format!("pc {pc}: {why}")))?;
                 if ins.op == Op::Call {
                     calls[fi].push(ins.a);
@@ -638,8 +690,7 @@ impl Program {
         Ok(())
     }
 
-    fn check_instr(&self, pc: usize, ins: &Instr, f: &FnInfo) -> Result<(), String> {
-        let _ = pc;
+    fn check_instr(&self, ins: &Instr, f: &FnInfo) -> Result<(), String> {
         let lay = ins.op.layout();
         let static_words = u32::from(self.static_words);
         for (kind, v) in [(lay.a, ins.a), (lay.b, ins.b), (lay.c, ins.c)] {
@@ -677,6 +728,12 @@ impl Program {
             Op::Await | Op::AwaitAll if u32::from(ins.a) + 1 >= static_words => {
                 Err("Await's error slot is outside the static region".into())
             }
+            Op::CallBuiltin => match Builtin::from_u16(ins.a).map(Builtin::arity) {
+                Some(Arity::Fixed(n)) if u32::from(ins.b) + u32::from(n) > static_words => {
+                    Err("CallBuiltin arguments run outside the static region".into())
+                }
+                _ => Ok(()),
+            },
             Op::CallHost => {
                 let n = self.host_sites[usize::from(ins.a)].params.len() as u64;
                 if u64::from(ins.b) + n > u64::from(static_words) {

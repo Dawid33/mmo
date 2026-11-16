@@ -1,22 +1,22 @@
 //! The assembler: builds a [`Program`] for hand-written test programs and for the compiler's code
 //! generator.
 //!
-//! Static region layout: a shared cursor hands out words in declaration order. A function declared with
-//! [`ProgramBuilder::declare`] / [`ProgramBuilder::func`] takes its frame (`3 + params + locals` words:
-//! word 0 return link, word 1 return value, word 2 error value, then parameters, then locals and
-//! temporaries) right there, and a global takes one word. Every slot is therefore known the moment it is
-//! declared, so code can use absolute slot operands while it is emitted. Declaring all functions first
-//! and the globals last gives "frames in declaration order, then the globals" as the design describes.
+//! Slots are **symbolic** while code is emitted ([`SlotRef`]) and become absolute words in
+//! [`ProgramBuilder::finish`]: frames laid out in function-id (declaration) order from slot 0, then the
+//! globals in declaration order. A frame is `3 + params + locals` words (word 0 return link, word 1 return
+//! value, word 2 error value, then the parameters, then locals and temporaries); `locals` is one more than
+//! the highest local used, so nobody has to know a frame's size up front. A function is declared
+//! ([`ProgramBuilder::declare`], giving a [`FnRef`]) before or after the code that calls it; its body is
+//! emitted through a [`FnBuilder`] and closed with [`FnBuilder::end`].
 //!
-//! Functions are declared (and callable) at any time; their bodies are emitted one at a time through
-//! [`FnBuilder`], in any order, and appended to the code in that order. A body must be closed with
-//! [`FnBuilder::end`]. Errors found while building (more than 65 535 words, an unbound label, a bad
-//! reference) are remembered and returned by [`ProgramBuilder::finish`], which also runs
+//! Each of `a`, `b`, `c` of an instruction is a slot ([`SlotRef`]) or an immediate (`u16`), as
+//! [`Op::layout`] says; a mismatch is remembered as an error. Errors found while building (a static region
+//! over 65 535 words, an unbound label, a misused slot) are returned by `finish`, which also runs
 //! [`Program::validate`].
 
 use std::collections::BTreeMap;
 
-use crate::bytecode::{BYTECODE_VERSION, Instr, Op};
+use crate::bytecode::{BYTECODE_VERSION, Instr, Op, Operand as Kind, Wide};
 use crate::host::HostFnKind;
 use crate::program::{
     FnInfo, GlobalInfo, HandlerInfo, HostSite, LineEntry, Program, ProgramError, Shape,
@@ -26,51 +26,109 @@ use crate::types::{TypeDesc, TypeId, TypeTable};
 /// Words before the parameters: return link, return value, error value.
 pub const FRAME_HEADER_WORDS: u16 = 3;
 
-/// The absolute slots of one function's frame.
+/// A declared function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Frame {
-    pub base: u16,
-    pub params: u16,
-    pub locals: u16,
+pub struct FnRef(pub u16);
+
+/// A declared global.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlobalRef(pub u16);
+
+/// A static-region word, resolved to an absolute index by `finish`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotRef {
+    Frame {
+        func: FnRef,
+        word: u16,
+    },
+    Global(GlobalRef),
+    /// A misuse (a parameter index past the parameter count); `finish` reports it.
+    Invalid,
 }
 
-impl Frame {
-    /// Word `i` of the frame (absolute).
-    pub fn slot(&self, i: u16) -> u16 {
-        self.base.saturating_add(i)
-    }
-    pub fn link_slot(&self) -> u16 {
-        self.base
-    }
-    pub fn ret_slot(&self) -> u16 {
-        self.slot(1)
-    }
-    pub fn err_slot(&self) -> u16 {
-        self.slot(2)
-    }
-    pub fn param(&self, i: u16) -> u16 {
-        self.slot(FRAME_HEADER_WORDS.saturating_add(i))
-    }
-    pub fn local(&self, i: u16) -> u16 {
-        self.slot(
-            FRAME_HEADER_WORDS
-                .saturating_add(self.params)
-                .saturating_add(i),
-        )
-    }
-    pub fn words(&self) -> u16 {
-        FRAME_HEADER_WORDS
-            .saturating_add(self.params)
-            .saturating_add(self.locals)
+/// An instruction operand: a slot or an immediate number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opnd {
+    Slot(SlotRef),
+    Imm(u16),
+}
+
+impl From<SlotRef> for Opnd {
+    fn from(s: SlotRef) -> Opnd {
+        Opnd::Slot(s)
     }
 }
 
+impl From<GlobalRef> for Opnd {
+    fn from(g: GlobalRef) -> Opnd {
+        Opnd::Slot(SlotRef::Global(g))
+    }
+}
+
+impl From<u16> for Opnd {
+    fn from(n: u16) -> Opnd {
+        Opnd::Imm(n)
+    }
+}
+
+/// The words of one function's frame, as slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Label(usize);
+pub struct FrameRef {
+    pub func: FnRef,
+    pub params: u8,
+}
+
+impl FrameRef {
+    fn word(&self, word: u16) -> SlotRef {
+        SlotRef::Frame {
+            func: self.func,
+            word,
+        }
+    }
+    pub fn link(&self) -> SlotRef {
+        self.word(0)
+    }
+    pub fn ret(&self) -> SlotRef {
+        self.word(1)
+    }
+    pub fn err(&self) -> SlotRef {
+        self.word(2)
+    }
+    pub fn param(&self, i: u16) -> SlotRef {
+        if i < u16::from(self.params) {
+            self.word(FRAME_HEADER_WORDS + i)
+        } else {
+            SlotRef::Invalid
+        }
+    }
+    /// Local or temporary `i`; the frame grows to hold it.
+    pub fn local(&self, i: u16) -> SlotRef {
+        match (FRAME_HEADER_WORDS + u16::from(self.params)).checked_add(i) {
+            Some(w) => self.word(w),
+            None => SlotRef::Invalid,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Label(usize, u16);
+
+#[derive(Clone, Copy)]
+enum Wideness {
+    Two(Opnd, Opnd),
+    T(u32),
+}
+
+#[derive(Clone, Copy)]
+struct Pending {
+    op: Op,
+    a: Opnd,
+    rest: Wideness,
+}
 
 pub struct ProgramBuilder {
     host_api_version: u32,
-    code: Vec<Instr>,
+    code: Vec<Pending>,
     consts: Vec<u64>,
     const_ids: BTreeMap<u64, u32>,
     strings: Vec<String>,
@@ -79,7 +137,6 @@ pub struct ProgramBuilder {
     shape_ids: BTreeMap<(u8, u32), u16>,
     types: Vec<TypeDesc>,
     fns: Vec<FnInfo>,
-    frames: Vec<Frame>,
     globals: Vec<GlobalInfo>,
     handlers: Vec<HandlerInfo>,
     main_fn: Option<u16>,
@@ -87,12 +144,11 @@ pub struct ProgramBuilder {
     lines: Vec<LineEntry>,
     files: Vec<String>,
     cur_file: Option<u16>,
-    cursor: u32,
     error: Option<ProgramError>,
 }
 
-fn narrow<T: TryFrom<usize>>(n: usize) -> Option<T> {
-    T::try_from(n).ok()
+fn id16(n: usize) -> Option<u16> {
+    u16::try_from(n).ok()
 }
 
 impl ProgramBuilder {
@@ -108,7 +164,6 @@ impl ProgramBuilder {
             shape_ids: BTreeMap::new(),
             types: Vec::new(),
             fns: Vec::new(),
-            frames: Vec::new(),
             globals: Vec::new(),
             handlers: Vec::new(),
             main_fn: None,
@@ -116,7 +171,6 @@ impl ProgramBuilder {
             lines: Vec::new(),
             files: Vec::new(),
             cur_file: None,
-            cursor: 0,
             error: None,
         }
     }
@@ -127,82 +181,61 @@ impl ProgramBuilder {
         }
     }
 
-    /// `n` more words of the static region; the first one's index.
-    fn alloc_words(&mut self, n: u32) -> u16 {
-        let at = self.cursor;
-        self.cursor = self.cursor.saturating_add(n);
-        match u16::try_from(at) {
-            Ok(a) if self.cursor <= u32::from(u16::MAX) => a,
-            _ => {
-                self.fail("the static region is larger than 65535 words");
-                0
-            }
-        }
-    }
-
-    /// A global's slot. Its initialiser defaults to fn 0; set it with [`Self::set_global_init`].
-    pub fn global(&mut self, name: &str, ty: TypeId) -> u16 {
-        let slot = self.alloc_words(1);
+    /// A global. Its initialiser defaults to fn 0; set it with [`Self::set_global_init`].
+    pub fn global(&mut self, name: &str, ty: TypeId) -> GlobalRef {
+        let Some(i) = id16(self.globals.len()) else {
+            self.fail("more than 65536 globals");
+            return GlobalRef(0);
+        };
         self.globals.push(GlobalInfo {
             name: name.to_string(),
-            slot,
+            slot: 0, // resolved by finish
             ty,
             init_fn: 0,
         });
-        slot
+        GlobalRef(i)
     }
 
-    pub fn set_global_init(&mut self, slot: u16, init_fn: u16) {
-        match self.globals.iter_mut().find(|g| g.slot == slot) {
-            Some(g) => g.init_fn = init_fn,
-            None => self.fail(format!("no global in slot {slot}")),
+    pub fn set_global_init(&mut self, g: GlobalRef, init: FnRef) {
+        match self.globals.get_mut(usize::from(g.0)) {
+            Some(g) => g.init_fn = init.0,
+            None => self.fail("set_global_init of an unknown global"),
         }
     }
 
-    /// Declares a function and lays out its frame; its body comes later ([`Self::body`]). Returns its id.
-    pub fn declare(&mut self, name: &str, params: u16, locals: u16) -> u16 {
-        let words = u32::from(FRAME_HEADER_WORDS) + u32::from(params) + u32::from(locals);
-        let base = self.alloc_words(words);
-        let id = match narrow::<u16>(self.fns.len()) {
-            Some(i) => i,
-            None => {
-                self.fail("more than 65536 functions");
-                0
-            }
+    /// Declares a function with `params` parameter slots; usable (called, named) before its body exists.
+    pub fn declare(&mut self, name: &str, params: u8) -> FnRef {
+        let Some(id) = id16(self.fns.len()) else {
+            self.fail("more than 65536 functions");
+            return FnRef(0);
         };
-        self.frames.push(Frame {
-            base,
-            params,
-            locals,
-        });
         self.fns.push(FnInfo {
             name: name.to_string(),
             entry: 0,
             end: 0,
-            frame_base: base,
-            frame_words: u16::try_from(words).unwrap_or(u16::MAX),
+            params,
+            frame_base: 0,
+            frame_words: 0, // resolved by finish
             ref_slots: Vec::new(),
         });
-        id
+        FnRef(id)
     }
 
     /// `declare` and start its body.
-    pub fn func(&mut self, name: &str, params: u16, locals: u16) -> FnBuilder<'_> {
-        let id = self.declare(name, params, locals);
-        self.body(id)
+    pub fn func(&mut self, name: &str, params: u8) -> FnBuilder<'_> {
+        let f = self.declare(name, params);
+        self.body(f)
     }
 
     /// Starts the body of a declared function.
-    pub fn body(&mut self, id: u16) -> FnBuilder<'_> {
-        if usize::from(id) >= self.fns.len() {
-            self.fail(format!("body of undeclared fn {id}"));
+    pub fn body(&mut self, f: FnRef) -> FnBuilder<'_> {
+        if usize::from(f.0) >= self.fns.len() {
+            self.fail("body of an undeclared fn");
         }
         let start = u32::try_from(self.code.len()).unwrap_or(u32::MAX);
-        let frame = self.frame(id);
         FnBuilder {
             pb: self,
-            id,
-            frame,
+            func: f,
             start,
             labels: Vec::new(),
             fixups: Vec::new(),
@@ -210,17 +243,16 @@ impl ProgramBuilder {
         }
     }
 
-    /// The frame of a declared function (an all-zero frame for an unknown id, which `finish` reports).
-    pub fn frame(&mut self, id: u16) -> Frame {
-        match self.frames.get(usize::from(id)) {
-            Some(f) => *f,
+    /// The frame of a declared function.
+    pub fn frame(&mut self, f: FnRef) -> FrameRef {
+        match self.fns.get(usize::from(f.0)) {
+            Some(i) => FrameRef {
+                func: f,
+                params: i.params,
+            },
             None => {
-                self.fail(format!("frame of undeclared fn {id}"));
-                Frame {
-                    base: 0,
-                    params: 0,
-                    locals: 0,
-                }
+                self.fail("frame of an undeclared fn");
+                FrameRef { func: f, params: 0 }
             }
         }
     }
@@ -250,12 +282,9 @@ impl ProgramBuilder {
         if let Some(&i) = self.shape_ids.get(&(fields, ref_bits)) {
             return i;
         }
-        let i = match narrow::<u16>(self.shapes.len()) {
-            Some(i) => i,
-            None => {
-                self.fail("more than 65536 shapes");
-                0
-            }
+        let Some(i) = id16(self.shapes.len()) else {
+            self.fail("more than 65536 shapes");
+            return 0;
         };
         self.shapes.push(Shape { fields, ref_bits });
         self.shape_ids.insert((fields, ref_bits), i);
@@ -265,14 +294,11 @@ impl ProgramBuilder {
     /// Interns a type descriptor (equal descriptors share an id).
     pub fn ty(&mut self, d: TypeDesc) -> TypeId {
         if let Some(i) = self.types.iter().position(|t| *t == d) {
-            return u16::try_from(i).unwrap_or(0);
+            return id16(i).unwrap_or(0);
         }
-        let i = match narrow::<u16>(self.types.len()) {
-            Some(i) => i,
-            None => {
-                self.fail("more than 65536 types");
-                0
-            }
+        let Some(i) = id16(self.types.len()) else {
+            self.fail("more than 65536 types");
+            return 0;
         };
         self.types.push(d);
         i
@@ -285,12 +311,9 @@ impl ProgramBuilder {
         params: Vec<TypeId>,
         ret: TypeId,
     ) -> u16 {
-        let i = match narrow::<u16>(self.host_sites.len()) {
-            Some(i) => i,
-            None => {
-                self.fail("more than 65536 host sites");
-                0
-            }
+        let Some(i) = id16(self.host_sites.len()) else {
+            self.fail("more than 65536 host sites");
+            return 0;
         };
         self.host_sites.push(HostSite {
             host_fn,
@@ -301,16 +324,16 @@ impl ProgramBuilder {
         i
     }
 
-    pub fn handler(&mut self, event: &str, event_ty: TypeId, fn_id: u16) {
+    pub fn handler(&mut self, event: &str, event_ty: TypeId, f: FnRef) {
         self.handlers.push(HandlerInfo {
             event: event.to_string(),
             event_ty,
-            fn_id,
+            fn_id: f.0,
         });
     }
 
-    pub fn main(&mut self, fn_id: u16) {
-        self.main_fn = Some(fn_id);
+    pub fn main(&mut self, f: FnRef) {
+        self.main_fn = Some(f.0);
     }
 
     /// The file the following line entries belong to.
@@ -322,7 +345,7 @@ impl ProgramBuilder {
                 self.files.len() - 1
             }
         };
-        let i = match narrow::<u16>(i) {
+        let i = match id16(i) {
             Some(i) => i,
             None => {
                 self.fail("more than 65536 files");
@@ -333,16 +356,89 @@ impl ProgramBuilder {
         i
     }
 
-    /// Runs `validate` and returns the program.
-    pub fn finish(self) -> Result<Program, ProgramError> {
-        if let Some(e) = self.error {
+    /// Lays out the static region, resolves every slot, runs `validate` and returns the program.
+    pub fn finish(mut self) -> Result<Program, ProgramError> {
+        if let Some(e) = self.error.take() {
             return Err(e);
         }
-        let static_words = u16::try_from(self.cursor).unwrap_or(u16::MAX);
+        // frame sizes: the header, the parameters and the highest word any operand names
+        let mut words: Vec<u32> = self
+            .fns
+            .iter()
+            .map(|f| u32::from(FRAME_HEADER_WORDS) + u32::from(f.params))
+            .collect();
+        for p in &self.code {
+            let opnds = match p.rest {
+                Wideness::Two(b, c) => [Some(p.a), Some(b), Some(c)],
+                Wideness::T(_) => [Some(p.a), None, None],
+            };
+            for o in opnds.into_iter().flatten() {
+                if let Opnd::Slot(SlotRef::Frame { func, word }) = o {
+                    match words.get_mut(usize::from(func.0)) {
+                        Some(w) => *w = (*w).max(u32::from(word) + 1),
+                        None => return invalid("a slot names an undeclared fn"),
+                    }
+                }
+            }
+        }
+        for (f, w) in self.fns.iter().zip(words.iter_mut()) {
+            if let Some(&top) = f.ref_slots.last() {
+                *w = (*w).max(u32::from(top) + 1);
+            }
+        }
+        let mut bases = Vec::with_capacity(words.len());
+        let mut cursor = 0u32;
+        for w in &words {
+            bases.push(cursor);
+            cursor = cursor.saturating_add(*w);
+        }
+        let frames_end = cursor;
+        let total = frames_end.saturating_add(self.globals.len() as u32);
+        if total > u32::from(u16::MAX) {
+            return invalid("the static region is larger than 65535 words");
+        }
+        for (i, f) in self.fns.iter_mut().enumerate() {
+            f.frame_base = bases[i] as u16; // total fits u16
+            f.frame_words = words[i] as u16;
+        }
+        for (i, g) in self.globals.iter_mut().enumerate() {
+            g.slot = (frames_end + i as u32) as u16;
+        }
+        let resolve = |o: Opnd| -> Result<u16, ProgramError> {
+            match o {
+                Opnd::Imm(n) => Ok(n),
+                Opnd::Slot(SlotRef::Frame { func, word }) => bases
+                    .get(usize::from(func.0))
+                    .and_then(|b| u16::try_from(b + u32::from(word)).ok())
+                    .map_or_else(|| invalid("a slot is outside the static region"), Ok),
+                Opnd::Slot(SlotRef::Global(g)) => {
+                    if usize::from(g.0) < self.globals.len() {
+                        Ok((frames_end + u32::from(g.0)) as u16)
+                    } else {
+                        invalid("a slot names an undeclared global")
+                    }
+                }
+                Opnd::Slot(SlotRef::Invalid) => {
+                    invalid("a parameter index is past the function's parameter count")
+                }
+            }
+        };
+        let mut code = Vec::with_capacity(self.code.len());
+        for p in &self.code {
+            code.push(match p.rest {
+                Wideness::Two(b, c) => Instr {
+                    op: p.op,
+                    a: resolve(p.a)?,
+                    b: resolve(b)?,
+                    c: resolve(c)?,
+                },
+                Wideness::T(t) => Instr::with_t(p.op, resolve(p.a)?, t),
+            });
+        }
         let p = Program {
             bytecode_version: BYTECODE_VERSION,
             host_api_version: self.host_api_version,
-            code: self.code,
+            code,
             consts: self.consts,
             strings: self.strings,
             shapes: self.shapes,
@@ -354,18 +450,21 @@ impl ProgramBuilder {
             host_sites: self.host_sites,
             lines: self.lines,
             files: self.files,
-            static_words,
+            static_words: total as u16,
         };
         p.validate()?;
         Ok(p)
     }
 }
 
+fn invalid<T>(why: &str) -> Result<T, ProgramError> {
+    Err(ProgramError::Invalid(why.to_string()))
+}
+
 /// The body of one function. Close it with [`FnBuilder::end`].
 pub struct FnBuilder<'a> {
     pb: &'a mut ProgramBuilder,
-    id: u16,
-    frame: Frame,
+    func: FnRef,
     start: u32,
     labels: Vec<Option<u32>>,
     /// (index in the code, label) of jumps waiting for their target.
@@ -374,28 +473,33 @@ pub struct FnBuilder<'a> {
 }
 
 impl FnBuilder<'_> {
-    pub fn id(&self) -> u16 {
-        self.id
+    pub fn fn_ref(&self) -> FnRef {
+        self.func
     }
 
-    pub fn frame(&self) -> Frame {
-        self.frame
+    /// This function's own frame.
+    pub fn frame(&self) -> FrameRef {
+        self.of(self.func)
     }
 
-    /// Word `i` of this function's frame, absolute.
-    pub fn slot(&self, i: u16) -> u16 {
-        self.frame().slot(i)
+    /// A function's frame (a callee's parameter, return and error words).
+    pub fn of(&self, f: FnRef) -> FrameRef {
+        FrameRef {
+            func: f,
+            params: self.pb.fns.get(usize::from(f.0)).map_or(0, |i| i.params),
+        }
     }
-    pub fn ret_slot(&self) -> u16 {
-        self.frame().ret_slot()
+
+    pub fn ret(&self) -> SlotRef {
+        self.frame().ret()
     }
-    pub fn err_slot(&self) -> u16 {
-        self.frame().err_slot()
+    pub fn err(&self) -> SlotRef {
+        self.frame().err()
     }
-    pub fn param(&self, i: u16) -> u16 {
+    pub fn param(&self, i: u16) -> SlotRef {
         self.frame().param(i)
     }
-    pub fn local(&self, i: u16) -> u16 {
+    pub fn local(&self, i: u16) -> SlotRef {
         self.frame().local(i)
     }
 
@@ -403,45 +507,105 @@ impl FnBuilder<'_> {
         u32::try_from(self.pb.code.len()).unwrap_or(u32::MAX)
     }
 
+    fn check_kind(&mut self, op: Op, kind: Kind, o: Opnd) {
+        let ok = match (kind, o) {
+            (Kind::Slot, Opnd::Slot(_)) => true,
+            (Kind::Slot, Opnd::Imm(_)) => false,
+            (_, Opnd::Slot(_)) => false,
+            (_, Opnd::Imm(_)) => true,
+        };
+        if !ok {
+            self.pb.fail(format!(
+                "{op:?}: an operand is a {kind:?} but was given the other kind"
+            ));
+        }
+    }
+
     /// Appends an instruction; its pc.
-    pub fn emit(&mut self, op: Op, a: u16, b: u16, c: u16) -> u32 {
+    pub fn emit(
+        &mut self,
+        op: Op,
+        a: impl Into<Opnd>,
+        b: impl Into<Opnd>,
+        c: impl Into<Opnd>,
+    ) -> u32 {
+        let (a, b, c) = (a.into(), b.into(), c.into());
+        let lay = op.layout();
+        if lay.wide != Wide::None {
+            self.pb
+                .fail(format!("{op:?} takes a wide operand: use emit_t"));
+        }
+        self.check_kind(op, lay.a, a);
+        self.check_kind(op, lay.b, b);
+        self.check_kind(op, lay.c, c);
         let pc = self.pc();
-        self.pb.code.push(Instr { op, a, b, c });
+        self.pb.code.push(Pending {
+            op,
+            a,
+            rest: Wideness::Two(b, c),
+        });
         pc
     }
 
-    /// Appends an instruction with a 32-bit operand `T` (`LoadConst`, `LoadStr`, ...).
-    pub fn emit_t(&mut self, op: Op, a: u16, t: u32) -> u32 {
+    /// Appends an instruction with a 32-bit operand `T` (`LoadConst`, `LoadStr`: an index from
+    /// [`ProgramBuilder::const_u64`] / [`ProgramBuilder::string`]).
+    pub fn emit_t(&mut self, op: Op, a: impl Into<Opnd>, t: u32) -> u32 {
+        let a = a.into();
+        let lay = op.layout();
+        if lay.wide == Wide::None || lay.wide == Wide::Target {
+            self.pb
+                .fail(format!("{op:?} has no const or string operand"));
+        }
+        self.check_kind(op, lay.a, a);
         let pc = self.pc();
-        self.pb.code.push(Instr::with_t(op, a, t));
+        self.pb.code.push(Pending {
+            op,
+            a,
+            rest: Wideness::T(t),
+        });
         pc
+    }
+
+    /// `Call` of a declared function.
+    pub fn call(&mut self, f: FnRef) -> u32 {
+        self.emit(Op::Call, f.0, 0u16, 0u16)
     }
 
     pub fn label(&mut self) -> Label {
         self.labels.push(None);
-        Label(self.labels.len() - 1)
+        Label(self.labels.len() - 1, self.func.0)
     }
 
     /// Binds the label to the next instruction.
     pub fn bind(&mut self, l: Label) {
         let pc = self.pc();
         match self.labels.get_mut(l.0) {
-            Some(slot @ None) => *slot = Some(pc),
+            Some(slot @ None) if l.1 == self.func.0 => *slot = Some(pc),
             _ => self
                 .pb
                 .fail("a label is bound twice or is not from this function"),
         }
     }
 
-    /// A jump (`Jmp`, `JmpIf`, `JmpIfNot`) to `l`; `a` is the condition slot (0 for `Jmp`).
-    pub fn jump(&mut self, op: Op, a: u16, l: Label) -> u32 {
-        let pc = self.emit_t(op, a, 0);
-        self.fixups.push((self.code_index(pc), l));
+    /// A jump (`Jmp`, `JmpIf`, `JmpIfNot`) to `l`; `a` is the condition slot (an immediate 0 for `Jmp`).
+    pub fn jump(&mut self, op: Op, a: impl Into<Opnd>, l: Label) -> u32 {
+        let a = a.into();
+        let lay = op.layout();
+        if lay.wide != Wide::Target {
+            self.pb.fail(format!("{op:?} is not a jump"));
+        }
+        if l.1 != self.func.0 {
+            self.pb.fail("a jump to a label of another function");
+        }
+        self.check_kind(op, lay.a, a);
+        let pc = self.pc();
+        self.fixups.push((self.pb.code.len(), l));
+        self.pb.code.push(Pending {
+            op,
+            a,
+            rest: Wideness::T(0),
+        });
         pc
-    }
-
-    fn code_index(&self, pc: u32) -> usize {
-        usize::try_from(pc).unwrap_or(usize::MAX)
     }
 
     fn line_entry(&mut self, line: u32, col: u32) {
@@ -471,12 +635,13 @@ impl FnBuilder<'_> {
         self.line_entry(line, col);
     }
 
-    /// Marks a frame word (absolute slot) as holding a heap kind: it goes into the function's `ref_slots`.
-    pub fn mark_ref(&mut self, slot: u16) {
-        let base = self.frame.base;
-        match slot.checked_sub(base) {
-            Some(rel) => self.refs.push(rel),
-            None => self.pb.fail("mark_ref of a slot below the frame"),
+    /// Marks a word of this function's own frame as holding a heap kind (`ref_slots`).
+    pub fn mark_ref(&mut self, slot: SlotRef) {
+        match slot {
+            SlotRef::Frame { func, word } if func == self.func => self.refs.push(word),
+            _ => self
+                .pb
+                .fail("mark_ref of a slot that is not in this function's frame"),
         }
     }
 
@@ -486,8 +651,8 @@ impl FnBuilder<'_> {
         for (at, l) in fixups {
             match self.labels.get(l.0).copied().flatten() {
                 Some(target) => {
-                    if let Some(i) = self.pb.code.get_mut(at) {
-                        *i = Instr::with_t(i.op, i.a, target);
+                    if let Some(p) = self.pb.code.get_mut(at) {
+                        p.rest = Wideness::T(target);
                     }
                 }
                 None => self.pb.fail("a jump to a label that was never bound"),
@@ -497,8 +662,8 @@ impl FnBuilder<'_> {
         let mut refs = std::mem::take(&mut self.refs);
         refs.sort_unstable();
         refs.dedup();
-        let (id, start) = (self.id, self.start);
-        if let Some(f) = self.pb.fns.get_mut(usize::from(id)) {
+        let (id, start) = (self.func, self.start);
+        if let Some(f) = self.pb.fns.get_mut(usize::from(id.0)) {
             f.entry = start;
             f.end = end;
             f.ref_slots = refs;

@@ -1,10 +1,10 @@
 //! The instruction set, the program format, its validation and the assembler (design D5, D6, D9).
 
 use quest_vm::asm::ProgramBuilder;
-use quest_vm::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op};
+use quest_vm::bytecode::{Arity, BYTECODE_VERSION, Builtin, Instr, Op};
 use quest_vm::fuel::*;
 use quest_vm::host::HostFnKind;
-use quest_vm::program::{Program, ProgramError};
+use quest_vm::program::{FnInfo, GlobalInfo, Program, ProgramError};
 use quest_vm::types::TypeDesc;
 
 fn instr(op: Op, a: u16, b: u16, c: u16) -> Instr {
@@ -149,6 +149,54 @@ fn op_and_builtin_numbers_pinned() {
         assert_eq!(b as u16, n, "{b:?}");
         assert_eq!(Builtin::from_u16(n), Some(b));
     }
+    // argument slots read from `b` (design D5 / the Builtin::arity doc)
+    let arity: &[(Builtin, Arity)] = &[
+        (ListPush, Arity::Fixed(2)),
+        (ListPop, Arity::Fixed(1)),
+        (ListInsert, Arity::Fixed(3)),
+        (ListRemove, Arity::Fixed(2)),
+        (ListSlice, Arity::Fixed(3)),
+        (ListContains, Arity::Fixed(2)),
+        (DictGet, Arity::Fixed(2)),
+        (DictRemove, Arity::Fixed(2)),
+        (DictContains, Arity::Fixed(2)),
+        (DictKeys, Arity::Fixed(1)),
+        (DictValues, Arity::Fixed(1)),
+        (DictLen, Arity::Fixed(1)),
+        (DictNext, Arity::Fixed(2)),
+        (DictKeyAt, Arity::Fixed(2)),
+        (DictValAt, Arity::Fixed(2)),
+        (StrLen, Arity::Fixed(1)),
+        (StrConcatN, Arity::Counted),
+        (StrSplit, Arity::Fixed(2)),
+        (StrStartsWith, Arity::Fixed(2)),
+        (StrEndsWith, Arity::Fixed(2)),
+        (StrContains, Arity::Fixed(2)),
+        (StrTrim, Arity::Fixed(1)),
+        (StrUpper, Arity::Fixed(1)),
+        (StrLower, Arity::Fixed(1)),
+        (ParseInt, Arity::Fixed(1)),
+        (Fmt, Arity::Fixed(2)),
+        (AbsI, Arity::Fixed(1)),
+        (MinI, Arity::Fixed(2)),
+        (MaxI, Arity::Fixed(2)),
+        (AbsF, Arity::Fixed(1)),
+        (MinF, Arity::Fixed(2)),
+        (MaxF, Arity::Fixed(2)),
+        (Sqrt, Arity::Fixed(1)),
+        (Floor, Arity::Fixed(1)),
+        (Ceil, Arity::Fixed(1)),
+        (Round, Arity::Fixed(1)),
+        (Sin, Arity::Fixed(1)),
+        (Cos, Arity::Fixed(1)),
+        (Pow, Arity::Fixed(2)),
+        (Assert, Arity::Fixed(2)),
+        (Print, Arity::Fixed(1)),
+    ];
+    assert_eq!(arity.len(), Builtin::ALL.len());
+    for &(b, a) in arity {
+        assert_eq!(b.arity(), a, "{b:?}");
+    }
     assert_eq!(Builtin::from_u16(41), None);
     assert_eq!(Builtin::from_u16(u16::MAX), None);
 }
@@ -174,15 +222,15 @@ fn fuel_table_pinned() {
 fn base() -> Program {
     let mut pb = ProgramBuilder::new(7);
     let int = pb.ty(TypeDesc::Int);
-    let main = pb.declare("main", 0, 2);
-    let callee = pb.declare("callee", 1, 1);
+    let main = pb.declare("main", 0);
+    let callee = pb.declare("callee", 1);
     let mut f = pb.body(main);
     f.line(1);
     f.emit(Op::Nop, 0, 0, 0);
     f.emit(Op::LoadSmall, f.local(0), 5, 0);
     let ok = f.label();
     f.jump(Op::JmpIfNot, f.local(0), ok);
-    f.emit(Op::Copy, 0, 0, 0);
+    f.emit(Op::Copy, f.local(1), f.local(0), 0);
     f.bind(ok);
     f.line(2);
     f.emit(Op::Ret, 0, 0, 0);
@@ -193,7 +241,7 @@ fn base() -> Program {
     c.emit(Op::AddI, c.local(0), c.param(0), c.param(0));
     c.emit(Op::Ret, 0, 0, 0);
     c.end();
-    pb.main(0);
+    pb.main(main);
     pb.finish().expect("base program is valid")
 }
 
@@ -305,6 +353,102 @@ fn validate_rejects_host_site_out_of_range() {
 }
 
 #[test]
+fn validate_rejects_builtin_arguments_past_the_static_region() {
+    let mut p = base();
+    let n = p.static_words;
+    poke(
+        &mut p,
+        0,
+        instr(Op::CallBuiltin, Builtin::ListPush as u16, n - 2, 0),
+    );
+    p.validate().unwrap(); // two argument slots fit exactly
+    let mut p = base();
+    poke(
+        &mut p,
+        0,
+        instr(Op::CallBuiltin, Builtin::ListPush as u16, n - 1, 0),
+    );
+    invalid(&p);
+}
+
+#[test]
+fn validate_rejects_handler_frame_without_room_for_its_event() {
+    let p = full();
+    let h = usize::from(p.handlers[0].fn_id);
+    let mut q = p.clone();
+    q.fns[h].frame_words = 3;
+    invalid(&q);
+    let mut q = p.clone();
+    q.fns[h].params = 0;
+    invalid(&q);
+    // the event parameter's ref slot must agree with the event type
+    let mut q = p.clone();
+    q.fns[h].ref_slots.clear();
+    invalid(&q);
+    // main and initialisers take no parameters
+    let mut q = p.clone();
+    let m = usize::from(q.main_fn.unwrap());
+    q.fns[m].params = 1;
+    q.fns[m].frame_words += 1;
+    invalid(&q);
+}
+
+#[test]
+fn validate_rejects_global_below_a_frame_end() {
+    let mut p = full();
+    p.globals[0].slot = 0;
+    invalid(&p);
+}
+
+/// 5 000 one-instruction functions and 50 000 globals (the most a 16-bit static region holds): validation
+/// and parsing take time linear in the input, not quadratic.
+#[test]
+fn validate_is_fast_on_many_globals_and_frames() {
+    let t = std::time::Instant::now();
+    let mut p = Program {
+        bytecode_version: BYTECODE_VERSION,
+        host_api_version: 1,
+        code: vec![],
+        consts: vec![],
+        strings: vec![],
+        shapes: vec![],
+        types: quest_vm::types::TypeTable(vec![TypeDesc::Int]),
+        fns: vec![],
+        globals: vec![],
+        handlers: vec![],
+        main_fn: None,
+        host_sites: vec![],
+        lines: vec![],
+        files: vec![],
+        static_words: 65_000,
+    };
+    for i in 0..5_000u32 {
+        p.code.push(instr(Op::Ret, 0, 0, 0));
+        p.fns.push(FnInfo {
+            name: String::new(),
+            entry: i,
+            end: i + 1,
+            params: 0,
+            frame_base: (i * 3) as u16,
+            frame_words: 3,
+            ref_slots: vec![],
+        });
+    }
+    for i in 0..50_000u32 {
+        p.globals.push(GlobalInfo {
+            name: String::new(),
+            slot: (15_000 + i) as u16,
+            ty: 0,
+            init_fn: 0,
+        });
+    }
+    p.validate().unwrap();
+    let q = Program::from_bytes(&p.to_bytes()).unwrap();
+    assert_eq!(q, p);
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+}
+
+#[test]
 fn validate_rejects_overlapping_frames() {
     let mut p = base();
     p.fns[1].frame_base = p.fns[0].frame_base;
@@ -365,10 +509,10 @@ fn full() -> Program {
             ("Some".into(), vec![("value".into(), rec)]),
         ],
     });
-    let init = pb.declare("m::init_g", 0, 1);
+    let init = pb.declare("m::init_g", 0);
     let g = pb.global("m::g", list);
     pb.set_global_init(g, init);
-    let handler = pb.declare("m::on_click", 1, 3);
+    let handler = pb.declare("m::on_click", 1);
     let site = pb.host_site(5, HostFnKind::Promise, vec![st, int], prom);
     let shape = pb.shape(2, 0b01);
     let k = pb.const_u64(0xdead_beef_0000_0001);
@@ -385,10 +529,11 @@ fn full() -> Program {
     f.end();
     let mut h = pb.body(handler);
     h.line_col(9, 4);
+    h.mark_ref(h.param(0));
     h.emit(Op::Ret, 0, 0, 0);
     h.end();
     pb.handler("PlayerClicked", en, handler);
-    pb.main(handler);
+    pb.main(init);
     let _ = (dict, g);
     pb.finish().expect("full program is valid")
 }
