@@ -1,0 +1,6 @@
+error[type-mismatch]: `world.compare_and_set` takes `new` of the type of `expected`: expected `str`, found `int`
+ --> main.qs:3:61
+  |
+3 |     match await world.compare_and_set("wyrm_quest", "open", e.player.id):
+  |                                                             ^^^^^^^^^^^
+  = note: one key holds one type, so `Changed(current)` has exactly that type

@@ -358,6 +358,30 @@ impl Infer<'_> {
             (None, "emit") => "emit",
             _ => "this host function",
         };
+        // One key holds one type: `new` has the type of `expected`, so `Changed(current)` (typed by
+        // `expected`, decision 11) can always carry what the key holds.
+        if op == "world.compare_and_set"
+            && let (Some(&expected), Some(&new), Some(at)) = (
+                params.get(1),
+                params.get(2),
+                args.get(2).map(|a| a.value.span),
+            )
+            && !self.unify(expected, new)
+        {
+            let (e, f) = (self.show(expected), self.show(new));
+            let mut d = super::error(
+                "type-mismatch",
+                format!(
+                    "`world.compare_and_set` takes `new` of the type of `expected`: expected `{e}`, found `{f}`"
+                ),
+                b.file,
+                at,
+            );
+            d.notes.push(
+                "one key holds one type, so `Changed(current)` has exactly that type".to_string(),
+            );
+            b.diags.push(d);
+        }
         for (i, class) in open {
             if let (Some(ty), Some(a)) = (params.get(i), args.get(i)) {
                 b.checks.push(Check {

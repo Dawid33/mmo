@@ -1,7 +1,10 @@
 # Spec §5.7: errors raised without declaration, error sets, a pinned set, `?`, the three `else` forms, `match`
 # on a fallible call (exhaustive against the inferred set), `?` / `else` on Option, an error escaping a handler.
 # Adapted: the spec's `c` is a `Chest` struct declared here; its `give(p, gold)` gives `Item(kind="gold",
-# count=gold)` (the stub's `give` takes an `Item`); `log` is the stub command (it prints `log: …`).
+# count=gold)` (the stub's `give` takes an `Item`); `log` is the stub command (it prints `log: …`). Each spec
+# form sits in a wrapper function (`give_or_return` for `else return`, `take_or_log` for the `else err:` block,
+# `settle` for the `match`) so that `main` can run them one after another; `take_or_log`'s block returns `-1`
+# where the spec's returns nothing, because the wrapper returns the gold it took.
 error ChestError = ChestEmpty | NotEnough(have: int)
 error QuestError = ChestError | QuestClosed | NotYourQuest
 

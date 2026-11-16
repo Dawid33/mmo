@@ -3,8 +3,8 @@
 # Adapted: `chest.take` is a promise (plan decision 10): `give(e.player, await chest.take("gold", 20)?)`;
 # the match gains `case Err(_)` — a direct host call raises its whole list (decision 21: `NotFound`,
 # `Timeout`, `Lost`, `NamespaceGone` besides `Changed`); the new value is `str(e.player.id)`, not the id:
-# `Changed(current)` has the type of the compared value (decision 11), here `str`, so a stored `int` would
-# not fit it and the answer would arrive as `Lost`.
+# `compare_and_set` takes `new` of the type of `expected` (one key holds one type, so `Changed(current)` has
+# exactly that type) — the spec's `e.player.id` is refused, see `fail/cas_mixed_types`.
 @on(ItemDelivered)
 fn claim(e):
     match await world.compare_and_set("wyrm_quest", "open", str(e.player.id)):

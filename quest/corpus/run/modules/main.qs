@@ -1,11 +1,12 @@
 # Spec §5.10: the module tree, `mod`, `use` (lists, `as`), `pub`, `crate::`, `super::`, `self::`, a `use`
 # cycle between modules (main uses rewards, rewards uses crate::Ledger).
-# Adapted: the spec's `npc/dialogue.qs` is `npc/talk.qs` — `dialogue` became a reserved word (spec §5.13);
-# `npc::talk` is `pub mod` so the crate root may reach into it.
+# Adapted: `npc/mod.qs` declares `pub mod dialogue` (a child module lives in its parent's directory and must
+# be `pub` for the crate root to reach into it). `dialogue` is a reserved word (spec §5.13) but stays valid as
+# a module name and path segment.
 mod rewards
 mod npc
 use rewards::give_gold
-use npc::talk::{greet, farewell}
+use npc::dialogue::{greet, farewell}
 use rewards::give_gold as pay
 
 pub struct Ledger:
