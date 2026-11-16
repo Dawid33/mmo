@@ -9,7 +9,14 @@
 
 mod harness;
 
-pub use harness::{CaseConfig, config_of, diagnostics_of, expect_text_of, golden_of, tree_of};
+/// Well-typed programs by construction, for the property suites (native only: proptest).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod r#gen;
+
+pub use harness::{
+    CaseConfig, Trace, config_of, diagnostics_of, expect_text_of, golden_of, report_line, trace_of,
+    tree_of,
+};
 
 /// One corpus case, embedded.
 #[derive(Clone, Copy, Debug)]

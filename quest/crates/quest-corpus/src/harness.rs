@@ -131,14 +131,21 @@ pub fn diagnostics_of(case: &Case) -> String {
     format!("{head}{}", rendered.join("\n"))
 }
 
-/// What one run of a case produced.
-struct Run {
-    bytecode: u64,
+/// What one run of a case produced: the golden trace's parts ([`Trace::golden`]) and the final script
+/// regions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trace {
+    /// FNV-1a 64 of `Program::to_bytes()`.
+    pub bytecode: u64,
     /// Per tick: the tick, the fuel it used, the state hash after it.
-    ticks: Vec<(u64, u64, u64)>,
-    mem: u64,
-    output: Vec<String>,
-    reports: Vec<String>,
+    pub ticks: Vec<(u64, u64, u64)>,
+    /// FNV-1a 64 of the final memory.
+    pub mem: u64,
+    /// The final `Vm::script_bytes()`.
+    pub script: Vec<u8>,
+    pub output: Vec<String>,
+    /// One line per report ([`report_line`]).
+    pub reports: Vec<String>,
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
@@ -147,14 +154,19 @@ fn fnv(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-/// Compiles and runs the case as `quest run` does: the initialisers and `main` are asked for at once,
-/// then ticks run until the instance is quiescent or failed, or the config's tick limit is reached.
-/// `Err` is the text that stands in for the trace when the case does not compile or load.
-fn run(case: &Case) -> Result<Run, String> {
-    let cfg = config_of(case);
+/// Runs the case as `quest run` does, under `cfg` (the case's own is [`config_of`]): the initialisers and
+/// `main` are asked for at once, then ticks run until the instance is quiescent or failed, or `cfg.ticks`
+/// ticks ran. `before_step` is called before each tick with the runner and the program (a test may save
+/// and reload the VM there). `Err` is the text that stands in for the trace when the case does not
+/// compile or load.
+pub fn trace_of(
+    case: &Case,
+    cfg: &CaseConfig,
+    before_step: &mut dyn FnMut(&mut Runner, &Arc<Program>),
+) -> Result<Trace, String> {
     let tree = tree_of(case);
-    let program: Program = match compile(&tree, &quest_stub::stub_api()) {
-        Ok(c) => c.program,
+    let program: Arc<Program> = match compile(&tree, &quest_stub::stub_api()) {
+        Ok(c) => Arc::new(c.program),
         Err(diags) => {
             let rendered: Vec<String> = diags.iter().map(|d| render(d, &tree)).collect();
             return Err(format!("compile failed:\n{}\n", rendered.join("\n")));
@@ -163,14 +175,15 @@ fn run(case: &Case) -> Result<Run, String> {
     let bytecode = fnv(&program.to_bytes());
     let stub = StubConfig {
         latency: cfg.latency,
-        failures: cfg.failures,
-        chest: cfg.chest,
+        failures: cfg.failures.clone(),
+        chest: cfg.chest.clone(),
     };
-    let mut runner = Runner::new(Arc::new(program), MEM_BYTES_DEFAULT, stub)
+    let mut runner = Runner::new(program.clone(), MEM_BYTES_DEFAULT, stub)
         .map_err(|e| format!("load failed: {e:?}\n"))?;
     runner.vm.start_main();
     let mut ticks = Vec::new();
     for _ in 0..cfg.ticks {
+        before_step(&mut runner, &program);
         let tick = runner.now;
         let report = runner.step(cfg.fuel);
         ticks.push((tick, report.fuel_used, runner.vm.hash64()));
@@ -178,13 +191,19 @@ fn run(case: &Case) -> Result<Run, String> {
             break;
         }
     }
-    Ok(Run {
+    Ok(Trace {
         bytecode,
         ticks,
         mem: fnv(runner.vm.mem_bytes()),
+        script: runner.vm.script_bytes().to_vec(),
         output: std::mem::take(&mut runner.host.output),
         reports: runner.host.reports.iter().map(report_line).collect(),
     })
+}
+
+/// [`trace_of`] under the case's own config, with no hook.
+fn run(case: &Case) -> Result<Trace, String> {
+    trace_of(case, &config_of(case), &mut |_, _| {})
 }
 
 fn locs(out: &mut String, locs: &[SrcLoc]) {
@@ -238,7 +257,7 @@ fn cause_line(out: &mut String, cause: &AbortCause) {
 /// One report as one line: `queued <event>`, `dropped <event> <reason>`, `aborted <task>: <cause>` or
 /// `init-failed <global>: <cause>`, a cause being `error <name>[(<field>=<value>, …)][ at <file:line:col>…]` or
 /// `fault <kind> (<message>)[ at <file:line:col>…]`.
-fn report_line(r: &Report) -> String {
+pub fn report_line(r: &Report) -> String {
     let mut out = String::new();
     match r {
         Report::EventQueued { event } => {
@@ -260,7 +279,7 @@ fn report_line(r: &Report) -> String {
 }
 
 /// The output lines, then — when there are any — `reports:` and one line per report.
-fn output_text(out: &mut String, run: &Run, always_reports: bool) {
+fn output_text(out: &mut String, run: &Trace, always_reports: bool) {
     for line in &run.output {
         out.push_str(line);
         out.push('\n');
@@ -287,20 +306,27 @@ pub fn expect_text_of(case: &Case) -> String {
     }
 }
 
-/// The golden text of a run case: `bytecode <fnv64 of Program::to_bytes(), 16 hex>`, one
-/// `tick <n> fuel <used> hash <16 hex>` per tick, `mem <fnv64 of the final memory bytes>`, `output:` and the
-/// output lines, `reports:` and one line per report.
+/// The golden text of a run case: [`Trace::golden`] of its run under its own config, or the text that
+/// stands in for it.
 pub fn golden_of(case: &Case) -> String {
-    let r = match run(case) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    let mut out = format!("bytecode {:016x}\n", r.bytecode);
-    for (tick, fuel, hash) in &r.ticks {
-        let _ = writeln!(out, "tick {tick} fuel {fuel} hash {hash:016x}");
+    match run(case) {
+        Ok(r) => r.golden(),
+        Err(e) => e,
     }
-    let _ = writeln!(out, "mem {:016x}", r.mem);
-    out.push_str("output:\n");
-    output_text(&mut out, &r, true);
-    out
+}
+
+impl Trace {
+    /// The golden text: `bytecode <fnv64 of Program::to_bytes(), 16 hex>`, one
+    /// `tick <n> fuel <used> hash <16 hex>` per tick, `mem <fnv64 of the final memory bytes>`, `output:` and
+    /// the output lines, `reports:` and one line per report.
+    pub fn golden(&self) -> String {
+        let mut out = format!("bytecode {:016x}\n", self.bytecode);
+        for (tick, fuel, hash) in &self.ticks {
+            let _ = writeln!(out, "tick {tick} fuel {fuel} hash {hash:016x}");
+        }
+        let _ = writeln!(out, "mem {:016x}", self.mem);
+        out.push_str("output:\n");
+        output_text(&mut out, self, true);
+        out
+    }
 }
