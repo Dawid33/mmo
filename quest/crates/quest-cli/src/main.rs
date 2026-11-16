@@ -65,7 +65,10 @@ fn load_state(bytes: &[u8], program: Arc<Program>, cfg: VmConfig) -> Result<Vm, 
         return Vm::load(program, cfg, save).map_err(|e| format!("{e:?}"));
     }
     let vm = Vm::load(Arc::new(old), cfg.clone(), save).map_err(|e| format!("{e:?}"))?;
-    let (vm, report) = vm.migrate(program, cfg).map_err(|e| format!("{e:?}"))?;
+    // A refused edit leaves the state file as it is: the run stops before anything is saved.
+    let (vm, report) = vm
+        .migrate(program, cfg)
+        .map_err(|e| format!("the edit is refused (the state file is unchanged): {e:?}"))?;
     let lists = [
         ("carried", &report.carried),
         ("adopted", &report.adopted),

@@ -50,7 +50,9 @@ orphan: gold: int = Int(7)
 
 — `carried`, `adopted`, `initialised` and `orphaned` list names (a line only when its list is not empty),
 then one `orphan:` line per value kept aside (older orphans too), then `events dropped: N` and
-`handlers cancelled: N` when not 0. A file that cannot be loaded or migrated exits 2.
+`handlers cancelled: N` when not 0. A file that cannot be loaded exits 2. A migration can be refused (a
+value too large to read out, say): the run prints the reason and exits 2 without writing a state file, so
+the old state stays valid for the old script.
 
 A report prints as `error: handler <name> aborted: <fault or error text>` followed by one
 `  at <file>:<line>:<col>` per location, or as `warning: event <name> queued` /

@@ -3,7 +3,9 @@
 //! # Migration
 //! [`Vm::migrate`] moves an instance's state into a recompiled program by NAME, never by slot: the old
 //! instance is read out as self-describing values and a fresh instance of the new program is built from
-//! them, so nothing of the old memory's layout, tables or heap survives.
+//! them, so nothing of the old memory's layout, tables or heap survives. Every step below works on a
+//! copy: the old instance is never changed, so when a migration fails ([`MigrateError`]) the edit is
+//! refused and the block runs on with its old program and state, exactly as it was.
 //! 1. A segment still open (a task out of fuel mid-run) is aborted: its writes are undone as if it
 //!    faulted, and the task does not continue.
 //! 2. Parked tasks are cancelled and every promise record is dropped with the old memory (the fresh
@@ -16,8 +18,9 @@
 //!    ADOPTED; either way its initialiser does not run (`H_INIT_SKIP`). Otherwise its initialiser runs
 //!    at the next ticks (INITIALISED). An old global that was not carried becomes an orphan.
 //! 5. The queued events are delivered again in their order; one with no handler in the new program, or
-//!    whose shape no longer fits, is dropped. An event whose handlers had begun to run is not delivered
-//!    again (its first handlers ran under the old code) and counts as dropped.
+//!    whose shape no longer fits, is dropped. An event whose handlers had already started when the edit
+//!    landed is not delivered again — re-running handlers that already ran is worse than losing the rest
+//!    — and counts as dropped.
 //!
 //! The fresh instance has the old epoch, promise serial and latest `now`; everything else — `main`'s
 //! state, the arrival counter, the fuel debt — starts as in [`Vm::new`]. A failed instance migrates
@@ -37,6 +40,7 @@
 use std::sync::Arc;
 
 use crate::consts::QUEUE_LEN;
+use crate::fault::FaultKind;
 use crate::interp::Fault;
 use crate::layout::{
     H_EPOCH, H_EV_HANDLER, H_INIT_CURSOR, H_INIT_SKIP, H_NOW, H_PROMISE_SERIAL, H_QUEUE_COUNT,
@@ -125,8 +129,22 @@ fn write_type(types: &TypeTable, t: TypeId, depth: u32, out: &mut String) {
     }
 }
 
-fn invalid(f: Fault) -> LoadError {
-    LoadError::Invalid(format!("the instance does not parse: {}", f.message))
+/// Why [`Vm::migrate`] refused an edit. The old instance is unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MigrateError {
+    /// The new program or the memory size is refused, as by [`Vm::new`].
+    Refused(LoadError),
+    /// The old instance's memory does not parse.
+    Corrupt(String),
+    /// The value of global `name` cannot be read out (`ValueTooLarge`: the walk visits shared values
+    /// once per reference, so a heavily aliased value can exceed the work bound).
+    GlobalUnreadable { name: String, kind: FaultKind },
+    /// The new instance's inbox has no room for the set of carried globals.
+    InboxFull,
+}
+
+fn invalid(f: Fault) -> MigrateError {
+    MigrateError::Corrupt(f.message)
 }
 
 /// Adds `o` to the sorted orphan list, replacing one of the same name and type.
@@ -166,36 +184,45 @@ impl Vm {
         }
     }
 
-    /// The instance moved into `new`, the edited script's program (the module docs give the steps), and
-    /// what happened to each variable. `cfg` configures the new instance as in [`Vm::new`], except that
-    /// the epoch is the old instance's (`cfg.epoch` is not used). An error — the new program or memory
-    /// size is refused, the old memory does not parse, a global's value is too large to read out, or
-    /// the inbox has no room for the set of carried globals — consumes the old instance.
+    /// A new instance of `new`, the edited script's program, holding this instance's state (the module
+    /// docs give the steps), and what happened to each variable. `cfg` configures it as in [`Vm::new`],
+    /// except that the epoch is this instance's (`cfg.epoch` is not used). Never changes `self`: on an
+    /// error the edit is refused and this instance runs on as it was.
     pub fn migrate(
-        mut self,
+        &self,
         new: Arc<Program>,
         cfg: VmConfig,
-    ) -> Result<(Vm, MigrationReport), LoadError> {
+    ) -> Result<(Vm, MigrationReport), MigrateError> {
         let epoch = u32::try_from(self.header(H_EPOCH).map_err(invalid)?)
-            .map_err(|_| LoadError::Invalid("epoch out of range".into()))?;
-        let mut next = Vm::new(new, VmConfig { epoch, ..cfg })?;
+            .map_err(|_| MigrateError::Corrupt("epoch out of range".into()))?;
+        let mut next = Vm::new(new, VmConfig { epoch, ..cfg }).map_err(MigrateError::Refused)?;
         let mut report = MigrationReport::default();
 
+        // The old instance is read through a copy, whose open segment is undone (an abort restores
+        // only the script words, so the copy could not run on; it is only read).
+        let mut old_vm = Vm::adopt(
+            Arc::clone(&self.program),
+            self.program_hash,
+            self.store.clone(),
+            Vec::new(),
+        );
+        let this = &mut old_vm;
+
         // 1, 2: the open segment is undone; the parked tasks go with the old memory.
-        let resumed_mid_segment = self.task_in_progress().map_err(invalid)?
-            && self.header(H_RESUME_PARKED).map_err(invalid)? != 0;
-        self.store.segment_abort();
+        let resumed_mid_segment = this.task_in_progress().map_err(invalid)?
+            && this.header(H_RESUME_PARKED).map_err(invalid)? != 0;
+        this.store.segment_abort();
         report.handlers_cancelled =
-            self.parked_count().map_err(invalid)? + u32::from(resumed_mid_segment);
+            this.parked_count().map_err(invalid)? + u32::from(resumed_mid_segment);
 
         // 3: the old state as wire values.
-        let mut old = self.read_globals()?;
-        let (events, in_dispatch) = self.read_queue().map_err(invalid)?;
+        let mut old = this.read_globals()?;
+        let (events, in_dispatch) = this.read_queue().map_err(invalid)?;
         report.events_dropped = u32::from(in_dispatch);
 
         // 4: the new globals.
         let p = Arc::clone(&next.program);
-        let mut orphans = std::mem::take(&mut self.orphans);
+        let mut orphans = self.orphans.clone();
         let mut skip = vec![0u64; p.globals.len().div_ceil(64)];
         for (i, g) in p.globals.iter().enumerate() {
             let carried = match old.iter().position(|o| o.name == g.name) {
@@ -231,9 +258,10 @@ impl Vm {
         next.orphans = orphans;
         if skip.iter().any(|&w| w != 0) {
             let bytes: Vec<u8> = skip.iter().flat_map(|w| w.to_le_bytes()).collect();
-            let set = next.inbox_store(&bytes).map_err(invalid)?.ok_or_else(|| {
-                LoadError::Invalid("the inbox has no room for the carried globals".into())
-            })?;
+            let set = next
+                .inbox_store(&bytes)
+                .map_err(invalid)?
+                .ok_or(MigrateError::InboxFull)?;
             next.set_header(H_INIT_SKIP, set).map_err(invalid)?;
             next.skip_carried_inits().map_err(invalid)?;
         }
@@ -246,7 +274,7 @@ impl Vm {
         }
 
         for field in [H_PROMISE_SERIAL, H_NOW] {
-            let v = self.header(field).map_err(invalid)?;
+            let v = this.header(field).map_err(invalid)?;
             next.set_header(field, v).map_err(invalid)?;
         }
         next.store.mem.clear_log();
@@ -255,7 +283,7 @@ impl Vm {
 
     /// Every global whose value exists (initialised, or carried by an earlier migration), as an orphan
     /// would hold it, in program order.
-    fn read_globals(&self) -> Result<Vec<Orphan>, LoadError> {
+    fn read_globals(&self) -> Result<Vec<Orphan>, MigrateError> {
         let p = &self.program;
         let cursor = self.header(H_INIT_CURSOR).map_err(invalid)?;
         let mut out = Vec::new();
@@ -264,9 +292,13 @@ impl Vm {
                 continue;
             }
             let v = self.slot(g.slot);
-            let (value, _) = to_wire(&self.store, self.heap, &p.types, g.ty, v).map_err(|k| {
-                LoadError::Invalid(format!("global {} cannot be read out: {k:?}", g.name))
-            })?;
+            let (value, _) =
+                to_wire(&self.store, self.heap, &p.types, g.ty, v).map_err(|kind| {
+                    MigrateError::GlobalUnreadable {
+                        name: g.name.clone(),
+                        kind,
+                    }
+                })?;
             out.push(Orphan {
                 name: g.name.clone(),
                 ty: type_text(&p.types, g.ty),

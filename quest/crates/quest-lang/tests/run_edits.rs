@@ -7,9 +7,9 @@ mod common;
 use std::sync::Arc;
 
 use common::compile;
-use quest_stub::{Runner, StubConfig, stub_api};
-use quest_vm::host::{Host, PromiseId, Report};
-use quest_vm::migrate::{MigrationReport, Orphan};
+use quest_stub::{RunOutcome, Runner, StubConfig, stub_api};
+use quest_vm::host::{FaultKind, Host, PromiseId, Report};
+use quest_vm::migrate::{MigrateError, MigrationReport, Orphan};
 use quest_vm::wire::WireValue;
 use quest_vm::{Program, Resolved, Status, Vm, VmConfig};
 
@@ -122,6 +122,41 @@ fn same_name_compatible_is_carried() {
     settle(&mut r);
     assert_eq!(global(&r.vm, &p, "count"), WireValue::Int(12));
     assert_eq!(global(&r.vm, &p, "gold"), WireValue::Int(9));
+
+    // Regression (Task 31 review): a value too large to read out (1000 aliases of one list) refuses the
+    // edit and leaves the old instance exactly as it was, still running.
+    let aliased = "let a: list[int] = []
+let b: list[list[int]] = []
+
+fn main():
+    let i = 0
+    while i < 100:
+        a.append(i)
+        i = i + 1
+    let j = 0
+    while j < 1000:
+        b.append(a)
+        j = j + 1
+";
+    let (mut r, _) = start(aliased, StubConfig::default());
+    r.run_main(FUEL, 10_000);
+    assert!(r.host.reports.is_empty(), "{:?}", r.host.reports);
+    let (before, saved) = (r.vm.hash64(), r.vm.save());
+    let edited = program(&format!("{aliased}\nlet c = 1\n"));
+    assert_eq!(
+        r.vm.migrate(edited, vm_cfg(1)).err(),
+        Some(MigrateError::GlobalUnreadable {
+            name: "b".into(),
+            kind: FaultKind::ValueTooLarge,
+        })
+    );
+    assert_eq!((r.vm.hash64(), r.vm.save()), (before, saved));
+    assert!(r.vm.restart_main());
+    assert!(matches!(
+        r.run_main(FUEL, 10_000),
+        RunOutcome::Finished { .. }
+    ));
+    assert!(r.host.reports.is_empty(), "{:?}", r.host.reports);
 }
 
 #[test]

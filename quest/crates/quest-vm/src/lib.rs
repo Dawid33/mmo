@@ -37,7 +37,7 @@ pub use hash::Fnv64;
 pub use host::{Host, HostApi};
 pub use layout::{Layout, LoadError};
 pub use mem::{Checkpoint, Mem, MemError, RollbackError};
-pub use migrate::{MigrationReport, Orphan};
+pub use migrate::{MigrateError, MigrationReport, Orphan};
 pub use program::{Program, ProgramError};
 pub use save::SAVE_MAGIC;
 pub use store::Store;
