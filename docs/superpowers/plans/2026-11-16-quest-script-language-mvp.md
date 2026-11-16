@@ -140,6 +140,11 @@ Places where this plan goes beyond the spec or revisits a **[call]**. None reope
     element, global, user function's result, a join of two promises, an annotation `Promise[T]`) raises U, and so
     does `await all`. Promise types unify on the value type only. Cost: a `match` on an indirect promise must handle
     U (or use `_`), and `impossible-arm` cannot flag errors of U there. Fallible calls keep precise inferred sets.
+22. **An edit drops a partly dispatched event [designer's call, 2026-11-16, Task 31 review]:** if an edit lands
+    while an event's handlers are running (some ran, the current one is aborted), the event is not re-delivered to
+    the new program — re-running handlers that already ran is worse than skipping the rest. It counts in
+    `MigrationReport.events_dropped`. Events still waiting in the queue are re-delivered (spec §6.9). A migration
+    that fails leaves the old instance untouched: the edit is refused and the block keeps its program and state.
 16. **`quest test` is not built** (the spec marks it optional); `assert` / `assert_eq` in `main()` cover it.
 19. **Dialogue and quests are parsed by the MVP front end and compiled later [proposed 2026-11-16; spec §5.11–5.13,
     syntax awaiting approval].** Tasks 16, 18 and 19 lex, parse and resolve `dialogue` and `quest` items and the
