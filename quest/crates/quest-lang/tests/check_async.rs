@@ -240,7 +240,7 @@ fn precise():
     match await p:
         case Ok(_):
             pass
-        case Err(Timeout | Lost | NamespaceGone):
+        case Err(Timeout | Lost | NamespaceGone | WrongType):
             pass
     match await world.add("k", 1):
         case Ok(_):

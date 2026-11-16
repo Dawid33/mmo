@@ -88,7 +88,9 @@ queues an event (the queue holds 4: a warning while busy, then the newest is dro
 meanwhile) and yields a result you handle like any fallible call (`await p?`, `await p else 0`, `match await p:`).
 Hold a promise in a local to await it later; `await all([a, b])` awaits a list. A promise that is not a
 direct host call (a parameter, field, list element, global, a function's return) carries the union of
-**every** host error (decision 21): handle `Err(_)` there. Every await is a segment boundary: a fault after
+**every** host error (decision 21): handle `Err(_)` there. Every awaited result (and `await all`) can also
+fail with the **base promise errors** `Timeout`, `Lost` and `WrongType`, which the VM makes itself whatever
+the host function declares: an exhaustive `match await chest.take(...)` needs arms for them (or `Err(_)`). Every await is a segment boundary: a fault after
 an await undoes only the changes since it; commands and requests of an aborted segment never reach the host.
 `compare_and_set(key, expected, new)` needs `expected` and `new` of the same type (`str(e.player.id)`, not
 `e.player.id`, against a string key).
@@ -157,7 +159,7 @@ stderr.
 | `--mem BYTES` | VM memory | 262144 |
 | `--latency N` | ticks between a `world.*` / `chest.take` request and its answer | 0 |
 | `--trace` | one stderr line per tick: `tick=<n> fuel=<used> hash=<16 hex> status=<idle\|busy\|failed>` | off |
-| `--fail KIND[@NTH][:OP]` | the NTH (default 1) request of OP (default any) fails; KIND is `timeout`, `lost`, `changed` or `namespace-gone`; repeatable | none |
+| `--fail KIND[@NTH][:OP]` | the NTH (default 1) request of OP (default any) fails; KIND is `timeout`, `lost`, `changed` or `namespace-gone`; only requests whose op can fail that way count (`changed` only `world.compare_and_set`, `namespace-gone` only `world.*`); repeatable | none |
 | `--chest KIND=N` | N items of KIND in the chest; repeatable | empty |
 | `--save FILE` | write the program and its VM state after the run | |
 | `--load FILE` | start from a saved state | |

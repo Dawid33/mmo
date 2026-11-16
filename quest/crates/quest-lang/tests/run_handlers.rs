@@ -431,3 +431,53 @@ fn main():
     }
     assert_eq!(out.leaked_words, 0, "leaked");
 }
+
+/// Regression (final review I1): the VM fails any awaited promise with `Timeout`, `Lost` or `WrongType`,
+/// so a `match` covering only the host function's own `raises` is not exhaustive; with the base errors it
+/// runs, and a timed-out `chest.take` takes its arm.
+#[test]
+fn awaited_errors_include_the_base_errors() {
+    let arms = r#"fn main():
+    match await chest.take("gold", 1):
+        case Ok(it):
+            print(f"took {it.count}")
+        case Err(ChestEmpty):
+            print("empty")
+        case Err(NotEnough(have)):
+            print(f"only {have}")
+"#;
+    let ds = common::diagnostics(&[("main.qs", arms)]);
+    match ds.as_slice() {
+        [d] => {
+            assert_eq!(d.code, "non-exhaustive", "{ds:?}");
+            assert!(
+                ["Lost", "Timeout", "WrongType"]
+                    .iter()
+                    .any(|n| d.message.contains(n)),
+                "{ds:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let full = format!(
+        "{arms}        case Err(Timeout):
+            print(\"timed out\")
+        case Err(Lost):
+            print(\"lost\")
+        case Err(WrongType):
+            print(\"wrong type\")
+"
+    );
+    let cfg = StubConfig {
+        failures: vec![FailureRule {
+            op: Some("chest.take".to_string()),
+            nth: 1,
+            kind: FailureKind::Timeout,
+        }],
+        ..StubConfig::default()
+    };
+    assert_eq!(
+        printed_with(&[("main.qs", &full)], cfg),
+        lines(&["timed out"])
+    );
+}

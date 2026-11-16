@@ -1,7 +1,7 @@
 //! The stub's host-API description (design D9, version 1) and the host-fn ids it implies: a host fn id is the
 //! index into [`stub_api`]`().fns`.
 
-use quest_vm::host::{HostApi, HostError, HostFn, HostFnKind, HostStruct, HostTy};
+use quest_vm::host::{HostApi, HostError, HostFn, HostFnKind, HostStruct, HostTy, PROMISE_ERRORS};
 
 pub const F_SAY: u16 = 0;
 pub const F_LOG: u16 = 1;
@@ -200,6 +200,17 @@ fn err(name: &str, fields: &[(&str, HostTy)]) -> HostError {
         name: name.to_string(),
         fields: fields.iter().map(|(n, t)| p(n, t.clone())).collect(),
     }
+}
+
+/// Whether the host fn `id` can fail with the error `name`: it declares it, or it is a promise and `name` is
+/// one of the base promise errors (`quest_vm::host::PROMISE_ERRORS`).
+pub fn op_can_raise(id: u16, name: &str) -> bool {
+    let api = stub_api();
+    let Some(hf) = api.fns.get(usize::from(id)) else {
+        return false;
+    };
+    hf.raises.iter().any(|r| r == name)
+        || (hf.kind == HostFnKind::Promise && PROMISE_ERRORS.contains(&name))
 }
 
 /// `owner.name` for a host fn id (`world.get`, `Player.add_tag`, `emit`): what a [`crate::FailureRule`]

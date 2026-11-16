@@ -27,6 +27,12 @@ pub trait Host {
     fn report(&mut self, report: Report);
 }
 
+/// The errors the VM itself fails an awaited promise with, whatever the host function declares: `Lost` (the
+/// host lost the request, or answered an error the program does not know), `Timeout` (no answer within
+/// `PROMISE_TIMEOUT_TICKS`), `WrongType` (an answer that does not fit the promised type). All are data-less;
+/// the compiler adds them to every awaited result's error set.
+pub const PROMISE_ERRORS: [&str; 3] = ["Lost", "Timeout", "WrongType"];
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HostApi {
     pub version: u32,

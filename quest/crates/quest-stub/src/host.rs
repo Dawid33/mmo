@@ -22,7 +22,23 @@ pub enum FailureKind {
     NamespaceGone,
 }
 
+impl FailureKind {
+    /// The error the request fails with.
+    fn error_name(self) -> &'static str {
+        match self {
+            FailureKind::Timeout => "Timeout",
+            FailureKind::Lost => "Lost",
+            FailureKind::Changed => "Changed",
+            FailureKind::NamespaceGone => "NamespaceGone",
+        }
+    }
+}
+
 /// The `nth` (1-based) request of `op` (`"world.get"`, ...; `None` = any op) fails with `kind`.
+///
+/// A rule injects only an error the request's op can produce: one its host fn declares, or a base promise
+/// error (`Timeout`, `Lost`). For any other op the rule is skipped, and the request does not count toward
+/// `nth` (`Changed` with `op: None` picks the `nth` `world.compare_and_set`, never a `chest.take`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailureRule {
     pub op: Option<String>,
@@ -208,7 +224,9 @@ impl StubHost {
         let is_world = op.starts_with("world.");
         let mut fate = None;
         for (rule, seen) in &mut self.rules {
-            if rule.op.as_ref().is_some_and(|o| *o != op) {
+            if rule.op.as_ref().is_some_and(|o| *o != op)
+                || !op_can_raise(f, rule.kind.error_name())
+            {
                 continue;
             }
             *seen += 1;

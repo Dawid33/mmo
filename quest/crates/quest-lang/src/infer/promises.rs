@@ -12,6 +12,10 @@
 //!   variable, a function's result, a local assigned anything else. An annotation `Promise[T]` says nothing
 //!   about errors either: such a promise also fails with U.
 //!
+//! Both sets also hold the **base promise errors** `Lost`, `Timeout` and `WrongType`
+//! (`quest_vm::host::PROMISE_ERRORS`): the VM fails any awaited promise with them, whatever its host function
+//! declares.
+//!
 //! Sound by construction: a promise is made only by a host promise function, so U holds every error any
 //! promise can fail with, and the precise case sees every assignment of its local. Calls of fallible
 //! functions keep their precise inferred sets (`errors.rs`).
@@ -34,7 +38,7 @@ use super::{Body, Check, Class, Infer, error};
 use crate::ast::{Span, UnOp};
 use crate::hir::{self, DefId, Expr, ExprKind, FStrPart, HostItem, LocalId, Stmt, StmtKind};
 use crate::ty::{SetId, Ty, TyId};
-use quest_vm::host::HostFnKind;
+use quest_vm::host::{HostFnKind, PROMISE_ERRORS};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An `await`: what code generation needs (`Typed::awaits`, by the `await` expression).
@@ -62,7 +66,8 @@ impl Infer<'_> {
             .fns
             .iter()
             .filter(|f| f.kind == HostFnKind::Promise)
-            .flat_map(|f| f.raises.iter().cloned());
+            .flat_map(|f| f.raises.iter().cloned())
+            .chain(PROMISE_ERRORS.iter().map(|n| n.to_string()));
         self.types.set(names)
     }
 
@@ -79,7 +84,12 @@ impl Infer<'_> {
             .fns
             .get(i as usize)
             .filter(|f| f.kind == HostFnKind::Promise)?;
-        Some(self.types.set(f.raises.iter().cloned()))
+        let names = f
+            .raises
+            .iter()
+            .cloned()
+            .chain(PROMISE_ERRORS.iter().map(|n| n.to_string()));
+        Some(self.types.set(names))
     }
 
     /// The locals of a function's body whose promise has a precise set (see the module doc), with it.

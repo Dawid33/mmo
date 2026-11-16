@@ -51,7 +51,7 @@ use crate::hir::{
     StmtKind,
 };
 use crate::ty::{Ty, TyId};
-use quest_vm::host::{HostFnKind, HostTy};
+use quest_vm::host::{HostFnKind, HostTy, PROMISE_ERRORS};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An error name's data.
@@ -102,8 +102,13 @@ impl<'k> Infer<'k> {
             });
         }
         for f in &host.fns {
-            for name in &f.raises {
-                self.errors.entry(name.clone()).or_insert(ErrShape {
+            let base: &[&str] = match f.kind {
+                HostFnKind::Promise => &PROMISE_ERRORS,
+                HostFnKind::Query | HostFnKind::Command => &[],
+            };
+            let names = f.raises.iter().cloned();
+            for name in names.chain(base.iter().map(|n| n.to_string())) {
+                self.errors.entry(name).or_insert(ErrShape {
                     fields: Vec::new(),
                     origin: "raised by the host".to_string(),
                 });

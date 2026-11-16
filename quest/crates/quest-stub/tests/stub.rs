@@ -232,15 +232,51 @@ fn failure_rules() {
 
     // Changed carries the current value.
     let mut h = host(StubConfig {
-        failures: vec![rule(Some("world.set"), 2, FailureKind::Changed)],
+        failures: vec![rule(Some("world.compare_and_set"), 1, FailureKind::Changed)],
         ..cfg()
     });
     one(&mut h, 1, F_WORLD_SET, &[s("k"), W::Int(1)]).unwrap();
     assert_eq!(
-        one(&mut h, 2, F_WORLD_SET, &[s("k"), W::Int(2)]),
+        one(&mut h, 2, F_WORLD_CAS, &[s("k"), W::Int(1), W::Int(2)]),
         Err(variant("Changed", vec![("current", W::Int(1))]))
     );
     assert_eq!(one(&mut h, 3, F_WORLD_GET, &[s("k")]), Ok(W::Int(1)));
+}
+
+/// Regression (final review, Task 15 minor): a rule injects only errors its op can produce (its `raises`
+/// and the base promise errors); for any other op it is skipped and does not count.
+#[test]
+fn failure_rules_fit_the_op() {
+    let rule = |kind| FailureRule {
+        op: None,
+        nth: 1,
+        kind,
+    };
+    let mut h = host(StubConfig {
+        failures: vec![rule(FailureKind::Changed), rule(FailureKind::NamespaceGone)],
+        chest: vec![("gold".into(), 3)],
+        ..cfg()
+    });
+    // `chest.take` declares neither: both rules pass it by.
+    assert_eq!(
+        one(&mut h, 1, F_CHEST_TAKE, &[s("gold"), W::Int(1)]),
+        Ok(item("gold", 1))
+    );
+    // `world.compare_and_set` raises both: the first rule fires on it.
+    assert_eq!(
+        one(&mut h, 2, F_WORLD_CAS, &[s("k"), W::Int(1), W::Int(2)]),
+        Err(variant("Changed", vec![("current", W::Unit)]))
+    );
+    // A base error fits every promise.
+    let mut h = host(StubConfig {
+        failures: vec![rule(FailureKind::Lost)],
+        chest: vec![("gold".into(), 3)],
+        ..cfg()
+    });
+    assert_eq!(
+        one(&mut h, 1, F_CHEST_TAKE, &[s("gold"), W::Int(1)]),
+        Err(variant("Lost", vec![]))
+    );
 }
 
 #[test]
