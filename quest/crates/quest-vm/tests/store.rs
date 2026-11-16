@@ -1,4 +1,5 @@
 use proptest::prelude::*;
+use quest_vm::consts::HEADER_WORDS;
 use quest_vm::layout::*;
 use quest_vm::{Checkpoint, Layout, LoadError, Mem, MemError, Store};
 
@@ -12,7 +13,7 @@ fn plan_regions_are_ordered_disjoint_and_fill_memory() {
         let l = Layout::plan(100, mem_bytes).unwrap();
         let script_words = (l.heap_end - l.static_base) / 8;
         let regions = [
-            (0, 32 * 8),
+            (0, HEADER_WORDS * 8),
             (l.static_base, l.heap_base),
             (l.heap_base, l.heap_end),
             (l.shadow_base, l.shadow_base + script_words * 8),
@@ -28,7 +29,7 @@ fn plan_regions_are_ordered_disjoint_and_fill_memory() {
             assert!(r[0].0 <= r[0].1);
             assert!(r[0].1 <= r[1].0, "{r:?}");
         }
-        assert_eq!(l.static_base, 32 * 8);
+        assert_eq!(l.static_base, HEADER_WORDS * 8);
         assert_eq!(l.heap_base, l.static_base + 100 * 8);
         assert_eq!(l.shadow_base, l.heap_end);
         assert_eq!(l.cmds_end, l.trace_base);
@@ -48,7 +49,10 @@ fn plan_too_small() {
     assert!(need > 16_384);
     let l = Layout::plan(100, need).unwrap();
     assert!(l.heap_end - l.heap_base >= 4_096);
-    assert!(matches!(Layout::plan(100, need - 8), Err(LoadError::MemTooSmall { .. })));
+    assert!(matches!(
+        Layout::plan(100, need - 8),
+        Err(LoadError::MemTooSmall { .. })
+    ));
 }
 
 #[test]
@@ -59,15 +63,28 @@ fn header_roundtrip() {
     assert_eq!(Layout::read_header(&s.mem), Err(LoadError::BadMagic));
     let mut s = store();
     s.mem.w64(H_HEAP_END * 8, 8).unwrap();
-    assert!(matches!(Layout::read_header(&s.mem), Err(LoadError::Invalid(_))));
-    assert!(matches!(Layout::read_header(&Mem::new(8)), Err(LoadError::BadMagic)));
-    assert!(matches!(Layout::read_header(&Mem::new(0)), Err(LoadError::Invalid(_))));
+    assert!(matches!(
+        Layout::read_header(&s.mem),
+        Err(LoadError::Invalid(_))
+    ));
+    assert!(matches!(
+        Layout::read_header(&Mem::new(8)),
+        Err(LoadError::BadMagic)
+    ));
+    assert!(matches!(
+        Layout::read_header(&Mem::new(0)),
+        Err(LoadError::Invalid(_))
+    ));
 }
 
 #[test]
 fn abort_restores_script_words_only() {
     let mut s = store();
-    let (st, hp, q) = (s.layout.slot_off(3), s.layout.heap_base + 16, s.layout.queue_base);
+    let (st, hp, q) = (
+        s.layout.slot_off(3),
+        s.layout.heap_base + 16,
+        s.layout.queue_base,
+    );
     s.ws(st, 1).unwrap();
     s.ws(hp, 2).unwrap();
     s.wr(q, 3).unwrap();
@@ -140,8 +157,16 @@ fn misplaced_writes_are_errors_not_panics() {
     let mut s = store();
     let l = s.layout;
     assert_eq!(s.ws(0, 1), Err(MemError::OutOfRange { off: 0 }));
-    assert_eq!(s.ws(l.heap_end, 1), Err(MemError::OutOfRange { off: l.heap_end }));
-    assert_eq!(s.ws(l.static_base + 1, 1), Err(MemError::Unaligned { off: l.static_base + 1 }));
+    assert_eq!(
+        s.ws(l.heap_end, 1),
+        Err(MemError::OutOfRange { off: l.heap_end })
+    );
+    assert_eq!(
+        s.ws(l.static_base + 1, 1),
+        Err(MemError::Unaligned {
+            off: l.static_base + 1
+        })
+    );
     assert!(s.wr(l.static_base, 1).is_err());
     assert!(s.wr(l.heap_end, 1).is_err());
     assert!(s.wr(l.dirty_base, 1).is_err());
@@ -162,6 +187,57 @@ fn nested_open_keeps_segment_and_stray_commit_abort_are_no_ops() {
     s.segment_open();
     s.segment_abort();
     assert_eq!(s.r(a), Ok(1));
+}
+
+#[test]
+fn abort_restores_last_word_and_both_sides_of_a_bitmap_boundary() {
+    let mut s = store();
+    let l = s.layout;
+    let offs = [
+        l.static_base + 63 * 8,
+        l.static_base + 64 * 8,
+        l.heap_end - 8,
+    ];
+    for (i, o) in offs.iter().enumerate() {
+        s.ws(*o, 100 + i as u64).unwrap();
+    }
+    s.segment_open();
+    for o in offs {
+        s.ws(o, 7).unwrap();
+    }
+    s.segment_abort();
+    for (i, o) in offs.iter().enumerate() {
+        assert_eq!(s.r(*o), Ok(100 + i as u64));
+    }
+    for dw in 0..(l.inbox_base - l.dirty_base) / 8 {
+        assert_eq!(s.r(l.dirty_base + dw * 8), Ok(0));
+    }
+}
+
+#[test]
+fn stray_dirty_bits_past_the_last_script_word_are_ignored_and_cleared() {
+    // A memory whose script words are not a multiple of 64, so the last dirty word has spare bits.
+    let mut mem_bytes = 65_536;
+    let mut s = loop {
+        let s = Store::new(100, mem_bytes).unwrap();
+        if !((s.layout.heap_end - s.layout.static_base) / 8).is_multiple_of(64) {
+            break s;
+        }
+        mem_bytes += 8;
+    };
+    let l = s.layout;
+    let script_words = u64::from((l.heap_end - l.static_base) / 8);
+    let dirty_off = l.dirty_base + (script_words / 64) as u32 * 8;
+    let bit = script_words % 64;
+    s.segment_open();
+    s.mem.w64(l.queue_base, 0xCD).unwrap();
+    s.mem
+        .w64(dirty_off, s.r(dirty_off).unwrap() | (1 << bit) | (1 << 63))
+        .unwrap();
+    let runtime: Vec<u8> = s.mem.bytes()[l.inbox_base as usize..].to_vec();
+    s.segment_abort();
+    assert_eq!(&s.mem.bytes()[l.inbox_base as usize..], &runtime[..]);
+    assert_eq!(s.r(dirty_off), Ok(0));
 }
 
 #[derive(Clone, Debug)]

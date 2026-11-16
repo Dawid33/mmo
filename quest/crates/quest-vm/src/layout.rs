@@ -60,7 +60,52 @@ pub const H_SEGMENT_OPEN: u32 = 29;
 pub const H_TRACE_LEN: u32 = 30;
 pub const H_INIT_CURSOR: u32 = 31;
 
-const _: () = assert!(H_INIT_CURSOR < HEADER_WORDS);
+/// Every header field; a new `H_*` const must be added here, which checks it fits (words past
+/// the last field up to `HEADER_WORDS` stay zero and reserved).
+const H_ALL: [u32; 32] = [
+    H_MAGIC,
+    H_BYTECODE_VERSION,
+    H_HOST_API_VERSION,
+    H_PROGRAM_HASH,
+    H_MEM_BYTES,
+    H_EPOCH,
+    H_STATIC_WORDS,
+    H_HEAP_BASE,
+    H_HEAP_END,
+    H_SHADOW_BASE,
+    H_DIRTY_BASE,
+    H_INBOX_BASE,
+    H_INBOX_END,
+    H_QUEUE_BASE,
+    H_PROMISES_BASE,
+    H_PARKED_BASE,
+    H_CMDS_BASE,
+    H_CMDS_END,
+    H_TRACE_BASE,
+    H_STATUS,
+    H_TASK,
+    H_PC,
+    H_CURRENT_FN,
+    H_FUEL_DEBT,
+    H_PROMISE_SERIAL,
+    H_ARRIVAL,
+    H_QUEUE_HEAD,
+    H_QUEUE_COUNT,
+    H_CMD_LEN,
+    H_SEGMENT_OPEN,
+    H_TRACE_LEN,
+    H_INIT_CURSOR,
+];
+
+const _: () = {
+    let mut i = 0;
+    while i < H_ALL.len() {
+        assert!(H_ALL[i] < HEADER_WORDS);
+        // Indices are dense and ordered, so a field past the end of the list is a gap.
+        assert!(H_ALL[i] == i as u32);
+        i += 1;
+    }
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoadError {
@@ -194,11 +239,14 @@ impl Layout {
         }
         let narrow = |w: u32| -> Result<u32, LoadError> {
             let v = word(w).map_err(|_| short())?;
-            u32::try_from(v).map_err(|_| LoadError::Invalid(format!("header word {w} out of range")))
+            u32::try_from(v)
+                .map_err(|_| LoadError::Invalid(format!("header word {w} out of range")))
         };
         let mem_bytes = narrow(H_MEM_BYTES)?;
         if mem_bytes != mem.len() {
-            return Err(LoadError::Invalid("header mem_bytes differs from the memory".into()));
+            return Err(LoadError::Invalid(
+                "header mem_bytes differs from the memory".into(),
+            ));
         }
         let planned = Layout::plan(narrow(H_STATIC_WORDS)?, mem_bytes)?;
         let stored = [
@@ -217,7 +265,9 @@ impl Layout {
         ];
         for (w, expect) in stored {
             if narrow(w)? != expect {
-                return Err(LoadError::Invalid(format!("header word {w} disagrees with the layout")));
+                return Err(LoadError::Invalid(format!(
+                    "header word {w} disagrees with the layout"
+                )));
             }
         }
         Ok(planned)

@@ -5,9 +5,9 @@
 //! position in that log, so it survives `forget_before` trimming the front.
 //! The log is the sim-rollback log: it is not hashed and not saved.
 
+use state_hash::{StateHash, hash_len};
 use std::collections::VecDeque;
 use std::hash::Hasher;
-use state_hash::{StateHash, hash_len};
 
 const WORD: u32 = 8;
 
@@ -49,7 +49,11 @@ impl Mem {
 
     /// Adopts `bytes` as the memory, with an empty log.
     pub fn from_bytes(bytes: Vec<u8>) -> Mem {
-        Mem { bytes: bytes.into_boxed_slice(), log: VecDeque::new(), base: 0 }
+        Mem {
+            bytes: bytes.into_boxed_slice(),
+            log: VecDeque::new(),
+            base: 0,
+        }
     }
 
     pub fn len(&self) -> u32 {

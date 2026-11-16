@@ -4,7 +4,7 @@
 //! shadow and sets its dirty bit. Every write goes through `Mem::w64`, so the undo log
 //! covers shadow, bitmap and the segment flag too; there is no second log.
 
-use crate::layout::{Layout, LoadError, H_SEGMENT_OPEN};
+use crate::layout::{H_SEGMENT_OPEN, Layout, LoadError};
 use crate::mem::{Mem, MemError};
 
 #[derive(Clone, Debug)]
@@ -99,13 +99,16 @@ impl Store {
         let script_words = u64::from(l.heap_end - l.static_base) / 8;
         for dw in 0..script_words.div_ceil(64) {
             let dirty_off = self.dirty_off(dw * 64);
-            let Ok(bits) = self.mem.r64(dirty_off) else { continue };
+            let Ok(bits) = self.mem.r64(dirty_off) else {
+                continue;
+            };
             if bits == 0 {
                 continue;
             }
             if restore {
                 for b in 0..64u64 {
-                    if bits & (1 << b) != 0 {
+                    // Stray bits past the last script word are ignored (and cleared below).
+                    if bits & (1 << b) != 0 && dw * 64 + b < script_words {
                         let rel = ((dw * 64 + b) * 8) as u32;
                         if let Ok(old) = self.mem.r64(l.shadow_base + rel) {
                             let _ = self.mem.w64(l.static_base + rel, old);

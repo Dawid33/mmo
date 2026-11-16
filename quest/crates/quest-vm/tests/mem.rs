@@ -114,7 +114,10 @@ fn out_of_range_and_unaligned_are_errors() {
     assert_eq!(m.r64(4), Err(MemError::Unaligned { off: 4 }));
     assert_eq!(m.w64(4, 1), Err(MemError::Unaligned { off: 4 }));
     assert_eq!(m.r64(u32::MAX), Err(MemError::Unaligned { off: u32::MAX }));
-    assert_eq!(m.r64(u32::MAX - 7), Err(MemError::OutOfRange { off: u32::MAX - 7 }));
+    assert_eq!(
+        m.r64(u32::MAX - 7),
+        Err(MemError::OutOfRange { off: u32::MAX - 7 })
+    );
 }
 
 #[test]

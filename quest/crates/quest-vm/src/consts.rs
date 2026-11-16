@@ -4,7 +4,7 @@
 pub const MEM_BYTES_DEFAULT: u32 = 262_144;
 
 /// Header size in words.
-pub const HEADER_WORDS: u32 = 32;
+pub const HEADER_WORDS: u32 = 64;
 
 /// Runtime heap for queued event payloads and promise answers.
 pub const INBOX_BYTES: u32 = 8_192;
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn tunables_pinned() {
         assert_eq!(MEM_BYTES_DEFAULT, 262_144);
-        assert_eq!(HEADER_WORDS, 32);
+        assert_eq!(HEADER_WORDS, 64);
         assert_eq!(INBOX_BYTES, 8_192);
         assert_eq!(CMD_BYTES, 8_192);
         assert_eq!(HEAP_MIN_BYTES, 4_096);
