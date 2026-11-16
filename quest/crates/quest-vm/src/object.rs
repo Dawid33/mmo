@@ -30,7 +30,9 @@
 //! * `Obj`: the bits of `aux` are cleared as the fields are released;
 //! * `Dict`: `used` (payload word 2) and `len` shrink as the last positions are released (see `dict`); the
 //!   entries and index blocks are freed with the last one;
-//! * `RefPath`: `len` shrinks as the last steps are dropped (their heap-kind keys released, see `refs`).
+//! * `RefPath`: `len` shrinks as the last steps are dropped (their heap-kind keys released, see `refs`);
+//! * `Parked`: `len` shrinks as the last frame is done and `aux` counts the frame's released heap-kind
+//!   words (see `promise`).
 //!
 //! A reap step pops the head, releases at most `REAP_CHILDREN_MAX` children (they become zombies in turn and
 //! are linked ahead of it), then either frees the block or pushes it back at the head with its advanced
@@ -42,6 +44,7 @@ use crate::alloc::{Heap, Kind, ObjHeader};
 use crate::consts::{REAP_CHILDREN_MAX, STRUCT_FIELDS_MAX};
 use crate::dict;
 use crate::fault::{FaultKind, VmResult};
+use crate::promise;
 use crate::refs;
 use crate::store::Store;
 
@@ -54,7 +57,7 @@ pub fn is_ptr(v: u64) -> bool {
     v != 0 && v & 1 == 0
 }
 
-/// Which words of a parked frame hold heap kinds, by function id (used for `Parked` zombies, Task 13).
+/// Which words of a parked frame hold heap kinds, by function id (used for `Parked` zombies).
 pub trait FrameMaps {
     fn ref_slots(&self, fn_id: u16) -> &[u16];
 }
@@ -180,16 +183,12 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<O
     }
     let p = ptr_of(head)?;
     let mut h = heap.header(st, p)?;
-    // The one place later tasks extend: a kind with children of its own (`Dict`, `RefPath`, `Parked`).
-    // `RefPath`'s shape is checked by `refs::reap`.
+    // The kinds with children of their own: `Dict`, `RefPath` and `Parked` check their shapes in their
+    // own reap functions.
     match h.kind {
         Kind::Str | Kind::ListImm | Kind::Raw | Kind::ListRef => {}
         Kind::Obj => check_obj_shape(&h)?,
-        Kind::Dict | Kind::RefPath => {}
-        Kind::Parked => {
-            let _ = maps;
-            return Err(FaultKind::Corrupt);
-        }
+        Kind::Dict | Kind::RefPath | Kind::Parked => {}
         Kind::Free => return Err(FaultKind::Corrupt),
     }
     // Pop it: children released below are linked ahead of the next zombie, not ahead of this one.
@@ -224,10 +223,11 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<O
         Kind::RefPath => {
             refs::reap(st, heap, p, &mut h, &mut budget, &mut work)?;
         }
+        Kind::Parked => promise::reap_parked(st, heap, p, &mut h, maps, &mut budget, &mut work)?,
         _ => {}
     }
     let done = match h.kind {
-        Kind::ListRef | Kind::RefPath => h.len == 0,
+        Kind::ListRef | Kind::RefPath | Kind::Parked => h.len == 0,
         Kind::Obj => h.aux == 0,
         Kind::Dict => dict_done,
         _ => true,
@@ -265,8 +265,8 @@ pub fn make_unique(st: &mut Store, heap: Heap, v: u64) -> VmResult<(u64, u32)> {
         write_header(st, heap, p, old)?;
         return Ok((q, words));
     }
-    // Words in use, and whether they are references. A `RefPath` is immutable and never made unique;
-    // `Parked`: a later task.
+    // Words in use, and whether they are references. A `RefPath` is immutable and a `Parked` object has
+    // one owner (its parked record), so neither is ever made unique.
     let words = match h.kind {
         Kind::Str => h.len.div_ceil(WORD),
         Kind::ListImm | Kind::ListRef | Kind::Raw => h.len,

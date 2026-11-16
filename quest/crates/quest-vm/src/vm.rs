@@ -13,13 +13,14 @@ use std::sync::Arc;
 use crate::alloc::Heap;
 use crate::bytecode::BYTECODE_VERSION;
 use crate::fault::FaultKind;
-use crate::host::{Host, SrcLoc};
+use crate::host::{Host, PromiseId, SrcLoc};
 use crate::layout::{
     H_BYTECODE_VERSION, H_CURRENT_FN, H_EPOCH, H_HOST_API_VERSION, H_PC, H_PROGRAM_HASH, H_STATUS,
     LINK_SENTINEL, LoadError, STATUS_RUNNING,
 };
 use crate::mem::{Checkpoint, RollbackError};
 use crate::program::Program;
+pub use crate::promise::Resolved;
 use crate::sched::error_type;
 pub use crate::sched::{Delivery, Status, TickReport};
 use crate::store::Store;
@@ -66,6 +67,8 @@ pub enum RunEnd {
     OutOfFuel,
     /// The started function returned (or nothing was running).
     Returned,
+    /// The task parked at an `await`: its frames wait in the heap for the promise (`promise`).
+    Parked,
     /// `stack[0]` is the faulting instruction, then each caller's call site, innermost first.
     Faulted {
         kind: FaultKind,
@@ -153,6 +156,14 @@ impl Vm {
     /// host when their segment commits. With `fuel` 0 nothing changes.
     pub fn tick(&mut self, now: u64, fuel: u64, host: &mut dyn Host) -> TickReport {
         self.sched_tick(now, fuel, host)
+    }
+
+    /// Answers the promise `id` (design D7, spec §8.2): `Ok` with the value, `Err` with an error of the
+    /// program's error enum (anything else, or an answer too large for the inbox, is stored as `Lost`).
+    /// A continuation waiting on it becomes ready, ordered with events by arrival. An id that is unknown,
+    /// of another epoch or not outstanding is `Unknown` and changes nothing. No host call is made.
+    pub fn resolve(&mut self, id: PromiseId, outcome: Result<WireValue, WireValue>) -> Resolved {
+        self.promise_resolve(id.0, outcome)
     }
 
     pub fn status(&self) -> Status {

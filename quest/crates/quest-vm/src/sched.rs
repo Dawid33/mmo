@@ -14,29 +14,36 @@
 //! * The event being dispatched (`H_EV_*`): taken off the queue when its first handler starts, so it
 //!   does not hold a queue slot while its handlers run; `H_EV_HANDLER` is the index + 1 of its next
 //!   handler (0 = none). Its payload is freed when its last handler starts.
-//! * The command buffer (`cmds` region, `H_CMD_LEN` bytes used): one record per command or print, a
-//!   header word (`kind: u8 | host fn: u16 << 16 | byte length: u32 << 32`) and the bytes packed into
-//!   words (a command's arguments as the wire bytes of one `List`, a print's UTF-8 text). Bytes past
+//! * The command buffer (`cmds` region, `H_CMD_LEN` bytes used): one record per command, print or promise
+//!   request, a header word (`kind: u8 | host fn: u16 << 16 | byte length: u32 << 32`) and the bytes
+//!   packed into words (a command's arguments as the wire bytes of one `List`, a print's UTF-8 text, a
+//!   request's id as 8 little-endian bytes followed by its arguments as a command's). Bytes past
 //!   `H_CMD_LEN` are stale and never read.
+//! * The promise and parked tables (`promise`).
 //! * `H_NOW`: the latest `now` a tick was given.
 //!
 //! # Tasks and segments
 //! A task runs one function from its entry until its `Ret` on the sentinel link: the pending
 //! initialisers in `program.globals` order, then `main` if it was asked for, then the handlers of the
-//! queued events by arrival (each handler of an event its own task, in table order). Every task opens a
-//! segment when it starts. At its end the function's error word (frame word 2) is checked: non-zero is an
-//! escaping error. Otherwise the task's result is stored (an initialiser's return value is moved into its
-//! global; a handler's event parameter is released), the buffered records are read out, the segment
-//! commits, the buffer and the task are cleared, and only then are the commands and prints handed to the
-//! host in order (the host never sees an effect the memory has not committed). A fault or an escaping
-//! error aborts the segment (the script regions return to the task's start), clears the buffer and
-//! reports `Report::HandlerAborted` (`Report::InitFailed` for an initialiser, which also fails the
-//! instance); error data too large to convert for the report turns the cause into that fault. Only a
-//! `Corrupt` fault (memory that does not parse) fails the instance without an abort.
+//! queued events and of the ready continuations by arrival (each handler of an event its own task, in
+//! table order; a continuation resumes a parked task, `promise`). Every task opens a segment when it
+//! starts or resumes. A segment ends at the task's end or at an `await`, which parks the task. At the end
+//! the function's error word (frame word 2) is checked: non-zero is an escaping error. Otherwise the
+//! task's result is stored (an initialiser's return value is moved into its global; a handler's event
+//! parameter is released) and the segment commits: the buffered records are read out, the promise
+//! records the segment issued are marked sent (their deadline set), the segment commits, the buffer and
+//! the task are cleared, and only then are the commands, prints and requests handed to the host in
+//! order (the host never sees an effect the memory has not committed). A fault or an escaping error
+//! aborts the segment (the script regions return to the segment's start), clears the buffer, frees the
+//! promise records the segment issued (`promise`) and reports `Report::HandlerAborted`
+//! (`Report::InitFailed` for an initialiser, which also fails the instance); error data too large to
+//! convert for the report turns the cause into that fault. Only a `Corrupt` fault (memory that does not
+//! parse) fails the instance without an abort.
 //!
 //! # Idle
 //! An instance is idle when no task is in progress, nothing is runnable (no pending initialiser, no
-//! wanted `main`, no event queued or being dispatched) and the zombie list of the script heap is empty:
+//! wanted `main`, no event queued or being dispatched, no ready continuation; a task parked on a promise
+//! that is not resolved yet is not runnable) and the zombie list of the script heap is empty:
 //! `tick` reaps zombies between tasks (fuel-charged, like the run loop), and a tick that leaves zombies
 //! reports `Busy`. So an idle instance is quiescent and reaped, which leak checks rely on.
 
@@ -47,13 +54,13 @@ use crate::bytecode::Instr;
 use crate::consts::{ERR_TRACE_MAX, QUEUE_LEN};
 use crate::fault::FaultKind;
 use crate::fuel::FUEL_DISPATCH;
-use crate::host::{AbortCause, DropReason, Host, HostFnKind, Report, SrcLoc};
+use crate::host::{AbortCause, DropReason, Host, HostFnKind, PromiseId, Report, SrcLoc};
 use crate::interp::{Exec, Fault, Meter};
 use crate::layout::{
     H_ARRIVAL, H_CMD_LEN, H_CURRENT_FN, H_EV_ARRIVAL, H_EV_HANDLER, H_EV_PAYLOAD, H_FUEL_DEBT,
-    H_INIT_CURSOR, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEUE_COUNT, H_QUEUE_HEAD, H_STATUS, H_TASK,
-    H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL, QUEUE_REC_WORDS, STATUS_IDLE,
-    STATUS_RUNNING,
+    H_INIT_CURSOR, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEUE_COUNT, H_QUEUE_HEAD, H_RESUME_PARKED,
+    H_STATUS, H_TASK, H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL, QUEUE_REC_WORDS,
+    STATUS_IDLE, STATUS_RUNNING,
 };
 use crate::object::{capacity, hdr, obj, ptr_of, read_slot, write_slot};
 use crate::types::{TypeDesc, TypeId, TypeTable};
@@ -90,11 +97,11 @@ pub enum Status {
     Failed,
 }
 
-// `H_TASK`.
+// `H_TASK`. A resumed task keeps the kind and identity of the task that parked.
 const TASK_NONE: u64 = 0;
 const TASK_INIT: u64 = 1;
-const TASK_MAIN: u64 = 2;
-const TASK_HANDLER: u64 = 3;
+pub(crate) const TASK_MAIN: u64 = 2;
+pub(crate) const TASK_HANDLER: u64 = 3;
 // `H_MAIN`.
 const MAIN_NONE: u64 = 0;
 const MAIN_WANTED: u64 = 1;
@@ -105,6 +112,7 @@ const INSTANCE_FAILED: u64 = 1;
 // Command record kinds.
 const CMD_COMMAND: u64 = 0;
 const CMD_PRINT: u64 = 1;
+pub(crate) const CMD_REQUEST: u64 = 2;
 
 const WORD: u64 = 8;
 /// Frame words: the return link, the return value, the error value, the first parameter.
@@ -116,6 +124,7 @@ const FRAME_PARAM0: u16 = 3;
 enum Buffered {
     Command(u16, Vec<WireValue>),
     Print(String),
+    Request(u64, u16, Vec<WireValue>),
 }
 
 /// The task in progress, from the header.
@@ -126,7 +135,7 @@ struct Task {
     fn_id: u16,
 }
 
-fn corrupt<T>(why: &str) -> Exec<T> {
+pub(crate) fn corrupt<T>(why: &str) -> Exec<T> {
     Err(Fault::corrupt(why))
 }
 
@@ -140,7 +149,7 @@ pub(crate) fn error_type(types: &TypeTable) -> Option<TypeId> {
 }
 
 /// `base + i` words, as a byte offset.
-fn word_off(base: u32, i: u64) -> Exec<u32> {
+pub(crate) fn word_off(base: u32, i: u64) -> Exec<u32> {
     u32::try_from(u64::from(base) + i * WORD).map_err(|_| Fault::corrupt("offset out of range"))
 }
 
@@ -183,6 +192,7 @@ impl Vm {
             || self.header(H_MAIN)? == MAIN_WANTED
             || self.header(H_EV_HANDLER)? != 0
             || self.header(H_QUEUE_COUNT)? != 0
+            || self.next_ready()?.is_some()
             || self.heap.zombie_head(&self.store)? != 0)
     }
 
@@ -260,7 +270,7 @@ impl Vm {
     }
 
     /// The payload in a new `Raw` block of the inbox heap; `None` when it does not fit.
-    fn inbox_store(&mut self, bytes: &[u8]) -> Exec<Option<u64>> {
+    pub(crate) fn inbox_store(&mut self, bytes: &[u8]) -> Exec<Option<u64>> {
         let Ok(len) = u32::try_from(bytes.len()) else {
             return Ok(None);
         };
@@ -282,10 +292,10 @@ impl Vm {
         Ok(Some(u64::from(p)))
     }
 
-    fn inbox_read(&self, v: u64) -> Exec<Vec<u8>> {
+    pub(crate) fn inbox_read(&self, v: u64) -> Exec<Vec<u8>> {
         let (p, h) = hdr(&self.store, self.inbox, v)?;
         if h.kind != Kind::Raw || u64::from(h.len) > u64::from(capacity(&h)) * WORD {
-            return corrupt("a queued payload is not a payload");
+            return corrupt("an inbox block is not wire bytes");
         }
         let mut out = Vec::new();
         for i in 0..h.len.div_ceil(8) {
@@ -343,7 +353,9 @@ impl Vm {
             return Ok(());
         }
         let last = self.header(H_NOW)?;
-        self.set_header(H_NOW, now.max(last))?;
+        let now = now.max(last);
+        self.set_header(H_NOW, now)?;
+        self.expire_promises(now)?;
         let Some(fresh) = self.meter_after_debt(fuel)? else {
             return Ok(());
         };
@@ -361,6 +373,7 @@ impl Vm {
             match self.run_task(m, host)? {
                 RunEnd::OutOfFuel => break,
                 RunEnd::Returned => self.end_task(m, host)?,
+                RunEnd::Parked => self.commit_segment(host)?,
                 RunEnd::Faulted {
                     kind,
                     message,
@@ -378,8 +391,9 @@ impl Vm {
         self.set_header(H_FUEL_DEBT, m.debt())
     }
 
-    /// Starts the next task: a pending initialiser, then `main`, then the next handler of the event
-    /// being dispatched or of the oldest queued one. `false` when nothing is runnable.
+    /// Starts the next task: a pending initialiser, then `main`, then by lowest arrival number the next
+    /// handler of the event being dispatched (or of the oldest queued one) or a ready continuation.
+    /// `false` when nothing is runnable.
     fn start_next(&mut self, m: &mut Meter, host: &mut dyn Host) -> Exec<bool> {
         let p = Arc::clone(&self.program);
         let cursor = self.header(H_INIT_CURSOR)?;
@@ -399,11 +413,38 @@ impl Vm {
             self.begin_task(TASK_MAIN, 0, f)?;
             return Ok(true);
         }
-        if self.header(H_EV_HANDLER)? == 0 && !self.dequeue()? {
-            return Ok(false);
+        let dispatching = self.header(H_EV_HANDLER)? != 0;
+        let event = if dispatching {
+            Some(self.header(H_EV_ARRIVAL)?)
+        } else {
+            self.queue_head_arrival()?
+        };
+        match (event, self.next_ready()?) {
+            (Some(e), Some((_, r))) if e < r => {}
+            (_, Some((k, _))) => {
+                self.start_resume(k, m, host)?;
+                return Ok(true);
+            }
+            (None, None) => return Ok(false),
+            (Some(_), None) => {}
+        }
+        if !dispatching && !self.dequeue()? {
+            return corrupt("the queue lost its head");
         }
         self.start_handler(m, host)?;
         Ok(true)
+    }
+
+    /// The arrival number of the oldest queued event.
+    fn queue_head_arrival(&self) -> Exec<Option<u64>> {
+        let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
+        if head >= QUEUE_LEN as u64 || count > QUEUE_LEN as u64 {
+            return corrupt("queue head or count out of range");
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.store.r(self.queue_rec(head)?)?))
     }
 
     /// Takes the oldest queued event off the queue and makes it the event being dispatched.
@@ -573,14 +614,23 @@ impl Vm {
             }
             _ => {}
         }
-        // The memory is final (committed, the task cleared) before the host sees anything.
+        self.commit_segment(host)
+    }
+
+    /// Ends the task's segment (at its end or at an `await`): the buffered records are read out, the
+    /// requests marked sent, the segment committed and the task cleared; then the host gets the records in
+    /// order. The memory is final before the host sees anything.
+    fn commit_segment(&mut self, host: &mut dyn Host) -> Exec<()> {
         let buffered = self.read_cmds()?;
+        let now = self.header(H_NOW)?;
+        self.commit_promises(now)?;
         self.store.segment_commit();
         self.clear_task()?;
         for b in buffered {
             match b {
                 Buffered::Command(f, args) => host.command(f, &args),
                 Buffered::Print(text) => host.print(&text),
+                Buffered::Request(id, f, args) => host.request(PromiseId(id), f, &args),
             }
         }
         Ok(())
@@ -588,7 +638,7 @@ impl Vm {
 
     /// The task failed with `cause`: the segment is undone, the buffer cleared and the failure reported;
     /// an initialiser's failure fails the instance. A `Corrupt` fault fails it without an abort.
-    fn abort_task(&mut self, cause: AbortCause, host: &mut dyn Host) -> Exec<()> {
+    pub(crate) fn abort_task(&mut self, cause: AbortCause, host: &mut dyn Host) -> Exec<()> {
         if matches!(
             cause,
             AbortCause::Fault {
@@ -602,6 +652,7 @@ impl Vm {
         let t = self.current_task()?;
         let report = self.report_for(t, cause);
         self.store.segment_abort();
+        self.abort_promises()?;
         if t.kind == TASK_INIT {
             self.set_header(H_INSTANCE, INSTANCE_FAILED)?;
         }
@@ -612,7 +663,14 @@ impl Vm {
 
     /// Between tasks: no task, the interpreter idle, the buffer and the trace empty.
     fn clear_task(&mut self) -> Exec<()> {
-        for field in [H_TASK, H_TASK_ARG, H_CMD_LEN, H_TRACE_LEN, H_TRACE_DROPPED] {
+        for field in [
+            H_TASK,
+            H_TASK_ARG,
+            H_CMD_LEN,
+            H_TRACE_LEN,
+            H_TRACE_DROPPED,
+            H_RESUME_PARKED,
+        ] {
             self.set_header(field, 0)?;
         }
         self.set_header(H_STATUS, STATUS_IDLE)
@@ -706,15 +764,13 @@ impl Vm {
     // ---- host calls and the command buffer -----------------------------------------------------------
 
     /// `CallHost a, b, c`: the arguments (types from site `a`) from the slots at `b`. A query is asked
-    /// at once and its answer loaded into `c`; a command is buffered (it does not write `c`).
+    /// at once and its answer loaded into `c`; a command is buffered (it does not write `c`); a promise
+    /// request is buffered and its id written to `c` (`promise`).
     pub(crate) fn call_host(&mut self, ins: Instr, m: &mut Meter, host: &mut dyn Host) -> Exec<()> {
         let p = Arc::clone(&self.program);
         let Some(site) = p.host_sites.get(usize::from(ins.a)) else {
             return corrupt("unknown host site");
         };
-        if site.kind == HostFnKind::Promise {
-            return corrupt("unsupported instruction");
-        }
         let mut args = Vec::with_capacity(site.params.len());
         for (i, &ty) in (0u16..).zip(&site.params) {
             let slot = ins
@@ -725,10 +781,14 @@ impl Vm {
             m.words(words);
             args.push(w);
         }
-        if site.kind == HostFnKind::Command {
-            let mut bytes = Vec::new();
-            WireValue::List(args).encode(&mut bytes);
-            return self.buffer(CMD_COMMAND, site.host_fn, &bytes, m);
+        match site.kind {
+            HostFnKind::Command => {
+                let mut bytes = Vec::new();
+                WireValue::List(args).encode(&mut bytes);
+                return self.buffer(CMD_COMMAND, site.host_fn, &bytes, m);
+            }
+            HostFnKind::Promise => return self.issue_request(site.host_fn, args, ins.c, m),
+            HostFnKind::Query => {}
         }
         let answer = host.query(site.host_fn, &args).map_err(|message| Fault {
             kind: FaultKind::HostFault,
@@ -753,7 +813,7 @@ impl Vm {
     }
 
     /// Appends a record; a full buffer is the fault `TooManyCommands`.
-    fn buffer(&mut self, kind: u64, f: u16, bytes: &[u8], m: &mut Meter) -> Exec<()> {
+    pub(crate) fn buffer(&mut self, kind: u64, f: u16, bytes: &[u8], m: &mut Meter) -> Exec<()> {
         let l = self.store.layout;
         let cap = u64::from(l.cmds_end - l.cmds_base);
         let len = self.header(H_CMD_LEN)?;
@@ -812,6 +872,17 @@ impl Vm {
                     Ok(t) => Buffered::Print(t),
                     Err(_) => return corrupt("a print is not UTF-8"),
                 },
+                CMD_REQUEST => {
+                    let Some((id, rest)) = bytes.split_first_chunk::<8>() else {
+                        return corrupt("a request record has no id");
+                    };
+                    match WireValue::decode(rest) {
+                        Ok(WireValue::List(args)) => {
+                            Buffered::Request(u64::from_le_bytes(*id), f, args)
+                        }
+                        _ => return corrupt("a request's arguments do not decode"),
+                    }
+                }
                 _ => return corrupt("unknown command record"),
             });
             at += 1 + words;

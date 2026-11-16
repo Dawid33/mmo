@@ -18,7 +18,8 @@
 //! | `RefLoad`, `RefTake` | destination | reference slot | - |
 //! | `RefStore` | reference slot | source slot | - |
 //! | `Await` | value (error in `a + 1`) | promise slot | expected type id |
-//! | `AwaitAll` | results (error in `a + 1`) | slot of the list of promises | expected type id |
+//! | `AwaitAll` | results (error in `a + 1`) | slot of the list of promises | the result's type (`list[T]`) |
+//! | `PromiseDetach` | promise slot | - | - |
 //! | `CallHost` | host site | first argument slot | result slot (a query's answer; a command leaves it) |
 //! | `ListLen`, `GetTag`, `NegI`, `Not`, ... two-operand ops | destination | source | - |
 

@@ -208,7 +208,7 @@ impl Vm {
             }
             Op::RefKey => {
                 // The key flag lives in the dict the base path leads to now.
-                let t = self.resolve(self.rd(b)?, false, m)?;
+                let t = self.resolve_ref(self.rd(b)?, false, m)?;
                 if !t.is_ref || !is_ptr(t.value) {
                     return Err(FaultKind::BadRef.into());
                 }
@@ -220,13 +220,13 @@ impl Vm {
                 self.extend(a, b, Step::Key { key, is_ref: kr }, m)
             }
             Op::RefLoad => {
-                let t = self.resolve(self.rd(b)?, false, m)?;
+                let t = self.resolve_ref(self.rd(b)?, false, m)?;
                 m.charge(u64::from(t.steps));
                 let v = self.dup_out(t.value, t.is_ref)?;
                 self.put(a, v, t.is_ref)
             }
             Op::RefTake => {
-                let t = self.resolve(self.rd(b)?, true, m)?;
+                let t = self.resolve_ref(self.rd(b)?, true, m)?;
                 m.charge(u64::from(t.steps));
                 if t.is_ref {
                     self.write_place(t.place, 0, m)?;
@@ -234,7 +234,7 @@ impl Vm {
                 self.put(a, t.value, t.is_ref)
             }
             Op::RefStore => {
-                let t = self.resolve(self.rd(a)?, true, m)?;
+                let t = self.resolve_ref(self.rd(a)?, true, m)?;
                 m.charge(u64::from(t.steps));
                 let v = self.rd(b)?;
                 self.write_place(t.place, v, m)?;
@@ -283,7 +283,7 @@ impl Vm {
     }
 
     /// Walks the path `r`. `unique`: every container on the way is made unique in place.
-    fn resolve(&mut self, r: u64, unique: bool, m: &mut Meter) -> Exec<Target> {
+    fn resolve_ref(&mut self, r: u64, unique: bool, m: &mut Meter) -> Exec<Target> {
         let heap = self.heap;
         let (p, h) = path(&self.store, heap, r)?;
         let root = h.tag;

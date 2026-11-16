@@ -137,6 +137,8 @@ pub(crate) enum Flow {
     },
     /// The started function returned.
     Done,
+    /// The task parked at an `await` (its frames are in a `Parked` object, `promise`).
+    Park,
 }
 
 /// The charge taken before an instruction executes (design D6). Size-dependent extras are charged by
@@ -168,12 +170,15 @@ pub(crate) fn base_fuel(p: &Program, ins: Instr) -> u64 {
 }
 
 /// Whether a fault of `op` is undone back to the checkpoint taken just before it (module docs): every
-/// `HeapFull`, and every fault of the reference instructions, whose walk may have cloned part of a path.
+/// `HeapFull`, every fault of the reference instructions, whose walk may have cloned part of a path, and
+/// of the awaits, which park nothing unless they park everything.
 fn undone_on_fault(op: Op, kind: FaultKind) -> bool {
     kind == FaultKind::HeapFull
         || matches!(
             op,
-            Op::RefMake
+            Op::Await
+                | Op::AwaitAll
+                | Op::RefMake
                 | Op::RefField
                 | Op::RefIndex
                 | Op::RefKey
@@ -188,7 +193,7 @@ const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
 
 /// Where a return link leads: the caller and the pc after its `Call`. `None` for the sentinel and for
 /// anything that is not the return site of a `Call` of `callee` (the link is read from memory).
-fn return_site(p: &Program, link: u64, callee: u16) -> Option<(u16, u32)> {
+pub(crate) fn return_site(p: &Program, link: u64, callee: u16) -> Option<(u16, u32)> {
     if link == LINK_SENTINEL {
         return None;
     }
@@ -280,7 +285,7 @@ impl Vm {
     }
 
     /// The instruction at `pc`, which must lie inside `fn_id`'s code.
-    fn fetch(&self, fn_id: u16, pc: u32) -> Exec<Instr> {
+    pub(crate) fn fetch(&self, fn_id: u16, pc: u32) -> Exec<Instr> {
         let p = &self.program;
         match p.fns.get(usize::from(fn_id)) {
             Some(f) if f.entry <= pc && pc < f.end => p
@@ -374,6 +379,7 @@ impl Vm {
                 Ok(Flow::Goto(t)) => pc = t,
                 Ok(Flow::Enter { fn_id: f, pc: p }) => (fn_id, pc) = (f, p),
                 Ok(Flow::Done) => break Stop::Returned,
+                Ok(Flow::Park) => break Stop::Parked,
                 Err(f) => {
                     if undone_on_fault(ins.op, f.kind) {
                         // No partial effect (module docs). The checkpoint was taken a moment ago, so
@@ -388,12 +394,13 @@ impl Vm {
         self.set_header(H_CURRENT_FN, u64::from(fn_id))?;
         let status = match stop {
             Stop::Fuel => STATUS_RUNNING,
-            Stop::Returned | Stop::Fault(_) => STATUS_IDLE,
+            Stop::Returned | Stop::Parked | Stop::Fault(_) => STATUS_IDLE,
         };
         self.set_header(H_STATUS, status)?;
         Ok(match stop {
             Stop::Fuel => RunEnd::OutOfFuel,
             Stop::Returned => RunEnd::Returned,
+            Stop::Parked => RunEnd::Parked,
             Stop::Fault(f) => RunEnd::Faulted {
                 kind: f.kind,
                 message: f.message,
@@ -417,7 +424,7 @@ impl Vm {
     /// The faulting instruction's location, then each caller's call site, found by walking the return
     /// links outwards. A link that does not lead to a call site ends the walk; the walk is bounded by
     /// the number of functions (the call graph is acyclic, so no valid chain is longer).
-    fn fault_stack(&self, fn_id: u16, pc: u32) -> Vec<SrcLoc> {
+    pub(crate) fn fault_stack(&self, fn_id: u16, pc: u32) -> Vec<SrcLoc> {
         let p = &self.program;
         let mut stack = vec![p.loc(pc)];
         let mut cur = fn_id;
@@ -542,10 +549,8 @@ impl Vm {
 
             Op::CallHost => self.call_host(ins, m, host)?,
 
-            // ---- Not implemented yet: Task 13 replaces this arm with its group. ----
-            Op::Await | Op::AwaitAll | Op::PromiseDetach => {
-                return Err(Fault::corrupt("unsupported instruction"));
-            }
+            Op::Await | Op::AwaitAll => return self.exec_await(fn_id, pc, ins, m),
+            Op::PromiseDetach => self.exec_detach(a)?,
         }
         Ok(Flow::Next)
     }
@@ -614,5 +619,6 @@ impl Vm {
 enum Stop {
     Fuel,
     Returned,
+    Parked,
     Fault(Fault),
 }

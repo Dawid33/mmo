@@ -14,9 +14,9 @@ const WORD: u64 = 8;
 
 /// Words of one queue record (the scheduler owns its contents).
 pub const QUEUE_REC_WORDS: u32 = 4;
-/// Words of one promise record.
+/// Words of one promise record (`promise` owns its contents).
 pub const PROMISE_REC_WORDS: u32 = 6;
-/// Words of one parked-handler record.
+/// Words of one parked-handler record (`promise` owns its contents).
 pub const PARKED_REC_WORDS: u32 = 4;
 /// Words of one error-trace entry.
 pub const TRACE_REC_WORDS: u32 = 1;
@@ -75,6 +75,9 @@ pub const H_EV_HANDLER: u32 = 37;
 pub const H_EV_PAYLOAD: u32 = 38;
 /// The event being dispatched: its arrival number.
 pub const H_EV_ARRIVAL: u32 = 39;
+/// The `Parked` object of the continuation being resumed (0 = the task is not a resumed one): an abort of
+/// its segment brings the object back, and the cleanup releases it (`promise`).
+pub const H_RESUME_PARKED: u32 = 40;
 
 /// `H_STATUS`: nothing is running.
 pub const STATUS_IDLE: u64 = 0;
@@ -87,7 +90,7 @@ pub const LINK_SENTINEL: u64 = u64::MAX;
 
 /// Every header field; a new `H_*` const must be added here, which checks it fits (words past
 /// the last field up to `HEADER_WORDS` stay zero and reserved).
-const H_ALL: [u32; 40] = [
+const H_ALL: [u32; 41] = [
     H_MAGIC,
     H_BYTECODE_VERSION,
     H_HOST_API_VERSION,
@@ -128,6 +131,7 @@ const H_ALL: [u32; 40] = [
     H_EV_HANDLER,
     H_EV_PAYLOAD,
     H_EV_ARRIVAL,
+    H_RESUME_PARKED,
 ];
 
 const _: () = {
