@@ -51,6 +51,27 @@ pub struct Vm {
     pub(crate) error_ty: Option<TypeId>,
     /// The host's event names (`VmConfig::events`).
     pub(crate) events: Vec<String>,
+    /// `program.content_hash()`, computed once.
+    pub(crate) program_hash: u64,
+}
+
+/// What [`Vm::new`] and [`Vm::load`] require of a program: this VM's bytecode version, the host's API
+/// version, and a valid program (one built by hand may have skipped `finish`/`from_bytes`; the
+/// interpreter relies on it).
+pub(crate) fn check_program(program: &Program, host_api_version: u32) -> Result<(), LoadError> {
+    if program.bytecode_version != BYTECODE_VERSION {
+        return Err(LoadError::VersionMismatch {
+            found: program.bytecode_version,
+        });
+    }
+    if program.host_api_version != host_api_version {
+        return Err(LoadError::HostApiMismatch {
+            found: program.host_api_version,
+        });
+    }
+    program
+        .validate()
+        .map_err(|e| LoadError::Invalid(e.to_string()))
 }
 
 /// The result of one [`Vm::debug_run`].
@@ -81,26 +102,44 @@ impl Vm {
     /// Checks the versions, validates the program, plans the layout and writes a fresh memory: the
     /// header (layout, versions, program hash, epoch) and both allocators. The undo log starts empty.
     pub fn new(program: Arc<Program>, cfg: VmConfig) -> Result<Vm, LoadError> {
-        if program.bytecode_version != BYTECODE_VERSION {
-            return Err(LoadError::VersionMismatch {
-                found: program.bytecode_version,
-            });
-        }
-        if program.host_api_version != cfg.host_api_version {
-            return Err(LoadError::HostApiMismatch {
-                found: program.host_api_version,
-            });
-        }
-        // A program built by hand may have skipped `finish`/`from_bytes`; the interpreter relies on it.
-        program
-            .validate()
-            .map_err(|e| LoadError::Invalid(e.to_string()))?;
+        check_program(&program, cfg.host_api_version)?;
         if !cfg.mem_bytes.is_multiple_of(8) {
             return Err(LoadError::Invalid(
                 "mem_bytes is not a multiple of 8".into(),
             ));
         }
-        let mut store = Store::new(u32::from(program.static_words), cfg.mem_bytes)?;
+        let store = Store::new(u32::from(program.static_words), cfg.mem_bytes)?;
+        let program_hash = program.content_hash();
+        let mut vm = Vm::adopt(program, program_hash, store, cfg.events);
+        let header = [
+            (H_BYTECODE_VERSION, u64::from(BYTECODE_VERSION)),
+            (H_HOST_API_VERSION, u64::from(cfg.host_api_version)),
+            (H_PROGRAM_HASH, vm.program_hash),
+            (H_EPOCH, u64::from(cfg.epoch)),
+        ];
+        let (heap, inbox) = (vm.heap, vm.inbox);
+        let init = |store: &mut Store| {
+            for (w, v) in header {
+                store.wr(w * 8, v)?;
+            }
+            heap.init(store)?;
+            inbox.init(store)
+        };
+        init(&mut vm.store)
+            .map_err(|e| LoadError::Invalid(format!("writing a fresh memory: {e:?}")))?;
+        vm.store.mem.clear_log();
+        Ok(vm)
+    }
+
+    /// The instance of `program` (whose content hash is `program_hash`) with the state `store`, both
+    /// checked by the caller; every Rust field is derived from the program, the layout or the
+    /// configuration.
+    pub(crate) fn adopt(
+        program: Arc<Program>,
+        program_hash: u64,
+        store: Store,
+        events: Vec<String>,
+    ) -> Vm {
         let l = store.layout;
         let heap = Heap {
             base: l.heap_base,
@@ -112,31 +151,15 @@ impl Vm {
             end: l.inbox_end,
             script: false,
         };
-        let header = [
-            (H_BYTECODE_VERSION, u64::from(BYTECODE_VERSION)),
-            (H_HOST_API_VERSION, u64::from(cfg.host_api_version)),
-            (H_PROGRAM_HASH, program.content_hash()),
-            (H_EPOCH, u64::from(cfg.epoch)),
-        ];
-        let init = |store: &mut Store| {
-            for (w, v) in header {
-                store.wr(w * 8, v)?;
-            }
-            heap.init(store)?;
-            inbox.init(store)
-        };
-        init(&mut store)
-            .map_err(|e| LoadError::Invalid(format!("writing a fresh memory: {e:?}")))?;
-        store.mem.clear_log();
-        let error_ty = error_type(&program.types);
-        Ok(Vm {
+        Vm {
+            error_ty: error_type(&program.types),
+            program_hash,
             program,
             store,
             heap,
             inbox,
-            error_ty,
-            events: cfg.events,
-        })
+            events,
+        }
     }
 
     /// Asks for `main` to run once the initialisers are done (before queued events). `false` when the
@@ -207,9 +230,21 @@ impl Vm {
         self.store.mem.checkpoint()
     }
 
-    /// Undoes every memory write after `cp`; nothing changes on error.
+    /// Undoes every memory write after `cp` — ticks, deliveries, resolutions alike; nothing changes on
+    /// error. The state hash is then bit-exact what it was at `cp` (spec §6.6).
     pub fn rollback_to(&mut self, cp: Checkpoint) -> Result<(), RollbackError> {
         self.store.mem.rollback_to(cp)
+    }
+
+    /// Drops the undo history before `cp` (once the sim confirmed it); rolling back to `cp` or later
+    /// still works. Never touches the state.
+    pub fn forget_before(&mut self, cp: Checkpoint) {
+        self.store.mem.forget_before(cp)
+    }
+
+    /// Entries in the undo log: one per changed word since the oldest checkpoint still remembered.
+    pub fn log_len(&self) -> usize {
+        self.store.mem.log_len()
     }
 
     /// The value in static slot `slot` read as type `ty` (a test and debug accessor).

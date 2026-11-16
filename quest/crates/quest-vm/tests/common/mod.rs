@@ -4,10 +4,11 @@
 use std::sync::Arc;
 
 use quest_vm::Op;
-use quest_vm::asm::ProgramBuilder;
+use quest_vm::asm::{FnBuilder, ProgramBuilder, SlotRef};
 use quest_vm::consts::MEM_BYTES_DEFAULT;
-use quest_vm::host::{Host, PromiseId, Report};
+use quest_vm::host::{Host, HostFnKind, PromiseId, Report};
 use quest_vm::program::Program;
+use quest_vm::types::TypeDesc;
 use quest_vm::vm::{DebugRun, RunEnd, Vm, VmConfig};
 use quest_vm::wire::WireValue;
 
@@ -28,6 +29,34 @@ pub struct RecordingHost {
     pub prints: Vec<String>,
     pub reports: Vec<Report>,
     pub answer: Option<QueryFn>,
+}
+
+impl Clone for RecordingHost {
+    /// The records; a host answering queries with a closure cannot be cloned.
+    fn clone(&self) -> RecordingHost {
+        assert!(
+            self.answer.is_none(),
+            "clone of a host with an answer closure"
+        );
+        RecordingHost {
+            queries: self.queries.clone(),
+            commands: self.commands.clone(),
+            requests: self.requests.clone(),
+            prints: self.prints.clone(),
+            reports: self.reports.clone(),
+            answer: None,
+        }
+    }
+}
+
+impl RecordingHost {
+    /// Every call recorded so far, as text (for comparing two hosts).
+    pub fn transcript(&self) -> String {
+        format!(
+            "queries {:?}\ncommands {:?}\nrequests {:?}\nprints {:?}\nreports {:?}",
+            self.queries, self.commands, self.requests, self.prints, self.reports
+        )
+    }
 }
 
 impl Host for RecordingHost {
@@ -166,4 +195,117 @@ pub fn sum_loop(n: i16, via_call: bool) -> Arc<Program> {
         f.end();
     }
     Arc::new(pb.finish().expect("sum_loop program"))
+}
+
+/// Host fn ids of [`scenario`]'s promise `get(k: int) -> int` and command `log(n: int)`.
+pub const SC_GET: u16 = 20;
+pub const SC_LOG: u16 = 7;
+
+/// The payload of both of [`scenario`]'s events.
+pub fn sc_event(n: i64) -> WireValue {
+    WireValue::Struct {
+        name: "Ping".into(),
+        fields: vec![("n".into(), WireValue::Int(n))],
+    }
+}
+
+/// An event-driven program with one global `g: int` (fn 0 initialises it to 0):
+/// - `Ping { n }`: spins `spin` iterations (a handler that runs across ticks under little fuel), holds a
+///   heap string, `g += await get(n)` (a parked handler and a pending promise; an error leaves `g`), `log(g)`;
+/// - `Pong { n }`: `g += 1`, `log(g)`, then faults `DivByZero` when `n == 0` (an aborted segment).
+pub fn scenario(spin: i16) -> Arc<Program> {
+    let mut pb = ProgramBuilder::new(API);
+    let int = pb.ty(TypeDesc::Int);
+    let unit = pb.ty(TypeDesc::Unit);
+    let ping = pb.ty(TypeDesc::Struct {
+        name: "Ping".into(),
+        fields: vec![("n".into(), int)],
+    });
+    pb.ty(TypeDesc::Enum {
+        name: "Error".into(),
+        variants: ["Lost", "NotFound", "Timeout", "WrongType"]
+            .iter()
+            .map(|v| (v.to_string(), vec![]))
+            .collect(),
+    });
+    let prom = pb.ty(TypeDesc::Promise(int));
+    {
+        let mut f = pb.func("init0", 0);
+        f.emit(Op::Ret, 0u16, 0u16, 0u16);
+        f.end();
+    }
+    let g = SlotRef::Global(pb.global("g", int));
+    let get = pb.host_site(SC_GET, HostFnKind::Promise, vec![int], prom);
+    let log = pb.host_site(SC_LOG, HostFnKind::Command, vec![int], unit);
+    let text = pb.string("held across the await");
+    let log_g = |f: &mut FnBuilder, tmp: SlotRef| {
+        f.emit(Op::Copy, tmp, g, 0u16);
+        f.emit(Op::CallHost, log, tmp, tmp);
+    };
+
+    let on_ping = pb.declare("on_ping", 1);
+    {
+        let mut f = pb.body(on_ping);
+        let ev = f.param(0);
+        let (k, p, val, err, s, tmp) = (
+            f.local(0),
+            f.local(1),
+            f.local(2),
+            f.local(3),
+            f.local(4),
+            f.local(5),
+        );
+        f.mark_ref(ev);
+        f.mark_ref(err);
+        f.mark_ref(s);
+        f.emit(Op::GetField, k, ev, 0u16);
+        let (i, lim, one, cond) = (f.local(6), f.local(7), f.local(8), f.local(9));
+        f.emit(Op::LoadSmall, i, 0u16, 0u16);
+        f.emit(Op::LoadSmall, lim, spin as u16, 0u16);
+        f.emit(Op::LoadSmall, one, 1u16, 0u16);
+        let (top, done) = (f.label(), f.label());
+        f.bind(top);
+        f.emit(Op::LtI, cond, i, lim);
+        f.jump(Op::JmpIfNot, cond, done);
+        f.emit(Op::AddI, i, i, one);
+        f.jump(Op::Jmp, 0u16, top);
+        f.bind(done);
+        f.emit_t(Op::LoadStr, s, text);
+        f.emit(Op::CallHost, get, k, p);
+        f.emit(Op::Await, val, p, int);
+        f.emit(Op::AddI, g, g, val);
+        log_g(&mut f, tmp);
+        f.emit(Op::Ret, 0u16, 0u16, 0u16);
+        f.end();
+    }
+    pb.handler("Ping", ping, on_ping);
+
+    let on_pong = pb.declare("on_pong", 1);
+    {
+        let mut f = pb.body(on_pong);
+        let ev = f.param(0);
+        let (k, one, tmp, cond, zero, out) = (
+            f.local(0),
+            f.local(1),
+            f.local(2),
+            f.local(3),
+            f.local(4),
+            f.local(5),
+        );
+        f.mark_ref(ev);
+        f.emit(Op::GetField, k, ev, 0u16);
+        f.emit(Op::LoadSmall, one, 1u16, 0u16);
+        f.emit(Op::AddI, g, g, one);
+        log_g(&mut f, tmp);
+        f.emit(Op::LoadSmall, zero, 0u16, 0u16);
+        f.emit(Op::EqI, cond, k, zero);
+        let skip = f.label();
+        f.jump(Op::JmpIfNot, cond, skip);
+        f.emit(Op::DivI, out, zero, zero);
+        f.bind(skip);
+        f.emit(Op::Ret, 0u16, 0u16, 0u16);
+        f.end();
+    }
+    pb.handler("Pong", ping, on_pong);
+    Arc::new(pb.finish().expect("scenario program"))
 }
