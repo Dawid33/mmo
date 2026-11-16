@@ -16,9 +16,8 @@
 #      command: the link is the coordinator's, no --quic / --wt).
 #   4. Coordinator /metrics: 2 hosts live, a committed world cut; `worldctl hosts`: one
 #      live row per host name.
-#   5. host-b's pod force-killed: a new pod is Ready (it does not wait for the succession),
-#      under a NEW id; the old id is dead, settled by one Crash succession; the world keeps
-#      its generation, host-a's pod is untouched, cuts commit again.
+#   5. host-b's pod force-killed: a new pod is Ready, under a NEW id; the old id is ended
+#      (landless), no succession, generation unchanged; host-a's pod is untouched, cuts commit again.
 #   6. host-a scaled to 0 (SIGTERM): it leaves with a committed leave cut, no succession;
 #      scaled to 1: a new id; the killed host-b's old row is gone (pruned at this registration).
 #   7. The coordinator restarted: both hosts' links come up again, cuts commit.
@@ -385,7 +384,7 @@ s0=$(coord_metric mmo_successions_settled_total) || fail "no mmo_successions_set
 say "before: generation $gen, host-a pod $pa restarts $r0, successions declared $d0 settled $s0"
 t0=$SECONDS
 k delete pod "$pb" --grace-period=0 --force > /dev/null 2>&1
-# The new pod registers under a new id beside its open succession: Ready without waiting for it.
+# The new pod registers under a new id: Ready without waiting for the old row to be ended.
 wait_until 60 "a new host-b pod Ready" host_replaced_and_ready b "$uid1"
 pb=$(host_pod b)
 say "new host-b pod $pb Ready $((SECONDS - t0))s after the kill"
@@ -396,17 +395,17 @@ wait_until "$left" "committed cuts grow again (above $c1), within 60 s of the ki
 [ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed: $gen -> $(coord_metric mmo_world_generation)"
 [ "$(pod_uid "$pa")" = "$uid0" ] || fail "host-a's pod was replaced"
 [ "$(pod_restarts "$pa")" = "$r0" ] || fail "host-a restarted ($r0 -> $(pod_restarts "$pa"))"
-settled() {
-    local d s o
-    d=$(coord_metric mmo_successions_declared_total) && s=$(coord_metric mmo_successions_settled_total) &&
-        o=$(coord_metric mmo_successions_open) && [ "$d" -gt "$d0" ] && [ "$s" = "$d" ] && [ "$o" = 0 ]
-}
-wait_until 60 "the succession of the killed host declared and settled (none open)" settled
-d1=$(coord_metric mmo_successions_declared_total)
-s1=$(coord_metric mmo_successions_settled_total)
-say "after: generation $gen, host-a untouched, successions declared $d0 -> $d1, settled $s0 -> $s1"
-# A host that owns no land still gets a Crash succession when it dies (the ledger's ruling).
-[ "$d1" = $((d0 + 1)) ] || fail "expected exactly one succession declared for the killed host, got $d0 -> $d1"
+old_row_dead() { [ "$(row_state "$id_b")" = dead ]; }
+wait_until 60 "the killed host's old row $id_b ended (dead) by the coordinator" old_row_dead
+# Decision 9: a host that dies owning no land (the twin has no player to own any) is ENDED, not succeeded.
+# (The landed-crash path, a Crash succession, cannot run in the twin: no player claims land here.)
+d1=$(coord_metric mmo_successions_declared_total) || fail "no mmo_successions_declared_total after the kill"
+s1=$(coord_metric mmo_successions_settled_total) || fail "no mmo_successions_settled_total after the kill"
+o1=$(coord_metric mmo_successions_open) || fail "no mmo_successions_open after the kill"
+say "after: generation $gen, host-a untouched, successions declared $d0 -> $d1, settled $s0 -> $s1, open $o1"
+[ "$d1" = "$d0" ] || fail "a landless host's death declared a succession: declared $d0 -> $d1 (decision 9: ended, none)"
+[ "$o1" = 0 ] || fail "a succession is open after a landless host's death: $o1"
+[ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed after the landless host's death: $gen -> $(coord_metric mmo_world_generation)"
 rows | sed 's/^/   hosts: /'
 has_new_live_id b "$id_a" "$id_b" || fail "host b has no live row under a new id: $(rows | tr '\n' ';')"
 id_b2=$(live_id b)
