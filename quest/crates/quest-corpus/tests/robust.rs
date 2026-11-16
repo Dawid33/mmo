@@ -177,11 +177,59 @@ fn lossy_bytes() -> impl Strategy<Value = String> {
         .prop_map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
+/// A generated program (or a corpus case) with a few word-level edits: a word replaced by one of the
+/// alphabet, a line dropped or doubled. Most are near misses, which reach the checker and code generator
+/// rather than stopping in the lexer or parser.
+fn near_miss() -> impl Strategy<Value = String> {
+    let base = prop_oneof![
+        r#gen::program(),
+        proptest::sample::select(quest_corpus::RUN).prop_map(|c| {
+            c.files
+                .iter()
+                .find(|(p, _)| *p == "main.qs")
+                .map_or(String::new(), |(_, t)| t.to_string())
+        }),
+    ];
+    let edit = (
+        any::<u16>(),
+        any::<u16>(),
+        proptest::sample::select(TOKENS),
+        0u8..4,
+    );
+    (base, proptest::collection::vec(edit, 1..4)).prop_map(|(text, edits)| {
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        for (at, word, tok, how) in edits {
+            if lines.is_empty() {
+                break;
+            }
+            let i = usize::from(at) % lines.len();
+            match how {
+                0 => {
+                    lines.remove(i);
+                }
+                1 => {
+                    let l = lines[i].clone();
+                    lines.insert(i, l);
+                }
+                _ => {
+                    let mut words: Vec<&str> = lines[i].split(' ').collect();
+                    let w = usize::from(word) % words.len();
+                    words[w] = tok;
+                    lines[i] = words.join(" ");
+                }
+            }
+        }
+        let mut out = lines.join("\n");
+        out.truncate(out.floor_char_boundary(SOURCE_BYTES_MAX * 8));
+        out
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(r#gen::cases()))]
 
     #[test]
-    fn compiler_never_panics(text in prop_oneof![3 => token_soup(), 1 => lossy_bytes()]) {
+    fn compiler_never_panics(text in prop_oneof![3 => token_soup(), 1 => lossy_bytes(), 3 => near_miss()]) {
         // Returning at all is the property: a panic, a stack overflow or a hang fails the test.
         let _ = compile(&tree(&text), &quest_stub::stub_api());
     }
