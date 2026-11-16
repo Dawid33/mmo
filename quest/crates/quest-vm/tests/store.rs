@@ -229,14 +229,30 @@ fn stray_dirty_bits_past_the_last_script_word_are_ignored_and_cleared() {
     let script_words = u64::from((l.heap_end - l.static_base) / 8);
     let dirty_off = l.dirty_base + (script_words / 64) as u32 * 8;
     let bit = script_words % 64;
+    // A stray restore of bit i reads shadow_base + i*8 and writes static_base + i*8, which for
+    // i >= script_words is the dirty bitmap (reads zero here) and the shadow region. Fill the
+    // shadow with nonzero words so a stray restore visibly overwrites one.
+    for w in 0..script_words as u32 {
+        s.mem
+            .w64(l.shadow_base + w * 8, 0xAAAA_0000 + u64::from(w))
+            .unwrap();
+    }
     s.segment_open();
     s.mem.w64(l.queue_base, 0xCD).unwrap();
-    s.mem
-        .w64(dirty_off, s.r(dirty_off).unwrap() | (1 << bit) | (1 << 63))
-        .unwrap();
-    let runtime: Vec<u8> = s.mem.bytes()[l.inbox_base as usize..].to_vec();
+    let stray = s.r(dirty_off).unwrap() | (1 << bit) | (1 << 63);
+    s.mem.w64(dirty_off, stray).unwrap();
+    let outside = |s: &Store| {
+        let b = s.mem.bytes();
+        let mut v = b[l.shadow_base as usize..l.dirty_base as usize].to_vec();
+        v.extend_from_slice(&b[l.inbox_base as usize..]);
+        v
+    };
+    let before = outside(&s);
     s.segment_abort();
-    assert_eq!(&s.mem.bytes()[l.inbox_base as usize..], &runtime[..]);
+    assert!(
+        before == outside(&s),
+        "abort wrote outside the script regions"
+    );
     assert_eq!(s.r(dirty_off), Ok(0));
 }
 
