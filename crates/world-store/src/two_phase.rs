@@ -502,10 +502,11 @@ pub(crate) async fn report_entities_twice(pool: &PgPool, cut: CutId, tick: Tick)
 /// settle with the heir part's `adopts` is the coordinator's invariant, which the store
 /// cannot refuse without a table two parts would write): a settled succession whose
 /// predecessor still has `in_flight` rows under its ordinal was settled by a cut whose heir
-/// part did NOT adopt them. Those rows now outlive the settle; the predecessor's row is
-/// clean, so its next boot registers and restores them — each delivered a second time. One
-/// `error!` per cut; whether there was any. The check runs right after the decision (the
-/// predecessor's next boot could not register before it, so the rows are the dead boot's).
+/// part did NOT adopt them. Those rows now outlive the settle under an id no process will
+/// ever run again (Elastic 1: a restarted process is a new host): the heir did not deliver
+/// them, so what they carry is lost unless an operator restores it — the breach this
+/// reports. One `error!` per cut; whether there was any. The check runs right after the
+/// decision (the rows are the dead host's: its id is never issued again).
 /// Errors of the check itself are warned and ignored.
 pub(crate) async fn report_settled_unadopted(pool: &PgPool, cut: CutId) -> bool {
     let rows = sqlx::query_as::<_, (i64, i64, i64, i64)>(

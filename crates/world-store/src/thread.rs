@@ -526,12 +526,13 @@ async fn serve(
             // `hosts` row, bounded by the cut lock timeout). SQLite: the writer lock, as every write.
             Request::DrainHost(id, in_ms, r) => {
                 let lock_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     let _w = match &pool {
                         Pool::Sqlite(_) => Some(writer.lock().await),
                         Pool::Pg(_) => None,
                     };
-                    r.send(on_pool!(&pool, drain_host(id, in_ms, lock_ms)))
+                    r.send(on_pool!(&pool, drain_host(id, in_ms, lock_ms, lease_ms)))
                 })
             }
             Request::OpenSuccessions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, open_successions())) }),

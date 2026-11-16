@@ -34,8 +34,10 @@
 //!   `hosts` line. One statement over that one row ([`StoreHandle::drain_host`]); a mark only
 //!   moves earlier (a second drain with more time leaves it, with less brings it forward; there
 //!   is no un-drain). A draining host wins no new land and is not the gate host for logins; it
-//!   learns the mark at its next heartbeat. Refused for an absent, dead or clean row, and for
-//!   a notice above [`crate::DRAIN_MAX_SECS`].
+//!   learns the mark at its next heartbeat. Refused for an absent, dead or clean row, a row not
+//!   beaten within the lease (its process is gone), and a notice above
+//!   [`crate::DRAIN_MAX_SECS`]. Marking the only live host not draining yet adds a warning
+//!   line: once it leaves there is no gate host (joins answer 503) and no claimer.
 //! - `retire-host <url> <host id>` (R4, `claim` ownership, Postgres): retires a host that will
 //!   never come back, so its dirty `hosts` row stops blocking every world cut (the id as
 //!   `worldctl hosts` lists it: issued at registration, never reused). Refused while
@@ -264,7 +266,25 @@ pub fn drain_host(db: &StoreUrl, id: HostId, in_ms: u64) -> Result<String, Strin
         let now = store.db_now_ms().map_err(fail)?;
         let row = rows.iter().find(|r| r.id == id).ok_or_else(|| format!("drain: host {}'s row is gone", id.0))?;
         let land = owners.iter().filter(|(_, o, _)| u64::try_from(*o).is_ok_and(|o| o == id.0)).count();
-        Ok(host_line(row, land, now))
+        let line = host_line(row, land, now);
+        // Another live host that is not draining: the next gate host and claimer. None: say so.
+        let lease = store.host_lease_ms();
+        let staying = rows.iter().any(|r| {
+            r.id != id
+                && !r.clean
+                && r.state == crate::HOST_LIVE
+                && r.seen_ms != 0
+                && now.saturating_sub(r.seen_ms) <= lease
+                && r.drain_in_ms.is_none()
+        });
+        if staying {
+            return Ok(line);
+        }
+        Ok(format!(
+            "{line}\nwarning: host {} was the only live host not draining: once it leaves the world has no gate host — \
+             joins answer 503 until another host runs — and no host claims free land (start another host first)",
+            id.0
+        ))
     })();
     store.shutdown();
     result

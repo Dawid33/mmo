@@ -35,8 +35,10 @@
 //!   (its row lock only), guarded by the lapse — see the function.
 //! - `drain_host` (`worldctl drain`, Elastic 1; in `rows.rs`, both engines — SQLite under the
 //!   writer lock): ONE `UPDATE` of one dirty live `hosts` row's `drain_at_ms` (`LEAST` of the
-//!   old mark and the database clock + the notice: it only moves earlier), then, if it matched
-//!   nothing, a plain read of that row to say why; `lock_timeout` the cut lock timeout. UNFENCED
+//!   old mark and the database clock + the notice: it only moves earlier), guarded in its own
+//!   `WHERE` by the row having beaten within the lease (final review A-M7: a lapsed row is
+//!   refused — the guard reads only that row, no new lock), then, if it matched nothing, a
+//!   plain read of that row to say why; `lock_timeout` the cut lock timeout. UNFENCED
 //!   like the heartbeat: one `hosts` row, no ownership changed, nothing else wanted. It holds
 //!   that one row and waits for nothing after it, so — like a heartbeat, which also takes one
 //!   `hosts` row and nothing after it — it joins neither documented cycle (each needs a

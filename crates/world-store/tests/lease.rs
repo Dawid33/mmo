@@ -110,6 +110,38 @@ fn a_drain_mark_only_moves_earlier_and_needs_a_live_row() {
     });
 }
 
+/// Elastic 1 final review A-M7: a dirty live row whose host has not beaten within the lease
+/// (its process is gone, not declared dead yet) is refused (`NotDrainable`, naming why) — a
+/// countdown for it would mean nothing — and nothing is written; a vouched row (`seen_ms` 0)
+/// likewise. A row beaten within the lease is marked.
+#[test]
+fn a_lapsed_row_is_not_drainable() {
+    each_backend("lease_drain_lapsed", true, |url| {
+        let h = open(url);
+        let a = register(&h, "a", 10).unwrap().id;
+        let b = register(&h, "b", 11).unwrap().id;
+        let now = h.db_now_ms().unwrap();
+        h.shutdown();
+        let lapsed = now - game::HOST_LEASE_MS - 5_000;
+        raw_exec(url, &format!("UPDATE hosts SET seen_ms = {lapsed} WHERE id = {}", a.0));
+        raw_exec(url, &format!("UPDATE hosts SET seen_ms = 0 WHERE id = {}", b.0));
+        let h = open(url);
+        for id in [a, b] {
+            match h.drain_host(id, 60_000) {
+                Err(StoreError::NotDrainable(text)) => {
+                    assert!(text.contains("not beaten") && text.contains(&format!("host {}", id.0)), "{id}: {text}")
+                }
+                other => panic!("{id}: {other:?}"),
+            }
+        }
+        assert!(h.hosts().unwrap().iter().all(|r| r.drain_in_ms.is_none()), "nothing written");
+        // It beats again: markable.
+        assert!(h.heartbeat(a, 10).unwrap().live);
+        h.drain_host(a, 60_000).unwrap();
+        h.shutdown();
+    });
+}
+
 /// Postgres: a held lock on the host's own row makes a beat fail with an error after the
 /// lock timeout — it neither hangs nor answers `false` (which means "replaced").
 #[test]

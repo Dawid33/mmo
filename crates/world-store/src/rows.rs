@@ -307,8 +307,9 @@ macro_rules! engine_rows {
             ///
             /// `opened` is the super-region side this handle read at open (`srs` are of that
             /// side): see [`check_side`]. `live`: the claimer's boot — the claim is refused
-            /// unless that boot's `hosts` row is live ([`check_live`]); `None` (a boot claim
-            /// before registration, `AllInOne` / `Static`, tools) checks nothing.
+            /// unless that boot's `hosts` row is live ([`check_live`]); `None` (`AllInOne`, a
+            /// `Static` host's start-up claim — made after it registered, alone —, tools)
+            /// checks nothing.
             pub(crate) async fn claim_super_regions(
                 pool: &Pool,
                 owner: HostId,
@@ -875,10 +876,12 @@ macro_rules! engine_rows {
             /// of host `id`'s row, UNFENCED like the heartbeat — it writes one `hosts` row's
             /// `drain_at_ms` and changes no ownership (lock notes: `operator.rs`). The new
             /// deadline is the database clock + `in_ms`, unless the row's mark is earlier
-            /// already: a mark only moves earlier. Only a dirty live row; otherwise
-            /// [`StoreError::NotDrainable`] naming why (read after the update matched nothing),
-            /// nothing written. Postgres: `lock_timeout` `lock_ms`.
-            pub(crate) async fn drain_host(pool: &Pool, id: HostId, in_ms: u64, lock_ms: u64) -> Result<(), StoreError> {
+            /// already: a mark only moves earlier. Only a dirty live row beaten within `lease_ms`
+            /// by the database clock (a lapsed one's process is gone, not declared yet: a
+            /// countdown for it would mean nothing; a vouched one, `seen_ms` 0, likewise);
+            /// otherwise [`StoreError::NotDrainable`] naming why (read after the update matched
+            /// nothing), nothing written. Postgres: `lock_timeout` `lock_ms`.
+            pub(crate) async fn drain_host(pool: &Pool, id: HostId, in_ms: u64, lock_ms: u64, lease_ms: u64) -> Result<(), StoreError> {
                 // One clock reading per statement: Postgres' `LEAST` skips a NULL; SQLite's
                 // two-argument `MIN` is NULL then (and `unixepoch` is fixed within a statement).
                 let deadline = if $share_lock.is_empty() {
@@ -887,7 +890,8 @@ macro_rules! engine_rows {
                     format!("LEAST(drain_at_ms, {NOW_MS} + $2)")
                 };
                 let sql = format!(
-                    "UPDATE hosts SET drain_at_ms = {deadline} WHERE id = $1 AND clean = 0 AND state = {}",
+                    "UPDATE hosts SET drain_at_ms = {deadline} WHERE id = $1 AND clean = 0 AND state = {} \
+                     AND {NOW_MS} - seen_ms <= $3",
                     crate::HOST_LIVE
                 );
                 if in_ms > crate::DRAIN_MAX_SECS * 1000 {
@@ -899,13 +903,14 @@ macro_rules! engine_rows {
                 let in_ms = i(in_ms);
                 let mut tx = pool.begin().await?;
                 cut_lock_timeout(&mut *tx, lock_ms).await?;
-                let done = sqlx::query(&sql).bind(i(id.0)).bind(in_ms).execute(&mut *tx).await?;
+                let done = sqlx::query(&sql).bind(i(id.0)).bind(in_ms).bind(i(lease_ms)).execute(&mut *tx).await?;
                 if done.rows_affected() == 1 {
                     tx.commit().await?;
                     log::warn!("[world-store] host {} marked draining: it leaves within {in_ms} ms", id.0);
                     return Ok(());
                 }
-                let row = sqlx::query("SELECT clean, state FROM hosts WHERE id = $1").bind(i(id.0)).fetch_optional(&mut *tx).await?;
+                let read = format!("SELECT clean, state, {NOW_MS} - seen_ms FROM hosts WHERE id = $1");
+                let row = sqlx::query(&read).bind(i(id.0)).fetch_optional(&mut *tx).await?;
                 tx.rollback().await?;
                 let n = id.0;
                 let why = match row {
@@ -913,6 +918,11 @@ macro_rules! engine_rows {
                     Some(r) if r.try_get::<i64, _>(1)? != crate::HOST_LIVE => {
                         format!("host {n} is dead (declared, its land inherited): nothing to drain")
                     }
+                    Some(r) if r.try_get::<i64, _>(0)? == 0 => format!(
+                        "host {n} has not beaten its lease for {} ms: its process is gone (not declared dead yet) — \
+                         nothing to drain; its land goes to an heir once it is declared",
+                        r.try_get::<i64, _>(2)?
+                    ),
                     Some(_) => format!("host {n} left cleanly: nothing to drain"),
                 };
                 Err(StoreError::NotDrainable(why))

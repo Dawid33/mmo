@@ -44,7 +44,8 @@
 //! form any more.)
 //!
 //! **The drain mark** (Elastic 1 Task 7; `rows.rs` `drain_host`, `worldctl drain`): ONE
-//! `UPDATE` of one dirty live `hosts` row's `drain_at_ms`, UNFENCED like the heartbeat (it
+//! `UPDATE` of one dirty live `hosts` row's `drain_at_ms` (beaten within the lease: a lapsed
+//! row is refused, the guard in the same statement), UNFENCED like the heartbeat (it
 //! changes no ownership) — it holds that row and wants nothing after it, so it closes no cycle:
 //! like a heartbeat it only waits (at most its `lock_timeout`) for whoever holds the row — a
 //! declaration, a retirement, a registration's vouch or total crash, a claim's `check_live`

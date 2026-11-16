@@ -457,6 +457,21 @@ fn drain_marks_a_live_host_and_refuses_a_dead_one() {
     w.shutdown();
 }
 
+/// Elastic 1 final review: draining the ONLY live host that is not draining yet still marks it,
+/// and warns — once it leaves the world has no gate host (joins answer 503 until another host
+/// runs) and no host claims free land. With another live host not draining: no warning.
+#[test]
+fn draining_the_last_host_that_is_not_draining_warns() {
+    let Some(w) = World::new(2) else { return };
+    let url = url_of(&w);
+    let out = said(&url, &["drain", &url, "1", "--in", "60"]).expect("marked");
+    assert!(!out.contains("warning"), "host 0 still takes logins: {out}");
+    let out = said(&url, &["drain", &url, "0", "--in", "60"]).expect("marked all the same");
+    assert!(out.lines().next().is_some_and(|l| l.starts_with("0 host-0 live dirty")), "its hosts line first: {out}");
+    assert!(out.contains("warning") && out.contains("no gate host") && out.contains("503"), "{out}");
+    w.shutdown();
+}
+
 /// `retire-host` takes a host id as `worldctl hosts` lists it — any issued id, no count bounds
 /// it (here 41) — and a bad one is refused naming the listing.
 #[test]

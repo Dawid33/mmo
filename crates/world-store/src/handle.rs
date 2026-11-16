@@ -825,6 +825,16 @@ impl StoreHandle {
         self.ask(|r| Request::ResolvePlayer(key, r))
     }
 
+    /// [`StoreHandle::resolve_player`] without waiting: the answer comes on the receiver (the
+    /// gate host's login relay, which runs on the lease-critical main loop).
+    pub fn resolve_player_later(
+        &self,
+        key: &str,
+    ) -> crossbeam::channel::Receiver<Result<(PlayerId, Option<PlayerRecord>), StoreError>> {
+        let key = key.to_string();
+        self.ask_later(|r| Request::ResolvePlayer(key, r))
+    }
+
     /// [`StoreHandle::resolve_player`] for async callers (the network edge).
     pub async fn resolve_player_async(
         &self,
@@ -997,7 +1007,8 @@ impl StoreHandle {
     /// database clock + `in_ms`, or stays where it is if that is earlier (a mark only moves
     /// earlier: no postponement, no un-drain). ONE `UPDATE` of that one `hosts` row, unfenced
     /// like the heartbeat (it changes no ownership; the lock notes are in `operator.rs`).
-    /// Refused ([`StoreError::NotDrainable`], nothing written) unless the row is dirty and live.
+    /// Refused ([`StoreError::NotDrainable`], nothing written) unless the row is dirty, live and
+    /// beaten within the lease (a lapsed row's process is gone, not declared yet).
     /// A draining host wins no new land ([`Self::claim_free`] returns no rows) and is not the
     /// coordinator's gate host; it learns the mark at its next beat ([`Beat::drain_in_ms`]).
     pub fn drain_host(&self, id: HostId, in_ms: u64) -> Result<(), StoreError> {
