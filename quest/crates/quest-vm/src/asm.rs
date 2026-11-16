@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::bytecode::{Arity, BYTECODE_VERSION, Builtin, Instr, Op, Operand as Kind, Wide};
+use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand as Kind, Wide};
 use crate::host::HostFnKind;
 use crate::program::{
     FnInfo, GlobalInfo, HandlerInfo, HostSite, LineEntry, Program, ProgramError, Shape,
@@ -144,8 +144,6 @@ pub struct ProgramBuilder {
     lines: Vec<LineEntry>,
     files: Vec<String>,
     cur_file: Option<u16>,
-    /// (function, frame word past the end) of runs reserved with `locals_run`.
-    reserved: Vec<(FnRef, u32)>,
     error: Option<ProgramError>,
 }
 
@@ -173,7 +171,6 @@ impl ProgramBuilder {
             lines: Vec::new(),
             files: Vec::new(),
             cur_file: None,
-            reserved: Vec::new(),
             error: None,
         }
     }
@@ -370,41 +367,44 @@ impl ProgramBuilder {
             .iter()
             .map(|f| u32::from(FRAME_HEADER_WORDS) + u32::from(f.params))
             .collect();
-        for &(func, end) in &self.reserved {
-            if let Some(w) = words.get_mut(usize::from(func.0)) {
-                *w = (*w).max(end);
-            }
-        }
         for p in &self.code {
             // ranges an op reads or writes beyond the words it names: the owning frame covers them
             let (first, extra) = match (p.op, p.rest) {
-                (Op::Await | Op::AwaitAll, _) => (Some(p.a), 2),
+                (Op::Await | Op::AwaitAll, _) => (p.a, 2),
                 (Op::CallBuiltin, Wideness::Two(b, _)) => {
                     let n = match p.a {
-                        Opnd::Imm(id) => match Builtin::from_u16(id).map(Builtin::arity) {
-                            Some(Arity::Fixed(n)) => u32::from(n),
-                            _ => 1,
-                        },
-                        _ => 1,
+                        Opnd::Imm(id) => Builtin::from_u16(id).map(Builtin::arity),
+                        Opnd::Slot(_) => None,
                     };
-                    (Some(b), n)
+                    match n {
+                        Some(n) => (b, u32::from(n)),
+                        None => return invalid("CallBuiltin of an unknown builtin"),
+                    }
                 }
                 (Op::CallHost, Wideness::Two(b, _)) => {
                     let n = match p.a {
-                        Opnd::Imm(site) => self
-                            .host_sites
-                            .get(usize::from(site))
-                            .map_or(1, |s| s.params.len() as u32),
-                        _ => 1,
+                        Opnd::Imm(site) => self.host_sites.get(usize::from(site)),
+                        Opnd::Slot(_) => None,
                     };
-                    (Some(b), n)
+                    match n {
+                        Some(s) => (b, s.params.len() as u32),
+                        None => return invalid("CallHost of an unknown host site"),
+                    }
                 }
-                _ => (None, 0),
+                _ => (Opnd::Imm(0), 0),
             };
-            if let Some(Opnd::Slot(SlotRef::Frame { func, word })) = first
-                && let Some(w) = words.get_mut(usize::from(func.0))
-            {
-                *w = (*w).max(u32::from(word) + extra);
+            match first {
+                Opnd::Slot(SlotRef::Frame { func, word }) => {
+                    if let Some(w) = words.get_mut(usize::from(func.0)) {
+                        *w = (*w).max(u32::from(word) + extra);
+                    }
+                }
+                Opnd::Slot(SlotRef::Global(_)) => {
+                    return invalid(
+                        "an argument run or await result is in a global (it must be in a frame)",
+                    );
+                }
+                _ => {}
             }
             let opnds = match p.rest {
                 Wideness::Two(b, c) => [Some(p.a), Some(b), Some(c)],
@@ -539,18 +539,6 @@ impl FnBuilder<'_> {
     }
     pub fn local(&self, i: u16) -> SlotRef {
         self.frame().local(i)
-    }
-
-    /// Reserves `n` consecutive locals from local `first` (the frame covers them) and returns the first:
-    /// the base of a `StrConcatN` argument run (count, then the strings) or any other call's arguments.
-    pub fn locals_run(&mut self, first: u16, n: u16) -> SlotRef {
-        let start = self.local(first);
-        if let SlotRef::Frame { word, .. } = start {
-            self.pb
-                .reserved
-                .push((self.func, u32::from(word) + u32::from(n)));
-        }
-        start
     }
 
     fn pc(&self) -> u32 {

@@ -12,7 +12,7 @@
 //! count larger than the input runs out of bytes first) and ends with [`Program::validate`]; a program
 //! that validates can be handed to the interpreter.
 
-use crate::bytecode::{Arity, BYTECODE_VERSION, Builtin, Instr, Op, Operand, Wide};
+use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand, Wide};
 use crate::consts::{STRUCT_FIELDS_MAX, WIRE_DEPTH_MAX};
 use crate::hash::Fnv64;
 use crate::host::{HostFnKind, SrcLoc};
@@ -735,7 +735,7 @@ impl Program {
                 Err("Await's error slot is outside the static region".into())
             }
             Op::CallBuiltin => match Builtin::from_u16(ins.a).map(Builtin::arity) {
-                Some(Arity::Fixed(n)) if u32::from(ins.b) + u32::from(n) > static_words => {
+                Some(n) if u32::from(ins.b) + u32::from(n) > static_words => {
                     Err("CallBuiltin arguments run outside the static region".into())
                 }
                 _ => Ok(()),

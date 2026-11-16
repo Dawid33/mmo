@@ -1,7 +1,7 @@
 //! The instruction set, the program format, its validation and the assembler (design D5, D6, D9).
 
 use quest_vm::asm::ProgramBuilder;
-use quest_vm::bytecode::{Arity, BYTECODE_VERSION, Builtin, Instr, Op};
+use quest_vm::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op};
 use quest_vm::fuel::*;
 use quest_vm::host::HostFnKind;
 use quest_vm::program::{FnInfo, GlobalInfo, Program, ProgramError};
@@ -118,7 +118,7 @@ fn op_and_builtin_numbers_pinned() {
         (DictKeyAt, 13),
         (DictValAt, 14),
         (StrLen, 15),
-        (StrConcatN, 16),
+        (StrConcat, 16),
         (StrSplit, 17),
         (StrStartsWith, 18),
         (StrEndsWith, 19),
@@ -150,48 +150,48 @@ fn op_and_builtin_numbers_pinned() {
         assert_eq!(Builtin::from_u16(n), Some(b));
     }
     // argument slots read from `b` (design D5 / the Builtin::arity doc)
-    let arity: &[(Builtin, Arity)] = &[
-        (ListPush, Arity::Fixed(2)),
-        (ListPop, Arity::Fixed(1)),
-        (ListInsert, Arity::Fixed(3)),
-        (ListRemove, Arity::Fixed(2)),
-        (ListSlice, Arity::Fixed(3)),
-        (ListContains, Arity::Fixed(2)),
-        (DictGet, Arity::Fixed(2)),
-        (DictRemove, Arity::Fixed(2)),
-        (DictContains, Arity::Fixed(2)),
-        (DictKeys, Arity::Fixed(1)),
-        (DictValues, Arity::Fixed(1)),
-        (DictLen, Arity::Fixed(1)),
-        (DictNext, Arity::Fixed(2)),
-        (DictKeyAt, Arity::Fixed(2)),
-        (DictValAt, Arity::Fixed(2)),
-        (StrLen, Arity::Fixed(1)),
-        (StrConcatN, Arity::Counted),
-        (StrSplit, Arity::Fixed(2)),
-        (StrStartsWith, Arity::Fixed(2)),
-        (StrEndsWith, Arity::Fixed(2)),
-        (StrContains, Arity::Fixed(2)),
-        (StrTrim, Arity::Fixed(1)),
-        (StrUpper, Arity::Fixed(1)),
-        (StrLower, Arity::Fixed(1)),
-        (ParseInt, Arity::Fixed(1)),
-        (Fmt, Arity::Fixed(2)),
-        (AbsI, Arity::Fixed(1)),
-        (MinI, Arity::Fixed(2)),
-        (MaxI, Arity::Fixed(2)),
-        (AbsF, Arity::Fixed(1)),
-        (MinF, Arity::Fixed(2)),
-        (MaxF, Arity::Fixed(2)),
-        (Sqrt, Arity::Fixed(1)),
-        (Floor, Arity::Fixed(1)),
-        (Ceil, Arity::Fixed(1)),
-        (Round, Arity::Fixed(1)),
-        (Sin, Arity::Fixed(1)),
-        (Cos, Arity::Fixed(1)),
-        (Pow, Arity::Fixed(2)),
-        (Assert, Arity::Fixed(2)),
-        (Print, Arity::Fixed(1)),
+    let arity: &[(Builtin, u8)] = &[
+        (ListPush, 2),
+        (ListPop, 1),
+        (ListInsert, 3),
+        (ListRemove, 2),
+        (ListSlice, 3),
+        (ListContains, 2),
+        (DictGet, 2),
+        (DictRemove, 2),
+        (DictContains, 2),
+        (DictKeys, 1),
+        (DictValues, 1),
+        (DictLen, 1),
+        (DictNext, 2),
+        (DictKeyAt, 2),
+        (DictValAt, 2),
+        (StrLen, 1),
+        (StrConcat, 2),
+        (StrSplit, 2),
+        (StrStartsWith, 2),
+        (StrEndsWith, 2),
+        (StrContains, 2),
+        (StrTrim, 1),
+        (StrUpper, 1),
+        (StrLower, 1),
+        (ParseInt, 1),
+        (Fmt, 2),
+        (AbsI, 1),
+        (MinI, 2),
+        (MaxI, 2),
+        (AbsF, 1),
+        (MinF, 2),
+        (MaxF, 2),
+        (Sqrt, 1),
+        (Floor, 1),
+        (Ceil, 1),
+        (Round, 1),
+        (Sin, 1),
+        (Cos, 1),
+        (Pow, 2),
+        (Assert, 2),
+        (Print, 1),
     ];
     assert_eq!(arity.len(), Builtin::ALL.len());
     for &(b, a) in arity {
@@ -391,6 +391,18 @@ fn validate_rejects_handler_frame_without_room_for_its_event() {
     q.fns[m].params = 1;
     q.fns[m].frame_words += 1;
     invalid(&q);
+}
+
+#[test]
+fn finish_rejects_argument_runs_in_globals() {
+    let mut pb = ProgramBuilder::new(1);
+    let int = pb.ty(TypeDesc::Int);
+    let g = pb.global("g", int);
+    let mut f = pb.func("f", 0);
+    f.emit(Op::CallBuiltin, Builtin::AbsI as u16, g, f.local(0));
+    f.emit(Op::Ret, 0, 0, 0);
+    f.end();
+    assert!(matches!(pb.finish(), Err(ProgramError::Invalid(_))));
 }
 
 #[test]
