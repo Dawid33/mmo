@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/quest-vm", "crates/quest-stub"]
+members = ["crates/quest-vm", "crates/quest-stub", "crates/quest-lang"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ publish = false
 
 [workspace.dependencies]
 libm = "0.2"
+logos = "0.16"
 state-hash = { path = "../crates/state-hash", default-features = false }
 proptest = "1"
 wasm-bindgen-test = "0.3"
