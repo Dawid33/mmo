@@ -8,7 +8,9 @@
 //! * The mutating builtins (`ListPush`, `ListPop`, `ListInsert`, `ListRemove`, `DictRemove`) work on the
 //!   container in their first argument slot: it is made unique there, mutated, and its (possibly moved)
 //!   pointer is left in that slot.
-//! * A builtin returning unit (`ListPush`, `ListInsert`, `Assert`) does not write `c`.
+//! * A builtin returning unit (`ListPush`, `ListInsert`, `Assert`, `Print`) does not write `c`.
+//! * `Print` appends its text to the segment's command buffer (`sched`); the host sees it when the
+//!   segment commits, and never when it aborts.
 //! * A heap-kind result releases what `c` held. `Option[T]` results (`ListPop`, `DictGet`, `DictRemove`,
 //!   `ParseInt`): `None` is the immediate `(0 << 1) | 1`; `Some(x)` an `Obj` of tag 1 with one field whose
 //!   `aux` bit says whether `x` is a heap kind (from the container's kind or flags; an int for
@@ -154,8 +156,10 @@ impl Vm {
             AbsI | MinI | MaxI | AbsF | MinF | MaxF | Sqrt | Floor | Ceil | Round | Sin | Cos
             | Pow => self.math_builtin(b, args, res),
             Assert => self.assert_builtin(args),
-            // Task 12 (prints are buffered per segment).
-            Print => Err(Fault::corrupt("unsupported builtin")),
+            Print => {
+                let text = self.text_in(args, m)?;
+                self.buffer_print(&text, m)
+            }
         }
     }
 

@@ -19,6 +19,7 @@
 //! | `RefStore` | reference slot | source slot | - |
 //! | `Await` | value (error in `a + 1`) | promise slot | expected type id |
 //! | `AwaitAll` | results (error in `a + 1`) | slot of the list of promises | expected type id |
+//! | `CallHost` | host site | first argument slot | result slot (a query's answer; a command leaves it) |
 //! | `ListLen`, `GetTag`, `NegI`, `Not`, ... two-operand ops | destination | source | - |
 
 /// Version of the instruction set, builtin ids, fuel table and memory layout.

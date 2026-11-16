@@ -408,6 +408,75 @@ pub fn from_wire(
     Ok((v, walk.used))
 }
 
+/// Whether [`from_wire`] of `w` into type `t` would find the shapes matching, decided without building
+/// anything (a dry run of its structural checks: the same field matching, variant lookup, duplicate dict
+/// keys and container nesting limit). It does not check that the heap has room or that the walk stays
+/// under `WORK_WORDS_MAX`. Duplicate dict keys are found by their encoded bytes.
+pub fn fits(types: &TypeTable, t: TypeId, w: &WireValue) -> bool {
+    fits_in(types, t, w, 0)
+}
+
+/// `depth`: the containers entered so far (`from_wire` refuses a container at `WIRE_DEPTH_MAX`).
+fn fits_in(types: &TypeTable, t: TypeId, w: &WireValue, depth: usize) -> bool {
+    let Ok(d) = types.desc(t) else {
+        return false;
+    };
+    let room = depth < WIRE_DEPTH_MAX;
+    match (d, w) {
+        (TypeDesc::Unit, WireValue::Unit)
+        | (TypeDesc::Bool, WireValue::Bool(_))
+        | (TypeDesc::Int, WireValue::Int(_))
+        | (TypeDesc::Float, WireValue::Float(_))
+        | (TypeDesc::Str, WireValue::Str(_)) => true,
+        (TypeDesc::List(e), WireValue::List(items)) => {
+            room && items.iter().all(|i| fits_in(types, *e, i, depth + 1))
+        }
+        (TypeDesc::Dict(kt, vt), WireValue::Dict(pairs)) => {
+            let mut keys = std::collections::BTreeSet::new();
+            room && pairs.iter().all(|(k, v)| {
+                let mut bytes = Vec::new();
+                k.encode(&mut bytes);
+                fits_in(types, *kt, k, depth + 1)
+                    && fits_in(types, *vt, v, depth + 1)
+                    && keys.insert(bytes)
+            })
+        }
+        (TypeDesc::Struct { fields, .. }, WireValue::Struct { fields: wf, .. }) => {
+            room && fields_fit(types, fields, wf, depth + 1)
+        }
+        (TypeDesc::Enum { variants, .. }, WireValue::Variant { name, fields: wf }) => {
+            match variants.iter().find(|(n, _)| n == name) {
+                Some((_, fields)) if fields.is_empty() && wf.is_empty() => true,
+                Some((_, fields)) => room && fields_fit(types, fields, wf, depth + 1),
+                None => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// `build_obj`'s matching: the same number of fields, each declared name found in a wire field of its
+/// own, each value fitting its declared type.
+fn fields_fit(
+    types: &TypeTable,
+    fields: &[(String, TypeId)],
+    wf: &[(String, WireValue)],
+    depth: usize,
+) -> bool {
+    if fields.len() != wf.len() || fields.len() > STRUCT_FIELDS_MAX {
+        return false;
+    }
+    let mut used = vec![false; wf.len()];
+    fields
+        .iter()
+        .all(|(name, ft)| match wf.iter().position(|(n, _)| n == name) {
+            Some(j) if !std::mem::replace(&mut used[j], true) => {
+                fits_in(types, *ft, &wf[j].1, depth)
+            }
+            _ => false,
+        })
+}
+
 /// Releases `v` when it is a heap-kind value of type `t` (a plain immediate looks like a pointer).
 fn drop_value(st: &mut Store, heap: Heap, types: &TypeTable, t: TypeId, v: u64) {
     if types.is_ref(t) {

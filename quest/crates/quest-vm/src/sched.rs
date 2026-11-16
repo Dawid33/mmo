@@ -1,0 +1,780 @@
+//! The scheduler (design D7): tasks, abortable segments, the event queue and the command buffer.
+//!
+//! # State
+//! Everything lives in the flat memory, written through the store's logged paths, so `checkpoint` /
+//! `rollback_to` cover the scheduler too and `Vm::mem_bytes` stays the complete state:
+//! * `H_INSTANCE`: ok or failed. A failed instance is inert: `tick` runs nothing, `deliver` drops.
+//! * `H_TASK` / `H_TASK_ARG`: the task in progress (`TASK_*`) and its identity (the global index of an
+//!   `Init` task, the handler index of a `Handler` task); `TASK_NONE` between tasks. The interpreter's
+//!   own registers (`H_PC`, `H_CURRENT_FN`, `H_STATUS`) say where the task is.
+//! * `H_INIT_CURSOR`: the next global to initialise; `H_MAIN`: whether `main` was asked for / started.
+//! * The queue region: a ring of `QUEUE_LEN` records (`H_QUEUE_HEAD`, `H_QUEUE_COUNT`) of
+//!   `[arrival, first handler index, payload pointer, 0]`; the payload is the event's wire bytes in a
+//!   `Raw` block of the inbox heap. `H_ARRIVAL` numbers deliveries.
+//! * The event being dispatched (`H_EV_*`): taken off the queue when its first handler starts, so it
+//!   does not hold a queue slot while its handlers run; `H_EV_HANDLER` is the index + 1 of its next
+//!   handler (0 = none). Its payload is freed when its last handler starts.
+//! * The command buffer (`cmds` region, `H_CMD_LEN` bytes used): one record per command or print, a
+//!   header word (`kind: u8 | host fn: u16 << 16 | byte length: u32 << 32`) and the bytes packed into
+//!   words (a command's arguments as the wire bytes of one `List`, a print's UTF-8 text). Bytes past
+//!   `H_CMD_LEN` are stale and never read.
+//! * `H_NOW`: the latest `now` a tick was given.
+//!
+//! # Tasks and segments
+//! A task runs one function from its entry until its `Ret` on the sentinel link: the pending
+//! initialisers in `program.globals` order, then `main` if it was asked for, then the handlers of the
+//! queued events by arrival (each handler of an event its own task, in table order). Every task opens a
+//! segment when it starts. At its end the function's error word (frame word 2) is checked: non-zero is an
+//! escaping error. Otherwise the task's result is stored (an initialiser's return value is moved into its
+//! global; a handler's event parameter is released), the buffered commands are handed to the host in
+//! order, the segment commits and the buffer is cleared. A fault or an escaping error aborts the segment
+//! (the script regions return to the task's start), clears the buffer and reports
+//! `Report::HandlerAborted` (`Report::InitFailed` for an initialiser, which also fails the instance). A
+//! `Corrupt` fault fails the instance without an abort.
+//!
+//! # Idle
+//! An instance is idle when no task is in progress, nothing is runnable (no pending initialiser, no
+//! wanted `main`, no event queued or being dispatched) and the zombie list of the script heap is empty:
+//! `tick` reaps zombies between tasks (fuel-charged, like the run loop), and a tick that leaves zombies
+//! reports `Busy`. So an idle instance is quiescent and reaped, which leak checks rely on.
+
+use std::sync::Arc;
+
+use crate::alloc::Kind;
+use crate::bytecode::Instr;
+use crate::consts::{ERR_TRACE_MAX, QUEUE_LEN};
+use crate::fault::FaultKind;
+use crate::fuel::FUEL_DISPATCH;
+use crate::host::{AbortCause, DropReason, Host, HostFnKind, Report, SrcLoc};
+use crate::interp::{Exec, Fault, Meter};
+use crate::layout::{
+    H_ARRIVAL, H_CMD_LEN, H_CURRENT_FN, H_EV_ARRIVAL, H_EV_HANDLER, H_EV_PAYLOAD, H_FUEL_DEBT,
+    H_INIT_CURSOR, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEUE_COUNT, H_QUEUE_HEAD, H_STATUS, H_TASK,
+    H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL, QUEUE_REC_WORDS, STATUS_IDLE,
+    STATUS_RUNNING,
+};
+use crate::object::{capacity, hdr, ptr_of, read_slot, write_slot};
+use crate::types::{TypeDesc, TypeId, TypeTable};
+use crate::vm::{RunEnd, Vm};
+use crate::wire::{self, FromWire, WireValue, from_wire, to_wire};
+
+/// What [`Vm::deliver`] did with an event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Stored; no task was in progress.
+    Accepted,
+    /// Stored while a task was in progress: the owner's warning (decision 6).
+    Queued,
+    /// Not stored; nothing changed.
+    Dropped(DropReason),
+}
+
+/// The outcome of one [`Vm::tick`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TickReport {
+    /// Fuel charged during this tick; the last charge may exceed the budget (the excess is a debt the
+    /// next ticks repay first).
+    pub fuel_used: u64,
+    pub status: Status,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Nothing in progress, nothing runnable, nothing left to reap.
+    Idle,
+    /// More to run: a task in progress, a runnable task or zombies to reap.
+    Busy,
+    /// An initialiser failed or the memory is corrupt; inert.
+    Failed,
+}
+
+// `H_TASK`.
+const TASK_NONE: u64 = 0;
+const TASK_INIT: u64 = 1;
+const TASK_MAIN: u64 = 2;
+const TASK_HANDLER: u64 = 3;
+// `H_MAIN`.
+const MAIN_NONE: u64 = 0;
+const MAIN_WANTED: u64 = 1;
+const MAIN_STARTED: u64 = 2;
+// `H_INSTANCE`.
+const INSTANCE_OK: u64 = 0;
+const INSTANCE_FAILED: u64 = 1;
+// Command record kinds.
+const CMD_COMMAND: u64 = 0;
+const CMD_PRINT: u64 = 1;
+
+const WORD: u64 = 8;
+/// Frame words: the return link, the return value, the error value, the first parameter.
+const FRAME_RET: u16 = 1;
+const FRAME_ERR: u16 = 2;
+const FRAME_PARAM0: u16 = 3;
+
+/// A buffered effect, read back at commit.
+enum Buffered {
+    Command(u16, Vec<WireValue>),
+    Print(String),
+}
+
+/// The task in progress, from the header.
+#[derive(Clone, Copy)]
+struct Task {
+    kind: u64,
+    arg: u16,
+    fn_id: u16,
+}
+
+fn corrupt<T>(why: &str) -> Exec<T> {
+    Err(Fault::corrupt(why))
+}
+
+/// The id of the program's error enum (the one `Enum` named `Error`), if it has errors.
+pub(crate) fn error_type(types: &TypeTable) -> Option<TypeId> {
+    let i = types
+        .0
+        .iter()
+        .position(|d| matches!(d, TypeDesc::Enum { name, .. } if name == "Error"))?;
+    TypeId::try_from(i).ok()
+}
+
+/// `base + i` words, as a byte offset.
+fn word_off(base: u32, i: u64) -> Exec<u32> {
+    u32::try_from(u64::from(base) + i * WORD).map_err(|_| Fault::corrupt("offset out of range"))
+}
+
+impl Vm {
+    fn frame_slot(&self, fn_id: u16, word: u16) -> Exec<u16> {
+        let f = self
+            .program
+            .fns
+            .get(usize::from(fn_id))
+            .ok_or_else(|| Fault::corrupt("a task of an unknown function"))?;
+        f.frame_base
+            .checked_add(word)
+            .ok_or_else(|| Fault::corrupt("frame word out of range"))
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.header(H_INSTANCE) != Ok(INSTANCE_OK)
+    }
+
+    pub(crate) fn sched_status(&self) -> Status {
+        if self.failed() {
+            return Status::Failed;
+        }
+        match self.busy() {
+            Ok(false) => Status::Idle,
+            Ok(true) => Status::Busy,
+            Err(_) => Status::Failed,
+        }
+    }
+
+    fn task_in_progress(&self) -> Exec<bool> {
+        Ok(self.header(H_TASK)? != TASK_NONE)
+    }
+
+    /// A task in progress, a task to start, or zombies to reap.
+    fn busy(&self) -> Exec<bool> {
+        let init_pending = self.header(H_INIT_CURSOR)? < self.program.globals.len() as u64;
+        Ok(self.task_in_progress()?
+            || init_pending
+            || self.header(H_MAIN)? == MAIN_WANTED
+            || self.header(H_EV_HANDLER)? != 0
+            || self.header(H_QUEUE_COUNT)? != 0
+            || self.heap.zombie_head(&self.store)? != 0)
+    }
+
+    pub(crate) fn sched_start_main(&mut self) -> bool {
+        if self.program.main_fn.is_none() || self.failed() {
+            return false;
+        }
+        match self.header(H_MAIN) {
+            Ok(MAIN_NONE) => self.set_header(H_MAIN, MAIN_WANTED).is_ok(),
+            _ => false,
+        }
+    }
+
+    // ---- deliver -------------------------------------------------------------------------------------
+
+    /// [`Vm::deliver`]: a drop, or memory that does not parse, leaves the memory as it was.
+    pub(crate) fn sched_deliver(&mut self, event: &str, payload: &WireValue) -> Delivery {
+        let cp = self.store.mem.checkpoint();
+        let d = match self.try_deliver(event, payload) {
+            Ok(d) => d,
+            // The next tick finds the corruption and fails the instance.
+            Err(_) => Delivery::Dropped(DropReason::InstanceFailed),
+        };
+        if matches!(d, Delivery::Dropped(_)) {
+            // Taken a moment ago: its history is still there.
+            let _ = self.store.mem.rollback_to(cp);
+        }
+        d
+    }
+
+    fn try_deliver(&mut self, event: &str, payload: &WireValue) -> Exec<Delivery> {
+        let p = Arc::clone(&self.program);
+        let drop = |r| Ok(Delivery::Dropped(r));
+        let Some(first) = p.handlers.iter().position(|h| h.event == event) else {
+            // A known event is one whose struct the program has (the events are host structs).
+            let known = p
+                .types
+                .0
+                .iter()
+                .any(|d| matches!(d, TypeDesc::Struct { name, .. } if name == event));
+            return drop(if known {
+                DropReason::NoHandler
+            } else {
+                DropReason::UnknownEvent
+            });
+        };
+        if !wire::fits(&p.types, p.handlers[first].event_ty, payload) {
+            return drop(DropReason::WrongShape);
+        }
+        if self.failed() {
+            return drop(DropReason::InstanceFailed);
+        }
+        let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
+        let qlen = QUEUE_LEN as u64;
+        if head >= qlen || count > qlen {
+            return corrupt("queue head or count out of range");
+        }
+        if count == qlen {
+            return drop(DropReason::QueueFull);
+        }
+        let mut bytes = Vec::new();
+        payload.encode(&mut bytes);
+        let Some(ptr) = self.inbox_store(&bytes)? else {
+            return drop(DropReason::InboxFull);
+        };
+        let arrival = self.header(H_ARRIVAL)?;
+        let at = self.queue_rec((head + count) % qlen)?;
+        self.store.wr(at, arrival)?;
+        self.store.wr(word_off(at, 1)?, first as u64)?;
+        self.store.wr(word_off(at, 2)?, ptr)?;
+        self.set_header(H_ARRIVAL, arrival.wrapping_add(1))?;
+        self.set_header(H_QUEUE_COUNT, count + 1)?;
+        Ok(if self.task_in_progress()? {
+            Delivery::Queued
+        } else {
+            Delivery::Accepted
+        })
+    }
+
+    fn queue_rec(&self, i: u64) -> Exec<u32> {
+        word_off(self.store.layout.queue_base, i * u64::from(QUEUE_REC_WORDS))
+    }
+
+    /// The payload in a new `Raw` block of the inbox heap; `None` when it does not fit.
+    fn inbox_store(&mut self, bytes: &[u8]) -> Exec<Option<u64>> {
+        let Ok(len) = u32::try_from(bytes.len()) else {
+            return Ok(None);
+        };
+        let p = match self
+            .inbox
+            .alloc(&mut self.store, Kind::Raw, len.div_ceil(8))?
+        {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        let mut h = self.inbox.header(&self.store, p)?;
+        h.len = len;
+        self.inbox.set_header(&mut self.store, p, h)?;
+        for (i, chunk) in (0u32..).zip(bytes.chunks(8)) {
+            let mut w = [0u8; 8];
+            w[..chunk.len()].copy_from_slice(chunk);
+            write_slot(&mut self.store, self.inbox, p, &h, i, u64::from_le_bytes(w))?;
+        }
+        Ok(Some(u64::from(p)))
+    }
+
+    fn inbox_read(&self, v: u64) -> Exec<Vec<u8>> {
+        let (p, h) = hdr(&self.store, self.inbox, v)?;
+        if h.kind != Kind::Raw || u64::from(h.len) > u64::from(capacity(&h)) * WORD {
+            return corrupt("a queued payload is not a payload");
+        }
+        let mut out = Vec::new();
+        for i in 0..h.len.div_ceil(8) {
+            out.extend_from_slice(&read_slot(&self.store, p, &h, i)?.to_le_bytes());
+        }
+        out.truncate(h.len as usize);
+        Ok(out)
+    }
+
+    // ---- tick ----------------------------------------------------------------------------------------
+
+    /// [`Vm::tick`].
+    pub(crate) fn sched_tick(&mut self, now: u64, fuel: u64, host: &mut dyn Host) -> TickReport {
+        let mut m = Meter::new(0);
+        if fuel > 0
+            && let Err(f) = self.tick_run(now, fuel, host, &mut m)
+        {
+            self.fail(
+                AbortCause::Fault {
+                    kind: f.kind,
+                    message: f.message,
+                    stack: Vec::new(),
+                },
+                host,
+            );
+        }
+        TickReport {
+            fuel_used: m.used(),
+            status: self.sched_status(),
+        }
+    }
+
+    /// `Err` only for memory that does not parse (the caller fails the instance).
+    fn tick_run(&mut self, now: u64, fuel: u64, host: &mut dyn Host, m: &mut Meter) -> Exec<()> {
+        if self.failed() {
+            return Ok(());
+        }
+        let last = self.header(H_NOW)?;
+        self.set_header(H_NOW, now.max(last))?;
+        let Some(fresh) = self.meter_after_debt(fuel)? else {
+            return Ok(());
+        };
+        *m = fresh;
+        while m.left() > 0 && !self.failed() {
+            if !self.task_in_progress()? {
+                if self.reap_one(m)? {
+                    continue;
+                }
+                if !self.start_next(m, host)? {
+                    break;
+                }
+                continue;
+            }
+            match self.run_task(m, host)? {
+                RunEnd::OutOfFuel => break,
+                RunEnd::Returned => self.end_task(m, host)?,
+                RunEnd::Faulted {
+                    kind,
+                    message,
+                    stack,
+                } => self.abort_task(
+                    AbortCause::Fault {
+                        kind,
+                        message,
+                        stack,
+                    },
+                    host,
+                )?,
+            }
+        }
+        self.set_header(H_FUEL_DEBT, m.debt())
+    }
+
+    /// Starts the next task: a pending initialiser, then `main`, then the next handler of the event
+    /// being dispatched or of the oldest queued one. `false` when nothing is runnable.
+    fn start_next(&mut self, m: &mut Meter, host: &mut dyn Host) -> Exec<bool> {
+        let p = Arc::clone(&self.program);
+        let cursor = self.header(H_INIT_CURSOR)?;
+        if let Some(g) = usize::try_from(cursor).ok().and_then(|i| p.globals.get(i)) {
+            let arg = u16::try_from(cursor).map_err(|_| Fault::corrupt("init cursor"))?;
+            self.begin_task(TASK_INIT, arg, g.init_fn)?;
+            return Ok(true);
+        }
+        if cursor != p.globals.len() as u64 {
+            return corrupt("init cursor out of range");
+        }
+        if self.header(H_MAIN)? == MAIN_WANTED {
+            let Some(f) = p.main_fn else {
+                return corrupt("main wanted in a program without one");
+            };
+            self.set_header(H_MAIN, MAIN_STARTED)?;
+            self.begin_task(TASK_MAIN, 0, f)?;
+            return Ok(true);
+        }
+        if self.header(H_EV_HANDLER)? == 0 && !self.dequeue()? {
+            return Ok(false);
+        }
+        self.start_handler(m, host)?;
+        Ok(true)
+    }
+
+    /// Takes the oldest queued event off the queue and makes it the event being dispatched.
+    fn dequeue(&mut self) -> Exec<bool> {
+        let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
+        let qlen = QUEUE_LEN as u64;
+        if head >= qlen || count > qlen {
+            return corrupt("queue head or count out of range");
+        }
+        if count == 0 {
+            return Ok(false);
+        }
+        let at = self.queue_rec(head)?;
+        let mut rec = [0u64; QUEUE_REC_WORDS as usize];
+        for (i, w) in (0u64..).zip(rec.iter_mut()) {
+            let off = word_off(at, i)?;
+            *w = self.store.r(off)?;
+            self.store.wr(off, 0)?;
+        }
+        let [arrival, first, payload, _] = rec;
+        self.set_header(H_QUEUE_HEAD, (head + 1) % qlen)?;
+        self.set_header(H_QUEUE_COUNT, count - 1)?;
+        self.set_header(H_EV_HANDLER, first.saturating_add(1))?;
+        self.set_header(H_EV_PAYLOAD, payload)?;
+        self.set_header(H_EV_ARRIVAL, arrival)?;
+        Ok(true)
+    }
+
+    /// Starts the next handler of the event being dispatched: advances the cursor (freeing the payload
+    /// when this is the event's last handler), opens the task and loads the event into the handler's
+    /// parameter inside its segment.
+    fn start_handler(&mut self, m: &mut Meter, host: &mut dyn Host) -> Exec<()> {
+        let p = Arc::clone(&self.program);
+        let idx = self.header(H_EV_HANDLER)?.wrapping_sub(1);
+        let Some(h) = usize::try_from(idx).ok().and_then(|i| p.handlers.get(i)) else {
+            return corrupt("the event's handler index is out of range");
+        };
+        // `idx` indexes a table of at most 65 536 handlers
+        let (idx, arg) = (idx as usize, idx as u16);
+        let ptr = self.header(H_EV_PAYLOAD)?;
+        let bytes = self.inbox_read(ptr)?;
+        let next = p
+            .handlers
+            .iter()
+            .enumerate()
+            .skip(idx + 1)
+            .find(|(_, o)| o.event == h.event);
+        match next {
+            Some((j, _)) => self.set_header(H_EV_HANDLER, j as u64 + 1)?,
+            None => {
+                self.inbox.free(&mut self.store, ptr_of(ptr)?)?;
+                self.set_header(H_EV_HANDLER, 0)?;
+                self.set_header(H_EV_PAYLOAD, 0)?;
+                self.set_header(H_EV_ARRIVAL, 0)?;
+            }
+        }
+        m.charge(FUEL_DISPATCH);
+        m.words(u32::try_from(bytes.len().div_ceil(8)).unwrap_or(u32::MAX));
+        self.begin_task(TASK_HANDLER, arg, h.fn_id)?;
+        let w = WireValue::decode(&bytes)
+            .map_err(|_| Fault::corrupt("a queued payload does not decode"))?;
+        let slot = self.frame_slot(h.fn_id, FRAME_PARAM0)?;
+        let loaded = match from_wire(&mut self.store, self.heap, &p.types, h.event_ty, &w) {
+            Ok((v, words)) => {
+                m.words(words);
+                self.put(slot, v, p.types.is_ref(h.event_ty))
+            }
+            Err(FromWire::WrongType) => Err(Fault {
+                kind: FaultKind::HostFault,
+                message: "the event does not fit the handler's event type".into(),
+            }),
+            Err(FromWire::Fault(k)) => Err(k.into()),
+        };
+        match loaded {
+            Ok(()) => Ok(()),
+            Err(f) if f.kind == FaultKind::Corrupt => Err(f),
+            Err(f) => {
+                let entry = p.fns.get(usize::from(h.fn_id)).map_or(0, |f| f.entry);
+                self.abort_task(
+                    AbortCause::Fault {
+                        kind: f.kind,
+                        message: f.message,
+                        stack: vec![p.loc(entry)],
+                    },
+                    host,
+                )
+            }
+        }
+    }
+
+    /// Opens the task's segment and starts its function with a sentinel return link.
+    fn begin_task(&mut self, kind: u64, arg: u16, fn_id: u16) -> Exec<()> {
+        let Some(entry) = self.program.fns.get(usize::from(fn_id)).map(|f| f.entry) else {
+            return corrupt("a task of an unknown function");
+        };
+        if self.store.segment_is_open() {
+            return corrupt("a segment is open between tasks");
+        }
+        self.store.segment_open();
+        let link = self.frame_slot(fn_id, 0)?;
+        self.wt(link, LINK_SENTINEL)?;
+        for (field, v) in [
+            (H_PC, u64::from(entry)),
+            (H_CURRENT_FN, u64::from(fn_id)),
+            (H_STATUS, STATUS_RUNNING),
+            (H_TASK, kind),
+            (H_TASK_ARG, u64::from(arg)),
+            (H_TRACE_LEN, 0),
+            (H_TRACE_DROPPED, 0),
+        ] {
+            self.set_header(field, v)?;
+        }
+        Ok(())
+    }
+
+    fn current_task(&self) -> Exec<Task> {
+        let p = &self.program;
+        let kind = self.header(H_TASK)?;
+        let arg = u16::try_from(self.header(H_TASK_ARG)?)
+            .map_err(|_| Fault::corrupt("task identity out of range"))?;
+        let i = usize::from(arg);
+        let fn_id = match kind {
+            TASK_INIT => p.globals.get(i).map(|g| g.init_fn),
+            TASK_MAIN => p.main_fn,
+            TASK_HANDLER => p.handlers.get(i).map(|h| h.fn_id),
+            _ => None,
+        };
+        match fn_id {
+            Some(fn_id) => Ok(Task { kind, arg, fn_id }),
+            None => corrupt("unknown task"),
+        }
+    }
+
+    /// The task's function returned: an escaping error aborts; otherwise its result is stored, the
+    /// buffered effects reach the host and the segment commits.
+    fn end_task(&mut self, m: &mut Meter, host: &mut dyn Host) -> Exec<()> {
+        let p = Arc::clone(&self.program);
+        let t = self.current_task()?;
+        let err = self.rd(self.frame_slot(t.fn_id, FRAME_ERR)?)?;
+        if err != 0 {
+            let cause = self.error_cause(err, m)?;
+            return self.abort_task(cause, host);
+        }
+        let i = usize::from(t.arg);
+        match t.kind {
+            TASK_INIT => {
+                let Some(g) = p.globals.get(i) else {
+                    return corrupt("unknown global");
+                };
+                let is_ref = p.types.is_ref(g.ty);
+                let ret = self.frame_slot(t.fn_id, FRAME_RET)?;
+                let v = self.rd(ret)?;
+                if is_ref {
+                    self.wt(ret, 0)?;
+                }
+                self.put(g.slot, v, is_ref)?;
+                self.set_header(H_INIT_CURSOR, u64::from(t.arg) + 1)?;
+            }
+            TASK_HANDLER => {
+                let Some(h) = p.handlers.get(i) else {
+                    return corrupt("unknown handler");
+                };
+                if p.types.is_ref(h.event_ty) {
+                    let ev = self.frame_slot(t.fn_id, FRAME_PARAM0)?;
+                    self.put(ev, 0, true)?;
+                }
+            }
+            _ => {}
+        }
+        for b in self.read_cmds()? {
+            match b {
+                Buffered::Command(f, args) => host.command(f, &args),
+                Buffered::Print(text) => host.print(&text),
+            }
+        }
+        self.store.segment_commit();
+        self.clear_task()
+    }
+
+    /// The task failed with `cause`: the segment is undone, the buffer cleared and the failure reported;
+    /// an initialiser's failure fails the instance. A `Corrupt` fault fails it without an abort.
+    fn abort_task(&mut self, cause: AbortCause, host: &mut dyn Host) -> Exec<()> {
+        if matches!(
+            cause,
+            AbortCause::Fault {
+                kind: FaultKind::Corrupt,
+                ..
+            }
+        ) {
+            self.fail(cause, host);
+            return Ok(());
+        }
+        let t = self.current_task()?;
+        let report = self.report_for(t, cause);
+        self.store.segment_abort();
+        if t.kind == TASK_INIT {
+            self.set_header(H_INSTANCE, INSTANCE_FAILED)?;
+        }
+        self.clear_task()?;
+        host.report(report);
+        Ok(())
+    }
+
+    /// Between tasks: no task, the interpreter idle, the buffer and the trace empty.
+    fn clear_task(&mut self) -> Exec<()> {
+        for field in [H_TASK, H_TASK_ARG, H_CMD_LEN, H_TRACE_LEN, H_TRACE_DROPPED] {
+            self.set_header(field, 0)?;
+        }
+        self.set_header(H_STATUS, STATUS_IDLE)
+    }
+
+    /// Fails the instance (inert from now on) and reports `cause` against the task in progress.
+    fn fail(&mut self, cause: AbortCause, host: &mut dyn Host) {
+        let _ = self.set_header(H_INSTANCE, INSTANCE_FAILED);
+        let report = match self.current_task() {
+            Ok(t) => self.report_for(t, cause),
+            Err(_) => Report::HandlerAborted {
+                task: "?".into(),
+                cause,
+            },
+        };
+        host.report(report);
+    }
+
+    fn report_for(&self, t: Task, cause: AbortCause) -> Report {
+        let p = &self.program;
+        if t.kind == TASK_INIT {
+            let global = p
+                .globals
+                .get(usize::from(t.arg))
+                .map_or_else(|| "?".into(), |g| g.name.clone());
+            return Report::InitFailed { global, cause };
+        }
+        let task = p
+            .fns
+            .get(usize::from(t.fn_id))
+            .map_or_else(|| "?".into(), |f| f.name.clone());
+        Report::HandlerAborted { task, cause }
+    }
+
+    /// The escaping error `err` (still in the frame, before the abort) with its trace.
+    fn error_cause(&self, err: u64, m: &mut Meter) -> Exec<AbortCause> {
+        let (name, data) = match self.error_ty {
+            Some(t) => {
+                let (w, words) = to_wire(&self.store, self.heap, &self.program.types, t, err)?;
+                m.words(words);
+                match &w {
+                    WireValue::Variant { name, .. } => (name.clone(), w.clone()),
+                    _ => return corrupt("an error that is not a variant"),
+                }
+            }
+            None => ("?".into(), WireValue::Unit),
+        };
+        let len = self.header(H_TRACE_LEN)?;
+        if len > ERR_TRACE_MAX as u64 {
+            return corrupt("error trace length out of range");
+        }
+        let mut trace: Vec<SrcLoc> = Vec::new();
+        for i in 0..len {
+            let pc = self.store.r(word_off(self.store.layout.trace_base, i)?)?;
+            let pc = u32::try_from(pc).map_err(|_| Fault::corrupt("trace entry out of range"))?;
+            trace.push(self.program.loc(pc));
+        }
+        let trace_dropped = u32::try_from(self.header(H_TRACE_DROPPED)?).unwrap_or(u32::MAX);
+        Ok(AbortCause::Error {
+            name,
+            data,
+            trace,
+            trace_dropped,
+        })
+    }
+
+    // ---- host calls and the command buffer -----------------------------------------------------------
+
+    /// `CallHost a, b, c`: the arguments (types from site `a`) from the slots at `b`. A query is asked
+    /// at once and its answer loaded into `c`; a command is buffered (it does not write `c`).
+    pub(crate) fn call_host(&mut self, ins: Instr, m: &mut Meter, host: &mut dyn Host) -> Exec<()> {
+        let p = Arc::clone(&self.program);
+        let Some(site) = p.host_sites.get(usize::from(ins.a)) else {
+            return corrupt("unknown host site");
+        };
+        if site.kind == HostFnKind::Promise {
+            return corrupt("unsupported instruction");
+        }
+        let mut args = Vec::with_capacity(site.params.len());
+        for (i, &ty) in (0u16..).zip(&site.params) {
+            let slot = ins
+                .b
+                .checked_add(i)
+                .ok_or_else(|| Fault::corrupt("argument slot out of range"))?;
+            let (w, words) = to_wire(&self.store, self.heap, &p.types, ty, self.rd(slot)?)?;
+            m.words(words);
+            args.push(w);
+        }
+        if site.kind == HostFnKind::Command {
+            let mut bytes = Vec::new();
+            WireValue::List(args).encode(&mut bytes);
+            return self.buffer(CMD_COMMAND, site.host_fn, &bytes, m);
+        }
+        let answer = host.query(site.host_fn, &args).map_err(|message| Fault {
+            kind: FaultKind::HostFault,
+            message,
+        })?;
+        match from_wire(&mut self.store, self.heap, &p.types, site.ret, &answer) {
+            Ok((v, words)) => {
+                m.words(words);
+                self.put(ins.c, v, p.types.is_ref(site.ret))
+            }
+            Err(FromWire::WrongType) => Err(Fault {
+                kind: FaultKind::HostFault,
+                message: "wrong result type".into(),
+            }),
+            Err(FromWire::Fault(k)) => Err(k.into()),
+        }
+    }
+
+    /// `Print`: the text joins the segment's buffered effects.
+    pub(crate) fn buffer_print(&mut self, text: &str, m: &mut Meter) -> Exec<()> {
+        self.buffer(CMD_PRINT, 0, text.as_bytes(), m)
+    }
+
+    /// Appends a record; a full buffer is the fault `TooManyCommands`.
+    fn buffer(&mut self, kind: u64, f: u16, bytes: &[u8], m: &mut Meter) -> Exec<()> {
+        let l = self.store.layout;
+        let cap = u64::from(l.cmds_end - l.cmds_base);
+        let len = self.header(H_CMD_LEN)?;
+        if len > cap || !len.is_multiple_of(WORD) {
+            return corrupt("command buffer length out of range");
+        }
+        let too_many = || Fault::from(FaultKind::TooManyCommands);
+        let blen = u32::try_from(bytes.len()).map_err(|_| too_many())?;
+        let words = u64::from(blen).div_ceil(WORD);
+        let end = len + (1 + words) * WORD;
+        if end > cap {
+            return Err(too_many());
+        }
+        let at = word_off(l.cmds_base, len / WORD)?;
+        self.store
+            .wr(at, kind | u64::from(f) << 16 | u64::from(blen) << 32)?;
+        for (i, chunk) in (1u64..).zip(bytes.chunks(8)) {
+            let mut w = [0u8; 8];
+            w[..chunk.len()].copy_from_slice(chunk);
+            self.store.wr(word_off(at, i)?, u64::from_le_bytes(w))?;
+        }
+        m.words(u32::try_from(words).unwrap_or(u32::MAX));
+        self.set_header(H_CMD_LEN, end)
+    }
+
+    /// The buffered records in order; anything that does not parse is `Corrupt`.
+    fn read_cmds(&self) -> Exec<Vec<Buffered>> {
+        let l = self.store.layout;
+        let cap = u64::from(l.cmds_end - l.cmds_base);
+        let len = self.header(H_CMD_LEN)?;
+        if len > cap || !len.is_multiple_of(WORD) {
+            return corrupt("command buffer length out of range");
+        }
+        let mut out = Vec::new();
+        let mut at = 0u64; // words
+        while at * WORD < len {
+            let h = self.store.r(word_off(l.cmds_base, at)?)?;
+            let (kind, reserved, f, blen) = (h & 0xff, (h >> 8) & 0xff, (h >> 16) as u16, h >> 32);
+            let words = blen.div_ceil(WORD);
+            if reserved != 0 || (at + 1 + words) * WORD > len {
+                return corrupt("a command record does not parse");
+            }
+            let mut bytes = Vec::new();
+            for i in 0..words {
+                let w = self.store.r(word_off(l.cmds_base, at + 1 + i)?)?;
+                bytes.extend_from_slice(&w.to_le_bytes());
+            }
+            // blen <= len <= cap, which fits a u32
+            bytes.truncate(blen as usize);
+            out.push(match kind {
+                CMD_COMMAND => match WireValue::decode(&bytes) {
+                    Ok(WireValue::List(args)) => Buffered::Command(f, args),
+                    _ => return corrupt("a command's arguments do not decode"),
+                },
+                CMD_PRINT => match String::from_utf8(bytes) {
+                    Ok(t) => Buffered::Print(t),
+                    Err(_) => return corrupt("a print is not UTF-8"),
+                },
+                _ => return corrupt("unknown command record"),
+            });
+            at += 1 + words;
+        }
+        Ok(out)
+    }
+}

@@ -61,6 +61,20 @@ pub const H_TRACE_LEN: u32 = 30;
 pub const H_INIT_CURSOR: u32 = 31;
 /// Error-trace entries pushed past `ERR_TRACE_MAX` (counted, not stored).
 pub const H_TRACE_DROPPED: u32 = 32;
+/// The instance: `INSTANCE_OK` or `INSTANCE_FAILED` (the scheduler, `sched`).
+pub const H_INSTANCE: u32 = 33;
+/// The task's identity: the global index of an `Init` task, the handler index of a `Handler` task.
+pub const H_TASK_ARG: u32 = 34;
+/// Whether `main` was asked for (`MAIN_*`).
+pub const H_MAIN: u32 = 35;
+/// The latest `now` a tick was given.
+pub const H_NOW: u32 = 36;
+/// The event being dispatched: the index + 1 of its next handler to start (0 = none).
+pub const H_EV_HANDLER: u32 = 37;
+/// The event being dispatched: its payload in the inbox heap.
+pub const H_EV_PAYLOAD: u32 = 38;
+/// The event being dispatched: its arrival number.
+pub const H_EV_ARRIVAL: u32 = 39;
 
 /// `H_STATUS`: nothing is running.
 pub const STATUS_IDLE: u64 = 0;
@@ -73,7 +87,7 @@ pub const LINK_SENTINEL: u64 = u64::MAX;
 
 /// Every header field; a new `H_*` const must be added here, which checks it fits (words past
 /// the last field up to `HEADER_WORDS` stay zero and reserved).
-const H_ALL: [u32; 33] = [
+const H_ALL: [u32; 40] = [
     H_MAGIC,
     H_BYTECODE_VERSION,
     H_HOST_API_VERSION,
@@ -107,6 +121,13 @@ const H_ALL: [u32; 33] = [
     H_TRACE_LEN,
     H_INIT_CURSOR,
     H_TRACE_DROPPED,
+    H_INSTANCE,
+    H_TASK_ARG,
+    H_MAIN,
+    H_NOW,
+    H_EV_HANDLER,
+    H_EV_PAYLOAD,
+    H_EV_ARRIVAL,
 ];
 
 const _: () = {

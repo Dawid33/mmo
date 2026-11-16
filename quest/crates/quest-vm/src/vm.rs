@@ -1,7 +1,12 @@
 //! A program instance: the immutable program and its flat memory (spec §6.4). Every bit of interpreter
-//! state — pc, current function, status, fuel debt — lives in the memory's header, so after any run
-//! [`Vm::mem_bytes`] is the complete state; nothing is kept in Rust fields but the program and the
-//! layout-derived allocator handles.
+//! and scheduler state — pc, current function, status, fuel debt, the task, the queue, the command
+//! buffer — lives in the memory, so after any call [`Vm::mem_bytes`] is the complete state; nothing is
+//! kept in Rust fields but the program, the layout-derived allocator handles and what is derived from the
+//! program alone.
+//!
+//! The block's life (design D7, `sched`): [`Vm::new`] leaves the initialisers pending; each [`Vm::tick`]
+//! runs tasks under its fuel — the initialisers, then `main` once [`Vm::start_main`] asked for it, then
+//! the handlers of the events [`Vm::deliver`] queued.
 
 use std::sync::Arc;
 
@@ -15,6 +20,8 @@ use crate::layout::{
 };
 use crate::mem::{Checkpoint, RollbackError};
 use crate::program::Program;
+use crate::sched::error_type;
+pub use crate::sched::{Delivery, Status, TickReport};
 use crate::store::Store;
 use crate::types::TypeId;
 use crate::wire::{WireValue, to_wire};
@@ -35,8 +42,9 @@ pub struct Vm {
     /// The script heap.
     pub(crate) heap: Heap,
     /// The runtime heap for queued payloads and answers.
-    #[expect(dead_code, reason = "the scheduler (Task 12) is its first reader")]
     pub(crate) inbox: Heap,
+    /// The program's error enum (derived from the program at `new`).
+    pub(crate) error_ty: Option<TypeId>,
 }
 
 /// The result of one [`Vm::debug_run`].
@@ -112,12 +120,43 @@ impl Vm {
         init(&mut store)
             .map_err(|e| LoadError::Invalid(format!("writing a fresh memory: {e:?}")))?;
         store.mem.clear_log();
+        let error_ty = error_type(&program.types);
         Ok(Vm {
             program,
             store,
             heap,
             inbox,
+            error_ty,
         })
+    }
+
+    /// Asks for `main` to run once the initialisers are done (before queued events). `false` when the
+    /// program has no `main`, it was already asked for, or the instance failed.
+    pub fn start_main(&mut self) -> bool {
+        self.sched_start_main()
+    }
+
+    /// Queues an event for its handlers (design D7). `Queued` is `Accepted` delivered while a task was in
+    /// progress (the owner's warning). A dropped delivery changes nothing.
+    pub fn deliver(&mut self, event: &str, payload: &WireValue) -> Delivery {
+        self.sched_deliver(event, payload)
+    }
+
+    /// Runs tasks for up to `fuel` (less any debt an earlier tick left). `now` smaller than the latest
+    /// `now` counts as the latest. Reports go to `host.report`; buffered commands and prints reach the
+    /// host when their segment commits. With `fuel` 0 nothing changes.
+    pub fn tick(&mut self, now: u64, fuel: u64, host: &mut dyn Host) -> TickReport {
+        self.sched_tick(now, fuel, host)
+    }
+
+    pub fn status(&self) -> Status {
+        self.sched_status()
+    }
+
+    /// No task in progress, nothing queued or ready, no zombies left to reap (`Status::Idle`). A failed
+    /// instance is not idle: it is `Status::Failed`.
+    pub fn is_idle(&self) -> bool {
+        self.status() == Status::Idle
     }
 
     /// Static slot `slot`; 0 when it is out of range (a test and debug accessor).

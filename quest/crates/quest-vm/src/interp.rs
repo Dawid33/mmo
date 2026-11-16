@@ -69,7 +69,7 @@ pub(crate) struct Meter {
 }
 
 impl Meter {
-    fn new(budget: u64) -> Meter {
+    pub fn new(budget: u64) -> Meter {
         Meter {
             left: budget,
             debt: 0,
@@ -86,6 +86,21 @@ impl Meter {
         } else {
             self.left -= n;
         }
+    }
+
+    /// Fuel left in the budget.
+    pub fn left(&self) -> u64 {
+        self.left
+    }
+
+    /// What the charges took beyond the budget.
+    pub fn debt(&self) -> u64 {
+        self.debt
+    }
+
+    /// Everything charged.
+    pub fn used(&self) -> u64 {
+        self.used
     }
 
     /// Charges the "+ size" of design D6 for `words` words of reported work: `ceil(words / 8)`.
@@ -247,11 +262,11 @@ impl Vm {
         Ok(self.store.ws(off, v)?)
     }
 
-    fn header(&self, field: u32) -> Exec<u64> {
+    pub(crate) fn header(&self, field: u32) -> Exec<u64> {
         Ok(self.store.r(field * 8)?)
     }
 
-    fn set_header(&mut self, field: u32, v: u64) -> Exec<()> {
+    pub(crate) fn set_header(&mut self, field: u32, v: u64) -> Exec<()> {
         Ok(self.store.wr(field * 8, v)?)
     }
 
@@ -278,8 +293,9 @@ impl Vm {
         }
     }
 
-    pub(crate) fn run(&mut self, fuel: u64, _host: &mut dyn Host) -> DebugRun {
-        match self.run_loop(fuel) {
+    /// [`Vm::debug_run`]: runs the started function under `fuel` (less the stored debt).
+    pub(crate) fn run(&mut self, fuel: u64, host: &mut dyn Host) -> DebugRun {
+        match self.run_debug(fuel, host) {
             Ok(r) => r,
             // A header that cannot be read or written: no position to report.
             Err(f) => DebugRun {
@@ -293,8 +309,7 @@ impl Vm {
         }
     }
 
-    /// `Err` only when the header itself fails; an instruction's fault is a `RunEnd::Faulted`.
-    fn run_loop(&mut self, fuel: u64) -> Exec<DebugRun> {
+    fn run_debug(&mut self, fuel: u64, host: &mut dyn Host) -> Exec<DebugRun> {
         match self.header(H_STATUS)? {
             STATUS_IDLE => {
                 return Ok(DebugRun {
@@ -305,21 +320,45 @@ impl Vm {
             STATUS_RUNNING => {}
             _ => return Err(Fault::corrupt("unknown status")),
         }
-        let debt = self.header(H_FUEL_DEBT)?;
-        if fuel <= debt {
-            self.set_header(H_FUEL_DEBT, debt - fuel)?;
+        let Some(mut m) = self.meter_after_debt(fuel)? else {
             return Ok(DebugRun {
                 fuel_used: 0,
                 end: RunEnd::OutOfFuel,
             });
+        };
+        let end = self.run_task(&mut m, host)?;
+        self.set_header(H_FUEL_DEBT, m.debt)?;
+        Ok(DebugRun {
+            fuel_used: m.used,
+            end,
+        })
+    }
+
+    /// The meter of a run given `fuel`: the stored debt is repaid from it first. `None` when the debt
+    /// takes all of it (what is left of the debt is stored). The caller stores the meter's debt when the
+    /// run ends.
+    pub(crate) fn meter_after_debt(&mut self, fuel: u64) -> Exec<Option<Meter>> {
+        let debt = self.header(H_FUEL_DEBT)?;
+        if fuel <= debt {
+            self.set_header(H_FUEL_DEBT, debt - fuel)?;
+            return Ok(None);
         }
-        let mut m = Meter::new(fuel - debt);
+        Ok(Some(Meter::new(fuel - debt)))
+    }
+
+    /// Runs the function the header says is running until the meter's budget is spent, it returns
+    /// along the sentinel link or it faults. `Err` only when the header itself fails; an instruction's
+    /// fault is a `RunEnd::Faulted`. The pc, the current function and the status are written back.
+    pub(crate) fn run_task(&mut self, m: &mut Meter, host: &mut dyn Host) -> Exec<RunEnd> {
+        if self.header(H_STATUS)? != STATUS_RUNNING {
+            return Err(Fault::corrupt("no function is running"));
+        }
         let (mut fn_id, mut pc) = self.load_regs()?;
         let stop = loop {
             if m.left == 0 {
                 break Stop::Fuel;
             }
-            match self.reap_one(&mut m) {
+            match self.reap_one(m) {
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(f) => break Stop::Fault(f),
@@ -330,7 +369,7 @@ impl Vm {
             };
             m.charge(base_fuel(&self.program, ins));
             let before = self.store.mem.checkpoint();
-            match self.exec(fn_id, pc, ins, &mut m) {
+            match self.exec(fn_id, pc, ins, m, host) {
                 Ok(Flow::Next) => pc = pc.saturating_add(1),
                 Ok(Flow::Goto(t)) => pc = t,
                 Ok(Flow::Enter { fn_id: f, pc: p }) => (fn_id, pc) = (f, p),
@@ -347,13 +386,12 @@ impl Vm {
         };
         self.set_header(H_PC, u64::from(pc))?;
         self.set_header(H_CURRENT_FN, u64::from(fn_id))?;
-        self.set_header(H_FUEL_DEBT, m.debt)?;
         let status = match stop {
             Stop::Fuel => STATUS_RUNNING,
             Stop::Returned | Stop::Fault(_) => STATUS_IDLE,
         };
         self.set_header(H_STATUS, status)?;
-        let end = match stop {
+        Ok(match stop {
             Stop::Fuel => RunEnd::OutOfFuel,
             Stop::Returned => RunEnd::Returned,
             Stop::Fault(f) => RunEnd::Faulted {
@@ -361,15 +399,11 @@ impl Vm {
                 message: f.message,
                 stack: self.fault_stack(fn_id, pc),
             },
-        };
-        Ok(DebugRun {
-            fuel_used: m.used,
-            end,
         })
     }
 
     /// One reap step when the zombie list is not empty (`true`), charged `FUEL_REAP` plus its work.
-    fn reap_one(&mut self, m: &mut Meter) -> Exec<bool> {
+    pub(crate) fn reap_one(&mut self, m: &mut Meter) -> Exec<bool> {
         match reap_step(&mut self.store, self.heap, &*self.program)? {
             Some(words) => {
                 m.charge(FUEL_REAP);
@@ -404,7 +438,14 @@ impl Vm {
     }
 
     /// Executes one instruction of `fn_id` at `pc`.
-    fn exec(&mut self, fn_id: u16, pc: u32, ins: Instr, m: &mut Meter) -> Exec<Flow> {
+    fn exec(
+        &mut self,
+        fn_id: u16,
+        pc: u32,
+        ins: Instr,
+        m: &mut Meter,
+        host: &mut dyn Host,
+    ) -> Exec<Flow> {
         let Instr { op, a, b, c } = ins;
         match op {
             Op::Nop => {}
@@ -499,8 +540,10 @@ impl Vm {
             | Op::RefTake
             | Op::RefStore => self.exec_ref(ins, m)?,
 
-            // ---- Not implemented yet: Tasks 12–13 replace this arm with their groups. ----
-            Op::CallHost | Op::Await | Op::AwaitAll | Op::PromiseDetach => {
+            Op::CallHost => self.call_host(ins, m, host)?,
+
+            // ---- Not implemented yet: Task 13 replaces this arm with its group. ----
+            Op::Await | Op::AwaitAll | Op::PromiseDetach => {
                 return Err(Fault::corrupt("unsupported instruction"));
             }
         }
