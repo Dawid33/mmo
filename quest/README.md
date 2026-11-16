@@ -22,7 +22,9 @@ loop and a list.
 
 **Values are copied.** `let b = a` copies (cheaply, copy on write); changing `b` never changes `a`. A
 reference is the exception: `&x` (also into a place: `&quest.rewards[2]`), written in a type as `&T`,
-auto-dereferenced (`r.count = 1`), assigned through with `*r = v`. A reference may be passed down to a
+assigned through with `*r = v`. Fields, methods, `in`, slices, `str(r)` and `assert_eq` auto-dereference
+(`r.count = 1`); everything else takes `*r` (arithmetic, `min`/`max`/`abs`/`float`, `print`, `assert`,
+`parse_int`, `await`). A reference may be passed down to a
 callee; it may not be stored or returned (`ref-escapes`). A reference local or parameter cannot be
 reassigned (`r = &b` is `ref-reassign`: `b` could die before `r`); bind a new one with `let r = &b`, whose scope
 ends with its block.
@@ -53,14 +55,16 @@ one data shape per name; sets may include other sets). `raise ChestEmpty` / `rai
 no declaration on the function: a function's error set is inferred (`fn f() -> int raises S` pins it).
 A fallible call must be handled:
 
-- `f()?` propagates (the caller's set grows), `f() else 0` a fallback value, `f() else return` / `else raise X`, or a block `else err: ...` that must leave by `return` /
-  `raise` / a value;
+- `f()?` propagates (the caller's set grows), `f() else 0` a fallback value, `f() else return` /
+  `else raise X` / `else break` / `else continue`, or a block `else err: ...` that must leave by `return` /
+  `raise` / a value (a trailing `match` is a statement, not the block's value);
 - `match f(): case Ok(v): ... case Err(NotEnough(have)): ...`, exhaustive against the set; a bare error name
   (`case NotEnough(have):`) is shorthand for `Err(NotEnough(have))`;
 - the same `?` / `else` work on `Option`.
 
 An error that escapes a handler aborts it: its changes are undone, an error report with a trace is printed.
-Runtime faults (division by zero, out of fuel for a segment's memory, ...) abort a handler the same way.
+Runtime faults (division by zero, an index out of range, the heap full, ...) abort a handler the same way.
+Running out of fuel is never a fault: the handler continues next tick.
 
 **Collections and strings.** `list`: `append`, `insert(i, x)`, `pop()` (an `Option`), `remove(i)`, `len()`,
 `xs[i]`, slices `xs[a:b]` (clamped), `x in xs`. `dict`: `d[k]`, `d[k] = v`, `get(k)` (an `Option`),
@@ -74,6 +78,9 @@ iterating it is defined (iteration is by insertion position). `str`: `len()` (ch
 `max`, `floor`, `ceil`, `round`, `sqrt`, `sin`, `cos`, `pow`. Floats print shortest-round-trip; NaN is
 canonical; `==` on floats is IEEE, inside a list it compares bits. All of it is bit-identical on every
 platform.
+
+**Prelude.** `print(s)` (takes a `str`), `str(x)`, `assert(c)`, `assert_eq(a, b)`, `range(n)` /
+`range(a, b)`, `parse_int(s)`, the numeric functions above, `emit(e)`, `Some` / `None`, `Ok` / `Err`.
 
 **Modules.** One file is one module; `mod rewards` declares a child (`rewards.qs` or `rewards/mod.qs`; a
 child that others reach into is `pub mod`), `use rewards::give_gold`, `use a::{b, c as d}`, `pub` makes an
@@ -136,6 +143,16 @@ assurance comes from fuzzing, planned later.
 - Float `==` inside collections compares bits; `to_upper` is ASCII only.
 - The trace of a re-raise after another failure inside one handler shows the latest entries.
 - The host must discard the old VM after a successful `migrate`.
+- `range(...)` and `d.items()` only as a `for` loop's iterable (`not-yet` elsewhere).
+- An f-string interpolation cannot contain a string literal (`f"{parse_int("4")}"` is a syntax error): bind
+  it to a local first.
+- `Changed(current)` has one type per program, so a program uses `compare_and_set` at one value type only.
+- **An edit can be refused by a large shared value.** A migration reads every top-level value out as an
+  unshared copy, bounded by the structural-walk limit (`WORK_WORDS_MAX`, 65536 words). A modest value that
+  shares big sublists (the same 700-element row appended 100 times) walks far past it, so every edit of the
+  block is refused (`GlobalUnreadable { kind: ValueTooLarge }`) and the state kept for the old script;
+  Reset re-initialises it, losing the state. Avoid sharing large sublists in top-level state. A
+  sharing-preserving migration is future work.
 
 ## Commands
 
