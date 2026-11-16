@@ -267,6 +267,7 @@ fn main():
 
     // An upper-case head of `raise` is an error name even when an item has that name; a lower-case one
     // must be a binding.
+    // A bare caught error is matched by its error names; resolution leaves them to the type checker.
     let main = r#"struct Ledger:
     x: int
 fn f() -> int:
@@ -274,6 +275,14 @@ fn f() -> int:
 fn g() -> int:
     let n = 1 else err:
         raise er
+    return n
+fn h() -> int:
+    let n = 1 else err:
+        match err:
+            case NotEnough(have):
+                return have
+            case ChestEmpty:
+                return 0
     return n
 "#;
     let all = diagnostics(&[("main.qs", main)]);

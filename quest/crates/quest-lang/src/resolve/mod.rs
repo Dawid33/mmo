@@ -22,8 +22,10 @@
 //! Error names (spec §5.7) are global, never declared, and a space of their own. One rule where an error
 //! is expected — the head of a `raise` and a pattern inside `Err(…)`: an upper-case name is always an
 //! error name, even when an item has that name; a lower-case one is a binding (in `raise`, one that must be
-//! in scope). Elsewhere in a pattern a lower-case name (or `_x`) binds and an upper-case name must name a
-//! struct, event, variant or `Some` / `None` / `Ok` / `Err`.
+//! in scope). Elsewhere in a pattern a lower-case name (or `_x`) binds; an upper-case name is the struct,
+//! event, variant or `Some` / `None` / `Ok` / `Err` it names, and one that names nothing becomes
+//! `Ctor::ErrorOrUnknown`, which the type checker resolves against the scrutinee's type (an error name, or
+//! `unresolved`).
 
 mod dialogue;
 mod items;
@@ -1108,17 +1110,19 @@ impl<'a> Resolver<'a> {
     }
 
     /// What a constructor pattern's path names. Inside `Err(…)` an upper-case single name is always an
-    /// error name; elsewhere a name must name something.
+    /// error name; elsewhere one that names nothing is left to the type checker (`ErrorOrUnknown`).
     fn ctor(&mut self, path: &[String], at: ast::Span, cx: &mut Cx, in_err: bool) -> Option<Ctor> {
         let res = if let [name] = path {
             if in_err && !is_binding_name(name) {
                 return Some(Ctor::Error(name.clone()));
             }
             match self.lookup(cx, name) {
+                // Maybe an error name: the type checker decides, knowing the scrutinee's type.
+                None if !is_binding_name(name) => return Some(Ctor::ErrorOrUnknown(name.clone())),
                 None => {
                     let names = self.value_names(cx);
                     self.diags.push(unresolved(
-                        format!("cannot find `{name}`; an error name is matched inside `Err(…)`"),
+                        format!("cannot find `{name}`"),
                         name,
                         names.iter().map(String::as_str),
                         cx.file,

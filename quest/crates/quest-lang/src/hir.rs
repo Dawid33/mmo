@@ -447,4 +447,9 @@ pub enum Ctor {
     Host(HostItem),
     /// An error name.
     Error(String),
+    /// An upper-case name that names nothing, outside `raise` / `Err(…)` (e.g. `match err: case
+    /// NotEnough(have):` in an `else err:` block). Resolution does not report it; the type checker does:
+    /// against an error or a fallible scrutinee it is that error name, otherwise it reports `unresolved`
+    /// (with its "did you mean" note) at the pattern's span. Its sub-patterns are the `Ctor`'s fields.
+    ErrorOrUnknown(String),
 }
