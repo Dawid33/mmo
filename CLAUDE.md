@@ -69,6 +69,13 @@ changed build/run/test command updates its recipe in the same change.
   or `CHUNK_UNITS`). `wasm_determinism` / `scene_hash_golden` pin hashes per size, kept current at 16
   only — re-record (`just chunk_blocks=2 …`) before relying on 2. Server and client must match.
 
+**Quest script language** (`quest/` — its OWN Cargo workspace: own `Cargo.lock` and `quest/target/`, excluded
+from the root workspace; nothing in the root may depend on it, and it reaches into the game tree only for
+`crates/state-hash`): the standalone compiler (`quest-lang`), bytecode VM (`quest-vm`), stub host and CLI for
+player-written quest blocks. `just quest-check | quest-test | quest-run <dir> | quest-wasm`. Spec
+`docs/superpowers/specs/2026-11-16-quest-script-language-design.md`, plan
+`docs/superpowers/plans/2026-11-16-quest-script-language-mvp.md`.
+
 ### Deployment
 
 **Reaching orion:** the operator VPN (WireGuard `wg0` on the box, `10.99.0.1`, UDP 51820; this machine is the
