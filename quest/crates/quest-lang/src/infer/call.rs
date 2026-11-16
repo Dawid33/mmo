@@ -69,10 +69,8 @@ impl Infer<'_> {
                         let mut params: Vec<TyId> =
                             sig.receiver.map(|(_, t)| t).into_iter().collect();
                         params.extend(sig.params);
-                        let params = self.open_params(b, &name, &params, args);
                         self.args(b, &name, &params, args, e, None);
-                        let ret = self.open_result(sig.ret);
-                        self.fallible(ret, &sig.raises)
+                        self.fallible(sig.ret, &sig.raises)
                     }
                     // A member of a reported cycle, or one this body waits for.
                     None => {
@@ -228,10 +226,8 @@ impl Infer<'_> {
                 }
                 self.methods.insert(e.id, Method::Script(m));
                 self.called(b, m, e.span);
-                let params = self.open_params(b, &qualified, &sig.params, args);
-                self.args(b, &qualified, &params, args, e, None);
-                let ret = self.open_result(sig.ret);
-                self.fallible(ret, &sig.raises)
+                self.args(b, &qualified, &sig.params, args, e, None);
+                self.fallible(sig.ret, &sig.raises)
             }
             Ty::HostStruct(i) => {
                 let host = self.host;
@@ -316,9 +312,9 @@ impl Infer<'_> {
                 BuiltinMethod::Insert => args.get(1),
                 _ => None,
             };
-            if let Some(a) = kept {
-                let ty = self.expr_ty(a.value.id);
-                self.no_ref(b, ty, a.value.span, "put in a list");
+            // The list's element type: a reference only when it took one (else the mismatch is reported).
+            if let (Some(a), Some(elem)) = (kept, params.last()) {
+                self.no_ref(b, *elem, a.value.span, "put in a list");
             }
         }
         ret
@@ -431,13 +427,12 @@ impl Infer<'_> {
                 ("assert_eq", vec![t, t], TyId::UNIT, None)
             }
             Prelude::All => {
-                // The result's error set is the union of the promises' (they share one open set).
+                // Awaited, it fails with any promise's error (decision 21).
                 let t = self.fresh();
-                let set = self.fresh_set(Vec::new());
-                let promise = self.types.intern(Ty::Promise(t, set));
+                let promise = self.types.intern(Ty::Promise(t));
                 let list = self.types.intern(Ty::List(promise));
                 let all = self.types.intern(Ty::List(t));
-                let ret = self.types.intern(Ty::Promise(all, set));
+                let ret = self.types.intern(Ty::Promise(all));
                 ("all", vec![list], ret, None)
             }
             Prelude::Some => {

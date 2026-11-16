@@ -26,10 +26,9 @@
 //! what callers see. Callee-first order makes every callee's set final before its callers are typed.
 //!
 //! **Must handle** (decision 2): a call of a function with a non-empty set, or of a raising host query or
-//! command, has the type `T raises S` ([`Ty::Fallible`]). A promise's set is the second child of
-//! `Promise[T raises S]` and is open (see `ty.rs`): a raising host promise starts with the host's list, a
-//! written `Promise[T]` with none, and promises that meet (a list, an argument, `all`) share the union; `await`
-//! turns it into the fallible result (`promises.rs`). A fallible value is consumed where it is produced: by `?`,
+//! command, has the type `T raises S` ([`Ty::Fallible`]). A promise's type carries no set: `await` makes the
+//! fallible result, its set decided by the promise's origin (decision 21, `promises.rs`). A fallible value is
+//! consumed where it is produced: by `?`,
 //! by `else`, or as a `match` scrutinee (`Infer::expr_fallible`); anywhere else (`Infer::expr`) it is
 //! `unhandled-fallible`, and its value type is used from there on. `let _ = f()` is no exception. An error
 //! escaping `main`, a handler or a top-level initialiser is allowed (it is reported at run time).
@@ -251,8 +250,8 @@ impl<'k> Infer<'k> {
 
     /// The type of a call of the host function `f`, given the type of its value `ret` (a promise's: the
     /// promised value's) and of its parameters `params`: `T raises S` for a raising query or command,
-    /// `Promise[T raises S]` with an open set for a promise. The generic fields of the errors it raises are fixed
-    /// here at their first use (see the module doc).
+    /// `Promise[T]` for a promise. The generic fields of the errors it raises are fixed here at their first use
+    /// (see the module doc).
     pub(super) fn host_fallible(
         &mut self,
         b: &mut Body,
@@ -277,11 +276,7 @@ impl<'k> Infer<'k> {
             }
         }
         match hf.kind {
-            // An open set: it unions with the sets of the promises it meets.
-            HostFnKind::Promise => {
-                let set = self.fresh_set(hf.raises.clone());
-                self.types.intern(Ty::Promise(ret, set))
-            }
+            HostFnKind::Promise => self.types.intern(Ty::Promise(ret)),
             HostFnKind::Query | HostFnKind::Command => self.fallible(ret, &hf.raises),
         }
     }
@@ -420,9 +415,6 @@ impl<'k> Infer<'k> {
             .iter()
             .map(|a| (a.name.as_deref(), self.expr(b, &a.value), a.value.span))
             .collect();
-        for (_, ty, at) in &found {
-            self.no_ref(b, *ty, *at, "carried by an error");
-        }
         let shape_err = |b: &mut Body, why: String| {
             b.diags.push(error(
                 "error-shape",
@@ -454,6 +446,9 @@ impl<'k> Infer<'k> {
                     }
                 }
             }
+            for (_, ty, at) in &found {
+                self.no_ref(b, *ty, *at, "carried by an error");
+            }
             let origin = format!("raised at {}:{}", b.file, at.line);
             b.shapes
                 .insert(name.to_string(), ErrShape { fields, origin });
@@ -477,7 +472,7 @@ impl<'k> Infer<'k> {
         let mut given = vec![false; shape.fields.len()];
         let mut positional = 0usize;
         let mut instantiated = false;
-        for (field, ty, _) in &found {
+        for (field, ty, ty_at) in &found {
             let index = match field {
                 Some(n) => shape.fields.iter().position(|f| f.name == *n),
                 None => {
@@ -513,10 +508,12 @@ impl<'k> Infer<'k> {
                             format!("its field `{fname}` is `{want}` ({origin}), not `{ty}`"),
                         );
                     }
+                    self.no_ref(b, want, *ty_at, "carried by an error");
                 }
                 None => {
                     f.ty = Some(*ty);
                     instantiated = true;
+                    self.no_ref(b, *ty, *ty_at, "carried by an error");
                 }
             }
         }
@@ -534,7 +531,6 @@ impl<'k> Infer<'k> {
     /// `x?`.
     pub(super) fn try_op(&mut self, b: &mut Body, e: &Expr, x: &Expr) -> TyId {
         let ty = self.expr_fallible(b, x);
-        self.close_awaited(b, x);
         let ty = self.shallow(ty);
         match self.types.get(ty) {
             Ty::Fallible(value, set) => {
@@ -601,8 +597,6 @@ impl<'k> Infer<'k> {
         };
         let found = match &fallback.kind {
             ExprKind::FallbackBlock(local, body) => {
-                // The block reads the caught error.
-                self.close_awaited(b, x);
                 self.set_local(*local, caught);
                 let ty = self.fallback_block(b, body, value);
                 self.record(b, fallback, ty);

@@ -95,10 +95,8 @@ impl Infer<'_> {
         scrutinee: &Expr,
         cases: &[Case],
     ) -> bool {
-        // A fallible scrutinee is consumed here; an awaited one's errors are read (its set closes before
-        // any arm, so exhaustiveness sees final names).
+        // A fallible scrutinee is consumed here.
         let ty = self.expr_fallible(b, scrutinee);
-        self.close_awaited(b, scrutinee);
         let mut arms = Vec::with_capacity(cases.len());
         let mut failed = Vec::with_capacity(cases.len());
         let mut all = !cases.is_empty();
@@ -574,10 +572,14 @@ impl Infer<'_> {
         };
         let names = self.types.names(set);
         if names.binary_search_by(|n| n.as_str().cmp(name)).is_err() {
-            let set_text = names.join(" | ");
+            let only = if names.is_empty() {
+                "nothing can fail here".to_string()
+            } else {
+                format!("this can only fail with {}", names.join(" | "))
+            };
             b.diags.push(error(
                 "impossible-arm",
-                format!("the error `{name}` cannot occur here: this can only fail with {set_text}"),
+                format!("the error `{name}` cannot occur here: {only}"),
                 b.file,
                 p.span,
             ));

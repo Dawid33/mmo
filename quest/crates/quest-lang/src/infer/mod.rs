@@ -50,7 +50,7 @@
 //!   arms.
 //!
 //! - **References** (`refs.rs`): places, and `ref-escapes`. **Promises, `await` and handlers**
-//!   (`promises.rs`): promise error sets (open, closed, fixed, any), promise arguments, `await`, unused
+//!   (`promises.rs`): what an `await` fails with (by the promise's origin, decision 21), `await`, unused
 //!   promises, handler signatures.
 //!
 //! Files: `expr.rs` (expressions and operators), `stmt.rs` (statements, blocks, reachability), `call.rs`
@@ -79,7 +79,7 @@ use crate::diag::Diagnostic;
 use crate::hir::{
     self, Builtin, Crate, DefId, DefKind, EventRef, ExprId, LocalId, PatId, TypeName,
 };
-use crate::ty::{Printer, Ty, TyId, Types};
+use crate::ty::{Printer, SetId, Ty, TyId, Types};
 use quest_vm::host::HostApi;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -116,7 +116,10 @@ pub struct Typed {
     pub errors: BTreeMap<String, Vec<(String, TyId)>>,
     /// What each pattern node matches.
     pub patterns: BTreeMap<PatId, PatInfo>,
-    /// Every `await`, by its expression.
+    /// Every `await`, by its expression: its value's type and what it fails with — exactly a host promise
+    /// function's `raises` for a direct call of it (or a local assigned only such calls, never referenced),
+    /// else every error any host promise function raises (decision 21; `infer/promises.rs`). A
+    /// [`Ty::Promise`] has no error set.
     pub awaits: BTreeMap<ExprId, Await>,
     /// The place of every `&x` (by the `&` expression) and of every receiver passed to a `&self` method as
     /// a reference it is not already (by the receiver expression).
@@ -172,7 +175,6 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         host,
         types: Types::new(),
         subst: Vec::new(),
-        set_vars: Vec::new(),
         finals: BTreeMap::new(),
         exprs: vec![TyId::ERROR; krate.expr_count as usize],
         locals: vec![TyId::ERROR; krate.locals.len()],
@@ -193,7 +195,6 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         refs: BTreeMap::new(),
         handlers: BTreeMap::new(),
         may_await: BTreeSet::new(),
-        set_free: BTreeSet::new(),
         diags,
     };
     inf.user_types();
@@ -289,14 +290,13 @@ struct Body<'k> {
     patterns: Vec<(PatId, PatInfo)>,
     /// A top-level `let`'s initialiser (no `await`).
     in_init: bool,
-    /// The first open error set this body made (`promises.rs`).
-    first_set: u32,
-    /// Each `await`: its value's type and its promise's set.
-    awaits: BTreeMap<ExprId, (TyId, TyId)>,
+    /// Each `await`: its value's type and the errors it can fail with.
+    awaits: BTreeMap<ExprId, (TyId, SetId)>,
     /// Whether this body awaits, or calls a function that may.
     may_await: bool,
-    /// Promise sets passed to callees' parameters, checked at the end.
-    arg_sets: Vec<promises::ArgSet>,
+    /// The locals whose every assignment is a direct call of host promise functions raising one set, and
+    /// that set (`promises.rs`).
+    origins: BTreeMap<LocalId, SetId>,
 }
 
 impl<'k> Body<'k> {
@@ -320,10 +320,9 @@ impl<'k> Body<'k> {
             matched: Vec::new(),
             patterns: Vec::new(),
             in_init: false,
-            first_set: 0,
             awaits: BTreeMap::new(),
             may_await: false,
-            arg_sets: Vec::new(),
+            origins: BTreeMap::new(),
         }
     }
 }
@@ -334,10 +333,6 @@ struct Infer<'k> {
     types: Types,
     /// What each type variable is bound to. A variable is bound at most once.
     subst: Vec<Option<TyId>>,
-    /// The open error sets of promises ([`Ty::SetVar`]): a union-find whose roots hold the names.
-    set_vars: Vec<promises::SetVarSlot>,
-    /// Final types known to hold no promise error set (`promises.rs`, `reopen`).
-    set_free: BTreeSet<TyId>,
     /// Types holding variables, all bound: their final form, which therefore never changes. Keeps every
     /// walk over a type that inference built step by step from re-following its variables.
     finals: BTreeMap<TyId, TyId>,
@@ -497,7 +492,7 @@ impl<'k> Infer<'k> {
         self.bad_keys.clear();
         let file = self.file_of(d);
         let mut b = Body::new(file, TyId::ERROR);
-        b.first_set = u32::try_from(self.set_vars.len()).unwrap_or(u32::MAX);
+        b.origins = self.promise_origins(&f.body);
         b.ret = match &f.ret {
             Some(t) => self.lower_kept(t, file, &mut b.diags, "returned"),
             None => self.fresh(),
@@ -569,7 +564,6 @@ impl<'k> Infer<'k> {
             // It never returns normally (it always raises).
             self.bind(n, TyId::NEVER);
         }
-        self.mark_any_params(&b, &params, b.ret);
         self.finish(&mut b, Some(d));
         let raised = std::mem::take(&mut b.raises);
         let raises = self.fn_raises(&mut b, f.raises.as_ref(), raised);
@@ -605,7 +599,6 @@ impl<'k> Infer<'k> {
         let file = self.file_of(d);
         let mut b = Body::new(file, TyId::ERROR);
         b.in_init = true;
-        b.first_set = u32::try_from(self.set_vars.len()).unwrap_or(u32::MAX);
         let value = self.expr(&mut b, &g.value);
         if !b.waits.is_empty() {
             return b.waits;
@@ -648,7 +641,6 @@ impl<'k> Infer<'k> {
                 b.diags.push(d);
             }
         }
-        self.check_arg_sets(b);
         for local in std::mem::take(&mut b.bindings) {
             let ty = self.zonk(self.local_ty(local));
             if self.has_var(ty) {
@@ -789,7 +781,7 @@ impl<'k> Infer<'k> {
                 return Some(refs::escapes(c.op, file, c.at));
             }
             Class::Unused => {
-                if !matches!(shape, Ty::Promise(_, _)) {
+                if !matches!(shape, Ty::Promise(_)) {
                     return None;
                 }
                 (
@@ -883,15 +875,6 @@ impl<'k> Infer<'k> {
                 (Ty::Error, _) => self.default_vars(b),
                 (_, Ty::Error) => self.default_vars(a),
                 (Ty::Never, _) | (_, Ty::Never) => {}
-                // Promise error sets (`promises.rs`): open sets unite unless closed; a fixed set never grows,
-                // so it meets only an equal one (two different fixed sets are two types); an any-set meets
-                // every set.
-                (Ty::AnySet, _) | (_, Ty::AnySet) => {}
-                (Ty::Set(_), Ty::Set(_)) => ok = false,
-                (Ty::SetVar(x), Ty::SetVar(y)) => ok &= self.join_set_vars(x, y),
-                (Ty::SetVar(x), Ty::Set(s)) | (Ty::Set(s), Ty::SetVar(x)) => {
-                    ok &= self.meet_fixed(x, s);
-                }
                 (Ty::Var(n), _) => ok &= self.bind_checked(n, b),
                 (_, Ty::Var(n)) => ok &= self.bind_checked(n, a),
                 // The same head (constructor and any data that is not a child type: a fallible result's
@@ -949,11 +932,9 @@ impl<'k> Infer<'k> {
         }
     }
 
-    /// `ty` with every bound variable replaced by its binding and every open error set by its names so far,
-    /// all the way down. A type holding an open set is not memoised (`volatile`): the set may still grow.
+    /// `ty` with every bound variable replaced by its binding, all the way down.
     fn zonk(&mut self, ty: TyId) -> TyId {
         let mut done: BTreeMap<TyId, TyId> = BTreeMap::new();
-        let mut volatile: BTreeSet<TyId> = BTreeSet::new();
         let mut stack = vec![(ty, false)];
         while let Some((t, expanded)) = stack.pop() {
             if done.contains_key(&t) {
@@ -971,9 +952,7 @@ impl<'k> Infer<'k> {
             if s != t {
                 match done.get(&s) {
                     Some(z) => {
-                        if volatile.contains(&s) {
-                            volatile.insert(t);
-                        } else if self.types.is_ground(*z) {
+                        if self.types.is_ground(*z) {
                             self.finals.insert(t, *z);
                         }
                         done.insert(t, *z);
@@ -983,18 +962,6 @@ impl<'k> Infer<'k> {
                 continue;
             }
             let shape = self.types.get(t);
-            if let Ty::SetVar(n) = shape {
-                let z = if self.set_var_any(n) {
-                    self.types.intern(Ty::AnySet)
-                } else {
-                    let names = self.set_var_names(n);
-                    let set = self.types.set(names);
-                    self.types.intern(Ty::Set(set))
-                };
-                volatile.insert(t);
-                done.insert(t, z);
-                continue;
-            }
             let children = shape.children();
             if children.is_empty() {
                 done.insert(t, t);
@@ -1007,9 +974,7 @@ impl<'k> Infer<'k> {
                     .map(|c| done.get(c).copied().unwrap_or(*c))
                     .collect();
                 let z = self.types.intern(shape.with_children(&made));
-                if children.iter().any(|c| volatile.contains(c)) {
-                    volatile.insert(t);
-                } else if self.types.is_ground(z) {
+                if self.types.is_ground(z) {
                     self.finals.insert(t, z);
                 }
                 done.insert(t, z);
@@ -1058,10 +1023,7 @@ impl<'k> Infer<'k> {
                         Builtin::Str => (0, Ty::Str),
                         Builtin::List => (1, Ty::List(TyId::ERROR)),
                         Builtin::Option => (1, Ty::Option(TyId::ERROR)),
-                        // A written `Promise[T]` has an open error set of its own.
-                        Builtin::Promise => {
-                            (1, Ty::Promise(TyId::ERROR, self.fresh_set(Vec::new())))
-                        }
+                        Builtin::Promise => (1, Ty::Promise(TyId::ERROR)),
                         Builtin::Dict => (2, Ty::Dict(TyId::ERROR, TyId::ERROR)),
                     },
                     TypeName::Def(d) => (0, Ty::Adt(*d)),
@@ -1088,13 +1050,7 @@ impl<'k> Infer<'k> {
                 {
                     self.annotated_key(*key, file, *k, out);
                 }
-                match shape {
-                    Ty::Promise(_, set) => {
-                        let value = args.first().copied().unwrap_or(TyId::ERROR);
-                        self.types.intern(Ty::Promise(value, set))
-                    }
-                    _ => self.types.intern(shape.with_children(&args)),
-                }
+                self.types.intern(shape.with_children(&args))
             }
         }
     }

@@ -172,7 +172,7 @@ fn await_all_types() {
     assert_eq!(diags(&files), vec![]);
     assert_eq!(
         sigs(&files)["f"],
-        "fn() -> list[int] raises Lost | NamespaceGone | NotFound | Timeout | WrongType"
+        format!("fn() -> list[int] raises {ANY_PROMISE}")
     );
 }
 
@@ -213,49 +213,44 @@ fn greet_again(e):
 
 // Regressions.
 
-/// Two functions' promises with different (fixed) error sets meet in a list: the list's promises raise
-/// the union, not the first one's set.
+/// Every error a promise can fail with in the stub API (decision 21's U).
+const ANY_PROMISE: &str =
+    "Changed | ChestEmpty | Lost | NamespaceGone | NotEnough | NotFound | Timeout | WrongType";
+
+/// An `await` fails with exactly a host call's errors only for the call itself or a local assigned only such
+/// calls and never referenced; any other promise fails with every promise error. The first function is the
+/// review's probe of a promise smuggled in through a `&Promise` parameter.
 #[test]
-fn fixed_promise_sets_unite() {
-    let main = r#"fn a() -> Promise[()]:
-    return world.set("k", 1)
-
-fn c() -> Promise[()]:
-    return world.compare_and_set("k", 1, 2)
-
-fn both():
-    return [a(), c()]
-"#;
-    let files = [("main.qs", main)];
-    assert_eq!(diags(&files), vec![]);
-    assert_eq!(
-        sigs(&files)["both"],
-        "fn() -> list[Promise[() raises Changed | Lost | NamespaceGone | NotFound | Timeout]]"
-    );
-}
-
-/// A promise parameter accepts only the errors its body knows, unless the body handles every error.
-#[test]
-fn promise_parameters() {
-    let main = r#"fn any(p: Promise[int]) -> int:
-    let v = await p else 0
-    return v
-
-fn known(p: Promise[int]) -> int:
-    return await p?
+fn promise_origins() {
+    let main = r#"fn swap(p: Promise[()], r: &Promise[()]):
+    *r = p
+    let v = await p else ()
 
 fn main():
-    let x = any(world.get("k"))
-    let y = known(world.add("k", 1))
-"#;
-    assert_eq!(main_diags(main), vec![d("type-mismatch", "main.qs", 10)]);
-}
+    let q = world.set("k", 1)
+    swap(world.delete("k"), &q)
+    match await q:
+        case Ok(_):
+            pass
+        case Err(Timeout | Lost | NamespaceGone):
+            pass
 
-/// An awaited promise's errors are closed once a `match` read them: a promise with more errors cannot reach
-/// the same variable later.
-#[test]
-fn awaited_sets_close() {
-    let main = r#"fn f():
+fn precise():
+    let p = world.set("k", 1)
+    match await p:
+        case Ok(_):
+            pass
+        case Err(Timeout | Lost | NamespaceGone):
+            pass
+    match await world.add("k", 1):
+        case Ok(_):
+            pass
+        case Err(Changed(_)):
+            pass
+        case Err(_):
+            pass
+
+fn mixed():
     let p = world.set("k", 1)
     while true:
         match await p:
@@ -265,5 +260,62 @@ fn awaited_sets_close() {
                 pass
         p = world.delete("k")
 "#;
-    assert_eq!(main_diags(main), vec![d("type-mismatch", "main.qs", 9)]);
+    assert_eq!(
+        main_diags(main),
+        vec![
+            d("impossible-arm", "main.qs", 24),
+            d("non-exhaustive", "main.qs", 8),
+            d("non-exhaustive", "main.qs", 32),
+        ]
+    );
+}
+
+/// The review's probe of a promise in a struct field, returned by a function and awaited elsewhere: the
+/// awaiting function fails with every promise error.
+#[test]
+fn promise_through_a_field() {
+    let main = r#"struct S:
+    p: Promise[()]
+
+fn get(s: S) -> Promise[()]:
+    return s.p
+
+fn f(s: S):
+    await get(s)?
+
+fn writer(s: &S):
+    s.p = world.delete("k")
+
+fn main():
+    let s = S(p=world.set("k", 1))
+    writer(&s)
+    f(s) else ()
+"#;
+    let files = [("main.qs", main)];
+    assert_eq!(diags(&files), vec![]);
+    assert_eq!(
+        sigs(&files)["f"],
+        format!("fn(S) -> () raises {ANY_PROMISE}")
+    );
+}
+
+/// A reference that does not fit where it goes is one mistake: the mismatch, not also `ref-escapes`.
+#[test]
+fn ref_mismatch_once() {
+    let main = r#"fn main():
+    let x = 1
+    let xs = [1, 2]
+    xs.append(&x)
+    let d = {"a": 1}
+    d["b"] = &x
+    let ys = [1, &x]
+"#;
+    assert_eq!(
+        main_diags(main),
+        vec![
+            d("type-mismatch", "main.qs", 4),
+            d("type-mismatch", "main.qs", 6),
+            d("type-mismatch", "main.qs", 7),
+        ]
+    );
 }

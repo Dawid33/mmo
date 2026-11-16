@@ -536,10 +536,7 @@ fn promises():
     assert_eq!(sigs["tag"], "fn(Player) -> bool");
     assert_eq!(sigs["rolls"], "fn() -> int");
     assert_eq!(sigs["counts"], "fn() -> int");
-    // A promise's error set is open: promises that meet share the union of their sets.
-    assert_eq!(
-        sigs["promises"],
-        "fn() -> list[Promise[() raises Lost | NamespaceGone | NotFound | Timeout | WrongType]]"
-    );
+    // A promise's type carries no error set (decision 21).
+    assert_eq!(sigs["promises"], "fn() -> list[Promise[()]]");
     assert_eq!(sigs["takes"], "fn(Promise[int]) -> ()");
 }

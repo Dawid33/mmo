@@ -174,12 +174,14 @@ impl Infer<'_> {
                 let mut elem = None;
                 for x in items {
                     let ty = self.expr(b, x);
-                    self.no_ref(b, ty, x.span, "put in a list");
                     let Some(elem) = elem else {
+                        self.no_ref(b, ty, x.span, "put in a list");
                         elem = Some(ty);
                         continue;
                     };
-                    if !self.unify(elem, ty) {
+                    if self.unify(elem, ty) {
+                        self.no_ref(b, ty, x.span, "put in a list");
+                    } else {
                         let (want, found) = (self.show(elem), self.show(ty));
                         let message = format!(
                             "a list holds one type: this is `{found}`, the others `{want}`"
@@ -194,14 +196,23 @@ impl Infer<'_> {
                 let mut types: Option<(TyId, TyId)> = None;
                 for (k, v) in entries {
                     let (kt, vt) = (self.expr(b, k), self.expr(b, v));
-                    self.no_ref(b, kt, k.span, "put in a dict");
-                    self.no_ref(b, vt, v.span, "put in a dict");
-                    let Some((key, value)) = types else {
-                        types = Some((kt, vt));
-                        continue;
+                    // A reference goes in only where the entry fits (else its mismatch is reported).
+                    let (key_fits, value_fits) = match types {
+                        None => {
+                            types = Some((kt, vt));
+                            (true, true)
+                        }
+                        Some((key, value)) => (
+                            self.expect(b, key, kt, k.span),
+                            self.expect(b, value, vt, v.span),
+                        ),
                     };
-                    self.expect(b, key, kt, k.span);
-                    self.expect(b, value, vt, v.span);
+                    if key_fits {
+                        self.no_ref(b, kt, k.span, "put in a dict");
+                    }
+                    if value_fits {
+                        self.no_ref(b, vt, v.span, "put in a dict");
+                    }
                 }
                 let (key, value) = match types {
                     Some(kv) => kv,
@@ -268,10 +279,9 @@ impl Infer<'_> {
             Some(x) => (self.expr(b, x), x.span),
             None => (TyId::UNIT, at),
         };
-        // A `-> &T` was reported at the annotation (the error type now).
-        if self.shallow(b.ret) != TyId::ERROR {
-            self.no_ref(b, ty, at, "returned");
-        }
+        // What the function returns (a `-> &T` was reported at the annotation: the error type now; a
+        // mismatch is reported below).
+        self.no_ref(b, b.ret, at, "returned");
         if !self.unify(b.ret, ty) {
             let (want, found) = (self.show(b.ret), self.show(ty));
             let message = format!("this function returns `{want}`, not `{found}`");

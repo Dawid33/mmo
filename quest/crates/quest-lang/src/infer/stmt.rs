@@ -40,12 +40,13 @@ impl Infer<'_> {
                 let wanted = self.expr(b, place);
                 let found = self.expr(b, value);
                 self.expect(b, wanted, found, value.span);
+                // The place's type: a reference only when it took one (else the mismatch is reported).
                 match &place.kind {
                     ExprKind::Field(_, _) | ExprKind::Index(_, _) => {
-                        self.no_ref(b, found, value.span, "stored in a field or an element");
+                        self.no_ref(b, wanted, value.span, "stored in a field or an element");
                     }
                     ExprKind::Def(_) => {
-                        self.no_ref(b, found, value.span, "kept in a top-level variable");
+                        self.no_ref(b, wanted, value.span, "kept in a top-level variable");
                     }
                     _ => {}
                 }
