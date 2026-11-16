@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/quest-vm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+libm = "0.2"
+state-hash = { path = "../crates/state-hash", default-features = false }
+proptest = "1"
+wasm-bindgen-test = "0.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+opt-level = 1
