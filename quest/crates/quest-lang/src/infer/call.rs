@@ -97,7 +97,7 @@ impl Infer<'_> {
         arity: Option<&str>,
     ) {
         if let Some(named) = args.iter().find_map(|a| a.name.as_deref()) {
-            self.diags.push(super::error(
+            b.diags.push(super::error(
                 "arg-count",
                 format!("`{name}` takes its arguments by position, not by name (`{named}=`)"),
                 b.file,
@@ -112,7 +112,7 @@ impl Infer<'_> {
                 (None, 1) => "1 argument".to_string(),
                 (None, n) => format!("{n} arguments"),
             };
-            self.diags.push(super::error(
+            b.diags.push(super::error(
                 "arg-count",
                 format!("`{name}` takes {takes}, {} given", args.len()),
                 b.file,

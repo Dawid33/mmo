@@ -4,26 +4,34 @@
 //! - **One body at a time.** A body is a function's (or method's, or handler's) or a top-level `let`'s
 //!   initialiser. Inside it, inference is unification: every binding and expression gets a type, possibly a
 //!   fresh type variable ([`Ty::Var`]), and each use adds an equation, solved at once (`Infer::unify`, with an
-//!   occurs check). A variable is bound at most once, so a type whose variables are all bound has a final form
-//!   that never changes; it is memoised (`Infer::finals`) and every walk over a type is a loop that stops at a
-//!   type with no variable, so a type built step by step (`let a = [b]`, a thousand times) costs linear time.
+//!   occurs check). A variable is bound at most once (path compression only shortens a chain to the same
+//!   end), so a type whose variables are all bound has a final form that never changes; it is memoised
+//!   (`Infer::finals`), and every walk over a type is a loop that stops at a type with no variable. A type
+//!   built step by step (`let a = [b]`, a thousand times) or a long chain of variables is then typed in
+//!   linear time; an occurs check over a deep type that keeps an unbound variable is still linear per bind.
 //! - **Callee-first.** Bodies are visited in the call graph's order (`callgraph`), so every function a body
 //!   calls already has its final [`Sig`], and every unannotated top-level `let` it reads its final type. A call
 //!   never changes the callee: arguments are checked against the callee's signature, and a parameter's type
 //!   comes only from its annotation, from its own body, or (a handler's event parameter) from its `@on`. A
 //!   callee with no signature yet is a member of a reported cycle; the call is typed as already wrong.
+//! - **A parameter used at two types** (fixed by one use, contradicted by a later one) is `needs-annotation`
+//!   at the parameter, with a note naming the conflicting use, instead of `type-mismatch` (spec §5.2); once
+//!   per parameter (`Infer::disagree`).
 //! - **End of a body** (`Infer::finish`): the deferred operator checks run (`+` on `int`, `float` or `str`,
 //!   …, once the operand's type is known); a binding whose type still holds a variable is `needs-annotation`
 //!   naming it (no generic functions), then the return type, then any other expression (`print(str([]))`);
 //!   each report turns the variable into the error type, so one unknown gives one diagnostic. Then every type
 //!   of the body is made final (variables replaced by what they were bound to) and stored in [`Typed`].
+//!   A body's diagnostics are its own until then (`Body::diags`), so a body typed again leaves none behind.
 //! - **No cascades.** An expression whose error was reported earlier (by any pass) has the error type, which
 //!   is compatible with everything and replaces every unknown it meets (`list[_]` against it becomes
-//!   `list[?]`). `return`, `break`, `continue` and `raise` have the never type: compatible with everything,
+//!   `list[{error}]`). `return`, `break`, `continue` and `raise` have the never type: compatible with everything,
 //!   binding nothing.
 //! - **Returns.** An unannotated function's return type is a variable each `return` unifies. If the end of the
-//!   body is reachable, falling off it returns `()`: a function that returns a value elsewhere is
-//!   `missing-return`. A function that never returns normally (it always raises) returns `!`.
+//!   body is reachable, falling off it returns `()`; but a function that also returns a value (anything but a
+//!   literal `()`), or is annotated to return one, is `missing-return` at its last statement, and the
+//!   fall-off decides nothing about the return type. A function that never returns normally (it always
+//!   raises) returns `!`, and a call of it ends a block as `raise` does.
 //!
 //! **Not typed here yet** (each such node's operands are typed, then joined to the error type, so they
 //! produce no diagnostic of their own): struct and variant construction, fields, methods, indexing, slices,
@@ -175,6 +183,15 @@ struct Body<'k> {
     loops: Vec<bool>,
     /// Whether a `return` was seen.
     returns: bool,
+    /// Whether a `return` carried a value (other than a literal `()`).
+    value_returns: bool,
+    /// The variable of each unannotated parameter, which only the body's own uses may decide.
+    param_vars: BTreeMap<u32, LocalId>,
+    /// The parameters already reported as used at two types.
+    conflicted: BTreeSet<LocalId>,
+    /// This body's diagnostics, merged into the program's when the body is done: a body typed again
+    /// (Task 21 re-queues one whose method callee was not ready) leaves nothing behind.
+    diags: Vec<Diagnostic>,
 }
 
 impl<'k> Body<'k> {
@@ -187,6 +204,10 @@ impl<'k> Body<'k> {
             checks: Vec::new(),
             loops: Vec::new(),
             returns: false,
+            value_returns: false,
+            param_vars: BTreeMap::new(),
+            conflicted: BTreeSet::new(),
+            diags: Vec::new(),
         }
     }
 }
@@ -227,7 +248,9 @@ impl<'k> Infer<'k> {
             if let DefKind::Global(hir::Global { ty: Some(t), .. }) = &def.kind {
                 let d = DefId(u32::try_from(i).unwrap_or(u32::MAX));
                 let file = self.file_of(d);
-                let ty = self.lower(t, file);
+                let mut found = Vec::new();
+                let ty = self.lower(t, file, &mut found);
+                self.diags.append(&mut found);
                 self.globals.insert(d, ty);
             }
         }
@@ -257,11 +280,11 @@ impl<'k> Infer<'k> {
 
     fn func(&mut self, d: DefId, f: &hir::Fn) {
         let file = self.file_of(d);
-        let ret = match &f.ret {
-            Some(t) => self.lower(t, file),
+        let mut b = Body::new(file, TyId::ERROR);
+        b.ret = match &f.ret {
+            Some(t) => self.lower(t, file, &mut b.diags),
             None => self.fresh(),
         };
-        let mut b = Body::new(file, ret);
         let receiver = f.receiver.map(|(r, local)| {
             let owner = f
                 .owner
@@ -276,10 +299,16 @@ impl<'k> Infer<'k> {
         let mut params = Vec::with_capacity(f.params.len());
         for (i, p) in f.params.iter().enumerate() {
             let ty = match (&p.ty, f.handler) {
-                (Some(t), _) => self.lower(t, file),
+                (Some(t), _) => self.lower(t, file, &mut b.diags),
                 // A handler's event parameter is typed by its `@on`.
                 (None, Some(event)) if i == 0 => self.event_ty(event),
-                (None, _) => self.fresh(),
+                (None, _) => {
+                    let var = self.fresh();
+                    if let Ty::Var(n) = self.types.get(var) {
+                        b.param_vars.insert(n, p.local);
+                    }
+                    var
+                }
             };
             self.set_local(p.local, ty);
             b.bindings.push(p.local);
@@ -287,26 +316,35 @@ impl<'k> Infer<'k> {
         }
         let diverges = self.block(&mut b, &f.body);
         if !diverges {
-            if !self.unify(ret, TyId::UNIT) {
+            // Falling off the end returns `()`. With a value returned elsewhere it is a missing `return`,
+            // and the fall-off decides nothing about the return type.
+            let falls_off_to_unit = !b.value_returns && self.unify(b.ret, TyId::UNIT);
+            if !falls_off_to_unit {
                 let name = self.krate.qualified_name(d);
-                let ret = self.show(ret);
-                self.diags.push(error(
+                let what = if b.value_returns {
+                    "a value".to_string()
+                } else {
+                    format!("`{}`", self.show(b.ret))
+                };
+                let at = f.body.last().map_or(self.def_span(d), |s| s.span);
+                b.diags.push(error(
                     "missing-return",
                     format!(
-                        "`{name}` returns `{ret}`, but its end can be reached without a `return`"
+                        "`{name}` returns {what}, but its end can be reached after this without a `return`"
                     ),
                     file,
-                    self.def_span(d),
+                    at,
                 ));
             }
         } else if !b.returns
-            && let Ty::Var(n) = self.types.get(self.shallow(ret))
+            && let ret = self.shallow(b.ret)
+            && let Ty::Var(n) = self.types.get(ret)
         {
             // It never returns normally (it always raises).
             self.bind(n, TyId::NEVER);
         }
-        self.finish(&mut b);
-        let ret = self.ret_of(d, ret, file);
+        self.finish(&mut b, Some(d));
+        let ret = self.zonk(b.ret);
         let receiver = receiver.map(|(r, t)| (r, self.zonk(t)));
         let params = params.into_iter().map(|t| self.zonk(t)).collect();
         self.sigs.insert(
@@ -317,22 +355,7 @@ impl<'k> Infer<'k> {
                 ret,
             },
         );
-    }
-
-    /// A function's final return type; one still unknown is `needs-annotation`.
-    fn ret_of(&mut self, d: DefId, ret: TyId, file: &str) -> TyId {
-        let ret = self.zonk(ret);
-        if self.has_var(ret) {
-            let name = self.krate.qualified_name(d);
-            self.diags.push(error(
-                "needs-annotation",
-                format!("cannot infer what `{name}` returns: annotate it (`-> T`)"),
-                file,
-                self.def_span(d),
-            ));
-            self.default_vars(ret);
-        }
-        self.zonk(ret)
+        self.diags.append(&mut b.diags);
     }
 
     fn global(&mut self, d: DefId, g: &hir::Global) {
@@ -342,15 +365,14 @@ impl<'k> Infer<'k> {
         let ty = match self.globals.get(&d) {
             Some(annotated) => {
                 let annotated = *annotated;
-                self.expect(&b, annotated, value, g.value.span);
+                self.expect(&mut b, annotated, value, g.value.span);
                 annotated
             }
             None => value,
         };
-        let ty = self.zonk(ty);
         if self.has_var(ty) {
             let name = self.krate.def(d).map_or("", |def| def.name.as_str());
-            self.diags.push(error(
+            b.diags.push(error(
                 "needs-annotation",
                 format!("cannot infer the type of `{name}`: annotate it (`let {name}: T = …`)"),
                 file,
@@ -358,13 +380,15 @@ impl<'k> Infer<'k> {
             ));
             self.default_vars(ty);
         }
-        self.finish(&mut b);
+        self.finish(&mut b, None);
         let ty = self.zonk(ty);
         self.globals.insert(d, ty);
+        self.diags.append(&mut b.diags);
     }
 
-    /// The end of a body: deferred checks, `needs-annotation`, final types.
-    fn finish(&mut self, b: &mut Body) {
+    /// The end of a body: deferred checks, `needs-annotation` (bindings, then the return type of the
+    /// function `ret_of`, then other expressions), final types.
+    fn finish(&mut self, b: &mut Body, ret_of: Option<DefId>) {
         for c in std::mem::take(&mut b.checks) {
             let ty = self.zonk(c.ty);
             let ok = match self.types.get(ty) {
@@ -378,7 +402,7 @@ impl<'k> Infer<'k> {
                     Class::NumericOrStr => "`int`, `float` or `str`",
                 };
                 let found = self.show(ty);
-                self.diags.push(error(
+                b.diags.push(error(
                     "type-mismatch",
                     format!("`{}` takes {wanted}, not `{found}`", c.op),
                     b.file,
@@ -405,15 +429,29 @@ impl<'k> Infer<'k> {
                 if shown != "_" {
                     d.notes.push(format!("it is `{shown}`, with `_` unknown"));
                 }
-                self.diags.push(d);
+                b.diags.push(d);
                 self.default_vars(ty);
             }
+            let ty = self.zonk(ty);
+            self.set_local(local, ty);
+        }
+        if let Some(d) = ret_of
+            && self.has_var(b.ret)
+        {
+            let name = self.krate.qualified_name(d);
+            b.diags.push(error(
+                "needs-annotation",
+                format!("cannot infer what `{name}` returns: annotate it (`-> T`)"),
+                b.file,
+                self.def_span(d),
+            ));
+            self.default_vars(b.ret);
         }
         for (id, at) in std::mem::take(&mut b.exprs) {
             let ty = self.zonk(self.expr_ty(id));
             if self.has_var(ty) {
                 let shown = self.show(ty);
-                self.diags.push(error(
+                b.diags.push(error(
                     "needs-annotation",
                     format!(
                         "cannot infer the type of this expression (`{shown}`): annotate the binding it goes into"
@@ -469,19 +507,32 @@ impl<'k> Infer<'k> {
         }
     }
 
-    /// `ty` with its outer variables followed.
-    fn shallow(&self, mut ty: TyId) -> TyId {
+    /// `ty` with its outer variables followed. Every variable passed on the way is pointed straight at the
+    /// end (path compression: a binding is only rewritten to what it already means).
+    fn shallow(&mut self, ty: TyId) -> TyId {
+        let mut end = ty;
+        let mut passed = Vec::new();
         // Bindings never form a cycle (occurs check); the bound is a guard.
         for _ in 0..=self.subst.len() {
-            match self.types.get(ty) {
-                Ty::Var(n) => match self.subst.get(n as usize).copied().flatten() {
-                    Some(next) => ty = next,
-                    None => return ty,
-                },
-                _ => return ty,
+            let Ty::Var(n) = self.types.get(end) else {
+                break;
+            };
+            match self.subst.get(n as usize).copied().flatten() {
+                Some(next) => {
+                    passed.push(n);
+                    end = next;
+                }
+                None => break,
             }
         }
-        ty
+        if passed.len() > 1 {
+            for n in passed {
+                if let Some(slot) = self.subst.get_mut(n as usize) {
+                    *slot = Some(end);
+                }
+            }
+        }
+        end
     }
 
     /// Makes `a` and `b` the same type; false when they cannot be (some parts may be bound by then).
@@ -523,7 +574,7 @@ impl<'k> Infer<'k> {
     }
 
     /// The unbound variables in a type.
-    fn vars_in(&self, ty: TyId) -> BTreeSet<u32> {
+    fn vars_in(&mut self, ty: TyId) -> BTreeSet<u32> {
         let mut out = BTreeSet::new();
         let mut seen = BTreeSet::new();
         let mut stack = vec![ty];
@@ -542,7 +593,7 @@ impl<'k> Infer<'k> {
         out
     }
 
-    fn has_var(&self, ty: TyId) -> bool {
+    fn has_var(&mut self, ty: TyId) -> bool {
         !self.vars_in(ty).is_empty()
     }
 
@@ -623,16 +674,16 @@ impl<'k> Infer<'k> {
     }
 
     /// An annotation's type. A wrong number of type arguments is `type-mismatch`.
-    fn lower(&mut self, t: &hir::Type, file: &str) -> TyId {
+    fn lower(&mut self, t: &hir::Type, file: &str, out: &mut Vec<Diagnostic>) -> TyId {
         match &t.kind {
             hir::TypeKind::Error => TyId::ERROR,
             hir::TypeKind::Unit => TyId::UNIT,
             hir::TypeKind::Ref(inner) => {
-                let inner = self.lower(inner, file);
+                let inner = self.lower(inner, file, out);
                 self.types.intern(Ty::Ref(inner))
             }
             hir::TypeKind::Named(name, args) => {
-                let args: Vec<TyId> = args.iter().map(|a| self.lower(a, file)).collect();
+                let args: Vec<TyId> = args.iter().map(|a| self.lower(a, file, out)).collect();
                 let (wanted, shape) = match name {
                     TypeName::Builtin(b) => match b {
                         Builtin::Int => (0, Ty::Int),
@@ -655,7 +706,7 @@ impl<'k> Infer<'k> {
                         1 => "one type argument".to_string(),
                         n => format!("{n} type arguments"),
                     };
-                    self.diags.push(error(
+                    out.push(error(
                         "type-mismatch",
                         format!("`{head}` takes {takes}, {} given", args.len()),
                         file,
@@ -690,18 +741,84 @@ impl<'k> Infer<'k> {
         }
     }
 
-    /// Unifies `found` with `expected`, else `type-mismatch` at `at`; true when they agree.
-    fn expect(&mut self, b: &Body, expected: TyId, found: TyId, at: Span) -> bool {
+    /// Unifies `found` with `expected`, else reports the disagreement at `at`; true when they agree.
+    fn expect(&mut self, b: &mut Body, expected: TyId, found: TyId, at: Span) -> bool {
         if self.unify(expected, found) {
             return true;
         }
         let (e, f) = (self.show(expected), self.show(found));
-        self.mismatch(b, at, format!("expected `{e}`, found `{f}`"));
+        self.disagree(
+            b,
+            expected,
+            found,
+            at,
+            format!("expected `{e}`, found `{f}`"),
+        );
         false
     }
 
-    fn mismatch(&mut self, b: &Body, at: Span, message: String) {
-        self.diags.push(error("type-mismatch", message, b.file, at));
+    /// Reports a failed unification of `x` and `y` at `at`. When the type of an unannotated parameter,
+    /// fixed by an earlier use, is part of the conflict, it is `needs-annotation` at that parameter (spec
+    /// §5.2: a parameter used at two incompatible types asks for an annotation), once per parameter;
+    /// otherwise `type-mismatch` with `message`.
+    fn disagree(&mut self, b: &mut Body, x: TyId, y: TyId, at: Span, message: String) {
+        for (side, other) in [(x, y), (y, x)] {
+            let Some(local) = self.param_in(b, side) else {
+                continue;
+            };
+            if b.conflicted.insert(local) {
+                let (name, span) = self
+                    .krate
+                    .local(local)
+                    .map_or((String::new(), Span::default()), |l| {
+                        (l.name.clone(), l.span)
+                    });
+                let (was, now) = (self.show(side), self.show(other));
+                let mut d = error(
+                    "needs-annotation",
+                    format!(
+                        "`{name}` is used as `{was}` and as `{now}`: annotate it (`{name}: T`)"
+                    ),
+                    b.file,
+                    span,
+                );
+                d.notes.push(format!(
+                    "the use at line {}, column {} needs `{now}`",
+                    at.line, at.col
+                ));
+                b.diags.push(d);
+            }
+            return;
+        }
+        self.mismatch(b, at, message);
+    }
+
+    /// The first (by id) unannotated parameter whose variable `ty` passes through.
+    fn param_in(&self, b: &Body, ty: TyId) -> Option<LocalId> {
+        let mut found: Option<LocalId> = None;
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![ty];
+        while let Some(t) = stack.pop() {
+            if self.types.is_ground(t) || !seen.insert(t) {
+                continue;
+            }
+            match self.types.get(t) {
+                Ty::Var(n) => {
+                    if let Some(l) = b.param_vars.get(&n) {
+                        found = Some(found.map_or(*l, |f| f.min(*l)));
+                    }
+                    if let Some(next) = self.subst.get(n as usize).copied().flatten() {
+                        stack.push(next);
+                    }
+                }
+                other => stack.extend(other.children()),
+            }
+        }
+        found
+    }
+
+    fn mismatch(&mut self, b: &mut Body, at: Span, message: String) {
+        b.diags.push(error("type-mismatch", message, b.file, at));
     }
 }
 

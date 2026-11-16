@@ -110,6 +110,18 @@ fn needs_annotation() {
     let found = messages(&files, "needs-annotation");
     assert!(found[0].contains("`x`"), "{found:#?}");
     assert!(found[1].contains("`xs`"), "{found:#?}");
+
+    // A parameter used at two incompatible types asks for an annotation at the parameter, with a note
+    // pointing at the conflicting use.
+    let main = "fn twice(x):\n    let a = x + 1\n    let b = x + \"s\"\n";
+    let files = [("main.qs", main)];
+    assert_eq!(diags(&files), vec![d("needs-annotation", "main.qs", 1)]);
+    let all = diagnostics(&files);
+    assert!(all[0].message.contains("`x`"), "{all:#?}");
+    assert!(
+        all[0].notes.iter().any(|n| n.contains("line 3")),
+        "{all:#?}"
+    );
 }
 
 #[test]
@@ -157,14 +169,60 @@ fn callee_first_ignores_declaration_order() {
 
 #[test]
 fn missing_return() {
+    // Reported where the end is reached: after the body's last statement.
     let main = "fn f(x: int):\n    if x > 0:\n        return 1\n\nfn g() -> int:\n    pass\n";
     assert_eq!(
         diags(&[("main.qs", main)]),
         vec![
-            d("missing-return", "main.qs", 1),
-            d("missing-return", "main.qs", 5)
+            d("missing-return", "main.qs", 2),
+            d("missing-return", "main.qs", 6)
         ]
     );
+
+    // The fall-off does not type the returned parameter as `()`: it stays unknown.
+    let main = "fn f(c: bool, x):\n    if c:\n        return x\n";
+    assert_eq!(
+        diags(&[("main.qs", main)]),
+        vec![
+            d("missing-return", "main.qs", 2),
+            d("needs-annotation", "main.qs", 1)
+        ]
+    );
+
+    // A call to a function that never returns ends the block, as `raise` does.
+    let main = "fn fail():\n    raise Oops\n\nfn g() -> int:\n    fail()\n";
+    assert_eq!(diags(&[("main.qs", main)]), vec![]);
+}
+
+/// Regression: every type in `Typed` is final — a local bound to `list[_]` and then assigned `[1]` is
+/// `list[int]`, not a type variable.
+#[test]
+fn typed_holds_final_types() {
+    let main = "fn f():\n    let xs = []\n    xs = [1]\n";
+    let host = quest_stub::stub_api();
+    let (krate, _) = quest_lang::load_modules(&tree(&[("main.qs", main)]));
+    let (program, _) = quest_lang::resolve(&krate, &host);
+    let (typed, found) = quest_lang::infer(&program, &host);
+    assert!(found.is_empty(), "{found:#?}");
+    let printer = quest_lang::ty::Printer {
+        types: &typed.types,
+        krate: &program,
+        host: &host,
+    };
+    let xs = program
+        .locals
+        .iter()
+        .position(|l| l.name == "xs")
+        .expect("a local `xs`");
+    assert_eq!(printer.print(typed.locals[xs]), "list[int]");
+    let all = typed.locals.iter().chain(&typed.exprs);
+    for t in all {
+        assert!(
+            !matches!(typed.types.get(*t), quest_lang::ty::Ty::Var(_)),
+            "{}",
+            printer.print(*t)
+        );
+    }
 }
 
 #[test]

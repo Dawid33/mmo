@@ -31,7 +31,8 @@ impl Infer<'_> {
         let ty = self.expr(b, e);
         if !self.unify(TyId::BOOL, ty) {
             let found = self.show(ty);
-            self.mismatch(b, e.span, format!("a condition is a `bool`, not `{found}`"));
+            let message = format!("a condition is a `bool`, not `{found}`");
+            self.disagree(b, TyId::BOOL, ty, e.span, message);
         }
     }
 
@@ -84,13 +85,10 @@ impl Infer<'_> {
                     };
                     if !self.unify(elem, ty) {
                         let (want, found) = (self.show(elem), self.show(ty));
-                        self.mismatch(
-                            b,
-                            x.span,
-                            format!(
-                                "a list holds one type: this is `{found}`, the others `{want}`"
-                            ),
+                        let message = format!(
+                            "a list holds one type: this is `{found}`, the others `{want}`"
                         );
+                        self.disagree(b, elem, ty, x.span, message);
                     }
                 }
                 let elem = elem.unwrap_or_else(|| self.fresh());
@@ -159,17 +157,18 @@ impl Infer<'_> {
     /// `return` with its value (`()` without one).
     pub(super) fn ret_value(&mut self, b: &mut Body, value: Option<&Expr>, at: Span) {
         b.returns = true;
+        if value.is_some_and(|x| !matches!(x.kind, ExprKind::Unit)) {
+            b.value_returns = true;
+        }
         let (ty, at) = match value {
             Some(x) => (self.expr(b, x), x.span),
             None => (TyId::UNIT, at),
         };
         if !self.unify(b.ret, ty) {
             let (want, found) = (self.show(b.ret), self.show(ty));
-            self.mismatch(
-                b,
-                at,
-                format!("this function returns `{want}`, not `{found}`"),
-            );
+            let message = format!("this function returns `{want}`, not `{found}`");
+            let ret = b.ret;
+            self.disagree(b, ret, ty, at, message);
         }
     }
 
@@ -188,7 +187,8 @@ impl Infer<'_> {
             UnOp::Not => {
                 if !self.unify(TyId::BOOL, ty) {
                     let found = self.show(ty);
-                    self.mismatch(b, x.span, format!("`not` takes a `bool`, not `{found}`"));
+                    let message = format!("`not` takes a `bool`, not `{found}`");
+                    self.disagree(b, TyId::BOOL, ty, x.span, message);
                 }
                 TyId::BOOL
             }
@@ -198,7 +198,8 @@ impl Infer<'_> {
                 let reference = self.types.intern(Ty::Ref(target));
                 if !self.unify(reference, ty) {
                     let found = self.show(ty);
-                    self.mismatch(b, at, format!("`*` takes a reference, not `{found}`"));
+                    let message = format!("`*` takes a reference, not `{found}`");
+                    self.disagree(b, reference, ty, at, message);
                     return TyId::ERROR;
                 }
                 target
@@ -225,11 +226,8 @@ impl Infer<'_> {
         let (lt, rt) = (self.expr(b, l), self.expr(b, r));
         if !self.unify(lt, rt) {
             let (ls, rs) = (self.show(lt), self.show(rt));
-            self.mismatch(
-                b,
-                at,
-                format!("`{text}` takes two values of one type, not `{ls}` and `{rs}`"),
-            );
+            let message = format!("`{text}` takes two values of one type, not `{ls}` and `{rs}`");
+            self.disagree(b, lt, rt, at, message);
             return match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => TyId::ERROR,
                 _ => TyId::BOOL,

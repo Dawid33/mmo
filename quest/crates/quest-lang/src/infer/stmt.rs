@@ -1,7 +1,8 @@
 //! Statements and blocks, and whether the end of a block can be reached.
 //!
 //! A statement **diverges** when the code after it cannot run: `return`, `raise`, `break`, `continue`
-//! (statements, or the same as an expression statement); an `if` with an `else` whose branches all diverge;
+//! (statements, or the same as an expression statement), a call of a function that never returns (`-> !`);
+//! an `if` with an `else` whose branches all diverge;
 //! a `match` whose arms all do (it is exhaustive, Task 23); `while true` that no `break` leaves. A `for`
 //! loop never diverges.
 
@@ -25,7 +26,7 @@ impl Infer<'_> {
                 let found = self.expr(b, value);
                 let ty = match annotation {
                     Some(t) => {
-                        let wanted = self.lower(t, b.file);
+                        let wanted = self.lower(t, b.file, &mut b.diags);
                         self.expect(b, wanted, found, value.span);
                         wanted
                     }
@@ -41,9 +42,10 @@ impl Infer<'_> {
                 self.expect(b, wanted, found, value.span);
                 false
             }
+            // `return`, `break`, `continue`, `raise`, or a call that never returns.
             StmtKind::Expr(e) => {
-                self.expr(b, e);
-                diverging_expr(e)
+                let ty = self.expr(b, e);
+                self.shallow(ty) == TyId::NEVER
             }
             StmtKind::If(branches, other) => {
                 let mut all = true;
@@ -71,7 +73,7 @@ impl Infer<'_> {
                 false
             }
             StmtKind::Match(scrutinee, cases) => {
-                // Patterns (Task 23): the scrutinee is not constrained by them yet, their bindings are `?`.
+                // Patterns (Task 23): the scrutinee is not constrained by them yet, their bindings have the error type.
                 self.sink(b, scrutinee);
                 let mut all = !cases.is_empty();
                 for c in cases {
@@ -153,12 +155,4 @@ impl Infer<'_> {
             PatternKind::Error | PatternKind::Wild | PatternKind::Lit(_) => {}
         }
     }
-}
-
-/// An expression statement after which nothing runs.
-fn diverging_expr(e: &Expr) -> bool {
-    matches!(
-        e.kind,
-        ExprKind::Return(_) | ExprKind::Break | ExprKind::Continue | ExprKind::Raise(_)
-    )
 }

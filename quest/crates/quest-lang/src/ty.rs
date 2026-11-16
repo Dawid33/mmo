@@ -145,7 +145,7 @@ impl Types {
 const PRINT_DEPTH_MAX: u32 = 16;
 
 /// Prints types as source writes them (`int`, `list[int]`, `dict[str, int]`, `Option[int]`, `&Ledger`,
-/// `npc::Ledger`); the checker's own types print as `?` (error), `!` (never) and `_` (unknown).
+/// `npc::Ledger`); the checker's own types print as `{error}`, `!` (never) and `_` (unknown).
 pub struct Printer<'a> {
     pub types: &'a Types,
     pub krate: &'a Crate,
@@ -176,7 +176,7 @@ impl Printer<'_> {
             out.push(']');
         };
         match self.types.get(id) {
-            Ty::Error => out.push('?'),
+            Ty::Error => out.push_str("{error}"),
             Ty::Never => out.push('!'),
             Ty::Unit => out.push_str("()"),
             Ty::Int => out.push_str("int"),
