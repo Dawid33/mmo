@@ -195,7 +195,7 @@ pub struct Local {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostItem {
     /// `HostApi::fns`: a function without a receiver (`say`, `world.get`). Methods (`p.has_tag`) are
-    /// found by the receiver's type, after inference.
+    /// found by the receiver's type, during inference (`Typed::methods`).
     Fn(u32),
     /// `HostApi::structs`.
     Struct(u32),
@@ -370,7 +370,8 @@ pub enum ExprKind {
     Try(Box<Expr>),
     /// A call or a construction.
     Call(Box<Expr>, Vec<Arg>),
-    /// A field, or a method before its call (resolved by the receiver's type, after inference).
+    /// A field, or a method before its call (resolved by the receiver's type during inference:
+    /// `Typed::methods`).
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),

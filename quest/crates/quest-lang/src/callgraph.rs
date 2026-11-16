@@ -16,8 +16,9 @@
 //! unannotated `let` after that `let`. A cycle cannot be ordered: its members come together, by name, and are
 //! listed in [`Plan::cycles`] so inference can treat what it reaches too early as already wrong.
 //!
-//! A method call written `x.m()` is resolved by `x`'s type, after inference; the graph sees only calls whose
-//! callee resolution already named.
+//! A method call written `x.m()` is resolved by `x`'s type, during inference; the graph sees only calls whose
+//! callee resolution already named. Inference stops a body that reaches a function or `let` not typed yet and
+//! retries it after; the bodies left waiting on each other are a cycle, reported by [`stalled`] the same way.
 //!
 //! Every walk here is a loop (Tarjan's algorithm with an explicit stack), so a long call chain cannot
 //! overflow the native stack; the HIR walk is structural and bounded by the parser's depth limit.
@@ -56,21 +57,56 @@ struct Graph<'k> {
 
 /// Builds the graph, reports recursion and returns the order.
 pub fn plan(krate: &Crate) -> (Plan, Vec<Diagnostic>) {
-    let g = Graph::new(krate);
-    let mut diags = Vec::new();
-    for comp in sccs(g.nodes.len(), |n| g.successors(n, true)) {
-        if g.is_cycle(&comp, true) {
-            diags.push(g.report(&comp));
-        }
-    }
-    let comps = sccs(g.nodes.len(), |n| g.successors(n, false));
-    let cycles = comps
+    Graph::new(krate).plan()
+}
+
+/// The same for the bodies inference had to stop: each waits on the functions and unannotated top-level
+/// `let`s in its map (with the earliest site), which inference reached before they were typed — a method
+/// call `x.m()` this graph could not see. Recursion among them is reported as for direct calls; `order` is
+/// callee-first over them, and `cycles` lists every cycle (of calls, or through a `let`).
+pub fn stalled(
+    krate: &Crate,
+    waits: &BTreeMap<DefId, BTreeMap<DefId, Span>>,
+) -> (Plan, Vec<Diagnostic>) {
+    let mut g = Graph::with_nodes(krate, waits.keys().copied().collect());
+    g.edges = g
+        .nodes
         .iter()
-        .filter(|c| g.is_cycle(c, false))
-        .map(|c| c.iter().map(|n| g.nodes[*n]).collect())
+        .map(|d| {
+            let mut out: Vec<Edge> = waits
+                .get(d)
+                .into_iter()
+                .flatten()
+                .filter_map(|(to, at)| {
+                    let call = matches!(krate.def(*to).map(|t| &t.kind), Some(DefKind::Fn(_)));
+                    g.index.get(to).map(|&to| Edge { to, at: *at, call })
+                })
+                .collect();
+            out.sort_by_key(|e| e.to);
+            out
+        })
         .collect();
-    let order = g.order(&comps);
-    (Plan { order, cycles }, diags)
+    g.plan()
+}
+
+impl Graph<'_> {
+    fn plan(&self) -> (Plan, Vec<Diagnostic>) {
+        let g = self;
+        let mut diags = Vec::new();
+        for comp in sccs(g.nodes.len(), |n| g.successors(n, true)) {
+            if g.is_cycle(&comp, true) {
+                diags.push(g.report(&comp));
+            }
+        }
+        let comps = sccs(g.nodes.len(), |n| g.successors(n, false));
+        let cycles = comps
+            .iter()
+            .filter(|c| g.is_cycle(c, false))
+            .map(|c| c.iter().map(|n| g.nodes[*n]).collect())
+            .collect();
+        let order = g.order(&comps);
+        (Plan { order, cycles }, diags)
+    }
 }
 
 /// The strongly connected components of a graph of `n` nodes, each sorted, in reverse topological order
@@ -134,29 +170,35 @@ fn sccs(n: usize, successors: impl Fn(usize) -> Vec<usize>) -> Vec<Vec<usize>> {
 
 impl<'k> Graph<'k> {
     fn new(krate: &'k Crate) -> Graph<'k> {
-        let mut keyed: Vec<(String, DefId)> = krate
+        let defs = krate
             .defs
             .iter()
             .enumerate()
             .filter(|(_, d)| matches!(d.kind, DefKind::Fn(_) | DefKind::Global(_)))
-            .map(|(i, _)| {
-                let id = DefId(u32::try_from(i).unwrap_or(u32::MAX));
-                (krate.qualified_name(id), id)
-            })
+            .map(|(i, _)| DefId(u32::try_from(i).unwrap_or(u32::MAX)))
+            .collect();
+        let mut g = Graph::with_nodes(krate, defs);
+        g.edges = g.nodes.iter().map(|d| g.edges_of(*d)).collect();
+        g
+    }
+
+    /// A graph of `defs` without edges.
+    fn with_nodes(krate: &'k Crate, defs: Vec<DefId>) -> Graph<'k> {
+        let mut keyed: Vec<(String, DefId)> = defs
+            .into_iter()
+            .map(|id| (krate.qualified_name(id), id))
             .collect();
         keyed.sort();
         let nodes: Vec<DefId> = keyed.iter().map(|(_, id)| *id).collect();
         let keys = keyed.into_iter().map(|(k, _)| k).collect();
         let index = nodes.iter().enumerate().map(|(i, d)| (*d, i)).collect();
-        let mut g = Graph {
+        Graph {
             krate,
             nodes,
             index,
             keys,
             edges: Vec::new(),
-        };
-        g.edges = g.nodes.iter().map(|d| g.edges_of(*d)).collect();
-        g
+        }
     }
 
     fn successors(&self, n: usize, calls_only: bool) -> Vec<usize> {

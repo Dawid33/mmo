@@ -2,7 +2,7 @@
 
 use super::{Body, Check, Class, Infer};
 use crate::ast::{BinOp, Span, UnOp};
-use crate::hir::{DefKind, Expr, ExprKind, FStrPart};
+use crate::hir::{DefKind, Expr, ExprKind, FStrPart, HostItem, PRELUDE, Prelude};
 use crate::ty::{Ty, TyId};
 
 impl Infer<'_> {
@@ -26,6 +26,12 @@ impl Infer<'_> {
         self.unify(ty, TyId::ERROR);
     }
 
+    /// An item used as a value that is not one: `type-mismatch`.
+    fn not_a_value(&mut self, b: &mut Body, e: &Expr, message: String) -> TyId {
+        self.mismatch(b, e.span, message);
+        TyId::ERROR
+    }
+
     /// A condition: `bool`.
     pub(super) fn cond(&mut self, b: &mut Body, e: &Expr) {
         let ty = self.expr(b, e);
@@ -45,7 +51,7 @@ impl Infer<'_> {
             ExprKind::Bool(_) => TyId::BOOL,
             ExprKind::Str(_) => TyId::STR,
             ExprKind::FStr(parts) => {
-                // Any type formats (Task 21 pins which).
+                // Any type formats.
                 for p in parts {
                     if let FStrPart::Expr(x) = p {
                         self.expr(b, x);
@@ -64,16 +70,98 @@ impl Infer<'_> {
                     );
                     TyId::ERROR
                 }
-                // In a cycle (reported) until its initialiser is typed.
-                Some(DefKind::Global(_)) => self.globals.get(d).copied().unwrap_or(TyId::ERROR),
-                // A struct, enum or event as a value (Task 21).
-                _ => TyId::ERROR,
+                // Not typed yet: the body waits for it (or it is in a reported cycle).
+                Some(DefKind::Global(_)) => match self.globals.get(d) {
+                    Some(t) => *t,
+                    None => {
+                        self.wait(b, *d, e.span);
+                        TyId::ERROR
+                    }
+                },
+                Some(DefKind::Struct(_) | DefKind::Event(_)) => {
+                    let name = self.krate.qualified_name(*d);
+                    self.not_a_value(
+                        b,
+                        e,
+                        format!("`{name}` is a type: construct a value with `{name}(…)`"),
+                    )
+                }
+                Some(DefKind::Enum(_)) => {
+                    let name = self.krate.qualified_name(*d);
+                    self.not_a_value(
+                        b,
+                        e,
+                        format!("`{name}` is an enum: name one of its variants (`{name}::…`)"),
+                    )
+                }
+                Some(DefKind::ErrorSet(_)) => {
+                    let name = self.krate.qualified_name(*d);
+                    self.not_a_value(b, e, format!("`{name}` is an error set, not a value"))
+                }
+                // Dialogues and quests never reach inference.
+                Some(DefKind::Dialogue | DefKind::Quest) | None => TyId::ERROR,
             },
-            // Data, host items and the prelude as values (Task 21); error names (Task 22).
-            ExprKind::Variant(_, _)
-            | ExprKind::Host(_)
-            | ExprKind::Prelude(_)
-            | ExprKind::ErrorName(_) => TyId::ERROR,
+            ExprKind::Variant(d, i) => {
+                let fields = self
+                    .adts
+                    .get(d)
+                    .and_then(|s| s.get(*i as usize))
+                    .map_or(0, |s| s.names.len());
+                if fields == 0 {
+                    self.types.intern(Ty::Adt(*d))
+                } else {
+                    let name = self.variant_name(*d, *i);
+                    self.not_a_value(
+                        b,
+                        e,
+                        format!("`{name}` has fields: construct it with `{name}(…)`"),
+                    )
+                }
+            }
+            ExprKind::Host(item) => {
+                let host = self.host;
+                let message = match item {
+                    HostItem::Fn(i) => {
+                        let name = host.fns.get(*i as usize).map_or("", |f| f.name.as_str());
+                        format!("`{name}` is a host function, not a value: call it")
+                    }
+                    HostItem::Struct(i) => {
+                        let name = host
+                            .structs
+                            .get(*i as usize)
+                            .map_or("", |s| s.name.as_str());
+                        format!("`{name}` is a type: construct a value with `{name}(…)`")
+                    }
+                    HostItem::Event(i) => {
+                        let name = host.events.get(*i as usize).map_or("", |s| s.name.as_str());
+                        format!("`{name}` is a type: construct a value with `{name}(…)`")
+                    }
+                };
+                self.not_a_value(b, e, message)
+            }
+            ExprKind::Prelude(p) => match p {
+                Prelude::None => {
+                    let t = self.fresh();
+                    self.types.intern(Ty::Option(t))
+                }
+                // Results exist only in `match` (Task 22).
+                Prelude::Ok | Prelude::Err => TyId::ERROR,
+                Prelude::Option => self.not_a_value(
+                    b,
+                    e,
+                    "`Option` is a type: make a value with `Some(x)` or `None`".to_string(),
+                ),
+                _ => {
+                    let name = PRELUDE.iter().find(|(_, x)| x == p).map_or("", |(n, _)| *n);
+                    self.not_a_value(
+                        b,
+                        e,
+                        format!("`{name}` is a function, not a value: call it (`{name}(…)`)"),
+                    )
+                }
+            },
+            // Error names (Task 22).
+            ExprKind::ErrorName(_) => TyId::ERROR,
             ExprKind::List(items) => {
                 // The first element's type (a variable only for `[]`): no variable to follow later.
                 let mut elem = None;
@@ -109,26 +197,24 @@ impl Infer<'_> {
                     Some(kv) => kv,
                     None => (self.fresh(), self.fresh()),
                 };
+                let at = entries.first().map_or(e.span, |(k, _)| k.span);
+                self.check_key(b, key, at);
                 self.types.intern(Ty::Dict(key, value))
             }
             ExprKind::Unary(op, x) => self.unary(b, *op, x, e.span),
             ExprKind::Binary(op, l, r) => self.binary(b, *op, l, r, e.span),
             ExprKind::Call(callee, args) => self.call(b, e, callee, args),
-            // Fields, methods, indexing, slices (Task 21); `?` and `else` (Task 22); `await` (Task 24).
-            ExprKind::Field(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => {
+            ExprKind::Field(x, name) => self.field(b, e, x, name),
+            ExprKind::Index(x, i) => self.index(b, e, x, i),
+            ExprKind::Slice(x, from, to) => self.slice(b, e, x, [from.as_deref(), to.as_deref()]),
+            // `?` and `else` (Task 22); `await` (Task 24).
+            ExprKind::Try(x) | ExprKind::Await(x) => {
                 self.sink(b, x);
                 TyId::ERROR
             }
-            ExprKind::Index(x, i) | ExprKind::Else(x, i) => {
+            ExprKind::Else(x, i) => {
                 self.sink(b, x);
                 self.sink(b, i);
-                TyId::ERROR
-            }
-            ExprKind::Slice(x, from, to) => {
-                self.sink(b, x);
-                for y in [from, to].into_iter().flatten() {
-                    self.sink(b, y);
-                }
                 TyId::ERROR
             }
             ExprKind::FallbackBlock(local, body) => {
@@ -215,12 +301,7 @@ impl Infer<'_> {
                 self.cond(b, r);
                 return TyId::BOOL;
             }
-            // `in` (Task 21).
-            BinOp::In | BinOp::NotIn => {
-                self.sink(b, l);
-                self.sink(b, r);
-                return TyId::BOOL;
-            }
+            BinOp::In | BinOp::NotIn => return self.contains(b, l, r, at),
             _ => {}
         }
         let (lt, rt) = (self.expr(b, l), self.expr(b, r));

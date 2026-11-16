@@ -12,8 +12,14 @@
 //! - **Callee-first.** Bodies are visited in the call graph's order (`callgraph`), so every function a body
 //!   calls already has its final [`Sig`], and every unannotated top-level `let` it reads its final type. A call
 //!   never changes the callee: arguments are checked against the callee's signature, and a parameter's type
-//!   comes only from its annotation, from its own body, or (a handler's event parameter) from its `@on`. A
-//!   callee with no signature yet is a member of a reported cycle; the call is typed as already wrong.
+//!   comes only from its annotation, from its own body, or (a handler's event parameter) from its `@on`.
+//! - **The worklist.** The graph cannot see a method call `x.m()` (`x`'s type decides the callee). A body that
+//!   reaches a function or an unannotated `let` with no final type yet records it (`Body::waits`), is stopped
+//!   (its diagnostics and types are dropped), and is typed again once everything it waited on is done. When
+//!   nothing is left to run but bodies wait, they wait on each other: `callgraph::stalled` reports their cycles
+//!   (`recursion`, or `needs-annotation` for a `let` whose type depends on itself) exactly as for direct
+//!   calls, and they are run again callee-first. A member of a reported cycle (`Infer::in_cycle`) is never
+//!   waited on: a call of it before it is typed is typed as already wrong.
 //! - **A parameter used at two types** (fixed by one use, contradicted by a later one) is `needs-annotation`
 //!   at the parameter, with a note naming the conflicting use, instead of `type-mismatch` (spec §5.2); once
 //!   per parameter (`Infer::disagree`).
@@ -33,20 +39,24 @@
 //!   fall-off decides nothing about the return type. A function that never returns normally (it always
 //!   raises) returns `!`, and a call of it ends a block as `raise` does.
 //!
+//! - **A receiver must be known.** A field, a method, an index or `in` is looked up by the type of the value
+//!   it applies to; if that is still unknown there, it is `needs-annotation` (at the parameter when it is
+//!   one).
+//!
 //! **Not typed here yet** (each such node's operands are typed, then joined to the error type, so they
-//! produce no diagnostic of their own): struct and variant construction, fields, methods, indexing, slices,
-//! `in`, host calls and the rest of the prelude (Task 21); `raise`, `?`, `else` and error names (Task 22);
-//! patterns, whose bindings have the error type (Task 23); `await` (Task 24). Method calls written `x.m()`
-//! reach their callee only through `x`'s type: when Task 21 types them, a callee without a final signature
-//! that is not in a reported cycle means the graph's order missed an edge, and the body must be re-queued
-//! after the callee (and the cycle check redone with that edge).
+//! produce no diagnostic of their own): `raise`, `?`, `else`, `Ok`, `Err` and error names (Task 22);
+//! patterns, whose bindings have the error type (Task 23); `await` (Task 24).
 //!
 //! Files: `expr.rs` (expressions and operators), `stmt.rs` (statements, blocks, reachability), `call.rs`
-//! (calls and the prelude); this file holds the driver, unification and the end of a body.
+//! (calls: functions, methods, the prelude, the host), `data.rs` (user types, constructions, fields,
+//! collections); this file holds the driver, unification and the end of a body.
 
 mod call;
+mod data;
 mod expr;
 mod stmt;
+
+pub use call::{BuiltinMethod, Method};
 
 use crate::ast::{Receiver, Span};
 use crate::callgraph;
@@ -54,7 +64,7 @@ use crate::diag::Diagnostic;
 use crate::hir::{self, Builtin, Crate, DefId, DefKind, EventRef, ExprId, LocalId, TypeName};
 use crate::ty::{Printer, Ty, TyId, Types};
 use quest_vm::host::HostApi;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// A function's final type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +88,8 @@ pub struct Typed {
     pub sigs: BTreeMap<DefId, Sig>,
     /// Every top-level `let`.
     pub globals: BTreeMap<DefId, TyId>,
+    /// What each method call `x.m(…)` calls, by the call's expression.
+    pub methods: BTreeMap<ExprId, Method>,
     /// Functions and top-level `let`s, callee-first.
     pub order: Vec<DefId>,
 }
@@ -130,24 +142,28 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         locals: vec![TyId::ERROR; krate.locals.len()],
         sigs: BTreeMap::new(),
         globals: BTreeMap::new(),
+        methods: BTreeMap::new(),
+        in_cycle: BTreeSet::new(),
+        adts: BTreeMap::new(),
+        host_structs: Vec::new(),
+        host_events: Vec::new(),
+        early_keys: None,
+        bad_keys: BTreeSet::new(),
         diags,
     };
+    inf.user_types();
     inf.annotated_globals();
     inf.self_typed_globals(&plan.cycles);
-    for d in &plan.order {
-        match krate.def(*d).map(|def| &def.kind) {
-            Some(DefKind::Fn(f)) => inf.func(*d, f),
-            Some(DefKind::Global(g)) => inf.global(*d, g),
-            _ => {}
-        }
-    }
+    inf.in_cycle.extend(plan.cycles.iter().flatten());
+    let order = inf.run(plan.order);
     let typed = Typed {
         types: inf.types,
         exprs: inf.exprs,
         locals: inf.locals,
         sigs: inf.sigs,
         globals: inf.globals,
-        order: plan.order,
+        methods: inf.methods,
+        order,
     };
     (typed, inf.diags)
 }
@@ -155,12 +171,20 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
 /// An operator's requirement on its operands' type, checked at the end of the body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
-    /// `int` or `float`: `- * / %`, unary `-`.
+    /// `int` or `float`: `- * / %`, unary `-`, `abs`, `min`, `max`.
     Numeric,
     /// `int`, `float` or `str`: `+`, and the order comparisons.
     NumericOrStr,
+    /// A dict key (spec §5.8): `bad-dict-key`.
+    Key,
+    /// A value the host stores (`HostTy::Value`): no `Promise`, no reference; `not-storable`.
+    Storable,
+    /// An event (`HostTy::Event`): a script or host event.
+    Event,
 }
 
+/// A requirement on a type checked at the end of the body, once inference had every chance to decide it.
+/// `op` names what asks (an operator, a function).
 #[derive(Debug, Clone, Copy)]
 struct Check {
     ty: TyId,
@@ -190,8 +214,11 @@ struct Body<'k> {
     /// The parameters already reported as used at two types.
     conflicted: BTreeSet<LocalId>,
     /// This body's diagnostics, merged into the program's when the body is done: a body typed again
-    /// (Task 21 re-queues one whose method callee was not ready) leaves nothing behind.
+    /// leaves nothing behind.
     diags: Vec<Diagnostic>,
+    /// The functions and unannotated top-level `let`s this body reached before they were typed, with the
+    /// earliest site: the body is stopped and typed again after them.
+    waits: BTreeMap<DefId, Span>,
 }
 
 impl<'k> Body<'k> {
@@ -208,6 +235,7 @@ impl<'k> Body<'k> {
             param_vars: BTreeMap::new(),
             conflicted: BTreeSet::new(),
             diags: Vec::new(),
+            waits: BTreeMap::new(),
         }
     }
 }
@@ -225,11 +253,91 @@ struct Infer<'k> {
     locals: Vec<TyId>,
     sigs: BTreeMap<DefId, Sig>,
     globals: BTreeMap<DefId, TyId>,
+    methods: BTreeMap<ExprId, Method>,
+    /// The members of every reported cycle: never waited on.
+    in_cycle: BTreeSet<DefId>,
+    /// The field types of every struct and script event (one shape) and enum (one per variant).
+    adts: BTreeMap<DefId, Vec<data::Shape>>,
+    /// The field types of every host struct and host event, by index.
+    host_structs: Vec<data::Shape>,
+    host_events: Vec<data::Shape>,
+    /// While the user types are lowered: the key types of their dict annotations, checked once all are.
+    early_keys: Option<Vec<(TyId, String, Span)>>,
+    /// The key types reported as `bad-dict-key` in the body being typed.
+    bad_keys: BTreeSet<TyId>,
     diags: Vec<Diagnostic>,
 }
 
 impl<'k> Infer<'k> {
     // Bodies.
+
+    /// Types every body, starting from the call graph's `order`; returns the order they were finished in.
+    fn run(&mut self, order: Vec<DefId>) -> Vec<DefId> {
+        let mut done = Vec::with_capacity(order.len());
+        let mut queue: VecDeque<DefId> = order.into();
+        // A stopped body: what it still waits on. And who waits on each.
+        let mut waiting: BTreeMap<DefId, BTreeMap<DefId, Span>> = BTreeMap::new();
+        let mut waited_by: BTreeMap<DefId, Vec<DefId>> = BTreeMap::new();
+        loop {
+            while let Some(d) = queue.pop_front() {
+                let waits = match self.krate.def(d).map(|def| &def.kind) {
+                    Some(DefKind::Fn(f)) => self.func(d, f),
+                    Some(DefKind::Global(g)) => self.global(d, g),
+                    _ => continue,
+                };
+                if !waits.is_empty() {
+                    for on in waits.keys() {
+                        waited_by.entry(*on).or_default().push(d);
+                    }
+                    waiting.insert(d, waits);
+                    continue;
+                }
+                done.push(d);
+                for user in waited_by.remove(&d).unwrap_or_default() {
+                    let Some(rest) = waiting.get_mut(&user) else {
+                        continue;
+                    };
+                    rest.remove(&d);
+                    if rest.is_empty() {
+                        waiting.remove(&user);
+                        queue.push_back(user);
+                    }
+                }
+            }
+            if waiting.is_empty() {
+                return done;
+            }
+            // Every waiting body waits on another: they hold cycles.
+            let (plan, mut found) = callgraph::stalled(self.krate, &waiting);
+            self.diags.append(&mut found);
+            self.self_typed_globals(&plan.cycles);
+            self.in_cycle.extend(plan.cycles.iter().flatten());
+            waiting.clear();
+            waited_by.clear();
+            queue.extend(plan.order);
+        }
+    }
+
+    /// The final signature of the function `f`. Without one yet, the body waits for it unless `f` is in a
+    /// reported cycle.
+    fn sig_of(&mut self, b: &mut Body, f: DefId, at: Span) -> Option<Sig> {
+        if let Some(sig) = self.sigs.get(&f) {
+            return Some(sig.clone());
+        }
+        self.wait(b, f, at);
+        None
+    }
+
+    /// Records that `b` reached `d` (a function or an unannotated top-level `let`) before it was typed.
+    fn wait(&mut self, b: &mut Body, d: DefId, at: Span) {
+        if self.in_cycle.contains(&d) {
+            return;
+        }
+        let site = b.waits.entry(d).or_insert(at);
+        if (at.line, at.col) < (site.line, site.col) {
+            *site = at;
+        }
+    }
 
     fn file_of(&self, d: DefId) -> &'k str {
         self.krate
@@ -249,6 +357,7 @@ impl<'k> Infer<'k> {
                 let d = DefId(u32::try_from(i).unwrap_or(u32::MAX));
                 let file = self.file_of(d);
                 let mut found = Vec::new();
+                self.bad_keys.clear();
                 let ty = self.lower(t, file, &mut found);
                 self.diags.append(&mut found);
                 self.globals.insert(d, ty);
@@ -278,7 +387,9 @@ impl<'k> Infer<'k> {
         }
     }
 
-    fn func(&mut self, d: DefId, f: &hir::Fn) {
+    /// Types a function; what it waits on when it had to stop (then nothing of it is kept).
+    fn func(&mut self, d: DefId, f: &hir::Fn) -> BTreeMap<DefId, Span> {
+        self.bad_keys.clear();
         let file = self.file_of(d);
         let mut b = Body::new(file, TyId::ERROR);
         b.ret = match &f.ret {
@@ -315,6 +426,9 @@ impl<'k> Infer<'k> {
             params.push(ty);
         }
         let diverges = self.block(&mut b, &f.body);
+        if !b.waits.is_empty() {
+            return b.waits;
+        }
         if !diverges {
             // Falling off the end returns `()`. With a value returned elsewhere it is a missing `return`,
             // and the fall-off decides nothing about the return type.
@@ -356,12 +470,22 @@ impl<'k> Infer<'k> {
             },
         );
         self.diags.append(&mut b.diags);
+        BTreeMap::new()
     }
 
-    fn global(&mut self, d: DefId, g: &hir::Global) {
+    /// Types a top-level `let`'s initialiser; what it waits on when it had to stop.
+    fn global(&mut self, d: DefId, g: &hir::Global) -> BTreeMap<DefId, Span> {
+        self.bad_keys.clear();
+        if let Some(annotated) = self.globals.get(&d).copied() {
+            // Its annotation's bad keys were reported with it.
+            self.seen_bad_keys(annotated);
+        }
         let file = self.file_of(d);
         let mut b = Body::new(file, TyId::ERROR);
         let value = self.expr(&mut b, &g.value);
+        if !b.waits.is_empty() {
+            return b.waits;
+        }
         let ty = match self.globals.get(&d) {
             Some(annotated) => {
                 let annotated = *annotated;
@@ -384,6 +508,7 @@ impl<'k> Infer<'k> {
         let ty = self.zonk(ty);
         self.globals.insert(d, ty);
         self.diags.append(&mut b.diags);
+        BTreeMap::new()
     }
 
     /// The end of a body: deferred checks, `needs-annotation` (bindings, then the return type of the
@@ -391,23 +516,8 @@ impl<'k> Infer<'k> {
     fn finish(&mut self, b: &mut Body, ret_of: Option<DefId>) {
         for c in std::mem::take(&mut b.checks) {
             let ty = self.zonk(c.ty);
-            let ok = match self.types.get(ty) {
-                Ty::Error | Ty::Never | Ty::Var(_) | Ty::Int | Ty::Float => true,
-                Ty::Str => c.class == Class::NumericOrStr,
-                _ => false,
-            };
-            if !ok {
-                let wanted = match c.class {
-                    Class::Numeric => "`int` or `float`",
-                    Class::NumericOrStr => "`int`, `float` or `str`",
-                };
-                let found = self.show(ty);
-                b.diags.push(error(
-                    "type-mismatch",
-                    format!("`{}` takes {wanted}, not `{found}`", c.op),
-                    b.file,
-                    c.at,
-                ));
+            if let Some(d) = self.check(c, ty, b.file) {
+                b.diags.push(d);
             }
         }
         for local in std::mem::take(&mut b.bindings) {
@@ -466,6 +576,73 @@ impl<'k> Infer<'k> {
                 *slot = ty;
             }
         }
+    }
+
+    /// A deferred check of `c.ty` (now `ty`): its diagnostic, if it fails. An unknown type passes (it is
+    /// reported as unknown).
+    fn check(&mut self, c: Check, ty: TyId, file: &str) -> Option<Diagnostic> {
+        let shape = self.types.get(ty);
+        if matches!(shape, Ty::Error | Ty::Never | Ty::Var(_)) {
+            return None;
+        }
+        let (code, message) = match c.class {
+            Class::Numeric | Class::NumericOrStr => {
+                let ok = match shape {
+                    Ty::Int | Ty::Float => true,
+                    Ty::Str => c.class == Class::NumericOrStr,
+                    _ => false,
+                };
+                if ok {
+                    return None;
+                }
+                let wanted = match c.class {
+                    Class::Numeric => "`int` or `float`",
+                    _ => "`int`, `float` or `str`",
+                };
+                let found = self.show(ty);
+                (
+                    "type-mismatch",
+                    format!("`{}` takes {wanted}, not `{found}`", c.op),
+                )
+            }
+            Class::Key => {
+                return self.key_error(ty, file.to_string(), c.at);
+            }
+            Class::Storable => {
+                if self.is_storable(ty) {
+                    return None;
+                }
+                let found = self.show(ty);
+                // Its unknown parts (`Promise[_]`) are not asked about again.
+                self.default_vars(ty);
+                (
+                    "not-storable",
+                    format!(
+                        "`{}` stores its value, and a `{found}` cannot be stored: it holds a `Promise` or a reference",
+                        c.op
+                    ),
+                )
+            }
+            Class::Event => {
+                let is_event = match shape {
+                    Ty::HostEvent(_) => true,
+                    Ty::Adt(d) => matches!(
+                        self.krate.def(d).map(|def| &def.kind),
+                        Some(DefKind::Event(_))
+                    ),
+                    _ => false,
+                };
+                if is_event {
+                    return None;
+                }
+                let found = self.show(ty);
+                (
+                    "type-mismatch",
+                    format!("`{}` takes an event, not `{found}`", c.op),
+                )
+            }
+        };
+        Some(error(code, message, file, c.at))
     }
 
     // Bindings and expressions.
@@ -714,6 +891,11 @@ impl<'k> Infer<'k> {
                     ));
                     return TyId::ERROR;
                 }
+                if let (Ty::Dict(_, _), Some(key), Some(k)) =
+                    (shape, args.first(), arg_spans(t).first())
+                {
+                    self.annotated_key(*key, file, *k, out);
+                }
                 self.types.intern(shape.with_children(&args))
             }
         }
@@ -818,6 +1000,14 @@ impl<'k> Infer<'k> {
 
     fn mismatch(&mut self, b: &mut Body, at: Span, message: String) {
         b.diags.push(error("type-mismatch", message, b.file, at));
+    }
+}
+
+/// The spans of a named type's arguments.
+fn arg_spans(t: &hir::Type) -> Vec<Span> {
+    match &t.kind {
+        hir::TypeKind::Named(_, args) => args.iter().map(|a| a.span).collect(),
+        _ => Vec::new(),
     }
 }
 

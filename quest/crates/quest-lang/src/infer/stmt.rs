@@ -6,8 +6,8 @@
 //! a `match` whose arms all do (it is exhaustive, Task 23); `while true` that no `break` leaves. A `for`
 //! loop never diverges.
 
-use super::{Body, Infer};
-use crate::hir::{Expr, ExprKind, Pattern, PatternKind, Stmt, StmtKind};
+use super::{Body, BuiltinMethod, Infer, Method};
+use crate::hir::{Expr, ExprKind, LocalId, Pattern, PatternKind, Stmt, StmtKind};
 use crate::ty::{Ty, TyId};
 
 impl Infer<'_> {
@@ -105,15 +105,37 @@ impl Infer<'_> {
         }
     }
 
-    /// The bindings of `for`: one name over a list (its elements) or a dict (its keys).
-    fn for_bindings(&mut self, b: &mut Body, names: &[crate::hir::LocalId], iter: &Expr) {
+    /// The bindings of `for`: one name over a list (its elements) or a dict (its keys); two names over
+    /// `d.items()` (a dict's keys and values).
+    fn for_bindings(&mut self, b: &mut Body, names: &[LocalId], iter: &Expr) {
+        let elems: Vec<TyId> = match names {
+            [_] => vec![self.for_one(b, iter)],
+            _ => {
+                let (k, v) = self.for_items(b, iter);
+                vec![k, v]
+            }
+        };
+        for (n, ty) in names
+            .iter()
+            .zip(elems.into_iter().chain(std::iter::repeat(TyId::ERROR)))
+        {
+            self.set_local(*n, ty);
+            b.bindings.push(*n);
+        }
+    }
+
+    /// What `for x in iter` binds `x` to.
+    fn for_one(&mut self, b: &mut Body, iter: &Expr) -> TyId {
         let ty = self.expr(b, iter);
-        let ty = self.shallow(ty);
-        let elem = match self.types.get(ty) {
+        let (ty, _) = self.deref(ty);
+        match self.types.get(ty) {
             Ty::List(t) => t,
             Ty::Dict(k, _) => k,
-            // Unknown: the iterable's own binding is `needs-annotation`.
-            Ty::Error | Ty::Never | Ty::Var(_) => TyId::ERROR,
+            Ty::Error | Ty::Never => TyId::ERROR,
+            Ty::Var(_) => {
+                self.unknown_receiver(b, ty, iter.span, "a `for` loop");
+                TyId::ERROR
+            }
             _ => {
                 let found = self.show(ty);
                 self.mismatch(
@@ -123,17 +145,50 @@ impl Infer<'_> {
                 );
                 TyId::ERROR
             }
+        }
+    }
+
+    /// What `for k, v in d.items()` binds `k` and `v` to.
+    fn for_items(&mut self, b: &mut Body, iter: &Expr) -> (TyId, TyId) {
+        let dict = match &iter.kind {
+            ExprKind::Call(callee, args) if args.is_empty() => match &callee.kind {
+                ExprKind::Field(d, name) if name == "items" => Some((callee, d)),
+                _ => None,
+            },
+            _ => None,
         };
-        match names {
-            [one] => {
-                self.set_local(*one, elem);
-                b.bindings.push(*one);
+        let Some((callee, d)) = dict else {
+            self.sink(b, iter);
+            self.mismatch(
+                b,
+                iter.span,
+                "`for k, v in …` goes over a dict's `.items()`".to_string(),
+            );
+            return (TyId::ERROR, TyId::ERROR);
+        };
+        let ty = self.expr(b, d);
+        self.record(b, callee, TyId::ERROR);
+        self.record(b, iter, TyId::ERROR);
+        let (ty, _) = self.deref(ty);
+        match self.types.get(ty) {
+            Ty::Dict(k, v) => {
+                self.methods
+                    .insert(iter.id, Method::Builtin(BuiltinMethod::Items));
+                (k, v)
             }
-            // `for k, v in d.items()` (Task 21).
+            Ty::Error | Ty::Never => (TyId::ERROR, TyId::ERROR),
+            Ty::Var(_) => {
+                self.unknown_receiver(b, ty, d.span, "a `for` loop");
+                (TyId::ERROR, TyId::ERROR)
+            }
             _ => {
-                for n in names {
-                    self.set_local(*n, TyId::ERROR);
-                }
+                let found = self.show(ty);
+                self.mismatch(
+                    b,
+                    iter.span,
+                    format!("`.items()` is a dict's, not `{found}`'s"),
+                );
+                (TyId::ERROR, TyId::ERROR)
             }
         }
     }

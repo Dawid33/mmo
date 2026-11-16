@@ -235,7 +235,7 @@ fn m(p: Pair):
 fn host_names() {
     let main = r#"@on(PlayerClicked)
 fn h(e: PlayerClicked):
-    let v = world.get("k")
+    let v: Promise[int] = world.get("k")
     say(e.player, "hi")
 
 fn no_such():
@@ -245,9 +245,13 @@ fn shadowed():
     let world = 1
     let w = world.nope
 "#;
+    // The shadowed `world` is the `int`: its `.nope` is a field the type checker refuses.
     assert_eq!(
         diags(&[("main.qs", main)]),
-        vec![d("unresolved", "main.qs", 7)]
+        vec![
+            d("unknown-field", "main.qs", 11),
+            d("unresolved", "main.qs", 7)
+        ]
     );
 }
 

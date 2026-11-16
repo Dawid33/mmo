@@ -783,13 +783,20 @@ impl<'a> Resolver<'a> {
                 Some(res) => res,
                 None => {
                     let names = self.value_names(cx);
-                    self.diags.push(unresolved(
+                    let mut d = unresolved(
                         format!("cannot find `{name}`"),
                         name,
                         names.iter().map(String::as_str),
                         cx.file,
                         at,
-                    ));
+                    );
+                    if name == "len" {
+                        d.notes.push(
+                            "length is a method: `x.len()` on a `str`, `list` or `dict`"
+                                .to_string(),
+                        );
+                    }
+                    self.diags.push(d);
                     return Res::Error;
                 }
             }

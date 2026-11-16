@@ -94,6 +94,44 @@ fn helper() -> int:
         messages(&files, "recursion"),
         vec!["recursive call cycle: S::make -> helper -> S::make"]
     );
+
+    // Through method calls `x.m()`, which the call graph cannot see (the receiver's type decides the callee).
+    let main = r#"struct A:
+    x: int
+
+impl A:
+    fn f(self) -> int:
+        return self.f()
+"#;
+    let files = [("main.qs", main)];
+    assert_eq!(diags(&files), vec![d("recursion", "main.qs", 6)]);
+    assert_eq!(
+        messages(&files, "recursion"),
+        vec!["recursive call cycle: A::f -> A::f"]
+    );
+
+    let main = r#"struct A:
+    x: int
+
+struct B:
+    x: int
+
+impl A:
+    fn f(self) -> int:
+        let b = B(x=1)
+        return b.g()
+
+impl B:
+    fn g(self) -> int:
+        let a = A(x=1)
+        return a.f()
+"#;
+    let files = [("main.qs", main)];
+    assert_eq!(diags(&files), vec![d("recursion", "main.qs", 10)]);
+    assert_eq!(
+        messages(&files, "recursion"),
+        vec!["recursive call cycle: A::f -> B::g -> A::f"]
+    );
 }
 
 #[test]
