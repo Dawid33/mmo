@@ -439,7 +439,7 @@ impl Program {
                 init_fn: r.u16()?,
             })
         })?;
-        let handlers = r.vec(|r| {
+        let handlers = r.vec_ids(|r| {
             Ok(HandlerInfo {
                 event: r.str()?,
                 event_ty: r.u16()?,
@@ -544,6 +544,7 @@ impl Program {
             self.shapes.len(),
             self.host_sites.len(),
             self.globals.len(),
+            self.handlers.len(),
         ];
         if id_tables.iter().any(|&n| n > ID_TABLE_MAX as usize) {
             return invalid("a table is longer than its ids can address");
@@ -573,6 +574,11 @@ impl Program {
                 || u32::from(f.frame_base) + u32::from(f.frame_words) > static_words
             {
                 return invalid(format!("fn {i} has a frame outside the static region"));
+            }
+            if f.ref_slots.windows(2).any(|w| w[0] >= w[1]) {
+                return invalid(format!(
+                    "fn {i} has ref slots that are not strictly increasing"
+                ));
             }
             if f.ref_slots.iter().any(|&s| s >= f.frame_words) {
                 return invalid(format!("fn {i} has a ref slot outside its frame"));
@@ -637,7 +643,7 @@ impl Program {
                     h.event
                 ));
             }
-            if f.ref_slots.contains(&3) != self.types.is_ref(h.event_ty) {
+            if f.ref_slots.binary_search(&3).is_ok() != self.types.is_ref(h.event_ty) {
                 return invalid(format!(
                     "handler {}: its event parameter's ref slot disagrees with the event type",
                     h.event

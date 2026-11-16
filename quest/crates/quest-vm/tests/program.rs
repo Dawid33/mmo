@@ -394,6 +394,32 @@ fn validate_rejects_handler_frame_without_room_for_its_event() {
 }
 
 #[test]
+fn validate_rejects_unsorted_or_duplicate_ref_slots() {
+    let p = full();
+    for bad in [vec![2, 1], vec![1, 1]] {
+        let mut q = p.clone();
+        q.fns[0].ref_slots = bad; // fn 0 is the initialiser, 4 words
+        invalid(&q);
+    }
+    let mut q = p.clone();
+    q.fns[0].ref_slots = vec![1, 2];
+    q.validate().unwrap();
+}
+
+#[test]
+fn frames_cover_the_error_slot_of_await() {
+    let mut pb = ProgramBuilder::new(1);
+    let int = pb.ty(TypeDesc::Int);
+    let mut f = pb.func("f", 1);
+    f.emit(Op::Await, f.local(0), f.param(0), int);
+    f.emit(Op::Ret, 0, 0, 0);
+    f.end();
+    let p = pb.finish().unwrap();
+    // 3 header + 1 parameter + 1 local, plus the error word a + 1
+    assert_eq!(p.fns[0].frame_words, 6);
+}
+
+#[test]
 fn validate_rejects_global_below_a_frame_end() {
     let mut p = full();
     p.globals[0].slot = 0;
