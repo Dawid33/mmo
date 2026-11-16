@@ -139,6 +139,13 @@ fn local():
         diags(&[("main.qs", main), ("a.qs", a), ("a/b.qs", b)]),
         vec![]
     );
+
+    // `pub use` cannot re-export a private item.
+    let a = "fn secret():\n    pass\n\npub use self::secret as open\n";
+    assert_eq!(
+        diags(&[("main.qs", "mod a\n"), ("a.qs", a)]),
+        vec![d("private", "a.qs", 4)]
+    );
 }
 
 #[test]
@@ -205,6 +212,23 @@ fn duplicates() {
             d("duplicate-def", "main.qs", 7)
         ]
     );
+    // One name bound twice in a pattern; `|` alternatives each bind it once.
+    let main = r#"struct Pair:
+    x: int
+    y: int
+fn m(p: Pair):
+    match p:
+        case Pair(a, a):
+            pass
+        case Pair(a, 1) | Pair(1, a):
+            pass
+        case _:
+            pass
+"#;
+    assert_eq!(
+        diags(&[("main.qs", main)]),
+        vec![d("duplicate-def", "main.qs", 6)]
+    );
 }
 
 #[test]
@@ -240,6 +264,22 @@ fn main():
 "#;
     let a = "pub fn f() -> int:\n    raise ChestEmpty\n";
     assert_eq!(diags(&[("main.qs", main), ("a.qs", a)]), vec![]);
+
+    // An upper-case head of `raise` is an error name even when an item has that name; a lower-case one
+    // must be a binding.
+    let main = r#"struct Ledger:
+    x: int
+fn f() -> int:
+    raise Ledger
+fn g() -> int:
+    let n = 1 else err:
+        raise er
+    return n
+"#;
+    let all = diagnostics(&[("main.qs", main)]);
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert_eq!((all[0].code, all[0].line), ("unresolved", 7));
+    assert!(all[0].notes.iter().any(|n| n.contains("`err`")), "{all:#?}");
 }
 
 #[test]
@@ -414,5 +454,9 @@ fn not_yet_until_phase_10() {
             d("not-yet", "main.qs", 28),
             d("not-yet", "main.qs", 36),
         ]
+    );
+    assert_eq!(
+        diags(&[("main.qs", "quest Q:\n    let x = 1\n")]),
+        vec![d("not-yet", "main.qs", 1)]
     );
 }
