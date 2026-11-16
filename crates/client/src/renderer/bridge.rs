@@ -709,10 +709,11 @@ pub fn drain_client_updates(
     mut roots: ResMut<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
     // Paired to stay within Bevy's 16 system parameters.
-    (mut hud_status, mut tick_times, mut drain): (
+    (mut hud_status, mut tick_times, mut drain, mut region_hosts): (
         ResMut<HudStatus>,
         Option<ResMut<super::hud::RegionTickTimes>>,
         Option<ResMut<super::drain_notice::DrainNotice>>,
+        Option<ResMut<super::autopilot::RegionHosts>>,
     ),
     mut ui_updates: ResMut<crate::renderer::slint_overlay::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
@@ -879,6 +880,11 @@ pub fn drain_client_updates(
             ClientUpdateEvent::HostDraining { remaining_secs } => {
                 if let Some(drain) = drain.as_mut() {
                     drain.remaining_secs = remaining_secs;
+                }
+            }
+            ClientUpdateEvent::RegionHosts(hosts) => {
+                if let Some(map) = region_hosts.as_mut() {
+                    map.0 = hosts.into_iter().collect();
                 }
             }
             ClientUpdateEvent::EmbarkOptions(o) => {

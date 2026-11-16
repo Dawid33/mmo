@@ -17,9 +17,10 @@
 //! - `VOXEL_AUTOPILOT=shuttle` with `VOXEL_AUTOPILOT_BOUNDARY=host` or `thread`
 //!   (the R3 go / no-go, `just go-nogo-r3`): picks the region seam nearest the
 //!   start whose two sides belong to different hosts (`host`) or to one host
-//!   (`thread`) — [`pick_seam`], from `VOXEL_HOSTS` and
-//!   `VOXEL_SUPER_REGION_REGIONS`, which only this probe reads on the client —
-//!   turns to face the nearest point of that seam (away from its ends), flies
+//!   (`thread`) — [`pick_loaded_seam`], from the client's own region → host map
+//!   (`ClientUpdateEvent::RegionHosts`, built from its `ConnectionSet`; nothing is computed from
+//!   host ids, which the store issues and never reuses) — with no such seam loaded it keeps
+//!   flying forward and logs `autopilot_seam_wait` — turns to face the nearest point of that seam (away from its ends), flies
 //!   there, turns square to it and shuttles across it as above.
 //!
 //! `VOXEL_AUTOPILOT_SECONDS=N` closes the client N seconds after the climb.
@@ -35,7 +36,9 @@ use std::time::Duration;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use game::{GameEventKind, InputEvent, Key, RegionCoords};
+use std::collections::BTreeMap;
+
+use game::{GameEventKind, HostId, InputEvent, Key, RegionCoords};
 
 use super::join_timeline::WorldReady;
 use super::{GameEvents, LocalPlayer};
@@ -61,20 +64,20 @@ const TAKE_OFF: &[(u64, Step)] = &[
 /// When the cruise keys go down, after the climb.
 const CRUISE_AT_MS: u64 = 1950;
 
-/// The probe's host count for [`pick_seam`] (`VOXEL_HOSTS`, as the go / no-go recipe sets
-/// it): the servers read no host count any more; only this probe does, to lay the seams out.
-const HOSTS_ENV: &str = "VOXEL_HOSTS";
+/// The seam shuttle logs `autopilot_seam_wait` at most this often while no seam of its kind
+/// is loaded.
+const SEAM_WAIT_LOG_MS: u64 = 5_000;
+
+/// Which host serves each live region, as the client's own connection map says
+/// (`ClientUpdateEvent::RegionHosts`, sent only while the autopilot runs).
+#[derive(Resource, Default)]
+pub struct RegionHosts(pub BTreeMap<RegionCoords, Option<HostId>>);
 
 /// Default distance a shuttle leg runs past the boundary before reversing:
 /// clear of the seam margin the handoff scan uses, short enough to cross often.
 const SHUTTLE_OVERSHOOT_REGION_M: f32 = 6.0;
 const SHUTTLE_OVERSHOOT_CHUNK_M: f32 = 1.0;
 
-/// [`pick_seam`] looks this many regions around the home first (then further,
-/// up to [`PICK_SEAM_MAX_RADIUS`]).
-pub const PICK_SEAM_RADIUS: i32 = 4;
-/// The farthest [`pick_seam`] looks before giving up.
-pub const PICK_SEAM_MAX_RADIUS: i32 = 64;
 /// The seam shuttle is facing its goal once within this many degrees.
 const TURN_DONE_DEG: f32 = 2.0;
 /// A turn that leaves the heading error more than this times what it was went the
@@ -105,9 +108,8 @@ enum Mode {
     Fly,
     /// Back and forth across one plane of a `cell`-unit grid.
     Shuttle { cell: f32, overshoot: f32 },
-    /// Back and forth across one region seam of `kind`, [`pick_seam`] with `hosts`
-    /// hosts and `s` regions per super-region side.
-    Seam { kind: SeamKind, hosts: u32, s: u32, overshoot: f32 },
+    /// Back and forth across one region seam of `kind` ([`pick_loaded_seam`]).
+    Seam { kind: SeamKind, overshoot: f32 },
 }
 
 /// Shuttle progress: looking for the first boundary, then bouncing across it.
@@ -156,6 +158,8 @@ pub struct Autopilot {
     progress: Option<(Duration, Vec2, f32)>,
     /// Space is held (climbing out of terrain the body flew into) until then.
     climb_until: Option<Duration>,
+    /// When the seam shuttle last logged `autopilot_seam_wait`.
+    last_wait: Option<Duration>,
 }
 
 impl Autopilot {
@@ -181,20 +185,7 @@ impl Autopilot {
                 let overshoot = metres * game::movement::UNITS_PER_METER;
                 match seam {
                     None => Mode::Shuttle { cell, overshoot },
-                    Some(kind) => {
-                        // Probe only: the client otherwise never reads the world's host layout.
-                        let number = |key: &str| std::env::var(key).ok().and_then(|v| v.parse::<u32>().ok());
-                        let hosts = number(HOSTS_ENV).unwrap_or(1);
-                        let s = number("VOXEL_SUPER_REGION_REGIONS").unwrap_or(game::DEFAULT_SUPER_REGION_REGIONS);
-                        if kind == SeamKind::Host && hosts < 2 {
-                            error!(
-                                "autopilot: VOXEL_AUTOPILOT_BOUNDARY=host needs {}>=2 (the world's host count); no autopilot",
-                                HOSTS_ENV
-                            );
-                            return None;
-                        }
-                        Mode::Seam { kind, hosts, s: s.max(1), overshoot }
-                    }
+                    Some(kind) => Mode::Seam { kind, overshoot },
                 }
             }
             _ => Mode::Fly,
@@ -217,6 +208,7 @@ impl Autopilot {
             last_state: None,
             progress: None,
             climb_until: None,
+            last_wait: None,
         })
     }
 }
@@ -224,6 +216,7 @@ impl Autopilot {
 pub fn plugin(app: &mut App, autopilot: Autopilot) {
     info!("autopilot: {:?} once the world is ready", autopilot.mode);
     app.insert_resource(autopilot)
+        .init_resource::<RegionHosts>()
         .add_systems(Update, drive_autopilot.run_if(crate::session::world_systems_enabled()));
 }
 
@@ -233,6 +226,7 @@ fn drive_autopilot(
     player: Res<LocalPlayer>,
     game: Res<GameEvents>,
     roots: Res<super::bridge::RegionRoots>,
+    region_hosts: Res<RegionHosts>,
     // The body's camera (it carries the sim pose), not the frontend's: an online
     // session keeps the menu's camera entity around, parked at the origin.
     cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<super::bridge::SimTarget>)>,
@@ -310,10 +304,11 @@ fn drive_autopilot(
                 shuttle(&mut pilot, t.translation(), cell, overshoot, &key);
             }
         }
-        Mode::Seam { kind, hosts, s, overshoot } => {
+        Mode::Seam { kind, overshoot } => {
             if let Some(t) = camera {
-                let loaded: Vec<RegionCoords> = roots.0.keys().copied().collect();
-                seam_shuttle(&mut pilot, now, &t, &loaded, kind, hosts, s, overshoot, &key, &send);
+                let loaded: Vec<(RegionCoords, Option<HostId>)> =
+                    roots.0.keys().map(|rc| (*rc, region_hosts.0.get(rc).copied().flatten())).collect();
+                seam_shuttle(&mut pilot, now, &t, &loaded, kind, overshoot, &key, &send);
             }
         }
     }
@@ -372,16 +367,14 @@ fn yaw_error(from: Vec2, to: Vec2) -> f32 {
     cross_y.atan2(dot)
 }
 
-/// `VOXEL_AUTOPILOT=shuttle` across the [`pick_seam`] seam of `kind`.
+/// `VOXEL_AUTOPILOT=shuttle` across the [`pick_loaded_seam`] seam of `kind`.
 #[allow(clippy::too_many_arguments)]
 fn seam_shuttle(
     pilot: &mut Autopilot,
     now: Duration,
     camera: &GlobalTransform,
-    loaded: &[RegionCoords],
+    loaded: &[(RegionCoords, Option<HostId>)],
     kind: SeamKind,
-    hosts: u32,
-    s: u32,
     overshoot: f32,
     key: &impl Fn(Key, bool),
     send: &impl Fn(InputEvent),
@@ -446,9 +439,24 @@ fn seam_shuttle(
             let home = RegionCoords::new((pos.x / size).floor() as i32, (pos.z / size).floor() as i32);
             // Among the regions the client has: in fortress play the window stays on the
             // fortress, and a seam with an unloaded side is a wall the body stops at.
-            let (a, b) = pick_loaded_seam(home, loaded, hosts, s, kind == SeamKind::Host)
-                .unwrap_or_else(|| pick_seam(home, hosts, s, kind == SeamKind::Host));
-            // `b` is `a` plus one along the seam's axis (pick_seam's order).
+            let Some((a, b)) = pick_loaded_seam(home, loaded, kind == SeamKind::Host) else {
+                // No seam of the wanted kind among the regions the client holds yet: keep
+                // flying outward (never a computed owner) and say so, rarely.
+                hold_w(pilot, true);
+                if pilot.last_wait.is_none_or(|t| now - t >= Duration::from_millis(SEAM_WAIT_LOG_MS)) {
+                    pilot.last_wait = Some(now);
+                    game::perf_event!(
+                        "autopilot_seam_wait",
+                        "boundary={} home={},{} loaded={}",
+                        if kind == SeamKind::Host { "host" } else { "thread" },
+                        home.x,
+                        home.z,
+                        loaded.len()
+                    );
+                }
+                return;
+            };
+            // `b` is `a` plus one along the seam's axis (pick_loaded_seam's order).
             let axis = if b.x != a.x { 0 } else { 1 };
             // The point of the seam nearest the body, kept to the middle half of the
             // edge (clear of the corners and the regions beyond them).
@@ -464,10 +472,12 @@ fn seam_shuttle(
             };
             // Cross toward the far side of the seam first.
             let heading = if [at.x, at.y][axis] < seam { 1.0 } else { -1.0 };
-            let owner = |rc: RegionCoords| rendezvous_owner(game::super_region_of(rc, s), hosts);
+            let owner = |rc: RegionCoords| {
+                loaded.iter().find(|(r, _)| *r == rc).and_then(|(_, h)| *h).map_or(-1, |h| h.0 as i64)
+            };
             game::perf_event!(
                 "autopilot_seam",
-                "boundary={} home={},{} a={},{} b={},{} owner_a={} owner_b={} hosts={} s={}",
+                "boundary={} home={},{} a={},{} b={},{} owner_a={} owner_b={}",
                 if kind == SeamKind::Host { "host" } else { "thread" },
                 home.x,
                 home.z,
@@ -476,9 +486,7 @@ fn seam_shuttle(
                 b.x,
                 b.z,
                 owner(a),
-                owner(b),
-                hosts,
-                s
+                owner(b)
             );
             pilot.leg = Some(Leg::Turn {
                 goal: target - at,
@@ -548,36 +556,30 @@ fn seam_shuttle(
     }
 }
 
-/// The nearest region seam to `home` whose two sides have different owners
-/// (`want_host_seam`: a host seam) or the same owner (a thread seam), with
-/// `hosts` hosts and `s` regions per super-region side
-/// ([`rendezvous_owner`] of [`game::super_region_of`]). Returns `(a, b)`
-/// with `b` one region past `a` in +x or +z. "Nearest": by the distance from the
-/// middle of `home` to the middle of the seam, ties to the lower `a` (x, then z),
-/// then x before z — the same answer every time. Looks [`PICK_SEAM_RADIUS`]
-/// regions around `home`, then further; panics if no such seam lies within
-/// [`PICK_SEAM_MAX_RADIUS`] (a host seam needs `hosts` >= 2).
 /// The seam shuttle's progress watch: its window, the path that counts as moving, and
 /// how long it then holds Space (flight climbs while it is held).
 const STUCK_WINDOW_MS: u64 = 2_000;
 const STUCK_PATH_M: f32 = 1.0;
 const STUCK_CLIMB_MS: u64 = 1_500;
 
-/// As [`pick_seam`], among `loaded` regions only: the seam nearest `home` whose two
-/// sides are both loaded and have different owners (`want_host_seam`) or the same one.
-/// `None` when the loaded regions hold no such seam.
+/// The seam nearest `home` whose two sides are both loaded, both with a known host, and on
+/// different hosts (`want_host_seam`) or on the same one, by the client's own region → host
+/// map alone. Returns `(a, b)` with `b` one region past `a` in +x or +z. "Nearest": by the
+/// distance from the middle of `home` to the middle of the seam, ties to the lower `a`
+/// (x, then z), then x before z — the same answer every time. `None` when the loaded regions
+/// hold no such seam: nothing is invented from host ids.
 pub fn pick_loaded_seam(
     home: RegionCoords,
-    loaded: &[RegionCoords],
-    hosts: u32,
-    s: u32,
+    loaded: &[(RegionCoords, Option<HostId>)],
     want_host_seam: bool,
 ) -> Option<(RegionCoords, RegionCoords)> {
-    let owner = |rc: RegionCoords| rendezvous_owner(game::super_region_of(rc, s), hosts);
+    let host_of = |rc: RegionCoords| loaded.iter().find(|(r, _)| *r == rc).and_then(|(_, h)| *h);
     let mut best: Option<(i64, (i32, i32, u8), (RegionCoords, RegionCoords))> = None;
-    for &a in loaded {
+    for &(a, ha) in loaded {
+        let Some(ha) = ha else { continue };
         for (axis, b) in [(0u8, RegionCoords::new(a.x + 1, a.z)), (1u8, RegionCoords::new(a.x, a.z + 1))] {
-            if !loaded.contains(&b) || (owner(a) != owner(b)) != want_host_seam {
+            let Some(hb) = host_of(b) else { continue };
+            if (ha != hb) != want_host_seam {
                 continue;
             }
             // Twice the offset from home's middle to the seam's middle.
@@ -591,90 +593,32 @@ pub fn pick_loaded_seam(
     best.map(|(_, _, seam)| seam)
 }
 
-// NOT VALID AS BUILT (Elastic 1 final review C-I1): this hash lays seams out over host ids
-// `0..hosts`, but a fresh world issues ids from 1 (and every restart a new one), so under `claim`
-// the real claims are a rendezvous over OTHER ids — many "host" seams are thread seams and the
-// reverse, and `just go-nogo-r3`'s numbers do not measure what they say. The fix (not made): pick
-// the seam from the client's own region → host map (`pick_loaded_seam`), or give the probe the
-// real ids (`worldctl hosts`). A succession during the run moves the seam too;
-// `crossing_summary.py --go-nogo` marks such a run INVALID.
-pub fn pick_seam(home: RegionCoords, hosts: u32, s: u32, want_host_seam: bool) -> (RegionCoords, RegionCoords) {
-    let owner = |rc: RegionCoords| rendezvous_owner(game::super_region_of(rc, s), hosts);
-    let mut radius = PICK_SEAM_RADIUS;
-    loop {
-        let mut best: Option<(i64, (i32, i32, u8), (RegionCoords, RegionCoords))> = None;
-        for x in home.x - radius..=home.x + radius {
-            for z in home.z - radius..=home.z + radius {
-                let a = RegionCoords::new(x, z);
-                for (axis, b) in [(0u8, RegionCoords::new(x + 1, z)), (1u8, RegionCoords::new(x, z + 1))] {
-                    if (b.x - home.x).abs() > radius || (b.z - home.z).abs() > radius {
-                        continue;
-                    }
-                    if (owner(a) != owner(b)) != want_host_seam {
-                        continue;
-                    }
-                    // Twice the offset from home's middle to the seam's middle.
-                    let (dx, dz) = (
-                        i64::from(a.x + b.x - 2 * home.x),
-                        i64::from(a.z + b.z - 2 * home.z),
-                    );
-                    let candidate = (dx * dx + dz * dz, (x, z, axis), (a, b));
-                    if best.as_ref().is_none_or(|best| (candidate.0, candidate.1) < (best.0, best.1)) {
-                        best = Some(candidate);
-                    }
-                }
-            }
-        }
-        if let Some((_, _, seam)) = best {
-            return seam;
-        }
-        assert!(
-            radius < PICK_SEAM_MAX_RADIUS,
-            "pick_seam: no {} seam within {PICK_SEAM_MAX_RADIUS} regions of {home:?} ({hosts} hosts, s = {s})",
-            if want_host_seam { "host" } else { "thread" }
-        );
-        radius = (radius * 2).min(PICK_SEAM_MAX_RADIUS);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn owner(rc: RegionCoords, hosts: u32, s: u32) -> u64 {
-        rendezvous_owner(game::super_region_of(rc, s), hosts).0
-    }
-
-    fn adjacent(a: RegionCoords, b: RegionCoords) -> bool {
-        (a.x - b.x).abs() + (a.z - b.z).abs() == 1
-    }
-
-    fn within(rc: RegionCoords, home: RegionCoords, n: i32) -> bool {
-        (rc.x - home.x).abs() <= n && (rc.z - home.z).abs() <= n
+    fn map(entries: &[((i32, i32), u64)]) -> Vec<(RegionCoords, Option<HostId>)> {
+        entries.iter().map(|&((x, z), h)| (RegionCoords::new(x, z), Some(HostId(h)))).collect()
     }
 
     #[test]
-    fn pick_seam_finds_a_host_seam_and_a_thread_seam() {
-        let (hosts, s) = (2, 1);
-        for home in [RegionCoords::new(0, 0), RegionCoords::new(-3, 7), RegionCoords::new(12, -5)] {
-            let (a, b) = pick_seam(home, hosts, s, true);
-            assert!(adjacent(a, b), "{a:?} | {b:?} is a seam");
-            assert_ne!(owner(a, hosts, s), owner(b, hosts, s), "a host seam's sides differ in owner");
-            assert!(within(a, home, 4) && within(b, home, 4), "near {home:?}");
-            let (a, b) = pick_seam(home, hosts, s, false);
-            assert!(adjacent(a, b), "{a:?} | {b:?} is a seam");
-            assert_eq!(owner(a, hosts, s), owner(b, hosts, s), "a thread seam's sides agree");
-            assert!(within(a, home, 4) && within(b, home, 4), "near {home:?}");
-        }
+    fn a_host_seam_is_where_the_map_changes_host() {
+        let loaded = map(&[((0, 0), 1), ((1, 0), 2), ((0, 1), 1)]);
+        let home = RegionCoords::new(0, 0);
+        let (a, b) = (RegionCoords::new(0, 0), RegionCoords::new(1, 0));
+        assert_eq!(pick_loaded_seam(home, &loaded, true), Some((a, b)));
+        let (a, b) = (RegionCoords::new(0, 0), RegionCoords::new(0, 1));
+        assert_eq!(pick_loaded_seam(home, &loaded, false), Some((a, b)));
     }
 
-    /// One host: every seam is a thread seam, and the nearest is one of home's own edges.
     #[test]
-    fn pick_seam_one_host_is_home_edge() {
-        let home = RegionCoords::new(5, -2);
-        let (a, b) = pick_seam(home, 1, 16, false);
-        assert!(a == home || b == home, "{a:?} | {b:?} borders {home:?}");
-        assert_eq!(pick_seam(home, 1, 16, false), (a, b), "the same answer every time");
+    fn no_seam_is_invented_from_ids() {
+        let loaded = map(&[((0, 0), 7), ((1, 0), 7), ((0, 1), 7), ((1, 1), 7)]);
+        assert_eq!(pick_loaded_seam(RegionCoords::new(0, 0), &loaded, true), None);
+        // A side whose host is not known yet is no seam of either kind.
+        let unknown = vec![(RegionCoords::new(0, 0), Some(HostId(7))), (RegionCoords::new(1, 0), None)];
+        assert_eq!(pick_loaded_seam(RegionCoords::new(0, 0), &unknown, true), None);
+        assert_eq!(pick_loaded_seam(RegionCoords::new(0, 0), &unknown, false), None);
     }
 
     /// A positive yaw (about +Y) turns -Z (Bevy's forward) toward -X.
@@ -686,10 +630,4 @@ mod tests {
         assert_eq!(yaw_error(forward, forward), 0.0);
         assert_eq!(yaw_error(forward, Vec2::ZERO), 0.0);
     }
-}
-
-/// The rendezvous owner of `sr` among the dev hosts `0..hosts` (`n` 0 counts as 1): the
-/// layout a dev world of `hosts` hosts claims while every host lives.
-fn rendezvous_owner(sr: game::SuperRegion, hosts: u32) -> game::HostId {
-    game::rendezvous_among(sr, (0..u64::from(hosts.max(1))).map(game::HostId)).unwrap_or(game::HostId::SOLO)
 }

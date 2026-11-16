@@ -309,6 +309,24 @@ def silent_hosts(client_logs, server_logs):
     return "counts", reasons
 
 
+def shuttle_window(client_logs):
+    """`(first, last)` seconds of the day of the host run's shuttle: its first
+    `event=autopilot_seam` and its `event=autopilot_done` (CLIENT_CLOCK); None when either is
+    missing or unstamped."""
+    text = clean(client_logs.get("host run", []))
+    first = next((clock_s(CLIENT_CLOCK, line) for line in text if "event=autopilot_seam" in line), None)
+    last = next((clock_s(CLIENT_CLOCK, line) for line in reversed(text) if "event=autopilot_done" in line), None)
+    return None if first is None or last is None else (first, last)
+
+
+def in_window(window, at):
+    """Whether second-of-day `at` lies in `window`. Unknown window or stamp: yes (judged
+    strictly rather than waved through)."""
+    if window is None or at is None:
+        return True
+    return seconds_before(window[0], at) >= 0 and seconds_before(at, window[1]) >= 0
+
+
 def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, stack_alive=True, stack_exit=0,
                     stack_after=None):
     """What makes a run unfit to judge (empty: fit).
@@ -326,6 +344,7 @@ def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, s
       GPU, no `autopilot_done` (the shuttle did not run its time), or its session ended
       or a host refused it before `autopilot_done`."""
     reasons = []
+    window = shuttle_window(client_logs)
     for name, lines in server_logs.items():
         text = clean(lines)
         starts = sum(1 for line in text if "[server] role:" in line)
@@ -337,8 +356,11 @@ def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, s
         # A takeover moves the land, so the seam the autopilot picked is not between the
         # hosts it assumed: every succession line a host prints starts `[server] succession `
         # (world_manager/succession.rs), the coordinator's declaration says `declaring them dead`
-        # (coordinator/succession.rs).
-        taken = next((line for line in clean(lines) if any(w in line for w in SUCCESSION_MARKS)), None)
+        # (coordinator/succession.rs). Only one inside the host run's shuttle window (its first
+        # `event=autopilot_seam` to its `event=autopilot_done`) counts: the land is laid out
+        # before the shuttle and may move after it. No window known: any line counts.
+        taken = next((line for line in clean(lines) if any(w in line for w in SUCCESSION_MARKS)
+                      and in_window(window, clock_s(SERVER_CLOCK, line))), None)
         if taken:
             reasons.append(f"{name}: a succession happened (the land moved during the run): {taken.strip()[:160]}")
     for name, lines in {**server_logs, **(aux_logs or {})}.items():

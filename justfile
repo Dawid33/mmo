@@ -1456,24 +1456,18 @@ go_nogo_dir := "target/go-nogo-r3"
 go_nogo_db := "mmo_go_nogo_r3"
 go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 
-# NOT VALID AS BUILT (Elastic 1 final review C-I1): the autopilot lays seams out over host ids 0 and 1,
-# but a fresh world issues ids from 1 (every restart a new one), so its "host" seams are partly thread
-# seams and the reverse; and the database kept between runs gives a later run `Leave` successions of
-# the earlier run's hosts at once, which the summary marks INVALID. Fix the probe first (pick the seam
-# from the client's own region -> host map, `pick_loaded_seam`, or give it the real ids; and drop and
-# re-forge the database every run, or count only successions inside the probe window).
 # The R3 go / no-go probe (the plan's decision 13). A benchmark on this box: run it on
 # purpose, with nothing else heavy running. A release build at play region size; its OWN
-# world database `mmo_go_nogo_r3` on the dev Postgres (started as by `pg-up`), forged by `worldctl` with
-# super-regions of ONE region (two hosts then own a patchwork of single regions) and kept
-# for the next run — dropped and forged again only when it is not such a world — and its
+# world database `mmo_go_nogo_r3` on the dev Postgres (started as by `pg-up`), dropped and forged
+# again by `worldctl` on EVERY run (so no earlier run's hosts leave successions behind) with
+# super-regions of ONE region (two hosts then own a patchwork of single regions), and its
 # own login state, pins and logs under target/go-nogo-r3/: never the dev world `mmo`,
 # target/dev-r3 or target/dev-login. Refuses to start while anything holds the dev stack's
 # ports (a `dev-r3`, `dev-r2`, `dev-login`, `run-online` or `server` up). Runs the two-host
-# stack through scripts/dev_r3.sh (release binaries, `claim` ownership like `dev-r3`: on the fresh
-# database with both hosts up the claims lay out exactly like `game::rendezvous_owner`, which the
-# autopilot's seam pick uses; a succession during the run moves the seam, so a host or
-# coordinator log that shows one makes the run INVALID; every peer frame held `delay` ms), then
+# stack through scripts/dev_r3.sh (release binaries, `claim` ownership like `dev-r3`; the autopilot
+# picks its seams from the client's own region -> host map, never from host ids; a succession
+# inside the shuttle's window moves the seam, so a host or coordinator log that shows one
+# there makes the run INVALID; every peer frame held `delay` ms), then
 # `client debug online` twice under the autopilot shuttle, `seconds` each: across a seam
 # between two region threads of one host (`boundary=thread`), then across a seam between
 # the two hosts (`boundary=host`). Stops the stack (each host's leave cut; Ctrl-C at any
@@ -1519,8 +1513,8 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
         echo "go-nogo-r3: in use:$busy - a dev stack (dev-r3, dev-r2, dev-login, run-online, server) is up; stop it first" >&2
         exit 1
     fi
-    echo "go-nogo-r3: uses its OWN world database '$db' on the dev Postgres (kept between runs; dropped and"
-    echo "  forged again only when it is not a world of 1-region super-regions), login state under $out/login and"
+    echo "go-nogo-r3: uses its OWN world database '$db' on the dev Postgres (dropped and forged again on"
+    echo "  every run: 1-region super-regions), login state under $out/login and"
     echo "  pins under $stack. Resets: that world's clock and the logs under $out/. Never touches the dev world"
     echo "  'mmo', target/dev-r3 or target/dev-login."
     if [ -e "$out/unclean" ]; then
@@ -1536,28 +1530,11 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     mkdir -p "$out/login" "$stack"
     rm -f "$out"/client-*.log "$out/stack.log" "$out/verdict.txt" "$stack"/host-*.log "$stack/coordinator.log"
     psql() { docker compose -f deploy/dev/compose.yml exec -T postgres psql -U mmo -v ON_ERROR_STOP=1 -tA "$@"; }
-    side=""
-    if [ "$(psql -d mmo -c "SELECT 1 FROM pg_database WHERE datname = '$db'")" = 1 ]; then
-        side=$(psql -d "$db" -c "SELECT super_region_regions FROM world WHERE id = 1" 2>/dev/null || true)
-        if [ "$side" != 1 ]; then
-            echo "go-nogo-r3: '$db' is not a world of 1-region super-regions (side '${side:-none}'): dropping it (this recipe's own)"
-            psql -d mmo -c "DROP DATABASE $db" >/dev/null
-        else
-            # A store from before the voxel return (migration 11 not applied) is refused at start.
-            returned=$(psql -d "$db" -c "SELECT 1 FROM _sqlx_migrations WHERE version = 11 AND success" 2>/dev/null || true)
-            if [ "$returned" != 1 ]; then
-                echo "go-nogo-r3: '$db' is from before the voxel return (no migration 11): dropping it (this recipe's own)"
-                psql -d mmo -c "DROP DATABASE $db" >/dev/null
-                side=""
-            fi
-        fi
-    fi
-    if [ "$side" != 1 ]; then
-        psql -d mmo -c "CREATE DATABASE $db" >/dev/null
-        echo "go-nogo-r3: forging a world into '$db' (first run only; takes minutes)"
-        ./target/release/worldctl forge --db {{go_nogo_db_url}}
-        ./target/release/worldctl super-region {{go_nogo_db_url}} 1
-    fi
+    psql -d mmo -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" >/dev/null
+    psql -d mmo -c "CREATE DATABASE $db" >/dev/null
+    echo "go-nogo-r3: forging a world into '$db' (every run; takes minutes)"
+    ./target/release/worldctl forge --db {{go_nogo_db_url}}
+    ./target/release/worldctl super-region {{go_nogo_db_url}} 1
     ./target/release/worldctl clock-reset {{go_nogo_db_url}}
     export VOXEL_LOGIN_DB=$out/login/login.sqlite VOXEL_LOGIN_KEYS_DIR=$out/login/keys
     login=./target/release/login
@@ -1623,9 +1600,8 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     run_client() {
         issue_token
         echo "go-nogo-r3: client, autopilot boundary=$1, {{seconds}} s ($out/client-$1.log)"
-        # VOXEL_HOSTS below is the CLIENT autopilot's own variable (pick_seam lays the seams out from it); no server reads it.
         VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY=$1 VOXEL_AUTOPILOT_SECONDS={{seconds}} \
-            VOXEL_HOSTS=2 VOXEL_SUPER_REGION_REGIONS=1 PERF_LOG=1 RUST_BACKTRACE=1 \
+            PERF_LOG=1 RUST_BACKTRACE=1 \
             VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/$out/login/refresh \
             timeout --foreground -k 10 $(( {{seconds}} + {{online_wait_secs}} )) \
             ./{{probe_dir}}/release/client debug online >"$out/client-$1.log" 2>&1 </dev/null \
@@ -1653,12 +1629,15 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     echo "restarts:    supervisor $(grep -c 'starting it again' "$out/stack.log" || true);" \
         "host-0 started $(grep -c '\[server\] role:' "$stack/host-0.log" || true)x," \
         "host-1 started $(grep -c '\[server\] role:' "$stack/host-1.log" || true)x (more than once: INVALID)"
-    echo "logs:        $out/client-thread.log $out/client-host.log $stack/host-0.log $stack/host-1.log $stack/coordinator.log"
+    server_logs=("$stack"/host-*.log)
+    echo "logs:        $out/client-thread.log $out/client-host.log ${server_logs[*]} $stack/coordinator.log"
+    server_args=()
+    for f in "${server_logs[@]}"; do server_args+=(--server-log "$f"); done
     # The script's own code (0 GO, 1 NO-GO, 2 INVALID, 3 none), not tee's: 3 until it ran.
     verdict_rc=3
     set +e
     scripts/crossing_summary.py --go-nogo --thread-log "$out/client-thread.log" --host-log "$out/client-host.log" \
-        --server-log "$stack/host-0.log" --server-log "$stack/host-1.log" \
+        "${server_args[@]}" \
         --aux-log "$stack/coordinator.log" --aux-log "$out/login/login.log" \
         --stack-log "$out/stack.log" --stack-stop-line "$stop_line" --stack-alive "$stack_alive" \
         --stack-exit "${stack_rc:-1}" | tee "$out/verdict.txt"

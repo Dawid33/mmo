@@ -208,6 +208,30 @@ class GoNoGo(unittest.TestCase):
         aux = {"coordinator.log": ["INFO [server] role: coordinator"] + declared}
         self.assertEqual(self.run_verdict(*good, aux=aux)[0], "INVALID")
 
+    def shuttle_client(self):
+        return [
+            "2026-11-13T12:00:01.000000Z  INFO client::instance: [client-state-hash] checked=12 mismatched=0",
+            "2026-11-13T12:00:10.000000Z  INFO game::perf: [perf] event=autopilot_seam boundary=host home=0,0",
+            "2026-11-13T12:01:10.000000Z  INFO game::perf: [perf] event=autopilot_done cruise_s=60 reversals=80 ready=true",
+        ]
+
+    def succession_verdict(self, at):
+        good = [crossing(0, 1.0, 2) for _ in range(30)], [crossing(1, 1.0, 2) for _ in range(30)]
+        line = f"{at} WARN [server] succession 1: host 1 (boot 0x5) is dead, heir 0, base cut 3"
+        clients = {"thread run": CLIENT_OK, "host run": self.shuttle_client()}
+        return self.run_verdict(*good, clients=clients,
+                                servers={"host-0.log": SERVER_OK + [line], "host-1.log": SERVER_OK})
+
+    def test_succession_outside_the_window_is_not_invalid(self):
+        for at in ("11:59:00", "12:03:00"):
+            word, reasons, _ = self.succession_verdict(at)
+            self.assertEqual(word, "GO", reasons)
+
+    def test_succession_inside_the_window_is_invalid(self):
+        word, reasons, _ = self.succession_verdict("12:00:30")
+        self.assertEqual(word, "INVALID")
+        self.assertIn("succession", reasons[0])
+
     def test_invalid_when_a_host_panicked(self):
         panicked = SERVER_OK[:2] + ["thread 'region (3,4)' panicked at crates/game/src/x.rs:1:1:"] + SERVER_OK[2:]
         word, reasons, _ = self.run_verdict(*self.good(), servers={"host-0.log": SERVER_OK, "host-1.log": panicked})

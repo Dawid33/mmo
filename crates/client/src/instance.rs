@@ -309,6 +309,10 @@ pub struct GameInstanceManager {
     /// Per-region forward-tick wall times for the F3 Debug tab (native only).
     #[cfg(not(target_arch = "wasm32"))]
     tick_times: TickTimes,
+    /// The scripted autopilot is on (`VOXEL_AUTOPILOT`): tell the renderer which host serves
+    /// each live region ([`ClientUpdateEvent::RegionHosts`]), and what was last told.
+    #[cfg(not(target_arch = "wasm32"))]
+    region_hosts_told: Option<Vec<(RegionId, Option<HostId>)>>,
 }
 
 /// The last [`game::perf::TICK_TIME_WINDOW`] forward-tick times of each live
@@ -993,6 +997,10 @@ impl GameInstanceManager {
             perf: PerfBudget::default(),
             #[cfg(not(target_arch = "wasm32"))]
             tick_times: TickTimes::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            region_hosts_told: std::env::var("VOXEL_AUTOPILOT")
+                .is_ok_and(|v| !v.is_empty() && v != "0")
+                .then(Vec::new),
             #[cfg(not(target_arch = "wasm32"))]
             crossing: CrossingProbe::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -2791,9 +2799,24 @@ impl GameInstanceManager {
     /// [`game::perf::TICK_TIME_REPORT_INTERVAL`] (the F3 Debug tab).
     #[cfg(not(target_arch = "wasm32"))]
     fn maybe_report_tick_times(&mut self) {
+        self.tell_region_hosts();
         let live = self.host.ids();
         if let Some(stats) = self.tick_times.report(&live, Instant::now()) {
             let _ = self.client_event_send.send(ClientUpdateEvent::RegionTickTimes(stats));
+        }
+    }
+
+    /// With the autopilot on: the live regions' hosts, from the connection map, whenever
+    /// they changed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tell_region_hosts(&mut self) {
+        let Some(told) = self.region_hosts_told.as_ref() else { return };
+        let mut now: Vec<(RegionId, Option<HostId>)> =
+            self.host.ids().into_iter().map(|rc| (rc, self.region_host(rc))).collect();
+        now.sort();
+        if *told != now {
+            let _ = self.client_event_send.send(ClientUpdateEvent::RegionHosts(now.clone()));
+            self.region_hosts_told = Some(now);
         }
     }
 

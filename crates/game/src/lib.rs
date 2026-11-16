@@ -315,6 +315,10 @@ pub enum ClientUpdateEvent {
     /// The home host is draining: whole seconds until it leaves (`Some(0)` = it is leaving now);
     /// `None` clears the notice (the home moved, or the session ended).
     HostDraining { remaining_secs: Option<u64> },
+    /// Which host serves each live predicted region, from the client's own connection map
+    /// (`None` = its host not yet known); sent only when it changed and only while the
+    /// scripted autopilot runs (`VOXEL_AUTOPILOT`), which picks its seams from it.
+    RegionHosts(Vec<(RegionId, Option<HostId>)>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
