@@ -245,6 +245,17 @@ impl Coordinator {
         Ok(c)
     }
 
+    /// Start the clock at store time `now_ms`, before the core's first pass (a runtime that
+    /// sampled the store's clock only once the state was loaded): the calendar anchors here at
+    /// the history's `now`, and the save period counts from here. Never moves the clock back.
+    pub fn start_clock(&mut self, now_ms: u64) {
+        let now_ms = now_ms.max(self.clock_ms);
+        self.clock_ms = now_ms;
+        self.last_save_ms = now_ms;
+        self.calendar_anchor = (now_ms, self.history.now());
+        self.calendar_seen_ms = now_ms;
+    }
+
     pub fn history(&self) -> &History {
         &self.history
     }

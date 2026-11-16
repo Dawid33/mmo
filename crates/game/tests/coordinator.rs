@@ -3757,7 +3757,9 @@ fn downtime_is_not_caught_up() {
     }
     assert!(t - later <= DAY_MS + 1_000, "the next day turns within a day of the re-anchor");
 
-    // Rebuilt from the saved state, the hour later.
+    // Rebuilt from the saved state, the hour later: today the state holds no calendar anchor,
+    // so `from_state` anchors at `later` and this holds without the gap rule. The restart case
+    // proper (an anchor loaded from the store) is Task 5's test.
     let mut c2 = Coordinator::from_state(state, grid(), later).expect("state loads");
     let loaded = c2.history().now();
     c2.maintain(later);

@@ -936,8 +936,8 @@ pub struct CoordinatorRuntime {
     cuts: Option<WorldCuts>,
     /// `now_ms` the expected hosts were last read at.
     hosts_read_ms: Option<u64>,
-    /// The hosts read in flight, with the `now_ms` and the monotonic ms it was issued at.
-    hosts_rx: Option<(u64, u64, Answer<world_store::HostsRead>)>,
+    /// The hosts read in flight, with the `now_ms` it was issued at.
+    hosts_rx: Option<(u64, Answer<world_store::HostsRead>)>,
     /// The decision being recorded (one at a time: the core runs one cut at a time).
     recording: Option<Recording>,
     /// The world cut whose begin was last sent to the store (`record_cut_begin`, Elastic 1
@@ -1361,16 +1361,17 @@ impl CoordinatorRuntime {
         if self.hold_hosts_reads.load(Ordering::SeqCst) && self.hosts_rx.is_some() {
             return;
         }
-        if let Some((issued_ms, issued_mono, rx)) = &self.hosts_rx {
-            let (issued_ms, issued_mono) = (*issued_ms, *issued_mono);
+        if let Some((issued_ms, rx)) = &self.hosts_rx {
+            let issued_ms = *issued_ms;
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
                 Ok(Ok(world_store::HostsRead { rows, store_ms })) => {
-                    // The store's clock, taken as read halfway between the issue and now, so
-                    // now is half the round trip later (sampled at this moment: nothing handed
-                    // out before it is undercut). The core's `now` follows from the next pass.
-                    let mono = self.mono_ms();
-                    self.clock.sample(store_ms + mono.saturating_sub(issued_mono) / 2, mono);
+                    // The store's clock, taken as of this receipt: it lags the store by the
+                    // answer's way back, never leads it (a correction for the round trip would
+                    // count a stalled read's queueing as time, a forward step `StoreClock` keeps
+                    // and the lease watch's spans would grow by). The core's `now` follows from
+                    // the next pass.
+                    self.clock.sample(store_ms, self.mono_ms());
                     // A host that left and registered again (another boot) is expected again.
                     self.core.set_host_boots(rows.iter().map(|r| (r.id, r.boot)).collect());
                     // A row marked dead (a takeover declared it) runs nothing: not expected
@@ -1410,7 +1411,7 @@ impl CoordinatorRuntime {
         }
         if self.hosts_read_ms.is_none_or(|at| now >= at + WORLD_CUT_HOSTS_REFRESH_MS) {
             self.hosts_read_ms = Some(now);
-            self.hosts_rx = Some((now, self.mono_ms(), self.store.hosts_later()));
+            self.hosts_rx = Some((now, self.store.hosts_later()));
         }
     }
 

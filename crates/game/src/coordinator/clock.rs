@@ -13,7 +13,8 @@
 //! more than the gap in the past restarts its count ([`rebase_deadline`], [`rebase_since`]).
 
 /// Three day turns ([`crate::history::DAY_MS`]): a running coordinator turns a day well
-/// within it, so a longer silence of the calendar is downtime, not play.
+/// within it, so a longer silence of the calendar is downtime, not play. Measured from the last
+/// day turn: a running coordinator whose loop stalls more than ~20 s after a turn loses that time too.
 pub const CALENDAR_GAP_MS: u64 = 30_000;
 
 /// Store time from the process's monotonic clock: the offset of the last sample, and never
