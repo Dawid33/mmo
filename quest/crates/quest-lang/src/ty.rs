@@ -17,6 +17,11 @@
 //!   an awaited host promise that raises. It is never a value (plan decision 2): it exists only where it is
 //!   produced and is consumed there by `?`, `else` or a `match`.
 //! - [`Ty::Caught`]: a caught error (`else err:`), one of the set's names with its data.
+//!
+//! A **promise's error set is open**: `Promise[T]` is [`Ty::Promise`]`(T, set)`, whose second child is the set
+//! as a type — a fixed [`Ty::Set`] or an open [`Ty::SetVar`] (a raising host promise's call, an annotation
+//! `Promise[T]`, `all`). Unifying two promises unifies their values and makes their sets the union: an open
+//! set grows by union (it is never "bound"), two fixed sets always agree. A final type holds only fixed sets.
 
 use crate::hir::{Crate, DefId};
 use quest_vm::host::HostApi;
@@ -64,7 +69,8 @@ pub enum Ty {
     List(TyId),
     Dict(TyId, TyId),
     Option(TyId),
-    Promise(TyId),
+    /// The promised value and the promise's error set (a [`Ty::Set`] or [`Ty::SetVar`]).
+    Promise(TyId, TyId),
     /// `&T`.
     Ref(TyId),
     /// A script struct, enum or event.
@@ -79,16 +85,18 @@ pub enum Ty {
     Fallible(TyId, SetId),
     /// A caught error: one of the set's errors.
     Caught(SetId),
+    /// A promise's error set, fixed (only as a child of [`Ty::Promise`]).
+    Set(SetId),
+    /// A promise's open error set: grows by union during inference (only as a child of [`Ty::Promise`]).
+    SetVar(u32),
 }
 
 impl Ty {
     /// The types this one is made of, in order.
     pub fn children(self) -> Vec<TyId> {
         match self {
-            Ty::List(t) | Ty::Option(t) | Ty::Promise(t) | Ty::Ref(t) | Ty::Fallible(t, _) => {
-                vec![t]
-            }
-            Ty::Dict(k, v) => vec![k, v],
+            Ty::List(t) | Ty::Option(t) | Ty::Ref(t) | Ty::Fallible(t, _) => vec![t],
+            Ty::Dict(k, v) | Ty::Promise(k, v) => vec![k, v],
             _ => Vec::new(),
         }
     }
@@ -99,7 +107,7 @@ impl Ty {
         match self {
             Ty::List(_) => Ty::List(at(0)),
             Ty::Option(_) => Ty::Option(at(0)),
-            Ty::Promise(_) => Ty::Promise(at(0)),
+            Ty::Promise(_, _) => Ty::Promise(at(0), at(1)),
             Ty::Ref(_) => Ty::Ref(at(0)),
             Ty::Dict(_, _) => Ty::Dict(at(0), at(1)),
             Ty::Fallible(_, set) => Ty::Fallible(at(0), set),
@@ -146,7 +154,8 @@ impl Types {
             return *id;
         }
         let id = TyId(u32::try_from(self.tys.len()).unwrap_or(u32::MAX));
-        let ground = !matches!(ty, Ty::Var(_)) && ty.children().iter().all(|c| self.is_ground(*c));
+        let ground = !matches!(ty, Ty::Var(_) | Ty::SetVar(_))
+            && ty.children().iter().all(|c| self.is_ground(*c));
         self.tys.push(ty);
         self.ids.insert(ty, id);
         self.ground.push(ground);
@@ -190,7 +199,7 @@ const PRINT_DEPTH_MAX: u32 = 16;
 
 /// Prints types as source writes them (`int`, `list[int]`, `dict[str, int]`, `Option[int]`, `&Ledger`,
 /// `npc::Ledger`); the checker's own types print as `{error}`, `!` (never) and `_` (unknown); a fallible result
-/// as `int raises A | B`, a caught error as `error[A | B]`.
+/// as `int raises A | B`, a raising promise as `Promise[int raises A | B]`, a caught error as `error[A | B]`.
 pub struct Printer<'a> {
     pub types: &'a Types,
     pub krate: &'a Crate,
@@ -231,7 +240,17 @@ impl Printer<'_> {
             Ty::List(t) => inner("list", &[t], out),
             Ty::Dict(k, v) => inner("dict", &[k, v], out),
             Ty::Option(t) => inner("Option", &[t], out),
-            Ty::Promise(t) => inner("Promise", &[t], out),
+            Ty::Promise(t, set) => {
+                out.push_str("Promise[");
+                self.write(t, depth.saturating_add(1), out);
+                if let Ty::Set(set) = self.types.get(set)
+                    && !self.types.names(set).is_empty()
+                {
+                    out.push_str(" raises ");
+                    out.push_str(&self.types.names(set).join(" | "));
+                }
+                out.push(']');
+            }
             Ty::Ref(t) => {
                 out.push('&');
                 self.write(t, depth.saturating_add(1), out);
@@ -255,6 +274,8 @@ impl Printer<'_> {
                 out.push_str(" raises ");
                 out.push_str(&self.types.names(set).join(" | "));
             }
+            Ty::Set(set) => out.push_str(&self.types.names(set).join(" | ")),
+            Ty::SetVar(_) => out.push('_'),
             Ty::Caught(set) => {
                 out.push_str("error[");
                 out.push_str(&self.types.names(set).join(" | "));

@@ -514,6 +514,14 @@ fn counts():
 
 fn store():
     world.set("k", world.get("k"))
+
+fn takes(p: Promise[int]):
+    pass
+
+fn promises():
+    takes(world.add("k", 1))
+    let p: Promise[int] = world.get("k")
+    return [world.get("a"), world.set("b", 1)]
 "#;
     let files = [("main.qs", main)];
     assert_eq!(
@@ -528,4 +536,10 @@ fn store():
     assert_eq!(sigs["tag"], "fn(Player) -> bool");
     assert_eq!(sigs["rolls"], "fn() -> int");
     assert_eq!(sigs["counts"], "fn() -> int");
+    // A promise's error set is open: promises that meet share the union of their sets.
+    assert_eq!(
+        sigs["promises"],
+        "fn() -> list[Promise[() raises Lost | NamespaceGone | NotFound | Timeout | WrongType]]"
+    );
+    assert_eq!(sigs["takes"], "fn(Promise[int]) -> ()");
 }

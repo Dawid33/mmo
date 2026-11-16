@@ -256,6 +256,20 @@ fn f():
 
 fn g():
     let _ = world.compare_and_set("k", "a", "b")
+
+error Declared = Bare | WithData(n: int)
+
+fn h():
+    raise Bare(x=1)
+
+fn i():
+    raise Fresh()
+
+fn j():
+    raise Fresh()
+
+fn k():
+    raise Fresh
 "#;
     assert_eq!(
         main_diags(main),
@@ -264,6 +278,7 @@ fn g():
             d("error-shape", "main.qs", 8),
             d("error-shape", "main.qs", 14),
             d("error-shape", "main.qs", 20),
+            d("error-shape", "main.qs", 25),
         ]
     );
 }

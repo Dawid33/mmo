@@ -235,7 +235,7 @@ fn m(p: Pair):
 fn host_names() {
     let main = r#"@on(PlayerClicked)
 fn h(e: PlayerClicked):
-    let v: int = await world.get("k") else 0
+    let v: Promise[int] = world.get("k")
     say(e.player, "hi")
 
 fn no_such():

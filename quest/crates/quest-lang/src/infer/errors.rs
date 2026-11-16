@@ -5,8 +5,8 @@
 //! (`HostApi::errors`; a name a host function raises that the host does not list is data-less), the
 //! members with data of the `error` set items (in item order), then `raise` sites as bodies are finished
 //! (callee-first, so deterministic). Every later site must agree: same fields, same types, data or no data;
-//! otherwise it is `error-shape` there. A bare member of an `error` set (`error E = ChestEmpty | …`) only names
-//! an error: it fixes no shape. A `raise` with data of a name with no shape yet must name its fields
+//! otherwise it is `error-shape` there. A bare member of an `error` set (`error E = ChestEmpty | …`) declares
+//! a data-less error, as `raise ChestEmpty` does; `raise X()` is `raise X`. A `raise` with data of a name with no shape yet must name its fields
 //! (`raise NotEnough(have=3)`): positional data needs a known shape.
 //!
 //! **Generic host data** (decision 11): a host error field of type `Infer` (`Changed(current)`) is open until
@@ -26,8 +26,10 @@
 //! what callers see. Callee-first order makes every callee's set final before its callers are typed.
 //!
 //! **Must handle** (decision 2): a call of a function with a non-empty set, or of a raising host query or
-//! command, has the type `T raises S` ([`Ty::Fallible`]); a raising host promise is `Promise[T raises S]`, so
-//! `await` (Task 24) yields the fallible result. A fallible value is consumed where it is produced: by `?`,
+//! command, has the type `T raises S` ([`Ty::Fallible`]). A promise's set is the second child of
+//! `Promise[T raises S]` and is open (see `ty.rs`): a raising host promise starts with the host's list, a
+//! written `Promise[T]` with none, and promises that meet (a list, an argument, `all`) share the union; `await`
+//! (Task 24) turns it into the fallible result. A fallible value is consumed where it is produced: by `?`,
 //! by `else`, or as a `match` scrutinee (`Infer::expr_fallible`); anywhere else (`Infer::expr`) it is
 //! `unhandled-fallible`, and its value type is used from there on. `let _ = f()` is no exception. An error
 //! escaping `main`, a handler or a top-level initialiser is allowed (it is reported at run time).
@@ -118,10 +120,8 @@ impl<'k> Infer<'k> {
                         let ErrorMember::Error(v) = m else {
                             continue;
                         };
+                        // A member without fields declares a data-less error.
                         self.named.insert(v.name.clone());
-                        if v.fields.is_empty() {
-                            continue;
-                        }
                         let mut found = Vec::new();
                         let fields: Vec<ErrField> = v
                             .fields
@@ -140,7 +140,8 @@ impl<'k> Infer<'k> {
                                     .insert(v.name.clone(), ErrShape { fields, origin });
                             }
                             Some(known) => {
-                                if let Some(why) = self.declared_conflict(&known, &fields) {
+                                if let Some(why) = self.declared_conflict(&v.name, &known, &fields)
+                                {
                                     let message = format!(
                                         "`{}` has one data shape in the whole program: {why} ({})",
                                         v.name, known.origin
@@ -162,7 +163,12 @@ impl<'k> Infer<'k> {
     }
 
     /// Why a declared shape disagrees with a known one, if it does.
-    fn declared_conflict(&mut self, known: &ErrShape, fields: &[ErrField]) -> Option<String> {
+    fn declared_conflict(
+        &mut self,
+        name: &str,
+        known: &ErrShape,
+        fields: &[ErrField],
+    ) -> Option<String> {
         let same_names = known.fields.len() == fields.len()
             && known
                 .fields
@@ -172,7 +178,7 @@ impl<'k> Infer<'k> {
         if !same_names {
             return Some(format!(
                 "it is `{}` there",
-                self.shape_text("", &known.fields)
+                self.shape_text(name, &known.fields)
             ));
         }
         for (a, b) in known.fields.iter().zip(fields) {
@@ -240,7 +246,7 @@ impl<'k> Infer<'k> {
 
     /// The type of a call of the host function `f`, given the type of its value `ret` (a promise's: the
     /// promised value's) and of its parameters `params`: `T raises S` for a raising query or command,
-    /// `Promise[T raises S]` for a raising promise. The generic fields of the errors it raises are fixed
+    /// `Promise[T raises S]` with an open set for a promise. The generic fields of the errors it raises are fixed
     /// here at their first use (see the module doc).
     pub(super) fn host_fallible(
         &mut self,
@@ -265,10 +271,13 @@ impl<'k> Infer<'k> {
                 self.instantiate(b, name, ty, call.span);
             }
         }
-        let value = self.fallible(ret, &hf.raises);
         match hf.kind {
-            HostFnKind::Promise => self.types.intern(Ty::Promise(value)),
-            HostFnKind::Query | HostFnKind::Command => value,
+            // An open set: it unions with the sets of the promises it meets.
+            HostFnKind::Promise => {
+                let set = self.fresh_set(hf.raises.clone());
+                self.types.intern(Ty::Promise(ret, set))
+            }
+            HostFnKind::Query | HostFnKind::Command => self.fallible(ret, &hf.raises),
         }
     }
 
@@ -375,6 +384,8 @@ impl<'k> Infer<'k> {
 
     /// Checks a raise's data (`args`: `None` without parentheses) against the name's shape, or fixes it.
     fn raise_data(&mut self, b: &mut Body, name: &str, args: Option<&[Arg]>, at: Span) {
+        // Empty parentheses are no data.
+        let args = args.filter(|a| !a.is_empty());
         let found: Vec<(Option<&str>, TyId, Span)> = args
             .unwrap_or_default()
             .iter()

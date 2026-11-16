@@ -338,10 +338,12 @@ impl Infer<'_> {
                 | Ty::Float
                 | Ty::List(_)
                 | Ty::Dict(_, _)
-                | Ty::Promise(_)
+                | Ty::Promise(_, _)
                 | Ty::Ref(_)
                 | Ty::Fallible(_, _)
-                | Ty::Caught(_) => {
+                | Ty::Caught(_)
+                | Ty::Set(_)
+                | Ty::SetVar(_) => {
                     return false;
                 }
             }
@@ -359,7 +361,7 @@ impl Infer<'_> {
                 continue;
             }
             match self.types.get(t) {
-                Ty::Promise(_) | Ty::Ref(_) => return false,
+                Ty::Promise(_, _) | Ty::Ref(_) => return false,
                 Ty::Adt(d) => {
                     for shape in self.adts.get(&d).into_iter().flatten() {
                         stack.extend(shape.tys.iter().copied());

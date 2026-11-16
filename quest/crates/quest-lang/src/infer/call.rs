@@ -354,7 +354,7 @@ impl Infer<'_> {
             }
         }
         let ret = self.host_ty(&hf.ret, &mut |inf, _| inf.fresh());
-        // A promise's errors come with its value (`await` yields `T raises S`).
+        // A promise carries its (open) error set; `await` makes it the fallible result.
         self.host_fallible(b, e, f, &params, ret)
     }
 
@@ -412,11 +412,13 @@ impl Infer<'_> {
                 ("assert_eq", vec![t, t], TyId::UNIT, None)
             }
             Prelude::All => {
+                // The result's error set is the union of the promises' (they share one open set).
                 let t = self.fresh();
-                let promise = self.types.intern(Ty::Promise(t));
+                let set = self.fresh_set(Vec::new());
+                let promise = self.types.intern(Ty::Promise(t, set));
                 let list = self.types.intern(Ty::List(promise));
                 let all = self.types.intern(Ty::List(t));
-                let ret = self.types.intern(Ty::Promise(all));
+                let ret = self.types.intern(Ty::Promise(all, set));
                 ("all", vec![list], ret, None)
             }
             Prelude::Some => {

@@ -150,6 +150,7 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         host,
         types: Types::new(),
         subst: Vec::new(),
+        set_vars: Vec::new(),
         finals: BTreeMap::new(),
         exprs: vec![TyId::ERROR; krate.expr_count as usize],
         locals: vec![TyId::ERROR; krate.locals.len()],
@@ -279,6 +280,8 @@ struct Infer<'k> {
     types: Types,
     /// What each type variable is bound to. A variable is bound at most once.
     subst: Vec<Option<TyId>>,
+    /// The open error sets of promises ([`Ty::SetVar`]): a union-find whose roots hold the names.
+    set_vars: Vec<SetVarSlot>,
     /// Types holding variables, all bound: their final form, which therefore never changes. Keeps every
     /// walk over a type that inference built step by step from re-following its variables.
     finals: BTreeMap<TyId, TyId>,
@@ -769,6 +772,13 @@ impl<'k> Infer<'k> {
                 (Ty::Error, _) => self.default_vars(b),
                 (_, Ty::Error) => self.default_vars(a),
                 (Ty::Never, _) | (_, Ty::Never) => {}
+                // Promise error sets are open: meeting makes them one union, never a mismatch.
+                (Ty::Set(_), Ty::Set(_)) => {}
+                (Ty::SetVar(x), Ty::SetVar(y)) => self.join_set_vars(x, y),
+                (Ty::SetVar(x), Ty::Set(s)) | (Ty::Set(s), Ty::SetVar(x)) => {
+                    let names = self.types.names(s).to_vec();
+                    self.grow_set_var(x, names);
+                }
                 (Ty::Var(n), _) => ok &= self.bind_checked(n, b),
                 (_, Ty::Var(n)) => ok &= self.bind_checked(n, a),
                 // The same head (constructor and any data that is not a child type: a fallible result's
@@ -826,9 +836,11 @@ impl<'k> Infer<'k> {
         }
     }
 
-    /// `ty` with every bound variable replaced by its binding, all the way down.
+    /// `ty` with every bound variable replaced by its binding and every open error set by its names so far,
+    /// all the way down. A type holding an open set is not memoised (`volatile`): the set may still grow.
     fn zonk(&mut self, ty: TyId) -> TyId {
         let mut done: BTreeMap<TyId, TyId> = BTreeMap::new();
+        let mut volatile: BTreeSet<TyId> = BTreeSet::new();
         let mut stack = vec![(ty, false)];
         while let Some((t, expanded)) = stack.pop() {
             if done.contains_key(&t) {
@@ -846,7 +858,9 @@ impl<'k> Infer<'k> {
             if s != t {
                 match done.get(&s) {
                     Some(z) => {
-                        if self.types.is_ground(*z) {
+                        if volatile.contains(&s) {
+                            volatile.insert(t);
+                        } else if self.types.is_ground(*z) {
                             self.finals.insert(t, *z);
                         }
                         done.insert(t, *z);
@@ -856,6 +870,14 @@ impl<'k> Infer<'k> {
                 continue;
             }
             let shape = self.types.get(t);
+            if let Ty::SetVar(n) = shape {
+                let names = self.set_var_names(n);
+                let set = self.types.set(names);
+                let z = self.types.intern(Ty::Set(set));
+                volatile.insert(t);
+                done.insert(t, z);
+                continue;
+            }
             let children = shape.children();
             if children.is_empty() {
                 done.insert(t, t);
@@ -868,7 +890,9 @@ impl<'k> Infer<'k> {
                     .map(|c| done.get(c).copied().unwrap_or(*c))
                     .collect();
                 let z = self.types.intern(shape.with_children(&made));
-                if self.types.is_ground(z) {
+                if children.iter().any(|c| volatile.contains(c)) {
+                    volatile.insert(t);
+                } else if self.types.is_ground(z) {
                     self.finals.insert(t, z);
                 }
                 done.insert(t, z);
@@ -914,7 +938,10 @@ impl<'k> Infer<'k> {
                         Builtin::Str => (0, Ty::Str),
                         Builtin::List => (1, Ty::List(TyId::ERROR)),
                         Builtin::Option => (1, Ty::Option(TyId::ERROR)),
-                        Builtin::Promise => (1, Ty::Promise(TyId::ERROR)),
+                        // A written `Promise[T]` has an open error set of its own.
+                        Builtin::Promise => {
+                            (1, Ty::Promise(TyId::ERROR, self.fresh_set(Vec::new())))
+                        }
                         Builtin::Dict => (2, Ty::Dict(TyId::ERROR, TyId::ERROR)),
                     },
                     TypeName::Def(d) => (0, Ty::Adt(*d)),
@@ -941,7 +968,13 @@ impl<'k> Infer<'k> {
                 {
                     self.annotated_key(*key, file, *k, out);
                 }
-                self.types.intern(shape.with_children(&args))
+                match shape {
+                    Ty::Promise(_, set) => {
+                        let value = args.first().copied().unwrap_or(TyId::ERROR);
+                        self.types.intern(Ty::Promise(value, set))
+                    }
+                    _ => self.types.intern(shape.with_children(&args)),
+                }
             }
         }
     }
@@ -1045,6 +1078,80 @@ impl<'k> Infer<'k> {
 
     fn mismatch(&mut self, b: &mut Body, at: Span, message: String) {
         b.diags.push(error("type-mismatch", message, b.file, at));
+    }
+}
+
+/// An open error set ([`Ty::SetVar`]): its representative, and at a representative the names so far.
+#[derive(Debug, Clone)]
+struct SetVarSlot {
+    parent: u32,
+    names: BTreeSet<String>,
+}
+
+impl Infer<'_> {
+    /// A new open error set holding `names`.
+    pub(super) fn fresh_set(&mut self, names: Vec<String>) -> TyId {
+        let n = u32::try_from(self.set_vars.len()).unwrap_or(u32::MAX);
+        self.set_vars.push(SetVarSlot {
+            parent: n,
+            names: names.into_iter().collect(),
+        });
+        self.types.intern(Ty::SetVar(n))
+    }
+
+    /// The representative of an open set (path halving; the bound is a guard).
+    fn set_root(&mut self, mut n: u32) -> u32 {
+        for _ in 0..=self.set_vars.len() {
+            let Some(parent) = self.set_vars.get(n as usize).map(|s| s.parent) else {
+                break;
+            };
+            if parent == n {
+                break;
+            }
+            let grand = self
+                .set_vars
+                .get(parent as usize)
+                .map_or(parent, |s| s.parent);
+            if let Some(slot) = self.set_vars.get_mut(n as usize) {
+                slot.parent = grand;
+            }
+            n = parent;
+        }
+        n
+    }
+
+    fn set_var_names(&mut self, n: u32) -> Vec<String> {
+        let root = self.set_root(n);
+        self.set_vars
+            .get(root as usize)
+            .map_or(Vec::new(), |s| s.names.iter().cloned().collect())
+    }
+
+    fn grow_set_var(&mut self, n: u32, names: Vec<String>) {
+        let root = self.set_root(n);
+        if let Some(slot) = self.set_vars.get_mut(root as usize) {
+            slot.names.extend(names);
+        }
+    }
+
+    /// Makes two open sets one: the union of their names.
+    fn join_set_vars(&mut self, x: u32, y: u32) {
+        let (x, y) = (self.set_root(x), self.set_root(y));
+        if x == y {
+            return;
+        }
+        let (keep, gone) = (x.min(y), x.max(y));
+        let names = self
+            .set_vars
+            .get_mut(gone as usize)
+            .map(|s| {
+                s.parent = keep;
+                std::mem::take(&mut s.names)
+            })
+            .unwrap_or_default();
+        if let Some(slot) = self.set_vars.get_mut(keep as usize) {
+            slot.names.extend(names);
+        }
     }
 }
 
