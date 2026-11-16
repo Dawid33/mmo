@@ -56,8 +56,15 @@ fn spec_5_3_reference() {
     r.append(9)
     assert_eq(a, [1, 2, 9])
     print(f"{a} {b} {r.len()}")
+    let c = [1, 2, 9]
+    let s = &c
+    assert_eq(r, s)
+    print(f"{r == s} {r != s} {r} {str(s)}")
 "#;
-    assert_eq!(printed(main), lines(&["[1, 2, 9] [1, 2] 3"]));
+    assert_eq!(
+        printed(main),
+        lines(&["[1, 2, 9] [1, 2] 3", "true false [1, 2, 9] [1, 2, 9]"])
+    );
 }
 
 #[test]
@@ -131,6 +138,9 @@ fn deref_assign() {
     let main = r#"fn set(r: &int, v: int):
     *r = v
 
+fn same(x: &int, y: &int) -> bool:
+    return x == y
+
 fn main():
     let n = 1
     let r = &n
@@ -141,9 +151,9 @@ fn main():
     *e = *e * 10
     set(&xs[2], 8)
     set(r, n + 1)
-    print(f"{xs} {n}")
+    print(f"{xs} {n} {same(r, &xs[0])} {same(r, &n)}")
 "#;
-    assert_eq!(printed(main), lines(&["7 7", "[1, 20, 8] 8"]));
+    assert_eq!(printed(main), lines(&["7 7", "[1, 20, 8] 8 false true"]));
 }
 
 #[test]

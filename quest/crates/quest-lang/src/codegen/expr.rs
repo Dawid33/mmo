@@ -270,11 +270,12 @@ impl Emit<'_, '_, '_> {
             }
             _ => {}
         }
-        let ty = self.g.typed.types.get(self.ty_of(l));
+        // Operands of a reference type (`==` / `!=` on two `&T`) are compared by their targets.
+        let ty = self.target_kind(l);
         if ty == Ty::Str && op == BinOp::Add {
             self.builtin(
                 Builtin::StrConcat,
-                &[BArg::Expr(l), BArg::Expr(r)],
+                &[BArg::Target(l), BArg::Target(r)],
                 TyId::STR,
                 Some(dst),
             );
@@ -283,7 +284,7 @@ impl Emit<'_, '_, '_> {
         if ty == Ty::Float && op == BinOp::Rem {
             self.builtin(
                 Builtin::ModF,
-                &[BArg::Expr(l), BArg::Expr(r)],
+                &[BArg::Target(l), BArg::Target(r)],
                 TyId::FLOAT,
                 Some(dst),
             );
@@ -301,7 +302,7 @@ impl Emit<'_, '_, '_> {
             let (cs, zs) = (self.word(c), self.word(z));
             self.builtin(
                 Builtin::StrCmp,
-                &[BArg::Expr(l), BArg::Expr(r)],
+                &[BArg::Target(l), BArg::Target(r)],
                 TyId::INT,
                 Some(cs),
             );
@@ -350,7 +351,7 @@ impl Emit<'_, '_, '_> {
                 _ => (None, false),
             },
             // Heap kinds: deep structural equality.
-            _ if self.heap_ty(self.ty_of(l)) => match op {
+            _ if self.heap_ty(self.target_ty(l)) => match op {
                 BinOp::Eq => (Some((Op::Eq, false)), false),
                 BinOp::Ne => (Some((Op::Eq, false)), true),
                 _ => (None, false),
@@ -361,7 +362,7 @@ impl Emit<'_, '_, '_> {
             self.not_yet("this operator on these operands", at);
             return;
         };
-        let vs = self.vals(&[l, r]);
+        let vs = self.target_vals(&[l, r]);
         let (a, b) = if swap {
             (vs[1].slot, vs[0].slot)
         } else {
