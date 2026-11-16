@@ -754,14 +754,17 @@ impl StoreHandle {
     /// R4: the world restarts from its last committed cut — `world.generation + 1` (every host
     /// of the old generation is refused from then on) and every open succession abandoned
     /// (the land stays with the heirs), in one transaction fenced by `fence` under the world
-    /// row's lock. Returns the new generation. Postgres only.
-    pub fn rollback_world(&self, fence: CoordinatorFence) -> Result<u64, StoreError> {
-        self.ask(|r| Request::RollbackWorld(fence, r))
+    /// row's lock — only from generation `from`, the one the coordinator decided the rollback
+    /// at (Elastic 2a): a world past it was rolled back already (a rollback that committed
+    /// before its coordinator recorded it), nothing is written. Idempotent. Returns the world's
+    /// generation after it. Postgres only.
+    pub fn rollback_world(&self, fence: CoordinatorFence, from: u64) -> Result<u64, StoreError> {
+        self.ask(|r| Request::RollbackWorld(fence, from, r))
     }
 
     /// [`Self::rollback_world`], answered on the receiver.
-    pub fn rollback_world_later(&self, fence: CoordinatorFence) -> crossbeam::channel::Receiver<Result<u64, StoreError>> {
-        self.ask_later(|r| Request::RollbackWorld(fence, r))
+    pub fn rollback_world_later(&self, fence: CoordinatorFence, from: u64) -> crossbeam::channel::Receiver<Result<u64, StoreError>> {
+        self.ask_later(|r| Request::RollbackWorld(fence, from, r))
     }
 
     /// R4, `worldctl rollback` (the operator, who holds no coordinator fence): as

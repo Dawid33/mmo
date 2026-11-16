@@ -1019,6 +1019,14 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     // succeeded peer here): what crossed from host 1 may be stored in host 1's last part AND in
     // host 0's (the R3 version of this test pinned exactly that: entities stored twice). Host 0
     // refuses its part instead ("wait, never guess", `world_cut.rs` "Hosts outside the cut").
+    // Host 0 may commit a cut alone right after host 1 is gone, while nothing unsaved stands
+    // between them; once it holds unsaved traffic with host 1 (it sends toward its neighbour as
+    // it runs) it refuses its parts. The claim is about that state: from the first refusal on,
+    // no cut of host 0 alone commits. (How soon the traffic comes is timing, so `last` is read
+    // once host 0 refused, not at host 1's exit.)
+    w.pair.until("host 0 refuses a cut for its unsaved traffic with host 1", |p| {
+        p.sims.iter().find(|s| s.ordinal == h(0)).and_then(|s| s.manager.world_cut_refused_for()).is_some_and(|(_, with)| with == [h(1)])
+    });
     let (last, _) = last_committed(&db);
     let until = Instant::now() + 6 * CUT_EVERY;
     while Instant::now() < until {
@@ -1291,17 +1299,18 @@ fn entity_crossing_hosts_between_cuts_does_not_stall_saving() {
     w.until_committed_after(&db, first);
     let (stored, _) = last_committed(&db);
     let b1 = seam_of(&w, h(1));
-    push_over_the_seam(&mut w, h(0), id);
-    w.pair.until("the slime on host 1", |p| p.sims[1].holders(id) == [b1]);
-    w.until_committed_after(&db, stored);
     let rows = |column: &str| {
         format!(
             "SELECT {column} FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}",
             id.birth_region.x, id.birth_region.z, id.serial as i64
         )
     };
-    let stored_in: Vec<(i64, i64)> = query_i64s(&db, &rows("rx")).into_iter().zip(query_i64s(&db, &rows("rz"))).collect();
-    assert_eq!(stored_in, [(i64::from(b1.x), i64::from(b1.z))], "the slime is stored once, in host 1's region");
+    let stored_in = || -> Vec<(i64, i64)> { query_i64s(&db, &rows("rx")).into_iter().zip(query_i64s(&db, &rows("rz"))).collect() };
+    assert_eq!(stored_in(), [(i64::from(a0.x), i64::from(a0.z))], "the earlier cut stores the slime once, in host 0's region");
+    push_over_the_seam(&mut w, h(0), id);
+    w.pair.until("the slime on host 1", |p| p.sims[1].holders(id) == [b1]);
+    w.until_committed_after(&db, stored);
+    assert_eq!(stored_in(), [(i64::from(b1.x), i64::from(b1.z))], "the later cut stores the slime once, in host 1's region");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }

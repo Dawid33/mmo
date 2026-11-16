@@ -200,6 +200,10 @@ pub struct Coordinator {
     /// No store stands behind this core ([`Self::commit_unstored`], the inline link): its
     /// outputs are free at once, nothing is encoded.
     unstored: bool,
+    /// A transition was handed out ([`Self::take_transition`]) and its write is not answered
+    /// yet ([`Self::transition_written`] / [`Self::transition_failed`]): nothing leaves by
+    /// [`Self::take_out`] meanwhile — a message decided after it may depend on its state.
+    writing: bool,
 }
 
 /// The classification of every [`Coordinator`] field: the projection's (durable, written by
@@ -265,6 +269,7 @@ projection! {
         process = process,
         committed_raw = Vec::new(),
         unstored = false,
+        writing = false,
     }
 }
 
@@ -313,6 +318,7 @@ impl Coordinator {
             process,
             committed_raw: Vec::new(),
             unstored: false,
+            writing: false,
         };
         c.push_view(Target::Every);
         c
@@ -607,7 +613,7 @@ impl Coordinator {
     /// which hands them out with the projection that decided them. A core with no store
     /// ([`Self::commit_unstored`]) frees them at once.
     pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
-        if !self.unstored && self.durable_pending() {
+        if !self.unstored && (self.writing || self.durable_pending()) {
             return Vec::new();
         }
         std::mem::take(&mut self.out)
@@ -672,7 +678,15 @@ impl Coordinator {
         self.history.clear_content_dirty();
         let core = seal_core(&raw);
         self.committed_raw = raw;
+        self.writing = true;
         Some(Transition { core, history, out: std::mem::take(&mut self.out) })
+    }
+
+    /// The write of the transition last taken committed: its messages may leave (the caller
+    /// sends them), and [`Self::take_out`] frees again what was decided with nothing durable
+    /// pending.
+    pub fn transition_written(&mut self) {
+        self.writing = false;
     }
 
     /// The write of transition `t` failed (not committed, not fenced): its messages go back to
@@ -680,6 +694,7 @@ impl Coordinator {
     /// the whole projection again (the history too if `t` carried it). Nothing is decided
     /// twice: the inputs were applied once, and their state is in the next transition.
     pub fn transition_failed(&mut self, t: Transition) {
+        self.writing = false;
         if t.history.is_some() {
             self.history.mark_content_dirty();
         }

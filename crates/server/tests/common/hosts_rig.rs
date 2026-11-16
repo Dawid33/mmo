@@ -1163,12 +1163,14 @@ fn super_region_corners(s: u32, n: usize) -> Vec<(game::SuperRegion, RegionCoord
     all.into_iter().take(n).collect()
 }
 
-/// Slime `id` in host `h`'s seam region, put just past the seam toward the other host's.
+/// Slime `id` in host `h`'s seam region, put over the seam into the middle of the other host's
+/// seam region — half a region from the seam, so its own hops (stateless rolls of the tick)
+/// cannot carry it back before a cut, however the cuts' ticks fall.
 fn push_over_the_seam(w: &mut World, h: HostId, id: EntityId) {
     let (a, _) = w.seam;
     let from = seam_of(w, h);
     // The seam is `b = a + x`: from `a` over +x, from `b` over -x.
-    let x = if from == a { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
+    let x = if from == a { REGION_SIZE * 1.5 } else { -REGION_SIZE / 2.0 };
     sim(w, h).manager.spawner_mut().with_region(from, |region| {
         let key = region.data().id_index[&id];
         let at = game::rapier3d::math::Vector::new(x, above_ground_y(), REGION_SIZE / 2.0);

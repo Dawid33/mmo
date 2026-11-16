@@ -146,7 +146,8 @@ pub(crate) enum Request {
     /// R4: the coordinator declares a succession (Postgres).
     DeclareSuccession(Box<Declare>, Reply<crate::Declared>),
     /// R4: the coordinator rolls the world back (Postgres).
-    RollbackWorld(CoordinatorFence, Reply<u64>),
+    /// From the generation given (idempotent: a world past it answers its generation).
+    RollbackWorld(CoordinatorFence, u64, Reply<u64>),
     /// R4: the operator rolls the world back (`worldctl rollback`; Postgres): `(generation,
     /// successions abandoned)`.
     RollbackWorldOperator(Reply<(u64, u64)>),
@@ -490,11 +491,11 @@ async fn serve(
                     })
                 })
             }
-            Request::RollbackWorld(fence, r) => {
+            Request::RollbackWorld(fence, from, r) => {
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
-                        Pool::Pg(p) => succession::rollback_world(p, fence, lock_timeout_ms).await,
+                        Pool::Pg(p) => succession::rollback_world(p, fence, from, lock_timeout_ms).await,
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
                 })
@@ -869,7 +870,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::ResolvePrepared(r) => r.send(Err(StoreError::ReadOnly)),
         Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::DeclareSuccession(_, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::RollbackWorld(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RollbackWorld(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RollbackWorldOperator(r) => r.send(Err(StoreError::ReadOnly)),
         Request::EndLandlessHost(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::VouchHost(_, r) => r.send(Err(StoreError::ReadOnly)),

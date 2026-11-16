@@ -205,6 +205,11 @@
 //! replaces them (it deletes every row of its id). A total crash at registration abandons the
 //! same way and then re-keys every dirty row's rows (the heirs' among them) to the new host.
 //!
+//! The coordinator's rollback is conditional (Elastic 2a): under the same locks (`coordinator`
+//! `FOR SHARE`, then `world` `FOR NO KEY UPDATE`) it compares the world's generation with the one
+//! it decided the rollback at, and with another one writes nothing (a rollback that committed
+//! before its coordinator recorded it is never done twice). No new lock, no new edge.
+//!
 //! The operator's commands (`worldctl retire-host`'s vouch, `worldctl rollback`) are in `operator.rs`.
 
 use std::collections::BTreeSet;
@@ -631,16 +636,33 @@ async fn end_landless_in(
 }
 
 /// [`crate::StoreHandle::rollback_world`] (Postgres): under the coordinator fence and the
-/// world row's lock (the declaration's order), [`rollback_in`]. Returns the new generation.
-pub(crate) async fn rollback_world(pool: &PgPool, fence: CoordinatorFence, lock_timeout_ms: u64) -> Result<u64, StoreError> {
+/// world row's lock (the declaration's order), [`rollback_in`] — only from generation `from`
+/// (the one the coordinator decided the rollback at, Elastic 2a): a world past it was rolled
+/// back already (this rollback committed before its coordinator could record it, or the
+/// operator's), nothing is written and its generation is the answer. Idempotent. Returns the
+/// world's generation after it.
+pub(crate) async fn rollback_world(
+    pool: &PgPool,
+    fence: CoordinatorFence,
+    from: u64,
+    lock_timeout_ms: u64,
+) -> Result<u64, StoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
     let rolled = async {
         let stored = lock_coordinator_and_world(&mut tx, fence, None).await?;
-        rollback_in(&mut tx, stored).await
+        if stored != from {
+            return Ok((stored, None));
+        }
+        rollback_in(&mut tx, stored).await.map(|(g, abandoned)| (g, Some(abandoned)))
     }
     .await;
     let (generation, abandoned) = rolled.map_err(|e| e.into_store(ROLLING_BACK, lock_timeout_ms))?;
+    let Some(abandoned) = abandoned else {
+        tx.rollback().await?;
+        log::warn!("[world-store] the world is at generation {generation}, not {from}: rolled back already, nothing written");
+        return Ok(generation);
+    };
     tx.commit().await.map_err(|e| declare_error(ROLLING_BACK, e, lock_timeout_ms))?;
     log::warn!("[world-store] world rolled back to generation {generation}; {abandoned} open successions abandoned");
     Ok(generation)

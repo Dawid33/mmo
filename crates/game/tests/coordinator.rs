@@ -41,9 +41,18 @@ impl TakeMsgs for Coordinator {
 /// The pending transition written by a store that commits at once, then what may leave,
 /// with targets.
 fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
-    let mut out = c.take_transition().map(|t| t.out).unwrap_or_default();
+    let mut out = written(c).map(|t| t.out).unwrap_or_default();
     out.extend(c.take_out());
     out
+}
+
+/// The pending transition, written by a store that commits at once (acknowledged).
+fn written(c: &mut Coordinator) -> Option<Transition> {
+    let t = c.take_transition();
+    if t.is_some() {
+        c.transition_written();
+    }
+    t
 }
 
 /// A core restarted from transition `t` (`history`: the history the store holds, when `t`
@@ -3954,6 +3963,70 @@ fn a_world_life(gone: std::rc::Rc<std::cell::Cell<bool>>) -> Vec<(u64, Input)> {
     for _ in 0..12 {
         at(&mut life, 1_000, Box::new(|c, now| c.maintain(now)));
     }
+    // A lease read showing a dead row nobody here declared (host 8): the open successions are
+    // read again (`reread_for`, `reread`, `known`), and the read's answer.
+    at(&mut life, 10, Box::new(|c, now| {
+        let row = |o: u64, state: i64| HostSeen { ordinal: h(o), boot: 7 + o, clean: false, state, seen_ms: now, draining: false, landed: true };
+        c.observe_leases(&[row(0, game::HOST_LIVE), row(1, game::HOST_LIVE), row(8, game::HOST_DEAD)], now, now);
+    }));
+    at(&mut life, 10, Box::new(|c, now| {
+        assert!(c.take_successions_reread(), "a dead row nobody declared asks for a re-read");
+        c.successions_open(Vec::new(), now);
+    }));
+    // A host asks for land of a departed owner (`land_lookups`), the lookup's answer (`land_wanted`).
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(1), HostMsg::LandWanted { sr: (3, 3) }, now)));
+    at(&mut life, 10, Box::new(|c, now| {
+        assert_eq!(c.take_land_lookups(), vec![(3, 3)]);
+        c.land_wanted(h(9), now);
+    }));
+    // A host asks about a cut nobody remembers (`lookups`), and the store's answer.
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::CutPrepared { cut: game::CutId(77) }, now)));
+    at(&mut life, 10, Box::new(|c, _| {
+        assert_eq!(c.take_cut_lookups(), vec![(h(0), game::CutId(77))]);
+        c.cut_outcome(h(0), game::CutId(77), false);
+    }));
+    // Host 1's link drops and it attaches again.
+    at(&mut life, 10, Box::new(|c, _| c.host_detached(h(1))));
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(1), claim_attach(h(1), 7, Vec::new(), Vec::new()), now)));
+    // Host 1 asks to leave (`leave_requests`): its leave cut begins, both parts staged, committed.
+    at(&mut life, 10, Box::new(|c, now| c.handle(h(1), HostMsg::LeaveRequest, now)));
+    for _ in 0..2 {
+        at(&mut life, 1_000, Box::new(|c, now| c.maintain(now)));
+    }
+    for o in 0..2 {
+        at(&mut life, 10, Box::new(move |c, now| {
+            if let Some((cut, _)) = c.world_cut_running() {
+                c.handle(h(o), HostMsg::CutPrepared { cut }, now);
+            }
+        }));
+    }
+    at(&mut life, 10, Box::new(|c, _| {
+        let d = c.take_decision().expect("the leave cut's decision");
+        assert_eq!(d.leaving, vec![h(1)]);
+    }));
+    at(&mut life, 10, Box::new(|c, _| {
+        let (cut, _) = c.world_cut_running().expect("recorded next");
+        c.decided(cut, true);
+        assert_eq!(c.left_hosts(), vec![h(1)]);
+    }));
+    // The store refuses a declaration with a succession open elsewhere: a rollback is wanted
+    // (`rollback`), executed, and a host of the new generation attaches.
+    at(&mut life, 10, Box::new(|c, _| c.declaring_by_hand()));
+    at(&mut life, 10, Box::new(|c, now| c.declared(game::Declared::SuccessionOpen, now)));
+    at(&mut life, 10, Box::new(|c, _| {
+        assert_eq!(c.rollback_from(), Some(0));
+        c.rolled_back(1);
+    }));
+    at(&mut life, 10, Box::new(|c, now| {
+        let mut attach = claim_attach(h(7), 70, Vec::new(), Vec::new());
+        if let HostMsg::Attach { generation, .. } = &mut attach {
+            *generation = 1;
+        }
+        c.handle(h(7), attach, now);
+    }));
+    for _ in 0..3 {
+        at(&mut life, 1_000, Box::new(|c, now| c.maintain(now)));
+    }
     life
 }
 
@@ -3968,7 +4041,7 @@ fn configure(c: &mut Coordinator, gone: bool) {
 }
 
 /// Elastic 2a: the whole core is its projection. A world's inputs run into core A, and into
-/// core B, which is loaded again from its own last transition after EVERY input (the same
+/// core B, which is loaded again from its own last written transition after EVERY input (the same
 /// process boot: a cache reloaded) — each input as one runtime pass (the input, then the
 /// upkeep): their outputs are equal, in order, input by input, and so are their final bytes.
 #[test]
@@ -3988,6 +4061,7 @@ fn a_core_reloaded_after_every_input_is_identical() {
         b
     };
     let mut b = load(&t0, &history, start);
+    let mut last = t0;
     let (mut sent, mut transitions) = (Vec::new(), 0usize);
     // One runtime pass per input: the input, then the upkeep at the pass's store time.
     for (i, (now, input)) in life.iter().enumerate() {
@@ -3995,7 +4069,7 @@ fn a_core_reloaded_after_every_input_is_identical() {
             input(c, *now);
             c.maintain(*now);
         }
-        let (ta, tb) = (a.take_transition(), b.take_transition());
+        let (ta, tb) = (written(&mut a), written(&mut b));
         assert_eq!(ta.is_some(), tb.is_some(), "input {i}: a transition in one core only");
         let mut out_a = ta.as_ref().map(|t| t.out.clone()).unwrap_or_default();
         out_a.extend(a.take_out());
@@ -4015,18 +4089,23 @@ fn a_core_reloaded_after_every_input_is_identical() {
             if let Some(hb) = &tb.history {
                 history = hb.clone();
             }
-            b = load(&tb, &history, *now);
+            last = tb;
         }
+        // Reloaded after EVERY input, from the last transition written: what is not in it is lost.
+        b = load(&last, &history, *now);
     }
     let kinds = |f: fn(&CoordMsg) -> bool| sent.iter().filter(|m| f(m)).count();
     assert!(transitions > 20, "a life worth comparing: {transitions} transitions");
     assert!(kinds(|m| matches!(m, CoordMsg::SpawnPeople { .. })) >= 3, "regions started: {sent:?}");
     assert!(kinds(|m| matches!(m, CoordMsg::Reply { reply: WorldReply::Embarked { .. }, .. })) == 1, "the embark granted once: {:?}", replies(&sent));
     assert!(kinds(|m| matches!(m, CoordMsg::Calendar(_))) >= 3, "days turned");
-    assert_eq!(kinds(|m| matches!(m, CoordMsg::CutDone { committed: true, .. })), 5, "two cuts committed (3 + 2 participants)");
+    assert_eq!(kinds(|m| matches!(m, CoordMsg::CutDone { committed: true, .. })), 7, "three cuts committed (3 + 2 + 2 participants)");
+    assert_eq!(kinds(|m| matches!(m, CoordMsg::Generation(1))), 1, "the rollback told once");
     assert_eq!(kinds(|m| matches!(m, CoordMsg::Succession { .. })), 2, "the order to both recipients");
     assert_eq!(kinds(|m| matches!(m, CoordMsg::SuccessionDone { settled: true, .. })), 2, "settled, both told");
-    assert_eq!(a.encode_projection(), b.encode_projection(), "the final bytes");
+    // The final core bytes; the histories were compared as written by every transition (a clean
+    // advance of the history's `now` is not written: the calendar anchor carries the time).
+    assert_eq!(a.encode_projection().0, b.encode_projection().0, "the final bytes");
     assert_eq!(a.successions_open_count(), 0, "the succession settled");
 }
 
@@ -4157,4 +4236,72 @@ fn the_first_attach_of_a_new_generation_parks_every_older_hosts_regions() {
         c.handle(h(6), attach, 40);
         assert_eq!(c.region_host(r0), Some(h(5)), "host 5's region stands");
     }
+}
+
+/// Elastic 2a fix round 1 (I1): the wanted rollback is in the projection with the generation it
+/// was decided at (`rollback_from`), which the store's rollback is conditional on. The
+/// coordinator dies after the rollback commits and before its transition is written: the next
+/// process loads the projection still wanting it, asks the store again from the old generation,
+/// is answered the world's generation (already rolled back, nothing written) and records it ONCE:
+/// told to the hosts once — or, if hosts of the new generation attached first, not again at all
+/// (they stay attached).
+#[test]
+fn a_rollback_committed_before_its_transition_is_recorded_once_after_a_restart() {
+    for hosts_first in [false, true] {
+        let mut c = succeeding(3);
+        let _ = declare_one(&mut c, 3, h(2), 100);
+        commit_routed(&mut c);
+        read_leases(&mut c, 3, &[h(0)], &[h(2)], 200);
+        c.maintain(200);
+        assert_eq!(c.rollback_from(), Some(0), "wanted from the generation the hosts run");
+        let t = c.take_transition().expect("the rollback is wanted");
+        // The runtime's `rollback_world(fence, 0)` commits generation 1; the process dies before
+        // `rolled_back` is applied and written.
+        let (_, history) = c.encode_projection();
+        let mut c = reload(&t, &history, ProcessBoot(77), 300);
+        c.set_crash_policy(game::CrashPolicy::Succession);
+        assert_eq!(c.rollback_from(), Some(0), "the restarted process asks again from generation 0");
+        if hosts_first {
+            let mut attach = claim_attach(h(5), 50, Vec::new(), Vec::new());
+            if let HostMsg::Attach { generation, .. } = &mut attach {
+                *generation = 1;
+            }
+            c.handle(h(5), attach, 310);
+            commit_routed(&mut c);
+        }
+        // The store answers the world's generation: 1 (rolled back already, nothing written).
+        c.rolled_back(1);
+        let out = commit_routed(&mut c);
+        let told = out.iter().filter(|(_, m)| matches!(m, CoordMsg::Generation(1))).count();
+        assert_eq!(told, usize::from(!hosts_first), "hosts first {hosts_first}: {out:?}");
+        assert!(!c.rollback_wanted());
+        assert_eq!(c.world_generation(), 1);
+        if hosts_first {
+            assert_eq!(c.gate_host(), Some(h(5)), "the new generation's host stays attached");
+        }
+    }
+}
+
+/// Elastic 2a fix round 1 (I2): while a transition's write is in flight nothing leaves by
+/// `take_out`, not even what changed nothing durable — a replayed claim-granting reply whose
+/// grant is only in the unwritten transition must not overtake it (an exit whose last write
+/// timed out releases nothing). Once written, what waited leaves; a failed write keeps it.
+#[test]
+fn nothing_leaves_while_a_write_is_in_flight() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let t = c.take_transition().expect("the grant is pending");
+    // The host resends the request (a timeout): the memo answers, nothing durable changes.
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    assert!(c.take_transition().is_none(), "nothing durable changed since");
+    assert!(c.take_out().is_empty(), "the replayed grant waits for the grant's write");
+    c.transition_failed(t);
+    assert!(c.take_out().is_empty(), "a failed write releases nothing");
+    let t = c.take_transition().expect("written again");
+    assert!(c.take_out().is_empty());
+    c.transition_written();
+    let mut out: Vec<CoordMsg> = t.out.into_iter().map(|(_, m)| m).collect();
+    out.extend(c.take_out().into_iter().map(|(_, m)| m));
+    let granted = replies(&out).into_iter().filter(|(id, r)| *id == rid(1) && matches!(r, WorldReply::Embarked { .. })).count();
+    assert_eq!(granted, 2, "the grant and its replay, once written: {out:?}");
 }

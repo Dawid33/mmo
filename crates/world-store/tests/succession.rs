@@ -404,15 +404,39 @@ fn commit_settles_and_cleans_the_predecessor() {
     w.shutdown();
 }
 
+/// Elastic 2a (fix round 1, I1): the coordinator's rollback is conditional on the generation it
+/// decided it at. Its process dies after the rollback commits and before it wrote the transition
+/// recording it; the next process (a new claim) loads the projection still wanting the rollback
+/// from the old generation and asks again: the world is past it — nothing is written, its
+/// generation is the answer. The generation moved exactly once; the operator's rollback in
+/// between is not repeated either.
+#[test]
+fn a_rollback_asked_again_after_its_commit_moves_the_generation_once() {
+    let Some(w) = World::new(2) else { return };
+    w.vouch(hid(1));
+    let s = w.declared(hid(1), hid(0));
+    assert_eq!(w.h.rollback_world(w.c, 0).unwrap(), 1, "the rollback commits");
+    // The coordinator dies here; a new one claims the row and asks again from generation 0.
+    let next = w.h.claim_coordinator().unwrap();
+    assert_eq!(w.h.rollback_world(next, 0).unwrap(), 1, "rolled back already: its generation");
+    assert_eq!(w.h.world_generation().unwrap(), 1, "the generation moved once");
+    assert_eq!(scalar_i64(&w.w, &format!("SELECT abandoned FROM successions WHERE id = {}", s.id.0)), 1);
+    // The old process's fence still refuses it.
+    assert_eq!(w.h.rollback_world(w.c, 1).unwrap_err(), StoreError::Fenced { sr: None });
+    // From the current generation it rolls back again (a new failure).
+    assert_eq!(w.h.rollback_world(next, 1).unwrap(), 2);
+    w.shutdown();
+}
+
 #[test]
 fn rollback_abandons_open_ones_and_keeps_the_land_with_the_heir() {
     let Some(w) = World::new(2) else { return };
     w.vouch(hid(1));
     let s = w.declared(hid(1), hid(0));
     let stale = CoordinatorFence { epoch: w.c.epoch - 1 };
-    assert_eq!(w.h.rollback_world(stale).unwrap_err(), StoreError::Fenced { sr: None });
+    assert_eq!(w.h.rollback_world(stale, 0).unwrap_err(), StoreError::Fenced { sr: None });
     assert_eq!(w.h.world_generation().unwrap(), 0);
-    assert_eq!(w.h.rollback_world(w.c).unwrap(), 1);
+    assert_eq!(w.h.rollback_world(w.c, 0).unwrap(), 1);
     assert_eq!(w.h.world_generation().unwrap(), 1);
     assert!(w.h.open_successions().unwrap().is_empty());
     assert_eq!(scalar_i64(&w.w, &format!("SELECT abandoned FROM successions WHERE id = {}", s.id.0)), 1);
@@ -532,7 +556,7 @@ fn sqlite_declares_nothing() {
     let c = h.claim_coordinator().unwrap();
     let err = h.declare_succession(vec![(hid(1), 1)], vec![hid(0)], SuccessionKind::Crash, c, 0).unwrap_err();
     assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
-    assert!(matches!(h.rollback_world(c), Err(StoreError::Unsupported(_))));
+    assert!(matches!(h.rollback_world(c, 0), Err(StoreError::Unsupported(_))));
     assert!(matches!(h.end_landless_host(hid(1), 1, c), Err(StoreError::Unsupported(_))), "nor ends a host");
     assert!(h.open_successions().unwrap().is_empty());
     // The hosts read answers both engines' columns.
@@ -733,7 +757,7 @@ fn rollback_leaves_no_in_flight_row_without_a_reader() {
         }
         w.vouch(hid(1));
         let s = w.declared(hid(1), hid(0));
-        let generation = if operator { w.h.rollback_world_operator().unwrap().0 } else { w.h.rollback_world(w.c).unwrap() };
+        let generation = if operator { w.h.rollback_world_operator().unwrap().0 } else { w.h.rollback_world(w.c, 0).unwrap() };
         assert_eq!(generation, 1, "operator {operator}");
         assert!(w.h.open_successions().unwrap().is_empty());
         assert!(w.h.load_in_flight(Some(hid(1))).unwrap().is_empty(), "operator {operator}: no row without a reader under host 1");

@@ -290,8 +290,10 @@ pub(super) struct SuccessionRuns {
     /// ([`super::Coordinator::declaring`]).
     declaring: Option<ProcessBoot>,
     open: BTreeMap<SuccessionId, Run>,
-    /// A world rollback is wanted ([`Coordinator::rollback_wanted`]).
-    rollback: bool,
+    /// A world rollback is wanted ([`Coordinator::rollback_wanted`]), decided at this world
+    /// generation: the store rolls back only from it ([`Coordinator::rollback_from`]), so a
+    /// rollback that committed before a crash is never done twice.
+    rollback: Option<u64>,
     /// The predecessors declared, `(ordinal, boot)`: never lapsed or declared again.
     declared: BTreeSet<(HostId, u64)>,
     /// [`LeaseWatch::reads`] when the declaration in flight was handed out.
@@ -341,7 +343,7 @@ impl Default for SuccessionRuns {
             known: true,
             declaring: None,
             open: BTreeMap::new(),
-            rollback: false,
+            rollback: None,
             declared: BTreeSet::new(),
             declared_at_read: 0,
             deadline_ms: None,
@@ -495,7 +497,7 @@ impl super::Coordinator {
     pub fn declare_wanted(&mut self, now_ms: u64) -> Option<Declare> {
         let (declaring, ending) = (self.declaring(), self.ending().is_some());
         let r = &self.successions;
-        if !r.enabled || !r.known || declaring || r.rollback || ending || !r.open.is_empty() {
+        if !r.enabled || !r.known || declaring || r.rollback.is_some() || ending || !r.open.is_empty() {
             return None;
         }
         if r.refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
@@ -569,7 +571,7 @@ impl super::Coordinator {
             }
             Declared::SuccessionOpen => {
                 log::error!("coordinator: another succession is open in the store: the world rolls back");
-                self.successions.rollback = true;
+                self.want_rollback();
             }
             Declared::NotLapsed(hosts) => {
                 log::info!("coordinator: hosts {hosts:?} beat again (or left) before the declaration: forgotten");
@@ -622,20 +624,41 @@ impl super::Coordinator {
     /// Whether the world must roll back to its last committed cut (the module docs): the
     /// runtime calls `rollback_world` and then [`Self::rolled_back`].
     pub fn rollback_wanted(&self) -> bool {
+        self.successions.rollback.is_some()
+    }
+
+    /// The world generation the wanted rollback was decided at: the store rolls back only from
+    /// it, and answers a world already past it as rolled back (a rollback that committed before
+    /// this coordinator could write its transition is never done twice).
+    pub fn rollback_from(&self) -> Option<u64> {
         self.successions.rollback
+    }
+
+    /// A world rollback is wanted from the generation the hosts run now.
+    fn want_rollback(&mut self) {
+        self.successions.rollback.get_or_insert(self.generation_seen);
     }
 
     /// The world was rolled back to `generation`: every open succession is abandoned
     /// ([`CoordMsg::SuccessionDone`] unsettled) and every host told
     /// ([`CoordMsg::Generation`]: it exits).
+    ///
+    /// A world hosts already attach at (`generation` not above the one seen: a rollback that
+    /// committed while no coordinator ran, its hosts restarted and attached before this
+    /// answer) is not rolled back again here: the flags clear, its runs go, nobody is told.
     pub fn rolled_back(&mut self, generation: u64) {
-        log::error!("coordinator: the world rolled back to its last committed cut: generation {generation}");
         let open = std::mem::take(&mut self.successions.open);
         for id in open.into_keys() {
             self.push(Target::Every, CoordMsg::SuccessionDone { id, settled: false });
         }
-        self.successions.rollback = false;
+        self.successions.rollback = None;
         self.successions.declaring = None;
+        if generation <= self.generation_seen && self.attached_generation >= generation {
+            log::warn!("coordinator: the world is at generation {generation} already and its hosts attach there: nothing more to roll back");
+            self.rolled_back_to = self.rolled_back_to.max(Some(generation));
+            return;
+        }
+        log::error!("coordinator: the world rolled back to its last committed cut: generation {generation}");
         // Every host restarts from the cut, its hops with it (as a newer-generation `Attach`
         // says, `handle`: this coordinator raised the generation itself, so no `Attach` is
         // "newer" and nothing else would clear them).
@@ -736,7 +759,7 @@ impl super::Coordinator {
             }
         }
         if !lost.is_empty() {
-            self.successions.rollback = true;
+            self.want_rollback();
         }
         for (id, adopted) in answered {
             if !self.successions.open.contains_key(&id) {
@@ -770,7 +793,7 @@ impl super::Coordinator {
     /// boot seen beating since they opened ([`Run::beat`]).
     pub(super) fn maintain_successions(&mut self, now_ms: u64) {
         let r = &self.successions;
-        if !r.enabled || r.rollback || r.open.is_empty() {
+        if !r.enabled || r.rollback.is_some() || r.open.is_empty() {
             return;
         }
         let current = |h: HostId| self.attached_boot(h);
@@ -790,7 +813,7 @@ impl super::Coordinator {
                 id.0,
                 self.successions.deadline_ms.unwrap_or(SUCCESSION_DEADLINE_MS)
             );
-            self.successions.rollback = true;
+            self.want_rollback();
             return;
         }
         let open = &self.successions.open;
@@ -809,7 +832,7 @@ impl super::Coordinator {
             self.lapsed_undeclared(now_ms).into_iter().filter(|d| counts(d) && !ends(d)).collect();
         if !lapsed.is_empty() {
             log::error!("coordinator: hosts {lapsed:?} lost their lease while a succession is open: the world rolls back");
-            self.successions.rollback = true;
+            self.want_rollback();
         }
     }
 
@@ -823,7 +846,7 @@ impl super::Coordinator {
         }
         let current = |h: HostId| self.attached_boot(h);
         let waiting: Vec<SuccessionId> = r.open.values().filter(|run| !run.answered(current)).map(|run| run.s.id).collect();
-        (!r.known || self.declaring() || r.rollback || !waiting.is_empty()).then_some(waiting)
+        (!r.known || self.declaring() || r.rollback.is_some() || !waiting.is_empty()).then_some(waiting)
     }
 
     /// Whether an open succession is answered by everyone and nothing else holds cuts back: a
@@ -1138,7 +1161,7 @@ impl super::Coordinator {
     pub fn take_end_landless(&mut self, now_ms: u64) -> Option<EndLandless> {
         let (declaring, ending) = (self.declaring(), self.ending().is_some());
         let r = &self.successions;
-        if !r.enabled || !r.known || declaring || r.rollback || ending {
+        if !r.enabled || !r.known || declaring || r.rollback.is_some() || ending {
             return None;
         }
         if r.end_refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
@@ -1186,7 +1209,7 @@ impl super::Coordinator {
                         "coordinator: host {} lost its lease and an open succession names it: the world rolls back",
                         end.host
                     );
-                    self.successions.rollback = true;
+                    self.want_rollback();
                 }
                 self.successions.end_refused_at_read = Some(self.successions.ending_at_read);
             }

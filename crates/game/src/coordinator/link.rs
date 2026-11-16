@@ -101,6 +101,8 @@ impl SharedCore {
             Some(stored) => {
                 let mut out = Vec::new();
                 if let Some(t) = self.coordinator.take_transition() {
+                    // A store that never fails: committed at once.
+                    self.coordinator.transition_written();
                     stored.0 = t.core;
                     if let Some(h) = t.history {
                         stored.1 = h;

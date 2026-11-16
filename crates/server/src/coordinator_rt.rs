@@ -8,6 +8,10 @@
 //! that write committed. One write in flight at a time: whatever is decided meanwhile waits
 //! for the next transition. A failed write hands its transition back to the core (its
 //! messages wait) and is retried after [`COORDINATOR_SAVE_RETRY_MS`].
+//! Login orders are the exception (decision 1: a process-local relay of the login service's
+//! own state): each is relayed at once to the gate host chosen from the core's attachment state,
+//! which may not be written yet — a host takes orders in any attach state, and a lost order is
+//! the login service's retry.
 //!
 //! In `AllInOne` the host's `WorldManager` reaches it over a crossbeam
 //! [`ChannelWorldLink`] ([`start_all_in_one`]); as its own process
@@ -1664,7 +1668,8 @@ impl CoordinatorRuntime {
         let Some(p) = self.successions.as_mut() else { return Ok(()) };
         if self.core.rollback_wanted() {
             if p.rollback_rx.is_none() && now >= p.rollback_retry_at {
-                p.rollback_rx = Some(self.store.rollback_world_later(self.fence));
+                let from = self.core.rollback_from().unwrap_or_default();
+                p.rollback_rx = Some(self.store.rollback_world_later(self.fence, from));
             }
             let answer = match p.rollback_rx.as_ref().map(|rx| rx.try_recv()) {
                 None | Some(Err(TryRecvError::Empty)) => return Ok(()),
@@ -1827,6 +1832,7 @@ impl CoordinatorRuntime {
     ) -> Result<Vec<(Target, CoordMsg)>, ()> {
         match answer {
             Ok(w) => {
+                self.core.transition_written();
                 self.version = w.version;
                 self.failed_in_a_row = 0;
                 let mono = self.mono_ms();
@@ -1896,6 +1902,8 @@ impl CoordinatorRuntime {
             let answer = match written.recv_timeout(left) {
                 Ok(answer) => answer,
                 Err(RecvTimeoutError::Timeout) => {
+                    // Not committed (as far as anyone knows): nothing it decided, nor anything
+                    // decided after it, leaves (the core's `take_out` refuses while it is in flight).
                     log::error!("[coordinator] the world store did not answer the write at exit within {timeout:?}");
                     break;
                 }
