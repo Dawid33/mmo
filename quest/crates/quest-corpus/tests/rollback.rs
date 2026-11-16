@@ -5,10 +5,10 @@
 //! The stub is drawn too — a request latency of 0–5 ticks and at most one failure rule (`Lost`, `Changed`
 //! or `Timeout` on the nth `world.add`) — so checkpoints fall while handlers are parked on requests, and a
 //! `Timeout` case checkpoints near the VM's deadline (`PROMISE_TIMEOUT_TICKS`), so the window may cross the
-//! tick the promise times out in.
+//! tick the promise times out in. Whether a random case parks is luck; `rollback_across_a_park` is a fixed
+//! case that always does.
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::cell::Cell;
 use std::sync::Arc;
 
 use proptest::prelude::*;
@@ -87,8 +87,16 @@ fn input() -> impl Strategy<Value = Input> {
         })
 }
 
-/// One case; `Ok(true)` when a request was outstanding at the checkpoint (a handler parked across it).
-fn check(i: &Input) -> Result<bool, TestCaseError> {
+/// What a checked case saw.
+struct Checked {
+    /// A request was outstanding at the checkpoint: a handler parked across it.
+    parked: bool,
+    /// The output at the end of the window.
+    output: Vec<String>,
+}
+
+/// One case: checkpoint after `before` ticks, run `k`, roll back and restore the host, run `k` again.
+fn check(i: &Input) -> Result<Checked, TestCaseError> {
     let text = &i.text;
     let tree = SourceTree {
         files: [("main.qs".to_string(), text.clone())].into(),
@@ -127,25 +135,48 @@ fn check(i: &Input) -> Result<bool, TestCaseError> {
         "output after rollback\n{}",
         text
     );
-    Ok(parked)
+    Ok(Checked {
+        parked,
+        output: first_output,
+    })
 }
 
 #[test]
 fn rollback_bar_on_generated_programs() {
-    let parked = Cell::new(0u32);
     let mut runner = TestRunner::new(ProptestConfig::with_cases(generate::cases()));
-    let result = runner.run(&input(), |i| {
-        if check(&i)? {
-            parked.set(parked.get() + 1);
-        }
-        Ok(())
-    });
-    if let Err(e) = result {
+    if let Err(e) = runner.run(&input(), |i| check(&i).map(|_| ())) {
         panic!("{e}");
     }
-    // The property is only as strong as its inputs: some checkpoints must fall during a park.
-    assert!(
-        parked.get() > 0,
-        "no case checkpointed while a request was outstanding"
-    );
+}
+
+/// The property's random stubs park handlers across the checkpoint in only some cases; this one always
+/// does. `h` parks on a request at tick 1 that latency 3 answers at tick 4; the checkpoint is before tick
+/// 2, and the window resumes `h` and runs it to the end.
+#[test]
+fn rollback_across_a_park() {
+    let text = "let g = 0
+
+@on(PlayerClicked)
+fn h(e):
+    g = g + 1
+    let a = await world.add(\"n\", 5) else 0
+    g = g + a
+    print(f\"after {g}\")
+
+fn main():
+    emit(PlayerClicked(player=Player(id=1, name=\"ana\")))
+";
+    let input = Input {
+        text: text.to_string(),
+        stub: StubConfig {
+            latency: 3,
+            ..StubConfig::default()
+        },
+        fuel: 2_000,
+        before: 2,
+        k: 6,
+    };
+    let checked = check(&input).unwrap_or_else(|e| panic!("{e}"));
+    assert!(checked.parked, "`h` is parked at the checkpoint");
+    assert_eq!(checked.output, ["after 6"], "`h` resumed within the window");
 }
