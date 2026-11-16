@@ -126,6 +126,10 @@ fn edge_inputs() {
 fn errors() {
     assert_eq!(codes("if x:\n\ty\n"), vec![("tab-indent", 2, 1)]);
     assert_eq!(codes("if x:\n    a\n  b\n"), vec![("bad-dedent", 3, 1)]);
+    // The stream stays balanced and invents no block.
+    let (tokens, _) = lex("m", "if x:\n    a\n  b\n");
+    let count = |k: Tok| tokens.iter().filter(|t| t.kind == k).count();
+    assert_eq!((count(Tok::Indent), count(Tok::Dedent)), (1, 1));
     assert_eq!(codes("a $ b\n"), vec![("bad-char", 1, 3)]);
     assert_eq!(codes("\"abc\n"), vec![("unterminated-string", 1, 1)]);
     assert_eq!(codes("\"abc"), vec![("unterminated-string", 1, 1)]);
@@ -204,7 +208,11 @@ fn strings_and_fstrings() {
 #[test]
 fn a_megabyte_line_lexes() {
     let text = "1 + ".repeat(1 << 18);
+    let started = std::time::Instant::now();
     let (tokens, diags) = lex("m", &text);
+    // Linear work takes tens of milliseconds; work per token proportional to the rest of the input
+    // took several seconds here.
+    assert!(started.elapsed() < std::time::Duration::from_millis(1000));
     assert!(diags.is_empty());
     assert_eq!(tokens.len(), (1 << 19) + 2);
 }

@@ -250,10 +250,7 @@ fn string_extent(lex: &mut Lexer<Raw>, quote: char) -> Lit {
 
 /// Scans a number whose first digit was just matched.
 fn number(lex: &mut Lexer<Raw>) -> Num {
-    let first = lex.slice();
-    let rest = lex.remainder();
-    let full = format!("{first}{rest}");
-    let (len, value) = scan_number(&full);
+    let (len, value) = scan_number(&lex.source()[lex.span().start..]);
     lex.bump(len - 1);
     value
 }

@@ -90,9 +90,6 @@ impl<'a> Layout<'a> {
                 1,
                 width,
             ));
-            // Keep Indent and Dedent balanced: treat it as a block of its own.
-            self.stack.push(width);
-            self.emit(Tok::Indent, line, col, 0);
         }
     }
 
