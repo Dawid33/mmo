@@ -64,10 +64,19 @@
 //! with `EXISTS` subqueries on `super_regions` and `in_flight`, under the `world` lock and after
 //! the predecessors' rows are locked. It takes no lock (a plain read), so it changes no lock
 //! order and joins no cycle. A claim committing land just before it is seen (that host is a
-//! survivor); one committing after it was not in the world the survivors' journals describe —
-//! such a host met the dead boot with no land, so it exchanged no state with it, and if it
-//! dies before the settle it is a lapsed LANDED host: still a second failure (a rollback — the
-//! residual Elastic 2a accepts; never a loss).
+//! survivor). A host landless at the read exchanged no state with the dead boot BEFORE the
+//! read (it ran no region). AFTER it, it may win land — and, its directory refreshed by no
+//! order, route state to the dead host (land adjacent to the dead host's, a crossing before
+//! the heir adopts): state no survivor reports to the heir — also when a zombie of the dead
+//! host acknowledged it (its journal entry and unsaved-traffic mark stay). That host never saves it: its
+//! next world part is refused (unsaved traffic with a host outside the cut), it reads the
+//! directory, and at the next `BeginCut` — none begins until every recipient applied its
+//! order, which reaches a recipient before that `BeginCut` — a dead row it holds no
+//! succession of means it is no recipient: it stops without a save (`game` `world_cut.rs`,
+//! `WorldManager::take_unaccounted_dead`). Its lapse is a LANDED host's while the run is open:
+//! a second failure, the world rolls back. The same holds for any landed host dying before the
+//! settle (the residual Elastic 2a accepts): a rollback, never a loss, never a world that stops
+//! saving.
 //!
 //! **Ending a landless host** (`end_landless_host`, Elastic 2a): ONE transaction, fenced, under
 //! `lock_timeout` = the cut lock timeout. The lock walk, in this order: `coordinator` `FOR SHARE`

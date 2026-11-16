@@ -123,6 +123,13 @@ impl WorldGeneration {
     pub fn is_set(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
     }
+
+    /// This host must stop as for a rollback — no save, its `hosts` row left dirty — because it
+    /// holds state nobody can account for (Elastic 2a, `WorldManager::take_unaccounted_dead`):
+    /// its lapse rolls the world back to the last committed cut.
+    pub fn stop_for_rollback(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
 }
 
 /// The world store with the process's claimed fence. Cheap to clone; every
@@ -511,6 +518,8 @@ pub trait ClaimingManager {
     /// The dead `hosts` rows no open succession names ([`WorldManager::forget_dead_hosts`]).
     /// The tests' fakes keep no peers: nothing to forget.
     fn forget_dead_hosts(&mut self, _dead: Vec<HostId>) {}
+    /// Every dead `hosts` row of a read ([`WorldManager::note_dead_rows`]).
+    fn note_dead_rows(&mut self, _dead: Vec<HostId>) {}
 }
 
 impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
@@ -519,6 +528,9 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
     }
     fn forget_dead_hosts(&mut self, dead: Vec<HostId>) {
         WorldManager::forget_dead_hosts(self, dead)
+    }
+    fn note_dead_rows(&mut self, dead: Vec<HostId>) {
+        WorldManager::note_dead_rows(self, dead)
     }
     fn take_claims_wanted(&mut self) -> Vec<SuperRegion> {
         WorldManager::take_claims_wanted(self)
@@ -643,6 +655,7 @@ impl DirectoryKeeper {
                         manager.directory_read(rows, live);
                         // Dead rows no open succession names are gone for good (an ended
                         // landless host, Elastic 2a): forgotten first, so none is noted as left.
+                        manager.note_dead_rows(hosts.iter().filter(|r| r.state != world_store::HOST_LIVE).map(|r| r.id).collect());
                         manager.forget_dead_hosts(
                             hosts.iter().filter(|r| r.state != world_store::HOST_LIVE && !r.succeeding).map(|r| r.id).collect(),
                         );

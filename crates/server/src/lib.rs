@@ -1401,6 +1401,12 @@ pub fn run() -> claims::ServerExit {
         if let Some(generation) = manager.take_higher_generation() {
             world_generation.note(generation);
         }
+        // Elastic 2a: state traded with a dead host no succession here accounts for: stop
+        // without a save (the manager logged why); this host's lapse rolls the world back.
+        if let Some(dead) = manager.take_unaccounted_dead() {
+            log::error!("[server] state exchanged with dead host {dead} is accounted for nowhere: stopping without a save");
+            world_generation.stop_for_rollback();
+        }
         manager.pump_lod_results();
         if let Some(cuts) = cuts.as_mut() {
             // Backpressure: no new cut while the store still commits one. Under `claim` only

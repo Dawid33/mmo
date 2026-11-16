@@ -305,7 +305,8 @@ fn resolve(reports: &BTreeMap<HostId, SuccessionReportIn>) -> Resolved {
 /// `other` (holds no host, or holds one only for a moment that a forgotten host never reaches:
 /// `world_cut` names participants of a cut that is decided before any host is forgotten;
 /// `spawn_held` / `spawn_here` / `kicks_in` are answered within `SPAWN_SYNC_WAIT_MS`;
-/// `login_orders` are taken by the server in the same pass; `cut_refused_for` is a test-support record of a refusal; `successions`, `succession_reports`, `adoptions` end at
+/// `login_orders` are taken by the server in the same pass; `cut_refused_for` is a test-support record of a refusal;
+/// `unaccounted_dead` ends the process (it stops at once, no host is forgotten after it); `successions`, `succession_reports`, `adoptions` end at
 /// `SuccessionDone`, where the predecessor is forgotten; `forgotten_hosts` is the tombstone).
 /// Kinds: `key_map` / `key_set` keyed by the host; `pair_set` of `(host, _)`; `value_map`
 /// whose values are hosts; `value_first` / `value_second` whose value tuples hold the host
@@ -319,7 +320,7 @@ macro_rules! host_fields {
             peers, peer_waiting, peer_queued, peer_endpoints, peer_boots, left_peers, returning_peers,
             left_land, leave_pairs, count_pairs, early_marks, succeeded_peers
             ],
-            key_set: [peer_synced, pair_owns_seen, left_land_unread, unsaved_traffic],
+            key_set: [peer_synced, pair_owns_seen, left_land_unread, unsaved_traffic, dead_seen],
             pair_set: [dead_boots, peer_in_source_view],
             value_map: [foreign_running, redirected, departed],
             value_first: [handed, claim_wanted_sent],
@@ -343,7 +344,7 @@ macro_rules! host_fields {
             recently_despawned, despawn_warned, intent_replies_lost, parked_bodies, items_destroyed,
             incarnation, incarnation_seen, next_incarnation, unowned_waiting, claims_wanted, claim_asks,
             land_wanted, land_wanted_sent, land_scanned_ms, directory_wanted, journal_always,
-            peer_dropped_for_dead, peer_state_to_forgotten, cut_refused_for, forgotten_hosts, foreign_halo_stale, higher_generation, endpoint,
+            peer_dropped_for_dead, peer_state_to_forgotten, cut_refused_for, unaccounted_dead, forgotten_hosts, foreign_halo_stale, higher_generation, endpoint,
             asked_elsewhere_answered_ms, observer_orders, nonces, observer_revocations,
             foreign_input_warned_ms, unseeded_warned, world_cut, world_cut_seen, wrapper_seen, marks_queued,
             leave_requested, leaving_cut, leave_outcome, leave_decided, leave_parked, world_cut_done,
@@ -497,6 +498,21 @@ impl<S: RegionSpawner> WorldManager<S> {
                 Err(e) => log::debug!("[server] host {h}'s row is dead, but it is not forgotten yet: {e}"),
             }
         }
+    }
+
+    /// The `hosts` rows a directory read found dead (`dead`, every one of them): noted for the
+    /// cut-time check of traffic nobody accounts for ([`Self::dead_seen`]'s rule, `world_cut.rs`).
+    pub fn note_dead_rows(&mut self, dead: impl IntoIterator<Item = HostId>) {
+        let me = self.ordinal();
+        self.dead_seen.extend(dead.into_iter().filter(|h| *h != me && !self.forgotten_hosts.contains(h)));
+    }
+
+    /// The dead host this host exchanged state with that no succession run here accounts for
+    /// (Elastic 2a, once): the server stops WITHOUT saving — this host's row stays dirty, its
+    /// lapse while the succession is open is a second failure, and the world rolls back to the
+    /// last committed cut (a rollback, never a loss, never a world that stops saving).
+    pub fn take_unaccounted_dead(&mut self) -> Option<HostId> {
+        self.unaccounted_dead.take()
     }
 
     /// Whether host `host` was forgotten ([`Self::forget_host`]).

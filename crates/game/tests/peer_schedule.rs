@@ -8803,11 +8803,13 @@ fn a_host_started_after_a_leave_declaration_reaches_the_leavers_restart() {
 }
 
 /// Fix round 3, Elastic 1: S's process starts again after L's leave and BEFORE the
-/// declaration — a new host S', owning nothing, so (Elastic 2a) NO survivor of it: no order
-/// comes to it — and notes L as left only from a directory read AFTER the declaration. L's process starts again too (a new host L', owning nothing)
-/// and S' reaches it at once; S' then applies the order, the new host's link left alone. Nothing is lost
-/// or duplicated: the settle is whole, T's held slime lands once.
-fn survivor_booted_between(rig: &mut MultiRig) {
+/// declaration — a new host S' — but notes L as left only from a directory read AFTER the
+/// declaration. L's process starts again too (a new host L', owning nothing) and S' reaches it
+/// at once. `landed`: S' wins land before the declaration, so it is a survivor (Elastic 2a)
+/// and applies the order, the new host's link left alone; else S' holds no land, is no
+/// survivor, and no order comes to it. Nothing is lost or duplicated either way: the settle is
+/// whole, T's held slime lands once.
+fn survivor_booted_between_as(rig: &mut MultiRig, landed: bool) {
     let chain = heir_world(rig);
     let (rs, rd, rt) = (chain[0], chain[1], chain[2]);
     let (s, leaver, t) = (rig.owner(rs), rig.owner(rd), rig.owner(rt));
@@ -8823,9 +8825,12 @@ fn survivor_booted_between(rig: &mut MultiRig) {
         rig.kill(h);
     }
     let left_as = rig.boots[leaver.0 as usize];
-    // S's process starts again before the declaration: a new host S', landless — no survivor
-    // (Elastic 2a). Its coordinator link is held back meanwhile.
+    // S's process starts again before the declaration: a new host S'. Its coordinator link
+    // is held back meanwhile (its order, if any, with it).
     let s2 = rig.start("S");
+    if landed {
+        win_land(rig, s2, FAR_SR);
+    }
     let live: std::collections::BTreeSet<HostId> = [s2, t].into_iter().collect();
     rig.core().set_expected_hosts(live);
     assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s2.0 as usize].manager.world_attached()), "S' attached");
@@ -8833,7 +8838,7 @@ fn survivor_booted_between(rig: &mut MultiRig) {
     rig.with_land_on_demand();
     assert!(push_over(rig, from_t, rt, rd));
     let succession = until_land_declared(rig);
-    assert!(!succession.survivors.contains(&s2), "S' holds no land: no survivor (Elastic 2a): {succession:?}");
+    assert_eq!(succession.survivors.contains(&s2), landed, "S' is a survivor exactly when it holds land: {succession:?}");
     rig.read_directory(s2);
     rig.hosts[s2.0 as usize].manager.note_left_peers([(leaver, left_as)]);
     let back = rig.start("L");
@@ -8841,10 +8846,17 @@ fn survivor_booted_between(rig: &mut MultiRig) {
     rig.core().set_expected_hosts(live);
     assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[s2.0 as usize].manager.peer_is_reachable(back)), "S' reaches L's restart");
     rig.hold_world(s2, false);
-    for _ in 0..WAIT_ROUNDS {
-        rig.cut_round();
+    if landed {
+        assert!(
+            until(rig, SUCCESSION_ROUNDS, |rig| rig.core().succession_progress().iter().any(|(i, a, _)| *i == succession.id && a.contains(&s2))),
+            "S' applied the order"
+        );
+    } else {
+        for _ in 0..WAIT_ROUNDS {
+            rig.cut_round();
+        }
+        assert!(rig.hosts[s2.0 as usize].manager.successions().is_empty(), "no order comes to a host that is no survivor");
     }
-    assert!(rig.hosts[s2.0 as usize].manager.successions().is_empty(), "no order comes to a host that is no survivor");
     assert!(rig.hosts[s2.0 as usize].manager.peer_is_reachable(back), "the new host's link is left alone");
     assert_settled_whole(rig, &succession, &[from_t]);
     rig.run(rd);
@@ -8854,10 +8866,26 @@ fn survivor_booted_between(rig: &mut MultiRig) {
     assert_restored_once(rig, &[from_t]);
 }
 
+/// [`survivor_booted_between_as`], S' holding land before the declaration: a survivor.
+fn survivor_booted_between(rig: &mut MultiRig) {
+    survivor_booted_between_as(rig, true);
+}
+
+/// [`survivor_booted_between_as`], S' holding no land: no survivor (Elastic 2a).
+fn landless_booted_between(rig: &mut MultiRig) {
+    survivor_booted_between_as(rig, false);
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_survivor_booted_before_the_declaration_reports_nothing_of_a_released_leaver() {
     sweep("a_survivor_booted_before_the_declaration_reports_nothing_of_a_released_leaver", 3, 1, HEIR_SWEEP_SEEDS, survivor_booted_between);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_landless_host_booted_before_the_declaration_gets_no_order_and_the_settle_is_whole() {
+    sweep("a_landless_host_booted_before_the_declaration_gets_no_order_and_the_settle_is_whole", 3, 1, HEIR_SWEEP_SEEDS, landless_booted_between);
 }
 
 // --- The home answers for regions whose owner changed (R4 Task 16) ---------------------
@@ -10409,6 +10437,7 @@ fn flapping_landless_host(rig: &mut MultiRig) {
     rig.hold_orders(s.heir, false);
     assert_settled_whole(rig, &s, &[a]);
     assert_back_on_the_heir(rig, rd, b);
+    rig.assert_conserved_world();
     assert!(!rig.core().rollback_wanted() && rig.abandoned.is_empty(), "never rolled back");
     assert_eq!(rig.ended.len(), 3, "three ends, no succession of them");
     assert_eq!(rig.successions.len(), 1, "one succession: the landed host's");
@@ -10506,4 +10535,83 @@ fn landed_during_a_run_dies(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_host_landed_during_a_run_that_dies_rolls_back_whole() {
     sweep("a_host_landed_during_a_run_that_dies_rolls_back_whole", 2, 1, HEIR_SWEEP_SEEDS, landed_during_a_run_dies);
+}
+
+/// Elastic 2a, the post-declaration lander (review I1): a landless host X is no survivor of
+/// D's succession. Before the heir adopts, X wins land ADJACENT to D's and a slime crosses from
+/// X's region into D's old one — X's directory, refreshed by no order, still names D, so the
+/// transfer goes to the dead host and nobody will report it to the heir. No cut may commit
+/// without it: X refuses its part, reads the directory, finds D dead and stops without a save
+/// at the next `BeginCut`; its lapse is a landed host's during the run — the world rolls back
+/// to the base cut. A rollback, never a loss, never a world that stops saving.
+fn landed_adjacent_after_the_declaration(rig: &mut MultiRig) {
+    let chain = host_chain(2);
+    let (rs, rd) = (chain[0], chain[1]);
+    let rf = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .map(|(dx, dz)| RegionCoords::new(rd.x + dx, rd.z + dz))
+        .into_iter()
+        .find(|c| *c != rs && sr_of(rig, *c) != sr_of(rig, rs) && sr_of(rig, *c) != sr_of(rig, rd))
+        .expect("a free neighbour of the dead host's region");
+    let rows = rendezvous_rows(rig, &[sr_of(rig, rf)], &[]);
+    rig.with_directory(rows);
+    rig.with_claims();
+    rig.run(rs);
+    rig.run(rd);
+    world_cuts(rig);
+    rig.with_adoption();
+    rig.parked_hold = true;
+    let x = rig.start("x");
+    let running: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    rig.core().set_expected_hosts(running);
+    for _ in 0..FLAP_ROUNDS {
+        rig.cut_round();
+    }
+    let dead = rig.owner(rd);
+    let (a, b) = (slime_in(rig, rs, 0), slime_in(rig, rd, 1));
+    until_committed(rig, 1);
+    let base = rig.last_committed().0;
+    rig.kill(dead);
+    let s = rig.run_succession(dead).remove(0);
+    assert!(!s.survivors.contains(&x), "X holds no land at the declaration: {s:?}");
+    rig.hold_orders(s.heir, true);
+    win_land(rig, x, sr_of(rig, rf));
+    rig.homes[x.0 as usize] = rf;
+    rig.keep(x);
+    for _ in 0..FLAP_ROUNDS {
+        rig.cut_round();
+    }
+    assert_eq!(rig.hosts[x.0 as usize].manager.owner_of(rd), game::Owner::Host(dead), "X's directory is stale");
+    let id = rig.spawn_slime(rf, past_seam(rf, rd, REGION_SIZE / 2.0));
+    let journalled_to_dead = until(rig, CROSS_ROUNDS, |rig| rig.hosts[x.0 as usize].manager.peer_journal().entries(dead).next().is_some());
+    assert!(journalled_to_dead, "X sent the slime {id:?} to the dead host");
+    rig.hold_orders(s.heir, false);
+    let mut stopped = None;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        rig.cut_round();
+        rig.drive_claims();
+        if let Some(d) = rig.hosts[x.0 as usize].manager.take_unaccounted_dead() {
+            stopped = Some(d);
+            break;
+        }
+        assert!(rig.open_successions().contains(&s.id), "never settled without X's traffic");
+    }
+    assert_eq!(stopped, Some(dead), "X stops: its traffic with the dead host is accounted for nowhere (seed {})", rig.seed);
+    assert_eq!(rig.last_committed().0, base, "nothing committed after the base cut");
+    rig.kill(x);
+    let generation = rig.roll_back(x);
+    assert_eq!(generation, crate::common::multi_rig::RIG_GENERATION + 1, "one rollback");
+    assert!(rig.open_successions().is_empty() && rig.abandoned.contains(&s.id), "abandoned");
+    assert_restored_once(rig, &[a, b]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_landed_adjacent_after_the_declaration_rolls_the_world_back_never_stuck() {
+    sweep(
+        "a_host_landed_adjacent_after_the_declaration_rolls_the_world_back_never_stuck",
+        2,
+        1,
+        HEIR_SWEEP_SEEDS,
+        landed_adjacent_after_the_declaration,
+    );
 }

@@ -281,11 +281,31 @@ impl<S: RegionSpawner> WorldManager<S> {
         let outside = |h: &HostId| !peers.contains(h) && *h != me && !self.left_peers.contains_key(h) && !self.succeeded_peers.contains_key(h);
         let unsaved: Vec<HostId> = self.unsaved_traffic.iter().copied().filter(|h| outside(h)).collect();
         if !unsaved.is_empty() {
-            log::warn!(
-                "world cut {} of hosts {hosts:?}: this host exchanged state with hosts {unsaved:?}, which are not in it and \
-                 no cut has saved since: refused (the next cut takes them in)",
-                cut.0
-            );
+            // Elastic 2a: one of them was seen DEAD by a directory read before this `BeginCut`.
+            // No cut runs at a declaration and none begins until every recipient applied its
+            // order, which reached this host before this `BeginCut` on the same link: had this
+            // host been a recipient it would hold the dead host as succeeded. It is not — it won
+            // land after the declaration and traded state with the dead host (a stale
+            // directory) that nobody will report to the heir. No cut may commit without that
+            // state and none can with it: this host stops without saving, and its lapse rolls
+            // the world back (`take_unaccounted_dead`).
+            if let Some(dead) = unsaved.iter().copied().find(|h| self.dead_seen.contains(h)) {
+                log::error!(
+                    "world cut {}: this host exchanged state with host {dead}, whose row is dead, and holds no succession \
+                     of it (it is no recipient): that state is accounted for nowhere — stopping without a save; the world \
+                     rolls back to its last committed cut",
+                    cut.0
+                );
+                self.unaccounted_dead.get_or_insert(dead);
+            } else {
+                log::warn!(
+                    "world cut {} of hosts {hosts:?}: this host exchanged state with hosts {unsaved:?}, which are not in it \
+                     and no cut has saved since: refused (the next cut takes them in)",
+                    cut.0
+                );
+            }
+            // A host outside the cut may be dead: the next directory read tells.
+            self.directory_wanted = true;
             self.cut_refused_for = Some((cut, unsaved));
             return Err(CutFailure::Aborted);
         }

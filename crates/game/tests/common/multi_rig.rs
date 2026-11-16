@@ -1097,9 +1097,11 @@ impl MultiRig {
             .filter(|o| self.row_dead(*o))
             .filter(|o| !self.successions.iter().any(|(s, _)| open.contains(&s.id) && s.predecessor == *o))
             .collect();
+        let dead: Vec<HostId> = host_ids(self.hosts.len() as u32).filter(|o| self.row_dead(*o)).collect();
         let m = &mut self.hosts[h.0 as usize].manager;
         m.set_draining(self.draining.clone());
         m.directory_read(rows, live);
+        m.note_dead_rows(dead);
         m.forget_dead_hosts(gone);
         m.note_clean_rows(left);
     }
@@ -1459,11 +1461,11 @@ impl MultiRig {
         let n = self.hosts.len() as u32;
         let base_cut = self.last_cut.as_ref().map_or(CutId(0), |(c, _)| *c);
         let predecessors: BTreeSet<HostId> = d.dead.iter().map(|(p, _)| *p).collect();
-        // `declare_in`'s survivors (Elastic 2a): the dirty live hosts holding land — a
-        // `super_regions` or `in_flight` row — or named heir, minus the predecessors. (As before,
-        // the rig counts a killed host as no live row: its tests declare every killed host.)
+        // `declare_in`'s survivors (Elastic 2a), exactly: the dirty live `hosts` rows — a killed
+        // host whose row is not dead yet (not declared, not ended) is one — holding land (a
+        // `super_regions` or `in_flight` row) or named heir, minus the predecessors.
         let survivors: Vec<HostId> = host_ids(n)
-            .filter(|h| !self.dead.contains(h) && !self.row_dead(*h) && !predecessors.contains(h))
+            .filter(|h| !self.row_dead(*h) && self.left.get(h) != Some(&self.boots[h.0 as usize]) && !predecessors.contains(h))
             .filter(|h| self.landed(*h) || d.heirs.contains(h))
             .collect();
         let store = self.claim_store.as_mut().expect("with_claims: the rig's super_regions table");

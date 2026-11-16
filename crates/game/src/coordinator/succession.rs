@@ -65,7 +65,9 @@
 //! beside a healthy host (each restart a new landless id) never rolls the world back. A lapsed
 //! LANDED host while a run is open, or a lapsed recipient, is still a second failure (the
 //! residual: a host that won land after the declaration and dies before the settle rolls the
-//! world back — a rollback, never a loss).
+//! world back — a rollback, never a loss). Such a host that traded state with the dead host
+//! (its directory stale: no order reached it) stops itself without a save at the next
+//! `BeginCut` (`world_manager/world_cut.rs`, `take_unaccounted_dead`), which is that rollback.
 //!
 //! **Drain** (Task 11, decision 7): a host that leaves parks everything in its leave cut, its
 //! `hosts` row turns clean and its claims STAY. When a live host needs one of its regions it
@@ -449,7 +451,7 @@ impl super::Coordinator {
     /// the batch and answers [`Self::declared`] (or [`Self::declare_failed`]).
     pub fn declare_wanted(&mut self, now_ms: u64) -> Option<Declare> {
         let r = &self.successions;
-        if !r.enabled || !r.known || r.declaring || r.rollback || !r.open.is_empty() {
+        if !r.enabled || !r.known || r.declaring || r.rollback || r.ending.is_some() || !r.open.is_empty() {
             return None;
         }
         if r.refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
@@ -950,7 +952,9 @@ impl super::Coordinator {
     /// about to go adopts no land it would hand on minutes later.
     fn heir_candidates(&self, live: BTreeSet<HostId>) -> BTreeSet<HostId> {
         let staying: BTreeSet<HostId> = live.iter().copied().filter(|h| self.takes_logins(*h)).collect();
-        let landed: BTreeSet<HostId> = staying.iter().copied().filter(|h| self.landed(*h)).collect();
+        // Ranked on evidence: a row the latest read did not show (registered since) is not landed.
+        let landed: BTreeSet<HostId> =
+            staying.iter().copied().filter(|h| self.leases.row(*h).is_some_and(|r| r.landed)).collect();
         if !landed.is_empty() {
             landed
         } else if !staying.is_empty() {

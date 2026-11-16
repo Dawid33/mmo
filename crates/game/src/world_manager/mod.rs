@@ -1303,6 +1303,14 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The latest world cut this host refused its part of for `unsaved_traffic` with hosts
     /// outside it, with those hosts (test support: [`Self::world_cut_refused_for`]).
     cut_refused_for: Option<(CutId, Vec<HostId>)>,
+    /// Hosts whose `hosts` row a directory read showed dead ([`Self::note_dead_rows`], Elastic
+    /// 2a): a world cut refused for unsaved traffic with one of them, after that read, means
+    /// this host is no recipient of its succession — its traffic is unaccounted for.
+    dead_seen: BTreeSet<HostId>,
+    /// This host exchanged state with this dead host that no succession run here accounts for
+    /// (it won land after a declaration that did not name it): it must stop without saving —
+    /// its lapse rolls the world back ([`Self::take_unaccounted_dead`]).
+    unaccounted_dead: Option<HostId>,
     /// Messages to forgotten hosts dropped unsent ([`Self::forget_host`], `succession.rs`),
     /// since start (the `[server]` line's `peer_dropped_for_dead=`).
     peer_dropped_for_dead: u64,
@@ -1607,6 +1615,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer_queued: BTreeMap::new(),
             unsaved_traffic: BTreeSet::new(),
             cut_refused_for: None,
+            dead_seen: BTreeSet::new(),
+            unaccounted_dead: None,
             peer_dropped_for_dead: 0,
             peer_state_to_forgotten: 0,
             forgotten_hosts: BTreeSet::new(),
