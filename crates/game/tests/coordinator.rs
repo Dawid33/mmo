@@ -569,7 +569,7 @@ fn crossing_held_behind_the_attach_keeps_one_body() {
     let out = commit(&mut c);
     let (p, q) = (people[0], people[1]);
     // Bodies on the host: everyone spawned into A once.
-    let mut count = |p, out: &[CoordMsg], n: &mut i32| *n += body_delta(out, p);
+    let count = |p, out: &[CoordMsg], n: &mut i32| *n += body_delta(out, p);
     let (mut p_bodies, mut q_bodies) = (0, 0);
     count(p, &out, &mut p_bodies);
     count(q, &out, &mut q_bodies);
@@ -1455,7 +1455,7 @@ fn login_race(choices: &[u8], g_flight: &[HostMsg], grant: bool) -> (Vec<u8>, Co
     let mut h_hop = 1;
     let mut h_out = std::collections::VecDeque::from([online_at(A, fortress, false, h_hop)]);
     let mut h_in: std::collections::VecDeque<CoordMsg> = Default::default();
-    let mut route = |c: &mut Coordinator, h_in: &mut std::collections::VecDeque<CoordMsg>| {
+    let route = |c: &mut Coordinator, h_in: &mut std::collections::VecDeque<CoordMsg>| {
         for (to, m) in commit_routed(c) {
             if to == Target::Host(HOST_H) && matches!(m, CoordMsg::HopIs { player: A, .. }) {
                 h_in.push_back(m);

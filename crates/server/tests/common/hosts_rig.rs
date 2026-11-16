@@ -1096,22 +1096,6 @@ fn exit_host_leaving(
     (exit, sim.manager.leave_outcome())
 }
 
-/// Rounds until host `h` saw a newer world generation (a peer's hello, or a `BeginCut`):
-/// its rollback flag is set.
-fn until_rolled_back(w: &mut World, h: HostId) {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if let Some(g) = sim(w, h).manager.take_higher_generation() {
-            w.generations[h.0 as usize].note(g);
-        }
-        if w.generations[h.0 as usize].is_set() {
-            return;
-        }
-        assert!(Instant::now() < deadline, "host {h} never saw the newer world generation");
-        w.pair.round();
-    }
-}
-
 /// The running regions of every host up holding `id`, with their host.
 fn holders_all(w: &mut World, id: EntityId) -> Vec<(HostId, RegionCoords)> {
     let mut out = Vec::new();
@@ -1144,11 +1128,6 @@ fn saved_tick(db: &PgDb, rc: RegionCoords) -> i64 {
 /// The newest committed cut: `(cut, tick)`.
 fn last_committed(db: &PgDb) -> (i64, i64) {
     decisions(db).into_iter().filter(|(_, _, k)| *k).map(|(c, t, _)| (c, t)).last().expect("a committed cut")
-}
-
-/// The other host (two hosts).
-fn other(h: HostId) -> HostId {
-    HostId(1 - h.0)
 }
 
 /// A host booted as `server::run` boots it under `claim`: registered FIRST (the next id),
@@ -1184,10 +1163,6 @@ fn super_region_corners(s: u32, n: usize) -> Vec<(game::SuperRegion, RegionCoord
     all.into_iter().take(n).collect()
 }
 
-/// The bound on both hosts' clean leave when they are stopped together: well inside the
-/// supervisor's 95 s deadline (the leave batch, a cut's lead and its decision take ~3 s).
-const BOTH_LEAVE_WITHIN: Duration = Duration::from_secs(15);
-
 /// Slime `id` in host `h`'s seam region, put just past the seam toward the other host's.
 fn push_over_the_seam(w: &mut World, h: HostId, id: EntityId) {
     let (a, _) = w.seam;
@@ -1201,73 +1176,3 @@ fn push_over_the_seam(w: &mut World, h: HostId, id: EntityId) {
     });
 }
 
-/// What one host's `exit_world` came to: its outcome, how long it took from the shared
-/// stop signal, and the leave cut that named it (`leaving_cut`).
-struct Exited {
-    exit: server::claims::ServerExit,
-    took: Duration,
-    leaving_cut: Option<game::CutId>,
-}
-
-/// Every host gets the stop signal at the same moment (as the dev stack's supervisor
-/// TERMs them all): each runs the real `exit_world` on its own thread, its regions ticking
-/// at its own pace, the coordinator reading the highest world tick. Their outcomes, by
-/// ordinal; their peer listeners and coordinator links go with them.
-fn exit_every_host_at_once(w: &mut World) -> Vec<Exited> {
-    let mut sims: Vec<Sim> = std::mem::take(&mut w.pair.sims);
-    sims.sort_by_key(|s| s.ordinal);
-    let started = w.pair.started;
-    let tick = w.pair.tick.clone();
-    let stop = std::sync::Barrier::new(sims.len());
-    let params: Vec<(server::claims::Fenced, server::claims::WorldGeneration)> =
-        sims.iter().map(|s| (w.claims[s.ordinal.0 as usize].fenced().clone(), w.generations[s.ordinal.0 as usize].clone())).collect();
-    let exited = std::thread::scope(|scope| {
-        let handles: Vec<_> = sims
-            .iter_mut()
-            .zip(&params)
-            .map(|(sim, (fenced, generation))| {
-                let (tick, stop) = (tick.clone(), &stop);
-                scope.spawn(move || {
-                    let region_out = sim.region_out.clone();
-                    let cuts = sim.cuts.take();
-                    // Under `claim` the lease is beaten while the host waits for its leave cut
-                    // (`server::run`'s exit does so); the R3 rig's hosts beat nothing.
-                    let mut beat = sim.heartbeat.take();
-                    let beat_fenced = fenced.clone();
-                    stop.wait();
-                    let at = Instant::now();
-                    let exit = server::cuts::exit_world(
-                        &mut sim.manager,
-                        server::cuts::ExitParams {
-                            region_out: &region_out,
-                            now_ms: || started.elapsed().as_millis() as u64,
-                            cuts,
-                            coordinator: None,
-                            fenced,
-                            world_generation: generation,
-                            park_timeout: server::cuts::EXIT_PARK_TIMEOUT,
-                            save_timeout: Duration::from_secs(10),
-                            now_tick: || 0,
-                        },
-                        |m| {
-                            let _ = server::lease::pump_or_fence(&mut beat, &beat_fenced, Instant::now());
-                            m.spawner_mut().tick_all();
-                            m.spawner_mut().pump();
-                            tick.fetch_max(m.spawner_mut().world_tick(), std::sync::atomic::Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(5));
-                        },
-                    );
-                    Exited { exit, took: at.elapsed(), leaving_cut: sim.manager.leaving_cut() }
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("an exit thread panicked")).collect::<Vec<_>>()
-    });
-    for sim in sims {
-        let h = sim.ordinal;
-        drop(sim);
-        w.switches[h.0 as usize].drop_link();
-        w.links[h.0 as usize] = None;
-    }
-    exited
-}

@@ -1045,7 +1045,6 @@ impl MultiRig {
     /// must give every host its keeper's home as `Static` did. Kept by
     /// [`Self::rebuild_from_last_cut`].
     pub fn with_directory(&mut self, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
-        let hosts = self.hosts.len() as u32;
         for (h, rig) in self.hosts.iter_mut().enumerate() {
             let mut claim = game::PgClaim::new(HostId(h as u64));
             let directory = game::Ownership::directory_mut(&mut claim).expect("a directory");
