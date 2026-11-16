@@ -931,6 +931,13 @@ pub enum ServerPacket {
     /// two connections have no order between them, and a ping-pong's late `PlayerRegion`
     /// from the host the body left again must not take the home back there.
     HomeHop(u64),
+    /// This host was marked to drain (`worldctl drain`, Elastic 1): at world tick `at_tick`
+    /// it leaves the world — the session is ended with the leaving refusal and the client
+    /// rejoins on another host by itself. Sent to every session whose home is this host when
+    /// the drain is first known, to each that becomes home here later, and again when the
+    /// deadline moves earlier; never to an observer session. A hand-off away (`HomeHop` on
+    /// another connection) ends what it says.
+    HostDraining { at_tick: u64 },
 }
 
 /// What a client presents to another host (`Credential::Observer`) to subscribe to its

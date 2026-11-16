@@ -2617,6 +2617,8 @@ impl GameInstanceManager {
             }
             // Unreachable: `handle_packet` takes every `HomeHop` before it gets here.
             game::ServerPacket::HomeHop(_) => debug_assert!(false, "HomeHop reached apply_packet"),
+            // Task 9 draws the countdown.
+            game::ServerPacket::HostDraining { .. } => {}
             // The first packet of every session: which host the home is.
             game::ServerPacket::Host(endpoint) => {
                 info!("[client] the home connection is to host {}", endpoint.id);

@@ -168,6 +168,7 @@ pub mod claims;
 pub mod coordinator_rt;
 pub mod cuts;
 pub mod dev_structures;
+pub mod drain;
 pub mod health;
 pub mod lease;
 pub mod lod_workers;
@@ -1029,6 +1030,8 @@ pub fn run() -> claims::ServerExit {
     ));
     // Kept only to read the manager→writer backlog for the `[server]` line.
     let writer_backlog = server_send.clone();
+    // A drained host's refusals of new sessions (`drain::idle_drained`): the manager is gone by then.
+    let drained_out = server_send.clone();
     // Region starts generate on their own thread; the manager's copy of the
     // generator is only reached by paths that stay synchronous by design.
     let region_gen_cache = gen_cache.clone();
@@ -1271,6 +1274,9 @@ pub fn run() -> claims::ServerExit {
     }
     // Role `all` registers nothing: ready once its main loop runs (a host already is).
     health::Health::global().set_registered(true);
+    // The loop ended for a drain's deadline (`drain.rs`): after a committed leave the process
+    // stays up drained instead of exiting.
+    let mut drain_due = false;
     'main: loop {
         health::Health::global().loop_beat();
         let now_ms = start.elapsed().as_millis() as u64;
@@ -1322,6 +1328,12 @@ pub fn run() -> claims::ServerExit {
         // thread would keep beating for a host that no longer runs.
         if lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now()) {
             break 'main;
+        }
+        // A drain mark (`worldctl drain`), read by that beat: the deadline its players are told
+        // (`claim` hosts; a `static` host is a world's only one and is not drained).
+        if claim_on_demand {
+            let now_tick = world_clock.tick_at(start.elapsed().as_millis() as u64);
+            drain::note_drain(&mut manager, heartbeat.as_ref().and_then(lease::Heartbeat::drain_in_ms), now_tick);
         }
         // A newer host dialed in: its session, over the link made for it.
         if let Some(links) = &peer_links {
@@ -1382,6 +1394,12 @@ pub fn run() -> claims::ServerExit {
         if let Some(watch) = terrain_watch.as_mut() {
             watch.pump(&mut manager);
         }
+        // The drain's deadline passed and the coordinator is attached: leave (below), then idle.
+        if manager.drain_due() {
+            info!("[server] the drain deadline passed: leaving the world");
+            drain_due = true;
+            break 'main;
+        }
         report.maybe_report(
             &mut manager,
             perf::Backlog {
@@ -1418,9 +1436,11 @@ pub fn run() -> claims::ServerExit {
         // Under `claim` (`CrashPolicy::Succession`) a host of several keeps its lease while it
         // waits for its leave cut (R4): a lapse there would be declared a crash of a host whose
         // part the leave cut is staging; a `Replaced` answer sets the fenced flag the exit
-        // watches. Under `Static` nothing beats during the exit: R3's exit exactly.
-        |_| {
-            if claim_on_demand {
+        // watches. Under `Static` nothing beats during the exit: R3's exit exactly. Once the leave
+        // committed nothing beats any more: the clean row may be pruned at once (a landless
+        // leaver's), and a beat finding no row must not make a clean exit a fenced one.
+        |m| {
+            if claim_on_demand && m.leave_outcome() != Some(true) {
                 lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now());
             }
         },
@@ -1431,6 +1451,25 @@ pub fn run() -> claims::ServerExit {
         // The refusals are on their way out through the writer task.
         std::thread::sleep(FENCED_EXIT_FLUSH);
     }
+    let outcome = if drain::stays_drained(drain_due, outcome, manager.leave_outcome()) {
+        // Drained (`drain.rs`): nothing of the world is held here any more. The lease stops (no
+        // store call is made from now on: the clean row may be pruned), and the regions, the
+        // peer and coordinator links, the claim loop and the login relay go with the manager —
+        // what the leave settled stays settled. The edge stays up to refuse new sessions.
+        drop(heartbeat);
+        drop(directory_keeper);
+        drop(adoption_reader);
+        drop(terrain_watch);
+        drop(login_relay);
+        drop(manager);
+        drop(peer_links);
+        drain::idle_drained(&stop_signal, &client_packet_recv, &drained_out, health::Health::global())
+    } else {
+        if drain_due && outcome == claims::ServerExit::Clean {
+            log::error!("[server] the drain's leave did not commit: exiting with this host's row dirty (a crash to the others)");
+        }
+        outcome
+    };
     #[cfg(feature = "pyroscope")]
     if let Some(agent) = agent_running {
         let agent_ready = agent.stop().unwrap();

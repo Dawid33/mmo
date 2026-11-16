@@ -476,6 +476,10 @@ impl Pair {
             sim.settle(now);
             // The lease step of `server::run`'s loop (no heartbeat: nothing).
             let _ = server::lease::pump_or_fence(&mut sim.heartbeat, &sim.fenced, at);
+            // Its drain step (Elastic 1 Task 8): the beat's mark becomes the manager's deadline.
+            let drain_in_ms = sim.heartbeat.as_ref().and_then(server::lease::Heartbeat::drain_in_ms);
+            let tick = sim.manager.spawner_mut().world_tick();
+            server::drain::note_drain(&mut sim.manager, drain_in_ms, tick);
             sim.manager.maintain(now);
             if let Some(cuts) = sim.cuts.as_mut() {
                 cuts.pump(&mut sim.manager);
@@ -1040,8 +1044,20 @@ fn exit_host_with(
     w: &mut World,
     h: HostId,
     leave_timeout: Option<Duration>,
-    mut each: impl FnMut(&WorldManager<InlineSpawner>, &[HostClaims]),
+    each: impl FnMut(&WorldManager<InlineSpawner>, &[HostClaims]),
 ) -> server::claims::ServerExit {
+    exit_host_leaving(w, h, leave_timeout, each).0
+}
+
+/// [`exit_host_with`], and the exiting manager's leave outcome when its exit returned
+/// (`WorldManager::leave_outcome`: `Some(true)` = its leave cut committed) — what
+/// `server::run` decides a drained host's next step by (`server::drain::stays_drained`).
+fn exit_host_leaving(
+    w: &mut World,
+    h: HostId,
+    leave_timeout: Option<Duration>,
+    mut each: impl FnMut(&WorldManager<InlineSpawner>, &[HostClaims]),
+) -> (server::claims::ServerExit, Option<bool>) {
     let i = w.pair.sims.iter().position(|s| s.ordinal == h).expect("the host is up");
     let mut sim = w.pair.sims.remove(i);
     let fenced = w.claims[h.0 as usize].fenced().clone();
@@ -1077,7 +1093,7 @@ fn exit_host_with(
     );
     w.switches[h.0 as usize].drop_link();
     w.links[h.0 as usize] = None;
-    exit
+    (exit, sim.manager.leave_outcome())
 }
 
 /// Rounds until host `h` saw a newer world generation (a peer's hello, or a `BeginCut`):

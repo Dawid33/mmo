@@ -1659,3 +1659,104 @@ fn login_below_the_known_hop_is_numbered_above_it() {
     let core = h.manager.world_link().and_then(|l| l.as_inline()).unwrap().coordinator();
     assert_eq!((core.online_on(a), core.hop_of(a)), (None, 6), "its disconnect ends it");
 }
+
+// --- Elastic 1 Task 8: a host marked to drain -------------------------------------------
+
+/// The seconds a drain's countdown shows: rounded up, 0 once past (`TICK_RATE` is a period
+/// in ms).
+#[test]
+fn drain_remaining_rounds_up() {
+    assert_eq!(game::TICK_RATE, 50);
+    assert_eq!(game::drain_remaining_secs(1_000, 0), 50);
+    assert_eq!(game::drain_remaining_secs(1_001, 0), 51);
+    assert_eq!(game::drain_remaining_secs(10, 20), 0);
+    assert_eq!(game::drain_remaining_secs(20, 20), 0);
+    assert_eq!(game::drain_remaining_secs(21, 20), 1);
+}
+
+/// The `HostDraining` notices among `packets`, as `(client, at_tick)`.
+fn drain_notices(packets: &[(Option<ClientId>, ServerPacket)]) -> Vec<(ClientId, u64)> {
+    packets
+        .iter()
+        .filter_map(|(to, p)| match p {
+            ServerPacket::HostDraining { at_tick } => Some((to.expect("a notice is addressed"), *at_tick)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A home session is told the drain once when it is first known; the deadline only moves
+/// earlier, an earlier one within the heartbeat's ageing tolerance tells nobody again; a
+/// session joining later is told at its first upkeep; a shortened notice tells everyone
+/// again; an observer session is never told; a session that ends is forgotten.
+#[test]
+fn a_home_session_is_told_the_drain_once_and_a_late_joiner_too() {
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.drain_packets();
+    assert_eq!(h.manager.draining(), None);
+    h.manager.drain_at(1_000);
+    assert_eq!(h.manager.draining(), Some(1_000));
+    assert_eq!(drain_notices(&h.drain_packets()), [(0, 1_000)], "told when the drain is first known");
+    h.manager.maintain(10);
+    h.settle(10);
+    assert_eq!(drain_notices(&h.drain_packets()), [], "once");
+    // A later deadline (the mark's ageing between beats) and a slightly earlier one (a fresh
+    // beat's) change nothing.
+    h.manager.drain_at(1_100);
+    h.manager.drain_at(1_000 - game::DRAIN_RETELL_TOLERANCE_TICKS);
+    h.manager.maintain(20);
+    h.settle(20);
+    assert_eq!(h.manager.draining(), Some(1_000));
+    assert_eq!(drain_notices(&h.drain_packets()), [], "nobody told again");
+    // A late joiner: told at its first upkeep.
+    h.event(ServerEvent::connected(1), 30);
+    h.manager.maintain(30);
+    h.settle(30);
+    assert_eq!(drain_notices(&h.drain_packets()), [(1, 1_000)]);
+    // An observer session: never.
+    h.event(ServerEvent::ObserverConnected { client: 2, player: PlayerId(2) }, 40);
+    h.manager.maintain(40);
+    h.settle(40);
+    assert_eq!(drain_notices(&h.drain_packets()), [], "an observer is not told");
+    // The operator shortens the countdown: every home session is told again.
+    let earlier = 1_000 - game::DRAIN_RETELL_TOLERANCE_TICKS - 1;
+    h.manager.drain_at(earlier);
+    assert_eq!(h.manager.draining(), Some(earlier));
+    assert_eq!(drain_notices(&h.drain_packets()), [(0, earlier), (1, earlier)]);
+    // A session that ends is forgotten.
+    h.event(ServerEvent::ClientDisconnected(1), 50);
+    h.manager.maintain(50);
+    h.settle(50);
+    assert_eq!(h.manager.drain_told(), [(0, earlier)]);
+    assert_eq!(drain_notices(&h.drain_packets()), []);
+}
+
+/// A drain is due only once the world tick reached its deadline AND the coordinator has
+/// applied the host's `Attach`: with no coordinator link a drain past its deadline is never
+/// due (nothing is parked for a leave that cannot be asked for).
+#[test]
+fn a_drain_is_due_at_its_deadline_only_with_the_coordinator_attached() {
+    use crate::history_handover::{land_map, start};
+    use game::coordinator::{Coordinator, InlineWorldLink};
+    use game::history::{History, SocietyGrid};
+    crate::common::install_real_block_props();
+    let mut h = floored_harness();
+    h.event(session(0, 1, None), 0);
+    h.manager.drain_at(0);
+    assert!(!h.manager.drain_due(), "no coordinator: never due");
+    let map = land_map(16, 3);
+    let core = Coordinator::new(History::new(5, start(), SocietyGrid::from_world_map(&map)), 0);
+    h.manager.set_world_map(map);
+    h.manager.set_world_link(Box::new(InlineWorldLink::new(core)), 1, 0);
+    for t in 1..5 {
+        h.manager.maintain(t * 10);
+        h.settle(t * 10);
+    }
+    assert!(h.manager.world_attached());
+    assert!(h.manager.drain_due(), "past its deadline, attached: due");
+    let mut later = floored_harness();
+    let tick = game::RegionSpawner::world_tick(later.manager.spawner_mut());
+    later.manager.drain_at(tick + 100);
+    assert!(!later.manager.drain_due(), "before its deadline: not due");
+}

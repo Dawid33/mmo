@@ -35,8 +35,12 @@ pub const LIVEZ_STALL_MS: u64 = 30_000;
 const _: () = assert!(LIVEZ_STALL_MS == 3 * game::HOST_LEASE_MS);
 
 /// What a process not yet registered waits for ([`Health::set_waiting`]); the index + 1 is
-/// stored, 0 = nothing.
-const WAITING: [&str; 3] = ["succession", "vouched", "forge"];
+/// stored, 0 = nothing. `drained`: a host that left the world after a drain (Elastic 1 Task 8)
+/// and waits to be removed ([`Health::set_drained`]).
+const WAITING: [&str; 4] = ["succession", "vouched", "forge", DRAINED];
+
+/// [`WAITING`]'s word for a drained host: `/readyz`'s body, `mmo_waiting{why="drained"}`.
+pub const DRAINED: &str = "drained";
 
 /// `last_beat_ms` before the first [`Health::loop_beat`].
 const NEVER: i64 = i64::MIN;
@@ -109,11 +113,23 @@ impl Health {
         self.registered.store(yes, Ordering::Relaxed);
     }
 
-    /// Why the process is not registered yet: `"succession"`, `"vouched"` or `"forge"`
-    /// (anything else is taken as `None`); `None`: not waiting.
+    /// Why the process is not registered yet: `"succession"`, `"vouched"`, `"forge"` or
+    /// [`DRAINED`] (anything else is taken as `None`); `None`: not waiting.
     pub fn set_waiting(&self, why: Option<&'static str>) {
         let code = why.and_then(|w| WAITING.iter().position(|&x| x == w)).map_or(0, |i| i as u8 + 1);
         self.waiting.store(code, Ordering::Relaxed);
+    }
+
+    /// A host left the world after a drain and idles until it is removed (Elastic 1 Task 8):
+    /// not ready (`/readyz` 503 [`DRAINED`], `mmo_waiting{why="drained"}`, `mmo_registered` 0),
+    /// still judged alive by its idle loop's beat ([`Self::loop_beat`]).
+    pub fn set_drained(&self) {
+        self.set_registered(false);
+        self.set_waiting(Some(DRAINED));
+    }
+
+    fn drained(&self) -> bool {
+        self.waiting() == Some(DRAINED)
     }
 
     fn waiting(&self) -> Option<&'static str> {
@@ -172,11 +188,19 @@ impl Health {
         }
     }
 
-    /// Whether `/livez` fails: registered, and the loop's last pass older than
-    /// [`LIVEZ_STALL_MS`]. Before the first pass (a boot's long steps after its registration)
-    /// the lease's boot beats watch it, not this.
+    /// Whether `/livez` fails: registered (or drained: its idle loop beats), and the loop's last
+    /// pass older than [`LIVEZ_STALL_MS`]. Before the first pass (a boot's long steps after its
+    /// registration) the lease's boot beats watch it, not this.
     fn stalled(&self) -> bool {
-        self.registered.load(Ordering::Relaxed) && self.loop_age_ms().is_some_and(|age| age > LIVEZ_STALL_MS)
+        (self.registered.load(Ordering::Relaxed) || self.drained()) && self.loop_age_ms().is_some_and(|age| age > LIVEZ_STALL_MS)
+    }
+
+    /// Test support (`test-hooks`): a `Health` of its own, never the process's — tests run in
+    /// parallel, the global one is shared.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn for_test() -> &'static Health {
+        Box::leak(Box::new(Health::new()))
     }
 
     /// The Prometheus text exposition of every metric, labelled `role`. A registry of its own
@@ -287,6 +311,13 @@ pub fn serve(bind: SocketAddr, role: &'static str) -> io::Result<()> {
     serve_listener(listener, role, Health::global())
 }
 
+/// Test support (`test-hooks`): serves `health` (not the process's) on `listener`.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn serve_for_test(listener: std::net::TcpListener, role: &'static str, health: &'static Health) -> io::Result<()> {
+    serve_listener(listener, role, health)
+}
+
 fn serve_listener(listener: std::net::TcpListener, role: &'static str, health: &'static Health) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_io().build()?;
@@ -344,7 +375,7 @@ mod tests {
 
     /// A fresh `Health` of its own (tests run in parallel; the global one is shared).
     fn fresh() -> &'static Health {
-        Box::leak(Box::new(Health::new()))
+        Health::for_test()
     }
 
     /// `GET path` against a listener serving `health` on 127.0.0.1:0: (status, body).
@@ -391,6 +422,23 @@ mod tests {
         assert_eq!(get(health, "/readyz").0, 200);
     }
 
+    /// Elastic 1 Task 8: a drained host is not ready (`drained`), its idle loop keeps `/livez`
+    /// at 200 — and a drained loop that stalls fails it like a registered one.
+    #[test]
+    fn a_drained_host_is_unready_and_alive() {
+        let health = fresh();
+        health.set_registered(true);
+        health.loop_beat();
+        health.set_drained();
+        assert_eq!(get(health, "/readyz"), (503, "drained".to_string()));
+        assert_eq!(get(health, "/livez").0, 200);
+        let (_, text) = get(health, "/metrics");
+        assert!(text.contains("mmo_waiting{role=\"host\",why=\"drained\"} 1"), "{text}");
+        assert!(text.contains("mmo_registered{role=\"host\"} 0"), "{text}");
+        health.set_last_beat_ago(Duration::from_millis(LIVEZ_STALL_MS + 1));
+        assert_eq!(get(health, "/livez").0, 503, "a drained loop that stalled");
+    }
+
     #[test]
     fn metrics_names_are_stable() {
         let health = fresh();
@@ -419,6 +467,7 @@ mod tests {
             "why=\"succession\"",
             "why=\"vouched\"",
             "why=\"forge\"",
+            "why=\"drained\"",
             "role=\"host\"",
             "region_blocks=",
             "chunk_blocks=",

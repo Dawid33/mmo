@@ -1289,18 +1289,34 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// For each free super-region something here needs whose preferred live claimer is
     /// another (reachable) host: that host is asked ([`Volatile::ClaimWanted`]) at most once
     /// per [`CLAIM_WANTED_EVERY_MS`]. Called at the end of every [`Self::pump_peers`].
+    ///
+    /// Asked of one host for [`CLAIM_UNANSWERED_REREAD_MS`] with no owner known since, the
+    /// directory is read again ([`Self::take_directory_wanted`]; once per that span): the asked
+    /// host may be draining — it drops the asks (Elastic 1 Task 8) — and only a read shows this
+    /// host the mark, after which another host is preferred.
     fn ask_for_claims(&mut self, now_ms: u64) {
         let Some(directory) = self.ownership.0.directory() else { return };
         let me = self.ordinal();
         let mut asks = Vec::new();
+        let mut unanswered = Vec::new();
         for &sr in self.claims_wanted.iter().chain(self.unowned_waiting.keys()) {
             if self.ownership.0.owner_of(sr) != crate::Owner::Free {
                 continue;
             }
             let Some(preferred) = directory.preferred(sr).filter(|&p| p != me) else { continue };
-            let recent = self.claim_wanted_sent.get(&sr).is_some_and(|&(to, at)| to == preferred && now_ms < at + CLAIM_WANTED_EVERY_MS);
-            if !recent {
+            let sent = self.claim_wanted_sent.get(&sr).filter(|&&(to, _, _)| to == preferred);
+            if sent.is_some_and(|&(_, _, since)| now_ms >= since + CLAIM_UNANSWERED_REREAD_MS) {
+                unanswered.push((sr, preferred));
+            }
+            if !sent.is_some_and(|&(_, at, _)| now_ms < at + CLAIM_WANTED_EVERY_MS) {
                 asks.push((sr, preferred));
+            }
+        }
+        for (sr, to) in unanswered {
+            log::debug!("[server] host {to} has not claimed {sr:?} in {CLAIM_UNANSWERED_REREAD_MS} ms of asks: reading the directory");
+            self.directory_wanted = true;
+            if let Some(sent) = self.claim_wanted_sent.get_mut(&sr) {
+                sent.2 = now_ms;
             }
         }
         for (sr, to) in asks {
@@ -1310,7 +1326,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             if let Some(peer) = self.peers.get_mut(&to).filter(|p| !p.stale) {
                 log::debug!("[server] super-region {sr:?} is free and wanted here: host {to} asked to claim it");
                 peer.session.send_volatile(Volatile::ClaimWanted(sr));
-                self.claim_wanted_sent.insert(sr, (to, now_ms));
+                let since = self.claim_wanted_sent.get(&sr).filter(|&&(t, _, _)| t == to).map_or(now_ms, |&(_, _, since)| since);
+                self.claim_wanted_sent.insert(sr, (to, now_ms, since));
             }
         }
     }

@@ -6038,7 +6038,9 @@ fn a_stale_ask_of_a_draining_host(rig: &mut MultiRig) {
         until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
         "the slime never waited for an owner"
     );
-    for _ in 0..CROSS_ROUNDS {
+    // Fewer rounds than an unanswered ask takes to make the asker read the directory on its
+    // own (`CLAIM_UNANSWERED_REREAD_MS`: `an_ask_a_draining_host_drops_…`).
+    for _ in 0..WAIT_ROUNDS {
         rig.round();
     }
     assert_eq!(rig.claims_asked.get(&drainer).copied().unwrap_or(0), 0, "asked, the draining host claimed nothing");
@@ -9909,4 +9911,277 @@ fn gate_dies_after_relaying(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_gate_host_dying_after_relaying_an_order_places_the_retry_once() {
     sweep_hosts("a_gate_host_dying_after_relaying_an_order_places_the_retry_once", gate_dies_after_relaying);
+}
+
+// --- Elastic 1 Task 8: the host drains with a warning --------------------------------
+
+/// How far ahead (world ticks) of the mark a warned drain's deadline lies in these tests.
+const DRAIN_AHEAD_TICKS: u64 = 120;
+
+/// The translation of `client`'s body, if a running region holds it.
+fn body_translation(rig: &mut MultiRig, client: game::ClientId) -> Option<game::rapier3d::math::Vector> {
+    let (h, rc, _) = rig.player_body(client)?;
+    let mut out = None;
+    rig.hosts[h.0 as usize].manager.spawner_mut().with_region(rc, |region| {
+        let d = region.data();
+        let handle = d.player_entites.get(&client).and_then(|&k| *d.ecs.rigidbody.try_get(k));
+        out = handle.and_then(|h| d.physics.bodies.get(h)).map(|b| b.position().translation);
+    });
+    out
+}
+
+/// What the server's main loop does once [`game::WorldManager::drain_due`]: `cuts::leave_world`'s
+/// first step — every player parked, a leave cut asked for.
+fn leave_for_the_drain(rig: &mut MultiRig, h: HostId) {
+    let now = rig.hosts[h.0 as usize].now_ms;
+    let m = &mut rig.hosts[h.0 as usize].manager;
+    m.park_all_players(now);
+    m.request_leave();
+}
+
+/// Cut rounds until host `h`'s drain is due; panics past [`WORLD_CUT_ROUNDS`].
+fn until_drain_due(rig: &mut MultiRig, h: HostId) {
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if rig.hosts[h.0 as usize].manager.drain_due() {
+            return;
+        }
+        rig.cut_round();
+    }
+    panic!("host {h}'s drain never came due (seed {}, link delay {})", rig.seed, rig.link_delay);
+}
+
+/// Two hosts. A player plays on host A (its record region `rd`); a deposit of items crosses
+/// from B's region into `rd`. A is marked to drain at T: the player is told (once), and
+/// before T it moves while the items land. Nothing parks before T. At T A leaves as the
+/// server does (players parked, a leave cut) and the cut commits: the player's stored record
+/// stands where its body stood at T. A's process stops simulating; the player's next login is
+/// ordered on B, which asks for A's land: a `Leave` succession gives it to B, B places the
+/// login, and the player's body stands in `rd` where it stood at T — once. The items exist
+/// once all along, none destroyed (a leave has no item window); the world restarted from the
+/// last cut holds the player once.
+fn warned_drain(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let (s, leaver) = (rig.owner(rs), rig.owner(rd));
+    keeper_may_park(rig, leaver);
+    rig.connect_home(leaver, P_CLIENT, P_PLAYER, centre_of(rd));
+    let (_, _, body) = until_body(rig);
+    until_committed(rig, 1);
+    rig.record_packets();
+    let at = world_tick(rig) + DRAIN_AHEAD_TICKS;
+    rig.hosts[leaver.0 as usize].manager.drain_at(at);
+    assert_eq!(rig.hosts[leaver.0 as usize].manager.draining(), Some(at));
+    // Before T: the player moves, items come into its region.
+    assert!(rig.teleport(rd, body, [REGION_SIZE / 3.0, crate::common::above_floor_y(), REGION_SIZE / 3.0]));
+    deposit_across(rig, rs, rd);
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| pile_items(r, rd) == DEPOSIT && r.peer_unreceived() == 0),
+        "the deposit never landed in {rd:?}: {}",
+        pile_items(rig, rd)
+    );
+    assert!(world_tick(rig) < at, "the test's moves fit before the deadline");
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+        assert!(world_tick(rig) >= at || !rig.hosts[leaver.0 as usize].manager.drain_due(), "never due before T");
+    }
+    until_drain_due(rig, leaver);
+    assert!(world_tick(rig) >= at, "due at T, not before");
+    assert_eq!(rig.player_owners(P_CLIENT), [(leaver, rd)], "the player played until T");
+    let told: Vec<u64> = packets_to(rig, leaver)
+        .into_iter()
+        .filter_map(|p| match p {
+            game::ServerPacket::HostDraining { at_tick } => Some(*at_tick),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, [at], "the player was told the deadline once");
+    let stood = body_translation(rig, P_CLIENT).expect("its body at T");
+    rig.assert_items(u64::from(DEPOSIT));
+    // From the leave on the items lie in a parked region (the leave cut's), which the rig's
+    // per-round count does not see: counted again once the region runs on the heir.
+    rig.items = None;
+    leave_for_the_drain(rig, leaver);
+    let cut = until_leave_begun(rig, s, leaver);
+    assert!(until_decided(rig, cut), "the leave cut commits");
+    let record = rig.committed_players[&P_PLAYER].clone();
+    assert_eq!(record.region, rd);
+    assert!((record.pose.translation - stood).length() < 0.05, "stored where it stood at T: {:?} vs {stood:?}", record.pose.translation);
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[s.0 as usize].manager.peer_left(leaver)),
+        "host {s} heard the leave cut's decision"
+    );
+    // The drained process simulates nothing more (it idles until removed).
+    rig.kill(leaver);
+    rig.with_land_on_demand();
+    // The player's next login, ordered on B (as `login_on_departed_land`): placed once the
+    // land is B's and adopted — or refused if that took longer than the order may wait, and
+    // placed at the client's retry.
+    let order_until_answered = |rig: &mut MultiRig, epoch: u64| {
+        spawn_order_at(rig, s, P_PLAYER, rd, epoch);
+        let (mut taken, mut out) = (Vec::new(), Vec::new());
+        for _ in 0..SUCCESSION_ROUNDS {
+            rig.cut_round();
+            taken.extend(rig.serve_logins());
+            collect_login_out(rig, &mut out);
+            if !out.is_empty() {
+                break;
+            }
+        }
+        (taken, out)
+    };
+    let (mut taken, out) = order_until_answered(rig, 2);
+    let succession = until_land_declared(rig);
+    assert_eq!((succession.predecessor, succession.kind, succession.heir), (leaver, game::SuccessionKind::Leave, s));
+    let mut epoch = 2;
+    let refused = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: false, endpoint: None };
+    if out == [(s, refused)] {
+        assert!(taken.is_empty(), "a refused order placed nothing: {taken:?}");
+        let adopted = |rig: &mut MultiRig| rig.core().succession_progress().iter().any(|(i, _, a)| *i == succession.id && *a);
+        assert!(until(rig, SUCCESSION_ROUNDS, adopted) || rig.core().successions_open_count() == 0, "host {s} adopted");
+        epoch = 3;
+        (taken, _) = order_until_answered(rig, epoch);
+    }
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [s], "placed on host {s}, once");
+    rig.connect_login(s, NEW_LOGIN_CLIENT, P_PLAYER, Some(record), LOGIN_TOKEN, epoch);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT) == [(s, rd)]), "one body, in {rd:?} on host {s}");
+    let now = body_translation(rig, NEW_LOGIN_CLIENT).expect("its body");
+    // Restored from that record; it may have settled onto the ground since (gravity), never moved across it.
+    let across = ((now.x - stood.x).powi(2) + (now.z - stood.z).powi(2)).sqrt();
+    assert!(across < 0.05 && now.y <= stood.y + 0.05, "it stands where it stood at T: {now:?} vs {stood:?}");
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| pile_items(r, rd) == DEPOSIT),
+        "the items lie in {rd:?} on host {s}: {}",
+        pile_items(rig, rd)
+    );
+    rig.items = Some(u64::from(DEPOSIT));
+    rig.assert_items(u64::from(DEPOSIT));
+    assert_settled_whole(rig, &succession, &[]);
+    rig.assert_items(u64::from(DEPOSIT));
+    assert_player_once(rig, P_PLAYER);
+    let mut again = rig.rebuild_from_last_cut();
+    again.run(rd);
+    assert!(
+        until(&mut again, CROSS_ROUNDS, |r| pile_items(r, rd) == DEPOSIT),
+        "the restarted world's {rd:?} holds the items once: {}",
+        pile_items(&mut again, rd)
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_warned_drain_moves_its_players_and_loses_nothing() {
+    sweep("a_warned_drain_moves_its_players_and_loses_nothing", 2, 1, HEIR_SWEEP_SEEDS, warned_drain);
+}
+
+/// Review Focus 5: host A's coordinator link is down when its drain deadline passes. The
+/// drain is not due: no player is parked, its regions keep ticking, the notice stands. Once
+/// the link is up (the host attached again) it is due, and the leave cut commits.
+fn drain_waits_for_the_coordinator(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let (s, leaver) = (rig.owner(rs), rig.owner(rd));
+    keeper_may_park(rig, leaver);
+    rig.connect_home(leaver, P_CLIENT, P_PLAYER, centre_of(rd));
+    until_body(rig);
+    until_committed(rig, 1);
+    rig.hosts[leaver.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
+    rig.core().host_detached(leaver);
+    assert!(until(rig, WAIT_ROUNDS, |rig| !rig.hosts[leaver.0 as usize].manager.world_attached()), "the link never went down");
+    let at = world_tick(rig) + 5;
+    rig.hosts[leaver.0 as usize].manager.drain_at(at);
+    let mut region_ticks = Vec::new();
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+        assert!(!rig.hosts[leaver.0 as usize].manager.drain_due(), "never due while the coordinator is unreachable");
+        let mut t = 0;
+        rig.hosts[leaver.0 as usize].manager.spawner_mut().with_region(rd, |r| t = r.current_tick());
+        region_ticks.push(t);
+    }
+    assert!(world_tick(rig) > at, "past the deadline");
+    assert!(region_ticks.windows(2).all(|w| w[1] >= w[0]), "its region's tick never goes back: {region_ticks:?}");
+    assert!(region_ticks[region_ticks.len() - 1] >= region_ticks[0] + WAIT_ROUNDS as u64 / 2, "its region keeps ticking: {region_ticks:?}");
+    assert_eq!(rig.player_owners(P_CLIENT), [(leaver, rd)], "nobody was parked");
+    assert_eq!(rig.hosts[leaver.0 as usize].manager.draining(), Some(at), "the notice stands");
+    assert!(!rig.hosts[leaver.0 as usize].manager.leave_asked());
+    rig.hosts[leaver.0 as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
+    until_drain_due(rig, leaver);
+    leave_for_the_drain(rig, leaver);
+    let cut = until_leave_begun(rig, s, leaver);
+    assert!(until_decided(rig, cut), "the leave cut commits once the coordinator is back");
+    assert_eq!(rig.committed_players[&P_PLAYER].region, rd);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_drain_past_its_deadline_waits_for_the_coordinator() {
+    sweep("a_drain_past_its_deadline_waits_for_the_coordinator", 2, 1, HEIR_SWEEP_SEEDS, drain_waits_for_the_coordinator);
+}
+
+/// Ruling 3: the deadline passes while a world cut of host A is under way. The leave starts
+/// at once, as an exit's does (its players park mid-cut); the cut under way is not aborted
+/// by it and commits, then the leave cut (never beside another) commits: the player is
+/// stored once, in A's last part.
+fn drain_due_during_a_cut(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let (s, leaver) = (rig.owner(rs), rig.owner(rd));
+    keeper_may_park(rig, leaver);
+    rig.connect_home(leaver, P_CLIENT, P_PLAYER, centre_of(rd));
+    until_body(rig);
+    until_committed(rig, 1);
+    let (cut, _) = until_world_cut_on(rig, leaver);
+    let now_tick = world_tick(rig);
+    rig.hosts[leaver.0 as usize].manager.drain_at(now_tick);
+    assert!(rig.hosts[leaver.0 as usize].manager.drain_due(), "past the deadline, attached, a cut under way: due");
+    leave_for_the_drain(rig, leaver);
+    assert!(until_decided(rig, cut), "the cut under way is not aborted by the leave");
+    let leave = until_leave_begun(rig, s, leaver);
+    assert_ne!(leave, cut, "the leave cut comes after it");
+    assert!(until_decided(rig, leave), "the leave cut commits");
+    assert_eq!(rig.last_cut_writers(P_PLAYER), [leaver], "the player is in the leaver's last part");
+    assert_eq!(rig.committed_players[&P_PLAYER].region, rd);
+    assert_player_once(rig, P_PLAYER);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_drain_deadline_during_a_world_cut_waits_for_it_and_loses_nothing() {
+    sweep("a_drain_deadline_during_a_world_cut_waits_for_it_and_loses_nothing", 2, 1, HEIR_SWEEP_SEEDS, drain_due_during_a_cut);
+}
+
+/// Ruling 7 (Task 7's review): the needing host's directory is a read behind the drain mark —
+/// it keeps asking the draining host to claim (`ClaimWanted`), which drops the ask. Nobody
+/// reads the directory for it: an ask unanswered for [`game::CLAIM_UNANSWERED_REREAD_MS`]
+/// makes the asker read it, it then prefers itself and claims. The land is claimed within
+/// that bound (plus a claim's round trip) of the mark, and the slime ends in `b` once.
+fn an_unanswered_ask_rereads(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let sr = sr_of(rig, b);
+    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
+    rig.with_claims();
+    let ha = rig.owner(a);
+    let (drainer, other) = drain_the_preferred(sr);
+    assert_eq!(other, ha, "the needing host is not the preferred one");
+    rig.draining.insert(drainer);
+    rig.read_directory(drainer);
+    assert_eq!(rig.hosts[ha.0 as usize].manager.preferred_claimer(sr), Some(drainer), "a stale directory");
+    rig.run(a);
+    let marked = rig.hosts[ha.0 as usize].now_ms;
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    let bound = game::CLAIM_UNANSWERED_REREAD_MS + game::CLAIM_WANTED_EVERY_MS;
+    let rounds = (bound / game::TICK_RATE) as usize + CROSS_ROUNDS;
+    assert!(until(rig, rounds, |rig| rig.stored_owner(sr) == Some(ha)), "host {ha} never claimed {sr:?}");
+    let took = rig.hosts[ha.0 as usize].now_ms - marked;
+    assert!(took <= bound + 20 * game::TICK_RATE, "claimed {took} ms after the mark (bound {bound} ms, seed {})", rig.seed);
+    assert!(rig.reads_asked.get(&ha).is_some_and(|n| *n >= 1), "the asker read the directory on its own");
+    assert_eq!(rig.claims_asked.get(&drainer).copied().unwrap_or(0), 0, "the draining host claimed nothing");
+    rig.run(b);
+    until_settled_in(rig, id, b);
+    assert!(nothing_unowned(rig), "nothing waits for an owner");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_ask_a_draining_host_drops_makes_the_asker_reread_within_its_bound() {
+    sweep("an_ask_a_draining_host_drops_makes_the_asker_reread_within_its_bound", 2, 1, SEEDS / 4, an_unanswered_ask_rereads);
 }

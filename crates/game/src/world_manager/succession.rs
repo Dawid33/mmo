@@ -349,7 +349,7 @@ macro_rules! host_fields {
             leave_requested, leaving_cut, leave_outcome, leave_decided, leave_parked, world_cut_done,
             inbound_accounted, login_orders, logins, spawn_held, spawn_here, kicks_in, kicked, login_out,
             spawn_pins, kick_warned_ms, successions, succession_reports, succession_wait_logged_ms, inheriting,
-            successions_done, adoptions, succession_pinned, succession_seam_events
+            successions_done, adoptions, succession_pinned, succession_seam_events, drain
             ],
         }
     };
@@ -762,7 +762,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.left_peers.remove(&pred);
         self.left_land.remove(&pred);
         self.early_marks.remove(&pred);
-        self.claim_wanted_sent.retain(|_, (to, _)| *to != pred);
+        self.claim_wanted_sent.retain(|_, (to, _, _)| *to != pred);
         let mut departed_moved = 0usize;
         let mut departed_forgotten = 0usize;
         let pointing: Vec<PlayerId> = self.departed.iter().filter(|(_, h)| **h == pred).map(|(p, _)| *p).collect();

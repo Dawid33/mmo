@@ -24,11 +24,13 @@ use crate::save_cut::{
     CutId, InFlightRow, PendingCut, Uncommitted, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS,
 };
 
+mod drain;
 mod peers;
 mod placement;
 mod succession;
 mod world_cut;
 mod world_link;
+pub use drain::{drain_remaining_secs, DRAIN_RETELL_TOLERANCE_TICKS};
 pub use peers::intents_in;
 pub use succession::{SuccessionReportIn, SUCCESSION_WAIT_LOG_MS};
 pub use placement::{
@@ -93,6 +95,11 @@ pub const PENDING_ARRIVALS_PER_REGION_MAX: usize = 2 * crate::slime::SLIME_CAP_P
 /// ([`crate::Volatile::ClaimWanted`], R4 `PgClaim`): once per this many ms while the need
 /// lasts (it is volatile — a lost one is asked again).
 pub const CLAIM_WANTED_EVERY_MS: u64 = 1_000;
+/// A `ClaimWanted` asked of the same host this long without the super-region getting an owner
+/// makes the asker read the directory (Elastic 1 Task 8): a draining host drops the asks of a
+/// peer that has not read its mark yet, and nothing else would prompt that peer to read before
+/// its periodic backstop (`TERRAIN_POLL_SECS`). At most once per this long per super-region.
+pub const CLAIM_UNANSWERED_REREAD_MS: u64 = 3 * CLAIM_WANTED_EVERY_MS;
 /// Most often a host asks the coordinator for the land of a host that left cleanly
 /// ([`crate::HostMsg::LandWanted`], R4 drain): once per this many ms per super-region while
 /// something here needs it (it is not queued while the link is down — asked again).
@@ -1252,8 +1259,11 @@ pub struct WorldManager<S: RegionSpawner> {
     claims_wanted: BTreeSet<crate::SuperRegion>,
     /// Free super-regions a peer asked this host to claim ([`crate::Volatile::ClaimWanted`]).
     claim_asks: BTreeSet<crate::SuperRegion>,
-    /// The last `ClaimWanted` sent per super-region: to which host, at which `clock_ms`.
-    claim_wanted_sent: BTreeMap<crate::SuperRegion, (HostId, u64)>,
+    /// The last `ClaimWanted` sent per super-region: to which host, at which `clock_ms`, and
+    /// since when (`clock_ms`) that host has been asked without an answer — reset when another
+    /// host is asked, and at each directory read the silence prompts
+    /// ([`CLAIM_UNANSWERED_REREAD_MS`]).
+    claim_wanted_sent: BTreeMap<crate::SuperRegion, (HostId, u64, u64)>,
     /// Super-regions of a host that left cleanly (`left_peers`) that a spawn placement here
     /// needs (`placement.rs`): asked for with what waits in a held session
     /// ([`crate::HostMsg::LandWanted`], `peers.rs`), forgotten once their owner is no
@@ -1478,6 +1488,9 @@ pub struct WorldManager<S: RegionSpawner> {
     succession_pinned: BTreeSet<RegionCoords>,
     /// Journal entries this host's adoptions resolved (`[server]` line).
     succession_seam_events: u64,
+    /// This host was marked to drain (Elastic 1 Task 8, `drain.rs`): its deadline and the
+    /// home sessions told it. `None`: not draining.
+    drain: Option<drain::Drain>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1654,6 +1667,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             adoptions: BTreeMap::new(),
             succession_pinned: BTreeSet::new(),
             succession_seam_events: 0,
+            drain: None,
         }
     }
 
@@ -2399,6 +2413,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.client_disconnected(c, now_ms);
         }
         self.close_idle_observers(now_ms);
+        // A drain's notice to the sessions that became home here since (`drain.rs`).
+        self.tell_drain();
         // A succession waiting for its base cut (a commit found by the store's poll).
         self.retry_successions();
         // Subscribes this host could not answer when they came (`peers.rs`).
@@ -3610,6 +3626,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn end_session(&mut self, id: ClientId, now_ms: u64) {
         // What it was sent elsewhere for goes with it (its `asked_elsewhere` with the session).
         self.redirected.retain(|(c, _), _| *c != id);
+        self.drain_forget(id);
         let Some(session) = self.sessions.remove(&id) else { return };
         for rc in session.subscribed {
             self.unsubscribe_link(id, rc, now_ms);

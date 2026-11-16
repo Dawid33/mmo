@@ -2104,3 +2104,114 @@ mod login_link {
         w.stop(&dir);
     }
 }
+
+// ---- Elastic 1 Task 8: the host drains with a warning ----------------------------------
+
+/// `GET path` on the health endpoint at `addr`: (status, body).
+fn http_get(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n").expect("request");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("response");
+    let status = response.split(' ').nth(1).and_then(|s| s.parse().ok()).expect("a status line");
+    let body = response.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    (status, body)
+}
+
+/// Host `h` beats its lease from its main loop (as `server::run`'s does), and with it reads
+/// its drain mark.
+fn beat(w: &mut World, h: HostId) {
+    let store = w.claims[h.0 as usize].store().clone();
+    let boot = sim(w, h).boot;
+    sim(w, h).heartbeat = Some(server::lease::Heartbeat::new(store, h, boot));
+}
+
+/// `worldctl drain <url> 1 --in 1` against two real hosts and a real coordinator: host 1 hears
+/// the mark at its next beat, its deadline comes, it leaves through a committed leave cut (its
+/// row clean) — and then does NOT exit: it stays up drained. `/readyz` answers 503 `drained`,
+/// `/livez` 200, a connecting client is refused with the leaving refusal; 3 s later it still
+/// idles, also after its `hosts` row was deleted (a registration's prune may do that), and no
+/// new `hosts` row appeared (nothing restarted it as a new host). A stop signal: exit 0.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_drained_host_stays_up_unready_and_exits_zero_on_sigterm() {
+    install_props();
+    let Some(db) = PgDb::create("ddrained") else { return };
+    let dir = scratch("ddrained");
+    let mut w = world(&db, &dir);
+    w.until_committed_after(&db, 0);
+    beat(&mut w, h(1));
+    let rows_before = query_i64s(&db, "SELECT COUNT(*) FROM hosts");
+    w.claims[0].store().drain_host(h(1), 1_000).expect("worldctl drain 1 --in 1");
+    w.pair.until("host 1 heard its drain", |p| p.sims.iter().any(|s| s.ordinal == h(1) && s.manager.draining().is_some()));
+    w.pair.until("its deadline came", |p| p.sims.iter().any(|s| s.ordinal == h(1) && s.manager.drain_due()));
+    let (exit, leave) = exit_host_leaving(&mut w, h(1), None, |_, _| {});
+    assert_eq!((exit, leave), (server::claims::ServerExit::Clean, Some(true)), "left in a committed leave cut");
+    assert!(server::drain::stays_drained(true, exit, leave), "it stays up drained");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [1], "its row is clean");
+    // The drained process: its health endpoint, its edge's events, its stop signal.
+    let health = server::health::Health::for_test();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    server::health::serve_for_test(listener, "host", health).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (ev_tx, ev_rx) = unbounded();
+    let (out_tx, out_rx) = unbounded();
+    let flag = stop.clone();
+    let idle = std::thread::spawn(move || server::drain::idle_drained(&flag, &ev_rx, &out_tx, health));
+    let ready = || http_get(addr, "/readyz");
+    let deadline = Instant::now() + WAIT;
+    while ready().0 != 503 {
+        assert!(Instant::now() < deadline, "never unready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(ready(), (503, "drained".to_string()));
+    assert_eq!(http_get(addr, "/livez").0, 200);
+    ev_tx.send(ServerEvent::connected(77)).unwrap();
+    let (to, refusal) = out_rx.recv_timeout(Duration::from_secs(5)).expect("the connecting client is answered");
+    assert_eq!(to, Some(77));
+    assert!(matches!(&refusal, ServerPacket::Refused(why) if why == server::claims::LEAVING_REFUSAL), "{refusal:?}");
+    // Host 0 runs on meanwhile; host 1's process idles.
+    let alive_until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < alive_until {
+        w.pair.round();
+    }
+    assert!(!idle.is_finished(), "alive 3 s later");
+    exec(&db, "DELETE FROM hosts WHERE id = 1");
+    for _ in 0..20 {
+        w.pair.round();
+    }
+    assert!(!idle.is_finished(), "its row pruned: still up");
+    assert_eq!(http_get(addr, "/livez").0, 200, "alive");
+    assert_eq!(ready(), (503, "drained".to_string()));
+    assert_eq!(query_i64s(&db, "SELECT COUNT(*) FROM hosts")[0], rows_before[0] - 1, "no new hosts row");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(idle.join().unwrap(), server::claims::ServerExit::Clean, "SIGTERM: exit 0");
+    w.stop(&dir);
+}
+
+/// A stop signal during the warning means "leave now": host 1 is told a drain 300 s away; the
+/// stop comes — it leaves at once through a committed leave cut and exits (it does not wait for
+/// the deadline, and it does not stay up drained: that is only for the deadline's leave).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn sigterm_during_the_warning_leaves_at_once() {
+    install_props();
+    let Some(db) = PgDb::create("dsigterm") else { return };
+    let dir = scratch("dsigterm");
+    let mut w = world(&db, &dir);
+    w.until_committed_after(&db, 0);
+    beat(&mut w, h(1));
+    w.claims[0].store().drain_host(h(1), 300_000).expect("worldctl drain 1 --in 300");
+    w.pair.until("host 1 heard its drain", |p| p.sims.iter().any(|s| s.ordinal == h(1) && s.manager.draining().is_some()));
+    assert!(!sim(&mut w, h(1)).manager.drain_due(), "not due for 300 s");
+    let stopped = Instant::now();
+    let (exit, leave) = exit_host_leaving(&mut w, h(1), None, |_, _| {});
+    assert_eq!((exit, leave), (server::claims::ServerExit::Clean, Some(true)), "left in a committed leave cut");
+    assert!(stopped.elapsed() < Duration::from_secs(30), "at once, not at the deadline: {:?}", stopped.elapsed());
+    assert!(!server::drain::stays_drained(false, exit, leave), "a stop signal exits");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [1], "its row is clean");
+    w.stop(&dir);
+}
