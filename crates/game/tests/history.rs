@@ -915,3 +915,123 @@ fn legends_unknown_filters_and_cursor_clamp() {
     assert_eq!(h.legends(&q(LegendsFilter::All, None, 0)).lines.len(), 1);
     assert!(h.legends(&q(LegendsFilter::All, None, 5000)).lines.len() <= 200);
 }
+
+// ---- Elastic 2a Task 4: v4 saves every field; a load is not a restart ----
+
+/// One scripted input of [`a_history_reloaded_after_every_input_is_identical`], applied
+/// alike to both histories; what it hands out is collected in `out` for comparison.
+fn scripted_input(h: &mut History, step: u32, out: &mut Vec<String>) {
+    let site = h.sites().find(|s| s.abandoned.is_none()).map(|s| (s.id, s.region));
+    let Some((sid, r0)) = site else { return };
+    let r1 = RegionCoords::new(r0.x + 1, r0.z);
+    let embodied = |h: &History, rc: RegionCoords| -> Vec<(PersonId, [f32; 3])> {
+        h.people()
+            .filter(|p| p.alive() && p.location == Location::InRegion(rc))
+            .map(|p| (p.id, [16.0 + p.id.0 as f32, 0.0, 20.0]))
+            .collect()
+    };
+    match step {
+        5 => out.push(format!("started {:?}", h.region_started(r0))),
+        12 => h.note_positions(embodied(h, r0)),
+        20 => {
+            if let Some((p, _)) = embodied(h, r0).first().copied() {
+                out.push(format!("crossed {}", h.person_crossed(p, r1)));
+            }
+        }
+        28 => h.defer_directive(Directive { region: r1, event: game::GameEventKind::DespawnPerson(PersonId(0)) }),
+        35 => h.region_stopping(r0),
+        40 => {
+            let bodies = embodied(h, r0);
+            h.region_parked(r0, bodies);
+        }
+        50 => out.push(format!("started {:?}", h.region_started(r0))),
+        60 => {
+            // A host re-attaching r0 with one body fewer than the history has there.
+            let mut present = embodied(h, r0);
+            present.pop();
+            out.push(format!("reattach {:?}", h.reattach_regions(&[(r0, present)])));
+        }
+        70 => out.push(format!("started {:?}", h.region_started(r1))),
+        80 => {
+            let options = h.embark_options();
+            let pick = options.civs.iter().find_map(|c| {
+                c.sites.iter().find(|s| s.site != sid).map(|s| (c.civ, s.people[0].person))
+            });
+            let region = (2..40).flat_map(|x| (2..40).map(move |z| RegionCoords::new(x, z)))
+                .find(|r| h.player_embark_allowed(*r).is_ok());
+            if let (Some((civ, person)), Some(region)) = (pick, region) {
+                let req = game::EmbarkRequest { civ, people: vec![person], region };
+                out.push(format!("embark {:?}", h.player_embark(&req)));
+            }
+        }
+        _ => {}
+    }
+    h.advance(CalendarTick(h.now().0 + TICKS_PER_DAY));
+    if step % 7 == 0 {
+        out.push(format!("directives {:?}", h.take_directives()));
+        out.push(format!("notices {:?}", h.take_notices()));
+    }
+}
+
+/// [`big_land`] flat enough for a player's embark.
+fn gentle_land() -> WorldMap {
+    let mut map = big_land();
+    for t in &mut map.tiles {
+        t.relief_m = 1.0;
+    }
+    map
+}
+
+#[test]
+fn a_history_reloaded_after_every_input_is_identical() {
+    let map = gentle_land();
+    let grid = SocietyGrid::from_world_map(&map);
+    let mut a = bootstrap(&map, &params(2)).unwrap();
+    let mut b = decode(&encode(&a), grid.clone()).unwrap();
+    let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
+    for step in 0..200 {
+        b = decode(&encode(&b), grid.clone()).unwrap();
+        scripted_input(&mut a, step, &mut out_a);
+        scripted_input(&mut b, step, &mut out_b);
+        assert_eq!(encode(&a), encode(&b), "the histories part at step {step}");
+    }
+    assert_eq!(out_a, out_b);
+    assert!(out_a.iter().any(|l| l.starts_with("embark Ok")), "the script must embark: {out_a:?}");
+    assert!(out_a.iter().any(|l| l.starts_with("reattach")), "the script must reattach");
+    let page = |h: &History| h.legends(&LegendsQuery { filter: LegendsFilter::All, before: None, limit: 200 });
+    assert_eq!(page(&a), page(&b));
+}
+
+#[test]
+fn advancing_with_nothing_due_is_not_a_content_change() {
+    let mut h = bootstrap(&big_land(), &params(1)).unwrap();
+    let (mut clean, mut dirty) = (0, 0);
+    for _ in 0..(DAYS_PER_MONTH + 2) {
+        h.clear_content_dirty();
+        let mut before = h.clone();
+        h.advance(CalendarTick(h.now().0 + TICKS_PER_DAY));
+        if h.content_dirty() {
+            dirty += 1;
+        } else {
+            // Only the calendar moved.
+            before.now = h.now();
+            assert_eq!(encode(&before), encode(&h));
+            clean += 1;
+        }
+    }
+    assert!(clean > 0 && dirty > 0, "{clean} clean, {dirty} dirty advances");
+    h.clear_content_dirty();
+    assert!(h.take_directives().is_empty() && h.take_notices().is_empty());
+    assert!(!h.content_dirty(), "draining nothing is no change");
+    h.add_civ(Race::Dwarf);
+    assert!(h.content_dirty());
+}
+
+#[test]
+fn a_v3_file_is_refused() {
+    let map = big_land();
+    let mut bytes = encode(&bootstrap(&map, &params(0)).unwrap());
+    bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
+    let err = decode(&bytes, SocietyGrid::from_world_map(&map)).unwrap_err();
+    assert!(matches!(err, HistoryLoadError::OldVersion { found: 3 }), "{err:?}");
+}

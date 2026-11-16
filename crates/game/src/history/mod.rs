@@ -54,93 +54,38 @@ pub struct History {
     /// Where each embodied person last stood (region, region-local translation), noted by
     /// the autosave and by parks; the next embodiment in that region spawns them there.
     pub(crate) positions: BTreeMap<PersonId, (crate::RegionCoords, [f32; 3])>,
+    /// Pure of the world map: [`persist::decode`] takes it, never the file.
     #[serde(skip)]
     grid: Option<SocietyGrid>,
-    /// Regions running now (the manager's view). Not saved: a load starts with none, and
-    /// [`History::after_load`] hands every body and held journey back to the abstract history.
-    #[serde(skip)]
+    /// Regions running now (the manager's view). Saved: a load is not a restart — what a
+    /// restart must undo is undone by each host's attach (regions it does not list park,
+    /// [`History::reattach_regions`] is exact per region) and, for a host that never
+    /// returns, by its succession.
     running: BTreeSet<crate::RegionCoords>,
     /// Regions shutting down, not yet parked: steps acting on their people wait.
-    #[serde(skip)]
     stopping: BTreeSet<crate::RegionCoords>,
     /// Decided but not yet taken by [`History::take_directives`].
-    #[serde(skip)]
     directives: Vec<Directive>,
     /// Directives a host could not apply (their region had stopped), held for that
-    /// region's next start ([`History::defer_directive`]). Not saved: a load returns
-    /// every body to the abstract history, which supersedes them.
-    #[serde(skip)]
+    /// region's next start ([`History::defer_directive`]).
     bounced: Vec<Directive>,
     /// Everyone who may be a stray citizen (`Wandering` with a site): a superset, checked
-    /// on use, filled where hand-over makes strays and rebuilt by [`History::after_load`].
-    #[serde(skip)]
+    /// on use, filled where hand-over makes strays.
     stray_candidates: BTreeSet<PersonId>,
     /// When each held journey was last held (`Journey::held_in` set), for
-    /// [`rules::HELD_TIMEOUT_LEGS`]. Not saved: a load releases every hold.
-    #[serde(skip)]
+    /// [`rules::HELD_TIMEOUT_LEGS`].
     held_since: BTreeMap<JourneyId, CalendarTick>,
     /// Log lines about sites in live regions, for the clients playing there; drained by
     /// [`History::take_notices`]. Nothing is kept for regions not running (nobody plays
     /// them), so an unwatched history never builds these up.
-    #[serde(skip)]
     notices: Vec<(crate::RegionCoords, String)>,
-}
-
-/// The version-2 file body: [`History`] before `positions`. Bincode is positional, so a
-/// v2 body only decodes through this shape.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct HistoryV2 {
-    seed: u64,
-    now: CalendarTick,
-    people: BTreeMap<PersonId, Person>,
-    sites: BTreeMap<SiteId, Site>,
-    civs: BTreeMap<CivId, Civ>,
-    journeys: BTreeMap<JourneyId, Journey>,
-    queue: BTreeMap<(CalendarTick, u64), Step>,
-    next_seq: u64,
-    next_ids: [u32; 4],
-    log: Vec<LogEntry>,
-}
-
-impl HistoryV2 {
-    pub(crate) fn upgrade(self) -> History {
-        History {
-            seed: self.seed,
-            now: self.now,
-            people: self.people,
-            sites: self.sites,
-            civs: self.civs,
-            journeys: self.journeys,
-            queue: self.queue,
-            next_seq: self.next_seq,
-            next_ids: self.next_ids,
-            log: self.log,
-            positions: BTreeMap::new(),
-            grid: None,
-            running: BTreeSet::new(),
-            stopping: BTreeSet::new(),
-            directives: Vec::new(),
-            bounced: Vec::new(),
-            stray_candidates: BTreeSet::new(),
-            held_since: BTreeMap::new(),
-            notices: Vec::new(),
-        }
-    }
-
-    pub(crate) fn of(h: &History) -> HistoryV2 {
-        HistoryV2 {
-            seed: h.seed,
-            now: h.now,
-            people: h.people.clone(),
-            sites: h.sites.clone(),
-            civs: h.civs.clone(),
-            journeys: h.journeys.clone(),
-            queue: h.queue.clone(),
-            next_seq: h.next_seq,
-            next_ids: h.next_ids,
-            log: h.log.clone(),
-        }
-    }
+    /// Whether anything saved changed since [`History::clear_content_dirty`]: set by every
+    /// change made through the history's methods, but not by an [`History::advance`] that
+    /// ran no step (only `now` moved) nor by a drain that took nothing. Not saved: a
+    /// decoded history equals its bytes (clean); a new one is dirty. A change made straight
+    /// through a `pub` field is not seen.
+    #[serde(skip)]
+    content_dirty: bool,
 }
 
 impl History {
@@ -165,6 +110,7 @@ impl History {
             stray_candidates: BTreeSet::new(),
             held_since: BTreeMap::new(),
             notices: Vec::new(),
+            content_dirty: true,
         }
     }
 
@@ -181,6 +127,21 @@ impl History {
         self.now
     }
 
+    /// Whether the history changed since it was last saved ([`Self::clear_content_dirty`]).
+    pub fn content_dirty(&self) -> bool {
+        self.content_dirty
+    }
+
+    /// The history as it stands is saved.
+    pub fn clear_content_dirty(&mut self) {
+        self.content_dirty = false;
+    }
+
+    /// Something saved changed.
+    pub(crate) fn mark_content_dirty(&mut self) {
+        self.content_dirty = true;
+    }
+
     /// The history's random number for (`at`, `subject`, `salt`): [`rng::roll`] with
     /// `seed` folded in. Every rule draws through this (or [`History::chance`]).
     pub fn roll(&self, at: CalendarTick, subject: u64, salt: u64) -> u64 {
@@ -193,12 +154,14 @@ impl History {
     }
 
     pub(crate) fn schedule(&mut self, at: CalendarTick, step: Step) {
+        self.content_dirty = true;
         let seq = self.next_seq;
         self.next_seq += 1;
         self.queue.insert((at, seq), step);
     }
 
     pub(crate) fn log_event(&mut self, kind: LogKind) {
+        self.content_dirty = true;
         let regions = self.notice_regions(&kind);
         let entry = LogEntry { at: self.now, kind };
         if !regions.is_empty() {
@@ -209,6 +172,7 @@ impl History {
     }
 
     pub fn add_civ(&mut self, race: Race) -> CivId {
+        self.content_dirty = true;
         let id = CivId(self.next_ids[2]);
         self.next_ids[2] += 1;
         self.civs.insert(id, Civ { id, race, name: civ_name(id), sites: Vec::new() });
@@ -218,6 +182,7 @@ impl History {
     /// A person with no parents, at no site yet. Dies of old age at the rolled age
     /// (on the first `advance` if that date has already passed).
     pub fn add_founder(&mut self, sex: Sex, born: CalendarTick) -> PersonId {
+        self.content_dirty = true;
         let id = PersonId(self.next_ids[0]);
         self.next_ids[0] += 1;
         self.people.insert(id, Person::newborn(id, sex, born, None, None, None, Location::Unplaced));
@@ -243,6 +208,7 @@ impl History {
                 self.people.get(f).map(|p| p.abstract_location())
             );
         }
+        self.content_dirty = true;
         let id = SiteId(self.next_ids[1]);
         self.next_ids[1] += 1;
         let capacity = self.grid().capacity(region);
@@ -279,12 +245,14 @@ impl History {
         id
     }
 
-    /// Run every queued step due by `to`, in (time, insertion) order.
+    /// Run every queued step due by `to`, in (time, insertion) order. With no step due
+    /// and no held journey released, only `now` moves: not a content change.
     pub fn advance(&mut self, to: CalendarTick) {
         while let Some((&(at, seq), _)) = self.queue.first_key_value() {
             if at > to {
                 break;
             }
+            self.content_dirty = true;
             let step = self.queue.remove(&(at, seq)).unwrap();
             self.now = self.now.max(at);
             match step {

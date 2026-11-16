@@ -109,8 +109,9 @@ const VOXEL_BODY_TICKS: usize = 30;
 /// crc32 of `history::persist::encode` of [`history_scene`]'s bootstrapped
 /// history, on every target. Depends on the region size (journey leg times
 /// come from `REGION_BLOCKS`), so it is pinned at the test default of 64
-/// blocks only, and on `TICK_RATE`.
-const HISTORY_DIGEST: u32 = 0x4869_3884;
+/// blocks only, and on `TICK_RATE`. Re-recorded for history file v4 (every field but
+/// the grid saved).
+const HISTORY_DIGEST: u32 = 0xF2AB_CB4D;
 
 /// crc32 of the field bits of `game::mass_props::mass_properties` of
 /// [`l_shape`] (two cuboids, one turned 30° about Y) at

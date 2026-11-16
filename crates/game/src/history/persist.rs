@@ -5,9 +5,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// 2: `Person::home_location` and `Journey::held_in` (region hand-over).
-/// 3: `History::positions` (autosave-noted body positions). Version 2 files still load.
-pub const HISTORY_FILE_VERSION: u32 = 3;
-const OLDEST_LOADABLE_VERSION: u32 = 2;
+/// 3: `History::positions` (autosave-noted body positions).
+/// 4: every field but the grid (running and stopping regions, directives, bounced
+///    directives, stray candidates, hold times, notices): a load is not a restart.
+///    Older files are refused (`OldVersion`): worlds are re-forged, never migrated.
+pub const HISTORY_FILE_VERSION: u32 = 4;
+const OLDEST_LOADABLE_VERSION: u32 = 4;
 pub const HISTORY_MAGIC: [u8; 8] = *b"MMOHIST\0";
 
 /// Largest decompressed history body a file may claim; a bigger size prefix is refused
@@ -43,12 +46,6 @@ impl std::error::Error for HistoryLoadError {}
 
 pub fn encode(h: &History) -> Vec<u8> {
     encode_body(h, HISTORY_FILE_VERSION, bincode::serialize(h).expect("history serializes"))
-}
-
-/// A version-2 file of `h` (without its positions), for the old-file load test.
-#[doc(hidden)]
-pub fn encode_v2(h: &History) -> Vec<u8> {
-    encode_body(h, 2, bincode::serialize(&super::HistoryV2::of(h)).expect("history serializes"))
 }
 
 fn encode_body(h: &History, version: u32, body: Vec<u8>) -> Vec<u8> {
@@ -87,14 +84,10 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
     if body.len() != size {
         return Err(HistoryLoadError::Corrupt(format!("body is {} bytes, header says {size}", body.len())));
     }
-    let corrupt = |e: bincode::Error| HistoryLoadError::Corrupt(e.to_string());
-    let mut h: History = if found == 2 {
-        bincode::deserialize::<super::HistoryV2>(&body).map_err(corrupt)?.upgrade()
-    } else {
-        bincode::deserialize(&body).map_err(corrupt)?
-    };
+    // Exactly as saved: nobody embodied is returned to the abstract history here (a load is
+    // not a restart; the hosts' attaches and successions undo what a restart must).
+    let mut h: History = bincode::deserialize(&body).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
     h.set_grid(grid);
-    h.after_load();
     Ok(h)
 }
 

@@ -52,6 +52,9 @@ fn entry_side(prev: RegionCoords, rc: RegionCoords) -> RegionCoords {
 impl History {
     /// Drain the directives decided since the last call, in decision order.
     pub fn take_directives(&mut self) -> Vec<Directive> {
+        if !self.directives.is_empty() {
+            self.mark_content_dirty();
+        }
         std::mem::take(&mut self.directives)
     }
 
@@ -71,6 +74,7 @@ impl History {
     /// Put `person` at abstract place `loc`: kept as `home_location` while they are
     /// embodied (the body stays), else their `location`.
     pub(crate) fn set_abstract_location(&mut self, person: PersonId, loc: Location) {
+        self.mark_content_dirty();
         let embodied = self.embodied_in(person).is_some();
         if let Some(p) = self.people.get_mut(&person) {
             if embodied {
@@ -83,6 +87,7 @@ impl History {
     }
 
     fn emit(&mut self, region: RegionCoords, event: GameEventKind) {
+        self.mark_content_dirty();
         // A body leaving (despawn, walk-out) makes its noted spot stale.
         if let GameEventKind::DespawnPerson(p) | GameEventKind::WalkOut(p, _) = &event {
             self.positions.remove(p);
@@ -100,6 +105,7 @@ impl History {
     }
 
     fn embody(&mut self, person: PersonId, rc: RegionCoords, home: Location) {
+        self.mark_content_dirty();
         self.positions.remove(&person);
         if let Some(p) = self.people.get_mut(&person) {
             p.location = Location::InRegion(rc);
@@ -150,6 +156,7 @@ impl History {
 
     /// Hold `j` in `rc`: its region's bodies walk it, no abstract leg is queued.
     fn hold(&mut self, j: JourneyId, rc: RegionCoords) {
+        self.mark_content_dirty();
         if let Some(jr) = self.journeys.get_mut(&j) {
             jr.held_in = Some(rc);
             self.held_since.insert(j, self.now);
@@ -163,7 +170,11 @@ impl History {
     /// half the leg left (as after a park). Journeys held in a stopping region wait for its
     /// park. [`History::advance`] calls it.
     pub(crate) fn release_stuck_journeys(&mut self) {
+        let held = self.held_since.len();
         self.held_since.retain(|j, _| self.journeys.get(j).is_some_and(|jr| jr.held_in.is_some()));
+        if self.held_since.len() != held {
+            self.mark_content_dirty();
+        }
         let now = self.now;
         let stuck: Vec<(JourneyId, RegionCoords, Vec<PersonId>)> = self
             .held_since
@@ -189,6 +200,7 @@ impl History {
             })
             .collect();
         for (j, rc, bodies) in stuck {
+            self.mark_content_dirty();
             if !bodies.is_empty() {
                 ::log::warn!("history: journey {j:?} held in {rc:?} for too long; its bodies there go on abstractly");
             }
@@ -295,6 +307,7 @@ impl History {
     /// Region `rc` starts: the events that put history's people into it now — site people
     /// and strays at its landing, parties walking through it at the edge they came in by.
     pub fn region_started(&mut self, rc: RegionCoords) -> Vec<GameEventKind> {
+        self.mark_content_dirty();
         self.stopping.remove(&rc);
         self.running.insert(rc);
         let mark = self.directives.len();
@@ -348,6 +361,7 @@ impl History {
     /// held for the region's next [`History::region_started`], which delivers it once —
     /// unless that start supersedes it (see [`History::redeliver_bounced`]).
     pub fn defer_directive(&mut self, d: Directive) {
+        self.mark_content_dirty();
         self.bounced.push(d);
     }
 
@@ -426,6 +440,7 @@ impl History {
     /// away, every resident of a region that started unannounced, a spawn that never
     /// reached the host. All of it is returned.
     pub fn reattach_regions(&mut self, regions: &[(RegionCoords, Vec<(PersonId, [f32; 3])>)]) -> Vec<Directive> {
+        self.mark_content_dirty();
         for (rc, present) in regions {
             self.stopping.remove(rc);
             self.running.insert(*rc);
@@ -454,7 +469,7 @@ impl History {
         }
         // The lists are exact: an abstract resident of a reattached region has no body
         // there (it left over a seam while the link was down and was restored above, or the
-        // region started unannounced, or the history was reloaded). It gets one, as at the
+        // region started unannounced, or its host restarted). It gets one, as at the
         // region's start — else it would stay bodiless until the region restarts.
         let mark = self.directives.len();
         for (rc, _) in regions {
@@ -488,6 +503,7 @@ impl History {
     /// body is taken as [`History::reattach_regions`] takes one; a dead or duplicate body
     /// gets the returned `DespawnPerson`.
     pub fn adopt_body(&mut self, rc: RegionCoords, person: PersonId) -> Option<Directive> {
+        self.mark_content_dirty();
         if !self.running.contains(&rc) {
             ::log::warn!("history: a body crossed into {rc:?}, which the history had not running; it runs now");
             self.stopping.remove(&rc);
@@ -518,7 +534,7 @@ impl History {
         }
     }
 
-    /// Journey `j` has bodies in reattached `rc`: held there (as it was before the load
+    /// Journey `j` has bodies in reattached `rc`: held there (as it was before a park
     /// released it) when it is held nowhere and `rc` is on its route.
     fn hold_reattached(&mut self, j: JourneyId, rc: RegionCoords) {
         let Some(jr) = self.journeys.get_mut(&j) else { return };
@@ -532,6 +548,7 @@ impl History {
 
     /// Region `rc` is shutting down: steps acting on its people wait until it has parked.
     pub fn region_stopping(&mut self, rc: RegionCoords) {
+        self.mark_content_dirty();
         self.running.remove(&rc);
         self.stopping.insert(rc);
     }
@@ -540,6 +557,7 @@ impl History {
     /// history, and every journey held in `rc` resumes with half its current leg left.
     /// Anyone else still in `rc` is restored too, with a warning — a body went missing.
     pub fn region_parked(&mut self, rc: RegionCoords, people: Vec<(PersonId, [f32; 3])>) {
+        self.mark_content_dirty();
         self.running.remove(&rc);
         self.stopping.remove(&rc);
         self.note_positions(people.clone());
@@ -559,7 +577,9 @@ impl History {
     pub fn note_positions(&mut self, people: Vec<(PersonId, [f32; 3])>) {
         for (p, pos) in people {
             if let Some(Location::InRegion(rc)) = self.people.get(&p).map(|q| q.location) {
-                self.positions.insert(p, (rc, pos));
+                if self.positions.insert(p, (rc, pos)) != Some((rc, pos)) {
+                    self.content_dirty = true;
+                }
             }
         }
     }
@@ -567,34 +587,6 @@ impl History {
     /// The spot noted for `person` by [`History::note_positions`], if still pending.
     pub fn noted_position(&self, person: PersonId) -> Option<(RegionCoords, [f32; 3])> {
         self.positions.get(&person).copied()
-    }
-
-    /// After a load: nothing runs yet, so everyone embodied goes back to the abstract
-    /// history and every held journey resumes, as if their regions had parked.
-    /// [`super::persist::decode`] calls it.
-    pub fn after_load(&mut self) {
-        self.running.clear();
-        self.stopping.clear();
-        self.held_since.clear();
-        self.bounced.clear();
-        self.stray_candidates = self
-            .people
-            .values()
-            .filter(|p| p.site.is_some() && matches!(p.abstract_location(), Location::Wandering(_)))
-            .map(|p| p.id)
-            .collect();
-        let mut regions: BTreeSet<RegionCoords> = self
-            .people
-            .values()
-            .filter_map(|p| match p.location {
-                Location::InRegion(rc) => Some(rc),
-                _ => None,
-            })
-            .collect();
-        regions.extend(self.journeys.values().filter_map(|jr| jr.held_in));
-        for rc in regions {
-            self.release(rc, false);
-        }
     }
 
     /// Restore everyone still in `rc` (warning about the living when `warn`) and resume
@@ -620,6 +612,7 @@ impl History {
     /// Return `person`, embodied in `rc` (no longer live), to the abstract history. Their
     /// journey, if any, resumes in [`History::release`].
     fn restore(&mut self, person: PersonId, rc: RegionCoords) {
+        self.mark_content_dirty();
         let Some(p) = self.people.get_mut(&person) else { return };
         let home = std::mem::replace(&mut p.home_location, Location::Unplaced);
         if !p.alive() {
@@ -684,6 +677,7 @@ impl History {
     /// crossing out of the region a journey is held in (or of an unheld journey) moves the
     /// journey; it never steps back along its route.
     pub fn person_crossed(&mut self, person: PersonId, to: RegionCoords) -> bool {
+        self.mark_content_dirty();
         self.positions.remove(&person);
         let Some(p) = self.people.get_mut(&person).filter(|p| p.alive()) else { return false };
         let home = p.abstract_location();

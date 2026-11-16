@@ -810,7 +810,10 @@ mod state {
         let expected = small_state();
         assert_eq!(state.claims, expected.claims);
         assert_eq!(state.memo, expected.memo);
-        game::history::persist::decode(&state.history, grid()).expect("its history loads");
+        // Its history is a v3 file: refused since history v4 (worlds are re-forged, and
+        // `ensure_coordinator_state` replaces a state whose history is `OldVersion`).
+        let err = game::history::persist::decode(&state.history, grid()).expect_err("a v3 history is refused");
+        assert!(matches!(err, game::history::persist::HistoryLoadError::OldVersion { found: 3 }), "{err:?}");
     }
 
     #[test]

@@ -70,6 +70,7 @@ impl History {
         }
         let path = route(self.grid(), origin, to_region, ROUTE_MAX_NODES)?;
         let (leg_ticks, arrivals) = self.leg_arrivals(&path);
+        self.mark_content_dirty();
         let id = JourneyId(self.next_ids[3]);
         self.next_ids[3] += 1;
         let departed = self.now;
@@ -158,6 +159,7 @@ impl History {
 
     /// Drop every queued leg step of `j`.
     pub(crate) fn cancel_legs(&mut self, j: JourneyId) {
+        self.mark_content_dirty();
         self.queue.retain(|_, s| !matches!(s, Step::JourneyLeg { journey, .. } if *journey == j));
     }
 

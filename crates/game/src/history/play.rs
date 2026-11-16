@@ -72,6 +72,7 @@ impl History {
                 .ok_or(EmbarkRefusal::UnavailablePerson(p))?;
             sources.entry(from).or_default().push(p);
         }
+        self.mark_content_dirty();
         // Ruling P3-B: out of their old sites first (found_site wants them unplaced).
         for (&from, people) in &sources {
             for p in people {
@@ -148,6 +149,9 @@ impl History {
     /// site in a live region — born, died or married at it, departed from it, arrived at,
     /// founded or abandoned there.
     pub fn take_notices(&mut self) -> Vec<(RegionCoords, String)> {
+        if !self.notices.is_empty() {
+            self.mark_content_dirty();
+        }
         std::mem::take(&mut self.notices)
     }
 

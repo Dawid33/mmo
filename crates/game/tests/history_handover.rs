@@ -404,12 +404,29 @@ fn diagonal_entry_spawns_from_orthogonal_neighbour() {
 }
 
 #[test]
-fn load_normalises_embodied_state() {
-    assert_eq!(persist::HISTORY_FILE_VERSION, 3);
+fn a_load_keeps_embodied_state() {
+    assert_eq!(persist::HISTORY_FILE_VERSION, 4);
     let (h, a, j) = walking_out_of_running_site();
     assert_eq!(h.journey(j).unwrap().held_in, Some(rc(0, 0)));
     assert_eq!(h.pending_journey_legs(), 0);
     let back = persist::decode(&persist::encode(&h), SocietyGrid::from_world_map(&land_map(8, 3))).unwrap();
+    // A load is not a restart: bodies, holds and the queue stand as saved.
+    assert_eq!(back.journey(j).unwrap().held_in, Some(rc(0, 0)));
+    assert_eq!(back.pending_journey_legs(), 0);
+    for p in &a {
+        assert_eq!(back.person(*p).unwrap().location, h.person(*p).unwrap().location);
+        assert_eq!(back.person(*p).unwrap().home_location, h.person(*p).unwrap().home_location);
+    }
+    assert_eq!(persist::encode(&back), persist::encode(&h));
+}
+
+/// What the load used to do, a host's attach now does: the region it does not run parks,
+/// and everyone embodied there goes back to the abstract history.
+#[test]
+fn a_reload_then_a_park_normalises_embodied_state() {
+    let (h, a, j) = walking_out_of_running_site();
+    let mut back = persist::decode(&persist::encode(&h), SocietyGrid::from_world_map(&land_map(8, 3))).unwrap();
+    back.region_parked(rc(0, 0), Vec::new());
     assert!(back.people().all(|p| !matches!(p.location, Location::InRegion(_))));
     assert!(back.people().all(|p| p.home_location == Location::Unplaced));
     assert_eq!(back.journey(j).unwrap().held_in, None);

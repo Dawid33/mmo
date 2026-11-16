@@ -906,9 +906,11 @@ fn autosave_positions_are_respawn_positions() {
     // The autosave sees them far from the landing: block (3, 5), region-local units.
     let b = game::BLOCK_VOXELS as f32;
     h.note_positions(vec![(who, [3.5 * b, 40.0, 5.5 * b])]);
-    // A server restart: save, load (bodies go back to the abstract history), region starts.
+    // A server restart: save, load, the restarted host's attach lists no region (its
+    // region parks empty: bodies go back to the abstract history), the region starts.
     let grid = h.grid().clone();
     let mut h = persist::decode(&persist::encode(&h), grid).expect("history reloads");
+    h.region_parked(region, Vec::new());
     let events = h.region_started(region);
     assert_eq!(spawn_at(&events, who), Some(SpawnAt::Column([3, 5])));
     assert_eq!(h.noted_position(who), None, "the note is used up");
@@ -940,24 +942,16 @@ fn stale_position_not_used_after_leaving() {
 }
 
 #[test]
-fn history_v2_file_loads_with_empty_positions() {
+fn noted_positions_survive_a_reload() {
     let mut h = history();
     let (site, _, people) = home_site(&h);
     let region = h.site(site).unwrap().region;
     h.region_started(region);
     h.note_positions(vec![(people[0], [40.0, 0.0, 40.0])]);
     let grid = h.grid().clone();
-    let bytes = persist::encode_v2(&h);
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
-    let back = persist::decode(&bytes, grid.clone()).expect("a v2 file loads");
-    assert_eq!(back.noted_position(people[0]), None);
-    assert_eq!(back.people().count(), h.people().count());
-    assert_eq!(back.sites().count(), h.sites().count());
-    assert_eq!(back.log.len(), h.log.len());
-    assert_eq!(back.now(), h.now());
-    // And it is written back as the current version.
-    let again = persist::encode(&back);
-    assert_eq!(u32::from_le_bytes(again[8..12].try_into().unwrap()), persist::HISTORY_FILE_VERSION);
+    let back = persist::decode(&persist::encode(&h), grid).expect("a current file loads");
+    assert_eq!(back.noted_position(people[0]), Some((region, [40.0, 0.0, 40.0])));
+    assert_eq!(persist::encode(&back), persist::encode(&h));
 }
 
 const MARK_STACK: game::ItemStack = game::ItemStack { item: game::ItemId(5), count: 33 };

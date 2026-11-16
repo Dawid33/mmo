@@ -225,8 +225,9 @@ impl Coordinator {
         c
     }
 
-    /// A coordinator restarted from its saved state: the history loaded (everyone embodied
-    /// back in the abstract history until a host's [`HostMsg::Attach`]), every claimant
+    /// A coordinator restarted from its saved state: the history loaded exactly as saved
+    /// (live regions stay live until a host's [`HostMsg::Attach`] lists or parks them, or a
+    /// succession ends the host that ran them), every claimant
     /// offline until its host says otherwise, the memo as saved. Its calendar and every
     /// count run from store time `now_ms` (the state holds no anchor or deadline yet; once it
     /// does, a stored one goes through [`rebase_deadline`] / [`rebase_since`]).
@@ -265,6 +266,7 @@ impl Coordinator {
     /// through it: the hosts' messages own them.
     pub fn history_mut(&mut self) -> &mut History {
         self.dirty_since_save = true;
+        self.history.mark_content_dirty();
         &mut self.history
     }
 

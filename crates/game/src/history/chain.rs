@@ -96,6 +96,7 @@ impl History {
     /// Kill `person` now: widow the spouse, drop them from their site, log it, and
     /// abandon the site if nobody is left. A person already dead is left alone.
     pub fn record_death(&mut self, person: PersonId, cause: DeathCause) {
+        self.mark_content_dirty();
         let now = self.now;
         self.positions.remove(&person);
         let Some(p) = self.people.get_mut(&person) else { return };
