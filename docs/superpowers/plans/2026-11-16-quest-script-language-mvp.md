@@ -123,10 +123,14 @@ Places where this plan goes beyond the spec or revisits a **[call]**. None reope
     (`quest-lang/src/grammar.lalrpop`, compiled by `build.rs`), the token rules are a `logos` derive. The only
     hand-written part of the front end is the layout pass that turns line starts into `Indent` / `Dedent` /
     `Newline` tokens and splits f-strings — no generator expresses Python's indentation.
-17. **No recursive user types in the MVP** (a struct or enum that contains itself, directly or through
-    `list` / `dict` / `Option`): compile error `recursive-type`. Without recursion a script could not walk one
-    anyway, and it lets every value's nesting be bounded by its type (types nested deeper than 32 are
-    `type-too-deep`), which the VM's structural walks rely on.
+17. **Recursive data is allowed [decided by the owner 2026-11-16, spec §6.1 — replaces this plan's earlier "no
+    recursive user types"]:** a type may contain itself (a tree of nodes), directly or through other types. The
+    compiler rejects only a type that has no finite value (`infinite-type`: e.g. `struct Node: next: Node`; the
+    cycle must pass through `list`, `dict`, `Option` or an enum variant without it). Every structural walk in the VM
+    (equality, hashing, to/from wire, encode/decode, formatting, shape checks) is a loop over an explicit stack —
+    no Rust recursion over values and no nesting cap on values; `WORK_WORDS_MAX` still bounds every walk
+    (`ValueTooLarge`). `WireValue` drops, clones and compares without recursion. Only reference paths keep a
+    length cap (`REF_PATH_MAX` = 32 steps).
 18. **Dict equality ignores insertion order** (`{"a": 1, "b": 2} == {"b": 2, "a": 1}`), as in Python; iteration
     order is still insertion order. Lists, structs and strings compare element by element.
 16. **`quest test` is not built** (the spec marks it optional); `assert` / `assert_eq` in `main()` cover it.
@@ -154,7 +158,7 @@ and the tests pin behaviour.
 | `PROMISE_TIMEOUT_TICKS` | 200 | a request unanswered this long resolves `Timeout` |
 | `FUEL_PER_TICK_DEFAULT` | 2_000 | CLI default |
 | `REAP_CHILDREN_MAX` | 16 | children released per reap step |
-| `WIRE_DEPTH_MAX` | 32 | nesting of a wire value |
+| `REF_PATH_MAX` | 32 | most steps of a reference path (`&a.b[i]…`); values themselves have no nesting cap (decision 17) |
 | `STRUCT_FIELDS_MAX` | 32 | fields of a struct or variant |
 | `WORK_WORDS_MAX` | 65_536 | most words one structural walk (compare, hash, lookup, format, to-wire) may visit; beyond → fault `ValueTooLarge` |
 | `PARSE_DEPTH_MAX` | 256 | expression / block nesting in source (`quest-lang`) |
@@ -372,7 +376,7 @@ implementer's; a later task reads them from the code. Diagnostic `code`s (tests 
 `tab-indent`, `bad-dedent`, `bad-char`, `unterminated-string`, `bad-escape`, `bad-number`, `non-ascii-ident`,
 `syntax`, `too-deep`, `chained-comparison`, `mod-not-found`, `mod-ambiguous`, `duplicate-def`, `unresolved`,
 `private`, `assign-undeclared`, `type-mismatch`, `needs-annotation`, `unknown-field`, `unknown-method`,
-`missing-field`, `arg-count`, `bad-dict-key`, `recursive-type`, `type-too-deep`, `missing-return`, `too-many-fields`, `recursion`, `error-shape`,
+`missing-field`, `arg-count`, `bad-dict-key`, `infinite-type`, `missing-return`, `too-many-fields`, `recursion`, `error-shape`,
 `unhandled-fallible`, `not-fallible`, `raises-outside-pinned`, `unused-promise`, `non-exhaustive`,
 `impossible-arm`, `ref-escapes`, `ref-not-place`, `await-not-promise`, `await-in-init`, `not-storable`,
 `unknown-event`, `handler-signature`, `too-many-slots`; warnings `error-typo`, `unreachable-arm`.
@@ -1023,6 +1027,50 @@ Tests:
 - [ ] **Step 3:** implement. - [ ] **Step 4:** PASS; `just quest-check`.
 - [ ] **Step 5:** Commit `feat(quest): promises — requests at commit, await parking, timeouts`.
 
+### Task 13b: Recursive data — every structural walk is a loop
+
+Owner's decision 2026-11-16 (spec §6.1, plan decision 17): recursive data types are allowed, so valid memory can
+hold values nested arbitrarily deep (a 4 000-node linked list). Tasks 5–8 and 13 assumed nesting ≤ 32 and walk
+values with Rust recursion plus a depth cap that reports `Corrupt` / `TooDeep`. This task removes that assumption.
+
+**Files:** Modify `quest/crates/quest-vm/src/{consts.rs,eq.rs,dict.rs,list.rs,wire.rs,fmt.rs,types.rs,program.rs,
+refs.rs,sched.rs,promise.rs}` as needed; Test: extend existing test files only where a regression below says so.
+
+**Interfaces — Produces:** unchanged signatures, except: `WIRE_DEPTH_MAX` is removed (and from `tunables_pinned`);
+`REF_PATH_MAX: u32 = 32` replaces its use for reference paths; `WireError::TooDeep` is removed; `impl Drop`,
+`Clone` and `PartialEq` for `WireValue` are hand-written and non-recursive (`dismantle` becomes the `Drop` impl);
+`WireValue::depth_at_most` is removed together with the entry checks that used it (nothing recurses any more).
+
+Rules:
+- Every walk over heap memory or over a `WireValue` — `deep_eq`, `key_hash`, `dict::equal`, `list::contains`,
+  `to_wire`, `from_wire`, `fits`, `WireValue::encode` / `decode`, `fmt_value` — uses an explicit `Vec` stack. The
+  `Walk` budget (`WORK_WORDS_MAX`, `ValueTooLarge`) stays and is charged exactly as before; the depth counter goes.
+  Results (hash values, encoded bytes, formatted text, equality) are identical to the recursive versions for every
+  value the old code accepted — the existing tests and pinned bytes prove it.
+- Hostile input stays bounded without a depth cap: `decode` of untrusted bytes by the byte count, heap walks by the
+  work budget and the heap size, corrupt cyclic memory by the work budget (a cycle in memory is `ValueTooLarge`
+  or `Corrupt`, never a hang or a stack overflow).
+- `Program::validate` accepts type tables with cycles (ids still in range); it drops the type-nesting cap. Functions
+  over the type table (`is_ref`, `storable`, …) terminate on cyclic tables (`storable` = no `Promise` reachable —
+  a visited set over type ids).
+
+Regression tests (only these):
+- `deep_linked_list_walks` (in `tests/wire.rs`): a `struct Node { v: int, next: Option[Node] }` type table; a
+  5 000-node list built on the heap → `deep_eq` with an independent copy is true, `key_hash` equal, `to_wire` →
+  `encode` → `decode` → `from_wire` round-trips, `fmt_value` succeeds, and the same at 100 000 nodes as a
+  `WireValue` through `encode`/`decode`/`clone`/`==`/drop without stack overflow (run the test on the default test
+  thread, no enlarged stack).
+- `cyclic_memory_is_bounded` (in `tests/dicts.rs`, replacing `cyclic_memory_in_dict_keys_is_corrupt_not_a_stack_overflow`):
+  the same cyclic dict-key memory → `ValueTooLarge` or `Corrupt`, no overflow.
+- Update tests that asserted the old depth behaviour (`deep_eq_depth_is_capped`, `decode_rejects_bad_input`'s
+  33-deep case, `too_deep_answer_becomes_lost`) to the new behaviour; delete what no longer applies.
+
+- [ ] **Step 1:** update / add the tests above; run `just quest-test "-p quest-vm"` → the new ones FAIL (overflow or
+  `Corrupt`).
+- [ ] **Step 2:** convert every walk; remove the depth machinery.
+- [ ] **Step 3:** `just quest-test "-p quest-vm"` PASS; `just quest-check`.
+- [ ] **Step 4:** Commit `refactor(quest): recursive data — every structural walk is a loop`.
+
 ### Task 14: Checkpoints, `StateHash`, save and load
 
 **Files:** Create `src/save.rs`; Modify `src/vm.rs`; Test `tests/save.rs`
@@ -1284,8 +1332,9 @@ Tests:
   33 fields → `too-many-fields`.
 - `methods` — `l.add(5)` and `l.total()` of §5.5 type-check; `l.nope()` → `unknown-method`; calling a `&self`
   method on a non-place (`make().add(1)`) → `ref-not-place`.
-- `recursive_types` — `struct Node: next: Option[Node]`, an enum holding `list[Self]`, and two structs holding each
-  other → `recursive-type` naming the cycle; a type nested 33 deep → `type-too-deep`.
+- `recursive_types` — `struct Node: next: Option[Node]`, an enum `Tree` with a variant holding `list[Tree]`, and two
+  structs holding each other through `Option` all compile; `struct Bad: next: Bad` and two structs holding each other
+  directly → `infinite-type` naming the cycle.
 - `dict_equality_ignores_order` is a run test in Task 26 (`{"a": 1, "b": 2} == {"b": 2, "a": 1}` prints `true`).
 - `enums` — variant construction by name and by position; `let x: Option[int] = None`; `Some(1)`.
 - `collections` — `[1, "a"]` → `type-mismatch`; `{"a": 1}[0]` → `type-mismatch`; a `float` or `list` key →
