@@ -143,8 +143,8 @@ pub(crate) enum Request {
     /// R4: the operator rolls the world back (`worldctl rollback`; Postgres): `(generation,
     /// successions abandoned)`.
     RollbackWorldOperator(Reply<(u64, u64)>),
-    /// R4: the operator retires a host while no host runs (`worldctl retire-host`; Postgres).
-    RetireOffline(HostId, Reply<crate::Retired>),
+    /// Elastic 2a: the coordinator ends a lapsed landless host (no succession; Postgres).
+    EndLandlessHost(HostId, u64, CoordinatorFence, Reply<crate::LandlessEnd>),
     /// R4: the operator vouches for a lapsed host's death (`worldctl retire-host`; Postgres).
     VouchHost(HostId, Reply<crate::Vouched>),
     OpenSuccessions(Reply<Vec<crate::Succession>>),
@@ -501,13 +501,13 @@ async fn serve(
                     })
                 })
             }
-            // No writer lock (as a declaration): it may wait, bounded, behind a staged part.
-            Request::RetireOffline(ordinal, r) => {
+            // No writer lock (as a declaration): bounded by the cut lock timeout.
+            Request::EndLandlessHost(host, boot, fence, r) => {
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
                 let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
-                        Pool::Pg(p) => crate::operator::retire_offline(p, ordinal, lock_timeout_ms, lease_ms).await,
+                        Pool::Pg(p) => succession::end_landless_host(p, host, boot, fence, lock_timeout_ms, lease_ms).await,
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
                 })
@@ -864,7 +864,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::DeclareSuccession(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RollbackWorld(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RollbackWorldOperator(r) => r.send(Err(StoreError::ReadOnly)),
-        Request::RetireOffline(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::EndLandlessHost(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::VouchHost(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::DrainHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         // A read-only handle sends nothing, a notice included.

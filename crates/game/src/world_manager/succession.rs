@@ -429,7 +429,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// never issued twice). Called for the predecessor of a SETTLED succession (at
     /// `SuccessionDone`: the settle cut committed, the reports are no longer read) and for a
     /// host that left cleanly holding no land (`world_cut.rs` `forget_landless_leavers`: no
-    /// `Leave` succession can owe its heir anything of it). Refused — nothing forgotten — while
+    /// `Leave` succession can owe its heir anything of it), and for a dead row no open succession
+    /// names ([`Self::forget_dead_hosts`]: an ended landless host, Elastic 2a — it owned no
+    /// region, so no state message is addressed to it). Refused — nothing forgotten — while
     /// the peer journal still needs it ([`crate::PeerJournal::forget`]).
     ///
     /// **What is dropped** (counted, `peer_dropped_for_dead=`): what this host still owed it —
@@ -473,6 +475,28 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.peer_dropped_for_dead += dropped as u64;
         log::info!("[server] host {host} is forgotten ({dropped} message(s) owed to it dropped)");
         Ok(())
+    }
+
+    /// The `hosts` rows a directory read found DEAD that no open succession names as
+    /// predecessor (`dead`): gone for good — a landless host the coordinator ended (Elastic 2a,
+    /// no succession: no `SuccessionDone` ever comes to forget it), or the predecessor of a
+    /// settled succession this host was no recipient of. Each is forgotten
+    /// ([`Self::forget_host`]) unless it is this host, already forgotten, or the predecessor of a
+    /// run this host still holds (that run's `SuccessionDone` forgets it). A refusal (the journal
+    /// still needs it) is tried again at the next read.
+    pub fn forget_dead_hosts(&mut self, dead: impl IntoIterator<Item = HostId>) {
+        let me = self.ordinal();
+        let gone: Vec<HostId> = dead
+            .into_iter()
+            .filter(|h| *h != me && !self.forgotten_hosts.contains(h))
+            .filter(|h| !self.successions.values().any(|r| r.order.predecessor == *h))
+            .collect();
+        for h in gone {
+            match self.forget_host(h) {
+                Ok(()) => log::info!("[server] host {h}'s row is dead and no open succession names it: forgotten"),
+                Err(e) => log::debug!("[server] host {h}'s row is dead, but it is not forgotten yet: {e}"),
+            }
+        }
     }
 
     /// Whether host `host` was forgotten ([`Self::forget_host`]).

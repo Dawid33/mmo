@@ -1895,7 +1895,7 @@ fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
 
 /// Host `ordinal`'s row as the coordinator reads it: dirty and live, last seen at `seen_ms`.
 fn seen(ordinal: HostId, seen_ms: u64) -> HostSeen {
-    HostSeen { ordinal, boot: 100 + ordinal.0, clean: false, state: game::HOST_LIVE, seen_ms, draining: false }
+    HostSeen { ordinal, boot: 100 + ordinal.0, clean: false, state: game::HOST_LIVE, seen_ms, draining: false, landed: true }
 }
 
 /// A host is lapsed only once the coordinator itself read one `seen_ms` over a whole lease
@@ -3527,4 +3527,192 @@ fn every_host_draining_means_no_gate() {
     commit_routed(&mut c);
     read_draining(&mut c, 4, &[h(0), h(1), h(2)], 200);
     assert_eq!(c.login_order(spawn_order(2)), Some((h(3), CoordMsg::Login(spawn_order(2)))));
+}
+
+// --- Elastic 2a: recipients own land; a landless death is ended -----------------------------
+
+/// A read of hosts `0..n` at `now`, every one beating but those of `dead` (vouched, lapsed at
+/// once) and of `declared` (dead rows); those of `landless` hold no land.
+fn read_land(c: &mut Coordinator, n: u32, dead: &[HostId], declared: &[HostId], landless: &[HostId], now: u64) {
+    let rows: Vec<HostSeen> = (0..u64::from(n))
+        .map(h)
+        .map(|h| {
+            let mut row = seen(h, if dead.contains(&h) { 0 } else { now + 1 });
+            row.landed = !landless.contains(&h);
+            if declared.contains(&h) {
+                row.state = game::HOST_DEAD;
+            }
+            row
+        })
+        .collect();
+    c.observe_leases(&rows, now, now);
+}
+
+/// The store's survivors of `d`: every host of `0..n` but the predecessors and `landless`,
+/// plus the heirs.
+fn store_declares_landed(d: &Declare, n: u32, landless: &[HostId]) -> Vec<game::Succession> {
+    let mut list = store_declares(d, n, 1, game::CutId(0));
+    for s in &mut list {
+        s.survivors.retain(|h| !landless.contains(h) || d.heirs.contains(h));
+    }
+    list
+}
+
+/// A landless host lapsing — with no run open, or while one is open and it is no recipient of
+/// it — is ended, not succeeded and not a second failure: no rollback, the run settles with
+/// its survivors only, and the ended host is out of the view (not the gate, not expected).
+#[test]
+fn a_lapsed_landless_non_recipient_is_ended_not_a_second_failure() {
+    // No run open: a landless lapse is ended instead of declared.
+    let mut c = succeeding(3);
+    read_land(&mut c, 3, &[h(2)], &[], &[h(2)], 10);
+    assert_eq!(c.declare_wanted(10), None, "a landless lapse is no succession");
+    let end = c.take_end_landless(10).expect("ended instead");
+    assert_eq!(end, EndLandless { host: h(2), boot: 102 });
+    assert_eq!(c.take_end_landless(11), None, "one end in flight");
+    c.landless_ended(end, game::LandlessEnd::Ended, 12);
+    assert!(!c.rollback_wanted() && c.successions_open_count() == 0);
+    read_land(&mut c, 3, &[h(2)], &[h(2)], &[h(2)], 20);
+    assert_eq!((c.declare_wanted(20), c.take_end_landless(20)), (None, None), "never again");
+    assert_ne!(c.gate_host(), Some(h(2)));
+
+    // A run open (host 3 succeeded, survivors 0 and 1): landless host 2 lapses.
+    let mut c = succeeding(4);
+    read_land(&mut c, 4, &[h(3)], &[], &[h(2)], 100);
+    let d = c.declare_wanted(100).expect("host 3 is declared");
+    assert_eq!(d.dead, vec![(h(3), 103)]);
+    assert_ne!(d.heirs[0], h(2), "the landless host is no heir while a landed one takes logins");
+    let s = store_declares_landed(&d, 4, &[h(2)]).remove(0);
+    assert_eq!(s.survivors, vec![h(0), h(1)]);
+    c.declared(game::Declared::Done(vec![s.clone()]), 100);
+    c.set_expected_hosts([0, 1, 2].into_iter().map(h).collect());
+    commit_routed(&mut c);
+    read_land(&mut c, 4, &[h(2)], &[h(3)], &[h(2)], 200);
+    c.maintain(200);
+    assert!(!c.rollback_wanted(), "a landless non-recipient's lapse is no second failure");
+    let end = c.take_end_landless(200).expect("ended while the run is open");
+    assert_eq!(end.host, h(2));
+    c.landless_ended(end, game::LandlessEnd::Ended, 201);
+    c.maintain(201);
+    assert!(!c.rollback_wanted());
+    // The run settles with its survivors; the cut does not wait for the ended host.
+    for hn in [0, 1] {
+        c.handle(h(hn), HostMsg::SuccessionApplied { id: s.id }, 300);
+    }
+    c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 300);
+    commit_routed(&mut c);
+    c.maintain(300 + CUT_EVERY_MS);
+    let next = begun(&commit_routed(&mut c));
+    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(0), h(1)], "the settle cut begins without host 2");
+    assert_ne!(c.gate_host(), Some(h(2)));
+}
+
+/// A LANDED host lapsing while a run is open is still a second failure (the residual), and so
+/// is a landless recipient (a landless heir); the store answering `Recipient` to an end rolls
+/// back too. `OwnsLand` (it won land after the read) waits for a newer read.
+#[test]
+fn a_lapsed_landed_host_during_a_run_still_rolls_back() {
+    let mut c = succeeding(3);
+    declare_one(&mut c, 3, h(2), 100);
+    commit_routed(&mut c);
+    read_land(&mut c, 3, &[h(1)], &[h(2)], &[], 200);
+    assert_eq!(c.take_end_landless(200), None, "a landed host is not ended");
+    c.maintain(200);
+    assert!(c.rollback_wanted(), "a landed lapse before the settle rolls back");
+
+    // A landless survivor (it held land at the declaration; the read shows none now).
+    let mut c = succeeding(3);
+    let s = declare_one(&mut c, 3, h(2), 100);
+    let survivor = *s.survivors.iter().find(|h| **h != s.heir).expect("a survivor that is not the heir");
+    read_land(&mut c, 3, &[survivor], &[h(2)], &[survivor], 200);
+    assert_eq!(c.take_end_landless(200), None, "a recipient is not ended");
+    c.maintain(200);
+    assert!(c.rollback_wanted(), "a recipient's lapse rolls back");
+
+    // The store answers `Recipient` to an end handed out while a run is open (the run the
+    // core holds does not name the host; the store's does): a rollback.
+    let mut c = succeeding(4);
+    read_land(&mut c, 4, &[h(3)], &[], &[h(2)], 100);
+    let d = c.declare_wanted(100).expect("host 3 is declared");
+    c.declared(game::Declared::Done(store_declares_landed(&d, 4, &[h(2)])), 100);
+    commit_routed(&mut c);
+    read_land(&mut c, 4, &[h(2)], &[h(3)], &[h(2)], 200);
+    let end = c.take_end_landless(200).expect("host 2 is no recipient here");
+    c.landless_ended(end, game::LandlessEnd::Recipient, 201);
+    assert!(c.rollback_wanted(), "the store's run names it: a second failure");
+    // Without a run: `OwnsLand` waits for a newer read, `Recipient` asks for a re-read.
+    let mut c = succeeding(3);
+    read_land(&mut c, 3, &[h(2)], &[], &[h(2)], 10);
+    let end = c.take_end_landless(10).unwrap();
+    c.landless_ended(end, game::LandlessEnd::OwnsLand, 11);
+    assert_eq!(c.take_end_landless(12), None, "not before a newer read");
+    read_land(&mut c, 3, &[h(2)], &[], &[], 20);
+    assert_eq!(c.take_end_landless(20), None, "landed now");
+    assert_eq!(c.declare_wanted(20).map(|d| d.dead), Some(vec![(h(2), 102)]), "a landed lapse is declared");
+    let mut c = succeeding(3);
+    read_land(&mut c, 3, &[h(2)], &[], &[h(2)], 10);
+    let end = c.take_end_landless(10).unwrap();
+    c.landless_ended(end, game::LandlessEnd::Recipient, 11);
+    assert!(c.take_successions_reread(), "a run the core does not know: re-read");
+    assert!(!c.rollback_wanted());
+}
+
+/// Heirs are tried in order: landed hosts that take logins, then hosts that take logins, then
+/// every attached live host.
+#[test]
+fn the_heir_prefers_landed_hosts_that_take_logins() {
+    let heir = |landless: &[HostId], draining: &[HostId]| {
+        let mut c = succeeding(4);
+        let rows: Vec<HostSeen> = (0..4)
+            .map(h)
+            .map(|o| HostSeen {
+                landed: !landless.contains(&o),
+                draining: draining.contains(&o),
+                ..seen(o, if o == h(3) { 0 } else { 11 })
+            })
+            .collect();
+        c.observe_leases(&rows, 10, 10);
+        c.declare_wanted(10).expect("host 3 lapsed").heirs[0]
+    };
+    let all = |of: &[u64]| of.iter().copied().map(h).collect::<std::collections::BTreeSet<_>>();
+    // Host 2 is the only landed host taking logins (0 is landless, 1 drains).
+    assert_eq!(heir(&[h(0)], &[h(1)]), h(2));
+    // No landed host takes logins: the one that takes logins (landless 0).
+    assert_eq!(heir(&[h(0)], &[h(1), h(2)]), h(0));
+    // Nobody takes logins: any live host.
+    assert_eq!(heir(&[h(0)], &[h(0), h(1), h(2)]), game::heir_of(h(3), &all(&[0, 1, 2])).unwrap());
+    // Every candidate landed and taking logins: the rendezvous among all of them, as before.
+    assert_eq!(heir(&[], &[]), game::heir_of(h(3), &all(&[0, 1, 2])).unwrap());
+}
+
+/// An id absent from a successful `hosts` read was pruned: nothing of it is kept (B-M5) — not
+/// as succeeded, not its boot, not as declared, not as a dead row asking for a re-read.
+#[test]
+fn an_id_pruned_from_the_read_is_forgotten() {
+    let mut c = succeeding(4);
+    let s = declare_one(&mut c, 4, h(2), 100);
+    c.host_detached(h(2));
+    for hn in [0, 1, 3] {
+        c.handle(h(hn), HostMsg::SuccessionApplied { id: s.id }, 100);
+    }
+    c.handle(s.heir, HostMsg::SuccessionAdopted { id: s.id }, 100);
+    commit_routed(&mut c);
+    let mentioned = c.host_mentions(h(2));
+    assert!(mentioned.contains(&"succeeded") && mentioned.contains(&"declared") && mentioned.contains(&"boots"), "{mentioned:?}");
+    // Host 3's row turns dead behind the coordinator's back: a re-read is asked once.
+    read_land(&mut c, 4, &[], &[h(2), h(3)], &[], 200);
+    assert!(c.host_mentions(h(3)).contains(&"reread_for"));
+    assert!(c.take_successions_reread());
+    c.successions_open(vec![s.clone()], 201);
+    c.host_detached(h(3));
+    // Both rows pruned (a registration's prune): nothing is kept of either.
+    let rows: Vec<HostSeen> = [0, 1].into_iter().map(h).map(|o| seen(o, 301)).collect();
+    c.observe_leases(&rows, 300, 300);
+    assert_eq!(c.host_mentions(h(2)), Vec::<&str>::new());
+    assert_eq!(c.host_mentions(h(3)), Vec::<&str>::new());
+    // An attached host absent from the read (registered after it was issued) keeps its boot.
+    assert!(c.host_mentions(h(0)).contains(&"boots"));
+    let rows: Vec<HostSeen> = [1].into_iter().map(h).map(|o| seen(o, 401)).collect();
+    c.observe_leases(&rows, 400, 400);
+    assert!(c.host_mentions(h(0)).contains(&"boots"), "attached: kept");
 }

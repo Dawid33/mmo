@@ -578,7 +578,7 @@ macro_rules! engine_rows {
             /// registration) that issues the next id and never waits for anything else to happen.
             /// UNFENCED: it is what creates the identity a fence is built from; each statement's
             /// safety and the lock walk are in the module notes of `succession.rs`. In order:
-            /// 1. the world row (Postgres `FOR NO KEY UPDATE`, as every declaration, retirement,
+            /// 1. the world row (Postgres `FOR NO KEY UPDATE`, as every declaration, end of a landless host,
             ///    rollback and decision; SQLite has one writer): `id = next_host_id`, refused above
             ///    [`crate::HOST_ID_MAX`]; `next_host_id = id + 1`;
             /// 2. a non-empty `name`: other dirty live rows of that name get `seen_ms = 0` (so they
@@ -650,7 +650,7 @@ macro_rules! engine_rows {
                 lease_ms: u64,
             ) -> Result<Result<crate::Registered, Vec<HostId>>, crate::succession::DeclareError> {
                 // 1. The world row: serialises the counter, the generation and every statement
-                // below with every other registration, declaration, retirement, rollback and
+                // below with every other registration, declaration, end of a landless host, rollback and
                 // decision. `FOR NO KEY UPDATE` never waits for a claim's `FOR KEY SHARE`.
                 let no_key = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
                 let sql = format!("SELECT generation, next_host_id FROM world WHERE id = 1{no_key}");
@@ -829,11 +829,18 @@ macro_rules! engine_rows {
                 Ok(())
             }
 
-            /// Every host row, by id.
+            /// Every host row, by id, each with whether it holds land ([`HostRow::owns_land`]) and
+            /// whether an open succession has it as predecessor ([`HostRow::succeeding`]); the
+            /// subqueries read without locks.
             pub(crate) async fn hosts(pool: &Pool) -> Result<Vec<HostRow>, StoreError> {
                 let sql = format!(
                     "SELECT id, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, \
-                     seen_ms, name, drain_at_ms - {NOW_MS} FROM hosts ORDER BY id"
+                     seen_ms, name, drain_at_ms - {NOW_MS}, \
+                     (EXISTS (SELECT 1 FROM super_regions WHERE owner = hosts.id) \
+                      OR EXISTS (SELECT 1 FROM in_flight WHERE host = hosts.id)), \
+                     EXISTS (SELECT 1 FROM successions WHERE predecessor = hosts.id \
+                             AND predecessor_boot = hosts.boot AND settled_cut IS NULL AND abandoned = 0) \
+                     FROM hosts ORDER BY id"
                 );
                 let rows = sqlx::query(&sql).fetch_all(pool).await?;
                 rows.into_iter()
@@ -852,6 +859,8 @@ macro_rules! engine_rows {
                             seen_ms: u(r.try_get(10)?),
                             name: r.try_get(11)?,
                             drain_in_ms: r.try_get(12)?,
+                            owns_land: r.try_get(13)?,
+                            succeeding: r.try_get(14)?,
                         })
                     })
                     .collect()

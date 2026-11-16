@@ -40,7 +40,7 @@
 //! declaration of several predecessors", in which the zombie's upsert `ON CONFLICT` locked a
 //! row of another predecessor. `claim_free` no longer upserts: its `INSERT … ON CONFLICT DO
 //! NOTHING` takes no lock on an existing row, and its `UPDATE … WHERE owner = NO_OWNER` locks
-//! only a FREE row, which no declaration, retirement or registration locks. That cycle cannot
+//! only a FREE row, which no declaration, end of a landless host or registration locks. That cycle cannot
 //! form any more.)
 //!
 //! **The drain mark** (Elastic 1 Task 7; `rows.rs` `drain_host`, `worldctl drain`): ONE
@@ -48,7 +48,7 @@
 //! row is refused, the guard in the same statement), UNFENCED like the heartbeat (it
 //! changes no ownership) — it holds that row and wants nothing after it, so it closes no cycle:
 //! like a heartbeat it only waits (at most its `lock_timeout`) for whoever holds the row — a
-//! declaration, a retirement, a registration's vouch or total crash, a claim's `check_live`
+//! declaration, an end of a landless host, a registration's vouch or total crash, a claim's `check_live`
 //! `FOR SHARE` — and nothing waits for it while it waits. `claim_free`'s guard reads the mark
 //! in `check_live`'s own statement (the same `FOR SHARE` of the claimer's row, its last; no new
 //! lock): a mark that commits first is seen (the claim wins nothing and rolls back), one that
@@ -57,6 +57,39 @@
 //! changes no lock order): a host already marked locks no free row for nothing; the locked
 //! re-check stays the last statement. A re-claim of a host's OWN rows
 //! (`claim_super_regions_live`) ignores the mark.
+//!
+//! **The survivors** (Elastic 2a, the crash-loop rule): the declaration's survivors are the
+//! dirty live hosts that hold land — a `super_regions` row they own or an `in_flight` row of
+//! their id — plus the call's heirs, minus the predecessors: ONE plain `SELECT` over `hosts`
+//! with `EXISTS` subqueries on `super_regions` and `in_flight`, under the `world` lock and after
+//! the predecessors' rows are locked. It takes no lock (a plain read), so it changes no lock
+//! order and joins no cycle. A claim committing land just before it is seen (that host is a
+//! survivor); one committing after it was not in the world the survivors' journals describe —
+//! such a host met the dead boot with no land, so it exchanged no state with it, and if it
+//! dies before the settle it is a lapsed LANDED host: still a second failure (a rollback — the
+//! residual Elastic 2a accepts; never a loss).
+//!
+//! **Ending a landless host** (`end_landless_host`, Elastic 2a): ONE transaction, fenced, under
+//! `lock_timeout` = the cut lock timeout. The lock walk, in this order: `coordinator` `FOR SHARE`
+//! (the epoch compared: `Fenced`), `world` `FOR NO KEY UPDATE` (no generation compared — it does
+//! not touch the generation), then the host's one `hosts` row `FOR NO KEY UPDATE`. That is a
+//! prefix of the declaration's walk (`coordinator` → `world` → the predecessors' `hosts` rows),
+//! so it adds no cycle: it serialises with every declaration, registration, rollback and
+//! decision on `world`, and takes no `super_regions` row at all — the cycle-1 shape (a
+//! transaction holding `super_regions` rows and waiting for a `hosts` row, against one holding
+//! that `hosts` row and waiting for those `super_regions` rows) cannot form with it. Then plain
+//! reads (no locks): the row's lapse by the database clock, `EXISTS` over its `super_regions` /
+//! `in_flight` rows, `EXISTS` over the open `successions` naming it heir or survivor (read under
+//! `world`, which every writer of `successions` takes first). Then `UPDATE hosts SET state =
+//! DEAD` of the row already locked. A heartbeat of that row waits for it (its 1 s lock timeout:
+//! "no beat this time"; after the commit it answers `live: false` — the host is replaced). A
+//! ZOMBIE's `claim_free` (the ended process still running) upserts only FREE rows and takes its
+//! `hosts` row `FOR SHARE` as its LAST statement (`check_live`): if the end holds the row, the
+//! claim waits there and, once the end commits, finds the row dead and is refused (it rolls back
+//! what it upserted); if the claim committed first, the end's `EXISTS` sees the land and answers
+//! `OwnsLand` (nothing written). A re-claim of the host's own rows (`claim_super_regions_live`)
+//! re-claims nothing for a landless host. A drain mark and a vouch wait for the row as for a
+//! declaration. Nothing waits for a lock the end holds while that holder waits for it.
 //!
 //! **A cut's begin** (`two_phase::record_cut_begin`, Elastic 1 Task 4): `coordinator` `FOR
 //! SHARE` (the fence, as `decide_cut` takes it first), a PLAIN read of `world.next_host_id`
@@ -74,7 +107,7 @@
 //! → `in_flight`:
 //! - `world` `FOR NO KEY UPDATE` first (SQLite: the writer lock): serialises the counter
 //!   `next_host_id`, the generation and every statement below with every other registration,
-//!   declaration, retirement, rollback and decision, which all take it first too. It never
+//!   declaration, end of a landless host, rollback and decision, which all take it first too. It never
 //!   waits for a claim's `FOR KEY SHARE` (`check_side`), and the claim never waits for it.
 //!   `UPDATE world SET next_host_id` (and, a total crash, `generation`) is the same row. A
 //!   refused registration (`NotAlone`, the id bound, any error) rolls back: no id is issued.
@@ -111,7 +144,7 @@
 //!   `check_live` locks only a live dirty row, `vouch_host` and `drain_host` only a live dirty
 //!   row; a cut part
 //!   locks no `hosts` row; every statement that locks SEVERAL `hosts` rows (a declaration, a
-//!   settle, a retirement, another registration) holds `world` first. In a total crash the
+//!   settle, an end of a landless host, another registration) holds `world` first. In a total crash the
 //!   dirty rows it deletes were locked above (`FOR NO KEY UPDATE`, upgraded by the delete —
 //!   no other transaction can hold a lock on them that conflicts).
 //! - The `INSERT` of the new row: a key nobody holds (never issued before).
@@ -128,7 +161,7 @@
 //! dead once the registration commits); an aborted registration wrote nothing and its process
 //! exits and starts again. It extends no other cycle: `claim_free` locks no row a registration
 //! locks (free rows only), a boot claim (`claim_super_regions` with no live check) locks no
-//! `hosts` row, and the declaration, retirement, rollback and decision all wait for `world`
+//! `hosts` row, and the declaration, the end of a landless host, rollback and decision all wait for `world`
 //! before anything a registration holds.
 
 //! **After a world rollback** (the coordinator's [`rollback_world`] or the operator's
@@ -144,7 +177,7 @@
 //! replaces them (it deletes every row of its id). A total crash at registration abandons the
 //! same way and then re-keys every dirty row's rows (the heirs' among them) to the new host.
 //!
-//! The operator's commands (`worldctl retire-host`, `worldctl rollback`) are in `operator.rs`.
+//! The operator's commands (`worldctl retire-host`'s vouch, `worldctl rollback`) are in `operator.rs`.
 
 use std::collections::BTreeSet;
 
@@ -155,7 +188,7 @@ use sqlx::{PgPool, Row};
 use crate::rows::i;
 use crate::{CoordinatorFence, StoreError, SuperRegion};
 
-pub use game::{Declared, Succession, SuccessionId, SuccessionKind};
+pub use game::{Declared, LandlessEnd, Succession, SuccessionId, SuccessionKind};
 
 /// `successions.survivors`: ordinals, comma-separated.
 pub(crate) fn encode_survivors(survivors: &[HostId]) -> String {
@@ -386,9 +419,18 @@ async fn declare_in(
     }
     // Read under the world row's lock, which `register_host` takes: a host registering
     // later never met the dead boot; a live one the coordinator is not attached to is listed.
+    // Only a host holding land (a `super_regions` or `in_flight` row) — or an heir of this
+    // call — is a survivor (Elastic 2a, the crash-loop rule): a landless host exchanged no
+    // state with the dead one, and its own death is ended, never a second failure.
+    let heir_ids: Vec<i64> = heirs.iter().map(|h| i(h.0)).collect();
     let live: Vec<i64> = sqlx::query_scalar(&format!(
-        "SELECT id FROM hosts WHERE clean = 0 AND state = {HOST_LIVE} ORDER BY id"
+        "SELECT id FROM hosts h WHERE clean = 0 AND state = {HOST_LIVE} \
+         AND (EXISTS (SELECT 1 FROM super_regions WHERE owner = h.id) \
+              OR EXISTS (SELECT 1 FROM in_flight WHERE host = h.id) \
+              OR h.id = ANY($1)) \
+         ORDER BY id"
     ))
+    .bind(&heir_ids)
     .fetch_all(&mut *tx)
     .await?;
     let mut survivors = Vec::with_capacity(live.len());
@@ -467,6 +509,97 @@ async fn declare_in(
         });
     }
     Ok(Declared::Done(out))
+}
+
+/// What ending a landless host's lock timeout names.
+const ENDING: &str = "ending a landless host";
+
+/// [`crate::StoreHandle::end_landless_host`] (Postgres): see the module docs for the locks.
+pub(crate) async fn end_landless_host(
+    pool: &PgPool,
+    host: HostId,
+    boot: u64,
+    fence: CoordinatorFence,
+    lock_timeout_ms: u64,
+    lease_ms: u64,
+) -> Result<LandlessEnd, StoreError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
+    match end_landless_in(&mut tx, host, boot, fence, lease_ms).await {
+        Ok(LandlessEnd::Ended) => {
+            tx.commit().await.map_err(|e| declare_error(ENDING, e, lock_timeout_ms))?;
+            log::warn!(
+                "[world-store] host {host} (boot {boot:#x}) lost its lease holding no land: its row is dead, no succession, \
+                 the generation untouched"
+            );
+            Ok(LandlessEnd::Ended)
+        }
+        Ok(other) => {
+            tx.rollback().await?;
+            Ok(other)
+        }
+        Err(e) => Err(e.into_store(ENDING, lock_timeout_ms)),
+    }
+}
+
+/// [`end_landless_host`]'s statements inside `tx`; anything but `Ended` is rolled back.
+async fn end_landless_in(
+    tx: &mut sqlx::PgConnection,
+    host: HostId,
+    boot: u64,
+    fence: CoordinatorFence,
+    lease_ms: u64,
+) -> Result<LandlessEnd, DeclareError> {
+    // The declaration's prefix: the fence, then the world row (no generation compared: the
+    // generation is not touched — a host of an older one is refused anyway).
+    lock_coordinator_and_world(&mut *tx, fence, None).await?;
+    // The host's row: a heartbeat waits for this transaction, so a beat between the lapse check
+    // and the update cannot be lost; a claim's `check_live` (`FOR SHARE`, its last statement)
+    // waits too and then finds the row dead — the zombie's claim is refused.
+    let row = sqlx::query(&format!(
+        "SELECT boot, clean, state, seen_ms = 0 OR {PG_NOW_MS} - seen_ms > $2 FROM hosts WHERE id = $1 FOR NO KEY UPDATE"
+    ))
+    .bind(i(host.0))
+    .bind(i(lease_ms))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else { return Ok(LandlessEnd::Gone) };
+    let (stored_boot, clean, state, lapsed): (i64, i64, i64, bool) =
+        (row.try_get(0)?, row.try_get(1)?, row.try_get(2)?, row.try_get(3)?);
+    if stored_boot as u64 != boot || state != HOST_LIVE || clean != 0 {
+        return Ok(LandlessEnd::Gone);
+    }
+    if !lapsed {
+        return Ok(LandlessEnd::NotLapsed);
+    }
+    // Plain reads (no lock): a claim that commits its land before this read is seen here; one
+    // that would commit after waits at its `check_live` for this transaction and is refused.
+    let owns: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM super_regions WHERE owner = $1) OR EXISTS (SELECT 1 FROM in_flight WHERE host = $1)",
+    )
+    .bind(i(host.0))
+    .fetch_one(&mut *tx)
+    .await?;
+    if owns {
+        return Ok(LandlessEnd::OwnsLand);
+    }
+    // Read under the world row's lock, which every writer of `successions` takes first.
+    let named: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM successions WHERE settled_cut IS NULL AND abandoned = 0 \
+         AND (heir = $1 OR (',' || survivors || ',') LIKE ('%,' || CAST($1 AS TEXT) || ',%')))",
+    )
+    .bind(i(host.0))
+    .fetch_one(&mut *tx)
+    .await?;
+    if named {
+        return Ok(LandlessEnd::Recipient);
+    }
+    sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"))
+        .bind(i(host.0))
+        .bind(i(boot))
+        .execute(&mut *tx)
+        .await?;
+    Ok(LandlessEnd::Ended)
 }
 
 /// [`crate::StoreHandle::rollback_world`] (Postgres): under the coordinator fence and the

@@ -968,6 +968,9 @@ struct SuccessionPump {
     rollback_retry_at: u64,
     /// The owners read for the super-regions hosts asked for (`LandWanted`), with them.
     land_rx: Option<(Vec<game::SuperRegion>, Answer<Vec<(game::SuperRegion, i64, u64)>>)>,
+    /// The end of a lapsed landless host in flight (Elastic 2a, `end_landless_host`), with it.
+    end_rx: Option<(game::coordinator::EndLandless, Answer<game::LandlessEnd>)>,
+    end_retry_at: u64,
 }
 
 impl CoordinatorRuntime {
@@ -1366,6 +1369,7 @@ impl CoordinatorRuntime {
                             state: r.state,
                             seen_ms: r.seen_ms,
                             draining: r.drain_in_ms.is_some(),
+                            landed: r.owns_land,
                         })
                         .collect();
                     // Issue-to-receive stamps: an answer that waited in the channel through a
@@ -1653,6 +1657,40 @@ impl CoordinatorRuntime {
                 }
             }
             return Ok(());
+        }
+        // A lapsed landless host is ended (Elastic 2a): its own store call, beside a declaration
+        // (the store serialises the two on the world row) — never a succession, never a rollback.
+        if let Some((end, rx)) = &p.end_rx {
+            let end = *end;
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => None,
+                Ok(answer) => Some(answer),
+                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+            };
+            if let Some(answer) = answer {
+                p.end_rx = None;
+                match answer {
+                    Ok(outcome) => {
+                        if outcome == game::LandlessEnd::Ended {
+                            self.close_succeeded(&[(end.host, end.boot)]);
+                        }
+                        self.core.landless_ended(end, outcome, now);
+                    }
+                    Err(StoreError::Fenced { .. }) => return Err(()),
+                    Err(e) => {
+                        self.core.end_failed();
+                        let Some(p) = self.successions.as_mut() else { return Ok(()) };
+                        p.end_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                        self.warn_cuts(now, &format!("host {} could not be ended ({e}); trying again", end.host));
+                    }
+                }
+            }
+        }
+        let Some(p) = self.successions.as_mut() else { return Ok(()) };
+        if p.end_rx.is_none() && now >= p.end_retry_at {
+            if let Some(end) = self.core.take_end_landless(now) {
+                p.end_rx = Some((end, self.store.end_landless_host_later(end.host, end.boot, self.fence)));
+            }
         }
         if let Some(rx) = &p.declare_rx {
             let answer = match rx.try_recv() {

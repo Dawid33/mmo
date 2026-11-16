@@ -45,14 +45,9 @@
 //!   and for an id with no dirty live row. With another host alive it only VOUCHES for the
 //!   death ([`StoreHandle::vouch_host`]: `seen_ms = 0`, as a restart under its name would) — the
 //!   coordinator declares it at its next read and a running host inherits through the usual
-//!   succession. With NO host alive (every dirty row lapsed) it checks the refusals that need
-//!   no write, then resolves the cut parts a crash left staged (as every process start does —
-//!   the one write before the store's own checks) and opens the succession itself
-//!   ([`StoreHandle::retire_offline`], which also raises the world generation: every process
-//!   of the old one is refused from then on): the lowest other live-row id is the heir. A
-//!   restarted process is a NEW host (Elastic 1), so that heir may never attach again: the next
-//!   registration then finds nobody alive and its total-crash rule abandons the succession and
-//!   takes every dirty row's land. With no other `hosts` row: refused. Under `static` ownership
+//!   succession (a vouched landless host is ended instead, Elastic 2a). With NO host alive it
+//!   is refused (Elastic 2a): start one — the first registration finds nobody alive and its
+//!   total-crash rule takes every dirty row's land. Under `static` ownership
 //!   nothing declares a vouched row: there the remedy is `rollback` and a new host.
 //! - `rollback <url> --yes` (R4, Postgres): the world restarts from its last committed cut —
 //!   `world.generation + 1`, every open succession abandoned (its land and the predecessor's
@@ -459,58 +454,21 @@ fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: HostId) -> Result<Stri
         return match store.vouch_host(ordinal).map_err(fail)? {
             crate::Vouched::Vouched => Ok(format!(
                 "worldctl: host {ord}'s row in {db} is vouched dead (seen_ms = 0); hosts {alive_n:?} run: the coordinator \
-                 declares host {ord} dead at its next read and one of them inherits its land (claim ownership)"
+                 declares host {ord} dead at its next read and one of them inherits its land, if it holds any (claim ownership)"
             )),
             crate::Vouched::Running => Err(format!("retire-host: host {ord} is running: stop it first")),
             crate::Vouched::Refused(why) => Err(format!("retire-host: {why}")),
         };
     }
-    // Nobody alive. The refusals that need no write first (the store checks them again, under
-    // its locks): only then are the parts a crash left staged finished (as every start does) —
-    // a refused command writes nothing.
-    let row = rows.iter().find(|r| r.id == ordinal).map(|r| (r.clean, r.state));
-    if let Some(why) = crate::operator::not_retirable(ordinal, row) {
-        return Err(format!("retire-host: {why}"));
-    }
-    for s in store.open_successions().map_err(fail)? {
-        if let Some(why) = crate::operator::open_succession_refuses(&s, ordinal) {
-            return Err(format!("retire-host: {why}"));
-        }
-    }
-    if !rows.iter().any(|r| r.id != ordinal && r.state == crate::HOST_LIVE) {
-        return Err(no_heir(ordinal));
-    }
-    for (cut, committed) in store.resolve_prepared().map_err(fail)? {
-        log::warn!("[worldctl] world cut {} was left staged by a crash: {}", cut.0, if committed { "committed" } else { "aborted" });
-    }
-    match store.retire_offline(ordinal).map_err(fail)? {
-        crate::Retired::Opened(s) => Ok(format!(
-            "worldctl: host {ord} (boot {:#x}) of {db} retired while no host ran: succession {} opened, heir {} \
-             inherits its {} super-region(s) as of world cut {}; a restarted process is a new host, so the next host to \
-             register finds nobody alive: its total-crash rule abandons this succession and takes every dirty row's land",
-            s.predecessor_boot,
-            s.id.0,
-            s.heir.0,
-            s.moved.len(),
-            s.base_cut.0,
-        )),
-        crate::Retired::Running(hosts) => Err(format!(
-            "retire-host: hosts {:?} began beating meanwhile; nothing written — run retire-host again (it then vouches)",
-            hosts.iter().map(|h| h.0).collect::<Vec<_>>()
-        )),
-        crate::Retired::NoHeir => Err(no_heir(ordinal)),
-        crate::Retired::Refused(why) => Err(format!("retire-host: {why}")),
-    }
+    // Nobody alive (Elastic 2a): refused. The first host to register takes every dirty row's
+    // land itself (a total crash, `register_host`); nothing here opens a succession.
+    Err(format!("retire-host: {OFFLINE_RETIRE_REFUSED}"))
 }
 
-/// What `retire-host` says when no other id can inherit.
-fn no_heir(ordinal: HostId) -> String {
-    format!(
-        "retire-host: nothing to give host {0}'s land to (no other hosts row): start a host — with nobody alive its \
-         registration takes every dirty row's land, host {0}'s among them",
-        ordinal.0
-    )
-}
+/// What `retire-host` says with no host running (Elastic 2a: the offline retirement is gone).
+const OFFLINE_RETIRE_REFUSED: &str =
+    "no host is running: start one — the first registration takes the land (a total crash); retire-host only vouches \
+     for a dead row while hosts run";
 
 /// Rolls `db`'s world back (`rollback --yes`): `(generation, successions abandoned)`.
 pub fn rollback(db: &StoreUrl) -> Result<(u64, u64), String> {

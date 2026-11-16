@@ -114,8 +114,10 @@ pub struct Succession {
     pub base_cut: crate::CutId,
     /// The super-regions moved to the heir, at their new epochs, in key order.
     pub moved: Vec<(SuperRegion, u64)>,
-    /// Every other live dirty host at the declaration (the heir among them), by ordinal:
-    /// the hosts that report their journals to the heir.
+    /// Every other live dirty host at the declaration that holds land (a `super_regions` or
+    /// `in_flight` row) or is an heir of it, by ordinal: the hosts that report their journals
+    /// to the heir (Elastic 2a: a landless host is no recipient — its death is ended, not a
+    /// second failure).
     pub survivors: Vec<HostId>,
 }
 
@@ -136,6 +138,25 @@ pub enum Declared {
     /// heir ordinals (sorted): the caller does not tell them apart — it forgets the whole
     /// declaration and re-observes (its next lease read gives a new lapsed set and new heirs).
     Gone(Vec<HostId>),
+}
+
+/// What the store did with a lapsed host that holds no land (Elastic 2a, the crash-loop rule:
+/// a landless death is ENDED — its row marked dead, no succession, the generation untouched).
+/// Anything but `Ended` wrote nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandlessEnd {
+    /// Its row is dead now: nobody inherits anything, nobody reports, nothing rolls back.
+    Ended,
+    /// The row beat within the lease (and was not vouched) by the database clock.
+    NotLapsed,
+    /// It holds a `super_regions` or an `in_flight` row (it claimed land after the read):
+    /// a death of it is a succession's (or, while one is open, a second failure).
+    OwnsLand,
+    /// An open succession names it heir or survivor: its death is a second failure before
+    /// the settle — the caller rolls the world back.
+    Recipient,
+    /// No row, another boot's, or not live any more.
+    Gone,
 }
 
 /// Environment: `allinone` (default), `static` or `claim`.

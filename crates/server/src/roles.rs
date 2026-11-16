@@ -528,7 +528,8 @@ pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle,
         "{ALL_ROLE_BESIDE_HOSTS}: hosts {others:?} ran this world as split hosts and did not leave cleanly — they may hold \
          unsaved state, and an `all` process would claim their land, abort their staged cut parts and fence them. Start them \
          again (VOXEL_ROLE=host) until they leave cleanly; retire one that will never return with `worldctl retire-host \
-         <url> <host id>` (claim ownership); or restart the world from its last save with `worldctl rollback <url> --yes`"
+         <url> <host id>` while other hosts run (claim ownership; with none running the first host to register takes the \
+         land); or restart the world from its last save with `worldctl rollback <url> --yes`"
     ))
 }
 

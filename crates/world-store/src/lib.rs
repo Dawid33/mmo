@@ -34,8 +34,8 @@ pub use listen::{
     WORLD_DB_DIRECT_ENV,
 };
 pub use open::{LockGuard, MIGRATE_LOCK_TIMEOUT_MS, OpenMode, Pool, newest_migration, open_pool, set_migrate_lock_timeout_ms};
-pub use operator::{Retired, Vouched};
-pub use succession::{Declared, Succession, SuccessionId, SuccessionKind};
+pub use operator::Vouched;
+pub use succession::{Declared, LandlessEnd, Succession, SuccessionId, SuccessionKind};
 pub use terrain::TerrainFromStore;
 pub use two_phase::{cut_gid, SWEEP_ABORT_TICK};
 pub use url::{StoreUrl, redact_url};

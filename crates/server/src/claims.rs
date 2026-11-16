@@ -508,11 +508,17 @@ pub trait ClaimingManager {
     /// The clean `hosts` rows of a read, `(id, boot)` ([`WorldManager::note_clean_rows`]).
     /// The tests' fakes keep no peers: nothing to note.
     fn note_clean_rows(&mut self, _clean: Vec<(HostId, u64)>) {}
+    /// The dead `hosts` rows no open succession names ([`WorldManager::forget_dead_hosts`]).
+    /// The tests' fakes keep no peers: nothing to forget.
+    fn forget_dead_hosts(&mut self, _dead: Vec<HostId>) {}
 }
 
 impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
     fn note_clean_rows(&mut self, clean: Vec<(HostId, u64)>) {
         WorldManager::note_clean_rows(self, clean)
+    }
+    fn forget_dead_hosts(&mut self, dead: Vec<HostId>) {
+        WorldManager::forget_dead_hosts(self, dead)
     }
     fn take_claims_wanted(&mut self) -> Vec<SuperRegion> {
         WorldManager::take_claims_wanted(self)
@@ -635,6 +641,11 @@ impl DirectoryKeeper {
                     Ok((rows, live, hosts)) => {
                         manager.set_draining(draining_hosts(&hosts));
                         manager.directory_read(rows, live);
+                        // Dead rows no open succession names are gone for good (an ended
+                        // landless host, Elastic 2a): forgotten first, so none is noted as left.
+                        manager.forget_dead_hosts(
+                            hosts.iter().filter(|r| r.state != world_store::HOST_LIVE && !r.succeeding).map(|r| r.id).collect(),
+                        );
                         // Hosts that left in a committed leave cut: one this host missed (it
                         // registered while that cut ran, outside it; or its boot's read of the
                         // clean rows failed) is noted now — the manager skips the known ones.

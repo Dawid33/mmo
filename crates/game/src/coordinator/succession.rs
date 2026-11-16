@@ -30,7 +30,8 @@
 //!   and re-sends their orders; hosts answer again from memory (`Attach.successions`).
 //! - The orders go to the survivors AND the heir (the heir is a survivor whenever the
 //!   coordinator declared: it was live). A succession `worldctl retire-host` opened while no
-//!   host ran has no survivors: its heir booted after it, has nothing to report or resolve and
+//!   host ran (before Elastic 2a; that command now refuses with no host running, so no new one
+//!   is opened — the handling below stays for such a row) has no survivors: its heir booted after it, has nothing to report or resolve and
 //!   adopts from the store alone; its answers are all a cut waits for, and its
 //!   `SuccessionDone` goes to it too.
 //! - **Answers are per boot.** An answer counts only while the boot that gave it is the
@@ -54,6 +55,17 @@
 //!   cut begins and nothing is declared; then a new one runs as at a restart (its predecessor
 //!   taken out of the view), and a run no longer open is dropped as abandoned (every host
 //!   told `SuccessionDone { settled: false }`).
+//!
+//! **The crash-loop rule** (Elastic 2a, decision 9: recipients own land). The store's survivors
+//! are the dirty live hosts holding land (a `super_regions` or `in_flight` row) plus the heirs;
+//! heirs are picked among landed hosts that take logins first ([`HostSeen::landed`]). A lapsed
+//! host holding NO land that no open run names is ENDED ([`Coordinator::take_end_landless`]:
+//! its row dead, no succession, the generation untouched) — with no run open instead of a
+//! succession, and while one is open instead of a second failure: a pod that crash-loops
+//! beside a healthy host (each restart a new landless id) never rolls the world back. A lapsed
+//! LANDED host while a run is open, or a lapsed recipient, is still a second failure (the
+//! residual: a host that won land after the declaration and dies before the settle rolls the
+//! world back — a rollback, never a loss).
 //!
 //! **Drain** (Task 11, decision 7): a host that leaves parks everything in its leave cut, its
 //! `hosts` row turns clean and its claims STAY. When a live host needs one of its regions it
@@ -89,6 +101,11 @@ pub struct HostSeen {
     /// The operator marked it draining (`hosts.drain_at_ms` set, `worldctl drain`): it is never
     /// the gate host ([`super::Coordinator::gate_host`]).
     pub draining: bool,
+    /// It holds land at the read: a `super_regions` row or an `in_flight` row of its id
+    /// (Elastic 2a). A lapse of a landless host that no open run names is ENDED
+    /// ([`Coordinator::take_end_landless`]), never succeeded; heirs are picked among landed
+    /// hosts first ([`Coordinator::declare_wanted`]).
+    pub landed: bool,
 }
 
 /// What the watch remembers of one ordinal's row.
@@ -182,6 +199,15 @@ impl LeaseWatch {
             .map(|w| (w.row.ordinal, w.row.boot))
             .collect()
     }
+}
+
+/// A lapsed host that holds no land, for the runtime to end in the store
+/// (`end_landless_host`, [`Coordinator::take_end_landless`]): its row marked dead, no
+/// succession, no generation change. The answer goes to [`Coordinator::landless_ended`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndLandless {
+    pub host: HostId,
+    pub boot: u64,
 }
 
 /// A declaration of successions for the runtime to execute in the store
@@ -279,6 +305,14 @@ pub(super) struct SuccessionRuns {
     /// Hosts that left cleanly whose land is wanted ([`Coordinator::land_wanted`]): given
     /// away at the next [`Coordinator::declare_wanted`] between cuts.
     land_wanted: BTreeSet<HostId>,
+    /// The landless host handed to the runtime to end ([`Coordinator::take_end_landless`]),
+    /// not answered yet.
+    ending: Option<(HostId, u64)>,
+    /// [`LeaseWatch::reads`] when `ending` was handed out.
+    ending_at_read: u64,
+    /// The store refused the last end (`NotLapsed` / `OwnsLand` / `Gone`) as of this read: no
+    /// end until a newer read decides again.
+    end_refused_at_read: Option<u64>,
 }
 
 impl Default for SuccessionRuns {
@@ -299,6 +333,9 @@ impl Default for SuccessionRuns {
             reread_for: BTreeSet::new(),
             land_lookups: BTreeSet::new(),
             land_wanted: BTreeSet::new(),
+            ending: None,
+            ending_at_read: 0,
+            end_refused_at_read: None,
         }
     }
 }
@@ -418,7 +455,10 @@ impl super::Coordinator {
         if r.refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
             return None;
         }
-        let lapsed = self.lapsed_undeclared(now_ms);
+        let all_lapsed = self.lapsed_undeclared(now_ms);
+        // A landless lapse is ended, never succeeded (Elastic 2a: with no run open nothing
+        // names it — [`Self::take_end_landless`]).
+        let lapsed: Vec<(HostId, u64)> = all_lapsed.iter().copied().filter(|(h, _)| self.landed(*h)).collect();
         if lapsed.is_empty() {
             return self.leave_wanted();
         }
@@ -428,7 +468,8 @@ impl super::Coordinator {
             }
             return None;
         }
-        let gone: BTreeSet<HostId> = lapsed.iter().map(|(h, _)| *h).collect();
+        // No lapsed host inherits, landed or not.
+        let gone: BTreeSet<HostId> = all_lapsed.iter().map(|(h, _)| *h).collect();
         let live: BTreeSet<HostId> = self.attached_live().into_iter().filter(|h| !gone.contains(h)).collect();
         if live.is_empty() {
             log::debug!("coordinator: hosts {gone:?} lapsed and no live host is attached: nothing to declare");
@@ -708,7 +749,12 @@ impl super::Coordinator {
         let vouched = |d: &(HostId, u64)| self.leases.row(d.0).is_some_and(|r| r.boot == d.1 && r.seen_ms == 0);
         let counts =
             |d: &(HostId, u64)| vouched(d) || open.values().any(|run| !run.s.survivors.is_empty() || run.beat.contains(d));
-        let lapsed: Vec<(HostId, u64)> = self.lapsed_undeclared(now_ms).into_iter().filter(|d| counts(d)).collect();
+        // Elastic 2a: a landless host no open run names is ended ([`Self::take_end_landless`]),
+        // not a second failure; a landed one, or a recipient, still is (the residual: a host
+        // that won land after the declaration and dies before the settle rolls back).
+        let ends = |d: &(HostId, u64)| !self.landed(d.0) && !self.is_recipient(d.0);
+        let lapsed: Vec<(HostId, u64)> =
+            self.lapsed_undeclared(now_ms).into_iter().filter(|d| counts(d) && !ends(d)).collect();
         if !lapsed.is_empty() {
             log::error!("coordinator: hosts {lapsed:?} lost their lease while a succession is open: the world rolls back");
             self.successions.rollback = true;
@@ -898,12 +944,20 @@ impl super::Coordinator {
     }
 
     /// The hosts an heir is picked among, of `live` (attached, live, no predecessor of the
-    /// declaration): those that take logins — neither draining nor leaving
-    /// ([`Self::takes_logins`]) — so a host about to go adopts no land it would hand on minutes
-    /// later; all of `live` when none of them does (no land is left without an heir).
+    /// declaration), tried in order (Elastic 2a): those holding land that take logins — neither
+    /// draining nor leaving ([`Self::takes_logins`]) — then those that take logins, then all of
+    /// `live` (no land is left without an heir). A landed heir is a survivor anyway; a host
+    /// about to go adopts no land it would hand on minutes later.
     fn heir_candidates(&self, live: BTreeSet<HostId>) -> BTreeSet<HostId> {
         let staying: BTreeSet<HostId> = live.iter().copied().filter(|h| self.takes_logins(*h)).collect();
-        if staying.is_empty() { live } else { staying }
+        let landed: BTreeSet<HostId> = staying.iter().copied().filter(|h| self.landed(*h)).collect();
+        if !landed.is_empty() {
+            landed
+        } else if !staying.is_empty() {
+            staying
+        } else {
+            live
+        }
     }
 
     /// The `Leave` succession to declare now for drained land, if any (called by
@@ -962,6 +1016,12 @@ impl super::Coordinator {
             run.beat.extend(beating.iter().copied());
         }
         self.leases.observe(rows, issued_ms, received_ms);
+        // An id absent from the read was pruned (a clean or dead row owning nothing, named by no
+        // open succession): nothing kept of it any more (B-M5) — an id is never issued again.
+        let present: BTreeSet<HostId> = rows.iter().map(|r| r.ordinal).collect();
+        self.forget_absent_hosts(&present);
+        self.successions.declared.retain(|(h, _)| present.contains(h));
+        self.successions.reread_for.retain(|(h, _)| present.contains(h));
         // Before the open successions are known, their pending read lists it anyway.
         // A declaration in flight explains a dead row its answer will open.
         if !self.successions.enabled || !self.successions.known || self.successions.declaring {
@@ -988,5 +1048,113 @@ impl super::Coordinator {
     /// The lease watch (Task 8 declares successions from [`LeaseWatch::lapsed`]).
     pub fn leases(&self) -> &LeaseWatch {
         &self.leases
+    }
+
+    /// Whether the latest successful hosts read showed host `host` holding land (a row not read:
+    /// `true` — nothing is ended on no evidence).
+    fn landed(&self, host: HostId) -> bool {
+        self.leases.row(host).is_none_or(|r| r.landed)
+    }
+
+    /// Test support: which of the per-host memories still hold host `host` (by name: `left`,
+    /// `succeeded`, `boots`, `declared`, `reread_for`) — empty once a read no longer shows it.
+    #[doc(hidden)]
+    pub fn host_mentions(&self, host: HostId) -> Vec<&'static str> {
+        let mut out = self.cut_mentions(host);
+        if self.successions.declared.iter().any(|(h, _)| *h == host) {
+            out.push("declared");
+        }
+        if self.successions.reread_for.iter().any(|(h, _)| *h == host) {
+            out.push("reread_for");
+        }
+        out
+    }
+
+    /// Whether an open run names host `host` heir or survivor.
+    fn is_recipient(&self, host: HostId) -> bool {
+        self.successions.open.values().any(|run| recipient(&run.s, host))
+    }
+
+    /// The crash-loop rule (Elastic 2a): a lapsed host that holds no land and that no open run
+    /// names (heir or survivor) is handed to the runtime to END — its row marked dead in the
+    /// store (`end_landless_host`), no succession, no generation change — also while a run is
+    /// open, and with none open instead of a succession. One at a time, only between cuts (a
+    /// running cut it takes part in is decided abort first), never while a declaration or a
+    /// rollback is under way, and not again on the read the store refused it at. The runtime
+    /// answers [`Self::landless_ended`] (or [`Self::end_failed`]).
+    pub fn take_end_landless(&mut self, now_ms: u64) -> Option<EndLandless> {
+        let r = &self.successions;
+        if !r.enabled || !r.known || r.declaring || r.rollback || r.ending.is_some() {
+            return None;
+        }
+        if r.end_refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
+            return None;
+        }
+        let (host, boot) = self
+            .lapsed_undeclared(now_ms)
+            .into_iter()
+            .find(|(h, _)| !self.landed(*h) && !self.is_recipient(*h))?;
+        if self.cuts_running_participants().is_some_and(|run| run.contains(&host)) {
+            self.abort_cut_for_lapse(host);
+            return None;
+        }
+        if self.cuts_running_participants().is_some() {
+            // Between cuts only: the running cut is decided before the row turns dead.
+            return None;
+        }
+        log::warn!("coordinator: host {host} (boot {boot:#x}) lost its lease holding no land: ending it (no succession)");
+        self.successions.ending = Some((host, boot));
+        self.successions.ending_at_read = self.leases.reads();
+        Some(EndLandless { host, boot })
+    }
+
+    /// The store's answer to the end [`Self::take_end_landless`] handed out: `Ended` takes the
+    /// host out of the view ([`Self::host_ended`]); `OwnsLand` (it won land after the read),
+    /// `NotLapsed` and `Gone` wait for a newer read, which decides again; `Recipient` (an open
+    /// run names it) is a second failure before the settle — a rollback while a run is open
+    /// here, a re-read of the open successions otherwise (the store knows one this coordinator
+    /// does not).
+    pub fn landless_ended(&mut self, end: EndLandless, outcome: crate::LandlessEnd, now_ms: u64) {
+        self.clock_ms = self.clock_ms.max(now_ms);
+        if self.successions.ending != Some((end.host, end.boot)) {
+            log::warn!("coordinator: an answer to ending host {} came with no such end in flight: ignored", end.host);
+            return;
+        }
+        self.successions.ending = None;
+        match outcome {
+            crate::LandlessEnd::Ended => self.host_ended(end.host, end.boot),
+            crate::LandlessEnd::Recipient => {
+                if self.successions.open.is_empty() {
+                    log::warn!("coordinator: host {} is named by a succession this coordinator does not know: re-read", end.host);
+                    self.successions_reread();
+                } else {
+                    log::error!(
+                        "coordinator: host {} lost its lease and an open succession names it: the world rolls back",
+                        end.host
+                    );
+                    self.successions.rollback = true;
+                }
+                self.successions.end_refused_at_read = Some(self.successions.ending_at_read);
+            }
+            other => {
+                log::info!("coordinator: host {} was not ended ({other:?}): decided again at a newer read", end.host);
+                self.successions.end_refused_at_read = Some(self.successions.ending_at_read);
+            }
+        }
+    }
+
+    /// The end [`Self::take_end_landless`] handed out could not be executed (a store error, a
+    /// lock timeout): forgotten; the runtime asks again after its retry wait.
+    pub fn end_failed(&mut self) {
+        self.successions.ending = None;
+    }
+
+    /// Host `host`'s boot `boot` was ended (its landless row is dead): never lapsed or ended
+    /// again, not expected by cuts nor counted attached (a zombie's messages are dropped, as a
+    /// succeeded boot's), and taken out of the view as a predecessor is.
+    fn host_ended(&mut self, host: HostId, boot: u64) {
+        self.successions.declared.insert((host, boot));
+        self.note_succeeded(host, boot);
+        self.host_succeeded(host);
     }
 }

@@ -1374,6 +1374,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             self.land_wanted_sent.insert(sr, now_ms);
             self.world_send(HostMsg::LandWanted { sr });
+            // Elastic 2a: a landless host is no recipient of the `Leave` succession that gives
+            // this land away — no order updates its directory — so each ask comes with a
+            // directory read (paced as the asks are): the heir is found there once declared.
+            self.directory_wanted = true;
         }
         // A placement's need stays while it is held (`retry_held_spawns` notes it again).
         self.land_wanted = needs;

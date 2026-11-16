@@ -352,36 +352,3 @@ fn a_row_named_by_an_open_succession_is_not_pruned() {
     assert!(left.contains(&second.id));
     w.shutdown();
 }
-
-/// After an offline retirement (`worldctl retire-host` with no host alive: a succession to the
-/// heir, the generation raised) nobody is live, so the first registration is a total crash: it
-/// abandons that succession — the retired host's in-flight rows go to the heir, as a rollback
-/// does — and then takes every dirty row's land and in-flight rows, the heir's included.
-#[test]
-fn a_registration_after_an_offline_retirement_takes_the_whole_world() {
-    use crate::succession::{World, in_flight, part};
-    let Some(w) = World::new(2) else { return };
-    let rows1 = vec![in_flight(RegionCoords::new(1, 5))];
-    w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
-    w.hosts[1].prepare_cut(part(1, hid(1), rows1.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], w.c, 0, vec![]).unwrap());
-    for h in &w.hosts {
-        assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
-    }
-    crate::two_phase::exec(&w.w, &format!("UPDATE hosts SET seen_ms = seen_ms - {}", 2 * game::HOST_LEASE_MS));
-    let s = match w.h.retire_offline(hid(1)).unwrap() {
-        world_store::Retired::Opened(s) => s,
-        other => panic!("{other:?}"),
-    };
-    assert_eq!(w.h.world_generation().unwrap(), 1);
-    let land: std::collections::BTreeMap<_, _> = w.h.owned_by(hid(0)).unwrap().epochs;
-    let new = w.hosts[1].register_host(new_host("host-1", 900), CrashPolicy::Succession).unwrap();
-    assert_eq!((new.id, new.generation, new.bumped), (hid(2), 2, true));
-    assert!(w.h.open_successions().unwrap().is_empty(), "the retirement's succession {s:?} is abandoned");
-    let want: std::collections::BTreeMap<_, _> = land.iter().map(|(sr, e)| (*sr, e + 1)).collect();
-    assert_eq!(w.h.owned_by(new.id).unwrap().epochs, want, "the heir's land (the retired host's with it), epoch + 1");
-    assert_eq!(w.h.load_in_flight(Some(new.id)).unwrap(), rows1, "the retired host's in-flight rows, once");
-    assert!(w.h.load_in_flight(Some(hid(0))).unwrap().is_empty() && w.h.load_in_flight(Some(hid(1))).unwrap().is_empty());
-    assert_eq!(ids(&w.h), vec![new.id], "hosts 0 and 1, dead and landless, are pruned");
-    w.shutdown();
-}

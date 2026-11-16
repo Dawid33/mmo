@@ -287,92 +287,32 @@ fn retire_vouches_while_others_live() {
     w.shutdown();
 }
 
-/// Nobody alive (every dirty row lapsed): `retire-host` opens the succession itself — kind
-/// crash, heir the lowest other ordinal with a live `hosts` row, no survivors, based on the
-/// last committed cut — marks the row dead and moves its land at `epoch + 1`, in one
-/// transaction under the `world` row's lock. The heir reads the dead host's in-flight rows,
-/// and only a commit that settles it commits. A dead row, or one an open succession names,
-/// is refused.
+/// Nobody alive (every dirty row lapsed): `retire-host` is refused (Elastic 2a) — nothing is
+/// written, not even the staged part a crash left (the first registration resolves it, and its
+/// total-crash rule takes the land). A SQLite world (one host) is refused as before.
 #[test]
-fn retire_offline_opens_a_succession_to_the_lowest_other_host() {
+fn offline_retire_host_is_refused() {
     let Some(w) = World::new(3) else { return };
     let url = url_of(&w);
-    // A committed cut first (host 0 carries an in-flight row): the succession's base.
-    let rows0 = vec![in_flight(RegionCoords::new(0, 9))];
-    w.hosts[0].prepare_cut(part(1, hid(0), rows0.clone()), w.fences[0].clone(), 0).recv().unwrap().unwrap();
-    w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(1, hid(2), vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1), hid(2)], vec![], w.c, 0, vec![]).unwrap());
-    for h in &w.hosts {
-        assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
-    }
-    // A staged part a crash left behind (cut 2, host 0's): the command resolves it first.
-    w.hosts[0].prepare_cut(part(2, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     assert_eq!(prepared(&w.w), 1);
     lapse_all(&w);
-    // Host 0 is retired: the lowest OTHER ordinal (1) inherits.
-    let out = said(&url, &["retire-host", &url, "0"]).expect("retired offline");
-    assert!(out.contains("heir 1"), "{out}");
-    assert_eq!(prepared(&w.w), 0, "the staged part was resolved (aborted)");
-    let open = w.h.open_successions().unwrap();
-    assert_eq!(open.len(), 1);
-    let s = &open[0];
-    assert_eq!((s.predecessor, s.predecessor_boot, s.heir, s.kind), (hid(0), boot_of(hid(0)), hid(1), SuccessionKind::Crash));
-    assert_eq!(s.survivors, Vec::<game::HostId>::new(), "nobody ran: no survivor");
-    assert_eq!(s.base_cut, CutId(1), "the last committed cut");
-    let mut want: Vec<_> = w.fences[0].epochs.iter().map(|(sr, e)| (*sr, e + 1)).collect();
-    want.sort();
-    assert_eq!(s.moved, want, "every super-region of host 0, epoch + 1");
-    assert!(w.h.owned_by(hid(0)).unwrap().epochs.is_empty());
-    let heir = w.h.owned_by(hid(1)).unwrap();
-    for (sr, e) in &s.moved {
-        assert_eq!(heir.epochs.get(sr), Some(e));
+    let hosts_before = w.h.hosts().unwrap();
+    for id in ["0", "1", "7"] {
+        let err = said(&url, &["retire-host", &url, id]).expect_err("nobody alive");
+        assert!(
+            err.contains(
+                "no host is running: start one — the first registration takes the land (a total crash); retire-host only \
+                 vouches for a dead row while hosts run"
+            ),
+            "{id}: {err}"
+        );
     }
-    assert_eq!(w.state_of(hid(0)), (HOST_DEAD, false), "dead, dirty until settled");
-    assert_eq!(w.hosts[1].load_in_flight_of(hid(0), &heir).unwrap(), rows0, "the heir reads the dead host's rows");
-    // Refused now: host 0 is dead already; host 1 is named by the open succession.
-    let err = said(&url, &["retire-host", &url, "0"]).expect_err("dead already");
-    assert!(err.contains("host 0"), "{err}");
-    let err = said(&url, &["retire-host", &url, "1"]).expect_err("named by the open succession");
-    assert!(err.contains("succession"), "{err}");
-    assert_eq!(w.h.open_successions().unwrap().len(), 1);
-    // The retirement raised the generation: the hosts that boot again run at 1.
-    assert_eq!(w.h.world_generation().unwrap(), 1);
-    // The settle rule holds: only a commit naming it commits; it cleans host 0's row.
-    let heir_part = |id: u64| game::WorldCut { adopts: vec![hid(0)], ..part(id, hid(1), rows0.clone()) };
-    w.hosts[1].prepare_cut(part(3, hid(1), vec![]), heir.clone(), 1).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(3, hid(2), vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
-    assert!(!w.h.decide_cut(CutId(3), 300, true, vec![hid(1), hid(2)], vec![], w.c, 1, vec![]).unwrap(), "settles nothing");
-    for h in [1, 2] {
-        assert_eq!(w.hosts[h].cut_decided(CutId(3)).unwrap(), Some(false));
-    }
-    w.hosts[1].prepare_cut(heir_part(4), heir.clone(), 1).recv().unwrap().unwrap();
-    w.hosts[2].prepare_cut(part(4, hid(2), vec![]), w.fences[2].clone(), 1).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(4), 400, true, vec![hid(1), hid(2)], vec![], w.c, 1, vec![s.id]).unwrap());
+    assert_eq!(w.h.hosts().unwrap(), hosts_before, "no row touched");
     assert!(w.h.open_successions().unwrap().is_empty());
-    assert_eq!(w.state_of(hid(0)), (HOST_DEAD, true));
-    assert_eq!(w.h.load_in_flight(Some(hid(1))).unwrap(), rows0, "adopted under the heir");
-    assert!(w.h.load_in_flight(Some(hid(0))).unwrap().is_empty());
-    assert_eq!(prepared(&w.w), 0);
-    w.shutdown();
-}
-
-/// Nobody alive and no other `hosts` row to inherit: refused, nothing written. A SQLite
-/// world (one host) has no hosts to retire to either.
-#[test]
-fn retire_offline_with_no_other_host_is_refused() {
-    let Some(w) = World::new(2) else { return };
-    let url = url_of(&w);
-    exec(&w.w, "DELETE FROM hosts WHERE id = 0");
-    lapse_all(&w);
-    let err = said(&url, &["retire-host", &url, "1"]).expect_err("nobody to inherit");
-    assert!(
-        err.contains("nothing to give host 1's land to (no other hosts row): start a host"),
-        "{err}"
-    );
-    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
+    assert_eq!(w.h.world_generation().unwrap(), 0, "the generation untouched");
     assert_eq!(w.h.owned_by(hid(1)).unwrap(), w.fences[1], "nothing moved");
-    assert!(w.h.open_successions().unwrap().is_empty());
+    assert_eq!(prepared(&w.w), 1, "the staged part is left to the first registration");
     w.shutdown();
     let dir = temp_dir("retire_sqlite");
     let db = dir.join("w.sqlite");
@@ -535,33 +475,4 @@ fn rollback_needs_yes_and_bumps_once() {
     assert_eq!(w.h.world_generation().unwrap(), 2);
     assert_eq!(prepared(&w.w), 0);
     w.shutdown();
-}
-
-/// An offline retirement raises the world generation itself (in its transaction), whatever
-/// the heir's row looks like — dirty (it crashed) or clean (it left): every process of the old
-/// generation is refused at its next write (a zombie that wakes, a coordinator still running).
-#[test]
-fn retire_offline_bumps_the_generation_whatever_the_heirs_row() {
-    for heir_clean in [false, true] {
-        let Some(w) = World::new(3) else { return };
-        let url = url_of(&w);
-        if heir_clean {
-            exec(&w.w, "UPDATE hosts SET clean = 1 WHERE id = 0");
-        }
-        lapse_all(&w);
-        said(&url, &["retire-host", &url, "1"]).expect("retired offline");
-        assert_eq!(w.h.world_generation().unwrap(), 1, "heir clean {heir_clean}: raised once");
-        // The old generation's processes: a host's part, the coordinator's decision.
-        let err = w.hosts[2].prepare_cut(part(1, hid(2), vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap_err();
-        assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 }, "heir clean {heir_clean}");
-        let err = w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(2)], vec![], w.c, 0, vec![]).unwrap_err();
-        assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
-        // Elastic 1: the heir's next process is a NEW host; nobody is live, so its registration is
-        // a total crash — it raises the generation once more and takes the land (`hosts.rs`).
-        let next = w.hosts[0].register_host(crate::hosts::new_host("host-0", 7000), game::CrashPolicy::Succession).unwrap();
-        assert_eq!((next.generation, next.bumped), (2, true), "heir clean {heir_clean}");
-        assert_eq!(w.h.world_generation().unwrap(), 2);
-        assert_eq!(prepared(&w.w), 0);
-        w.shutdown();
-    }
 }

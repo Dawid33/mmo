@@ -10,7 +10,7 @@ use game::{
     ChunkCoords, CrashPolicy, CutId, EntityBundle, EntityId, InFlightRow, PortableRegion, RegionCoords, WorldCut,
 };
 use world_store::{
-    CoordinatorFence, Declared, Fence, HOST_DEAD, HOST_LIVE, StoreError, StoreHandle, StoreUrl, Succession,
+    CoordinatorFence, Declared, Fence, HOST_DEAD, HOST_LIVE, LandlessEnd, StoreError, StoreHandle, StoreUrl, Succession,
     SuccessionKind,
 };
 
@@ -533,7 +533,10 @@ fn sqlite_declares_nothing() {
     let err = h.declare_succession(vec![(hid(1), 1)], vec![hid(0)], SuccessionKind::Crash, c, 0).unwrap_err();
     assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
     assert!(matches!(h.rollback_world(c), Err(StoreError::Unsupported(_))));
+    assert!(matches!(h.end_landless_host(hid(1), 1, c), Err(StoreError::Unsupported(_))), "nor ends a host");
     assert!(h.open_successions().unwrap().is_empty());
+    // The hosts read answers both engines' columns.
+    assert!(h.hosts().unwrap().is_empty());
     h.shutdown();
 }
 
@@ -753,4 +756,152 @@ fn rollback_leaves_no_in_flight_row_without_a_reader() {
         assert_eq!(prepared(&w.w), 0);
         w.shutdown();
     }
+}
+
+// ---- Elastic 2a: recipients own land; a landless death is ended ---------------------------
+
+/// Host `o` holds no super-region any more (its rows free, epoch + 1): a host that never won
+/// land on demand.
+fn free_land(w: &World, o: game::HostId) {
+    exec(&w.w, &format!("UPDATE super_regions SET owner = {}, epoch = epoch + 1 WHERE owner = {}", game::NO_OWNER, o.0));
+}
+
+/// A dirty live host holding no land is no survivor of a declaration: only landed hosts (and
+/// the heirs) report their journals.
+#[test]
+fn a_landless_live_host_is_not_a_survivor() {
+    let Some(w) = World::new(4) else { return };
+    free_land(&w, hid(2));
+    w.vouch(hid(1));
+    let s = w.declared(hid(1), hid(0));
+    assert_eq!(s.survivors, vec![hid(0), hid(3)], "host 2 holds no land: no survivor");
+    assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false), "untouched");
+    w.shutdown();
+}
+
+/// The heir is a survivor even when it held no land before the declaration.
+#[test]
+fn the_heir_is_a_survivor_even_landless() {
+    let Some(w) = World::new(3) else { return };
+    free_land(&w, hid(0));
+    assert!(!w.h.hosts().unwrap()[0].owns_land);
+    w.vouch(hid(1));
+    let s = w.declared(hid(1), hid(0));
+    assert_eq!(s.survivors, vec![hid(0), hid(2)], "the landless heir is a survivor");
+    assert!(w.h.hosts().unwrap()[0].owns_land, "the heir holds the land now");
+    w.shutdown();
+}
+
+/// A lapsed host holding no land is ended: its row dead, no succession, the generation and
+/// every other row untouched; its heartbeat finds it replaced. A row that still beats, of
+/// another boot, or already dead is refused, nothing written.
+#[test]
+fn a_landless_lapsed_host_is_ended_without_a_generation_change() {
+    let Some(w) = World::new(3) else { return };
+    free_land(&w, hid(2));
+    let row = |o: game::HostId| w.h.hosts().unwrap().into_iter().find(|r| r.id == o).unwrap();
+    assert!(!row(hid(2)).owns_land && row(hid(1)).owns_land);
+    let boot2 = boot_of(hid(2));
+    assert_eq!(w.h.end_landless_host(hid(2), boot2, w.c), Ok(LandlessEnd::NotLapsed), "it beats");
+    w.lapse(hid(2));
+    assert_eq!(w.h.end_landless_host(hid(2), 999, w.c), Ok(LandlessEnd::Gone), "another boot");
+    assert_eq!(w.h.end_landless_host(hid(9), 1, w.c), Ok(LandlessEnd::Gone), "no row");
+    assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false), "nothing written");
+    let land_before: Vec<_> = (0..2).map(|o| w.h.owned_by(hid(o)).unwrap()).collect();
+    assert_eq!(w.h.end_landless_host(hid(2), boot2, w.c), Ok(LandlessEnd::Ended));
+    assert_eq!(w.state_of(hid(2)), (HOST_DEAD, false), "dead, no succession to clean it");
+    assert_eq!(w.h.world_generation().unwrap(), 0, "the generation untouched");
+    assert!(w.h.open_successions().unwrap().is_empty(), "no succession");
+    assert_eq!((0..2).map(|o| w.h.owned_by(hid(o)).unwrap()).collect::<Vec<_>>(), land_before, "nothing moved");
+    assert!(!w.hosts[2].heartbeat(hid(2), boot2).unwrap().live, "its next beat finds it replaced");
+    assert_eq!(w.h.end_landless_host(hid(2), boot2, w.c), Ok(LandlessEnd::Gone), "dead already");
+    // A claim of a free row by the ended boot (a zombie) is refused.
+    let err = w.hosts[2].claim_free(hid(2), boot2, vec![(40, 40)]);
+    assert!(err.is_err() || err.as_ref().is_ok_and(|f| f.epochs.is_empty()), "{err:?}");
+    assert!(w.h.owned_by(hid(2)).unwrap().epochs.is_empty(), "the zombie won nothing");
+    // The next registration prunes the dead landless row.
+    let next = w.hosts[2].register_host(crate::hosts::new_host("host-2", 777), CrashPolicy::Succession).unwrap();
+    assert!(!next.bumped);
+    assert!(!w.h.hosts().unwrap().iter().any(|r| r.id == hid(2)), "pruned");
+    w.shutdown();
+}
+
+/// A lapsed host holding land — a `super_regions` row, or only an `in_flight` row — is not
+/// ended: its death is a succession's.
+#[test]
+fn a_landed_host_is_not_ended() {
+    let Some(w) = World::new(3) else { return };
+    w.lapse(hid(1));
+    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1)), w.c), Ok(LandlessEnd::OwnsLand));
+    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
+    // Host 2's committed part leaves an in-flight row; then its super-regions go free.
+    w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[2].prepare_cut(part(1, hid(2), vec![in_flight(RegionCoords::new(3, 3))]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1), hid(2)], vec![], w.c, 0, vec![]).unwrap());
+    for h in &w.hosts {
+        assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
+    }
+    free_land(&w, hid(2));
+    w.lapse(hid(2));
+    assert!(w.h.hosts().unwrap()[2].owns_land, "an in-flight row is land");
+    assert_eq!(w.h.end_landless_host(hid(2), boot_of(hid(2)), w.c), Ok(LandlessEnd::OwnsLand));
+    assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false));
+    w.shutdown();
+}
+
+/// A landless host an open succession names — heir or survivor — is not ended: its death is
+/// a second failure before the settle (the caller rolls back).
+#[test]
+fn a_recipient_is_not_ended() {
+    let Some(w) = World::new(3) else { return };
+    w.vouch(hid(1));
+    let s = w.declared(hid(1), hid(0));
+    assert_eq!(s.survivors, vec![hid(0), hid(2)]);
+    // Both lose their land behind the store's back (as no host does): still named.
+    free_land(&w, hid(2));
+    free_land(&w, hid(0));
+    for o in [0, 2] {
+        w.lapse(hid(o));
+        assert_eq!(w.h.end_landless_host(hid(o), boot_of(hid(o)), w.c), Ok(LandlessEnd::Recipient), "host {o}");
+        assert_eq!(w.state_of(hid(o)), (HOST_LIVE, false));
+    }
+    w.shutdown();
+}
+
+/// Ending is fenced on the coordinator's epoch: a stale coordinator writes nothing.
+#[test]
+fn ending_is_fenced() {
+    let Some(w) = World::new(2) else { return };
+    free_land(&w, hid(1));
+    w.lapse(hid(1));
+    let _newer = w.h.claim_coordinator().unwrap();
+    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1)), w.c), Err(StoreError::Fenced { sr: None }));
+    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
+    w.shutdown();
+}
+
+/// While a succession is open, a landless host that is no recipient of it is ended: the
+/// succession stays open and settles as before, the generation untouched.
+#[test]
+fn a_landless_host_ends_while_a_succession_is_open() {
+    let Some(w) = World::new(4) else { return };
+    free_land(&w, hid(3));
+    w.vouch(hid(1));
+    let s = w.declared(hid(1), hid(0));
+    assert_eq!(s.survivors, vec![hid(0), hid(2)]);
+    w.lapse(hid(3));
+    assert_eq!(w.h.end_landless_host(hid(3), boot_of(hid(3)), w.c), Ok(LandlessEnd::Ended));
+    assert_eq!(w.state_of(hid(3)), (HOST_DEAD, false));
+    assert_eq!(w.h.open_successions().unwrap(), vec![s.clone()], "still open");
+    assert_eq!(w.h.world_generation().unwrap(), 0);
+    // The settle needs only the live dirty hosts: the ended one is not among them.
+    let heir = w.h.owned_by(hid(0)).unwrap();
+    let heir_part = game::WorldCut { adopts: vec![hid(1)], ..part(1, hid(0), vec![]) };
+    w.hosts[0].prepare_cut(heir_part, heir, 0).recv().unwrap().unwrap();
+    w.hosts[2].prepare_cut(part(1, hid(2), vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(2)], vec![], w.c, 0, vec![s.id]).unwrap());
+    assert!(w.h.open_successions().unwrap().is_empty(), "settled");
+    assert_eq!(w.h.world_generation().unwrap(), 0);
+    w.shutdown();
 }

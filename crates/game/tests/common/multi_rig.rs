@@ -376,6 +376,9 @@ pub struct MultiRig {
     /// it). A host at or above it registered after the cut began and may be absent from its
     /// decision ([`Self::decide_settling`]).
     pub begins: BTreeMap<CutId, u64>,
+    /// Rows the rig store ended (Elastic 2a, [`Self::end_landless_in_store`]): `(host, boot)`,
+    /// dead with no succession.
+    pub ended: BTreeSet<(HostId, u64)>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -500,6 +503,7 @@ impl MultiRig {
                 land_on_demand: false,
                 land_declared: Vec::new(),
                 begins: BTreeMap::new(),
+                ended: BTreeSet::new(),
             };
         for h in host_ids(keepers) {
             rig.keep(h);
@@ -621,7 +625,7 @@ impl MultiRig {
                 let boot = self.boots[h.0 as usize];
                 let clean = self.left.get(&h) == Some(&boot);
                 let state = if declared_dead.contains(&(h, boot)) && !clean { game::HOST_DEAD } else { game::HOST_LIVE };
-                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms: now + 1, draining: false }
+                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms: now + 1, draining: false, landed: self.landed(h) }
             })
             .collect();
         let expected: BTreeSet<HostId> =
@@ -1086,9 +1090,17 @@ impl MultiRig {
             .filter(|o| !self.dead.contains(o) && !self.draining.contains(o) && (!clean(o) || *o == h))
             .collect();
         let left: Vec<(HostId, u64)> = self.left.iter().map(|(o, b)| (*o, *b)).collect();
+        // Dead rows no open succession names (an ended landless host, a settled predecessor):
+        // forgotten before the clean rows are noted, as the server's directory keeper does.
+        let open = self.open_successions();
+        let gone: Vec<HostId> = host_ids(self.hosts.len() as u32)
+            .filter(|o| self.row_dead(*o))
+            .filter(|o| !self.successions.iter().any(|(s, _)| open.contains(&s.id) && s.predecessor == *o))
+            .collect();
         let m = &mut self.hosts[h.0 as usize].manager;
         m.set_draining(self.draining.clone());
         m.directory_read(rows, live);
+        m.forget_dead_hosts(gone);
         m.note_clean_rows(left);
     }
 
@@ -1244,7 +1256,9 @@ impl MultiRig {
             self.tracked.remove(id);
         }
         self.forgiven.extend(gone);
-        for other in host_ids(n).filter(|o| *o != h) {
+        // (A host started after another died has no link to it.)
+        let linked: Vec<HostId> = host_ids(n).filter(|o| *o != h && self.links.contains_key(&(h.min(*o), h.max(*o)))).collect();
+        for other in linked {
             self.link_down(h, other);
         }
         if self.coordinator.is_some() {
@@ -1394,7 +1408,7 @@ impl MultiRig {
                     let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
                     // Every live host beats every round; the dead ones are vouched.
                     let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
-                    game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false }
+                    game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, landed: self.landed(h) }
                 })
                 .collect();
             let mut core = self.core();
@@ -1445,7 +1459,13 @@ impl MultiRig {
         let n = self.hosts.len() as u32;
         let base_cut = self.last_cut.as_ref().map_or(CutId(0), |(c, _)| *c);
         let predecessors: BTreeSet<HostId> = d.dead.iter().map(|(p, _)| *p).collect();
-        let survivors: Vec<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && !predecessors.contains(h)).collect();
+        // `declare_in`'s survivors (Elastic 2a): the dirty live hosts holding land — a
+        // `super_regions` or `in_flight` row — or named heir, minus the predecessors. (As before,
+        // the rig counts a killed host as no live row: its tests declare every killed host.)
+        let survivors: Vec<HostId> = host_ids(n)
+            .filter(|h| !self.dead.contains(h) && !self.row_dead(*h) && !predecessors.contains(h))
+            .filter(|h| self.landed(*h) || d.heirs.contains(h))
+            .collect();
         let store = self.claim_store.as_mut().expect("with_claims: the rig's super_regions table");
         let mut out = Vec::new();
         for (&(predecessor, predecessor_boot), &heir) in d.dead.iter().zip(&d.heirs) {
@@ -1471,6 +1491,74 @@ impl MultiRig {
         }
         self.successions.extend(out.iter().cloned().map(|s| (s, None)));
         game::Declared::Done(out)
+    }
+
+    /// Whether host `h` holds land in the rig store (`hosts().owns_land`): a row of the rig's
+    /// `super_regions` table it owns, or an in-flight row its committed parts left. Without a
+    /// `super_regions` table (`Static`) every host is landed.
+    pub fn landed(&self, h: HostId) -> bool {
+        let Some(store) = &self.claim_store else { return true };
+        store.values().any(|(owner, _)| *owner == Some(h)) || self.committed.get(&h).is_some_and(|s| !s.in_flight.is_empty())
+    }
+
+    /// Whether host `h`'s rig `hosts` row (of its current boot) is dead: a crash succession
+    /// declared it, or the store ended it ([`Self::end_landless_in_store`]).
+    pub fn row_dead(&self, h: HostId) -> bool {
+        let boot = self.boots[h.0 as usize];
+        self.ended.contains(&(h, boot))
+            || self.successions.iter().any(|(s, _)| s.kind == game::SuccessionKind::Crash && (s.predecessor, s.predecessor_boot) == (h, boot))
+    }
+
+    /// The rig store's `end_landless_host` (Elastic 2a): `Gone` unless `(host, boot)` is the
+    /// current boot's live dirty row, `OwnsLand` while it holds land, `Recipient` while an open
+    /// succession names it heir or survivor, else its row is dead — no succession, the
+    /// generation untouched. The lapse is the caller's to have seen (the rig vouches a killed
+    /// host in its reads, [`Self::drive_leases`]).
+    pub fn end_landless_in_store(&mut self, end: game::coordinator::EndLandless) -> game::LandlessEnd {
+        let (h, boot) = (end.host, end.boot);
+        if self.boots[h.0 as usize] != boot || self.row_dead(h) || self.left.get(&h) == Some(&boot) {
+            return game::LandlessEnd::Gone;
+        }
+        if self.landed(h) {
+            return game::LandlessEnd::OwnsLand;
+        }
+        let open = self.open_successions();
+        if self.successions.iter().any(|(s, _)| open.contains(&s.id) && (s.heir == h || s.survivors.contains(&h))) {
+            return game::LandlessEnd::Recipient;
+        }
+        self.ended.insert((h, boot));
+        game::LandlessEnd::Ended
+    }
+
+    /// One pass of the coordinator runtime's hosts read and end pump (Elastic 2a): every
+    /// running host beating, every killed host whose row is not dead vouched (`seen_ms = 0`,
+    /// lapsed at once), dead rows dead, clean rows clean; the expected hosts the dirty live rows;
+    /// the core's upkeep run; then the end the core hands out executed in the rig store and
+    /// answered. The end handed out, with the store's answer.
+    pub fn drive_leases(&mut self) -> Option<(game::coordinator::EndLandless, game::LandlessEnd)> {
+        let n = self.hosts.len() as u32;
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
+            .map(|h| {
+                let boot = self.boots[h.0 as usize];
+                let clean = self.left.get(&h) == Some(&boot);
+                let state = if self.row_dead(h) { game::HOST_DEAD } else { game::HOST_LIVE };
+                let seen_ms = if self.dead.contains(&h) { 0 } else { now + 1 };
+                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms, draining: false, landed: self.landed(h) }
+            })
+            .collect();
+        let expected: BTreeSet<HostId> =
+            rows.iter().filter(|r| !r.clean && r.state == game::HOST_LIVE).map(|r| r.ordinal).collect();
+        let mut core = self.core();
+        core.observe_leases(&rows, now, now);
+        core.set_expected_hosts(expected);
+        core.maintain(now);
+        let end = core.take_end_landless(now);
+        drop(core);
+        let end = end?;
+        let outcome = self.end_landless_in_store(end);
+        self.core().landless_ended(end, outcome, now);
+        Some((end, outcome))
     }
 
     /// The rig store's open successions (neither settled nor abandoned).
@@ -1579,7 +1667,7 @@ impl MultiRig {
                 .filter(|h| !self.dead.contains(h) || *h == dead)
                 .map(|h| {
                     let seen_ms = if h == dead { 0 } else { now + 1 };
-                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h.0 as usize], clean: false, state: game::HOST_LIVE, seen_ms, draining: false }
+                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h.0 as usize], clean: false, state: game::HOST_LIVE, seen_ms, draining: false, landed: self.landed(h) }
                 })
                 .collect();
             let mut core = self.core();

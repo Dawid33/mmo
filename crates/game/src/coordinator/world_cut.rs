@@ -69,8 +69,9 @@ pub struct CutsBlocked {
     pub unexpected: Vec<HostId>,
     /// Open successions (R4) not answered yet by every survivor and their heir.
     pub successions: Vec<SuccessionId>,
-    /// Those of `successions` opened while no host ran (`worldctl retire-host`) whose heir
-    /// has not attached since, with that heir: no deadline runs for them until it does.
+    /// Those of `successions` opened while no host ran (the offline `worldctl retire-host` of
+    /// worlds before Elastic 2a, which no longer opens one) whose heir has not attached since,
+    /// with that heir: no deadline runs for them until it does.
     pub awaiting_heir: Vec<(SuccessionId, HostId)>,
 }
 
@@ -81,7 +82,8 @@ impl std::fmt::Display for CutsBlocked {
             write!(
                 f,
                 " hosts {:?} have a dirty `hosts` row (they may hold state) but are not attached — under claim \
-                 ownership such a row is declared dead once its lease lapses and its land goes to a live host; with \
+                 ownership such a row is declared dead once its lease lapses and its land goes to a live host (a row \
+                 holding no land is ended: nothing to inherit); with \
                  nobody else alive no host can inherit it, and the next host to register takes the land of every \
                  dirty row (the total crash: the world restarts from its last cut). `worldctl retire-host <url> \
                  <id>` vouches for a death the lease has not seen yet. Until then nothing is saved;",
@@ -294,6 +296,34 @@ impl Coordinator {
             }
             _ => true,
         });
+    }
+
+    /// The ids of a successful `hosts` read (`present`): an id absent from it was pruned and is
+    /// never issued again, so nothing is kept of it (B-M5) — not as left, succeeded, nor its
+    /// boot. An ATTACHED id keeps all three: a host registered after the read was issued attaches
+    /// before the next read shows it (its answers count per boot), and a zombie still attached
+    /// stays marked until its link drops.
+    pub(super) fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>) {
+        let attached = &self.cuts.attached;
+        let keep = |h: &HostId| present.contains(h) || attached.contains(h);
+        self.cuts.left.retain(|h, _| keep(h));
+        self.cuts.succeeded.retain(|h, _| keep(h));
+        self.cuts.boots.retain(|h, _| keep(h));
+    }
+
+    /// Which of `left`, `succeeded` and `boots` hold host `host` ([`Self::host_mentions`]).
+    pub(super) fn cut_mentions(&self, host: HostId) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.cuts.left.contains_key(&host) {
+            out.push("left");
+        }
+        if self.cuts.succeeded.contains_key(&host) {
+            out.push("succeeded");
+        }
+        if self.cuts.boots.contains_key(&host) {
+            out.push("boots");
+        }
+        out
     }
 
     /// Why no world cut begins although one is due, if that lasted

@@ -1990,90 +1990,6 @@ fn a_host_leaving_without_a_cut_tells_its_clients() {
     stopping_host_tells("late");
 }
 
-/// R4 Task 14, Elastic 1: every host died, and host 1 will never come back. With nobody alive
-/// the operator retires it (`worldctl retire-host`, the real command against this world): the
-/// succession is opened offline — no survivors, heir host 0, based on the last committed cut —
-/// and the generation raised. The named heir's process is gone, and a restarted process is a
-/// NEW host: the next registration finds nobody alive — a total crash. It ABANDONS the open
-/// succession, takes every dirty row's land (and host 1's in-flight rows) at `epoch + 1` and
-/// raises the generation once more. The next process registers owning nothing. Conservation
-/// from the last cut: every slime (one that crossed before it too) is live once and stored once.
-#[test]
-#[ignore = "slow: >100ms — run via just test-r4"]
-fn a_registration_after_an_offline_succession_abandons_it_and_takes_the_world() {
-    install_props();
-    let Some(db) = PgDb::create("tk_retired") else { return };
-    let dir = scratch("tk_retired");
-    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
-    let generation = t.w.store.world_generation().unwrap();
-    let (a0, b1) = (t.seams[0], t.seams[1]);
-    let crosser = slime(&mut t, h(1), b1, 0.0);
-    assert!(push(&mut t, h(1), crosser, b1, a0), "the crosser is pushed toward host 0");
-    t.until("the crosser arrived on host 0", WAIT, |t| t.live(crosser) == [(h(0), a0)]);
-    centre(&mut t, h(0), crosser, a0);
-    let ids = [slime(&mut t, h(0), a0, -3.0), slime(&mut t, h(1), b1, -3.0), slime(&mut t, h(1), b1, 3.0), crosser];
-    let _ = t.until_committed_after(&db, 0);
-    // Fix round 1: a crosser held IN FLIGHT under host 1 (its row at the last cut): the total
-    // crash must move it to the first host back, which delivers it.
-    let (flying, parked) = park_in_flight(&mut t, &db, h(1), b1);
-    let k = t.until_committed_after(&db, 0);
-    let k = t.until_committed_after(&db, k);
-    assert!(in_flight_under(&t, h(1), flying), "the last cut holds the crosser in flight under host 1");
-    t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
-    t.kill(h(0));
-    t.kill(h(1));
-    // Past every lease — the product's, which the command judges by: their last beats lie
-    // two leases back (time the test does not wait out).
-    let dead = Instant::now();
-    while dead.elapsed() < Duration::from_millis(LEASE_MS + 500) {
-        t.round();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    exec(&db, &format!("UPDATE hosts SET seen_ms = seen_ms - {}", 2 * game::HOST_LEASE_MS));
-    assert!(successions(&db).is_empty(), "nobody alive to inherit: nothing declared");
-    let url = db.0.url.clone();
-    let out = world_store::ctl::run(&["retire-host".to_string(), url.clone(), "1".to_string()]).expect("retired offline");
-    assert!(out.contains("heir 0"), "{out}");
-    let declared = successions(&db);
-    assert_eq!(declared.len(), 1);
-    assert_eq!(&declared[0][1..], &[1, 0, k, -1, 0], "host 1 → heir 0, based on the last cut, open");
-    assert_eq!(host_row(&db, h(1)).2, game::HOST_DEAD);
-    let owners_before = t.w.store.owners().unwrap();
-    let first = t.restart(&db, &dir, h(0), 5000);
-    assert_eq!(t.w.store.world_generation().unwrap(), generation + 2, "the retirement, then the total crash");
-    let row = successions(&db)[0];
-    assert_eq!((row[0], row[4], row[5]), (declared[0][0], -1, 1), "the open succession is abandoned, never settled: {row:?}");
-    let owners = t.w.store.owners().unwrap();
-    for (sr, owner, epoch) in &owners {
-        let before = owners_before.iter().find(|(o, _, _)| o == sr).expect("a row before");
-        assert_eq!(*owner, first.0 as i64, "{sr:?} is the first host back's");
-        assert!(*epoch > before.2, "{sr:?} taken at a higher epoch");
-    }
-    assert!(t.w.store.load_in_flight(Some(h(1))).unwrap().is_empty(), "no row left under host 1");
-    assert!(in_flight_under(&t, first, flying), "the total crash moved host 1's in-flight row to {first}");
-    let second = t.restart(&db, &dir, h(1), 6001);
-    assert!(t.w.claims[second.0 as usize].fence().epochs.is_empty(), "the next process owns nothing");
-    assert_eq!(t.w.store.world_generation().unwrap(), generation + 2, "not raised again");
-    t.until("both hosts attached", WAIT, |t| t.w.pair.sims.len() == 2 && t.w.pair.sims.iter().all(|s| s.manager.world_attached()));
-    // Conservation: every slime live once, and stored once from the last cut on.
-    t.watch(first, a0);
-    t.watch(first, b1);
-    t.watch(first, parked);
-    t.until("both seam regions run on the first host back", WAIT, |t| {
-        let running = t.sim(first).manager.running_regions();
-        running.contains(&a0) && running.contains(&b1)
-    });
-    t.until("the in-flight crosser landed on the first host back", LONG, |t| t.live(flying) == [(first, parked)]);
-    let after = t.until_committed_after(&db, k);
-    let _ = t.until_committed_after(&db, after);
-    for id in ids.into_iter().chain([flying]) {
-        assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
-        stored_once(&t, &db, id, "after the total crash");
-    }
-    assert_eq!(t.w.store.world_generation().unwrap(), generation + 2, "no further rollback");
-    t.stop(&db, &dir);
-}
-
 /// Was "a heir that reboots before the settle adopts again" (R4 fix round 1). Elastic 1: a
 /// restarted heir is a NEW host, so the heir's restart before the settle is a SECOND failure
 /// before the settle. Three hosts; host 2 dies, its heir applies the order (it never adopts),
@@ -2120,5 +2036,56 @@ fn a_heir_restarted_before_the_settle_is_a_second_failure() {
     let last = decisions(&db).into_iter().filter(|(_, _, ok)| *ok).map(|(c, _, _)| c).max().unwrap();
     assert!(last >= k);
     restart_after_the_rollback(&mut t, &db, &dir, &[other, heir, pred], &seams, &ids, last, generation + 1);
+    t.stop(&db, &dir);
+}
+
+/// Elastic 2a, the crash-loop rule (decision 9): host 1's pod crashes and its process
+/// restarts at once under its name — each time a NEW, landless id — then crashes again, three
+/// times, while host 0 runs. The landed host's death is the one succession (to host 0: a
+/// landless pod is no heir while a landed host takes logins, and no survivor); every
+/// crash-looped pod is ENDED (its row dead, no succession, its land none) — not a second
+/// failure — so the generation never moves, the succession settles, and every slime is live
+/// once and stored once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_crash_looping_pod_beside_a_healthy_host_never_raises_the_generation() {
+    install_props();
+    let Some(db) = PgDb::create("tk_crash_loop") else { return };
+    let dir = scratch("tk_crash_loop");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let generation = t.w.store.world_generation().unwrap();
+    let (s0, s1) = (t.seams[0], t.seams[1]);
+    let ids = [slime(&mut t, h(0), s0, 0.0), slime(&mut t, h(1), s1, 0.0)];
+    let _ = t.until_committed_after(&db, 0);
+    t.until("no cut running", WAIT, |t| t.w.pair.sims.iter().all(|s| s.manager.world_cut().is_none()));
+    t.kill(h(1));
+    let mut pods = Vec::new();
+    for i in 0..3u64 {
+        // The restart vouches its name's previous row (the landed host, then each pod).
+        let pod = t.restart(&db, &dir, h(1), 4000 + i);
+        assert!(t.w.claims[pod.0 as usize].fence().epochs.is_empty(), "pod {pod} owns nothing");
+        t.until(&format!("pod {pod} attached"), WAIT, |t| t.sim(pod).manager.world_attached());
+        t.kill(pod);
+        pods.push(pod);
+        assert_eq!(t.w.store.world_generation().unwrap(), generation, "pod {pod}: the generation never moves");
+    }
+    // A pod's row is ended (dead) — and pruned by a later registration (dead, owning nothing).
+    let live_row = |p: HostId| count(&db, &format!("SELECT COUNT(*) FROM hosts WHERE id = {} AND state = {}", p.0, game::HOST_LIVE));
+    t.until("every crash-looped pod ended", LONG, |_| pods.iter().all(|p| live_row(*p) == 0));
+    let row = t.until_settled(&db, h(1));
+    assert_eq!((row[2], row[5]), (0, 0), "host 0 inherits; settled, not abandoned: {row:?}");
+    let all = successions(&db);
+    assert!(all.iter().all(|r| r[1] == 1), "no succession of a landless pod: {all:?}");
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "never rolled back");
+    t.watch(h(0), s1);
+    t.until("both slimes live on host 0", LONG, |t| ids.iter().all(|id| t.live(*id).len() == 1));
+    let k = t.until_committed_after(&db, row[4]);
+    let _ = t.until_committed_after(&db, k);
+    for id in ids {
+        assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
+        stored_once(&t, &db, id, "after the crash loop");
+    }
+    assert_eq!(t.w.store.world_generation().unwrap(), generation);
     t.stop(&db, &dir);
 }

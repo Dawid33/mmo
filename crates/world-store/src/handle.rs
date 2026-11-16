@@ -64,6 +64,14 @@ pub struct HostRow {
     pub quic: Option<String>,
     pub webtransport: Option<String>,
     pub wt_cert_hash: Option<String>,
+    /// The host holds land at the read: a `super_regions` row it owns or an `in_flight` row of
+    /// its id (Elastic 2a: only such a host is a succession's survivor; a landless lapse is
+    /// ended, [`StoreHandle::end_landless_host_later`]).
+    pub owns_land: bool,
+    /// An open succession has this row's boot as its predecessor. A dead row that is not (its
+    /// succession settled, or it was ended holding no land) is gone for good: a host forgets it
+    /// (`WorldManager::forget_dead_hosts`).
+    pub succeeding: bool,
 }
 
 /// What one lease beat ([`StoreHandle::heartbeat`]) found.
@@ -684,7 +692,8 @@ impl StoreHandle {
     /// [`game::HOST_LEASE_MS`] by the database clock — and a `Leave` needs it clean (else
     /// `NotLapsed`); each heir must be live, dirty and beating (else `Gone`). Then: a crashed
     /// row is marked [`HOST_DEAD`], each succession row is inserted (based on the last
-    /// committed cut; `survivors` = every other live dirty host, read under the lock
+    /// committed cut; `survivors` = every other live dirty host that holds land — a
+    /// `super_regions` or `in_flight` row — or is an heir of the call, read under the lock
     /// `register_host` takes) and every super-region of the predecessor moves to its heir at
     /// `epoch + 1` — the heir reads its new fence with [`Self::owned_by`]; the predecessor's
     /// next fenced write or load is refused. The moved rows wait for a staged part holding
@@ -740,19 +749,28 @@ impl StoreHandle {
         self.ask(Request::RollbackWorldOperator)
     }
 
-    /// R4, `worldctl retire-host` with NO host alive: opens a crash succession of host
-    /// `ordinal` vouched for by the operator — no coordinator fence, no journal (the world is
-    /// at its last cut as a whole) — in one transaction under the `world` row's lock, as
-    /// [`Self::declare_succession`] would: the row marked dead, the land moved to the heir (the
-    /// lowest other ordinal with a live `hosts` row) at `epoch + 1`, the `successions` row
-    /// inserted with no survivors and the last committed cut as its base, and `world.generation`
-    /// raised (every process of the old generation is refused from then on). Refused, nothing
-    /// written, while any dirty live row beat within the lease ([`crate::Retired::Running`]),
-    /// with no other row to inherit ([`crate::Retired::NoHeir`]), or for a row that is not a
-    /// dirty live one or that an open succession names ([`crate::Retired::Refused`]). The heir
-    /// finds it at its next boot: the coordinator sends it the order. Postgres only.
-    pub fn retire_offline(&self, ordinal: HostId) -> Result<crate::Retired, StoreError> {
-        self.ask(|r| Request::RetireOffline(ordinal, r))
+    /// Elastic 2a, the crash-loop rule: host `host`'s row of boot `boot` lapsed and it holds no
+    /// land — its row is marked [`HOST_DEAD`] with NO succession and the world generation
+    /// untouched (nobody inherits, nobody reports, nothing rolls back), in one transaction
+    /// fenced by `fence` under the `world` row's lock (the declaration's), bounded by the cut
+    /// lock timeout. Refused, nothing written: [`crate::LandlessEnd::Gone`] (no row, another
+    /// boot's, not live), [`crate::LandlessEnd::NotLapsed`] (it beat within the lease by the
+    /// database clock and was not vouched), [`crate::LandlessEnd::OwnsLand`] (a `super_regions`
+    /// or `in_flight` row of it), [`crate::LandlessEnd::Recipient`] (an open succession names it
+    /// heir or survivor). The lock walk is in `succession.rs`. Postgres only (`Unsupported` on
+    /// SQLite).
+    pub fn end_landless_host(&self, host: HostId, boot: u64, fence: CoordinatorFence) -> Result<crate::LandlessEnd, StoreError> {
+        self.ask(|r| Request::EndLandlessHost(host, boot, fence, r))
+    }
+
+    /// [`Self::end_landless_host`], answered on the receiver.
+    pub fn end_landless_host_later(
+        &self,
+        host: HostId,
+        boot: u64,
+        fence: CoordinatorFence,
+    ) -> crossbeam::channel::Receiver<Result<crate::LandlessEnd, StoreError>> {
+        self.ask_later(|r| Request::EndLandlessHost(host, boot, fence, r))
     }
 
     /// R4, `worldctl retire-host` while other hosts live: host `ordinal`'s dirty live row gets
