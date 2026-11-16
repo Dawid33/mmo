@@ -153,14 +153,35 @@ fn dict_order() {
 
 #[test]
 fn mutation_during_iteration() {
-    let main = r#"fn main():
+    let main = r#"fn pick() -> int:
+    print("pick")
+    return 1
+
+fn main():
     let xs = [1, 2, 3]
     for x in xs:
         if x == 1:
             xs.append(4)
         print(f"{x}")
+    let ls = [[0], [7, 8, 9]]
+    for y in ls[pick()]:
+        if y == 7:
+            ls[1].append(10)
+        print(f"{y}")
+    let ds = [{"a": 1}, {"b": 2}]
+    for k in ds[pick()]:
+        if k == "b":
+            ds[1]["c"] = 3
+        print(k)
 "#;
-    assert_eq!(printed(main), lines(&["1", "2", "3", "4"]));
+    // A path's index is evaluated once (`pick` once per loop); the container is still read again at
+    // each step (the appended element and the inserted key are seen).
+    assert_eq!(
+        printed(main),
+        lines(&[
+            "1", "2", "3", "4", "pick", "7", "8", "9", "10", "pick", "b", "c"
+        ])
+    );
 }
 
 #[test]

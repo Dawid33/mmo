@@ -40,7 +40,64 @@ pub(super) enum PlaceOf<'e> {
     ThroughRef,
 }
 
+/// A path whose index and key operands were evaluated once, into words of their own (a `for` loop's
+/// place: the container is read again at each step, the operands' calls ran once).
+pub(super) struct HeldPath {
+    root: SlotRef,
+    steps: Vec<Step>,
+    ops: Vec<Option<Val>>,
+}
+
 impl Emit<'_, '_, '_> {
+    /// Evaluates the path's index and key operands, left to right, each into a temporary of its own.
+    pub(super) fn hold_path(&mut self, path: &Path<'_>) -> HeldPath {
+        let ops = path
+            .steps
+            .iter()
+            .map(|(_, x)| x.map(|x| self.val_copy(x)))
+            .collect();
+        HeldPath {
+            root: path.root,
+            steps: path.steps.iter().map(|(s, _)| *s).collect(),
+            ops,
+        }
+    }
+
+    /// Reads the held path's value into `dst` (`Get*` from the root, the operands as held).
+    pub(super) fn read_held(&mut self, held: &HeldPath, dst: SlotRef) {
+        let mut cur = held.root;
+        let mut prev: Option<u32> = None;
+        let n = held.steps.len();
+        for (k, step) in held.steps.iter().enumerate() {
+            let (into, t) = if k + 1 == n {
+                (dst, None)
+            } else {
+                let t = self.temp(true);
+                (self.word(t), Some(t))
+            };
+            let key = Self::operand(&held.ops, k);
+            match step {
+                Step::Field(i) => self.fb.emit(Op::GetField, into, cur, *i),
+                Step::Index => self.fb.emit(Op::GetIndex, into, cur, key),
+                Step::Key => self.fb.emit(Op::GetKey, into, cur, key),
+            };
+            if let Some(p) = prev {
+                let w = self.word(p);
+                self.fb.emit(Op::Drop, w, 0u16, 0u16);
+                self.free(p);
+            }
+            prev = t;
+            cur = into;
+        }
+    }
+
+    /// Gives back the held operands.
+    pub(super) fn release_held(&mut self, held: HeldPath) {
+        for v in held.ops.into_iter().rev().flatten() {
+            self.done(v);
+        }
+    }
+
     /// `e` as a place.
     pub(super) fn place_of<'e>(&self, e: &'e Expr) -> PlaceOf<'e> {
         let mut steps = Vec::new();

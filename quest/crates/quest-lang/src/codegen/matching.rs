@@ -10,7 +10,8 @@
 //! - An arm's bindings live in a scope of their own around the arm's body. When the pattern or the guard
 //!   fails, the bindings made so far are dropped (a binding's word holds 0 outside its arm).
 //! - When no arm matches, the `match` faults (`AssertFailed`, codegen carry-over 3): the exhaustiveness
-//!   check has a work cap past which it accepts a match without proving it.
+//!   check has a work cap past which it accepts a match without proving it. A `match` with an arm that
+//!   always matches (a bare binding or `_`, no guard) has no such fault: it would be dead code.
 
 use super::Emit;
 use super::expr::{BArg, float_bits};
@@ -63,14 +64,20 @@ impl Emit<'_, '_, '_> {
                 self.fb.emit(Op::Drop, *w, 0u16, 0u16);
             }
         }
-        self.line = (at.line, at.col);
-        self.at(at);
-        self.builtin(
-            Builtin::Assert,
-            &[BArg::Imm(0), BArg::Str(NO_ARM_MESSAGE)],
-            TyId::UNIT,
-            None,
-        );
+        // After an arm that always matches (a bare binding or `_`, no guard) the fault is dead code.
+        let irrefutable = cases.iter().any(|c| {
+            c.guard.is_none() && matches!(c.pattern.kind, PatternKind::Wild | PatternKind::Bind(_))
+        });
+        if !irrefutable {
+            self.line = (at.line, at.col);
+            self.at(at);
+            self.builtin(
+                Builtin::Assert,
+                &[BArg::Imm(0), BArg::Str(NO_ARM_MESSAGE)],
+                TyId::UNIT,
+                None,
+            );
+        }
         self.fb.bind(end);
         self.done(s);
     }

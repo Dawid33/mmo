@@ -4,7 +4,7 @@
 //! the blocks inside the loop and the temporaries made since the loop began; `return` (and the end of
 //! the body) drops every block, the heap parameters and every live temporary, then `Ret`.
 
-use super::place::PlaceOf;
+use super::place::{HeldPath, PlaceOf};
 use super::{Emit, Loop};
 use crate::hir::{Arg, DefKind, Expr, ExprKind, LocalId, Prelude, Stmt, StmtKind};
 use crate::infer::{BuiltinMethod, Method};
@@ -18,7 +18,7 @@ use quest_vm::{Builtin, Op};
 enum Source {
     /// A variable: its own word, read at each step.
     Variable(SlotRef),
-    /// A path from a variable: evaluated again at each step.
+    /// A path from a variable: read again at each step through its operands, evaluated once.
     Reread,
     /// Any other expression: evaluated once into a hidden copy.
     Copy,
@@ -232,18 +232,33 @@ impl Emit<'_, '_, '_> {
             _ => None,
         };
         let source = items.unwrap_or(iter);
-        let from = match self.place_of(source) {
-            PlaceOf::Path(p) if p.steps.is_empty() => Source::Variable(p.root),
-            PlaceOf::Path(_) => Source::Reread,
-            PlaceOf::Value => Source::Copy,
+        if !matches!(self.ty_kind(source), Ty::List(_) | Ty::Dict(_, _)) {
+            return self.not_yet("a `for` loop through a reference", iter.span);
+        }
+        // A path's operands are evaluated once, before the loop (their calls run once).
+        let (from, held) = match self.place_of(source) {
+            PlaceOf::Path(p) if p.steps.is_empty() => (Source::Variable(p.root), None),
+            PlaceOf::Path(p) => (Source::Reread, Some(self.hold_path(&p))),
+            PlaceOf::Value => (Source::Copy, None),
             PlaceOf::ThroughRef => {
                 return self.not_yet("a `for` loop through a reference", iter.span);
             }
         };
+        let held_ref = held.as_ref();
         match self.ty_kind(source) {
-            Ty::List(_) => self.for_list(names, source, from, body),
-            Ty::Dict(_, _) => self.for_dict(names, source, from, items.is_some(), body),
-            _ => self.not_yet("a `for` loop through a reference", iter.span),
+            Ty::Dict(_, _) => self.for_dict(names, source, from, held_ref, items.is_some(), body),
+            _ => self.for_list(names, source, from, held_ref, body),
+        }
+        if let Some(h) = held {
+            self.release_held(h);
+        }
+    }
+
+    /// Reads a loop's container into `dst`: from its held path (`Reread`), or by evaluating `source`.
+    fn read_source(&mut self, source: &Expr, held: Option<&HeldPath>, dst: SlotRef) {
+        match held {
+            Some(h) => self.read_held(h, dst),
+            None => self.eval_into(source, dst),
         }
     }
 
@@ -275,9 +290,17 @@ impl Emit<'_, '_, '_> {
     }
 
     /// `for x in xs`: an index from 0 while below the length, the element copied into `x` at each step.
-    /// The list is read again at each step from its place (so the body's changes count, carry-over 6),
+    /// The list is read again at each step from its place (so the body's changes count, carry-over 6; a
+    /// path's indexes and keys were evaluated once, before the loop),
     /// or from a hidden copy of any other expression.
-    fn for_list(&mut self, names: &[LocalId], source: &Expr, from: Source, body: &[Stmt]) {
+    fn for_list(
+        &mut self,
+        names: &[LocalId],
+        source: &Expr,
+        from: Source,
+        path: Option<&HeldPath>,
+        body: &[Stmt],
+    ) {
         let (i, n, test, one) = (
             self.temp(false),
             self.temp(false),
@@ -308,7 +331,7 @@ impl Emit<'_, '_, '_> {
         let (top, step, exit) = (self.fb.label(), self.fb.label(), self.fb.label());
         self.fb.bind(top);
         if from == Source::Reread {
-            self.eval_into(source, list);
+            self.read_source(source, path, list);
         }
         self.fb.emit(Op::ListLen, n_s, list, 0u16);
         self.fb.emit(Op::LtI, test_s, i_s, n_s);
@@ -343,6 +366,7 @@ impl Emit<'_, '_, '_> {
         names: &[LocalId],
         source: &Expr,
         from: Source,
+        path: Option<&HeldPath>,
         items: bool,
         body: &[Stmt],
     ) {
@@ -377,7 +401,7 @@ impl Emit<'_, '_, '_> {
             Source::Variable(w) => {
                 self.fb.emit(Op::Dup, d, w, 0u16);
             }
-            Source::Reread => self.eval_into(source, d),
+            Source::Reread => self.read_source(source, path, d),
             Source::Copy => {}
         }
         self.fb.emit(Op::Copy, arg, pos_s, 0u16);
