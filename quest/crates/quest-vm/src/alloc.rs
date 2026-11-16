@@ -24,7 +24,7 @@ const A_ZOMBIE: u32 = 1;
 const A_USED: u32 = 2;
 const A_FREE_HEADS: u32 = 3;
 
-/// Bump top, zombie-list head (reserved for the reaper), used words, one free-list head per class.
+/// Bump top, zombie-list head (kept by `object`), used words, one free-list head per class.
 pub const ALLOC_HEADER_WORDS: u32 = A_FREE_HEADS + CLASS_SLOTS;
 
 #[repr(u8)]
@@ -85,7 +85,8 @@ fn block_bytes(class: u8) -> u64 {
 }
 
 impl Heap {
-    fn w(&self, st: &mut Store, off: u32, v: u64) -> Result<(), MemError> {
+    /// Writes one word through this heap's path (`ws` for the script heap, `wr` for the inbox).
+    pub fn w(&self, st: &mut Store, off: u32, v: u64) -> Result<(), MemError> {
         if self.script {
             st.ws(off, v)
         } else {
@@ -128,6 +129,15 @@ impl Heap {
             });
         }
         Ok(t as u32)
+    }
+
+    /// Head of the zombie list (an object pointer, 0 = no zombies); the reaper owns its meaning.
+    pub fn zombie_head(&self, st: &Store) -> Result<u64, MemError> {
+        st.r(self.ah(A_ZOMBIE))
+    }
+
+    pub fn set_zombie_head(&self, st: &mut Store, v: u64) -> Result<(), MemError> {
+        self.w(st, self.ah(A_ZOMBIE), v)
     }
 
     pub fn used_words(&self, st: &Store) -> Result<u32, MemError> {
