@@ -150,7 +150,7 @@ impl Emit<'_, '_, '_> {
             }
             ExprKind::Int(n) => self.load_int(dst, *n),
             ExprKind::Float(f) => {
-                let c = self.fb.program().const_u64(float_bits(*f));
+                let c = self.fb.const_u64(float_bits(*f));
                 self.fb.emit_t(Op::LoadConst, dst, c);
             }
             ExprKind::Str(s) => self.load_str(dst, s),
@@ -206,14 +206,14 @@ impl Emit<'_, '_, '_> {
                 self.fb.emit(Op::LoadSmall, dst, small as u16, 0u16);
             }
             Err(_) => {
-                let c = self.fb.program().const_u64(n as u64);
+                let c = self.fb.const_u64(n as u64);
                 self.fb.emit_t(Op::LoadConst, dst, c);
             }
         }
     }
 
     fn load_str(&mut self, dst: SlotRef, s: &str) {
-        let i = self.fb.program().string(s);
+        let i = self.fb.string(s);
         self.fb.emit_t(Op::LoadStr, dst, i);
     }
 

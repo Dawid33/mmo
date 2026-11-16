@@ -515,10 +515,24 @@ impl FnBuilder<'_> {
         self.func
     }
 
-    /// The program being built, so its tables (constants, strings, shapes, types, host sites) can grow
-    /// while this body is open. Declaring functions or starting another body from here is a misuse.
-    pub fn program(&mut self) -> &mut ProgramBuilder {
-        self.pb
+    /// [`ProgramBuilder::const_u64`], while this body is open.
+    pub fn const_u64(&mut self, v: u64) -> u32 {
+        self.pb.const_u64(v)
+    }
+
+    /// [`ProgramBuilder::string`], while this body is open.
+    pub fn string(&mut self, s: &str) -> u32 {
+        self.pb.string(s)
+    }
+
+    /// [`ProgramBuilder::shape`], while this body is open.
+    pub fn shape(&mut self, fields: u8, ref_bits: u32) -> u16 {
+        self.pb.shape(fields, ref_bits)
+    }
+
+    /// [`ProgramBuilder::ty`], while this body is open.
+    pub fn ty(&mut self, d: TypeDesc) -> TypeId {
+        self.pb.ty(d)
     }
 
     /// This function's own frame.

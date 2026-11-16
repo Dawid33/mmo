@@ -98,7 +98,7 @@ pub(crate) fn generate(
     for d in &plan.globals {
         let ty = typed.globals.get(d).copied().unwrap_or(TyId::ERROR);
         let (file, span) = g.def_site(*d);
-        let Some(tid) = g.type_id(&mut pb, ty, &file, span) else {
+        let Some(tid) = g.type_id(&mut |d| pb.ty(d), ty, &file, span) else {
             continue;
         };
         let gr = pb.global(&krate.qualified_name(*d), tid);
@@ -238,7 +238,7 @@ impl Gen<'_> {
     /// nest deeply). `None` (reported at `at`) for a type a later task lowers.
     fn type_id(
         &mut self,
-        pb: &mut ProgramBuilder,
+        intern: &mut dyn FnMut(TypeDesc) -> TypeId,
         ty: TyId,
         file: &str,
         at: Span,
@@ -289,7 +289,7 @@ impl Gen<'_> {
                 },
                 _ => TypeDesc::Unit,
             };
-            let tid = pb.ty(desc);
+            let tid = intern(desc);
             self.type_ids.insert(t, tid);
             stack.pop();
         }
@@ -461,7 +461,8 @@ impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
     /// The VM type of `ty` (`None`: reported).
     fn type_id(&mut self, ty: TyId, at: Span) -> Option<TypeId> {
         let file = self.file.clone();
-        self.g.type_id(self.fb.program(), ty, &file, at)
+        let fb = &mut self.fb;
+        self.g.type_id(&mut |d| fb.ty(d), ty, &file, at)
     }
 
     /// Marks the heap words in `ref_slots` and closes the body; the frame's size in words.
