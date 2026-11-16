@@ -2646,6 +2646,91 @@ fn a_claim_coordinator_declares_successions_with_one_host() {
     assert_eq!((d.dead, d.heirs, d.kind), (vec![(h(5), 105)], vec![h(0)], game::SuccessionKind::Crash));
 }
 
+/// Final review B-I2: hosts 0..3 attached, host 3 lapses; `marked` (the heir `heir_of` would
+/// pick over the other three) is marked draining in the same read. The declaration.
+fn declare_beside_a_draining_heir(alone: bool) -> (Declare, HostId) {
+    let n = if alone { 2 } else { 4 };
+    let mut c = succeeding(n);
+    let dead = h(u64::from(n) - 1);
+    let live: std::collections::BTreeSet<HostId> = (0..u64::from(n) - 1).map(h).collect();
+    let marked = game::heir_of(dead, &live).unwrap();
+    let rows: Vec<HostSeen> = (0..u64::from(n))
+        .map(h)
+        .map(|o| {
+            let mut row = seen(o, if o == dead { 0 } else { 11 });
+            row.draining = o == marked;
+            row
+        })
+        .collect();
+    c.observe_leases(&rows, 10, 10);
+    (c.declare_wanted(10).expect("host lapsed: declared"), marked)
+}
+
+/// A draining host is not chosen as heir while another live attached host can be: it would
+/// adopt a dead host's whole land minutes before it leaves (its players moved twice, a second
+/// `Leave` succession). The heir is `heir_of` over the hosts that are not going.
+#[test]
+fn a_draining_host_is_not_heir_while_another_can_be() {
+    let (d, marked) = declare_beside_a_draining_heir(false);
+    let staying: std::collections::BTreeSet<HostId> = [0, 1, 2].into_iter().map(h).filter(|o| *o != marked).collect();
+    assert_eq!(d.heirs, vec![game::heir_of(h(3), &staying).unwrap()], "not the draining host {marked}");
+    assert_ne!(d.heirs, vec![marked]);
+}
+
+/// The only live attached host is draining: it IS the heir — no land is left without one.
+#[test]
+fn a_draining_host_is_heir_when_it_is_the_only_one() {
+    let (d, marked) = declare_beside_a_draining_heir(true);
+    assert_eq!(marked, h(0));
+    assert_eq!((d.dead, d.heirs), (vec![(h(1), 101)], vec![h(0)]));
+}
+
+/// A host that asked to leave (SIGTERM: its leave request waits) is not chosen as heir while
+/// another can be — it would have to adopt inside `SUCCESSION_DEADLINE_MS` while exiting; it
+/// is when it is the only one.
+#[test]
+fn a_leaving_host_is_heir_only_when_it_is_the_only_one() {
+    for n in [4u32, 2] {
+        let mut c = succeeding(n);
+        let dead = h(u64::from(n) - 1);
+        let live: std::collections::BTreeSet<HostId> = (0..u64::from(n) - 1).map(h).collect();
+        let leaving = game::heir_of(dead, &live).unwrap();
+        c.handle(leaving, HostMsg::LeaveRequest, 5);
+        read_leases(&mut c, n, &[dead], &[], 10);
+        let d = c.declare_wanted(10).expect("host lapsed: declared");
+        if n == 2 {
+            assert_eq!(d.heirs, vec![leaving], "the only host left: it is the heir");
+        } else {
+            let staying: std::collections::BTreeSet<HostId> = live.iter().copied().filter(|o| *o != leaving).collect();
+            assert_eq!(d.heirs, vec![game::heir_of(dead, &staying).unwrap()], "not the leaving host {leaving}");
+        }
+    }
+}
+
+/// The same for a `Leave` succession (a departed host's land wanted): the heir is not the
+/// draining host while another can be.
+#[test]
+fn a_departed_hosts_land_does_not_go_to_a_draining_host() {
+    let (mut c, t) = departed(4, h(1));
+    let live: std::collections::BTreeSet<HostId> = [0, 2, 3].into_iter().map(h).collect();
+    let marked = game::heir_of(h(1), &live).unwrap();
+    let rows: Vec<HostSeen> = (0..4)
+        .map(h)
+        .map(|o| {
+            let mut row = seen(o, t + 1);
+            row.clean = o == h(1);
+            row.draining = o == marked;
+            row
+        })
+        .collect();
+    c.observe_leases(&rows, t, t);
+    land_asked(&mut c, h(1), t);
+    let d = c.declare_wanted(t).expect("its land is given away");
+    let staying: std::collections::BTreeSet<HostId> = live.iter().copied().filter(|o| *o != marked).collect();
+    assert_eq!(d.kind, game::SuccessionKind::Leave);
+    assert_eq!(d.heirs, vec![game::heir_of(h(1), &staying).unwrap()], "not the draining host {marked}");
+}
+
 /// Ruling 6's degenerate case: the ONLY host lapses and nobody else is attached — no heir
 /// exists, so nothing is declared (no panic), and the blocked-cuts report names the host: the
 /// next registration finds nobody alive and its total-crash rule takes the land.

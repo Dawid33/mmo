@@ -1073,16 +1073,23 @@ impl MultiRig {
         }
     }
 
-    /// Host `h` reads the rig's `super_regions` table whole, every host live.
+    /// Host `h` reads the rig's `super_regions` table whole, with the `hosts` rows as the
+    /// server's directory keeper reads them: live = every running host whose row is not clean
+    /// and not marked draining (`claims::live_hosts`), and the clean rows (hosts that left in
+    /// a committed cut) handed to the manager after the read (`note_clean_rows`).
     pub fn read_directory(&mut self, h: HostId) {
         let store = self.claim_store.as_ref().expect("with_claims");
         let rows: Vec<(game::SuperRegion, i64, u64)> =
             store.iter().map(|(sr, (owner, epoch))| (*sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), *epoch)).collect();
-        let live: BTreeSet<HostId> =
-            host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h) && !self.draining.contains(h)).collect();
+        let clean = |o: &HostId| self.left.get(o) == Some(&self.boots[o.0 as usize]);
+        let live: BTreeSet<HostId> = host_ids(self.hosts.len() as u32)
+            .filter(|o| !self.dead.contains(o) && !self.draining.contains(o) && (!clean(o) || *o == h))
+            .collect();
+        let left: Vec<(HostId, u64)> = self.left.iter().map(|(o, b)| (*o, *b)).collect();
         let m = &mut self.hosts[h.0 as usize].manager;
         m.set_draining(self.draining.clone());
         m.directory_read(rows, live);
+        m.note_clean_rows(left);
     }
 
     /// One round of every host's claim loop (as the server's): directory reads asked for,

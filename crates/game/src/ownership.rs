@@ -420,9 +420,11 @@ impl Directory {
         self.draining.contains(&host)
     }
 
-    /// Whether any host is known live (draining or not): with live hosts and no
-    /// [`Self::preferred`] claimer, every live host is draining — free land stays free, and a
-    /// directory read would change nothing until a host joins (the periodic read finds it).
+    /// Whether any host is known live. The server's reads leave draining hosts (and clean rows)
+    /// out of `live` but always put this host in, draining or not; so with every other live
+    /// host draining `live` holds this host alone. With live hosts and no [`Self::preferred`]
+    /// claimer, every live host is draining — free land stays free, and a directory read would
+    /// change nothing until a host joins (the periodic read finds it).
     pub fn knows_live(&self) -> bool {
         !self.live.is_empty()
     }

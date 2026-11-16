@@ -9311,6 +9311,169 @@ fn a_host_joining_during_a_cut_is_in_the_next_one() {
     sweep("a_host_joining_during_a_cut_is_in_the_next_one", 2, 1, SEEDS / 4, join_during_a_cut);
 }
 
+/// A token the login service kicks while no host holds its player.
+const KICKED_TOKEN: &str = "0ddba110ddba11";
+
+/// The founders' world for a leave the newcomer misses: one region per founder running (one
+/// founder: its home), a claim directory laid out as `static` would, world cuts, the heir's
+/// adoption reads answered. The chain; its last region is the leaver's.
+fn founders_world(rig: &mut MultiRig) -> Vec<RegionCoords> {
+    let n = rig.hosts.len() as u32;
+    let chain = if n == 1 { vec![rig.homes[0]] } else { host_chain(n) };
+    let rows = rendezvous_rows(rig, &[], &[]);
+    rig.with_directory(rows);
+    rig.with_claims();
+    for rc in &chain {
+        rig.run(*rc);
+    }
+    world_cuts(rig);
+    rig.with_adoption();
+    rig.parked_hold = true;
+    chain
+}
+
+/// Final review B-I1: host L (the test player on it) asks to leave; while its leave cut runs —
+/// with the other founder K, or alone (one old host, one new) — host N registers and attaches
+/// (a new id, owning nothing). The cut commits beside N, which is outside it: no `CutDone`
+/// tells N that L left. N learns it from the clean `hosts` row its next periodic read brings
+/// (`note_clean_rows`): it holds its session with L, stops awaiting L's sync, and K and N link
+/// up. Then, at gate N: a kick of a player nobody holds is acknowledged (it waits for no reply
+/// of L's), and a login whose record lies in L's land is placed once the `Leave` succession
+/// gave that land to an heir — one body, the player once in the world and in the store.
+/// Whether N registered before the cut was decided (the case).
+fn join_during_a_leave(rig: &mut MultiRig) -> bool {
+    let chain = founders_world(rig);
+    let rl = *chain.last().expect("a region");
+    let leaver = rig.owner(rl);
+    let others: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|o| *o != leaver).collect();
+    keeper_may_park(rig, leaver);
+    rig.connect_home(leaver, P_CLIENT, P_PLAYER, centre_of(rl));
+    until_body(rig);
+    until_committed(rig, 1);
+    // A free super-region whose claim the leaver is preferred for (B-M3: once its leave is
+    // committed it leaves every directory's preference at once).
+    let preferred_free = (100..400).map(|x| (x, x)).find(|sr| rig.hosts[leaver.0 as usize].manager.preferred_claimer(*sr) == Some(leaver));
+    rig.hosts[leaver.0 as usize].manager.request_leave();
+    let mut cut = None;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let leaving = rig.hosts[leaver.0 as usize].manager.leaving_cut();
+        if leaving.is_some() && others.iter().all(|o| rig.hosts[o.0 as usize].manager.world_cut() == leaving) {
+            cut = leaving;
+            break;
+        }
+        rig.cut_round();
+    }
+    let cut = cut.expect("the leave cut began on every founder");
+    let hit = !rig.decided.contains_key(&cut);
+    let n = rig.start("n");
+    assert!(until_decided(rig, cut), "the leave cut commits beside the newcomer (seed {}, link delay {})", rig.seed, rig.link_delay);
+    assert_eq!(rig.left.get(&leaver), Some(&rig.boots[leaver.0 as usize]), "L's row is clean");
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| others.iter().all(|o| rig.hosts[o.0 as usize].manager.peer_left(leaver))),
+        "every founder heard the leave cut's decision"
+    );
+    if let Some(sr) = preferred_free {
+        for o in &others {
+            assert_ne!(rig.hosts[o.0 as usize].manager.preferred_claimer(sr), Some(leaver), "host {o} no longer prefers the leaver for {sr:?}");
+        }
+    }
+    // Linked once the cut is decided (Task 4's `linked_or_outside`, the later link checked).
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| others.iter().all(|o| r.hosts[o.0 as usize].manager.peer_is_reachable(n) && r.hosts[n.0 as usize].manager.peer_is_reachable(*o))),
+        "the newcomer and every founder that stays reach each other (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    rig.kill(leaver);
+    // N's periodic hosts read: L's row is clean.
+    rig.read_directory(n);
+    assert!(rig.hosts[n.0 as usize].manager.peer_left(leaver), "the newcomer learnt from the clean row that host {leaver} left");
+    if let Some(sr) = preferred_free {
+        assert_ne!(rig.hosts[n.0 as usize].manager.preferred_claimer(sr), Some(leaver), "nor does the newcomer prefer it");
+    }
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[n.0 as usize].manager.peers_synced()),
+        "the newcomer awaits no sync of the host that left (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    // A kick at gate N, of a player nobody holds: acknowledged without a reply from L.
+    rig.hosts[n.0 as usize].event(game::ServerEvent::Kick { player_token: KICKED_TOKEN.into(), session_epoch: 1, reason: "signed out".into() });
+    let mut out = Vec::new();
+    for _ in 0..CROSS_ROUNDS {
+        rig.cut_round();
+        rig.serve_logins();
+        collect_login_out(rig, &mut out);
+        if !out.is_empty() {
+            break;
+        }
+    }
+    let kick_ack = game::LoginOut::KickAck { player_token: KICKED_TOKEN.into(), session_epoch: 1 };
+    assert_eq!(out, [(n, kick_ack)], "the kick is acknowledged once, by gate N");
+    // A login at gate N whose record lies in L's land: placed once the land has an heir.
+    let parked = rig.committed_players[&P_PLAYER].clone();
+    assert_eq!(parked.region, rl, "the leave cut parked the player in L's land");
+    rig.with_land_on_demand();
+    spawn_order_at(rig, n, P_PLAYER, rl, 1);
+    let (mut taken, mut out) = (Vec::new(), Vec::new());
+    for _ in 0..SUCCESSION_ROUNDS {
+        rig.cut_round();
+        taken.extend(rig.serve_logins());
+        collect_login_out(rig, &mut out);
+        if !out.is_empty() {
+            break;
+        }
+    }
+    let succession = until_land_declared(rig);
+    assert_eq!((succession.predecessor, succession.kind), (leaver, game::SuccessionKind::Leave));
+    let heir = succession.heir;
+    let refused = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1, ok: false, endpoint: None };
+    let epoch = if out == [(n, refused.clone())] {
+        assert!(taken.is_empty(), "a refused order placed nothing: {taken:?}");
+        let adopted = |rig: &mut MultiRig| rig.core().succession_progress().iter().any(|(i, _, a)| *i == succession.id && *a);
+        assert!(until(rig, SUCCESSION_ROUNDS, adopted) || rig.core().successions_open_count() == 0, "the heir adopted");
+        // The client's retry.
+        spawn_order_at(rig, n, P_PLAYER, rl, 2);
+        (taken, out) = (Vec::new(), Vec::new());
+        for _ in 0..SUCCESSION_ROUNDS {
+            rig.cut_round();
+            taken.extend(rig.serve_logins());
+            collect_login_out(rig, &mut out);
+            if !out.is_empty() {
+                break;
+            }
+        }
+        2
+    } else {
+        1
+    };
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [heir], "placed on the heir, once");
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: epoch, ok: true, endpoint: Some(rig_endpoint(heir)) };
+    assert_eq!(out, [(n, ack)], "the login service is told by gate N");
+    rig.connect_login(heir, NEW_LOGIN_CLIENT, P_PLAYER, Some(parked), LOGIN_TOKEN, epoch);
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(NEW_LOGIN_CLIENT).len() == 1), "one body");
+    assert_eq!(rig.player_owners(NEW_LOGIN_CLIENT), [(heir, rl)], "where the leave cut parked the player");
+    assert!(rig.parked_on(P_PLAYER).is_empty(), "no parked copy");
+    assert_settled_whole(rig, &succession, &[]);
+    until_committed(rig, 1);
+    assert_player_once(rig, P_PLAYER);
+    hit
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_registering_during_a_leave_cut_learns_the_leave_and_places_logins() {
+    for founders in [1, 2] {
+        sweep_hits(
+            &format!("a_host_registering_during_a_leave_cut_learns_the_leave_and_places_logins ({founders} founders)"),
+            founders,
+            1,
+            SEEDS / 4,
+            join_during_a_leave,
+        );
+    }
+}
+
 /// After a settled succession of a dead host, nothing of it is left on any live host: every
 /// per-host field of the manager forgets it (`WorldManager::mentions`, generated from the same
 /// field list as `forget_host`), and it is never linked or written to again.

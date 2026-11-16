@@ -491,7 +491,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                     pair.held.len()
                 );
                 self.left_peers.insert(ordinal, boot);
-                if self.ownership.0.directory().is_some() {
+                if let Some(directory) = self.ownership.0.directory_mut() {
+                    // Out of this host's claim preference at once (its row is clean: the next
+                    // read leaves it out too) — free land it was preferred for is asked of a
+                    // host that stays, not of nobody until the next directory read.
+                    directory.note_dead(ordinal);
                     self.left_land.insert(ordinal, land);
                 }
                 back = self.peer_boots.get(&ordinal).copied().filter(|b| Some(*b) != boot);
@@ -551,7 +555,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// One that comes back says so with another boot's hello (`peer_hello_boot`), and is
     /// expected again from then on — a clean row read at boot is never the row of a boot
     /// that runs: every boot clears its row before it dials or listens. Called before the
-    /// first [`Self::maintain`] (no hello read yet).
+    /// first [`Self::maintain`] (no hello read yet), and later through
+    /// [`Self::note_clean_rows`] for a leave this host missed.
     pub fn note_left_peers(&mut self, left: impl IntoIterator<Item = (HostId, u64)>) {
         let me = self.ordinal();
         for (ordinal, boot) in left {
@@ -560,8 +565,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             log::info!("[server] host {ordinal} left the world cleanly (boot {boot}): not awaited until it returns");
             self.left_peers.insert(ordinal, Some(boot));
-            // Boot path: this boot holds no message of the departed boot's time (it was not
-            // running then), so its held session only gates NEW traffic, and that goes by
+            // Boot path (and a leave missed while outside its cut: the cut froze the session,
+            // the leaver received nothing of this host): no message of this host reached the
+            // departed boot after its part was taken, so its held session only gates NEW
+            // traffic, and that goes by
             // this host's directory: once it is read, what it gives the departed host stands
             // — land it still holds (not given away yet: an order will come, this host being
             // a survivor), or none (it never held any, or a `Leave` succession of it was
@@ -580,6 +587,39 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
+    }
+
+    /// The clean `hosts` rows of a periodic read (`(id, boot)`: hosts that left in a committed
+    /// leave cut; the server's directory keeper hands them over after each directory read).
+    /// One this host has not heard of is noted as at boot ([`Self::note_left_peers`]) — a host
+    /// that registered while that leave cut ran is outside the cut and gets no `CutDone`, and a
+    /// boot whose own read of the clean rows failed missed it; without this, its sync would be
+    /// awaited for ever and its land never asked for. Skipped: this host, a host whose leave
+    /// cut this host takes part in (`end_leaves` decides it), and one already known to have
+    /// left, been succeeded or forgotten. A session with it is held (nothing more goes to the
+    /// leaver's process: what this host owes it is its `Leave` succession's — the leave cut
+    /// froze that session, so the leaver received nothing of it), it leaves the claim
+    /// preference, and a landless one is forgotten.
+    pub fn note_clean_rows(&mut self, clean: impl IntoIterator<Item = (HostId, u64)>) {
+        let me = self.ordinal();
+        let new: Vec<(HostId, u64)> = clean
+            .into_iter()
+            .filter(|(o, _)| *o != me && !self.left_peers.contains_key(o) && !self.leave_pairs.contains_key(o))
+            .filter(|(o, _)| !self.peer_succeeded(*o) && !self.forgotten_hosts.contains(o))
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        for (o, _) in &new {
+            if let Some(peer) = self.peers.get_mut(o) {
+                peer.session.hold();
+            }
+            if let Some(directory) = self.ownership.0.directory_mut() {
+                directory.note_dead(*o);
+            }
+        }
+        self.note_left_peers(new);
+        self.forget_landless_leavers();
     }
 
     /// The directory was read whole: a departed host's land the boot path could not note yet

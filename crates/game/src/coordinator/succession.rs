@@ -8,7 +8,8 @@
 //! **The runs** ([`SuccessionRuns`], `CrashPolicy::Succession` only — `Static` never
 //! declares, its crash policy is the world rollback):
 //! - [`Coordinator::declare_wanted`] hands the runtime ONE batch of every lapsed host, each
-//!   with its heir ([`crate::heir_of`] over the attached hosts that did not lapse), only
+//!   with its heir ([`crate::heir_of`] over the attached hosts that did not lapse — those
+//!   neither draining nor leaving, while there is one: `heir_candidates`), only
 //!   between cuts (a running cut with a lapsed participant is decided abort first), with no
 //!   succession open and none being declared. No live attached host: nothing (a total crash
 //!   is the boots' business).
@@ -39,9 +40,11 @@
 //!   boot's `Attach` and gets the order again — it adopts again from the store. A declared
 //!   run's recipient that attaches as another boot than the one the run counts on (its boot
 //!   when the run opened) lost its journal: no order goes to that boot and the world rolls
-//!   back. (`register_host` normally keeps such a boot out until then: a dirty reboot beside a
-//!   live host vouches for its old row and waits — that row lapses, a second death, a
-//!   rollback; with nobody alive it raises the generation, which fences the old heir's parts.)
+//!   back. (Elastic 1: a restarted process registers under a NEW id, so no recipient attaches
+//!   as another boot of itself any more — the guard stays. A recipient's restart leaves its old
+//!   id silent instead: that id lapses while the run is open — a second failure before the
+//!   settle — and the world rolls back; with nobody alive the restart's registration raises
+//!   the generation, which fences the old parts.)
 //! - A RUNNING coordinator reads the open successions again — on these three triggers only,
 //!   never periodically —
 //!   ([`Coordinator::take_successions_reread`]) when the store changed them behind its back:
@@ -431,6 +434,7 @@ impl super::Coordinator {
             log::debug!("coordinator: hosts {gone:?} lapsed and no live host is attached: nothing to declare");
             return None;
         }
+        let live = self.heir_candidates(live);
         let heirs: Vec<HostId> =
             lapsed.iter().map(|(h, _)| crate::heir_of(*h, &live).expect("a live host other than the predecessor")).collect();
         log::warn!("coordinator: hosts {lapsed:?} lost their lease: declaring them dead, heirs {heirs:?}");
@@ -893,6 +897,15 @@ impl super::Coordinator {
         self.successions.land_wanted.iter().copied().collect()
     }
 
+    /// The hosts an heir is picked among, of `live` (attached, live, no predecessor of the
+    /// declaration): those that take logins — neither draining nor leaving
+    /// ([`Self::takes_logins`]) — so a host about to go adopts no land it would hand on minutes
+    /// later; all of `live` when none of them does (no land is left without an heir).
+    fn heir_candidates(&self, live: BTreeSet<HostId>) -> BTreeSet<HostId> {
+        let staying: BTreeSet<HostId> = live.iter().copied().filter(|h| self.takes_logins(*h)).collect();
+        if staying.is_empty() { live } else { staying }
+    }
+
     /// The `Leave` succession to declare now for drained land, if any (called by
     /// [`Self::declare_wanted`] when no host lapsed): a wanted owner whose `hosts` row the
     /// latest read shows clean and live, not declared yet, with a live attached heir, between
@@ -923,7 +936,7 @@ impl super::Coordinator {
             // Only between cuts: the store's base cut is the one every survivor counts from.
             return None;
         }
-        let live: BTreeSet<HostId> = attached.into_iter().filter(|h| *h != owner).collect();
+        let live = self.heir_candidates(attached.into_iter().filter(|h| *h != owner).collect());
         let Some(heir) = crate::heir_of(owner, &live) else {
             log::debug!("coordinator: host {owner}'s land is wanted and no live host is attached to inherit it");
             return None;
