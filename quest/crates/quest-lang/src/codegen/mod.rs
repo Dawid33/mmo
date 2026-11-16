@@ -5,7 +5,7 @@
 //! top-level `let`s in initialisation order, then emits each body through an [`Emit`]: `stmt.rs` lowers
 //! statements, blocks, loops and function bodies, `expr.rs` expressions and calls, `data.rs`
 //! constructions, collections, fields and the built-in methods, `place.rs` writes into places (take →
-//! mutate → put back), `matching.rs` `match`, `errors.rs` `raise`, `?`, `else` and the program's `$Error`
+//! mutate → put back), `refs.rs` references and `&self` receivers, `matching.rs` `match`, `errors.rs` `raise`, `?`, `else` and the program's `$Error`
 //! enum (declared first in the type table). A struct or enum type takes its VM type id before its
 //! fields are lowered, so a type that contains itself names its own id. A construct a later task
 //! compiles is the error `not-yet` at its span ([`Emit::not_yet`]), so the code generator grows by
@@ -35,6 +35,7 @@ mod errors;
 mod expr;
 mod matching;
 mod place;
+mod refs;
 mod stmt;
 
 use crate::ast::Span;

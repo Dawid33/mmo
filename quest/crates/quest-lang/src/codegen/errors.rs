@@ -27,7 +27,8 @@ use super::Emit;
 use super::Gen;
 use super::Val;
 use super::data::NONE_IMMEDIATE;
-use crate::ast::{Receiver, Span};
+use super::expr::CallArg;
+use crate::ast::Span;
 use crate::hir::{Arg, DefKind, Expr, ExprKind, LocalId, Stmt, StmtKind};
 use crate::infer::Method;
 use crate::ty::{Ty, TyId};
@@ -97,25 +98,12 @@ impl Emit<'_, '_, '_> {
             self.not_yet("this fallible expression", x.span);
             return None;
         };
-        let mut exprs: Vec<&Expr> = Vec::with_capacity(args.len() + 1);
+        let mut cargs: Vec<CallArg<'_>> = Vec::with_capacity(args.len() + 1);
         let d = match &callee.kind {
             ExprKind::Def(d) if matches!(self.def_kind(*d), Some(DefKind::Fn(_))) => *d,
             ExprKind::Field(recv, _) => match self.g.typed.methods.get(&x.id) {
                 Some(Method::Script(m)) => {
-                    let by_ref = self
-                        .g
-                        .typed
-                        .sigs
-                        .get(m)
-                        .is_some_and(|s| matches!(s.receiver, Some((Receiver::Ref, _))));
-                    if by_ref || matches!(self.ty_kind(recv), Ty::Ref(_)) {
-                        self.not_yet(
-                            "a `&self` method call or a call through a reference",
-                            x.span,
-                        );
-                        return None;
-                    }
-                    exprs.push(recv);
+                    cargs.push(self.receiver_arg(*m, recv));
                     *m
                 }
                 _ => {
@@ -128,8 +116,8 @@ impl Emit<'_, '_, '_> {
                 return None;
             }
         };
-        exprs.extend(args.iter().map(|a| &a.value));
-        let frame = self.call_raw(x, d, &exprs)?;
+        cargs.extend(args.iter().map(|a| CallArg::Value(&a.value)));
+        let frame = self.call_raw(x, d, &cargs)?;
         let ret = self.g.typed.sigs.get(&d).map_or(TyId::UNIT, |s| s.ret);
         Some(Outcome {
             value: frame.ret(),

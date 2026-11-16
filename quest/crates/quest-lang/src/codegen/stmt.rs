@@ -232,20 +232,19 @@ impl Emit<'_, '_, '_> {
             _ => None,
         };
         let source = items.unwrap_or(iter);
-        if !matches!(self.ty_kind(source), Ty::List(_) | Ty::Dict(_, _)) {
-            return self.not_yet("a `for` loop through a reference", iter.span);
+        if !matches!(self.target_kind(source), Ty::List(_) | Ty::Dict(_, _)) {
+            return self.not_yet("a `for` loop over this value", iter.span);
         }
         // A path's operands are evaluated once, before the loop (their calls run once).
         let (from, held) = match self.place_of(source) {
             PlaceOf::Path(p) if p.steps.is_empty() => (Source::Variable(p.root), None),
             PlaceOf::Path(p) => (Source::Reread, Some(self.hold_path(&p))),
             PlaceOf::Value => (Source::Copy, None),
-            PlaceOf::ThroughRef => {
-                return self.not_yet("a `for` loop through a reference", iter.span);
-            }
+            // Read again at each step through a path built once.
+            PlaceOf::ThroughRef(rp) => (Source::Reread, Some(self.hold_ref(&rp))),
         };
         let held_ref = held.as_ref();
-        match self.ty_kind(source) {
+        match self.target_kind(source) {
             Ty::Dict(_, _) => self.for_dict(names, source, from, held_ref, items.is_some(), body),
             _ => self.for_list(names, source, from, held_ref, body),
         }

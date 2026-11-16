@@ -37,7 +37,8 @@ impl Emit<'_, '_, '_> {
     /// `match scrutinee:` and its cases.
     pub(super) fn match_stmt(&mut self, at: Span, scrutinee: &Expr, cases: &[Case]) {
         let (s, err) = match self.ty_kind(scrutinee) {
-            Ty::Ref(_) => return self.not_yet("a `match` on a reference", at),
+            // What the reference refers to, copied.
+            Ty::Ref(_) => (self.val_target(scrutinee), None),
             Ty::Fallible(_, _) => {
                 let Some(o) = self.outcome(scrutinee) else {
                     return;

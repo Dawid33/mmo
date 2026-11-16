@@ -7,7 +7,7 @@
 //! back (dropping a heap value). [`Emit::exec`] evaluates for the effect only.
 
 use super::{Emit, Val};
-use crate::ast::{BinOp, Receiver, Span, UnOp};
+use crate::ast::{BinOp, Span, UnOp};
 use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, Prelude};
 use crate::infer::Method;
 use crate::layout::each_expr;
@@ -29,6 +29,27 @@ pub(super) enum BArg<'e> {
     Str(&'static str),
     /// A value already in a word (borrowed).
     Word(SlotRef, bool),
+    /// The expression's value, or what it refers to when it is a reference.
+    Target(&'e Expr),
+}
+
+/// An argument of a script function call.
+#[derive(Clone, Copy)]
+pub(super) enum CallArg<'e> {
+    /// The expression's value.
+    Value(&'e Expr),
+    /// A reference to the expression's place (a `&self` receiver).
+    Ref(&'e Expr),
+    /// A copy of what the reference expression refers to (a `self` receiver through a reference).
+    Target(&'e Expr),
+}
+
+impl<'e> CallArg<'e> {
+    fn expr(self) -> &'e Expr {
+        match self {
+            CallArg::Value(x) | CallArg::Ref(x) | CallArg::Target(x) => x,
+        }
+    }
 }
 
 /// Whether evaluating `e` may run code that writes a variable (a call).
@@ -183,7 +204,8 @@ impl Emit<'_, '_, '_> {
             ExprKind::Return(x) => self.ret(x.as_deref()),
             ExprKind::Break => self.leave_loop(true),
             ExprKind::Continue => self.leave_loop(false),
-            ExprKind::Unary(UnOp::Ref | UnOp::Deref, _) => self.not_yet("a reference", e.span),
+            ExprKind::Unary(UnOp::Ref, x) => self.ref_into(x, dst),
+            ExprKind::Unary(UnOp::Deref, r) => self.deref_into(r, dst),
             ExprKind::List(xs) => self.list_literal(e, xs, dst),
             ExprKind::Dict(pairs) => self.dict_literal(e, pairs, dst),
             ExprKind::Field(x, name) => self.field(e, x, name, dst),
@@ -387,9 +409,9 @@ impl Emit<'_, '_, '_> {
 
     /// `x` as a string: itself when it is one, else formatted (design D8).
     fn text_of(&mut self, x: &Expr, dst: SlotRef) {
-        let ty = self.ty_of(x);
+        let ty = self.target_ty(x);
         if self.g.typed.types.get(ty) == Ty::Str {
-            self.eval_into(x, dst);
+            self.eval_target_into(x, dst);
             return;
         }
         let Some(tid) = self.type_id(ty, x.span) else {
@@ -397,7 +419,7 @@ impl Emit<'_, '_, '_> {
         };
         self.builtin(
             Builtin::Fmt,
-            &[BArg::Expr(x), BArg::Imm(i64::from(tid))],
+            &[BArg::Target(x), BArg::Imm(i64::from(tid))],
             TyId::STR,
             Some(dst),
         );
@@ -419,6 +441,7 @@ impl Emit<'_, '_, '_> {
                 BArg::Imm(_) => false,
                 BArg::Str(_) => true,
                 BArg::Word(_, heap) => *heap,
+                BArg::Target(e) => self.heap_ty(self.target_ty(e)),
             })
             .collect();
         // A single variable that lives in this frame is its own run.
@@ -446,6 +469,7 @@ impl Emit<'_, '_, '_> {
                         BArg::Imm(n) => self.load_int(w, *n),
                         BArg::Str(s) => self.load_str(w, s),
                         BArg::Word(s, heap) => self.copy(w, *s, *heap),
+                        BArg::Target(e) => self.eval_target_into(e, w),
                     }
                 }
                 (self.word(run), Some(run))
@@ -489,8 +513,9 @@ impl Emit<'_, '_, '_> {
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg], dst: Option<SlotRef>) {
         match &callee.kind {
             ExprKind::Def(d) if matches!(self.def_kind(*d), Some(DefKind::Fn(_))) => {
-                let exprs: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
-                self.call_fn(e, *d, &exprs, dst)
+                let cargs: Vec<CallArg<'_>> =
+                    args.iter().map(|a| CallArg::Value(&a.value)).collect();
+                self.call_fn(e, *d, &cargs, dst)
             }
             ExprKind::Prelude(p) => self.prelude(e, *p, args, dst),
             ExprKind::Field(recv, _) => self.method_call(e, recv, args, dst),
@@ -511,26 +536,14 @@ impl Emit<'_, '_, '_> {
         }
     }
 
-    /// `recv.m(args)`: a script method (`self` by value: the receiver is its first argument) or a
-    /// built-in one.
+    /// `recv.m(args)`: a script method (the receiver is its first argument: [`Self::receiver_arg`]) or
+    /// a built-in one.
     fn method_call(&mut self, e: &Expr, recv: &Expr, args: &[Arg], dst: Option<SlotRef>) {
         match self.g.typed.methods.get(&e.id).cloned() {
             Some(Method::Script(m)) => {
-                let by_ref = self
-                    .g
-                    .typed
-                    .sigs
-                    .get(&m)
-                    .is_some_and(|s| matches!(s.receiver, Some((Receiver::Ref, _))));
-                if by_ref || matches!(self.ty_kind(recv), Ty::Ref(_)) {
-                    return self.not_yet(
-                        "a `&self` method call or a call through a reference",
-                        e.span,
-                    );
-                }
-                let mut exprs: Vec<&Expr> = vec![recv];
-                exprs.extend(args.iter().map(|a| &a.value));
-                self.call_fn(e, m, &exprs, dst)
+                let mut cargs = vec![self.receiver_arg(m, recv)];
+                cargs.extend(args.iter().map(|a| CallArg::Value(&a.value)));
+                self.call_fn(e, m, &cargs, dst)
             }
             Some(Method::Builtin(b)) => self.builtin_method(e, b, recv, args, dst),
             Some(Method::Host(_)) => self.not_yet("a host method call", e.span),
@@ -540,8 +553,8 @@ impl Emit<'_, '_, '_> {
 
     /// A call of a script function that cannot fail: [`Self::call_raw`], then the result is moved out of
     /// the callee's word 1.
-    fn call_fn(&mut self, e: &Expr, d: DefId, exprs: &[&Expr], dst: Option<SlotRef>) {
-        let Some(callee) = self.call_raw(e, d, exprs) else {
+    fn call_fn(&mut self, e: &Expr, d: DefId, args: &[CallArg<'_>], dst: Option<SlotRef>) {
+        let Some(callee) = self.call_raw(e, d, args) else {
             return;
         };
         let ret_ty = self.g.typed.sigs.get(&d).map_or(TyId::UNIT, |s| s.ret);
@@ -563,33 +576,38 @@ impl Emit<'_, '_, '_> {
     /// A call of a script function: the arguments are evaluated left to right, then written into the
     /// callee's parameter words (literals straight there), then `Call`. The result is left in the
     /// callee's words 1 (value) and 2 (error); `None` when the call was reported.
-    pub(super) fn call_raw(&mut self, e: &Expr, d: DefId, exprs: &[&Expr]) -> Option<FrameRef> {
+    pub(super) fn call_raw(
+        &mut self,
+        e: &Expr,
+        d: DefId,
+        args: &[CallArg<'_>],
+    ) -> Option<FrameRef> {
         let Some(&f) = self.g.fns.get(&d) else {
             self.not_yet("this call", e.span);
             return None;
         };
         let callee = self.fb.of(f);
-        let mut vals: Vec<Option<Val>> = Vec::with_capacity(exprs.len());
-        for (i, x) in exprs.iter().enumerate() {
-            if is_const(x) {
-                vals.push(None);
-                continue;
-            }
-            let later_writes = exprs
+        let mut vals: Vec<Option<Val>> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let later_writes = args
                 .get(i + 1..)
                 .unwrap_or_default()
                 .iter()
-                .any(|y| may_write(y));
-            vals.push(Some(if later_writes {
-                self.val_copy(x)
-            } else {
-                self.val(x)
-            }));
+                .any(|y| may_write(y.expr()));
+            let v = match *a {
+                CallArg::Value(x) if is_const(x) => None,
+                CallArg::Value(x) if later_writes => Some(self.val_copy(x)),
+                CallArg::Value(x) => Some(self.val(x)),
+                // A path is resolved when it is used: the later arguments cannot change it.
+                CallArg::Ref(x) => Some(self.ref_to(x)?),
+                CallArg::Target(x) => Some(self.val_target(x)),
+            };
+            vals.push(v);
         }
-        for (i, (x, v)) in exprs.iter().zip(vals).enumerate() {
+        for (i, (a, v)) in args.iter().zip(vals).enumerate() {
             let param = callee.param(u16::try_from(i).unwrap_or(u16::MAX));
             match v {
-                None => self.eval_into(x, param),
+                None => self.eval_into(a.expr(), param),
                 Some(v) => match v.temp {
                     Some(t) => {
                         let op = if v.heap { Op::Move } else { Op::Copy };

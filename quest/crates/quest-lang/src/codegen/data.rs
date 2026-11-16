@@ -198,45 +198,50 @@ impl Emit<'_, '_, '_> {
 
     /// `x.name`.
     pub(super) fn field(&mut self, e: &Expr, x: &Expr, name: &str, dst: SlotRef) {
-        let Some(i) = self.field_index(self.ty_kind(x), name) else {
-            return self.not_yet("a field of this value (through a reference?)", e.span);
+        let Some(i) = self.field_index(self.target_kind(x), name) else {
+            return self.not_yet("a field of this value", e.span);
         };
-        let v = self.val(x);
+        let v = self.val_target(x);
         self.fb.emit(Op::GetField, dst, v.slot, i);
         self.done(v);
     }
 
     /// `x[i]`: a list's element or a dict's value.
     pub(super) fn index(&mut self, e: &Expr, x: &Expr, i: &Expr, dst: SlotRef) {
-        let op = match self.ty_kind(x) {
+        let op = match self.target_kind(x) {
             Ty::List(_) => Op::GetIndex,
             Ty::Dict(_, _) => Op::GetKey,
-            _ => return self.not_yet("indexing through a reference", e.span),
+            _ => return self.not_yet("indexing this value", e.span),
         };
-        let vs = self.vals(&[x, i]);
+        let vs = self.target_vals(&[x, i]);
         self.fb.emit(op, dst, vs[0].slot, vs[1].slot);
         self.done_all(vs);
     }
 
     /// `x[a:b]`; a missing bound is 0 or the end.
     pub(super) fn slice(&mut self, e: &Expr, x: &Expr, bounds: [Option<&Expr>; 2], dst: SlotRef) {
-        if !matches!(self.ty_kind(x), Ty::List(_)) {
-            return self.not_yet("a slice through a reference", e.span);
+        if !matches!(self.target_kind(x), Ty::List(_)) {
+            return self.not_yet("a slice of this value", e.span);
         }
         let lo = bounds[0].map_or(BArg::Imm(0), BArg::Expr);
         let hi = bounds[1].map_or(BArg::Imm(SLICE_END), BArg::Expr);
         let ty = self.ty_of(e);
-        self.builtin(Builtin::ListSlice, &[BArg::Expr(x), lo, hi], ty, Some(dst));
+        self.builtin(
+            Builtin::ListSlice,
+            &[BArg::Target(x), lo, hi],
+            ty,
+            Some(dst),
+        );
     }
 
     /// `x in c` (`negate`: `not in`): an element of a list, a key of a dict. `x` is evaluated first.
     pub(super) fn contains(&mut self, at: Span, x: &Expr, c: &Expr, negate: bool, dst: SlotRef) {
-        let b = match self.ty_kind(c) {
+        let b = match self.target_kind(c) {
             Ty::List(_) => Builtin::ListContains,
             Ty::Dict(_, _) => Builtin::DictContains,
-            _ => return self.not_yet("`in` through a reference", at),
+            _ => return self.not_yet("`in` on this value", at),
         };
-        let vs = self.vals(&[x, c]);
+        let vs = self.target_vals(&[x, c]);
         let args = [
             BArg::Word(vs[1].slot, vs[1].heap),
             BArg::Word(vs[0].slot, vs[0].heap),
@@ -265,11 +270,11 @@ impl Emit<'_, '_, '_> {
         dst: Option<SlotRef>,
     ) {
         use BuiltinMethod as M;
-        let rty = self.ty_kind(recv);
+        // Methods see through references.
+        let rty = self.target_kind(recv);
         let (b, mutates) = match (m, rty) {
-            (_, Ty::Ref(_)) => return self.not_yet("a method call through a reference", e.span),
             (M::Len, Ty::List(_)) => {
-                let v = self.val(recv);
+                let v = self.val_target(recv);
                 match dst {
                     Some(d) => {
                         self.fb.emit(Op::ListLen, d, v.slot, 0u16);
@@ -308,7 +313,7 @@ impl Emit<'_, '_, '_> {
         if mutates {
             self.mutate(b, recv, &rest, result, dst);
         } else {
-            let mut bargs = vec![BArg::Expr(recv)];
+            let mut bargs = vec![BArg::Target(recv)];
             bargs.extend(rest.iter().map(|x| BArg::Expr(x)));
             self.builtin(b, &bargs, result, dst);
         }
