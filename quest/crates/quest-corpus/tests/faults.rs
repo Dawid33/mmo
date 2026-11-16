@@ -5,6 +5,7 @@
 //!
 //! Not here: `Corrupt` (memory that does not parse) and `HostFault` (a host query that fails) — no valid
 //! program causes either against the stub; the VM's own suites cover them.
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
 

@@ -17,3 +17,6 @@ quest-stub = { path = "../quest-stub" }
 # The program generator (`generate`) is native-only, as proptest is.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 proptest.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

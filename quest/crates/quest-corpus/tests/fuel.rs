@@ -1,6 +1,7 @@
 //! Fuel and pause points over the corpus and generated programs (spec §6.2, §11 "Fuel/pause"; plan Task 33): a program run with a
 //! small fuel budget per tick ends with the same output and script state as with unlimited fuel, and two
 //! runs pause at the same points (the same per-tick fuel and state hash).
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
 
@@ -17,7 +18,6 @@ const FUELS: [u64; 3] = [7, 50, 333];
 const TICKS_SLACK: u64 = 10_000;
 
 /// The most fuel a generated program may take in all to be used here (it is run at 7 per tick).
-#[cfg(not(target_arch = "wasm32"))]
 const GENERATED_FUEL_MAX: u64 = 1_000_000;
 
 /// The end of a run.
@@ -86,7 +86,6 @@ fn differences(name: &str, tree: &SourceTree, cfg: &CaseConfig, unlimited: &End)
 }
 
 /// How many generated programs are also run.
-#[cfg(not(target_arch = "wasm32"))]
 const GENERATED: usize = 8;
 
 #[test]
@@ -99,7 +98,6 @@ fn fuel_equivalence() {
     }
     // …and the first few generated programs (from a fixed seed) under the default stub that take at most
     // `GENERATED_FUEL_MAX` fuel (a generated program may take tens of millions: nested loops of calls).
-    #[cfg(not(target_arch = "wasm32"))]
     {
         use proptest::strategy::{Strategy, ValueTree};
         let mut rng = proptest::test_runner::TestRunner::deterministic();

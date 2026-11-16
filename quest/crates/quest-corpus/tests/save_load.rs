@@ -7,6 +7,7 @@
 //! hash, output and reports — so the remaining golden lines are identical. Memory is compared rather than
 //! the golden's FNV hash because hashing 256 KiB at every tick of every resumed run is what would make
 //! this suite slow.
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
 
