@@ -49,11 +49,13 @@ const T_DICT: u8 = 6;
 const T_STRUCT: u8 = 7;
 const T_VARIANT: u8 = 8;
 
-/// A self-describing value. `Clone`, `PartialEq` (floats by `f64` `==`) and `Drop` are written by hand
-/// as loops: a value can nest arbitrarily deep, and the derived ones would recurse. `Debug` stays derived
-/// (recursive): only tests print values.
-#[derive(Debug)]
+/// A self-describing value. `Clone`, `PartialEq` (floats by `f64` `==`), `Debug` and `Drop` are written by
+/// hand as loops: a value can nest arbitrarily deep, and the derived ones would recurse. Code outside this
+/// crate takes a value apart with [`WireValue::into_list`], [`WireValue::into_fields`] and
+/// [`WireValue::into_pairs`] (`Drop` forbids moving fields out by a pattern).
+#[derive(Default)]
 pub enum WireValue {
+    #[default]
     Unit,
     Bool(bool),
     Int(i64),
@@ -134,9 +136,27 @@ impl WireValue {
     }
 
     /// The items of a `List` (`Drop` forbids moving them out by a pattern).
-    pub(crate) fn into_list(mut self) -> Option<Vec<WireValue>> {
+    pub fn into_list(mut self) -> Option<Vec<WireValue>> {
         match &mut self {
             WireValue::List(items) => Some(std::mem::take(items)),
+            _ => None,
+        }
+    }
+
+    /// The name and fields of a `Struct` or `Variant`.
+    pub fn into_fields(mut self) -> Option<(String, Vec<(String, WireValue)>)> {
+        match &mut self {
+            WireValue::Struct { name, fields } | WireValue::Variant { name, fields } => {
+                Some((std::mem::take(name), std::mem::take(fields)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The pairs of a `Dict`, in order.
+    pub fn into_pairs(mut self) -> Option<Vec<(WireValue, WireValue)>> {
+        match &mut self {
+            WireValue::Dict(pairs) => Some(std::mem::take(pairs)),
             _ => None,
         }
     }
@@ -168,6 +188,79 @@ impl Drop for WireValue {
         while let Some(mut v) = stack.pop() {
             v.take_children(&mut stack);
         }
+    }
+}
+
+/// A piece of [`WireValue`]'s `Debug` output still to be written.
+enum DebugTok<'a> {
+    Lit(&'static str),
+    Name(&'a str),
+    Val(&'a WireValue),
+}
+
+impl std::fmt::Debug for WireValue {
+    /// The text the derived `Debug` writes (`List([Int(1), Str("a")])`, `Struct { name: "P", fields:
+    /// [("n", Int(1))] }`), from an explicit stack of pieces so nothing recurses. The alternate form
+    /// (`{:#?}`) is the same single line.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use DebugTok::{Lit, Name, Val};
+        let mut stack = vec![Val(self)];
+        while let Some(tok) = stack.pop() {
+            let v = match tok {
+                Lit(s) => {
+                    f.write_str(s)?;
+                    continue;
+                }
+                Name(n) => {
+                    write!(f, "{n:?}")?;
+                    continue;
+                }
+                Val(v) => v,
+            };
+            match v {
+                WireValue::Unit => f.write_str("Unit")?,
+                WireValue::Bool(b) => write!(f, "Bool({b:?})")?,
+                WireValue::Int(i) => write!(f, "Int({i:?})")?,
+                WireValue::Float(x) => write!(f, "Float({x:?})")?,
+                WireValue::Str(s) => write!(f, "Str({s:?})")?,
+                WireValue::List(items) => {
+                    f.write_str("List([")?;
+                    stack.push(Lit("])"));
+                    for (i, item) in items.iter().enumerate().rev() {
+                        stack.push(Val(item));
+                        if i > 0 {
+                            stack.push(Lit(", "));
+                        }
+                    }
+                }
+                WireValue::Dict(pairs) => {
+                    f.write_str("Dict([")?;
+                    stack.push(Lit("])"));
+                    for (i, (k, v)) in pairs.iter().enumerate().rev() {
+                        stack.extend([Lit(")"), Val(v), Lit(", "), Val(k), Lit("(")]);
+                        if i > 0 {
+                            stack.push(Lit(", "));
+                        }
+                    }
+                }
+                WireValue::Struct { name, fields } | WireValue::Variant { name, fields } => {
+                    let kind = if matches!(v, WireValue::Struct { .. }) {
+                        "Struct"
+                    } else {
+                        "Variant"
+                    };
+                    write!(f, "{kind} {{ name: {name:?}, fields: [")?;
+                    stack.push(Lit("] }"));
+                    for (i, (n, v)) in fields.iter().enumerate().rev() {
+                        stack.extend([Lit(")"), Val(v), Lit(", "), Name(n), Lit("(")]);
+                        if i > 0 {
+                            stack.push(Lit(", "));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

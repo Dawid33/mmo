@@ -626,3 +626,31 @@ fn deep_linked_list_walks() {
     assert!(wire_list(99_999) != w);
     drop((w, back, copy));
 }
+
+#[test]
+fn ownership_helpers_take_values_apart() {
+    let item = || WireValue::Int(1);
+    let list = WireValue::List(vec![item(), WireValue::Str(s("a"))]);
+    assert_eq!(list.into_list(), Some(vec![item(), WireValue::Str(s("a"))]));
+    assert_eq!(WireValue::Unit.into_list(), None);
+    for named in [
+        WireValue::Struct {
+            name: s("P"),
+            fields: vec![(s("n"), item())],
+        },
+        WireValue::Variant {
+            name: s("P"),
+            fields: vec![(s("n"), item())],
+        },
+    ] {
+        assert_eq!(named.into_fields(), Some((s("P"), vec![(s("n"), item())])));
+    }
+    assert_eq!(WireValue::List(vec![]).into_fields(), None);
+    let dict = WireValue::Dict(vec![(WireValue::Str(s("k")), item())]);
+    assert_eq!(
+        dict.into_pairs(),
+        Some(vec![(WireValue::Str(s("k")), item())])
+    );
+    assert_eq!(WireValue::default().into_pairs(), None);
+    assert_eq!(WireValue::default(), WireValue::Unit);
+}
