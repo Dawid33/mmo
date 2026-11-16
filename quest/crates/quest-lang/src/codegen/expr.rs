@@ -7,8 +7,9 @@
 //! back (dropping a heap value). [`Emit::exec`] evaluates for the effect only.
 
 use super::{Emit, Val};
-use crate::ast::{BinOp, Span, UnOp};
+use crate::ast::{BinOp, Receiver, Span, UnOp};
 use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, Prelude};
+use crate::infer::Method;
 use crate::layout::each_expr;
 use crate::ty::{Ty, TyId};
 use quest_vm::asm::SlotRef;
@@ -20,7 +21,7 @@ const ASSERT_MESSAGE: &str = "assertion failed";
 const ASSERT_EQ_MESSAGE: &str = "assert_eq: the values differ";
 
 /// An argument of a builtin call.
-enum BArg<'e> {
+pub(super) enum BArg<'e> {
     Expr(&'e Expr),
     /// An immediate int (`Fmt`'s type id).
     Imm(i64),
@@ -31,7 +32,7 @@ enum BArg<'e> {
 }
 
 /// Whether evaluating `e` may run code that writes a variable (a call).
-fn may_write(e: &Expr) -> bool {
+pub(super) fn may_write(e: &Expr) -> bool {
     let mut found = false;
     each_expr(e, &mut |x| {
         if matches!(x.kind, ExprKind::Call(_, _) | ExprKind::Await(_)) {
@@ -54,7 +55,7 @@ fn is_const(e: &Expr) -> bool {
 }
 
 /// The bits of a float constant, NaN canonical (design D4).
-fn float_bits(f: f64) -> u64 {
+pub(super) fn float_bits(f: f64) -> u64 {
     if f.is_nan() {
         0x7ff8_0000_0000_0000
     } else {
@@ -76,7 +77,7 @@ impl Emit<'_, '_, '_> {
     }
 
     /// `e`'s value in a temporary of its own.
-    fn val_copy(&mut self, e: &Expr) -> Val {
+    pub(super) fn val_copy(&mut self, e: &Expr) -> Val {
         let heap = self.heap_expr(e);
         let t = self.temp(heap);
         let slot = self.word(t);
@@ -90,7 +91,7 @@ impl Emit<'_, '_, '_> {
 
     /// The values of operands evaluated left to right: a variable is read from its word, unless an
     /// operand to its right may write it.
-    fn vals(&mut self, es: &[&Expr]) -> Vec<Val> {
+    pub(super) fn vals(&mut self, es: &[&Expr]) -> Vec<Val> {
         let mut out = Vec::with_capacity(es.len());
         for (i, e) in es.iter().enumerate() {
             let later_writes = es
@@ -183,13 +184,20 @@ impl Emit<'_, '_, '_> {
             ExprKind::Break => self.leave_loop(true),
             ExprKind::Continue => self.leave_loop(false),
             ExprKind::Unary(UnOp::Ref | UnOp::Deref, _) => self.not_yet("a reference", e.span),
-            ExprKind::List(_) | ExprKind::Dict(_) => self.not_yet("a list or dict literal", e.span),
-            ExprKind::Field(_, _) | ExprKind::Index(_, _) | ExprKind::Slice(_, _, _) => {
-                self.not_yet("a field, an element or a slice", e.span)
-            }
-            ExprKind::Variant(_, _) => self.not_yet("an enum variant", e.span),
-            ExprKind::Prelude(_) => self.not_yet("`None`", e.span),
+            ExprKind::List(xs) => self.list_literal(e, xs, dst),
+            ExprKind::Dict(pairs) => self.dict_literal(e, pairs, dst),
+            ExprKind::Field(x, name) => self.field(e, x, name, dst),
+            ExprKind::Index(x, i) => self.index(e, x, i, dst),
+            ExprKind::Slice(x, lo, hi) => self.slice(e, x, [lo.as_deref(), hi.as_deref()], dst),
+            ExprKind::Variant(d, i) => self.construct(e, *d, Some(*i), &[], dst),
+            ExprKind::Prelude(Prelude::None) => self.none(dst),
+            ExprKind::Prelude(_) => self.not_yet("this item as a value", e.span),
             ExprKind::Await(_) => self.not_yet("`await`", e.span),
+            ExprKind::Else(x, fallback)
+                if self.is_option(x) && !matches!(fallback.kind, ExprKind::FallbackBlock(_, _)) =>
+            {
+                self.option_else(x, fallback, dst)
+            }
             ExprKind::Try(_)
             | ExprKind::Else(_, _)
             | ExprKind::Raise(_)
@@ -200,7 +208,7 @@ impl Emit<'_, '_, '_> {
         }
     }
 
-    fn load_int(&mut self, dst: SlotRef, n: i64) {
+    pub(super) fn load_int(&mut self, dst: SlotRef, n: i64) {
         match i16::try_from(n) {
             Ok(small) => {
                 self.fb.emit(Op::LoadSmall, dst, small as u16, 0u16);
@@ -238,7 +246,7 @@ impl Emit<'_, '_, '_> {
                 return;
             }
             BinOp::In | BinOp::NotIn => {
-                self.not_yet("`in`", at);
+                self.contains(at, l, r, op == BinOp::NotIn, dst);
                 return;
             }
             _ => {}
@@ -400,7 +408,13 @@ impl Emit<'_, '_, '_> {
 
     /// `CallBuiltin` with its arguments in a run of consecutive words, borrowed by the builtin and
     /// dropped after it. The result goes to `dst` (`None`: a unit builtin, or the result is dropped).
-    fn builtin(&mut self, b: Builtin, args: &[BArg<'_>], result: TyId, dst: Option<SlotRef>) {
+    pub(super) fn builtin(
+        &mut self,
+        b: Builtin,
+        args: &[BArg<'_>],
+        result: TyId,
+        dst: Option<SlotRef>,
+    ) {
         let kinds: Vec<bool> = args
             .iter()
             .map(|a| match a {
@@ -478,25 +492,64 @@ impl Emit<'_, '_, '_> {
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg], dst: Option<SlotRef>) {
         match &callee.kind {
             ExprKind::Def(d) if matches!(self.def_kind(*d), Some(DefKind::Fn(_))) => {
-                self.call_fn(e, *d, args, dst)
+                let exprs: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
+                self.call_fn(e, *d, &exprs, dst)
             }
             ExprKind::Prelude(p) => self.prelude(e, *p, args, dst),
-            ExprKind::Field(_, _) => self.not_yet("a method call", e.span),
+            ExprKind::Field(recv, _) => self.method_call(e, recv, args, dst),
             ExprKind::Host(_) => self.not_yet("a host call", e.span),
-            _ => self.not_yet("a construction", e.span),
+            _ => match self.constructor(callee) {
+                Some((d, variant)) => match dst {
+                    Some(dst) => self.construct(e, d, variant, args, dst),
+                    None => {
+                        let t = self.temp(true);
+                        let w = self.word(t);
+                        self.construct(e, d, variant, args, w);
+                        self.fb.emit(Op::Drop, w, 0u16, 0u16);
+                        self.free(t);
+                    }
+                },
+                None => self.not_yet("this call", e.span),
+            },
+        }
+    }
+
+    /// `recv.m(args)`: a script method (`self` by value: the receiver is its first argument) or a
+    /// built-in one.
+    fn method_call(&mut self, e: &Expr, recv: &Expr, args: &[Arg], dst: Option<SlotRef>) {
+        match self.g.typed.methods.get(&e.id).cloned() {
+            Some(Method::Script(m)) => {
+                let by_ref = self
+                    .g
+                    .typed
+                    .sigs
+                    .get(&m)
+                    .is_some_and(|s| matches!(s.receiver, Some((Receiver::Ref, _))));
+                if by_ref || matches!(self.ty_kind(recv), Ty::Ref(_)) {
+                    return self.not_yet(
+                        "a `&self` method call or a call through a reference",
+                        e.span,
+                    );
+                }
+                let mut exprs: Vec<&Expr> = vec![recv];
+                exprs.extend(args.iter().map(|a| &a.value));
+                self.call_fn(e, m, &exprs, dst)
+            }
+            Some(Method::Builtin(b)) => self.builtin_method(e, b, recv, args, dst),
+            Some(Method::Host(_)) => self.not_yet("a host method call", e.span),
+            None => self.not_yet("this call", e.span),
         }
     }
 
     /// A call of a script function: the arguments are evaluated left to right, then written into the
     /// callee's parameter words (literals straight there), then `Call`, then the result is moved out of
     /// the callee's word 1.
-    fn call_fn(&mut self, e: &Expr, d: DefId, args: &[Arg], dst: Option<SlotRef>) {
+    fn call_fn(&mut self, e: &Expr, d: DefId, exprs: &[&Expr], dst: Option<SlotRef>) {
         let Some(&f) = self.g.fns.get(&d) else {
             self.not_yet("this call", e.span);
             return;
         };
         let callee = self.fb.of(f);
-        let exprs: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
         let mut vals: Vec<Option<Val>> = Vec::with_capacity(exprs.len());
         for (i, x) in exprs.iter().enumerate() {
             if is_const(x) {
@@ -638,9 +691,19 @@ impl Emit<'_, '_, '_> {
             Prelude::AssertEq => self.assert_eq(e, args, dst),
             Prelude::Range => self.not_yet("`range` outside a `for` loop", e.span),
             Prelude::All => self.not_yet("`all`", e.span),
-            Prelude::Some | Prelude::None | Prelude::Option | Prelude::Ok | Prelude::Err => {
-                self.not_yet("an `Option` value", e.span)
-            }
+            Prelude::Some => match (arg(0), dst) {
+                (Some(x), Some(d)) => self.some(x, d),
+                (Some(x), None) => {
+                    let t = self.temp(true);
+                    let w = self.word(t);
+                    self.some(x, w);
+                    self.fb.emit(Op::Drop, w, 0u16, 0u16);
+                    self.free(t);
+                }
+                _ => self.not_yet("this call", e.span),
+            },
+            Prelude::None | Prelude::Option => self.not_yet("this call", e.span),
+            Prelude::Ok | Prelude::Err => self.not_yet("error handling", e.span),
         }
     }
 

@@ -3,11 +3,15 @@
 //!
 //! **Shape.** [`generate`] declares every function in fn-id order ([`crate::layout`]), then the
 //! top-level `let`s in initialisation order, then emits each body through an [`Emit`]: `stmt.rs` lowers
-//! statements, blocks, loops and function bodies, `expr.rs` expressions. A construct a later task compiles
-//! is the error `not-yet` at its span ([`Emit::not_yet`]), so the code generator grows by adding cases.
+//! statements, blocks, loops and function bodies, `expr.rs` expressions and calls, `data.rs`
+//! constructions, collections, fields and the built-in methods, `place.rs` writes into places (take →
+//! mutate → put back), `matching.rs` `match`. A struct or enum type takes its VM type id before its
+//! fields are lowered, so a type that contains itself names its own id. A construct a later task
+//! compiles is the error `not-yet` at its span ([`Emit::not_yet`]), so the code generator grows by
+//! adding cases.
 //!
 //! **Slots** (design D5, codegen carry-over 1). Every binding (`LocalId`) gets a frame word of its own
-//! when its `let` (or `for`) is emitted, never reused. Temporaries come from a pool and are reused, but
+//! when its `let`, `for` or pattern is emitted, never reused. Temporaries come from a pool and are reused, but
 //! only for a value of the same kind: a word is a heap kind or an immediate for its whole life, because
 //! several instructions write an immediate without releasing what the word held. Heap-kind words are
 //! listed in the function's `ref_slots`.
@@ -25,12 +29,16 @@
 //! may write that variable — a global, a later task's reference), the variable is copied into a
 //! temporary first.
 
+mod data;
 mod expr;
+mod matching;
+mod place;
 mod stmt;
 
 use crate::ast::Span;
 use crate::diag::Diagnostic;
 use crate::hir::{Crate, DefId, DefKind, LocalId};
+use crate::infer::Shape;
 use crate::infer::Typed;
 use crate::layout::{self, FnKind};
 use crate::ty::{Ty, TyId};
@@ -98,7 +106,7 @@ pub(crate) fn generate(
     for d in &plan.globals {
         let ty = typed.globals.get(d).copied().unwrap_or(TyId::ERROR);
         let (file, span) = g.def_site(*d);
-        let Some(tid) = g.type_id(&mut |d| pb.ty(d), ty, &file, span) else {
+        let Some(tid) = g.type_id(&mut pb, ty, &file, span) else {
             continue;
         };
         let gr = pb.global(&krate.qualified_name(*d), tid);
@@ -185,7 +193,7 @@ pub(crate) struct Gen<'a> {
     diags: Vec<Diagnostic>,
 }
 
-impl Gen<'_> {
+impl<'a> Gen<'a> {
     /// A function's parameter words: the receiver, then the parameters.
     fn param_count(&self, d: DefId) -> usize {
         self.typed
@@ -234,18 +242,48 @@ impl Gen<'_> {
         )
     }
 
-    /// The VM type of `ty`, interned in the program's type table (children first, by a loop: a type may
-    /// nest deeply). `None` (reported at `at`) for a type a later task lowers.
+    /// The fields of a struct or event (one shape) or of an enum's variants (one per variant).
+    fn shapes(&self, d: DefId) -> &'a [Shape] {
+        let typed: &'a Typed = self.typed;
+        typed.adts.get(&d).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `d` is an enum (else a struct or an event).
+    fn is_enum(&self, d: DefId) -> bool {
+        matches!(
+            self.krate.def(d).map(|def| &def.kind),
+            Some(DefKind::Enum(_))
+        )
+    }
+
+    /// The `aux` bitmap of an object of this shape: bit `i` set when field `i` holds a heap kind.
+    fn ref_bits(&self, shape: &Shape) -> u32 {
+        shape
+            .tys
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| self.is_heap(**t))
+            .fold(0u32, |bits, (i, _)| {
+                bits | 1u32.checked_shl(i as u32).unwrap_or(0)
+            })
+    }
+
+    /// The VM type of `ty`, in the program's type table (children first, by a loop: a type may nest
+    /// deeply). A struct or enum takes a reserved id before its fields are lowered, so a type that
+    /// contains itself (decision 17) names its own id. `None` (reported at `at`) for a type a later
+    /// task lowers.
     fn type_id(
         &mut self,
-        intern: &mut dyn FnMut(TypeDesc) -> TypeId,
+        out: &mut dyn TypeSink,
         ty: TyId,
         file: &str,
         at: Span,
     ) -> Option<TypeId> {
         let mut stack = vec![ty];
+        // Structs and enums with an id, whose descriptor is not written yet.
+        let mut pending: BTreeSet<TyId> = BTreeSet::new();
         while let Some(&t) = stack.last() {
-            if self.type_ids.contains_key(&t) {
+            if self.type_ids.contains_key(&t) && !pending.contains(&t) {
                 stack.pop();
                 continue;
             }
@@ -253,12 +291,19 @@ impl Gen<'_> {
             let children = match shape {
                 Ty::List(_) | Ty::Dict(_, _) | Ty::Option(_) | Ty::Promise(_) => shape.children(),
                 Ty::Unit | Ty::Never | Ty::Int | Ty::Float | Ty::Bool | Ty::Str => Vec::new(),
+                Ty::Adt(d) => {
+                    if let std::collections::btree_map::Entry::Vacant(slot) = self.type_ids.entry(t)
+                    {
+                        slot.insert(out.reserve_ty());
+                        pending.insert(t);
+                    }
+                    self.shapes(d)
+                        .iter()
+                        .flat_map(|s| s.tys.iter().copied())
+                        .collect()
+                }
                 _ => {
-                    self.not_yet(
-                        "a value of a struct, enum, error or reference type",
-                        file,
-                        at,
-                    );
+                    self.not_yet("a value of an error, host or reference type", file, at);
                     return None;
                 }
             };
@@ -272,6 +317,13 @@ impl Gen<'_> {
                 continue;
             }
             let id = |c: TyId| self.type_ids.get(&c).copied().unwrap_or(0);
+            let fields = |s: &Shape| -> Vec<(String, TypeId)> {
+                s.names
+                    .iter()
+                    .cloned()
+                    .zip(s.tys.iter().map(|t| id(*t)))
+                    .collect()
+            };
             let desc = match shape {
                 Ty::Int => TypeDesc::Int,
                 Ty::Float => TypeDesc::Float,
@@ -287,13 +339,69 @@ impl Gen<'_> {
                         ("Some".to_string(), vec![("value".to_string(), id(v))]),
                     ],
                 },
+                Ty::Adt(d) => {
+                    let name = self
+                        .krate
+                        .def(d)
+                        .map_or(String::new(), |def| def.name.clone());
+                    match self.krate.def(d).map(|def| &def.kind) {
+                        Some(DefKind::Enum(vs)) => TypeDesc::Enum {
+                            name,
+                            variants: vs
+                                .iter()
+                                .zip(self.shapes(d))
+                                .map(|(v, s)| (v.name.clone(), fields(s)))
+                                .collect(),
+                        },
+                        _ => TypeDesc::Struct {
+                            name,
+                            fields: self.shapes(d).first().map(fields).unwrap_or_default(),
+                        },
+                    }
+                }
                 _ => TypeDesc::Unit,
             };
-            let tid = intern(desc);
-            self.type_ids.insert(t, tid);
+            match self.type_ids.get(&t).copied() {
+                Some(tid) if pending.remove(&t) => out.define_ty(tid, desc),
+                _ => {
+                    let tid = out.ty(desc);
+                    self.type_ids.insert(t, tid);
+                }
+            }
             stack.pop();
         }
         self.type_ids.get(&ty).copied()
+    }
+}
+
+/// Where the type table grows: the program, or the program through an open body.
+trait TypeSink {
+    fn ty(&mut self, d: TypeDesc) -> TypeId;
+    fn reserve_ty(&mut self) -> TypeId;
+    fn define_ty(&mut self, id: TypeId, d: TypeDesc);
+}
+
+impl TypeSink for ProgramBuilder {
+    fn ty(&mut self, d: TypeDesc) -> TypeId {
+        ProgramBuilder::ty(self, d)
+    }
+    fn reserve_ty(&mut self) -> TypeId {
+        ProgramBuilder::reserve_ty(self)
+    }
+    fn define_ty(&mut self, id: TypeId, d: TypeDesc) {
+        ProgramBuilder::define_ty(self, id, d)
+    }
+}
+
+impl TypeSink for FnBuilder<'_> {
+    fn ty(&mut self, d: TypeDesc) -> TypeId {
+        FnBuilder::ty(self, d)
+    }
+    fn reserve_ty(&mut self) -> TypeId {
+        FnBuilder::reserve_ty(self)
+    }
+    fn define_ty(&mut self, id: TypeId, d: TypeDesc) {
+        FnBuilder::define_ty(self, id, d)
     }
 }
 
@@ -461,8 +569,7 @@ impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
     /// The VM type of `ty` (`None`: reported).
     fn type_id(&mut self, ty: TyId, at: Span) -> Option<TypeId> {
         let file = self.file.clone();
-        let fb = &mut self.fb;
-        self.g.type_id(&mut |d| fb.ty(d), ty, &file, at)
+        self.g.type_id(&mut self.fb, ty, &file, at)
     }
 
     /// Marks the heap words in `ref_slots` and closes the body; the frame's size in words.

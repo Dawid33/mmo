@@ -4,11 +4,25 @@
 //! the blocks inside the loop and the temporaries made since the loop began; `return` (and the end of
 //! the body) drops every block, the heap parameters and every live temporary, then `Ret`.
 
+use super::place::PlaceOf;
 use super::{Emit, Loop};
-use crate::hir::{DefKind, Expr, ExprKind, LocalId, Prelude, Stmt, StmtKind};
+use crate::hir::{Arg, DefKind, Expr, ExprKind, LocalId, Prelude, Stmt, StmtKind};
+use crate::infer::{BuiltinMethod, Method};
 use crate::layout::FnKind;
-use quest_vm::Op;
+use crate::ty::Ty;
 use quest_vm::asm::SlotRef;
+use quest_vm::{Builtin, Op};
+
+/// Where a `for` loop reads its list or dict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// A variable: its own word, read at each step.
+    Variable(SlotRef),
+    /// A path from a variable: evaluated again at each step.
+    Reread,
+    /// Any other expression: evaluated once into a hidden copy.
+    Copy,
+}
 
 impl Emit<'_, '_, '_> {
     /// Emits the body of `kind`; the frame's size in words.
@@ -99,10 +113,7 @@ impl Emit<'_, '_, '_> {
             }
             StmtKind::Assign(place, value) => match self.variable(place) {
                 Some(slot) => self.eval_into(value, slot),
-                None => self.not_yet(
-                    "assignment to a field, an element or through a reference",
-                    place.span,
-                ),
+                None => self.assign_place(place, value),
             },
             StmtKind::Expr(e) => self.exec(e),
             StmtKind::If(branches, other) => {
@@ -139,7 +150,7 @@ impl Emit<'_, '_, '_> {
                 self.fb.bind(exit);
             }
             StmtKind::For(names, iter, body) => self.for_loop(names, iter, body),
-            StmtKind::Match(_, _) => self.not_yet("`match`", s.span),
+            StmtKind::Match(scrutinee, cases) => self.match_stmt(s.span, scrutinee, cases),
             StmtKind::Pass => {}
             StmtKind::Break => self.leave_loop(true),
             StmtKind::Continue => self.leave_loop(false),
@@ -200,21 +211,215 @@ impl Emit<'_, '_, '_> {
         self.loops.pop();
     }
 
-    /// `for x in range(n)` / `range(a, b)`: a counter from `a` (0) while below `b`, copied into `x` at
-    /// each step. Both bounds are evaluated once, before the loop.
+    /// `for` over a `range`, a list, a dict's keys or a dict's `items()`.
     fn for_loop(&mut self, names: &[LocalId], iter: &Expr, body: &[Stmt]) {
-        let range = match (&iter.kind, names) {
+        match (&iter.kind, names) {
             (ExprKind::Call(callee, args), [name])
                 if matches!(callee.kind, ExprKind::Prelude(Prelude::Range)) =>
             {
-                Some((*name, args))
+                return self.for_range(*name, iter, args, body);
+            }
+            _ => {}
+        }
+        // `d.items()`: the dict.
+        let items = match (&iter.kind, self.g.typed.methods.get(&iter.id)) {
+            (ExprKind::Call(callee, _), Some(Method::Builtin(BuiltinMethod::Items))) => {
+                match &callee.kind {
+                    ExprKind::Field(d, _) => Some(&**d),
+                    _ => None,
+                }
             }
             _ => None,
         };
-        let Some((name, args)) = range else {
-            self.not_yet("a `for` loop over a list or a dict", iter.span);
-            return;
+        let source = items.unwrap_or(iter);
+        let from = match self.place_of(source) {
+            PlaceOf::Path(p) if p.steps.is_empty() => Source::Variable(p.root),
+            PlaceOf::Path(_) => Source::Reread,
+            PlaceOf::Value => Source::Copy,
+            PlaceOf::ThroughRef => {
+                return self.not_yet("a `for` loop through a reference", iter.span);
+            }
         };
+        match self.ty_kind(source) {
+            Ty::List(_) => self.for_list(names, source, from, body),
+            Ty::Dict(_, _) => self.for_dict(names, source, from, items.is_some(), body),
+            _ => self.not_yet("a `for` loop through a reference", iter.span),
+        }
+    }
+
+    /// The bindings of a loop (fresh words), in a scope of their own around the loop: dropped where it
+    /// exits (by `break` too) or by `return`.
+    fn loop_bindings(&mut self, names: &[LocalId]) -> Vec<SlotRef> {
+        let mut words = Vec::with_capacity(names.len());
+        let mut scope = Vec::new();
+        for name in names {
+            let heap = self.heap_ty(self.g.typed.local(*name));
+            let i = self.slots.fresh(heap);
+            let w = self.word(i);
+            self.locals.insert(*name, w);
+            if heap {
+                scope.push(w);
+            }
+            words.push(w);
+        }
+        self.scopes.push(scope);
+        words
+    }
+
+    /// Closes [`Self::loop_bindings`]' scope.
+    fn end_loop_bindings(&mut self) {
+        let scope = self.scopes.pop().unwrap_or_default();
+        for w in scope.into_iter().rev() {
+            self.fb.emit(Op::Drop, w, 0u16, 0u16);
+        }
+    }
+
+    /// `for x in xs`: an index from 0 while below the length, the element copied into `x` at each step.
+    /// The list is read again at each step from its place (so the body's changes count, carry-over 6),
+    /// or from a hidden copy of any other expression.
+    fn for_list(&mut self, names: &[LocalId], source: &Expr, from: Source, body: &[Stmt]) {
+        let (i, n, test, one) = (
+            self.temp(false),
+            self.temp(false),
+            self.temp(false),
+            self.temp(false),
+        );
+        let (i_s, n_s, test_s, one_s) =
+            (self.word(i), self.word(n), self.word(test), self.word(one));
+        self.fb.emit(Op::LoadSmall, i_s, 0u16, 0u16);
+        // The list's word: the variable itself, or a temporary.
+        let held = match from {
+            Source::Variable(_) => None,
+            Source::Reread | Source::Copy => Some(self.temp(true)),
+        };
+        let list = match (from, held) {
+            (Source::Variable(w), _) => w,
+            (_, Some(t)) => self.word(t),
+            _ => SlotRef::Invalid,
+        };
+        if from == Source::Copy {
+            self.eval_into(source, list);
+        }
+        let x = self
+            .loop_bindings(names)
+            .first()
+            .copied()
+            .unwrap_or(SlotRef::Invalid);
+        let (top, step, exit) = (self.fb.label(), self.fb.label(), self.fb.label());
+        self.fb.bind(top);
+        if from == Source::Reread {
+            self.eval_into(source, list);
+        }
+        self.fb.emit(Op::ListLen, n_s, list, 0u16);
+        self.fb.emit(Op::LtI, test_s, i_s, n_s);
+        self.fb.jump(Op::JmpIfNot, test_s, exit);
+        self.fb.emit(Op::GetIndex, x, list, i_s);
+        if from == Source::Reread {
+            self.fb.emit(Op::Drop, list, 0u16, 0u16);
+        }
+        self.loop_body(body, exit, step);
+        self.fb.bind(step);
+        self.at_stmt_line();
+        self.fb.emit(Op::LoadSmall, one_s, 1u16, 0u16);
+        self.fb.emit(Op::AddI, i_s, i_s, one_s);
+        self.fb.jump(Op::Jmp, 0u16, top);
+        self.fb.bind(exit);
+        if let Some(t) = held {
+            self.fb.emit(Op::Drop, list, 0u16, 0u16);
+            self.free(t);
+        }
+        self.end_loop_bindings();
+        for t in [one, test, n, i] {
+            self.free(t);
+        }
+    }
+
+    /// `for k in d` / `for k, v in d.items()`: by the entries' stable serials (design D4, carry-over 6),
+    /// `pos = 0; loop { s = DictNext(d, pos); if s < 0 break; k = DictKeyAt(d, s); v = DictValAt(d, s);
+    /// pos = s + 1; body }`. The dict is read again at each step from its place, or from a hidden copy of
+    /// any other expression.
+    fn for_dict(
+        &mut self,
+        names: &[LocalId],
+        source: &Expr,
+        from: Source,
+        items: bool,
+        body: &[Stmt],
+    ) {
+        // [the dict, the position or serial]: the builtins' argument run.
+        let run = self.slots.run(&[true, false]);
+        self.live.push(run);
+        let (d, arg) = (self.word(run), self.word(run + 1));
+        let (pos, s, test, zero, one) = (
+            self.temp(false),
+            self.temp(false),
+            self.temp(false),
+            self.temp(false),
+            self.temp(false),
+        );
+        let (pos_s, s_s, test_s, zero_s, one_s) = (
+            self.word(pos),
+            self.word(s),
+            self.word(test),
+            self.word(zero),
+            self.word(one),
+        );
+        self.fb.emit(Op::LoadSmall, pos_s, 0u16, 0u16);
+        self.fb.emit(Op::LoadSmall, zero_s, 0u16, 0u16);
+        self.fb.emit(Op::LoadSmall, one_s, 1u16, 0u16);
+        if from == Source::Copy {
+            self.eval_into(source, d);
+        }
+        let bound = self.loop_bindings(names);
+        let (top, exit) = (self.fb.label(), self.fb.label());
+        self.fb.bind(top);
+        match from {
+            Source::Variable(w) => {
+                self.fb.emit(Op::Dup, d, w, 0u16);
+            }
+            Source::Reread => self.eval_into(source, d),
+            Source::Copy => {}
+        }
+        self.fb.emit(Op::Copy, arg, pos_s, 0u16);
+        self.fb
+            .emit(Op::CallBuiltin, Builtin::DictNext as u16, d, s_s);
+        self.fb.emit(Op::LtI, test_s, s_s, zero_s);
+        self.fb.jump(Op::JmpIf, test_s, exit);
+        self.fb.emit(Op::Copy, arg, s_s, 0u16);
+        if let Some(&k) = bound.first() {
+            self.fb
+                .emit(Op::CallBuiltin, Builtin::DictKeyAt as u16, d, k);
+        }
+        if items && let Some(&v) = bound.get(1) {
+            self.fb
+                .emit(Op::CallBuiltin, Builtin::DictValAt as u16, d, v);
+        }
+        if from != Source::Copy {
+            self.fb.emit(Op::Drop, d, 0u16, 0u16);
+        }
+        self.fb.emit(Op::AddI, pos_s, s_s, one_s);
+        self.loop_body(body, exit, top);
+        self.at_stmt_line();
+        self.fb.jump(Op::Jmp, 0u16, top);
+        self.fb.bind(exit);
+        self.fb.emit(Op::Drop, d, 0u16, 0u16);
+        self.end_loop_bindings();
+        for t in [one, zero, test, s, pos] {
+            self.free(t);
+        }
+        self.free(run + 1);
+        self.free(run);
+    }
+
+    /// The statement's line again (after a nested statement's).
+    fn at_stmt_line(&mut self) {
+        let (line, col) = self.line;
+        self.fb.line_col(line, col);
+    }
+
+    /// `for x in range(n)` / `range(a, b)`: a counter from `a` (0) while below `b`, copied into `x` at
+    /// each step. Both bounds are evaluated once, before the loop.
+    fn for_range(&mut self, name: LocalId, iter: &Expr, args: &[Arg], body: &[Stmt]) {
         let (cur, end, test, one) = (
             self.temp(false),
             self.temp(false),
@@ -227,7 +432,7 @@ impl Emit<'_, '_, '_> {
             self.word(test),
             self.word(one),
         );
-        match args.as_slice() {
+        match args {
             [to] => {
                 self.fb.emit(Op::LoadSmall, cur_s, 0u16, 0u16);
                 self.eval_into(&to.value, end_s);

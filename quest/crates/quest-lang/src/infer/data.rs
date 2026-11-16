@@ -26,9 +26,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The fields of a struct, an event or an enum variant: names and types, in declaration order.
 #[derive(Debug, Clone, Default)]
-pub(super) struct Shape {
-    pub(super) names: Vec<String>,
-    pub(super) tys: Vec<TyId>,
+pub struct Shape {
+    pub names: Vec<String>,
+    pub tys: Vec<TyId>,
 }
 
 impl Infer<'_> {

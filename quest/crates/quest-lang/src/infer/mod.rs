@@ -69,6 +69,7 @@ mod refs;
 mod stmt;
 
 pub use call::{BuiltinMethod, Method};
+pub use data::Shape;
 pub use patterns::{PatCtor, PatInfo};
 pub use promises::Await;
 pub use refs::{Place, PlaceRoot, PlaceStep};
@@ -126,6 +127,8 @@ pub struct Typed {
     pub refs: BTreeMap<ExprId, Place>,
     /// Every handler with a valid signature, and its event's type.
     pub handlers: BTreeMap<DefId, TyId>,
+    /// The fields of every struct and event (one shape) and enum (one per variant, in order).
+    pub adts: BTreeMap<DefId, Vec<Shape>>,
 }
 
 impl Typed {
@@ -219,6 +222,7 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         awaits: inf.awaits,
         refs: inf.refs,
         handlers: inf.handlers,
+        adts: inf.adts,
     };
     (typed, inf.diags)
 }

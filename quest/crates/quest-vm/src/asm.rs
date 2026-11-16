@@ -14,7 +14,7 @@
 //! over 65 535 words, an unbound label, a misused slot) are returned by `finish`, which also runs
 //! [`Program::validate`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand as Kind, Wide};
 use crate::host::HostFnKind;
@@ -136,6 +136,8 @@ pub struct ProgramBuilder {
     shapes: Vec<Shape>,
     shape_ids: BTreeMap<(u8, u32), u16>,
     types: Vec<TypeDesc>,
+    /// Type ids reserved by [`ProgramBuilder::reserve_ty`] and not defined yet.
+    reserved: BTreeSet<u16>,
     fns: Vec<FnInfo>,
     globals: Vec<GlobalInfo>,
     handlers: Vec<HandlerInfo>,
@@ -163,6 +165,7 @@ impl ProgramBuilder {
             shapes: Vec::new(),
             shape_ids: BTreeMap::new(),
             types: Vec::new(),
+            reserved: BTreeSet::new(),
             fns: Vec::new(),
             globals: Vec::new(),
             handlers: Vec::new(),
@@ -291,9 +294,14 @@ impl ProgramBuilder {
         i
     }
 
-    /// Interns a type descriptor (equal descriptors share an id).
+    /// Interns a type descriptor (equal descriptors share an id; a reserved id is never shared).
     pub fn ty(&mut self, d: TypeDesc) -> TypeId {
-        if let Some(i) = self.types.iter().position(|t| *t == d) {
+        let found = self
+            .types
+            .iter()
+            .enumerate()
+            .find(|(i, t)| **t == d && id16(*i).is_some_and(|i| !self.reserved.contains(&i)));
+        if let Some((i, _)) = found {
             return id16(i).unwrap_or(0);
         }
         let Some(i) = id16(self.types.len()) else {
@@ -302,6 +310,26 @@ impl ProgramBuilder {
         };
         self.types.push(d);
         i
+    }
+
+    /// A type id of its own, defined later by [`Self::define_ty`]: a type that contains itself (decision
+    /// 17) names its id before its descriptor is complete. `finish` fails while one is undefined.
+    pub fn reserve_ty(&mut self) -> TypeId {
+        let Some(i) = id16(self.types.len()) else {
+            self.fail("more than 65536 types");
+            return 0;
+        };
+        self.types.push(TypeDesc::Unit);
+        self.reserved.insert(i);
+        i
+    }
+
+    /// Defines a type id from [`Self::reserve_ty`].
+    pub fn define_ty(&mut self, id: TypeId, d: TypeDesc) {
+        match self.types.get_mut(usize::from(id)) {
+            Some(slot) if self.reserved.remove(&id) => *slot = d,
+            _ => self.fail(format!("type {id} was not reserved")),
+        }
     }
 
     pub fn host_site(
@@ -360,6 +388,11 @@ impl ProgramBuilder {
     pub fn finish(mut self) -> Result<Program, ProgramError> {
         if let Some(e) = self.error.take() {
             return Err(e);
+        }
+        if let Some(t) = self.reserved.first() {
+            return Err(ProgramError::Invalid(format!(
+                "type {t} was reserved and never defined"
+            )));
         }
         // frame sizes: the header, the parameters and the highest word any operand names
         let mut words: Vec<u32> = self
@@ -533,6 +566,16 @@ impl FnBuilder<'_> {
     /// [`ProgramBuilder::ty`], while this body is open.
     pub fn ty(&mut self, d: TypeDesc) -> TypeId {
         self.pb.ty(d)
+    }
+
+    /// [`ProgramBuilder::reserve_ty`], while this body is open.
+    pub fn reserve_ty(&mut self) -> TypeId {
+        self.pb.reserve_ty()
+    }
+
+    /// [`ProgramBuilder::define_ty`], while this body is open.
+    pub fn define_ty(&mut self, id: TypeId, d: TypeDesc) {
+        self.pb.define_ty(id, d)
     }
 
     /// This function's own frame.
