@@ -2860,3 +2860,15 @@ quest-test args="":
 # quest-run <dir> [flags] — compile and run a quest script directory (see quest/README.md for the flags).
 quest-run dir *args:
     {{cap}} {{cargo}} run -q --manifest-path quest/Cargo.toml -p quest-cli -- run {{dir}} {{args}}
+
+# The quest corpus goldens (bytecode hash, per-tick state hash and fuel, final memory, output) recorded on
+# native must be reproduced on wasm32 (node, wasm-bindgen-test-runner — from quest/'s own Cargo.lock).
+quest-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' quest/Cargo.lock)
+    root="$PWD/quest/target/tools/wasm-bindgen-$ver"
+    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
+    {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml -p quest-corpus --test determinism
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+        {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml -p quest-corpus --test determinism --target wasm32-unknown-unknown
