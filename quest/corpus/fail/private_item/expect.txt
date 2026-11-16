@@ -1,0 +1,5 @@
+error[private]: `secret` is private to module `rewards`
+ --> main.qs:4:15
+  |
+4 |     print(str(rewards::secret()))
+  |               ^^^^^^^^^^^^^^^

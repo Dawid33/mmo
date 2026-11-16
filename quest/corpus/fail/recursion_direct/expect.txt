@@ -1,0 +1,5 @@
+error[recursion]: recursive call cycle: f -> f
+ --> main.qs:2:12
+  |
+2 |     return f(n)
+  |            ^^^^

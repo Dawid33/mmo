@@ -1,0 +1,5 @@
+error[recursion]: recursive call cycle: even -> odd -> even
+ --> main.qs:4:12
+  |
+4 |     return odd(n - 1)
+  |            ^^^^^^^^^^

@@ -483,6 +483,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quest-corpus"
+version = "0.1.0"
+dependencies = [
+ "quest-lang",
+ "quest-stub",
+ "quest-vm",
+]
+
+[[package]]
 name = "quest-lang"
 version = "0.1.0"
 dependencies = [

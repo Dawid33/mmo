@@ -1,0 +1,11 @@
+error[unhandled-fallible]: this can fail (TooBig) and the failure must be handled: `?` to pass it on, `else` for a fallback, or `match`
+ --> main.qs:7:13
+  |
+7 |     let r = check(5)
+  |             ^^^^^^^^
+
+error[unhandled-fallible]: this can fail (TooBig) and the failure must be handled: `?` to pass it on, `else` for a fallback, or `match`
+ --> main.qs:8:5
+  |
+8 |     check(2)
+  |     ^^^^^^^^

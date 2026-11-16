@@ -1,0 +1,5 @@
+error[error-shape]: `TooBig` has one data shape in the whole program: it is `TooBig(limit: int)` (raised at main.qs:3), so raise it with its data
+ --> main.qs:8:15
+  |
+8 |         raise TooBig
+  |               ^^^^^^

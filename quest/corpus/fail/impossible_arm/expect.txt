@@ -1,0 +1,5 @@
+error[impossible-arm]: the error `TooBig` cannot occur here: this can only fail with Negative
+  --> main.qs:12:18
+   |
+12 |         case Err(TooBig):
+   |                  ^^^^^^

@@ -1,0 +1,6 @@
+error[non-exhaustive]: this `match` does not cover every value: `Stage::Accepted(_)` is not matched
+ --> main.qs:7:5
+  |
+7 |     match s:
+  |     ^^^^^
+  = note: add an arm for it, or `case _:` for everything else

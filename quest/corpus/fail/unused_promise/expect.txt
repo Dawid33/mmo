@@ -1,0 +1,5 @@
+error[unused-promise]: this promise is dropped: `await` it, or keep it with `let _ = …` to let it run detached
+ --> main.qs:2:5
+  |
+2 |     world.set("k", 1)
+  |     ^^^^^^^^^^^^^^^^^

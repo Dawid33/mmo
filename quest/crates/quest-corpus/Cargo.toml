@@ -1,0 +1,15 @@
+[package]
+name = "quest-corpus"
+description = "The quest script program corpus (every spec example), its expectations and goldens, embedded so wasm32 can run it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+quest-lang = { path = "../quest-lang" }
+quest-vm = { path = "../quest-vm" }
+quest-stub = { path = "../quest-stub" }

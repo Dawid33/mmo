@@ -1,0 +1,14 @@
+took 20
+fallback 0
+give ana 20 gold
+log: failed: NotEnough(have=3)
+-1
+give ana 20 gold
+ana: Only 3 left.
+Item(kind="gold", count=5)
+Item(kind="nothing", count=0)
+40
+0
+paid 0
+reports:
+aborted on_click: error ChestEmpty at main.qs:18:9 main.qs:24:16 main.qs:60:16

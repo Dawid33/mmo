@@ -1,0 +1,6 @@
+error[ref-escapes]: a reference cannot be put in a list
+ --> main.qs:4:17
+  |
+4 |     let held = [r]
+  |                 ^
+  = note: a reference may only be held in a local or passed as an argument
