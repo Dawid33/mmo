@@ -46,6 +46,9 @@ const T_OBJ: u8 = 3;
 #[derive(Default)]
 pub(crate) struct Walk {
     pub(crate) used: u32,
+    /// Heap values entered on the way to the current one. It travels with the budget through every nested
+    /// call (a dict key comparison inside a value comparison continues it), so no entry point restarts it.
+    depth: usize,
 }
 
 impl Walk {
@@ -60,11 +63,15 @@ impl Walk {
     }
 }
 
-fn enter(depth: usize) -> VmResult<usize> {
-    if depth >= WIRE_DEPTH_MAX {
+/// Runs `f` one heap level deeper; past `WIRE_DEPTH_MAX` levels it fails `Corrupt`.
+fn nested<T>(walk: &mut Walk, f: impl FnOnce(&mut Walk) -> VmResult<T>) -> VmResult<T> {
+    if walk.depth >= WIRE_DEPTH_MAX {
         return Err(FaultKind::Corrupt);
     }
-    Ok(depth + 1)
+    walk.depth += 1;
+    let r = f(walk);
+    walk.depth -= 1;
+    r
 }
 
 /// Deep structural equality of two slots. `is_ref`: the slots are heap kinds (a pointer or an immediate
@@ -84,18 +91,10 @@ pub(crate) fn deep_eq_in(
     is_ref: bool,
     walk: &mut Walk,
 ) -> VmResult<bool> {
-    eq(st, heap, a, b, is_ref, 0, walk)
+    eq(st, heap, a, b, is_ref, walk)
 }
 
-fn eq(
-    st: &Store,
-    heap: Heap,
-    a: u64,
-    b: u64,
-    is_ref: bool,
-    depth: usize,
-    work: &mut Walk,
-) -> VmResult<bool> {
+fn eq(st: &Store, heap: Heap, a: u64, b: u64, is_ref: bool, work: &mut Walk) -> VmResult<bool> {
     work.charge(1)?;
     if a == b {
         return Ok(true);
@@ -103,7 +102,11 @@ fn eq(
     if !is_ref || !is_ptr(a) || !is_ptr(b) {
         return Ok(false);
     }
-    let depth = enter(depth)?;
+    nested(work, |work| eq_heap(st, heap, a, b, work))
+}
+
+/// Two distinct heap pointers, one level down.
+fn eq_heap(st: &Store, heap: Heap, a: u64, b: u64, work: &mut Walk) -> VmResult<bool> {
     let (pa, ha) = hdr(st, heap, a)?;
     let (pb, hb) = hdr(st, heap, b)?;
     if ha.kind != hb.kind {
@@ -122,7 +125,7 @@ fn eq(
             for i in 0..ha.len {
                 let x = read_slot(st, pa, &ha, i)?;
                 let y = read_slot(st, pb, &hb, i)?;
-                if !eq(st, heap, x, y, refs, depth, work)? {
+                if !eq(st, heap, x, y, refs, work)? {
                     return Ok(false);
                 }
             }
@@ -137,27 +140,20 @@ fn eq(
             for i in 0..ha.len {
                 let x = read_slot(st, pa, &ha, i)?;
                 let y = read_slot(st, pb, &hb, i)?;
-                if !eq(st, heap, x, y, ha.aux & (1 << i) != 0, depth, work)? {
+                if !eq(st, heap, x, y, ha.aux & (1 << i) != 0, work)? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
-        Kind::Dict => dict_eq(st, heap, a, b, depth, work),
+        Kind::Dict => dict_eq(st, heap, a, b, work),
         _ => Err(FaultKind::Corrupt),
     }
 }
 
-fn dict_eq(
-    st: &Store,
-    heap: Heap,
-    a: u64,
-    b: u64,
-    depth: usize,
-    work: &mut Walk,
-) -> VmResult<bool> {
+fn dict_eq(st: &Store, heap: Heap, a: u64, b: u64, work: &mut Walk) -> VmResult<bool> {
     dict::equal(st, heap, a, b, work, &mut |x, y, refs, walk| {
-        eq(st, heap, x, y, refs, depth, walk)
+        eq(st, heap, x, y, refs, walk)
     })
 }
 
@@ -178,7 +174,7 @@ pub(crate) fn key_hash_in(
     walk: &mut Walk,
 ) -> VmResult<u64> {
     let mut h = Fnv64::default();
-    hash(st, heap, key, is_ref, 0, &mut h, walk)?;
+    hash(st, heap, key, is_ref, &mut h, walk)?;
     Ok(h.finish())
 }
 
@@ -187,7 +183,6 @@ fn hash(
     heap: Heap,
     v: u64,
     is_ref: bool,
-    depth: usize,
     h: &mut Fnv64,
     work: &mut Walk,
 ) -> VmResult<()> {
@@ -197,7 +192,11 @@ fn hash(
         h.write(&v.to_le_bytes());
         return Ok(());
     }
-    let depth = enter(depth)?;
+    nested(work, |work| hash_heap(st, heap, v, h, work))
+}
+
+/// A heap pointer, one level down.
+fn hash_heap(st: &Store, heap: Heap, v: u64, h: &mut Fnv64, work: &mut Walk) -> VmResult<()> {
     let (p, hd) = hdr(st, heap, v)?;
     match hd.kind {
         Kind::Str => {
@@ -211,7 +210,7 @@ fn hash(
             h.write(&u64::from(hd.len).to_le_bytes());
             for i in 0..hd.len {
                 let e = read_slot(st, p, &hd, i)?;
-                hash(st, heap, e, hd.kind == Kind::ListRef, depth, h, work)?;
+                hash(st, heap, e, hd.kind == Kind::ListRef, h, work)?;
             }
         }
         Kind::Obj => {
@@ -221,7 +220,7 @@ fn hash(
             h.write(&u64::from(hd.len).to_le_bytes());
             for i in 0..hd.len {
                 let f = read_slot(st, p, &hd, i)?;
-                hash(st, heap, f, hd.aux & (1 << i) != 0, depth, h, work)?;
+                hash(st, heap, f, hd.aux & (1 << i) != 0, h, work)?;
             }
         }
         _ => return Err(FaultKind::Corrupt),

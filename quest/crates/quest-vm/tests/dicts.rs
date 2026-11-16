@@ -428,6 +428,22 @@ fn deep_eq_depth_is_capped() {
 }
 
 #[test]
+fn cyclic_memory_in_dict_keys_is_corrupt_not_a_stack_overflow() {
+    let (mut st, h) = setup();
+    // Two dicts whose only key is a list that holds the dict itself (a cycle no valid program makes):
+    // comparing them goes dict -> key list -> dict -> ... and must hit the nesting cap.
+    let mut cyc = || {
+        let d = dict::new(&mut st, h, true, false).unwrap();
+        let key = list::new(&mut st, h, true).unwrap();
+        dict::set(&mut st, h, d, key, 1).unwrap();
+        list::push(&mut st, h, key, d).unwrap();
+        d
+    };
+    let (a, b) = (cyc(), cyc());
+    assert_eq!(deep_eq(&st, h, a, b, true).unwrap_err(), FaultKind::Corrupt);
+}
+
+#[test]
 fn list_contains_is_structural() {
     let (mut st, h) = setup();
     let mut l = list::new(&mut st, h, true).unwrap();
