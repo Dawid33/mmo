@@ -133,6 +133,13 @@ Places where this plan goes beyond the spec or revisits a **[call]**. None reope
     length cap (`REF_PATH_MAX` = 32 steps).
 18. **Dict equality ignores insertion order** (`{"a": 1, "b": 2} == {"b": 2, "a": 1}`), as in Python; iteration
     order is still insertion order. Lists, structs and strings compare element by element.
+21. **Promise error sets by origin [designer's call, 2026-11-16, after Tasks 22–24 reviews]:** precise error-set
+    tracking through data flow proved unsound in review. Rule instead: let U be the union of the `raises` lists of
+    every host promise function. `await` of a host promise call itself, or of a local assigned only from host calls
+    with the same `raises`, raises exactly that list; `await` of any other promise (a parameter, struct field, list
+    element, global, user function's result, a join of two promises, an annotation `Promise[T]`) raises U, and so
+    does `await all`. Promise types unify on the value type only. Cost: a `match` on an indirect promise must handle
+    U (or use `_`), and `impossible-arm` cannot flag errors of U there. Fallible calls keep precise inferred sets.
 16. **`quest test` is not built** (the spec marks it optional); `assert` / `assert_eq` in `main()` cover it.
 19. **Dialogue and quests are parsed by the MVP front end and compiled later [proposed 2026-11-16; spec §5.11–5.13,
     syntax awaiting approval].** Tasks 16, 18 and 19 lex, parse and resolve `dialogue` and `quest` items and the
