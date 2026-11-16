@@ -515,6 +515,12 @@ impl FnBuilder<'_> {
         self.func
     }
 
+    /// The program being built, so its tables (constants, strings, shapes, types, host sites) can grow
+    /// while this body is open. Declaring functions or starting another body from here is a misuse.
+    pub fn program(&mut self) -> &mut ProgramBuilder {
+        self.pb
+    }
+
     /// This function's own frame.
     pub fn frame(&self) -> FrameRef {
         self.of(self.func)

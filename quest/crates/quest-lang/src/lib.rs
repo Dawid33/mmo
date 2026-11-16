@@ -2,11 +2,13 @@
 
 pub mod ast;
 mod callgraph;
+mod codegen;
 pub mod diag;
 mod exhaust;
 pub mod hir;
 mod indent;
 pub mod infer;
+mod layout;
 pub mod lex;
 mod modules;
 pub mod parse;
@@ -26,6 +28,7 @@ pub use parse::{parse_expr_str, parse_pattern_str, parse_type_str};
 pub use resolve::resolve;
 pub use source::SourceTree;
 
+use quest_vm::Program;
 use quest_vm::host::HostApi;
 use std::collections::BTreeMap;
 
@@ -47,13 +50,17 @@ pub fn signatures(tree: &SourceTree, host: &HostApi) -> BTreeMap<String, String>
         .collect()
 }
 
-/// Checks a program against the host's API with every compiler stage built so far (plan D10): `Ok` with
-/// the warnings, or `Err` with every diagnostic when any is an error; either way sorted by file, line and
-/// column.
-///
-/// Dialogues and quests (decision 19) are resolved and checked, then each gets one `not-yet` and is
+/// A compiled program and the warnings its checks gave.
+#[derive(Debug, Clone)]
+pub struct Compiled {
+    pub program: Program,
+    pub warnings: Vec<Diagnostic>,
+}
+
+/// The front end: modules, resolution and type inference; every diagnostic, sorted by file, line and
+/// column. Dialogues and quests (decision 19) are resolved and checked, then each gets one `not-yet` and is
 /// dropped before the later stages: the call graph and type inference ([`infer`]).
-pub fn check(tree: &SourceTree, host: &HostApi) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
+fn front(tree: &SourceTree, host: &HostApi) -> (hir::Crate, Typed, Vec<Diagnostic>) {
     let (krate, mut diags) = load_modules(tree);
     let (program, mut resolved) = resolve(&krate, host);
     diags.append(&mut resolved);
@@ -80,12 +87,50 @@ pub fn check(tree: &SourceTree, host: &HostApi) -> Result<Vec<Diagnostic>, Vec<D
             def.span.len,
         ));
     }
-    let (_typed, mut inferred) = infer(&program, host);
+    let (typed, mut inferred) = infer(&program, host);
     diags.append(&mut inferred);
+    sort_diags(&mut diags);
+    (program, typed, diags)
+}
+
+fn sort_diags(diags: &mut [Diagnostic]) {
     diags.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
-    if diags.iter().any(|d| d.severity == Severity::Error) {
+}
+
+fn has_errors(diags: &[Diagnostic]) -> bool {
+    diags.iter().any(|d| d.severity == Severity::Error)
+}
+
+/// Checks a program against the host's API with every compiler stage before layout and code generation
+/// (plan D10): `Ok` with the warnings, or `Err` with every diagnostic when any is an error; either way
+/// sorted by file, line and column. What only code generation finds (`too-many-slots`, and `not-yet` for a
+/// construct the code generator does not compile yet) is reported by [`compile`].
+pub fn check(tree: &SourceTree, host: &HostApi) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
+    let (_, _, diags) = front(tree, host);
+    if has_errors(&diags) {
         Err(diags)
     } else {
         Ok(diags)
+    }
+}
+
+/// Compiles a program against the host's API (plan D10): `check`, then layout and code generation. `Err`
+/// with every diagnostic (sorted as `check`'s) when any is an error; code generation runs only on a program
+/// the checks accepted.
+pub fn compile(tree: &SourceTree, host: &HostApi) -> Result<Compiled, Vec<Diagnostic>> {
+    let (krate, typed, diags) = front(tree, host);
+    if has_errors(&diags) {
+        return Err(diags);
+    }
+    match codegen::generate(&krate, &typed, host) {
+        Ok(program) => Ok(Compiled {
+            program,
+            warnings: diags,
+        }),
+        Err(mut errors) => {
+            errors.extend(diags);
+            sort_diags(&mut errors);
+            Err(errors)
+        }
     }
 }
