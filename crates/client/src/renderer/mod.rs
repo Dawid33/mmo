@@ -31,6 +31,7 @@ pub mod compute; // off-main-thread jobs: Bevy's pool natively, Web Workers on w
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
+pub mod drain_notice;
 pub(crate) mod grid_debug;
 pub mod hud;
 pub(crate) mod input;
@@ -57,7 +58,6 @@ pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
 pub mod water;
-pub mod drain_notice;
 pub mod embark_tabs;
 pub mod history_view;
 pub mod world_map;

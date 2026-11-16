@@ -3450,6 +3450,9 @@ mod manager_tests {
     #[test]
     fn a_drain_from_an_observer_connection_is_ignored() {
         let (mut manager, server_send, server_recv, _opener, kept) = manager_on_host_0();
+        // The fixture sends no region snapshot, which is what starts the predicted clock
+        // (`new_region`): start it, so a notice is told on receipt.
+        manager.clock.start_at(0);
         let r = RegionCoords::new(5, 0);
         manager.subscribed.insert(r);
         manager.request_region(r);
@@ -3458,21 +3461,31 @@ mod manager_tests {
         let one = manager.conns.conn_to(h(1)).expect("a connection to host 1");
         let home = manager.conns.home();
         assert_ne!(one, home);
-        let drains = |kept: &(Receiver<ClientUpdateEvent>, crossbeam::channel::Sender<GameEventKind>)| {
-            kept.0.try_iter().filter(|e| matches!(e, ClientUpdateEvent::HostDraining { .. })).count()
+        // The `HostDraining` payloads among the events queued so far.
+        let drains = |kept: &KeptEnds| -> Vec<Option<u64>> {
+            kept.0
+                .try_iter()
+                .filter_map(|e| match e {
+                    ClientUpdateEvent::HostDraining { remaining_secs } => Some(remaining_secs),
+                    _ => None,
+                })
+                .collect()
         };
         let _ = drains(&kept);
         let (events, incoming) = crossbeam::channel::unbounded();
         events.send((one, ConnEvent::Packet(ServerPacket::HostDraining { at_tick: 100 }))).unwrap();
         assert!(manager.pump(&incoming).unwrap());
-        manager.send_tick();
-        assert!(manager.pump_packets(&server_recv).unwrap());
-        assert_eq!(drains(&kept), 0, "an observer connection's notice is dropped");
+        assert!(drains(&kept).is_empty(), "an observer connection's notice is dropped");
+        // The same packet from the home: 100 ticks at 50 ms = 5 s from tick 0, told on receipt.
         events.send((home, ConnEvent::Packet(ServerPacket::HostDraining { at_tick: 100 }))).unwrap();
         assert!(manager.pump(&incoming).unwrap());
-        manager.send_tick();
-        assert!(manager.pump_packets(&server_recv).unwrap());
-        assert_eq!(drains(&kept), 1, "the home's notice reaches the renderer");
+        assert_eq!(drains(&kept), vec![Some(5)], "the home's notice reaches the renderer");
+        // A home hop to the other connection clears it: exactly one clearing event.
+        events.send((one, ConnEvent::Packet(ServerPacket::HomeHop(1)))).unwrap();
+        events.send((one, ConnEvent::Packet(ServerPacket::PlayerRegion(Some(RegionCoords::new(0, 0)), 0)))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        assert_eq!(manager.conns.home(), one, "the home moved");
+        assert_eq!(drains(&kept), vec![None], "the home hop clears the notice");
     }
 
     /// R4 Task 16, fix round 1: a region subscribed on host 1's connection that host 1

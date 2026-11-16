@@ -101,6 +101,19 @@ mod tests {
         assert_eq!(d.poll(Some(800)), Some(Some(0)));
     }
 
+    /// A notice that arrives before the first region snapshot (the clock has not started) tells
+    /// nothing on receipt; the first poll with a tick does (the Tick arm polls after the clock
+    /// advances).
+    #[test]
+    fn a_deadline_offered_before_the_clock_starts_is_told_at_the_first_tick() {
+        let mut d = DrainDeadline::default();
+        assert!(d.offer(100));
+        assert_eq!(d.poll(None), None);
+        assert_eq!(d.poll(None), None);
+        assert_eq!(d.poll(Some(0)), Some(Some(game::drain_remaining_secs(100, 0))));
+        assert_eq!(d.poll(Some(1)), None);
+    }
+
     #[test]
     fn a_home_change_clears_the_notice() {
         let mut d = DrainDeadline::default();
