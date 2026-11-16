@@ -131,8 +131,7 @@ pub fn diagnostics_of(case: &Case) -> String {
     format!("{head}{}", rendered.join("\n"))
 }
 
-/// What one run of a case produced: the golden trace's parts ([`Trace::golden`]) and the final script
-/// regions.
+/// What one run of a case produced: the golden trace's parts ([`Trace::golden`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trace {
     /// FNV-1a 64 of `Program::to_bytes()`.
@@ -141,8 +140,6 @@ pub struct Trace {
     pub ticks: Vec<(u64, u64, u64)>,
     /// FNV-1a 64 of the final memory.
     pub mem: u64,
-    /// The final `Vm::script_bytes()`.
-    pub script: Vec<u8>,
     pub output: Vec<String>,
     /// One line per report ([`report_line`]).
     pub reports: Vec<String>,
@@ -156,14 +153,8 @@ fn fnv(bytes: &[u8]) -> u64 {
 
 /// Runs the case as `quest run` does, under `cfg` (the case's own is [`config_of`]): the initialisers and
 /// `main` are asked for at once, then ticks run until the instance is quiescent or failed, or `cfg.ticks`
-/// ticks ran. `before_step` is called before each tick with the runner and the program (a test may save
-/// and reload the VM there). `Err` is the text that stands in for the trace when the case does not
-/// compile or load.
-pub fn trace_of(
-    case: &Case,
-    cfg: &CaseConfig,
-    before_step: &mut dyn FnMut(&mut Runner, &Arc<Program>),
-) -> Result<Trace, String> {
+/// ticks ran. `Err` is the text that stands in for the trace when the case does not compile or load.
+pub fn trace_of(case: &Case, cfg: &CaseConfig) -> Result<Trace, String> {
     let tree = tree_of(case);
     let program: Arc<Program> = match compile(&tree, &quest_stub::stub_api()) {
         Ok(c) => Arc::new(c.program),
@@ -178,12 +169,11 @@ pub fn trace_of(
         failures: cfg.failures.clone(),
         chest: cfg.chest.clone(),
     };
-    let mut runner = Runner::new(program.clone(), MEM_BYTES_DEFAULT, stub)
+    let mut runner = Runner::new(program, MEM_BYTES_DEFAULT, stub)
         .map_err(|e| format!("load failed: {e:?}\n"))?;
     runner.vm.start_main();
     let mut ticks = Vec::new();
     for _ in 0..cfg.ticks {
-        before_step(&mut runner, &program);
         let tick = runner.now;
         let report = runner.step(cfg.fuel);
         ticks.push((tick, report.fuel_used, runner.vm.hash64()));
@@ -195,15 +185,14 @@ pub fn trace_of(
         bytecode,
         ticks,
         mem: fnv(runner.vm.mem_bytes()),
-        script: runner.vm.script_bytes().to_vec(),
         output: std::mem::take(&mut runner.host.output),
         reports: runner.host.reports.iter().map(report_line).collect(),
     })
 }
 
-/// [`trace_of`] under the case's own config, with no hook.
+/// [`trace_of`] under the case's own config.
 fn run(case: &Case) -> Result<Trace, String> {
-    trace_of(case, &config_of(case), &mut |_, _| {})
+    trace_of(case, &config_of(case))
 }
 
 fn locs(out: &mut String, locs: &[SrcLoc]) {

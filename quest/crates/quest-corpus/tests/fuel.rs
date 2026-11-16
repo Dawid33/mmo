@@ -71,8 +71,8 @@ fn fuel_equivalence() {
 fn pause_points_repeat() {
     for case in RUN {
         let cfg = config_of(case);
-        let a = trace_of(case, &cfg, &mut |_, _| {}).expect(case.name);
-        let b = trace_of(case, &cfg, &mut |_, _| {}).expect(case.name);
+        let a = trace_of(case, &cfg).expect(case.name);
+        let b = trace_of(case, &cfg).expect(case.name);
         assert_eq!(a.ticks, b.ticks, "{}: per-tick fuel and hashes", case.name);
         assert_eq!(a.output, b.output, "{}", case.name);
     }

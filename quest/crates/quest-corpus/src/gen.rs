@@ -9,7 +9,8 @@
 //! remove, struct field writes, `if`, `while` bounded by a counter (≤ 20), a call, `raise` (functions
 //! only; every call of a function that may raise is `else`-handled), `await world.add(…) else 0`, a write
 //! through a reference, and `print`. Lists stay short (append is guarded by a length check), and index
-//! writes are guarded, so a generated program does not fault on its own data; it may run for many ticks.
+//! writes are guarded, so a generated program does not fault on its own data — except `TooManyCommands` when
+//! it prints in deep loops; it may run for many ticks.
 
 use proptest::collection::vec;
 use proptest::prelude::*;
