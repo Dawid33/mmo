@@ -285,7 +285,8 @@ match take_gold(c, 20):
 
 **Faults vs errors [call]:** programming faults are not in error sets and cannot be caught: index out of
 range, missing dict key via `d[k]` (use `d.get(k)` → `Option`), integer overflow, division by zero, invalid
-reference path, heap cap exceeded, bad `float→int`. A fault aborts the running handler exactly like an
+reference path, heap cap exceeded, bad `float→int`, a value too large to compare, hash or format in one step
+(`ValueTooLarge`: more than a fixed number of words visited — shared nested values make such a walk exponential). A fault aborts the running handler exactly like an
 escaping error (undo + report with a stack trace). Fuel exhaustion is **not** a fault (§6.2).
 
 ### 5.8 Collections and strings [decided: lists and dicts with Python literal syntax]

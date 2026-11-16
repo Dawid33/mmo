@@ -123,6 +123,12 @@ Places where this plan goes beyond the spec or revisits a **[call]**. None reope
     (`quest-lang/src/grammar.lalrpop`, compiled by `build.rs`), the token rules are a `logos` derive. The only
     hand-written part of the front end is the layout pass that turns line starts into `Indent` / `Dedent` /
     `Newline` tokens and splits f-strings — no generator expresses Python's indentation.
+17. **No recursive user types in the MVP** (a struct or enum that contains itself, directly or through
+    `list` / `dict` / `Option`): compile error `recursive-type`. Without recursion a script could not walk one
+    anyway, and it lets every value's nesting be bounded by its type (types nested deeper than 32 are
+    `type-too-deep`), which the VM's structural walks rely on.
+18. **Dict equality ignores insertion order** (`{"a": 1, "b": 2} == {"b": 2, "a": 1}`), as in Python; iteration
+    order is still insertion order. Lists, structs and strings compare element by element.
 16. **`quest test` is not built** (the spec marks it optional); `assert` / `assert_eq` in `main()` cover it.
 
 ---
@@ -150,6 +156,7 @@ and the tests pin behaviour.
 | `REAP_CHILDREN_MAX` | 16 | children released per reap step |
 | `WIRE_DEPTH_MAX` | 32 | nesting of a wire value |
 | `STRUCT_FIELDS_MAX` | 32 | fields of a struct or variant |
+| `WORK_WORDS_MAX` | 65_536 | most words one structural walk (compare, hash, lookup, format, to-wire) may visit; beyond → fault `ValueTooLarge` |
 | `PARSE_DEPTH_MAX` | 256 | expression / block nesting in source (`quest-lang`) |
 
 ### D2. Flat memory
@@ -210,7 +217,10 @@ Every value is one 64-bit slot.
   Nested places are updated by **take → mutate → put back** (`TakeField` / `SetField`, `TakeIndex` / `SetIndex`,
   `TakeKey` / `SetKey`), each step on a unique parent.
 - `dict`: insertion-ordered (entries block + hash index); removal keeps the others' order; a re-inserted key goes
-  last; iteration is by entry position. Key hash = FNV-1a 64 over the key's wire bytes.
+  last; iteration is by a stable per-entry **serial** (a per-dict counter; compaction keeps serials), so a
+  running loop never skips or repeats an entry whatever is inserted or removed. Key hash = FNV-1a 64 over a
+  type-tagged walk of the key in memory. Every structural walk stops with `ValueTooLarge` at `WORK_WORDS_MAX`
+  (shared nested values make an uncapped walk exponential).
 - A reference (`&x`) is a `RefPath` object: root static slot + steps (field index, list index, dict key),
   re-resolved on every use; an unresolvable path is the fault `BadRef`.
 
@@ -328,7 +338,7 @@ pub enum AbortCause { Error { name: String, data: WireValue, trace: Vec<SrcLoc>,
 ```
 
 `FaultKind`: `IndexOutOfRange`, `MissingKey`, `IntOverflow`, `DivByZero`, `BadRef`, `HeapFull`, `BadFloatToInt`,
-`AssertFailed`, `TooManyCommands`, `TooManyPromises`, `TooManyParked`, `PromiseAlreadyAwaited`, `HostFault`,
+`AssertFailed`, `ValueTooLarge`, `TooManyCommands`, `TooManyPromises`, `TooManyParked`, `PromiseAlreadyAwaited`, `HostFault`,
 `Corrupt` (memory that does not parse — sets the instance `Failed`, no abort is attempted).
 
 The stub API (`quest_stub::stub_api()`, version 1): structs `Player { id: int, name: str }`,
@@ -362,7 +372,7 @@ implementer's; a later task reads them from the code. Diagnostic `code`s (tests 
 `tab-indent`, `bad-dedent`, `bad-char`, `unterminated-string`, `bad-escape`, `bad-number`, `non-ascii-ident`,
 `syntax`, `too-deep`, `chained-comparison`, `mod-not-found`, `mod-ambiguous`, `duplicate-def`, `unresolved`,
 `private`, `assign-undeclared`, `type-mismatch`, `needs-annotation`, `unknown-field`, `unknown-method`,
-`missing-field`, `arg-count`, `bad-dict-key`, `missing-return`, `too-many-fields`, `recursion`, `error-shape`,
+`missing-field`, `arg-count`, `bad-dict-key`, `recursive-type`, `type-too-deep`, `missing-return`, `too-many-fields`, `recursion`, `error-shape`,
 `unhandled-fallible`, `not-fallible`, `raises-outside-pinned`, `unused-promise`, `non-exhaustive`,
 `impossible-arm`, `ref-escapes`, `ref-not-place`, `await-not-promise`, `await-in-init`, `not-storable`,
 `unknown-event`, `handler-signature`, `too-many-slots`; warnings `error-typo`, `unreachable-arm`.
@@ -1274,6 +1284,9 @@ Tests:
   33 fields → `too-many-fields`.
 - `methods` — `l.add(5)` and `l.total()` of §5.5 type-check; `l.nope()` → `unknown-method`; calling a `&self`
   method on a non-place (`make().add(1)`) → `ref-not-place`.
+- `recursive_types` — `struct Node: next: Option[Node]`, an enum holding `list[Self]`, and two structs holding each
+  other → `recursive-type` naming the cycle; a type nested 33 deep → `type-too-deep`.
+- `dict_equality_ignores_order` is a run test in Task 26 (`{"a": 1, "b": 2} == {"b": 2, "a": 1}` prints `true`).
 - `enums` — variant construction by name and by position; `let x: Option[int] = None`; `Some(1)`.
 - `collections` — `[1, "a"]` → `type-mismatch`; `{"a": 1}[0]` → `type-mismatch`; a `float` or `list` key →
   `bad-dict-key`; a struct of `int` and `str` as key is fine; `xs[0:1]` is a list; `d.get(k)` is `Option[V]`;
@@ -1650,7 +1663,7 @@ Tests:
 - `save_load_at_every_tick` — every run case: for each of its first 200 ticks, save, load, continue: the remaining
   golden lines are identical.
 - `each_fault_kind` — one source per `FaultKind` a script can cause (`IndexOutOfRange`, `MissingKey`,
-  `IntOverflow`, `DivByZero`, `BadRef`, `HeapFull`, `BadFloatToInt`, `AssertFailed`, `TooManyCommands`,
+  `IntOverflow`, `DivByZero`, `BadRef`, `HeapFull`, `BadFloatToInt`, `AssertFailed`, `ValueTooLarge`, `TooManyCommands`,
   `TooManyPromises`, `TooManyParked`, `PromiseAlreadyAwaited`): a top-level counter set before the fault is back
   to its old value, nothing was printed by the task, the report names the kind and a line.
 - proptest `compiler_never_panics` — random strings from the token alphabet (keywords, punctuation, names,
