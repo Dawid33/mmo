@@ -667,11 +667,14 @@ clean-old-worlds *args:
 #   just worldctl super-region <url> <n>
 #     sets the super-region side (regions per side) of a world no host has claimed
 #     yet; its hosts and coordinator then run with VOXEL_SUPER_REGION_REGIONS=<n>;
-#   just worldctl retire-host <url> <ordinal>
-#     (claim ownership, Postgres) retires a host that will never return: refused while
-#     it beats ("stop it first"); with other hosts alive it only vouches for its death
-#     (the coordinator declares it, a running host inherits); with none alive it opens
-#     the succession itself — the lowest other ordinal inherits at its next boot;
+#   just worldctl drain <url> <host id> [--in <secs>]
+#     marks a live host draining (default 300 s, at most 7 days; a mark only moves earlier):
+#     it warns its players, leaves through a leave cut at the deadline and stays up unready;
+#   just worldctl retire-host <url> <host id>
+#     (claim ownership, Postgres) retires a host that will never return (the id as `hosts`
+#     lists it): refused while it beats ("stop it first"); with other hosts alive it only
+#     vouches for its death (the coordinator declares it, a running host inherits); with none
+#     alive it opens the succession itself — the lowest other live-row id is the heir;
 #   just worldctl rollback <url> --yes
 #     (Postgres) restarts the world from its last save: the generation goes up, open
 #     successions are abandoned, every running host exits 5 at its next save.
@@ -1857,8 +1860,9 @@ twin-apply:
     echo "twin: applied; the world waits for its forge: just twin-check (forges and checks), or just world_ctx={{twin_ctx}} world_ns=world-twin world-ctl forge"
 
 # The twin's integration check (scripts/twin_check.sh): pods wait for a forge, serve after
-# it, survive a killed host, a clean host leave, a coordinator restart, a world stop and
-# start; records memory. Run on a FRESH twin-apply (it forges the world). Exit 0 = pass.
+# it, the hosts' PodDisruptionBudgets, survive a killed host (a new id), a clean host leave,
+# a coordinator restart, a drain (world-drain: drained, not restarted) and a host brought back,
+# a world stop and start; records memory. Run on a FRESH twin-apply (it forges the world). Exit 0 = pass.
 twin-check:
     TWIN_CONTEXT={{twin_ctx}} scripts/twin_check.sh
 
@@ -2019,9 +2023,10 @@ world-images-build:
 orion-world-push: world-images-build
     TOFU={{tofu}} scripts/orion_world_push.sh
 
-# Stop-update-start release of a world (scripts/world_update.sh): hosts to 0 (each host's leave line is
-# printed; a host that left without a cut is WARNED about), new images by digest on coordinator, toolbox,
-# hosts and web, hosts back. The refs it replaces are recorded first in the world's ConfigMap
+# Stop-update-start release of a world (scripts/world_update.sh): every host Deployment to 0 (each host's
+# leave line is printed; a host that left without a cut is WARNED about), new images by digest on
+# coordinator, toolbox, every host Deployment and web, each host Deployment back to 1 (a failed run says
+# how to go on: re-run it with the same two refs). The refs it replaces are recorded first in the world's ConfigMap
 # release-history (what orion-world-rollback goes back to). e.g. `just orion-world-update <server-ref>
 # <web-ref>` with the refs `orion-world-push` printed; `namespace=` picks the world's namespace.
 orion-world-update server-digest web-digest namespace="world-errantry":
@@ -2044,7 +2049,7 @@ world_ns := "world-errantry"
 
 # worldctl inside the toolbox pod, where $VOXEL_WORLD_DB is. The URL is expanded in the pod and never
 # printed. e.g. `just world-ctl forge --preset default`, `just world-ctl rollback --yes`. forge, retile
-# and export take `--db <url>`; clock-reset, super-region, retire-host and rollback take the URL first
+# and export take `--db <url>`; clock-reset, super-region, hosts, drain, retire-host and rollback take the URL first
 # (the forms of worldctl's usage text). `export` writes its file inside the toolbox pod, where it is
 # lost with the pod: copy it out with `kubectl cp` (a hint is printed).
 [positional-arguments]
@@ -2052,52 +2057,147 @@ world-ctl *args:
     kubectl --context {{world_ctx}} -n {{world_ns}} exec deploy/toolbox -c toolbox -- sh -c 'cmd=$1; shift; case "$cmd" in forge|retile|export) exec worldctl "$cmd" --db "$VOXEL_WORLD_DB" "$@" ;; *) exec worldctl "$cmd" "$VOXEL_WORLD_DB" "$@" ;; esac' sh "$@"
     @if [ "$1" = export ]; then echo "world-ctl: the exported file is inside the toolbox pod; copy it out now: kubectl --context {{world_ctx}} -n {{world_ns}} cp <toolbox-pod>:<out.world> ./<out.world> -c toolbox"; fi
 
-# The world's pods, its Services' node ports, and each pod's /readyz body (through the API server's
-# pod proxy to the health port 9100).
+# The world's pods, its host Deployments (one per host, `host-<name>`), its Services' node ports, and
+# each pod's /readyz body (through the API server's pod proxy to the health port 9100). A drained host
+# (/readyz `drained`) is unready for good: the line says how to remove it. Waits on nothing.
 world-status:
     #!/usr/bin/env bash
     set -euo pipefail
     k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
     k get pods -o wide
     echo
+    k get deploy -l app.kubernetes.io/component=host -o custom-columns=HOST:.metadata.name,WANT:.spec.replicas,READY:.status.readyReplicas,IMAGE:.spec.template.spec.containers[0].image
+    echo
     k get svc -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,PORT:.spec.ports[*].port,NODEPORT:.spec.ports[*].nodePort
     echo
     # Only the coordinator and the hosts have the health port.
     for pod in $(k get pods -l 'app.kubernetes.io/component in (coordinator,host)' -o jsonpath='{.items[*].metadata.name}'); do
         echo "== $pod /readyz"
-        # kubectl replaces a 503's body ("forge", "succession", ...) with a generic error, but logs
-        # the body itself at -v=8. A pod that does not answer gets the API server's Status object.
-        body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
+        # A 200's body is kubectl's output. kubectl replaces a 503's body ("forge", "succession",
+        # "drained", ...) with a generic error, but logs the body itself at -v=8. A pod that does not
+        # answer gets the API server's Status object.
+        if ! body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" 2>/dev/null); then
+            body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
+        fi
         case "$body" in
             ''|'{"kind":"Status"'*) echo "(no answer)" ;;
+            drained)
+                host=$(k get pod "$pod" -o jsonpath='{.metadata.labels.errantry/host}' 2>/dev/null || true)
+                echo "drained: host ${host:-?} left the world and stays unready until removed: remove \"${host:-<name>}\" from var.hosts and apply (or \`kubectl rollout restart deployment/host-${host:-<name>}\` brings it back as a NEW host)" ;;
             *) echo "$body" ;;
         esac
         echo
     done
 
-# A pod's /metrics through the API server's pod proxy, e.g. `just world-metrics hosts-0`.
-world-metrics pod:
-    kubectl --context {{world_ctx}} -n {{world_ns}} get --raw /api/v1/namespaces/{{world_ns}}/pods/{{pod}}:9100/proxy/metrics
+# A pod's /metrics through the API server's pod proxy: `host-<name>` (that host's pod), `coordinator`,
+# or a pod name. e.g. `just world-metrics host-a`.
+world-metrics target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
+    t="{{target}}"
+    case "$t" in
+        coordinator) sel='app.kubernetes.io/component=coordinator' ;;
+        host-*) sel="app.kubernetes.io/component=host,errantry/host=${t#host-}" ;;
+        *) sel='' ;;
+    esac
+    pod=''
+    # The pod of that label that is not being deleted; else the argument is a pod name.
+    [ -z "$sel" ] || pod=$(k get pods -l "$sel" -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers | awk '$2 == "<none>" { print $1; exit }')
+    [ -n "$pod" ] || pod="$t"
+    k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/metrics"
 
-# Follow a pod's log, e.g. `just world-logs hosts-0`.
-world-logs pod:
-    kubectl --context {{world_ctx}} -n {{world_ns}} logs -f --tail 200 {{pod}}
+# Follow a pod's log: `host-<name>` (that host's pod), `coordinator`, or a pod name.
+# e.g. `just world-logs host-a`.
+world-logs target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
+    t="{{target}}"
+    case "$t" in
+        coordinator) sel='app.kubernetes.io/component=coordinator' ;;
+        host-*) sel="app.kubernetes.io/component=host,errantry/host=${t#host-}" ;;
+        *) sel='' ;;
+    esac
+    pod=''
+    # The pod of that label that is not being deleted; else the argument is a pod name.
+    [ -z "$sel" ] || pod=$(k get pods -l "$sel" -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers | awk '$2 == "<none>" { print $1; exit }')
+    [ -n "$pod" ] || pod="$t"
+    k logs -f --tail 200 "$pod"
 
-# Stop the world: hosts to 0 (each asks for a leave cut and exits, bounded by about 90 s), wait until
-# no host pod is left, print each host's leave line (WARNS when one left without a committed cut: the
-# next start raises the world generation), then the coordinator to 0. Waits up to WORLD_STOP_TIMEOUT s
-# (default 150).
+# The world's `hosts` rows (`worldctl hosts` in the toolbox): one line per row, `<id> <name> <live|dead>
+# <clean|dirty> land=<n> seen=<ms|vouched> drain=<ms|->`. A host's id is issued when its pod registers:
+# a restarted pod is a NEW id under the same name; an old row shows dead, and is gone after a later
+# registration (once it owns nothing).
+world-hosts:
+    kubectl --context {{world_ctx}} -n {{world_ns}} exec deploy/toolbox -c toolbox -- sh -c 'exec worldctl hosts "$VOXEL_WORLD_DB"'
+
+# Drain host <name> (a key of var.hosts): finds its live row in `worldctl hosts`, runs
+# `worldctl drain <id> --in <secs>` (default 300; the host warns its players), follows its pod's log
+# until the leave line (WORLD_DRAIN_TIMEOUT s after the deadline, default 180), prints it and the next
+# step: remove "<name>" from var.hosts and apply, or `kubectl rollout restart deployment/host-<name>`
+# to bring it back as a NEW host. Deletes nothing, scales nothing. Only a `claim` host acts on a mark.
+world-drain name secs="300":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
+    name="{{name}}" secs="{{secs}}"
+    case "$name" in ''|*[!a-z0-9-]*) echo "world-drain: '$name' is not a host name (a key of var.hosts)" >&2; exit 2 ;; esac
+    case "$secs" in ''|*[!0-9]*) echo "world-drain: '$secs' is not a number of seconds" >&2; exit 2 ;; esac
+    k get deploy "host-$name" > /dev/null || { echo "world-drain: no Deployment host-$name in {{world_ns}}; nothing changed" >&2; exit 2; }
+    rows=$(k exec deploy/toolbox -c toolbox -- sh -c 'exec worldctl hosts "$VOXEL_WORLD_DB"') ||
+        { echo "world-drain: worldctl hosts failed; nothing changed" >&2; exit 1; }
+    ids=$(printf '%s\n' "$rows" | awk -v n="$name" '$2 == n && $3 == "live" && $4 == "dirty" && $1 ~ /^[0-9]+$/ { print $1 }')
+    if [ "$(printf '%s' "$ids" | grep -c .)" -ne 1 ]; then
+        echo "world-drain: not exactly one live row named $name (a host that already left, or is not registered yet); nothing changed. The rows:" >&2
+        printf '%s\n' "$rows" | sed 's/^/    /' >&2
+        exit 1
+    fi
+    pod=$(k get pods -l "app.kubernetes.io/component=host,errantry/host=$name" -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers | awk '$2 == "<none>" { print $1; exit }')
+    [ -n "$pod" ] || { echo "world-drain: host $name has no running pod; nothing changed" >&2; exit 1; }
+    log=$(mktemp)
+    k logs -f --tail=0 "$pod" > "$log" 2>&1 &
+    follower=$!
+    trap 'kill $follower 2>/dev/null || true; rm -f "$log"' EXIT
+    sleep 1
+    echo "world-drain: host $name is id $ids (pod $pod); marking it to leave within $secs s"
+    k exec deploy/toolbox -c toolbox -- sh -c 'exec worldctl drain "$VOXEL_WORLD_DB" "$1" --in "$2"' sh "$ids" "$secs"
+    timeout=$((secs + ${WORLD_DRAIN_TIMEOUT:-180}))
+    echo "world-drain: following $pod's log until it leaves (up to $timeout s; Ctrl-C stops only the wait, the drain stands)"
+    deadline=$((SECONDS + timeout))
+    while ! grep -qF -e '[server] drained:' -e 'left without a cut' "$log"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "world-drain: after $timeout s no leave line in $pod's log; the drain stands. Look: just world_ctx={{world_ctx}} world_ns={{world_ns}} world-logs host-$name" >&2
+            exit 1
+        fi
+        sleep 2
+    done
+    if grep -qF 'left without a cut' "$log"; then
+        echo "world-drain: WARNING: host $name LEFT WITHOUT A CUT: $(grep -F 'left without a cut' "$log" | tail -1 | sed 's/.*\(\[server\]\)/\1/')" >&2
+        echo "world-drain: the process exits and its Deployment restarts it as a NEW host: the drain is lost (the world treats id $ids as crashed)." >&2
+        exit 1
+    fi
+    echo "world-drain: $(grep -F '[server] left the world in cut' "$log" | tail -1 | sed 's/.*\(\[server\] left the world in cut\)/\1/')"
+    echo "world-drain: host $name (id $ids) is drained: /readyz says drained, it stays up until its pod is removed."
+    echo "world-drain: next: remove \"$name\" from var.hosts and apply (its Deployment, Service and budget go),"
+    echo "world-drain:   or bring it back as a NEW host: kubectl --context {{world_ctx}} -n {{world_ns}} rollout restart deployment/host-$name"
+
+# Stop the world: every host Deployment (-l app.kubernetes.io/component=host) to 0 (each host asks for
+# a leave cut and exits, bounded by about 90 s; a drained host just exits), wait until no host pod is
+# left, print each host's leave line (WARNS when one left without a committed cut: the next start
+# raises the world generation), then the coordinator to 0. Waits up to WORLD_STOP_TIMEOUT s (default 150).
 world-stop:
     #!/usr/bin/env bash
     set -euo pipefail
     k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
     timeout="${WORLD_STOP_TIMEOUT:-150}"
-    # wait_gone <pod-name-regex>: no pod matches; a failed listing is retried, never read as empty.
+    hostsel='app.kubernetes.io/component=host'
+    # wait_gone <label selector>: no pod matches; a failed listing is retried, never read as empty.
     wait_gone() {
         local deadline=$((SECONDS + timeout)) listing left
         while :; do
-            if listing=$(k get pods -o name 2>&1); then
-                left=$(printf '%s\n' "$listing" | grep -c "^pod/$1" || true)
+            if listing=$(k get pods -l "$1" -o name 2>&1); then
+                left=$(printf '%s\n' "$listing" | grep -c '^pod/' || true)
                 [ "$left" -eq 0 ] && return 0
                 what="$left pod(s) still there"
             else
@@ -2113,8 +2213,9 @@ world-stop:
     # With the coordinator already down the hosts cannot finish their leave cut: they would hang until
     # the grace period. Refuse before anything is scaled.
     coord=$(k get deploy/coordinator -o jsonpath='{.spec.replicas}') || { echo "world-stop: cannot read the coordinator; nothing changed" >&2; exit 2; }
-    hostpods=$(k get pods -o name) || { echo "world-stop: cannot list the pods; nothing changed" >&2; exit 2; }
-    if [ "${coord:-0}" = 0 ] && printf '%s\n' "$hostpods" | grep -q '^pod/hosts-[0-9]'; then
+    hostdeps=$(k get deploy -l "$hostsel" -o name) || { echo "world-stop: cannot list the host Deployments; nothing changed" >&2; exit 2; }
+    hostpods=$(k get pods -l "$hostsel" -o name) || { echo "world-stop: cannot list the host pods; nothing changed" >&2; exit 2; }
+    if [ "${coord:-0}" = 0 ] && printf '%s\n' "$hostpods" | grep -q '^pod/'; then
         echo "world-stop: the coordinator is at 0 replicas but host pods still exist; they cannot leave cleanly. Run \`just world-start\` first, or delete the host pods knowingly. Nothing changed." >&2
         exit 2
     fi
@@ -2122,14 +2223,19 @@ world-stop:
     follow_dir=$(mktemp -d)
     follow_pids=()
     trap 'for p in "${follow_pids[@]}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$follow_dir"' EXIT
-    for pod in $(printf '%s\n' "$hostpods" | sed -n 's#^pod/\(hosts-[0-9][0-9]*\)$#\1#p'); do
+    for pod in $(printf '%s\n' "$hostpods" | sed -n 's#^pod/##p'); do
         k logs -f --tail=20 "$pod" > "$follow_dir/$pod.log" 2>&1 &
         follow_pids+=("$!")
     done
     sleep 1
-    echo "world-stop: hosts to 0, waiting until no host pod is left ($timeout s)"
-    k scale statefulset/hosts --replicas=0
-    wait_gone 'hosts-[0-9]'
+    if [ -n "$hostdeps" ]; then
+        echo "world-stop: host Deployments to 0 ($(printf '%s\n' "$hostdeps" | sed 's#^deployment.apps/##' | tr '\n' ' ')), waiting until no host pod is left ($timeout s)"
+        # shellcheck disable=SC2086
+        k scale $hostdeps --replicas=0
+    else
+        echo "world-stop: the world has no host Deployment"
+    fi
+    wait_gone "$hostsel"
     sleep 1
     for p in "${follow_pids[@]}"; do kill "$p" 2>/dev/null || true; done
     # The leave of each host (the same lines scripts/world_update.sh reads): WARN, never abort.
@@ -2142,6 +2248,9 @@ world-stop:
         if grep -qF "left without a cut" "$f"; then
             echo "    $pod: LEFT WITHOUT A CUT: $(grep -F 'left without a cut' "$f" | tail -1 | sed 's/.*\(\[server\]\)/\1/')"
             no_cut="$no_cut $pod"
+        elif grep -qF "stop signal while drained" "$f"; then
+            # It left the world at its drain; world-start brings it back as a NEW host.
+            echo "    $pod: drained earlier (it left the world at its drain): stopped. world-start starts it again as a NEW host; to remove it, take its name out of var.hosts and apply"
         elif grep -qF "[server] left the world in cut" "$f"; then
             echo "    $pod: $(grep -F '[server] left the world in cut' "$f" | tail -1 | sed 's/.*\(\[server\] left the world in cut\)/\1/')"
         else
@@ -2160,53 +2269,69 @@ world-stop:
     fi
     echo "world-stop: coordinator to 0"
     k scale deploy/coordinator --replicas=0
-    wait_gone 'coordinator-'
+    wait_gone 'app.kubernetes.io/component=coordinator'
     echo "world-stop: the world is down (web and toolbox keep running); \`just world-start\` brings it back"
 
-# Start the world: coordinator to 1, wait until it is Ready, then the hosts to the count of
-# `hosts-<i>.env` keys in the ConfigMap host-endpoints, wait until every host is Ready.
+# Start the world: coordinator to 1, wait until it is Ready, then every host Deployment
+# (-l app.kubernetes.io/component=host) to 1, wait until each has readyReplicas 1 (never `rollout
+# status`). A drained host (/readyz `drained`, unready for good) is not waited for: it is named, with
+# how to remove it. Refused when the world has no host Deployment. WORLD_START_TIMEOUT s (default 300).
 world-start:
     #!/usr/bin/env bash
     set -euo pipefail
     k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
-    keys=$(k get configmap host-endpoints -o json)
-    count=$(printf '%s\n' "$keys" | grep -c '^ *"hosts-[0-9]*\.env":' || true)
+    hostsel='app.kubernetes.io/component=host'
+    names=$(k get deploy -l "$hostsel" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    count=$(printf '%s' "$names" | grep -c . || true)
     if [ "$count" -lt 1 ]; then
-        echo "world-start: ConfigMap host-endpoints has no hosts-<i>.env key; refusing to start" >&2
+        echo "world-start: the world has no host Deployment ($hostsel); refusing to start" >&2
         exit 1
     fi
     echo "world-start: coordinator to 1"
     k scale deploy/coordinator --replicas=1
     k rollout status deploy/coordinator --timeout=5m
-    echo "world-start: hosts to $count"
-    k scale statefulset/hosts --replicas="$count"
-    # The hosts StatefulSet is OnDelete: `rollout status` refuses it. Poll readyReplicas instead
-    # (WORLD_START_TIMEOUT s, default 300); a failed read keeps waiting, never counts as ready.
+    echo "world-start: host Deployments to 1: $(printf '%s\n' "$names" | tr '\n' ' ')"
+    for d in $names; do k scale "deploy/$d" --replicas=1; done
+    # Not `rollout status`: a drained host is unready for good, and a host waiting for a succession
+    # may be unready for minutes. Poll each Deployment's readyReplicas (WORLD_START_TIMEOUT s, default
+    # 300); a failed read keeps waiting, never counts as ready. A host whose pod says `drained` is not
+    # waited for.
+    # readyz <pod>: the /readyz body, 200 or not (kubectl logs a 503's body at -v=8).
+    readyz() { k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$1:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true; }
     timeout="${WORLD_START_TIMEOUT:-300}"
     deadline=$((SECONDS + timeout))
     while :; do
-        if ready=$(k get statefulset/hosts -o jsonpath='{.status.readyReplicas}' 2>&1); then
-            case "$ready" in ''|*[!0-9]*) ready=0 ;; esac
-            [ "$ready" -ge "$count" ] && break
-            what="$ready of $count hosts Ready"
-        else
-            what="reading the StatefulSet failed ($(printf '%s' "$ready" | head -1))"
-        fi
+        ready=0 drained='' waiting=''
+        for d in $names; do
+            if r=$(k get "deploy/$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null) && [ "${r:-0}" = 1 ]; then
+                ready=$((ready + 1))
+                continue
+            fi
+            pods=$(k get pods -l "$hostsel,errantry/host=${d#host-}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+            is_drained=0
+            for p in $pods; do [ "$(readyz "$p")" = drained ] && is_drained=1; done
+            if [ "$is_drained" = 1 ]; then drained="$drained ${d#host-}"; else waiting="$waiting $d"; fi
+        done
+        [ -z "$waiting" ] && break
         if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "world-start: after $timeout s: $what" >&2
+            echo "world-start: after $timeout s: $ready of $count hosts Ready; not Ready:$waiting" >&2
             exit 1
         fi
         sleep 2
     done
-    echo "world-start: the world is up ($count hosts)"
+    for h in $drained; do
+        echo "world-start: host $h is DRAINED (it left the world; /readyz says drained) and stays unready: remove \"$h\" from var.hosts and apply, or bring it back as a NEW host: kubectl --context {{world_ctx}} -n {{world_ns}} rollout restart deployment/host-$h"
+    done
+    echo "world-start: the world is up ($ready of $count hosts Ready${drained:+; drained:$drained})"
 
 # Print (never run) the command that registers this world with the login service of `world_ctx`'s
 # cluster: `just orion-login world add …` on orion, `kubectl --context <ctx> -n login exec deploy/login --
 # login world add …` on any other context (the twin's own login). `world add` REPLACES the world's row:
 # run it with every option, or the omitted ones are lost.
 # The world id is the namespace without its `world-` prefix; `name=` sets the displayed name.
-# --quic / --wt are host 0's VOXEL_ADVERTISE_QUIC / _WT from the ConfigMap host-endpoints; the link pin is the
-# SHA-256 of the public certificate in Secret host-link-identity. A name with a single quote is refused.
+# The login service links to the coordinator (coordinator.<ns>.svc.cluster.local:6490), pinned by the
+# SHA-256 of the public certificate in Secret login-link-identity. No --quic / --wt: each spawn answer
+# names the endpoint of the host that places the player. A name with a single quote is refused.
 world-register $name="Errantry":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2214,23 +2339,17 @@ world-register $name="Errantry":
     ns="{{world_ns}}"
     id="${ns#world-}"
     case "$name" in *\'*) echo "world-register: the name must not contain a single quote" >&2; exit 2 ;; esac
-    env0=$(k get configmap host-endpoints -o jsonpath='{.data.hosts-0\.env}')
-    # value <VAR>: the value of VAR in host 0's env file, `export ` and quotes stripped.
-    value() { printf '%s\n' "$env0" | sed -n "s/^\(export \)\{0,1\}$1=//p" | head -1 | tr -d "\"'"; }
-    quic=$(value VOXEL_ADVERTISE_QUIC)
-    wt=$(value VOXEL_ADVERTISE_WT)
-    if [ -z "$quic" ] || [ -z "$wt" ]; then
-        echo "world-register: hosts-0.env has no VOXEL_ADVERTISE_QUIC / VOXEL_ADVERTISE_WT" >&2
-        exit 1
-    fi
-    pin=$(k get secret host-link-identity -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
+    pin=$(k get secret login-link-identity -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
     case "$pin" in
-        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret host-link-identity" >&2; exit 1 ;;
+        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret login-link-identity" >&2; exit 1 ;;
     esac
+    # sha256sum of nothing: the Secret or its key is missing.
+    [ "$pin" != e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] ||
+        { echo "world-register: Secret login-link-identity has no link.cert-sha256.cert" >&2; exit 1; }
     [ "${#pin}" -eq 64 ] || { echo "world-register: link pin is not 64 hex digits" >&2; exit 1; }
     echo "Run this (it replaces the row of world '$id'; nothing was changed by this recipe):"
     echo
-    args="world add $id --name '$name' --quic $quic --wt $wt --link hosts-0.hosts.$ns.svc.cluster.local:6490 --link-cert $pin"
+    args="world add $id --name '$name' --link coordinator.$ns.svc.cluster.local:6490 --link-cert $pin"
     if [ "{{world_ctx}}" = "{{orion_context}}" ]; then
         echo "just orion-login $args"
     else

@@ -1,24 +1,36 @@
 #!/usr/bin/env bash
-# The k3d twin's integration check (`just twin-check`; plan
-# docs/superpowers/plans/2026-11-15-r5-k8s.md, Task 13). Runs against a FRESH
-# `just twin-apply` (it forges the world): the modules, images and server code of the
-# world on Kubernetes, end to end, with no client.
+# The k3d twin's integration check (`just twin-check`; plans
+# docs/superpowers/plans/2026-11-15-r5-k8s.md, Task 13, and
+# docs/superpowers/plans/2026-11-15-elastic-1-hosts-as-deployments.md, Task 12). Runs
+# against a FRESH `just twin-apply` (it forges the world): the modules, images and server
+# code of the world on Kubernetes, end to end, with no client. The hosts are the
+# Deployments host-a and host-b (pods selected by app.kubernetes.io/component=host and
+# errantry/host=<name>; a pod's name is random, a host's id is issued at registration).
 #   1. pg Ready, login / toolbox / web rolled out; the coordinator and both hosts run,
 #      unready, /readyz "forge" (nothing forged by a pod). 1b: a host waiting for the
 #      forge stops on a plain SIGTERM at once with exit code 0 (PID 1's signal path).
 #   2. worldctl forge from the toolbox; the coordinator and both hosts become Ready.
-#   3. The world registered in the twin's own login service (world-register's kubectl command).
-#   4. Coordinator /metrics: 2 hosts live, a committed world cut.
-#   5. hosts-1 force-killed: the world keeps its generation, hosts-0 is untouched,
-#      hosts-1 comes back Ready, cuts commit again; what a landless host's death does
-#      to the successions (one Crash succession, settled: the ledger's ruling).
-#   6. hosts-0 deleted (SIGTERM): it leaves with a committed leave cut, comes back.
+#      2b: every host has a PodDisruptionBudget that allows no disruption (0); an
+#      eviction dry run of a host pod is recorded (refused or not: not a check).
+#   3. The world registered in the twin's own login service (world-register's kubectl
+#      command: the link is the coordinator's, no --quic / --wt).
+#   4. Coordinator /metrics: 2 hosts live, a committed world cut; `worldctl hosts`: one
+#      live row per host name.
+#   5. host-b's pod force-killed: a new pod is Ready (it does not wait for the succession),
+#      under a NEW id; the old id is dead, settled by one Crash succession; the world keeps
+#      its generation, host-a's pod is untouched, cuts commit again.
+#   6. host-a scaled to 0 (SIGTERM): it leaves with a committed leave cut, no succession;
+#      scaled to 1: a new id; the killed host-b's old row is gone (pruned at this registration).
 #   7. The coordinator restarted: both hosts' links come up again, cuts commit.
 #   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
 #      and API, and login's /metrics and /healthz are NOT published (404).
-#   9. world-stop then world-start (the recipes): the hosts leave with committed leave
+#   9. world-drain b 5 (the recipe): host-b leaves at the deadline and stays up drained
+#      (/readyz "drained", /livez 200), not restarted, no new `hosts` row; host-a runs on;
+#      world-status names the drained host and world-start does not wait for it; then
+#      `rollout restart deployment/host-b` brings it back Ready under a new id.
+#  10. world-stop then world-start (the recipes): the hosts leave with committed leave
 #      cuts, the coordinator stops after them, everything comes back Ready.
-#  10. Records (asserts nothing): each pod's memory after the forge and five minutes
+#  11. Records (asserts nothing): each pod's memory after the forge and five minutes
 #      after the world-start, and any pod log line about a file it could not write.
 # Every wait has a timeout and says what it waited for. Exit 0 = pass, 1 = a check
 # failed (pods, events and logs are dumped and saved under target/twin/check-<time>/).
@@ -53,6 +65,8 @@ dump() {
     echo
     echo "---- pods"
     k get pods -o wide || true
+    echo "---- hosts rows"
+    wjust world-hosts 2>&1 | tail -20 || true
     echo "---- events (last 30)"
     k get events --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
     for pod in $(k get pods -o name 2>/dev/null | sed 's#^pod/##'); do
@@ -94,25 +108,36 @@ pod_uid() { pod_field "$1" '{.metadata.uid}'; }
 pod_ready() { [ "$(pod_field "$1" '{.status.conditions[?(@.type=="Ready")].status}')" = True ]; }
 pod_running() { [ "$(pod_field "$1" '{.status.phase}')" = Running ] && [ -z "$(pod_field "$1" '{.metadata.deletionTimestamp}')" ]; }
 pod_restarts() { pod_field "$1" '{.status.containerStatuses[0].restartCount}'; }
-# The coordinator's pod that is not being deleted (a Deployment's pod has a generated name).
-coordinator_pod() {
-    k get pods -l app.kubernetes.io/component=coordinator \
-        -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers 2>/dev/null |
+# live_pod <label selector>: the pod of that selector that is not being deleted ('' if none).
+live_pod() {
+    k get pods -l "$1" -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers 2>/dev/null |
         awk '$2 == "<none>" { print $1; exit }' || true
+}
+coordinator_pod() { live_pod app.kubernetes.io/component=coordinator; }
+# host_pod <name>: host <name>'s pod (Deployment host-<name>).
+host_pod() { live_pod "app.kubernetes.io/component=host,errantry/host=$1"; }
+host_ready() {
+    local p
+    p=$(host_pod "$1")
+    [ -n "$p" ] && pod_ready "$p"
 }
 all_ready() {
     local c
     c=$(coordinator_pod)
-    [ -n "$c" ] && pod_ready "$c" && pod_ready hosts-0 && pod_ready hosts-1
+    [ -n "$c" ] && pod_ready "$c" && host_ready a && host_ready b
 }
-# replaced_and_ready <pod> <old uid>: a new pod of that name is Ready.
-replaced_and_ready() {
-    local uid
-    uid=$(pod_uid "$1") || return 1
-    [ -n "$uid" ] && [ "$uid" != "$2" ] && pod_ready "$1"
+# host_replaced_and_ready <name> <old uid>: host <name> has a new pod, Ready.
+host_replaced_and_ready() {
+    local p uid
+    p=$(host_pod "$1")
+    [ -n "$p" ] || return 1
+    uid=$(pod_uid "$p") || return 1
+    [ -n "$uid" ] && [ "$uid" != "$2" ] && pod_ready "$p"
 }
 # gone <pod> <uid>: no pod of that name with that uid.
 gone() { [ "$(pod_uid "$1" || true)" != "$2" ]; }
+# no_pods <label selector>
+no_pods() { [ -z "$(k get pods -l "$1" -o name 2>/dev/null || echo failed)" ]; }
 
 # --- health port (through the API server's pod proxy) ---------------------------
 
@@ -159,6 +184,30 @@ committed_above() {
 }
 waiting_forge() { [ "$(metric "$1" mmo_waiting why=forge)" = 1 ]; }
 
+# --- the hosts table (worldctl hosts, through the world-hosts recipe) ----------------
+
+# rows: `worldctl hosts`' lines (`<id> <name> <live|dead> <clean|dirty> land=… seen=… drain=…`).
+rows() { wjust world-hosts 2>/dev/null | grep -E '^[0-9]+ ' || true; }
+# live_id <name>: the id of the one live dirty row of that name ('' unless exactly one).
+live_id() {
+    local ids
+    ids=$(rows | awk -v n="$1" '$2 == n && $3 == "live" && $4 == "dirty" { print $1 }')
+    [ "$(printf '%s' "$ids" | grep -c .)" = 1 ] && printf '%s\n' "$ids"
+    return 0
+}
+# row_state <id>: live / dead, '' when there is no such row.
+row_state() { rows | awk -v i="$1" '$1 == i { print $3 }'; }
+# has_new_live_id <name> <ids…>: host <name> has a live dirty row whose id is none of the given.
+has_new_live_id() {
+    local name="$1" id
+    shift
+    id=$(live_id "$name")
+    [ -n "$id" ] || return 1
+    case " $* " in *" $id "*) return 1 ;; esac
+    return 0
+}
+all_ids() { rows | awk '{ print $1 }' | tr '\n' ' '; }
+
 # --- logs -------------------------------------------------------------------------
 
 # follow <pod> <file>: follows the pod's log into the file in the background (until the
@@ -194,7 +243,7 @@ memory_snapshot() {
             peak=$(k exec "$pod" -- cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo "?")
             age=$(pod_field "$pod" '{.status.startTime}')
             awk -v p="$pod" -v c="$cur" -v k="$peak" -v a="$age" 'BEGIN {
-                printf "   cgroup: %-28s current %8s MiB  peak %8s MiB  (started %s)\n", p,
+                printf "   cgroup: %-34s current %8s MiB  peak %8s MiB  (started %s)\n", p,
                     (c ~ /^[0-9]+$/ ? sprintf("%.0f", c / 1048576) : c),
                     (k ~ /^[0-9]+$/ ? sprintf("%.0f", k / 1048576) : k), a }'
         done
@@ -203,6 +252,8 @@ memory_snapshot() {
 
 echo "twin-check: context $ctx, namespace $ns; transcript files in $out/"
 kc get nodes > /dev/null || fail "the cluster ($ctx) does not answer: just twin-up && just twin-apply"
+hostdeps=$(k get deploy -l app.kubernetes.io/component=host -o jsonpath='{.items[*].metadata.name}')
+[ "$hostdeps" = "host-a host-b" ] || fail "expected the host Deployments host-a host-b, found: '$hostdeps'"
 
 # ---------------------------------------------------------------------------------
 step "1. the database, login, toolbox and web are up; the world waits for its forge"
@@ -215,15 +266,17 @@ say "toolbox rolled out"
 k rollout status deploy/web --timeout=300s > /dev/null || fail "web did not roll out in 300s"
 say "web rolled out"
 waiting_pods() {
-    local c
-    c=$(coordinator_pod)
-    [ -n "$c" ] && pod_running "$c" && pod_running hosts-0 && pod_running hosts-1 &&
-        waiting_forge "$c" && waiting_forge hosts-0 && waiting_forge hosts-1
+    local c a b
+    c=$(coordinator_pod) a=$(host_pod a) b=$(host_pod b)
+    [ -n "$c" ] && [ -n "$a" ] && [ -n "$b" ] && pod_running "$c" && pod_running "$a" && pod_running "$b" &&
+        waiting_forge "$c" && waiting_forge "$a" && waiting_forge "$b"
 }
-wait_until 180 "the coordinator, hosts-0 and hosts-1 Running, each waiting for the forge (mmo_waiting{why=forge} 1)" waiting_pods
+wait_until 180 "the coordinator, host-a and host-b Running, each waiting for the forge (mmo_waiting{why=forge} 1)" waiting_pods
 coord=$(coordinator_pod)
+pa=$(host_pod a)
+pb=$(host_pod b)
 # Record (not a check): restarts before the forge, with the end of the previous run's log.
-for pod in "$coord" hosts-0 hosts-1; do
+for pod in "$coord" "$pa" "$pb"; do
     n=$(pod_restarts "$pod")
     if [ "${n:-0}" != 0 ]; then
         k logs "$pod" --previous > "$out/$pod.before-forge.previous.log" 2>&1 || true
@@ -231,7 +284,7 @@ for pod in "$coord" hosts-0 hosts-1; do
         tail -3 "$out/$pod.before-forge.previous.log" | sed 's/^/      /'
     fi
 done
-for pod in "$coord" hosts-0 hosts-1; do
+for pod in "$coord" "$pa" "$pb"; do
     pod_ready "$pod" && fail "$pod is Ready before any forge (is this twin fresh? just twin-down && just twin-up && just twin-apply)"
     body=$(readyz "$pod")
     case "$body" in
@@ -241,25 +294,26 @@ for pod in "$coord" hosts-0 hosts-1; do
 done
 
 step "1b. a host waiting for the forge stops at once on SIGTERM, exit code 0"
-uid1=$(pod_uid hosts-1)
-k get pod hosts-1 -w -o jsonpath='{.metadata.uid} {.status.containerStatuses[0].state.terminated.exitCode}{"\n"}' \
-    > "$out/hosts-1-sigterm.watch" 2>&1 &
+uid1=$(pod_uid "$pb")
+k get pod "$pb" -w -o jsonpath='{.metadata.uid} {.status.containerStatuses[0].state.terminated.exitCode}{"\n"}' \
+    > "$out/host-b-sigterm.watch" 2>&1 &
 bg_pids+=("$!")
-follow hosts-1 "$out/hosts-1-sigterm.log"
+follow "$pb" "$out/host-b-sigterm.log"
 sleep 2
 t0=$SECONDS
-k delete pod hosts-1 --wait=false > /dev/null
-wait_until 30 "the waiting hosts-1 gone (its grace period is 100 s)" gone hosts-1 "$uid1"
+k delete pod "$pb" --wait=false > /dev/null
+wait_until 30 "the waiting host-b pod $pb gone (its grace period is 100 s)" gone "$pb" "$uid1"
 stop_secs=$((SECONDS - t0))
 sleep 1
-exit_code=$(awk -v u="$uid1" '$1 == u && $2 != "" { print $2 }' "$out/hosts-1-sigterm.watch" | tail -1)
-[ -n "$exit_code" ] || fail "no exit code of the old hosts-1 seen (watch: $out/hosts-1-sigterm.watch)"
-[ "$exit_code" = 0 ] || fail "the waiting hosts-1 exited $exit_code on SIGTERM, not 0"
-grep -qF "stop signal while waiting for a world: exiting" "$out/hosts-1-sigterm.log" ||
-    fail "the waiting hosts-1's log has no 'stop signal while waiting for a world' line ($out/hosts-1-sigterm.log)"
-say "hosts-1 stopped in ${stop_secs}s with exit code 0: $(grep -F 'stop signal while waiting' "$out/hosts-1-sigterm.log" | tail -1)"
-wait_until 120 "the new hosts-1 Running and waiting for the forge" waiting_pods
-pod_ready hosts-1 && fail "the new hosts-1 is Ready before any forge"
+exit_code=$(awk -v u="$uid1" '$1 == u && $2 != "" { print $2 }' "$out/host-b-sigterm.watch" | tail -1)
+[ -n "$exit_code" ] || fail "no exit code of the old host-b pod seen (watch: $out/host-b-sigterm.watch)"
+[ "$exit_code" = 0 ] || fail "the waiting host-b pod exited $exit_code on SIGTERM, not 0"
+grep -qF "stop signal while waiting for a world: exiting" "$out/host-b-sigterm.log" ||
+    fail "the waiting host-b's log has no 'stop signal while waiting for a world' line ($out/host-b-sigterm.log)"
+say "host-b stopped in ${stop_secs}s with exit code 0: $(grep -F 'stop signal while waiting' "$out/host-b-sigterm.log" | tail -1)"
+wait_until 120 "a new host-b pod Running and waiting for the forge" waiting_pods
+pb=$(host_pod b)
+pod_ready "$pb" && fail "the new host-b pod is Ready before any forge"
 
 # ---------------------------------------------------------------------------------
 step "2. forge from the toolbox; the world becomes Ready"
@@ -267,8 +321,26 @@ t0=$SECONDS
 wjust world-ctl forge > "$out/forge.txt" 2>&1 || { tail -20 "$out/forge.txt"; fail "worldctl forge failed"; }
 tail -5 "$out/forge.txt" | sed 's/^/   forge: /'
 say "forge done in $((SECONDS - t0))s"
-wait_until 300 "the coordinator, hosts-0 and hosts-1 Ready" all_ready
+wait_until 300 "the coordinator, host-a and host-b Ready" all_ready
 memory_snapshot "after the forge (toolbox peak = the forge)"
+
+step "2b. every host has a PodDisruptionBudget that allows no disruption"
+for d in $hostdeps; do
+    allowed=$(k get pdb "$d" -o jsonpath='{.status.disruptionsAllowed}') || fail "no PodDisruptionBudget $d"
+    expected=$(k get pdb "$d" -o jsonpath='{.status.expectedPods}')
+    [ "$allowed" = 0 ] || fail "PodDisruptionBudget $d allows $allowed disruption(s), not 0"
+    [ "$expected" = 1 ] || fail "PodDisruptionBudget $d selects $expected pod(s), not its host's 1"
+    say "PodDisruptionBudget $d: disruptionsAllowed 0, expectedPods 1"
+done
+# Record only: whether this k3s refuses an eviction dry run of a host pod by its budget.
+pa=$(host_pod a)
+ev=$(printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"%s"},"deleteOptions":{"dryRun":["All"]}}' "$pa" "$ns")
+if said=$(printf '%s' "$ev" | k create --raw "/api/v1/namespaces/$ns/pods/$pa/eviction?dryRun=All" -f - 2>&1); then
+    say "record: an eviction dry run of $pa was ALLOWED by the API server: $(printf '%s' "$said" | head -c 200)"
+else
+    say "record: an eviction dry run of $pa was refused: $(printf '%s' "$said" | tr '\n' ' ' | head -c 200)"
+fi
+[ "$(host_pod a)" = "$pa" ] && pod_ready "$pa" || fail "host-a's pod changed after the eviction dry run"
 
 # ---------------------------------------------------------------------------------
 step "3. register the world in the twin's login service"
@@ -279,7 +351,7 @@ line=$(printf '%s\n' "$reg" | grep -F "$prefix" || true)
 case "$line" in "$prefix"world\ add\ *) ;; *) fail "world-register printed no '${prefix}world add' command: $reg" ;; esac
 args="${line#"$prefix"}"
 # The only command this script runs from text: checked word by word first.
-printf '%s\n' "$args" | grep -Eq "^world add twin --name 'Twin' --quic 127\.0\.0\.1:30466 --wt https://127\.0\.0\.1:30467/ --link hosts-0\.hosts\.$ns\.svc\.cluster\.local:6490 --link-cert [0-9a-f]{64}$" ||
+printf '%s\n' "$args" | grep -Eq "^world add twin --name 'Twin' --link coordinator\.$ns\.svc\.cluster\.local:6490 --link-cert [0-9a-f]{64}$" ||
     fail "world-register printed an unexpected command: $line"
 eval "set -- $args"
 said=$(kc -n login exec deploy/login -- login "$@" 2>&1) || fail "login world add failed: $said"
@@ -289,66 +361,92 @@ printf '%s\n' "$said" | sed 's/^/   login: /'
 grep -q twin <<< "$said" || fail "the login service does not list world twin"
 
 # ---------------------------------------------------------------------------------
-step "4. the coordinator sees two live hosts and commits world cuts"
+step "4. the coordinator sees two live hosts and commits world cuts; one live row per host"
 two_live() { [ "$(coord_metric mmo_hosts_live)" = 2 ]; }
 wait_until 60 "mmo_hosts_live 2" two_live
 wait_until 60 "mmo_cuts_decided_total{outcome=committed} >= 1" committed_above 0
 gen=$(coord_metric mmo_world_generation) || fail "no mmo_world_generation"
 say "world generation $gen, committed cuts $(committed)"
+rows | sed 's/^/   hosts: /'
+id_a=$(live_id a)
+id_b=$(live_id b)
+[ -n "$id_a" ] && [ -n "$id_b" ] || fail "not exactly one live dirty row each for a and b: $(rows | tr '\n' ';')"
+say "host a is id $id_a, host b is id $id_b"
 
 # ---------------------------------------------------------------------------------
-step "5. crash: hosts-1 force-deleted"
-r0=$(pod_restarts hosts-0)
-uid0=$(pod_uid hosts-0)
-uid1=$(pod_uid hosts-1)
+step "5. crash: host-b's pod force-deleted"
+pa=$(host_pod a)
+pb=$(host_pod b)
+r0=$(pod_restarts "$pa")
+uid0=$(pod_uid "$pa")
+uid1=$(pod_uid "$pb")
 d0=$(coord_metric mmo_successions_declared_total) || fail "no mmo_successions_declared_total"
 s0=$(coord_metric mmo_successions_settled_total) || fail "no mmo_successions_settled_total"
-say "before: generation $gen, hosts-0 restarts $r0, successions declared $d0 settled $s0"
+say "before: generation $gen, host-a pod $pa restarts $r0, successions declared $d0 settled $s0"
 t0=$SECONDS
-k delete pod hosts-1 --grace-period=0 --force > /dev/null 2>&1
-wait_until 60 "a new hosts-1 Ready" replaced_and_ready hosts-1 "$uid1"
+k delete pod "$pb" --grace-period=0 --force > /dev/null 2>&1
+# The new pod registers under a new id beside its open succession: Ready without waiting for it.
+wait_until 60 "a new host-b pod Ready" host_replaced_and_ready b "$uid1"
+pb=$(host_pod b)
+say "new host-b pod $pb Ready $((SECONDS - t0))s after the kill"
 c1=$(committed) || fail "the coordinator does not answer after the crash"
 left=$((60 - (SECONDS - t0)))
 [ "$left" -gt 0 ] || left=1
 wait_until "$left" "committed cuts grow again (above $c1), within 60 s of the kill" committed_above "$c1"
 [ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed: $gen -> $(coord_metric mmo_world_generation)"
-[ "$(pod_uid hosts-0)" = "$uid0" ] || fail "hosts-0 was replaced"
-[ "$(pod_restarts hosts-0)" = "$r0" ] || fail "hosts-0 restarted ($r0 -> $(pod_restarts hosts-0))"
+[ "$(pod_uid "$pa")" = "$uid0" ] || fail "host-a's pod was replaced"
+[ "$(pod_restarts "$pa")" = "$r0" ] || fail "host-a restarted ($r0 -> $(pod_restarts "$pa"))"
+settled() {
+    local d s o
+    d=$(coord_metric mmo_successions_declared_total) && s=$(coord_metric mmo_successions_settled_total) &&
+        o=$(coord_metric mmo_successions_open) && [ "$d" -gt "$d0" ] && [ "$s" = "$d" ] && [ "$o" = 0 ]
+}
+wait_until 60 "the succession of the killed host declared and settled (none open)" settled
 d1=$(coord_metric mmo_successions_declared_total)
 s1=$(coord_metric mmo_successions_settled_total)
-o1=$(coord_metric mmo_successions_open)
-say "after: generation $gen, hosts-0 untouched, successions declared $d0 -> $d1, settled $s0 -> $s1, open $o1"
-# Ruling (ledger): a host that owns no land still gets a Crash succession when it dies —
-# Coordinator::declare_wanted never looks at land; the new boot vouches its old row dead
-# (seen_ms 0 = lapsed at once), waits for the succession, and registers after the settle.
+say "after: generation $gen, host-a untouched, successions declared $d0 -> $d1, settled $s0 -> $s1"
+# A host that owns no land still gets a Crash succession when it dies (the ledger's ruling).
 [ "$d1" = $((d0 + 1)) ] || fail "expected exactly one succession declared for the killed host, got $d0 -> $d1"
-[ "$s1" = "$d1" ] && [ "$o1" = 0 ] || fail "the succession is not settled (declared $d1, settled $s1, open $o1)"
-k logs hosts-1 > "$out/hosts-1-after-crash.log" 2>&1 || true
+rows | sed 's/^/   hosts: /'
+has_new_live_id b "$id_a" "$id_b" || fail "host b has no live row under a new id: $(rows | tr '\n' ';')"
+id_b2=$(live_id b)
+[ "$(row_state "$id_b")" = dead ] || fail "host b's old id $id_b is not a dead row (state '$(row_state "$id_b")'): $(rows | tr '\n' ';')"
+say "host b is now id $id_b2; its old id $id_b is dead"
+k logs "$pb" > "$out/host-b-after-crash.log" 2>&1 || true
 
 # ---------------------------------------------------------------------------------
-step "6. clean leave: hosts-0 deleted (SIGTERM)"
-uid0=$(pod_uid hosts-0)
+step "6. clean leave: host-a scaled to 0 (SIGTERM), then back to 1"
+pa=$(host_pod a)
+uid0=$(pod_uid "$pa")
 d0=$(coord_metric mmo_successions_declared_total)
-follow hosts-0 "$out/hosts-0-leave.log"
+follow "$pa" "$out/host-a-leave.log"
 sleep 2
 t0=$SECONDS
-k delete pod hosts-0 --wait=false > /dev/null
-wait_until 100 "the leaving hosts-0 gone" gone hosts-0 "$uid0"
-say "hosts-0 left in $((SECONDS - t0))s"
+k scale deploy/host-a --replicas=0 > /dev/null
+wait_until 100 "the leaving host-a pod gone" no_pods "app.kubernetes.io/component=host,errantry/host=a"
+say "host-a left in $((SECONDS - t0))s"
 sleep 1
-grep -qF "[server] left the world in cut" "$out/hosts-0-leave.log" ||
-    fail "hosts-0's log has no leave-cut line ($out/hosts-0-leave.log)"
-grep -qF "left without a cut" "$out/hosts-0-leave.log" && fail "hosts-0 left without a cut ($out/hosts-0-leave.log)"
-say "$(grep -F '[server] left the world in cut' "$out/hosts-0-leave.log" | tail -1)"
-wait_until 120 "a new hosts-0 Ready" replaced_and_ready hosts-0 "$uid0"
+grep -qF "[server] left the world in cut" "$out/host-a-leave.log" ||
+    fail "host-a's log has no leave-cut line ($out/host-a-leave.log)"
+grep -qF "left without a cut" "$out/host-a-leave.log" && fail "host-a left without a cut ($out/host-a-leave.log)"
+say "$(grep -F '[server] left the world in cut' "$out/host-a-leave.log" | tail -1)"
+k scale deploy/host-a --replicas=1 > /dev/null
+wait_until 120 "a new host-a pod Ready" host_replaced_and_ready a "$uid0"
 [ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed after a clean leave"
 [ "$(coord_metric mmo_successions_declared_total)" = "$d0" ] || fail "a clean leave declared a succession"
 say "generation $gen unchanged, no succession"
+wait_until 30 "host a has a live row under a new id" has_new_live_id a "$id_a" "$id_b" "$id_b2"
+id_a2=$(live_id a)
+rows | sed 's/^/   hosts: /'
+[ -z "$(row_state "$id_b")" ] || fail "host b's old id $id_b (dead, landless) is still a row after host a's registration: $(rows | tr '\n' ';')"
+say "host a is now id $id_a2; host b's old id $id_b is gone (pruned at this registration); host a's old id $id_a: '$(row_state "$id_a")' (record)"
 
 # ---------------------------------------------------------------------------------
 step "7. coordinator restart"
 restarted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 old_coord=$(coordinator_pod)
+pa=$(host_pod a)
+pb=$(host_pod b)
 k rollout restart deploy/coordinator > /dev/null
 new_coord() {
     local c
@@ -356,7 +454,7 @@ new_coord() {
     [ -n "$c" ] && [ "$c" != "$old_coord" ] && pod_ready "$c"
 }
 links_up() {
-    log_has_since hosts-0 "$restarted_at" "world coordinator link up" && log_has_since hosts-1 "$restarted_at" "world coordinator link up"
+    log_has_since "$pa" "$restarted_at" "world coordinator link up" && log_has_since "$pb" "$restarted_at" "world coordinator link up"
 }
 t0=$SECONDS
 wait_until 90 "both hosts log 'world coordinator link up' again" links_up
@@ -394,32 +492,92 @@ for path in /login/metrics /login/healthz; do
 done
 
 # ---------------------------------------------------------------------------------
-step "9. world-stop, then world-start"
+step "9. drain host b (world-drain b 5): drained, not restarted, no new row; then back as a new host"
+pa=$(host_pod a)
+pb=$(host_pod b)
+ua=$(pod_uid "$pa") ra=$(pod_restarts "$pa")
+ub=$(pod_uid "$pb") rb=$(pod_restarts "$pb")
+id_b2=$(live_id b)
+[ -n "$id_b2" ] || fail "host b has no live row before the drain: $(rows | tr '\n' ';')"
+ids_before=$(all_ids)
+say "host b is id $id_b2 (pod $pb); rows before: $ids_before"
+t0=$SECONDS
+wjust world-drain b 5 > "$out/world-drain.txt" 2>&1 || { sed 's/^/   /' "$out/world-drain.txt"; fail "world-drain b 5 failed"; }
+sed 's/^/   /' "$out/world-drain.txt"
+grep -qF "host b (id $id_b2) is drained" "$out/world-drain.txt" || fail "world-drain did not report host b drained"
+say "world-drain returned after $((SECONDS - t0))s"
+is_drained() { [ "$(readyz "$pb")" = drained ]; }
+wait_until 60 "host-b's /readyz says drained" is_drained
+# The kubelet marks the pod unready after the probe's failure threshold (3 × 5 s).
+pod_unready() { ! pod_ready "$1"; }
+wait_until 30 "the drained host-b pod not Ready" pod_unready "$pb"
+say "waiting 20 s: the drained pod must stay up, unrestarted"
+sleep 20
+[ "$(host_pod b)" = "$pb" ] || fail "host-b's pod changed after the drain ($pb -> $(host_pod b))"
+[ "$(pod_uid "$pb")" = "$ub" ] || fail "host-b's pod was replaced after the drain"
+[ "$(pod_restarts "$pb")" = "$rb" ] || fail "host-b restarted after the drain ($rb -> $(pod_restarts "$pb"))"
+is_drained || fail "host-b's /readyz no longer says drained: $(readyz "$pb")"
+proxy "$pb" livez > /dev/null 2>&1 || fail "the drained host-b's /livez does not answer 200"
+say "host-b: /readyz drained, /livez 200, same pod, $rb restart(s)"
+for id in $(all_ids); do
+    case " $ids_before " in *" $id "*) ;; *) fail "a new hosts row $id appeared after the drain: $(rows | tr '\n' ';')" ;; esac
+done
+rows | sed 's/^/   hosts: /'
+say "no new hosts row"
+[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host-a's pod changed or restarted during host-b's drain"
+c1=$(committed)
+wait_until 60 "committed cuts grow with host-b drained (above $c1)" committed_above "$c1"
+[ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed after the drain"
+wjust world-status > "$out/world-status-drained.txt" 2>&1 || { sed 's/^/   /' "$out/world-status-drained.txt"; fail "world-status failed"; }
+grep -qF 'drained: host b left the world' "$out/world-status-drained.txt" || fail "world-status does not name the drained host b ($out/world-status-drained.txt)"
+say "world-status: $(grep -F 'drained: host b' "$out/world-status-drained.txt" | head -1)"
+t0=$SECONDS
+WORLD_START_TIMEOUT=90 wjust world-start > "$out/world-start-drained.txt" 2>&1 ||
+    { sed 's/^/   /' "$out/world-start-drained.txt"; fail "world-start with a drained host failed (it must not wait for it)"; }
+sed 's/^/   /' "$out/world-start-drained.txt"
+grep -qF "host b is DRAINED" "$out/world-start-drained.txt" || fail "world-start did not name the drained host b"
+say "world-start returned in $((SECONDS - t0))s without waiting for the drained host"
+k rollout restart deployment/host-b > /dev/null
+wait_until 120 "host-b back: a new pod Ready" host_replaced_and_ready b "$ub"
+# shellcheck disable=SC2086 # one word per id
+wait_until 30 "host b registered under a new id" has_new_live_id b $ids_before
+say "host b is back as id $(live_id b)"
+rows | sed 's/^/   hosts: /'
+[ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed when host b came back"
+
+# ---------------------------------------------------------------------------------
+step "10. world-stop, then world-start"
 coord=$(coordinator_pod)
-follow hosts-0 "$out/hosts-0-stop.log"
-follow hosts-1 "$out/hosts-1-stop.log"
+pa=$(host_pod a)
+pb=$(host_pod b)
+follow "$pa" "$out/host-a-stop.log"
+follow "$pb" "$out/host-b-stop.log"
 follow "$coord" "$out/coordinator-stop.log"
 sleep 2
 wjust world-stop > "$out/world-stop.txt" 2>&1 || { sed 's/^/   /' "$out/world-stop.txt"; fail "world-stop failed"; }
 sed 's/^/   /' "$out/world-stop.txt"
 sleep 1
-for h in hosts-0 hosts-1; do
+for h in host-a host-b; do
     grep -qF "[server] left the world in cut" "$out/$h-stop.log" || fail "$h's log has no leave-cut line ($out/$h-stop.log)"
     grep -qF "left without a cut" "$out/$h-stop.log" && fail "$h left without a cut ($out/$h-stop.log)"
     say "$h: $(grep -F '[server] left the world in cut' "$out/$h-stop.log" | tail -1)"
 done
 [ "$(k get deploy/coordinator -o jsonpath='{.spec.replicas}')" = 0 ] || fail "the coordinator was not scaled to 0"
-[ -z "$(k get pods -o name | grep -E '^pod/(hosts-|coordinator-)' || true)" ] || fail "world pods left after world-stop"
+for d in $hostdeps; do
+    [ "$(k get "deploy/$d" -o jsonpath='{.spec.replicas}')" = 0 ] || fail "$d was not scaled to 0"
+done
+no_pods 'app.kubernetes.io/component in (coordinator,host)' || fail "world pods left after world-stop"
 wjust world-start > "$out/world-start.txt" 2>&1 || { sed 's/^/   /' "$out/world-start.txt"; fail "world-start failed"; }
 sed 's/^/   /' "$out/world-start.txt"
 world_started=$SECONDS
-wait_until 30 "the coordinator, hosts-0 and hosts-1 Ready" all_ready
+wait_until 30 "the coordinator, host-a and host-b Ready" all_ready
 wait_until 60 "the coordinator commits a cut after the start" committed_above 0
 [ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed across stop and start"
 say "world back, generation $gen"
+rows | sed 's/^/   hosts: /'
 
 # ---------------------------------------------------------------------------------
-step "10. records: memory five minutes after the world-start; write failures in pod logs"
+step "11. records: memory five minutes after the world-start; write failures in pod logs"
 wait_left=$((300 - (SECONDS - world_started)))
 if [ "$wait_left" -gt 0 ]; then
     say "waiting ${wait_left}s (five minutes after the world-start)"

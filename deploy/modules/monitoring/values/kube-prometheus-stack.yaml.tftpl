@@ -158,19 +158,23 @@ additionalPrometheusRulesMap:
           - alert: WorldHostsBelowReplicas
             # A host that hangs between its registration and its first loop pass stays live and Ready
             # for Kubernetes (/livez judges only from the first pass): the coordinator's count of live
-            # hosts is what shows it. Silent with one host (mmo_hosts_live is set only while world cuts
-            # run, never with one host: hence `> 1`) and while the world is stopped (0 replicas).
+            # hosts is what shows it. One Deployment host-<name> of 1 replica per host: the right side
+            # counts the host Deployments that want a pod. Silent with one host (mmo_hosts_live is set
+            # only while world cuts run, never with one host: hence the `> 1`, on the count — written
+            # in parentheses, since comparisons bind left to right) and while the world is stopped
+            # (every host Deployment at 0). A drained host keeps its Deployment at 1 but is no live
+            # host: this fires until it is removed from var.hosts.
             expr: |
               max by (namespace) (mmo_hosts_live{role="coordinator"})
               < on (namespace)
-              max by (namespace) (kube_statefulset_replicas{namespace=~"world-.*", statefulset="hosts"} > 1)
+              (count by (namespace) (kube_deployment_spec_replicas{namespace=~"world-.*", deployment=~"host-.*"} > 0) > 1)
             for: 5m
             labels:
               severity: warning
               cluster: ${cluster}
             annotations:
-              summary: "World {{ $labels.namespace }} has fewer live hosts than its StatefulSet wants"
-              description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than the hosts StatefulSet's replicas (a host down, hung at its start, or not yet forged; one-host worlds never fire)."
+              summary: "World {{ $labels.namespace }} has fewer live hosts than its host Deployments want"
+              description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than its host Deployments that want a pod (a host down, hung at its start, not yet forged, or drained: a drained host stays until its name is removed from var.hosts and applied — this alert is the cue; one-host worlds never fire)."
 
           - alert: WorldHostNotReady
             expr: |
