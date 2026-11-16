@@ -79,6 +79,7 @@ pub fn resolve(krate: &ast::Crate, host: &HostApi) -> (hir::Crate, Vec<Diagnosti
         locals: r.locals,
         methods: r.methods,
         deferred: r.deferred,
+        expr_count: r.expr_count,
     };
     (out, r.diags)
 }
@@ -256,6 +257,8 @@ struct Resolver<'a> {
     /// Every line id used so far, with where.
     line_ids: BTreeMap<String, (String, ast::Span)>,
     root_quest_seen: bool,
+    /// The next [`hir::ExprId`].
+    expr_count: u32,
 }
 
 fn index_u32(i: usize) -> u32 {
@@ -348,7 +351,15 @@ impl<'a> Resolver<'a> {
             deferred: Vec::new(),
             line_ids: BTreeMap::new(),
             root_quest_seen: false,
+            expr_count: 0,
         }
+    }
+
+    /// An expression with the next id.
+    fn mk_expr(&mut self, kind: hir::ExprKind, span: ast::Span) -> hir::Expr {
+        let id = hir::ExprId(self.expr_count);
+        self.expr_count = self.expr_count.saturating_add(1);
+        hir::Expr { id, kind, span }
     }
 
     fn file_of(&self, m: ModId) -> &'a str {
@@ -989,10 +1000,7 @@ impl<'a> Resolver<'a> {
         if let [name] = path.as_slice()
             && let Some(id) = cx.local(name)
         {
-            return hir::Expr {
-                kind: hir::ExprKind::Local(id),
-                span: e.span,
-            };
+            return self.mk_expr(hir::ExprKind::Local(id), e.span);
         }
         let res = if let [name] = path.as_slice() {
             self.lookup(cx, name)
@@ -1013,7 +1021,7 @@ impl<'a> Resolver<'a> {
                 hir::ExprKind::Error
             }
         };
-        hir::Expr { kind, span: e.span }
+        self.mk_expr(kind, e.span)
     }
 
     fn case(&mut self, c: &ast::Case, cx: &mut Cx) -> hir::Case {
@@ -1242,7 +1250,7 @@ impl<'a> Resolver<'a> {
                 H::FallbackBlock(id, body)
             }
         };
-        hir::Expr { kind, span: e.span }
+        self.mk_expr(kind, e.span)
     }
 
     /// `base.name`: a host namespace's function (`world.get`) when `base` is a namespace no binding or
@@ -1305,15 +1313,12 @@ impl<'a> Resolver<'a> {
             self.diags.push(d);
             hir::ExprKind::Error
         };
-        let head = hir::Expr { kind, span: at };
+        let head = self.mk_expr(kind, at);
         match args {
             None => head,
             Some(args) => {
                 let args = self.args(args, cx);
-                hir::Expr {
-                    kind: hir::ExprKind::Call(Box::new(head), args),
-                    span: e.span,
-                }
+                self.mk_expr(hir::ExprKind::Call(Box::new(head), args), e.span)
             }
         }
     }

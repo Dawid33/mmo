@@ -27,6 +27,11 @@ pub struct ModId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DefId(pub u32);
 
+/// An expression: unique in the crate, assigned by resolution in construction order (children before their
+/// parent), below [`Crate::expr_count`]. Inference records each expression's type by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExprId(pub u32);
+
 /// A binding: an index into [`Crate::locals`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocalId(pub u32);
@@ -42,6 +47,8 @@ pub struct Crate {
     /// The dialogue and quest items, in definition order: `check` answers each with `not-yet` until
     /// Phase 10.
     pub deferred: Vec<DefId>,
+    /// Every [`ExprId`] is below this (the ids inside dropped dialogues and quests are unused).
+    pub expr_count: u32,
 }
 
 impl Crate {
@@ -318,6 +325,7 @@ pub const BUILTIN_TYPES: [(&str, Builtin); 8] = [
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expr {
+    pub id: ExprId,
     pub kind: ExprKind,
     pub span: Span,
 }
