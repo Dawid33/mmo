@@ -8,11 +8,14 @@
 #   just orion-init world && just orion-plan world && just orion-apply world
 # The coordinator and the hosts stay unready until the world is forged from the
 # toolbox (see modules/world/main.tf). Releases: scripts/world_update.sh.
-# An apply owns the replica counts (coordinator 1, hosts = length(var.hosts)): an
-# `orion-apply world` while the world is stopped (`just world-stop`) or in the middle
-# of an update STARTS it again on whatever images are set then (an interrupted
-# update's half-set images included). Apply only with the world running and no
-# update under way; images are never changed by an apply (ignore_changes).
+# An apply owns the replica counts (coordinator 1, each host Deployment host-<name> 1):
+# an `orion-apply world` while the world is stopped (`just world-stop`) or in the
+# middle of an update STARTS it again on whatever images are set then (an interrupted
+# update's half-set images included). An apply that changes the host pod template
+# restarts EVERY host at once (each leaves through its cut). Apply only with the world
+# running and no update under way, or stopped on purpose; images are never changed by
+# an apply (ignore_changes). Removing a host: `worldctl drain` it, then drop its key
+# from `hosts` below and apply (modules/world/hosts.tf).
 variable "state_bucket" {
   description = "The orion state bucket (../backend.s3.tfbackend), to read other roots' outputs."
   type        = string
@@ -90,10 +93,10 @@ module "world" {
   database_url      = data.terraform_remote_state.postgres.outputs.world_urls[var.world_id]
   service_token     = data.terraform_remote_state.login.outputs.service_token
 
-  hosts = [
-    { quic_node_port = 30466, wt_node_port = 30467 },
-    { quic_node_port = 30468, wt_node_port = 30469 },
-  ]
+  hosts = {
+    a = { quic_node_port = 30466, wt_node_port = 30467 }
+    b = { quic_node_port = 30468, wt_node_port = 30469 }
+  }
   public_host        = var.public_host
   client_certificate = { issuer = "letsencrypt" }
   web = {
@@ -126,15 +129,19 @@ output "namespace" {
   value = module.world.namespace
 }
 
-output "host_link" {
-  description = "For `login world add … --link` (the entry host's service link)."
-  value       = module.world.host_link
+output "login_link" {
+  description = "For `login world add … --link` (the coordinator's login link)."
+  value       = module.world.login_link
 }
 
-output "host_link_cert_pem" {
-  value = module.world.host_link_cert_pem
+output "login_link_cert_pem" {
+  value = module.world.login_link_cert_pem
 }
 
 output "endpoints" {
   value = module.world.endpoints
+}
+
+output "host_names" {
+  value = module.world.host_names
 }

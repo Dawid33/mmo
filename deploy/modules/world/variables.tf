@@ -37,15 +37,19 @@ variable "service_token" {
 }
 
 variable "hosts" {
-  description = "One entry per region host, in ordinal order: the node ports its per-host NodePort Service opens for QUIC and WebTransport (both UDP). The host count is the list's length."
-  type        = list(object({ quic_node_port = number, wt_node_port = number }))
+  description = "One entry per region host, keyed by its name (VOXEL_HOST_NAME; Deployment, Service and PodDisruptionBudget host-<name>; label errantry/host): the node ports its NodePort Service opens for QUIC and WebTransport (both UDP). Keep a running host's name stable — a key removed is that host's Deployment deleted (drain it first: hosts.tf), a key added is a new host."
+  type        = map(object({ quic_node_port = number, wt_node_port = number }))
   validation {
     condition     = length(var.hosts) >= 1
     error_message = "hosts: at least one host."
   }
   validation {
-    condition = length(distinct(flatten([for h in var.hosts : [h.quic_node_port, h.wt_node_port]]))) == 2 * length(var.hosts) && alltrue(flatten([
-      for h in var.hosts : [for p in [h.quic_node_port, h.wt_node_port] : p >= 30000 && p <= 32767]
+    condition     = alltrue([for k in keys(var.hosts) : can(regex("^[a-z][a-z0-9]{0,11}$", k))])
+    error_message = "hosts: every key a lower-case letter, then up to 11 lower-case letters or digits."
+  }
+  validation {
+    condition = length(distinct(flatten([for h in values(var.hosts) : [h.quic_node_port, h.wt_node_port]]))) == 2 * length(var.hosts) && alltrue(flatten([
+      for h in values(var.hosts) : [for p in [h.quic_node_port, h.wt_node_port] : p >= 30000 && p <= 32767]
     ]))
     error_message = "hosts: every node port distinct and within 30000-32767."
   }

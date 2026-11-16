@@ -1,7 +1,9 @@
 # The coordinator (VOXEL_ROLE=coordinator): claims, embark/return, history, the
 # successions, the world cuts' decisions. One pod, Recreate: two coordinators of
-# one world must never run side by side. It listens for its hosts on 6480/UDP with
-# the identity from identities.tf, and serves /livez, /readyz and /metrics on 9100.
+# one world must never run side by side (a convenience: the store's fencing is what
+# keeps two writers apart). It listens for its hosts on 6480/UDP and for the login
+# service on 6490/UDP (the login link: the login service never dials a host), each
+# with its identity from identities.tf, and serves /livez, /readyz and /metrics on 9100.
 
 resource "kubernetes_deployment_v1" "coordinator" {
   metadata {
@@ -54,14 +56,23 @@ resource "kubernetes_deployment_v1" "coordinator" {
             default_mode = local.secret_mode
           }
         }
+        volume {
+          name = "login-link-identity"
+          secret {
+            secret_name  = kubernetes_secret_v1.link_identity["login-link"].metadata[0].name
+            default_mode = local.secret_mode
+          }
+        }
         container {
           name              = "coordinator"
           image             = var.images.server
           image_pull_policy = "IfNotPresent"
           dynamic "env" {
             for_each = merge(local.server_env, {
-              VOXEL_ROLE             = "coordinator"
-              VOXEL_COORDINATOR_BIND = "0.0.0.0:6480"
+              VOXEL_ROLE                      = "coordinator"
+              VOXEL_COORDINATOR_BIND          = "0.0.0.0:6480"
+              VOXEL_LOGIN_LINK_BIND           = "0.0.0.0:6490"
+              VOXEL_LOGIN_LINK_CERT_HASH_FILE = "${local.login_link_dir}/${local.link_file}"
             })
             content {
               name  = env.key
@@ -83,6 +94,11 @@ resource "kubernetes_deployment_v1" "coordinator" {
             protocol       = "UDP"
           }
           port {
+            name           = "login"
+            container_port = 6490
+            protocol       = "UDP"
+          }
+          port {
             name           = "health"
             container_port = local.health_port
           }
@@ -94,6 +110,11 @@ resource "kubernetes_deployment_v1" "coordinator" {
           volume_mount {
             name       = "coordinator-identity"
             mount_path = local.coordinator_dir
+            read_only  = true
+          }
+          volume_mount {
+            name       = "login-link-identity"
+            mount_path = local.login_link_dir
             read_only  = true
           }
           security_context {
@@ -135,10 +156,11 @@ resource "kubernetes_deployment_v1" "coordinator" {
   }
 }
 
-# Headless: hosts resolve coordinator.<ns>.svc.cluster.local to the pod's own IP
-# at every dial, so no UDP conntrack entry to a Service IP outlives a restart, and
-# an unready coordinator (waiting for its forge) is still reachable. The health
-# port is here for the ServiceMonitor (charts/world-monitor).
+# Headless: hosts (6480) and the login service (6490, output login_link) resolve
+# coordinator.<ns>.svc.cluster.local to the pod's own IP at every dial, so no UDP
+# conntrack entry to a Service IP outlives a restart, and an unready coordinator
+# (waiting for its forge) is still reachable. The health port is here for the
+# ServiceMonitor (charts/world-monitor).
 resource "kubernetes_service_v1" "coordinator" {
   metadata {
     name      = "coordinator"
@@ -153,6 +175,12 @@ resource "kubernetes_service_v1" "coordinator" {
       name        = "link"
       port        = 6480
       target_port = "link"
+      protocol    = "UDP"
+    }
+    port {
+      name        = "login"
+      port        = 6490
+      target_port = "login"
       protocol    = "UDP"
     }
     port {

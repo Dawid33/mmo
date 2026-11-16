@@ -1,10 +1,14 @@
 # The twin's game world `twin` (namespace world-twin): the live world module with two
-# hosts on the same node ports as orion, imported images (mmo/server:twin,
+# hosts (a, b) on the same node ports as orion, imported images (mmo/server:twin,
 # mmo/web:twin; no pull secret), each host's self-signed client certificate (pinned by
 # clients: the other certificate path than orion's Let's Encrypt one), plain-HTTP web
 # at http://game.localhost:8480/, no ServiceMonitor, a 10 s save period and small
 # requests. Needs ../postgres and ../login applied (their local state is read here).
 # Forge it from the toolbox: `just world_ctx=k3d-mmo world_ns=world-twin world-ctl forge`.
+# An apply owns the replica counts (coordinator 1, each host Deployment 1: applied to a
+# stopped world it starts it), and an apply that changes the host pod template restarts
+# every host at once (each leaves through its cut): apply with the world running and
+# no update under way, or stopped on purpose.
 data "terraform_remote_state" "postgres" {
   backend = "local"
   config = {
@@ -30,10 +34,10 @@ module "world" {
   database_url  = data.terraform_remote_state.postgres.outputs.world_urls["twin"]
   service_token = data.terraform_remote_state.login.outputs.service_token
 
-  hosts = [
-    { quic_node_port = 30466, wt_node_port = 30467 },
-    { quic_node_port = 30468, wt_node_port = 30469 },
-  ]
+  hosts = {
+    a = { quic_node_port = 30466, wt_node_port = 30467 }
+    b = { quic_node_port = 30468, wt_node_port = 30469 }
+  }
   public_host        = "127.0.0.1"
   client_certificate = null
   web = {
@@ -51,10 +55,18 @@ module "world" {
   }
 }
 
-output "host_link" {
-  value = module.world.host_link
+output "login_link" {
+  value = module.world.login_link
+}
+
+output "login_link_cert_pem" {
+  value = module.world.login_link_cert_pem
 }
 
 output "endpoints" {
   value = module.world.endpoints
+}
+
+output "host_names" {
+  value = module.world.host_names
 }

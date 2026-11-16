@@ -1,28 +1,31 @@
 # One game world on Kubernetes (plan docs/superpowers/plans/2026-11-15-r5-k8s.md,
-# Task 11): a coordinator (coordinator.tf), N region hosts as a StatefulSet with
-# one NodePort Service per host (hosts.tf), a toolbox pod for worldctl (below),
-# the browser bundle (web.tf), the service-link identities (identities.tf), and
-# the ServiceMonitor and client Certificate through charts/world-monitor (below).
+# Task 11; hosts as Deployments: 2026-11-15-elastic-1-hosts-as-deployments.md): a
+# coordinator (coordinator.tf), one Deployment, NodePort Service and
+# PodDisruptionBudget per region host (hosts.tf), a toolbox pod for worldctl
+# (below), the browser bundle (web.tf), the coordinator's service-link identities
+# (identities.tf), and the ServiceMonitor and client Certificate through
+# charts/world-monitor (below).
 #
 # Images: the workloads are created with var.images and then ignore their image;
 # releases set digests with `kubectl set image` (scripts/world_update.sh: hosts
 # stop first, then the images change, then the hosts come back). The object names
 # that script uses are fixed here: Deployments coordinator / toolbox / web with
-# containers of the same names, StatefulSet hosts with container host.
+# containers of the same names; Deployments host-<k> (one per key of var.hosts,
+# label app.kubernetes.io/component=host, errantry/host=<k>) with container host.
 #
 # The coordinator and the hosts are created without waiting for a rollout: with
 # VOXEL_EMPTY_STORE=wait they stay unready until the world is forged, which is
 # done afterwards from the toolbox
 # (`kubectl exec deploy/toolbox -- sh -c 'worldctl forge --db "$VOXEL_WORLD_DB" …'`).
 #
-# Stopping a world: scale hosts to 0 first (each asks for a leave cut, ≤ ~90 s),
-# then the coordinator, as world_update.sh does. A plain `kubectl delete
+# Stopping a world: scale every host Deployment to 0 first (each asks for a leave
+# cut, ≤ ~90 s), then the coordinator, as world_update.sh does. A plain `kubectl delete
 # namespace` stops everything at once and is not a supported way to stop it.
 #
 # Files and the server's uid: the server image runs as uid/gid 10001. Every pod
 # of the server image runs as 10001 with fsGroup 10001, so mounted Secrets
-# (mode 0440: owner root, group 10001) and the ConfigMap (0444) are readable,
-# and the peer identity's emptyDir is writable.
+# (mode 0440: owner root, group 10001) are readable, and the peer identity's
+# emptyDir is writable.
 
 locals {
   ns = kubernetes_namespace_v1.world.metadata[0].name
@@ -47,14 +50,15 @@ locals {
   # Mount points (the hash files' directories hold the identities' Secrets).
   service_token_dir = "/run/voxel/service"
   coordinator_dir   = "/run/voxel/coordinator"
-  host_link_dir     = "/run/voxel/host-link"
+  login_link_dir    = "/run/voxel/login-link"
   peer_dir          = "/run/voxel/peer"
   client_cert_dir   = "/run/voxel/client"
-  host_env_dir      = "/etc/world/hosts"
 
   # Env both the coordinator and the hosts get (plain values; secrets are refs).
+  # VOXEL_WORLD_ID: every link hello names the world and a listener refuses another
+  # world's; it is also the world's id in the login registry (`world add <id>`).
   server_env = merge(local.ownership_env, {
-    VOXEL_HOSTS                      = tostring(length(var.hosts))
+    VOXEL_WORLD_ID                   = var.world_id
     VOXEL_SERVICE_TOKEN_FILE         = "${local.service_token_dir}/service-token"
     VOXEL_COORDINATOR_CERT_HASH_FILE = "${local.coordinator_dir}/${local.link_file}"
     VOXEL_EMPTY_STORE                = "wait"
@@ -63,17 +67,18 @@ locals {
     VOXEL_HEALTH_BIND                = "0.0.0.0:${local.health_port}"
   })
 
-  # A changed secret rolls the coordinator (env and files are read at start). The
-  # hosts' template carries theirs too, but they are OnDelete: it applies at each
-  # host's next start. Not the pull secret: the kubelet reads that.
-  coordinator_checksum = sha256(join(",", [
+  # A changed secret rolls the pods that read it (env and files are read at start):
+  # the coordinator its own two identities, the hosts only the coordinator's
+  # certificate. A changed hosts_checksum restarts every host at once (Recreate, one
+  # Deployment each). Not the pull secret: the kubelet reads that.
+  hosts_checksum = sha256(join(",", [
     var.database_url,
     var.service_token,
     tls_self_signed_cert.coordinator.cert_pem,
   ]))
-  hosts_checksum = sha256(join(",", [
-    local.coordinator_checksum,
-    tls_self_signed_cert.host_link.cert_pem,
+  coordinator_checksum = sha256(join(",", [
+    local.hosts_checksum,
+    tls_self_signed_cert.login_link.cert_pem,
   ]))
 
   # Workload resources: request cpu and memory, limit memory only.

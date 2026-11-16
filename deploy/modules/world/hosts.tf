@@ -1,8 +1,9 @@
-# The region hosts (VOXEL_ROLE=host): StatefulSet hosts, pods hosts-0 … hosts-<n-1>,
-# one per entry of var.hosts. A pod's ordinal and the addresses clients are told
-# come from its own file in ConfigMap host-endpoints, read by the shell before it
-# execs the server (PID 1, so SIGTERM reaches it: an exiting host asks for a
-# leave cut).
+# The region hosts (VOXEL_ROLE=host): one Deployment host-<k> per key k of var.hosts,
+# each with its own NodePort Service host-<k> and PodDisruptionBudget host-<k>. A host's
+# identity is the id the store issues when it registers; the key is only its name
+# (VOXEL_HOST_NAME: log lines, and a restarted process of the same name lapses its old
+# registration at once) and the label errantry/host. Nothing is derived from a number:
+# the addresses clients are told and the peer address are set here per host.
 #
 # Differences from scripts/dev_r3.sh, on purpose: dev restarts a host only on exit
 # 5 or 137 (and 3 under claim) and gives up after 3 restarts in 60 s; here every
@@ -12,45 +13,52 @@
 # comes from the coordinator's certificate in a Secret and a host dials until the
 # coordinator answers.
 #
-# Parallel pod management: a boot waiting on a succession (unready, maybe for
-# minutes) must not hold back the others. OnDelete updates: a template change
-# reaches a host only when its pod is deleted (world_update.sh scales to 0).
-# No CPU limit: a throttled main loop is a missed lease heartbeat.
+# Each Deployment has 1 replica and strategy Recreate: a template change stops the old
+# pod (SIGTERM: it asks for a leave cut, ≤ ~90 s) before the new one starts. An apply
+# that changes the host pod template therefore restarts EVERY host at once. Hosts are
+# independent Deployments: a boot waiting on a succession (unready, maybe for minutes)
+# holds back no other host. No CPU limit: a throttled main loop is a missed lease
+# heartbeat.
+#
+# Draining and removing a host: `worldctl drain` marks it; at its deadline it leaves
+# through a leave cut and stays up, unready (/readyz 503 `drained`, /livez 200), until
+# its pod is removed — readiness never restarts a pod, and nothing here waits for a
+# rollout. Remove its key from var.hosts and apply: its Deployment, Service and
+# PodDisruptionBudget go.
+#
+# Emptying a node (a kernel update, a move): the PodDisruptionBudget (max_unavailable 0)
+# makes `kubectl drain` wait on every host pod of the node. Drain each of those hosts
+# with `worldctl drain`, remove them from var.hosts (adding new keys to take their
+# place, on another node, if wanted) and apply; then the node drains. The budget is an
+# operations guard against an eviction that would turn a host into a crash; it is not
+# what keeps two writers apart (the store's fencing is).
 
-resource "kubernetes_config_map_v1" "host_endpoints" {
-  metadata {
-    name      = "host-endpoints"
-    namespace = local.ns
-    labels    = local.labels
-  }
-  data = {
-    for i, h in var.hosts : "hosts-${i}.env" => <<-EOT
-      VOXEL_HOST_ORDINAL=${i}
-      VOXEL_ADVERTISE_QUIC=${var.public_host}:${h.quic_node_port}
-      VOXEL_ADVERTISE_WT=https://${var.public_host}:${h.wt_node_port}/
-    EOT
+locals {
+  # Per host: its pods' labels (the Deployment's selector); the Service and the budget
+  # select a subset.
+  host_pod_labels = {
+    for k, _ in var.hosts : k => merge(local.host_labels, { "errantry/host" = k })
   }
 }
 
-resource "kubernetes_stateful_set_v1" "hosts" {
+resource "kubernetes_deployment_v1" "host" {
+  for_each = var.hosts
   metadata {
-    name      = "hosts"
+    name      = "host-${each.key}"
     namespace = local.ns
-    labels    = local.host_labels
+    labels    = local.host_pod_labels[each.key]
   }
   spec {
-    service_name          = kubernetes_service_v1.hosts.metadata[0].name
-    replicas              = length(var.hosts)
-    pod_management_policy = "Parallel"
-    update_strategy {
-      type = "OnDelete"
+    replicas = 1
+    strategy {
+      type = "Recreate"
     }
     selector {
-      match_labels = local.host_labels
+      match_labels = local.host_pod_labels[each.key]
     }
     template {
       metadata {
-        labels = local.host_labels
+        labels = local.host_pod_labels[each.key]
         annotations = {
           "checksum/secrets" = local.hosts_checksum
         }
@@ -91,13 +99,6 @@ resource "kubernetes_stateful_set_v1" "hosts" {
             }
           }
         }
-        volume {
-          name = "host-link-identity"
-          secret {
-            secret_name  = kubernetes_secret_v1.link_identity["host-link"].metadata[0].name
-            default_mode = local.secret_mode
-          }
-        }
         # The peer identity: made at each pod's first start and published in the
         # `hosts` table at registration (a new pin per pod).
         volume {
@@ -105,12 +106,6 @@ resource "kubernetes_stateful_set_v1" "hosts" {
           empty_dir {
             medium     = "Memory"
             size_limit = "1Mi"
-          }
-        }
-        volume {
-          name = "host-endpoints"
-          config_map {
-            name = kubernetes_config_map_v1.host_endpoints.metadata[0].name
           }
         }
         # cert-manager's Secret (charts/world-monitor): the pod starts once it exists.
@@ -128,8 +123,8 @@ resource "kubernetes_stateful_set_v1" "hosts" {
           name              = "host"
           image             = var.images.server
           image_pull_policy = "IfNotPresent"
-          # $HOSTNAME is the pod name (hosts-<i>); the shell expands it.
-          command = ["sh", "-c", "set -a; . ${local.host_env_dir}/$HOSTNAME.env; set +a; exec server"]
+          # The image's CMD `server` is PID 1, so SIGTERM reaches it: an exiting host
+          # asks for a leave cut.
           # ORDER MATTERS: $(POD_IP) below expands only because POD_IP is declared first.
           env {
             name = "POD_IP"
@@ -145,19 +140,18 @@ resource "kubernetes_stateful_set_v1" "hosts" {
           }
           dynamic "env" {
             for_each = merge(local.server_env, {
-              VOXEL_ROLE                     = "host"
-              VOXEL_COORDINATOR_ADDR         = "${local.coordinator_fq}:6480"
-              VOXEL_BIND_ADDR                = "0.0.0.0"
-              VOXEL_SERVER_PORT              = "6466"
-              VOXEL_WT_PORT                  = "6467"
-              VOXEL_PEER_BIND                = "0.0.0.0:6500"
-              VOXEL_PEER_CERT_HASH_FILE      = "${local.peer_dir}/peer.cert-sha256"
-              VOXEL_ENTRY_HOST               = "0"
-              VOXEL_HOST_LINK_BIND           = "0.0.0.0:6490"
-              VOXEL_HOST_LINK_CERT_HASH_FILE = "${local.host_link_dir}/${local.link_file}"
-              VOXEL_AUTH                     = "jwt"
-              VOXEL_WORLD_ID                 = var.world_id
-              VOXEL_LOGIN_URL                = var.auth.login_url
+              VOXEL_ROLE                = "host"
+              VOXEL_HOST_NAME           = each.key
+              VOXEL_ADVERTISE_QUIC      = "${var.public_host}:${each.value.quic_node_port}"
+              VOXEL_ADVERTISE_WT        = "https://${var.public_host}:${each.value.wt_node_port}/"
+              VOXEL_COORDINATOR_ADDR    = "${local.coordinator_fq}:6480"
+              VOXEL_BIND_ADDR           = "0.0.0.0"
+              VOXEL_SERVER_PORT         = "6466"
+              VOXEL_WT_PORT             = "6467"
+              VOXEL_PEER_BIND           = "0.0.0.0:6500"
+              VOXEL_PEER_CERT_HASH_FILE = "${local.peer_dir}/peer.cert-sha256"
+              VOXEL_AUTH                = "jwt"
+              VOXEL_LOGIN_URL           = var.auth.login_url
               }, var.client_certificate == null ? {} : {
               VOXEL_CLIENT_CERT = "${local.client_cert_dir}/tls.crt"
               VOXEL_CLIENT_KEY  = "${local.client_cert_dir}/tls.key"
@@ -192,11 +186,6 @@ resource "kubernetes_stateful_set_v1" "hosts" {
             protocol       = "UDP"
           }
           port {
-            name           = "link"
-            container_port = 6490
-            protocol       = "UDP"
-          }
-          port {
             name           = "health"
             container_port = local.health_port
           }
@@ -211,18 +200,8 @@ resource "kubernetes_stateful_set_v1" "hosts" {
             read_only  = true
           }
           volume_mount {
-            name       = "host-link-identity"
-            mount_path = local.host_link_dir
-            read_only  = true
-          }
-          volume_mount {
             name       = "peer"
             mount_path = local.peer_dir
-          }
-          volume_mount {
-            name       = "host-endpoints"
-            mount_path = local.host_env_dir
-            read_only  = true
           }
           dynamic "volume_mount" {
             for_each = var.client_certificate == null ? [] : ["client-tls"]
@@ -242,10 +221,11 @@ resource "kubernetes_stateful_set_v1" "hosts" {
             requests = local.host_resources.requests
             limits   = local.host_resources.limits
           }
-          # No startup probe. /livez fails only after LIVEZ_STALL_MS (30 s) of a
-          # stalled registered loop, so this fires after about a minute — long after
-          # the lease (10 s) has handed the host's land to an heir. A host waiting
-          # for its forge or its succession is live and unready.
+          # No startup probe: /livez is 200 until the process has registered, so a long
+          # boot (a forge wait, a succession wait) never fails it. It fails only after
+          # LIVEZ_STALL_MS (30 s) of a stalled registered loop, so this fires after about
+          # a minute — long after the lease (10 s) has handed the host's land to an heir.
+          # A host waiting for its forge or its succession, or drained, is live and unready.
           liveness_probe {
             http_get {
               path = "/livez"
@@ -265,62 +245,36 @@ resource "kubernetes_stateful_set_v1" "hosts" {
       }
     }
   }
-  # Unready until the world is forged (main.tf): never wait for the rollout.
+  # Unready until the world is forged (main.tf), and for good once drained: never wait
+  # for the rollout. A Deployment past its progress deadline only reports it in its
+  # status; it changes nothing and an apply does not read it.
   wait_for_rollout = false
-  # Releases set the image (world_update.sh); an apply must not undo them.
+  # Releases set the image (world_update.sh); an apply must not undo them. The replica
+  # count is not ignored: an apply sets each host back to 1 (see the roots' headers).
   lifecycle {
     ignore_changes = [spec[0].template[0].spec[0].container[0].image]
   }
 }
 
-# Headless: peers dial each other's pod IPs (VOXEL_ADVERTISE_PEER), and the login
-# service dials hosts-0.hosts.<ns>.svc.cluster.local:6490 (output host_link), also
-# while the pod is unready. The health port is for the ServiceMonitor.
-resource "kubernetes_service_v1" "hosts" {
-  metadata {
-    name      = "hosts"
-    namespace = local.ns
-    labels    = local.host_labels
-  }
-  spec {
-    cluster_ip                  = "None"
-    publish_not_ready_addresses = true
-    selector                    = local.host_labels
-    port {
-      name        = "peer"
-      port        = 6500
-      target_port = "peer"
-      protocol    = "UDP"
-    }
-    port {
-      name        = "link"
-      port        = 6490
-      target_port = "link"
-      protocol    = "UDP"
-    }
-    port {
-      name        = "health"
-      port        = local.health_port
-      target_port = "health"
-    }
-  }
-}
-
 # What clients dial: one NodePort Service per host, selecting exactly its pod.
 # externalTrafficPolicy Local keeps the client's source address (no SNAT).
-resource "kubernetes_service_v1" "host" {
-  for_each = { for i, h in var.hosts : tostring(i) => h }
+resource "kubernetes_service_v1" "host_endpoint" {
+  for_each = var.hosts
   metadata {
     name      = "host-${each.key}"
     namespace = local.ns
     # Not the hosts' component label: the ServiceMonitor must not select these.
-    labels = merge(local.labels, { "app.kubernetes.io/component" = "host-endpoint" })
+    labels = merge(local.labels, {
+      "app.kubernetes.io/component" = "host-endpoint"
+      "errantry/host"               = each.key
+    })
   }
   spec {
     type                    = "NodePort"
     external_traffic_policy = "Local"
     selector = {
-      "statefulset.kubernetes.io/pod-name" = "hosts-${each.key}"
+      "app.kubernetes.io/component" = "host"
+      "errantry/host"               = each.key
     }
     port {
       name        = "quic"
@@ -335,6 +289,46 @@ resource "kubernetes_service_v1" "host" {
       target_port = "wt"
       node_port   = each.value.wt_node_port
       protocol    = "UDP"
+    }
+  }
+}
+
+# A voluntary eviction (a node drain) of a host's pod waits: see the header.
+resource "kubernetes_pod_disruption_budget_v1" "host" {
+  for_each = var.hosts
+  metadata {
+    name      = "host-${each.key}"
+    namespace = local.ns
+    labels    = local.host_pod_labels[each.key]
+  }
+  spec {
+    max_unavailable = "0"
+    selector {
+      match_labels = {
+        "errantry/host" = each.key
+      }
+    }
+  }
+}
+
+# Headless, for the ServiceMonitor only (charts/world-monitor): every host pod is its
+# own /metrics target, also while starting or drained (not Ready). Peers dial each
+# other's pod IPs from the `hosts` table and the login service dials the coordinator,
+# so no other port is here.
+resource "kubernetes_service_v1" "hosts" {
+  metadata {
+    name      = "hosts"
+    namespace = local.ns
+    labels    = local.host_labels
+  }
+  spec {
+    cluster_ip                  = "None"
+    publish_not_ready_addresses = true
+    selector                    = local.host_labels
+    port {
+      name        = "health"
+      port        = local.health_port
+      target_port = "health"
     }
   }
 }
