@@ -85,6 +85,10 @@ variable "ownership" {
     condition     = contains(["static", "claim"], var.ownership)
     error_message = "ownership: static or claim (allinone is the single-process mode)."
   }
+  validation {
+    condition     = var.ownership != "static" || length(var.hosts) == 1
+    error_message = "ownership: static runs ONE host (a second registers beside a live row and is refused: NotAlone, a crash loop); with more than one key in hosts use claim."
+  }
 }
 
 variable "save_secs" {

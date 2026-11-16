@@ -1456,6 +1456,12 @@ go_nogo_dir := "target/go-nogo-r3"
 go_nogo_db := "mmo_go_nogo_r3"
 go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 
+# NOT VALID AS BUILT (Elastic 1 final review C-I1): the autopilot lays seams out over host ids 0 and 1,
+# but a fresh world issues ids from 1 (every restart a new one), so its "host" seams are partly thread
+# seams and the reverse; and the database kept between runs gives a later run `Leave` successions of
+# the earlier run's hosts at once, which the summary marks INVALID. Fix the probe first (pick the seam
+# from the client's own region -> host map, `pick_loaded_seam`, or give it the real ids; and drop and
+# re-forge the database every run, or count only successions inside the probe window).
 # The R3 go / no-go probe (the plan's decision 13). A benchmark on this box: run it on
 # purpose, with nothing else heavy running. A release build at play region size; its OWN
 # world database `mmo_go_nogo_r3` on the dev Postgres (started as by `pg-up`), forged by `worldctl` with
@@ -2073,8 +2079,8 @@ world-status:
     # Only the coordinator and the hosts have the health port.
     for pod in $(k get pods -l 'app.kubernetes.io/component in (coordinator,host)' -o jsonpath='{.items[*].metadata.name}'); do
         echo "== $pod /readyz"
-        # A 200's body is kubectl's output. kubectl replaces a 503's body ("forge", "succession",
-        # "drained", ...) with a generic error, but logs the body itself at -v=8. A pod that does not
+        # A 200's body is kubectl's output ("ok"). kubectl replaces a 503's body ("forge", "drained" or
+        # "starting") with a generic error, but logs the body itself at -v=8. A pod that does not
         # answer gets the API server's Status object.
         if ! body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" 2>/dev/null); then
             body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
@@ -2136,7 +2142,8 @@ world-hosts:
 # `worldctl drain <id> --in <secs>` (default 300; the host warns its players), follows its pod's log
 # until the leave line (WORLD_DRAIN_TIMEOUT s after the deadline, default 180), prints it and the next
 # step: remove "<name>" from var.hosts and apply, or `kubectl rollout restart deployment/host-<name>`
-# to bring it back as a NEW host. Deletes nothing, scales nothing. Only a `claim` host acts on a mark.
+# to bring it back as a NEW host. Deletes nothing, scales nothing. Only a `claim` host acts on a mark:
+# a world whose coordinator runs VOXEL_OWNERSHIP other than claim is refused up front.
 world-drain name secs="300":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2145,6 +2152,13 @@ world-drain name secs="300":
     case "$name" in ''|*[!a-z0-9-]*) echo "world-drain: '$name' is not a host name (a key of var.hosts)" >&2; exit 2 ;; esac
     case "$secs" in ''|*[!0-9]*) echo "world-drain: '$secs' is not a number of seconds" >&2; exit 2 ;; esac
     k get deploy "host-$name" > /dev/null || { echo "world-drain: no Deployment host-$name in {{world_ns}}; nothing changed" >&2; exit 2; }
+    # Only a `claim` host acts on a mark: a `static` world (its one host) is refused up front.
+    ownership=$(k get deploy/coordinator -o jsonpath='{.spec.template.spec.containers[?(@.name=="coordinator")].env[?(@.name=="VOXEL_OWNERSHIP")].value}') ||
+        { echo "world-drain: cannot read the coordinator's VOXEL_OWNERSHIP; nothing changed" >&2; exit 2; }
+    if [ "$ownership" != claim ]; then
+        echo "world-drain: the world's ownership is '${ownership:-unset}', not claim: a static host is its world's only one and ignores a drain mark. Stop the world instead (just world-stop). Nothing changed." >&2
+        exit 2
+    fi
     rows=$(k exec deploy/toolbox -c toolbox -- sh -c 'exec worldctl hosts "$VOXEL_WORLD_DB"') ||
         { echo "world-drain: worldctl hosts failed; nothing changed" >&2; exit 1; }
     ids=$(printf '%s\n' "$rows" | awk -v n="$name" '$2 == n && $3 == "live" && $4 == "dirty" && $1 ~ /^[0-9]+$/ { print $1 }')
@@ -2218,6 +2232,26 @@ world-stop:
     if [ "${coord:-0}" = 0 ] && printf '%s\n' "$hostpods" | grep -q '^pod/'; then
         echo "world-stop: the coordinator is at 0 replicas but host pods still exist; they cannot leave cleanly. Run \`just world-start\` first, or delete the host pods knowingly. Nothing changed." >&2
         exit 2
+    fi
+    # Before acting: a drained host and a host MARKED draining (not due yet) come back at the next
+    # world-start as NEW hosts (a mark is lost). All warned at once, then one 10 s pause to stop.
+    warned=0
+    for pod in $(printf '%s\n' "$hostpods" | sed -n 's#^pod/##p'); do
+        body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
+        [ "$body" = drained ] && { echo "world-stop: WARNING: $pod is DRAINED: world-start brings it back as a NEW host; to remove it, take its name out of var.hosts and apply" >&2; warned=1; }
+    done
+    if rows=$(k exec deploy/toolbox -c toolbox -- sh -c 'exec worldctl hosts "$VOXEL_WORLD_DB"' 2>/dev/null); then
+        marked=$(printf '%s\n' "$rows" | awk '$3 == "live" && $4 == "dirty" && $NF != "drain=-" { print $2 " (id " $1 ")" }')
+        if [ -n "$marked" ]; then
+            printf '%s\n' "$marked" | sed 's/^/world-stop: WARNING: host /; s/$/ is MARKED draining: it stops now, its drain unfinished, and world-start brings it back as a NEW host with NO mark/' >&2
+            warned=1
+        fi
+    elif printf '%s\n' "$hostpods" | grep -q '^pod/'; then
+        echo "world-stop: could not read the hosts' drain marks (worldctl hosts in the toolbox). Going on." >&2
+    fi
+    if [ "$warned" -eq 1 ]; then
+        echo "world-stop: stop here within 10 s (Ctrl-C) to act on the warnings above; nothing has changed yet." >&2
+        sleep 10
     fi
     # Each host pod's log is followed until the pod ends: its leave line is read after it is gone.
     follow_dir=$(mktemp -d)

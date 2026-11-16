@@ -437,8 +437,13 @@ wait_until 120 "a new host-a pod Ready" host_replaced_and_ready a "$uid0"
 say "generation $gen unchanged, no succession"
 wait_until 30 "host a has a live row under a new id" has_new_live_id a "$id_a" "$id_b" "$id_b2"
 id_a2=$(live_id a)
-rows | sed 's/^/   hosts: /'
-[ -z "$(row_state "$id_b")" ] || fail "host b's old id $id_b (dead, landless) is still a row after host a's registration: $(rows | tr '\n' ';')"
+listing=$(rows)
+printf '%s\n' "$listing" | sed 's/^/   hosts: /'
+# Not vacuous: an empty listing (a failed read) proves nothing.
+[ -n "$listing" ] || fail "the hosts listing is empty: cannot check that host b's old id $id_b is gone"
+if printf '%s\n' "$listing" | awk -v i="$id_b" '$1 == i { f = 1 } END { exit !f }'; then
+    fail "host b's old id $id_b (dead, landless) is still a row after host a's registration: $(printf '%s' "$listing" | tr '\n' ';')"
+fi
 say "host a is now id $id_a2; host b's old id $id_b is gone (pruned at this registration); host a's old id $id_a: '$(row_state "$id_a")' (record)"
 
 # ---------------------------------------------------------------------------------
@@ -519,10 +524,13 @@ sleep 20
 is_drained || fail "host-b's /readyz no longer says drained: $(readyz "$pb")"
 proxy "$pb" livez > /dev/null 2>&1 || fail "the drained host-b's /livez does not answer 200"
 say "host-b: /readyz drained, /livez 200, same pod, $rb restart(s)"
-for id in $(all_ids); do
-    case " $ids_before " in *" $id "*) ;; *) fail "a new hosts row $id appeared after the drain: $(rows | tr '\n' ';')" ;; esac
+listing=$(rows)
+# Not vacuous: an empty listing (a failed read) proves nothing.
+[ -n "$listing" ] || fail "the hosts listing is empty after the drain: cannot check that no new row appeared"
+for id in $(printf '%s\n' "$listing" | awk '{ print $1 }'); do
+    case " $ids_before " in *" $id "*) ;; *) fail "a new hosts row $id appeared after the drain: $(printf '%s' "$listing" | tr '\n' ';')" ;; esac
 done
-rows | sed 's/^/   hosts: /'
+printf '%s\n' "$listing" | sed 's/^/   hosts: /'
 say "no new hosts row"
 [ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host-a's pod changed or restarted during host-b's drain"
 c1=$(committed)

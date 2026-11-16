@@ -124,8 +124,8 @@ additionalPrometheusRulesMap:
               severity: warning
               cluster: ${cluster}
             annotations:
-              summary: "A host of {{ $labels.namespace }} was declared dead"
-              description: "The coordinator of {{ $labels.namespace }} declared a succession in the last 10 minutes."
+              summary: "A succession was declared in {{ $labels.namespace }}"
+              description: "The coordinator of {{ $labels.namespace }} declared a succession in the last 10 minutes: a host declared dead (a crash), OR the land of a host that left cleanly given to an heir (a Leave succession — after every drain, and after a restart or a stop/start of a host that held land). The coordinator's log line says which."
 
           - alert: WorldSuccessionStuck
             expr: |
@@ -160,8 +160,8 @@ additionalPrometheusRulesMap:
             # for Kubernetes (/livez judges only from the first pass): the coordinator's count of live
             # hosts is what shows it. One Deployment host-<name> of 1 replica per host: the right side
             # counts the host Deployments that want a pod. Silent with one host (mmo_hosts_live is set
-            # only while world cuts run, never with one host: hence the `> 1`, on the count — written
-            # in parentheses, since comparisons bind left to right) and while the world is stopped
+            # only while world cuts run — never under `static`, but a lone `claim` host sets it: hence
+            # the `> 1`, on the count — written in parentheses, since comparisons bind left to right) and while the world is stopped
             # (every host Deployment at 0). A drained host keeps its Deployment at 1 but is no live
             # host: this fires until it is removed from var.hosts.
             expr: |
@@ -177,15 +177,18 @@ additionalPrometheusRulesMap:
               description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than its host Deployments that want a pod (a host down, hung at its start, not yet forged, or drained: a drained host stays until its name is removed from var.hosts and applied — this alert is the cue; one-host worlds never fire)."
 
           - alert: WorldHostNotReady
+            # A drained host (mmo_waiting{why="drained"}) is unregistered on purpose until it is
+            # removed: left out here; WorldHostsBelowReplicas is its cue.
             expr: |
               mmo_registered{role="host"} == 0
+              unless on (namespace, pod) (mmo_waiting{role="host", why="drained"} == 1)
             for: 5m
             labels:
               severity: warning
               cluster: ${cluster}
             annotations:
               summary: "A host of {{ $labels.namespace }} is not registered"
-              description: "Pod {{ $labels.pod }} of {{ $labels.namespace }} has not registered for 5 minutes (see mmo_waiting for why)."
+              description: "Pod {{ $labels.pod }} of {{ $labels.namespace }} has not registered for 5 minutes (see mmo_waiting for why: forge, or none while it starts). A drained host is not counted here (WorldHostsBelowReplicas)."
 
           - alert: WorldPodRestartLoop
             expr: |

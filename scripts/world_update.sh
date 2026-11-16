@@ -18,8 +18,10 @@
 # (coordinator, toolbox, every host Deployment's host, web); a world with no host
 # Deployment is refused, and so is one whose coordinator is at 0 replicas (a world
 # stopped by world-stop: the release never starts the coordinator, and hosts without one
-# cannot leave through a cut — start the world first). A drained host (/readyz `drained`) is WARNED about: the release
-# stops it and starts it again as a NEW host — remove it from var.hosts first if it is to go.
+# cannot leave through a cut — start the world first). A drained host (/readyz `drained`) and a host
+# MARKED draining (`worldctl hosts` drain=, not due yet) are WARNED about, all at once, then one 10 s
+# pause before anything changes: the release stops each and starts it again as a NEW host — a mark
+# is lost — so remove a drained one from var.hosts first if it is to go.
 #
 # Release history: before any image is set, the refs being replaced are recorded in the
 # ConfigMap `release-history` of the world's namespace (it lives with the world, not on
@@ -200,15 +202,33 @@ if [ "${coord_replicas:-0}" = 0 ]; then
 fi
 for d in $hostdeps; do preflight "$d" host; done
 preflight deploy/web web
-# A drained host is unready for good; the release starts it again as a NEW host (a warning, not a refusal).
+# A drained host is unready for good, and a host MARKED draining (`worldctl hosts`' drain= column,
+# not due yet) has its notice running: the release starts either again as a NEW, unmarked host
+# (a warning, not a refusal). All warned at once, then ONE pause to stop.
 if [ "$dry" -eq 0 ]; then
+    warned=0
     for pod in $(k get pods -l "$hostsel" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
         body=$(k get --raw "/api/v1/namespaces/$ns/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
         if [ "$body" = drained ]; then
-            echo "world_update: WARNING: $pod is DRAINED: this release stops it and starts it again as a NEW host. To remove it instead, stop here (Ctrl-C within 10 s), take its name out of var.hosts and apply." >&2
-            sleep 10
+            echo "world_update: WARNING: $pod is DRAINED: this release stops it and starts it again as a NEW host. To remove it instead, take its name out of var.hosts and apply." >&2
+            warned=1
         fi
     done
+    if rows=$(k exec deploy/toolbox -c toolbox -- sh -c 'exec worldctl hosts "$VOXEL_WORLD_DB"' 2>/dev/null); then
+        marked=$(printf '%s\n' "$rows" | awk '$3 == "live" && $4 == "dirty" && $NF != "drain=-" { sub(/^drain=/, "", $NF); print $2 " (id " $1 ", due in " int($NF / 1000) " s)" }')
+        if [ -n "$marked" ]; then
+            printf '%s\n' "$marked" | while read -r m; do
+                echo "world_update: WARNING: host $m is MARKED draining: this release restarts it as a NEW host with NO mark — its drain is lost (drain it again afterwards, or let it finish first)." >&2
+            done
+            warned=1
+        fi
+    else
+        echo "world_update: could not read the hosts' drain marks (worldctl hosts in the toolbox); a host marked draining would come back unmarked. Going on." >&2
+    fi
+    if [ "$warned" -eq 1 ]; then
+        echo "world_update: stop here within 10 s (Ctrl-C) to act on the warnings above; nothing has changed yet." >&2
+        sleep 10
+    fi
 fi
 
 step 1 "read the host Deployments' replicas and record the release being replaced"
