@@ -134,6 +134,22 @@ Places where this plan goes beyond the spec or revisits a **[call]**. None reope
 18. **Dict equality ignores insertion order** (`{"a": 1, "b": 2} == {"b": 2, "a": 1}`), as in Python; iteration
     order is still insertion order. Lists, structs and strings compare element by element.
 16. **`quest test` is not built** (the spec marks it optional); `assert` / `assert_eq` in `main()` cover it.
+19. **Dialogue and quests are parsed by the MVP front end and compiled later [proposed 2026-11-16; spec §5.11–5.13,
+    syntax awaiting approval].** Tasks 16, 18 and 19 lex, parse and resolve `dialogue` and `quest` items and the
+    dialogue steps. **Dialogue is declarative data run by the region, never executed by the VM [decided by the
+    owner 2026-11-16, spec §5.11]**: Phase 10 compiles a dialogue into a graph plus pure condition functions and
+    builds a reference runner; effects are `emit`ted events handled by ordinary handlers. Until Phase 10, `check` and `compile` answer each such item with the error `not-yet`,
+    so Phases 5–9 never see them. Phase 10 types, lowers and runs them. Reason: the grammar is decided once, while
+    it is cheap to change; every later phase stays as planned.
+20. **Contextual words are reclassified by the layout pass**, not reserved:
+    - `node`, `stage`, `role`, `objective`, `event`, `emit` and `detour`, when one is the first token of a
+      logical line and is followed by an identifier or a string;
+    - `default`, when it is the first token of a logical line and is followed by a string;
+    - `per`, directly after `once`;
+    - `at`, on a line begun by `objective`.
+
+    Scripts keep these words as variable names (`match stage:`); the grammar sees distinct tokens, so LR(1)
+    stays conflict-free.
 
 ---
 
@@ -330,6 +346,7 @@ pub trait Host {
 }
 pub struct HostApi { pub version: u32, pub structs: Vec<HostStruct>, pub events: Vec<String>,
                      pub fns: Vec<HostFn>, pub errors: Vec<HostError> }
+// A method's receiver (`receiver: Some("Player")`) is passed to the host as args[0], before `params`.
 pub struct HostFn { pub namespace: Option<String>, pub receiver: Option<String>, pub name: String,
                     pub params: Vec<(String, HostTy)>, pub ret: HostTy, pub raises: Vec<String>,
                     pub kind: HostFnKind /* Query | Command | Promise */ }
@@ -381,6 +398,12 @@ implementer's; a later task reads them from the code. Diagnostic `code`s (tests 
 `impossible-arm`, `ref-escapes`, `ref-not-place`, `await-not-promise`, `await-in-init`, `not-storable`,
 `unknown-event`, `handler-signature`, `too-many-slots`; warnings `error-typo`, `unreachable-arm`.
 
+Dialogue and quests (decision 19).
+- From the front end (Tasks 18–19): `not-a-step`, `quest-only`, `mixed-dialogue-body`, `jump-target`,
+  `dialogue-signature`, `bark-choice`, `quest-placement`, `bad-decorator`, `duplicate-line-id`.
+- Until Phase 10: `not-yet`.
+- From Phase 10: `role-assign`, `bad-where`, `bad-line-text`, `impure-condition`; the warning `missing-line-id`.
+
 Rendered form (pinned):
 
 ```
@@ -406,8 +429,34 @@ error[recursion]: recursive call cycle: f -> f
   tail of a `let`, an assignment or an expression statement (the block's last expression statement is its value).
 - Construction and patterns take fields by name or by position: `Ledger(owner="ana", entries=[])`,
   `Stage::Accepted(5)`, `raise NotEnough(have=3)`, `case NotEnough(have)`.
-- Top level allows only items (`fn`, `struct`, `impl`, `enum`, `error`, `mod`, `use`, `@on(...) fn`) and `let`,
-  each optionally `pub`.
+- Top level allows only items (`fn`, `struct`, `impl`, `enum`, `error`, `mod`, `use`, `dialogue`, `quest`, decorated
+  `fn` / `dialogue`) and `let`, each optionally `pub`.
+- **Dialogue and quest grammar (spec §5.11–5.13, decision 19).** A dialogue body is **steps**, a grammar of its
+  own (`Steps` / `StepBlock`), not statements. The rules that keep it LR(1) with no conflict:
+  - **Dialogue item:** `Decorator* "pub"? "dialogue" Ident Params ("for" Expr)? ":" Newline Indent (Node | Step)+
+    Dedent`, with `Node = "node" Ident ("when" Cond)? ":" StepBlock`. Nodes mixed with steps are refused by
+    resolve (`mixed-dialogue-body`); a node inside a step block is a `syntax` error.
+  - **Line step:** `(Ident ":")? (Str | FString) LineId? ("when" Cond)? Newline`, with
+    `LineId = "@" Ident ("." Ident)*`. No expression statement exists among steps, so a string at the start of
+    a step is always a line, and the speaker form `Ident ":"` cannot collide with anything.
+  - **Other steps:**
+    - `"choice" ("(" Args ")")? ":" Newline Indent Option+ Dedent`, with
+      `Option = ("once" | "default")? (Str | FString) LineId? ("if" Expr)? (":" StepBlock | Newline)`, or `"default" ":" StepBlock` (the hidden fallback);
+    - `"=>" LineStep-without-Newline ("when" Cond)? (":" StepBlock | Newline)`;
+    - `"when" Cond ":" StepBlock` and `"once" ("per" Expr)? ":" StepBlock`;
+    - `"->" Ident`, `"detour" Ident`, `"emit" Path "(" Args ")"`, `"return"`.
+  - **`Cond = "once" ("per" Expr)? ("if" Expr)? | Expr`.** The language has no conditional expression, so `if`
+    ends a `per` expression and an option's text.
+  - **`not-a-step`:** `parse.rs` maps a `syntax` error inside a step block whose unexpected token begins a
+    statement (`let`, `if`, `while`, `for`, `match`, an identifier followed by `(` or `=`) to `not-a-step`,
+    naming the step forms.
+  - **Quest:** `"quest" Ident ":" Indent QuestMember+ Dedent`, where a member is
+    `role Ident ":" Type ("where" Expr)? Newline`, `let`, `event`, a dialogue, a decorated `fn`, or
+    `stage Ident ":" Indent StageMember+ Dedent`. A stage member is `objective (Str | FString) LineId?
+    ("at" Expr)? Newline`, a dialogue or a decorated `fn`.
+  - **Event item:** `"event" Ident ":" Indent Field+ Dedent`, the same field list as a `struct`.
+  - **`-> Ident`** is also a statement, valid only in a quest handler (a stage change); elsewhere it is
+    `jump-target`.
 - **Parser technology:** tokens come from a `logos`-derived enum (`lex.rs`); a layout pass (`indent.rs`) adds
   `Indent` / `Dedent` / `Newline`, drops newlines inside brackets and splits f-strings; the grammar is
   `grammar.lalrpop` with an `extern` token block over that token stream (LALRPOP's external-lexer interface).
@@ -1191,6 +1240,14 @@ Tests:
 - `strings_and_fstrings` — both quote kinds, every escape, `f"a{x + 1}b{{c}}"` → `[Text("a"), Expr(x + 1), Text("b{c}")]`.
 - `a_megabyte_line_lexes` — 1 MiB of `1 + ` repeated: returns without panic. (Review Focus 2)
 - `render_format` — the block of D10, exactly, and one with a note line (`  = note: …`).
+- `dialogue_tokens` — `=>`, the keywords `dialogue quest choice once when where`, and `@farmer.start` →
+  `At Ident Dot Ident`; `# a comment @x` yields nothing.
+- `contextual_words` — `node start:` → `Node Ident Colon`, but `node = 1` and `match node:` keep `Ident`;
+  `stage Open:`, `role dog: Creature`, `objective "Find" at dog` → `Objective Str AtKw Ident` (`AtKw` is the word `at`; `At` stays the `@` token);
+  `once per p:` → `Once Per Ident Colon`; `let per = 1` keeps `Ident`; `default "Option 1?":` →
+  `Default Str Colon`, but `default = 3` keeps `Ident`; `emit Accepted(player=p)` → `Emit Ident LParen …`,
+  `detour farmer_secret` → `Detour Ident`, `event Accepted:` → `Event Ident Colon`, while `let event = 1` and
+  `emit(x)` keep `Ident`. (Decision 20)
 
 - [ ] **Step 1:** tests. - [ ] **Step 2:** `just quest-test "-p quest-lang --test lex"` → FAIL.
 - [ ] **Step 3:** implement. - [ ] **Step 4:** PASS; `just quest-check`.
@@ -1255,6 +1312,18 @@ Tests:
 - `messages_name_the_expected_token` — a missing `:` after `if x` → `syntax` at the line's end whose message
   names `` `:` `` among the expected tokens; a missing indented block → `syntax` naming `an indented block`.
 - `block_nesting_limit` — 300 nested `if true:` → `too-deep`.
+- `spec_dialogue_and_quest_parse` — the code blocks of spec §5.11 and §5.12, copied in, parse with zero
+  diagnostics. The dump shows the `for farmer` target, `(line npc "…" farmer.start)`, the `choice` with four
+  options (one `once`, one with an `if` guard, one with no block), `(emit Accepted player=p)`, `(jump start)`,
+  `(detour farmer_secret)`, three `node hello` with their `when` conditions, a line group of three, the
+  `event` item, and the quest's roles, stages, objectives, stage dialogue and stage handlers. (Decision 19)
+- `examples_doc_parses` — every quest-script block of `docs/superpowers/specs/2026-11-16-dialogue-examples.md`,
+  copied in, parses with zero diagnostics. That covers `choice(timeout=300):` with a `default` option, a
+  `=>` member with steps, `when cond:` step blocks and `detour` into the same dialogue.
+- `steps_are_not_statements` — `let x = 1`, `if x:` and `give(p, i)` inside a dialogue → `not-a-step`, each
+  naming the step forms; `"hi"` as a statement in a `fn` is an ordinary expression statement.
+- `dialogue_grammar_has_no_conflicts` — the grammar builds with no LALRPOP conflict (the build itself checks
+  it); the dump shows the speaker form and every option form.
 
 - [ ] **Step 1:** tests. - [ ] **Step 2:** `just quest-test "-p quest-lang --test parse_items"` → FAIL.
 - [ ] **Step 3:** implement. - [ ] **Step 4:** PASS; `just quest-check`.
@@ -1286,6 +1355,18 @@ Tests:
 - `duplicates` — two `fn f` in one module, two fields of one name → `duplicate-def`.
 - `host_names` — `world.get`, `say`, `PlayerClicked` resolve; a local named `world` shadows the namespace.
 - `error_names_need_no_import` — `raise ChestEmpty` in one module, `case Err(ChestEmpty)` in another.
+- `dialogue_placement` (decision 19):
+  - `objective` outside a stage, or `role` outside a quest → `quest-only`;
+  - nodes mixed with steps in one dialogue body → `mixed-dialogue-body`;
+  - `-> nowhere` and `detour nowhere` → `jump-target`; `-> Stage` resolves in a quest handler and is
+    `jump-target` in any other `fn`;
+  - `emit Nope()` → `unresolved`; `emit` of a script `event` and of a host event both resolve;
+  - `dialogue d(p: Player)` or `dialogue d(p: Player, npc: Person, x: int)` → `dialogue-signature`;
+  - a `quest` outside the crate root, or two of them → `quest-placement`;
+  - `@pick` on a `fn` or `@on` on a `dialogue` → `bad-decorator`;
+  - two lines with one id in different modules → `duplicate-line-id`.
+- `not_yet_until_phase_10` — `check` on the §5.11 farmer dialogue reports exactly one `not-yet` per dialogue
+  and quest item, and nothing else.
 
 - [ ] **Step 1:** tests. - [ ] **Step 2:** `just quest-test "-p quest-lang --test resolve"` → FAIL.
 - [ ] **Step 3:** implement. - [ ] **Step 4:** PASS; `just quest-check`.
@@ -1777,6 +1858,54 @@ Tests (`determinism.rs`, each `#[cfg_attr(target_arch = "wasm32", wasm_bindgen_t
 
 ---
 
+## Phase 10 — Dialogue and quests (outline; detail it before starting, after the MVP review)
+
+Spec §5.11–5.13; decision 19. Phase 4 already parses and resolves everything here; this phase removes `not-yet`.
+**Dialogue is data the region runs, never VM code** (owner, 2026-11-16): the VM evaluates only pure condition
+functions and runs the handlers that `emit`ted events reach. These are initial-implementation tests of a new
+feature, not the post-MVP regression rule.
+
+- **Task 36: The dialogue graph format (`quest-vm/src/dialogue.rs`).**
+  - `DialogueGraph`: dialogues → nodes → steps (`Line`, `Choice`, `LineGroup`, `When`, `Once`, `Jump`,
+    `Detour`, `Emit`, `Return`), options, group members with their condition-function ids, line ids, the
+    `for` target function and the `@pick` strategy.
+  - Stored in `Program.dialogues`, inside `Program::to_bytes()` / `from_bytes` and its validation (every
+    referenced function id is a pure function of the right arity; hostile bytes → `Err`, never a panic).
+  - `Vm::eval_pure(fn_id, args, fuel) -> Result<WireValue, PureFault>`: runs one pure function with no task,
+    no segment, no commands and no undo-log entries beyond its own locals. Running out of fuel or a fault is
+    an `Err`; the caller treats it as false.
+- **Task 37: Checks.**
+  - Line text is a literal (`bad-line-text`); a speaker is `p`, `npc` or a `Person` / `Player` in scope.
+  - Conditions are `bool`, `timeout` is an `int`, and `emit` arguments match the event's fields.
+  - **Purity** (`impure-condition`) over each condition, substitution, `emit` argument and `for` target,
+    and transitively over the `fn`s they call: no assignment to non-locals, no host command or request, no
+    `emit`, no `await`, no escaping error.
+  - Role types, `role-assign`, and the expression subset a `where` may use (`bad-where`).
+  - Line ids: provisional ids and `missing-line-id`.
+- **Task 38: Lowering.**
+  - Each dialogue becomes a `DialogueGraph` entry. Each condition, substitution, `emit` argument and `for`
+    target becomes a pure function in the `Program`, taking `p`, `npc` and the referenced roles.
+  - Script `event` items become event types in the program's type table, deliverable like host events.
+  - A quest becomes a generated stage enum (a persistent global) and handlers guarded by stage; `-> Stage`
+    is a set plus a return; stage dialogues carry their stage as an extra attachment condition.
+  - The string table is emitted beside the `Program` (`Compiled.lines`).
+- **Task 39: The reference runner (`quest-vm/src/dialogue_run.rs`) and the CLI.**
+  - `Conversation` is the engine-agnostic state machine the game's region code will embed: start (collect
+    attached dialogues, pick the entry), step (lines out, `emit`ted events queued to the VM, choices offered,
+    jumps, detours on an explicit return stack capped by `DIALOGUE_STACK_MAX`), pick, leave, timeout. Its
+    state (and the per-instance pick counts and `once` / `visited` records) is plain data with `StateHash`.
+  - The stub host gains `Talked` / `DialogueEnded` and scripted picks (`StubConfig.picks`).
+  - `quest run --talk <npc>` prints lines and reads picks from stdin; `--picks 1,2,1` is the scripted form;
+    `--roles` gives a quest's role values as wire literals.
+- **Task 40: Corpus.**
+  - Cases: the §5.11 farmer and greeting dialogues; the §5.12 quest, its stage dialogue attached and
+    detached as the stage changes; a detour cycle and a self-detour that end; one that hits
+    `DIALOGUE_STACK_MAX` (`TooDeep`); a condition that faults (counts as false, reported); an `emit` whose
+    handler changes what a later condition sees; an edit that removes the current node (`Edited`).
+  - Goldens for each (lines, events, state hash), reproduced on wasm32.
+
+---
+
 ## Spec coverage
 
 | spec | tasks |
@@ -1789,6 +1918,7 @@ Tests (`determinism.rs`, each `#[cfg_attr(target_arch = "wasm32", wasm_bindgen_t
 | §5.7 errors, faults | 9, 12, 22, 27, 33 |
 | §5.8–5.9 collections, strings, numbers | 5, 6, 9, 10, 21, 26 |
 | §5.10 modules | 19 |
+| §5.11–5.13 dialogue, quests, their lexis | 16, 18, 19 (front end, `not-yet`); 36–40 (Phase 10) |
 | §6.1–6.2 static frames, fuel | 8, 9, 10 |
 | §6.3–6.5 flat memory, VM state, determinism | 2–7, 14, 34 |
 | §6.6 undo, segments, buffered effects | 2, 3, 12, 13, 14, 33 |
