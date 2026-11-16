@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod alloc;
 pub mod consts;
 pub mod hash;
 pub mod layout;

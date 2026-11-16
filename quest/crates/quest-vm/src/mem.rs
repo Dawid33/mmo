@@ -15,6 +15,8 @@ const WORD: u32 = 8;
 pub enum MemError {
     OutOfRange { off: u32 },
     Unaligned { off: u32 },
+    /// Memory that no valid sequence of writes produces (a bad pointer, header or free list).
+    Corrupt { off: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
