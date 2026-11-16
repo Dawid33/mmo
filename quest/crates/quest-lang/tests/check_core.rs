@@ -199,3 +199,25 @@ fn annotations_are_checked() {
         vec![d("type-mismatch", "main.qs", 2)]
     );
 }
+
+/// Regression: a type built step by step through bindings (`let x1 = [x0]`, …) was re-walked in full at
+/// every step — quadratic, 17 s for 4000 steps. It is linear now; the bound is generous.
+#[test]
+fn deep_inferred_types_are_linear() {
+    let steps = 4000;
+    for first in ["[1]", "[]"] {
+        let mut main = format!("fn f():\n    let x0 = {first}\n");
+        for i in 1..steps {
+            main.push_str(&format!("    let x{i} = [x{}]\n", i - 1));
+        }
+        let start = std::time::Instant::now();
+        let found = diags(&[("main.qs", &main)]);
+        let unknown = usize::from(first == "[]");
+        assert_eq!(found.len(), unknown, "{found:?}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "{first}: {:?}",
+            start.elapsed()
+        );
+    }
+}
