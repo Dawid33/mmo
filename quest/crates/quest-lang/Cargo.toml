@@ -10,3 +10,8 @@ workspace = true
 
 [dependencies]
 logos = { workspace = true }
+lalrpop-util = { workspace = true }
+quest-vm = { path = "../quest-vm" }
+
+[build-dependencies]
+lalrpop = { workspace = true }

@@ -1,0 +1,338 @@
+// The quest script grammar (plan D11). LALRPOP generates an LR(1) parser from it at build time; the
+// build fails on any conflict, and none is suppressed.
+//
+// Tokens come from `lex()` (the logos scanner + the layout pass); the location of a token is its index
+// in the token slice, which `parse.rs` maps back to line and column. Every action builds its node
+// through a helper of `parse.rs` that records the node's span and depth and refuses a node deeper than
+// `PARSE_DEPTH_MAX` (`too-deep`).
+//
+// Expression precedence, one tier per level, loosest first:
+//   Expr (`else` fallback) · OrExpr · AndExpr · NotExpr · CmpExpr (not chainable) · SumExpr · ProdExpr ·
+//   Unary (`-` `&` `*`) · PostExpr (`await`) · Plain / Tried (call, `.name`, `[i]`, `[a:b]`; `?`).
+// `::` is part of a path (a primary), not an operator. Types and patterns are separate nonterminals,
+// reached only from their own positions, so `list[int]` never meets indexing.
+
+use crate::ast::{Arg, BinOp, Expr, ExprKind, Path, PatField, PatLit, Pattern, PatternKind, Type, TypeKind, UnOp};
+use crate::lex::{FPart, Tok, Token};
+use crate::parse::{binary, chained, expr, fstring, lit_pat, paren, pat, path_pat, suffix, ty, unary, ParseFail, Suffix};
+
+grammar<'t>(toks: &'t [Token], file: &'t str);
+
+extern {
+    type Location = usize;
+    type Error = ParseFail;
+
+    enum Tok {
+        INDENT => Tok::Indent,
+        DEDENT => Tok::Dedent,
+        NEWLINE => Tok::Newline,
+        EOF => Tok::Eof,
+        "fn" => Tok::Fn,
+        "let" => Tok::Let,
+        "if" => Tok::If,
+        "elif" => Tok::Elif,
+        "else" => Tok::Else,
+        "while" => Tok::While,
+        "for" => Tok::For,
+        "in" => Tok::In,
+        "not" => Tok::Not,
+        "and" => Tok::And,
+        "or" => Tok::Or,
+        "return" => Tok::Return,
+        "break" => Tok::Break,
+        "continue" => Tok::Continue,
+        "pass" => Tok::Pass,
+        "match" => Tok::Match,
+        "case" => Tok::Case,
+        "struct" => Tok::Struct,
+        "impl" => Tok::Impl,
+        "enum" => Tok::Enum,
+        "error" => Tok::Error,
+        "mod" => Tok::Mod,
+        "use" => Tok::Use,
+        "pub" => Tok::Pub,
+        "as" => Tok::As,
+        "raise" => Tok::Raise,
+        "await" => Tok::Await,
+        "self" => Tok::SelfKw,
+        "crate" => Tok::Crate,
+        "super" => Tok::Super,
+        "true" => Tok::True,
+        "false" => Tok::False,
+        "dialogue" => Tok::Dialogue,
+        "quest" => Tok::Quest,
+        "choice" => Tok::Choice,
+        "once" => Tok::Once,
+        "when" => Tok::When,
+        "where" => Tok::Where,
+        "node" => Tok::Node,
+        "stage" => Tok::Stage,
+        "role" => Tok::Role,
+        "objective" => Tok::Objective,
+        "event" => Tok::Event,
+        "emit" => Tok::Emit,
+        "detour" => Tok::Detour,
+        "default" => Tok::Default,
+        "per" => Tok::Per,
+        "at" => Tok::AtKw,
+        "(" => Tok::LParen,
+        ")" => Tok::RParen,
+        "[" => Tok::LBracket,
+        "]" => Tok::RBracket,
+        "{" => Tok::LBrace,
+        "}" => Tok::RBrace,
+        "," => Tok::Comma,
+        ":" => Tok::Colon,
+        "::" => Tok::ColonColon,
+        "." => Tok::Dot,
+        "@" => Tok::At,
+        "=" => Tok::Assign,
+        "==" => Tok::EqEq,
+        "!=" => Tok::NotEq,
+        "<" => Tok::Lt,
+        "<=" => Tok::Le,
+        ">" => Tok::Gt,
+        ">=" => Tok::Ge,
+        "+" => Tok::Plus,
+        "-" => Tok::Minus,
+        "*" => Tok::Star,
+        "/" => Tok::Slash,
+        "%" => Tok::Percent,
+        "&" => Tok::Amp,
+        "|" => Tok::Pipe,
+        "?" => Tok::Question,
+        "->" => Tok::Arrow,
+        "=>" => Tok::FatArrow,
+        NAME => Tok::Ident(<String>),
+        INT => Tok::Int(<i64>),
+        FLOAT => Tok::Float(<f64>),
+        STRING => Tok::Str(<String>),
+        FSTRING => Tok::FString(<Vec<FPart>>),
+    }
+}
+
+// Entry points.
+
+pub ExprEntry: Expr = Expr;
+pub TypeEntry: Type = Type;
+pub PatternEntry: Pattern = Pattern;
+
+// Helpers.
+
+/// Zero or more, separated by commas, with an optional trailing comma.
+Comma<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    },
+};
+
+/// One or more, separated by commas, with an optional trailing comma.
+Comma1<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T> ","? => {
+        v.push(e);
+        v
+    },
+};
+
+PathSeg: String = {
+    NAME,
+    "self" => "self".to_string(),
+    "crate" => "crate".to_string(),
+    "super" => "super".to_string(),
+};
+
+/// A segment after `::`: the dialogue keywords of spec 5.13 (reserved after the module examples of
+/// 5.10 were written: `npc::dialogue`) are names there, where nothing else can follow.
+PathTail: String = {
+    PathSeg,
+    "dialogue" => "dialogue".to_string(),
+    "quest" => "quest".to_string(),
+    "choice" => "choice".to_string(),
+    "once" => "once".to_string(),
+    "when" => "when".to_string(),
+    "where" => "where".to_string(),
+};
+
+Path: Path = {
+    PathSeg => vec![<>],
+    <mut p:Path> "::" <s:PathTail> => {
+        p.push(s);
+        p
+    },
+};
+
+// Expressions.
+
+/// The loosest tier: the error fallback `e else fallback` (right-associative: `a else b else c` tries
+/// `b` when `a` fails, and `c` when `b` does).
+Expr: Expr = {
+    <l:@L> <e:OrExpr> "else" <f:Fallback> <r:@R> =>? expr(toks, l, r, ExprKind::Else(Box::new(e), Box::new(f))),
+    OrExpr,
+};
+
+/// The right side of `else`: a value, or a way out.
+Fallback: Expr = {
+    Expr,
+    <l:@L> "return" <e:Expr?> <r:@R> =>? expr(toks, l, r, ExprKind::Return(e.map(Box::new))),
+    <l:@L> "break" <r:@R> =>? expr(toks, l, r, ExprKind::Break),
+    <l:@L> "continue" <r:@R> =>? expr(toks, l, r, ExprKind::Continue),
+    <l:@L> "raise" <e:OrExpr> <r:@R> =>? expr(toks, l, r, ExprKind::Raise(Box::new(e))),
+};
+
+OrExpr: Expr = {
+    <l:@L> <a:OrExpr> "or" <b:AndExpr> <r:@R> =>? binary(toks, l, r, BinOp::Or, a, b),
+    AndExpr,
+};
+
+AndExpr: Expr = {
+    <l:@L> <a:AndExpr> "and" <b:NotExpr> <r:@R> =>? binary(toks, l, r, BinOp::And, a, b),
+    NotExpr,
+};
+
+NotExpr: Expr = {
+    <l:@L> "not" <e:NotExpr> <r:@R> =>? unary(toks, l, r, UnOp::Not, e),
+    CmpExpr,
+};
+
+/// One comparison at most: a second operator after a comparison is `chained-comparison`.
+CmpExpr: Expr = {
+    SumExpr,
+    Comparison,
+    Comparison <at:@L> CmpOp SumExpr =>? chained(at),
+};
+
+Comparison: Expr = {
+    <l:@L> <a:SumExpr> <op:CmpOp> <b:SumExpr> <r:@R> =>? binary(toks, l, r, op, a, b),
+};
+
+CmpOp: BinOp = {
+    "==" => BinOp::Eq,
+    "!=" => BinOp::Ne,
+    "<" => BinOp::Lt,
+    "<=" => BinOp::Le,
+    ">" => BinOp::Gt,
+    ">=" => BinOp::Ge,
+    "in" => BinOp::In,
+    "not" "in" => BinOp::NotIn,
+};
+
+SumExpr: Expr = {
+    <l:@L> <a:SumExpr> <op:SumOp> <b:ProdExpr> <r:@R> =>? binary(toks, l, r, op, a, b),
+    ProdExpr,
+};
+
+SumOp: BinOp = {
+    "+" => BinOp::Add,
+    "-" => BinOp::Sub,
+};
+
+ProdExpr: Expr = {
+    <l:@L> <a:ProdExpr> <op:ProdOp> <b:Unary> <r:@R> =>? binary(toks, l, r, op, a, b),
+    Unary,
+};
+
+ProdOp: BinOp = {
+    "*" => BinOp::Mul,
+    "/" => BinOp::Div,
+    "%" => BinOp::Rem,
+};
+
+Unary: Expr = {
+    <l:@L> "-" <e:Unary> <r:@R> =>? unary(toks, l, r, UnOp::Neg, e),
+    <l:@L> "&" <e:Unary> <r:@R> =>? unary(toks, l, r, UnOp::Ref, e),
+    <l:@L> "*" <e:Unary> <r:@R> =>? unary(toks, l, r, UnOp::Deref, e),
+    PostExpr,
+};
+
+/// `await` takes a postfix chain without `?` (`Plain`); a `?` after it applies to the awaited result,
+/// and anything after that `?` continues the chain (`Tried`).
+PostExpr: Expr = {
+    Plain,
+    <l:@L> "await" <e:Plain> <r:@R> =>? expr(toks, l, r, ExprKind::Await(Box::new(e))),
+    Tried,
+};
+
+/// A postfix chain that has passed a `?` (or an `await`).
+Tried: Expr = {
+    <l:@L> <e:PostExpr> "?" <r:@R> =>? expr(toks, l, r, ExprKind::Try(Box::new(e))),
+    <l:@L> <e:Tried> <s:Suffix> <r:@R> =>? suffix(toks, l, r, e, s),
+};
+
+/// A postfix chain with no `?` and no `await`.
+Plain: Expr = {
+    Primary,
+    <l:@L> <e:Plain> <s:Suffix> <r:@R> =>? suffix(toks, l, r, e, s),
+};
+
+Suffix: Suffix = {
+    "(" <Comma<Arg>> ")" => Suffix::Call(<>),
+    "." <NAME> => Suffix::Field(<>),
+    "[" <i:Expr> "]" => Suffix::Index(i),
+    "[" <a:Expr?> ":" <b:Expr?> "]" => Suffix::Slice(a, b),
+};
+
+Arg: Arg = {
+    <value:Expr> => Arg { name: None, value },
+    <n:NAME> "=" <value:Expr> => Arg { name: Some(n), value },
+};
+
+Primary: Expr = {
+    <l:@L> <v:INT> <r:@R> =>? expr(toks, l, r, ExprKind::Int(v)),
+    <l:@L> <v:FLOAT> <r:@R> =>? expr(toks, l, r, ExprKind::Float(v)),
+    <l:@L> <v:STRING> <r:@R> =>? expr(toks, l, r, ExprKind::Str(v)),
+    <l:@L> <v:FSTRING> <r:@R> =>? {
+        let kind = fstring(toks, file, l, v)?;
+        expr(toks, l, r, kind)
+    },
+    <l:@L> "true" <r:@R> =>? expr(toks, l, r, ExprKind::Bool(true)),
+    <l:@L> "false" <r:@R> =>? expr(toks, l, r, ExprKind::Bool(false)),
+    <l:@L> <p:Path> <r:@R> =>? expr(toks, l, r, ExprKind::Path(p)),
+    <l:@L> "(" <e:Expr> ")" =>? paren(e, l),
+    <l:@L> "[" <items:Comma<Expr>> "]" <r:@R> =>? expr(toks, l, r, ExprKind::List(items)),
+    <l:@L> "{" <entries:Comma<DictEntry>> "}" <r:@R> =>? expr(toks, l, r, ExprKind::Dict(entries)),
+};
+
+DictEntry: (Expr, Expr) = {
+    <k:Expr> ":" <v:Expr> => (k, v),
+};
+
+// Types.
+
+Type: Type = {
+    <l:@L> "(" ")" <r:@R> =>? ty(toks, l, r, TypeKind::Unit),
+    <l:@L> <p:Path> <r:@R> =>? ty(toks, l, r, TypeKind::Named(p, Vec::new())),
+    <l:@L> <p:Path> "[" <args:Comma1<Type>> "]" <r:@R> =>? ty(toks, l, r, TypeKind::Named(p, args)),
+};
+
+// Patterns.
+
+Pattern: Pattern = {
+    PatSingle,
+    <l:@L> <first:PatSingle> <rest:("|" <PatSingle>)+> <r:@R> =>? {
+        let mut alts = rest;
+        alts.insert(0, first);
+        pat(toks, l, r, PatternKind::Or(alts))
+    },
+};
+
+PatSingle: Pattern = {
+    <l:@L> <p:Path> <r:@R> =>? path_pat(toks, l, r, p),
+    <l:@L> <p:Path> "(" <fields:Comma<PatField>> ")" <r:@R> =>? pat(toks, l, r, PatternKind::Ctor(p, fields)),
+    <l:@L> <v:INT> <r:@R> =>? lit_pat(toks, l, r, PatLit::Int(v)),
+    // The lexer never yields a negative literal, so this negation cannot wrap.
+    <l:@L> "-" <v:INT> <r:@R> =>? lit_pat(toks, l, r, PatLit::Int(v.wrapping_neg())),
+    <l:@L> <v:FLOAT> <r:@R> =>? lit_pat(toks, l, r, PatLit::Float(v)),
+    <l:@L> "-" <v:FLOAT> <r:@R> =>? lit_pat(toks, l, r, PatLit::Float(-v)),
+    <l:@L> <v:STRING> <r:@R> =>? lit_pat(toks, l, r, PatLit::Str(v)),
+    <l:@L> "true" <r:@R> =>? lit_pat(toks, l, r, PatLit::Bool(true)),
+    <l:@L> "false" <r:@R> =>? lit_pat(toks, l, r, PatLit::Bool(false)),
+};
+
+PatField: PatField = {
+    <pattern:Pattern> => PatField { name: None, pattern },
+    <n:NAME> "=" <pattern:Pattern> => PatField { name: Some(n), pattern },
+};
