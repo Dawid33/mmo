@@ -244,10 +244,8 @@ fn render_format() {
 fn dialogue_tokens() {
     use Tok::*;
     assert_eq!(
-        toks("=> dialogue quest choice once when where"),
-        vec![
-            FatArrow, Dialogue, Quest, Choice, Once, When, Where, Newline, Eof
-        ]
+        toks("=> dialogue choice once when where"),
+        vec![FatArrow, Dialogue, Choice, Once, When, Where, Newline, Eof]
     );
     assert_eq!(
         toks("@farmer.start"),
@@ -262,6 +260,22 @@ fn contextual_words() {
     assert_eq!(
         toks("node start:"),
         vec![Node, ident("start"), Colon, Newline, Eof]
+    );
+    assert_eq!(
+        toks("quest Lostdog:"),
+        vec![Quest, ident("Lostdog"), Colon, Newline, Eof]
+    );
+    assert_eq!(
+        toks("pub quest Lostdog:"),
+        vec![Pub, Quest, ident("Lostdog"), Colon, Newline, Eof]
+    );
+    assert_eq!(
+        toks("let quest = 1"),
+        vec![Let, ident("quest"), Assign, Int(1), Newline, Eof]
+    );
+    assert_eq!(
+        toks("&quest.rewards"),
+        vec![Amp, ident("quest"), Dot, ident("rewards"), Newline, Eof]
     );
     assert_eq!(
         toks("node = 1"),

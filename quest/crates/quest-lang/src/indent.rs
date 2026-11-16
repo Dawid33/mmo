@@ -128,6 +128,19 @@ fn contextual_words(out: &mut [Token]) {
         {
             dialogue_header(&mut out[i..]);
         }
+        // A quest header: `quest Name:` or `pub quest Name:`; anywhere else `quest` is a plain name.
+        let header_at = if at_line_start && out[i].kind == Tok::Pub {
+            i + 1
+        } else {
+            i
+        };
+        if (at_line_start || header_at != i)
+            && is_ident(out.get(header_at), "quest")
+            && matches!(out.get(header_at + 1).map(|t| &t.kind), Some(Tok::Ident(_)))
+            && matches!(out.get(header_at + 2).map(|t| &t.kind), Some(Tok::Colon))
+        {
+            out[header_at].kind = Tok::Quest;
+        }
         if at_line_start {
             let Tok::Ident(word) = &out[i].kind else {
                 continue;

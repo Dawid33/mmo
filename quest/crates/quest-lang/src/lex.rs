@@ -176,7 +176,6 @@ enum Raw {
     #[token("true", |_| Tok::True)]
     #[token("false", |_| Tok::False)]
     #[token("dialogue", |_| Tok::Dialogue)]
-    #[token("quest", |_| Tok::Quest)]
     #[token("choice", |_| Tok::Choice)]
     #[token("once", |_| Tok::Once)]
     #[token("when", |_| Tok::When)]

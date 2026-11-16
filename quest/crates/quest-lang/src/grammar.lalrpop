@@ -172,7 +172,6 @@ PathSeg: String = {
 /// (`npc::dialogue`): a path may still name a module so — after `::`, or first when `::` follows.
 Reserved: String = {
     "dialogue" => "dialogue".to_string(),
-    "quest" => "quest".to_string(),
     "choice" => "choice".to_string(),
     "once" => "once".to_string(),
     "when" => "when".to_string(),

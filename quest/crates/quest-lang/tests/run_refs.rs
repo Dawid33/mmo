@@ -89,12 +89,12 @@ fn reference_into_a_place() {
     let main = format!(
         r#"{QUEST}
 fn main():
-    let qu = Quest(name="q", rewards=[Reward(item="a", count=1), Reward(item="b", count=2), Reward(item="c", count=3)])
-    let before = qu
-    let r = &qu.rewards[2]
+    let quest = Quest(name="q", rewards=[Reward(item="a", count=1), Reward(item="b", count=2), Reward(item="c", count=3)])
+    let before = quest
+    let r = &quest.rewards[2]
     r.count = r.count + 4
     r.item = r.item + "!"
-    print(f"{{qu}}")
+    print(f"{{quest}}")
     print(f"{{before.rewards[2]}} {{r.count}}")
 "#
     );
