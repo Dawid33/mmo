@@ -701,6 +701,14 @@ pub fn session_end_reason(error: &game::GameError) -> String {
     }
 }
 
+/// The autopilot's region -> host map (native only); the browser has no autopilot, so its
+/// stand-in is a resource nothing ever inserts.
+#[cfg(not(target_arch = "wasm32"))]
+use super::autopilot::RegionHosts;
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource)]
+pub struct RegionHosts;
+
 pub fn drain_client_updates(
     mut commands: Commands,
     updates: Res<ClientUpdates>,
@@ -713,7 +721,7 @@ pub fn drain_client_updates(
         ResMut<HudStatus>,
         Option<ResMut<super::hud::RegionTickTimes>>,
         Option<ResMut<super::drain_notice::DrainNotice>>,
-        Option<ResMut<super::autopilot::RegionHosts>>,
+        Option<ResMut<RegionHosts>>,
     ),
     mut ui_updates: ResMut<crate::renderer::slint_overlay::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
@@ -882,10 +890,16 @@ pub fn drain_client_updates(
                     drain.remaining_secs = remaining_secs;
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
             ClientUpdateEvent::RegionHosts(hosts) => {
                 if let Some(map) = region_hosts.as_mut() {
                     map.0 = hosts.into_iter().collect();
                 }
+            }
+            // Only the native autopilot reads the region -> host map; the browser never sends it.
+            #[cfg(target_arch = "wasm32")]
+            ClientUpdateEvent::RegionHosts(_) => {
+                let _ = &mut region_hosts;
             }
             ClientUpdateEvent::EmbarkOptions(o) => {
                 history_out.write(HistoryMsg::EmbarkOptions(o))
