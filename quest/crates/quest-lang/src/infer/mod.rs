@@ -573,7 +573,8 @@ impl<'k> Infer<'k> {
     }
 
     /// The end of a body: deferred checks, `needs-annotation` (bindings, then the return type of the
-    /// function `ret_of`, then other expressions), final types.
+    /// function `ret_of`, then other expressions), final types (patterns' too: a variable left there is the
+    /// error type, silently).
     fn finish(&mut self, b: &mut Body, ret_of: Option<DefId>) {
         for c in std::mem::take(&mut b.checks) {
             let ty = self.zonk(c.ty);
@@ -637,11 +638,17 @@ impl<'k> Infer<'k> {
                 *slot = ty;
             }
         }
+        // Errors first: a generic error field a pattern left undecided stays open (`commit_errors`), and is
+        // not fixed to the error type by the defaulting below.
+        self.commit_errors(b);
         for (id, mut info) in std::mem::take(&mut b.patterns) {
+            // A wildcard over an undecided field: no diagnostic, but no variable in `Typed` either.
+            if self.has_var(info.ty) {
+                self.default_vars(info.ty);
+            }
             info.ty = self.zonk(info.ty);
             self.patterns.insert(id, info);
         }
-        self.commit_errors(b);
     }
 
     /// A deferred check of `c.ty` (now `ty`): its diagnostic, if it fails. An unknown type passes (it is

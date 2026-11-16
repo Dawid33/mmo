@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{diagnostics, diags};
+use common::{diagnostics, diags, tree};
 use quest_lang::{Diagnostic, Severity};
 
 /// One expected diagnostic: code, file, line.
@@ -199,6 +199,27 @@ fn give(c: int):
         "{}",
         missing(main)
     );
+
+    // A wildcard as the only use leaves the field undecided: no diagnostic, and no type variable in `Typed`.
+    let main = "fn take(c: int) -> int raises Changed:
+    return c
+
+fn give(c: int):
+    match take(c):
+        case Ok(_):
+            pass
+        case Err(Changed(_)):
+            pass
+";
+    let host = quest_stub::stub_api();
+    let (krate, _) = quest_lang::load_modules(&tree(&[("main.qs", main)]));
+    let (program, _) = quest_lang::resolve(&krate, &host);
+    let (typed, found) = quest_lang::infer(&program, &host);
+    assert!(found.is_empty(), "{found:#?}");
+    assert!(!typed.patterns.is_empty());
+    for info in typed.patterns.values() {
+        assert!(typed.types.is_ground(info.ty), "{info:?}");
+    }
 
     // Against anything else, a name that names nothing is `unresolved`, with its suggestion.
     let main = format!(
