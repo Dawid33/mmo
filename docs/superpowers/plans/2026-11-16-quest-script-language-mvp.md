@@ -344,7 +344,7 @@ pub trait Host {
     fn print(&mut self, text: &str);
     fn report(&mut self, report: Report);
 }
-pub struct HostApi { pub version: u32, pub structs: Vec<HostStruct>, pub events: Vec<String>,
+pub struct HostApi { pub version: u32, pub structs: Vec<HostStruct>, pub events: Vec<HostStruct>,
                      pub fns: Vec<HostFn>, pub errors: Vec<HostError> }
 // A method's receiver (`receiver: Some("Player")`) is passed to the host as args[0], before `params`.
 pub struct HostFn { pub namespace: Option<String>, pub receiver: Option<String>, pub name: String,
