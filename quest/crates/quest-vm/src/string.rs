@@ -59,13 +59,15 @@ pub fn char_len(st: &Store, heap: Heap, v: u64) -> VmResult<u32> {
     u32::try_from(n).map_err(|_| FaultKind::Corrupt)
 }
 
-/// A new string of the parts in order; the parts keep their references.
-pub fn concat(st: &mut Store, heap: Heap, parts: &[u64]) -> VmResult<u64> {
+/// A new string of the parts in order; the parts keep their references. Also returns the payload words
+/// of the result (what was copied).
+pub fn concat(st: &mut Store, heap: Heap, parts: &[u64]) -> VmResult<(u64, u32)> {
     let mut all = Vec::new();
     for &p in parts {
         all.extend_from_slice(&bytes_of(st, heap, p)?);
     }
-    new_bytes(st, heap, &all)
+    let words = u32::try_from(all.len().div_ceil(8)).map_err(|_| FaultKind::HeapFull)?;
+    Ok((new_bytes(st, heap, &all)?, words))
 }
 
 /// Content equality of two string values; `Ok(false)` when either is not a string.

@@ -80,11 +80,12 @@ pub fn set(st: &mut Store, heap: Heap, l: u64, i: i64, v: u64) -> VmResult<()> {
     Ok(())
 }
 
-/// Makes room for one more element; returns the list's pointer (a new block when it grew).
-fn reserve_one(st: &mut Store, heap: Heap, l: u64) -> VmResult<(u32, ObjHeader)> {
+/// Makes room for one more element; returns the list's block (a new one when it grew) and the words the
+/// growth moved and zeroed (elements copied plus the old block's payload).
+fn reserve_one(st: &mut Store, heap: Heap, l: u64) -> VmResult<(u32, ObjHeader, u32)> {
     let (p, h) = unique(st, heap, l)?;
     if h.len < capacity(&h) {
-        return Ok((p, h));
+        return Ok((p, h, 0));
     }
     let class = u32::from(h.class) + 1;
     let q = alloc(st, heap, h.kind, (1u32 << class) - 2)?;
@@ -98,30 +99,33 @@ fn reserve_one(st: &mut Store, heap: Heap, l: u64) -> VmResult<(u32, ObjHeader)>
         write_slot(st, heap, q, &nh, i, w)?;
     }
     heap.free(st, p)?;
-    Ok((q, nh))
+    Ok((q, nh, h.len + capacity(&h)))
 }
 
-pub fn push(st: &mut Store, heap: Heap, l: u64, v: u64) -> VmResult<u64> {
+/// Appends `v`; returns the list pointer and the words a growth moved (0 when it did not grow).
+pub fn push(st: &mut Store, heap: Heap, l: u64, v: u64) -> VmResult<(u64, u32)> {
     let n = len(st, heap, l)?;
     insert(st, heap, l, i64::from(n), v)
 }
 
-/// Inserts at `i` (`0..=len`), shifting the tail right; ownership of `v` moves in.
-pub fn insert(st: &mut Store, heap: Heap, l: u64, i: i64, v: u64) -> VmResult<u64> {
+/// Inserts at `i` (`0..=len`), shifting the tail right; ownership of `v` moves in. Returns the list
+/// pointer and the words shifted plus those a growth moved.
+pub fn insert(st: &mut Store, heap: Heap, l: u64, i: i64, v: u64) -> VmResult<(u64, u32)> {
     let n = len(st, heap, l)?;
     let at = match u32::try_from(i) {
         Ok(at) if at <= n => at,
         _ => return Err(FaultKind::IndexOutOfRange),
     };
-    let (p, mut h) = reserve_one(st, heap, l)?;
+    let (p, mut h, mut work) = reserve_one(st, heap, l)?;
     for j in (at..n).rev() {
         let w = read_slot(st, p, &h, j)?;
         write_slot(st, heap, p, &h, j + 1, w)?;
+        work += 1;
     }
     write_slot(st, heap, p, &h, at, v)?;
     h.len = n + 1;
     write_header(st, heap, p, h)?;
-    Ok(u64::from(p))
+    Ok((u64::from(p), work))
 }
 
 /// Removes the last element and hands it over; `None` when empty.
@@ -137,8 +141,8 @@ pub fn pop(st: &mut Store, heap: Heap, l: u64) -> VmResult<Option<u64>> {
     Ok(Some(v))
 }
 
-/// Removes element `i`, shifting the tail left, and hands it over.
-pub fn remove(st: &mut Store, heap: Heap, l: u64, i: i64) -> VmResult<u64> {
+/// Removes element `i`, shifting the tail left, and hands it over with the words shifted.
+pub fn remove(st: &mut Store, heap: Heap, l: u64, i: i64) -> VmResult<(u64, u32)> {
     let (p, mut h) = unique(st, heap, l)?;
     let at = index(i, h.len)?;
     let v = read_slot(st, p, &h, at)?;
@@ -146,15 +150,16 @@ pub fn remove(st: &mut Store, heap: Heap, l: u64, i: i64) -> VmResult<u64> {
         let w = read_slot(st, p, &h, j)?;
         write_slot(st, heap, p, &h, j - 1, w)?;
     }
+    let work = h.len - 1 - at;
     write_slot(st, heap, p, &h, h.len - 1, 0)?;
     h.len -= 1;
     write_header(st, heap, p, h)?;
-    Ok(v)
+    Ok((v, work))
 }
 
 /// A new list of `l[a..b]`; `b` clamps to `len`, `a >= b` gives an empty list, a negative bound faults.
-/// Elements of a `ListRef` get a reference. `l` need not be unique.
-pub fn slice(st: &mut Store, heap: Heap, l: u64, a: i64, b: i64) -> VmResult<u64> {
+/// Elements of a `ListRef` get a reference. `l` need not be unique. Also returns the words copied.
+pub fn slice(st: &mut Store, heap: Heap, l: u64, a: i64, b: i64) -> VmResult<(u64, u32)> {
     let (p, h) = list(st, heap, l)?;
     if a < 0 || b < 0 {
         return Err(FaultKind::IndexOutOfRange);
@@ -173,7 +178,7 @@ pub fn slice(st: &mut Store, heap: Heap, l: u64, a: i64, b: i64) -> VmResult<u64
             incref(st, heap, w)?;
         }
     }
-    Ok(u64::from(q))
+    Ok((u64::from(q), n))
 }
 
 /// Whether an element equals `v`: identical slots, or (in a `ListRef`) two strings with the same text.

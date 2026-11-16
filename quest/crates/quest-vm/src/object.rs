@@ -15,6 +15,11 @@
 //! * Mutating functions need a unique object (refcount 1; callers `make_unique` first) and return
 //!   `Corrupt` otherwise: a shared object being written is a compiler bug.
 //!
+//! # Reported work
+//! A function that copies, moves or zeroes a block of unbounded size returns the work next to its result:
+//! the `u32` is the number of words this call copied, moved or zeroed; callers charge fuel for it
+//! (design D6, `ceil(words / 8)`).
+//!
 //! # The zombie list
 //! `release` of the last reference does not free anything. It links the block into an intrusive list whose
 //! head is the allocator header's zombie word. A zombie keeps its kind, class, `len`, `aux` and payload (the
@@ -105,6 +110,16 @@ pub(crate) fn write_header(st: &mut Store, heap: Heap, p: u32, h: ObjHeader) -> 
     Ok(heap.set_header(st, p, h)?)
 }
 
+/// An `Obj` header read from memory: at most `STRUCT_FIELDS_MAX` fields, ref bits only on existing fields.
+/// Everything that shifts by a field index relies on this.
+pub(crate) fn check_obj_shape(h: &ObjHeader) -> VmResult<()> {
+    let n = h.len as usize;
+    if n > STRUCT_FIELDS_MAX || (n < 32 && h.aux >> n != 0) {
+        return Err(FaultKind::Corrupt);
+    }
+    Ok(())
+}
+
 /// The object must be unique (refcount 1).
 pub(crate) fn require_unique(h: &ObjHeader) -> VmResult<()> {
     if h.refcount == 1 {
@@ -151,17 +166,19 @@ pub fn release(st: &mut Store, heap: Heap, v: u64) -> VmResult<()> {
 
 // ---- the reaper --------------------------------------------------------------------------------------
 
-/// One bounded step of deferred freeing. `false`: there was no zombie.
-pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<bool> {
+/// One bounded step of deferred freeing. `None`: there was no zombie. `Some(words)`: a step ran and
+/// released that many child slots plus zeroed the payload of the block it freed (if it freed one).
+pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<Option<u32>> {
     let head = heap.zombie_head(st)?;
     if head == 0 {
-        return Ok(false);
+        return Ok(None);
     }
     let p = ptr_of(head)?;
     let mut h = heap.header(st, p)?;
     // The one place later tasks extend: a kind with children of its own (`Dict`, `RefPath`, `Parked`).
     match h.kind {
-        Kind::Str | Kind::ListImm | Kind::Raw | Kind::ListRef | Kind::Obj => {}
+        Kind::Str | Kind::ListImm | Kind::Raw | Kind::ListRef => {}
+        Kind::Obj => check_obj_shape(&h)?,
         Kind::Dict | Kind::RefPath | Kind::Parked => {
             let _ = maps;
             return Err(FaultKind::Corrupt);
@@ -171,6 +188,7 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<b
     // Pop it: children released below are linked ahead of the next zombie, not ahead of this one.
     heap.set_zombie_head(st, u64::from(h.refcount))?;
     let mut budget = REAP_CHILDREN_MAX;
+    let mut work = 0u32;
     match h.kind {
         Kind::ListRef => {
             while budget > 0 && h.len > 0 {
@@ -178,6 +196,7 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<b
                 h.len -= 1;
                 release(st, heap, child)?;
                 budget -= 1;
+                work += 1;
             }
         }
         Kind::Obj => {
@@ -190,6 +209,7 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<b
                 h.aux &= h.aux - 1;
                 release(st, heap, child)?;
                 budget -= 1;
+                work += 1;
             }
         }
         _ => {}
@@ -201,12 +221,13 @@ pub fn reap_step(st: &mut Store, heap: Heap, maps: &dyn FrameMaps) -> VmResult<b
     };
     if done {
         heap.free(st, p)?;
+        work += capacity(&h);
     } else {
         h.refcount = u32::try_from(heap.zombie_head(st)?).map_err(|_| FaultKind::Corrupt)?;
         write_header(st, heap, p, h)?;
         heap.set_zombie_head(st, u64::from(p))?;
     }
-    Ok(true)
+    Ok(Some(work))
 }
 
 // ---- copy-on-write -----------------------------------------------------------------------------------
@@ -227,7 +248,11 @@ pub fn make_unique(st: &mut Store, heap: Heap, v: u64) -> VmResult<(u64, u32)> {
     // Words in use, and whether they are references (`Dict`, `RefPath`, `Parked`: later tasks).
     let words = match h.kind {
         Kind::Str => h.len.div_ceil(WORD),
-        Kind::ListImm | Kind::ListRef | Kind::Raw | Kind::Obj => h.len,
+        Kind::ListImm | Kind::ListRef | Kind::Raw => h.len,
+        Kind::Obj => {
+            check_obj_shape(&h)?;
+            h.len
+        }
         Kind::Dict | Kind::RefPath | Kind::Parked | Kind::Free => return Err(FaultKind::Corrupt),
     };
     if words > capacity(&h) {
@@ -269,6 +294,7 @@ pub mod obj {
         if h.kind != Kind::Obj {
             return Err(FaultKind::Corrupt);
         }
+        check_obj_shape(&h)?;
         Ok((p, h))
     }
 

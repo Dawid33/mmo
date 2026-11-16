@@ -30,7 +30,7 @@ fn setup() -> (Store, Heap) {
 
 fn reap_all(st: &mut Store, h: Heap) -> u32 {
     let mut steps = 0;
-    while reap_step(st, h, &NoFrames).unwrap() {
+    while reap_step(st, h, &NoFrames).unwrap().is_some() {
         steps += 1;
     }
     steps
@@ -45,7 +45,7 @@ fn ints(st: &Store, h: Heap, l: u64) -> Vec<i64> {
 fn int_list(st: &mut Store, h: Heap, xs: &[i64]) -> u64 {
     let mut l = list::new(st, h, false).unwrap();
     for &x in xs {
-        l = list::push(st, h, l, x as u64).unwrap();
+        l = list::push(st, h, l, x as u64).unwrap().0;
     }
     l
 }
@@ -59,7 +59,7 @@ fn cow_copy_is_independent() {
     let (b2, copied) = make_unique(&mut st, h, b).unwrap();
     assert_ne!(b2, a);
     assert_eq!(copied, 2);
-    let b2 = list::push(&mut st, h, b2, 3).unwrap();
+    let b2 = list::push(&mut st, h, b2, 3).unwrap().0;
     assert_eq!(ints(&st, h, a), vec![1, 2]);
     assert_eq!(ints(&st, h, b2), vec![1, 2, 3]);
     assert_eq!(h.header(&st, a as u32).unwrap().refcount, 1);
@@ -96,9 +96,9 @@ fn release_of_nested_value_frees_everything() {
         let mut inner = list::new(&mut st, h, true).unwrap();
         for j in 0..3 {
             let s = string::new(&mut st, h, &format!("s{i}-{j}")).unwrap();
-            inner = list::push(&mut st, h, inner, s).unwrap();
+            inner = list::push(&mut st, h, inner, s).unwrap().0;
         }
-        outer = list::push(&mut st, h, outer, inner).unwrap();
+        outer = list::push(&mut st, h, outer, inner).unwrap().0;
     }
     assert!(h.used_words(&st).unwrap() > base);
     release(&mut st, h, outer).unwrap();
@@ -114,14 +114,23 @@ fn reap_is_bounded() {
     let mut l = list::new(&mut st, h, true).unwrap();
     for i in 0..1000 {
         let s = string::new(&mut st, h, &format!("{i}")).unwrap();
-        l = list::push(&mut st, h, l, s).unwrap();
+        l = list::push(&mut st, h, l, s).unwrap().0;
     }
-    let used = h.used_words(&st).unwrap();
     release(&mut st, h, l).unwrap();
-    assert!(reap_step(&mut st, h, &NoFrames).unwrap());
-    let freed_words = used - h.used_words(&st).unwrap();
-    // A string "0".."999" is a 2-word-header + 1-word block = class 2 = 4 words.
-    assert!(freed_words <= REAP_CHILDREN_MAX as u32 * 4, "{freed_words}");
+    let work = reap_step(&mut st, h, &NoFrames).unwrap().unwrap();
+    // Sixteen child slots released; the parent is not done, so no payload was zeroed.
+    assert_eq!(work, REAP_CHILDREN_MAX as u32);
+    // The parent is back at the head with its cursor advanced by exactly the budget...
+    let mut at = h.zombie_head(&st).unwrap() as u32;
+    let parent = h.header(&st, at).unwrap();
+    assert_eq!(parent.len, 1000 - REAP_CHILDREN_MAX as u32);
+    // ...and the zombie list is the parent plus exactly the children released.
+    let mut zombies = 0;
+    while at != 0 {
+        zombies += 1;
+        at = h.header(&st, at).unwrap().refcount;
+    }
+    assert_eq!(zombies, 1 + REAP_CHILDREN_MAX);
     // Running on to the end still frees all of it.
     reap_all(&mut st, h);
     let (st2, h2) = setup();
@@ -131,7 +140,7 @@ fn reap_is_bounded() {
 #[test]
 fn reap_with_no_zombies_is_false() {
     let (mut st, h) = setup();
-    assert!(!reap_step(&mut st, h, &NoFrames).unwrap());
+    assert!(reap_step(&mut st, h, &NoFrames).unwrap().is_none());
 }
 
 #[test]
@@ -144,7 +153,7 @@ fn string_roundtrip_utf8() {
     assert_eq!(string::read(&st, h, s).unwrap(), t);
     let e = string::new(&mut st, h, "").unwrap();
     assert_eq!(string::read(&st, h, e).unwrap(), "");
-    let c = string::concat(&mut st, h, &[s, e, s]).unwrap();
+    let c = string::concat(&mut st, h, &[s, e, s]).unwrap().0;
     assert_eq!(string::read(&st, h, c).unwrap(), format!("{t}{t}"));
     assert_eq!(string::read(&st, h, s).unwrap(), t);
 }
@@ -200,8 +209,8 @@ fn list_grows_across_classes_and_keeps_order() {
     let xs: Vec<i64> = (0..200).collect();
     let l = int_list(&mut st, h, &xs);
     assert_eq!(ints(&st, h, l), xs);
-    let l = list::insert(&mut st, h, l, 0, (-1i64) as u64).unwrap();
-    assert_eq!(list::remove(&mut st, h, l, 1).unwrap(), 0);
+    let l = list::insert(&mut st, h, l, 0, (-1i64) as u64).unwrap().0;
+    assert_eq!(list::remove(&mut st, h, l, 1).unwrap().0, 0);
     assert_eq!(list::get(&st, h, l, 0).unwrap() as i64, -1);
     assert!(list::contains(&st, h, l, 199).unwrap());
     assert!(!list::contains(&st, h, l, 200).unwrap());
@@ -211,11 +220,11 @@ fn list_grows_across_classes_and_keeps_order() {
 fn slice_clamps() {
     let (mut st, h) = setup();
     let l = int_list(&mut st, h, &[1, 2, 3, 4]);
-    let s = list::slice(&mut st, h, l, 1, 10).unwrap();
+    let s = list::slice(&mut st, h, l, 1, 10).unwrap().0;
     assert_eq!(ints(&st, h, s), vec![2, 3, 4]);
-    let s = list::slice(&mut st, h, l, 3, 1).unwrap();
+    let s = list::slice(&mut st, h, l, 3, 1).unwrap().0;
     assert_eq!(ints(&st, h, s), Vec::<i64>::new());
-    let s = list::slice(&mut st, h, l, 9, 12).unwrap();
+    let s = list::slice(&mut st, h, l, 9, 12).unwrap().0;
     assert_eq!(ints(&st, h, s), Vec::<i64>::new());
     assert_eq!(
         list::slice(&mut st, h, l, -1, 2),
@@ -233,8 +242,8 @@ fn slice_of_refs_shares_elements() {
     let base = h.used_words(&st).unwrap();
     let s = string::new(&mut st, h, "x").unwrap();
     let l = list::new(&mut st, h, true).unwrap();
-    let l = list::push(&mut st, h, l, s).unwrap();
-    let sl = list::slice(&mut st, h, l, 0, 1).unwrap();
+    let l = list::push(&mut st, h, l, s).unwrap().0;
+    let sl = list::slice(&mut st, h, l, 0, 1).unwrap().0;
     assert_eq!(h.header(&st, s as u32).unwrap().refcount, 2);
     release(&mut st, h, l).unwrap();
     release(&mut st, h, sl).unwrap();
@@ -249,7 +258,7 @@ fn list_set_take_pop_ownership() {
     let a = string::new(&mut st, h, "a").unwrap();
     let b = string::new(&mut st, h, "b").unwrap();
     let l = list::new(&mut st, h, true).unwrap();
-    let l = list::push(&mut st, h, l, a).unwrap();
+    let l = list::push(&mut st, h, l, a).unwrap().0;
     // take moves the element out, leaving an empty slot.
     let got = list::take(&mut st, h, l, 0).unwrap();
     assert_eq!(got, a);
@@ -283,9 +292,75 @@ fn struct_fields_and_ref_bits() {
     assert_eq!(obj::get_field(&st, h, o, 2), Err(FaultKind::Corrupt));
     assert_eq!(h.header(&st, o as u32).unwrap().kind, Kind::Obj);
     // Field 0 holds 12345-ish bits that look like nothing; release touches the string only.
+    // Field 0 is not a ref field: it may hold anything, even a pointer-shaped value.
+    let t = string::new(&mut st, h, "bystander").unwrap();
+    obj::set_field(&mut st, h, o, 0, t).unwrap();
     release(&mut st, h, o).unwrap();
     reap_all(&mut st, h);
+    // Only the marked field's string was released; `t` was never counted by the object.
+    assert_eq!(h.header(&st, t as u32).unwrap().refcount, 1);
+    assert_eq!(string::read(&st, h, t).unwrap(), "bystander");
+    release(&mut st, h, t).unwrap();
+    reap_all(&mut st, h);
     assert_eq!(h.used_words(&st).unwrap(), base);
+}
+
+#[test]
+fn corrupt_field_count_cannot_panic() {
+    let (mut st, h) = setup();
+    let p = h.alloc(&mut st, Kind::Obj, 60).unwrap().unwrap();
+    let mut hd = h.header(&st, p).unwrap();
+    hd.len = 40;
+    h.set_header(&mut st, p, hd).unwrap();
+    let o = u64::from(p);
+    assert_eq!(
+        obj::set_field(&mut st, h, o, 40, 1),
+        Err(FaultKind::Corrupt)
+    );
+    assert_eq!(obj::get_field(&st, h, o, 0), Err(FaultKind::Corrupt));
+    assert_eq!(make_unique(&mut st, h, o), Ok((o, 0)));
+    // Ref bits beyond the field count are refused as well.
+    hd.len = 2;
+    hd.aux = 0b100;
+    h.set_header(&mut st, p, hd).unwrap();
+    assert_eq!(obj::get_field(&st, h, o, 0), Err(FaultKind::Corrupt));
+    release(&mut st, h, o).unwrap();
+    assert_eq!(reap_step(&mut st, h, &NoFrames), Err(FaultKind::Corrupt));
+}
+
+#[test]
+fn reported_work_is_the_real_work() {
+    let (mut st, h) = setup();
+    // A fresh list has 4 payload words: a block of 6 words total, class 3 holds 6 elements.
+    let mut l = list::new(&mut st, h, false).unwrap();
+    let cap = 6;
+    for i in 0..cap {
+        let (n, w) = list::push(&mut st, h, l, i).unwrap();
+        assert_eq!(w, 0);
+        l = n;
+    }
+    // The seventh element grows class 3 -> class 4: six elements moved, the old six-word payload zeroed.
+    let (l2, w) = list::push(&mut st, h, l, 6).unwrap();
+    assert_eq!(w, 6 + 6);
+    assert_ne!(l2, l);
+    // Insert at the front of seven elements shifts seven words, no growth.
+    let (l2, w) = list::insert(&mut st, h, l2, 0, 99).unwrap();
+    assert_eq!(w, 7);
+    // Remove at index 1 of eight shifts six words.
+    assert_eq!(list::remove(&mut st, h, l2, 1).unwrap().1, 6);
+    let (_, w) = list::slice(&mut st, h, l2, 2, 5).unwrap();
+    assert_eq!(w, 3);
+    let s = string::new(&mut st, h, "0123456789").unwrap();
+    assert_eq!(string::concat(&mut st, h, &[s, s]).unwrap().1, 3);
+    // Reaping a list of two strings: two child slots, then the freed block's payload (class 3 = 6 words)
+    // on the step that finishes it.
+    let mut l = list::new(&mut st, h, true).unwrap();
+    for _ in 0..2 {
+        let s = string::new(&mut st, h, "x").unwrap();
+        l = list::push(&mut st, h, l, s).unwrap().0;
+    }
+    release(&mut st, h, l).unwrap();
+    assert_eq!(reap_step(&mut st, h, &NoFrames).unwrap(), Some(2 + 6));
 }
 
 #[test]
@@ -331,7 +406,7 @@ fn heap_full_inside_growth_is_a_fault() {
     let mut fault = None;
     for i in 0..100_000u64 {
         match list::push(&mut st, h, l, i) {
-            Ok(n) => l = n,
+            Ok(n) => l = n.0,
             Err(e) => {
                 fault = Some(e);
                 break;
@@ -353,10 +428,10 @@ fn pause_survives_abort_and_rollback() {
     let mut l = list::new(&mut st, h, true).unwrap();
     for i in 0..40 {
         let s = string::new(&mut st, h, &format!("{i}")).unwrap();
-        l = list::push(&mut st, h, l, s).unwrap();
+        l = list::push(&mut st, h, l, s).unwrap().0;
     }
     release(&mut st, h, l).unwrap();
-    assert!(reap_step(&mut st, h, &NoFrames).unwrap());
+    assert!(reap_step(&mut st, h, &NoFrames).unwrap().is_some());
     st.mem.clear_log();
     let cp = st.mem.checkpoint();
     let before = st.mem.bytes().to_vec();
@@ -455,7 +530,7 @@ proptest! {
             cur = u;
             match o {
                 Op::Push(v) => {
-                    cur = list::push(&mut st, h, cur, v as u64).unwrap();
+                    cur = list::push(&mut st, h, cur, v as u64).unwrap().0;
                     model.push(v);
                 }
                 Op::Pop => {
@@ -464,13 +539,13 @@ proptest! {
                 }
                 Op::Insert(i, v) => {
                     let i = i % (model.len() + 1);
-                    cur = list::insert(&mut st, h, cur, i as i64, v as u64).unwrap();
+                    cur = list::insert(&mut st, h, cur, i as i64, v as u64).unwrap().0;
                     model.insert(i, v);
                 }
                 Op::Remove(i) => {
                     if !model.is_empty() {
                         let i = i % model.len();
-                        prop_assert_eq!(list::remove(&mut st, h, cur, i as i64).unwrap() as i64, model.remove(i));
+                        prop_assert_eq!(list::remove(&mut st, h, cur, i as i64).unwrap().0 as i64, model.remove(i));
                     }
                 }
                 Op::Set(i, v) => {
