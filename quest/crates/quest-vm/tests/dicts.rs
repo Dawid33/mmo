@@ -382,7 +382,7 @@ fn deep_eq_cases() {
             .unwrap()
             .0
     );
-    // Dicts: same entries in the same order.
+    // Dicts: the same entries, in any order.
     let mk = |st: &mut Store, es: &[(u64, u64)]| {
         let d = dict::new(st, h, false, false).unwrap();
         for &(k, v) in es {
@@ -395,6 +395,8 @@ fn deep_eq_cases() {
     let d3 = mk(&mut st, &[(1, 1), (2, 3)]);
     let d4 = mk(&mut st, &[(1, 1)]);
     assert!(deep_eq(&st, h, d1, d2, true).unwrap().0);
+    let swapped = mk(&mut st, &[(2, 2), (1, 1)]);
+    assert!(deep_eq(&st, h, d1, swapped, true).unwrap().0);
     assert!(!deep_eq(&st, h, d1, d3, true).unwrap().0);
     assert!(!deep_eq(&st, h, d1, d4, true).unwrap().0);
     // A tombstone does not matter.

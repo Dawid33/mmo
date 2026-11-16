@@ -4,9 +4,9 @@
 //! Immediates compare by bits (a canonical NaN equals itself, `0.0 != -0.0`). Heap values of the same
 //! kind compare by content: `Str` by bytes; `ListImm` / `ListRef` by length, then element by element;
 //! `Obj` by tag, field count, then field by field (the `aux` bitmap says which fields are heap kinds);
-//! `Dict` by live length, then the live entries in insertion order (same keys in the same order with equal
-//! values). Different kinds are unequal. Two identical slots are equal without a walk. Nesting is capped
-//! at `WIRE_DEPTH_MAX`: deeper is `Corrupt` (valid memory has no cycles and the compiler bounds types).
+//! `Dict` by live length, then every key of one found in the other with an equal value (insertion order is
+//! ignored: `{a:1, b:2} == {b:2, a:1}`). Different kinds are unequal. Two identical slots are equal without a walk. Nesting is capped
+//! at `WIRE_DEPTH_MAX`: deeper is `Corrupt` (unreachable from valid memory: the compiler rejects recursive user types and types nested deeper than 32, and memory has no cycles).
 //!
 //! # Key hash
 //! [`key_hash`] is FNV-1a 64 ([`Fnv64`]) over a type-tagged walk of the key (this replaces design D4's
@@ -156,43 +156,9 @@ fn dict_eq(
     depth: usize,
     work: &mut Walk,
 ) -> VmResult<bool> {
-    if dict::len(st, heap, a)? != dict::len(st, heap, b)? {
-        return Ok(false);
-    }
-    let (keys_ref, vals_ref) = dict::flags(st, heap, a)?;
-    if (keys_ref, vals_ref) != dict::flags(st, heap, b)? {
-        return Ok(false);
-    }
-    let (mut pa, mut pb) = (0i64, 0i64);
-    loop {
-        let (na, wa) = dict::next(st, heap, a, pa)?;
-        let (nb, wb) = dict::next(st, heap, b, pb)?;
-        work.charge(wa)?;
-        work.charge(wb)?;
-        if na < 0 || nb < 0 {
-            // Equal live counts: both ran out together, or the memory is inconsistent.
-            return if na < 0 && nb < 0 {
-                Ok(true)
-            } else {
-                Err(FaultKind::Corrupt)
-            };
-        }
-        let (ka, kb) = (
-            dict::key_at(st, heap, a, na)?,
-            dict::key_at(st, heap, b, nb)?,
-        );
-        if !eq(st, heap, ka, kb, keys_ref, depth, work)? {
-            return Ok(false);
-        }
-        let (va, vb) = (
-            dict::val_at(st, heap, a, na)?,
-            dict::val_at(st, heap, b, nb)?,
-        );
-        if !eq(st, heap, va, vb, vals_ref, depth, work)? {
-            return Ok(false);
-        }
-        (pa, pb) = (na + 1, nb + 1);
-    }
+    dict::equal(st, heap, a, b, work, &mut |x, y, refs, walk| {
+        eq(st, heap, x, y, refs, depth, walk)
+    })
 }
 
 /// The hash of a dict key (see the module docs for the definition). `is_ref`: the key slot is a heap kind.

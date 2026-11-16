@@ -277,12 +277,6 @@ pub fn len(st: &Store, heap: Heap, d: u64) -> VmResult<u32> {
     Ok(open(st, heap, d)?.h.len)
 }
 
-/// Whether keys / values are heap kinds.
-pub(crate) fn flags(st: &Store, heap: Heap, d: u64) -> VmResult<(bool, bool)> {
-    let dd = open(st, heap, d)?;
-    Ok((dd.keys_ref(), dd.vals_ref()))
-}
-
 /// The raw value stored under `key`; no refcount changes.
 pub fn get(st: &Store, heap: Heap, d: u64, key: u64) -> VmResult<(Option<u64>, u32)> {
     let dd = open(st, heap, d)?;
@@ -466,6 +460,39 @@ fn collect(st: &mut Store, heap: Heap, d: u64, field: u32) -> VmResult<(u64, u32
         work = work.saturating_add(w).saturating_add(1);
     }
     Ok((l, work))
+}
+
+/// Order-insensitive equality: the same live count, and every key of `a` found in `b` (by the stored hash
+/// and `deep_eq`) with a value `val_eq` accepts (called as `(a's value, b's value, values are heap kinds)`).
+/// Everything charges the caller's `walk`.
+pub(crate) fn equal(
+    st: &Store,
+    heap: Heap,
+    a: u64,
+    b: u64,
+    walk: &mut Walk,
+    val_eq: &mut dyn FnMut(u64, u64, bool, &mut Walk) -> VmResult<bool>,
+) -> VmResult<bool> {
+    let (da, db) = (open(st, heap, a)?, open(st, heap, b)?);
+    if da.h.len != db.h.len || da.h.aux != db.h.aux {
+        return Ok(false);
+    }
+    for pos in 0..da.used {
+        walk.charge(1)?;
+        let hw = da.eread(st, pos, E_HASH)?;
+        if hw == 0 {
+            continue;
+        }
+        let key = da.eread(st, pos, E_KEY)?;
+        let Some(q) = db.find(st, heap, key, hw, walk)? else {
+            return Ok(false);
+        };
+        let (x, y) = (da.eread(st, pos, E_VAL)?, db.eread(st, q, E_VAL)?);
+        if !val_eq(x, y, da.vals_ref(), walk)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A new list of the keys in iteration order (heap-kind keys get a reference); also the work.
