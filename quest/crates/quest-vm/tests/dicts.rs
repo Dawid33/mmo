@@ -178,10 +178,7 @@ fn missing_key_get_is_none() {
     assert_eq!(dict::take(&mut st, h, d, 5).unwrap().0, None);
     assert!(!dict::contains(&st, h, d, 5).unwrap().0);
     assert_eq!(dict::next(&st, h, d, 0).unwrap().0, -1);
-    assert_eq!(
-        dict::key_at(&st, h, d, 0).unwrap_err(),
-        FaultKind::IndexOutOfRange
-    );
+    assert_eq!(dict::key_at(&st, h, d, 0).unwrap_err(), FaultKind::Corrupt);
 }
 
 #[test]
@@ -444,6 +441,120 @@ fn list_contains_is_structural() {
 
 fn pair_of_ints(st: &mut Store, h: Heap) -> u64 {
     pair(st, h, 4, "q")
+}
+
+/// `c_0 = []`, `c_{i+1} = [c_i, c_i]`: 2^depth leaves when walked as a tree.
+fn shared_chain(st: &mut Store, h: Heap, depth: usize) -> u64 {
+    let mut c = list::new(st, h, false).unwrap();
+    for _ in 0..depth {
+        incref(st, h, c).unwrap();
+        let l = list::new(st, h, true).unwrap();
+        let (l, _) = list::push(st, h, l, c).unwrap();
+        c = list::push(st, h, l, c).unwrap().0;
+    }
+    c
+}
+
+#[test]
+fn shared_sublists_cannot_stall_a_walk() {
+    let (mut st, h) = setup();
+    // Depth 30 is within WIRE_DEPTH_MAX: 2^30 leaves as a tree.
+    let a = shared_chain(&mut st, h, 30);
+    let b = shared_chain(&mut st, h, 30);
+    let t = std::time::Instant::now();
+    assert_eq!(
+        deep_eq(&st, h, a, b, true).unwrap_err(),
+        FaultKind::ValueTooLarge
+    );
+    assert_eq!(
+        key_hash(&st, h, a, true).unwrap_err(),
+        FaultKind::ValueTooLarge
+    );
+    let l = list::new(&mut st, h, true).unwrap();
+    let (l, _) = list::push(&mut st, h, l, a).unwrap();
+    assert_eq!(
+        list::contains(&st, h, l, b).unwrap_err(),
+        FaultKind::ValueTooLarge
+    );
+    let d = dict::new(&mut st, h, true, false).unwrap();
+    assert_eq!(
+        dict::get(&st, h, d, a).unwrap_err(),
+        FaultKind::ValueTooLarge
+    );
+    assert!(t.elapsed().as_secs_f64() < 1.0);
+    // Work that fits is reported and stays under the cap.
+    let (a, b) = (shared_chain(&mut st, h, 8), shared_chain(&mut st, h, 8));
+    let (eq, work) = deep_eq(&st, h, a, b, true).unwrap();
+    assert!(eq && work > 256 && work <= quest_vm::consts::WORK_WORDS_MAX);
+}
+
+#[test]
+fn a_walk_that_inserts_sees_every_entry_across_a_compaction() {
+    let (mut st, h) = setup();
+    // [dead, A, B, C] fills the first block (4 words/entry: 3 entries), so build with a spare: the first
+    // class holds 3, so use a dead, A, B and let the insert of C and D trigger the compaction.
+    let d = int_dict(&mut st, h);
+    for k in [100, 1, 2] {
+        put(&mut st, h, d, k, k);
+    }
+    dict::remove(&mut st, h, d, 100).unwrap();
+    // Now [dead, A=1, B=2], one position left.
+    let mut seen = vec![];
+    let mut pos = 0;
+    loop {
+        let (s, _) = dict::next(&st, h, d, pos).unwrap();
+        if s < 0 {
+            break;
+        }
+        let k = dict::key_at(&st, h, d, s).unwrap();
+        seen.push(k);
+        if k == 1 {
+            // Fills the block (3 -> a compaction on the next insert), then one more triggers it.
+            put(&mut st, h, d, 3, 3);
+            put(&mut st, h, d, 4, 4);
+        }
+        pos = s + 1;
+    }
+    assert_eq!(seen, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn a_walk_survives_growth_and_compaction_in_the_middle() {
+    let (mut st, h) = setup_sized(1 << 20);
+    let d = int_dict(&mut st, h);
+    for k in 0..100u64 {
+        put(&mut st, h, d, k, k);
+    }
+    for k in (0..100u64).step_by(3) {
+        dict::remove(&mut st, h, d, k).unwrap();
+    }
+    let expected: Vec<u64> = (0..100).filter(|k| k % 3 != 0).chain(1000..1300).collect();
+    let mut seen = vec![];
+    let mut pos = 0;
+    let mut next_key = 1000;
+    loop {
+        let (s, _) = dict::next(&st, h, d, pos).unwrap();
+        if s < 0 {
+            break;
+        }
+        let k = dict::key_at(&st, h, d, s).unwrap();
+        seen.push(k);
+        // Every few steps append a new key and remove an old one already visited: growth and
+        // compaction happen under the walk.
+        if seen.len() % 5 == 0 && next_key < 1300 {
+            for _ in 0..6 {
+                put(&mut st, h, d, next_key, next_key);
+                next_key += 1;
+            }
+            dict::remove(&mut st, h, d, k).unwrap();
+        }
+        pos = s + 1;
+    }
+    let mut want = expected.clone();
+    want.retain(|k| seen.contains(k));
+    assert_eq!(seen, want);
+    assert_eq!(seen.iter().filter(|k| **k >= 1000).count(), 300);
+    assert_eq!(seen.iter().filter(|k| **k < 1000).count(), 66);
 }
 
 #[derive(Clone, Debug)]

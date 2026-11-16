@@ -22,9 +22,12 @@
 //!
 //! # Reported work
 //! Both return the number of words compared or hashed next to the result; callers charge fuel for it.
+//! A value can share sublists (valid memory is a DAG), so a walk can be exponential in its depth: every
+//! walk carries a [`Walk`] budget of `WORK_WORDS_MAX` words and fails with `ValueTooLarge` the moment it
+//! is exceeded, so the reported work is always at most `WORK_WORDS_MAX`.
 
 use crate::alloc::{Heap, Kind};
-use crate::consts::WIRE_DEPTH_MAX;
+use crate::consts::{WIRE_DEPTH_MAX, WORK_WORDS_MAX};
 use crate::dict;
 use crate::fault::{FaultKind, VmResult};
 use crate::hash::Fnv64;
@@ -38,8 +41,23 @@ const T_STR: u8 = 1;
 const T_LIST: u8 = 2;
 const T_OBJ: u8 = 3;
 
-fn tick(work: &mut u32, n: u32) {
-    *work = work.saturating_add(n);
+/// The words one structural walk has visited. One per top-level call (a lookup or `list::contains`
+/// shares one across all its comparisons); passing `WORK_WORDS_MAX` stops the walk at once.
+#[derive(Default)]
+pub(crate) struct Walk {
+    pub(crate) used: u32,
+}
+
+impl Walk {
+    pub(crate) fn charge(&mut self, n: u32) -> VmResult<()> {
+        match self.used.checked_add(n) {
+            Some(u) if u <= WORK_WORDS_MAX => {
+                self.used = u;
+                Ok(())
+            }
+            _ => Err(FaultKind::ValueTooLarge),
+        }
+    }
 }
 
 fn enter(depth: usize) -> VmResult<usize> {
@@ -52,9 +70,21 @@ fn enter(depth: usize) -> VmResult<usize> {
 /// Deep structural equality of two slots. `is_ref`: the slots are heap kinds (a pointer or an immediate
 /// variant); otherwise they are plain immediates compared by bits. Also returns the words compared.
 pub fn deep_eq(st: &Store, heap: Heap, a: u64, b: u64, is_ref: bool) -> VmResult<(bool, u32)> {
-    let mut work = 0;
-    let eq = eq(st, heap, a, b, is_ref, 0, &mut work)?;
-    Ok((eq, work))
+    let mut walk = Walk::default();
+    let r = deep_eq_in(st, heap, a, b, is_ref, &mut walk)?;
+    Ok((r, walk.used))
+}
+
+/// [`deep_eq`] charging a budget the caller shares with its other walks.
+pub(crate) fn deep_eq_in(
+    st: &Store,
+    heap: Heap,
+    a: u64,
+    b: u64,
+    is_ref: bool,
+    walk: &mut Walk,
+) -> VmResult<bool> {
+    eq(st, heap, a, b, is_ref, 0, walk)
 }
 
 fn eq(
@@ -64,9 +94,9 @@ fn eq(
     b: u64,
     is_ref: bool,
     depth: usize,
-    work: &mut u32,
+    work: &mut Walk,
 ) -> VmResult<bool> {
-    tick(work, 1);
+    work.charge(1)?;
     if a == b {
         return Ok(true);
     }
@@ -81,7 +111,7 @@ fn eq(
     }
     match ha.kind {
         Kind::Str => {
-            tick(work, ha.len.div_ceil(8));
+            work.charge(ha.len.div_ceil(8))?;
             same_text(st, heap, a, b)
         }
         Kind::ListImm | Kind::ListRef => {
@@ -118,7 +148,14 @@ fn eq(
     }
 }
 
-fn dict_eq(st: &Store, heap: Heap, a: u64, b: u64, depth: usize, work: &mut u32) -> VmResult<bool> {
+fn dict_eq(
+    st: &Store,
+    heap: Heap,
+    a: u64,
+    b: u64,
+    depth: usize,
+    work: &mut Walk,
+) -> VmResult<bool> {
     if dict::len(st, heap, a)? != dict::len(st, heap, b)? {
         return Ok(false);
     }
@@ -130,7 +167,8 @@ fn dict_eq(st: &Store, heap: Heap, a: u64, b: u64, depth: usize, work: &mut u32)
     loop {
         let (na, wa) = dict::next(st, heap, a, pa)?;
         let (nb, wb) = dict::next(st, heap, b, pb)?;
-        tick(work, wa.saturating_add(wb));
+        work.charge(wa)?;
+        work.charge(wb)?;
         if na < 0 || nb < 0 {
             // Equal live counts: both ran out together, or the memory is inconsistent.
             return if na < 0 && nb < 0 {
@@ -160,10 +198,22 @@ fn dict_eq(st: &Store, heap: Heap, a: u64, b: u64, depth: usize, work: &mut u32)
 /// The hash of a dict key (see the module docs for the definition). `is_ref`: the key slot is a heap kind.
 /// Also returns the words hashed.
 pub fn key_hash(st: &Store, heap: Heap, key: u64, is_ref: bool) -> VmResult<(u64, u32)> {
+    let mut walk = Walk::default();
+    let r = key_hash_in(st, heap, key, is_ref, &mut walk)?;
+    Ok((r, walk.used))
+}
+
+/// [`key_hash`] charging a budget the caller shares with its other walks.
+pub(crate) fn key_hash_in(
+    st: &Store,
+    heap: Heap,
+    key: u64,
+    is_ref: bool,
+    walk: &mut Walk,
+) -> VmResult<u64> {
     let mut h = Fnv64::default();
-    let mut work = 0;
-    hash(st, heap, key, is_ref, 0, &mut h, &mut work)?;
-    Ok((h.finish(), work))
+    hash(st, heap, key, is_ref, 0, &mut h, walk)?;
+    Ok(h.finish())
 }
 
 fn hash(
@@ -173,9 +223,9 @@ fn hash(
     is_ref: bool,
     depth: usize,
     h: &mut Fnv64,
-    work: &mut u32,
+    work: &mut Walk,
 ) -> VmResult<()> {
-    tick(work, 1);
+    work.charge(1)?;
     if !is_ref || !is_ptr(v) {
         h.write(&[T_IMM]);
         h.write(&v.to_le_bytes());
@@ -185,7 +235,7 @@ fn hash(
     let (p, hd) = hdr(st, heap, v)?;
     match hd.kind {
         Kind::Str => {
-            tick(work, hd.len.div_ceil(8));
+            work.charge(hd.len.div_ceil(8))?;
             h.write(&[T_STR]);
             h.write(&u64::from(hd.len).to_le_bytes());
             h.write(&bytes_of(st, heap, v)?);

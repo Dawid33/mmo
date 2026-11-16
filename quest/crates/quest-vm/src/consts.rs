@@ -39,6 +39,9 @@ pub const REAP_CHILDREN_MAX: usize = 16;
 /// Nesting of a wire value.
 pub const WIRE_DEPTH_MAX: usize = 32;
 
+/// The most words one structural walk (compare, hash, lookup) may visit.
+pub const WORK_WORDS_MAX: u32 = 65_536;
+
 /// Fields of a struct or variant.
 pub const STRUCT_FIELDS_MAX: usize = 32;
 
@@ -64,6 +67,7 @@ mod tests {
         assert_eq!(FUEL_PER_TICK_DEFAULT, 2_000);
         assert_eq!(REAP_CHILDREN_MAX, 16);
         assert_eq!(WIRE_DEPTH_MAX, 32);
+        assert_eq!(WORK_WORDS_MAX, 65_536);
         assert_eq!(STRUCT_FIELDS_MAX, 32);
         assert_eq!(PARSE_DEPTH_MAX, 256);
     }

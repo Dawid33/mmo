@@ -11,6 +11,8 @@ pub enum FaultKind {
     DivByZero,
     BadRef,
     HeapFull,
+    /// A structural walk (compare, hash, lookup) would visit more than `WORK_WORDS_MAX` words.
+    ValueTooLarge,
     BadFloatToInt,
     AssertFailed,
     TooManyCommands,

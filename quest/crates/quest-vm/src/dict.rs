@@ -1,22 +1,26 @@
 //! Insertion-ordered dicts (design D4): an entries block plus a hash index, all in the flat memory.
 //!
 //! # Layout
-//! A `Dict` object (`len` = live entries, `aux` bit 0 = keys are heap kinds, bit 1 = values are) has three
-//! payload words: the entries block, the index block, and `used` (entry positions handed out, live or dead).
+//! A `Dict` object (`len` = live entries, `aux` bit 0 = keys are heap kinds, bit 1 = values are) has four
+//! payload words: the entries block, the index block, `used` (entry positions handed out, live or dead) and
+//! the serial counter (the serial the next NEW key gets, from 0; a `u32`: at `u32::MAX` a new key is `HeapFull`).
 //! * The entries block (`Raw`) holds `ENTRY_WORDS` words per position: `hash | 1` (0 = a dead position),
 //!   key, value. Positions are handed out in insertion order and never reused until a growth compacts them.
 //! * The index block (`Raw`) is open addressing with linear probing: slot = position + 1, 0 = empty. A
 //!   removed entry leaves its index slot pointing at the dead position (a tombstone in the probe chain), so
 //!   chains never break. Slots = the block's payload words; the entries block is the same size class, so
-//!   the table is at most a third full and a probe always meets an empty slot.
+//!   the table is at most a quarter full and a probe always meets an empty slot.
 //! * Growth happens when the entries block is full: into the next class when at least half of the
 //!   positions are live, else into the same class (the dead positions were most of it). Either way the
 //!   entries are copied in order without the dead ones and the index rebuilt. The dict's own pointer never
 //!   changes, so `set` returns it only for symmetry with `list::push`.
 //!
-//! Iteration is by position ([`next`], [`key_at`], [`val_at`]): removal keeps the others' order, a
-//! re-inserted key goes last, overwriting keeps the position. A growth renumbers positions, so a walk must
-//! not insert keys while iterating unless it restarts; appends without a growth are seen by the walk.
+//! Iteration is by **serial**, never by entry index ([`next`], [`key_at`], [`val_at`]). Each entry stores a
+//! serial: the dict's counter at the moment its key was inserted as a NEW key. Overwriting keeps it, a
+//! removed-then-re-inserted key gets a new (larger) one, which is what puts it last. Serials increase with
+//! the position, dead entries keep theirs until a growth compacts them away, and compaction preserves them, so
+//! a growth never changes what a walk sees: an entry that exists when the walk reaches its serial is visited
+//! exactly once whatever is inserted or removed meanwhile, and entries inserted during the walk are visited.
 //!
 //! # Ownership
 //! Follows `object`'s rules. `set` takes the key and the value (an existing key: the passed key is released
@@ -30,7 +34,7 @@
 //! count as a `u32` next to its result (design D6); lookups include hashing and comparing the key.
 
 use crate::alloc::{Heap, Kind, ObjHeader};
-use crate::eq::{deep_eq, key_hash};
+use crate::eq::{Walk, deep_eq_in, key_hash_in};
 use crate::fault::{FaultKind, VmResult};
 use crate::list;
 use crate::object::{
@@ -38,20 +42,22 @@ use crate::object::{
 };
 use crate::store::Store;
 
-const ENTRY_WORDS: u32 = 3;
+const ENTRY_WORDS: u32 = 4;
 const E_HASH: u32 = 0;
-const E_KEY: u32 = 1;
-const E_VAL: u32 = 2;
+const E_SERIAL: u32 = 1;
+const E_KEY: u32 = 2;
+const E_VAL: u32 = 3;
 
 const P_ENTRIES: u32 = 0;
 const P_INDEX: u32 = 1;
 const P_USED: u32 = 2;
-const DICT_PAYLOAD: u32 = 3;
+const P_SERIAL: u32 = 3;
+const DICT_PAYLOAD: u32 = 4;
 
 const FLAG_KEYS: u32 = 1;
 const FLAG_VALS: u32 = 2;
 
-/// Size class of a new dict's blocks: 14 payload words = 4 entries, 14 index slots.
+/// Size class of a new dict's blocks: 14 payload words = 3 entries, 14 index slots.
 const FIRST_CLASS: u8 = 4;
 
 fn payload_of(class: u8) -> u32 {
@@ -176,35 +182,41 @@ impl Dict {
         write_slot(st, heap, self.ep, &self.eh, pos * ENTRY_WORDS + field, v)
     }
 
-    /// The live position holding `key` (stored-hash word `hw`), and the work done.
-    fn find(&self, st: &Store, heap: Heap, key: u64, hw: u64) -> VmResult<(Option<u32>, u32)> {
+    /// The live position holding `key` (stored-hash word `hw`); probes and comparisons charge `walk`.
+    fn find(
+        &self,
+        st: &Store,
+        heap: Heap,
+        key: u64,
+        hw: u64,
+        walk: &mut Walk,
+    ) -> VmResult<Option<u32>> {
         let slots = capacity(&self.ih);
         let mut s = (hw % u64::from(slots)) as u32;
-        let mut work = 0u32;
         for _ in 0..slots {
-            work = work.saturating_add(1);
+            walk.charge(1)?;
             let v = read_slot(st, self.ip, &self.ih, s)?;
             if v == 0 {
-                return Ok((None, work));
+                return Ok(None);
             }
             let pos = u32::try_from(v - 1).map_err(|_| FaultKind::Corrupt)?;
             if self.eread(st, pos, E_HASH)? == hw {
                 let stored = self.eread(st, pos, E_KEY)?;
-                let (eq, w) = deep_eq(st, heap, stored, key, self.keys_ref())?;
-                work = work.saturating_add(w);
-                if eq {
-                    return Ok((Some(pos), work));
+                if deep_eq_in(st, heap, stored, key, self.keys_ref(), walk)? {
+                    return Ok(Some(pos));
                 }
             }
             s = if s + 1 == slots { 0 } else { s + 1 };
         }
-        Ok((None, work))
+        Ok(None)
     }
 
+    /// Hash, probe and compare under one budget; also returns the words visited.
     fn lookup(&self, st: &Store, heap: Heap, key: u64) -> VmResult<(Option<u32>, u32)> {
-        let (hash, hw_work) = key_hash(st, heap, key, self.keys_ref())?;
-        let (pos, w) = self.find(st, heap, key, hash | 1)?;
-        Ok((pos, hw_work.saturating_add(w)))
+        let mut walk = Walk::default();
+        let hash = key_hash_in(st, heap, key, self.keys_ref(), &mut walk)?;
+        let pos = self.find(st, heap, key, hash | 1, &mut walk)?;
+        Ok((pos, walk.used))
     }
 
     /// Moves the live entries, in order, into fresh blocks of `class` and rebuilds the index. Returns the
@@ -306,10 +318,10 @@ pub fn take(st: &mut Store, heap: Heap, d: u64, key: u64) -> VmResult<(Option<u6
 pub fn set(st: &mut Store, heap: Heap, d: u64, key: u64, val: u64) -> VmResult<(u64, u32)> {
     let mut dd = open(st, heap, d)?;
     require_unique(&dd.h)?;
-    let (hash, mut work) = key_hash(st, heap, key, dd.keys_ref())?;
-    let hw = hash | 1;
-    let (found, w) = dd.find(st, heap, key, hw)?;
-    work = work.saturating_add(w);
+    let mut walk = Walk::default();
+    let hw = key_hash_in(st, heap, key, dd.keys_ref(), &mut walk)? | 1;
+    let found = dd.find(st, heap, key, hw, &mut walk)?;
+    let mut work = walk.used;
     if let Some(pos) = found {
         let old = dd.eread(st, pos, E_VAL)?;
         dd.ewrite(st, heap, pos, E_VAL, val)?;
@@ -321,6 +333,9 @@ pub fn set(st: &mut Store, heap: Heap, d: u64, key: u64, val: u64) -> VmResult<(
         }
         return Ok((d, work));
     }
+    let serial =
+        u32::try_from(read_slot(st, dd.p, &dd.h, P_SERIAL)?).map_err(|_| FaultKind::Corrupt)?;
+    let next_serial = serial.checked_add(1).ok_or(FaultKind::HeapFull)?;
     if dd.used >= dd.entry_capacity() {
         let class = if u64::from(dd.h.len) * 2 >= u64::from(dd.entry_capacity()) {
             dd.eh.class + 1
@@ -333,7 +348,9 @@ pub fn set(st: &mut Store, heap: Heap, d: u64, key: u64, val: u64) -> VmResult<(
     let pos = dd.used;
     write_slot(st, heap, dd.p, &dd.h, P_USED, u64::from(pos) + 1)?;
     dd.used = pos + 1;
+    write_slot(st, heap, dd.p, &dd.h, P_SERIAL, u64::from(next_serial))?;
     dd.ewrite(st, heap, pos, E_HASH, hw)?;
+    dd.ewrite(st, heap, pos, E_SERIAL, u64::from(serial))?;
     dd.ewrite(st, heap, pos, E_KEY, key)?;
     dd.ewrite(st, heap, pos, E_VAL, val)?;
     work = work.saturating_add(index_insert(st, heap, dd.ip, &dd.ih, hw, pos)?);
@@ -353,6 +370,7 @@ pub fn remove(st: &mut Store, heap: Heap, d: u64, key: u64) -> VmResult<(Option<
     };
     let stored = dd.eread(st, pos, E_KEY)?;
     let v = dd.eread(st, pos, E_VAL)?;
+    // The serial stays: serials of all positions, dead or alive, increase with the position.
     for f in [E_HASH, E_KEY, E_VAL] {
         dd.ewrite(st, heap, pos, f, 0)?;
     }
@@ -365,37 +383,64 @@ pub fn remove(st: &mut Store, heap: Heap, d: u64, key: u64) -> VmResult<(Option<
     Ok((Some(v), work))
 }
 
-/// The first live position `>= pos` (a negative `pos` counts as 0), or -1; also the positions scanned.
+/// The first position of the entries block whose serial is `>= serial` (`used` when there is none).
+/// Serials increase with the position, dead entries keep theirs, so this is a binary search.
+fn lower_bound(dd: &Dict, st: &Store, serial: u32) -> VmResult<u32> {
+    let (mut lo, mut hi) = (0u32, dd.used);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if dd.eread(st, mid, E_SERIAL)? < u64::from(serial) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
+}
+
+/// The serial of the first live entry whose serial is `>= pos` (a negative `pos` counts as 0), or -1; also
+/// the work (the search plus the dead positions skipped). A loop is `pos = 0; s = next(pos); ...; pos = s + 1`:
+/// an entry that exists when the walk reaches its serial is visited exactly once whatever is inserted or
+/// removed meanwhile, and entries inserted during the walk (larger serials) are visited.
 pub fn next(st: &Store, heap: Heap, d: u64, pos: i64) -> VmResult<(i64, u32)> {
     let dd = open(st, heap, d)?;
-    let start = u32::try_from(pos.max(0)).unwrap_or(u32::MAX);
-    let mut work = 0u32;
-    for p in start..dd.used {
+    let Ok(start) = u32::try_from(pos.max(0)) else {
+        return Ok((-1, 1));
+    };
+    let mut p = lower_bound(&dd, st, start)?;
+    let mut work = 32 - dd.used.leading_zeros();
+    while p < dd.used {
         work = work.saturating_add(1);
         if dd.eread(st, p, E_HASH)? != 0 {
-            return Ok((i64::from(p), work));
+            let serial = dd.eread(st, p, E_SERIAL)?;
+            return Ok((i64::try_from(serial).map_err(|_| FaultKind::Corrupt)?, work));
         }
+        p += 1;
     }
     Ok((-1, work))
 }
 
-fn live_position(dd: &Dict, st: &Store, pos: i64) -> VmResult<u32> {
-    match u32::try_from(pos) {
-        Ok(p) if p < dd.used && dd.eread(st, p, E_HASH)? != 0 => Ok(p),
-        _ => Err(FaultKind::IndexOutOfRange),
+/// The position of the live entry with this serial; anything else is a caller bug (`Corrupt`).
+fn live_position(dd: &Dict, st: &Store, serial: i64) -> VmResult<u32> {
+    let s = u32::try_from(serial).map_err(|_| FaultKind::Corrupt)?;
+    let p = lower_bound(dd, st, s)?;
+    if p < dd.used && dd.eread(st, p, E_SERIAL)? == u64::from(s) && dd.eread(st, p, E_HASH)? != 0 {
+        Ok(p)
+    } else {
+        Err(FaultKind::Corrupt)
     }
 }
 
-/// The raw key at a live position; `IndexOutOfRange` for a dead or missing one.
-pub fn key_at(st: &Store, heap: Heap, d: u64, pos: i64) -> VmResult<u64> {
+/// The raw key of the live entry with this serial (one `next` returned); `Corrupt` if there is none.
+pub fn key_at(st: &Store, heap: Heap, d: u64, serial: i64) -> VmResult<u64> {
     let dd = open(st, heap, d)?;
-    dd.eread(st, live_position(&dd, st, pos)?, E_KEY)
+    dd.eread(st, live_position(&dd, st, serial)?, E_KEY)
 }
 
-/// The raw value at a live position; `IndexOutOfRange` for a dead or missing one.
-pub fn val_at(st: &Store, heap: Heap, d: u64, pos: i64) -> VmResult<u64> {
+/// The raw value of the live entry with this serial (one `next` returned); `Corrupt` if there is none.
+pub fn val_at(st: &Store, heap: Heap, d: u64, serial: i64) -> VmResult<u64> {
     let dd = open(st, heap, d)?;
-    dd.eread(st, live_position(&dd, st, pos)?, E_VAL)
+    dd.eread(st, live_position(&dd, st, serial)?, E_VAL)
 }
 
 fn collect(st: &mut Store, heap: Heap, d: u64, field: u32) -> VmResult<(u64, u32)> {
@@ -456,6 +501,8 @@ pub(crate) fn clone(st: &mut Store, heap: Heap, src: u32, sh: ObjHeader) -> VmRe
     write_slot(st, heap, q, &nh, P_ENTRIES, u64::from(ne))?;
     write_slot(st, heap, q, &nh, P_INDEX, u64::from(ni))?;
     write_slot(st, heap, q, &nh, P_USED, u64::from(dd.used))?;
+    let counter = read_slot(st, dd.p, &dd.h, P_SERIAL)?;
+    write_slot(st, heap, q, &nh, P_SERIAL, counter)?;
     for w in 0..dd.used * ENTRY_WORDS {
         let v = read_slot(st, dd.ep, &dd.eh, w)?;
         write_slot(st, heap, ne, &neh, w, v)?;

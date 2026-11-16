@@ -8,7 +8,7 @@
 //! (possibly new) pointer.
 
 use crate::alloc::{Heap, Kind, ObjHeader};
-use crate::eq::deep_eq;
+use crate::eq::{Walk, deep_eq_in};
 use crate::fault::{FaultKind, VmResult};
 use crate::object::{
     alloc, capacity, hdr, incref, read_slot, release, require_unique, write_header, write_slot,
@@ -181,17 +181,15 @@ pub fn slice(st: &mut Store, heap: Heap, l: u64, a: i64, b: i64) -> VmResult<(u6
 }
 
 /// Whether an element equals `v` structurally ([`deep_eq`]; plain bits in a `ListImm`). Also returns the
-/// words compared.
+/// words compared (one budget of `WORK_WORDS_MAX` for the whole scan).
 pub fn contains(st: &Store, heap: Heap, l: u64, v: u64) -> VmResult<(bool, u32)> {
     let (p, h) = list(st, heap, l)?;
-    let mut work = 0u32;
+    let mut walk = Walk::default();
     for i in 0..h.len {
         let w = read_slot(st, p, &h, i)?;
-        let (eq, n) = deep_eq(st, heap, w, v, h.kind == Kind::ListRef)?;
-        work = work.saturating_add(n);
-        if eq {
-            return Ok((true, work));
+        if deep_eq_in(st, heap, w, v, h.kind == Kind::ListRef, &mut walk)? {
+            return Ok((true, walk.used));
         }
     }
-    Ok((false, work))
+    Ok((false, walk.used))
 }
