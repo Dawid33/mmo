@@ -290,12 +290,14 @@ escaping error (undo + report with a stack trace). Fuel exhaustion is **not** a 
 
 ### 5.8 Collections and strings [decided: lists and dicts with Python literal syntax]
 
-- `[1, 2, 3]`, `{"a": 1}`, indexing `x[i]`, `len(x)`, `in`, methods (`append`, `pop`, `insert`, `remove`,
+- `[1, 2, 3]`, `{"a": 1}`, indexing `x[i]`, `in`, methods (`len`, `append`, `pop`, `insert`, `remove`,
   `get`, `keys`, `values`, `items`, …). Slicing `x[a:b]` **[call: include]**.
 - Dict keys: `int`, `bool`, `str`, and enums/structs composed only of those **[call]**. Iteration in
   insertion order.
 - `str`: immutable UTF-8 values; f-strings `f"{x}"`; indexing by character is **not** provided in the MVP
   (methods like `split`, `starts_with`, `len` in bytes or chars — builder's choice, documented) **[call]**.
+- Length is the method `x.len()` on `str`, `list` and `dict`, as in Rust; there is no free `len(x)` function
+  **[decided 2026-11-16]**. Bool literals are lower case: `true`, `false` **[decided 2026-11-16]**.
 
 ### 5.9 Numbers [decided: floats allowed, deterministic]
 
@@ -556,7 +558,7 @@ fn ask(e):
 - **The compiler learns the host API from a host description [call]:** a signature table (functions and
   their types, event structs and fields, the `world.*` operations, built-in error names) passed to
   `quest-lang` at compile time; `quest-lang` has no host knowledge of its own beyond the core built-ins
-  (`print`, `len`, `range`, collections, `Option`, `Promise`). The table has its own version; a compiled
+  (`print`, `range`, collections, `Option`, `Promise`). The table has its own version; a compiled
   program records the host-API version next to the bytecode version, and both are checked when the VM loads it.
   The standalone host ships the MVP's table.
 - **Standalone host** (the MVP's only implementation): in-memory players/items/chests/tags; `say` and
