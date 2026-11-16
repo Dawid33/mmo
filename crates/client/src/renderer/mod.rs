@@ -57,6 +57,7 @@ pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
 pub mod water;
+pub mod drain_notice;
 pub mod embark_tabs;
 pub mod history_view;
 pub mod world_map;
@@ -126,6 +127,7 @@ impl Plugin for SimBridgePlugin {
         .add_message::<world_map::WorldMapMsg>()
         .add_session_message_clear::<world_map::WorldMapMsg>()
         .add_session_reset::<history_view::HistoryView>()
+        .add_session_reset::<drain_notice::DrainNotice>()
         .add_message::<history_view::HistoryMsg>()
         .add_session_message_clear::<history_view::HistoryMsg>()
         .add_session_reset::<LocalPlayer>()

@@ -1937,6 +1937,7 @@ struct MapParams<'w, 's> {
     embarked: Option<ResMut<'w, Embarked>>,
     shown: crate::session::SessionLocal<'w, 's, MapShown>,
     history: ResMut<'w, HistoryView>,
+    drain: Option<Res<'w, super::drain_notice::DrainNotice>>,
     requests: Option<Res<'w, ClientRequests>>,
     inspected: crate::session::SessionLocal<'w, 's, Inspected>,
     /// The embark tabs as last pushed.
@@ -2127,6 +2128,11 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     let game_status = if status.is_empty() { p.history.current_notice(now).unwrap_or("") } else { status };
     if ui.get_game_status() != game_status {
         ui.set_game_status(game_status.into());
+    }
+    // The drain countdown: the text changes once a second, so compare before setting.
+    let drain_line = p.drain.as_ref().map(|d| d.line()).unwrap_or_default();
+    if ui.get_drain_line() != drain_line.as_str() {
+        ui.set_drain_line(drain_line.into());
     }
     let can_retire = p.history.fortress.is_some() && embarked;
     if ui.get_can_retire() != can_retire {

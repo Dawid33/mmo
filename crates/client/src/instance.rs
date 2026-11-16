@@ -231,6 +231,8 @@ pub struct GameInstanceManager {
     views: BTreeMap<RegionId, crate::regions::runner::HomeView>,
     /// The one predicted world tick every region runs to (`regions::clock`).
     clock: crate::regions::clock::PredictedClock,
+    /// The home host's drain deadline (a world tick) and what the renderer was told of it.
+    drain: crate::renderer::drain_notice::DrainDeadline,
     /// `(tick, state hash)` per region from the last `region_probe`.
     probe: BTreeMap<RegionId, (game::Tick, u32)>,
     /// The finite world's extent and coarse-route map, from the server's
@@ -941,6 +943,7 @@ impl GameInstanceManager {
             views: BTreeMap::new(),
             probe: BTreeMap::new(),
             clock: Default::default(),
+            drain: Default::default(),
             route_map: None,
             buffer: Vec::new(),
             tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
@@ -1241,6 +1244,7 @@ impl GameInstanceManager {
                     self.crossing.home_tick(self.held_ticks(home, target) > 0);
                 }
                 self.host.broadcast(|| RegionCmd::Tick(target));
+                self.tell_drain();
                 #[cfg(not(target_arch = "wasm32"))]
                 self.perf.record_tick(tick_start.elapsed());
                 // The ticks' transfers are routed here (`drain_reports`), and
@@ -2155,6 +2159,9 @@ impl GameInstanceManager {
             self.conns.ordinal_of(old),
             self.conns.home_ordinal()
         );
+        // The old home's drain says nothing of the new one (which sends its own).
+        self.drain.clear();
+        self.tell_drain();
         // The subscribes left unanswered at the old home get no answer the client reads
         // any more (it reads only region traffic there; a `RegionElsewhere` from it is
         // dropped): each region still wanted and not held is released there (the old home
@@ -2184,6 +2191,14 @@ impl GameInstanceManager {
         // Released there and asked here again, both paced (`update_lod_window`).
         self.lod_release.extend(self.lod_subscribed.iter().map(|key| (old, *key)));
         self.lod_resend = self.lod_subscribed.clone();
+    }
+
+    /// Tell the renderer how long the home host has left, when the whole seconds changed
+    /// (from the predicted world tick, never a wall clock) or the notice cleared.
+    fn tell_drain(&mut self) {
+        if let Some(remaining_secs) = self.drain.poll(self.clock.tick()) {
+            let _ = self.client_event_send.send(ClientUpdateEvent::HostDraining { remaining_secs });
+        }
     }
 
     /// Another host refused (and closes) its connection: its regions are asked
@@ -2617,8 +2632,13 @@ impl GameInstanceManager {
             }
             // Unreachable: `handle_packet` takes every `HomeHop` before it gets here.
             game::ServerPacket::HomeHop(_) => debug_assert!(false, "HomeHop reached apply_packet"),
-            // Task 9 draws the countdown.
-            game::ServerPacket::HostDraining { .. } => {}
+            // Only the home's (`handle_packet` drops it from any other connection): the
+            // countdown is told to the renderer from here and on every tick.
+            game::ServerPacket::HostDraining { at_tick } => {
+                if conn == self.conns.home() && self.drain.offer(at_tick) {
+                    self.tell_drain();
+                }
+            }
             // The first packet of every session: which host the home is.
             game::ServerPacket::Host(endpoint) => {
                 info!("[client] the home connection is to host {}", endpoint.id);
@@ -3423,6 +3443,36 @@ mod manager_tests {
         assert!(manager.pump_packets(&server_recv).unwrap());
         assert!(manager_packets(&manager).is_empty());
         assert!(!manager.subscribed.contains(&gone) && manager.pending_move.is_none(), "never a move");
+    }
+
+    /// A drain notice from an observer connection is dropped; the same packet from the home
+    /// tells the renderer, and a home hop clears it.
+    #[test]
+    fn a_drain_from_an_observer_connection_is_ignored() {
+        let (mut manager, server_send, server_recv, _opener, kept) = manager_on_host_0();
+        let r = RegionCoords::new(5, 0);
+        manager.subscribed.insert(r);
+        manager.request_region(r);
+        server_send.send(elsewhere(r, h(1))).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let one = manager.conns.conn_to(h(1)).expect("a connection to host 1");
+        let home = manager.conns.home();
+        assert_ne!(one, home);
+        let drains = |kept: &(Receiver<ClientUpdateEvent>, crossbeam::channel::Sender<GameEventKind>)| {
+            kept.0.try_iter().filter(|e| matches!(e, ClientUpdateEvent::HostDraining { .. })).count()
+        };
+        let _ = drains(&kept);
+        let (events, incoming) = crossbeam::channel::unbounded();
+        events.send((one, ConnEvent::Packet(ServerPacket::HostDraining { at_tick: 100 }))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        manager.send_tick();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert_eq!(drains(&kept), 0, "an observer connection's notice is dropped");
+        events.send((home, ConnEvent::Packet(ServerPacket::HostDraining { at_tick: 100 }))).unwrap();
+        assert!(manager.pump(&incoming).unwrap());
+        manager.send_tick();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert_eq!(drains(&kept), 1, "the home's notice reaches the renderer");
     }
 
     /// R4 Task 16, fix round 1: a region subscribed on host 1's connection that host 1

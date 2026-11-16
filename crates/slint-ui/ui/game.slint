@@ -287,6 +287,8 @@ export component GameUi inherits Window {
     // The game-level status line ("Loading region…", a Play refusal);
     // "" draws nothing. Hidden under the open map, which shows `map-status`.
     in property <string> game-status;
+    // The home server's drain countdown, shown above the status line; "" draws nothing.
+    in property <string> drain-line;
     // The status line's centre (window logical pixels), for headless tests.
     out property <length> status-x: root.width / 2;
     out property <length> status-y: root.status-top + 12px;
@@ -362,13 +364,29 @@ export component GameUi inherits Window {
     // Top centre, between the fortress panel and the menu column, apart from
     // the map window; only while
     // there is something to say, so it takes no pixels or clicks otherwise.
+    // Above the status line (which moves down 44px while this shows), in the same style.
+    if root.drain-line != "" && !root.map-open && !root.map-modal: drain := FrameFace {
+        width: self.content-x + drain-label.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right;
+        height: self.content-y + drain-label.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: root.status-top;
+
+        drain-label := LabelFace {
+            x: drain.content-x;
+            y: drain.content-y;
+            text: root.drain-line;
+        }
+    }
+
     if root.game-status != "" && !root.map-open && !root.map-modal: status := FrameFace {
         width: self.content-x + status-label.preferred-width + Styles.frame.box.padding.right
             + GraphicalSets.inset(Styles.frame.graphics).right;
         height: self.content-y + status-label.preferred-height + Styles.frame.box.padding.bottom
             + GraphicalSets.inset(Styles.frame.graphics).bottom;
         x: (root.width - self.width) / 2;
-        y: root.status-top;
+        y: root.status-top + (root.drain-line != "" ? 44px : 0px);
 
         status-label := LabelFace {
             x: status.content-x;

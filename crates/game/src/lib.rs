@@ -312,6 +312,9 @@ pub enum ClientUpdateEvent {
     Legends(history::LegendsPage),
     /// World history: the answer to a start-adventure request.
     AdventureResult(Result<history::SiteId, history::AdventureRefusal>),
+    /// The home host is draining: whole seconds until it leaves (`Some(0)` = it is leaving now);
+    /// `None` clears the notice (the home moved, or the session ended).
+    HostDraining { remaining_secs: Option<u64> },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
