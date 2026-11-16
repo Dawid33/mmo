@@ -11,7 +11,7 @@
 //! | `GetField`, `TakeField` | destination | object slot | field index |
 //! | `SetField` | object slot | field index | source slot (moved in) |
 //! | `GetIndex`, `TakeIndex`, `GetKey`, `TakeKey` | destination | container slot | index / key slot |
-//! | `SetIndex`, `SetKey` | container slot | index / key slot | source slot (moved in) |
+//! | `SetIndex`, `SetKey` | container slot | index / key slot (borrowed) | source slot (moved in) |
 //! | `RefMake` | destination | root slot | 1: the target is a heap kind |
 //! | `RefField` | destination | base reference slot | field index |
 //! | `RefIndex`, `RefKey` | destination | base reference slot | index / key slot |

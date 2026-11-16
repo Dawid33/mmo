@@ -2,6 +2,7 @@
 
 pub mod alloc;
 pub mod asm;
+mod builtins;
 pub mod bytecode;
 pub mod consts;
 pub mod dict;
@@ -12,6 +13,7 @@ pub mod fuel;
 pub mod hash;
 pub mod host;
 mod interp;
+mod interp_heap;
 pub mod layout;
 pub mod list;
 pub mod mem;

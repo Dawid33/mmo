@@ -272,6 +272,12 @@ pub fn new(st: &mut Store, heap: Heap, keys_are_refs: bool, vals_are_refs: bool)
     Ok(u64::from(p))
 }
 
+/// Whether the keys and the values are heap kinds (`aux` bits 0 and 1).
+pub fn flags(st: &Store, heap: Heap, d: u64) -> VmResult<(bool, bool)> {
+    let dd = open(st, heap, d)?;
+    Ok((dd.keys_ref(), dd.vals_ref()))
+}
+
 /// Live entries.
 pub fn len(st: &Store, heap: Heap, d: u64) -> VmResult<u32> {
     Ok(open(st, heap, d)?.h.len)

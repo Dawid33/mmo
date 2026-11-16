@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+libm.workspace = true
 state-hash.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

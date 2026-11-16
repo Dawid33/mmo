@@ -6,20 +6,37 @@
 //! memory. Everything read from memory (header fields, return links) is checked; static operands were
 //! checked by [`Program::validate`] when the `Vm` was made.
 //!
-//! Fuel: each instruction's base charge ([`base_fuel`]) is taken before it executes; a charge larger
-//! than what is left takes the budget below zero and the deficit becomes the debt, repaid from the
-//! next run's budget before anything executes.
+//! Fuel: each instruction's base charge ([`base_fuel`]) is taken before it executes, and its
+//! size-dependent work (`ceil(words / 8)` of what a value-layer function reported) by the instruction
+//! through the [`Meter`]; a charge larger than what is left takes the budget below zero and the deficit
+//! becomes the debt, repaid from the next run's budget before anything executes.
+//!
+//! # The reaper
+//! Each iteration of the loop first looks at the zombie list: when it is not empty, one reap step runs
+//! (`FUEL_REAP` + its reported work) instead of an instruction. So the zombie list is always empty when an
+//! instruction starts, and every free the program causes is paid for, a bounded step at a time.
+//!
+//! # A full heap
+//! An instruction that fails with `HeapFull` is undone through the undo log (back to the checkpoint taken
+//! just before it), so it leaves no partial effect, and the run faults `HeapFull` at it. It is never
+//! retried after a reap step: the instruction began with an empty zombie list (above), and undoing it
+//! also undoes any release it made, so after the undo there is nothing a reap step could give back. The
+//! fuel it was charged stands.
 
 use crate::bytecode::{Instr, Op};
 use crate::consts::ERR_TRACE_MAX;
 use crate::fault::FaultKind;
-use crate::fuel::{FUEL_CALL, FUEL_SIMPLE};
-use crate::host::{Host, SrcLoc};
+use crate::fuel::{
+    FUEL_ALLOC, FUEL_AWAIT, FUEL_BUILTIN, FUEL_CALL, FUEL_HEAP, FUEL_HOST_COMMAND, FUEL_HOST_QUERY,
+    FUEL_HOST_REQUEST, FUEL_KEY, FUEL_REAP, FUEL_SIMPLE,
+};
+use crate::host::{Host, HostFnKind, SrcLoc};
 use crate::layout::{
     H_CURRENT_FN, H_FUEL_DEBT, H_PC, H_STATUS, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL,
     STATUS_IDLE, STATUS_RUNNING,
 };
 use crate::mem::MemError;
+use crate::object::reap_step;
 use crate::program::Program;
 use crate::vm::{DebugRun, RunEnd, Vm};
 use crate::wire::canonical_bits;
@@ -40,6 +57,41 @@ impl Fault {
     }
 }
 
+/// The fuel of one run: what is left of the budget, the debt an overshoot made and everything charged.
+/// Every charge, of an instruction's base cost, of its size-dependent work or of a reap step, goes
+/// through it, so the accounting lives in one place.
+pub(crate) struct Meter {
+    left: u64,
+    debt: u64,
+    used: u64,
+}
+
+impl Meter {
+    fn new(budget: u64) -> Meter {
+        Meter {
+            left: budget,
+            debt: 0,
+            used: 0,
+        }
+    }
+
+    /// Charges `n`; what the budget cannot cover becomes debt.
+    pub fn charge(&mut self, n: u64) {
+        self.used = self.used.saturating_add(n);
+        if n > self.left {
+            self.debt = self.debt.saturating_add(n - self.left);
+            self.left = 0;
+        } else {
+            self.left -= n;
+        }
+    }
+
+    /// Charges the "+ size" of design D6 for `words` words of reported work: `ceil(words / 8)`.
+    pub fn words(&mut self, words: u32) {
+        self.charge(u64::from(words.div_ceil(8)));
+    }
+}
+
 impl From<FaultKind> for Fault {
     fn from(kind: FaultKind) -> Fault {
         Fault {
@@ -55,7 +107,7 @@ impl From<MemError> for Fault {
     }
 }
 
-type Exec<T> = Result<T, Fault>;
+pub(crate) type Exec<T> = Result<T, Fault>;
 
 /// What an instruction does to the pc.
 pub(crate) enum Flow {
@@ -70,12 +122,31 @@ pub(crate) enum Flow {
     Done,
 }
 
-/// The charge taken before an instruction executes. Size-dependent extras are charged by the
-/// instruction itself (later tasks).
-pub(crate) fn base_fuel(op: Op) -> u64 {
-    match op {
-        Op::Call | Op::Ret => FUEL_CALL,
-        _ => FUEL_SIMPLE,
+/// The charge taken before an instruction executes (design D6). Size-dependent extras are charged by
+/// the instruction itself through the [`Meter`]. Every op is listed: a new one does not compile until
+/// its cost is stated.
+pub(crate) fn base_fuel(p: &Program, ins: Instr) -> u64 {
+    use Op::*;
+    match ins.op {
+        Nop | LoadSmall | LoadConst | Copy | AddI | SubI | MulI | DivI | RemI | NegI | EqI
+        | NeI | LtI | LeI | AddF | SubF | MulF | DivF | NegF | EqF | NeF | LtF | LeF
+        | IntToFloat | FloatToInt | Not | Jmp | JmpIf | JmpIfNot | TracePush | GetTag | ListLen
+        | PromiseDetach => FUEL_SIMPLE,
+        // A comparison: simple, plus the words the walk compared.
+        Eq => FUEL_SIMPLE,
+        Call | Ret => FUEL_CALL,
+        Dup | Move | Drop | GetField | TakeField | SetField | MakeUnique | GetIndex | TakeIndex
+        | SetIndex | RefLoad | RefTake | RefStore => FUEL_HEAP,
+        LoadStr | NewObj | NewList | NewDict | RefMake | RefField | RefIndex | RefKey => FUEL_ALLOC,
+        GetKey | TakeKey | SetKey => FUEL_KEY,
+        CallBuiltin => FUEL_BUILTIN,
+        // `validate` checked the site; an unknown one faults when it executes.
+        CallHost => match p.host_sites.get(usize::from(ins.a)).map(|s| s.kind) {
+            Some(HostFnKind::Command) => FUEL_HOST_COMMAND,
+            Some(HostFnKind::Promise) => FUEL_HOST_REQUEST,
+            Some(HostFnKind::Query) | None => FUEL_HOST_QUERY,
+        },
+        Await | AwaitAll => FUEL_AWAIT,
     }
 }
 
@@ -149,11 +220,11 @@ fn float_to_int(x: f64) -> Result<u64, FaultKind> {
 }
 
 impl Vm {
-    fn rd(&self, slot: u16) -> Exec<u64> {
+    pub(crate) fn rd(&self, slot: u16) -> Exec<u64> {
         Ok(self.store.r(self.store.layout.slot_off(slot))?)
     }
 
-    fn wt(&mut self, slot: u16, v: u64) -> Exec<()> {
+    pub(crate) fn wt(&mut self, slot: u16, v: u64) -> Exec<()> {
         let off = self.store.layout.slot_off(slot);
         Ok(self.store.ws(off, v)?)
     }
@@ -224,37 +295,41 @@ impl Vm {
                 end: RunEnd::OutOfFuel,
             });
         }
-        let mut left = fuel - debt;
-        let mut debt = 0u64;
-        let mut used = 0u64;
+        let mut m = Meter::new(fuel - debt);
         let (mut fn_id, mut pc) = self.load_regs()?;
         let stop = loop {
-            if left == 0 {
+            if m.left == 0 {
                 break Stop::Fuel;
+            }
+            match self.reap_one(&mut m) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(f) => break Stop::Fault(f),
             }
             let ins = match self.fetch(fn_id, pc) {
                 Ok(i) => i,
                 Err(f) => break Stop::Fault(f),
             };
-            let cost = base_fuel(ins.op);
-            used = used.saturating_add(cost);
-            if cost > left {
-                debt = cost - left;
-                left = 0;
-            } else {
-                left -= cost;
-            }
-            match self.exec(fn_id, pc, ins) {
+            m.charge(base_fuel(&self.program, ins));
+            let before = self.store.mem.checkpoint();
+            match self.exec(fn_id, pc, ins, &mut m) {
                 Ok(Flow::Next) => pc = pc.saturating_add(1),
                 Ok(Flow::Goto(t)) => pc = t,
                 Ok(Flow::Enter { fn_id: f, pc: p }) => (fn_id, pc) = (f, p),
                 Ok(Flow::Done) => break Stop::Returned,
-                Err(f) => break Stop::Fault(f),
+                Err(f) => {
+                    if f.kind == FaultKind::HeapFull {
+                        // No partial effect (module docs). The checkpoint was taken a moment ago, so
+                        // its history cannot have been dropped.
+                        let _ = self.store.mem.rollback_to(before);
+                    }
+                    break Stop::Fault(f);
+                }
             }
         };
         self.set_header(H_PC, u64::from(pc))?;
         self.set_header(H_CURRENT_FN, u64::from(fn_id))?;
-        self.set_header(H_FUEL_DEBT, debt)?;
+        self.set_header(H_FUEL_DEBT, m.debt)?;
         let status = match stop {
             Stop::Fuel => STATUS_RUNNING,
             Stop::Returned | Stop::Fault(_) => STATUS_IDLE,
@@ -270,9 +345,21 @@ impl Vm {
             },
         };
         Ok(DebugRun {
-            fuel_used: used,
+            fuel_used: m.used,
             end,
         })
+    }
+
+    /// One reap step when the zombie list is not empty (`true`), charged `FUEL_REAP` plus its work.
+    fn reap_one(&mut self, m: &mut Meter) -> Exec<bool> {
+        match reap_step(&mut self.store, self.heap, &*self.program)? {
+            Some(words) => {
+                m.charge(FUEL_REAP);
+                m.words(words);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// The faulting instruction's location, then each caller's call site, found by walking the return
@@ -299,7 +386,7 @@ impl Vm {
     }
 
     /// Executes one instruction of `fn_id` at `pc`.
-    fn exec(&mut self, fn_id: u16, pc: u32, ins: Instr) -> Exec<Flow> {
+    fn exec(&mut self, fn_id: u16, pc: u32, ins: Instr, m: &mut Meter) -> Exec<Flow> {
         let Instr { op, a, b, c } = ins;
         match op {
             Op::Nop => {}
@@ -365,7 +452,6 @@ impl Vm {
             Op::Ret => return self.ret(fn_id),
             Op::TracePush => self.trace_push(pc, a == 1)?,
 
-            // ---- Not implemented yet: Tasks 10–13 replace this arm with their groups. ----
             Op::LoadStr
             | Op::Dup
             | Op::Move
@@ -385,15 +471,17 @@ impl Vm {
             | Op::NewDict
             | Op::GetKey
             | Op::TakeKey
-            | Op::SetKey
-            | Op::RefMake
+            | Op::SetKey => self.exec_heap(ins, m)?,
+            Op::CallBuiltin => self.call_builtin(ins, m)?,
+
+            // ---- Not implemented yet: Tasks 11–13 replace this arm with their groups. ----
+            Op::RefMake
             | Op::RefField
             | Op::RefIndex
             | Op::RefKey
             | Op::RefLoad
             | Op::RefTake
             | Op::RefStore
-            | Op::CallBuiltin
             | Op::CallHost
             | Op::Await
             | Op::AwaitAll

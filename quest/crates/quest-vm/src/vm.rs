@@ -13,8 +13,11 @@ use crate::layout::{
     H_BYTECODE_VERSION, H_CURRENT_FN, H_EPOCH, H_HOST_API_VERSION, H_PC, H_PROGRAM_HASH, H_STATUS,
     LINK_SENTINEL, LoadError, STATUS_RUNNING,
 };
+use crate::mem::{Checkpoint, RollbackError};
 use crate::program::Program;
 use crate::store::Store;
+use crate::types::TypeId;
+use crate::wire::{WireValue, to_wire};
 
 /// What an instance is created with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +143,26 @@ impl Vm {
     /// Words in use in the script heap (0 when its header does not parse).
     pub fn heap_used_words(&self) -> u32 {
         self.heap.used_words(&self.store).unwrap_or(0)
+    }
+
+    /// The current position in the undo log (design D3).
+    pub fn checkpoint(&self) -> Checkpoint {
+        self.store.mem.checkpoint()
+    }
+
+    /// Undoes every memory write after `cp`; nothing changes on error.
+    pub fn rollback_to(&mut self, cp: Checkpoint) -> Result<(), RollbackError> {
+        self.store.mem.rollback_to(cp)
+    }
+
+    /// The value in static slot `slot` read as type `ty` (a test and debug accessor).
+    #[doc(hidden)]
+    pub fn debug_value(&self, slot: u16, ty: TypeId) -> Result<WireValue, FaultKind> {
+        if u32::from(slot) >= self.store.layout.static_words {
+            return Err(FaultKind::Corrupt);
+        }
+        let v = self.store.r(self.store.layout.slot_off(slot))?;
+        Ok(to_wire(&self.store, self.heap, &self.program.types, ty, v)?.0)
     }
 
     /// Starts `fn_id` with a sentinel return link: its `Ret` ends the run with [`RunEnd::Returned`]. An
