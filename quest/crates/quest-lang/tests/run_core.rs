@@ -199,3 +199,17 @@ fn too_many_slots() {
     assert_eq!(codes, ["too-many-slots"]);
     assert_eq!((diags[0].file.as_str(), diags[0].line), ("main.qs", 1));
 }
+
+#[test]
+fn float_remainder_and_string_ordering() {
+    let main = r#"fn main():
+    print(f"{7.5 % 2.0} {-7.5 % 2.0}")
+    let a = "a"
+    let b = "b"
+    let ab = "ab"
+    print(f"{a < b} {b <= a} {ab > a} {a >= a}")
+"#;
+    let out = run(&[("main.qs", main)]);
+    assert!(out.reports.is_empty(), "{:?}", out.reports);
+    assert_eq!(out.lines, lines(&["1.5 -1.5", "true false true true"]));
+}

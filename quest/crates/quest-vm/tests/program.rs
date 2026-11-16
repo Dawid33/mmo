@@ -143,6 +143,8 @@ fn op_and_builtin_numbers_pinned() {
         (Pow, 38),
         (Assert, 39),
         (Print, 40),
+        (ModF, 41),
+        (StrCmp, 42),
     ];
     assert_eq!(bs.len(), Builtin::ALL.len());
     for &(b, n) in bs {
@@ -192,12 +194,14 @@ fn op_and_builtin_numbers_pinned() {
         (Pow, 2),
         (Assert, 2),
         (Print, 1),
+        (ModF, 2),
+        (StrCmp, 2),
     ];
     assert_eq!(arity.len(), Builtin::ALL.len());
     for &(b, a) in arity {
         assert_eq!(b.arity(), a, "{b:?}");
     }
-    assert_eq!(Builtin::from_u16(41), None);
+    assert_eq!(Builtin::from_u16(43), None);
     assert_eq!(Builtin::from_u16(u16::MAX), None);
 }
 

@@ -22,6 +22,9 @@
 //! | `PromiseDetach` | promise slot | - | - |
 //! | `CallHost` | host site | first argument slot | result slot (a query's answer; a command leaves it) |
 //! | `ListLen`, `GetTag`, `NegI`, `Not`, ... two-operand ops | destination | source | - |
+//!
+//! Builtins are numbered in the order of design D5's list, then the ones added after it, each appended
+//! so no earlier number moves: `ModF` (41, float `%`) and `StrCmp` (42, string ordering).
 
 /// Version of the instruction set, builtin ids, fuel table and memory layout.
 pub const BYTECODE_VERSION: u32 = 1;
@@ -165,6 +168,8 @@ numbered!(
         Pow,
         Assert,
         Print,
+        ModF,
+        StrCmp,
     ]
 );
 
@@ -173,7 +178,8 @@ impl Builtin {
     /// slots from the call's `b`, the result in `c`. Mutating builtins (`ListPush`, `ListPop`,
     /// `ListInsert`, `ListRemove`, `DictRemove`) work on the container in the first argument slot and
     /// leave it (possibly moved) there. `StrConcat` is binary (the compiler chains it); `Fmt`'s second
-    /// argument is the type id as an immediate int; `Assert`'s is the message string.
+    /// argument is the type id as an immediate int; `Assert`'s is the message string. `ModF` is float `%`
+    /// (`libm::fmod`, NaN canonical); `StrCmp` compares two strings byte by byte (int -1 / 0 / 1).
     pub fn arity(self) -> u8 {
         use Builtin::*;
         match self {
@@ -181,7 +187,8 @@ impl Builtin {
             | ParseInt | AbsI | AbsF | Sqrt | Floor | Ceil | Round | Sin | Cos | Print => 1,
             ListPush | ListRemove | ListContains | DictGet | DictRemove | DictContains
             | DictNext | DictKeyAt | DictValAt | StrConcat | StrSplit | StrStartsWith
-            | StrEndsWith | StrContains | Fmt | MinI | MaxI | MinF | MaxF | Pow | Assert => 2,
+            | StrEndsWith | StrContains | Fmt | MinI | MaxI | MinF | MaxF | Pow | Assert | ModF
+            | StrCmp => 2,
             ListInsert | ListSlice => 3,
         }
     }

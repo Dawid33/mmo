@@ -253,6 +253,38 @@ impl Emit<'_, '_, '_> {
             );
             return;
         }
+        if ty == Ty::Float && op == BinOp::Rem {
+            self.builtin(
+                Builtin::ModF,
+                &[BArg::Expr(l), BArg::Expr(r)],
+                TyId::FLOAT,
+                Some(dst),
+            );
+            return;
+        }
+        if ty == Ty::Str && matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            // `StrCmp` gives -1 / 0 / 1, compared with 0: (op, 0 on the left).
+            let (code, zero_first) = match op {
+                BinOp::Lt => (Op::LtI, false),
+                BinOp::Le => (Op::LeI, false),
+                BinOp::Gt => (Op::LtI, true),
+                _ => (Op::LeI, true),
+            };
+            let (c, z) = (self.temp(false), self.temp(false));
+            let (cs, zs) = (self.word(c), self.word(z));
+            self.builtin(
+                Builtin::StrCmp,
+                &[BArg::Expr(l), BArg::Expr(r)],
+                TyId::INT,
+                Some(cs),
+            );
+            self.fb.emit(Op::LoadSmall, zs, 0u16, 0u16);
+            let (a, b) = if zero_first { (zs, cs) } else { (cs, zs) };
+            self.fb.emit(code, dst, a, b);
+            self.free(z);
+            self.free(c);
+            return;
+        }
         // (op, swap the operands, negate the result)
         let int = |op: BinOp| match op {
             BinOp::Add => Some((Op::AddI, false)),

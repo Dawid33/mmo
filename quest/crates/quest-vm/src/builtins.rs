@@ -25,7 +25,10 @@
 //!   its first argument as the type whose id its second holds, a top-level string raw.
 //! * Numbers: math goes through `libm`, every float result has its NaN canonicalised. `MinF` / `MaxF`:
 //!   a NaN argument gives the canonical NaN; of `-0.0` and `0.0`, `MinF` returns `-0.0` and `MaxF`
-//!   `0.0`. `AbsI(i64::MIN)` is `IntOverflow`. `Round` rounds half away from zero.
+//!   `0.0`. `AbsI(i64::MIN)` is `IntOverflow`. `Round` rounds half away from zero. `ModF` is
+//!   `libm::fmod` (the sign of the dividend, as Rust's `%` on floats).
+//! * `StrCmp`: byte-lexicographic order of the two strings' UTF-8 (= code point order), as an int
+//!   -1 / 0 / 1.
 //! * `Assert`: a condition of 0 faults `AssertFailed` with the message string (the default text when the
 //!   message slot holds no string).
 
@@ -152,9 +155,9 @@ impl Vm {
             DictGet | DictRemove | DictContains | DictKeys | DictValues | DictLen | DictNext
             | DictKeyAt | DictValAt => self.dict_builtin(b, args, res, m),
             StrLen | StrConcat | StrSplit | StrStartsWith | StrEndsWith | StrContains | StrTrim
-            | StrUpper | StrLower | ParseInt | Fmt => self.str_builtin(b, args, res, m),
+            | StrUpper | StrLower | ParseInt | Fmt | StrCmp => self.str_builtin(b, args, res, m),
             AbsI | MinI | MaxI | AbsF | MinF | MaxF | Sqrt | Floor | Ceil | Round | Sin | Cos
-            | Pow => self.math_builtin(b, args, res),
+            | Pow | ModF => self.math_builtin(b, args, res),
             Assert => self.assert_builtin(args),
             Print => {
                 let text = self.text_in(args, m)?;
@@ -332,6 +335,17 @@ impl Vm {
                 };
                 self.wt(res, u64::from(r))
             }
+            Builtin::StrCmp => {
+                let s = string::bytes_of(&self.store, heap, self.rd(args)?)?;
+                let t = string::bytes_of(&self.store, heap, self.rd(arg(args, 1)?)?)?;
+                m.words(words_of(s.len()).saturating_add(words_of(t.len())));
+                let r: i64 = match s.cmp(&t) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                };
+                self.wt(res, r as u64)
+            }
             Builtin::StrLen => {
                 let s = self.text_in(args, m)?;
                 let n = s.chars().count() as u64;
@@ -364,7 +378,7 @@ impl Vm {
     fn math_builtin(&mut self, b: Builtin, args: u16, res: u16) -> Exec<()> {
         use Builtin::*;
         let x = self.rd(args)?;
-        let binary = matches!(b, MinI | MaxI | MinF | MaxF | Pow);
+        let binary = matches!(b, MinI | MaxI | MinF | MaxF | Pow | ModF);
         let y = if binary { self.rd(arg(args, 1)?)? } else { 0 };
         let (xi, yi, xf, yf) = (x as i64, y as i64, float(x), float(y));
         let v = match b {
@@ -381,6 +395,7 @@ impl Vm {
             Sin => canonical_bits(libm::sin(xf)),
             Cos => canonical_bits(libm::cos(xf)),
             Pow => canonical_bits(libm::pow(xf, yf)),
+            ModF => canonical_bits(libm::fmod(xf, yf)),
             _ => return Err(Fault::corrupt("not a math builtin")),
         };
         self.wt(res, v)
