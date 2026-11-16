@@ -126,8 +126,8 @@ a total crash, the generation raised: such a change is `world-stop` → apply (w
 change (a `var.hosts` key, host resources) goes through cuts on a running world. **A host added after a release**
 starts on `var.images.server` (`:latest`) beside the released digest: right after the apply, `kubectl set image
 deploy/host-<k> host=<the coordinator's image>` (TODO.md, Elastic 1) — else the next release finds mixed images and
-records no previous release. A host pod that crash-loops AFTER registering can roll the world back again and again
-(each restart is a new id, at once a recipient of its predecessor's succession); every check that needs no id runs
+records no previous release. A host pod that crash-loops AFTER registering no longer rolls the world back (each
+landless incarnation is ended, not succeeded — Succession below); every check that needs no id still runs
 before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
 rolling update**; it (and `world-stop` / `world-start`) brings a drained or marked host back as a NEW host. An `orion-apply world`
 owns the replica counts: applied while the world is stopped or mid-update it STARTS the world on whatever images are
@@ -262,6 +262,31 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   **The coordinator takes the same `VOXEL_OWNERSHIP` as its hosts**: its own environment decides whether it
   declares successions (`roles::coordinator_crash_policy`, from that word alone); a host's `Attach` carries its
   crash policy, and the coordinator refuses one that is not its own (the error names `VOXEL_OWNERSHIP`).
+- **The coordinator's state is in the store (Elastic 2a; plan
+  `docs/superpowers/plans/2026-11-16-elastic-2a-coordinator-state-in-the-store.md`, "As built")**: the process holds
+  none of its own. `game::Coordinator` is a cache of the `coordinator` row (migration `0016_coordinator_rows`:
+  `version`, `core`, `history`; `state` dropped): `core` = the whole durable projection (claims, memo, presence,
+  `region_host`, the cut and succession runs, the calendar anchor — every field classified in `projection!`,
+  `coordinator/mod.rs`: a new one does not compile until listed); `history` = History v4 (every field but `grid`;
+  a load is not a restart, no blanket return), written only when `content_dirty` (a day turn with nothing due
+  writes nothing); both bincode + lz4. Each runtime pass is a **transition**: apply the inputs → `take_transition`
+  → `write_coordinator_later`, a compare-and-set (`WHERE epoch = $e AND version = $v`) → only after the commit
+  are its outputs sent (**write-before-send**; one write in flight, `take_out` releases nothing meanwhile; an
+  answer that changed nothing durable leaves without a write). No periodic save, no `gated` messages. A failed
+  write keeps its outputs and retries (`COORDINATOR_SAVE_RETRY_MS`); another epoch → `Fenced`; the same epoch
+  at another version → `StoreError::Conflict`: the row is re-read and written over once only if it is this
+  process's own lost commit (≤ `COORDINATOR_UNACKED_MAX` remembered), else exit `EXIT_FENCED`. A process may
+  hold only its links, the decoded cache, observation timers (`LeaseWatch`, retry pacing, log limits) and the
+  login relay queues. Attachments, a handed-out cut decision, a declaration and an end in flight carry a random
+  `ProcessBoot`: another boot's count as detached / not in flight (a restart needs no forget step). The first
+  `Attach` at a newer generation parks every older-generation host's regions (`first_of_generation`).
+  **Store time**: the core's `now_ms` is the store's clock (`StoreClock`: sampled from each commit's `RETURNING`
+  and each `hosts` read, extrapolated by the monotonic clock, never backwards). **Downtime is not caught up**:
+  after `CALENDAR_GAP_MS` (30 s) without a day turn the calendar re-anchors at its stored tick, and a stored cut
+  / succession deadline older than the gap restarts its count at load. An older core format, another world's
+  row, or no projection beside saved regions is refused at start — re-forge (`just pg-reset`, `just run
+  --reset`). Counters `mmo_coordinator_transitions_total`, `mmo_coordinator_written_bytes_total{part}`,
+  `mmo_coordinator_conflicts_total` and the `[coordinator] window=` line.
 - **Many hosts (R3 + R4 takeover + Elastic 1 hosts by id; plans `docs/superpowers/plans/2026-11-12-r3-multi-host.md`,
   `2026-11-13-r4-takeover.md`, `2026-11-15-elastic-1-hosts-as-deployments.md` ("As built") — built; whole-branch
   reviews and the owner's hand checks pending, see `TODO.md`)**: `claim` is any number of hosts and needs role
@@ -271,7 +296,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   - **Identity**: a host is a `game::HostId`, issued by `register_host` from `world.next_host_id` (migration
     `0014_host_ids`) when the process registers — before it claims or links — and **never reused**; nothing may
     be derived from its number (ports, file names, counts; `HOST_ID_MAX` bounds it). `HostId::SOLO` (0) is role
-    `all` / SQLite. A restarted process is a NEW host that owns nothing; its old id is ended by a succession.
+    `all` / SQLite. A restarted process is a NEW host that owns nothing; its old id is ended by a succession if
+    it owned land, else by `end_landless_host` (row dead, no succession, generation unchanged). The coordinator
+    forgets an id a `hosts` read no longer shows and nothing attached holds (`forget_absent_hosts`); a host
+    forgets dead rows no open succession names (`forget_dead_hosts`).
     `VOXEL_HOST_NAME` (default empty) labels a process (logs, dev files, `hosts.name`, the Deployment), never a
     key: a registration lapses the other dirty live rows of its non-empty name at once (`seen_ms = 0`).
     `VOXEL_HOST_ORDINAL`, `VOXEL_HOSTS`, `VOXEL_ENTRY_HOST` are gone (ignored if set).
@@ -306,12 +334,20 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     (`SETTLE_CUT_RETRY_MS` after the last cut ended, not a save period), and its commit decision names the open
     successions (`settles`) — the store records any other set as an abort. Conserved: identities (entities,
     players, people) exactly once; items and terrain edits that crossed the dead host's seams within one
-    save interval are not guaranteed (`succession_seam_events=` on the `[server]` line); a leave or an
-    offline retirement has no item window.
+    save interval are not guaranteed (`succession_seam_events=` on the `[server]` line); a leave has no item
+    window. **Recipients own land** (Elastic 2a): survivors are the dirty live hosts with a `super_regions` or
+    `in_flight` row, plus the heirs; heirs are tried landed ∧ takes logins → takes logins → attached live. A
+    lapsed landless host that is neither heir nor survivor of an open run is ended by `end_landless_host` (one
+    fenced transaction: row dead, no succession, generation untouched — even while a run is open). A host
+    refused a cut part for unsaved traffic with a host a directory read showed dead (land won after the
+    declaration, beside the dead host) stops for a rollback (`unaccounted_dead`, exit 5): a rollback, never a
+    loss, never a stuck world.
   - **The world generation is the last resort**: `static` / `allinone`, a total crash (below), a second
-    failure before the settle / `SUCCESSION_DEADLINE_MS` (30 s) without every answer / a recipient's reboot in
-    a declared run, `worldctl rollback <url> --yes` (the first process back then raises it once more); an
-    offline `retire-host` raises it.
+    LANDED (or recipient's) failure before the settle — the residual: a host that claims land during an open
+    run and dies before its settle rolls the world back — / `SUCCESSION_DEADLINE_MS` (30 s) without every
+    answer / a recipient's reboot in a declared run, `worldctl rollback <url> --yes` (the first process back then
+    raises it once more). The coordinator's `rollback_world` is conditional on the generation it was decided
+    from: asked again after its commit (a restart before its transition was written) it moves it once.
   - **Registration** (`register_host`, `world-store/src/rows.rs`; `server/src/lease.rs`): a boot never waits.
     One transaction issues the id, lapses its name's old rows, refuses a `static` host beside a live row, and —
     with nobody else live and a dirty row (a total crash) — abandons the open successions, takes every dirty
@@ -335,10 +371,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     ignores a mark; `worldctl drain` refuses a row not beaten within the lease and warns when it marks the last
     host not draining (no gate host: joins 503; no claimer). A stopping host tells its
     sessions why on every exit branch (`LEAVING_REFUSAL`, `FENCED_REFUSAL`, `ROLLBACK_REFUSAL`).
-  - `worldctl hosts <url>` lists the rows; `worldctl retire-host <url> <host id>` (`world-store/src/operator.rs`):
-    hosts alive → only vouches the row dead; none → a succession to the lowest other live-row id, generation
-    raised (that heir never attaches again: the next registration's total crash abandons it). `claim` only —
-    the store does not record the policy, so it cannot refuse a `static` world.
+  - `worldctl hosts <url>` lists the rows; `worldctl retire-host <url> <host id>` (`world-store/src/operator.rs`)
+    only vouches a row dead while hosts run; with no host running it is refused (the first registration takes
+    the land, a total crash). `claim` only — the store does not record the policy, so it cannot refuse a
+    `static` world.
   - Login links to the COORDINATOR, which relays each order (`CoordMsg::Login(LoginOrder)`) to the **gate
     host** — the lowest attached, live, not leaving, not draining id (`Coordinator::gate_host`) — and each
     answer (`HostMsg::Login`) back, keeping no per-order state (a gate that dies holding an order costs a 503
@@ -358,9 +394,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   - `just dev-r3 <hosts> [delay]`: login + coordinator + every host under `scripts/dev_r3.sh` (restarts a host as
     a NEW host on exit 5, 137, and 3 under `claim`; knobs in its header; state `target/dev-r3/`); `just host`,
     `coordinator`, `world-hosts-dev`, `drain-dev` (arguments: `just --list`; `host` and `coordinator` take the
-    same ownership word). `just go-nogo-r3` is NOT VALID AS BUILT (its probe assumes ids 0 and 1: TODO.md).
+    same ownership word). `just go-nogo-r3` re-forges each run and seams from the client's own region→host map
+    (Elastic 2a Task 1); its first valid run is a hand check (TODO.md).
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
-  with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
+  with an epoch; every cut / region load / coordinator write is fenced on it (`StoreError::Fenced`) — a fenced
   process stops writing and exits `EXIT_FENCED` (3, also when fenced at `register_host`); a dead coordinator
   thread exits `EXIT_COORDINATOR_FAILED` (4); a world rollback exits `EXIT_WORLD_ROLLBACK` (5). No advisory
   lock any more (SQLite keeps its flock). `OpenMode::ReadOnly` handles (export, tools) write nothing and need
@@ -368,15 +405,16 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   every host with a non-clean `hosts` row (`two_phase::decide_cut` records an abort otherwise) — EXCEPT one
   registered after the cut began: the fenced coordinator records each cut's begin with the `next_host_id` of
   that moment (`record_cut_begin`, `cut_begins`, migration `0015_cut_begins`), and only ids at or above it may
-  be missing; never relax that check without the host side (Peer link rules). A succession
+  be missing; never relax that check without the host side (Peer link rules). Each decision prunes the older
+  `cut_begins`; `cut_decisions` is never pruned (a re-attaching host's `pending_cut` looks one up). A succession
   moves rows at `epoch + 1`: the replaced process is fenced at its next heartbeat (`lease.rs`
   `pump_or_fence`) or write. A new `hosts` / `super_regions` / `successions` statement needs its lock walk
   (lock order and the one safe deadlock cycle: the module notes of `world-store/src/succession.rs`; the
-  operator's in `operator.rs`; unfenced `successions` writers are the two operator commands and a
+  operator's in `operator.rs`; unfenced `successions` writers are the operator's rollback and a
   total-crash registration). The settles↔adopts pairing (a settled
   succession's heir part carried `adopts`) is a coordinator-side invariant the store does not enforce — it
   only detects a breach after the commit (`two_phase::report_settled_unadopted`, `cuts_settled_unadopted`).
-- **Link rules**: a re-`Attach` after any reconnect rebuilds the coordinator's view; requests are memoised by
+- **Link rules**: a re-`Attach` after any reconnect reconciles the coordinator's (durable) view; requests are memoised by
   `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
   beats latency). Login pushes `SpawnPlayer`/`Kick` to the coordinator's login listener (role `all`: to the
   process); kicks are durable until acked (login migration 0003); the coordinator relays, holding at most the
@@ -396,7 +434,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   by marks still aborts it. From `BeginCut` until `CutDone` a participant FREEZES its session with every host
   outside the cut (nothing sent or read), and refuses its part if it exchanged a state message with such a
   host that no committed cut of both saved (`unsaved_traffic`) — what lets `decide_cut` omit a newcomer. The
-  coordinator down means no cuts, no takeover and no logins until it is back.
+  coordinator down means no cuts, no takeover and no logins until it is back (one process until Elastic 2b) —
+  but nothing it decided is lost: a restart resumes from the row.
 - **Peer journal** (`game/src/peer/journal.rs`): every host under `claim` (a `static` host records nothing)
   journals the state messages it exchanged with each peer since the last committed cut — a succession's
   reports; an entity's events are ordered by its transfer stamp, a player's by the hand-off's hop, never by a
