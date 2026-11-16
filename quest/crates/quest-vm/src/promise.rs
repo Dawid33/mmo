@@ -338,8 +338,7 @@ impl Vm {
         Ok(a)
     }
 
-    /// Frees promise record `i` and its answer (also for Task 31: an edit frees the records of the
-    /// promises it cancels).
+    /// Frees promise record `i` and its answer.
     pub(crate) fn free_promise(&mut self, i: usize) -> Exec<()> {
         let r = self.read_prom(i)?;
         if r.answer != 0 {
@@ -348,25 +347,15 @@ impl Vm {
         self.write_prom(i, &PromRec::default())
     }
 
-    /// Cancels parked task `k` (no segment open): the records of the promises it awaits are freed and its
-    /// `Parked` object is released, so the reaper gives its frames' heap values back. For Task 31 (an
-    /// edit cancels the parked handlers); nothing calls it yet.
-    #[allow(dead_code)]
-    pub(crate) fn cancel_parked(&mut self, k: usize) -> Exec<()> {
-        let r = self.read_park(k)?;
-        if r.state == K_FREE {
-            return Ok(());
-        }
-        if self.store.segment_is_open() {
-            return corrupt("a parked task cancelled inside a segment");
-        }
-        for i in 0..PROMISE_MAX {
-            if self.read_prom(i)?.owner == k as u64 + 1 {
-                self.free_promise(i)?;
+    /// The parked tasks, waiting or ready: what an edit cancels (`migrate`).
+    pub(crate) fn parked_count(&self) -> Exec<u32> {
+        let mut n = 0;
+        for k in 0..PARKED_MAX {
+            if self.read_park(k)?.state != K_FREE {
+                n += 1;
             }
         }
-        release(&mut self.store, self.heap, r.obj)?;
-        self.write_park(k, &ParkRec::default())
+        Ok(n)
     }
 
     // ---- requests and the segment's end --------------------------------------------------------------

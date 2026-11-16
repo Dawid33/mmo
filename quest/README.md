@@ -9,7 +9,7 @@ runner (`quest-stub`) and the `quest` command (`quest-cli`). Its own Cargo works
 ```
 quest check <dir>
 quest run <dir> [--fuel N] [--ticks N] [--mem BYTES] [--trace] [--latency N]
-                [--fail KIND[@NTH][:OP]] [--chest KIND=N] [--save FILE] [--load FILE]
+                [--fail KIND[@NTH][:OP]] [--chest KIND=N] [--save FILE] [--load FILE] [--reset]
 ```
 
 `<dir>` is read recursively for `*.qs` files (paths relative to it, `/` separators).
@@ -30,12 +30,27 @@ stderr.
 | `--trace` | one stderr line per tick: `tick=<n> fuel=<used> hash=<16 hex> status=<idle\|busy\|failed>` | off |
 | `--fail KIND[@NTH][:OP]` | the NTH (default 1) request of OP (default any) fails; KIND is `timeout`, `lost`, `changed` or `namespace-gone`; repeatable | none |
 | `--chest KIND=N` | N items of KIND in the chest; repeatable | empty |
-| `--save FILE` | write the VM state after the run | |
+| `--save FILE` | write the program and its VM state after the run | |
 | `--load FILE` | start from a saved state | |
+| `--reset` | re-initialise the instance (after `--load`): as if the script had just been placed | off |
 
-`--load` needs the same program the state was saved with; a state saved by another program is refused
-(exit 2, the load error). A loaded state that already ran `main` runs it again.
-(Migration to a changed program and `--reset` are not available yet.)
+A state file holds the program it was saved with. `--load` of a state saved by the same program resumes it
+exactly; a loaded state that already ran `main` runs it again. A state saved by a changed script is
+**migrated** (spec §6.9): each top-level variable whose name and type still fit keeps its value, a new one
+runs its initialiser, and a value whose variable is gone or no longer fits is kept aside as an orphan (a
+later edit that brings the name back with a fitting type takes it again); queued events go to the new
+handlers, parked handlers are cancelled. The migration prints to stderr:
+
+```
+carried: runs
+initialised: bonus
+orphaned: gold
+orphan: gold: int = Int(7)
+```
+
+— `carried`, `adopted`, `initialised` and `orphaned` list names (a line only when its list is not empty),
+then one `orphan:` line per value kept aside (older orphans too), then `events dropped: N` and
+`handlers cancelled: N` when not 0. A file that cannot be loaded or migrated exits 2.
 
 A report prints as `error: handler <name> aborted: <fault or error text>` followed by one
 `  at <file>:<line>:<col>` per location, or as `warning: event <name> queued` /

@@ -195,3 +195,40 @@ fn no_main_exit_1() {
     assert_eq!(code(&o), 1);
     assert_eq!(err(&o), "no fn main() in main.qs\n");
 }
+
+#[test]
+fn save_then_load_changed_program() {
+    let a =
+        "let runs = 0\nlet gold = 7\n\nfn main():\n    runs = runs + 1\n    print(f\"{runs}\")\n";
+    let b = "let runs = 0\nlet bonus = 10\n\nfn main():\n    runs = runs + 1\n    print(f\"{runs} {bonus}\")\n";
+    let d = dir("migrate", &[("main.qs", a)]);
+    let file = d.join("state.bin");
+    let f = file.to_str().unwrap();
+    let first = quest(&["run", "--save", f], &d);
+    assert_eq!(
+        (code(&first), out(&first)),
+        (0, "1\n".to_string()),
+        "{}",
+        err(&first)
+    );
+    std::fs::write(d.join("main.qs"), b).unwrap();
+    // The migrated state (with its orphan) is saved again; the reset run loads it.
+    let second = quest(&["run", "--load", f, "--save", f], &d);
+    assert_eq!(
+        (code(&second), out(&second)),
+        (0, "2 10\n".to_string()),
+        "{}",
+        err(&second)
+    );
+    assert_eq!(
+        err(&second),
+        "carried: runs\ninitialised: bonus\norphaned: gold\norphan: gold: int = Int(7)\n"
+    );
+    let reset = quest(&["run", "--load", f, "--reset"], &d);
+    assert_eq!(
+        (code(&reset), out(&reset)),
+        (0, "1 10\n".to_string()),
+        "{}",
+        err(&reset)
+    );
+}

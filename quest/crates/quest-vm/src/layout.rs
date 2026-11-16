@@ -78,6 +78,10 @@ pub const H_EV_ARRIVAL: u32 = 39;
 /// The `Parked` object of the continuation being resumed (0 = the task is not a resumed one): an abort of
 /// its segment brings the object back, and the cleanup releases it (`promise`).
 pub const H_RESUME_PARKED: u32 = 40;
+/// After a migration, the initialisers to skip (their globals were carried over, `migrate`): a `Raw`
+/// block of the inbox heap holding one bit per global; 0 = none. Freed once the init cursor is past the
+/// last global.
+pub const H_INIT_SKIP: u32 = 41;
 
 /// `H_STATUS`: nothing is running.
 pub const STATUS_IDLE: u64 = 0;
@@ -90,7 +94,7 @@ pub const LINK_SENTINEL: u64 = u64::MAX;
 
 /// Every header field; a new `H_*` const must be added here, which checks it fits (words past
 /// the last field up to `HEADER_WORDS` stay zero and reserved).
-const H_ALL: [u32; 41] = [
+const H_ALL: [u32; 42] = [
     H_MAGIC,
     H_BYTECODE_VERSION,
     H_HOST_API_VERSION,
@@ -132,6 +136,7 @@ const H_ALL: [u32; 41] = [
     H_EV_PAYLOAD,
     H_EV_ARRIVAL,
     H_RESUME_PARKED,
+    H_INIT_SKIP,
 ];
 
 const _: () = {

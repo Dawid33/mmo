@@ -4,6 +4,9 @@
 //! kept in Rust fields but the program, the layout-derived allocator handles and what is derived from the
 //! program alone.
 //!
+//! One exception: the orphans an edit kept aside (`migrate`) are a Rust field, which [`Vm::save`] and the
+//! state hash cover with the memory.
+//!
 //! The block's life (design D7, `sched`): [`Vm::new`] leaves the initialisers pending; each [`Vm::tick`]
 //! runs tasks under its fuel — the initialisers, then `main` once [`Vm::start_main`] asked for it, then
 //! the handlers of the events [`Vm::deliver`] queued.
@@ -19,6 +22,7 @@ use crate::layout::{
     LINK_SENTINEL, LoadError, STATUS_RUNNING,
 };
 use crate::mem::{Checkpoint, RollbackError};
+use crate::migrate::Orphan;
 use crate::program::Program;
 pub use crate::promise::Resolved;
 use crate::sched::error_type;
@@ -53,6 +57,8 @@ pub struct Vm {
     pub(crate) events: Vec<String>,
     /// `program.content_hash()`, computed once.
     pub(crate) program_hash: u64,
+    /// Values an edit kept aside (`migrate`): state outside the memory, saved and hashed with it.
+    pub(crate) orphans: Vec<Orphan>,
 }
 
 /// What [`Vm::new`] and [`Vm::load`] require of a program: this VM's bytecode version, the host's API
@@ -159,6 +165,7 @@ impl Vm {
             heap,
             inbox,
             events,
+            orphans: Vec::new(),
         }
     }
 
@@ -215,7 +222,7 @@ impl Vm {
         self.store.r(self.store.layout.slot_off(slot)).unwrap_or(0)
     }
 
-    /// The whole memory: the complete state of the instance.
+    /// The whole memory: with [`Vm::orphans`], the complete state of the instance.
     pub fn mem_bytes(&self) -> &[u8] {
         self.store.mem.bytes()
     }

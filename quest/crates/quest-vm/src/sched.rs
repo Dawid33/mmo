@@ -8,6 +8,8 @@
 //!   `Init` task, the handler index of a `Handler` task); `TASK_NONE` between tasks. The interpreter's
 //!   own registers (`H_PC`, `H_CURRENT_FN`, `H_STATUS`) say where the task is.
 //! * `H_INIT_CURSOR`: the next global to initialise; `H_MAIN`: whether `main` was asked for / started.
+//!   `H_INIT_SKIP`: after a migration, the globals whose initialisers do not run (their values were
+//!   carried over, `migrate`); the cursor steps over them.
 //! * The queue region: a ring of `QUEUE_LEN` records (`H_QUEUE_HEAD`, `H_QUEUE_COUNT`) of
 //!   `[arrival, first handler index, payload pointer, 0]`; the payload is the event's wire bytes in a
 //!   `Raw` block of the inbox heap. `H_ARRIVAL` numbers deliveries.
@@ -58,9 +60,9 @@ use crate::host::{AbortCause, DropReason, Host, HostFnKind, PromiseId, Report, S
 use crate::interp::{Exec, Fault, Meter};
 use crate::layout::{
     H_ARRIVAL, H_CMD_LEN, H_CURRENT_FN, H_EV_ARRIVAL, H_EV_HANDLER, H_EV_PAYLOAD, H_FUEL_DEBT,
-    H_INIT_CURSOR, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEUE_COUNT, H_QUEUE_HEAD, H_RESUME_PARKED,
-    H_STATUS, H_TASK, H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL, QUEUE_REC_WORDS,
-    STATUS_IDLE, STATUS_RUNNING,
+    H_INIT_CURSOR, H_INIT_SKIP, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEUE_COUNT, H_QUEUE_HEAD,
+    H_RESUME_PARKED, H_STATUS, H_TASK, H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL,
+    QUEUE_REC_WORDS, STATUS_IDLE, STATUS_RUNNING,
 };
 use crate::object::{capacity, hdr, obj, ptr_of, read_slot, write_slot};
 use crate::types::{ERROR_ENUM_NAME, TypeDesc, TypeId, TypeTable};
@@ -180,7 +182,7 @@ impl Vm {
         }
     }
 
-    fn task_in_progress(&self) -> Exec<bool> {
+    pub(crate) fn task_in_progress(&self) -> Exec<bool> {
         Ok(self.header(H_TASK)? != TASK_NONE)
     }
 
@@ -276,7 +278,7 @@ impl Vm {
         })
     }
 
-    fn queue_rec(&self, i: u64) -> Exec<u32> {
+    pub(crate) fn queue_rec(&self, i: u64) -> Exec<u32> {
         word_off(self.store.layout.queue_base, i * u64::from(QUEUE_REC_WORDS))
     }
 
@@ -446,6 +448,44 @@ impl Vm {
         Ok(true)
     }
 
+    /// Whether a migration carried global `i` over (its initialiser does not run).
+    pub(crate) fn init_skipped(&self, i: u64) -> Exec<bool> {
+        let set = self.header(H_INIT_SKIP)?;
+        if set == 0 {
+            return Ok(false);
+        }
+        let (p, h) = hdr(&self.store, self.inbox, set)?;
+        let n = self.program.globals.len() as u64;
+        if h.kind != Kind::Raw || u64::from(h.len) < n.div_ceil(64) * WORD || i >= n {
+            return corrupt("the skipped initialisers do not parse");
+        }
+        // i < n <= 65 536 globals
+        let w = read_slot(&self.store, p, &h, (i / 64) as u32)?;
+        Ok(w >> (i % 64) & 1 != 0)
+    }
+
+    /// Moves the init cursor past the globals a migration carried over, and frees the set of them once
+    /// the cursor is past the last global. Reports the globals stepped over.
+    pub(crate) fn skip_carried_inits(&mut self) -> Exec<u32> {
+        let set = self.header(H_INIT_SKIP)?;
+        if set == 0 {
+            return Ok(0);
+        }
+        let n = self.program.globals.len() as u64;
+        let mut cursor = self.header(H_INIT_CURSOR)?;
+        let mut stepped = 0u32;
+        while cursor < n && self.init_skipped(cursor)? {
+            cursor += 1;
+            stepped += 1;
+        }
+        self.set_header(H_INIT_CURSOR, cursor)?;
+        if cursor >= n {
+            self.inbox.free(&mut self.store, ptr_of(set)?)?;
+            self.set_header(H_INIT_SKIP, 0)?;
+        }
+        Ok(stepped)
+    }
+
     /// The arrival number of the oldest queued event.
     fn queue_head_arrival(&self) -> Exec<Option<u64>> {
         let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
@@ -613,6 +653,8 @@ impl Vm {
                 }
                 self.put(g.slot, v, is_ref)?;
                 self.set_header(H_INIT_CURSOR, u64::from(t.arg) + 1)?;
+                let words = self.skip_carried_inits()?;
+                m.words(words);
             }
             TASK_HANDLER => {
                 let Some(h) = p.handlers.get(i) else {

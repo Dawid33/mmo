@@ -8,7 +8,7 @@ use std::sync::Arc;
 use quest_lang::{SourceTree, compile, render};
 use quest_stub::{FailureKind, FailureRule, Runner, StubConfig, stub_api};
 use quest_vm::host::{AbortCause, Report};
-use quest_vm::{Status, Vm, VmConfig};
+use quest_vm::{Program, Status, Vm, VmConfig};
 
 const EXIT_ABORTED: u8 = 2;
 const EXIT_TICK_LIMIT: u8 = 3;
@@ -30,6 +30,63 @@ struct RunOpts {
     chest: Vec<(String, i64)>,
     save: Option<String>,
     load: Option<String>,
+    reset: bool,
+}
+
+/// A state file of `--save` / `--load`: this magic, the program's bytes (a `u32` length and the bytes),
+/// then the VM's save. The program comes along so that a later run of a changed script can migrate
+/// the state: reading the old values out needs the old program.
+const STATE_MAGIC: [u8; 8] = *b"QSSTATE1";
+
+fn state_file(program: &Program, vm: &Vm) -> Vec<u8> {
+    let code = program.to_bytes();
+    let mut out = STATE_MAGIC.to_vec();
+    // A program's bytes are far below 4 GiB.
+    out.extend_from_slice(&(code.len() as u32).to_le_bytes());
+    out.extend_from_slice(&code);
+    out.extend_from_slice(&vm.save());
+    out
+}
+
+/// The instance in a state file, for `program`: loaded as it was when the file holds `program`,
+/// migrated (the report on stderr) when it holds another.
+fn load_state(bytes: &[u8], program: Arc<Program>, cfg: VmConfig) -> Result<Vm, String> {
+    let rest = bytes
+        .strip_prefix(&STATE_MAGIC[..])
+        .ok_or("not a quest state file")?;
+    let (len, rest) = rest.split_first_chunk::<4>().ok_or("truncated")?;
+    let len = u32::from_le_bytes(*len) as usize;
+    if rest.len() < len {
+        return Err("truncated".into());
+    }
+    let (code, save) = rest.split_at(len);
+    let old = Program::from_bytes(code).map_err(|e| format!("{e:?}"))?;
+    if old.content_hash() == program.content_hash() {
+        return Vm::load(program, cfg, save).map_err(|e| format!("{e:?}"));
+    }
+    let vm = Vm::load(Arc::new(old), cfg.clone(), save).map_err(|e| format!("{e:?}"))?;
+    let (vm, report) = vm.migrate(program, cfg).map_err(|e| format!("{e:?}"))?;
+    let lists = [
+        ("carried", &report.carried),
+        ("adopted", &report.adopted),
+        ("initialised", &report.initialised),
+        ("orphaned", &report.orphaned),
+    ];
+    for (what, names) in lists {
+        if !names.is_empty() {
+            eprintln!("{what}: {}", names.join(", "));
+        }
+    }
+    for o in vm.orphans() {
+        eprintln!("orphan: {}: {} = {:?}", o.name, o.ty, o.value);
+    }
+    if report.events_dropped > 0 {
+        eprintln!("events dropped: {}", report.events_dropped);
+    }
+    if report.handlers_cancelled > 0 {
+        eprintln!("handlers cancelled: {}", report.handlers_cancelled);
+    }
+    Ok(vm)
 }
 
 fn usage(msg: &str) -> ExitCode {
@@ -83,6 +140,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunOpts, String> 
         chest: Vec::new(),
         save: None,
         load: None,
+        reset: false,
     };
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -91,7 +149,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunOpts, String> 
             "--mem" => o.mem = number(&flag, args.next())?,
             "--latency" => o.latency = number(&flag, args.next())?,
             "--trace" => o.trace = true,
-            "--reset" => return Err("--reset is not supported yet".into()),
+            "--reset" => o.reset = true,
             "--fail" => {
                 let v = args.next().ok_or("--fail needs a value")?;
                 o.failures.push(parse_fail(&v)?);
@@ -250,13 +308,16 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
             host_api_version: api.version,
             events: api.events.into_iter().map(|e| e.name).collect(),
         };
-        match Vm::load(program, vm_cfg, &bytes) {
+        match load_state(&bytes, Arc::clone(&program), vm_cfg) {
             Ok(vm) => runner.vm = vm,
             Err(e) => {
-                eprintln!("error: cannot load {file}: {e:?}");
+                eprintln!("error: cannot load {file}: {e}");
                 return ExitCode::from(EXIT_ABORTED);
             }
         }
+    }
+    if opts.reset {
+        runner.vm.reset();
     }
     if program_has_main {
         // A loaded state that already ran `main` is asked to run it again; one still in the middle of it
@@ -302,7 +363,7 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
         }
     }
     if let Some(file) = &opts.save
-        && let Err(e) = std::fs::write(file, runner.vm.save())
+        && let Err(e) = std::fs::write(file, state_file(&program, &runner.vm))
     {
         eprintln!("quest: {file}: {e}");
         return ExitCode::from(EXIT_NO_INPUT);

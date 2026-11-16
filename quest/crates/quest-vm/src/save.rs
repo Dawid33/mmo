@@ -11,7 +11,11 @@
 //! | 8 | the program's content hash |
 //! | 4 | the memory's length `n` |
 //! | `n` | the memory |
-//! | 4 | the orphan count (0: orphans arrive with Task 31, which defines their entries) |
+//! | 4 | the orphan count |
+//! | … | each orphan (`migrate`): its name, its type text, its value's wire bytes, each a `u32` byte length and the bytes |
+//!
+//! The orphans are in their canonical order (sorted by name, then type text, no pair twice): a save
+//! that breaks it is refused, so equal states have equal saves and hashes.
 //!
 //! [`Vm::load`] checks the envelope and the memory's header (versions, program hash, length, every
 //! region base); it does not parse the scheduler's or the heap's contents. A loaded memory that is
@@ -28,24 +32,30 @@ use crate::layout::{
     H_BYTECODE_VERSION, H_HOST_API_VERSION, H_PROGRAM_HASH, H_STATIC_WORDS, Layout, LoadError,
 };
 use crate::mem::Mem;
+use crate::migrate::Orphan;
 use crate::program::Program;
 use crate::store::Store;
 use crate::vm::{Vm, VmConfig, check_program};
+use crate::wire::WireValue;
 
 /// The first bytes of every save.
 pub const SAVE_MAGIC: [u8; 8] = *b"QSSAVE01";
 
-/// The orphan count every save has until orphans exist (Task 31).
-const NO_ORPHANS: u32 = 0;
-
 impl StateHash for Vm {
-    /// The bytecode version, the program's content hash, the memory, the orphan count — never the undo
-    /// log, never the configuration.
+    /// The bytecode version, the program's content hash, the memory, the orphans (count, then each one's
+    /// name, type text and wire bytes) — never the undo log, never the configuration.
     fn state_hash<H: Hasher>(&self, h: &mut H) {
         BYTECODE_VERSION.state_hash(h);
         self.program_hash.state_hash(h);
         self.store.mem.state_hash(h);
-        NO_ORPHANS.state_hash(h);
+        (self.orphans.len() as u64).state_hash(h);
+        for o in &self.orphans {
+            o.name.state_hash(h);
+            o.ty.state_hash(h);
+            let mut bytes = Vec::new();
+            o.value.encode(&mut bytes);
+            bytes.state_hash(h);
+        }
     }
 }
 
@@ -68,6 +78,17 @@ impl<'a> Reader<'a> {
         let mut b = [0; 4];
         b.copy_from_slice(self.take(4)?);
         Ok(u32::from_le_bytes(b))
+    }
+
+    /// A `u32` byte length and that many bytes.
+    fn bytes(&mut self) -> Result<&'a [u8], LoadError> {
+        let n = self.u32()?;
+        self.take(n as usize)
+    }
+
+    fn text(&mut self) -> Result<String, LoadError> {
+        String::from_utf8(self.bytes()?.to_vec())
+            .map_err(|_| LoadError::Invalid("an orphan's text is not UTF-8".into()))
     }
 
     fn u64(&mut self) -> Result<u64, LoadError> {
@@ -95,7 +116,19 @@ impl Vm {
         out.extend_from_slice(&self.program_hash.to_le_bytes());
         out.extend_from_slice(&self.store.mem.len().to_le_bytes());
         out.extend_from_slice(mem);
-        out.extend_from_slice(&NO_ORPHANS.to_le_bytes());
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            // An orphan's parts came out of a memory of at most 4 GiB.
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        out.extend_from_slice(&(self.orphans.len() as u32).to_le_bytes());
+        for o in &self.orphans {
+            put(&mut out, o.name.as_bytes());
+            put(&mut out, o.ty.as_bytes());
+            let mut value = Vec::new();
+            o.value.encode(&mut value);
+            put(&mut out, &value);
+        }
         out
     }
 
@@ -127,8 +160,18 @@ impl Vm {
         }
         let mem_len = r.u32()?;
         let mem = r.take(mem_len as usize)?;
-        if r.u32()? != NO_ORPHANS {
-            return Err(LoadError::Invalid("orphans not supported yet".into()));
+        let mut orphans: Vec<Orphan> = Vec::new();
+        for _ in 0..r.u32()? {
+            let (name, ty) = (r.text()?, r.text()?);
+            let value = WireValue::decode(r.bytes()?)
+                .map_err(|e| LoadError::Invalid(format!("an orphan's value: {e:?}")))?;
+            if orphans
+                .last()
+                .is_some_and(|l| (&l.name, &l.ty) >= (&name, &ty))
+            {
+                return Err(LoadError::Invalid("the orphans are out of order".into()));
+            }
+            orphans.push(Orphan { name, ty, value });
         }
         if !r.rest.is_empty() {
             return Err(LoadError::Invalid("bytes after the save".into()));
@@ -157,7 +200,9 @@ impl Vm {
             }
         }
         let store = Store { mem, layout };
-        Ok(Vm::adopt(program, program_hash, store, cfg.events))
+        let mut vm = Vm::adopt(program, program_hash, store, cfg.events);
+        vm.orphans = orphans;
+        Ok(vm)
     }
 }
 
