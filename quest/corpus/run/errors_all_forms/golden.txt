@@ -1,0 +1,19 @@
+bytecode 3f2bf793f1809b7b
+tick 0 fuel 1410 hash ca36007c98c22193
+tick 1 fuel 184 hash 7f8f6612b4fa3ea7
+mem 6f752680482f667f
+output:
+took 20
+fallback 0
+give ana 20 gold
+log: failed: NotEnough(have=3)
+-1
+give ana 20 gold
+ana: Only 3 left.
+Item(kind="gold", count=5)
+Item(kind="nothing", count=0)
+40
+0
+paid 0
+reports:
+aborted on_click: error ChestEmpty at main.qs:18:9 main.qs:24:16 main.qs:60:16
