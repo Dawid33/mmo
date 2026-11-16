@@ -4,6 +4,133 @@ The quest script language: compiler (`quest-lang`), bytecode VM (`quest-vm`), in
 runner (`quest-stub`) and the `quest` command (`quest-cli`). Its own Cargo workspace; use the recipes
 `just quest-check | quest-test | quest-run <dir> | quest-wasm` from the repository root.
 
+## The language in one page
+
+Indentation-structured, statically typed with inference, Python-looking on the surface, Rust-like underneath.
+A quest block is one source directory; the examples below are real programs from `corpus/run/`.
+
+**Bindings.** `let x = 1` introduces a binding, `x = 2` reassigns it. A name lives to the end of its block;
+a later `let` of the same name shadows it, and may change its type. Types are inferred; annotate where the
+compiler asks (`let n: int = ...`, `needs-annotation`). Literals: `true`/`false`, ints (`1_000`, `0xff`,
+64-bit), floats (`1e3`), strings, f-strings (`f"{a} of {b}"`), lists `[1, 2]`, dicts `{"a": 1}`, `None`.
+
+**Functions.** `fn name(a, b: int) -> int:`; parameter and return types are inferred when omitted. Control
+flow: `if`/`elif`/`else`, `while`, `for x in list`, `for k, v in dict.items()`, `for i in range(n)`,
+`break`, `continue`, `return`, `pass`. **No recursion**: a function that calls itself, directly or through
+others (methods included), is the error `recursion`. Recursive *data* (a tree) is allowed; walk it with a
+loop and a list.
+
+**Values are copied.** `let b = a` copies (cheaply, copy on write); changing `b` never changes `a`. A
+reference is the exception: `&x` (also into a place: `&quest.rewards[2]`), written in a type as `&T`,
+auto-dereferenced (`r.count = 1`), assigned through with `*r = v`. A reference may be passed down to a
+callee; it may not be stored or returned (`ref-stored`, `ref-returned`).
+
+**Structs, impl, enums, match.**
+
+```
+struct Ledger:
+    entries: list[int]
+impl Ledger:
+    fn total(self) -> int: ...        # self: a copy
+    fn add(&self, n): ...             # &self: may mutate
+enum Stage:
+    Asked
+    Accepted(tick: int)
+match stage:
+    case Stage::Accepted(tick) if tick > 100: ...
+    case Stage::Accepted(_) | Stage::Done: ...
+```
+
+Construct with `Ledger(entries=[])` (by name) or positionally. `match` must be exhaustive and an arm that can
+never match is an error (`non-exhaustive`, `impossible-arm`); a missing arm of an otherwise-total `match`
+faults deterministically rather than falling through. In a struct or variant pattern an omitted field acts
+as `_`. `Option[T]` is `Some(x)` / `None`.
+
+**Errors.** `error ChestError = ChestEmpty | NotEnough(have: int)` declares error names (one global space,
+one data shape per name; sets may include other sets). `raise ChestEmpty` / `raise NotEnough(have=3)` need
+no declaration on the function: a function's error set is inferred (`fn f() -> int raises S` pins it).
+A fallible call must be handled:
+
+- `f()?` propagates (the caller's set grows), `f() else 0` a fallback value, `f() else return` / `else raise X`, or a block `else err: ...` that must leave by `return` /
+  `raise` / a value;
+- `match f(): case Ok(v): ... case Err(NotEnough(have)): ...`, exhaustive against the set; a bare error name
+  (`case NotEnough(have):`) is shorthand for `Err(NotEnough(have))`;
+- the same `?` / `else` work on `Option`.
+
+An error that escapes a handler aborts it: its changes are undone, an error report with a trace is printed.
+Runtime faults (division by zero, out of fuel for a segment's memory, ...) abort a handler the same way.
+
+**Collections and strings.** `list`: `append`, `insert(i, x)`, `pop()` (an `Option`), `remove(i)`, `len()`,
+`xs[i]`, slices `xs[a:b]` (clamped), `x in xs`. `dict`: `d[k]`, `d[k] = v`, `get(k)` (an `Option`),
+`remove(k)`, `keys()`, `values()`, `items()`, `in`; iteration is in insertion order, equality ignores order,
+keys are ints, strings, bools, structs and enums (not floats, lists or dicts). Mutating a collection while
+iterating it is defined (iteration is by insertion position). `str`: `len()` (characters), `split`,
+`trim`, `starts_with`, `ends_with`, `contains`, `to_upper`/`to_lower` (ASCII only), `+`, `parse_int(s)`
+(an `Option`). Methods are called with a dot, `len()` included.
+
+**Numbers.** `int / int` truncates toward zero, `%` is the remainder; `int(x)`, `float(n)`, `abs`, `min`,
+`max`, `floor`, `ceil`, `round`, `sqrt`, `sin`, `cos`, `pow`. Floats print shortest-round-trip; NaN is
+canonical; `==` on floats is IEEE, inside a list it compares bits. All of it is bit-identical on every
+platform.
+
+**Modules.** One file is one module; `mod rewards` declares a child (`rewards.qs` or `rewards/mod.qs`; a
+child that others reach into is `pub mod`), `use rewards::give_gold`, `use a::{b, c as d}`, `pub` makes an
+item visible outside its module, `crate::`, `super::`, `self::` paths. `use` cycles between modules are fine.
+
+**Handlers and events.** `@on(PlayerClicked) fn greet(e): ...` runs once per event, one handler at a
+time; several handlers of one event run in table order. A handler is also a plain function. `emit(Event(...))`
+queues an event (the queue holds 4: a warning while busy, then the newest is dropped with an error).
+
+**Promises.** Host reads and writes that answer later (`world.get`, `world.set`, `world.compare_and_set`,
+`chest.take`, ...) return a promise; `await p` parks the handler until it resolves (other events run
+meanwhile) and yields a result you handle like any fallible call (`await p?`, `await p else 0`, `match await p:`).
+Hold a promise in a local to await it later; `await all([a, b])` awaits a list. A promise that is not a
+direct host call (a parameter, field, list element, global, a function's return) carries the union of
+**every** host error (decision 21): handle `Err(_)` there. Every await is a segment boundary: a fault after
+an await undoes only the changes since it; commands and requests of an aborted segment never reach the host.
+`compare_and_set(key, expected, new)` needs `expected` and `new` of the same type (`str(e.player.id)`, not
+`e.player.id`, against a string key).
+
+## What a block's state is
+
+The top-level `let`s. They run once, in module-dependency then declaration order, before `main` (an `await`
+in an initialiser is refused). Everything else (locals, parked handlers, the queue, pending promises) is VM
+state that is saved and restored with them. **Edits** (`quest run --load` with a changed script): a variable
+whose name and type still fit keeps its value; a new one runs its initialiser; a removed or retyped one
+becomes an **orphan** kept aside (a later edit that brings the name back with a fitting type takes it again);
+queued events go to the new handlers (those with none are dropped), parked handlers are cancelled and their
+writes stay, an event whose handlers already started is not re-delivered. **Reset** (`--reset`)
+re-initialises everything: variables, queue, parked handlers, promises, orphans.
+
+## Tunables
+
+All in `crates/quest-vm/src/consts.rs`; some are part of the saved format. Instance memory 262144 bytes;
+fuel 2000 per tick (CLI); queue 4; promise records 16; parked handlers 4; promise timeout 200 ticks;
+command buffer 8192 bytes; inbox 8192 bytes; error trace 16 entries; reference path 32 steps; struct or
+variant fields 32; one structural walk (compare, hash, format) at most 65536 words (`ValueTooLarge`);
+source nesting 256.
+
+## Tests, goldens
+
+`just quest-check` (clippy `-D warnings` plus a wasm32 build), `just quest-test ["<cargo test args>"]`,
+`just quest-run <dir> [flags]`, `just quest-wasm` (the corpus determinism goldens on native and on wasm32).
+`corpus/run/<case>/` holds `main.qs`, `expect.txt` and `golden.txt` (bytecode hash, per-tick fuel and state
+hash, output); `corpus/fail/<case>/` the expected diagnostics. When behaviour changes on purpose, re-bless:
+`QUEST_BLESS=1 just quest-test "-p quest-corpus"`, read the diff of the goldens, commit it.
+
+**Testing rule (owner, 2026-11-16).** The plan's tests are the initial implementation's. From now on a test is
+written only as a regression for a bug that was actually found; never pre-emptively or "for coverage". Broad
+assurance comes from fuzzing, planned later.
+
+## Known MVP limits
+
+- **`not-yet` compile errors**: fallible host queries and commands (the stub's are promises or infallible),
+  an unawaited `all(...)`, and `dialogue` / `quest` items: they parse, resolve and type-check, then report
+  `not-yet` until Phase 10 lowers them.
+- Float `==` inside collections compares bits; `to_upper` is ASCII only.
+- The trace of a re-raise after another failure inside one handler shows the latest entries.
+- The host must discard the old VM after a successful `migrate`.
+
 ## Commands
 
 ```

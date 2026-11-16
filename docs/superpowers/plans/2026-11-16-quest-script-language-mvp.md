@@ -1941,3 +1941,94 @@ feature, not the post-MVP regression rule.
 | §9 host interface, stub, CLI, diagnostics | 8, 15, 16, 30 |
 | §10 layout, isolation, recipes | 1, 15, 16, 30, 32, 34 |
 | §11 testing | every task; the cross-cutting suites in 32–34; the line-by-line check in 35 |
+
+## As built (2026-11-16, Task 35)
+
+The MVP (Tasks 1–34, Phases 1–9) is built and reviewed; Phase 10 (dialogue and quest lowering) is not.
+Source of the deviations below: the execution ledger (`.superpowers/sdd/2026-11-16-quest-script-language-mvp/progress.md`).
+
+### Measured
+
+| | |
+|---|---|
+| Commits touching `quest/` since 083a612b | 79 (plus recipe/doc commits in the justfile, CLAUDE.md and this plan) |
+| Rust source | about 29,400 lines in `quest/crates/*/src` |
+| Tests | 403, all passing: quest-vm 199, quest-lang 166, quest-corpus 16, quest-cli 12, quest-stub 10 |
+| Corpus | 16 run cases (each with `expect.txt` + `golden.txt`), 13 fail cases |
+| `just quest-test` | 10.6 s wall (warm build); the slowest suite is `save_load` (5.5 s) |
+| `just quest-wasm` | native 4/4 in 0.53 s, wasm32 4/4 in 0.57 s (every golden matched on the first run) |
+| `just quest-check` | clippy `-D warnings` and the wasm32 build clean; only the three known manifest warnings |
+| Game build | `grep quest Cargo.toml crates/*/Cargo.toml` = the `exclude` line only; `Cargo.lock` holds no quest crate; no commit of this plan touched `crates/` or `Cargo.lock` except 837c9131 (Task 25, incident 4); `just smoke` passes ("smoke ok in 2s", client warnings only, none quest-related) |
+
+### Spec §11 walk
+
+| §11 bullet | Covered by |
+|---|---|
+| Compiler: indentation lexing | `quest-lang/tests/lex.rs` `indent_dedent_basic`, `blank_and_comment_lines_are_invisible`, `brackets_suppress_newlines`, `dedents_close_at_eof`; corpus `fail/bad_indentation` |
+| parsing | `parse_expr.rs` (`precedence`, `postfix_and_try`, `syntax_errors_name_the_expected_tokens`, `depth_limit_is_exact`), `parse_items.rs` (`items`, `error_recovery_reports_both`, `dialogue_grammar_has_no_conflicts`) |
+| scoping / shadowing | `resolve.rs` `scopes`, `shadowed`; `check_core.rs` `shadowing_may_change_type`; `run_core.rs` `block_scope_and_shadowing` |
+| inference, "needs an annotation" | `check_core.rs` `needs_annotation`, `mismatches`, `callee_first_ignores_declaration_order`; corpus `fail/needs_annotation` |
+| error-set inference and pinning | `check_errors.rs` `inferred_sets`, `pinned_set`, `named_sets_union`, `one_shape_per_name`; corpus `fail/error_shape`, `fail/unhandled_fallible` |
+| exhaustive match (missing arm, impossible arm) | `check_match.rs` `missing`, `spec_5_6_is_exhaustive`, `guards_do_not_cover`, `unreachable_arm_warning`, impossible arms in `fallible_match`; corpus `fail/non_exhaustive`, `fail/impossible_arm` |
+| recursion rejection (direct and mutual) | `check_core.rs` `recursion_direct`, `recursion_mutual`; corpus `fail/recursion_direct`, `fail/recursion_mutual`; the VM's `program.rs` `validate_rejects_call_cycle` |
+| reference restrictions | `check_async.rs` `ref_escapes`, `ref_needs_a_place`, `ref_mismatch_once`; corpus `fail/ref_stored`, `fail/ref_returned` |
+| modules and visibility | `resolve.rs` `spec_module_tree_resolves`, `mod_errors`, `visibility`, `use_cycles_between_modules_are_fine`; corpus `run/modules`, `fail/private_item` |
+| Program corpus (every spec example compiles and behaves) | `quest-corpus/tests/corpus.rs` `run_cases_match_expect`, `fail_cases_match_expect`, `goldens_are_current`; `parse_items.rs` `every_spec_snippet_parses`; the `spec_5_*` / `spec_7_*` / `spec_8_2_*` tests in `run_core/data/errors/handlers/refs.rs` |
+| Fuel/pause | `quest-corpus/tests/fuel.rs` `fuel_equivalence` (all 16 cases plus 8 generated), `pause_points_repeat` |
+| Rollback | `quest-corpus/tests/rollback.rs` `rollback_bar_on_generated_programs` (latency and failures drawn), `rollback_across_a_park`; `quest-vm` `mem.rs`, `alloc.rs`, `save.rs` `rollback_bar`, `sched.rs` `rollback_mid_handler_is_bit_exact` |
+| Serialization (parked handlers, pending promises) | `quest-corpus/tests/save_load.rs` `save_load_at_every_tick` (every run case, each of its first 200 ticks); `quest-vm` `save.rs` `save_load_at_every_tick_resumes_identically`, `load_of_damaged_bytes_never_panics` |
+| Cross-platform determinism (traces, bytecode) | `quest-corpus/tests/determinism.rs` `goldens_reproduce`, `fail_diagnostics_reproduce`, `float_bits_reproduce`, run native and on wasm32 by `just quest-wasm`; `run_core.rs` `bytecode_is_deterministic` |
+| Edits (carried, initialised, orphaned; remove a handler; reset) | `quest-lang/tests/run_edits.rs`: `same_name_compatible_is_carried`, `new_variable_is_initialised`, `removed_variable_is_orphaned`, `retyped_variable_is_orphaned_and_reinitialised`, `orphan_is_adopted_when_the_name_returns`, `events_without_a_handler_are_dropped`, `queued_events_reach_the_new_handlers`, `parked_handlers_are_cancelled_but_writes_stay`, `reset_equals_fresh` (variables, queue, parked handlers, promises, orphans), `reset_revives_a_failed_instance`; CLI `save_then_load_changed_program` |
+| Flat memory (bytes native = wasm32; allocator addresses) | `determinism.rs` `goldens_reproduce` (final memory hash), `allocator_addresses_reproduce`; `quest-vm` `alloc.rs` `first_address_is_pinned`, `two_runs_same_addresses` |
+| Segments | `quest-vm` `promises.rs` `fault_after_await_undoes_only_the_last_segment`, `aborted_segment_requests_never_reach_the_host`; `sched.rs` `commands_reach_the_host_only_at_commit`, `fault_undoes_the_segment`; corpus `run/fault_after_await` |
+| Queue / promises | `sched.rs` `queue_warns_only_when_busy`, `queue_overflow_drops_the_newest`; `promises.rs` `every_rejection_kind`, `await_parks_and_other_events_run`, `resume_order_follows_arrival`, `caps` (parked cap), `timeout_after_the_deadline`; latency: `quest-stub/tests/stub.rs` `latency_is_exact`, `run_handlers.rs` `spec_8_2_ask`; corpus `queue_overflow`, `timeout`, `promises_ask`, `promises_claim` |
+| Faults (each kind aborts, undoes, reports a trace) | `quest-corpus/tests/faults.rs` `each_fault_kind`; `run_core.rs` `runtime_fault_reports_the_line`; `sched.rs` `escaping_error_reports_name_data_trace` |
+
+Every bullet is covered; no test was added in this task.
+
+### What differs from the plan
+
+- **HEADER_WORDS 32 → 64** (Task 3): the header was full; 256 bytes per instance.
+- **`WORK_WORDS_MAX` 65 536 and `FaultKind::ValueTooLarge`** (Task 6): every structural walk (compare, hash, lookup, format, to-wire) is bounded, because shared sublists made them exponential.
+- **Dict iteration positions are stable per-entry serials**; dict equality ignores order (decision 18).
+- **Decision 17 rewritten** (owner, spec §6.1): recursion is forbidden only for function calls; recursive data is allowed and every structural walk is iterative (new Task 13b); `recursive-type` / `type-too-deep` became `infinite-type`; `WIRE_DEPTH_MAX` became `REF_PATH_MAX`.
+- **`FnInfo.params`**, symbolic slots in `ProgramBuilder` (frames, then globals), a pinned builtin arity table (Task 8). **No variadic builtins**: `StrConcatN` became binary `StrConcat`; an f-string chains k−1 concats.
+- **`HeapFull` is an undo of the instruction plus a fault**, with zombies drained before each instruction (Task 10), not reap-and-retry.
+- **Eager `RefKey`** (Task 11): a reference to a dict key of an unresolvable path faults at creation, not at use.
+- **Only `Corrupt` fails the instance**; oversized error data aborts the handler with `ValueTooLarge`. `VmConfig.events` carries event names; `HostApi.events` carries field lists so `e.player` types (Task 21).
+- **Host values are depth-checked at every entry** (Task 13); a resumed task keeps the parked task's kind.
+- **Reserved dialogue words** are accepted as path segments and module names; `quest` is contextual (a keyword only starting a logical line followed by an identifier and `:`), so spec §5.3's `&quest.rewards[2]` parses (decisions 19–20).
+- **One error-name rule** (Task 19): upper-case names in `raise` and `Err(…)` are error names; elsewhere in patterns an unknown upper-case name is resolved by the scrutinee's type. Omitted pattern fields act as `_`; a bare error name on a fallible scrutinee is `Err(name)` (both kept by ruling).
+- **Decision 21 replaces precise promise error sets** (Task 24): a promise has a precise set only when awaited straight from a host call; every other promise carries the union of all host errors. Impossible-arm precision for indirect promises is lost; fallible calls keep precise sets.
+- **A bare member of an `error` set declares a data-less error** (Task 22).
+- **`ModF` and `StrCmp` builtins** appended after `Print` for float `%` and string `<`/`>` (Task 25); the generated error enum is named `$Error` (`ERROR_ENUM_NAME`) so a script's `enum Error` cannot clash.
+- **`for` over an index path evaluates index and key operands once** into hidden locals; every value position that accepts `&T` loads the target first (Task 26, 28).
+- **`quest check` runs layout and code generation** and discards the program (Task 25 ruling).
+- **Migration** (Task 31) works on a clone; a refused migration leaves the old VM untouched and the CLI exits 2 without writing state. Decision 22: an event whose handlers already started when an edit lands is not re-delivered (counted in `events_dropped`). `--reset` re-initialises everything.
+- **`compare_and_set` requires `expected` and `new` of one type** (Task 32). Spec §8.2's `compare_and_set("wyrm_quest", "open", e.player.id)` is therefore a `type-mismatch`; the corpus example uses `str(e.player.id)` and `fail/cas_mixed_types` pins it. The spec text still shows the old form.
+- **Spec §5.10's `dialogue` module tree compiles as written**, but a child module reached from outside is `pub mod` (Rust's rule).
+- **Wall-clock bounds in two tests were replaced** by deterministic counters (`quest_lang::work`, an allocation-counting test) after they flaked under load.
+- **The corpus examples adapt the spec** where it is loose (a `Chest` struct, type annotations on `get`, `chest.take` as a promise); each file's header says how.
+
+### Deferred minors, by crate
+
+- **quest-vm**: `Mem::len` truncation above 4 GiB and `from_bytes` accepting a length that is no multiple of 8; `Fnv64::write_u64` uses native endianness; `set_header` accepts kind `Free` on a live block; `Heap::ah` uses plain `u32` addition; `hdr()` accepts a zombie; `list::contains` identity compare for non-strings (now `deep_eq`); `to_w` / `from_w` nest-check mismatch for strings; `make_unique` doc; `dict_eq` reopens dicts per entry; uncharged dict probes in `DictKeyAt`/`ValAt`; `SetKey` leaks a ref on `ValueTooLarge` (masked by abort); `load` ignores `cfg.mem_bytes`; `H_FUEL_DEBT` unbounded from memory; a nonexistent fn id sets status idle; enum variant count unbounded vs the `u16` tag; immediate flags unchecked in `validate`; `Label` not tied to its `FnBuilder`; `ProgramBuilder::ty` linear interning; `RefStore` to the path's own root; `from_wire` leak on a corrupt dict; the single global error-trace buffer (a re-raise shows later entries).
+- **quest-lang**: a `<` chain gives a generic error; bad-dedent plus syntax double report; a stray `else` after a broken statement absorbed; `SkipTok`/`IdSeg`/`spelling` list tokens by hand; `ModItem`/`UsePath` accept `self`/`crate`/`super`; `Cx::local` is a linear scope lookup (quadratic on long chains); `use` fixpoint O(n²) on adversarial chains; unfixed generic error field cases; `value_returns` for `return g()` with `g: ()`; occurs-check on unresolved element chains (pinned at ≤ 3n²); one bad-dict-key report per key type per body; order-dependent unknown-receiver `needs-annotation`; a mismatch inside an `else` chain reported twice; `[world.set(…)]` as a statement gets no unused-promise; `DEPTH_MAX` counts search steps; `print(r)` relies on the checker refusing `&T`; `let _ = p` detaches an existing local too.
+- **quest-stub**: the runner expires requests at zero fuel while `Vm::tick` skips its timeout pass; an `op: None` failure rule can answer `chest.take` with undeclared errors; a dead `Timeout|Never` arm.
+- **quest-cli**: `read_tree` follows symlink cycles; drop reasons print in Debug form; lossy non-UTF-8 file names; the state file is a plain `fs::write` (not atomic); after a successful `migrate` the host must discard the old VM (same epoch and promise ids).
+- **quest-corpus / recipes**: some goldens are mostly idle-tick lines; `quest-wasm` does not assert the wasm32 half ran more than 0 tests.
+
+### Incidents (factual)
+
+1. Task 3: a `cargo fmt --all` instruction reformatted about 600 tracked files of the game tree through the path dependency; the owner reverted the root tree. Formatting is now `cd quest && cargo fmt -p <crate>` only.
+2. Commit 81805e05 swept in another session's uncommitted plan edits (decisions 19–20, +132 lines) by staging the whole plan file. Left as is; plan and spec edits are staged by filtered patch since.
+3. Task 21: the implementer rewrote the branch tip (`commit-tree` + `update-ref`) to split 49119220 into 8da8880e + e4f0ee21; nothing was published and the tree was identical. History rewrites are now forbidden by the contract.
+4. Commit 837c9131 (Task 25) also carried another session's staged deletion of `crates/game/tests/fixtures/coordinator_state_v1.bin`. Left as is; commits use an explicit pathspec.
+5. A machine crash killed the Task 29 implementer; its uncommitted tests were kept and the task resumed.
+
+### Not done
+
+- **Phase 10** (Tasks 36–40): lowering of `dialogue` and `quest` items (they parse, resolve and type-check, then report `not-yet`), and the host-side use of the language in the game.
+- **`not-yet` in the core language**: fallible host queries and commands, and an unawaited `all(...)`.
+- **Fuzzing** (planned; from here on tests are regression-only).
+- **Whole-branch review** by the owner.
