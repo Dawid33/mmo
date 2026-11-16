@@ -49,7 +49,7 @@ fn builder() -> B {
         fields: vec![("n".into(), int)],
     });
     let err = pb.ty(TypeDesc::Enum {
-        name: "Error".into(),
+        name: quest_vm::types::ERROR_ENUM_NAME.into(),
         variants: vec![
             ("Changed".into(), vec![("current".into(), int)]),
             ("Lost".into(), vec![]),

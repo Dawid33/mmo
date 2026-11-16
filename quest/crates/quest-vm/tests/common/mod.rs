@@ -222,7 +222,7 @@ pub fn scenario(spin: i16) -> Arc<Program> {
         fields: vec![("n".into(), int)],
     });
     pb.ty(TypeDesc::Enum {
-        name: "Error".into(),
+        name: quest_vm::types::ERROR_ENUM_NAME.into(),
         variants: ["Lost", "NotFound", "Timeout", "WrongType"]
             .iter()
             .map(|v| (v.to_string(), vec![]))

@@ -6,7 +6,7 @@
 //! - The scrutinee is evaluated once, into a temporary. A fallible scrutinee (`match f():`) leaves two:
 //!   its value and its error (`errors.rs`); `Ok(…)` matches when the error word is 0 and tests the value,
 //!   `Err(…)` and a bare error name otherwise and test the error. An error name tests the tag of the
-//!   program's `Error` enum.
+//!   program's `$Error` enum.
 //! - A constructor tests the tag (`GetTag`: an object's tag, or a field-less variant's immediate), then its
 //!   fields: a binding is written straight from the field (`GetField`), any other sub-pattern tests the
 //!   field in a temporary, dropped on both ways out.

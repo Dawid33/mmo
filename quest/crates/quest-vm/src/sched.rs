@@ -63,7 +63,7 @@ use crate::layout::{
     STATUS_IDLE, STATUS_RUNNING,
 };
 use crate::object::{capacity, hdr, obj, ptr_of, read_slot, write_slot};
-use crate::types::{TypeDesc, TypeId, TypeTable};
+use crate::types::{ERROR_ENUM_NAME, TypeDesc, TypeId, TypeTable};
 use crate::vm::{RunEnd, Vm};
 use crate::wire::{self, FromWire, WireValue, from_wire, to_wire};
 
@@ -139,12 +139,12 @@ pub(crate) fn corrupt<T>(why: &str) -> Exec<T> {
     Err(Fault::corrupt(why))
 }
 
-/// The id of the program's error enum (the one `Enum` named `Error`), if it has errors.
+/// The id of the program's error enum (the one `Enum` named [`ERROR_ENUM_NAME`]), if it has errors.
 pub(crate) fn error_type(types: &TypeTable) -> Option<TypeId> {
     let i = types
         .0
         .iter()
-        .position(|d| matches!(d, TypeDesc::Enum { name, .. } if name == "Error"))?;
+        .position(|d| matches!(d, TypeDesc::Enum { name, .. } if name == ERROR_ENUM_NAME))?;
     TypeId::try_from(i).ok()
 }
 

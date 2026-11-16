@@ -7,6 +7,10 @@ use crate::fault::{FaultKind, VmResult};
 
 pub type TypeId = u16;
 
+/// The name of the program's error enum (every error name a variant, design D5 / D9): one no script can
+/// declare, so a script's own `enum Error` stays an ordinary enum.
+pub const ERROR_ENUM_NAME: &str = "$Error";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeDesc {
     Unit,

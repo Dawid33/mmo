@@ -302,7 +302,7 @@ fn fault_undoes_the_segment() {
 /// The program's error enum: `NotEnough(have: int)` (tag 0) and `Oops` (tag 1).
 fn error_ty(pb: &mut ProgramBuilder, int: TypeId) -> TypeId {
     pb.ty(TypeDesc::Enum {
-        name: "Error".into(),
+        name: quest_vm::types::ERROR_ENUM_NAME.into(),
         variants: vec![
             ("NotEnough".into(), vec![("have".into(), int)]),
             ("Oops".into(), vec![]),
@@ -812,7 +812,7 @@ fn oversized_error_data_aborts_the_handler() {
     let mut pb = ProgramBuilder::new(API);
     let t = tys(&mut pb);
     pb.ty(TypeDesc::Enum {
-        name: "Error".into(),
+        name: quest_vm::types::ERROR_ENUM_NAME.into(),
         variants: vec![("Big".into(), vec![("blob".into(), t.str)])],
     });
     let shape = pb.shape(1, 1);

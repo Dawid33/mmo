@@ -1,9 +1,9 @@
 //! Errors (spec §5.7, design D5, codegen carry-over 9): `raise`, `?`, the `else` fallbacks, the program's
-//! `Error` enum, and the fallible result `match` tests (`matching.rs`).
+//! `$Error` enum, and the fallible result `match` tests (`matching.rs`).
 //!
-//! **Values.** Every error name of the program is a variant of one enum named `Error`, variants sorted by
-//! name (`Typed::errors`), declared before any other type so the scheduler's lookup by name finds it even
-//! when the program has an `enum Error` of its own. A data-less error is the immediate `(tag << 1) | 1`,
+//! **Values.** Every error name of the program is a variant of one enum named
+//! [`ERROR_ENUM_NAME`] (`$Error`: no script can declare it, so a script's own `enum Error` is an ordinary
+//! enum), variants sorted by name (`Typed::errors`), declared before any other type. A data-less error is the immediate `(tag << 1) | 1`,
 //! one with data an `Obj` of that tag, its fields in the name's data order. A function's error is its
 //! frame word 2 (0: none); a function that cannot fail never writes it.
 //!
@@ -19,7 +19,9 @@
 //! - `match x:`: the value and the error move into temporaries the arms test.
 //!
 //! **`raise`** builds the error in its own word 2, then `TracePush 1` (a new trace) at the `raise`, drops,
-//! `Ret`. The trace's entries are the `pc`s of the `TracePush`es, so each one is placed at its own site.
+//! `Ret`; re-raising a caught error (`raise err`) pushes with `TracePush 0`, so its trace keeps the sites it
+//! passed before it was caught. The trace's entries are the `pc`s of the `TracePush`es, so each one is
+//! placed at its own site.
 
 use super::Emit;
 use super::Gen;
@@ -32,11 +34,9 @@ use crate::ty::{Ty, TyId};
 use quest_vm::Op;
 use quest_vm::ProgramBuilder;
 use quest_vm::asm::SlotRef;
-use quest_vm::types::TypeDesc;
+use quest_vm::types::{ERROR_ENUM_NAME, TypeDesc};
 
-/// The name of the program's error enum, which the scheduler looks up (design D9).
-const ERROR_ENUM: &str = "Error";
-/// `TracePush`'s operand: start a new trace (a `raise`), or append to it (a `?`).
+/// `TracePush`'s operand: start a new trace (a `raise` of a name), or append to it (a `?`, a re-raise).
 const TRACE_NEW: u16 = 1;
 const TRACE_APPEND: u16 = 0;
 
@@ -50,7 +50,7 @@ pub(super) struct Outcome {
 }
 
 impl Gen<'_> {
-    /// Declares the `Error` enum (when the program has error names), before any other type.
+    /// Declares the `$Error` enum (when the program has error names), before any other type.
     pub(super) fn declare_errors(&mut self, pb: &mut ProgramBuilder) {
         let typed = self.typed;
         if typed.errors.is_empty() {
@@ -76,7 +76,7 @@ impl Gen<'_> {
         pb.define_ty(
             id,
             TypeDesc::Enum {
-                name: ERROR_ENUM.to_string(),
+                name: ERROR_ENUM_NAME.to_string(),
                 variants,
             },
         );
@@ -289,18 +289,28 @@ impl Emit<'_, '_, '_> {
         self.at_line();
     }
 
-    /// `raise x` at `at`: an error name, with or without data, or a caught error.
+    /// `raise x` at `at`: an error name, with or without data (a new trace), or a caught error (re-raised:
+    /// its trace goes on, keeping the sites it already passed).
     pub(super) fn raise(&mut self, at: Span, x: &Expr) {
         let own = self.fb.err();
-        match &x.kind {
-            ExprKind::ErrorName(name) => self.error_value(x, name, &[], own),
+        let mode = match &x.kind {
+            ExprKind::ErrorName(name) => {
+                self.error_value(x, name, &[], own);
+                TRACE_NEW
+            }
             ExprKind::Call(callee, args) => match &callee.kind {
-                ExprKind::ErrorName(name) => self.error_value(x, name, args, own),
-                _ => self.not_yet("this `raise`", x.span),
+                ExprKind::ErrorName(name) => {
+                    self.error_value(x, name, args, own);
+                    TRACE_NEW
+                }
+                _ => return self.not_yet("this `raise`", x.span),
             },
-            _ => self.eval_into(x, own),
-        }
-        self.trace(at, TRACE_NEW);
+            _ => {
+                self.eval_into(x, own);
+                TRACE_APPEND
+            }
+        };
+        self.trace(at, mode);
         self.ret_now();
     }
 

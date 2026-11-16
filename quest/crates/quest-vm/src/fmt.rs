@@ -3,7 +3,7 @@
 //! `42`, `1.5`, `2.0`, `NaN`, `inf`, `-inf`, `true`, `()`; a string raw at the top level and quoted when
 //! nested (`"` `\` and newlines, tabs and carriage returns escaped); `[1, 2]`; `{"a": 1}`;
 //! `Ledger(owner="ana", entries=[])`; `Stage::Accepted(tick=5)`; `Stage::Asked`; `Option` as `Some(3)` /
-//! `None`; an error (a variant of the program's enum named `Error`) by its name alone: `NotEnough(have=3)`,
+//! `None`; an error (a variant of the program's error enum, [`ERROR_ENUM_NAME`]) by its name alone: `NotEnough(have=3)`,
 //! `ChestEmpty`. Floats print as Rust's `{:?}` (shortest round-trip).
 //!
 //! The heap value is read through [`to_wire`] (same walk budget, same reported work) and the result is
@@ -12,7 +12,7 @@
 use crate::alloc::Heap;
 use crate::fault::{FaultKind, VmResult};
 use crate::store::Store;
-use crate::types::{TypeDesc, TypeId, TypeTable};
+use crate::types::{ERROR_ENUM_NAME, TypeDesc, TypeId, TypeTable};
 use crate::wire::{WireValue, to_wire};
 use std::fmt::Write;
 
@@ -159,7 +159,7 @@ fn write_value(
                     && variants[0].0 == "None"
                     && variants[1].0 == "Some";
                 // The program's errors (codegen carry-over 9) print by their name alone.
-                if is_option || name == "Error" {
+                if is_option || name == ERROR_ENUM_NAME {
                     out.push_str(vname);
                 } else {
                     out.push_str(name);

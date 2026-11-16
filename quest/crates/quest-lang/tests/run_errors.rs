@@ -163,6 +163,50 @@ fn main():
         }
         other => panic!("expected one error report, got {other:?}"),
     }
+
+    // A caught error raised again keeps its trace: the first `raise`, the re-raise, the `?`. A script's
+    // own `enum Error` does not stand in for the program's errors.
+    let main = format!(
+        r#"{CHEST}
+enum Error:
+    A
+    B(n: int)
+
+fn pay(c: Chest) -> int:
+    let gold = take_gold(c, 20) else err:
+        raise err
+    return gold
+
+fn main():
+    let c = Chest(gold=3)
+    let mine = Error::B(n=4)
+    print(str(pay(c)?))
+"#
+    );
+    let out = run(&[("main.qs", main.as_str())]);
+    match out.reports.as_slice() {
+        [
+            Report::HandlerAborted {
+                cause:
+                    AbortCause::Error {
+                        name, data, trace, ..
+                    },
+                ..
+            },
+        ] => {
+            assert_eq!(name, "NotEnough");
+            assert_eq!(
+                *data,
+                WireValue::Variant {
+                    name: "NotEnough".to_string(),
+                    fields: vec![("have".to_string(), WireValue::Int(3))],
+                }
+            );
+            let at: Vec<u32> = trace.iter().map(|l| l.line).collect();
+            assert_eq!(at, vec![8, 17, 23]);
+        }
+        other => panic!("expected one error report, got {other:?}"),
+    }
 }
 
 #[test]
@@ -246,6 +290,25 @@ fn main():
     assert_eq!(
         printed(&main),
         lines(&["NotEnough(have=3)", "ChestEmpty", "0"])
+    );
+
+    // A script's own `enum Error` is an ordinary enum.
+    let main = format!(
+        r#"{CHEST}
+enum Error:
+    A
+    B(n: int)
+
+fn main():
+    let gold = take_gold(Chest(gold=3), 20) else err:
+        print(f"{{err}}")
+        0
+    print(f"{{Error::B(n=4)}} {{Error::A}} {{gold}}")
+"#
+    );
+    assert_eq!(
+        printed(&main),
+        lines(&["NotEnough(have=3)", "Error::B(n=4) Error::A 0"])
     );
 }
 
