@@ -320,7 +320,7 @@ Primary: Expr = {
     <l:@L> <v:FLOAT> <r:@R> =>? expr(toks, l, r, ExprKind::Float(v)),
     <l:@L> <v:STRING> <r:@R> =>? expr(toks, l, r, ExprKind::Str(v)),
     <l:@L> <v:FSTRING> <r:@R> =>? {
-        let kind = fstring(toks, file, l, v)?;
+        let kind = fstring(errs, toks, file, l, v);
         expr(toks, l, r, kind)
     },
     <l:@L> "true" <r:@R> =>? expr(toks, l, r, ExprKind::Bool(true)),
@@ -384,9 +384,18 @@ OtherErr: () = <e:!> => recovered(errs, toks, file, e, Ctx::Other);
 
 /// What a broken line leaves: its end, and the indented block under it.
 Skipped: () = {
-    NEWLINE,
-    NEWLINE Skip,
-    Skip,
+    NEWLINE Continued*,
+    NEWLINE Skip Continued*,
+    Skip Continued*,
+};
+
+/// An `elif` / `else` clause after a broken line: the rest of a broken `if` chain (neither word begins an
+/// entry, so this takes nothing a block could use).
+Continued: () = ContinuedWord LineTok* NEWLINE Skip?;
+
+ContinuedWord: () = {
+    "elif",
+    "else",
 };
 
 /// An indented block taken whole, unparsed.
@@ -395,6 +404,11 @@ Skip: () = INDENT SkipTok* DEDENT;
 SkipTok: () = {
     Skip,
     NEWLINE,
+    LineTok,
+};
+
+/// Any token but a layout one.
+LineTok: () = {
     "fn",
     "let",
     "if",
@@ -812,7 +826,7 @@ Line: crate::ast::Line = {
 LineText: Expr = {
     <l:@L> <v:STRING> <r:@R> =>? expr(toks, l, r, ExprKind::Str(v)),
     <l:@L> <v:FSTRING> <r:@R> =>? {
-        let kind = fstring(toks, file, l, v)?;
+        let kind = fstring(errs, toks, file, l, v);
         expr(toks, l, r, kind)
     },
 };

@@ -24,8 +24,6 @@ lalrpop_util::lalrpop_mod!(
 pub enum ParseFail {
     /// The node at this token would be deeper than `PARSE_DEPTH_MAX`.
     TooDeep(usize),
-    /// An f-string's `{expr}` part failed to parse; its diagnostics, already positioned.
-    Nested(Vec<Diagnostic>),
 }
 
 pub(crate) type PErr = ParseError<usize, Tok, ParseFail>;
@@ -298,13 +296,15 @@ pub(crate) fn suffix(toks: &[Token], l: usize, r: usize, e: Expr, s: Suffix) -> 
     expr(toks, l, r, kind)
 }
 
-/// Parses the `{expr}` parts of an f-string token (token `at`).
+/// Parses the `{expr}` parts of an f-string token (token `at`). A part that fails to parse records its
+/// diagnostics and stands as an [`ExprKind::Error`]; the parse goes on.
 pub(crate) fn fstring(
+    errs: &mut Vec<Diagnostic>,
     toks: &[Token],
     file: &str,
     at: usize,
     parts: Vec<FPart>,
-) -> Result<ExprKind, PErr> {
+) -> ExprKind {
     let fallback = toks.get(at).map_or((1, 1), |t| (t.line, t.col));
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
@@ -317,15 +317,20 @@ pub(crate) fn fstring(
                 match expr_tokens(file, &inner, end) {
                     Ok(e) => out.push(FStrPart::Expr(e)),
                     Err(diags) => {
-                        return Err(ParseError::User {
-                            error: ParseFail::Nested(diags),
-                        });
+                        for d in diags {
+                            record(errs, d);
+                        }
+                        out.push(FStrPart::Expr(Expr {
+                            kind: ExprKind::Error,
+                            span: span(toks, at, at.saturating_add(1)),
+                            depth: 1,
+                        }));
                     }
                 }
             }
         }
     }
-    Ok(ExprKind::FStr(out))
+    ExprKind::FStr(out)
 }
 
 pub(crate) fn ty(toks: &[Token], l: usize, r: usize, kind: TypeKind) -> Result<Type, PErr> {
@@ -572,9 +577,6 @@ fn diagnose(file: &str, toks: &[Token], end: End, err: PErr) -> Vec<Diagnostic> 
             .map_or((end.0, end.1, 0), |t| (t.line, t.col, t.len))
     };
     let (code, message, (line, col, len)) = match err {
-        ParseError::User {
-            error: ParseFail::Nested(diags),
-        } => return diags,
         ParseError::User {
             error: ParseFail::TooDeep(i),
         } => (

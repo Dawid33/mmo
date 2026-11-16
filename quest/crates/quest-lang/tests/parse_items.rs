@@ -665,6 +665,12 @@ fn error_recovery_reports_both() {
     assert_eq!(codes(text), vec![("syntax", 2), ("syntax", 3)]);
     let (file, _) = parse_file("main.qs", text);
     assert_has(&file.dump(), r#"(call print "ok")"#);
+    // One broken header of an `if` chain is one error: its `elif` / `else` clauses go with it.
+    let text = "fn main():\n    if x\n        a()\n    elif y:\n        b()\n    else:\n        c()\n    d()\n";
+    assert_eq!(codes(text), vec![("syntax", 2)]);
+    // An f-string's broken part is recorded, and the parse goes on to the next error.
+    let text = "fn main():\n    print(f\"a {x +}\")\n    pass\n    pass\n    let = 1\n";
+    assert_eq!(codes(text), vec![("syntax", 2), ("syntax", 5)]);
 }
 
 #[test]
