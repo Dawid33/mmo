@@ -2856,3 +2856,7 @@ quest-check:
 # quest-test "-p quest-vm --test mem" — the language's tests (all of them when no argument is given).
 quest-test args="":
     {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml {{ if args == "" { "--workspace" } else { args } }}
+
+# quest-run <dir> [flags] — compile and run a quest script directory (see quest/README.md for the flags).
+quest-run dir *args:
+    {{cap}} {{cargo}} run -q --manifest-path quest/Cargo.toml -p quest-cli -- run {{dir}} {{args}}
