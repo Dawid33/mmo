@@ -2832,3 +2832,14 @@ firefox-profile profile *args:
 # Remove build artifacts.
 clean:
     {{cargo}} clean
+
+# The quest script language: its OWN Cargo workspace in quest/ (own Cargo.lock and quest/target/), so its
+# builds never touch the game's. Plan: docs/superpowers/plans/2026-11-16-quest-script-language-mvp.md.
+# quest-check: type-check, clippy, and the wasm32 build of the crates that must run anywhere.
+quest-check:
+    {{cap}} {{cargo}} clippy --manifest-path quest/Cargo.toml --workspace --all-targets -- -D warnings
+    {{cap}} {{cargo}} check --manifest-path quest/Cargo.toml --workspace --exclude quest-cli --target wasm32-unknown-unknown
+
+# quest-test "-p quest-vm --test mem" — the language's tests (all of them when no argument is given).
+quest-test args="":
+    {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml {{ if args == "" { "--workspace" } else { args } }}
