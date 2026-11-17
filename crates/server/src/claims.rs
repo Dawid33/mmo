@@ -101,11 +101,24 @@ impl Fenced {
 pub struct WorldGeneration {
     mine: u64,
     flag: Arc<AtomicBool>,
+    /// The flag was set by [`Self::stop_for_rollback`] (this host's own stop), not by a higher
+    /// generation seen: [`Self::why`] says which.
+    own: Arc<AtomicBool>,
 }
 
 impl WorldGeneration {
     pub fn new(mine: u64) -> Self {
-        WorldGeneration { mine, flag: Arc::default() }
+        WorldGeneration { mine, flag: Arc::default(), own: Arc::default() }
+    }
+
+    /// Why the flag is set, for the stop's log lines: this host's own stop for a rollback, or
+    /// another host's restart from a crash (a higher world generation seen).
+    pub fn why(&self) -> String {
+        if self.own.load(Ordering::SeqCst) {
+            "this host traded state with a dead host that no succession accounts for (it stops for a rollback)".into()
+        } else {
+            format!("another host restarted dirty (a world generation higher than {})", self.mine)
+        }
     }
 
     /// The generation this boot runs at.
@@ -128,6 +141,7 @@ impl WorldGeneration {
     /// holds state nobody can account for (Elastic 2a, `WorldManager::take_unaccounted_dead`):
     /// its lapse rolls the world back to the last committed cut.
     pub fn stop_for_rollback(&self) {
+        self.own.store(true, Ordering::SeqCst);
         self.flag.store(true, Ordering::SeqCst);
     }
 }
@@ -653,8 +667,9 @@ impl DirectoryKeeper {
                     Ok((rows, live, hosts)) => {
                         manager.set_draining(draining_hosts(&hosts));
                         manager.directory_read(rows, live);
-                        // Dead rows no open succession names are gone for good (an ended
-                        // landless host, Elastic 2a): forgotten first, so none is noted as left.
+                        // Every dead row is noted (`note_dead_rows`); then those no open
+                        // succession names — gone for good (an ended landless host, Elastic 2a)
+                        // — are forgotten, before the clean rows below, so none is noted as left.
                         manager.note_dead_rows(hosts.iter().filter(|r| r.state != world_store::HOST_LIVE).map(|r| r.id).collect());
                         manager.forget_dead_hosts(
                             hosts.iter().filter(|r| r.state != world_store::HOST_LIVE && !r.succeeding).map(|r| r.id).collect(),

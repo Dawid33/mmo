@@ -749,7 +749,7 @@ fn leave_world<S: RegionSpawner>(
         if world_generation.is_set() {
             manager.refuse_sessions(&clients, ROLLBACK_REFUSAL);
             cuts.finish_without_cut(manager);
-            log::error!("[server] world rolled back while leaving: another host restarted dirty; nothing more is saved");
+            log::error!("[server] world rolled back while leaving: {}; nothing more is saved", world_generation.why());
             return ServerExit::WorldRolledBack;
         }
         let settled = cuts.world_part().is_none();
@@ -862,7 +862,7 @@ pub fn exit_world<S: RegionSpawner>(
         if let Some(cuts) = cuts {
             cuts.finish_without_cut(manager);
         }
-        log::error!("[server] world rolled back: another host restarted dirty; nothing more is saved");
+        log::error!("[server] world rolled back: {}; nothing more is saved", world_generation.why());
         return ServerExit::WorldRolledBack;
     }
     if let Some(cuts) = cuts.take_if(|c| c.world_cuts()) {

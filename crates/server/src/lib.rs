@@ -1332,7 +1332,7 @@ pub fn run() -> claims::ServerExit {
             break 'main;
         }
         if world_generation.is_set() {
-            log::error!("[server] a host restarted dirty (a higher world generation than {}); stopping to restart from the same save", world_generation.mine());
+            log::error!("[server] {}; stopping to restart from the same save", world_generation.why());
             break 'main;
         }
         if coordinator.as_ref().is_some_and(coordinator_rt::CoordinatorThread::is_finished) {

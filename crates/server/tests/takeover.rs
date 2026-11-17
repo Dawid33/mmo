@@ -1397,6 +1397,56 @@ fn outage_longer_than_the_lease_declares_nobody() {
     t.stop(&db, &dir);
 }
 
+/// Elastic 2a final review (S1): the store's clock steps a minute forward (an NTP step on the
+/// database host) while both hosts' beats are held for about a second — well within the lease:
+/// the reads on either side of the step show one `seen_ms`. The lease watch runs on the
+/// coordinator process's monotonic clock, so nobody lapses (on the store's clock the span would
+/// be the step), nobody is declared, nobody fenced, the generation unchanged, and cuts go on.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_forward_step_of_the_store_clock_lapses_nobody() {
+    install_props();
+    let Some(db) = PgDb::create("tk_clock_step") else { return };
+    let dir = scratch("tk_clock_step");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let generation = t.w.store.world_generation().unwrap();
+    let k = t.until_committed_after(&db, 0);
+    let lapsed = |t: &Takeover| -> Vec<(HostId, u64)> {
+        t.w.coordinator.as_ref().unwrap().thread.inspect(|c| c.leases().lapsed(u64::MAX), WAIT).expect("the core answers")
+    };
+    let beats: Vec<(HostId, Option<server::lease::Heartbeat>)> =
+        t.w.pair.sims.iter_mut().map(|s| (s.ordinal, s.heartbeat.take())).collect();
+    let held = Instant::now();
+    let mut stepped = false;
+    while held.elapsed() < Duration::from_millis(1_200) {
+        if !stepped && held.elapsed() >= Duration::from_millis(300) {
+            t.w.coordinator.as_ref().unwrap().thread.step_store_clock(60_000);
+            stepped = true;
+        }
+        t.round();
+        let now = lapsed(&t);
+        assert!(now.is_empty(), "a forward step of the store's clock lapsed {now:?}");
+    }
+    for (h, beat) in beats {
+        t.sim(h).heartbeat = beat;
+    }
+    let back = Instant::now();
+    while back.elapsed() < Duration::from_millis(2 * LEASE_MS) {
+        t.round();
+        let now = lapsed(&t);
+        assert!(now.is_empty(), "a forward step of the store's clock lapsed {now:?}");
+        assert!(successions(&db).is_empty(), "a clock step declared somebody: {:?}", successions(&db));
+    }
+    for h in (0..2u64).map(HostId) {
+        assert!(!t.sim(h).fenced.is_set(), "host {h} is not fenced");
+        assert!(!t.w.generations[h.0 as usize].is_set(), "host {h} saw no rollback");
+    }
+    assert_eq!(t.w.store.world_generation().unwrap(), generation);
+    let _ = t.until_committed_after(&db, k);
+    assert!(successions(&db).is_empty());
+    t.stop(&db, &dir);
+}
+
 /// [`World`] of two `static` hosts ([`two_hosts`]) whose coordinator runs the crash policy
 /// `policy` and whose hosts beat their leases (as `server::run`'s do), the lease shortened
 /// for every party as in the `claim` tests.
@@ -1733,8 +1783,26 @@ fn a_clean_leave_keeps_the_generation_and_its_waiting_transfers_reach_the_heir()
     t.until("the slime arrived on the heir", LONG, |t| t.sim(heir).holders(id) == [b1]);
     let k = t.until_committed_after(&db, last_committed(&db).0);
     let _ = t.until_committed_after(&db, k);
-    assert_eq!(t.live(id).len(), 1, "once: {:?}", t.live(id));
-    stored_once(&t, &db, id, "after the leave's succession");
+    // The WATCH item (Elastic 2a final review S-M4): a failure says where the slime is.
+    let diag = |t: &mut Takeover| -> String {
+        let counters: Vec<(HostId, u64, u64)> = t
+            .w
+            .pair
+            .sims
+            .iter()
+            .map(|s| (s.ordinal, s.manager.peer_dropped_for_dead(), s.manager.peer_state_to_forgotten()))
+            .collect();
+        format!(
+            "live {:?}, heir {heir}, stored rows {:?}, in-flight rows {}, per host (peer_dropped_for_dead, \
+             peer_state_to_forgotten) {counters:?}",
+            t.live(id),
+            stored_rows(&db, id),
+            in_flight_rows(&t.w.store, id)
+        )
+    };
+    assert_eq!(t.live(id).len(), 1, "once: {}", diag(&mut t));
+    let what = format!("after the leave's succession ({})", diag(&mut t));
+    stored_once(&t, &db, id, &what);
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "no rollback");
     t.stop(&db, &dir);
 }
@@ -1924,8 +1992,26 @@ fn a_leavers_restart_is_a_new_host_and_its_land_is_given_at_once() {
     t.until("the slime arrived on the heir", WAIT, |t| t.sim(heir).holders(id) == [b1]);
     let k = t.until_committed_after(&db, last_committed(&db).0);
     let _ = t.until_committed_after(&db, k);
-    assert_eq!(t.live(id).len(), 1, "once: {:?}", t.live(id));
-    stored_once(&t, &db, id, "after the leave's succession");
+    // The WATCH item (Elastic 2a final review S-M4): a failure says where the slime is.
+    let diag = |t: &mut Takeover| -> String {
+        let counters: Vec<(HostId, u64, u64)> = t
+            .w
+            .pair
+            .sims
+            .iter()
+            .map(|s| (s.ordinal, s.manager.peer_dropped_for_dead(), s.manager.peer_state_to_forgotten()))
+            .collect();
+        format!(
+            "live {:?}, heir {heir}, stored rows {:?}, in-flight rows {}, per host (peer_dropped_for_dead, \
+             peer_state_to_forgotten) {counters:?}",
+            t.live(id),
+            stored_rows(&db, id),
+            in_flight_rows(&t.w.store, id)
+        )
+    };
+    assert_eq!(t.live(id).len(), 1, "once: {}", diag(&mut t));
+    let what = format!("after the leave's succession ({})", diag(&mut t));
+    stored_once(&t, &db, id, &what);
     assert_eq!(t.w.store.world_generation().unwrap(), generation, "no rollback");
     t.stop(&db, &dir);
 }

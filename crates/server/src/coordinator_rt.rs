@@ -669,13 +669,16 @@ pub struct CoordinatorThread {
 }
 
 /// The test hooks of the coordinator's writes ([`CoordinatorThread::fail_coordinator_writes`],
-/// [`CoordinatorThread::kill_after_commit_before_send`]).
+/// [`CoordinatorThread::kill_after_commit_before_send`]) and of its store clock
+/// ([`CoordinatorThread::step_store_clock`]).
 #[cfg(feature = "test-hooks")]
 #[derive(Clone, Default)]
 struct WriteHooks {
     fail: Arc<AtomicBool>,
     kill_after_commit: Arc<AtomicBool>,
     lose_answer: Arc<AtomicBool>,
+    /// Ms added to every store-clock sample from now on.
+    store_clock_step: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CoordinatorThread {
@@ -702,6 +705,15 @@ impl CoordinatorThread {
     #[cfg(feature = "test-hooks")]
     pub fn lose_next_write_answer(&self) {
         self.hooks.lose_answer.store(true, Ordering::SeqCst);
+    }
+
+    /// Test hook: the store's clock steps `ms` forward (an NTP step on the database host) —
+    /// every store time the coordinator samples from now on is `ms` later (cumulative): its
+    /// `now` jumps at the next sample.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn step_store_clock(&self, ms: u64) {
+        self.hooks.store_clock_step.fetch_add(ms, Ordering::SeqCst);
     }
 
     /// Test hook: while `held`, the `hosts` read in flight is not answered (one is issued if
@@ -1009,6 +1021,8 @@ pub struct CoordinatorRuntime {
     /// `now_ms` the expected hosts were last read at.
     hosts_read_ms: Option<u64>,
     /// The hosts read in flight, with the `now_ms` it was issued at.
+    /// Its first field is the MONOTONIC ms ([`Self::mono_ms`]) the read was issued at: the
+    /// lease watch's clock (Elastic 2a final review, S1).
     hosts_rx: Option<(u64, Answer<world_store::HostsRead>)>,
     /// The decision being recorded (one at a time: the core runs one cut at a time).
     recording: Option<Recording>,
@@ -1213,6 +1227,15 @@ impl CoordinatorRuntime {
     /// The process's monotonic clock, ms since [`Self::started`].
     fn mono_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
+    }
+
+    /// The store answered `store_ms` now: the core's clock is sampled
+    /// ([`game::coordinator::StoreClock::sample`]).
+    fn sample_store_clock(&mut self, store_ms: u64) {
+        #[cfg(feature = "test-hooks")]
+        let store_ms = store_ms + self.hooks.store_clock_step.load(Ordering::SeqCst);
+        let mono = self.mono_ms();
+        self.clock.sample(store_ms, mono);
     }
 
     /// The core's `now_ms`: store time ([`game::coordinator::StoreClock`]).
@@ -1495,17 +1518,20 @@ impl CoordinatorRuntime {
         if self.hold_hosts_reads.load(Ordering::SeqCst) && self.hosts_rx.is_some() {
             return;
         }
-        if let Some((issued_ms, rx)) = &self.hosts_rx {
-            let issued_ms = *issued_ms;
+        if let Some((issued_mono, rx)) = &self.hosts_rx {
+            let issued_mono = *issued_mono;
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
                 Ok(Ok(world_store::HostsRead { rows, store_ms })) => {
+                    // The lease watch's receipt stamp: the monotonic clock, taken before the
+                    // sample below (a forward step of the store's clock never reaches the watch).
+                    let received_mono = self.mono_ms();
                     // The store's clock, taken as of this receipt: it lags the store by the
                     // answer's way back, never leads it (a correction for the round trip would
                     // count a stalled read's queueing as time, a forward step `StoreClock` keeps
                     // and the lease watch's spans would grow by). The core's `now` follows from
                     // the next pass.
-                    self.clock.sample(store_ms, self.mono_ms());
+                    self.sample_store_clock(store_ms);
                     // A host that left and registered again (another boot) is expected again.
                     self.core.set_host_boots(rows.iter().map(|r| (r.id, r.boot)).collect());
                     // A row marked dead (a takeover declared it) runs nothing: not expected
@@ -1527,8 +1553,11 @@ impl CoordinatorRuntime {
                         })
                         .collect();
                     // Issue-to-receive stamps: an answer that waited in the channel through a
-                    // stall of this thread never stretches the span (`LeaseWatch::observe`).
-                    self.core.observe_leases(&seen, issued_ms, now);
+                    // stall of this thread never stretches the span (`LeaseWatch::observe`). On
+                    // the MONOTONIC clock (Elastic 2a final review, S1): a forward step of the
+                    // store's clock between two reads never stretches it either; the store's
+                    // own lapse check at the declaration stays the second gate.
+                    self.core.observe_leases(&seen, issued_mono, received_mono);
                 }
                 Ok(Err(e)) => {
                     self.core.expected_hosts_unknown();
@@ -1545,7 +1574,7 @@ impl CoordinatorRuntime {
         }
         if self.hosts_read_ms.is_none_or(|at| now >= at + WORLD_CUT_HOSTS_REFRESH_MS) {
             self.hosts_read_ms = Some(now);
-            self.hosts_rx = Some((now, self.store.hosts_later()));
+            self.hosts_rx = Some((self.mono_ms(), self.store.hosts_later()));
         }
     }
 
@@ -1981,8 +2010,7 @@ impl CoordinatorRuntime {
                 self.failed_in_a_row = 0;
                 self.unacked.clear();
                 self.conflict_retried = false;
-                let mono = self.mono_ms();
-                self.clock.sample(w.store_ms, mono);
+                self.sample_store_clock(w.store_ms);
                 let (core, history) = (t.core.len() as u64, t.history.as_ref().map_or(0, |h| h.len() as u64));
                 self.tally.transitions += 1;
                 self.tally.core_bytes += core;
