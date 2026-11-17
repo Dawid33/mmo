@@ -159,6 +159,53 @@ fn a_refused_decision_still_commits_the_core() {
     w.shutdown();
 }
 
+/// Task 3 fix round 1: a committed cut is announced to the terrain listeners only once its
+/// staged parts are committed — the notice is the post-commit finish's own last step, never a
+/// separate effect that could run beside it (a listener reading before `COMMIT PREPARED` would
+/// see the old versions and wait for its poll).
+#[test]
+fn a_committed_cut_is_announced_only_after_its_parts_are_finished() {
+    let Some(w) = World::new(2) else { return };
+    let notices = w.h.listen_cuts(world_store::NotifyMode::Listen);
+    for o in 0..2 {
+        w.hosts[o].prepare_cut(part(1, hid(o as u64), vec![]), w.fences[o].clone(), 0).recv().unwrap().unwrap();
+    }
+    let read = w.h.load_coordinator().unwrap().expect("bootstrapped").version;
+    let decide = StoreDecision::DecideCut(CutDecide {
+        cut: CutId(1),
+        tick: 100,
+        commit: true,
+        hosts: vec![hid(0), hid(1)],
+        leaving: vec![],
+        generation: 0,
+        settles: vec![],
+    });
+    let written = write(&w.h, transition(read, &[5], None, vec![decide])).unwrap();
+    assert_eq!(
+        written.after_commit,
+        vec![AfterCommit::FinishCut { cut: CutId(1), tick: 100, committed: true }],
+        "one effect: the finish, which announces"
+    );
+    assert_eq!(prepared(&w.w), 2, "nothing finished before the effect");
+    for a in written.after_commit {
+        w.h.after_commit_later(a).recv().unwrap().unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let left = deadline.checked_duration_since(std::time::Instant::now()).expect("the committed cut was announced");
+        match notices.recv_timeout(left) {
+            Ok(world_store::CutNotice::Cut { tick }) => {
+                assert_eq!(tick, 100);
+                break;
+            }
+            Ok(world_store::CutNotice::Resync) => continue,
+            Err(_) => panic!("the committed cut was never announced"),
+        }
+    }
+    assert_eq!(prepared(&w.w), 0, "its parts were committed before the notice");
+    w.shutdown();
+}
+
 /// A declaration that waits out its lock timeout behind a staged part of the predecessor is
 /// refused — that is ITS answer (`Declared` with an error, nothing of it written); the core it
 /// rode in commits all the same.

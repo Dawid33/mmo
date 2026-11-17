@@ -20,8 +20,8 @@
 //!    looks its decisions up, never issues them again).
 //!
 //! After the commit the runtime runs the post-commit effects ([`AfterCommit`]): the staged
-//! parts of a decided cut finished (`COMMIT PREPARED` / `ROLLBACK PREPARED`) and a committed
-//! cut announced to the terrain listeners. A replica that dies first leaves them to the existing
+//! parts of a decided cut finished (`COMMIT PREPARED` / `ROLLBACK PREPARED`) and then — by the
+//! same effect, never beside it — a committed cut announced to the terrain listeners. A replica that dies first leaves them to the existing
 //! lookups (a host's `cut_decided`, a start's `resolve_prepared`, the listeners' poll).
 
 use game::coordinator::{CallStamp, DecisionAnswer, ReplicaId, StoreDecision};
@@ -60,10 +60,13 @@ pub struct TransitionWritten {
 /// ([`crate::StoreHandle::after_commit_later`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AfterCommit {
-    /// Every staged part of `cut` finished as `committed` says (and, committed, the checks
-    /// for entities stored twice and settles not adopted).
+    /// Every staged part of `cut` finished as `committed` says; committed, the terrain
+    /// listeners are then told (`pg_notify`: only once the parts' rows are visible) and the
+    /// checks for entities stored twice and settles not adopted run.
     FinishCut { cut: CutId, tick: Tick, committed: bool },
-    /// The terrain listeners told a cut committed (`pg_notify`).
+    /// The terrain listeners told a cut committed (`pg_notify`) on its own. A committed
+    /// transition never queues it (its `FinishCut` announces); kept for a caller that knows the
+    /// parts are finished.
     NotifyCut { cut: CutId, tick: Tick },
 }
 
@@ -237,10 +240,9 @@ pub(crate) fn answers(w: &TransitionWrite, version: u64, decided: Vec<Decided>) 
         answers.push(match d {
             Decided::Cut { cut, tick, committed } => {
                 if let Ok(committed) = committed {
+                    // One effect: a committed cut is announced by its finish, after its parts
+                    // are committed (never beside it: a listener would read the old versions).
                     after.push(AfterCommit::FinishCut { cut, tick, committed });
-                    if committed {
-                        after.push(AfterCommit::NotifyCut { cut, tick });
-                    }
                 }
                 DecisionAnswer::Cut { stamp, cut, committed: committed.map_err(text) }
             }
@@ -259,9 +261,14 @@ pub(crate) fn answers(w: &TransitionWrite, version: u64, decided: Vec<Decided>) 
 /// committed cut was finished (the caller then runs its checks).
 pub(crate) async fn after_commit_pg(pool: &PgPool, world_tag: Option<u32>, a: AfterCommit, stop_after: Option<u32>) -> Result<bool, StoreError> {
     match a {
-        AfterCommit::FinishCut { cut, committed, .. } => {
+        AfterCommit::FinishCut { cut, tick, committed } => {
             let tag = world_tag.ok_or_else(|| StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into()))?;
             two_phase::finish_staged(pool, tag, cut, committed, stop_after).await?;
+            if committed {
+                // Only now are its parts' rows visible: the terrain listeners re-read on it. A
+                // failure fails the effect, which is tried again (the finish is idempotent).
+                crate::rows::notify_cut(pool, cut, tick).await?;
+            }
             Ok(committed)
         }
         AfterCommit::NotifyCut { cut, tick } => {

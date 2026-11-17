@@ -48,7 +48,7 @@
 //! no cut runs.
 //!
 //! Each decision stored as committed is announced to the hosts' terrain listeners
-//! ([`AfterCommit::NotifyCut`], after the transition's commit; Task 19).
+//! (by its [`AfterCommit::FinishCut`], once the cut's staged parts are committed; Task 19).
 //!
 //! A core that cannot be rebased onto a newer row ends the process as fenced: the shared
 //! [`Fenced`] flag is set — the server's main loop sees it and exits
@@ -1694,10 +1694,8 @@ impl CoordinatorRuntime {
                     // The running cut's own decision, as stored: its post-commit effects may not
                     // have run (the answer that carried them was lost) — run again, idempotent.
                     self.cut_decided(l.cut, l.tick, *stored, &[]);
+                    // A committed one is announced by the finish, once its parts are committed.
                     self.after.push(AfterJob { a: AfterCommit::FinishCut { cut: l.cut, tick: l.tick, committed: *stored }, rx: None, retry_at: now });
-                    if *stored {
-                        self.after.push(AfterJob { a: AfterCommit::NotifyCut { cut: l.cut, tick: l.tick }, rx: None, retry_at: now });
-                    }
                     self.core.decision_looked_up(l.cut, *stored);
                 }
             }
