@@ -62,29 +62,25 @@ fn tab_x(overlay: &mut Overlay<GameUi>, index: i32) -> f32 {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn tabs_switch_bodies() {
     let mut overlay = overlay();
-    assert_eq!(overlay.ui().get_embark_tab(), 0, "opens on Fortress");
+    assert_eq!(overlay.ui().get_embark_tab(), 0, "opens on Adventure");
     let ui = overlay.ui();
-    assert!(ui.get_embark_tabs_end() <= ui.get_embark_tabs_right(), "the three tabs fit the panel");
+    assert!(ui.get_embark_tabs_end() <= ui.get_embark_tabs_right(), "the two tabs fit the panel");
 
     let changed = Rc::new(RefCell::new(Vec::new()));
     let c = changed.clone();
     overlay.ui().on_embark_tab_changed(move |i| c.borrow_mut().push(i));
-    let adventure = tab_x(&mut overlay, 1);
+    let legends = tab_x(&mut overlay, 1);
     changed.borrow_mut().clear();
     let y = overlay.ui().get_embark_tabs_y();
-    let fortress_pixels = overlay.pixels().iter().filter(|p| p.alpha > 0).count();
-
-    click(&mut overlay, adventure, y);
-    assert_eq!(overlay.ui().get_embark_tab(), 1);
-    assert_eq!(*changed.borrow(), [1]);
+    let adventure_pixels = overlay.pixels().iter().filter(|p| p.alpha > 0).count();
 
     // Legends widens the panel (the map's reserve follows): more is drawn.
-    let legends = tab_x(&mut overlay, 2);
     click(&mut overlay, legends, y);
-    assert_eq!(overlay.ui().get_embark_tab(), 2);
+    assert_eq!(overlay.ui().get_embark_tab(), 1);
+    assert_eq!(*changed.borrow(), [1]);
     let legends_pixels = overlay.pixels().iter().filter(|p| p.alpha > 0).count();
     assert!(overlay.opaque_at(450, 200), "the widened panel covers x = 450");
-    assert!(legends_pixels >= fortress_pixels, "{legends_pixels} vs {fortress_pixels}");
+    assert!(legends_pixels >= adventure_pixels, "{legends_pixels} vs {adventure_pixels}");
 }
 
 #[test]
@@ -94,7 +90,7 @@ fn adventure_start_enabled_only_with_site() {
     let started = Rc::new(RefCell::new(0));
     let s = started.clone();
     overlay.ui().on_adventure_start(move || *s.borrow_mut() += 1);
-    overlay.ui().set_embark_tab(1);
+    overlay.ui().set_embark_tab(0);
     overlay.ui().set_adventure_civs(strings(&["The Realm of Copper", "The Guild of Ash"]));
     overlay.ui().set_adventure_civ_picked(0);
     overlay.ui().set_adventure_sites(strings(&["Boatmurdered — pop 12", "Oilfurnace — pop 3"]));
@@ -136,7 +132,7 @@ fn legends_filter_click_reports_index() {
         "1 Granite 102: Urist McMiner was born in Boatmurdered.",
         "1 Granite 101: Boatmurdered was founded by the Realm of Copper.",
     ]));
-    overlay.ui().set_embark_tab(2);
+    overlay.ui().set_embark_tab(1);
     overlay.render();
 
     let ui = overlay.ui();
@@ -160,7 +156,7 @@ fn legends_scroll_to_bottom_loads_more() {
     let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
     overlay.ui().set_legends_lines(strings(&lines));
     overlay.ui().set_legends_more(true);
-    overlay.ui().set_embark_tab(2);
+    overlay.ui().set_embark_tab(1);
     overlay.render();
 
     // Over the lines: right of the filter column, in the widened panel.
@@ -190,6 +186,8 @@ fn legends_scroll_to_bottom_loads_more() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn menu_shows_end_adventure() {
+    // The menu has no "Retire fortress" button and no `can-retire` property any more; End adventure is the
+    // only extra button, and only when an adventure is held.
     let mut overlay = Overlay::<GameUi>::new().expect("game UI");
     overlay.resize(WIDTH, HEIGHT, 1.0);
     overlay.ui().set_menu_open(true);

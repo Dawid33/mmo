@@ -901,12 +901,8 @@ pub fn drain_client_updates(
             ClientUpdateEvent::RegionHosts(_) => {
                 let _ = &mut region_hosts;
             }
-            ClientUpdateEvent::EmbarkOptions(o) => {
-                history_out.write(HistoryMsg::EmbarkOptions(o))
-            }
-            ClientUpdateEvent::EmbarkResult(r) => {
-                history_out.write(HistoryMsg::EmbarkResult(r))
-            }
+            // No UI reads them any more; the variants are deleted in the embark removal's Task 6.
+            ClientUpdateEvent::EmbarkOptions(_) | ClientUpdateEvent::EmbarkResult(_) => {}
             ClientUpdateEvent::PersonInfo(p) => history_out.write(HistoryMsg::PersonInfo(p)),
             ClientUpdateEvent::Civs(c) => history_out.write(HistoryMsg::Civs(c)),
             ClientUpdateEvent::Legends(p) => history_out.write(HistoryMsg::Legends(p)),

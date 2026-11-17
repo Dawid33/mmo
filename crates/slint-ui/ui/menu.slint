@@ -6,13 +6,9 @@ export component GameMenu {
     callback close-menu();
     // Leave the world for the main menu (stops a local server).
     callback main-menu();
-    // Give up the fortress; the arrival map opens to embark or return.
-    callback retire();
-    // Whether the player has a fortress to retire.
-    in property <bool> can-retire;
     // End the adventure; the arrival map opens again.
     callback end-adventure();
-    // Whether the player is on an adventure (shown in place of Retire).
+    // Whether the player is on an adventure (shown beside World Map).
     in property <bool> can-end-adventure;
     // Whether this client can leave to a main menu (not on wasm).
     in property <bool> can-leave: true;
@@ -40,10 +36,6 @@ export component GameMenu {
             if !root.leave-only: Button {
                 text: "World Map";
                 clicked => { root.open-map(); }
-            }
-            if !root.leave-only && root.can-retire: Button {
-                text: "Retire fortress";
-                clicked => { root.retire(); }
             }
             end-slot := VerticalLayout {
                 if !root.leave-only && root.can-end-adventure: Button {

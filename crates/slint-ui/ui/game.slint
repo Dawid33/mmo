@@ -1,7 +1,7 @@
 import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, RadialItem, RadialMenu, Styles, VerticalFlow } from "@widgets";
 import { GameMenu } from "menu.slint";
 import { SiteMark, WorldMap, WorldMapConfig } from "world-map.slint";
-import { EmbarkLayout, EmbarkPanel, EmbarkRow, LegendsFilterRow, LegendsLayout } from "embark.slint";
+import { EmbarkLayout, EmbarkPanel, LegendsFilterRow, LegendsLayout } from "embark.slint";
 import { GameTheme } from "theme.slint";
 import { FortressLayout, FortressPanel } from "fortress-panel.slint";
 import { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
@@ -10,7 +10,7 @@ import { StubWindow } from "stub-window.slint";
 import { InventoryScreen, ItemSlot } from "inventory.slint";
 import { ChatBox, ChatConfig, ChatRow } from "chat.slint";
 
-export { ChatRow, ItemSlot, EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
+export { ChatRow, ItemSlot, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -186,18 +186,7 @@ export component GameUi inherits Window {
     in property <bool> hover-blocked;
     // The embark panel (beside the map while it is visible).
     in property <bool> embark-visible;
-    in property <[string]> embark-civs;
-    in property <int> embark-civ-picked: -1;
-    in property <[EmbarkRow]> embark-rows;
-    in property <string> embark-counter;
-    in property <string> embark-region;
-    in property <bool> embark-enabled;
-    in property <[string]> embark-returns;
-    callback embark-pick-civ(int);
-    callback embark-toggle-person(int, int);
-    callback embark-go();
-    callback embark-return-to(int);
-    // The panel's open tab: 0 Fortress, 1 Adventure, 2 Legends.
+    // The panel's open tab: 0 Adventure, 1 Legends.
     in-out property <int> embark-tab: 0;
     callback embark-tab-changed(int);
     // The Adventure tab: civs with a populated site, the picked civ's
@@ -261,10 +250,6 @@ export component GameUi inherits Window {
     callback close-menu();
     // The menu's Main menu button: leave the world.
     callback main-menu();
-    // The menu's Retire fortress button.
-    callback retire();
-    // Whether the menu offers Retire fortress.
-    in property <bool> can-retire;
     // The menu's End adventure button, and whether it is offered (an
     // adventure is held).
     callback end-adventure();
@@ -490,8 +475,6 @@ export component GameUi inherits Window {
         open-map => { root.open-map(); }
         close-menu => { root.close-menu(); }
         main-menu => { root.main-menu(); }
-        can-retire: root.can-retire;
-        retire => { root.retire(); }
         can-end-adventure: root.can-end-adventure;
         end-adventure => { root.end-adventure(); }
     }
@@ -530,7 +513,7 @@ export component GameUi inherits Window {
     }
 
     // The Legends tab widens the panel; the map keeps the rest.
-    property <length> embark-width: root.embark-tab == 2 ? LegendsLayout.width : EmbarkLayout.width;
+    property <length> embark-width: root.embark-tab == 1 ? LegendsLayout.width : EmbarkLayout.width;
     // `visible` rather than `if`, so its hit-test positions above stay
     // readable.
     embark := EmbarkPanel {
@@ -539,17 +522,6 @@ export component GameUi inherits Window {
         y: WorldMapConfig.margin;
         width: root.embark-width;
         height: root.height - 2 * WorldMapConfig.margin;
-        civs: root.embark-civs;
-        civ-picked: root.embark-civ-picked;
-        rows: root.embark-rows;
-        counter: root.embark-counter;
-        region-text: root.embark-region;
-        embark-enabled: root.embark-enabled;
-        returns: root.embark-returns;
-        pick-civ(i) => { root.embark-pick-civ(i); }
-        toggle-person(s, p) => { root.embark-toggle-person(s, p); }
-        embark => { root.embark-go(); }
-        return-to(i) => { root.embark-return-to(i); }
         tab <=> root.embark-tab;
         tab-changed(i) => { root.embark-tab-changed(i); }
         adventure-civs: root.adventure-civs;

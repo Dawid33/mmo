@@ -15,15 +15,15 @@ use game::{Designation, DesignationKind, OpId, PersonInfo, SiteMarker, TilePos};
 pub const PERSON_NAME_REQUESTS_PER_SEC: u32 = 4;
 
 /// The Governance tab: the date when the calendar is known, then the
-/// fortress's residents, or "No fortress" when none is held.
-pub fn governance_lines(calendar: Option<CalendarTick>, fortress: Option<&SiteMarker>) -> Vec<String> {
+/// residents of the site the player adventures from, or "No settlement".
+pub fn governance_lines(calendar: Option<CalendarTick>, site: Option<&SiteMarker>) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(calendar) = calendar {
         lines.push(format!("Date {}", calendar.date()));
     }
-    match fortress {
+    match site {
         Some(site) => lines.push(format!("Residents {}", site.population)),
-        None => lines.push("No fortress".into()),
+        None => lines.push("No settlement".into()),
     }
     lines
 }
@@ -78,14 +78,14 @@ mod tests {
     }
 
     #[test]
-    fn governance_without_fortress() {
-        assert_eq!(governance_lines(None, None), ["No fortress"]);
+    fn governance_without_site() {
+        assert_eq!(governance_lines(None, None), ["No settlement"]);
         let lines = governance_lines(Some(CalendarTick(0)), None);
-        assert_eq!(lines, [format!("Date {}", CalendarTick(0).date()), "No fortress".to_string()]);
+        assert_eq!(lines, [format!("Date {}", CalendarTick(0).date()), "No settlement".to_string()]);
     }
 
     #[test]
-    fn governance_with_fortress() {
+    fn governance_with_site() {
         let site = SiteMarker {
             site: game::history::SiteId(1),
             civ: game::history::CivId(0),

@@ -12,13 +12,12 @@ use slint_ui::{GameUi, LegendsFilterRow};
 use super::history_view::{AdventureSelection, EmbarkTab, HistoryView};
 use super::slint_overlay::map_tile;
 
-/// The tab of the Slint `embark-tab` index (0 Fortress, 1 Adventure, 2 Legends);
-/// Fortress for an unknown index.
+/// The tab of the Slint `embark-tab` index (0 Adventure, 1 Legends);
+/// Adventure for an unknown index.
 pub fn embark_tab(index: i32) -> EmbarkTab {
     match index {
-        1 => EmbarkTab::Adventure,
-        2 => EmbarkTab::Legends,
-        _ => EmbarkTab::Fortress,
+        1 => EmbarkTab::Legends,
+        _ => EmbarkTab::Adventure,
     }
 }
 
@@ -252,10 +251,9 @@ mod tests {
 
     #[test]
     fn tab_index_maps_to_tab() {
-        assert_eq!(embark_tab(0), EmbarkTab::Fortress);
-        assert_eq!(embark_tab(1), EmbarkTab::Adventure);
-        assert_eq!(embark_tab(2), EmbarkTab::Legends);
-        assert_eq!(embark_tab(7), EmbarkTab::Fortress);
+        assert_eq!(embark_tab(0), EmbarkTab::Adventure);
+        assert_eq!(embark_tab(1), EmbarkTab::Legends);
+        assert_eq!(embark_tab(7), EmbarkTab::Adventure);
     }
 
     #[test]

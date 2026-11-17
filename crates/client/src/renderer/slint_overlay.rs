@@ -39,7 +39,7 @@ use slint_ui::slint::{
     SharedString, VecModel,
 };
 use slint_ui::wheel::{self, WheelInput, WheelPhase};
-use slint_ui::{EmbarkRow, GameUi, HudConfig, HudUi, Overlay, SiteMark, WorldMapConfig};
+use slint_ui::{GameUi, HudConfig, HudUi, Overlay, SiteMark, WorldMapConfig};
 use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines, MapLayer};
 
 use super::bridge::{LocalBody, SimEntity, SimKind};
@@ -154,17 +154,7 @@ pub enum UiAction {
     /// A People row clicked in the fortress panel (index into
     /// [`PeopleRows`]): select that person.
     PickPerson(i32),
-    /// The embark panel's civ button (index into the options' civs).
-    EmbarkPickCiv(i32),
-    /// A person's check box (site index, person index in the picked civ).
-    EmbarkTogglePerson(i32, i32),
-    /// The panel's Embark button: found a site on the selected tile.
-    Embark,
-    /// A "Return to <site>" button (index into `HistoryView::returnable`).
-    ReturnTo(i32),
-    /// The Esc menu's Retire fortress button.
-    Retire,
-    /// The embark panel's tab row (0 Fortress, 1 Adventure, 2 Legends).
+    /// The embark panel's tab row (0 Adventure, 1 Legends).
     EmbarkTab(i32),
     /// The Adventure tab's civ button (index into `AdventureSelection::civs`).
     AdventurePickCiv(i32),
@@ -549,7 +539,6 @@ impl Plugin for SlintOverlayPlugin {
                     // press does one thing.
                     menu_keys.before(minimap::minimap_pointer),
                     apply_ui_actions.before(minimap::minimap_pointer),
-                    apply_embark_result.before(minimap::minimap_pointer),
                     apply_adventure_result.before(minimap::minimap_pointer),
                     arrival_map.before(minimap::minimap_pointer),
                     // Also before the commander: the clicks the open wheel
@@ -798,15 +787,7 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_close_map(push(UiAction::CloseMap));
     ui.on_close_menu(push(UiAction::CloseMenu));
     ui.on_main_menu(push(UiAction::MainMenu));
-    ui.on_retire(push(UiAction::Retire));
     ui.on_play(push(UiAction::Play));
-    ui.on_embark_go(push(UiAction::Embark));
-    let queue = actions.clone();
-    ui.on_embark_pick_civ(move |i| queue.borrow_mut().push(UiAction::EmbarkPickCiv(i)));
-    let queue = actions.clone();
-    ui.on_embark_toggle_person(move |s, p| queue.borrow_mut().push(UiAction::EmbarkTogglePerson(s, p)));
-    let queue = actions.clone();
-    ui.on_embark_return_to(move |i| queue.borrow_mut().push(UiAction::ReturnTo(i)));
     let queue = actions.clone();
     ui.on_embark_tab_changed(move |i| queue.borrow_mut().push(UiAction::EmbarkTab(i)));
     let queue = actions.clone();
@@ -1327,81 +1308,6 @@ fn apply_ui_actions(
                     follow.0 = Some(if is_local { FollowTarget::LocalPlayer } else { FollowTarget::Entity(region, key) });
                 }
             }
-            UiAction::EmbarkPickCiv(i) => {
-                if let Ok(i) = usize::try_from(i) {
-                    history.selection.pick_civ(i);
-                }
-            }
-            UiAction::EmbarkTogglePerson(site, person) => {
-                let offered = history.embark_options.as_ref().and_then(|o| {
-                    let civ = o.civs.get(history.selection.civ?)?;
-                    let p = civ.sites.get(usize::try_from(site).ok()?)?.people.get(usize::try_from(person).ok()?)?;
-                    Some(p.person)
-                });
-                if let Some(p) = offered {
-                    history.selection.toggle(p);
-                }
-            }
-            UiAction::Embark => {
-                if history.embark_pending {
-                    continue;
-                }
-                let region = world_map.map.as_ref().and_then(|m| tile_region(m, ui.get_selected_col(), ui.get_selected_row()));
-                let request = region.zip(history.embark_options.as_ref()).and_then(|(rc, o)| history.selection.request(o, rc));
-                let (Some(rc), Some(request)) = (region, request) else { continue };
-                // The same check the panel's button uses; the server decides anyway.
-                let grid = world_map.map.as_ref().map(game::history::SocietyGrid::from_world_map);
-                if grid.is_none_or(|g| history_view::embark_tile_check(&g, &history.sites, rc).is_err()) {
-                    continue;
-                }
-                let sent = requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::Embark(request)).is_ok());
-                if sent {
-                    // A stale result must never drive the UI.
-                    history.embark_result = None;
-                    history.embark_refusal = None;
-                    history.embark_pending = true;
-                } else {
-                    warn!("[embark] request not sent: no game thread");
-                }
-            }
-            UiAction::ReturnTo(i) => {
-                if history.embark_pending {
-                    continue;
-                }
-                let site = usize::try_from(i).ok().and_then(|i| history.returnable().get(i).map(|s| s.site));
-                let Some(site) = site else { continue };
-                let sent = requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::ReturnTo(site)).is_ok());
-                if sent {
-                    history.embark_result = None;
-                    history.embark_refusal = None;
-                    history.embark_pending = true;
-                }
-            }
-            UiAction::Retire => {
-                if history.fortress.is_none() || history.embark_pending {
-                    continue;
-                }
-                if !requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::Retire).is_ok()) {
-                    warn!("[embark] retire not sent: no game thread");
-                    continue;
-                }
-                // Back to the arrival map: the embark panel returns with the
-                // site as a returnable one (fresh options and sites follow).
-                history.fortress = None;
-                history.fortress_region = None;
-                history.retired = true;
-                history.options_requested = false;
-                history.embark_result = None;
-                history.embark_refusal = None;
-                if let Some(embarked) = embarked.as_mut() {
-                    embarked.0 = false;
-                }
-                if let Some(follow) = follow.as_mut() {
-                    follow.0 = None;
-                }
-                to.menu = false;
-                // `arrival_map` opens the (now modal) map.
-            }
             UiAction::EndAdventure => {
                 if history.adventuring.is_none() || history.adventure_pending {
                     continue;
@@ -1410,13 +1316,10 @@ fn apply_ui_actions(
                     warn!("[adventure] end not sent: no game thread");
                     continue;
                 }
-                // Back to the arrival map, as after Retire.
+                // Back to the start screen.
                 history.adventuring = None;
                 history.adventure_result = None;
                 history.adventure_refusal = None;
-                history.options_requested = false;
-                history.embark_result = None;
-                history.embark_refusal = None;
                 if let Some(embarked) = embarked.as_mut() {
                     embarked.0 = false;
                 }
@@ -1598,8 +1501,6 @@ fn apply_adventure_result(
     match result {
         Ok(site) => {
             history.adventuring = Some(site);
-            // The embark panel stays beside the map only while not playing.
-            history.retired = false;
             if let Some(embarked) = embarked.as_mut() {
                 embarked.0 = true;
             }
@@ -1612,48 +1513,6 @@ fn apply_adventure_result(
             set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), true);
         }
         Err(why) => history.adventure_refusal = Some((why, time.elapsed_secs())),
-    }
-}
-
-/// An `EmbarkResult` (answer to Embark or Return): `Ok` embarks (the arrival
-/// map closes, the camera re-places over the new body), a refusal goes on the
-/// map status line for `REFUSAL_SHOW_SECS`. The result is taken, never read twice.
-fn apply_embark_result(
-    slint: Option<NonSend<SlintLayer<GameUi>>>,
-    mut history: ResMut<HistoryView>,
-    mut embarked: Option<ResMut<Embarked>>,
-    mut cam: Option<ResMut<CommanderCamera>>,
-    mut world_map: ResMut<WorldMapState>,
-    status: Res<HudStatus>,
-    mut policy: Option<ResMut<CursorPolicy>>,
-    time: Res<Time>,
-) {
-    let Some(slint) = slint else { return };
-    if history.embark_result.is_none() {
-        return;
-    }
-    let Some(result) = history.embark_result.take() else { return };
-    history.embark_pending = false;
-    match result {
-        Ok(site) => {
-            history.retired = false;
-            history.fortress = Some(site);
-            if let Some(embarked) = embarked.as_mut() {
-                embarked.0 = true;
-            }
-            if let Some(cam) = cam.as_mut() {
-                cam.placed = false;
-            }
-            let ui = slint.overlay.ui();
-            let mut to = Screens::of(ui);
-            to.map = false;
-            set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), true);
-        }
-        Err(why) => {
-            history.embark_refusal = Some((why, time.elapsed_secs()));
-            // The options may be what went stale (someone left, a site arose).
-            history.options_requested = false;
-        }
     }
 }
 
@@ -1919,12 +1778,8 @@ struct MapShown {
     /// (generation, selected column, selected row, home, Play pending,
     /// embarked) the tile info was last computed for.
     info_for: Option<(u64, i32, i32, Option<RegionCoords>, bool, bool)>,
-    /// The embark check's grid, built from `map` (per generation).
-    grid: Option<(u64, game::history::SocietyGrid)>,
     /// The site markers last pushed.
     sites: Vec<SiteMark>,
-    /// (hovered column, row, history revision) the hover overlay was last set for.
-    hover_for: Option<(i32, i32, bool)>,
 }
 
 /// What the world map window reads.
@@ -2012,20 +1867,16 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     let history_changed = p.history.is_changed();
     if history_changed {
         shown.info_for = None;
-        shown.hover_for = None;
     }
 
-    // The embark panel stands beside the map before embarking and after Retire.
-    let panel = map.is_some() && (!embarked || p.history.retired);
-    if panel && !p.history.options_requested {
-        if p.requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::RequestEmbarkOptions).is_ok()) {
-            p.history.options_requested = true;
-        }
-    }
-    // Play is a dev action; a world without history (no one can embark) keeps it as the way in.
-    let no_embark = !embarked && p.history.embark_options.as_ref().is_some_and(|o| o.civs.is_empty());
-    let embark_ui = panel && !no_embark;
-    let show_play = cfg!(feature = "dev_ui") || no_embark;
+    // The start screen's panel stands beside the map while not in play. A world
+    // with no populated site has nothing to pick: the dev Play button is its way in.
+    let panel = map.is_some() && !embarked;
+    let no_site = !embarked
+        && p.history.sites_received
+        && !p.history.sites.iter().any(history_view::populated);
+    let embark_ui = panel && !no_site;
+    let show_play = cfg!(feature = "dev_ui") || no_site;
     if ui.get_show_play() != show_play {
         ui.set_show_play(show_play);
     }
@@ -2047,13 +1898,6 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         ui.set_map_sites(ModelRc::default());
     }
 
-    if map.is_some() && shown.grid.as_ref().map(|(g, _)| *g) != Some(shown.generation) {
-        shown.grid = map.map(|m| (shown.generation, game::history::SocietyGrid::from_world_map(m)));
-    }
-    let check = |rc: RegionCoords| {
-        shown.grid.as_ref().map_or(Ok(()), |(_, g)| history_view::embark_tile_check(g, &p.history.sites, rc))
-    };
-
     let info_for = Some((shown.generation, col, row, home, pending, embarked));
     if shown.info_for != info_for {
         shown.info_for = info_for;
@@ -2068,55 +1912,13 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         ui.set_tile_lines(ModelRc::new(VecModel::from(lines)));
         let blocker = picked.map(|(map, rc)| play_blocker(map, rc, blocker_home(embarked, home)));
         ui.set_play_enabled(!pending && matches!(blocker, Some(None)));
-        let embark_why = if embark_ui { picked.and_then(|(_, rc)| check(rc).err()) } else { None };
-        let reason = embark_why.map(history_view::embark_refusal_text).or(blocker.flatten()).unwrap_or("");
-        ui.set_play_reason(reason.into());
-        let region_text = match (picked, embark_why) {
-            (None, _) => "Select a tile to embark on".to_string(),
-            (Some(_), Some(why)) => history_view::embark_refusal_text(why).to_string(),
-            (Some((_, rc)), None) => format!("Embark in region ({}, {})", rc.x, rc.z),
-        };
-        let enabled = embark_ui
-            && !p.history.embark_pending
-            && p.history.selection.party_ok()
-            && picked.is_some()
-            && embark_why.is_none();
-        if ui.get_embark_region() != region_text.as_str() {
-            ui.set_embark_region(region_text.into());
-        }
-        ui.set_embark_enabled(enabled);
-        // The panel's lists follow the choice.
-        ui.set_embark_counter(p.history.selection.counter().into());
-        ui.set_embark_civ_picked(p.history.selection.civ.map_or(-1, |c| c as i32));
-        let options = p.history.embark_options.clone().unwrap_or_default();
-        let civs: Vec<SharedString> = options.civs.iter().map(|c| c.name.as_str().into()).collect();
-        ui.set_embark_civs(ModelRc::new(VecModel::from(civs)));
-        let rows: Vec<EmbarkRow> = history_view::embark_rows(&options, &p.history.selection)
-            .into_iter()
-            .map(|r| EmbarkRow { site: r.site, person: r.person, text: r.text.into(), checked: r.checked })
-            .collect();
-        ui.set_embark_rows(ModelRc::new(VecModel::from(rows)));
-        let returns: Vec<SharedString> = p.history.returnable().iter().map(|s| s.name.as_str().into()).collect();
-        ui.set_embark_returns(ModelRc::new(VecModel::from(returns)));
-    }
-
-    // A dark overlay on the hovered tile when embarking there is refused
-    // (the Fortress tab only: Adventure and Legends pick no tile to found on).
-    let (hcol, hrow) = (ui.get_map_hover_col(), ui.get_map_hover_row());
-    let darken = embark_ui && p.history.tab == EmbarkTab::Fortress;
-    if shown.hover_for != Some((hcol, hrow, darken)) {
-        shown.hover_for = Some((hcol, hrow, darken));
-        let blocked = darken && map.and_then(|m| tile_region(m, hcol, hrow)).is_some_and(|rc| check(rc).is_err());
-        if ui.get_hover_blocked() != blocked {
-            ui.set_hover_blocked(blocked);
-        }
+        ui.set_play_reason(blocker.flatten().unwrap_or("").into());
     }
 
     // In the map window and, with the map closed (Play closes it), on the
     // game-level status line.
     let now = p.time.elapsed_secs();
-    let refusal = p.history.visible_embark_refusal(now).map(history_view::embark_refusal_text);
-    let refusal = refusal.or_else(|| p.history.visible_adventure_refusal(now).map(|why| why.describe()));
+    let refusal = p.history.visible_adventure_refusal(now).map(|why| why.describe());
     let status = match refusal {
         Some(text) if p.pending.0.is_none() => text,
         _ => map_status_text(p.pending.0, p.world_map.visible_refusal(now)),
@@ -2133,10 +1935,6 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     let drain_line = p.drain.as_ref().map(|d| d.line()).unwrap_or_default();
     if ui.get_drain_line() != drain_line.as_str() {
         ui.set_drain_line(drain_line.into());
-    }
-    let can_retire = p.history.fortress.is_some() && embarked;
-    if ui.get_can_retire() != can_retire {
-        ui.set_can_retire(can_retire);
     }
     let can_end_adventure = p.history.adventuring.is_some() && embarked;
     if ui.get_can_end_adventure() != can_end_adventure {
@@ -2188,7 +1986,7 @@ fn sync_fortress_panel(
     let shown = p.shown.get();
     let history = &map.history;
     if history.is_changed() || shown.governance.is_none() {
-        let site = history.fortress.and_then(|f| history.sites.iter().find(|s| s.site == f));
+        let site = history.adventuring.and_then(|a| history.sites.iter().find(|s| s.site == a));
         let lines = fortress_panel::governance_lines(history.calendar, site);
         if shown.governance.as_ref() != Some(&lines) {
             ui.set_governance_lines(string_model(&lines));
