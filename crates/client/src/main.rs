@@ -172,7 +172,7 @@ fn main() {
     // Shared debug toggles: render thread (F3 dev panel) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
 
-    // `client debug <preset> [--reset]` (e.g. `just run` = `debug embarked`)
+    // `client debug <preset> [--reset]` (e.g. `just run` = `debug world`)
     // skips the manual setup; a plain `client` opens on the main menu. Parsed
     // first, so a bad command line exits before any window opens.
     #[cfg(not(target_arch = "wasm32"))]

@@ -26,7 +26,7 @@ pub mod connections; // one connection per server host, routed by region (R3)
 pub mod regions; // predicted regions behind a message pair: inline or one thread each
 pub mod frontend; // FrontendUi layer: main menu + placeholder screens
 #[cfg(not(target_arch = "wasm32"))]
-pub mod debug_launch; // `client debug <preset>`: skip the manual setup (e.g. `embarked`)
+pub mod debug_launch; // `client debug <preset>`: skip the manual setup (e.g. `world`)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod local_host; // the child server a menu-started session plays on
 pub mod session; // AppState, SessionScoped, session reset registry, FrontendCamera

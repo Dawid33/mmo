@@ -26,6 +26,8 @@ pub const MAX_NOTICES: usize = 16;
 #[derive(Resource, Default)]
 pub struct HistoryView {
     pub sites: Vec<SiteMarker>,
+    /// The server's `Sites` arrived (they may be empty: a world without history).
+    pub sites_received: bool,
     pub calendar: Option<CalendarTick>,
     /// (text, `Time::elapsed_secs` when received), oldest first.
     pub notices: VecDeque<(String, f32)>,
@@ -420,6 +422,7 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
             HistoryMsg::Sites(v) => {
                 view.adventure.retain_offered(v);
                 view.sites = v.clone();
+                view.sites_received = true;
             }
             HistoryMsg::Fortress(f) => {
                 view.fortress = f.map(|f| f.site);

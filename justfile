@@ -188,14 +188,12 @@ client:
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
-# Debug launch: straight into a small generated world with a fortress embarked
-# (`client debug embarked`, crates/client/src/debug_launch.rs). The world is
-# worlds/debug-embarked/ (16 km / 32 m, forged on first run) and is REUSED, with
-# its fortress, on every later run; `just run --reset` (or deleting the
-# directory) re-forges it and embarks afresh. `just run --adventure` starts in
-# adventure mode instead, at the first populated site (`--adventure-at N` picks
-# the site). `just run --reset --prefab dev-hut` stamps a prefab beside the
-# landing of the region you embark in only (needs it never saved, so `--reset`; more
+# Debug launch: straight into a small generated world, adventuring at the first populated site
+# (`client debug world`, crates/client/src/debug_launch.rs; `--site N` picks the site). The world is
+# worlds/debug-world/ (16 km / 32 m, forged on first run) and is REUSED, with its player,
+# on every later run; `just run --reset` (or deleting the directory) re-forges it and starts
+# afresh. (The old worlds/debug-embarked/ is no longer used.) `just run --reset --prefab dev-hut`
+# stamps a prefab beside the landing of the adventure site's region only (needs it never saved, so `--reset`; more
 # `--prefab`s join with `;`); `VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;statuen-07"`
 # adds a prefab directory. Builds both binaries — the client spawns the world's server itself,
 # like a menu start.
@@ -206,13 +204,13 @@ run *args:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
-    RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
+    RUST_BACKTRACE=1 ./target/debug/client debug world {{args}}
 
 # A town to stand in: `run --reset --town <style>` with every sub-directory of `prefab-imports/` added
 # to `VOXEL_PREFAB_DIRS` (the imported packs hold the houses tagged with a style), e.g.
 # `just town medieval` or `just town medieval:2:64` (STYLE[:ARMS[:LEN]]). One town of that style is laid
-# out beside the landing of the region you embark in (the spawn region a fresh session waits in before
-# embarking is skipped). It passes --reset: it DELETES and re-forges `worlds/debug-embarked/`, the world
+# out beside the landing of the adventure site's region (the spawn region a fresh session waits in before
+# the adventure starts is skipped). It passes --reset: it DELETES and re-forges `worlds/debug-world/`, the world
 # `just run` reuses. Builds both binaries like `run`; more `args` follow.
 town style *args:
     #!/usr/bin/env bash
@@ -230,17 +228,16 @@ town style *args:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
-    RUST_BACKTRACE=1 ./target/debug/client debug embarked --reset --town {{style}} {{args}}
+    RUST_BACKTRACE=1 ./target/debug/client debug world --reset --town {{style}} {{args}}
 
 run_two_port := "6476"
 
-# `run` with TWO clients on one server, both in ONE fortress: client 1 is the
-# debug launch in fortress mode, hosting the embarked world's server on UDP
-# `run_two_port` (`--port`); once it has embarked (it logs
-# `[debug] embarked: fortress site=N`), client 2 joins (`--join`) and starts an
-# adventure at that fortress (`--adventure-at N`). Output is prefixed
+# `run` with TWO clients on one server: two players adventuring at one site. Client 1 is the
+# debug launch, hosting the world's server on UDP `run_two_port` (`--port`); once its
+# adventure has started (it logs `[debug] playing: adventure site=N`), client 2 joins
+# (`--join`) and starts an adventure at that site (`--site N`). Output is prefixed
 # [client 1] / [client 2] (client 1's also in target/run-two/client1.log); the
-# server log is worlds/debug-embarked/server.log. Closing client 1 ends both
+# server log is worlds/debug-world/server.log. Closing client 1 ends both
 # (its server is single-player: it exits with its host). `just run-two --reset`
 # re-forges the world first.
 run-two *args:
@@ -260,20 +257,20 @@ run-two *args:
     : > "$log"
     pids=()
     trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
-    RUST_BACKTRACE=1 ./target/debug/client debug embarked --port "$port" {{args}} \
+    RUST_BACKTRACE=1 ./target/debug/client debug world --port "$port" {{args}} \
         > >(tee "$log" | sed -u 's/^/[client 1] /') 2>&1 &
     host=$!; pids+=("$host")
-    # The world may be forged first, then client 1 embarks: wait for its fortress.
+    # The world may be forged first, then client 1 starts its adventure: wait for its site.
     site=""
     until [ -n "$site" ]; do
         kill -0 "$host" 2>/dev/null || exit 0
         sleep 0.5
-        site=$(grep -aoE 'embarked: fortress site=[0-9]+' "$log" | head -n1 | grep -oE '[0-9]+$' || true)
+        site=$(grep -aoE 'playing: adventure site=[0-9]+' "$log" | head -n1 | grep -oE '[0-9]+$' || true)
     done
-    echo "[run-two] client 1 holds fortress site $site; client 2 adventures there"
+    echo "[run-two] client 1 adventures at site $site; client 2 adventures there"
     # Its own player name: with client 1's, the server would see client 1's player.
     VOXEL_PLAYER_NAME="${VOXEL_PLAYER_NAME:-${USER:-player}}-2" RUST_BACKTRACE=1 \
-        ./target/debug/client debug embarked --join "127.0.0.1:$port" --adventure-at "$site" \
+        ./target/debug/client debug world --join "127.0.0.1:$port" --site "$site" \
         > >(sed -u 's/^/[client 2] /') 2>&1 &
     pids+=("$!")
     wait "$host" || true
@@ -323,7 +320,7 @@ client-release:
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
 
-# `run` in release mode: the embarked debug world (`just run-release --reset`
+# `run` in release mode: the debug world (`just run-release --reset`
 # starts it over).
 run-release *args:
     #!/usr/bin/env bash
@@ -332,7 +329,7 @@ run-release *args:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --release --bin client --bin server
-    RUST_BACKTRACE=1 ./target/release/client debug embarked {{args}}
+    RUST_BACKTRACE=1 ./target/release/client debug world {{args}}
 
 # Scripted flight across region seams (release): server + client, the client
 # flying a straight line under VOXEL_AUTOPILOT once the world is ready, closing
@@ -482,7 +479,7 @@ worldgen-bench:
 # Region start time + server RSS per running region, on real region threads
 # (no client, no LOD): `just genesis-probe 9 30 -9,-6` starts the 3x3 around
 # region (-9,-6), keeps it ticking 30 s and prints RSS. Builds at the play
-# region size; serves `world_file` if set (e.g. worlds/debug-embarked/terrain.world).
+# region size; serves `world_file` if set (e.g. worlds/debug-world/terrain.world).
 genesis-probe regions="1" hold="0" center="0,0":
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release -p server --example genesis_probe
     VOXEL_WORLD_FILE="{{world_file}}" ./target/release/examples/genesis_probe {{regions}} {{hold}} {{center}}
@@ -1172,8 +1169,8 @@ dev-login: kc-up _dev-login-setup
 # The `dev-login` setup, then the login service and the jwt dev server in the
 # background (logs target/dev-login/{login,server}.log), and once both answer (at most
 # `online_wait_secs`) the client in the foreground as `client debug online`: it starts from the
-# kept login of `dev_email` (no screens, no password), joins world `dev` with the ticket's JWT and embarks (returning to the
-# account's fortress if it has one). Closing the client SIGTERMs the server (it saves
+# kept login of `dev_email` (no screens, no password), joins world `dev` with the ticket's JWT and starts an adventure (or resumes the
+# account's). Closing the client SIGTERMs the server (it saves
 # the world) and the login service. Honours `adapter` / `world` like `run`; play
 # region size. Refuses to start if UDP 6466 or TCP 8790 is already taken.
 # Straight into the game WITH login, as the pre-created dev account (no screens).
