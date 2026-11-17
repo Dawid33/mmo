@@ -195,6 +195,7 @@ fn game_ui_props(ui: &slint_ui::GameUi) -> Vec<(&'static str, String)> {
         ("menu-open", ui.get_menu_open().to_string()),
         ("map-open", ui.get_map_open().to_string()),
         ("map-available", ui.get_map_available().to_string()),
+        ("adventure", ui.get_adventure().to_string()),
     ]
 }
 
@@ -292,6 +293,10 @@ fn second_session_starts_clean() {
     first.join(&mut app);
     assert!(count::<With<SessionScoped>>(&mut app) > 0, "the first session spawned its region");
     assert!(!app.world().resource::<ChunkGrid>().0.is_empty(), "the first session meshed terrain");
+    // A new client is in its body, which the fresh UI already shows: the session
+    // switches to the overview so the game UI has something of its own.
+    app.world_mut().resource_mut::<client::renderer::commander::adventure::ClientPlayMode>().0 = game::PlayMode::Overview;
+    app.update();
     assert_ne!(live_game_ui(&app), fresh_ui, "the first session showed itself in the game UI");
     assert_eq!(active_ui_cameras(&mut app), vec![(false, true)], "in the world the commander camera has the UI");
     // A played fortress and a half-made adventure request, which must not reach the next world.

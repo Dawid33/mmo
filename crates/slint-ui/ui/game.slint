@@ -80,7 +80,7 @@ export component GameUi inherits Window {
     // Adventure mode: the client plays its one body instead of commanding
     // (crates/client/src/renderer/commander/adventure.rs); the fortress tools
     // are off meanwhile (`tools-available`). No UI switches it for now.
-    in property <bool> adventure;
+    in property <bool> adventure: true;
 
     // The top-right column (menu-column.slint): Settings and Encyclopedia,
     // each a stub window for now (modal screens, like the map), and the
@@ -128,7 +128,7 @@ export component GameUi inherits Window {
 
     // Fortress tools (crates/client/src/renderer/commander/designate.rs).
     // False with no home region (not joined yet).
-    in property <bool> tools-available: true;
+    in property <bool> tools-available: false;
     // The active tool's index in `TOOL_KEYS` order (Dig, Deconstruct, Build,
     // Chop, Erase); -1 = none. Its wedge shows selected.
     in property <int> active-tool: -1;

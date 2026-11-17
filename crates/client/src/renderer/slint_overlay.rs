@@ -624,6 +624,7 @@ fn push_hud_state(
     policy: Option<Res<CursorPolicy>>,
     band: Option<Res<SelectionBand>>,
     minimap_pixels: Option<ResMut<minimap::MinimapPixels>>,
+    status: Option<Res<HudStatus>>,
     items: Option<Res<HudItems>>,
     first_person: Option<Res<super::commander::first_person::FirstPerson>>,
     adventure: Option<Res<ClientPlayMode>>,
@@ -656,9 +657,11 @@ fn push_hud_state(
         _ => {}
     }
 
-    // The minimap exists in commander mode only.
-    if ui.get_minimap_visible() != minimap_pixels.is_some() {
-        ui.set_minimap_visible(minimap_pixels.is_some());
+    // The minimap shows once a home region is joined (a session that is still
+    // starting, or just reset, draws none, as a fresh HUD).
+    let minimap = minimap_pixels.is_some() && status.is_some_and(|s| s.home_region.is_some());
+    if ui.get_minimap_visible() != minimap {
+        ui.set_minimap_visible(minimap);
     }
     if let Some(mut pixels) = minimap_pixels {
         let image = |data: &[[u8; 4]], edge: u32| {
