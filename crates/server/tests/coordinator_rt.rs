@@ -108,7 +108,7 @@ fn start_request(site: SiteId) -> WorldRequest {
 fn stored_state(store: &StoreHandle, map: &WorldMap) -> Option<(History, Vec<(PlayerId, Claim)>)> {
     let row = store.load_coordinator().unwrap()?;
     let grid = game::history::SocietyGrid::from_world_map(map);
-    let c = game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ProcessBoot(0), 0).expect("the projection loads");
+    let c = game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ReplicaId(0), 0).expect("the projection loads");
     Some((c.history().clone(), c.claims()))
 }
 
@@ -663,7 +663,7 @@ fn single_player_restart_resumes_history_where_it_was() {
 
     let row = store.load_coordinator().unwrap().expect("written");
     let grid = game::history::SocietyGrid::from_world_map(&map);
-    let last = resumed(&game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ProcessBoot(0), 0).unwrap());
+    let last = resumed(&game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ReplicaId(0), 0).unwrap());
     // The change made just before the crash is in it (and whatever the core decided after it,
     // before the write: a day's turn at most).
     assert!(last.now >= target && last.now >= decided.now && last.legends >= decided.legends, "{last:?} vs {decided:?}");
@@ -751,34 +751,53 @@ fn a_conflict_with_its_own_lost_commit_is_written_over_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Elastic 2a: another writer moved the coordinator row under this coordinator's epoch (a bug in
-/// one-process E2a): its next write is a `Conflict` the row does not explain, and it stops as
-/// fenced without sending what it decided.
+/// Elastic 2b (decision 1): another writer moves the coordinator row right before this
+/// coordinator's next write (the test hook writes the row's own projection at the next version):
+/// the write is a `Conflict` the row does not explain as this process's own lost commit. The
+/// coordinator rebases onto the row, replays what it applied since its last commit, and writes
+/// again: the grant commits after one rebase, its reply leaves once, the process runs on, one
+/// conflict counted.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_conflict_with_another_writer_stops_the_coordinator_as_fenced() {
+fn a_conflict_rebases_instead_of_exiting() {
     let dir = scratch("otherwriter");
     let map = land_map();
     let store = open_store(&dir);
     let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    let (fence, site) = (start.fence, start_site(start.coordinator.history()));
+    let site = start_site(start.coordinator.history());
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     let row = first_write(&store);
-    let other = store.write_coordinator_later(fence, row.version, row.core.clone(), None).recv().unwrap().expect("the other write commits");
-    assert_eq!(other.version, row.version + 1);
+    thread.write_conflict_once();
     let id = attach_and_start(&mut link, site);
     let deadline = Instant::now() + WAIT;
-    while !thread.is_finished() {
-        assert!(Instant::now() < deadline, "the coordinator ran on beside another writer");
-        if let Some(CoordMsg::Reply { id: got, .. }) = link.recv() {
-            assert_ne!(got, id, "the reply left");
+    let mut replies = 0;
+    let quiet_from = loop {
+        assert!(Instant::now() < deadline, "the reply never left");
+        assert!(!thread.is_finished(), "the coordinator stopped at the conflict");
+        match link.recv() {
+            Some(CoordMsg::Reply { id: got, .. }) if got == id => {
+                replies += 1;
+                break Instant::now();
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(2)),
         }
-        std::thread::sleep(Duration::from_millis(2));
+    };
+    while quiet_from.elapsed() < Duration::from_millis(700) {
+        match link.recv() {
+            Some(CoordMsg::Reply { id: got, .. }) if got == id => replies += 1,
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(2)),
+        }
     }
-    assert!(fenced.is_set(), "the process is fenced");
-    assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
-    assert_eq!(store.load_coordinator().unwrap().unwrap().version, other.version, "nothing written over the other writer");
+    assert_eq!(replies, 1, "the reply left once");
+    assert!(!thread.is_finished() && !fenced.is_set(), "the coordinator runs on");
+    assert_eq!(thread.conflicts(), 1, "one conflict counted (mmo_coordinator_conflicts_total)");
+    let after = store.load_coordinator().unwrap().unwrap();
+    assert!(after.version >= row.version + 2, "the other write ({}) and the rebased one: {}", row.version + 1, after.version);
+    assert_eq!(stored_state(&store, &map).unwrap().1, vec![(PlayerId(1), Claim::Adventure(site))], "one grant");
+    assert_eq!(thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }

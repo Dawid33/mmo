@@ -536,7 +536,7 @@ fn resident_in_a_stopping_neighbour_keeps_one_body_across_the_attach() {
             let link = w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline");
             let (core, history) = link.coordinator().encode_projection();
             let grid = SocietyGrid::from_world_map(&strip());
-            let restarted = game::Coordinator::load(&core, &history, grid, game::coordinator::ProcessBoot(1), w.now_ms);
+            let restarted = game::Coordinator::load(&core, &history, grid, game::coordinator::ReplicaId(1), w.now_ms);
             *link.coordinator_mut() = restarted.expect("the projection loads");
         }
         w.packet(ClientPacket::ReleaseRegionConnection(rc(2, 0)));

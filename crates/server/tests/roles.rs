@@ -1703,7 +1703,7 @@ fn raw_start(host: &world_store::Registered, seq: u64, start: Start) -> (game::R
 fn stored_core(store: &StoreHandle, map: &WorldMap) -> game::Coordinator {
     let row = store.load_coordinator().unwrap().expect("a written coordinator state");
     let grid = game::history::SocietyGrid::from_world_map(map);
-    game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ProcessBoot(0), 0).expect("the projection loads")
+    game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ReplicaId(0), 0).expect("the projection loads")
 }
 
 /// What a restart must resume exactly: the calendar (history tick and the calendar's anchor),

@@ -1,4 +1,4 @@
-use crate::common::h;
+use crate::common::{h, CoreInputs};
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
     Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,

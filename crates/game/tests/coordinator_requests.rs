@@ -7,7 +7,7 @@
 //! `InlineWorldLink::set_up`. Each test sweeps [`SEEDS`] seeds; a failure names the seed
 //! to replay.
 
-use crate::common::{h, populated_site};
+use crate::common::{h, populated_site, CoreInputs};
 use std::sync::{Arc, Mutex};
 
 use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, land_map, years_before};
@@ -818,7 +818,7 @@ fn coordinator_claim_older_than_the_host_never_locks_out() {
         let started = w.coordinator().encode_projection();
         let load = |now_ms: u64| {
             let grid = SocietyGrid::from_world_map(&strip());
-            Coordinator::load(&started.0, &started.1, grid, game::coordinator::ProcessBoot(1), now_ms)
+            Coordinator::load(&started.0, &started.1, grid, game::coordinator::ReplicaId(1), now_ms)
         };
         // (a) A ends its adventure; the coordinator then restarts from the save before the
         // release.

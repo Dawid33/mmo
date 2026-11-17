@@ -13,12 +13,13 @@
 //! Outside it, and so lost by a restart (each loss only delays a decision): the lease watch
 //! ([`super::LeaseWatch`], on the process's monotonic clock, re-counted from zero), the counts
 //! of its reads that refusals are stamped with, the store-retry and report pacing, the memo's
-//! warning rate limit, the outgoing messages (a transition carries them; see [`Transition`])
-//! and the login relay. The runtime's configuration (the cut period and epoch, the crash
-//! policy, the lease dials, the hosts a cut expects, the world tick) is set again by every
-//! runtime that loads it.
+//! warning rate limit, the outgoing messages (a transition carries them; see [`Transition`]),
+//! the input log (`input.rs`: what was applied since the last commit, replayed by a rebase)
+//! and the login relay. The runtime's configuration (the cut period, the crash policy, the
+//! lease dials, the hosts a cut expects, the world tick) is set again by every runtime that
+//! loads it; the cut ids' high half (`WorldCuts.epoch`) is in the projection (Elastic 2b).
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{CoordMsg, Target};
@@ -28,16 +29,10 @@ use crate::history::persist::HistoryLoadError;
 /// migrated (Dawid, 2026-11-15): a core of an older format is refused `OldVersion` (the
 /// server refuses the start beside saved regions and says to re-forge); a newer or unknown one
 /// is `Corrupt`. Formats 1 and 2 were the whole state in one blob (history, claims, memo); 3
-/// still held the fortress claims (site → player).
-pub const COORDINATOR_STATE_VERSION: u8 = 4;
-
-/// The coordinator process's boot: a random `u64` drawn at process start (the runtime; tests
-/// pick one). An attachment stamped with another process boot counts as detached, and a store
-/// call handed out by another process boot as not in flight: a restart needs no "forget every
-/// link" step — the projection it loads is exact, and what belonged to the dead process is
-/// recognised as such.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ProcessBoot(pub u64);
+/// still held the fortress claims (site → player); 4 stamped with a process boot and kept the
+/// cut ids' high half out of the projection (Elastic 2b: a [`super::ReplicaId`], and
+/// `WorldCuts.epoch` durable).
+pub const COORDINATOR_STATE_VERSION: u8 = 5;
 
 /// One transition of the core ([`super::Coordinator::take_transition`]): the projection as
 /// bytes — `core`, and `history` when it changed — and the messages it released. The runtime

@@ -276,6 +276,29 @@ pub fn start_request(site: game::history::SiteId) -> game::coordinator::WorldReq
     game::coordinator::WorldRequest::StartAdventure(site)
 }
 
+/// The coordinator's inputs as the tests send them, each through
+/// [`game::Coordinator::apply`] — logged as the runtime's are (Elastic 2b): a host's message,
+/// the upkeep, a host's link going down (at store time 0: the core's clock floor lifts it).
+pub trait CoreInputs {
+    fn handle(&mut self, host: game::HostId, msg: game::HostMsg, now_ms: u64);
+    fn maintain(&mut self, now_ms: u64);
+    fn host_detached(&mut self, host: game::HostId);
+}
+
+impl CoreInputs for game::Coordinator {
+    fn handle(&mut self, host: game::HostId, msg: game::HostMsg, now_ms: u64) {
+        self.apply(game::coordinator::Input::Host { host, msg }, now_ms);
+    }
+
+    fn maintain(&mut self, now_ms: u64) {
+        self.apply(game::coordinator::Input::Maintain, now_ms);
+    }
+
+    fn host_detached(&mut self, host: game::HostId) {
+        self.apply(game::coordinator::Input::LinkDown { host }, 0);
+    }
+}
+
 /// The rendezvous owner of `sr` among the hosts `h(0)..h(n)` (the seeded rig's fixed table;
 /// `n` 0 counts as 1).
 pub fn rendezvous_owner(sr: game::SuperRegion, n: u32) -> game::HostId {

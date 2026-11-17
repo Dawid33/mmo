@@ -93,7 +93,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{CoordMsg, ProcessBoot, Target};
+use super::{CoordMsg, ReplicaId, Target};
 use crate::HostId;
 use crate::{
     CrashPolicy, Declared, Succession, SuccessionId, SuccessionKind, HOST_LEASE_MS, HOST_LIVE, SUCCESSION_DEADLINE_MS,
@@ -292,10 +292,10 @@ fn recipients(s: &Succession) -> BTreeSet<HostId> {
 
 /// The coordinator's successions, in its projection (Elastic 2a) but for the configuration
 /// and the counts of lease reads (`#[serde(skip)]`: the lease watch is an observation a
-/// restart counts again). The store's open `successions` rows stay the truth: a starting
-/// coordinator reads them again ([`super::Coordinator::successions_unknown`]) and drops a run
-/// they no longer list. A store call handed out by another process boot (a declaration, an
-/// end) counts as not in flight.
+/// restart counts again; a rebase keeps them, [`SuccessionRuns::carry_process_fields`]). The
+/// store's open `successions` rows stay the truth: a starting coordinator reads them again
+/// ([`super::Coordinator::successions_unknown`]) and drops a run they no longer list. A store
+/// call handed out by another replica (a declaration, an end) counts as not in flight.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct SuccessionRuns {
     /// `CrashPolicy::Succession`: the runs are on (configuration).
@@ -304,9 +304,9 @@ pub(super) struct SuccessionRuns {
     /// The store's open successions are known (a restarted coordinator reads them first:
     /// until then nothing is declared and no cut begins — "wait, never guess").
     known: bool,
-    /// A declaration was handed to the runtime and is not answered yet: by which process boot
+    /// A declaration was handed to the runtime and is not answered yet: by which replica
     /// ([`super::Coordinator::declaring`]).
-    declaring: Option<ProcessBoot>,
+    declaring: Option<ReplicaId>,
     open: BTreeMap<SuccessionId, Run>,
     /// A world rollback is wanted ([`Coordinator::rollback_wanted`]), decided at this world
     /// generation: the store rolls back only from it ([`Coordinator::rollback_from`]), so a
@@ -342,9 +342,9 @@ pub(super) struct SuccessionRuns {
     /// away at the next [`Coordinator::declare_wanted`] between cuts.
     land_wanted: BTreeSet<HostId>,
     /// The landless host handed to the runtime to end ([`Coordinator::take_end_landless`]),
-    /// not answered yet, with the process boot that handed it out
+    /// not answered yet, with the replica that handed it out
     /// ([`super::Coordinator::ending`]).
-    ending: Option<(HostId, u64, ProcessBoot)>,
+    ending: Option<(HostId, u64, ReplicaId)>,
     /// [`LeaseWatch::reads`] when `ending` was handed out.
     #[serde(skip)]
     ending_at_read: u64,
@@ -379,7 +379,54 @@ impl Default for SuccessionRuns {
     }
 }
 
+impl SuccessionRuns {
+    /// A rebase ([`super::Coordinator::rebase`]): these runs (a newer row's, decoded) take the
+    /// process's own fields of `from` (the configuration and the lease-read counts). Every field
+    /// is named: a new one does not compile until classified.
+    pub(super) fn carry_process_fields(&mut self, from: &SuccessionRuns) {
+        let SuccessionRuns {
+            enabled,
+            known: _,
+            declaring: _,
+            open: _,
+            rollback: _,
+            declared: _,
+            declared_at_read,
+            deadline_ms,
+            refused_at_read,
+            listed_early: _,
+            reread: _,
+            rereading: _,
+            reread_for: _,
+            land_lookups: _,
+            land_wanted: _,
+            ending: _,
+            ending_at_read,
+            end_refused_at_read,
+        } = from;
+        self.enabled = *enabled;
+        self.declared_at_read = *declared_at_read;
+        self.deadline_ms = *deadline_ms;
+        self.refused_at_read = *refused_at_read;
+        self.ending_at_read = *ending_at_read;
+        self.end_refused_at_read = *end_refused_at_read;
+    }
+}
+
 impl super::Coordinator {
+    /// The newest store time the open runs recorded ([`super::Coordinator::clock_floor`]):
+    /// each run's start (its deadline less its span; an offline run waiting for its heir has
+    /// none).
+    pub(super) fn successions_clock_floor(&self) -> u64 {
+        let span = self.successions.deadline_ms.unwrap_or(SUCCESSION_DEADLINE_MS);
+        self.successions
+            .open
+            .values()
+            .filter(|r| r.deadline_ms != u64::MAX)
+            .map(|r| r.deadline_ms.saturating_sub(span))
+            .max()
+            .unwrap_or(0)
+    }
     /// What a host crash costs the world this coordinator runs: `Succession` turns the
     /// succession runs on (`claim`, any number of hosts); `Rollback` (the default) never
     /// declares one.
@@ -406,6 +453,7 @@ impl super::Coordinator {
     /// reads them as a RE-read: a run the store no longer lists (a `worldctl rollback` while no
     /// coordinator ran) is dropped, every host told.
     pub fn successions_unknown(&mut self) {
+        self.note_unlogged();
         self.successions.rereading |= !self.successions.open.is_empty();
         self.successions.known = false;
     }
@@ -418,14 +466,14 @@ impl super::Coordinator {
         }
     }
 
-    /// A declaration handed out by this process boot is in flight.
+    /// A declaration handed out by this replica is in flight.
     fn declaring(&self) -> bool {
-        self.successions.declaring == Some(self.process)
+        self.successions.declaring == Some(self.replica)
     }
 
-    /// The end of a landless host handed out by this process boot, in flight.
+    /// The end of a landless host handed out by this replica, in flight.
     fn ending(&self) -> Option<(HostId, u64)> {
-        self.successions.ending.filter(|(_, _, p)| *p == self.process).map(|(h, b, _)| (h, b))
+        self.successions.ending.filter(|(_, _, p)| *p == self.replica).map(|(h, b, _)| (h, b))
     }
 
     /// The store's open successions (a coordinator starting, `open_successions()`, or a
@@ -435,6 +483,7 @@ impl super::Coordinator {
     /// hold — at a re-read, or at a start (its declaration's answer died with the process that
     /// asked) — has its predecessor taken out of the view as a declaration's is.
     pub fn successions_open(&mut self, list: Vec<Succession>, now_ms: u64) {
+        self.note_unlogged();
         self.clock_ms = self.clock_ms.max(now_ms);
         self.successions.known = true;
         let rereading = std::mem::take(&mut self.successions.rereading);
@@ -552,13 +601,15 @@ impl super::Coordinator {
         let heirs: Vec<HostId> =
             lapsed.iter().map(|(h, _)| crate::heir_of(*h, &live).expect("a live host other than the predecessor")).collect();
         log::warn!("coordinator: hosts {lapsed:?} lost their lease: declaring them dead, heirs {heirs:?}");
-        self.successions.declaring = Some(self.process);
+        self.note_unlogged();
+        self.successions.declaring = Some(self.replica);
         self.successions.declared_at_read = self.leases.reads();
         Some(Declare { dead: lapsed, heirs, kind: SuccessionKind::Crash })
     }
 
     /// The store's answer to the batch [`Self::declare_wanted`] handed out (the module docs).
     pub fn declared(&mut self, outcome: Declared, now_ms: u64) {
+        self.note_unlogged();
         self.clock_ms = self.clock_ms.max(now_ms);
         if !self.declaring() {
             // No declaration is in flight any more: a rollback cleared it ([`Self::rolled_back`])
@@ -613,21 +664,30 @@ impl super::Coordinator {
     /// in flight — its answer ([`Self::declared`]) is taken.
     #[doc(hidden)]
     pub fn declaring_by_hand(&mut self) {
-        self.successions.declaring = Some(self.process);
+        self.note_unlogged();
+        self.successions.declaring = Some(self.replica);
         self.successions.declared_at_read = self.leases.reads();
     }
 
     /// The batch [`Self::declare_wanted`] handed out could not be executed (a store error, a
     /// lock timeout): forgotten; the runtime asks again after its retry wait.
     pub fn declare_failed(&mut self) {
+        self.note_unlogged();
         self.successions.declaring = None;
     }
 
     /// The store's open successions may have changed behind this coordinator's back (the
     /// module docs): read them again — no cut begins and nothing is declared until
     /// [`Self::successions_open`] answers ([`Self::take_successions_reread`] asks the runtime).
-    /// Nothing under the `Rollback` policy.
+    /// Nothing under the `Rollback` policy. The runtime's call (a store's answer: outside the
+    /// log); the core's own inputs ask [`Self::reread_successions`].
     pub fn successions_reread(&mut self) {
+        self.note_unlogged();
+        self.reread_successions();
+    }
+
+    /// [`Self::successions_reread`], as an input's (or an answer's) own step.
+    pub(super) fn reread_successions(&mut self) {
         if !self.successions.enabled {
             return;
         }
@@ -643,7 +703,11 @@ impl super::Coordinator {
     /// Whether the runtime is to read the open successions again (once per ask) and answer
     /// [`Self::successions_open`].
     pub fn take_successions_reread(&mut self) -> bool {
-        std::mem::take(&mut self.successions.reread)
+        let asked = std::mem::take(&mut self.successions.reread);
+        if asked {
+            self.note_unlogged();
+        }
+        asked
     }
 
     /// Whether the world must roll back to its last committed cut (the module docs): the
@@ -674,6 +738,7 @@ impl super::Coordinator {
     /// told each is abandoned, `SuccessionDone` unsettled — a host of the new generation holds
     /// none and ignores it), but no `Generation` is sent and nobody is detached.
     pub fn rolled_back(&mut self, generation: u64) {
+        self.note_unlogged();
         let open = std::mem::take(&mut self.successions.open);
         for id in open.into_keys() {
             self.push(Target::Every, CoordMsg::SuccessionDone { id, settled: false });
@@ -1014,7 +1079,11 @@ impl super::Coordinator {
     /// The super-regions hosts asked for since the last call: the runtime reads their owners
     /// in the store and answers [`Self::land_wanted`] for each owned one.
     pub fn take_land_lookups(&mut self) -> Vec<crate::SuperRegion> {
-        std::mem::take(&mut self.successions.land_lookups).into_iter().collect()
+        let lookups: Vec<crate::SuperRegion> = std::mem::take(&mut self.successions.land_lookups).into_iter().collect();
+        if !lookups.is_empty() {
+            self.note_unlogged();
+        }
+        lookups
     }
 
     /// Host `owner` holds a super-region a host asked for (the runtime's lookup): if it left
@@ -1034,6 +1103,7 @@ impl super::Coordinator {
             return;
         }
         if self.successions.land_wanted.insert(owner) {
+            self.note_unlogged();
             log::info!("coordinator: host {owner} left and its land is wanted: it goes to an heir");
         }
     }
@@ -1075,6 +1145,7 @@ impl super::Coordinator {
         }
         let attached: BTreeSet<HostId> = self.attached_live().into_iter().collect();
         let (leases, declared) = (&self.leases, &self.successions.declared);
+        let wanted = self.successions.land_wanted.len();
         self.successions.land_wanted.retain(|owner| {
             let row = leases.row(*owner);
             // Declared already (an owners lookup answered just after the declaration): done.
@@ -1087,6 +1158,9 @@ impl super::Coordinator {
             }
             !back
         });
+        if self.successions.land_wanted.len() != wanted {
+            self.note_unlogged();
+        }
         let (owner, boot) =
             self.successions.land_wanted.iter().find_map(|&owner| self.leases.row(owner).map(|row| (owner, row.boot)))?;
         if self.cuts_running_participants().is_some() {
@@ -1099,7 +1173,8 @@ impl super::Coordinator {
             return None;
         };
         log::warn!("coordinator: host {owner} (boot {boot:#x}) left and its land is wanted: giving it all to heir {heir}");
-        self.successions.declaring = Some(self.process);
+        self.note_unlogged();
+        self.successions.declaring = Some(self.replica);
         self.successions.declared_at_read = self.leases.reads();
         Some(Declare { dead: vec![(owner, boot)], heirs: vec![heir], kind: SuccessionKind::Leave })
     }
@@ -1111,6 +1186,21 @@ impl super::Coordinator {
     /// once ([`Self::host_ended`]) and asks, once, for the open successions to be read again
     /// ([`Self::successions_reread`]).
     pub fn observe_leases(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
+        // A read is no input (Elastic 2b Task 6 makes it the ticker's): what it changes in the
+        // projection is a change outside the log — only removals of per-host memories and beats
+        // added below, or a dead row taken out of the view (which asks for a re-read).
+        let sizes = |c: &Self| {
+            let beats: usize = c.successions.open.values().map(|r| r.beat.len()).sum();
+            (c.cut_memory_sizes(), c.boots_seen.len(), c.successions.declared.len(), c.successions.reread_for.len(), beats)
+        };
+        let before = sizes(self);
+        self.observe_leases_inner(rows, issued_ms, received_ms);
+        if sizes(self) != before {
+            self.note_unlogged();
+        }
+    }
+
+    fn observe_leases_inner(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
         // Beats since the last read (a boot's `seen_ms` moved): what an offline run counts.
         let beating: Vec<(HostId, u64)> = rows
             .iter()
@@ -1218,7 +1308,8 @@ impl super::Coordinator {
             return None;
         }
         log::warn!("coordinator: host {host} (boot {boot:#x}) lost its lease holding no land: ending it (no succession)");
-        self.successions.ending = Some((host, boot, self.process));
+        self.note_unlogged();
+        self.successions.ending = Some((host, boot, self.replica));
         self.successions.ending_at_read = self.leases.reads();
         Some(EndLandless { host, boot })
     }
@@ -1230,6 +1321,7 @@ impl super::Coordinator {
     /// here, a re-read of the open successions otherwise (the store knows one this coordinator
     /// does not).
     pub fn landless_ended(&mut self, end: EndLandless, outcome: crate::LandlessEnd, now_ms: u64) {
+        self.note_unlogged();
         self.clock_ms = self.clock_ms.max(now_ms);
         if self.ending() != Some((end.host, end.boot)) {
             log::warn!("coordinator: an answer to ending host {} came with no such end in flight: ignored", end.host);
@@ -1261,6 +1353,7 @@ impl super::Coordinator {
     /// The end [`Self::take_end_landless`] handed out could not be executed (a store error, a
     /// lock timeout): forgotten; the runtime asks again after its retry wait.
     pub fn end_failed(&mut self) {
+        self.note_unlogged();
         self.successions.ending = None;
     }
 

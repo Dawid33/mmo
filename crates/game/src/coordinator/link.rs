@@ -5,7 +5,7 @@ use crate::HostId;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::{CoordMsg, Coordinator, HostMsg, Target};
+use super::{CoordMsg, Coordinator, HostMsg, Input, Target};
 
 /// The host's end of the link to the world coordinator: messages out, messages in, in
 /// order (FIFO each way while the link is up).
@@ -131,19 +131,45 @@ pub struct RigReplica {
 ///
 /// With a store ([`RigCluster::with_store`], the seeded rig) every pump drives a replica's
 /// transitions ([`Coordinator::take_transition`]): each is written to the row at the version
-/// the replica last read, as a store that never fails, before its messages are routed.
+/// the replica last read, as a store that never fails, before its messages are routed. A write
+/// at a stale version (another writer moved the row) rebases the replica onto the row
+/// ([`Coordinator::rebase`]) and writes again, as the runtime does.
 /// Without one the core is unstored ([`Coordinator::commit_unstored`]).
 #[doc(hidden)]
 pub struct RigCluster {
     replicas: Vec<RigReplica>,
     store: Option<RigStore>,
     boxes: BTreeMap<HostId, VecDeque<CoordMsg>>,
+    /// [`Self::arm_foreign_version`]: before the next write of a replica that may rebase, a
+    /// foreign writer moves the row.
+    foreign_armed: bool,
+    /// Rebases done after a conflict, so far.
+    rebases: u64,
 }
 
 impl RigCluster {
     pub fn new(coordinator: Coordinator) -> Arc<Mutex<RigCluster>> {
         let replica = RigReplica { core: coordinator, version: 0, hosts: BTreeSet::new() };
-        Arc::new(Mutex::new(RigCluster { replicas: vec![replica], store: None, boxes: BTreeMap::new() }))
+        Arc::new(Mutex::new(RigCluster {
+            replicas: vec![replica],
+            store: None,
+            boxes: BTreeMap::new(),
+            foreign_armed: false,
+            rebases: 0,
+        }))
+    }
+
+    /// Test hook: right before the next write of a replica holding nothing changed outside its
+    /// log ([`Coordinator::unlogged_pending`]: one the runtime would rebase rather than stop), a
+    /// foreign writer writes the row's own projection at the next version — the row moves, its
+    /// content does not — so that write conflicts and the replica rebases.
+    pub fn arm_foreign_version(&mut self) {
+        self.foreign_armed = true;
+    }
+
+    /// Rebases after a conflict so far.
+    pub fn rebases(&self) -> u64 {
+        self.rebases
     }
 
     /// [`Self::new`] with a store behind the core: every transition is written to its row,
@@ -177,8 +203,9 @@ impl RigCluster {
     /// from [`Self::stored`]), which has read the row as it stands, and whatever the old
     /// process had not handed to a link yet — its outgoing queue, the hosts' mailboxes — is
     /// lost with it.
-    pub fn restart(&mut self, coordinator: Coordinator) {
+    pub fn restart(&mut self, mut coordinator: Coordinator) {
         let version = self.store.as_ref().and_then(|s| s.row()).map_or(0, |r| r.version);
+        coordinator.set_version(version);
         self.replicas[0].core = coordinator;
         self.replicas[0].version = version;
         for b in self.boxes.values_mut() {
@@ -193,11 +220,34 @@ impl RigCluster {
             Some(store) => {
                 let replica = &mut self.replicas[r];
                 let mut out = Vec::new();
-                if let Some(t) = replica.core.take_transition() {
+                let mut next = replica.core.take_transition();
+                while let Some(t) = next.take() {
+                    if self.foreign_armed && !replica.core.unlogged_pending() {
+                        if let Some(row) = store.row().cloned() {
+                            self.foreign_armed = false;
+                            store.write(row.version, row.core, None).expect("the foreign writer writes at the row's version");
+                        }
+                    }
                     // A store that never fails, written at the version this replica read.
-                    replica.version = store.write(replica.version, t.core, t.history).expect("one replica writes at the version it read");
-                    replica.core.transition_written();
-                    out = t.out;
+                    match store.write(replica.version, t.core, t.history) {
+                        Ok(version) => {
+                            replica.version = version;
+                            replica.core.transition_written(version);
+                            out = t.out;
+                        }
+                        Err(RigConflict) => {
+                            // The row moved: rebased onto it, the log replayed, written again.
+                            assert!(
+                                !replica.core.unlogged_pending(),
+                                "a conflict with changes outside the log: the runtime would stop here"
+                            );
+                            let row = store.row().cloned().expect("a conflict is with a row");
+                            replica.core.rebase(&row.core, Some(&row.history), row.version).expect("the row loads");
+                            replica.version = row.version;
+                            self.rebases += 1;
+                            next = replica.core.take_transition();
+                        }
+                    }
                 }
                 out.extend(replica.core.take_out());
                 out
@@ -315,8 +365,13 @@ impl InlineWorldLink {
     pub fn shared_at(core: Arc<Mutex<RigCluster>>, replica: usize, host: HostId) -> Self {
         {
             let mut c = lock(&core);
+            let replicas = c.replicas.len();
             c.boxes.entry(host).or_default();
-            c.replicas[replica].hosts.insert(host);
+            c.replicas
+                .get_mut(replica)
+                .unwrap_or_else(|| panic!("replica {replica} of a cluster of {replicas}: no such replica"))
+                .hosts
+                .insert(host);
         }
         let mut link = Self::over(Core::Shared(core), host);
         link.replica = replica;
@@ -454,9 +509,9 @@ impl WorldLink for InlineWorldLink {
                     if let HostMsg::Attach { host, .. } = &msg {
                         self.host = *host;
                     }
-                    coord.handle(self.host, msg, now_ms);
+                    coord.apply(Input::Host { host: self.host, msg }, now_ms);
                 }
-                coord.maintain(now_ms);
+                coord.apply(Input::Maintain, now_ms);
                 coord.commit_unstored();
                 coord.take_out().into_iter().map(|(_, m)| m).collect()
             }
@@ -465,9 +520,9 @@ impl WorldLink for InlineWorldLink {
                 let r = self.replica;
                 while self.in_q.front().is_some_and(|(due, _)| *due <= step) {
                     let (_, msg) = self.in_q.pop_front().expect("checked");
-                    cluster.replicas[r].core.handle(self.host, msg, now_ms);
+                    cluster.replicas[r].core.apply(Input::Host { host: self.host, msg }, now_ms);
                 }
-                cluster.replicas[r].core.maintain(now_ms);
+                cluster.replicas[r].core.apply(Input::Maintain, now_ms);
                 cluster.route(r);
                 cluster.boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
             }

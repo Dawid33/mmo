@@ -390,11 +390,14 @@ pub struct CoordinatorStart {
     pub version: u64,
 }
 
-/// A number distinct per coordinator process start ([`game::coordinator::ProcessBoot`]): the
-/// wall clock's nanoseconds mixed with the process id.
-fn process_boot() -> game::coordinator::ProcessBoot {
+/// This coordinator process's replica ([`game::coordinator::ReplicaId`]), drawn at random per
+/// process start (Elastic 2b Task 4 issues them from the store): a randomly keyed hash of the
+/// wall clock's nanoseconds and the process id.
+fn replica_id() -> game::coordinator::ReplicaId {
+    use std::hash::BuildHasher;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-    game::coordinator::ProcessBoot(nanos ^ (u64::from(std::process::id()) << 32) ^ 0xC00D_0000_0000_0000)
+    let random = std::collections::hash_map::RandomState::new().hash_one((nanos, std::process::id()));
+    game::coordinator::ReplicaId(random)
 }
 
 /// The refusal of a world whose coordinator state this build cannot take over while regions
@@ -436,7 +439,7 @@ pub fn ensure_coordinator_state(
     // Claim first, then load (see `CoordinatorStart::fence`).
     let fence = store.claim_coordinator().map_err(|e| format!("claiming the world coordinator: {e}"))?;
     log::info!("[coordinator] claimed the world coordinator (epoch {})", fence.epoch);
-    let process = process_boot();
+    let process = replica_id();
     let saved_regions = || -> Result<bool, String> {
         store.stored_regions().map(|r| !r.is_empty()).map_err(|e| format!("reading the world's saved regions: {e}"))
     };
@@ -814,7 +817,8 @@ mod tests {
         assert_eq!(first.source, CoordinatorSource::Bootstrapped);
         assert!(first.source.needs_save());
         assert_eq!((first.version, second.version), (0, 0), "a claimed row with no projection");
-        assert_ne!(first.coordinator.process(), game::coordinator::ProcessBoot(0), "a process boot of its own");
+        assert_ne!(first.coordinator.replica(), game::coordinator::ReplicaId(0), "a replica id of its own");
+        assert_ne!(first.coordinator.replica(), second.coordinator.replica(), "drawn per start");
         assert_eq!(history_bytes(&first), history_bytes(&second), "a bootstrap is deterministic (until it is saved)");
         store.shutdown();
     }

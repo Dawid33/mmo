@@ -15,6 +15,11 @@
 //! host sees the coordinator's messages in the order they were decided (a later `SpawnPeople`
 //! never overtakes an earlier directive for that region).
 //!
+//! **Replicas over one row (Elastic 2b, `input.rs`):** every input arrives through
+//! [`Coordinator::apply`], which logs it until its transition commits; a write that meets a
+//! newer row is followed by [`Coordinator::rebase`]: the newer projection, the log applied
+//! again onto it. Attachments and store calls are stamped with the [`ReplicaId`].
+//!
 //! **Many hosts:** every outgoing message carries its [`Target`]: a region's messages go to
 //! the host that announced the region (`RegionStarted`, its `Attach`, a delivered
 //! `PersonCrossed`), a reply or claim answer to the host that asked, the world's view to
@@ -24,15 +29,19 @@
 //! never comes back is ended by its succession.
 
 mod clock;
+mod input;
 mod link;
 mod msg;
+mod replicas;
 mod state;
 mod succession;
 mod world_cut;
 
 pub use clock::*;
+pub use input::*;
 pub use link::*;
 pub use msg::*;
+pub use replicas::*;
 pub use state::*;
 pub use succession::*;
 pub use world_cut::*;
@@ -162,7 +171,7 @@ pub struct Coordinator {
     /// A player's go when it goes offline on its host; all go at a newer generation.
     displaced_told: BTreeSet<(PlayerId, HostId, u64)>,
     /// The latest `now_ms` seen (store ms, `clock.rs`). The process's: a loaded core starts
-    /// at the store time it was loaded at.
+    /// at the store time it was loaded at; a rebase keeps it.
     clock_ms: u64,
     /// `(now_ms, calendar tick)` the calendar was anchored at (store ms).
     calendar_anchor: (u64, CalendarTick),
@@ -187,8 +196,24 @@ pub struct Coordinator {
     /// What the hosts told the login service ([`HostMsg::Login`]), in arrival order, for the
     /// runtime to forward ([`Self::take_login_out`]). Nothing about an order is kept.
     login_out: Vec<crate::LoginOut>,
-    /// This process's boot: what its attachments and store calls are stamped with.
-    process: ProcessBoot,
+    /// This replica: what its attachments and store calls are stamped with.
+    replica: ReplicaId,
+    /// Every input applied since the last commit, with the store time it was applied at
+    /// (`input.rs`): what a rebase applies again onto a newer row.
+    log: Vec<(u64, Input)>,
+    /// `log`'s length when the transition in flight was taken: its commit drops the log up to
+    /// here ([`Self::transition_written`]).
+    log_boundary: usize,
+    /// The row version this core holds (as loaded, last committed, or rebased onto).
+    version: u64,
+    /// Changes of the projection outside the log so far ([`Self::unlogged_pending`]), the count
+    /// when the transition in flight was taken, and the count its last commit covered.
+    unlogged: u64,
+    unlogged_taken: u64,
+    unlogged_committed: u64,
+    /// [`Self::take_transition`] just found the projection as committed, and nothing was
+    /// applied since: [`Self::take_out`] needs no encode of its own.
+    clean_checked: bool,
     /// The bincode of the projection as last handed out ([`Self::take_transition`]) or
     /// loaded: a transition is due when the projection's bytes differ from it (or the history
     /// changed).
@@ -204,9 +229,17 @@ pub struct Coordinator {
 
 /// The classification of every [`Coordinator`] field: the projection's (durable, written by
 /// the runtime, `state.rs`) with their types — the `history` travels as its own blob — and
-/// the process's own, with what a loaded core starts them at.
+/// the process's own, with what a loaded core starts them at: `kept` by a rebase (the
+/// process's observations, its relay, its log) or `reset` by it (what belonged to the
+/// projection it replaced).
 macro_rules! projection {
-    (durable { $($d:ident: $dty:ty,)* } process($proc:ident, $now:ident) { $($p:ident = $pinit:expr,)* }) => {
+    (
+        durable { $($d:ident: $dty:ty,)* }
+        process($proc:ident, $now:ident) {
+            kept { $($k:ident = $kinit:expr,)* }
+            reset { $($r:ident = $rinit:expr,)* }
+        }
+    ) => {
         /// The projection, borrowed for encoding.
         #[derive(Serialize, Debug)]
         struct ProjectionRef<'a> {
@@ -225,9 +258,20 @@ macro_rules! projection {
             }
 
             /// A core from a decoded projection and history: the process's own fields as a
-            /// loaded core of process boot `$proc` starts them at store time `$now`.
-            fn from_projection(p: Projection, history: History, $proc: ProcessBoot, $now: u64) -> Self {
-                Coordinator { history, $($d: p.$d,)* $($p: $pinit,)* }
+            /// loaded core of replica `$proc` starts them at store time `$now`.
+            fn from_projection(p: Projection, history: History, $proc: ReplicaId, $now: u64) -> Self {
+                Coordinator { history, $($d: p.$d,)* $($k: $kinit,)* $($r: $rinit,)* }
+            }
+
+            /// A rebase's swap ([`Self::rebase`]): the projection (and the history, if given)
+            /// replaced, the process's `kept` fields untouched, its `reset` ones as a load
+            /// starts them.
+            fn replace_projection(&mut self, p: Projection, history: Option<History>) {
+                $(self.$d = p.$d;)*
+                if let Some(history) = history {
+                    self.history = history;
+                }
+                $(self.$r = $rinit;)*
             }
         }
     };
@@ -255,32 +299,43 @@ projection! {
         successions: SuccessionRuns,
         rolled_back_to: Option<u64>,
     }
-    process(process, now_ms) {
-        memo_warned_ms = None,
-        out = Vec::new(),
-        clock_ms = now_ms,
-        leases = LeaseWatch::default(),
-        login_out = Vec::new(),
-        process = process,
-        committed_raw = Vec::new(),
-        unstored = false,
-        writing = false,
+    process(replica, now_ms) {
+        kept {
+            memo_warned_ms = None,
+            clock_ms = now_ms,
+            leases = LeaseWatch::default(),
+            login_out = Vec::new(),
+            replica = replica,
+            log = Vec::new(),
+            unstored = false,
+        }
+        reset {
+            out = Vec::new(),
+            log_boundary = 0,
+            version = 0,
+            unlogged = 0,
+            unlogged_taken = 0,
+            unlogged_committed = 0,
+            clean_checked = false,
+            committed_raw = Vec::new(),
+            writing = false,
+        }
     }
 }
 
 impl Coordinator {
     /// A coordinator over `history`, its calendar running from `history.now()` at
-    /// `now_ms`, of process boot 0 (tests, tools, the inline link: [`Self::new_for`] names
-    /// one). Its first outgoing message is a [`CoordMsg::View`].
+    /// `now_ms`, of replica 0 (tests, tools, the inline link: [`Self::new_for`] names one).
+    /// Its first outgoing message is a [`CoordMsg::View`].
     pub fn new(history: History, now_ms: u64) -> Self {
-        Self::new_for(history, now_ms, ProcessBoot::default())
+        Self::new_for(history, now_ms, ReplicaId::default())
     }
 
     /// A new coordinator (a bootstrap: nothing of it is stored yet — its first transition
     /// writes all of it, the history included) over `history`, its calendar anchored at
-    /// store time `now_ms` at `history.now()`, of process boot `process`. Its first outgoing
+    /// store time `now_ms` at `history.now()`, of replica `replica`. Its first outgoing
     /// message is a [`CoordMsg::View`].
-    pub fn new_for(mut history: History, now_ms: u64, process: ProcessBoot) -> Self {
+    pub fn new_for(mut history: History, now_ms: u64, replica: ReplicaId) -> Self {
         history.mark_content_dirty();
         let calendar_anchor = (now_ms, history.now());
         let mut c = Coordinator {
@@ -309,7 +364,14 @@ impl Coordinator {
             successions: SuccessionRuns::default(),
             rolled_back_to: None,
             login_out: Vec::new(),
-            process,
+            replica,
+            log: Vec::new(),
+            log_boundary: 0,
+            version: 0,
+            unlogged: 0,
+            unlogged_taken: 0,
+            unlogged_committed: 0,
+            clean_checked: false,
             committed_raw: Vec::new(),
             unstored: false,
             writing: false,
@@ -319,40 +381,55 @@ impl Coordinator {
     }
 
     /// A coordinator restarted (or a cache reloaded) from its written projection: `core` and
-    /// `history` as [`Self::take_transition`] made them, for process boot `process`, at store
+    /// `history` as [`Self::take_transition`] made them, for replica `replica`, at store
     /// time `now_ms` — everything exactly as written (the calendar continues from its stored
     /// anchor: a quick restart skips no day and repeats no day turn; a longer silence than
     /// [`CALENDAR_GAP_MS`] is downtime, re-anchored at the load where the calendar last stood,
     /// never earlier than a host was told — [`Self::calendar_resume`]), but:
-    /// - an attachment, and a store call handed out, of another process boot count as
-    ///   detached / not in flight ([`ProcessBoot`]): every host attaches again, and its
-    ///   `Attach` corrects what the projection holds of it (its unlisted regions park, its
-    ///   unlisted players go offline); a host that never comes back is ended by its succession;
+    /// - an attachment, and a store call handed out, of another replica count as detached / not
+    ///   in flight ([`ReplicaId`]): every host attaches again, and its `Attach` corrects what
+    ///   the projection holds of it (its unlisted regions park, its unlisted players go
+    ///   offline); a host that never comes back is ended by its succession;
     /// - a stored deadline more than [`CALENDAR_GAP_MS`] in the past restarts its count
     ///   ([`rebase_deadline`] / [`rebase_since`]): never earlier than stored.
     ///
     /// Nothing goes out at a load (the hosts get the view with their `Attach`). The runtime
-    /// sets its configuration again (the cut period and epoch, the crash policy, …). An older
-    /// core format is `OldVersion` (worlds are re-forged).
+    /// sets its configuration again (the cut period, the crash policy, …) and the row version it
+    /// read ([`Self::set_version`]). An older core format is `OldVersion` (worlds are re-forged).
     pub fn load(
         core: &[u8],
         history: &[u8],
         grid: SocietyGrid,
-        process: ProcessBoot,
+        replica: ReplicaId,
         now_ms: u64,
     ) -> Result<Self, HistoryLoadError> {
         let p: Projection = decode_core(core)?;
         let history = crate::history::persist::decode(history, grid)?;
-        let mut c = Coordinator::from_projection(p, history, process, now_ms);
+        let mut c = Coordinator::from_projection(p, history, replica, now_ms);
         c.committed_raw = raw_core(&c.projection());
         c.rebase_deadlines(now_ms);
         if c.calendar_gap(now_ms) {
             // Downtime: re-anchored at once where the calendar last stood (never the stored
-            // history's `now`, which lags it: a calendar advance alone is not written). The
-            // history itself moves there at the first `maintain` (the runtime's first pass).
+            // history's `now`, which lags it: a calendar advance alone is not written), and the
+            // history moved there at once (no step is due before it: a step that ran was
+            // written) — not one pass later, at the first `maintain`.
             c.reanchor_calendar(now_ms);
+            let resumed = c.calendar_resume();
+            c.history.advance(resumed);
         }
         Ok(c)
+    }
+
+    /// The row version a loaded core was read at (the runtime, the rig; a commit and a rebase
+    /// set it themselves).
+    pub fn set_version(&mut self, version: u64) {
+        self.version = version;
+    }
+
+    /// The row version this core holds: as loaded ([`Self::set_version`]), last committed
+    /// ([`Self::transition_written`]) or rebased onto ([`Self::rebase`]).
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// [`Self::load`]'s re-base of every stored deadline and period start at store time `now_ms`.
@@ -365,10 +442,11 @@ impl Coordinator {
         &self.history
     }
 
-    /// The history, to change directly (tests, tools). What it decides goes out at the
-    /// next [`Self::handle`] / [`Self::maintain`]. Never call its region lifecycle methods
-    /// through it: the hosts' messages own them.
+    /// The history, to change directly (tests, tools): a change outside the log
+    /// ([`Self::unlogged_pending`]). What it decides goes out at the next [`Self::apply`].
+    /// Never call its region lifecycle methods through it: the hosts' messages own them.
     pub fn history_mut(&mut self) -> &mut History {
+        self.note_unlogged();
         self.history.mark_content_dirty();
         &mut self.history
     }
@@ -397,7 +475,7 @@ impl Coordinator {
     /// since — unless `now_ms` is more than [`CALENDAR_GAP_MS`] past the calendar's last sign
     /// of life (`calendar_seen_ms`: a day turn, a view handed out): that was downtime, not
     /// play, and is not caught up — the calendar stands where it last stood
-    /// ([`Self::calendar_resume`], where the next [`Self::maintain`] re-anchors it).
+    /// ([`Self::calendar_resume`], where the next [`Input::Maintain`] re-anchors it).
     pub fn calendar_now(&self, now_ms: u64) -> CalendarTick {
         if self.calendar_gap(now_ms) {
             return self.calendar_resume();
@@ -433,8 +511,18 @@ impl Coordinator {
         now_ms.saturating_sub(self.calendar_seen_ms) > CALENDAR_GAP_MS
     }
 
-    /// Apply one message of host `host` (the ordinal its link is for).
-    pub fn handle(&mut self, host: HostId, msg: HostMsg, now_ms: u64) {
+    /// What host `host` tells the login service ([`HostMsg::Login`]): into the process's login
+    /// relay as it is — never logged — unless it comes from a succeeded boot (a zombie: dropped).
+    fn forward_login(&mut self, host: HostId, out: crate::LoginOut) {
+        if self.from_succeeded_boot(host, None) {
+            log::debug!("coordinator: a login message of host {host}'s succeeded boot dropped: {out:?}");
+            return;
+        }
+        self.login_out.push(out);
+    }
+
+    /// Apply one message of host `host` (the ordinal its link is for): [`Input::Host`].
+    fn on_host(&mut self, host: HostId, msg: HostMsg, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         // A zombie of a succeeded boot (R4) changes nothing: its state-changing requests are
         // refused (memoised), everything else is dropped.
@@ -486,7 +574,7 @@ impl Coordinator {
                     self.displaced_told.clear();
                     // A rollback this coordinator did not order (`worldctl rollback`), or a
                     // total crash's first boot: the store's open successions may differ.
-                    self.successions_reread();
+                    self.reread_successions();
                 }
                 self.forget_settled(host, boot, settled_below, true);
                 if generation > self.attached_generation {
@@ -604,11 +692,11 @@ impl Coordinator {
         }
     }
 
-    /// Move the calendar to `now_ms`: the history advances, its directives go to the
-    /// running regions, a day's turn broadcasts the calendar (and the sites if they
+    /// Move the calendar to `now_ms` ([`Input::Maintain`]): the history advances, its directives
+    /// go to the running regions, a day's turn broadcasts the calendar (and the sites if they
     /// changed), and the notices go to their regions. `WorldManager::maintain`'s world
     /// services, moved here.
-    pub fn maintain(&mut self, now_ms: u64) {
+    fn on_maintain(&mut self, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         if self.calendar_gap(now_ms) {
             // Downtime: the calendar goes on from where it last stood.
@@ -630,11 +718,22 @@ impl Coordinator {
     /// decided while nothing durable changed since the last transition (a query's answer) —
     /// or, with a durable change pending, nothing: those wait for [`Self::take_transition`],
     /// which hands them out with the projection that decided them. A core with no store
-    /// ([`Self::commit_unstored`]) frees them at once.
+    /// ([`Self::commit_unstored`]) frees them at once. Released, the inputs logged since the
+    /// last commit changed nothing durable: they are dropped from the log (the row holds all
+    /// they did). Right after a [`Self::take_transition`] that found nothing to write, the
+    /// projection is not encoded again.
     pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
-        if !self.unstored && (self.writing || self.durable_pending()) {
-            return Vec::new();
+        if !self.unstored {
+            if self.writing {
+                return Vec::new();
+            }
+            let clean = std::mem::take(&mut self.clean_checked) || !self.durable_pending();
+            if !clean {
+                return Vec::new();
+            }
         }
+        self.log.clear();
+        self.unlogged_committed = self.unlogged;
         std::mem::take(&mut self.out)
     }
 
@@ -684,7 +783,7 @@ impl Coordinator {
     /// answered, so whatever is decided meanwhile waits for it.
     ///
     /// The history's directives are always drained into the outgoing queue by the step that
-    /// made them ([`Self::handle`], [`Self::maintain`]), so a projection never holds one
+    /// made them ([`Self::apply`]), so a projection never holds one
     /// undrained: a restart cannot re-send a directive outside the truth check of the hosts'
     /// `Attach` (`reattach_regions`).
     pub fn take_transition(&mut self) -> Option<Transition> {
@@ -695,6 +794,7 @@ impl Coordinator {
         let raw = raw_core(&self.projection());
         let history_changed = self.history.content_dirty();
         if !history_changed && raw == self.committed_raw {
+            self.clean_checked = true;
             return None;
         }
         let history = history_changed.then(|| crate::history::persist::encode(&self.history));
@@ -702,22 +802,31 @@ impl Coordinator {
         let core = seal_core(&raw);
         self.committed_raw = raw;
         self.writing = true;
+        self.clean_checked = false;
+        self.log_boundary = self.log.len();
+        self.unlogged_taken = self.unlogged;
         Some(Transition { core, history, out: std::mem::take(&mut self.out) })
     }
 
-    /// The write of the transition last taken committed: its messages may leave (the caller
-    /// sends them), and [`Self::take_out`] frees again what was decided with nothing durable
-    /// pending.
-    pub fn transition_written(&mut self) {
+    /// The write of the transition last taken committed as row version `version`: its messages
+    /// may leave (the caller sends them), the inputs it holds leave the log, and
+    /// [`Self::take_out`] frees again what was decided with nothing durable pending.
+    pub fn transition_written(&mut self, version: u64) {
         self.writing = false;
+        self.version = version;
+        let boundary = std::mem::take(&mut self.log_boundary).min(self.log.len());
+        self.log.drain(..boundary);
+        self.unlogged_committed = self.unlogged_taken;
     }
 
     /// The write of transition `t` failed (not committed, not fenced): its messages go back to
     /// the head of the outgoing queue, in order, and the next [`Self::take_transition`] writes
     /// the whole projection again (the history too if `t` carried it). Nothing is decided
-    /// twice: the inputs were applied once, and their state is in the next transition.
+    /// twice: the inputs were applied once, and their state is in the next transition; they
+    /// stay in the log.
     pub fn transition_failed(&mut self, t: Transition) {
         self.writing = false;
+        self.log_boundary = 0;
         if t.history.is_some() {
             self.history.mark_content_dirty();
         }
@@ -748,9 +857,15 @@ impl Coordinator {
         format!("{:#?}", self.projection())
     }
 
-    /// This core's process boot ([`ProcessBoot`]).
-    pub fn process(&self) -> ProcessBoot {
-        self.process
+    /// This core's replica ([`ReplicaId`]).
+    pub fn replica(&self) -> ReplicaId {
+        self.replica
+    }
+
+    /// The calendar day last broadcast (test support: it never goes back).
+    #[doc(hidden)]
+    pub fn calendar_day(&self) -> u64 {
+        self.calendar_day
     }
 
     /// The claims as the projection holds them, by player.
@@ -812,7 +927,8 @@ impl Coordinator {
     }
 
     fn push_view(&mut self, to: Target) {
-        let calendar = self.calendar_now(self.clock_ms);
+        // Never behind the history (a rebased cache's clock may lag the row's writer).
+        let calendar = self.calendar_now(self.clock_ms).max(self.history.now());
         if !self.calendar_gap(self.clock_ms) {
             // A view is a sign of the calendar's life: what it says is durable (the projection
             // changed, so it leaves with the transition holding this) — a load never re-anchors
@@ -827,10 +943,12 @@ impl Coordinator {
     }
 
     /// At a calendar day's turn (at store `now_ms`): the calendar, and the sites if they
-    /// changed. The turn is the calendar's sign of life ([`Self::calendar_now`]'s gap).
+    /// changed. The turn is the calendar's sign of life ([`Self::calendar_now`]'s gap). Only
+    /// forward: a day at or before the one last broadcast turns nothing (two replicas a few
+    /// milliseconds apart never flap the day, Elastic 2b decision 9).
     fn broadcast_daily(&mut self, now: CalendarTick, now_ms: u64) {
         let day = now.0 / TICKS_PER_DAY;
-        if self.calendar_day == day {
+        if day <= self.calendar_day {
             return;
         }
         self.calendar_day = day;
@@ -864,7 +982,7 @@ impl Coordinator {
         let attached: Vec<HostId> = self.attached_hosts().filter(|h| *h != host).collect();
         for h in attached {
             log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is detached");
-            self.host_detached(h);
+            self.detach_host(h);
         }
     }
 

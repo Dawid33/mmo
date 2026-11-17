@@ -985,6 +985,11 @@ impl StoreHandle {
         self.ask(Request::LoadCoordinator)
     }
 
+    /// [`Self::load_coordinator`], answered on the receiver (a caller bounded by a deadline).
+    pub fn load_coordinator_later(&self) -> crossbeam::channel::Receiver<Result<Option<StoredCoordinator>, StoreError>> {
+        self.ask_later(Request::LoadCoordinator)
+    }
+
     /// The world's clock anchor (R3): stores `proposed` if the world has none, and
     /// returns the stored anchor either way — the first writer wins, so every host
     /// and the coordinator of a world number ticks from the same instant.

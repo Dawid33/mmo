@@ -6,6 +6,7 @@
 //! they agree. Every host-seam test builds on it. [`MultiRig::with_coordinator`] gives
 //! every host its own seeded, delaying inline link to ONE world coordinator.
 use super::cut_store::CutStore;
+use super::CoreInputs;
 use super::rig::{Rig, CLIENT};
 use game::{
     ClientId, ClientPacket, CutId, HostId, EntityId, HostEndpoint, InFlightRow, Intent, IntentMsg, InlinePeerLink, InlineSchedule,
@@ -523,7 +524,7 @@ impl MultiRig {
     pub fn with_coordinator(&mut self, history: game::history::History) {
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         self.coordinator_starts = 1;
-        let process = game::coordinator::ProcessBoot(self.coordinator_starts);
+        let process = game::coordinator::ReplicaId(self.coordinator_starts);
         // A store stands behind it (Elastic 2a): every output leaves with its transition, and
         // the last transition is what a restarted coordinator loads.
         let core = game::coordinator::RigCluster::with_store(game::Coordinator::new_for(history, now, process));
@@ -594,7 +595,7 @@ impl MultiRig {
         let shared = self.coordinator.clone().expect("a coordinator");
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         self.coordinator_starts += 1;
-        let process = game::coordinator::ProcessBoot(self.coordinator_starts);
+        let process = game::coordinator::ReplicaId(self.coordinator_starts);
         let open: Vec<game::Succession> = self
             .successions
             .iter()

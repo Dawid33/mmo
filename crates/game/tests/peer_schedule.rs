@@ -4,7 +4,7 @@
 //! `jittery`, the link delay rolling through 0..=3 with the seed). Every round checks
 //! conservation across hosts ([`MultiRig::assert_conserved_world`]); a failure names a
 //! replayable `(mode, seed, delay)`. Run via `just test-threads`.
-use crate::common::{h, populated_site};
+use crate::common::{h, populated_site, CoreInputs};
 use game::{HostId, InlineSchedule, RegionCoords, RegionSpawner, FLIP_HYSTERESIS, REGION_SIZE};
 
 use crate::common::cut_store::CutStore;
@@ -7182,7 +7182,7 @@ fn coordinator_restart_at_any_round(rig: &mut MultiRig) {
     if committed(rig) == before {
         until_committed(rig, 1);
     }
-    assert_eq!(rig.core().process(), game::coordinator::ProcessBoot(2), "the restarted process runs");
+    assert_eq!(rig.core().replica(), game::coordinator::ReplicaId(2), "the restarted process runs");
     assert!(rig.core().gate_host().is_some(), "the hosts attached to the restarted process");
     let epochs: std::collections::BTreeSet<u64> = rig.decided.keys().map(|c| c.0 >> 32).collect();
     assert!(epochs.contains(&2), "a cut of the restarted coordinator (epoch 2) was decided: {:?}", rig.decided);
@@ -7207,6 +7207,56 @@ fn coordinator_restart_at_any_round(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_coordinator_restart_at_any_round_conserves_everything() {
     sweep("a_coordinator_restart_at_any_round_conserves_everything", 3, 1, SEEDS, coordinator_restart_at_any_round);
+}
+
+/// Rounds of [`rebase_at_any_round`].
+const REBASE_ROUNDS: usize = 90;
+
+/// [`rebase_at_any_round`]'s world, on `rig`: slimes shuttling across host seams while world
+/// cuts run; with `inject`, at seeded rounds the rig's store row moves under the coordinator (a
+/// foreign version holding what it already holds), so its next write conflicts and it rebases
+/// onto the row and replays its log. Every round the world is conserved and the journals explain
+/// every difference from the last committed cut. The rebases done, and the core's projection.
+fn shuttle_with_foreign_versions(rig: &mut MultiRig, inject: bool) -> (u64, String, Vec<(game::PlayerId, game::coordinator::Claim)>, Vec<game::coordinator::RequestId>) {
+    let chain = heir_world(rig);
+    let slimes: Vec<game::EntityId> = (0..4).map(|i| slime_in(rig, chain[i % chain.len()], i)).collect();
+    for r in 0..REBASE_ROUNDS {
+        let roll = crate::common::multi_rig::mix(rig.seed, 0x2B_0000 + r as u64);
+        if r % 3 == 0 {
+            let i = ((roll >> 16) % (chain.len() as u64 - 1)) as usize;
+            push_over(rig, slimes[(roll % slimes.len() as u64) as usize], chain[i], chain[i + 1]);
+        }
+        if inject && roll % 5 == 0 {
+            rig.core().arm_foreign_version();
+        }
+        rig.cut_round();
+        rig.assert_conserved_world();
+        rig.assert_journals_explain_the_cut();
+    }
+    let core = rig.core();
+    (core.rebases(), core.projection_debug(), core.claims(), core.memo_ids())
+}
+
+/// Elastic 2b (decision 1): one replica, three hosts. At seeded rounds the store's row moves
+/// under the replica; its next write conflicts, it rebases onto the row and replays every input
+/// it applied since its last commit, then writes again. The world is conserved throughout, cuts
+/// commit, and the core ends exactly where the same world's core ends without the foreign
+/// versions: its projection, claims and memo.
+fn rebase_at_any_round(rig: &mut MultiRig) {
+    let mut plain = MultiRig::new(rig.hosts.len() as u32, rig.s, rig.schedule, rig.seed, rig.link_delay);
+    let (none, plain_core, plain_claims, plain_memo) = shuttle_with_foreign_versions(&mut plain, false);
+    assert_eq!(none, 0, "no rebase without a foreign version");
+    let (rebases, core, claims, memo) = shuttle_with_foreign_versions(rig, true);
+    assert!(rebases > 0, "the replica rebased (seed {})", rig.seed);
+    assert!(committed(rig) > 0, "cuts committed");
+    assert_eq!((claims, memo), (plain_claims, plain_memo), "the claims and the memo");
+    assert!(core == plain_core, "the projection differs from the world's without foreign versions (seed {}):\n{core}\n{plain_core}", rig.seed);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_rebase_at_any_round_conserves_everything() {
+    sweep("a_rebase_at_any_round_conserves_everything", 3, 1, SEEDS, rebase_at_any_round);
 }
 
 /// Three hosts: a slime walks S1→D→S2 after the last committed cut, then D dies. S1's
