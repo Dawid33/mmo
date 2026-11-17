@@ -119,11 +119,14 @@
 //! **The coordinator's write** (Elastic 2a, `rows.rs` `write_coordinator`): ONE statement,
 //! `UPDATE coordinator SET core, history = COALESCE($h, history), version = version + 1 …
 //! WHERE id = 1 AND epoch = $e AND version = $v`, autocommitted — the one `coordinator` row
-//! `FOR UPDATE` for that statement and nothing else. Every other statement on that row takes it
-//! `FOR SHARE` as its FIRST lock (`decide_cut`, `record_cut_begin`, a declaration, an end of a
-//! landless host, `rollback_world`): the write waits for such a transaction to commit (at most
-//! that transaction's length) and none of them waits for the write while holding something the
-//! write wants — it wants nothing else: no cycle. A claim (`claim_coordinator`: `epoch + 1`)
+//! locked `FOR NO KEY UPDATE` (an `UPDATE` of non-key columns; it conflicts with `FOR SHARE`)
+//! for that statement and nothing else. Every other statement on that row takes it `FOR SHARE`
+//! as its FIRST lock (`decide_cut`, `record_cut_begin`, a declaration, an end of a landless
+//! host, `rollback_world`): the write waits for such a transaction to commit (at most that
+//! transaction's length — the write sets no `lock_timeout` of its own, so it waits as long as
+//! the holder's own timeouts let the holder run, holding the store thread's writer mutex
+//! meanwhile) and none of them waits for the write while holding something the write wants —
+//! it wants nothing else: no cycle. A claim (`claim_coordinator`: `epoch + 1`)
 //! serialises with it on the row: after the claim the write finds another epoch (`Fenced`). With
 //! no row matched it reads the epoch again (a plain read): the same epoch is `Conflict`.
 //!
@@ -145,7 +148,11 @@
 //!   for this transaction and then lands after the vouch: the declaration's lapse re-check sees
 //!   it). Those rows stay locked to the commit, so a restarted process's own old row is never
 //!   counted live, and in a total crash it is among the dirty rows locked next (already held).
-//! - The live read (`live_ids`) and the dirty count take no lock.
+//! - The live read (`live_ids`) and the dirty count take no lock. The dirty count (Elastic 2a
+//!   final review S-M1) counts a dirty row only if it is live, holds land (a `super_regions` or
+//!   `in_flight` row) or is the predecessor of an open succession — plain subqueries over
+//!   `super_regions`, `in_flight` and `successions`, still no lock, so it changes no lock order:
+//!   an ENDED row (dead, landless, named by no open run) is no total crash; step 5 prunes it.
 //! - A total crash only: the open `successions` rows `FOR UPDATE` (every other writer of them
 //!   holds `world` first; a staged heir part reads them without a lock), then EVERY dirty
 //!   `hosts` row `FOR NO KEY UPDATE` in id order — the live read is repeated under these locks,

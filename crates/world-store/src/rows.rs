@@ -700,7 +700,18 @@ macro_rules! engine_rows {
                 // landed meanwhile makes its row live after all (a beat waits for these locks
                 // from here on).
                 let mut generation = world;
-                let dirty: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hosts WHERE clean = 0").fetch_one(&mut **tx).await?;
+                // "Somebody dirty" is a dirty row that is live, or holds land (a `super_regions`
+                // or `in_flight` row), or is the predecessor of an open succession — never an
+                // ENDED row (dead, landless, named by no open run: Elastic 2a final review S-M1),
+                // which step 5 prunes: after a clean stop it is no total crash. A plain read
+                // under the world row's lock (step 1), which every writer of these rows takes.
+                let sql = format!(
+                    "SELECT COUNT(*) FROM hosts WHERE clean = 0 AND (state = {live} \
+                     OR id IN (SELECT owner FROM super_regions) OR id IN (SELECT host FROM in_flight) \
+                     OR id IN (SELECT predecessor FROM successions WHERE settled_cut IS NULL AND abandoned = 0))",
+                    live = crate::HOST_LIVE,
+                );
+                let dirty: i64 = sqlx::query_scalar(&sql).fetch_one(&mut **tx).await?;
                 if live.is_empty() && dirty > 0 {
                     if !$update_lock.is_empty() {
                         sqlx::query(

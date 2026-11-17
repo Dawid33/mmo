@@ -850,6 +850,25 @@ fn a_landless_lapsed_host_is_ended_without_a_generation_change() {
     w.shutdown();
 }
 
+/// Elastic 2a final review (S-M1): an ended row — dirty, dead, holding nothing — that no
+/// registration pruned yet is no total crash. Every other host left cleanly (a clean stop): the
+/// first registration finds nobody live and nobody dirty that holds or may hold anything, and
+/// raises no generation.
+#[test]
+fn an_ended_row_is_no_total_crash_after_a_clean_stop() {
+    let Some(w) = World::new(2) else { return };
+    free_land(&w, hid(1));
+    w.lapse(hid(1));
+    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1)), w.c), Ok(LandlessEnd::Ended));
+    // Host 0 leaves in its committed leave cut: its row clean.
+    exec(&w.w, "UPDATE hosts SET clean = 1 WHERE id = 0");
+    let next = w.hosts[0].register_host(crate::hosts::new_host("host-0", 900), CrashPolicy::Succession).unwrap();
+    assert!(!next.bumped, "an ended row is no total crash: {next:?}");
+    assert_eq!(w.h.world_generation().unwrap(), 0, "the generation untouched");
+    assert!(!w.h.hosts().unwrap().iter().any(|r| r.id == hid(1)), "the ended row is pruned");
+    w.shutdown();
+}
+
 /// A lapsed host holding land — a `super_regions` row, or only an `in_flight` row — is not
 /// ended: its death is a succession's.
 #[test]
