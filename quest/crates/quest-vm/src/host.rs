@@ -33,10 +33,16 @@ pub trait Host {
 /// the compiler adds them to every awaited result's error set.
 pub const PROMISE_ERRORS: [&str; 3] = ["Lost", "Timeout", "WrongType"];
 
+/// The namespace of the host side of the quest builtins (`quest.joined`, `quest.complete`, …): the compiler
+/// lowers to it; no script can name it.
+pub const QUEST_NAMESPACE: &str = "quest";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HostApi {
     pub version: u32,
     pub structs: Vec<HostStruct>,
+    /// The host's enums (data-less variants only); a value is `WireValue::Variant` named `Enum::Variant`.
+    pub enums: Vec<HostEnum>,
     /// The events the host delivers, with their fields (a handler's parameter, `emit`'s argument).
     pub events: Vec<HostStruct>,
     pub fns: Vec<HostFn>,
@@ -47,6 +53,13 @@ pub struct HostApi {
 pub struct HostStruct {
     pub name: String,
     pub fields: Vec<(String, HostTy)>,
+}
+
+/// A host enum: its variants carry no data (`Occupation::Smith`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostEnum {
+    pub name: String,
+    pub variants: Vec<String>,
 }
 
 /// An error the host can raise; `fields` are its data (empty for a data-less error).
@@ -65,6 +78,13 @@ pub struct HostFn {
     pub ret: HostTy,
     pub raises: Vec<String>,
     pub kind: HostFnKind,
+    /// Read as `x.name`, without parentheses: a receiver `Query` with no parameters.
+    pub property: bool,
+    /// A query the coordinator can evaluate: the only kind allowed in the query subset (`where`,
+    /// `requires`).
+    pub fact: bool,
+    /// The `Int` parameters a call may leave out (it passes the rest by name), and the value each takes then.
+    pub defaults: Vec<(String, i64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +104,8 @@ pub enum HostTy {
     List(Box<HostTy>),
     Option(Box<HostTy>),
     Struct(String),
+    /// A host enum, by name.
+    Enum(String),
     /// Any storable value.
     Value,
     /// The receiving type.

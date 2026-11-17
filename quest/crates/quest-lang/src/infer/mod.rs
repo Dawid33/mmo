@@ -108,8 +108,12 @@ pub struct Typed {
     pub sigs: BTreeMap<DefId, Sig>,
     /// Every top-level `let`.
     pub globals: BTreeMap<DefId, TyId>,
-    /// What each method call `x.m(…)` calls, by the call's expression.
+    /// What each method call `x.m(…)` calls, by the call's expression; also each host property read
+    /// `x.name` (a `Method::Host`), by the field expression.
     pub methods: BTreeMap<ExprId, Method>,
+    /// Each host call that names an argument or leaves a parameter out, by the call's expression: for each
+    /// parameter in order, the index of the argument that gives it (`None`: its default).
+    pub host_args: BTreeMap<ExprId, Vec<Option<u32>>>,
     /// Functions and top-level `let`s, callee-first.
     pub order: Vec<DefId>,
     /// Every error name of the program, sorted (the VM's one `Error` enum: a name's variant is its index
@@ -188,6 +192,7 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         sigs: BTreeMap::new(),
         globals: BTreeMap::new(),
         methods: BTreeMap::new(),
+        host_args: BTreeMap::new(),
         in_cycle: BTreeSet::new(),
         adts: BTreeMap::new(),
         host_structs: Vec::new(),
@@ -220,6 +225,7 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         sigs: inf.sigs,
         globals: inf.globals,
         methods: inf.methods,
+        host_args: inf.host_args,
         order,
         errors,
         patterns: inf.patterns,
@@ -355,6 +361,7 @@ struct Infer<'k> {
     sigs: BTreeMap<DefId, Sig>,
     globals: BTreeMap<DefId, TyId>,
     methods: BTreeMap<ExprId, Method>,
+    host_args: BTreeMap<ExprId, Vec<Option<u32>>>,
     /// The members of every reported cycle: never waited on.
     in_cycle: BTreeSet<DefId>,
     /// The field types of every struct and script event (one shape) and enum (one per variant).

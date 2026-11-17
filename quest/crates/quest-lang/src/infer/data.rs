@@ -16,7 +16,7 @@
 //! **Dict keys** (spec §5.8): `int`, `bool`, `str`, and enums (`Option` among them) and structs whose fields are
 //! all keys, through the same rule; a recursive type is a key when nothing in it breaks the rule.
 
-use super::{Body, Check, Class, Infer, error};
+use super::{Body, Check, Class, Infer, Method, error};
 use crate::ast::{Span, UnOp};
 use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, Field};
 use crate::ty::{Ty, TyId};
@@ -133,6 +133,15 @@ impl Infer<'_> {
                 } else {
                     TyId::ERROR
                 }
+            }
+            HostTy::Enum(name) => {
+                let krate = self.krate;
+                let host = self.host;
+                host.enums
+                    .iter()
+                    .position(|e| &e.name == name)
+                    .and_then(|i| krate.host_enums.get(i))
+                    .map_or(TyId::ERROR, |d| self.types.intern(Ty::Adt(*d)))
             }
             HostTy::Value | HostTy::Infer | HostTy::Event => open(self, t),
         }
@@ -526,6 +535,30 @@ impl Infer<'_> {
         });
         if let Some(t) = found {
             return t;
+        }
+        // A host struct's property (`p.alive`), or a method named without its call.
+        if let Ty::HostStruct(i) = self.types.get(ty) {
+            let host = self.host;
+            let owner = host.structs.get(i as usize).map(|s| s.name.as_str());
+            if let Some(f) = host
+                .fns
+                .iter()
+                .position(|f| f.receiver.as_deref() == owner && f.name == name)
+            {
+                let owner = owner.unwrap_or_default();
+                if host.fns.get(f).is_some_and(|hf| hf.property) {
+                    let f = u32::try_from(f).unwrap_or(u32::MAX);
+                    self.methods.insert(e.id, Method::Host(f));
+                    return self.host_call(b, e, f, &[]);
+                }
+                b.diags.push(error(
+                    "missing-call",
+                    format!("`{owner}.{name}` is a method, not a property: call it (`.{name}(…)`)"),
+                    b.file,
+                    e.span,
+                ));
+                return TyId::ERROR;
+            }
         }
         let shown = self.show(ty);
         let is_method = matches!(self.types.get(ty), Ty::Adt(d) if self.krate.methods.contains_key(&(d, name.to_string())));

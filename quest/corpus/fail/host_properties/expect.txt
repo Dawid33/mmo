@@ -1,0 +1,17 @@
+error[missing-call]: `Person.has_tag` is a method, not a property: call it (`.has_tag(…)`)
+ --> main.qs:2:18
+  |
+2 |     let tagged = p.has_tag
+  |                  ^^^^^^^^^
+
+error[not-assignable]: a host property is read-only: the host changes it, through a command
+ --> main.qs:3:5
+  |
+3 |     p.alive = false
+  |     ^^^^^^^
+
+error[not-callable]: `Person.alive` is a property, not a method: read it without parentheses (`.alive`)
+ --> main.qs:4:12
+  |
+4 |     return p.alive()
+  |            ^^^^^^^^^

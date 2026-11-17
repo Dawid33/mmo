@@ -393,14 +393,24 @@ impl<'a> Gen<'a> {
                         .krate
                         .def(d)
                         .map_or(String::new(), |def| def.name.clone());
+                    // A host enum's variants carry the host's names, `Occupation::Smith`: the VM converts
+                    // them by these.
+                    let host = self.krate.host_enums.contains(&d);
                     match self.krate.def(d).map(|def| &def.kind) {
                         Some(DefKind::Enum(vs)) => TypeDesc::Enum {
-                            name,
                             variants: vs
                                 .iter()
                                 .zip(self.shapes(d))
-                                .map(|(v, s)| (v.name.clone(), fields(s)))
+                                .map(|(v, s)| {
+                                    let vname = if host {
+                                        format!("{name}::{}", v.name)
+                                    } else {
+                                        v.name.clone()
+                                    };
+                                    (vname, fields(s))
+                                })
                                 .collect(),
+                            name,
                         },
                         _ => TypeDesc::Struct {
                             name,

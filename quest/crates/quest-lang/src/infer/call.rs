@@ -12,7 +12,7 @@ use super::{Body, Check, Class, Infer};
 use crate::ast::Receiver;
 use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, HostItem, Prelude};
 use crate::ty::{Ty, TyId};
-use quest_vm::host::HostTy;
+use quest_vm::host::{HostFn, HostTy};
 
 /// What a method call `x.m(…)` calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +237,19 @@ impl Infer<'_> {
                     .iter()
                     .position(|f| f.receiver.as_deref() == owner && f.name == name);
                 match found {
+                    Some(f) if host.fns.get(f).is_some_and(|hf| hf.property) => {
+                        let owner = owner.unwrap_or_default();
+                        b.diags.push(super::error(
+                            "not-callable",
+                            format!(
+                                "`{owner}.{name}` is a property, not a method: read it without parentheses (`.{name}`)"
+                            ),
+                            b.file,
+                            e.span,
+                        ));
+                        self.sink_args(b, args);
+                        TyId::ERROR
+                    }
                     Some(f) => {
                         let f = u32::try_from(f).unwrap_or(u32::MAX);
                         self.methods.insert(e.id, Method::Host(f));
@@ -323,8 +336,10 @@ impl Infer<'_> {
     // The host.
 
     /// A host function or method `f` (plan D9): a promise returns `Promise[T]`; `Value` takes any storable
-    /// value, `Infer` is the receiving type, `Event` any event.
-    fn host_call(&mut self, b: &mut Body, e: &Expr, f: u32, args: &[Arg]) -> TyId {
+    /// value, `Infer` is the receiving type, `Event` any event. Arguments go by position, then by name; a
+    /// parameter with a default may be left out (`host_args`). A property read (`x.alive`) is a call of
+    /// its host method without arguments.
+    pub(super) fn host_call(&mut self, b: &mut Body, e: &Expr, f: u32, args: &[Arg]) -> TyId {
         let host = self.host;
         let Some(hf) = host.fns.get(f as usize) else {
             self.sink_args(b, args);
@@ -348,9 +363,35 @@ impl Infer<'_> {
             params.push(ty);
         }
         // A call with the wrong count was reported; its result (often a variable) is not asked about again.
-        if !self.args(b, &name, &params, args, e, None) {
-            return TyId::ERROR;
-        }
+        let short = args.len() < params.len() && !hf.defaults.is_empty();
+        let order: Vec<Option<u32>> = if short || args.iter().any(|a| a.name.is_some()) {
+            let Some(order) = self.host_order(b, &name, hf, args, e) else {
+                return TyId::ERROR;
+            };
+            for (p, a) in params.iter().zip(&order) {
+                if let Some(a) = a.and_then(|a| args.get(a as usize)) {
+                    let found = self.expr(b, &a.value);
+                    self.expect(b, *p, found, a.value.span);
+                }
+            }
+            if order.iter().enumerate().any(|(i, a)| *a != Some(i as u32)) {
+                self.host_args.insert(e.id, order.clone());
+            }
+            order
+        } else {
+            if !self.args(b, &name, &params, args, e, None) {
+                return TyId::ERROR;
+            }
+            (0..params.len()).map(|i| Some(i as u32)).collect()
+        };
+        // The argument at each parameter.
+        let at = |i: usize| {
+            order
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|a| args.get(a as usize))
+        };
         // Checked once the arguments' types are decided.
         let op: &'static str = match (hf.namespace.as_deref(), hf.name.as_str()) {
             (Some("world"), "set") => "world.set",
@@ -361,11 +402,8 @@ impl Infer<'_> {
         // One key holds one type: `new` has the type of `expected`, so `Changed(current)` (typed by
         // `expected`, decision 11) can always carry what the key holds.
         if op == "world.compare_and_set"
-            && let (Some(&expected), Some(&new), Some(at)) = (
-                params.get(1),
-                params.get(2),
-                args.get(2).map(|a| a.value.span),
-            )
+            && let (Some(&expected), Some(&new), Some(at)) =
+                (params.get(1), params.get(2), at(2).map(|a| a.value.span))
             && !self.unify(expected, new)
         {
             let (e, f) = (self.show(expected), self.show(new));
@@ -383,7 +421,7 @@ impl Infer<'_> {
             b.diags.push(d);
         }
         for (i, class) in open {
-            if let (Some(ty), Some(a)) = (params.get(i), args.get(i)) {
+            if let (Some(ty), Some(a)) = (params.get(i), at(i)) {
                 b.checks.push(Check {
                     ty: *ty,
                     class,
@@ -395,6 +433,76 @@ impl Infer<'_> {
         let ret = self.host_ty(&hf.ret, &mut |inf, _| inf.fresh());
         // A promise carries its (open) error set; `await` makes it the fallible result.
         self.host_fallible(b, e, f, &params, ret)
+    }
+
+    /// Which argument gives each parameter of host fn `hf` when `args` name some or leave some out:
+    /// positional arguments first, then named ones; a left-out parameter must have a default. `None` when it
+    /// was reported (`arg-count`; the arguments are sunk).
+    fn host_order(
+        &mut self,
+        b: &mut Body,
+        name: &str,
+        hf: &HostFn,
+        args: &[Arg],
+        call: &Expr,
+    ) -> Option<Vec<Option<u32>>> {
+        let mut order: Vec<Option<u32>> = vec![None; hf.params.len()];
+        let mut problem = None;
+        let mut named = false;
+        for (k, a) in args.iter().enumerate() {
+            let k = k as u32;
+            match &a.name {
+                None if named => {
+                    problem = Some("a positional argument after a named one".to_string());
+                }
+                None => match order.get_mut(k as usize) {
+                    Some(slot) => *slot = Some(k),
+                    None => {
+                        problem = Some(format!(
+                            "{} parameters, {} given",
+                            hf.params.len(),
+                            args.len()
+                        ));
+                    }
+                },
+                Some(n) => {
+                    named = true;
+                    match hf.params.iter().position(|(p, _)| p == n) {
+                        Some(i) if order[i].is_some() => {
+                            problem = Some(format!("`{n}` given twice"));
+                        }
+                        Some(i) => order[i] = Some(k),
+                        None => problem = Some(format!("no parameter `{n}`")),
+                    }
+                }
+            }
+            if problem.is_some() {
+                break;
+            }
+        }
+        if problem.is_none()
+            && let Some(((p, _), _)) = hf
+                .params
+                .iter()
+                .zip(&order)
+                .find(|((p, _), a)| a.is_none() && !hf.defaults.iter().any(|(d, _)| d == p))
+        {
+            problem = Some(format!("`{p}` is not given"));
+        }
+        match problem {
+            None => Some(order),
+            Some(why) => {
+                let params: Vec<&str> = hf.params.iter().map(|(p, _)| p.as_str()).collect();
+                b.diags.push(super::error(
+                    "arg-count",
+                    format!("`{name}({})`: {why}", params.join(", ")),
+                    b.file,
+                    call.span,
+                ));
+                self.sink_args(b, args);
+                None
+            }
+        }
     }
 
     // The prelude.

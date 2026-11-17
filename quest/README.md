@@ -90,6 +90,14 @@ item visible outside its module, `crate::`, `super::`, `self::` paths. `use` cyc
 time; several handlers of one event run in table order. A handler is also a plain function. `emit(Event(...))`
 queues an event (the queue holds 4: a warning while busy, then the newest is dropped with an error).
 
+**The host.** The host describes what a script may call (`HostApi`): functions, namespaces (`world.get`),
+structs and events, and enums of data-less variants (`Occupation::Smith`; a script matches them like its own
+enums; the host sees `Occupation::Smith` as the variant's name). A host *property* is read without parentheses
+(`npc.alive`; `npc.alive()` is `not-callable`, `p.has_tag` without its call is `missing-call`, assigning one is
+`not-assignable`). Host functions take arguments by position, then by name (`near(a, b, blocks=8)`); a
+parameter with a default may be left out. A fallible host command (`place(...) else: ...`) must be handled like
+any fallible call; the VM hands a command over when its segment commits, so the call itself never fails yet.
+
 **Promises.** Host reads and writes that answer later (`world.get`, `world.set`, `world.compare_and_set`,
 `chest.take`, ...) return a promise; `await p` parks the handler until it resolves (other events run
 meanwhile) and yields a result you handle like any fallible call (`await p?`, `await p else 0`, `match await p:`).
@@ -137,7 +145,7 @@ assurance comes from fuzzing, planned later.
 
 ## Known MVP limits
 
-- **`not-yet` compile errors**: fallible host queries and commands (the stub's are promises or infallible),
+- **`not-yet` compile errors**: fallible host queries,
   an unawaited `all(...)`, and `dialogue` / `quest` items: they parse, resolve and type-check, then report
   `not-yet` until Phase 10 lowers them.
 - Float `==` inside collections compares bits; `to_upper` is ASCII only.

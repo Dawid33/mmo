@@ -2,6 +2,7 @@
 //!
 //! - An item is a [`DefId`]: an index into [`Crate::defs`], assigned in module order (modules sorted by
 //!   path, the root first), then declaration order; a method takes the next id where its `impl` stands.
+//!   The host's enums come last ([`Crate::host_enums`]).
 //! - A binding is a [`LocalId`]: an index into [`Crate::locals`], fresh for every parameter, `let`, `for`
 //!   variable, pattern binding and `else err:` binding, so shadowing is explicit.
 //! - A host function, struct or event is its index into the [`HostApi`](quest_vm::host::HostApi) tables
@@ -49,6 +50,9 @@ pub struct Crate {
     pub locals: Vec<Local>,
     /// The methods of each struct or enum, by (type, method name).
     pub methods: BTreeMap<(DefId, String), DefId>,
+    /// The item of each host enum, by its index into `HostApi::enums`: an `enum` of the root with no
+    /// source, after every script item (resolution's `collect_host_enums`).
+    pub host_enums: Vec<DefId>,
     /// The dialogue and quest items, in definition order: `check` answers each with `not-yet` until
     /// Phase 10.
     pub deferred: Vec<DefId>,

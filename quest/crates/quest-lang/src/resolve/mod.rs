@@ -56,8 +56,10 @@ const ROOT: ModId = ModId(0);
 
 /// Resolves the module tree against the host's API.
 pub fn resolve(krate: &ast::Crate, host: &HostApi) -> (hir::Crate, Vec<Diagnostic>) {
+    let host_enums = items::host_enum_items(host);
     let mut r = Resolver::new(krate, host);
     r.collect();
+    r.collect_host_enums(&host_enums);
     r.resolve_imports();
     r.resolve_impls();
     let kinds = r.resolve_bodies();
@@ -78,6 +80,7 @@ pub fn resolve(krate: &ast::Crate, host: &HostApi) -> (hir::Crate, Vec<Diagnosti
         defs,
         locals: r.locals,
         methods: r.methods,
+        host_enums: r.host.enum_defs.clone(),
         deferred: r.deferred,
         expr_count: r.expr_count,
         pat_count: r.pat_count,
@@ -888,6 +891,8 @@ impl<'a> Resolver<'a> {
                 res
             } else if let Some(i) = self.host.structs.get(name.as_str()) {
                 Res::Host(HostItem::Struct(*i))
+            } else if let Some(d) = self.host.enums.get(name.as_str()) {
+                Res::Def(*d)
             } else if let Some(i) = self.host.events.get(name.as_str()) {
                 Res::Host(HostItem::Event(*i))
             } else if let Some((_, b)) = BUILTIN_TYPES.iter().find(|(n, _)| n == name) {
@@ -898,6 +903,7 @@ impl<'a> Resolver<'a> {
                 let mut names: Vec<String> =
                     BUILTIN_TYPES.iter().map(|(n, _)| n.to_string()).collect();
                 names.extend(self.host.structs.keys().cloned());
+                names.extend(self.host.enums.keys().cloned());
                 names.extend(self.host.events.keys().cloned());
                 if let Some(scope) = self.scopes.get(cx.module.0 as usize) {
                     names.extend(scope.keys().map(|s| s.to_string()));

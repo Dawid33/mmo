@@ -7,7 +7,7 @@ use super::{
 };
 use crate::ast;
 use crate::hir::{self, DefId, HostItem, ModId};
-use quest_vm::host::HostApi;
+use quest_vm::host::{HostApi, QUEST_NAMESPACE};
 use std::collections::BTreeMap;
 
 /// The host API's names.
@@ -19,6 +19,35 @@ pub(super) struct HostNames {
     pub(super) namespaces: BTreeMap<String, BTreeMap<String, u32>>,
     pub(super) structs: BTreeMap<String, u32>,
     pub(super) events: BTreeMap<String, u32>,
+    /// Each host enum's item (`collect_host_enums`), by name.
+    pub(super) enums: BTreeMap<String, DefId>,
+    /// The same items by index into `HostApi::enums`.
+    pub(super) enum_defs: Vec<DefId>,
+}
+
+/// A host enum as an `enum` item of the crate root (data-less variants), so it resolves, type-checks,
+/// matches and lowers like a script enum; its name is the host's, outside every module's namespace.
+pub(super) fn host_enum_items(host: &HostApi) -> Vec<ast::Item> {
+    host.enums
+        .iter()
+        .map(|e| ast::Item {
+            kind: ast::ItemKind::Enum(
+                e.name.clone(),
+                e.variants
+                    .iter()
+                    .map(|v| ast::Variant {
+                        name: v.clone(),
+                        fields: Vec::new(),
+                        span: ast::Span::default(),
+                    })
+                    .collect(),
+            ),
+            public: true,
+            decorators: Vec::new(),
+            span: ast::Span::default(),
+            depth: 0,
+        })
+        .collect()
 }
 
 impl HostNames {
@@ -26,7 +55,9 @@ impl HostNames {
         let mut names = HostNames::default();
         for (i, f) in host.fns.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else { break };
-            if f.receiver.is_some() {
+            // The `quest` namespace is the host side of the quest builtins: the compiler lowers to it, no
+            // script names it.
+            if f.receiver.is_some() || f.namespace.as_deref() == Some(QUEST_NAMESPACE) {
                 continue;
             }
             match &f.namespace {
@@ -61,6 +92,8 @@ impl HostNames {
             Some(Res::Namespace)
         } else if let Some(i) = self.structs.get(name) {
             Some(Res::Host(HostItem::Struct(*i)))
+        } else if let Some(d) = self.enums.get(name) {
+            Some(Res::Def(*d))
         } else {
             self.events
                 .get(name)
@@ -73,6 +106,7 @@ impl HostNames {
             .keys()
             .chain(self.namespaces.keys())
             .chain(self.structs.keys())
+            .chain(self.enums.keys())
             .chain(self.events.keys())
             .map(String::as_str)
     }
@@ -103,6 +137,27 @@ impl<'a> Resolver<'a> {
             for item in &m.ast.items {
                 self.collect_item(id, &m.path, &m.file, item);
             }
+        }
+    }
+
+    /// The host enums' items, after every script item: ids above the script's, in the root, in no namespace.
+    pub(super) fn collect_host_enums(&mut self, items: &'a [ast::Item]) {
+        for item in items {
+            let ast::ItemKind::Enum(name, _) = &item.kind else {
+                continue;
+            };
+            let id = DefId(index_u32(self.metas.len()));
+            self.metas.push(Meta {
+                name,
+                module: ROOT,
+                public: true,
+                span: item.span,
+                tag: Tag::Enum,
+                item,
+                impl_index: None,
+            });
+            self.host.enums.entry(name.clone()).or_insert(id);
+            self.host.enum_defs.push(id);
         }
     }
 
@@ -396,6 +451,12 @@ impl<'a> Resolver<'a> {
             name => match self.entry(from, name) {
                 Some((Some(res), _)) => res,
                 Some((None, _)) => return Walk::Pending,
+                // A host enum (`Occupation::Smith`).
+                None if mode == Mode::Item && self.host.enums.contains_key(name) => self
+                    .host
+                    .enums
+                    .get(name)
+                    .map_or(Res::Error, |d| Res::Def(*d)),
                 None => {
                     let candidates = self
                         .scopes

@@ -1,7 +1,17 @@
-//! The stub's host-API description (design D9, version 1) and the host-fn ids it implies: a host fn id is the
+//! The stub's host-API description (design D9, version 2) and the host-fn ids it implies: a host fn id is the
 //! index into [`stub_api`]`().fns`.
+//!
+//! Version 2 adds the quest host API of spec §9.1 ("Assumed host API" of the quest examples): the entity
+//! handles and types, the enums `Occupation` and `SiteKind`, the fact queries (marked `fact` for the query
+//! subset) and other pure queries, the commands, the events, and in the namespace `quest` the host side of
+//! the quest builtins. The types and events a quest generates or the compiler owns (`Entered`, `RoleLost`,
+//! `Talked`, `DialogueEnded`, `SceneEnded`, `EndReason`, `SceneEnd`, `Exit`, `Stage`, `Role`) are not here.
+//! A `Dialogue` parameter is `Value` until the compiler has its own `Dialogue` type.
 
-use quest_vm::host::{HostApi, HostError, HostFn, HostFnKind, HostStruct, HostTy, PROMISE_ERRORS};
+use quest_vm::host::{
+    HostApi, HostEnum, HostError, HostFn, HostFnKind, HostStruct, HostTy, PROMISE_ERRORS,
+    QUEST_NAMESPACE,
+};
 
 pub const F_SAY: u16 = 0;
 pub const F_LOG: u16 = 1;
@@ -50,6 +60,56 @@ fn f(
         ret,
         raises: raises.iter().map(|r| r.to_string()).collect(),
         kind,
+        property: false,
+        fact: false,
+        defaults: Vec::new(),
+    }
+}
+
+/// `f` marked as a fact: a query the coordinator can evaluate.
+fn fact(mut f: HostFn) -> HostFn {
+    f.fact = true;
+    f
+}
+
+/// A property `owner.name` (read without parentheses), a fact when `is_fact`.
+fn property(owner: &str, name: &str, ret: HostTy, is_fact: bool) -> HostFn {
+    let mut p = f(Some(owner), true, name, &[], ret, &[], HostFnKind::Query);
+    p.property = true;
+    p.fact = is_fact;
+    p
+}
+
+/// A free command (no namespace, no receiver) that cannot fail.
+fn command(name: &str, params: &[(&str, HostTy)]) -> HostFn {
+    f(
+        None,
+        false,
+        name,
+        params,
+        HostTy::Unit,
+        &[],
+        HostFnKind::Command,
+    )
+}
+
+/// A command in the `quest` namespace.
+fn quest_command(name: &str, params: &[(&str, HostTy)]) -> HostFn {
+    f(
+        Some(QUEST_NAMESPACE),
+        false,
+        name,
+        params,
+        HostTy::Unit,
+        &[],
+        HostFnKind::Command,
+    )
+}
+
+fn host_enum(name: &str, variants: &[&str]) -> HostEnum {
+    HostEnum {
+        name: name.to_string(),
+        variants: variants.iter().map(|v| v.to_string()).collect(),
     }
 }
 
@@ -72,116 +132,301 @@ fn world(name: &str, params: &[(&str, HostTy)], ret: HostTy, own: &[&str]) -> Ho
 /// The stub's host API. A method's receiver is not in `params`; the stub expects it as the first argument.
 pub fn stub_api() -> HostApi {
     use HostFnKind::{Command, Promise, Query};
-    use HostTy::{Bool, Event, Infer, Int, Str, Struct, Unit, Value};
+    use HostTy::{Bool, Enum, Event, Infer, Int, List, Str, Struct, Unit, Value};
     let player = || Struct("Player".into());
     let item = || Struct("Item".into());
+    let person = || Struct("Person".into());
+    let creature = || Struct("Creature".into());
+    let site = || Struct("Site".into());
+    let place = || Struct("Place".into());
+    let prefab = || Struct("Prefab".into());
     let key = || ("key", Str);
-    HostApi {
-        version: 1,
-        structs: vec![
-            event("Player", &[("id", Int), ("name", Str)]),
-            event("Item", &[("kind", Str), ("count", Int)]),
+    let mut fns = vec![
+        f(
+            None,
+            false,
+            "say",
+            &[("p", player()), ("text", Str)],
+            Unit,
+            &[],
+            Command,
+        ),
+        f(None, false, "log", &[("text", Str)], Unit, &[], Command),
+        f(
+            None,
+            false,
+            "give",
+            &[("p", player()), ("item", item())],
+            Unit,
+            &[],
+            Command,
+        ),
+        f(
+            Some("Player"),
+            true,
+            "add_tag",
+            &[("tag", Str)],
+            Unit,
+            &[],
+            Command,
+        ),
+        f(
+            Some("Player"),
+            true,
+            "remove_tag",
+            &[("tag", Str)],
+            Unit,
+            &[],
+            Command,
+        ),
+        f(
+            Some("chest"),
+            false,
+            "put",
+            &[("item", item())],
+            Unit,
+            &[],
+            Command,
+        ),
+        f(None, false, "emit", &[("e", Event)], Unit, &[], Command),
+        f(
+            Some("Player"),
+            true,
+            "has_tag",
+            &[("tag", Str)],
+            Bool,
+            &[],
+            Query,
+        ),
+        f(
+            None,
+            false,
+            "roll",
+            &[("salt", Int), ("sides", Int)],
+            Int,
+            &[],
+            Query,
+        ),
+        f(
+            Some("chest"),
+            false,
+            "count",
+            &[("kind", Str)],
+            Int,
+            &[],
+            Query,
+        ),
+        f(
+            Some("chest"),
+            false,
+            "take",
+            &[("kind", Str), ("n", Int)],
+            item(),
+            &["ChestEmpty", "NotEnough"],
+            Promise,
+        ),
+        world("get", &[key()], Infer, &["NotFound", "WrongType"]),
+        world("set", &[key(), ("v", Value)], Unit, &[]),
+        world("add", &[key(), ("n", Int)], Int, &["NotFound", "WrongType"]),
+        world(
+            "compare_and_set",
+            &[key(), ("expected", Value), ("new", Value)],
+            Unit,
+            &["NotFound", "Changed"],
+        ),
+        world("delete", &[key()], Unit, &["NotFound"]),
+    ];
+    // Version 2: facts.
+    let mut near = fact(f(
+        None,
+        false,
+        "near",
+        &[
+            ("a", Value),
+            ("b", Value),
+            ("regions", Int),
+            ("blocks", Int),
         ],
-        events: vec![
-            event("PlayerClicked", &[("player", player())]),
-            event("PlayerEntered", &[("player", player())]),
-            event("ItemDelivered", &[("player", player()), ("item", item())]),
-        ],
-        fns: vec![
-            f(
-                None,
-                false,
-                "say",
-                &[("p", player()), ("text", Str)],
-                Unit,
-                &[],
-                Command,
-            ),
-            f(None, false, "log", &[("text", Str)], Unit, &[], Command),
-            f(
-                None,
-                false,
-                "give",
-                &[("p", player()), ("item", item())],
-                Unit,
-                &[],
-                Command,
-            ),
-            f(
-                Some("Player"),
-                true,
-                "add_tag",
-                &[("tag", Str)],
-                Unit,
-                &[],
-                Command,
-            ),
-            f(
-                Some("Player"),
-                true,
-                "remove_tag",
-                &[("tag", Str)],
-                Unit,
-                &[],
-                Command,
-            ),
-            f(
-                Some("chest"),
-                false,
-                "put",
-                &[("item", item())],
-                Unit,
-                &[],
-                Command,
-            ),
-            f(None, false, "emit", &[("e", Event)], Unit, &[], Command),
-            f(
-                Some("Player"),
+        Bool,
+        &[],
+        Query,
+    ));
+    near.defaults = vec![("regions".to_string(), 0), ("blocks".to_string(), 0)];
+    fns.extend([
+        fact(f(None, false, "act", &[], Int, &[], Query)),
+        fact(f(None, false, "loop", &[], Int, &[], Query)),
+        fact(f(
+            None,
+            false,
+            "completed",
+            &[("def", Str)],
+            Bool,
+            &[],
+            Query,
+        )),
+        near,
+    ]);
+    // The entity handles' properties and tags.
+    for owner in ["Person", "Creature"] {
+        fns.extend([
+            property(owner, "alive", Bool, true),
+            property(owner, "occupation", Enum("Occupation".into()), true),
+            property(owner, "site", site(), true),
+            property(owner, "owner", person(), true),
+            property(owner, "kind", Str, false),
+            property(owner, "name", Str, false),
+            fact(f(
+                Some(owner),
                 true,
                 "has_tag",
                 &[("tag", Str)],
                 Bool,
                 &[],
                 Query,
-            ),
-            f(
-                None,
-                false,
-                "roll",
-                &[("salt", Int), ("sides", Int)],
-                Int,
-                &[],
-                Query,
-            ),
-            f(
-                Some("chest"),
-                false,
-                "count",
-                &[("kind", Str)],
-                Int,
-                &[],
-                Query,
-            ),
-            f(
-                Some("chest"),
-                false,
-                "take",
-                &[("kind", Str), ("n", Int)],
-                item(),
-                &["ChestEmpty", "NotEnough"],
-                Promise,
-            ),
-            world("get", &[key()], Infer, &["NotFound", "WrongType"]),
-            world("set", &[key(), ("v", Value)], Unit, &[]),
-            world("add", &[key(), ("n", Int)], Int, &["NotFound", "WrongType"]),
-            world(
-                "compare_and_set",
-                &[key(), ("expected", Value), ("new", Value)],
-                Unit,
-                &["NotFound", "Changed"],
-            ),
-            world("delete", &[key()], Unit, &["NotFound"]),
+            )),
+        ]);
+    }
+    fns.extend([
+        fact(f(
+            None,
+            false,
+            "site_kind",
+            &[("s", site())],
+            Enum("SiteKind".into()),
+            &[],
+            Query,
+        )),
+        fact(f(
+            Some("Place"),
+            true,
+            "open_ground",
+            &[("blocks", Int)],
+            Bool,
+            &[],
+            Query,
+        )),
+        // Other pure queries.
+        f(
+            Some("Player"),
+            true,
+            "skill",
+            &[("name", Str)],
+            Int,
+            &[],
+            Query,
+        ),
+        f(
+            Some("Player"),
+            true,
+            "inventory_count",
+            &[("kind", Str)],
+            Int,
+            &[],
+            Query,
+        ),
+        f(None, false, "ours", &[("e", Value)], Bool, &[], Query),
+        f(
+            None,
+            false,
+            "prefab",
+            &[("name", Str)],
+            prefab(),
+            &[],
+            Query,
+        ),
+        // Commands.
+        command("take", &[("p", player()), ("kind", Str), ("n", Int)]),
+        command("follow", &[("c", creature()), ("p", player())]),
+        f(
+            None,
+            false,
+            "place",
+            &[("prefab", prefab()), ("at", place())],
+            Unit,
+            &["NoRoom"],
+            Command,
+        ),
+        command("tag", &[("e", Value), ("t", Str)]),
+        command("attach_dialogue", &[("npc", person()), ("d", Value)]),
+        command("detach_dialogue", &[("npc", person()), ("d", Value)]),
+        command("bark", &[("npc", person()), ("d", Value)]),
+        // The host side of the quest builtins.
+        quest_command("joined", &[("p", player())]),
+        quest_command("left", &[("p", player())]),
+        quest_command("join_refused", &[("p", player())]),
+        quest_command("complete", &[("ps", List(Box::new(player())))]),
+        quest_command("fail", &[]),
+        quest_command("decline", &[]),
+        quest_command("play", &[("scene", Value), ("cast", List(Box::new(Value)))]),
+        fact(f(
+            Some(QUEST_NAMESPACE),
+            false,
+            "completed_by",
+            &[("p", player())],
+            Bool,
+            &[],
+            Query,
+        )),
+        f(
+            Some(QUEST_NAMESPACE),
+            false,
+            "dialogue_depth",
+            &[],
+            Int,
+            &[],
+            Query,
+        ),
+    ]);
+    HostApi {
+        version: 2,
+        structs: vec![
+            event("Player", &[("id", Int), ("name", Str)]),
+            event("Item", &[("kind", Str), ("count", Int)]),
+            event("Person", &[("id", Int)]),
+            event("Creature", &[("id", Int)]),
+            event("Site", &[("id", Int)]),
+            event("Place", &[("id", Int)]),
+            event("Prefab", &[("name", Str)]),
+            event("Timer", &[("id", Int)]),
         ],
+        enums: vec![
+            host_enum(
+                "Occupation",
+                &[
+                    "Farmer",
+                    "Miller",
+                    "Smith",
+                    "Guard",
+                    "Elder",
+                    "Miner",
+                    "Merchant",
+                    "Innkeeper",
+                    "None",
+                ],
+            ),
+            host_enum("SiteKind", &["Village", "Town", "Mine", "Camp"]),
+        ],
+        events: vec![
+            event("PlayerClicked", &[("player", player())]),
+            event("PlayerEntered", &[("player", player())]),
+            event("ItemDelivered", &[("player", player()), ("item", item())]),
+            event("PlayerNear", &[("player", player())]),
+            event(
+                "ItemGiven",
+                &[("player", player()), ("to", Value), ("item", item())],
+            ),
+            event(
+                "Killed",
+                &[
+                    ("victim", Value),
+                    ("by", HostTy::Option(Box::new(player()))),
+                ],
+            ),
+            event("PlayerDefeated", &[("player", player())]),
+            event("BlockUsed", &[("player", player()), ("tag", Str)]),
+            event("Setup", &[]),
+        ],
+        fns,
         errors: vec![
             err("ChestEmpty", &[]),
             err("NotEnough", &[("have", Int)]),
@@ -191,6 +436,7 @@ pub fn stub_api() -> HostApi {
             err("Timeout", &[]),
             err("Lost", &[]),
             err("NamespaceGone", &[]),
+            err("NoRoom", &[]),
         ],
     }
 }

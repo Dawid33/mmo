@@ -158,8 +158,9 @@ fn write_value(
                     && variants.len() == 2
                     && variants[0].0 == "None"
                     && variants[1].0 == "Some";
-                // The program's errors (codegen carry-over 9) print by their name alone.
-                if is_option || name == ERROR_ENUM_NAME {
+                // The program's errors (codegen carry-over 9) print by their name alone; a host enum's
+                // variant is already `Enum::Variant`.
+                if is_option || name == ERROR_ENUM_NAME || vname.contains("::") {
                     out.push_str(vname);
                 } else {
                     out.push_str(name);

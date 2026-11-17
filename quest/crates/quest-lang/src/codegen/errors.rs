@@ -30,7 +30,7 @@ use super::Val;
 use super::data::NONE_IMMEDIATE;
 use super::expr::CallArg;
 use crate::ast::Span;
-use crate::hir::{Arg, DefKind, Expr, ExprKind, LocalId, Stmt, StmtKind};
+use crate::hir::{Arg, DefKind, Expr, ExprKind, HostItem, LocalId, Stmt, StmtKind};
 use crate::infer::Method;
 use crate::ty::{Ty, TyId};
 use quest_vm::Op;
@@ -108,11 +108,13 @@ impl Emit<'_, '_, '_> {
         let mut cargs: Vec<CallArg<'_>> = Vec::with_capacity(args.len() + 1);
         let d = match &callee.kind {
             ExprKind::Def(d) if matches!(self.def_kind(*d), Some(DefKind::Fn(_))) => *d,
+            ExprKind::Host(HostItem::Fn(f)) => return self.host_outcome(x, *f, None, args),
             ExprKind::Field(recv, _) => match self.g.typed.methods.get(&x.id) {
                 Some(Method::Script(m)) => {
                     cargs.push(self.receiver_arg(*m, recv));
                     *m
                 }
+                Some(Method::Host(f)) => return self.host_outcome(x, *f, Some(recv), args),
                 _ => {
                     self.not_yet("this fallible call", x.span);
                     return None;

@@ -38,6 +38,12 @@ use quest_vm::types::TypeId;
 /// A host site's identity: host fn, kind (`HostFnKind` as a number), argument types, result type.
 pub(super) type SiteKey = (u16, u8, Vec<TypeId>, TypeId);
 
+/// A host call's operand: an argument, or a left-out parameter's default.
+enum Operand<'x> {
+    Expr(&'x Expr),
+    Int(i64),
+}
+
 /// The name a discarding `let` binds.
 const DISCARD: &str = "_";
 
@@ -114,11 +120,31 @@ impl Emit<'_, '_, '_> {
         let (Some(hf), Ok(host_fn)) = (host.fns.get(f as usize), u16::try_from(f)) else {
             return self.not_yet("this host call", e.span);
         };
-        let mut operands: Vec<&Expr> = recv.into_iter().collect();
-        operands.extend(args.iter().map(|a| &a.value));
+        let mut operands: Vec<Operand<'_>> = recv.into_iter().map(Operand::Expr).collect();
+        match self.g.typed.host_args.get(&e.id) {
+            None => operands.extend(args.iter().map(|a| Operand::Expr(&a.value))),
+            // Named arguments go to their parameters, a left-out one takes its default.
+            Some(order) => {
+                for ((name, _), a) in hf.params.iter().zip(order) {
+                    operands.push(match a.and_then(|a| args.get(a as usize)) {
+                        Some(a) => Operand::Expr(&a.value),
+                        None => Operand::Int(
+                            hf.defaults
+                                .iter()
+                                .find(|(d, _)| d == name)
+                                .map_or(0, |(_, v)| *v),
+                        ),
+                    });
+                }
+            }
+        }
         let mut params = Vec::with_capacity(operands.len());
         for x in &operands {
-            let Some(t) = self.type_id(self.target_ty(x), x.span) else {
+            let t = match x {
+                Operand::Expr(x) => self.type_id(self.target_ty(x), x.span),
+                Operand::Int(_) => self.type_id(TyId::INT, e.span),
+            };
+            let Some(t) = t else {
                 return;
             };
             params.push(t);
@@ -126,12 +152,13 @@ impl Emit<'_, '_, '_> {
         let ty = self.ty_of(e);
         let result = match (hf.kind, self.g.typed.types.get(ty)) {
             (HostFnKind::Promise, Ty::Promise(v)) => v,
-            // A host query or command that can fail: the stub API has none, and the VM's `CallHost` has
-            // no error result.
-            (HostFnKind::Promise, _) | (_, Ty::Fallible(_, _)) => {
+            // A fallible command too: it is buffered until its segment commits, so the call itself
+            // always succeeds ([`Emit::host_outcome`]).
+            (HostFnKind::Command, _) => TyId::UNIT,
+            // A host query that can fail: the VM's `CallHost` has no error result yet.
+            (HostFnKind::Promise, _) | (HostFnKind::Query, Ty::Fallible(_, _)) => {
                 return self.not_yet("this host call", e.span);
             }
-            (HostFnKind::Command, _) => TyId::UNIT,
             (HostFnKind::Query, _) => ty,
         };
         let Some(ret) = self.type_id(result, e.span) else {
@@ -141,7 +168,10 @@ impl Emit<'_, '_, '_> {
 
         let kinds: Vec<bool> = operands
             .iter()
-            .map(|x| self.heap_ty(self.target_ty(x)))
+            .map(|x| match x {
+                Operand::Expr(x) => self.heap_ty(self.target_ty(x)),
+                Operand::Int(_) => false,
+            })
             .collect();
         let run = self.slots.run(&kinds);
         for (k, heap) in kinds.iter().enumerate() {
@@ -151,7 +181,10 @@ impl Emit<'_, '_, '_> {
         }
         for (k, x) in operands.iter().enumerate() {
             let w = self.word(run + k as u32);
-            self.eval_target_into(x, w);
+            match x {
+                Operand::Expr(x) => self.eval_target_into(x, w),
+                Operand::Int(n) => self.load_int(w, *n),
+            }
         }
         // Without arguments the run is empty: any word of the frame names it.
         let base = if operands.is_empty() {
@@ -193,6 +226,32 @@ impl Emit<'_, '_, '_> {
             }
             self.free(i);
         }
+    }
+
+    /// A call of the fallible host command `f` (`x`): the command is buffered like any other, and the
+    /// call succeeds — the VM has no answer for a command until its segment commits, so the error is
+    /// always none here. `None` when it was reported.
+    pub(super) fn host_outcome(
+        &mut self,
+        x: &Expr,
+        f: u32,
+        recv: Option<&Expr>,
+        args: &[Arg],
+    ) -> Option<Outcome> {
+        if self.g.host.fns.get(f as usize).map(|hf| hf.kind) != Some(HostFnKind::Command) {
+            self.not_yet("this fallible host call", x.span);
+            return None;
+        }
+        let run = self.slots.run(&[false, true]);
+        let (value, err) = (self.word(run), self.word(run + 1));
+        self.host_call(x, f, recv, args, Some(value));
+        self.fb.emit(Op::LoadSmall, err, 0u16, 0u16);
+        Some(Outcome {
+            value,
+            heap: false,
+            err,
+            temps: Some(run),
+        })
     }
 
     /// `await x` (`e`): the task parks until the promise is resolved, or every promise of `all([…])`;

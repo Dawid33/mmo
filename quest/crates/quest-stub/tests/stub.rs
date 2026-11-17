@@ -67,9 +67,10 @@ fn one(h: &mut StubHost, id: u64, f: u16, args: &[W]) -> Result<W, W> {
 #[test]
 fn stub_api_is_pinned() {
     let api = stub_api();
-    assert_eq!(api.version, 1);
+    assert_eq!(api.version, 2);
     let mut names: Vec<String> = Vec::new();
     names.extend(api.structs.iter().map(|x| format!("struct {}", x.name)));
+    names.extend(api.enums.iter().map(|x| format!("enum {}", x.name)));
     names.extend(api.events.iter().map(|x| format!("event {}", x.name)));
     names.extend(api.errors.iter().map(|x| format!("error {}", x.name)));
     for f in &api.fns {
@@ -79,41 +80,192 @@ fn stub_api_is_pinned() {
             .or(f.receiver.clone())
             .unwrap_or_default();
         let dot = if owner.is_empty() { "" } else { "." };
-        names.push(format!("fn {owner}{dot}{}", f.name));
+        let mut marks = String::new();
+        if f.property {
+            marks.push_str(" property");
+        }
+        if f.fact {
+            marks.push_str(" fact");
+        }
+        names.push(format!("fn {owner}{dot}{}{marks}", f.name));
     }
     names.sort();
     let want = [
+        "enum Occupation",
+        "enum SiteKind",
         "error Changed",
         "error ChestEmpty",
         "error Lost",
         "error NamespaceGone",
+        "error NoRoom",
         "error NotEnough",
         "error NotFound",
         "error Timeout",
         "error WrongType",
+        "event BlockUsed",
         "event ItemDelivered",
+        "event ItemGiven",
+        "event Killed",
         "event PlayerClicked",
+        "event PlayerDefeated",
         "event PlayerEntered",
+        "event PlayerNear",
+        "event Setup",
+        "fn Creature.alive property fact",
+        "fn Creature.has_tag fact",
+        "fn Creature.kind property",
+        "fn Creature.name property",
+        "fn Creature.occupation property fact",
+        "fn Creature.owner property fact",
+        "fn Creature.site property fact",
+        "fn Person.alive property fact",
+        "fn Person.has_tag fact",
+        "fn Person.kind property",
+        "fn Person.name property",
+        "fn Person.occupation property fact",
+        "fn Person.owner property fact",
+        "fn Person.site property fact",
+        "fn Place.open_ground fact",
         "fn Player.add_tag",
         "fn Player.has_tag",
+        "fn Player.inventory_count",
         "fn Player.remove_tag",
+        "fn Player.skill",
+        "fn act fact",
+        "fn attach_dialogue",
+        "fn bark",
         "fn chest.count",
         "fn chest.put",
         "fn chest.take",
+        "fn completed fact",
+        "fn detach_dialogue",
         "fn emit",
+        "fn follow",
         "fn give",
         "fn log",
+        "fn loop fact",
+        "fn near fact",
+        "fn ours",
+        "fn place",
+        "fn prefab",
+        "fn quest.complete",
+        "fn quest.completed_by fact",
+        "fn quest.decline",
+        "fn quest.dialogue_depth",
+        "fn quest.fail",
+        "fn quest.join_refused",
+        "fn quest.joined",
+        "fn quest.left",
+        "fn quest.play",
         "fn roll",
         "fn say",
+        "fn site_kind fact",
+        "fn tag",
+        "fn take",
         "fn world.add",
         "fn world.compare_and_set",
         "fn world.delete",
         "fn world.get",
         "fn world.set",
+        "struct Creature",
         "struct Item",
+        "struct Person",
+        "struct Place",
         "struct Player",
+        "struct Prefab",
+        "struct Site",
+        "struct Timer",
     ];
     assert_eq!(names, want);
+}
+
+#[test]
+fn stub_api_v2_is_well_formed() {
+    use quest_vm::host::HostTy;
+    use std::collections::BTreeSet;
+    let api = stub_api();
+    // No duplicate names: types share one space; fns are unique per owner.
+    let mut types = BTreeSet::new();
+    for name in api
+        .structs
+        .iter()
+        .map(|s| &s.name)
+        .chain(api.enums.iter().map(|e| &e.name))
+        .chain(api.events.iter().map(|e| &e.name))
+    {
+        assert!(types.insert(name.clone()), "type {name} twice");
+    }
+    let mut errors = BTreeSet::new();
+    for e in &api.errors {
+        assert!(errors.insert(e.name.clone()), "error {} twice", e.name);
+    }
+    let mut fns = BTreeSet::new();
+    for f in &api.fns {
+        let key = (f.namespace.clone(), f.receiver.clone(), f.name.clone());
+        assert!(fns.insert(key), "fn {} twice", f.name);
+    }
+    for e in &api.enums {
+        let distinct: BTreeSet<&String> = e.variants.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            e.variants.len(),
+            "enum {} repeats a variant",
+            e.name
+        );
+    }
+    // Every named type exists.
+    fn named(t: &HostTy, out: &mut Vec<(bool, String)>) {
+        match t {
+            HostTy::Struct(n) => out.push((false, n.clone())),
+            HostTy::Enum(n) => out.push((true, n.clone())),
+            HostTy::List(i) | HostTy::Option(i) => named(i, out),
+            _ => {}
+        }
+    }
+    let mut used = Vec::new();
+    for s in api.structs.iter().chain(&api.events) {
+        s.fields.iter().for_each(|(_, t)| named(t, &mut used));
+    }
+    for e in &api.errors {
+        e.fields.iter().for_each(|(_, t)| named(t, &mut used));
+    }
+    for f in &api.fns {
+        f.params.iter().for_each(|(_, t)| named(t, &mut used));
+        named(&f.ret, &mut used);
+        for r in &f.raises {
+            assert!(errors.contains(r), "{} raises an unknown {r}", f.name);
+        }
+        if let Some(r) = &f.receiver {
+            assert!(
+                api.structs.iter().any(|s| &s.name == r),
+                "{} on an unknown {r}",
+                f.name
+            );
+        }
+        // A property is a receiver query without parameters.
+        if f.property {
+            assert!(f.receiver.is_some() && f.params.is_empty(), "{}", f.name);
+            assert_eq!(f.kind, HostFnKind::Query, "{}", f.name);
+        }
+        if f.fact {
+            assert_eq!(f.kind, HostFnKind::Query, "{}", f.name);
+        }
+        for (d, _) in &f.defaults {
+            assert!(
+                f.params.iter().any(|(n, t)| n == d && *t == HostTy::Int),
+                "{}: default {d} is no Int parameter",
+                f.name
+            );
+        }
+    }
+    for (is_enum, n) in used {
+        let found = if is_enum {
+            api.enums.iter().any(|e| e.name == n)
+        } else {
+            api.structs.iter().chain(&api.events).any(|s| s.name == n)
+        };
+        assert!(found, "{n} is named but not declared");
+    }
 }
 
 #[test]

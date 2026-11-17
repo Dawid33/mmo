@@ -42,6 +42,16 @@ impl Infer<'_> {
             StmtKind::Assign(place, value) => {
                 let wanted = self.expr(b, place);
                 let found = self.expr(b, value);
+                if matches!(self.methods.get(&place.id), Some(Method::Host(_))) {
+                    b.diags.push(super::error(
+                        "not-assignable",
+                        "a host property is read-only: the host changes it, through a command"
+                            .to_string(),
+                        b.file,
+                        place.span,
+                    ));
+                    return false;
+                }
                 self.expect(b, wanted, found, value.span);
                 // The place's type: a reference only when it took one (else the mismatch is reported).
                 match &place.kind {

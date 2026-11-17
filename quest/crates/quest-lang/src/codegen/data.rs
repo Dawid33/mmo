@@ -13,8 +13,8 @@
 use super::{Emit, Val};
 use crate::ast::Span;
 use crate::hir::{Arg, DefId, Expr, ExprKind};
-use crate::infer::BuiltinMethod;
 use crate::infer::Shape;
+use crate::infer::{BuiltinMethod, Method};
 use crate::ty::{Ty, TyId};
 use quest_vm::asm::SlotRef;
 use quest_vm::{Builtin, Op};
@@ -213,6 +213,10 @@ impl Emit<'_, '_, '_> {
 
     /// `x.name`.
     pub(super) fn field(&mut self, e: &Expr, x: &Expr, name: &str, dst: SlotRef) {
+        // A host property: a call of its host method.
+        if let Some(Method::Host(f)) = self.g.typed.methods.get(&e.id) {
+            return self.host_call(e, *f, Some(x), &[], Some(dst));
+        }
         let Some(i) = self.field_index(self.target_kind(x), name) else {
             return self.not_yet("a field of this value", e.span);
         };
