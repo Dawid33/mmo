@@ -8,9 +8,16 @@
 //! `clock.now(mono)` wherever it passes `now_ms`.
 //!
 //! **Downtime is not caught up.** A store clock that jumped by more than [`CALENDAR_GAP_MS`]
-//! since the calendar last turned a day (a paused or restarted coordinator) re-anchors the
-//! calendar at the history's own `now` (`Coordinator::calendar_now`), and a stored deadline
-//! more than the gap in the past restarts its count ([`rebase_deadline`], [`rebase_since`]).
+//! since the calendar's last sign of life — a day turn, a view handed out (a paused or
+//! restarted coordinator) — re-anchors the calendar where it last stood, never earlier than a
+//! host was told (`Coordinator::calendar_now`), and a stored deadline more than the gap in the
+//! past restarts its count ([`rebase_deadline`], [`rebase_since`]).
+//!
+//! **The lease watch is not on this clock** (Elastic 2a final review, S1): its spans run on the
+//! process's monotonic clock (`LeaseWatch`). A forward step of the store's clock is taken here
+//! at once (never bounded: a sample is the store's word): the calendar re-anchors past the gap,
+//! and a deadline it overtakes fires early — a cut aborts, an open succession's deadline rolls
+//! the world back — a rollback, never a loss.
 
 /// Three day turns ([`crate::history::DAY_MS`]): a running coordinator turns a day well
 /// within it, so a longer silence of the calendar is downtime, not play. Measured from the last

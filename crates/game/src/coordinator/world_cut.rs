@@ -343,16 +343,20 @@ impl Coordinator {
     }
 
     /// The ids of a successful `hosts` read (`present`): an id absent from it was pruned and is
-    /// never issued again, so nothing is kept of it (B-M5) — not as left, succeeded, nor its
-    /// boot. An ATTACHED id keeps all three: a host registered after the read was issued attaches
-    /// before the next read shows it (its answers count per boot), and a zombie still attached
-    /// stays marked until its link drops.
+    /// never issued again, so nothing is kept of it (B-M5) — not as left, succeeded, its boot,
+    /// the boots its `Attach`es named (`boots_seen`), nor an attachment of an older coordinator
+    /// process (final review G2: a crash-looping pod across coordinator restarts never grows
+    /// the projection). An id ATTACHED to this process keeps all of it: a host registered after
+    /// the read was issued attaches before the next read shows it (its answers count per boot),
+    /// and a zombie still attached stays marked until its link drops.
     pub(super) fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>) {
         let attached: BTreeSet<HostId> = self.attached_hosts().collect();
         let keep = |h: &HostId| present.contains(h) || attached.contains(h);
         self.cuts.left.retain(|h, _| keep(h));
         self.cuts.succeeded.retain(|h, _| keep(h));
         self.cuts.boots.retain(|h, _| keep(h));
+        self.cuts.attached.retain(|h, _| keep(h));
+        self.boots_seen.retain(|h, _| keep(h));
     }
 
     /// Which of `left`, `succeeded` and `boots` hold host `host` ([`Self::host_mentions`]).
@@ -691,7 +695,7 @@ impl Coordinator {
 
     /// The hosts attached to THIS process boot, by id (an attachment of another process boot
     /// — a restart's projection — counts as detached).
-    fn attached_hosts(&self) -> impl Iterator<Item = HostId> + '_ {
+    pub(super) fn attached_hosts(&self) -> impl Iterator<Item = HostId> + '_ {
         self.cuts.attached.iter().filter(|(_, (_, p))| *p == self.process).map(|(h, _)| *h)
     }
 

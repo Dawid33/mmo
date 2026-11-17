@@ -28,8 +28,12 @@
 //!   ([`Coordinator::rolled_back`] → [`CoordMsg::Generation`]).
 //! - A restarted coordinator loads its runs with its projection (Elastic 2a), reads the open
 //!   successions again ([`Coordinator::successions_open`]: a run the store no longer lists is
-//!   dropped) and re-sends their orders as the recipients attach again; hosts answer again
-//!   from memory (`Attach.successions`).
+//!   dropped; one it lists that the projection lacks — the dead process never wrote its
+//!   declaration's answer — has its predecessor taken out of the view) and re-sends their
+//!   orders as the recipients attach again; hosts answer again from memory
+//!   (`Attach.successions`). A dead dirty row this core never declared (an end whose answer
+//!   was lost so) is taken out of the view at the `hosts` read that shows it
+//!   ([`Coordinator::observe_leases`]).
 //! - The orders go to the survivors AND the heir (the heir is a survivor whenever the
 //!   coordinator declared: it was live). A succession `worldctl retire-host` opened while no
 //!   host ran (before Elastic 2a; that command now refuses with no host running, so no new one
@@ -130,8 +134,15 @@ struct Watched {
 /// The coordinator's lapse watch over the `hosts` rows (fed every
 /// `WORLD_CUT_HOSTS_REFRESH_MS` by the runtime).
 ///
-/// A read is stamped twice on the coordinator's clock: when it was issued and when its
-/// answer was received. The unchanged span counts from the first read's RECEIVE to the
+/// **Its clock is the process's monotonic one** (Elastic 2a final review, S1), never the
+/// store's that the rest of the core runs on: the watch is an observation of this process (not
+/// in the projection — a restart counts every lease from zero), and a forward step of the
+/// store's clock (`StoreClock` takes any) between two reads would otherwise stretch a span
+/// over a whole lease and declare a healthy host dead. The store's own lapse check
+/// (`PG_NOW_MS - seen_ms` at the declaration) stays the second gate.
+///
+/// A read is stamped twice on that clock: when it was issued and when its answer was
+/// received. The unchanged span counts from the first read's RECEIVE to the
 /// latest read's ISSUE — a lower bound on how long the row really stood still. Stamping by
 /// processing time alone would let a coordinator stall (an answer waiting in a channel)
 /// stretch two ordinary reads of one beat over a whole lease.
@@ -191,10 +202,17 @@ impl LeaseWatch {
         self.rows.clear();
     }
 
+    /// [`Self::lapsed`] by every read observed (the core's question: it never compares its
+    /// store-clock `now` with the watch's monotonic stamps).
+    pub fn lapsed_by_reads(&self) -> Vec<(HostId, u64)> {
+        self.lapsed(u64::MAX)
+    }
+
     /// The `(ordinal, boot)` of every dirty live row that lapsed by the reads issued up to
-    /// `now_ms`: vouched (`seen_ms == 0`), or showing one `seen_ms` from a read received at
-    /// `first` to a later read issued at least [`HOST_LEASE_MS`] after `first`. Time without
-    /// a read counts for nothing (`now_ms` never extends the span). By ordinal.
+    /// `now_ms` (the watch's clock): vouched (`seen_ms == 0`), or showing one `seen_ms` from a
+    /// read received at `first` to a later read issued at least [`HOST_LEASE_MS`] after
+    /// `first`. Time without a read counts for nothing (`now_ms` never extends the span). By
+    /// ordinal.
     pub fn lapsed(&self, now_ms: u64) -> Vec<(HostId, u64)> {
         self.rows
             .values()
@@ -413,8 +431,9 @@ impl super::Coordinator {
     /// The store's open successions (a coordinator starting, `open_successions()`, or a
     /// re-read): each is run again — its order re-sent to every recipient as it attaches (they
     /// answer from memory), its deadline counted from `now_ms`. After a re-read a run it does
-    /// not list is dropped (the store abandoned it: every host told), and a new one's
-    /// predecessor is taken out of the view as a declaration's is.
+    /// not list is dropped (the store abandoned it: every host told). A run this core did not
+    /// hold — at a re-read, or at a start (its declaration's answer died with the process that
+    /// asked) — has its predecessor taken out of the view as a declaration's is.
     pub fn successions_open(&mut self, list: Vec<Succession>, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.successions.known = true;
@@ -455,9 +474,12 @@ impl super::Coordinator {
             );
             let predecessor = s.predecessor;
             self.open_run(s, now_ms);
-            if rereading {
-                self.host_succeeded(predecessor);
-            }
+            // A run new to this core — at a re-read, and at a start too: the store committed
+            // it and the process that declared it died before writing its answer (Elastic 2a
+            // final review, C1; the projection still has the predecessor running regions and
+            // holding players) — takes the predecessor out of the view as a declaration's
+            // answer does. Idempotent: only what is still the predecessor's.
+            self.host_succeeded(predecessor);
         }
         let early = std::mem::take(&mut self.successions.listed_early);
         for (host, boot, id, adopted) in early {
@@ -495,6 +517,9 @@ impl super::Coordinator {
     /// first (the declaration follows once that decision is recorded). The runtime executes
     /// the batch and answers [`Self::declared`] (or [`Self::declare_failed`]).
     pub fn declare_wanted(&mut self, now_ms: u64) -> Option<Declare> {
+        // The lapses are the lease watch's, on its own clock ([`LeaseWatch`]); `now_ms` only
+        // moves the core's.
+        self.clock_ms = self.clock_ms.max(now_ms);
         let (declaring, ending) = (self.declaring(), self.ending().is_some());
         let r = &self.successions;
         if !r.enabled || !r.known || declaring || r.rollback.is_some() || ending || !r.open.is_empty() {
@@ -503,7 +528,7 @@ impl super::Coordinator {
         if r.refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
             return None;
         }
-        let all_lapsed = self.lapsed_undeclared(now_ms);
+        let all_lapsed = self.lapsed_undeclared();
         // A landless lapse is ended, never succeeded (Elastic 2a: with no run open nothing
         // names it — [`Self::take_end_landless`]).
         let lapsed: Vec<(HostId, u64)> = all_lapsed.iter().copied().filter(|(h, _)| self.landed(*h)).collect();
@@ -645,7 +670,9 @@ impl super::Coordinator {
     ///
     /// A world hosts already attach at (`generation` not above the one seen: a rollback that
     /// committed while no coordinator ran, its hosts restarted and attached before this
-    /// answer) is not rolled back again here: the flags clear, its runs go, nobody is told.
+    /// answer) is not rolled back again here: the flags clear and its runs go (every host is
+    /// told each is abandoned, `SuccessionDone` unsettled — a host of the new generation holds
+    /// none and ignores it), but no `Generation` is sent and nobody is detached.
     pub fn rolled_back(&mut self, generation: u64) {
         let open = std::mem::take(&mut self.successions.open);
         for id in open.into_keys() {
@@ -829,7 +856,7 @@ impl super::Coordinator {
         // that won land after the declaration and dies before the settle rolls back).
         let ends = |d: &(HostId, u64)| !self.landed(d.0) && !self.is_recipient(d.0);
         let lapsed: Vec<(HostId, u64)> =
-            self.lapsed_undeclared(now_ms).into_iter().filter(|d| counts(d) && !ends(d)).collect();
+            self.lapsed_undeclared().into_iter().filter(|d| counts(d) && !ends(d)).collect();
         if !lapsed.is_empty() {
             log::error!("coordinator: hosts {lapsed:?} lost their lease while a succession is open: the world rolls back");
             self.want_rollback();
@@ -885,10 +912,11 @@ impl super::Coordinator {
         }
     }
 
-    /// The lapsed rows, `(ordinal, boot)`, but those already declared.
-    fn lapsed_undeclared(&self, now_ms: u64) -> Vec<(HostId, u64)> {
+    /// The lapsed rows by every read observed ([`LeaseWatch::lapsed_by_reads`]: the watch's
+    /// own clock), `(ordinal, boot)`, but those already declared.
+    fn lapsed_undeclared(&self) -> Vec<(HostId, u64)> {
         let declared = &self.successions.declared;
-        self.leases.lapsed(now_ms).into_iter().filter(|d| !declared.contains(d)).collect()
+        self.leases.lapsed_by_reads().into_iter().filter(|d| !declared.contains(d)).collect()
     }
 
     /// Run `s` from `now_ms`: its orders go to the recipients attached now.
@@ -1078,9 +1106,11 @@ impl super::Coordinator {
     }
 
     /// A successful read of the `hosts` rows, issued at `issued_ms` and received at
-    /// `received_ms` ([`LeaseWatch::observe`]). A dirty dead row this coordinator never
-    /// declared (an offline `worldctl retire-host`) asks, once, for the open successions to be
-    /// read again ([`Self::successions_reread`]).
+    /// `received_ms` — the process's MONOTONIC clock, never the store's ([`LeaseWatch`]).
+    /// A dirty dead row this coordinator never declared (an end or a declaration whose answer
+    /// a dead process never wrote, a total crash's registration) is taken out of the view at
+    /// once ([`Self::host_ended`]) and asks, once, for the open successions to be read again
+    /// ([`Self::successions_reread`]).
     pub fn observe_leases(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
         // Beats since the last read (a boot's `seen_ms` moved): what an offline run counts.
         let beating: Vec<(HostId, u64)> = rows
@@ -1111,6 +1141,13 @@ impl super::Coordinator {
             .collect();
         if !unknown.is_empty() {
             log::warn!("coordinator: hosts {unknown:?} are marked dead and this coordinator declared none of them");
+            // Dead in the store: whatever ended it (an end or a succession whose answer a dead
+            // process never wrote, a total crash's registration), it runs nothing any more —
+            // taken out of the view now (Elastic 2a final review, C1). A run the re-read finds
+            // for it takes it out again: idempotent.
+            for &(host, boot) in &unknown {
+                self.host_ended(host, boot);
+            }
             self.successions.reread_for.extend(unknown);
             self.successions_reread();
         }
@@ -1159,6 +1196,8 @@ impl super::Coordinator {
     /// rollback is under way, and not again on the read the store refused it at. The runtime
     /// answers [`Self::landless_ended`] (or [`Self::end_failed`]).
     pub fn take_end_landless(&mut self, now_ms: u64) -> Option<EndLandless> {
+        // As [`Self::declare_wanted`]: the lapses are the lease watch's own.
+        self.clock_ms = self.clock_ms.max(now_ms);
         let (declaring, ending) = (self.declaring(), self.ending().is_some());
         let r = &self.successions;
         if !r.enabled || !r.known || declaring || r.rollback.is_some() || ending {
@@ -1168,7 +1207,7 @@ impl super::Coordinator {
             return None;
         }
         let (host, boot) = self
-            .lapsed_undeclared(now_ms)
+            .lapsed_undeclared()
             .into_iter()
             .find(|(h, _)| !self.landed(*h) && !self.is_recipient(*h))?;
         if self.cuts_running_participants().is_some_and(|run| run.contains(&host)) {

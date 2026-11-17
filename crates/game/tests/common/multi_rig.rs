@@ -1463,6 +1463,18 @@ impl MultiRig {
     /// [`Self::run_succession`] of several killed hosts at once: every one of them vouched
     /// dead in the same lease reads, declared in one batch.
     pub fn run_successions(&mut self, deads: &[HostId]) -> Vec<game::Succession> {
+        self.run_successions_answered(deads, true)
+    }
+
+    /// [`Self::run_succession`] whose store commit is never answered: the coordinator process
+    /// dies between the store's commit and the transition holding its answer (Elastic 2a final
+    /// review, C1) — call [`Self::restart_coordinator_from_store`] next. The successions the
+    /// rig store opened.
+    pub fn declare_unanswered(&mut self, dead: HostId) -> Vec<game::Succession> {
+        self.run_successions_answered(&[dead], false)
+    }
+
+    fn run_successions_answered(&mut self, deads: &[HostId], answer: bool) -> Vec<game::Succession> {
         let n = self.hosts.len() as u32;
         self.core().set_crash_policy(game::CrashPolicy::Succession);
         let declared_dead: BTreeSet<(HostId, u64)> =
@@ -1492,6 +1504,10 @@ impl MultiRig {
         }
         let d = d.expect("declared");
         let outcome = self.declare_in_store(&d);
+        if !answer {
+            let game::Declared::Done(list) = outcome else { panic!("the rig store refused the declaration: {outcome:?}") };
+            return list;
+        }
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         let live: BTreeSet<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && !d.dead.iter().any(|(p, _)| p == h)).collect();
         let mut core = self.core();
@@ -1605,6 +1621,18 @@ impl MultiRig {
     /// the core's upkeep run; then the end the core hands out executed in the rig store and
     /// answered. The end handed out, with the store's answer.
     pub fn drive_leases(&mut self) -> Option<(game::coordinator::EndLandless, game::LandlessEnd)> {
+        self.drive_leases_answered(true)
+    }
+
+    /// [`Self::drive_leases`] whose end, if the core hands one out, is executed in the rig store
+    /// and never answered: the coordinator process dies between the store's commit and the
+    /// transition holding its answer (Elastic 2a final review, C1) — call
+    /// [`Self::restart_coordinator_from_store`] next.
+    pub fn end_unanswered(&mut self) -> Option<(game::coordinator::EndLandless, game::LandlessEnd)> {
+        self.drive_leases_answered(false)
+    }
+
+    fn drive_leases_answered(&mut self, answer: bool) -> Option<(game::coordinator::EndLandless, game::LandlessEnd)> {
         let n = self.hosts.len() as u32;
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
@@ -1618,15 +1646,27 @@ impl MultiRig {
             .collect();
         let expected: BTreeSet<HostId> =
             rows.iter().filter(|r| !r.clean && r.state == game::HOST_LIVE).map(|r| r.ordinal).collect();
+        let open: Vec<game::Succession> = self
+            .successions
+            .iter()
+            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
+            .map(|(s, _)| s.clone())
+            .collect();
         let mut core = self.core();
         core.observe_leases(&rows, now, now);
         core.set_expected_hosts(expected);
+        // The runtime answers a re-read of the open successions the read asked for.
+        if core.take_successions_reread() {
+            core.successions_open(open, now);
+        }
         core.maintain(now);
         let end = core.take_end_landless(now);
         drop(core);
         let end = end?;
         let outcome = self.end_landless_in_store(end);
-        self.core().landless_ended(end, outcome, now);
+        if answer {
+            self.core().landless_ended(end, outcome, now);
+        }
         Some((end, outcome))
     }
 

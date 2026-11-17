@@ -3,14 +3,20 @@
 //! runtime writes in ONE compare-and-set of the `coordinator` row — `core` (this module's
 //! format) and `history` ([`crate::history::persist`], written only when it changed). A
 //! process restarted from them, or a cache reloaded from them, behaves as the one that wrote
-//! them ([`super::Coordinator::load`]).
+//! them ([`super::Coordinator::load`]). The projection's fields are listed in `mod.rs`'s
+//! `projection!`; among them, beside the history's companions (claims, the memo, the calendar
+//! anchor) and the hosts' view (`region_host`, `online_on`, hops), `boots_seen` (the boots each
+//! host's `Attach`es named: a new one forgets the answers of the others) and
+//! `attached_generation` (the generation of the latest first-of-its-generation `Attach`: the
+//! next higher one finds every older host gone).
 //!
 //! Outside it, and so lost by a restart (each loss only delays a decision): the lease watch
-//! ([`super::LeaseWatch`], re-counted from zero), the counts of its reads that refusals are
-//! stamped with, the store-retry and report pacing, the memo's warning rate limit, the
-//! outgoing messages (a transition carries them; see [`Transition`]) and the login relay. The
-//! runtime's configuration (the cut period and epoch, the crash policy, the lease dials, the
-//! hosts a cut expects, the world tick) is set again by every runtime that loads it.
+//! ([`super::LeaseWatch`], on the process's monotonic clock, re-counted from zero), the counts
+//! of its reads that refusals are stamped with, the store-retry and report pacing, the memo's
+//! warning rate limit, the outgoing messages (a transition carries them; see [`Transition`])
+//! and the login relay. The runtime's configuration (the cut period and epoch, the crash
+//! policy, the lease dials, the hosts a cut expects, the world tick) is set again by every
+//! runtime that loads it.
 
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;

@@ -10512,6 +10512,77 @@ fn a_flapping_landless_host_never_rolls_the_world_back() {
     sweep("a_flapping_landless_host_never_rolls_the_world_back", 2, 1, SEEDS, flapping_landless_host);
 }
 
+/// Elastic 2a final review (C1, conservation): the coordinator process dies between a store
+/// decision's commit and the transition holding its answer, and a new process starts from the
+/// last transition written — once after the store ENDED a landless host, once after it declared
+/// a landed host's succession. Each dead host is taken out of the restarted core's view (the
+/// ended one at the first `hosts` read showing its dead row, the succeeded one when the start
+/// reads the open successions): no region of the dead host stays its, the run settles on the
+/// restarted coordinator, and the world holds each slime once.
+fn coordinator_dies_between_a_store_decision_and_its_transition(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let dead = rig.owner(rd);
+    rig.core().set_crash_policy(game::CrashPolicy::Succession);
+    let (a, b) = (slime_in(rig, rs, 0), slime_in(rig, rd, 1));
+    until_committed(rig, 1);
+    // A landless process starts, runs, dies; its end commits and the coordinator dies unanswered.
+    let x = rig.start("x");
+    let running: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    rig.core().set_expected_hosts(running);
+    for _ in 0..FLAP_ROUNDS {
+        rig.cut_round();
+    }
+    rig.kill(x);
+    let mut ended = None;
+    for _ in 0..FLAP_ROUNDS {
+        if let Some(done) = rig.end_unanswered() {
+            ended = Some(done);
+            break;
+        }
+        rig.cut_round();
+    }
+    let (end, outcome) = ended.unwrap_or_else(|| panic!("host {x} was never ended (seed {})", rig.seed));
+    assert_eq!((end.host, outcome), (x, game::LandlessEnd::Ended));
+    rig.restart_coordinator_from_store();
+    rig.cut_round();
+    assert_eq!(rig.drive_leases(), None, "nothing more to end");
+    assert!(
+        rig.core().host_mentions(x).contains(&"succeeded"),
+        "the ended host is out of the restarted coordinator's view: {:?} (seed {})",
+        rig.core().host_mentions(x),
+        rig.seed
+    );
+    for _ in 0..FLAP_ROUNDS {
+        rig.cut_round();
+        rig.assert_conserved_world();
+    }
+    // A landed host dies; its succession commits and the coordinator dies unanswered.
+    rig.kill(dead);
+    let s = rig.declare_unanswered(dead).remove(0);
+    rig.restart_coordinator_from_store();
+    assert_ne!(rig.core().region_host(rd), Some(dead), "the dead host's region is no longer its (seed {})", rig.seed);
+    rig.cut_round();
+    rig.assert_conserved_world();
+    assert_settled_whole(rig, &s, &[a]);
+    assert_back_on_the_heir(rig, rd, b);
+    rig.assert_conserved_world();
+    assert!(!rig.core().rollback_wanted() && rig.abandoned.is_empty(), "never rolled back");
+    assert_eq!(rig.successions.len(), 1, "one succession: the landed host's");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_coordinator_dying_between_a_store_decision_and_its_transition_conserves_the_world() {
+    sweep(
+        "a_coordinator_dying_between_a_store_decision_and_its_transition_conserves_the_world",
+        2,
+        1,
+        HEIR_SWEEP_SEEDS,
+        coordinator_dies_between_a_store_decision_and_its_transition,
+    );
+}
+
 /// A landless host runs beside two landed ones when one of them dies: it is no survivor (the
 /// store's rule). It wins land after the declaration; it is still no recipient — no order, no
 /// report — and the settle cut, which it takes part in, commits: the world whole.

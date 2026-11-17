@@ -401,13 +401,13 @@ fn state_round_trips() {
 fn advancing_with_nothing_due_writes_nothing() {
     let (hist, _, _) = world();
     let mut c = Coordinator::new(hist, 0);
-    assert!(c.take_transition().is_some_and(|t| t.history.is_some()), "a new core writes itself first, history and all");
-    assert!(c.take_transition().is_none(), "nothing changed, nothing waits");
+    assert!(written(&mut c).is_some_and(|t| t.history.is_some()), "a new core writes itself first, history and all");
+    assert!(written(&mut c).is_none(), "nothing changed, nothing waits");
     c.maintain(1_000);
-    assert!(c.take_transition().is_none(), "the clock moved, nothing durable changed");
+    assert!(written(&mut c).is_none(), "the clock moved, nothing durable changed");
     c.maintain(game::history::calendar::DAY_MS);
-    assert!(c.take_transition().is_some(), "a day turned");
-    assert!(c.take_transition().is_none());
+    assert!(written(&mut c).is_some(), "a day turned");
+    assert!(written(&mut c).is_none());
 }
 
 #[test]
@@ -768,7 +768,7 @@ fn host_report_reconciles_claims() {
     commit(&mut c);
     c.handle(h(0), online(A, None, false), 0);
     assert_eq!(c.claim_of(A), None);
-    assert!(c.take_transition().is_some_and(|t| t.out.is_empty()), "a dropped claim is a transition of its own");
+    assert!(written(&mut c).is_some_and(|t| t.out.is_empty()), "a dropped claim is a transition of its own");
     // The host holds the fortress the coordinator lost: taken back.
     c.handle(h(0), online(A, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
@@ -3773,7 +3773,7 @@ fn the_calendar_continues_across_a_quick_restart() {
     while c.history().now().0 < start + 2 * TICKS_PER_DAY + 2 {
         now += 250;
         c.maintain(now);
-        if let Some(t) = c.take_transition() {
+        if let Some(t) = written(&mut c) {
             if let Some(h) = &t.history {
                 history = h.clone();
             }
@@ -4053,7 +4053,7 @@ fn a_core_reloaded_after_every_input_is_identical() {
     let process = ProcessBoot(0x5EED);
     let mut a = Coordinator::new_for(hist, start, process);
     configure(&mut a, false);
-    let t0 = a.take_transition().expect("a new core writes itself");
+    let t0 = written(&mut a).expect("a new core writes itself");
     let mut history = t0.history.clone().expect("with its history");
     let load = |t: &Transition, history: &[u8], now: u64| {
         let mut b = Coordinator::load(&t.core, history, grid(), process, now).expect("the projection loads");
@@ -4304,4 +4304,205 @@ fn nothing_leaves_while_a_write_is_in_flight() {
     out.extend(c.take_out().into_iter().map(|(_, m)| m));
     let granted = replies(&out).into_iter().filter(|(id, r)| *id == rid(1) && matches!(r, WorldReply::Embarked { .. })).count();
     assert_eq!(granted, 2, "the grant and its replay, once written: {out:?}");
+}
+
+// ---- Elastic 2a final review fix wave ----------------------------------------------------
+
+/// Elastic 2a final review (C1, conservation): the coordinator dies after the store committed a
+/// decision about host 1 — its succession, or the end of its (landless) row — and before the
+/// transition holding the core's answer was written. The next process loads the projection,
+/// which still has host 1 running its region (the people embodied there) and player A online
+/// on it: once the store's open successions are read (a new run) or a `hosts` read shows the
+/// dead row nobody here declared (an end), host 1 is taken out of the view as a predecessor is
+/// — its region parks (the people return to the abstract history), A goes offline.
+#[test]
+fn a_store_decision_lost_with_its_transition_still_takes_the_dead_host_out() {
+    let (_, _, people) = world();
+    let r0 = rc(0, 0);
+    for ended in [false, true] {
+        let mut c = succeeding(2);
+        let here: Vec<(PersonId, [f32; 3])> = people[2..].iter().map(|p| (*p, [0.0; 3])).collect();
+        c.handle(h(1), attach(h(1), 1, vec![RunningRegion { rc: r0, incarnation: 1, people: here }], vec![report(A, None, false)]), 0);
+        commit_routed(&mut c);
+        assert_eq!((c.region_host(r0), c.online_on(A)), (Some(h(1)), Some(h(1))));
+        for p in &people[2..] {
+            assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r0));
+        }
+        // The projection as the store holds it: the last transition written.
+        let (core, history) = c.encode_projection();
+        let landless: &[HostId] = if ended { &[h(1)] } else { &[] };
+        read_land(&mut c, 2, &[h(1)], &[], landless, 10);
+        let run = if ended {
+            let end = c.take_end_landless(10).expect("a landless lapse is ended");
+            assert_eq!(end.host, h(1));
+            None
+        } else {
+            let d = c.declare_wanted(10).expect("host 1 is declared");
+            Some(store_declares(&d, 2, 1, game::CutId(0)).remove(0))
+        };
+        // The store committed it; the process dies before its answer is applied and written.
+        let mut c = Coordinator::load(&core, &history, grid(), ProcessBoot(2), 20).expect("the projection loads");
+        c.set_cut_epoch(4);
+        c.set_world_cuts(CUT_EVERY_MS);
+        c.set_crash_policy(game::CrashPolicy::Succession);
+        c.set_expected_hosts([h(0)].into_iter().collect());
+        c.successions_unknown();
+        c.successions_open(run.into_iter().collect(), 20);
+        c.handle(h(0), attach(h(0), 2, Vec::new(), Vec::new()), 20);
+        read_land(&mut c, 2, &[], &[h(1)], landless, 30);
+        if c.take_successions_reread() {
+            c.successions_open(Vec::new(), 31);
+        }
+        c.maintain(40);
+        commit_routed(&mut c);
+        assert_eq!(c.region_host(r0), None, "ended {ended}: host 1's region is no longer its");
+        assert!(!c.history().live_regions().contains(&r0), "ended {ended}: {r0:?} parked");
+        for p in &people[2..] {
+            assert_ne!(
+                c.history().person(*p).unwrap().location,
+                Location::InRegion(r0),
+                "ended {ended}: {p:?}'s body is back in the history"
+            );
+        }
+        assert_eq!(c.online_on(A), None, "ended {ended}: A went offline with its host");
+        assert!(c.host_mentions(h(1)).contains(&"succeeded"), "ended {ended}: host 1's boot is a dead one");
+    }
+}
+
+/// Elastic 2a final review (I1): the calendar never moves backwards across a load. A running
+/// coordinator writes no transition for a calendar advance alone (decision 7), so the stored
+/// history's `now` lags the calendar the hosts were told (its day turns, its views). Loaded
+/// after a long downtime, the calendar re-anchors where it last stood — never at the stale
+/// history's `now` — and a view handed out between two day turns is durable before it leaves.
+#[test]
+fn the_calendar_never_runs_backwards_across_a_load() {
+    const T0: u64 = 1_763_000_000_000;
+    let (hist, _, _) = world();
+    let mut c = Coordinator::new(hist, T0);
+    let mut history = c.take_transition().expect("a new core writes").history.expect("its history");
+    c.transition_written();
+    let mut now = T0;
+    let mut told = c.history().now();
+    let mut last = None;
+    // A minute of play, one second a step, every transition written: no history write.
+    for _ in 0..60 {
+        now += 1_000;
+        c.maintain(now);
+        if let Some(t) = c.take_transition() {
+            if let Some(h) = &t.history {
+                history = h.clone();
+            }
+            c.transition_written();
+            for (_, m) in &t.out {
+                if let CoordMsg::Calendar(at) = m {
+                    told = told.max(*at);
+                }
+            }
+            last = Some(t);
+        }
+        c.take_out();
+    }
+    // Loaded from the last day turn's transition an hour later: no earlier than that day turn.
+    let turned = last.expect("days turned");
+    assert!(turned.history.is_none(), "a calendar advance alone writes no history");
+    let mut c1 = reload(&turned, &history, ProcessBoot(1), now + 3_600_000);
+    assert!(c1.history().now() < told, "the stored history lags the day turns told");
+    assert!(c1.calendar_now(now + 3_600_000) >= told, "{:?} < {told:?}: back to the stored history", c1.calendar_now(now + 3_600_000));
+    c1.maintain(now + 3_600_000);
+    assert!(c1.history().now() >= told);
+    // A host attaches between two day turns: its view carries the calendar of now.
+    now += 4_000;
+    c.handle(h(0), attach(h(0), 1, Vec::new(), Vec::new()), now);
+    let t = c.take_transition().expect("an attach changes the projection");
+    c.transition_written();
+    if let Some(h) = &t.history {
+        history = h.clone();
+    }
+    for (_, m) in &t.out {
+        if let CoordMsg::View { calendar, .. } = m {
+            told = told.max(*calendar);
+        }
+    }
+    let stored_now = game::coordinator::Coordinator::load(&t.core, &history, grid(), ProcessBoot(1), now)
+        .expect("loads")
+        .history()
+        .now();
+    assert!(stored_now < told, "the stored history lags what the hosts were told ({stored_now:?} < {told:?})");
+    // Loaded an hour later: re-anchored where the calendar last stood, not caught up.
+    let later = now + 3_600_000;
+    let mut c2 = reload(&t, &history, ProcessBoot(2), later);
+    assert!(c2.calendar_now(later) >= told, "{:?} < {told:?}: the calendar ran backwards", c2.calendar_now(later));
+    c2.maintain(later);
+    let at = c2.history().now();
+    assert!(at >= told, "{at:?} < {told:?}: the calendar ran backwards");
+    assert!(at.0 <= told.0 + TICKS_PER_DAY, "{at:?}: downtime is not caught up (told {told:?})");
+    c2.handle(h(0), attach(h(0), 2, Vec::new(), Vec::new()), later + 10);
+    let out = commit(&mut c2);
+    for m in &out {
+        if let CoordMsg::View { calendar, .. } | CoordMsg::Calendar(calendar) = m {
+            assert!(*calendar >= told, "{calendar:?} < {told:?}: a host was told an earlier calendar");
+        }
+    }
+}
+
+/// Elastic 2a final review (I2): the first host attaching at a higher world generation finds
+/// every host of an older one gone — those still attached (their links not dropped yet) are
+/// detached: none is the gate host, an heir, or a participant a cut waits for.
+#[test]
+fn the_first_attach_of_a_new_generation_detaches_the_older_hosts() {
+    let mut c = succeeding(3);
+    assert_eq!(c.gate_host(), Some(h(0)));
+    let mut attach = claim_attach(h(5), 50, Vec::new(), Vec::new());
+    if let HostMsg::Attach { generation, .. } = &mut attach {
+        *generation = 1;
+    }
+    c.handle(h(5), attach, 10);
+    // A newer generation's attach reads the open successions again (none).
+    assert!(c.take_successions_reread());
+    c.successions_open(Vec::new(), 10);
+    commit_routed(&mut c);
+    assert_eq!(c.gate_host(), Some(h(5)), "no host of the older generation is the gate");
+    c.set_expected_hosts([h(5)].into_iter().collect());
+    c.maintain(10 + 10 * CUT_EVERY_MS);
+    let out = commit_routed(&mut c);
+    assert_eq!(begun(&out).iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![h(5)], "a cut of the new generation's host alone");
+    // Host 5 lapses: no old host inherits.
+    let rows = vec![seen(h(5), 0)];
+    c.observe_leases(&rows, 20 * CUT_EVERY_MS, 20 * CUT_EVERY_MS);
+    assert_eq!(c.declare_wanted(20 * CUT_EVERY_MS), None, "no live host of the new generation: nothing to declare");
+}
+
+/// Elastic 2a final review (G1): no transition is taken while one is being written.
+#[test]
+fn no_second_transition_while_one_is_written() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let t = c.take_transition().expect("the grant is pending");
+    c.handle(h(0), request(2, B, WorldRequest::Embark(EmbarkRequest { civ, people: people[2..4].to_vec(), region: rc(9, 0) })), 0);
+    assert!(c.take_transition().is_none(), "one at a time");
+    c.transition_written();
+    let next = c.take_transition().expect("the second grant, after the first was answered");
+    assert!(replies(&next.out.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>()).iter().any(|(id, _)| *id == rid(2)));
+    drop(t);
+}
+
+/// Elastic 2a final review (G2): what the projection keeps per host id — an attachment, the
+/// boots its `Attach`es named — goes with the id once a `hosts` read no longer shows it (the
+/// id is never issued again): a crash-looping pod across coordinator restarts never grows the
+/// core.
+#[test]
+fn an_absent_id_leaves_no_attachment_or_boot_in_the_projection() {
+    let mut c = succeeding(3);
+    let (core, history) = c.encode_projection();
+    let mut c = Coordinator::load(&core, &history, grid(), ProcessBoot(9), 100).expect("loads");
+    c.set_crash_policy(game::CrashPolicy::Succession);
+    c.handle(h(0), claim_attach(h(0), 70, Vec::new(), Vec::new()), 100);
+    commit_routed(&mut c);
+    // `{:#?}` prints a host id over three lines: compared without the whitespace.
+    let names_host_2 = |c: &Coordinator| c.projection_debug().split_whitespace().collect::<String>().contains("HostId(2,)");
+    assert!(names_host_2(&c), "host 2's attachment and boots are in the projection");
+    let rows: Vec<HostSeen> = [0, 1].into_iter().map(h).map(|o| seen(o, 201)).collect();
+    c.observe_leases(&rows, 200, 200);
+    commit_routed(&mut c);
+    assert!(!names_host_2(&c), "nothing of host 2 is kept: {}", c.projection_debug());
 }

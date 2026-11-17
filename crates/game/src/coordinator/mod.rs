@@ -170,9 +170,9 @@ pub struct Coordinator {
     clock_ms: u64,
     /// `(now_ms, calendar tick)` the calendar was anchored at (store ms).
     calendar_anchor: (u64, CalendarTick),
-    /// `now_ms` of the calendar's last day turn (or anchor): a `now_ms` more than
-    /// [`CALENDAR_GAP_MS`] past it is downtime, and re-anchors the calendar
-    /// ([`Self::calendar_now`]).
+    /// `now_ms` of the calendar's last sign of life — a day turn, a view handed out, or its
+    /// anchor: a `now_ms` more than [`CALENDAR_GAP_MS`] past it is downtime, and re-anchors the
+    /// calendar where it last stood ([`Self::calendar_now`], [`Self::calendar_resume`]).
     calendar_seen_ms: u64,
     /// The calendar day last broadcast.
     calendar_day: u64,
@@ -328,7 +328,8 @@ impl Coordinator {
     /// `history` as [`Self::take_transition`] made them, for process boot `process`, at store
     /// time `now_ms` — everything exactly as written (the calendar continues from its stored
     /// anchor: a quick restart skips no day and repeats no day turn; a longer silence than
-    /// [`CALENDAR_GAP_MS`] is downtime, re-anchored at the next [`Self::maintain`]), but:
+    /// [`CALENDAR_GAP_MS`] is downtime, re-anchored at the load where the calendar last stood,
+    /// never earlier than a host was told — [`Self::calendar_resume`]), but:
     /// - an attachment, and a store call handed out, of another process boot count as
     ///   detached / not in flight ([`ProcessBoot`]): every host attaches again, and its
     ///   `Attach` corrects what the projection holds of it (its unlisted regions park, its
@@ -351,6 +352,12 @@ impl Coordinator {
         let mut c = Coordinator::from_projection(p, history, process, now_ms);
         c.committed_raw = raw_core(&c.projection());
         c.rebase_deadlines(now_ms);
+        if c.calendar_gap(now_ms) {
+            // Downtime: re-anchored at once where the calendar last stood (never the stored
+            // history's `now`, which lags it: a calendar advance alone is not written). The
+            // history itself moves there at the first `maintain` (the runtime's first pass).
+            c.reanchor_calendar(now_ms);
+        }
         Ok(c)
     }
 
@@ -393,15 +400,38 @@ impl Coordinator {
     }
 
     /// The calendar at `now_ms` (store ms): the anchor's tick plus one per `TICK_RATE` ms
-    /// since — unless `now_ms` is more than [`CALENDAR_GAP_MS`] past the last day turn
-    /// (`calendar_seen_ms`): that was downtime, not play, and is not caught up — the calendar
-    /// stands at the history's own `now` (where the next [`Self::maintain`] re-anchors it).
+    /// since — unless `now_ms` is more than [`CALENDAR_GAP_MS`] past the calendar's last sign
+    /// of life (`calendar_seen_ms`: a day turn, a view handed out): that was downtime, not
+    /// play, and is not caught up — the calendar stands where it last stood
+    /// ([`Self::calendar_resume`], where the next [`Self::maintain`] re-anchors it).
     pub fn calendar_now(&self, now_ms: u64) -> CalendarTick {
         if self.calendar_gap(now_ms) {
-            return self.history.now();
+            return self.calendar_resume();
         }
         let (ms, tick) = self.calendar_anchor;
         CalendarTick(tick.0 + now_ms.saturating_sub(ms) / crate::TICK_RATE)
+    }
+
+    /// Where the calendar last stood: its tick at its last sign of life (`calendar_seen_ms` on
+    /// the anchor), or the history's own `now` if that is later. Never earlier than anything
+    /// a host was told — every day turn and every view moves `calendar_seen_ms`, durable before
+    /// the message leaves — while the stored history's `now` may lag it (a calendar advance
+    /// alone writes no history, Elastic 2a decision 7; final review I1).
+    fn calendar_resume(&self) -> CalendarTick {
+        let (ms, tick) = self.calendar_anchor;
+        let seen = CalendarTick(tick.0 + self.calendar_seen_ms.saturating_sub(ms) / crate::TICK_RATE);
+        seen.max(self.history.now())
+    }
+
+    /// The calendar re-anchored at store time `now_ms` where it last stood
+    /// ([`Self::calendar_resume`]): downtime is not caught up, and time never runs backwards.
+    fn reanchor_calendar(&mut self, now_ms: u64) {
+        log::info!(
+            "coordinator: the calendar was silent {} ms (over {CALENDAR_GAP_MS}): re-anchored, not caught up",
+            now_ms.saturating_sub(self.calendar_seen_ms)
+        );
+        self.calendar_anchor = (now_ms, self.calendar_resume());
+        self.calendar_seen_ms = now_ms;
     }
 
     /// Whether `now_ms` lies more than [`CALENDAR_GAP_MS`] past the calendar's last day turn.
@@ -587,13 +617,8 @@ impl Coordinator {
     pub fn maintain(&mut self, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         if self.calendar_gap(now_ms) {
-            // Downtime: the calendar goes on from where the history stands.
-            log::info!(
-                "coordinator: the calendar was silent {} ms (over {CALENDAR_GAP_MS}): re-anchored, not caught up",
-                now_ms.saturating_sub(self.calendar_seen_ms)
-            );
-            self.calendar_anchor = (now_ms, self.history.now());
-            self.calendar_seen_ms = now_ms;
+            // Downtime: the calendar goes on from where it last stood.
+            self.reanchor_calendar(now_ms);
         }
         let to = self.calendar_now(now_ms);
         self.history.advance(to);
@@ -669,6 +694,10 @@ impl Coordinator {
     /// undrained: a restart cannot re-send a directive outside the truth check of the hosts'
     /// `Attach` (`reattach_regions`).
     pub fn take_transition(&mut self) -> Option<Transition> {
+        if self.writing {
+            // One at a time (final review G1): the one handed out is not answered yet.
+            return None;
+        }
         let raw = raw_core(&self.projection());
         let history_changed = self.history.content_dirty();
         if !history_changed && raw == self.committed_raw {
@@ -790,6 +819,12 @@ impl Coordinator {
 
     fn push_view(&mut self, to: Target) {
         let calendar = self.calendar_now(self.clock_ms);
+        if !self.calendar_gap(self.clock_ms) {
+            // A view is a sign of the calendar's life: what it says is durable (the projection
+            // changed, so it leaves with the transition holding this) — a load never re-anchors
+            // the calendar before it ([`Self::calendar_resume`]).
+            self.calendar_seen_ms = self.calendar_seen_ms.max(self.clock_ms);
+        }
         self.push(to, CoordMsg::View {
             civs: self.history.civ_markers(),
             sites: self.history.site_markers(),
@@ -818,9 +853,12 @@ impl Coordinator {
     /// the world restarted from a cut (a rollback, a total crash), so every host of an older
     /// generation is gone — its processes are fenced and exit, and a restarted process is a
     /// new host. Each one the projection still names (running a region, holding a player) is
-    /// taken out as a predecessor is: its regions park, its players go offline. What a restart
-    /// of this coordinator used to undo by forgetting every host (before Elastic 2a its view of
-    /// the hosts was never saved) is undone here, where the hosts' generation says so.
+    /// taken out as a predecessor is: its regions park, its players go offline; and each one
+    /// still attached (its link not dropped yet) is detached — never the gate host, an heir, or
+    /// a host a cut waits for (Elastic 2a final review, I2; as [`Self::rolled_back`] detaches
+    /// every host). What a restart of this coordinator used to undo by forgetting every host
+    /// (before Elastic 2a its view of the hosts was never saved) is undone here, where the
+    /// hosts' generation says so.
     fn first_of_generation(&mut self, host: HostId, generation: u64) {
         self.attached_generation = generation;
         let gone: BTreeSet<HostId> =
@@ -828,6 +866,11 @@ impl Coordinator {
         for h in gone {
             log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is gone");
             self.host_succeeded(h);
+        }
+        let attached: Vec<HostId> = self.attached_hosts().filter(|h| *h != host).collect();
+        for h in attached {
+            log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is detached");
+            self.host_detached(h);
         }
     }
 
