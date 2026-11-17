@@ -678,6 +678,9 @@ pub struct CoordinatorThread {
     hold_hosts_reads: Arc<AtomicBool>,
     #[cfg(feature = "test-hooks")]
     hooks: WriteHooks,
+    /// [`CoordinatorThread::hold_main_loop`] is armed.
+    #[cfg(feature = "test-hooks")]
+    hold_main_loop: Arc<AtomicBool>,
 }
 
 /// The test hooks of the coordinator's writes ([`CoordinatorThread::fail_coordinator_writes`],
@@ -756,6 +759,15 @@ impl CoordinatorThread {
     #[cfg(feature = "test-hooks")]
     pub fn hold_hosts_reads(&self, held: bool) {
         self.hold_hosts_reads.store(held, Ordering::SeqCst);
+    }
+
+    /// Test hook: while `held`, the coordinator's main loop makes no pass — no input handled,
+    /// nothing written or sent, no replica beat (a hung process, Elastic 2b Task 4). Released, it
+    /// runs on from where it stood.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn hold_main_loop(&self, held: bool) {
+        self.hold_main_loop.store(held, Ordering::SeqCst);
     }
 
     /// Test hook: a decided cut's post-commit finish (its staged parts' `COMMIT PREPARED`) that
@@ -1067,6 +1079,20 @@ pub struct CoordinatorRuntime {
     /// What a host crash costs the world, as this coordinator was started
     /// (`VOXEL_OWNERSHIP`): every host's `Attach` must name the same ([`policy_agrees`]).
     policy: game::CrashPolicy,
+    /// The row version whose transition last wrote the history the core holds (a refresh reads
+    /// the row's history only when newer).
+    history_version: u64,
+    /// The replica lease (a split coordinator; `None` in-process).
+    replication: Option<Replication>,
+    /// The version check in flight ([`Self::pump_version_check`]).
+    version_rx: Option<Answer<u64>>,
+    /// The row re-read after a version check found it moved.
+    refresh_rx: Option<Answer<Option<world_store::StoredCoordinator>>>,
+    /// This replica's `ReplicaJoined` committed ([`Self::joined`]).
+    joined: bool,
+    /// Test hook ([`CoordinatorThread::hold_main_loop`]).
+    #[cfg(feature = "test-hooks")]
+    hold_main_loop: Arc<AtomicBool>,
 }
 
 /// The store reads of the core's successions ([`CoordinatorRuntime::pump_successions`]) and
@@ -1121,6 +1147,20 @@ enum End {
     /// Test hook: [`CoordinatorThread::kill_after_commit_before_send`].
     #[cfg(feature = "test-hooks")]
     Killed,
+    /// Another replica ended this one (Elastic 2b Task 4): its beat answered "not live", or the
+    /// core it rebased onto no longer holds it. It writes nothing more; the process exits fenced.
+    Evicted,
+}
+
+/// A split coordinator's replica lease (Elastic 2b Task 4, [`CoordinatorRuntime::pump_replica`]).
+struct Replication {
+    beat_rx: Option<Answer<bool>>,
+    /// The monotonic ms of the next beat.
+    next_beat_mono: u64,
+    /// The replicas read in flight, with the monotonic ms it was issued at.
+    read_rx: Option<(u64, Answer<Vec<world_store::ReplicaRow>>)>,
+    next_read_mono: u64,
+    watch: game::coordinator::ReplicaWatch,
 }
 
 /// The answer of a transition's write, as the runtime takes it ([`CoordinatorRuntime::settle`]).
@@ -1183,7 +1223,18 @@ impl CoordinatorRuntime {
         let hold_hosts_reads = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "test-hooks")]
         let hooks = WriteHooks::default();
+        #[cfg(feature = "test-hooks")]
+        let hold_main_loop = Arc::new(AtomicBool::new(false));
         let (store_ms, started) = start.store_time;
+        // A split coordinator beats its replica row and watches the others' (Elastic 2b Task 4).
+        let replication = matches!(links.links, Links::Listener(_)).then(|| Replication {
+            beat_rx: None,
+            next_beat_mono: 0,
+            read_rx: None,
+            next_read_mono: 0,
+            watch: game::coordinator::ReplicaWatch::default(),
+        });
+        let history_version = start.history_version;
         let mut clock = game::coordinator::StoreClock::default();
         clock.sample(store_ms, 0);
         // A bootstrapped core is written whole again by its first transition (its encoding
@@ -1191,6 +1242,10 @@ impl CoordinatorRuntime {
         // was set once, at the bootstrap (`world_file::ensure_coordinator_state`).
         let mut core = start.coordinator;
         core.set_version(start.version);
+        // Its first input: this replica registered (Elastic 2b Task 4) — live from its first
+        // transition on; alone, every replica registered before it is gone.
+        let me = core.replica();
+        core.apply(Input::ReplicaJoined { me, alone: start.alone }, store_ms);
         if let Some(c) = &cuts {
             core.set_world_cuts(c.every.as_millis() as u64);
         }
@@ -1231,6 +1286,13 @@ impl CoordinatorRuntime {
             warned_ms: None,
             successions,
             policy,
+            history_version,
+            replication,
+            version_rx: None,
+            refresh_rx: None,
+            joined: false,
+            #[cfg(feature = "test-hooks")]
+            hold_main_loop: hold_main_loop.clone(),
         };
         let join = std::thread::Builder::new()
             .name("coordinator".into())
@@ -1255,6 +1317,8 @@ impl CoordinatorRuntime {
             hold_hosts_reads,
             #[cfg(feature = "test-hooks")]
             hooks,
+            #[cfg(feature = "test-hooks")]
+            hold_main_loop,
         }
     }
 
@@ -1298,12 +1362,21 @@ impl CoordinatorRuntime {
                 // The handle is gone (its owner unwound): stop as an orderly exit would.
                 Err(TryRecvError::Disconnected) => Some(crate::EXIT_SAVE_TIMEOUT),
             };
+            #[cfg(feature = "test-hooks")]
+            if self.hold_main_loop.load(Ordering::SeqCst) && stopping.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             let now = self.now_ms();
             let health = crate::health::Health::global();
             // The split coordinator's loop (role `coordinator`); in-process (role `all`) the
             // host's main loop beats.
             if matches!(self.links.links, Links::Listener(_)) {
                 health.loop_beat();
+            }
+            // The replica's lease first (a beat answering "not live": ended — nothing more).
+            if let Err(end) = self.pump_replica(now) {
+                return self.end(end);
             }
             self.drain_hosts(now);
             self.drain_login(now);
@@ -1325,7 +1398,15 @@ impl CoordinatorRuntime {
                 Ok(out) => out,
                 Err(end) => return self.end(end),
             };
+            if self.core.evicted() {
+                // The row it rebased onto ended it: what it decided never leaves.
+                return self.end(End::Evicted);
+            }
             self.report_writes();
+            if matches!(self.links.links, Links::Listener(_)) {
+                let live = self.core.replicas_live();
+                health.coordinator_replicas(live.len() as u64, self.core.ticker() == Some(self.core.replica()));
+            }
             health.world_generation(self.core.world_generation());
             health.successions_open(self.core.successions_open_count() as u64);
             #[cfg(feature = "test-hooks")]
@@ -1994,9 +2075,164 @@ impl CoordinatorRuntime {
             return Ok(out);
         }
         if !self.write_next() {
+            if self.core.replicas_live().contains(&self.core.replica()) && !self.core.evicted() {
+                self.joined();
+            }
+            self.pump_version_check(now)?;
             out.extend(self.core.take_out());
         }
         Ok(out)
+    }
+
+    /// This replica's `ReplicaJoined` is committed (Elastic 2b Task 4): a split coordinator is
+    /// ready (`/readyz` 200).
+    fn joined(&mut self) {
+        if self.joined {
+            return;
+        }
+        self.joined = true;
+        log::info!("[coordinator] replica {} joined the live set (live {:?})", self.core.replica(), self.core.replicas_live());
+        if matches!(self.links.links, Links::Listener(_)) {
+            crate::health::Health::global().set_registered(true);
+        }
+    }
+
+    /// The version check of what leaves without a write (Elastic 2b departs 5; only while more
+    /// than one replica is live — the core asks for none otherwise): the row's version read; at
+    /// this cache's version the outputs the check covers may leave ([`Coordinator::take_out`]),
+    /// at another the row is read again (its history only if newer) and the core rebased onto it
+    /// first. One read in flight; the loop never waits for it.
+    fn pump_version_check(&mut self, now: u64) -> Result<(), End> {
+        if let Some(rx) = &self.refresh_rx {
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(()),
+                Ok(answer) => answer,
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            self.refresh_rx = None;
+            match answer {
+                Ok(Some(row)) if row.version != self.core.version() => self.refresh_onto(row)?,
+                Ok(_) => {}
+                Err(e) => log::warn!("[coordinator] the row could not be read for a refresh: {e}"),
+            }
+            return Ok(());
+        }
+        if let Some(rx) = &self.version_rx {
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(()),
+                Ok(answer) => answer,
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            self.version_rx = None;
+            match answer {
+                Ok(v) if self.core.version_checked(v) => {}
+                Ok(v) => {
+                    log::info!(
+                        "[coordinator] version check: the row is at {v}, this cache at {}: refreshing before anything leaves",
+                        self.core.version()
+                    );
+                    let since = if self.core.history_dirty() { 0 } else { self.history_version };
+                    self.refresh_rx = Some(self.store.load_coordinator_since_later(since));
+                }
+                Err(e) => {
+                    // Nothing leaves on it; the next pass asks again.
+                    self.core.version_checked(u64::MAX);
+                    log::warn!("[coordinator] version check failed: {e}");
+                }
+            }
+            let _ = now;
+            return Ok(());
+        }
+        if self.core.version_check_wanted().is_some() {
+            self.version_rx = Some(self.store.row_version_later());
+        }
+        Ok(())
+    }
+
+    /// A newer row a version check found (decision 1's rebase, without a conflict): the core
+    /// rebased onto it — its history kept unless the row's is newer — under the same conditions
+    /// as after a conflict (a core holding a change outside its log, or a write that may be in
+    /// the row, cannot be rebased: the process stops as fenced, the next start loads the row).
+    fn refresh_onto(&mut self, row: world_store::StoredCoordinator) -> Result<(), End> {
+        if self.core.unlogged_pending() || !self.unacked.is_empty() {
+            log::error!(
+                "[coordinator] the row moved to version {} (this cache at {}) and the core cannot be rebased without a loss; \
+                 stopping as fenced — the next start loads it",
+                row.version,
+                self.core.version()
+            );
+            return Err(End::Conflict);
+        }
+        let history = (!row.history.is_empty()).then_some(row.history.as_slice());
+        if let Err(e) = self.core.rebase(&row.core, history, row.version) {
+            log::error!("[coordinator] the row at version {} does not load ({e}); stopping as fenced", row.version);
+            return Err(End::Conflict);
+        }
+        if history.is_some() {
+            self.history_version = row.history_version;
+        }
+        Ok(())
+    }
+
+    /// The replica's lease (Elastic 2b Task 4; a split coordinator only): its row beaten every
+    /// [`game::coordinator::REPLICA_BEAT_MS`] from this main loop (a beat answering "not live":
+    /// another replica ended it — the end), the replicas' rows read as often into its own
+    /// [`game::coordinator::ReplicaWatch`], and — when it is the lowest replica its watch shows
+    /// live — every replica the watch shows lapsed and the core still holds live ended
+    /// ([`Input::ReplicaLapsed`], its row ended in that transition). The calls are answered on
+    /// receivers: the loop never waits for them.
+    fn pump_replica(&mut self, now: u64) -> Result<(), End> {
+        let mono = self.mono_ms();
+        let me = self.core.replica();
+        let Some(r) = self.replication.as_mut() else { return Ok(()) };
+        if let Some(rx) = &r.beat_rx {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Ok(Ok(true)) => r.beat_rx = None,
+                Ok(Ok(false)) => {
+                    log::error!("[coordinator] replica {me}'s row is ended (another replica found it lapsed): stopping as fenced");
+                    return Err(End::Evicted);
+                }
+                Ok(Err(e)) => {
+                    log::warn!("[coordinator] replica {me}'s beat failed ({e}): no beat this time");
+                    r.beat_rx = None;
+                }
+                Err(TryRecvError::Disconnected) => r.beat_rx = None,
+            }
+        }
+        if r.beat_rx.is_none() && mono >= r.next_beat_mono {
+            r.beat_rx = Some(self.store.beat_replica_later(me));
+            r.next_beat_mono = mono + game::coordinator::REPLICA_BEAT_MS;
+        }
+        if let Some((issued, rx)) = &r.read_rx {
+            let issued = *issued;
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Ok(Ok(rows)) => {
+                    r.watch.observe(&rows, issued);
+                    r.read_rx = None;
+                }
+                Ok(Err(e)) => {
+                    log::warn!("[coordinator] the replicas could not be read ({e}); the watch starts over");
+                    r.watch.observe_failed();
+                    r.read_rx = None;
+                }
+                Err(TryRecvError::Disconnected) => r.read_rx = None,
+            }
+        }
+        if r.read_rx.is_none() && mono >= r.next_read_mono {
+            r.read_rx = Some((mono, self.store.replicas_later()));
+            r.next_read_mono = mono + game::coordinator::REPLICA_BEAT_MS;
+        }
+        if r.watch.ends_lapsed(me, mono) {
+            let lapsed: Vec<_> =
+                r.watch.lapsed(mono).into_iter().filter(|l| *l != me && self.core.replicas_live().contains(l)).collect();
+            for l in lapsed {
+                log::warn!("[coordinator] replica {l}'s row stood still for a lease: ending it");
+                self.core.apply(Input::ReplicaLapsed(l), now);
+            }
+        }
+        Ok(())
     }
 
     /// Hands the core's next transition to the store (one at a time: none may be in flight);
@@ -2094,10 +2330,22 @@ impl CoordinatorRuntime {
                     // Its decisions' answers and post-commit effects die with the process.
                     return Settled::End(End::Killed);
                 }
+                if t.history.is_some() {
+                    self.history_version = w.version;
+                }
+                if self.core.replicas_live().contains(&self.core.replica()) {
+                    self.joined();
+                }
                 // The decisions' answers: inputs of the core (logged), applied before anything
-                // else; then their post-commit effects.
-                self.answered(&w.answers, now);
+                // else — each one's side effects only if the core awaits it (an answer whose
+                // stamp is not the mark's changes nothing, and is counted for nothing); then
+                // their post-commit effects.
                 for a in w.answers {
+                    if self.core.answer_awaited(&a) {
+                        self.answered(std::slice::from_ref(&a), now);
+                    } else {
+                        log::debug!("[coordinator] a decision's answer no mark awaits: no side effects ({a:?})");
+                    }
                     self.core.apply(Input::Decision(a), now);
                 }
                 self.after.extend(w.after_commit.into_iter().map(|a| AfterJob { a, rx: None, retry_at: now }));
@@ -2122,6 +2370,7 @@ impl CoordinatorRuntime {
                             row.version
                         );
                         self.core.set_version(row.version);
+                        self.history_version = row.history_version;
                         self.core.transition_refused(t);
                         self.retry_at_ms = now;
                         Settled::Held { now: true }
@@ -2171,6 +2420,7 @@ impl CoordinatorRuntime {
             log::error!("[coordinator] write conflict: the row at version {} does not load ({e}); stopping as fenced", row.version);
             return Settled::End(End::Conflict);
         }
+        self.history_version = row.history_version;
         self.conflicts_in_a_row += 1;
         log::warn!(
             "[coordinator] write conflict: another writer moved the row from version {mine} to {}; rebased onto it ({} in a row)",
@@ -2330,6 +2580,12 @@ impl CoordinatorRuntime {
                 log::warn!("[coordinator] test kill: the transition committed, nothing it released leaves");
                 self.down();
                 ServerExit::CoordinatorFailed
+            }
+            End::Evicted => {
+                log::error!("[coordinator] replica {} was ended by another replica: it writes nothing more; stopping as fenced", self.core.replica());
+                self.fenced.set();
+                self.down();
+                ServerExit::Fenced
             }
         }
     }

@@ -2222,3 +2222,192 @@ fn sigterm_during_the_warning_leaves_at_once() {
     assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE id = 1"), [1], "its row is clean");
     w.stop(&dir);
 }
+
+// ---- Elastic 2b Task 4: coordinator replicas -------------------------------------------------
+
+/// The live replicas `c`'s core holds.
+fn live_of(c: &server::coordinator_rt::ListeningCoordinator) -> std::collections::BTreeSet<game::coordinator::ReplicaId> {
+    c.thread.inspect(|c| c.replicas_live().clone(), WAIT).expect("the coordinator answers")
+}
+
+/// A second coordinator replica (B) beside the world's (A), as `run_coordinator` starts one —
+/// registered first, then the row — with no world cuts (a spare: no host dials it until a test
+/// switches one to it), its own store handle and pin file. Rounds until both replicas' cores
+/// hold both. B, its store and its pin file.
+fn spare_replica(
+    w: &mut World,
+    db: &PgDb,
+    dir: &std::path::Path,
+) -> (server::coordinator_rt::ListeningCoordinator, StoreHandle, PathBuf) {
+    let store = db.open();
+    let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
+    assert!(!start.alone, "A beats its row: B is not alone");
+    let cert = dir.join("replica-b").join("coordinator.cert-sha256");
+    std::fs::create_dir_all(cert.parent().unwrap()).unwrap();
+    let b = server::coordinator_rt::start_listening_as(
+        store.clone(),
+        start,
+        "127.0.0.1:0".parse().unwrap(),
+        TOKEN.into(),
+        Some(cert.clone()),
+        server::claims::Fenced::default(),
+        None,
+        CrashPolicy::Rollback,
+        RIG_WORLD,
+        None,
+    )
+    .expect("B listens");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let a = live_of(w.coordinator.as_ref().expect("A runs"));
+        if a.len() == 2 && live_of(&b) == a {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the replicas never both joined: A holds {a:?}");
+        w.pair.round();
+    }
+    (b, store, cert)
+}
+
+/// A claim granted by the world's coordinator: `player`'s adventure at the first populated
+/// site, asked as host 0 (boot 1000) would. Rounds until the core holds it.
+fn grant_a_claim(w: &mut World, player: game::PlayerId) -> game::Claim {
+    let c = w.coordinator.as_ref().expect("the coordinator runs");
+    let site = c
+        .thread
+        .with_core(
+            move |c| {
+                let h = c.history();
+                let site = h.sites().find(|s| s.abandoned.is_none() && !h.living_members(s.id).is_empty()).expect("a populated site").id;
+                let id = game::RequestId { host: HostId(0), boot: 1000, seq: 9_000 };
+                let req = game::WorldRequest::StartAdventure(site);
+                let now = c.clock_floor();
+                c.apply(game::coordinator::Input::Host { host: HostId(0), msg: game::HostMsg::Request { id, player, hop: 1, req } }, now);
+                site
+            },
+            WAIT,
+        )
+        .expect("the coordinator answers");
+    let claim = game::Claim::Adventure(site);
+    let deadline = Instant::now() + WAIT;
+    while w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.claim_of(player), WAIT).flatten() != Some(claim) {
+        assert!(Instant::now() < deadline, "the claim was never granted");
+        w.pair.round();
+    }
+    claim
+}
+
+/// Elastic 2b Task 4 (Review Focus 5): coordinator replicas A and B over one row, two hosts
+/// attached to A, a player's claim granted. Both replicas die; C registers ALONE (no other
+/// replica beaten within the lease: both rows marked dead) and its first transition drops A
+/// and B from the live set. Both hosts re-attach to C, the next world cut commits, the world
+/// generation is unchanged (a replica crash is no world crash), and the claim is intact.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn every_replica_down_then_one_back_resumes_from_the_row() {
+    install_props();
+    let Some(db) = PgDb::create("repdown") else { return };
+    let dir = scratch("repdown");
+    let mut w = world(&db, &dir);
+    let generation = w.claims[0].store().world_generation().unwrap();
+    let (player, _) = w.claims[0].store().resolve_player("replicas-test-player").unwrap();
+    let claim = grant_a_claim(&mut w, player);
+    let (b, b_store, _) = spare_replica(&mut w, &db, &dir);
+    let (a_id, b_id) = {
+        let live: Vec<_> = live_of(&b).into_iter().collect();
+        (live[0], live[1])
+    };
+    let last = decisions(&db).into_iter().filter(|(_, _, k)| *k).map(|(c, _, _)| c).max().unwrap_or(0);
+
+    // Both replicas die (no stop, no last write).
+    kill_coordinator(&mut w);
+    b.thread.kill();
+    b_store.shutdown();
+    // C starts once both rows lapsed (a lease of 0 for its registration: both are silent).
+    std::thread::sleep(Duration::from_millis(20));
+    let store = db.open();
+    store.set_replica_lease_ms(0);
+    restart_coordinator_listening(&mut w, store);
+    w.store.set_replica_lease_ms(game::coordinator::REPLICA_LEASE_MS);
+    let c = w.coordinator.as_ref().expect("C runs");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (live, me) = c.thread.inspect(|c| (c.replicas_live().clone(), c.replica()), WAIT).expect("C answers");
+        if live.len() == 1 && live.contains(&me) {
+            assert!(me > b_id && me > a_id, "a new id: {me} after {a_id}, {b_id}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "C never dropped A and B: {live:?}");
+        w.pair.round();
+    }
+    let rows: Vec<(game::coordinator::ReplicaId, bool)> = w.store.replicas().unwrap().into_iter().map(|r| (r.replica, r.live)).collect();
+    assert!(rows.contains(&(a_id, false)) && rows.contains(&(b_id, false)), "A's and B's rows are dead: {rows:?}");
+    w.pair.until("both hosts re-attached to C", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+    w.until_committed_after(&db, last);
+    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation, "the generation is unchanged");
+    let held = w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.claim_of(player), WAIT).flatten();
+    assert_eq!(held, Some(claim), "the player's claim is intact");
+    w.stop(&dir);
+}
+
+/// Elastic 2b Task 4: replica A's main loop hangs (no pass, no beat) past the replica lease.
+/// B — the lowest replica its own watch shows live — ends it (`ReplicaLapsed`, A's row ended
+/// in the same transaction); released, A's first beat finds its row dead and it exits fenced
+/// (exit 3) without writing. A's hosts re-attach to B (their links switched to B, as a host's
+/// dialer rotates to another replica).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_lapsed_replica_is_ended_and_exits_fenced() {
+    install_props();
+    let Some(db) = PgDb::create("replapse") else { return };
+    let dir = scratch("replapse");
+    let mut w = world(&db, &dir);
+    let (b, b_store, b_cert) = spare_replica(&mut w, &db, &dir);
+    let (a_id, b_id) = {
+        let live: Vec<_> = live_of(&b).into_iter().collect();
+        (live[0], live[1])
+    };
+    let version_before = w.store.load_coordinator().unwrap().unwrap().version;
+    w.coordinator.as_ref().unwrap().thread.hold_main_loop(true);
+    let deadline = Instant::now() + Duration::from_secs(game::coordinator::REPLICA_LEASE_MS / 1000 + 20);
+    let rows = |s: &StoreHandle| -> Vec<(game::coordinator::ReplicaId, bool)> {
+        s.replicas().unwrap().into_iter().map(|r| (r.replica, r.live)).collect()
+    };
+    // B's core drops A, and its row is ended in the same (committed) transition.
+    while live_of(&b).contains(&a_id) || !rows(&b_store).contains(&(a_id, false)) {
+        assert!(Instant::now() < deadline, "B never ended A");
+        w.pair.round();
+    }
+    assert!(rows(&b_store).contains(&(b_id, true)), "B's row is live: {:?}", rows(&b_store));
+    let ended_at = b_store.load_coordinator().unwrap().unwrap().version;
+    assert!(ended_at > version_before);
+
+    // Released: A's beat finds its row dead — it exits fenced, writing nothing more.
+    let a = w.coordinator.take().expect("A runs");
+    a.thread.hold_main_loop(false);
+    let deadline = Instant::now() + WAIT;
+    while !a.thread.is_finished() {
+        assert!(Instant::now() < deadline, "A never stopped");
+        w.pair.round();
+    }
+    assert_eq!(a.thread.shutdown(Duration::from_secs(5)), server::claims::ServerExit::Fenced, "A exits fenced (3)");
+    let rows = b_store.replicas().unwrap();
+    assert!(rows.iter().any(|r| r.replica == a_id && !r.live), "A stays ended");
+
+    // A's hosts re-attach to B.
+    for sim in &w.pair.sims {
+        w.switches[sim.ordinal.0 as usize].replace(quic_world_link(b.addr, b_cert.clone(), sim.ordinal, sim.boot, sim.reg));
+    }
+    let both: std::collections::BTreeSet<HostId> = [HostId(0), HostId(1)].into_iter().collect();
+    let deadline = Instant::now() + WAIT;
+    while b.thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("B answers") != both {
+        assert!(Instant::now() < deadline, "the hosts never re-attached to B");
+        w.pair.round();
+    }
+    w.pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+    assert_eq!(live_of(&b), [b_id].into_iter().collect(), "B alone is live");
+    w.coordinator = Some(b);
+    let old = std::mem::replace(&mut w.store, b_store);
+    old.shutdown();
+    w.stop(&dir);
+}

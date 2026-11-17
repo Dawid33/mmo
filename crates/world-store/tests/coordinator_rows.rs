@@ -13,8 +13,13 @@ use crate::handle::{each_backend, open};
 use crate::succession::{World, boot_of, part};
 use crate::two_phase::prepared;
 
-fn stored(version: u64, core: &[u8], history: &[u8]) -> Option<StoredCoordinator> {
-    Some(StoredCoordinator { version, core: core.to_vec(), history: history.to_vec() })
+/// The row as `(version, core, history)` (its `history_version` checked on its own).
+fn stored(version: u64, core: &[u8], history: &[u8]) -> Option<(u64, Vec<u8>, Vec<u8>)> {
+    Some((version, core.to_vec(), history.to_vec()))
+}
+
+fn row(s: StoredCoordinator) -> (u64, Vec<u8>, Vec<u8>) {
+    (s.version, s.core, s.history)
 }
 
 /// A transition of replica 1 at `version`: `core`, `history`, `decisions`.
@@ -38,7 +43,7 @@ fn bootstrap_is_first_writer_wins() {
         h.shutdown();
         let other = open(url);
         assert_eq!(other.bootstrap_coordinator(vec![2], vec![20]).unwrap(), Bootstrapped::Exists);
-        assert_eq!(other.load_coordinator().unwrap(), stored(1, &[1], &[10]), "the second bootstrap wrote nothing");
+        assert_eq!(other.load_coordinator().unwrap().map(row), stored(1, &[1], &[10]), "the second bootstrap wrote nothing");
         other.shutdown();
     });
 }
@@ -58,11 +63,11 @@ fn a_write_with_a_stale_version_conflicts() {
         assert_eq!(second.version, 3);
         // A writer that read version 2 (the other wrote 3 since).
         assert_eq!(write(&h, transition(2, &[3], Some(&[30]), vec![])).unwrap_err(), StoreError::Conflict);
-        assert_eq!(h.load_coordinator().unwrap(), stored(3, &[2], &[10]), "the conflicting write wrote nothing");
+        assert_eq!(h.load_coordinator().unwrap().map(row), stored(3, &[2], &[10]), "the conflicting write wrote nothing");
         // A version from the future conflicts too.
         assert_eq!(write(&h, transition(9, &[4], None, vec![])).unwrap_err(), StoreError::Conflict);
         write(&h, transition(3, &[5], None, vec![])).unwrap();
-        assert_eq!(h.load_coordinator().unwrap(), stored(4, &[5], &[10]));
+        assert_eq!(h.load_coordinator().unwrap().map(row), stored(4, &[5], &[10]));
         h.shutdown();
     });
 }
@@ -75,9 +80,9 @@ fn history_is_kept_when_not_written() {
         h.bootstrap_coordinator(vec![1], vec![10, 11]).unwrap();
         write(&h, transition(1, &[2], None, vec![])).unwrap();
         write(&h, transition(2, &[3], None, vec![])).unwrap();
-        assert_eq!(h.load_coordinator().unwrap(), stored(3, &[3], &[10, 11]), "the core moves on, the history stays");
+        assert_eq!(h.load_coordinator().unwrap().map(row), stored(3, &[3], &[10, 11]), "the core moves on, the history stays");
         write(&h, transition(3, &[4], Some(&[40]), vec![])).unwrap();
-        assert_eq!(h.load_coordinator().unwrap(), stored(4, &[4], &[40]));
+        assert_eq!(h.load_coordinator().unwrap().map(row), stored(4, &[4], &[40]));
         h.shutdown();
     });
 }
@@ -91,7 +96,7 @@ fn a_decision_on_sqlite_is_unsupported() {
     let begin = StoreDecision::BeginCut { cut: CutId(1) };
     let err = write(&h, transition(1, &[2], None, vec![begin])).unwrap_err();
     assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
-    assert_eq!(h.load_coordinator().unwrap(), stored(1, &[1], &[10]), "nothing written");
+    assert_eq!(h.load_coordinator().unwrap().map(row), stored(1, &[1], &[10]), "nothing written");
     h.shutdown();
 }
 

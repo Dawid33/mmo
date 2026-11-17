@@ -32,6 +32,10 @@ use server::roles::{QuicWorldLink, Role, SPLIT_ROLES_NEED_POSTGRES};
 use server::world_file::{ensure_coordinator_state, WorldSource};
 use world_store::{StoreHandle, StoreUrl};
 
+#[path = "common/coordinator.rs"]
+mod coordinator_common;
+use coordinator_common::{attach_msg, resumed};
+
 /// Wall time any wait below may take before the test fails (a dialer's reconnect
 /// backoff tops out at 5 s).
 const WAIT: Duration = Duration::from_secs(30);
@@ -1058,7 +1062,7 @@ fn a_host_with_a_stale_registration_is_refused_by_the_coordinator() {
                 _ => assert!(Instant::now() < deadline, "the link never came up"),
             }
         }
-        link.send(game::HostMsg::Attach { host: HostId(reg), epoch: 1, running: Vec::new(), online: Vec::new(), generation, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback }).unwrap();
+        link.send(bare_attach(HostId(reg), generation, 1, game::CrashPolicy::Rollback)).unwrap();
         (link, events)
     };
     let (stale, stale_events) = dial(1, first);
@@ -1103,19 +1107,7 @@ fn raw_host_link(
 
 /// An empty `Attach` of host `host` at `generation` under `policy`.
 fn bare_attach(host: HostId, generation: u64, boot: u64, policy: game::CrashPolicy) -> game::HostMsg {
-    game::HostMsg::Attach {
-        host,
-        epoch: 1,
-        running: Vec::new(),
-        online: Vec::new(),
-        generation,
-        boot,
-        settled_below: 0,
-        handed: Vec::new(),
-        pending_cut: None,
-        successions: Vec::new(),
-        policy,
-    }
+    attach_msg(host, 1, Vec::new(), generation, boot, None, policy)
 }
 
 /// A coordinator of SEVERAL hosts started without `VOXEL_OWNERSHIP=claim` (crash policy
@@ -1678,19 +1670,7 @@ const RAW_HOP: u64 = 1;
 /// `pending_cut` as the host's last unanswered cut.
 fn raw_attach(host: &world_store::Registered, epoch: u64, pending: bool, pending_cut: Option<game::CutId>) -> game::HostMsg {
     let online = vec![game::OnlinePlayer { player: RAW_PLAYER, claim: None, claim_pending: pending, report: epoch, hop: RAW_HOP }];
-    game::HostMsg::Attach {
-        host: host.id,
-        epoch,
-        running: Vec::new(),
-        online,
-        generation: host.generation,
-        boot: 1,
-        settled_below: 0,
-        handed: Vec::new(),
-        pending_cut,
-        successions: Vec::new(),
-        policy: game::CrashPolicy::Rollback,
-    }
+    attach_msg(host.id, epoch, online, host.generation, 1, pending_cut, game::CrashPolicy::Rollback)
 }
 
 /// The raw host's request `seq`: its player's adventure at `start`'s site.
@@ -1701,23 +1681,7 @@ fn raw_start(host: &world_store::Registered, seq: u64, start: Start) -> (game::R
 
 /// The coordinator state the store holds, loaded as a restart loads it.
 fn stored_core(store: &StoreHandle, map: &WorldMap) -> game::Coordinator {
-    let row = store.load_coordinator().unwrap().expect("a written coordinator state");
-    let grid = game::history::SocietyGrid::from_world_map(map);
-    game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ReplicaId(0), 0).expect("the projection loads")
-}
-
-/// What a restart must resume exactly: the calendar (history tick and the calendar's anchor),
-/// the site markers, the legends' length.
-#[derive(Debug, PartialEq)]
-struct Resumed {
-    now: CalendarTick,
-    anchor: ((u64, CalendarTick), u64),
-    sites: Vec<game::SiteMarker>,
-    legends: usize,
-}
-
-fn resumed(c: &game::Coordinator) -> Resumed {
-    Resumed { now: c.history().now(), anchor: c.calendar_anchor(), sites: c.history().site_markers(), legends: c.history().log().len() }
+    coordinator_common::stored_core(store, map).expect("a written coordinator state")
 }
 
 /// A coordinator listening for one host whose link is read raw: no `WorldManager`, so what

@@ -694,6 +694,19 @@ impl super::Coordinator {
     /// outcome, or its refusal (nothing written: a lock timeout behind a staged part, a store
     /// error) — forgotten, declared again after the runtime's retry wait. An answer with another
     /// stamp changes nothing.
+    /// The marks of the declaration, the end and the rollback in flight ([`Self::answer_awaited`]).
+    pub(super) fn successions_declaring(&self) -> Option<CallStamp> {
+        self.successions.declaring
+    }
+
+    pub(super) fn successions_ending(&self) -> Option<(HostId, u64, CallStamp)> {
+        self.successions.ending
+    }
+
+    pub(super) fn successions_rolling(&self) -> Option<CallStamp> {
+        self.successions.rolling
+    }
+
     pub(super) fn declare_answered(&mut self, stamp: CallStamp, outcome: Result<Declared, String>, now_ms: u64) {
         if self.successions.declaring != Some(stamp) {
             // Not this mark's: another call's, or none in flight any more — a rollback cleared

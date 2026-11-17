@@ -17,6 +17,7 @@ mod common;
 mod forged;
 mod open;
 mod players;
+mod replicas;
 mod schema;
 mod stud_refusal;
 mod succession;

@@ -91,11 +91,15 @@ pub struct HostsRead {
 
 /// The world coordinator's row as stored ([`StoreHandle::load_coordinator`], Elastic 2a): its
 /// projection, `core` and `history`, at `version` (what the next write must name).
+/// `history_version`: the version whose transition last wrote `history` (Elastic 2b Task 4); a
+/// [`StoreHandle::load_coordinator_since`] that found it no newer than asked leaves `history`
+/// empty (a written history never is).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredCoordinator {
     pub version: u64,
     pub core: Vec<u8>,
     pub history: Vec<u8>,
+    pub history_version: u64,
 }
 
 /// What one lease beat ([`StoreHandle::heartbeat`]) found.
@@ -971,6 +975,67 @@ impl StoreHandle {
     /// [`Self::load_coordinator`], answered on the receiver (a caller bounded by a deadline).
     pub fn load_coordinator_later(&self) -> crossbeam::channel::Receiver<Result<Option<StoredCoordinator>, StoreError>> {
         self.ask_later(Request::LoadCoordinator)
+    }
+
+    /// The coordinator's projection with its history only if a transition wrote it after
+    /// version `history_version` (else [`StoredCoordinator::history`] is empty: the caller's
+    /// history is the row's); `None` before the first write (Elastic 2b Task 4).
+    pub fn load_coordinator_since(&self, history_version: u64) -> Result<Option<StoredCoordinator>, StoreError> {
+        self.ask(|r| Request::LoadCoordinatorSince(history_version, r))
+    }
+
+    /// [`Self::load_coordinator_since`], answered on the receiver.
+    pub fn load_coordinator_since_later(
+        &self,
+        history_version: u64,
+    ) -> crossbeam::channel::Receiver<Result<Option<StoredCoordinator>, StoreError>> {
+        self.ask_later(|r| Request::LoadCoordinatorSince(history_version, r))
+    }
+
+    /// The `coordinator` row's version (0: no row), answered on the receiver: a replica's
+    /// version check of the outputs it releases without a write (Elastic 2b departs 5).
+    pub fn row_version_later(&self) -> crossbeam::channel::Receiver<Result<u64, StoreError>> {
+        self.ask_later(Request::RowVersion)
+    }
+
+    /// Registers a coordinator replica (Elastic 2b Task 4; once per coordinator process start,
+    /// `addr` where it listens for hosts — a label). ONE transaction (`replicas.rs`): the next id
+    /// issued from `coordinator.next_replica` (never one issued before; the row created empty if
+    /// there is none), every other live row not beaten within [`game::coordinator::REPLICA_LEASE_MS`]
+    /// by the database clock marked dead — `alone` when no other row is left live — the dead rows
+    /// older than a day pruned, the new row inserted live.
+    pub fn register_replica(&self, addr: &str) -> Result<crate::ReplicaRegistered, StoreError> {
+        let addr = addr.to_string();
+        self.ask(|r| Request::RegisterReplica(addr, r))
+    }
+
+    /// One beat of replica `me`'s row (Postgres: on the beat connection, under a 1 s
+    /// `lock_timeout` and the beat deadline): `false` when it is no longer live (ended — the
+    /// replica exits fenced). An error is "no beat this time". Never called on SQLite.
+    pub fn beat_replica(&self, me: game::coordinator::ReplicaId) -> Result<bool, StoreError> {
+        self.ask(|r| Request::BeatReplica(me, r))
+    }
+
+    /// [`Self::beat_replica`], answered on the receiver.
+    pub fn beat_replica_later(&self, me: game::coordinator::ReplicaId) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+        self.ask_later(|r| Request::BeatReplica(me, r))
+    }
+
+    /// Every `coordinator_replicas` row, by id, answered on the receiver (a replica's lapse watch).
+    pub fn replicas_later(&self) -> crossbeam::channel::Receiver<Result<Vec<crate::ReplicaRow>, StoreError>> {
+        self.ask_later(Request::Replicas)
+    }
+
+    /// Every `coordinator_replicas` row, by id.
+    pub fn replicas(&self) -> Result<Vec<crate::ReplicaRow>, StoreError> {
+        self.ask(Request::Replicas)
+    }
+
+    /// Test hook: the replica lease a registration judges the other rows by, ms (default
+    /// [`game::coordinator::REPLICA_LEASE_MS`]). Shared by every clone.
+    #[doc(hidden)]
+    pub fn set_replica_lease_ms(&self, ms: u64) {
+        self.cuts.replica_lease_ms.store(ms, Ordering::SeqCst);
     }
 
     /// The world's clock anchor (R3): stores `proposed` if the world has none, and

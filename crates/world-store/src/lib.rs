@@ -14,6 +14,7 @@ mod handle;
 mod listen;
 mod open;
 mod operator;
+mod replicas;
 mod rows;
 mod succession;
 mod terrain;
@@ -37,6 +38,10 @@ pub use listen::{
 };
 pub use open::{LockGuard, MIGRATE_LOCK_TIMEOUT_MS, OpenMode, Pool, newest_migration, open_pool, set_migrate_lock_timeout_ms};
 pub use operator::Vouched;
+pub use replicas::{REPLICA_PRUNE_MS, ReplicaRegistered};
+/// A `coordinator_replicas` row as a replicas read returns it (defined in `game`: the
+/// coordinator's [`game::coordinator::ReplicaWatch`] reads it).
+pub use game::coordinator::ReplicaRow;
 pub use succession::{Declared, LandlessEnd, Succession, SuccessionId, SuccessionKind};
 pub use terrain::TerrainFromStore;
 pub use two_phase::{cut_gid, SWEEP_ABORT_TICK};

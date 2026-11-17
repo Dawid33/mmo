@@ -571,13 +571,14 @@ pub fn run_coordinator() -> ServerExit {
     let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
     let clock = CoordinatorClock::new(clock, phase);
     log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
-    let start = match world_file::ensure_coordinator_state(&store, &map, None).unwrap_or_else(|e| fatal(e)) {
+    let bind = coordinator_addr_from(COORDINATOR_BIND_ENV, std::env::var(COORDINATOR_BIND_ENV).ok().as_deref())
+        .unwrap_or_else(|e| fatal(e));
+    // Registered as a replica first (Elastic 2b Task 4: an id issued by the store), then the row.
+    let start = match world_file::ensure_coordinator_state_at(&store, &map, None, &bind.to_string()).unwrap_or_else(|e| fatal(e)) {
         Some(start) => start,
         None => fatal("this world has no history (nobody can live in it): there is nothing to coordinate".into()),
     };
     let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service link's token: {e}")));
-    let bind = coordinator_addr_from(COORDINATOR_BIND_ENV, std::env::var(COORDINATOR_BIND_ENV).ok().as_deref())
-        .unwrap_or_else(|e| fatal(e));
     let cert_file = cert_hash_file_from(std::env::var(COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
     if let Some(dir) = cert_file.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| fatal(format!("{}: {e}", dir.display())));
@@ -617,9 +618,9 @@ pub fn run_coordinator() -> ServerExit {
         Some(login),
     )
     .unwrap_or_else(|e| fatal(e));
-    // The store is open and the hosts' listener bound: ready. Its thread beats the loop.
+    // Ready (`/readyz` 200) once its `ReplicaJoined` transition committed: the thread says so
+    // (Elastic 2b Task 4). Its thread beats the loop.
     let health = crate::health::Health::global();
-    health.set_registered(true);
 
     let stop = early_stop.unwrap_or_else(crate::watch_stop_signals_on_thread);
     while !coordinator.thread.is_finished() && !stop.load(std::sync::atomic::Ordering::SeqCst) {

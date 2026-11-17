@@ -235,6 +235,26 @@ pub struct Coordinator {
     /// The stamp of the transition in flight: the row version it commits as, by this replica.
     /// The marks it carries hold it ([`Self::transition_failed`] resolves them).
     writing_stamp: Option<CallStamp>,
+    /// The live coordinator replicas (Elastic 2b Task 4, `replicas.rs`): an attachment counts
+    /// only while its replica is here; the lowest is the ticker ([`Self::ticker`]).
+    replicas: BTreeSet<ReplicaId>,
+    /// This replica's own [`Input::ReplicaJoined`] was applied: from then on a core lacking its
+    /// id is [`Self::evicted`].
+    joined: bool,
+    /// The version check of the outputs free to leave with several live replicas (Elastic 2b
+    /// departs 5): handed out ([`Self::version_check_wanted`]), confirmed or not.
+    version_check: Option<VersionCheck>,
+}
+
+/// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
+/// then, and how many outputs and logged inputs it covers (those decided before it was asked).
+#[derive(Clone, Copy, Debug)]
+struct VersionCheck {
+    version: u64,
+    out_len: usize,
+    log_len: usize,
+    /// The row was read at `version` ([`Coordinator::version_checked`]).
+    confirmed: bool,
 }
 
 /// The classification of every [`Coordinator`] field: the projection's (durable, written by
@@ -308,6 +328,7 @@ projection! {
         cuts: WorldCuts,
         successions: SuccessionRuns,
         rolled_back_to: Option<u64>,
+        replicas: BTreeSet<ReplicaId>,
     }
     process(replica, now_ms) {
         kept {
@@ -318,6 +339,7 @@ projection! {
             replica = replica,
             log = Vec::new(),
             unstored = false,
+            joined = false,
         }
         reset {
             out = Vec::new(),
@@ -331,6 +353,7 @@ projection! {
             writing = false,
             decisions = Vec::new(),
             writing_stamp = None,
+            version_check = None,
         }
     }
 }
@@ -389,6 +412,10 @@ impl Coordinator {
             writing: false,
             decisions: Vec::new(),
             writing_stamp: None,
+            // The replica that bootstraps the row is live: its first transition writes it so.
+            replicas: [replica].into_iter().collect(),
+            joined: false,
+            version_check: None,
         };
         c.push_view(Target::Every);
         c
@@ -400,14 +427,16 @@ impl Coordinator {
     /// anchor: a quick restart skips no day and repeats no day turn; a longer silence than
     /// [`CALENDAR_GAP_MS`] is downtime, re-anchored at the load where the calendar last stood,
     /// never earlier than a host was told — [`Self::calendar_resume`]), but:
-    /// - an attachment of another replica counts as detached ([`ReplicaId`]): every host
-    ///   attaches again, and its `Attach` corrects what the projection holds of it (its unlisted
-    ///   regions park, its unlisted players go offline); a host that never comes back is ended
-    ///   by its succession;
-    /// - a store decision another replica handed out (its mark, `decisions.rs`) committed with
-    ///   the transition holding it, and its answer died with that process: it is LOOKED UP,
-    ///   never issued again ([`Self::orphan_marks`]; until Elastic 2b Task 4's live set, every
-    ///   other replica is a dead process);
+    /// - an attachment counts only while its replica is in the stored live set (Elastic 2b Task
+    ///   4): the runtime's first input is this replica's [`Input::ReplicaJoined`] — `alone`, the
+    ///   total replica crash, it drops every replica registered before it, whose hosts attach
+    ///   again; each `Attach` corrects what the projection holds of its host (its unlisted
+    ///   regions park, its unlisted players go offline); a host that never comes back is ended by
+    ///   its succession;
+    /// - a store decision a replica that is not in the live set handed out (its mark,
+    ///   `decisions.rs`) committed with the transition holding it, and its answer died with that
+    ///   process: it is LOOKED UP, never issued again ([`Self::orphan_marks`]); a live replica's
+    ///   mark is that replica's to answer (a replica dropped later has its marks looked up then);
     /// - a stored deadline more than [`CALENDAR_GAP_MS`] in the past restarts its count
     ///   ([`rebase_deadline`] / [`rebase_since`]): never earlier than stored.
     ///
@@ -425,7 +454,8 @@ impl Coordinator {
         let history = crate::history::persist::decode(history, grid)?;
         let mut c = Coordinator::from_projection(p, history, replica, now_ms);
         c.committed_raw = raw_core(&c.projection());
-        if c.orphan_marks(|stamp| stamp.replica != replica, "it was handed out by a process that is gone") {
+        let live = c.replicas.clone();
+        if c.orphan_marks(|stamp| !live.contains(&stamp.replica), "it was handed out by a replica that is not live") {
             // Outside the log: a rebase before the next commit would lose it (the runtime then
             // stops, and the next start looks it up again).
             c.note_unlogged();
@@ -761,9 +791,15 @@ impl Coordinator {
     /// hand-out or answer in between (each of those clears the verdict anyway: every input
     /// through [`Self::apply`], every change outside the log through `note_unlogged`, every
     /// store decision handed out through `push_decision`).
+    ///
+    /// With more than one live replica (Elastic 2b departs 5) a cache may be stale: outputs
+    /// leave only once the row was read at this cache's version — the ones decided before
+    /// [`Self::version_check_wanted`] handed the check out, after [`Self::version_checked`]
+    /// confirmed it; until then nothing leaves (a check that found the row moved: the runtime
+    /// rebases first). An evicted core ([`Self::evicted`]) releases nothing.
     pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
         if !self.unstored {
-            if self.writing {
+            if self.writing || self.evicted() {
                 return Vec::new();
             }
             let clean = std::mem::take(&mut self.clean_checked) || !self.durable_pending();
@@ -771,6 +807,17 @@ impl Coordinator {
                 return Vec::new();
             }
             debug_assert!(self.decisions.is_empty(), "a store decision waits, yet nothing durable is pending");
+            if self.replicas.len() > 1 && !self.out.is_empty() {
+                let Some(check) = self.version_check.filter(|c| c.confirmed && c.version == self.version) else {
+                    return Vec::new();
+                };
+                self.version_check = None;
+                let n = check.out_len.min(self.out.len());
+                let logged = check.log_len.min(self.log.len());
+                self.log.drain(..logged);
+                self.unlogged_committed = self.unlogged;
+                return self.out.drain(..n).collect();
+            }
         } else {
             // No store: nothing to decide in (an unstored core runs no world cut nor succession).
             self.decisions.clear();
@@ -778,6 +825,97 @@ impl Coordinator {
         self.log.clear();
         self.unlogged_committed = self.unlogged;
         std::mem::take(&mut self.out)
+    }
+
+    /// The version check the outputs free to leave wait for (Elastic 2b departs 5): with more
+    /// than one live replica, nothing durable pending, nothing being written, outputs waiting and
+    /// no check out yet — this cache's version, for the runtime to compare with the row's
+    /// (`SELECT version`) and answer with [`Self::version_checked`]. It covers the outputs
+    /// decided so far. `None`: no check wanted (one replica: none at all).
+    pub fn version_check_wanted(&mut self) -> Option<u64> {
+        if self.unstored || self.writing || self.evicted() || self.replicas.len() <= 1 || self.out.is_empty() {
+            return None;
+        }
+        if self.version_check.is_some_and(|c| c.version == self.version) || self.durable_pending() {
+            return None;
+        }
+        self.version_check = Some(VersionCheck { version: self.version, out_len: self.out.len(), log_len: self.log.len(), confirmed: false });
+        Some(self.version)
+    }
+
+    /// The row's version as the check handed out read it: at this cache's version, the outputs
+    /// it covers may leave ([`Self::take_out`]) — `true`; anything else (the row moved: this
+    /// cache is stale, the runtime rebases; or no such check out) — `false`, nothing leaves.
+    pub fn version_checked(&mut self, row_version: u64) -> bool {
+        match self.version_check.take() {
+            Some(mut c) if c.version == self.version && row_version == self.version => {
+                c.confirmed = true;
+                self.version_check = Some(c);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The live replicas, as the projection holds them (Elastic 2b Task 4).
+    pub fn replicas_live(&self) -> &BTreeSet<ReplicaId> {
+        &self.replicas
+    }
+
+    /// The ticker: the lowest live replica (`None`: none live).
+    pub fn ticker(&self) -> Option<ReplicaId> {
+        self.replicas.first().copied()
+    }
+
+    /// This replica joined ([`Input::ReplicaJoined`]) and the projection no longer holds it:
+    /// another replica ended it. It writes nothing and lets nothing leave; the runtime exits
+    /// fenced.
+    pub fn evicted(&self) -> bool {
+        !self.unstored && self.joined && !self.replicas.contains(&self.replica)
+    }
+
+    /// Replica `me` joined (its first input): it is live; `alone` (the store found no other
+    /// replica beaten within the lease, every one marked dead) drops every replica registered
+    /// before it — ids are issued in order, so a replica that registered after it, and joined
+    /// first, stays.
+    fn on_replica_joined(&mut self, me: ReplicaId, alone: bool) {
+        if me == self.replica {
+            self.joined = true;
+        }
+        if alone {
+            let gone: Vec<ReplicaId> = self.replicas.iter().copied().filter(|r| *r < me).collect();
+            for r in gone {
+                log::warn!("coordinator: replica {me} registered alone: replica {r} is gone");
+                self.drop_replica(r);
+            }
+        }
+        if self.replicas.insert(me) {
+            log::info!("coordinator: replica {me} joined; live {:?}", self.replicas);
+        }
+    }
+
+    /// Replica `r` lapsed (another replica's watch saw its row stand still for a lease): it is
+    /// dropped, and its row is ended in the same transaction ([`StoreDecision::EndReplica`]).
+    /// Not live any more (a replay onto a row that dropped it already): nothing.
+    fn on_replica_lapsed(&mut self, r: ReplicaId) {
+        if r == self.replica {
+            log::warn!("coordinator: replica {r} is told it lapsed itself: ignored (its beat decides)");
+            return;
+        }
+        if self.replicas.contains(&r) {
+            log::warn!("coordinator: replica {r} lapsed: ended");
+            self.drop_replica(r);
+            self.push_decision(StoreDecision::EndReplica(r));
+        }
+    }
+
+    /// Replica `r` is no longer live: the hosts attached to it count detached from here on (their
+    /// attachments stay in the projection, as a restart's did, until each host attaches again or
+    /// a `hosts` read no longer shows it — a cut they take part in aborts at their re-`Attach` or
+    /// its deadline), the store calls it handed out and never answered are looked up.
+    fn drop_replica(&mut self, r: ReplicaId) {
+        self.replicas.remove(&r);
+        self.orphan_marks(|s| s.replica == r, "its replica is no longer live");
     }
 
     /// The gate host: the host the login service's orders go to ([`Self::login_order`]) — the
@@ -834,6 +972,10 @@ impl Coordinator {
             // One at a time (final review G1): the one handed out is not answered yet.
             return None;
         }
+        if self.evicted() {
+            // Ended by another replica: nothing is written (the runtime exits fenced).
+            return None;
+        }
         // The marks handed out since the last transition are this one's: it commits, if at
         // all, as the next version of the row it was read at (the compare-and-set).
         let stamp = CallStamp { replica: self.replica, version: self.version + 1 };
@@ -853,6 +995,8 @@ impl Coordinator {
         self.clean_checked = false;
         self.log_boundary = self.log.len();
         self.unlogged_taken = self.unlogged;
+        // Every output leaves with this transition: its compare-and-set is their version check.
+        self.version_check = None;
         Some(Transition { core, history, out: std::mem::take(&mut self.out), decisions: std::mem::take(&mut self.decisions) })
     }
 
@@ -884,7 +1028,12 @@ impl Coordinator {
     /// carries is looked up ([`Self::orphan_marks`]).
     pub fn transition_failed(&mut self, t: Transition) {
         let stamp = self.writing_stamp;
-        self.hand_back(t);
+        // An end of a replica's row carries no mark (no lookup would find it lost) and is
+        // idempotent: issued again with the next transition (Elastic 2b Task 4).
+        let ends: Vec<StoreDecision> =
+            self.hand_back(t).into_iter().filter(|d| matches!(d, StoreDecision::EndReplica(_))).collect();
+        let later = std::mem::replace(&mut self.decisions, ends);
+        self.decisions.extend(later);
         if let Some(stamp) = stamp {
             self.orphan_marks(|s| *s == stamp, "its write failed and may have committed");
         }
@@ -951,6 +1100,26 @@ impl Coordinator {
         cut || successions
     }
 
+    /// Whether `answer` is the one a mark here awaits — what applying it ([`Input::Decision`])
+    /// would act on; any other changes nothing. The runtime takes an answer's side effects
+    /// (counters, closing a succeeded host's connection, retry pacing) only for these. A cut's
+    /// begin and a replica's end carry no mark: always.
+    pub fn answer_awaited(&self, answer: &DecisionAnswer) -> bool {
+        match answer {
+            DecisionAnswer::Cut { stamp, cut, .. } => self.cut_mark_is(*cut, *stamp),
+            DecisionAnswer::Declared { stamp, .. } => self.successions_declaring() == Some(*stamp),
+            DecisionAnswer::Ended { stamp, end, .. } => self.successions_ending() == Some((end.host, end.boot, *stamp)),
+            DecisionAnswer::RolledBack { stamp, .. } => self.successions_rolling() == Some(*stamp),
+            DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } => true,
+        }
+    }
+
+    /// Whether the cache's history changed since it was last written or loaded (a refresh then
+    /// reads the row's history whole).
+    pub fn history_dirty(&self) -> bool {
+        self.history.content_dirty()
+    }
+
     /// One answer of a store decision ([`Input::Decision`]): applied only if its stamp is the
     /// mark's (`decisions.rs`).
     fn on_decision(&mut self, answer: DecisionAnswer, now_ms: u64) {
@@ -967,7 +1136,7 @@ impl Coordinator {
             DecisionAnswer::Declared { stamp, outcome } => self.declare_answered(stamp, outcome, now_ms),
             DecisionAnswer::Ended { stamp, end, outcome } => self.end_answered(stamp, end, outcome, now_ms),
             DecisionAnswer::RolledBack { stamp, outcome } => self.rollback_answered(stamp, outcome, now_ms),
-            DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica:?}'s row is dead"),
+            DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica}'s row is ended"),
         }
     }
 
@@ -1102,7 +1271,7 @@ impl Coordinator {
     /// generation is gone — its processes are fenced and exit, and a restarted process is a
     /// new host. Each one the projection still names (running a region, holding a player) is
     /// taken out as a predecessor is: its regions park, its players go offline; and each one
-    /// still attached (its link not dropped yet) is detached — never the gate host, an heir, or
+    /// still attached (its link not dropped yet), to any replica, is detached — never the gate host, an heir, or
     /// a host a cut waits for (Elastic 2a final review, I2; as [`Self::rolled_back`] detaches
     /// every host). What a restart of this coordinator used to undo by forgetting every host
     /// (before Elastic 2a its view of the hosts was never saved) is undone here, where the
@@ -1115,7 +1284,8 @@ impl Coordinator {
             log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is gone");
             self.host_succeeded(h);
         }
-        let attached: Vec<HostId> = self.attached_hosts().filter(|h| *h != host).collect();
+        // Every replica's attachments (Elastic 2b Task 4), not only the live ones' counted ones.
+        let attached: Vec<HostId> = self.attachments_any().into_iter().filter(|h| *h != host).collect();
         for h in attached {
             log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is detached");
             self.detach_host(h);

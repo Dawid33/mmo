@@ -535,6 +535,11 @@ impl Coordinator {
     /// — and the open successions read again (a stale generation: the world rolled back behind
     /// this coordinator's back, `worldctl rollback`). An answer with another stamp changes
     /// nothing.
+    /// Whether the running cut is `cut` and its decision's mark is `stamp`.
+    pub(super) fn cut_mark_is(&self, cut: CutId, stamp: CallStamp) -> bool {
+        self.cuts.run.as_ref().is_some_and(|r| r.cut == cut && r.taken == Some(stamp))
+    }
+
     pub(super) fn cut_answered(&mut self, stamp: CallStamp, cut: CutId, committed: Result<bool, String>) {
         let Some(run) = self.cuts.run.as_mut().filter(|r| r.cut == cut && r.taken == Some(stamp)) else {
             log::debug!("coordinator: an answer to cut {}'s decision ({stamp:?}) that no mark here awaits: ignored", cut.0);
@@ -877,10 +882,24 @@ impl Coordinator {
         self.attached_hosts().filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h)).collect()
     }
 
-    /// The hosts attached to THIS replica, by id (an attachment to another replica — a
-    /// restart's projection — is not this replica's; the live set of Task 4 widens this).
+    /// The hosts attached, by id: to any LIVE replica (Elastic 2b Task 4) — an attachment to a
+    /// replica not in the live set (ended, or dropped by a lone registration) counts detached.
     pub(super) fn attached_hosts(&self) -> impl Iterator<Item = HostId> + '_ {
-        self.cuts.attached.iter().filter(|(_, (_, p))| *p == self.replica).map(|(h, _)| *h)
+        self.cuts.attached.iter().filter(|(_, (_, p))| self.replicas.contains(p)).map(|(h, _)| *h)
+    }
+
+    /// Every attachment's host, whatever its replica (a newer generation's first `Attach`
+    /// detaches them all).
+    pub(super) fn attachments_any(&self) -> Vec<HostId> {
+        self.cuts.attached.keys().copied().collect()
+    }
+
+    /// The hosts attached to replica `r` while it is live (none once it is not).
+    pub fn hosts_attached_to(&self, r: ReplicaId) -> BTreeSet<HostId> {
+        if !self.replicas.contains(&r) {
+            return BTreeSet::new();
+        }
+        self.cuts.attached.iter().filter(|(_, (_, p))| *p == r).map(|(h, _)| *h).collect()
     }
 
     /// Whether a message of `host` comes from a succeeded boot of it (`boot`: the boot an
@@ -890,7 +909,14 @@ impl Coordinator {
         boot.or_else(|| self.cuts.boots.get(&host).copied()) == Some(dead)
     }
 
+    /// Whether `host` is attached to a live replica (any: Elastic 2b Task 4).
     pub(super) fn is_attached(&self, host: HostId) -> bool {
+        self.cuts.attached.get(&host).is_some_and(|(_, p)| self.replicas.contains(p))
+    }
+
+    /// Whether `host`'s attachment is to THIS replica (its link here: only this replica's link
+    /// going down detaches it, [`super::Input::LinkDown`]).
+    pub(super) fn is_attached_here(&self, host: HostId) -> bool {
         self.cuts.attached.get(&host).is_some_and(|(_, p)| *p == self.replica)
     }
 

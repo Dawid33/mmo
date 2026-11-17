@@ -135,7 +135,7 @@
 //! 3. The commit.
 //!
 //! Why no cycle: every statement that locks `coordinator` takes it FIRST (only the coordinator's
-//! transitions and its bootstrap's one-statement insert touch it); hosts, claims, registrations,
+//! transitions, its bootstrap's one-statement insert and a replica's registration touch it); hosts, claims, registrations,
 //! heartbeats, the drain mark and the operator never lock it. So nothing holds another lock and
 //! then waits for `coordinator`. After it each decision keeps its own walk (`world` → `hosts` →
 //! `super_regions`; `world` → `cut_decisions` → `hosts` → `successions`), which was already a
@@ -146,6 +146,25 @@
 //! On Postgres the transition takes no writer mutex of the store thread (a host's prepare queued
 //! behind a staged part must not wait for it in-process); on SQLite every transition is one
 //! statement, has no decision, and holds the writer lock.
+//!
+//! **The coordinator's replicas** (Elastic 2b Task 4, `replicas.rs`; table `coordinator_replicas`):
+//! - A registration (`register_replica`), ONE transaction: `coordinator` FIRST — the upsert
+//!   `INSERT … ON CONFLICT (id) DO UPDATE SET next_replica = next_replica + 1` issues the id
+//!   (the row locked as a transition's compare-and-set locks it; it waits for a transition in
+//!   flight, at most `CLAIM_LOCK_TIMEOUT_MS`) — then `coordinator_replicas`: the stale live rows
+//!   marked dead (one `UPDATE`), the old dead rows pruned (one `DELETE`), the new row inserted.
+//! - A beat (`beat_replica`): one `UPDATE` of the caller's own live `coordinator_replicas` row, on
+//!   the beat connection under a 1 s `lock_timeout`; it holds that row and wants nothing after it.
+//! - The end ([`game::coordinator::StoreDecision::EndReplica`], `replicas::end_replica_in`): in a
+//!   transition, after its compare-and-set holds `coordinator`, in its savepoint — one `UPDATE` of
+//!   that replica's row.
+//!
+//! No cycle: `coordinator_replicas` rows are locked only by these statements; the registration
+//! and the end take `coordinator` first (as every statement locking it does), the beat takes no
+//! other lock. So nothing holding a `coordinator_replicas` row waits for `coordinator`. A beat
+//! behind a registration's lapse or an end waits at most its lock timeout ("no beat this time")
+//! and, after their commit, answers "not live". Two transitions or registrations meet on the
+//! `coordinator` row first: a wait, then a conflict, never a deadlock.
 //!
 //! **The coordinator's bootstrap** (`rows.rs` `bootstrap_coordinator`, Elastic 2b Task 3): ONE
 //! statement, `INSERT INTO coordinator … ON CONFLICT (id) DO UPDATE … WHERE coordinator.core IS

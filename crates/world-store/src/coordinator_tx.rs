@@ -117,7 +117,8 @@ pub(crate) async fn write_pg(
 ) -> Result<(u64, u64, Vec<Decided>), StoreError> {
     let mut tx = pool.begin().await?;
     let sql = format!(
-        "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, saved_utc = $3 \
+        "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, saved_utc = $3, \
+         history_version = CASE WHEN $2::bytea IS NULL THEN history_version ELSE version + 1 END \
          WHERE id = 1 AND version = $4 RETURNING version, {PG_NOW_MS}"
     );
     let row = sqlx::query(&sql)
@@ -220,13 +221,16 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
             let keep = matches!(rolled, Ok((_, Some(_))));
             (Decided::RolledBack(rolled.map(|(g, _)| g)), keep)
         }
-        StoreDecision::EndReplica(replica) => (
-            Decided::ReplicaEnded {
-                replica: *replica,
-                outcome: Err(StoreError::Unsupported("ending a coordinator replica's row comes with Elastic 2b Task 4".into())),
-            },
-            false,
-        ),
+        StoreDecision::EndReplica(replica) => {
+            let ended = crate::replicas::end_replica_in(&mut *tx, *replica).await;
+            match &ended {
+                Ok(true) => log::warn!("[world-store] coordinator replica {replica} lapsed: its row is ended (with the transition)"),
+                Ok(false) => log::info!("[world-store] coordinator replica {replica}: no live row to end (ended already)"),
+                Err(e) => log::warn!("[world-store] coordinator replica {replica}: its row could not be ended: {e}"),
+            }
+            let keep = ended.is_ok();
+            (Decided::ReplicaEnded { replica: *replica, outcome: ended.map(|_| ()) }, keep)
+        }
     }
 }
 

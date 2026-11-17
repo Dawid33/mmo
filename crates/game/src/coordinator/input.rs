@@ -23,7 +23,7 @@ use crate::HostId;
 use crate::history::persist::HistoryLoadError;
 
 use super::state::{decode_core, raw_core};
-use super::{Coordinator, DecisionAnswer, HostMsg, Projection};
+use super::{Coordinator, DecisionAnswer, HostMsg, Projection, ReplicaId};
 
 /// One input of the coordinator core, as a replica applies it ([`Coordinator::apply`]) and
 /// replays it at a rebase.
@@ -42,6 +42,16 @@ pub enum Input {
     /// only if its stamp is the mark's — at a replay too, so a rebase onto a row holding the
     /// mark applies it there, and onto one without it changes nothing.
     Decision(DecisionAnswer),
+    /// Replica `me` registered (Elastic 2b Task 4): every replica's first input. It adds `me`
+    /// to the live set; `alone` (the store found no other replica beaten within
+    /// [`super::REPLICA_LEASE_MS`] and marked them dead: a total replica crash) drops every
+    /// replica registered before it. Idempotent.
+    ReplicaJoined { me: ReplicaId, alone: bool },
+    /// Replica `r` lapsed (this replica's own [`super::ReplicaWatch`] saw its row stand still
+    /// for a lease): dropped from the live set, its row ended in the same transaction
+    /// ([`super::StoreDecision::EndReplica`]). Idempotent: a replay onto a row that dropped it
+    /// does nothing.
+    ReplicaLapsed(ReplicaId),
 }
 
 impl Coordinator {
@@ -70,7 +80,7 @@ impl Coordinator {
         match input {
             Input::Host { host, msg } => self.on_host(host, msg, now),
             Input::LinkDown { host } => {
-                if self.is_attached(host) {
+                if self.is_attached_here(host) {
                     self.detach_host(host);
                 } else {
                     log::debug!("coordinator: host {host}'s link down: not attached to this replica, nothing to detach");
@@ -78,6 +88,8 @@ impl Coordinator {
             }
             Input::Maintain => self.on_maintain(now),
             Input::Decision(answer) => self.on_decision(answer, now),
+            Input::ReplicaJoined { me, alone } => self.on_replica_joined(me, alone),
+            Input::ReplicaLapsed(r) => self.on_replica_lapsed(r),
         }
     }
 
@@ -121,10 +133,13 @@ impl Coordinator {
         // A mark of this replica still set now was committed in the row by an earlier
         // transition of it whose answer was never applied (nothing is in flight after a
         // rebase: the transition that met the conflict did not commit): looked up, never
-        // issued again. (Another replica's marks are its own to answer; Elastic 2b Task 4
-        // looks up those of a replica no longer live.)
-        let me = self.replica;
-        self.orphan_marks(|stamp| stamp.replica == me, "its answer was never applied before a rebase");
+        // issued again. A live replica's marks are its own to answer; those of a replica not in
+        // the live set (Elastic 2b Task 4: ended, or gone in a lone registration) are looked up.
+        let (me, live) = (self.replica, self.replicas.clone());
+        self.orphan_marks(
+            |stamp| stamp.replica == me || !live.contains(&stamp.replica),
+            "its answer was never applied before a rebase, or its replica is not live",
+        );
         Ok(())
     }
 

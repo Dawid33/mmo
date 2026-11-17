@@ -1017,9 +1017,11 @@ macro_rules! engine_rows {
                 history: Vec<u8>,
             ) -> Result<crate::Bootstrapped, StoreError> {
                 let row = sqlx::query(
-                    "INSERT INTO coordinator (id, epoch, version, core, history, saved_utc) VALUES (1, 1, 1, $1, $2, $3) \
+                    "INSERT INTO coordinator (id, epoch, version, core, history, saved_utc, history_version) \
+                     VALUES (1, 1, 1, $1, $2, $3, 1) \
                      ON CONFLICT (id) DO UPDATE SET epoch = coordinator.epoch + 1, version = coordinator.version + 1, \
-                     core = excluded.core, history = excluded.history, saved_utc = excluded.saved_utc \
+                     core = excluded.core, history = excluded.history, saved_utc = excluded.saved_utc, \
+                     history_version = coordinator.version + 1 \
                      WHERE coordinator.core IS NULL RETURNING version, epoch",
                 )
                 .bind(core)
@@ -1049,6 +1051,7 @@ macro_rules! engine_rows {
             ) -> Result<(u64, u64), StoreError> {
                 let sql = format!(
                     "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, \
+                     history_version = CASE WHEN $2 IS NULL THEN history_version ELSE version + 1 END, \
                      saved_utc = $3 WHERE id = 1 AND version = $4 RETURNING version, {NOW_MS}"
                 );
                 let row = sqlx::query(&sql)
@@ -1067,14 +1070,19 @@ macro_rules! engine_rows {
             /// The coordinator row's projection; `None` when there is no row or its `core` was
             /// never written (a claimed row before its first write).
             pub(crate) async fn load_coordinator(pool: &Pool) -> Result<Option<crate::StoredCoordinator>, StoreError> {
-                let row = sqlx::query("SELECT version, core, history FROM coordinator WHERE id = 1")
+                let row = sqlx::query("SELECT version, core, history, history_version FROM coordinator WHERE id = 1")
                     .fetch_optional(pool)
                     .await?;
                 let Some(r) = row else { return Ok(None) };
                 let core: Option<Vec<u8>> = r.try_get(1)?;
                 let Some(core) = core else { return Ok(None) };
                 let history: Option<Vec<u8>> = r.try_get(2)?;
-                Ok(Some(crate::StoredCoordinator { version: u(r.try_get(0)?), core, history: history.unwrap_or_default() }))
+                Ok(Some(crate::StoredCoordinator {
+                    version: u(r.try_get(0)?),
+                    core,
+                    history: history.unwrap_or_default(),
+                    history_version: u(r.try_get(3)?),
+                }))
             }
 
             pub(crate) async fn forged_archive(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {

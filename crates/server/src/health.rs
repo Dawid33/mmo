@@ -70,6 +70,8 @@ pub struct Health {
     coordinator_core_bytes: AtomicU64,
     coordinator_history_bytes: AtomicU64,
     coordinator_conflicts: AtomicU64,
+    coordinator_replicas_live: AtomicU64,
+    coordinator_is_ticker: AtomicBool,
 }
 
 impl Health {
@@ -92,6 +94,8 @@ impl Health {
             coordinator_core_bytes: AtomicU64::new(0),
             coordinator_history_bytes: AtomicU64::new(0),
             coordinator_conflicts: AtomicU64::new(0),
+            coordinator_replicas_live: AtomicU64::new(0),
+            coordinator_is_ticker: AtomicBool::new(false),
         }
     }
 
@@ -206,6 +210,13 @@ impl Health {
         self.coordinator_conflicts.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The coordinator replica's view of the live set (Elastic 2b Task 4): how many replicas its
+    /// core holds live, and whether it is their ticker.
+    pub fn coordinator_replicas(&self, live: u64, ticker: bool) {
+        self.coordinator_replicas_live.store(live, Ordering::Relaxed);
+        self.coordinator_is_ticker.store(ticker, Ordering::Relaxed);
+    }
+
     /// Milliseconds since the last loop pass; `None` before the first.
     fn loop_age_ms(&self) -> Option<u64> {
         match self.last_beat_ms.load(Ordering::Relaxed) {
@@ -296,6 +307,16 @@ impl Health {
             "mmo_coordinator_conflicts_total",
             "Coordinator writes refused as a conflict (the row's version moved under its epoch).",
             load(&self.coordinator_conflicts),
+        );
+        gauge(
+            "mmo_coordinator_replicas_live",
+            "Coordinator replicas live, as this replica's core holds them (Elastic 2b).",
+            load(&self.coordinator_replicas_live),
+        );
+        gauge(
+            "mmo_coordinator_is_ticker",
+            "1 while this coordinator replica is the ticker (the lowest live replica).",
+            u64::from(self.coordinator_is_ticker.load(Ordering::Relaxed)),
         );
         let build = IntGaugeVec::new(
             opts("mmo_build_info", "The running build (always 1)."),
@@ -521,6 +542,8 @@ mod tests {
             "mmo_coordinator_transitions_total",
             "mmo_coordinator_written_bytes_total",
             "mmo_coordinator_conflicts_total",
+            "mmo_coordinator_replicas_live",
+            "mmo_coordinator_is_ticker",
             "mmo_build_info",
         ] {
             assert!(text.lines().any(|l| l.starts_with(&format!("# TYPE {name} "))), "{name} is missing:\n{text}");

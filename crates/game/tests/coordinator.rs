@@ -56,9 +56,13 @@ fn written(c: &mut Coordinator) -> Option<Transition> {
 }
 
 /// A core restarted from transition `t` (`history`: the history the store holds, when `t`
-/// carried none) as process boot `process`, at store time `now_ms`.
+/// carried none) as replica `process`, at store time `now_ms` — its first input its
+/// registration alone (Elastic 2b Task 4: the restart of the only replica; every replica
+/// registered before it is gone).
 fn reload(t: &Transition, history: &[u8], process: ReplicaId, now_ms: u64) -> Coordinator {
-    Coordinator::load(&t.core, t.history.as_deref().unwrap_or(history), grid(), process, now_ms).expect("the projection loads")
+    let mut c = Coordinator::load(&t.core, t.history.as_deref().unwrap_or(history), grid(), process, now_ms).expect("the projection loads");
+    c.apply(Input::ReplicaJoined { me: process, alone: true }, now_ms);
+    c
 }
 
 fn grid() -> SocietyGrid {
@@ -354,6 +358,8 @@ fn state_round_trips() {
     let mut c2 = reload(&t, &history, ReplicaId(1), 0);
     assert_eq!(c2.claims(), vec![(A, Claim::Adventure(site)), (B, Claim::Adventure(site))]);
     assert_eq!(c2.memo_ids().len(), 2);
+    // Its registration (Elastic 2b Task 4: the live set) is its first transition.
+    assert!(written(&mut c2).is_some_and(|t| t.out.is_empty() && t.decisions.is_empty()), "the join alone");
     assert!(c2.take_transition().is_none(), "a loaded projection writes nothing until something changes");
     let refuse = |bytes: &[u8]| Coordinator::load(bytes, &history, grid(), ReplicaId(1), 0).err();
     assert!(matches!(refuse(&[COORDINATOR_STATE_VERSION + 1]), Some(game::history::persist::HistoryLoadError::Corrupt(_))), "an unknown format is refused");
@@ -4458,6 +4464,7 @@ fn an_absent_id_leaves_no_attachment_or_boot_in_the_projection() {
     let mut c = succeeding(3);
     let (core, history) = c.encode_projection();
     let mut c = Coordinator::load(&core, &history, grid(), ReplicaId(9), 100).expect("loads");
+    c.apply(Input::ReplicaJoined { me: ReplicaId(9), alone: true }, 100);
     c.set_crash_policy(game::CrashPolicy::Succession);
     c.handle(h(0), claim_attach(h(0), 70, Vec::new(), Vec::new()), 100);
     commit_routed(&mut c);
@@ -4631,6 +4638,8 @@ fn a_link_down_of_a_host_attached_elsewhere_changes_nothing() {
     };
     let mut b = row.replica(2);
     configure(&mut b);
+    // B is the live replica (Elastic 2b Task 4: an attachment counts while its replica is live).
+    b.apply(Input::ReplicaJoined { me: ReplicaId(2), alone: true }, 0);
     b.apply(Input::Host { host: h(0), msg: attach(h(0), 1, Vec::new(), Vec::new()) }, 0);
     b.apply(Input::Host { host: h(1), msg: attach(h(1), 1, Vec::new(), Vec::new()) }, 0);
     b.apply(Input::Maintain, 10 * CUT_EVERY_MS);
@@ -4733,4 +4742,101 @@ fn a_mark_whose_answer_was_lost_is_looked_up_not_reissued() {
     assert_eq!(c.declare_wanted(3_000), None, "nor after it: the declared run is open");
     assert_eq!(c.successions_open_count(), 1, "one run");
     assert!(!c.rollback_wanted(), "never rolled back");
+}
+
+// ---- Elastic 2b Task 4: the live set of replicas -----------------------------------------
+
+/// Two replicas joined over one row (`a` = replica 1 committed it first, `b` = replica 2), each
+/// rebased onto the row's latest version. The row, `a`, `b`.
+fn two_replicas() -> (Row, Coordinator, Coordinator) {
+    let (base, _, _) = coordinator();
+    let mut row = Row::of(&base);
+    let mut a = row.replica(1);
+    a.apply(Input::ReplicaJoined { me: ReplicaId(1), alone: true }, 0);
+    row.write(&mut a).expect("A writes first");
+    let mut b = row.replica(2);
+    b.apply(Input::ReplicaJoined { me: ReplicaId(2), alone: false }, 0);
+    row.write(&mut b).expect("B writes on A's row");
+    row.rebase(&mut a);
+    let both: std::collections::BTreeSet<ReplicaId> = [ReplicaId(1), ReplicaId(2)].into_iter().collect();
+    assert_eq!(a.replicas_live(), &both, "A's cache holds both");
+    assert_eq!(b.replicas_live(), &both, "B's cache holds both");
+    (row, a, b)
+}
+
+/// Elastic 2b Task 4: an attachment counts while its replica is in the durable live set — on
+/// every replica: a host attached to A counts on B too (the gate, the cuts, the heirs) — and
+/// counts detached from the transition that drops A (`ReplicaLapsed`, which ends A's row in the
+/// same transaction) on.
+#[test]
+fn an_attachment_of_a_lapsed_replica_counts_detached() {
+    let (mut row, mut a, mut b) = two_replicas();
+    a.set_crash_policy(game::CrashPolicy::Succession);
+    b.set_crash_policy(game::CrashPolicy::Succession);
+    a.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 0);
+    row.write(&mut a).expect("A's attach commits");
+    row.rebase(&mut b);
+    b.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 0);
+    row.write(&mut b).expect("B's attach commits");
+    let one = |h: HostId| -> std::collections::BTreeSet<HostId> { [h].into_iter().collect() };
+    assert_eq!(b.hosts_attached_to(ReplicaId(1)), one(h(0)), "host 0 is A's");
+    assert_eq!(b.hosts_attached_to(ReplicaId(2)), one(h(1)), "host 1 is B's");
+    assert_eq!(b.gate_host(), Some(h(0)), "host 0, attached to A, counts on B");
+    assert_eq!(b.ticker(), Some(ReplicaId(1)), "the lowest live replica ticks");
+
+    b.apply(Input::ReplicaLapsed(ReplicaId(1)), 100);
+    let t = b.take_transition().expect("the lapse is durable");
+    assert_eq!(t.decisions, vec![StoreDecision::EndReplica(ReplicaId(1))], "A's row is ended in the same transaction");
+    b.transition_written(b.version() + 1);
+    let only_b: std::collections::BTreeSet<ReplicaId> = [ReplicaId(2)].into_iter().collect();
+    assert_eq!(b.replicas_live(), &only_b);
+    assert_eq!(b.ticker(), Some(ReplicaId(2)), "B ticks now");
+    assert_eq!(b.gate_host(), Some(h(1)), "host 0's attachment to the ended replica counts detached");
+    assert!(b.hosts_attached_to(ReplicaId(1)).is_empty(), "nothing counts attached to an ended replica");
+}
+
+/// Elastic 2b Task 4: a replica whose rebased core lacks its own id (another replica ended it)
+/// writes nothing and lets nothing leave — not even what it decided on its stale cache.
+#[test]
+fn a_replica_missing_from_its_own_rebased_core_writes_nothing() {
+    let (mut row, mut a, mut b) = two_replicas();
+    b.apply(Input::ReplicaLapsed(ReplicaId(1)), 100);
+    row.write(&mut b).expect("B ends A");
+    a.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 200);
+    let _lost = row.write(&mut a).expect_err("A's write conflicts: B moved the row");
+    row.rebase(&mut a);
+    assert!(!a.replicas_live().contains(&ReplicaId(1)), "the row ended A");
+    assert!(a.evicted(), "A knows it was ended");
+    assert!(a.take_transition().is_none(), "A writes nothing");
+    assert!(a.take_out().is_empty(), "nothing leaves A");
+}
+
+/// Elastic 2b Task 4 (departs 5): with two live replicas a query answered without any durable
+/// change (free to leave) waits for the version check: it leaves once the row is read at this
+/// cache's version, never before; a row read at another version leaves nothing (the replica
+/// rebases first). With one live replica it leaves at once, as before.
+#[test]
+fn free_outputs_wait_for_the_version_check_with_two_replicas() {
+    let (_row, mut a, _b) = two_replicas();
+    let (_, _, people) = world();
+    a.handle(h(0), request(1, B, WorldRequest::PersonInfo(people[2])), 300);
+    assert!(a.take_transition().is_none(), "a query changes nothing durable");
+    assert!(a.take_out().is_empty(), "with two replicas nothing leaves before the version check");
+    let v = a.version_check_wanted().expect("a check is wanted");
+    assert_eq!(v, a.version(), "of this cache's version");
+    assert!(a.version_check_wanted().is_none(), "one at a time");
+    assert!(!a.version_checked(v + 1), "the row moved: the cache is stale");
+    assert!(a.take_out().is_empty(), "a stale cache releases nothing");
+    let v = a.version_check_wanted().expect("checked again");
+    assert!(a.version_checked(v), "the row is at this cache's version");
+    let out: Vec<CoordMsg> = a.take_out().into_iter().map(|(_, m)| m).collect();
+    assert!(matches!(reply_to(&out, 1), WorldReply::PersonInfo(_)), "the answer leaves after the check: {out:?}");
+
+    // One replica: at once.
+    let (mut c, _, people) = coordinator();
+    c.handle(h(0), request(2, B, WorldRequest::PersonInfo(people[2])), 300);
+    assert!(c.take_transition().is_none());
+    assert!(c.version_check_wanted().is_none(), "no check with one replica");
+    let out: Vec<CoordMsg> = c.take_out().into_iter().map(|(_, m)| m).collect();
+    assert!(matches!(reply_to(&out, 2), WorldReply::PersonInfo(_)), "{out:?}");
 }

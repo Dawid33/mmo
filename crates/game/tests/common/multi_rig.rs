@@ -626,6 +626,9 @@ impl MultiRig {
             let grid = guard.history().grid().clone();
             let policy = guard.crash_policy();
             let mut loaded = game::Coordinator::load(&core, &history, grid, process, now).expect("the projection loads");
+            // Its first input: it registered alone (the old process's row lapsed) — Elastic 2b
+            // Task 4: the old replica's attachments and marks are no longer live.
+            loaded.apply(game::coordinator::Input::ReplicaJoined { me: process, alone: true }, now);
             loaded.set_crash_policy(policy);
             loaded.set_expected_hosts(expected);
             if policy == game::CrashPolicy::Succession {

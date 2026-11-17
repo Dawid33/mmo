@@ -123,6 +123,16 @@ pub(crate) enum Request {
     /// A committed transition's post-commit effect (`coordinator_tx.rs`).
     AfterCommit(crate::AfterCommit, Option<u32>, Reply<()>),
     LoadCoordinator(Reply<Option<crate::StoredCoordinator>>),
+    /// Elastic 2b Task 4: the row, its history only if written after the version given.
+    LoadCoordinatorSince(u64, Reply<Option<crate::StoredCoordinator>>),
+    /// Elastic 2b Task 4: the row's version.
+    RowVersion(Reply<u64>),
+    /// Elastic 2b Task 4: a coordinator replica registers (`replicas.rs`).
+    RegisterReplica(String, Reply<crate::ReplicaRegistered>),
+    /// Elastic 2b Task 4: a replica's beat (Postgres: the beat connection).
+    BeatReplica(game::coordinator::ReplicaId, Reply<bool>),
+    /// Elastic 2b Task 4: every `coordinator_replicas` row.
+    Replicas(Reply<Vec<crate::ReplicaRow>>),
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
     SetSuperRegionRegions(u32, Reply<bool>),
@@ -174,6 +184,10 @@ pub(crate) struct CutState {
     /// The host lease a declaration and a boot judge a row's `seen_ms` by, ms
     /// ([`game::HOST_LEASE_MS`]; a test hook shortens it, [`crate::StoreHandle::set_host_lease_ms`]).
     pub host_lease_ms: AtomicU64,
+    /// The replica lease a replica's registration judges the other rows by, ms
+    /// ([`game::coordinator::REPLICA_LEASE_MS`]; a test hook shortens it,
+    /// [`crate::StoreHandle::set_replica_lease_ms`]).
+    pub replica_lease_ms: AtomicU64,
     /// Committed world cuts this handle decided that hold an entity in two regions
     /// ([`two_phase::report_entities_twice`]).
     pub entities_twice_cuts: AtomicU64,
@@ -191,6 +205,7 @@ impl CutState {
             lock_timeout_ms: AtomicU64::new(crate::CUT_LOCK_TIMEOUT_MS),
             claim_lock_timeout_ms: AtomicU64::new(crate::CLAIM_LOCK_TIMEOUT_MS),
             host_lease_ms: AtomicU64::new(game::HOST_LEASE_MS),
+            replica_lease_ms: AtomicU64::new(game::coordinator::REPLICA_LEASE_MS),
             entities_twice_cuts: AtomicU64::new(0),
             entities_checked_cuts: AtomicU64::new(0),
             settled_unadopted_cuts: AtomicU64::new(0),
@@ -219,6 +234,16 @@ macro_rules! on_pool {
         match $pool {
             Pool::Sqlite(p) => rows::sqlite::$f(p, $($arg),*).await,
             Pool::Pg(p) => rows::pg::$f(p, $($arg),*).await,
+        }
+    };
+}
+
+/// Calls `replicas::<engine>::$f(pool, args…)` on whichever engine `pool` is.
+macro_rules! on_replicas {
+    ($pool:expr, $f:ident($($arg:expr),*)) => {
+        match $pool {
+            Pool::Sqlite(p) => crate::replicas::sqlite::$f(p, $($arg),*).await,
+            Pool::Pg(p) => crate::replicas::pg::$f(p, $($arg),*).await,
         }
     };
 }
@@ -583,6 +608,39 @@ async fn serve(
                 r.send(on_pool!(&pool, bootstrap_coordinator(core, history)))
             }),
             Request::LoadCoordinator(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) }),
+            Request::LoadCoordinatorSince(since, r) => {
+                tokio::spawn(async move { r.send(on_replicas!(&pool, load_coordinator_since(since))) })
+            }
+            Request::RowVersion(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, row_version())) }),
+            Request::Replicas(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, replicas())) }),
+            Request::RegisterReplica(addr, r) => {
+                let lease_ms = cuts.replica_lease_ms.load(Ordering::SeqCst);
+                let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    // SQLite: one writer at a time. Postgres: the `coordinator` row orders it.
+                    let _w = match &pool {
+                        Pool::Sqlite(_) => Some(writer.lock().await),
+                        Pool::Pg(_) => None,
+                    };
+                    r.send(on_replicas!(&pool, register_replica(&addr, lease_ms, lock_ms)))
+                })
+            }
+            // Postgres: the beat connection, as a host's heartbeat (never the shared pool).
+            Request::BeatReplica(me, r) => match (&pool, &beat_tx) {
+                (Pool::Pg(_), Some(beat_tx)) => {
+                    if let Err(mpsc::error::SendError(job)) = beat_tx.send(BeatJob::Replica(me, r)) {
+                        job.refuse("the heartbeat task has stopped");
+                    }
+                    continue;
+                }
+                _ => tokio::spawn(async move {
+                    let _w = match &pool {
+                        Pool::Sqlite(_) => Some(writer.lock().await),
+                        Pool::Pg(_) => None,
+                    };
+                    r.send(on_replicas!(&pool, beat_replica(me)))
+                }),
+            },
             Request::EnsureClockAnchor(proposed, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, ensure_clock_anchor(proposed)))
@@ -613,8 +671,8 @@ async fn serve(
             // the lease) — the beat task's own connection, under its deadline.
             Request::Heartbeat(ordinal, boot, r) => match (&pool, &beat_tx) {
                 (Pool::Pg(_), Some(beat_tx)) => {
-                    if let Err(mpsc::error::SendError((_, _, r))) = beat_tx.send((ordinal, boot, r)) {
-                        r.send(Err(StoreError::Backend("the heartbeat task has stopped".into())));
+                    if let Err(mpsc::error::SendError(job)) = beat_tx.send(BeatJob::Host(ordinal, boot, r)) {
+                        job.refuse("the heartbeat task has stopped");
                     }
                     continue;
                 }
@@ -687,8 +745,23 @@ async fn serve(
     drop(guard);
 }
 
-/// A lease beat for the beat task: `(ordinal, boot, answer)`.
-type BeatJob = (HostId, u64, Reply<crate::Beat>);
+/// A lease beat for the beat task: a host's `(ordinal, boot, answer)`, or a coordinator
+/// replica's (Elastic 2b Task 4).
+enum BeatJob {
+    Host(HostId, u64, Reply<crate::Beat>),
+    Replica(game::coordinator::ReplicaId, Reply<bool>),
+}
+
+impl BeatJob {
+    /// Answered with an error (`why`) without beating.
+    fn refuse(self, why: &str) {
+        let e = || StoreError::Backend(why.into());
+        match self {
+            BeatJob::Host(_, _, r) => r.send(Err(e())),
+            BeatJob::Replica(_, r) => r.send(Err(e())),
+        }
+    }
+}
 
 /// `application_name` of a store's heartbeat connection.
 pub(crate) const HEARTBEAT_APP: &str = "mmo-heartbeat";
@@ -703,13 +776,46 @@ pub(crate) const HEARTBEAT_APP: &str = "mmo-heartbeat";
 /// [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (`SET LOCAL`: nothing outlives the transaction, also
 /// behind a connection pooler): a beat behind a registration or a declaration of its own row
 /// fails fast. One statement over the caller's own `hosts` row, UNFENCED on purpose (as
-/// `rows`' `heartbeat`, which SQLite still uses).
+/// `rows`' `heartbeat`, which SQLite still uses). A coordinator replica's beat (Elastic 2b Task
+/// 4) is the same shape over its own `coordinator_replicas` row (`replicas.rs`).
 async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::UnboundedReceiver<BeatJob>) {
     use sqlx::{ConnectOptions, Connection, Row};
     let deadline = std::time::Duration::from_millis(crate::HEARTBEAT_DEADLINE_MS);
     let sql = crate::rows::heartbeat_sql(crate::succession::PG_NOW_MS);
+    let replica_sql = crate::replicas::beat_sql(crate::succession::PG_NOW_MS);
     let mut conn: Option<sqlx::PgConnection> = None;
-    while let Some((ordinal, boot, reply)) = rx.recv().await {
+    while let Some(job) = rx.recv().await {
+        let (ordinal, boot, reply) = match job {
+            BeatJob::Host(ordinal, boot, reply) => (ordinal, boot, reply),
+            BeatJob::Replica(me, reply) => {
+                let beat = async {
+                    if conn.is_none() {
+                        conn = Some(options.connect().await?);
+                    }
+                    let mut tx = conn.as_mut().expect("connected above").begin().await?;
+                    sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", crate::HEARTBEAT_LOCK_TIMEOUT_MS)).execute(&mut *tx).await?;
+                    let row = sqlx::query(&replica_sql).bind(i(me.0)).fetch_optional(&mut *tx).await?;
+                    tx.commit().await?;
+                    Ok::<bool, sqlx::Error>(row.is_some())
+                };
+                let answer = match tokio::time::timeout(deadline, beat).await {
+                    Ok(Ok(live)) => Ok(live),
+                    Ok(Err(e)) => {
+                        conn = None;
+                        Err(e.into())
+                    }
+                    Err(_) => {
+                        conn = None;
+                        Err(StoreError::Backend(format!(
+                            "a replica beat got no answer within {} ms; its connection is dropped",
+                            crate::HEARTBEAT_DEADLINE_MS
+                        )))
+                    }
+                };
+                reply.send(answer);
+                continue;
+            }
+        };
         let beat = async {
             if conn.is_none() {
                 conn = Some(options.connect().await?);
@@ -883,6 +989,8 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SetSuperRegionRegions(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RegisterHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RegisterReplica(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::BeatReplica(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PrepareCut(c, _, _, r) => {
             cuts.settle(c.id);
             r.send(Err(StoreError::ReadOnly))

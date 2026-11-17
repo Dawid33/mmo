@@ -377,16 +377,12 @@ pub struct CoordinatorStart {
     /// There is no claim (Elastic 2b Task 3): a coordinator still running that commits after
     /// this read moves the version, and this start's first write meets a `Conflict` and rebases.
     pub version: u64,
-}
-
-/// This coordinator process's replica ([`game::coordinator::ReplicaId`]), drawn at random per
-/// process start (Elastic 2b Task 4 issues them from the store): a randomly keyed hash of the
-/// wall clock's nanoseconds and the process id.
-fn replica_id() -> game::coordinator::ReplicaId {
-    use std::hash::BuildHasher;
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-    let random = std::collections::hash_map::RandomState::new().hash_one((nanos, std::process::id()));
-    game::coordinator::ReplicaId(random)
+    /// This replica registered with no other replica live (Elastic 2b Task 4): its first input
+    /// ([`game::coordinator::Input::ReplicaJoined`]) drops every replica registered before it.
+    pub alone: bool,
+    /// The row version whose transition last wrote the history this core holds (0: unknown —
+    /// a refresh then reads the history whole).
+    pub history_version: u64,
 }
 
 /// The refusal of a world whose coordinator state this build cannot take over while regions
@@ -422,21 +418,41 @@ pub fn ensure_coordinator_state(
     map: &game::WorldMap,
     sqlite_db: Option<&Path>,
 ) -> Result<Option<CoordinatorStart>, String> {
+    ensure_coordinator_state_at(store, map, sqlite_db, "")
+}
+
+/// [`ensure_coordinator_state`] for a replica listening for hosts at `addr` (a label in its
+/// `coordinator_replicas` row). Elastic 2b Task 4: the replica REGISTERS first — its id issued
+/// by the store, never reused (`StoreHandle::register_replica`) — then reads the row.
+pub fn ensure_coordinator_state_at(
+    store: &StoreHandle,
+    map: &game::WorldMap,
+    sqlite_db: Option<&Path>,
+    addr: &str,
+) -> Result<Option<CoordinatorStart>, String> {
+    let registered = store.register_replica(addr).map_err(|e| format!("registering the coordinator replica: {e}"))?;
+    start_from_row(store, map, sqlite_db, registered)
+}
+
+/// [`ensure_coordinator_state_at`] once registered as `registered`.
+fn start_from_row(
+    store: &StoreHandle,
+    map: &game::WorldMap,
+    sqlite_db: Option<&Path>,
+    registered: world_store::ReplicaRegistered,
+) -> Result<Option<CoordinatorStart>, String> {
     use game::history::persist::{self, HistoryLoadError};
     use game::history::SocietyGrid;
     let grid = SocietyGrid::from_world_map(map);
     let replaceable = |e: &HistoryLoadError| matches!(e, HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. });
-    let process = replica_id();
+    let process = registered.replica;
     let saved_regions = || -> Result<bool, String> {
         store.stored_regions().map(|r| !r.is_empty()).map_err(|e| format!("reading the world's saved regions: {e}"))
     };
     // The core's clock is the store's: sampled once the row is read.
     let store_ms = || store.db_now_ms().map_err(|e| format!("reading the world store's clock: {e}"));
-    let started = |coordinator: game::Coordinator, store_ms: u64, source: CoordinatorSource, version: u64| CoordinatorStart {
-        coordinator,
-        store_time: (store_ms, Instant::now()),
-        source,
-        version,
+    let started = |coordinator: game::Coordinator, store_ms: u64, source: CoordinatorSource, version: u64, history_version: u64| {
+        CoordinatorStart { coordinator, store_time: (store_ms, Instant::now()), source, version, alone: registered.alone, history_version }
     };
     // A new core (migrated or bootstrapped): the row's first version, unless one is there (a
     // replaced state: the first transition writes over it at its version), or another replica
@@ -469,7 +485,9 @@ pub fn ensure_coordinator_state(
     if let Some(row) = stored {
         let now = store_ms()?;
         match game::Coordinator::load(&row.core, &row.history, grid.clone(), process, now) {
-            Ok(coordinator) => return Ok(Some(started(coordinator, now, CoordinatorSource::Stored, row.version))),
+            Ok(coordinator) => {
+                return Ok(Some(started(coordinator, now, CoordinatorSource::Stored, row.version, row.history_version)));
+            }
             Err(e) if replaceable(&e) => {
                 if saved_regions()? {
                     return Err(refuse_old_world(&format!("does not load ({e})")));
@@ -488,8 +506,11 @@ pub fn ensure_coordinator_state(
                 log::info!("[server] migrating the world's history row into the coordinator's state");
                 let now = store_ms()?;
                 return match first(game::Coordinator::new_for(history, now, process), replacing)? {
-                    Some((coordinator, version)) => Ok(Some(started(coordinator, now, CoordinatorSource::Migrated, version))),
-                    None => ensure_coordinator_state(store, map, sqlite_db),
+                    Some((coordinator, version)) => {
+                        let written = if replacing.is_some() { 0 } else { version };
+                        Ok(Some(started(coordinator, now, CoordinatorSource::Migrated, version, written)))
+                    }
+                    None => start_from_row(store, map, sqlite_db, registered),
                 };
             }
             Err(e) if replaceable(&e) => keep_replaced("history", &e, &bytes, sqlite_db.map(history_backup_path))?,
@@ -499,9 +520,13 @@ pub fn ensure_coordinator_state(
     let Some(history) = bootstrap_history(map, grid) else { return Ok(None) };
     let now = store_ms()?;
     match first(game::Coordinator::new_for(history, now, process), replacing)? {
-        Some((coordinator, version)) => Ok(Some(started(coordinator, now, CoordinatorSource::Bootstrapped, version))),
+        Some((coordinator, version)) => {
+            // A replaced state's history is written by the first transition (0: read it whole).
+            let written = if replacing.is_some() { 0 } else { version };
+            Ok(Some(started(coordinator, now, CoordinatorSource::Bootstrapped, version, written)))
+        }
         // Another replica bootstrapped the row since this one read it: load it.
-        None => ensure_coordinator_state(store, map, sqlite_db),
+        None => start_from_row(store, map, sqlite_db, registered),
     }
 }
 
@@ -850,7 +875,8 @@ mod tests {
         assert_eq!(second.source, CoordinatorSource::Stored, "the first start wrote the row (Elastic 2b: bootstrapped at once)");
         assert_eq!((first.version, second.version), (1, 1), "the row's first version");
         assert_ne!(first.coordinator.replica(), game::coordinator::ReplicaId(0), "a replica id of its own");
-        assert_ne!(first.coordinator.replica(), second.coordinator.replica(), "drawn per start");
+        assert!(first.coordinator.replica() < second.coordinator.replica(), "issued per start, never reused");
+        assert!(first.alone, "the first replica is alone");
         assert_eq!(history_bytes(&first), history_bytes(&second), "the bootstrap's history, as written");
         store.shutdown();
     }

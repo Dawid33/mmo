@@ -22,6 +22,10 @@ use server::player_store::{PlayerKey, PlayerStore, StorePlayers};
 use server::world_file::{ensure_coordinator_state, CoordinatorSource, CoordinatorStart};
 use world_store::{StoreHandle, StoreUrl};
 
+#[path = "common/coordinator.rs"]
+mod coordinator_common;
+use coordinator_common::{attach_msg, resumed, stored_core};
+
 /// The placement hop the tests' `Attach` reports their player at, and so the hop of its requests.
 const ATTACHED_HOP: u64 = 1;
 
@@ -106,9 +110,7 @@ fn start_request(site: SiteId) -> WorldRequest {
 
 /// The coordinator's state as the store holds it, decoded (`None` before its first save).
 fn stored_state(store: &StoreHandle, map: &WorldMap) -> Option<(History, Vec<(PlayerId, Claim)>)> {
-    let row = store.load_coordinator().unwrap()?;
-    let grid = game::history::SocietyGrid::from_world_map(map);
-    let c = game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ReplicaId(0), 0).expect("the projection loads");
+    let c = stored_core(store, map)?;
     Some((c.history().clone(), c.claims()))
 }
 
@@ -400,7 +402,7 @@ fn directive_not_sent_before_save() {
     let player = PlayerId(1);
     let id = RequestId { host: h(0), boot: 1, seq: 1 };
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
+    link.send(attach_msg(h(0), 1, online, 0, 1, None, game::CrashPolicy::Rollback));
     // The site's region runs: its residents are embodied there; then the player's adventure.
     link.send(HostMsg::RegionStarted { rc, incarnation: 1 });
     link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: start_request(site) });
@@ -506,20 +508,6 @@ fn coordinator_panic_skips_the_exit_cut() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// What a restart must resume exactly: the calendar (history tick and the calendar's anchor),
-/// the site markers, the legends' length.
-#[derive(Debug, PartialEq)]
-struct Resumed {
-    now: game::history::CalendarTick,
-    anchor: ((u64, game::history::CalendarTick), u64),
-    sites: Vec<game::SiteMarker>,
-    legends: usize,
-}
-
-fn resumed(c: &game::Coordinator) -> Resumed {
-    Resumed { now: c.history().now(), anchor: c.calendar_anchor(), sites: c.history().site_markers(), legends: c.history().log().len() }
-}
-
 /// Elastic 2a, single player (role `all`, SQLite): the bootstrap's first transition writes the
 /// row's version 1; an adventure's grant and years of history are written moments before the
 /// coordinator dies (after the commit, before its sends), and the restart resumes from exactly
@@ -545,10 +533,7 @@ fn single_player_restart_resumes_history_where_it_was() {
     };
     assert_eq!(first.version, 1, "the bootstrap's first transition writes version 1");
     let player = PlayerId(1);
-    let id = RequestId { host: h(0), boot: 1, seq: 1 };
-    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: start_request(site) });
+    let id = attach_and_start(&mut link, site);
     loop {
         assert!(Instant::now() < deadline, "the start was never answered");
         match link.recv() {
@@ -584,8 +569,7 @@ fn single_player_restart_resumes_history_where_it_was() {
     assert!(!fenced.is_set());
 
     let row = store.load_coordinator().unwrap().expect("written");
-    let grid = game::history::SocietyGrid::from_world_map(&map);
-    let last = resumed(&game::Coordinator::load(&row.core, &row.history, grid, game::coordinator::ReplicaId(0), 0).unwrap());
+    let last = resumed(&stored_core(&store, &map).expect("written"));
     // The change made just before the crash is in it (and whatever the core decided after it,
     // before the write: a day's turn at most).
     assert!(last.now >= target && last.now >= decided.now && last.legends >= decided.legends, "{last:?} vs {decided:?}");
@@ -609,7 +593,7 @@ fn attach_and_start(link: &mut coordinator_rt::ChannelWorldLink, site: SiteId) -
     let player = PlayerId(1);
     let id = RequestId { host: h(0), boot: 1, seq: 1 };
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
+    link.send(attach_msg(h(0), 1, online, 0, 1, None, game::CrashPolicy::Rollback));
     link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: start_request(site) });
     id
 }
