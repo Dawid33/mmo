@@ -974,7 +974,7 @@ orion-vpn-status:
     ping -c1 -W2 10.99.0.1 >/dev/null && echo "box 10.99.0.1: ok" || echo "box 10.99.0.1: NO ANSWER"
     getent hosts kube-dns.kube-system.svc.cluster.local >/dev/null && echo "cluster DNS: ok" || echo "cluster DNS: FAILS"
     kubectl --context {{orion_context}} get --raw /livez >/dev/null 2>&1 && echo "k3s API: ok" || echo "k3s API: FAILS"
-    echo "grafana (vpn-names): $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://grafana.vpn.errantry.renownandruin.com/api/health) (000 = no answer)"
+    echo "grafana: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local/api/health) (000 = no answer)"
     echo "keycloak admin (https, vpn-names): $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 https://keycloak.vpn.errantry.renownandruin.com/admin/master/console/) (000 = no answer)"
     echo "garage admin: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://garage.garage.svc.cluster.local:3903/health) (000 = no answer)"
 
@@ -1803,33 +1803,32 @@ twin-up:
     kubectl --context {{twin_ctx}} wait --for=condition=Ready node --all --timeout=180s
     echo "twin: cluster mmo is up (context {{twin_ctx}}); next: just twin-images && just twin-apply"
 
-# Build the release images (world-images-build, orion-login-build, orion-panel-build) as mmo/server:twin,
-# mmo/web:twin, mmo/login:twin and mmo/panel:twin, each from a staging directory as the push scripts
+# Build the release images (world-images-build, orion-login-build) as mmo/server:twin,
+# mmo/web:twin and mmo/login:twin, each from a staging directory as the push scripts
 # do, and import them into the twin's node (no registry).
-twin-images: world-images-build orion-login-build orion-panel-build
+twin-images: world-images-build orion-login-build
     #!/usr/bin/env bash
     set -euo pipefail
     stage=$(mktemp -d)
     trap 'rm -rf "$stage"' EXIT
-    mkdir "$stage/server" "$stage/web" "$stage/login" "$stage/panel"
+    mkdir "$stage/server" "$stage/web" "$stage/login"
     cp target/release/server target/release/worldctl deploy/images/server/Dockerfile "$stage/server/"
     cp -R target/web "$stage/web/web"
     cp deploy/images/web/Dockerfile deploy/images/web/nginx.conf "$stage/web/"
     cp target/release/login deploy/images/login/Dockerfile "$stage/login/"
-    cp target/release/panel deploy/images/panel/Dockerfile "$stage/panel/"
-    for name in server web login panel; do
+    for name in server web login; do
         echo "twin: building mmo/$name:twin"
         docker build -q -t "mmo/$name:twin" "$stage/$name" > /dev/null
     done
-    scripts/k3d.sh image import mmo/server:twin mmo/web:twin mmo/login:twin mmo/panel:twin -c mmo
+    scripts/k3d.sh image import mmo/server:twin mmo/web:twin mmo/login:twin -c mmo
     echo "twin: images imported; running pods keep their old image until they are re-created"
 
-# Apply the five local roots in order (platform -> postgres -> login -> world -> panel), without
+# Apply the four local roots in order (platform -> postgres -> login -> world), without
 # asking: the cluster is a throwaway. Each root's .terraform lives under target/twin/.
 twin-apply:
     #!/usr/bin/env bash
     set -euo pipefail
-    for r in platform postgres login world panel; do
+    for r in platform postgres login world; do
         echo "twin: applying deploy/envs/local/$r"
         export TF_DATA_DIR="{{justfile_directory()}}/target/twin/$r/.terraform"
         {{tofu}} -chdir=deploy/envs/local/$r init -input=false -reconfigure > /dev/null
@@ -1854,10 +1853,6 @@ twin-check:
 twin-down:
     -scripts/k3d.sh cluster delete mmo
     rm -f target/twin/*.tfstate target/twin/*.tfstate.backup
-
-# The twin's world panel (deploy/envs/local/panel) on http://127.0.0.1:<port>/ (port-forward).
-twin-panel port="8090":
-    kubectl --context {{twin_ctx}} -n panel port-forward svc/panel {{port}}:80
 
 # kubectl against the twin, e.g. `just twin-kube get pods -A`.
 [positional-arguments]
@@ -1919,8 +1914,7 @@ orion-bootstrap-plan:
 orion-kube *args:
     kubectl --context {{orion_context}} "$@"
 
-# Grafana is VPN-only (http://grafana.vpn.errantry.renownandruin.com); with the VPN down this forwards it to
-# http://127.0.0.1:3000 (its root_url stays the VPN name, so Keycloak sign-in needs the VPN: use the admin password).
+# Grafana without the public Ingress: http://127.0.0.1:3000 (port-forward).
 orion-grafana port="3000":
     kubectl --context {{orion_context}} -n monitoring port-forward svc/kube-prometheus-stack-grafana {{port}}:80
 
@@ -2030,37 +2024,6 @@ orion-login *args:
 # Follow the login service's log.
 orion-login-logs:
     kubectl --context {{orion_context}} -n login logs -f deploy/login --tail 200
-
-# The world panel (crates/panel, deploy/modules/panel; plan docs/superpowers/plans/2026-11-15-r5b-world-panel.md):
-# an operator page over every world namespace of a cluster (state, pods, /readyz, metrics, release
-# history, forge Jobs) that starts, stops and forges worlds as the world-* recipes do. No Ingress, no
-# login: on orion it is reached by port-forward only.
-# The panel on orion: http://127.0.0.1:<port>/ (port-forward to the panel namespace).
-orion-panel port="8090":
-    kubectl --context {{orion_context}} -n panel port-forward svc/panel {{port}}:80
-
-# Release build of the panel binary (what orion-panel-push and twin-images put in the image).
-orion-panel-build:
-    {{cap}} {{cargo}} build --release -p panel --bin panel
-
-# Build the image (labelled with the git revision), push it to ECR as mmo/panel:latest and set it on
-# the panel Deployment BY DIGEST (scripts/orion_panel_push.sh). Before the panel root exists it only pushes.
-orion-panel-push: orion-panel-build
-    KUBE_CONTEXT={{orion_context}} TOFU={{tofu}} scripts/orion_panel_push.sh
-
-# The panel run from this checkout against any context, with YOUR kubectl credentials (through a
-# `kubectl proxy` on 127.0.0.1:<proxy>), on http://127.0.0.1:<port>/. e.g. `just panel ctx=k3d-mmo`.
-# It can do whatever your kubeconfig can: start, stop and forge act on that cluster.
-panel ctx=world_ctx port="8090" proxy="18001":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    {{cap}} {{cargo}} build -p panel --bin panel
-    kubectl --context {{ctx}} proxy --address 127.0.0.1 --port {{proxy}} > /dev/null &
-    proxy_pid=$!
-    trap 'kill $proxy_pid 2>/dev/null || true' EXIT
-    for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:{{proxy}}/version 2>/dev/null && break; sleep 0.1; done
-    echo "panel: context {{ctx}}, http://127.0.0.1:{{port}}/"
-    PANEL_KUBE_API=http://127.0.0.1:{{proxy}} PANEL_BIND=127.0.0.1:{{port}} target/debug/panel
 
 # One game world is one Kubernetes namespace. These recipes work on the world in
 # `world_ctx` / `world_ns`; the twin reuses them: `just world_ctx=k3d-mmo world_ns=world-twin world-status`.
@@ -2214,7 +2177,6 @@ world-drain name secs="300":
 # a leave cut and exits, bounded by about 90 s; a drained host just exits), wait until no host pod is
 # left, print each host's leave line (WARNS when one left without a committed cut: the next start
 # raises the world generation), then the coordinator to 0. Waits up to WORLD_STOP_TIMEOUT s (default 150).
-# crates/panel/src/ops.rs runs the same steps: keep the two in step.
 world-stop:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2325,7 +2287,6 @@ world-stop:
 # (-l app.kubernetes.io/component=host) to 1, wait until each has readyReplicas 1 (never `rollout
 # status`). A drained host (/readyz `drained`, unready for good) is not waited for: it is named, with
 # how to remove it. Refused when the world has no host Deployment. WORLD_START_TIMEOUT s (default 300).
-# crates/panel/src/ops.rs runs the same steps: keep the two in step.
 world-start:
     #!/usr/bin/env bash
     set -euo pipefail
