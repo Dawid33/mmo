@@ -2040,7 +2040,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                     | GameEventKind::WalkOut(..)
                     | GameEventKind::ClientLeft(_)
                     | GameEventKind::ParkPlayer(_)
-                    | GameEventKind::RestorePlayer(..) => {
+                    | GameEventKind::RestorePlayer(..)
+                    | GameEventKind::PlaceBody(..) => {
                         log::debug!(
                             "dropping internal event kind sent by client {id} for {:?}",
                             event.region_id

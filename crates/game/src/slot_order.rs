@@ -88,7 +88,8 @@ pub fn slot_class(kind: &GameEventKind) -> SlotClass {
         | GameEventKind::DespawnPerson(_)
         | GameEventKind::WalkOut(..)
         | GameEventKind::ParkPlayer(_)
-        | GameEventKind::RestorePlayer(..) => SlotClass::Other,
+        | GameEventKind::RestorePlayer(..)
+        | GameEventKind::PlaceBody(..) => SlotClass::Other,
     }
 }
 
@@ -154,7 +155,8 @@ fn key_of(kind: &GameEventKind) -> Key {
         | GameEventKind::DespawnPerson(_)
         | GameEventKind::WalkOut(..)
         | GameEventKind::ParkPlayer(_)
-        | GameEventKind::RestorePlayer(..) => [0; 6],
+        | GameEventKind::RestorePlayer(..)
+        | GameEventKind::PlaceBody(..) => [0; 6],
     }
 }
 

@@ -1,5 +1,5 @@
-//! Adventure mode: a client either commands the fortress from the top-down
-//! camera ([`PlayMode::Overview`], a debug view) or plays its one body
+//! Adventure mode: a client either looks on from the top-down overview camera
+//! ([`PlayMode::Overview`], a debug view) or plays its one body
 //! ([`PlayMode::Adventure`]), walked by `Order::MoveTo` goals rather than the
 //! keyboard (`fps_cam_mode` is untouched). The mode is per-client rollback
 //! state on [`crate::Client`], so it travels with the client's bundle across
@@ -83,8 +83,10 @@ pub fn body_on_tile(at: TilePos) -> Vector {
 
 impl Rollback {
     /// Switches `client`'s play mode, undo-safely. `false` = unknown client,
-    /// nothing changed. Entering Adventure while in Adventure is a no-op.
-    /// Entering Adventure with `at` moves the body onto the standable tile
+    /// nothing changed. Entering Adventure while in Adventure is a no-op, `at`
+    /// ignored: a client never moves its body this way (the server places it
+    /// with [`Self::place_body_at_safe`]). Entering Adventure with `at` moves
+    /// the body onto the standable tile
     /// nearest `at` in its column (`nearest_standable`), or to the region's
     /// spawn column when there is none; with no `at` the body stays where it
     /// is. Overview leaves the body where it stands and closes the survival
@@ -130,6 +132,25 @@ impl Rollback {
                         self.data.ecs.walker.set_safe(key, None);
                     }
                 }
+            }
+        }
+        true
+    }
+
+    /// Server-authored placement ([`crate::GameEventKind::PlaceBody`]), undo-safely:
+    /// `client`'s body goes onto the standable tile nearest `at` in its column
+    /// (as [`Self::set_play_mode_safe`] places it) and any walk in progress
+    /// ends. `false` with no change for an unknown client or a tile outside
+    /// the region; its level is clamped to the column's scan range.
+    pub fn place_body_at_safe(&mut self, client: ClientId, at: TilePos) -> bool {
+        let Some(at) = clamp_tile(self, at) else { return false };
+        if !self.data.clients.contains_key(&client) {
+            return false;
+        }
+        self.place_body_safe(client, at);
+        if let Some(&key) = self.data.player_entites.get(&client) {
+            if self.data.ecs.walker.try_get(key).is_some() {
+                self.data.ecs.walker.set_safe(key, None);
             }
         }
         true

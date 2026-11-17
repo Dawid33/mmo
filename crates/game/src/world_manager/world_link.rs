@@ -940,9 +940,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// fresh connection starts (its claim given back; the site stays); the adventure's
     /// region parks by the usual grace rule. No adventure = no-op.
     pub(super) fn end_adventure(&mut self, id: ClientId, now_ms: u64) {
-        // No move possible (no refusal exists for an adventure's end): it goes on.
-        if !self.adventurer_of.contains_key(&id) || !self.can_move(id, SPAWN_REGION) {
-            return;
+        let Some(&site) = self.adventurer_of.get(&id) else { return };
+        if !self.can_move(id, SPAWN_REGION) {
+            // No move possible (no refusal exists for an adventure's end): it goes on,
+            // and the client, which left play when it asked, is told so again — the
+            // answer its start had.
+            return self.adventure_result(id, Ok(site));
         }
         self.adventurer_of.remove(&id);
         let landing = self.landing_in(SPAWN_REGION);
@@ -1071,17 +1074,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 let landing = self.landing_in(region);
                 // Already at home in that region: `move_client` only resends `PlayerRegion`
-                // and the body stays put, so the order itself carries the landing tile
-                // (a high level clamps to the column's top and `nearest_standable` searches
+                // and the body stays put, so the server places it on the landing tile (a
+                // high level clamps to the column's top and `nearest_standable` searches
                 // down). Elsewhere `CreateClientAt` has placed the body.
-                let at = (self.homes.get(&client) == Some(&region))
-                    .then(|| [landing[0] as i32, ADVENTURE_LANDING_HINT_Y, landing[1] as i32]);
+                let here = self.homes.get(&client) == Some(&region);
                 self.move_client(client, region, landing, now_ms);
                 self.send_player_event(
                     client,
                     region,
-                    GameEventKind::Order(client, Order::SetMode { mode: PlayMode::Adventure, at }),
+                    GameEventKind::Order(client, Order::SetMode { mode: PlayMode::Adventure, at: None }),
                 );
+                if here {
+                    let at = [landing[0] as i32, ADVENTURE_LANDING_HINT_Y, landing[1] as i32];
+                    self.send_player_event(client, region, GameEventKind::PlaceBody(client, at));
+                }
                 self.adventurer_of.insert(client, site);
                 self.claim_changed(p.player);
                 self.adventure_result(client, Ok(site));

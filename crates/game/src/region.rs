@@ -262,6 +262,7 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::ClientLeft(c) => format!("ClientLeft(c={c:?})"),
         GameEventKind::ParkPlayer(c) => format!("ParkPlayer(c={c:?})"),
         GameEventKind::RestorePlayer(c, r) => format!("RestorePlayer(c={c:?}, region={:?})", r.region),
+        GameEventKind::PlaceBody(c, at) => format!("PlaceBody(c={c:?}, at={at:?})"),
         GameEventKind::Quit => "Quit".to_string(),
         GameEventKind::EntityArrived(b) => {
             format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
@@ -965,6 +966,10 @@ impl Region {
             GameEventKind::RestorePlayer(client_id, record) => {
                 info!("{}", ev_desc(&event));
                 self.data.restore_player_safe(client_id, &record);
+            }
+            GameEventKind::PlaceBody(client_id, at) => {
+                info!("{}", ev_desc(&event));
+                self.data.place_body_at_safe(client_id, at);
             }
             GameEventKind::SpawnPerson(spawn) => {
                 self.data.apply_person_spawn_safe(spawn, self.id, self.route_map.as_deref());

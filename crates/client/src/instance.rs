@@ -1246,6 +1246,7 @@ impl GameInstanceManager {
             | GameEventKind::ClientLeft(_)
             | GameEventKind::ParkPlayer(_)
             | GameEventKind::RestorePlayer(..)
+            | GameEventKind::PlaceBody(..)
             | GameEventKind::SpawnPerson(_)
             | GameEventKind::DespawnPerson(_)
             | GameEventKind::WalkOut(..)) => {

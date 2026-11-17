@@ -451,14 +451,93 @@ fn adventure_starts_at_populated_site() {
 fn adventure_in_the_home_region_lands_the_body_on_the_site() {
     let (mut w, home, _, _, _) = bootstrap_world();
     let region = w.history().site(home).unwrap().region;
-    // Dev Play puts the player's body in the site's region first, off the landing.
+    // Dev Play puts the player's body in the site's region, on its landing; it walks off.
     w.packet(A, ClientPacket::PlayRegion(region));
+    w.tick();
+    assert_eq!(w.body_column(region, A), Some(LANDING), "Play lands on the landing");
+    let goal = [LANDING[0] + 6, LANDING[1]];
+    let walk = GameEventKind::Order(A, game::Order::MoveTo(game::Goal::local(region, goal, None)));
+    w.packet(A, ClientPacket::GameEvent(GameEvent::new(walk, 0, region)));
+    for _ in 0..200 {
+        w.tick();
+    }
+    let off = w.body_column(region, A).expect("a body");
+    assert_ne!(off, LANDING, "the body walked off the landing");
+    // A client's own SetMode never moves its body.
+    let set = GameEventKind::Order(A, game::Order::SetMode { mode: PlayMode::Adventure, at: Some([LANDING[0], 4, LANDING[1]]) });
+    w.packet(A, ClientPacket::GameEvent(GameEvent::new(set, 0, region)));
+    w.tick();
+    assert_eq!(w.body_column(region, A), Some(off), "a client-sent SetMode is no teleport");
     w.take(A);
     assert_eq!(w.adventure(A, home), Ok(home));
     w.settle();
     assert_eq!(w.mode_in(region, A), Some(PlayMode::Adventure));
     w.tick();
-    assert_eq!(w.body_column(region, A), Some([20, 30]), "the body is at the site's landing");
+    assert_eq!(w.body_column(region, A), Some(LANDING), "the body is at the site's landing");
+}
+
+/// The block column the strip's site regions land a body on.
+const LANDING: [i32; 2] = [20, 30];
+
+/// Every super-region this process's, but the spawn region's owner can be lost (as while
+/// a succession's heir has not adopted it): nobody can be moved there then.
+#[derive(Debug)]
+struct SpawnLost(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl game::Ownership for SpawnLost {
+    fn me(&self) -> game::HostId {
+        game::HostId::SOLO
+    }
+    fn owner_of(&self, sr: game::SuperRegion) -> game::Owner {
+        let lost = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        if lost && sr == game::super_region_of(SPAWN_REGION, 1) {
+            game::Owner::Unknown
+        } else {
+            game::Owner::Me
+        }
+    }
+    fn policy(&self) -> game::CrashPolicy {
+        game::CrashPolicy::Rollback
+    }
+    fn directory_mut(&mut self) -> Option<&mut game::Directory> {
+        None
+    }
+    fn runs_every_host(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn end_adventure_that_cannot_move_keeps_it_and_says_so() {
+    let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut w = World::new();
+    w.manager.set_ownership(Box::new(SpawnLost(lost.clone())), 1);
+    w.connect(A);
+    let (home, _, _) = home_site(w.history());
+    let region = w.history().site(home).unwrap().region;
+    assert_eq!(w.adventure(A, home), Ok(home));
+    w.tick();
+    w.take(A);
+    lost.store(true, std::sync::atomic::Ordering::Relaxed);
+    w.packet(A, ClientPacket::EndAdventure);
+    let to_a = w.take(A);
+    let results: Vec<_> = to_a
+        .iter()
+        .filter_map(|p| match p {
+            ServerPacket::AdventureResult(r) => Some(*r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec![Ok(home)], "the client is told the adventure goes on: {to_a:?}");
+    assert_eq!(player_region(&to_a), None, "no move");
+    w.tick();
+    assert_eq!(w.players_in(region), vec![A], "the adventurer stays at the site");
+    assert_eq!(w.manager.client_claim(A), Some(game::Claim::Adventure(home)), "the claim is held");
+    // Once the spawn region can be reached again the end goes through.
+    lost.store(false, std::sync::atomic::Ordering::Relaxed);
+    w.packet(A, ClientPacket::EndAdventure);
+    assert_eq!(player_region(&w.take(A)), Some(Some(SPAWN_REGION)));
+    assert_eq!(w.manager.client_claim(A), None, "the claim is freed");
 }
 
 #[test]

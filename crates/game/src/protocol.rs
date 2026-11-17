@@ -980,6 +980,11 @@ pub enum GameEventKind {
     /// as a stamped transfer: joins this region's queue, applied / delivered
     /// at the opening of its due tick. Never accepted from a client.
     Intent(crate::IntentMsg),
+    /// Server-authored: the client's body is put on the standable tile nearest
+    /// `.1` in its column (`Rollback::place_body_at_safe`), any walk ended; an
+    /// adventure started in the region the body already stands in lands it on
+    /// the site this way. Never accepted from a client.
+    PlaceBody(ClientId, crate::TilePos),
 }
 
 /// Where a spawned person appears in a region.
@@ -1024,6 +1029,7 @@ impl GameEventKind {
             | GameEventKind::CreateClient(id)
             | GameEventKind::CreateClientAt(id, ..)
             | GameEventKind::RestorePlayer(id, _)
+            | GameEventKind::PlaceBody(id, _)
             | GameEventKind::UiAction(id, _)
             | GameEventKind::Order(id, _) => Some(*id),
             GameEventKind::Tick
