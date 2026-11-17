@@ -150,8 +150,8 @@ pub struct ItemStack {
 pub struct Client {
     pub input: InputState,
     pub fps_cam_mode: bool,
-    /// Fortress (commander camera) or Adventure (one body walked by
-    /// orders); `adventure.rs`.
+    /// Overview (the commander camera, a debug view) or Adventure (the one
+    /// body, the default); `adventure.rs`.
     pub mode: crate::PlayMode,
     pub inventory: crate::Inventory,
     pub inventory_open: bool,
@@ -180,7 +180,7 @@ impl Client {
     /// Leaves the survival screens: the inventory closes (the cursor stack
     /// goes back into it; the rest is returned for the caller to drop), any
     /// chest closes and mining stops. Used when the play mode changes to
-    /// Fortress.
+    /// Overview.
     pub fn leave_survival(&mut self) -> Option<ItemStack> {
         self.inventory_open = false;
         self.open_container = None;

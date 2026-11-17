@@ -1,9 +1,9 @@
 //! The world coordinator: the services that do not partition by region — the history and
 //! its calendar, claims (one adventure per player), adventure validation, legends, person
-//! info, the daily calendar / site broadcasts and notices. A host talks to it only through [`HostMsg`] / [`CoordMsg`] over a
-//! [`WorldLink`]. Threadless and IO-free: time arrives as `now_ms` — the store's clock in
-//! milliseconds (`clock.rs`: [`StoreClock`], [`CALENDAR_GAP_MS`]) — and writing is the caller's
-//! ([`Coordinator::take_transition`]).
+//! info, the daily calendar / site broadcasts and notices. A host talks to it only through
+//! [`HostMsg`] / [`CoordMsg`] over a [`WorldLink`]. Threadless and IO-free: time arrives as
+//! `now_ms` — the store's clock in milliseconds (`clock.rs`: [`StoreClock`],
+//! [`CALENDAR_GAP_MS`]) — and writing is the caller's ([`Coordinator::take_transition`]).
 //!
 //! **One durable projection (Elastic 2a, `state.rs`):** everything the core holds but its
 //! observations and its outgoing messages is the projection the runtime writes with a
@@ -941,8 +941,9 @@ impl Coordinator {
     /// claim stands (that request's answer, or the host's `ReleaseClaim` after it, settles
     /// it); without one the host's claim is the truth: the coordinator's own may be a save
     /// behind (a crash lost a grant) or ahead (a crash lost a release). A claim the host
-    /// reports and the coordinator lacks is taken. Whenever the claim the coordinator ends with differs from the report, the
-    /// host is told it ([`CoordMsg::ClaimIs`]): the coordinator's answer is final.
+    /// reports and the coordinator lacks is taken. Whenever the claim the coordinator ends
+    /// with differs from the report, the host is told it ([`CoordMsg::ClaimIs`]): the
+    /// coordinator's answer is final.
     ///
     /// A report whose hop is lower than the player's latest is stale and ignored; the
     /// host is told the latest ([`CoordMsg::HopIs`]) in case the report is of its current

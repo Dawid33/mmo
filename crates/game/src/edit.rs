@@ -659,7 +659,7 @@ impl Rollback {
 
     /// The block under `client`'s crosshair within [`REACH`]: the first
     /// non-air block along its eye ray (implied ground included). Shared by
-    /// the Fortress instant edit and survival mining / placing.
+    /// the Overview's instant edit and survival mining / placing.
     pub fn eye_hit(&self, client: ClientId) -> Option<BlockHit> {
         let (eye, dir) = self.eye_ray(client)?;
         self.raycast_block_in(eye, dir, REACH)
@@ -672,7 +672,7 @@ impl Rollback {
         self.current_block(coords, local)
     }
 
-    /// One creative (Fortress) break or place for `client`'s player from its
+    /// One creative (Overview) break or place for `client`'s player from its
     /// eye along its look: an intent to the block's owner (into `out` when
     /// that is a neighbour), applied at the next tick's opening. Returns
     /// whether one was sent. Edits seen to be invalid (nothing in reach, the

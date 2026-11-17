@@ -67,6 +67,11 @@ const TAKE_OFF: &[(u64, Step)] = &[
 ];
 /// When the cruise keys go down, after the climb.
 const CRUISE_AT_MS: u64 = 1950;
+/// How often the overview is asked for again while the body is still in Adventure (a
+/// lost toggle would hold the probe before its start, where no deadline counts). The
+/// ask names the target mode (`toggle_order` from the mode shown), so a repeat while
+/// the first is in flight asks for the same thing.
+const OVERVIEW_ASK_EVERY_MS: u64 = 2_000;
 
 /// The seam shuttle logs `autopilot_seam_wait` at most this often while no seam of its kind
 /// is loaded.
@@ -143,8 +148,8 @@ pub struct Autopilot {
     /// Close the app this long after the cruise starts.
     cruise_for: Option<Duration>,
     started: Option<Duration>,
-    /// The switch to the overview was requested (once per run).
-    overview_asked: bool,
+    /// When the switch to the overview was last requested.
+    overview_asked: Option<Duration>,
     next_step: usize,
     cruising: bool,
     leg: Option<Leg>,
@@ -204,7 +209,7 @@ impl Autopilot {
             mode,
             cruise_for,
             started: None,
-            overview_asked: false,
+            overview_asked: None,
             next_step: 0,
             cruising: false,
             leg: None,
@@ -264,10 +269,14 @@ fn drive_autopilot(
     let (true, Some(player)) = (ready.0, player.0) else {
         return;
     };
-    // The body cannot fly: ask once for the overview, and start only when it is in.
+    // The body cannot fly: ask for the overview (again every OVERVIEW_ASK_EVERY_MS),
+    // and start only when it is in.
     if mode.adventure() {
-        if !pilot.overview_asked && pilot.started.is_none() {
-            pilot.overview_asked = true;
+        let due = pilot
+            .overview_asked
+            .is_none_or(|at| now.saturating_sub(at) >= Duration::from_millis(OVERVIEW_ASK_EVERY_MS));
+        if due && pilot.started.is_none() {
+            pilot.overview_asked = Some(now);
             toggle.write(super::commander::adventure::ToggleModeRequest);
         }
         if pilot.started.is_none() {

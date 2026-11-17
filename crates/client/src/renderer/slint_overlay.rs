@@ -1481,7 +1481,8 @@ fn send_legends_query(
     }
 }
 
-/// An `AdventureResult` (answer to Start adventure): `Ok` starts it (the
+/// An `AdventureResult` (answer to Start adventure, or to an End the host could
+/// not do — the adventure goes on): `Ok` starts it (the
 /// arrival map closes, the camera re-places over the body), a refusal goes on
 /// the map status line for `REFUSAL_SHOW_SECS`. The result is taken, never
 /// read twice.
@@ -1875,9 +1876,7 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     // The start screen's panel stands beside the map while not in play. A world
     // with no populated site has nothing to pick: the dev Play button is its way in.
     let panel = map.is_some() && !in_play;
-    let no_site = !in_play
-        && p.history.sites_received
-        && !p.history.sites.iter().any(history_view::populated);
+    let no_site = no_site_to_pick(in_play, p.history.sites_received, &p.history.sites);
     let arrival_ui = panel && !no_site;
     let show_play = cfg!(feature = "dev_ui") || no_site;
     if ui.get_show_play() != show_play {
@@ -2157,9 +2156,33 @@ fn unpremultiply(p: slint_ui::slint::platform::software_renderer::PremultipliedR
     [un(p.red), un(p.green), un(p.blue), p.alpha]
 }
 
+/// Whether the start screen has no site to pick (out of play, the sites told, none of
+/// them populated): the Play button is then the way in, dev build or not. Before the
+/// sites arrive nothing is known yet, so there is no Play.
+fn no_site_to_pick(in_play: bool, sites_received: bool, sites: &[game::SiteMarker]) -> bool {
+    !in_play && sites_received && !sites.iter().any(history_view::populated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn play_shows_only_when_the_told_sites_hold_nobody_to_play() {
+        let site = |population| game::SiteMarker {
+            site: game::history::SiteId(0),
+            civ: game::history::CivId(0),
+            region: game::RegionCoords::new(1, 0),
+            name: "Site".into(),
+            population,
+            abandoned: false,
+        };
+        assert!(!no_site_to_pick(false, false, &[]), "sites not received yet: no Play");
+        assert!(!no_site_to_pick(false, true, &[site(0), site(3)]), "a populated site: no Play");
+        assert!(no_site_to_pick(false, true, &[site(0)]), "no populated site: Play");
+        assert!(no_site_to_pick(false, true, &[]), "no site at all: Play");
+        assert!(!no_site_to_pick(true, true, &[]), "in play: no start screen");
+    }
 
     /// Startup systems may use what a layer's `with_init` inserted (the asset
     /// viewer's `scan_at_start` reads its `Actions`): layers are set up first.

@@ -28,7 +28,7 @@
 //!   at once — or, landing in a neighbour's cell, deposited there by an
 //!   intent to its owner (`item_piles.rs`).
 //!
-//! Fortress clients keep `edit.rs`'s creative edit (also intents).
+//! Overview clients keep `edit.rs`'s creative edit (also intents).
 
 use crate::edit::{BlockPos, BREAK_BUTTON};
 use crate::intents::{Effects as _, RegionEffects};
