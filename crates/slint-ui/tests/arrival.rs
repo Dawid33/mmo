@@ -1,5 +1,5 @@
-//! The embark panel beside the arrival map, headless: its Fortress /
-//! Adventure / Legends tabs switch bodies, each tab's controls report back,
+//! The arrival panel beside the arrival map, headless: its Adventure /
+//! Legends tabs switch bodies, each tab's controls report back,
 //! and the Esc menu offers End adventure while an adventure is held.
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -11,7 +11,7 @@ use slint_ui::{GameUi, LegendsFilterRow, Overlay};
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 
-/// The arrival map open with the embark panel beside it.
+/// The arrival map open with the arrival panel beside it.
 fn overlay() -> Overlay<GameUi> {
     let mut overlay = Overlay::new().expect("game UI");
     overlay.resize(WIDTH, HEIGHT, 1.0);
@@ -20,7 +20,7 @@ fn overlay() -> Overlay<GameUi> {
     overlay.ui().set_map_cols(4);
     overlay.ui().set_map_rows(4);
     overlay.ui().set_map_modal(true);
-    overlay.ui().set_embark_visible(true);
+    overlay.ui().set_arrival_visible(true);
     overlay.render();
     overlay
 }
@@ -38,45 +38,45 @@ fn strings(items: &[&str]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items))
 }
 
-/// The x of tab `index` on the embark tab row: scans from the row's left end
-/// for the click that selects it (from the Fortress tab), then goes back to
-/// Fortress.
+/// The x of tab `index` on the arrival tab row: scans from the row's left end
+/// for the click that selects it (from the first tab), then goes back to
+/// the first tab.
 fn tab_x(overlay: &mut Overlay<GameUi>, index: i32) -> f32 {
-    let y = overlay.ui().get_embark_tabs_y();
-    let mut x = overlay.ui().get_embark_tabs_x() + 2.0;
-    while x < overlay.ui().get_embark_tabs_end() {
-        overlay.ui().set_embark_tab(0);
+    let y = overlay.ui().get_arrival_tabs_y();
+    let mut x = overlay.ui().get_arrival_tabs_x() + 2.0;
+    while x < overlay.ui().get_arrival_tabs_end() {
+        overlay.ui().set_arrival_tab(0);
         overlay.render();
         click(overlay, x, y);
-        if overlay.ui().get_embark_tab() == index {
-            overlay.ui().set_embark_tab(0);
+        if overlay.ui().get_arrival_tab() == index {
+            overlay.ui().set_arrival_tab(0);
             overlay.render();
             return x;
         }
         x += 4.0;
     }
-    panic!("tab {index} not found on the embark tab row");
+    panic!("tab {index} not found on the arrival tab row");
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn tabs_switch_bodies() {
     let mut overlay = overlay();
-    assert_eq!(overlay.ui().get_embark_tab(), 0, "opens on Adventure");
+    assert_eq!(overlay.ui().get_arrival_tab(), 0, "opens on Adventure");
     let ui = overlay.ui();
-    assert!(ui.get_embark_tabs_end() <= ui.get_embark_tabs_right(), "the two tabs fit the panel");
+    assert!(ui.get_arrival_tabs_end() <= ui.get_arrival_tabs_right(), "the two tabs fit the panel");
 
     let changed = Rc::new(RefCell::new(Vec::new()));
     let c = changed.clone();
-    overlay.ui().on_embark_tab_changed(move |i| c.borrow_mut().push(i));
+    overlay.ui().on_arrival_tab_changed(move |i| c.borrow_mut().push(i));
     let legends = tab_x(&mut overlay, 1);
     changed.borrow_mut().clear();
-    let y = overlay.ui().get_embark_tabs_y();
+    let y = overlay.ui().get_arrival_tabs_y();
     let adventure_pixels = overlay.pixels().iter().filter(|p| p.alpha > 0).count();
 
     // Legends widens the panel (the map's reserve follows): more is drawn.
     click(&mut overlay, legends, y);
-    assert_eq!(overlay.ui().get_embark_tab(), 1);
+    assert_eq!(overlay.ui().get_arrival_tab(), 1);
     assert_eq!(*changed.borrow(), [1]);
     let legends_pixels = overlay.pixels().iter().filter(|p| p.alpha > 0).count();
     assert!(overlay.opaque_at(450, 200), "the widened panel covers x = 450");
@@ -90,7 +90,7 @@ fn adventure_start_enabled_only_with_site() {
     let started = Rc::new(RefCell::new(0));
     let s = started.clone();
     overlay.ui().on_adventure_start(move || *s.borrow_mut() += 1);
-    overlay.ui().set_embark_tab(0);
+    overlay.ui().set_arrival_tab(0);
     overlay.ui().set_adventure_civs(strings(&["The Realm of Copper", "The Guild of Ash"]));
     overlay.ui().set_adventure_civ_picked(0);
     overlay.ui().set_adventure_sites(strings(&["Boatmurdered — pop 12", "Oilfurnace — pop 3"]));
@@ -132,7 +132,7 @@ fn legends_filter_click_reports_index() {
         "1 Granite 102: Urist McMiner was born in Boatmurdered.",
         "1 Granite 101: Boatmurdered was founded by the Realm of Copper.",
     ]));
-    overlay.ui().set_embark_tab(1);
+    overlay.ui().set_arrival_tab(1);
     overlay.render();
 
     let ui = overlay.ui();
@@ -156,7 +156,7 @@ fn legends_scroll_to_bottom_loads_more() {
     let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
     overlay.ui().set_legends_lines(strings(&lines));
     overlay.ui().set_legends_more(true);
-    overlay.ui().set_embark_tab(1);
+    overlay.ui().set_arrival_tab(1);
     overlay.render();
 
     // Over the lines: right of the filter column, in the widened panel.

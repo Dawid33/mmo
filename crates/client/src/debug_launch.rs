@@ -8,7 +8,7 @@
 //!   plays where the player spawned). The world is REUSED between runs: an
 //!   existing world is loaded (not re-forged) and a player the server restored
 //!   into an adventure plays on. Only deleting the world directory or
-//!   `--reset` starts over. (The old `worlds/debug-embarked/` is no longer used.)
+//!   `--reset` starts over.
 //!   `VOXEL_DEBUG_WORLD=<slug>` (native) plays an existing `worlds/<slug>/`
 //!   instead — e.g. a big benchmark world — and is never forged or reset.
 //!   Several clients on one server (`just run-two`, native): `--port N` hosts
@@ -54,7 +54,7 @@ use crate::login::flow::{LoginIntent, LoginSession, RejoinEnd};
 use crate::renderer::commander::CommanderCamera;
 use crate::renderer::history_view::{populated, HistoryView};
 use crate::renderer::ClientRequests;
-use crate::session::{AppState, Embarked, LastSessionError, PendingWorld, PreparingWorld, SessionEnded, StartingStatus};
+use crate::session::{AppState, InPlay, LastSessionError, PendingWorld, PreparingWorld, SessionEnded, StartingStatus};
 
 /// `worlds/<this>/`: the `world` preset's world.
 pub const DEBUG_WORLD_SLUG: &str = "debug-world";
@@ -646,11 +646,11 @@ fn poll_forge(
 /// In the world and not yet playing: start an adventure at `--site`, else at
 /// the first populated site; a world with no populated site is played where
 /// the player spawned. The result handling (`apply_adventure_result`) sets
-/// `Embarked` on success.
+/// `InPlay` on success.
 fn auto_start(
     mut launch: ResMut<DebugLaunch>,
     state: Res<State<AppState>>,
-    embarked: Option<ResMut<Embarked>>,
+    in_play: Option<ResMut<InPlay>>,
     mut history: ResMut<HistoryView>,
     requests: Option<Res<ClientRequests>>,
     cam: Option<ResMut<CommanderCamera>>,
@@ -659,9 +659,9 @@ fn auto_start(
     if *state.get() != AppState::InWorld {
         return;
     }
-    let Some(mut embarked) = embarked else { return };
+    let Some(mut in_play) = in_play else { return };
     let wanted = launch.scenario.site();
-    if embarked.0 {
+    if in_play.0 {
         // `just run-two` reads this line to send client 2 to the same site.
         match history.adventuring {
             Some(site) => {
@@ -697,7 +697,7 @@ fn auto_start(
         (None, Start::Wait) => return,
         (None, Start::PlayHere) => {
             info!("[debug] playing: no populated site");
-            embarked.0 = true;
+            in_play.0 = true;
             if let Some(mut cam) = cam {
                 cam.placed = false;
             }

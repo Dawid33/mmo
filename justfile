@@ -192,7 +192,7 @@ client:
 # (`client debug world`, crates/client/src/debug_launch.rs; `--site N` picks the site). The world is
 # worlds/debug-world/ (16 km / 32 m, forged on first run) and is REUSED, with its player,
 # on every later run; `just run --reset` (or deleting the directory) re-forges it and starts
-# afresh. (The old worlds/debug-embarked/ is no longer used.) `just run --reset --prefab dev-hut`
+# afresh. `just run --reset --prefab dev-hut`
 # stamps a prefab beside the landing of the adventure site's region only (needs it never saved, so `--reset`; more
 # `--prefab`s join with `;`); `VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;statuen-07"`
 # adds a prefab directory. Builds both binaries — the client spawns the world's server itself,

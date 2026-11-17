@@ -28,8 +28,8 @@ fn read(cols: &[(ColumnCoords, game::Column)], [x, y, z]: [i32; 3]) -> BlockId {
     }
 }
 
-/// A forged world's fresh session waits in the spawn region before it embarks: that region is not
-/// announced, so the embark target becomes the home. A procedural world announces every region.
+/// A forged world's fresh session waits in the spawn region before its adventure starts: that region is not
+/// announced, so the adventure's start region becomes the home. A procedural world announces every region.
 #[test]
 fn the_spawn_region_is_not_announced_in_a_forged_world() {
     let spawn = game::world_manager::SPAWN_REGION;

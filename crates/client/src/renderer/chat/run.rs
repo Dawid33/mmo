@@ -66,9 +66,9 @@ pub fn effects(command: Command, ctx: &RunContext) -> Vec<Effect> {
         Command::Adventure if ctx.adventuring => vec![error("Already on an adventure")],
         Command::Adventure if !ctx.site_picked => vec![error("Pick a site on the Adventure tab first")],
         Command::Adventure => vec![Effect::StartAdventure, info("Starting the adventure")],
-        Command::Fortress if ctx.adventure_pending => vec![error("An adventure is already starting or ending")],
-        Command::Fortress if !ctx.adventuring => vec![error("Not on an adventure")],
-        Command::Fortress => vec![Effect::EndAdventure, info("Ending the adventure")],
+        Command::Leave if ctx.adventure_pending => vec![error("An adventure is already starting or ending")],
+        Command::Leave if !ctx.adventuring => vec![error("Not on an adventure")],
+        Command::Leave => vec![Effect::EndAdventure, info("Ending the adventure")],
         #[cfg(feature = "dev_ui")]
         Command::Complete => vec![Effect::Complete, info("Every designation done")],
         #[cfg(feature = "dev_ui")]
@@ -197,10 +197,10 @@ mod tests {
     }
 
     #[test]
-    fn fortress_ends_only_an_adventure() {
-        assert_eq!(effects(Command::Fortress, &ctx()), [Effect::Error("Not on an adventure".into())]);
+    fn leave_ends_only_an_adventure() {
+        assert_eq!(effects(Command::Leave, &ctx()), [Effect::Error("Not on an adventure".into())]);
         let on_one = RunContext { adventuring: true, ..ctx() };
-        assert_eq!(effects(Command::Fortress, &on_one)[0], Effect::EndAdventure);
+        assert_eq!(effects(Command::Leave, &on_one)[0], Effect::EndAdventure);
     }
 
     #[test]

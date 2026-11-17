@@ -14,7 +14,7 @@ pub enum Command {
     /// Start an adventure at the site picked on the Adventure tab.
     Adventure,
     /// End the adventure.
-    Fortress,
+    Leave,
     Where,
     Clear,
     /// Every designation done at once (the Debug tab's button).
@@ -32,7 +32,7 @@ pub enum Command {
 pub const HELP: &[&str] = &[
     "/help - this list",
     "/adventure - start an adventure at the site picked on the Adventure tab",
-    "/fortress - end the adventure",
+    "/leave - end the adventure",
     "/where - the region and block you are in",
     "/clear - empty the chat",
     #[cfg(feature = "dev_ui")]
@@ -92,7 +92,7 @@ fn parse(verb: &str, args: &[&str]) -> Result<Command, String> {
     match verb {
         "help" => alone(Command::Help),
         "adventure" => alone(Command::Adventure),
-        "fortress" => alone(Command::Fortress),
+        "leave" => alone(Command::Leave),
         "where" => alone(Command::Where),
         "clear" => alone(Command::Clear),
         #[cfg(feature = "dev_ui")]
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(submit("  /where  "), Submitted::Run(Command::Where));
         assert_eq!(submit("/clear"), Submitted::Run(Command::Clear));
         assert_eq!(submit("/adventure"), Submitted::Run(Command::Adventure));
-        assert_eq!(submit("/fortress"), Submitted::Run(Command::Fortress));
+        assert_eq!(submit("/leave"), Submitted::Run(Command::Leave));
     }
 
     #[test]

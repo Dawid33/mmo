@@ -1,7 +1,7 @@
 //! World history on the main thread. The server sends the sites, the calendar,
 //! notices and person info as `ClientUpdateEvent`s;
 //! the bridge forwards each as a [`HistoryMsg`] and [`apply_history_msgs`] keeps
-//! [`HistoryView`], which the world map / embark / inspector UI reads.
+//! [`HistoryView`], which the world map / arrival / inspector UI reads.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -32,8 +32,8 @@ pub struct HistoryView {
     pub people: BTreeMap<PersonId, (PersonInfo, f32)>,
     /// Every civ's name (server `Civs`, on connect).
     pub civs: Vec<CivMarker>,
-    /// The embark screen's tab.
-    pub tab: EmbarkTab,
+    /// The arrival screen's tab.
+    pub tab: ArrivalTab,
     /// The Adventure tab's choice.
     pub adventure: AdventureSelection,
     /// The last answer to a start-adventure request.
@@ -48,9 +48,9 @@ pub struct HistoryView {
     pub legends: LegendsState,
 }
 
-/// Which tab of the embark screen is open.
+/// Which tab of the arrival screen is open.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbarkTab {
+pub enum ArrivalTab {
     #[default]
     Adventure,
     Legends,

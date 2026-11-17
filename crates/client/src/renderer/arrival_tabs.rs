@@ -1,7 +1,7 @@
-//! The embark screen's Adventure and Legends tabs (`ui/embark.slint`): the
+//! The arrival screen's Adventure and Legends tabs (`ui/arrival.slint`): the
 //! pure mapping between [`HistoryView`] and the `GameUi` properties — civ /
 //! site lists and their indices, the Legends filter column and header — and
-//! [`sync_embark_tabs`], which pushes them only when they changed. The
+//! [`sync_arrival_tabs`], which pushes them only when they changed. The
 //! `UiAction`s the tabs send are applied in `slint_overlay::apply_ui_actions`.
 
 use game::history::{CivId, LegendLine, LegendsFilter, SiteId};
@@ -9,15 +9,15 @@ use game::{CivMarker, RegionCoords, SiteMarker, WorldMap};
 use slint_ui::slint::{Model, ModelRc, SharedString, VecModel};
 use slint_ui::{GameUi, LegendsFilterRow};
 
-use super::history_view::{AdventureSelection, EmbarkTab, HistoryView};
+use super::history_view::{AdventureSelection, ArrivalTab, HistoryView};
 use super::slint_overlay::map_tile;
 
-/// The tab of the Slint `embark-tab` index (0 Adventure, 1 Legends);
+/// The tab of the Slint `arrival-tab` index (0 Adventure, 1 Legends);
 /// Adventure for an unknown index.
-pub fn embark_tab(index: i32) -> EmbarkTab {
+pub fn arrival_tab(index: i32) -> ArrivalTab {
     match index {
-        1 => EmbarkTab::Legends,
-        _ => EmbarkTab::Adventure,
+        1 => ArrivalTab::Legends,
+        _ => ArrivalTab::Adventure,
     }
 }
 
@@ -173,7 +173,7 @@ fn strings(v: &[String]) -> ModelRc<SharedString> {
 /// (`None` = nothing pushed yet). Call when the history changed or nothing
 /// was pushed. Appended legends lines are added to the existing model, so
 /// the list keeps its scroll position.
-pub fn sync_embark_tabs(ui: &GameUi, h: &HistoryView, shown: &mut Option<TabsView>) {
+pub fn sync_arrival_tabs(ui: &GameUi, h: &HistoryView, shown: &mut Option<TabsView>) {
     let new = tabs_view(h);
     let first = shown.is_none();
     let old = shown.take().unwrap_or_default();
@@ -250,9 +250,9 @@ mod tests {
 
     #[test]
     fn tab_index_maps_to_tab() {
-        assert_eq!(embark_tab(0), EmbarkTab::Adventure);
-        assert_eq!(embark_tab(1), EmbarkTab::Legends);
-        assert_eq!(embark_tab(7), EmbarkTab::Adventure);
+        assert_eq!(arrival_tab(0), ArrivalTab::Adventure);
+        assert_eq!(arrival_tab(1), ArrivalTab::Legends);
+        assert_eq!(arrival_tab(7), ArrivalTab::Adventure);
     }
 
     #[test]

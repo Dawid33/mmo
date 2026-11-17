@@ -17,7 +17,7 @@
 //! Slint layers composite only onto an active `Camera3d` marked
 //! [`UiCamera`](crate::renderer::UiCamera) (`renderer/slint_composite.rs`). While
 //! [`frontend_owns`] is true — every [`AppState`] except `InWorld`, and `InWorld`
-//! before the player has [`Embarked`] — the [`FrontendCamera`] carries
+//! before the player has [`InPlay`] — the [`FrontendCamera`] carries
 //! `UiCamera` and **no other system may claim `UiCamera`** or keep a world
 //! camera active over it (`bridge::enforce_single_active_camera` stands
 //! aside while it does). Outside that window the world's cameras own
@@ -69,13 +69,13 @@ pub struct SessionEnded {
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SkipMenu(pub bool);
 
-/// The player has embarked: pressed Play on the arrival map (the world map,
+/// The player is in play: pressed Play on the arrival map (the world map,
 /// modal until then) and arrived. Until then the frontend owns the screen even
 /// in `InWorld` — the spawn region loading behind the map is never shown. False
 /// after a menu start, true from the first frame with [`SkipMenu`]. Reset with
 /// the session.
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub struct Embarked(pub bool);
+pub struct InPlay(pub bool);
 
 /// Why the last session ended without the player's say (server died, connect
 /// failed, …), shown on the main menu. Set by the session flow when a start
@@ -130,18 +130,18 @@ impl PendingJoin {
 }
 
 /// Native: the port the next [`PendingWorld`]'s server binds instead of a free
-/// one (`client debug embarked --port N`, so other clients can join it).
+/// one (`client debug world --port N`, so other clients can join it).
 /// Kept for the process's life.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostPort(pub u16);
 
 /// Native: join this already running server instead of starting a
-/// [`PendingWorld`]'s own (`client debug embarked --join ADDR`). Set before
+/// [`PendingWorld`]'s own (`client debug world --join ADDR`). Set before
 /// `AppState::Starting`; the session flow connects to it and removes it.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JoinServer(pub std::net::SocketAddr);
 
-/// A start whose world is still being prepared (the `debug embarked` launch
+/// A start whose world is still being prepared (the `debug world` launch
 /// forging its world): `Starting` waits for the [`PendingWorld`] to arrive
 /// instead of failing for want of one. Whoever inserts it sets the starting
 /// screen's [`StartingStatus`] and replaces it with a `PendingWorld` (or ends
@@ -287,36 +287,36 @@ pub fn world_systems_enabled() -> impl SystemCondition<()> {
 
 /// [`frontend_owns`] over optional resources: without the session state
 /// (headless tests, examples) the frontend never owns the screen.
-pub fn frontend_has_screen(state: Option<&State<AppState>>, embarked: Option<&Embarked>) -> bool {
-    state.is_some_and(|s| frontend_owns(*s.get(), embarked.is_some_and(|e| e.0)))
+pub fn frontend_has_screen(state: Option<&State<AppState>>, in_play: Option<&InPlay>) -> bool {
+    state.is_some_and(|s| frontend_owns(*s.get(), in_play.is_some_and(|e| e.0)))
 }
 
 /// Whether the frontend (menu screens, starting screen, arrival map) owns the screen.
-pub fn frontend_owns(state: AppState, embarked: bool) -> bool {
-    state != AppState::InWorld || !embarked
+pub fn frontend_owns(state: AppState, in_play: bool) -> bool {
+    state != AppState::InWorld || !in_play
 }
 
-/// Whether the arrival map is up: in the world, not embarked, and the world
+/// Whether the arrival map is up: in the world, not in play, and the world
 /// map has arrived. Then the game UI (the map only) is drawn and takes input in
 /// the frontend's place, while the frontend camera still owns the screen;
 /// before the map arrives the frontend's starting screen shows.
-pub fn arrival_map_shown(state: AppState, embarked: bool, map_arrived: bool) -> bool {
-    state == AppState::InWorld && !embarked && map_arrived
+pub fn arrival_map_shown(state: AppState, in_play: bool, map_arrived: bool) -> bool {
+    state == AppState::InWorld && !in_play && map_arrived
 }
 
 /// Whether the frontend's own screens (`FrontendUi`) are drawn: the frontend
 /// owns the screen and the arrival map is not up. Exactly one interactive
 /// layer has the screen at any time: this, or the game UI.
-pub fn frontend_ui_shown(state: AppState, embarked: bool, map_arrived: bool) -> bool {
-    frontend_owns(state, embarked) && !arrival_map_shown(state, embarked, map_arrived)
+pub fn frontend_ui_shown(state: AppState, in_play: bool, map_arrived: bool) -> bool {
+    frontend_owns(state, in_play) && !arrival_map_shown(state, in_play, map_arrived)
 }
 
 /// [`frontend_owns`] as a run condition.
 pub fn frontend_owns_screen()
--> impl FnMut(Option<Res<State<AppState>>>, Option<Res<Embarked>>) -> bool + Clone {
-    |state: Option<Res<State<AppState>>>, embarked: Option<Res<Embarked>>| {
+-> impl FnMut(Option<Res<State<AppState>>>, Option<Res<InPlay>>) -> bool + Clone {
+    |state: Option<Res<State<AppState>>>, in_play: Option<Res<InPlay>>| {
         let state = state.map_or(AppState::default(), |s| *s.get());
-        frontend_owns(state, embarked.is_some_and(|e| e.0))
+        frontend_owns(state, in_play.is_some_and(|e| e.0))
     }
 }
 
@@ -350,7 +350,7 @@ pub fn skip_menu() -> bool {
 /// service opens on the login screen (else its join-only menu).
 pub fn initial_state(skip_menu: bool, login_first: bool) -> AppState {
     // The dev bypass (`VOXEL_SKIP_MENU`, a set `VOXEL_WORLD_FILE`, the probes)
-    // goes straight to InWorld with the player already embarked (`Embarked`
+    // goes straight to InWorld with the player already in play (`InPlay`
     // starts as `skip_menu`), connecting to an already running server.
     if skip_menu {
         AppState::InWorld
@@ -435,8 +435,8 @@ impl Plugin for SessionPlugin {
             .init_resource::<SessionResets>()
             .init_resource::<SessionMessageClears>()
             .init_resource::<SessionGeneration>()
-            .insert_resource(Embarked(self.skip_menu))
-            .add_session_reset::<Embarked>()
+            .insert_resource(InPlay(self.skip_menu))
+            .add_session_reset::<InPlay>()
             .init_resource::<LastSessionError>()
             .add_session_reset::<StartingStatus>()
             .init_resource::<StartingLog>()
@@ -455,10 +455,10 @@ impl Plugin for SessionPlugin {
 fn sync_frontend_camera(
     mut commands: Commands,
     state: Res<State<AppState>>,
-    embarked: Res<Embarked>,
+    in_play: Res<InPlay>,
     cameras: Query<Entity, With<FrontendCamera>>,
 ) {
-    if frontend_owns(*state.get(), embarked.0) {
+    if frontend_owns(*state.get(), in_play.0) {
         if cameras.is_empty() {
             commands.spawn(frontend_camera_bundle());
         }
@@ -784,8 +784,8 @@ mod flow {
         world.get_resource_or_init::<StartingLog>().0 = tail;
     }
 
-    /// The first `SetPlayer` of a session: we are in. Not embarked yet — the
-    /// arrival map is the embark step (`slint_overlay`).
+    /// The first `SetPlayer` of a session: we are in. Not in play yet — the
+    /// arrival map is the start screen (`slint_overlay`).
     fn enter_world_on_player(player: Res<LocalPlayer>, mut next: ResMut<NextState<AppState>>) {
         if player.0.is_some() {
             next.set(AppState::InWorld);
@@ -893,7 +893,7 @@ mod flow {
 /// - Join server ([`PendingServer`]) → `Starting`: a fresh set of
 ///   [`SessionChannels`], a fresh game manager and a WebTransport connection
 ///   (`sim_driver::start_session`). The first `SetPlayer` moves on to
-///   `InWorld`, not embarked: the arrival map is the embark step, as native.
+///   `InWorld`, not in play: the arrival map is the start screen, as native.
 /// - A connect that gives up, or a lost connection, ends the session with the
 ///   reason ([`SessionEnded`], from `sim_driver::drive_sim`): a failed start
 ///   stays on the starting screen to show why, a lost session goes to the menu.
@@ -991,8 +991,8 @@ mod web_flow {
         world.insert_resource(driver);
     }
 
-    /// The first `SetPlayer` of a session: we are in. Not embarked yet — the
-    /// arrival map is the embark step (`slint_overlay`).
+    /// The first `SetPlayer` of a session: we are in. Not in play yet — the
+    /// arrival map is the start screen (`slint_overlay`).
     fn enter_world_on_player(player: Res<LocalPlayer>, mut next: ResMut<NextState<AppState>>) {
         if player.0.is_some() {
             next.set(AppState::InWorld);
@@ -1133,14 +1133,14 @@ mod tests {
         app.add_session_reset::<Counter>().insert_resource(Untouched(7));
         app.add_session_reset_with(|w| w.resource_mut::<Counter>().0 += 100);
         app.world_mut().resource_mut::<Counter>().0 = 5;
-        app.world_mut().insert_resource(Embarked(true));
+        app.world_mut().insert_resource(InPlay(true));
 
         end_session(app.world_mut());
 
         // Reset first (5 → 0), then the custom reset (0 → 100): registration order.
         assert_eq!(app.world().resource::<Counter>().0, 100);
         assert_eq!(*app.world().resource::<Untouched>(), Untouched(7));
-        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false));
+        assert_eq!(*app.world().resource::<InPlay>(), InPlay(false));
     }
 
     #[derive(Resource, Default)]
@@ -1217,13 +1217,13 @@ mod tests {
             app.world_mut().resource_mut::<NextState<AppState>>().set(state);
             app.update();
             app.update();
-            // InWorld but not yet embarked: still the frontend's screen.
+            // InWorld but not yet in play: still the frontend's screen.
             assert_eq!(frontend_cameras(&mut app), vec![(true, true)], "{state:?}");
         }
 
-        app.world_mut().resource_mut::<Embarked>().0 = true;
+        app.world_mut().resource_mut::<InPlay>().0 = true;
         app.update();
-        assert!(frontend_cameras(&mut app).is_empty(), "embarked: the world owns the screen");
+        assert!(frontend_cameras(&mut app).is_empty(), "in_play: the world owns the screen");
 
         // Back to the menu: the session ends, the frontend takes the screen again.
         end_session(app.world_mut());
@@ -1235,11 +1235,11 @@ mod tests {
 
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
-    fn skip_menu_starts_embarked_in_world() {
+    fn skip_menu_starts_in_play() {
         let mut app = app(true);
         app.update();
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::InWorld);
-        assert_eq!(*app.world().resource::<Embarked>(), Embarked(true));
+        assert_eq!(*app.world().resource::<InPlay>(), InPlay(true));
         assert!(frontend_cameras(&mut app).is_empty());
     }
 
@@ -1339,7 +1339,7 @@ mod tests {
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     #[cfg(not(target_arch = "wasm32"))]
-    fn menu_start_enters_the_world_not_embarked() {
+    fn menu_start_enters_the_world_not_in_play() {
         let mut app = app(false);
         app.init_resource::<crate::renderer::LocalPlayer>().add_plugins(SessionFlowPlugin);
         SessionChannels::new().install(app.world_mut());
@@ -1349,7 +1349,7 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::InWorld);
-        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false), "the arrival map embarks");
+        assert_eq!(*app.world().resource::<InPlay>(), InPlay(false), "the arrival map starts play");
         assert_eq!(frontend_cameras(&mut app).len(), 1, "the frontend camera keeps the screen");
     }
 
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn exactly_one_layer_has_the_screen() {
         use AppState::*;
-        // (state, embarked, map arrived) → frontend screens shown, arrival map shown
+        // (state, in play, map arrived) → frontend screens shown, arrival map shown
         let cases = [
             (MainMenu, false, false, true, false),
             (Starting, false, true, true, false),
@@ -1389,9 +1389,9 @@ mod tests {
             (InWorld, false, true, false, true),
             (InWorld, true, true, false, false),
         ];
-        for (state, embarked, map, frontend, arrival) in cases {
-            assert_eq!(frontend_ui_shown(state, embarked, map), frontend, "{state:?} {embarked} {map}");
-            assert_eq!(arrival_map_shown(state, embarked, map), arrival, "{state:?} {embarked} {map}");
+        for (state, in_play, map, frontend, arrival) in cases {
+            assert_eq!(frontend_ui_shown(state, in_play, map), frontend, "{state:?} {in_play} {map}");
+            assert_eq!(arrival_map_shown(state, in_play, map), arrival, "{state:?} {in_play} {map}");
         }
     }
 
@@ -1408,7 +1408,7 @@ mod tests {
         app.update();
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::MainMenu);
         assert_eq!(app.world().resource::<LastSessionError>().0, None);
-        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false));
+        assert_eq!(*app.world().resource::<InPlay>(), InPlay(false));
     }
 
     /// A session joined with a login ticket ends on the online world list,
@@ -1429,7 +1429,7 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Worlds);
-        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false), "the session was left");
+        assert_eq!(*app.world().resource::<InPlay>(), InPlay(false), "the session was left");
         assert!(app.world().resource::<LoginSession>().logged_in(), "still signed in");
     }
 
@@ -1517,7 +1517,7 @@ mod tests {
         // The session's world.
         app.world_mut().spawn(SessionScoped);
         app.world_mut().resource_mut::<Counter>().0 = 5;
-        app.world_mut().resource_mut::<Embarked>().0 = true;
+        app.world_mut().resource_mut::<InPlay>().0 = true;
         app.world_mut().resource_mut::<crate::renderer::LocalPlayer>().0 = Some(1);
         let generation = app.world().resource::<SessionGeneration>().0;
 
@@ -1529,7 +1529,7 @@ mod tests {
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting);
         assert_eq!(scoped(&mut app), 0, "the old session's trees survived the rejoin");
         assert_eq!(app.world().resource::<Counter>().0, 0, "a registered resource survived the rejoin");
-        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false));
+        assert_eq!(*app.world().resource::<InPlay>(), InPlay(false));
         assert_eq!(app.world().resource::<crate::renderer::LocalPlayer>().0, None);
         assert!(app.world().resource::<SessionGeneration>().0 > generation, "no end_session ran");
         assert!(matches!(old.request_recv.try_recv(), Ok(ClientRequest::Leave)), "no Leave sent");
@@ -1586,10 +1586,10 @@ mod tests {
     }
 
     #[test]
-    fn frontend_owns_every_state_but_embarked_in_world() {
+    fn frontend_owns_every_state_but_in_play_in_world() {
         for state in [AppState::MainMenu, AppState::MapGenerator, AppState::LoadWorld, AppState::Starting] {
             assert!(frontend_owns(state, false), "{state:?}");
-            assert!(frontend_owns(state, true), "{state:?} embarked");
+            assert!(frontend_owns(state, true), "{state:?} in_play");
         }
         assert!(frontend_owns(AppState::InWorld, false));
         assert!(!frontend_owns(AppState::InWorld, true));

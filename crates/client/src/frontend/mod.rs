@@ -9,7 +9,7 @@
 //! arrival map (the game UI's world map, before the first Play) is not up.
 //! The generator lives in [`generator`], the world list in [`load_world`] and
 //! the menu's map backdrop in [`menu_background`] (native only); the starting screen's lines come from [`starting_lines`].
-//! Once embarked, the same layer draws the [`loading`] screen (screen 4) over
+//! Once in play, the same layer draws the [`loading`] screen (screen 4) over
 //! the world camera until the camera is placed and the home region is meshed.
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -31,7 +31,7 @@ use crate::renderer::slint_overlay::{render_slint_layer, SlintLayer, SlintLayerP
 use crate::session::SessionResetExt;
 use crate::login::flow::{LoginIntent, LoginSession};
 use crate::renderer::world_map::WorldMapState;
-use crate::session::{frontend_ui_shown, AppState, Embarked, LastSessionError, StartingLog, StartingStatus};
+use crate::session::{frontend_ui_shown, AppState, InPlay, LastSessionError, StartingLog, StartingStatus};
 
 /// What a frontend button asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,7 +85,7 @@ pub const WORLDS_SCREEN: i32 = 6;
 
 /// The `FrontendUi.screen` an [`AppState`] shows (`InWorld` shows the
 /// starting screen: the layer is visible there only until the world map
-/// arrives, and hidden once embarked).
+/// arrives, and hidden once in play).
 pub fn screen_index(state: AppState) -> i32 {
     match state {
         AppState::MainMenu => 0,
@@ -175,7 +175,7 @@ impl Plugin for FrontendPlugin {
             Update,
             (apply_frontend_actions, crate::login::flow::start_login, crate::login::flow::poll_login).chain(),
         )
-        // After every Update system that embarks or re-arms the camera, so the
+        // After every Update system that starts play or re-arms the camera, so the
         // loading screen is drawn on the very frame the world camera takes over.
         .add_systems(
             PostUpdate,
@@ -275,7 +275,7 @@ fn apply_frontend_actions(
     (login, mut login_intents): (Option<Res<LoginSession>>, MessageWriter<LoginIntent>),
     mut commands: Commands,
     state: Res<State<AppState>>,
-    embarked: Res<Embarked>,
+    in_play: Res<InPlay>,
     world_map: Option<Res<WorldMapState>>,
     mut error: ResMut<LastSessionError>,
     mut log: ResMut<StartingLog>,
@@ -285,7 +285,7 @@ fn apply_frontend_actions(
     let Some(actions) = actions else { return };
     let queued = std::mem::take(&mut *actions.0.borrow_mut());
     let map_arrived = world_map.is_some_and(|m| m.map.is_some());
-    if !frontend_ui_shown(*state.get(), embarked.0, map_arrived) {
+    if !frontend_ui_shown(*state.get(), in_play.0, map_arrived) {
         return;
     }
     for action in queued {
@@ -332,7 +332,7 @@ fn apply_frontend_actions(
 fn push_frontend_state(
     layer: Option<NonSend<SlintLayer<FrontendUi>>>,
     state: Res<State<AppState>>,
-    embarked: Res<Embarked>,
+    in_play: Res<InPlay>,
     can_load: Res<CanLoad>,
     error: Res<LastSessionError>,
     starting: Option<Res<StartingStatus>>,
@@ -346,7 +346,7 @@ fn push_frontend_state(
     let Some(layer) = layer else { return };
     let ui = layer.overlay.ui();
     let map_arrived = world_map.is_some_and(|m| m.map.is_some());
-    let frontend = frontend_ui_shown(*state.get(), embarked.0, map_arrived);
+    let frontend = frontend_ui_shown(*state.get(), in_play.0, map_arrived);
     let loading = !frontend && cover.visible();
     let shown = frontend || loading;
     if ui.get_shown() != shown {

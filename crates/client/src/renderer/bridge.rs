@@ -1421,10 +1421,10 @@ pub fn enforce_single_active_camera(
     mut commands: Commands,
     hud_status: Res<HudStatus>,
     state: Option<Res<State<crate::session::AppState>>>,
-    embarked: Option<Res<crate::session::Embarked>>,
+    in_play: Option<Res<crate::session::InPlay>>,
     mut cams: Query<(Entity, &SimEntity, &mut Camera, Has<super::UiCamera>), With<Camera3d>>,
 ) {
-    if crate::session::frontend_has_screen(state.as_deref(), embarked.as_deref()) {
+    if crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref()) {
         for (e, _, mut cam, has_marker) in &mut cams {
             if cam.is_active {
                 cam.is_active = false;
@@ -2294,7 +2294,7 @@ mod tests {
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn body_camera_yields_to_the_frontend() {
-        use crate::session::{AppState, Embarked, SessionPlugin};
+        use crate::session::{AppState, InPlay, SessionPlugin};
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin, SessionPlugin { skip_menu: false, login_first: false }))
             .init_resource::<HudStatus>()
@@ -2319,11 +2319,11 @@ mod tests {
         app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InWorld);
         app.update();
         app.update();
-        assert_eq!(state(&app), (false, false), "in world but not embarked: still the frontend's");
+        assert_eq!(state(&app), (false, false), "in world but not in_play: still the frontend's");
 
-        app.world_mut().resource_mut::<Embarked>().0 = true;
+        app.world_mut().resource_mut::<InPlay>().0 = true;
         app.update();
-        assert_eq!(state(&app), (true, true), "embarked: the body camera has the screen again");
+        assert_eq!(state(&app), (true, true), "in_play: the body camera has the screen again");
     }
 
     #[test]

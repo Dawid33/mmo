@@ -135,7 +135,7 @@ pub fn sync_body_visibility(
     }
 }
 
-/// On a mode change: Adventure puts the fortress tool down; Fortress drops
+/// On a mode change: Adventure puts the designate tool down; Overview drops
 /// the body from the selection (it is not selectable there).
 pub fn on_mode_change(
     mode: Res<ClientPlayMode>,
@@ -161,7 +161,7 @@ pub fn on_mode_change(
             }
         }
         PlayMode::Overview => {
-            // The body is hidden in Fortress: don't stay pinned to it.
+            // The body is hidden in Overview: don't stay pinned to it.
             if follow.0 == Some(FollowTarget::LocalPlayer) {
                 follow.0 = None;
             }

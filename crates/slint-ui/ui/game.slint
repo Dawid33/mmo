@@ -1,7 +1,7 @@
 import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, RadialItem, RadialMenu, Styles, VerticalFlow } from "@widgets";
 import { GameMenu } from "menu.slint";
 import { SiteMark, WorldMap, WorldMapConfig } from "world-map.slint";
-import { EmbarkLayout, EmbarkPanel, LegendsFilterRow, LegendsLayout } from "embark.slint";
+import { ArrivalLayout, ArrivalPanel, LegendsFilterRow, LegendsLayout } from "arrival.slint";
 import { GameTheme } from "theme.slint";
 import { FortressLayout, FortressPanel } from "fortress-panel.slint";
 import { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
@@ -180,15 +180,14 @@ export component GameUi inherits Window {
     in property <string> map-status;
     in property <[SiteMark]> map-sites;
     in property <bool> show-play: true;
-    // The tile under the map pointer, and whether embarking there is refused.
+    // The tile under the map pointer.
     out property <int> map-hover-col: map.hover-col;
     out property <int> map-hover-row: map.hover-row;
-    in property <bool> hover-blocked;
-    // The embark panel (beside the map while it is visible).
-    in property <bool> embark-visible;
+    // The arrival panel (beside the map while it is visible).
+    in property <bool> arrival-visible;
     // The panel's open tab: 0 Adventure, 1 Legends.
-    in-out property <int> embark-tab: 0;
-    callback embark-tab-changed(int);
+    in-out property <int> arrival-tab: 0;
+    callback arrival-tab-changed(int);
     // The Adventure tab: civs with a populated site, the picked civ's
     // populated sites ("<site> — pop N"), the picked site's region, and
     // whether Start adventure is enabled (a site picked, nothing pending).
@@ -212,17 +211,17 @@ export component GameUi inherits Window {
     callback legends-pick-filter(int);
     callback legends-load-more();
     callback legends-line-clicked(int);
-    // Hit-test positions of the embark panel for headless tests (window
+    // Hit-test positions of the arrival panel for headless tests (window
     // logical pixels).
-    out property <length> embark-tabs-x: embark.tabs-x;
-    out property <length> embark-tabs-y: embark.tabs-y;
-    out property <length> embark-tabs-end: embark.tabs-end;
-    out property <length> embark-tabs-right: embark.tabs-right;
-    out property <length> adventure-start-x: embark.adventure-start-x;
-    out property <length> adventure-start-y: embark.adventure-start-y;
-    out property <length> legends-filter-x: embark.legends-filter-x;
-    out property <length> legends-filter-first-y: embark.legends-filter-first-y;
-    out property <length> legends-filter-row-height: embark.legends-filter-row-height;
+    out property <length> arrival-tabs-x: arrival.tabs-x;
+    out property <length> arrival-tabs-y: arrival.tabs-y;
+    out property <length> arrival-tabs-end: arrival.tabs-end;
+    out property <length> arrival-tabs-right: arrival.tabs-right;
+    out property <length> adventure-start-x: arrival.adventure-start-x;
+    out property <length> adventure-start-y: arrival.adventure-start-y;
+    out property <length> legends-filter-x: arrival.legends-filter-x;
+    out property <length> legends-filter-first-y: arrival.legends-filter-first-y;
+    out property <length> legends-filter-row-height: arrival.legends-filter-row-height;
     in-out property <float> map-zoom: 1;
     in-out property <length> map-pan-x;
     in-out property <length> map-pan-y;
@@ -256,7 +255,7 @@ export component GameUi inherits Window {
     in property <bool> can-end-adventure;
     // Whether the menu offers Main menu (false on wasm, which has no menu).
     in property <bool> can-leave: true;
-    // Not embarked yet: the world map is the embark step. Its Close is gone,
+    // Not in play yet: the world map is the start screen. Its Close is gone,
     // the Esc menu offers only Main menu, and neither the fortress panel, the
     // menu column nor the status line is drawn.
     in property <bool> map-modal;
@@ -501,8 +500,7 @@ export component GameUi inherits Window {
         map-status: root.map-status;
         sites: root.map-sites;
         show-play: root.show-play;
-        hover-blocked: root.hover-blocked;
-        reserve-left: root.embark-visible ? root.embark-width + WorldMapConfig.gap : 0px;
+        reserve-left: root.arrival-visible ? root.arrival-width + WorldMapConfig.gap : 0px;
         map-zoom <=> root.map-zoom;
         map-pan-x <=> root.map-pan-x;
         map-pan-y <=> root.map-pan-y;
@@ -513,17 +511,17 @@ export component GameUi inherits Window {
     }
 
     // The Legends tab widens the panel; the map keeps the rest.
-    property <length> embark-width: root.embark-tab == 1 ? LegendsLayout.width : EmbarkLayout.width;
+    property <length> arrival-width: root.arrival-tab == 1 ? LegendsLayout.width : ArrivalLayout.width;
     // `visible` rather than `if`, so its hit-test positions above stay
     // readable.
-    embark := EmbarkPanel {
-        visible: root.map-open && root.embark-visible;
+    arrival := ArrivalPanel {
+        visible: root.map-open && root.arrival-visible;
         x: WorldMapConfig.margin;
         y: WorldMapConfig.margin;
-        width: root.embark-width;
+        width: root.arrival-width;
         height: root.height - 2 * WorldMapConfig.margin;
-        tab <=> root.embark-tab;
-        tab-changed(i) => { root.embark-tab-changed(i); }
+        tab <=> root.arrival-tab;
+        tab-changed(i) => { root.arrival-tab-changed(i); }
         adventure-civs: root.adventure-civs;
         adventure-civ-picked: root.adventure-civ-picked;
         adventure-sites: root.adventure-sites;

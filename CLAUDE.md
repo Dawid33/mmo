@@ -31,8 +31,8 @@ Old RTS pivot is on branch `ds/rtsPivot`. `TODO.md` tracks the current direction
 ## Building and running
 
 The root `justfile` is canonical — `just --list`. Key recipes: `build`, `run` (debug launch straight into
-an embarked world), `run-two` (two clients, one fortress), `play` (real start: main menu → generator →
-world map → embark), `server` + `client` (dev server on 127.0.0.1:6466), `web`, `smoke`, `test-one`,
+an adventure), `run-two` (two players adventuring at one site), `play` (real start: main menu → generator →
+world map → Adventure tab), `server` + `client` (dev server on 127.0.0.1:6466), `web`, `smoke`, `test-one`,
 `test-threads`, `determinism-wasm`, `clippy`, `world-map`. **Keep the justfile in sync**: any new or
 changed build/run/test command updates its recipe in the same change.
 
@@ -46,15 +46,15 @@ changed build/run/test command updates its recipe in the same change.
   `cpu_percent=`, `jobs=`). Raw `cargo` is NOT pinned — go through `just` or prefix it yourself.
 - **GPU**: `just adapter=6700 …` / `$VOXEL_ADAPTER` pins wgpu; unpinned, `client::adapter_pick` picks the
   best adapter (never the slow NVK T600 if anything better exists). Check the `AdapterInfo` log line.
-- **Debug launches** (`crates/client/src/debug_launch.rs`): `client debug embarked [--reset]` forges
-  `worlds/debug-embarked/` once and reuses it (`--adventure`: adventure mode instead of the fortress); add presets there. Worlds live in `worlds/<slug>/`
+- **Debug launches** (`crates/client/src/debug_launch.rs`): `client debug world [--reset] [--site N]` forges
+  `worlds/debug-world/` once and reuses it, then starts an adventure at the first populated site (or site N); add presets there. Worlds live in `worlds/<slug>/`
   (git-ignored; `terrain.sqlite` store, `world.json`, `server.log`). Menu worlds spawn their own
   single-player server (`VOXEL_SINGLE_PLAYER=1`, free port). `VOXEL_SKIP_MENU=1` connects to the dev server.
 
 ### Build/run dials
 
 - **World scale** (client, runtime): `just world=tiny|small|full` (`world_scale.rs`), `view=<m>` view
-  distance, `VOXEL_NEAR_RADIUS`, `VOXEL_LOD_RINGS`, `VOXEL_FORTRESS_RADIUS`. Use small worlds on weak GPUs;
+  distance, `VOXEL_NEAR_RADIUS`, `VOXEL_LOD_RINGS`. Use small worlds on weak GPUs;
   compare perf numbers only within one scale.
 - **Region size** (BUILD time, blocks): `region_blocks=64|128|256|512` (`VOXEL_REGION_BLOCKS`). Play
   recipes default to 256, tests/check/clippy/raw cargo to 64. Server and client must match (no handshake).
@@ -250,7 +250,7 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   only rustls crypto provider is **ring** — keep `aws-lc-rs` out of the tree.
 - **Role split (R2, `VOXEL_ROLE=all|host|coordinator`, default `all` = one process as before; plan
   `docs/superpowers/plans/2026-11-07-r2b-role-split.md`)**: the coordinator (`game::coordinator`, claims,
-  embark/return, history, sites, the coordinator row) and the host (`WorldManager` + regions) talk only via
+  adventures, history, sites, the coordinator row) and the host (`WorldManager` + regions) talk only via
   `HostMsg`/`CoordMsg` over a `WorldLink` — `InlineWorldLink`/channel in `all`, `QuicWorldLink` over
   `svc-link` (QUIC, shared `VOXEL_SERVICE_TOKEN[_FILE]`, pinned self-signed cert) when split. Split roles
   need Postgres (`VOXEL_WORLD_DB`) and refuse anything else. Env: `VOXEL_COORDINATOR_BIND`/`_ADDR`
@@ -428,7 +428,7 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   process); kicks are durable until acked (login migration 0003); the coordinator relays, holding at most the
   `SessionEnded`s no login service is connected for (`LOGIN_ENDS_HELD_MAX`). It serves any number of hosts
   by id. Every link hello names the world (`LinkHello.world` = `VOXEL_WORLD_ID`; a mismatch is refused, `""`
-  matches only `""`); `LINK_PROTOCOL_VERSION` is 7 — older hosts and clients do not mix with this build
+  matches only `""`); `LINK_PROTOCOL_VERSION` is 8 — older hosts and clients do not mix with this build
   (stop, upgrade, rejoin).
 - **Peer link rules** (`game::peer`, `world_manager/peers.rs`, `world_cut.rs`): a `PeerSession` is never
   replaced — `set_peer` on a known host id swaps the link and resets the connection. Resume is boot-scoped

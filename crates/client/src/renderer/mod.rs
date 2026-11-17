@@ -58,7 +58,7 @@ pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
 pub mod water;
-pub mod embark_tabs;
+pub mod arrival_tabs;
 pub mod history_view;
 pub mod world_map;
 use block_textures::build_layers;

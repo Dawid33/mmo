@@ -1,9 +1,9 @@
 //! Coarse twins: distance LOD inside the simulated neighbourhood.
 //!
 //! Every simulated region draws its sim chunks at full detail — chiselled
-//! branches, half blocks, cutout leaves — out to the far edge of the fortress
+//! branches, half blocks, cutout leaves — out to the far edge of the simulated
 //! neighbourhood (~400–700 m from the camera). Measured 2026-11-05 on the Iris
-//! Xe, embarked 3×3 at 256 m regions, horizon view: 22.8M near quads, a
+//! Xe, a 3×3 at 256 m regions, horizon view: 22.8M near quads, a
 //! geometry-bound 23.5 ms main pass and a 15.6 ms far shadow cascade.
 //!
 //! So each sim chunk with quads also gets a COARSE TWIN: its blocks

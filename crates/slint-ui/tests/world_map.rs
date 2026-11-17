@@ -271,7 +271,7 @@ fn non_modal_map_closes() {
 }
 
 /// Before the first Play (the arrival map, `map-modal`) there is no Close:
-/// the map is the embark step. (Esc / M are Bevy-side, in the client.)
+/// the map is the start screen. (Esc / M are Bevy-side, in the client.)
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn modal_map_cannot_be_closed() {

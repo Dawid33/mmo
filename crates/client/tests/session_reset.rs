@@ -40,7 +40,7 @@ use client::renderer::slint_overlay::SlintLayer;
 use client::renderer::history_view::HistoryView;
 use client::renderer::world_map::WorldMapState;
 use client::renderer::{ClientUpdates, GameEvents, LocalPlayer, SimBridgePlugin, UiCamera};
-use client::session::{end_session, AppState, Embarked, FrontendCamera, SessionPlugin, SessionScoped};
+use client::session::{end_session, AppState, InPlay, FrontendCamera, SessionPlugin, SessionScoped};
 use client::world_scale::WorldScale;
 use client::{GameInstanceManager, LocalServer};
 
@@ -171,11 +171,11 @@ fn leave(app: &mut App) {
 }
 
 /// Back into a world: what the session flow's Starting → InWorld plus the
-/// arrival map's embark do.
+/// arrival map's Play do.
 fn enter_world(app: &mut App) {
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InWorld);
     app.update();
-    app.world_mut().resource_mut::<Embarked>().0 = true;
+    app.world_mut().resource_mut::<InPlay>().0 = true;
 }
 
 fn count<F: bevy::ecs::query::QueryFilter>(app: &mut App) -> usize {

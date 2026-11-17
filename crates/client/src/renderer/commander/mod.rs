@@ -622,12 +622,12 @@ fn fresh_height_grid() -> HeightGrid {
 pub fn yield_commander_camera(
     mut commands: Commands,
     state: Option<Res<State<crate::session::AppState>>>,
-    embarked: Option<Res<crate::session::Embarked>>,
+    in_play: Option<Res<crate::session::InPlay>>,
     first_person: Option<Res<first_person::FirstPerson>>,
     mut cams: Query<(Entity, &mut Camera, Has<crate::renderer::UiCamera>), With<CommanderView>>,
 ) {
     // In first person the adventurer's eyes have the screen.
-    let world_owns = !crate::session::frontend_has_screen(state.as_deref(), embarked.as_deref())
+    let world_owns = !crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref())
         && first_person.is_none_or(|fp| !fp.on);
     for (e, mut cam, has_marker) in &mut cams {
         if cam.is_active != world_owns {

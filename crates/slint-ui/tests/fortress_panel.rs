@@ -144,7 +144,7 @@ fn hidden_on_the_arrival_map() {
     let mut overlay = overlay();
     overlay.ui().set_map_modal(true);
     overlay.render();
-    assert!(!overlay.opaque_at(24, 24), "no fortress panel during the embark step");
+    assert!(!overlay.opaque_at(24, 24), "no fortress panel during the arrival map");
 }
 
 #[test]

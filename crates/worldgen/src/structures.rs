@@ -538,9 +538,9 @@ impl StructureSource for DevRegionSource {
 
 /// Dev placements beside the landing column of ONE region: the FIRST region whose full generation is
 /// to start running, as announced by the server's region-thread generator through
-/// [`StructureSource::region_requested`] (in a debug launch, the embark region, when it is generated
+/// [`StructureSource::region_requested`] (in a debug launch, the adventure's start region, when it is generated
 /// fresh rather than restored from the store: the server does not announce a forged world's spawn
-/// region, where a fresh session waits before it embarks);
+/// region, where a fresh session waits before its adventure starts);
 /// nowhere else. The placements are `dev_placements(entries, origin_of(home), prefabs, ground)`, computed
 /// once, when the first request arrives; later requests are ignored. Until then `placements_in` is empty.
 ///

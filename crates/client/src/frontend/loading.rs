@@ -1,5 +1,5 @@
 //! The loading screen: an opaque cover (`FrontendUi` screen 4, `loading.slint`)
-//! over the world from the moment the player embarks — or plays a region,
+//! over the world from the moment the player starts play — or plays a region,
 //! or starts straight in the world — until the commander camera has been put
 //! over the body ([`CommanderCamera::placed`]) and the home region's terrain
 //! has been meshed, then faded out over [`LOADING_FADE_SECS`]. The world loads
@@ -17,7 +17,7 @@ use crate::renderer::hud::HudStatus;
 use crate::renderer::meshing::chunk_mesh::ChunkMeshDirty;
 use crate::renderer::meshing::queue::RemeshQueue;
 use crate::renderer::meshing::MeshingTask;
-use crate::session::{AppState, Embarked};
+use crate::session::{AppState, InPlay};
 
 /// Consecutive frames the home region must have no meshing work left (with
 /// the camera placed) before the cover lifts: snapshot batches and brick
@@ -64,7 +64,7 @@ pub struct LoadingCover {
 /// What the cover decides on, gathered each frame (pure data, for tests).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LoadSignals {
-    /// In the world, embarked and on the commander view: the cover may show.
+    /// In the world, in play and on the commander view: the cover may show.
     pub eligible: bool,
     pub camera_placed: bool,
     pub home_known: bool,
@@ -102,7 +102,7 @@ impl LoadingCover {
             return None;
         }
         // A camera that is not (or no longer) over the body means a load is on:
-        // the first placement, or a Play / embark into another region.
+        // the first placement, or a Play into another region.
         if !s.camera_placed && !matches!(self.phase, CoverPhase::Covering { .. }) {
             *self = Self { phase: CoverPhase::Covering { since: now }, step: STEP_JOINING, ..Self::default() };
         }
@@ -146,7 +146,7 @@ impl LoadingCover {
 }
 
 /// Gathers [`LoadSignals`] and advances the [`LoadingCover`]. Runs in
-/// `PostUpdate`, after every `Update` system that embarks or re-arms the
+/// `PostUpdate`, after every `Update` system that starts play or re-arms the
 /// camera, so the cover is up on the very frame the world camera takes over.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn update_loading_cover(
@@ -154,7 +154,7 @@ pub fn update_loading_cover(
     policy: Option<ResMut<crate::renderer::cursor::CursorPolicy>>,
     time: Res<Time<Real>>,
     state: Option<Res<State<AppState>>>,
-    embarked: Option<Res<Embarked>>,
+    in_play: Option<Res<InPlay>>,
     mode: Option<Res<CameraMode>>,
     cam: Option<Res<CommanderCamera>>,
     status: Option<Res<HudStatus>>,
@@ -167,7 +167,7 @@ pub fn update_loading_cover(
     >,
 ) {
     let eligible = state.is_some_and(|s| *s.get() == AppState::InWorld)
-        && embarked.is_some_and(|e| e.0)
+        && in_play.is_some_and(|e| e.0)
         && mode.is_some_and(|m| *m == CameraMode::Commander)
         && cam.is_some();
     let home = status.and_then(|s| s.home_region);

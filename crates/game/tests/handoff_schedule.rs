@@ -827,11 +827,11 @@ use game::WorldBlockPos;
 const PLACE_ROUNDS: usize = 6;
 
 /// Puts the client's body on `at` (a world block in the spawn region) by
-/// entering Adventure there; `fortress` then switches back to Fortress mode
+/// entering Adventure there; `overview` then switches back to Overview mode
 /// with key control on (the held-key walk's mode).
-fn place_player(rig: &mut Rig, at: WorldBlockPos, fortress: bool) {
+fn place_player(rig: &mut Rig, at: WorldBlockPos, overview: bool) {
     rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(at)) });
-    if fortress {
+    if overview {
         rig.order(Order::SetMode { mode: PlayMode::Overview, at: None });
         rig.key(Key::KeyE, true);
         rig.key(Key::KeyE, false);

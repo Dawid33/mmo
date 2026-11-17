@@ -68,20 +68,18 @@ export component WorldMap {
     in property <string> map-status;
     // Sites, drawn over the picture (a model, so they update without a redraw).
     in property <[SiteMark]> sites;
-    // Room kept free at the window's left for the embark panel.
+    // Room kept free at the window's left for the arrival panel.
     in property <length> reserve-left: 0px;
-    // Play is a dev action once the embark panel is the way in.
+    // Play is a dev action once the arrival panel is the way in.
     in property <bool> show-play: true;
-    // The tile under the pointer, -1 when off the map; whether embarking
-    // there is refused (a dark overlay on it).
+    // The tile under the pointer, -1 when off the map.
     out property <int> hover-col: touch.has-hover ? root.tile-at(touch.mouse-x - root.map-pan-x, root.map-cols) : -1;
     out property <int> hover-row: touch.has-hover ? root.tile-at(touch.mouse-y - root.map-pan-y, root.map-rows) : -1;
-    in property <bool> hover-blocked;
     in-out property <float> map-zoom: 1;
     // Where the map's top-left corner sits in the view.
     in-out property <length> map-pan-x;
     in-out property <length> map-pan-y;
-    // The arrival map (not embarked yet): Play is the only way out, so there
+    // The arrival map (not in play yet): Play is the only way out, so there
     // is no Close button. (Esc / M are the client's, which honours it too.)
     in property <bool> map-modal;
 
@@ -235,13 +233,6 @@ export component WorldMap {
                 height: max(0px, root.cell-len - 4px);
                 border-width: 2px;
                 border-color: WorldMapConfig.selected-color;
-            }
-            if root.map-available && root.hover-blocked && !root.dragged && root.hover-col >= 0 && root.hover-row >= 0: Rectangle {
-                x: root.map-pan-x + root.hover-col * root.tile-len;
-                y: root.map-pan-y + root.hover-row * root.tile-len;
-                width: root.cell-len;
-                height: root.cell-len;
-                background: #000000a0;
             }
             if root.map-available && !root.dragged && root.hover-col >= 0 && root.hover-row >= 0: Rectangle {
                 x: root.map-pan-x + root.hover-col * root.tile-len;

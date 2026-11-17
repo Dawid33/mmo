@@ -16,8 +16,8 @@ pub const PREFAB_DIRS_ENV: &str = "VOXEL_PREFAB_DIRS";
 /// `<rx>,<rz>=<spec>`: the prefabs of `<spec>` (see `parse_dev_spec`) beside region (rx, rz)'s landing;
 /// `all=<spec>` / `home=<spec>`: the same beside every region's / the home region's landing;
 /// `town=<style>[:<arms>[:<arm_len>]]`: a town (see [`parse_town_spec`]) beside the home region's. The home
-/// is the first region announced to the source ([`announces_region`]): in a forged world the embark
-/// region, in a procedural one the spawn region.
+/// is the first region announced to the source ([`announces_region`]): in a forged world the adventure's
+/// start region, in a procedural one the spawn region.
 pub const DEV_STRUCTURES_ENV: &str = "VOXEL_DEV_STRUCTURES";
 
 /// Where a region's landing column is (region-local block x, z), if the world map says.
@@ -33,7 +33,7 @@ pub enum DevStructures {
     /// `all=<spec>`: the spec's prefabs beside every region's landing, laid out lazily.
     EveryRegion { spec: String },
     /// `home=<spec>`: the spec's prefabs beside the landing of the home region — the first region whose
-    /// generation is announced ([`announces_region`]: in a forged world the embark region, never the spawn
+    /// generation is announced ([`announces_region`]: in a forged world the adventure's start region, never the spawn
     /// region a fresh session waits in; in a procedural world the first region generated in full) — and
     /// nowhere else.
     Home { spec: String },
@@ -47,13 +47,13 @@ pub enum DevStructures {
 /// installed (a world from the store).
 ///
 /// In a forged world a fresh session (no player record, e.g. a debug launch with `--reset`) is created
-/// in [`game::world_manager::SPAWN_REGION`] and only waits there before it embarks, so that region is
-/// not announced: the embark target becomes the home of a `home=` / `town=` source. A procedural world
-/// (no world map, no embark) announces every region, the spawn region included.
+/// in [`game::world_manager::SPAWN_REGION`] and only waits there before its adventure starts, so that region is
+/// not announced: the adventure's start region becomes the home of a `home=` / `town=` source. A procedural world
+/// (no world map, no adventure start) announces every region, the spawn region included.
 ///
-/// Known edges: embarking on the spawn tile itself gets no announcement (no home, no town); and the
-/// first announced region still wins — the embark target's thread starts first, its neighbours a
-/// round-trip later, so in practice the home is the embark region.
+/// Known edges: starting the adventure on the spawn tile itself gets no announcement (no home, no town); and the
+/// first announced region still wins — the start region's thread starts first, its neighbours a
+/// round-trip later, so in practice the home is the adventure's start region.
 pub fn announces_region(rc: RegionCoords, forged: bool) -> bool {
     !(forged && rc == game::world_manager::SPAWN_REGION)
 }

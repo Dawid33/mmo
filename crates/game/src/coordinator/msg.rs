@@ -273,7 +273,7 @@ pub enum CoordMsg {
     SiteMarkers(Vec<SiteMarker>),
     /// The claim the host reported for `player` (`PlayerOnline`, or an `Attach`'s online
     /// entry) differs from the coordinator's, which is final: the host sets the player's
-    /// claim to exactly `claim` and tells its client. Sent to the reporting host only.
+    /// claim to exactly `claim` (it tells the client nothing). Sent to the reporting host only.
     /// `report` is the [`OnlinePlayer::report`] it answers.
     ClaimIs { player: PlayerId, claim: Option<Claim>, report: u64 },
     /// A history log line for the clients whose home is `region`.

@@ -1057,8 +1057,8 @@ pub fn run() -> claims::ServerExit {
         std::sync::Arc::new(move |rc| {
             // The first region announced is the home region of a `home=` / `town=` dev source; far-terrain
             // and halo generation must not decide it, so only this generator announces. In a forged world
-            // the spawn region, where a fresh session waits before it embarks, is never announced: the
-            // home is the embark region (`dev_structures::announces_region`).
+            // the spawn region, where a fresh session waits before its adventure starts, is never announced: the
+            // home is the adventure's start region (`dev_structures::announces_region`).
             if dev_structures::announces_region(rc, forged_world) {
                 worldgen::structures::active().region_requested(rc);
             }

@@ -9,7 +9,7 @@
 mod asset_viewer;
 mod controls;
 mod dev_panel;
-mod embark;
+mod arrival;
 mod fortress_panel;
 mod fortress_wheel;
 mod frontend;
