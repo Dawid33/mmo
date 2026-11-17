@@ -771,7 +771,7 @@ fn spec_dialogue_and_quest_parse() {
         "(@on Nightfall) (fn bolted (e) (jump Search))",
         r#"(stage Returning (objective bring_home (fstr "Bring " (field dog name) " home") lostdog.return (at farmer))"#,
         "(part dog_watch on dog (@on PlayerNear) (fn spotted (e)",
-        "(call emit (call DogFound player=(field e player)))",
+        "(call $emit (call DogFound player=(field e player)))",
     ] {
         assert_has(&dump, part);
     }
@@ -1344,7 +1344,7 @@ fn part_on_and_at() {
     assert_eq!(
         dump,
         "(quest Q (part watch on dog (let seen 0) (event Spotted (p Player)) \
-         (@on PlayerNear) (fn near (e) (call emit (call Spotted p=(field e player))))) \
+         (@on PlayerNear) (fn near (e) (call $emit (call Spotted p=(field e player))))) \
          (part depths at mine (@on Setup) (fn nest (e) (pass))))"
     );
 }

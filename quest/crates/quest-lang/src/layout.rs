@@ -178,7 +178,11 @@ pub(crate) fn each_expr_in(body: &[Stmt], f: &mut dyn FnMut(&Expr)) {
                 }
             }
             StmtKind::Return(Some(e)) => each_expr(e, f),
-            StmtKind::Return(None) | StmtKind::Pass | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Return(None)
+            | StmtKind::Pass
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Stage(_) => {}
         }
     }
 }
@@ -243,6 +247,8 @@ pub(crate) fn each_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprKind::ErrorName(_)
         | ExprKind::Return(None)
         | ExprKind::Break
-        | ExprKind::Continue => {}
+        | ExprKind::Continue
+        | ExprKind::Quest(_)
+        | ExprKind::Exit(_, _) => {}
     }
 }

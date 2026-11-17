@@ -59,6 +59,34 @@ const STATIC_WORDS_MAX: u32 = u16::MAX as u32;
 /// Words before a frame's parameters: return link, return value, error value.
 const FRAME_HEADER_WORDS: u32 = quest_vm::asm::FRAME_HEADER_WORDS as u32;
 
+/// `not-yet` for each dialogue, scene and quest: they are lowered by a later task (Tasks 43–44). Their
+/// synthesised fns and generated items never reach code generation.
+fn not_yet_dialogues(krate: &Crate) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for def in &krate.defs {
+        let noun = match &def.kind {
+            DefKind::Quest(_) => "quest",
+            DefKind::Dialogue(_) if def.parent.is_none() => "dialogue",
+            _ => continue,
+        };
+        let file = krate
+            .module(def.module)
+            .map_or(String::new(), |m| m.file.clone());
+        out.push(Diagnostic::error(
+            "not-yet",
+            format!(
+                "{noun} `{}` is checked but not compiled yet (dialogue and quests come in a later version)",
+                def.name
+            ),
+            &file,
+            def.span.line,
+            def.span.col,
+            def.span.len,
+        ));
+    }
+    out
+}
+
 /// Compiles a checked program (no error diagnostics were reported): the program, or the errors only
 /// code generation finds (`too-many-slots`, `not-yet`).
 pub(crate) fn generate(
@@ -66,6 +94,10 @@ pub(crate) fn generate(
     typed: &Typed,
     host: &HostApi,
 ) -> Result<Program, Vec<Diagnostic>> {
+    let pending = not_yet_dialogues(krate);
+    if !pending.is_empty() {
+        return Err(pending);
+    }
     let plan = layout::plan(krate, typed);
     let mut pb = ProgramBuilder::new(host.version);
     let mut g = Gen {

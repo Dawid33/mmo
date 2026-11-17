@@ -101,6 +101,8 @@ impl Infer<'_> {
             }
             StmtKind::Match(scrutinee, cases) => self.match_stmt(b, s.span, scrutinee, cases),
             StmtKind::Pass => false,
+            // Typed with the quest's lowering checks (Task 39): the stage was resolved.
+            StmtKind::Stage(_) => false,
             StmtKind::Break => {
                 if let Some(seen) = b.loops.last_mut() {
                     *seen = true;

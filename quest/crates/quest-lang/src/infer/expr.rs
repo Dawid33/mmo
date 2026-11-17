@@ -106,8 +106,8 @@ impl Infer<'_> {
                     let name = self.krate.qualified_name(*d);
                     self.not_a_value(b, e, format!("`{name}` is an error set, not a value"))
                 }
-                // Dialogues and quests never reach inference.
-                Some(DefKind::Dialogue | DefKind::Quest) | None => TyId::ERROR,
+                // A dialogue's value (a `Dialogue`) is typed with the dialogue checks (Task 39).
+                Some(DefKind::Dialogue(_) | DefKind::Quest(_)) | None => TyId::ERROR,
             },
             ExprKind::Variant(d, i) => {
                 let fields = self
@@ -169,6 +169,8 @@ impl Infer<'_> {
             },
             // Only the head of a `raise` (typed there).
             ExprKind::ErrorName(_) => TyId::ERROR,
+            // The compiler's own functions and exits are typed with the quest checks (Task 39).
+            ExprKind::Quest(_) | ExprKind::Exit(_, _) => TyId::ERROR,
             ExprKind::List(items) => {
                 // The first element's type (a variable only for `[]`): no variable to follow later.
                 let mut elem = None;

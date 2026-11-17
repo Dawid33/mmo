@@ -190,6 +190,12 @@ impl Infer<'_> {
                 self.sink_args(b, args);
                 TyId::ERROR
             }
+            // An objective's commands (`finish()`, `progress(n)`, …) are typed with the quest checks
+            // (Task 39).
+            Ty::Adt(d) if Some(d) == self.krate.builtins.objective => {
+                self.sink_args(b, args);
+                TyId::ERROR
+            }
             Ty::Adt(d) => {
                 let Some(m) = self.krate.methods.get(&(d, name.to_string())).copied() else {
                     return self.no_method(b, e, ty, name, args);

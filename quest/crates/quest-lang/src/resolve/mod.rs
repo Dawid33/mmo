@@ -7,15 +7,19 @@
 //! 2. **Imports:** every `use` is resolved to what it names, repeatedly until nothing changes, so `use`
 //!    cycles between modules are fine; an import that only reaches itself is `unresolved`.
 //! 3. **Impls:** each `impl` finds its struct or enum, and its methods enter [`hir::Crate::methods`].
-//! 4. **Bodies:** types, functions, globals; dialogues and quests are resolved and checked (decision 19),
-//!    then kept only as deferred items.
+//! 4. **Bodies:** types, functions, globals, dialogues and quests. Every expression of a dialogue becomes a
+//!    synthesised pure `fn` (`dialogue.rs`); a quest's members and generated names become items whose
+//!    parent is the quest (`quest.rs`; see `hir/dialogue.rs`).
 //!
-//! Passes 1–3 live in `items.rs`, the dialogue and quest checks in `dialogue.rs`; this file holds pass 4:
+//! Passes 1–3 live in `items.rs`, dialogues in `dialogue.rs`, quests in `quest.rs`; this file holds pass 4:
 //! lookup, types, statements, patterns and expressions.
 //!
 //! Lookup of a single name: the bindings in scope (innermost first), then — inside a quest — the quest's
-//! own names, then the module's items and imports, then the host's functions, namespaces, structs and
-//! events, then the prelude. A path `a::b::c` starts at `crate`, `self`, `super` or an item of the module
+//! own names (a part's first) and builtins (`join`, `complete`, …), inside a dialogue's condition
+//! `dialogue_depth`, then the module's items and imports, then the compiler's own items (`Objective`,
+//! `Talked`, `DialogueEnded`, `SceneEnded`, `EndReason`, `SceneEnd`), then the host's functions, namespaces,
+//! structs and events, then `after`, `cancel` and `play`, then the prelude. The callee of the statement
+//! `emit Ev(…)` is always the host's `emit`, whatever a script names `emit`. A path `a::b::c` starts at `crate`, `self`, `super` or an item of the module
 //! and walks modules, then an enum's variant or a struct's / enum's method. An item is visible from its own
 //! module and that module's descendants; from anywhere else only if `pub` (`private`).
 //!
@@ -29,6 +33,7 @@
 
 mod dialogue;
 mod items;
+mod quest;
 
 use crate::ast;
 use crate::diag::Diagnostic;
@@ -37,8 +42,9 @@ use crate::hir::{
     Prelude, TypeName,
 };
 use crate::modules::ROOT_FILE;
-use dialogue::{DIALOGUE_BUILTINS, QUEST_BUILTINS, QuestName, QuestScope};
+use crate::parse::EMIT_CALLEE;
 use items::HostNames;
+use quest::{QName, QuestScope};
 use quest_vm::host::HostApi;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -60,19 +66,23 @@ pub fn resolve(krate: &ast::Crate, host: &HostApi) -> (hir::Crate, Vec<Diagnosti
     let mut r = Resolver::new(krate, host);
     r.collect();
     r.collect_host_enums(&host_enums);
+    r.collect_builtins();
     r.resolve_imports();
     r.resolve_impls();
-    let kinds = r.resolve_bodies();
+    r.resolve_bodies();
+    let kinds = std::mem::take(&mut r.kinds);
     let defs = r
         .metas
         .iter()
         .zip(kinds)
         .map(|(m, kind)| hir::Def {
-            name: m.name.to_string(),
+            name: m.name.clone(),
             module: m.module,
             public: m.public,
             span: m.span,
-            kind,
+            parent: m.parent,
+            // Every item's kind is set by `resolve_bodies` or where it was generated.
+            kind: kind.unwrap_or(DefKind::Struct(Vec::new())),
         })
         .collect();
     let out = hir::Crate {
@@ -81,7 +91,7 @@ pub fn resolve(krate: &ast::Crate, host: &HostApi) -> (hir::Crate, Vec<Diagnosti
         locals: r.locals,
         methods: r.methods,
         host_enums: r.host.enum_defs.clone(),
-        deferred: r.deferred,
+        builtins: r.builtins,
         expr_count: r.expr_count,
         pat_count: r.pat_count,
     };
@@ -98,8 +108,12 @@ enum Res {
     /// A host namespace (`world`): only `world.<fn>` means something.
     Namespace,
     Prelude(Prelude),
-    /// A quest's own name, or a dialogue / quest builtin: resolved, lowered in Phase 10.
-    Deferred,
+    /// A function only the compiler lowers.
+    Quest(hir::QuestFn),
+    /// A dialogue's exit.
+    Exit(DefId, u32),
+    /// A quest's stage name: not a value (`Stage::Name` is).
+    Stage(hir::StageIdx),
     /// Something already reported.
     Error,
 }
@@ -157,14 +171,17 @@ impl Tag {
 
 /// An item's facts from collection: everything but its resolved body.
 struct Meta<'a> {
-    name: &'a str,
+    name: String,
     module: ModId,
     public: bool,
     span: ast::Span,
     tag: Tag,
-    item: &'a ast::Item,
+    /// The source item; `None` for a generated one (a quest's names, a synthesised fn, a compiler builtin).
+    item: Option<&'a ast::Item>,
     /// The `impl` a method is in.
     impl_index: Option<usize>,
+    /// The quest a quest's item belongs to.
+    parent: Option<DefId>,
 }
 
 struct Impl<'a> {
@@ -184,9 +201,12 @@ struct Cx<'q> {
     /// Where each open scope starts in `locals`.
     marks: Vec<usize>,
     quest: Option<&'q QuestScope>,
+    /// Inside a dialogue's synthesised fn, where `dialogue_depth()` is known.
     in_dialogue: bool,
     /// Inside a quest's handler, where `-> Stage` changes the stage.
     quest_fn: bool,
+    /// Inside a `Setup` handler, where `decline()` is allowed.
+    in_setup: bool,
 }
 
 impl<'q> Cx<'q> {
@@ -199,6 +219,7 @@ impl<'q> Cx<'q> {
             quest,
             in_dialogue: false,
             quest_fn: false,
+            in_setup: false,
         }
     }
 
@@ -257,7 +278,11 @@ struct Resolver<'a> {
     impls: Vec<Impl<'a>>,
     methods: BTreeMap<(DefId, String), DefId>,
     locals: Vec<hir::Local>,
-    deferred: Vec<DefId>,
+    /// Each item's resolved kind, by id: set by `resolve_bodies`, or where a generated item is made.
+    kinds: Vec<Option<DefKind>>,
+    builtins: hir::Builtins,
+    /// The compiler's own items by name (`builtins`).
+    builtin_names: BTreeMap<&'static str, DefId>,
     /// Every line id used so far, with where.
     line_ids: BTreeMap<String, (String, ast::Span)>,
     root_quest_seen: bool,
@@ -357,7 +382,9 @@ impl<'a> Resolver<'a> {
             impls: Vec::new(),
             methods: BTreeMap::new(),
             locals: Vec::new(),
-            deferred: Vec::new(),
+            kinds: Vec::new(),
+            builtins: hir::Builtins::default(),
+            builtin_names: BTreeMap::new(),
             line_ids: BTreeMap::new(),
             root_quest_seen: false,
             expr_count: 0,
@@ -424,12 +451,32 @@ impl<'a> Resolver<'a> {
 
     // Pass 4: bodies.
 
-    fn resolve_bodies(&mut self) -> Vec<DefKind> {
-        let mut kinds = Vec::with_capacity(self.metas.len());
-        for i in 0..self.metas.len() {
+    /// Sets the kind of item `d`.
+    fn set_kind(&mut self, d: DefId, kind: DefKind) {
+        let i = d.0 as usize;
+        if self.kinds.len() <= i {
+            self.kinds.resize(i.saturating_add(1), None);
+        }
+        if let Some(slot) = self.kinds.get_mut(i) {
+            *slot = Some(kind);
+        }
+    }
+
+    /// Resolves every collected item that has no kind yet; a quest's and a dialogue's items (and their
+    /// synthesised fns) are added and given their kinds on the way.
+    fn resolve_bodies(&mut self) {
+        let collected = self.metas.len();
+        if self.kinds.len() < collected {
+            self.kinds.resize(collected, None);
+        }
+        for i in 0..collected {
             let id = DefId(index_u32(i));
+            if self.kinds.get(i).is_some_and(Option::is_some) {
+                continue;
+            }
             let Some(meta) = self.metas.get(i) else { break };
-            let (m, item, impl_index) = (meta.module, meta.item, meta.impl_index);
+            let (m, impl_index) = (meta.module, meta.impl_index);
+            let Some(item) = meta.item else { continue };
             let file = self.file_of(m);
             let kind = match &item.kind {
                 ast::ItemKind::Fn(f) => {
@@ -447,46 +494,47 @@ impl<'a> Resolver<'a> {
                 }
                 ast::ItemKind::Enum(_, variants) => {
                     let mut cx = Cx::new(m, file, None);
-                    let mut seen = BTreeSet::new();
-                    let mut out = Vec::new();
-                    for v in variants {
-                        if !seen.insert(v.name.as_str()) {
-                            self.diags.push(error(
-                                "duplicate-def",
-                                format!("variant `{}` is defined twice", v.name),
-                                file,
-                                v.span,
-                            ));
-                        }
-                        out.push(self.variant(v, &mut cx));
-                    }
-                    DefKind::Enum(out)
+                    DefKind::Enum(self.variants(variants, &mut cx))
                 }
                 ast::ItemKind::ErrorSet(_, members) => {
                     DefKind::ErrorSet(self.error_set(members, &mut Cx::new(m, file, None)))
                 }
                 ast::ItemKind::Let(l) => {
                     let mut cx = Cx::new(m, file, None);
-                    let ty = l.ty.as_ref().map(|t| self.ty(t, &mut cx));
-                    let value = self.expr(&l.value, &mut cx);
-                    DefKind::Global(hir::Global { ty, value })
+                    DefKind::Global(self.global(l, &mut cx))
                 }
                 ast::ItemKind::Dialogue(d) | ast::ItemKind::Scene(d) => {
-                    self.dialogue(d, item, m, None);
-                    self.deferred.push(id);
-                    DefKind::Dialogue
+                    DefKind::Dialogue(self.dialogue(d, item, m, None))
                 }
-                ast::ItemKind::Quest(q) => {
-                    self.quest(&q.body, item, m);
-                    self.deferred.push(id);
-                    DefKind::Quest
-                }
+                ast::ItemKind::Quest(q) => DefKind::Quest(self.quest(q, item, m, id)),
                 // Collected items are only the kinds above.
-                _ => DefKind::Quest,
+                _ => continue,
             };
-            kinds.push(kind);
+            self.set_kind(id, kind);
         }
-        kinds
+    }
+
+    fn variants(&mut self, variants: &[ast::Variant], cx: &mut Cx) -> Vec<hir::Variant> {
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for v in variants {
+            if !seen.insert(v.name.as_str()) {
+                self.diags.push(error(
+                    "duplicate-def",
+                    format!("variant `{}` is defined twice", v.name),
+                    cx.file,
+                    v.span,
+                ));
+            }
+            out.push(self.variant(v, cx));
+        }
+        out
+    }
+
+    fn global(&mut self, l: &ast::Let, cx: &mut Cx) -> hir::Global {
+        let ty = l.ty.as_ref().map(|t| self.ty(t, cx));
+        let value = self.expr(&l.value, cx);
+        hir::Global { ty, value }
     }
 
     fn fields(&mut self, fields: &[ast::Field], cx: &mut Cx) -> Vec<hir::Field> {
@@ -556,6 +604,8 @@ impl<'a> Resolver<'a> {
         cx: &mut Cx,
     ) -> hir::Fn {
         let (handler, unknown_event) = self.fn_decorators(item, is_method, cx);
+        cx.in_setup =
+            matches!(handler, Some(EventRef::Host(i)) if self.host.events.get("Setup") == Some(&i));
         cx.push();
         let receiver = f
             .receiver
@@ -601,6 +651,7 @@ impl<'a> Resolver<'a> {
             raises,
             handler,
             body,
+            pure: None,
         }
     }
 
@@ -615,7 +666,7 @@ impl<'a> Resolver<'a> {
         };
         match res {
             Res::Def(d) if self.tag(d) == Some(Tag::ErrorSet) => Some(hir::Raises::Set(d)),
-            Res::Error | Res::Deferred => None,
+            Res::Error => None,
             _ => {
                 self.diags.push(error(
                     "unresolved",
@@ -704,7 +755,7 @@ impl<'a> Resolver<'a> {
         match res {
             Some(Res::Def(d)) if self.tag(d) == Some(Tag::Event) => Some(EventRef::Script(d)),
             Some(Res::Host(HostItem::Event(i))) => Some(EventRef::Host(i)),
-            Some(Res::Error | Res::Deferred) => None,
+            Some(Res::Error) => None,
             _ => {
                 let name = path.join("::");
                 let mut d = error(
@@ -726,6 +777,12 @@ impl<'a> Resolver<'a> {
     /// The events a single name may name from `cx`.
     fn event_names(&self, cx: &Cx) -> Vec<String> {
         let mut names: Vec<String> = self.host.events.keys().cloned().collect();
+        names.extend(
+            self.builtin_names
+                .iter()
+                .filter(|(_, d)| self.tag(**d) == Some(Tag::Event))
+                .map(|(n, _)| n.to_string()),
+        );
         if let Some(scope) = self.scopes.get(cx.module.0 as usize) {
             for (name, entry) in scope {
                 if let Some(Res::Def(d)) = self.slot_res(entry.slot)
@@ -739,7 +796,7 @@ impl<'a> Resolver<'a> {
             names.extend(
                 q.names
                     .iter()
-                    .filter(|(_, k)| **k == QuestName::Event)
+                    .filter(|(_, k)| matches!(k, QName::Def(d) if self.tag(*d) == Some(Tag::Event)))
                     .map(|(n, _)| n.clone()),
             );
         }
@@ -750,19 +807,40 @@ impl<'a> Resolver<'a> {
 
     /// What a single name means outside the bindings.
     fn lookup(&self, cx: &Cx, name: &str) -> Option<Res> {
-        if let Some(q) = cx.quest
-            && (q.names.contains_key(name) || QUEST_BUILTINS.contains(&name))
-        {
-            return Some(Res::Deferred);
+        if name == EMIT_CALLEE {
+            return self
+                .host
+                .free
+                .get("emit")
+                .map(|i| Res::Host(HostItem::Fn(*i)));
         }
-        if cx.in_dialogue && DIALOGUE_BUILTINS.contains(&name) {
-            return Some(Res::Deferred);
+        if let Some(q) = cx.quest {
+            match q.names.get(name) {
+                Some(QName::Def(d)) => return Some(Res::Def(*d)),
+                Some(QName::Stage(s)) => return Some(Res::Stage(*s)),
+                None => {}
+            }
+            if let Some(f) = hir::QUEST_FNS.iter().find(|f| f.name() == name) {
+                return Some(Res::Quest(*f));
+            }
+        }
+        if cx.in_dialogue && name == hir::QuestFn::DialogueDepth.name() {
+            return Some(Res::Quest(hir::QuestFn::DialogueDepth));
         }
         if let Some((res, _)) = self.entry(cx.module, name) {
             return Some(res.unwrap_or(Res::Error));
         }
+        if let Some(d) = self.builtin_names.get(name) {
+            return Some(Res::Def(*d));
+        }
         self.host
             .lookup(name)
+            .or_else(|| {
+                hir::SCRIPT_FNS
+                    .iter()
+                    .find(|f| f.name() == name)
+                    .map(|f| Res::Quest(*f))
+            })
             .or_else(|| Prelude::from_name(name).map(Res::Prelude))
     }
 
@@ -771,21 +849,59 @@ impl<'a> Resolver<'a> {
         let mut names: Vec<String> = cx.locals.iter().map(|(n, _)| n.clone()).collect();
         if let Some(q) = cx.quest {
             names.extend(q.names.keys().cloned());
-            names.extend(QUEST_BUILTINS.iter().map(|s| s.to_string()));
+            names.extend(hir::QUEST_FNS.iter().map(|f| f.name().to_string()));
         }
         if cx.in_dialogue {
-            names.extend(DIALOGUE_BUILTINS.iter().map(|s| s.to_string()));
+            names.push(hir::QuestFn::DialogueDepth.name().to_string());
         }
         if let Some(scope) = self.scopes.get(cx.module.0 as usize) {
             names.extend(scope.keys().map(|s| s.to_string()));
         }
+        names.extend(self.builtin_names.keys().map(|s| s.to_string()));
         names.extend(self.host.names().map(str::to_string));
+        names.extend(hir::SCRIPT_FNS.iter().map(|f| f.name().to_string()));
         names.extend(PRELUDE.iter().map(|(n, _)| n.to_string()));
         names
     }
 
-    /// Walks a multi-segment path from `cx`'s module, reporting what it finds wrong.
+    /// Walks a multi-segment path from `cx`'s module (or from a quest's own name: `Stage::Search`,
+    /// `Role::dog`, `confront::paid`), reporting what it finds wrong.
     fn walk_here(&mut self, cx: &Cx, path: &[String], at: ast::Span) -> Res {
+        if let (Some(q), Some((first, rest))) = (cx.quest, path.split_first())
+            && let Some(start) = q.names.get(first)
+        {
+            let mut cur = match start {
+                QName::Def(d) => Res::Def(*d),
+                QName::Stage(_) => {
+                    self.diags.push(error(
+                        "unresolved",
+                        format!("`{first}` is a stage: its value is `Stage::{first}`"),
+                        cx.file,
+                        at,
+                    ));
+                    return Res::Error;
+                }
+            };
+            let mut walked = first.clone();
+            for seg in rest {
+                let next = match cur {
+                    Res::Def(d) => self.member(d, seg),
+                    _ => None,
+                };
+                let Some(next) = next else {
+                    self.diags.push(error(
+                        "unresolved",
+                        format!("`{walked}` has no variant, exit or method `{seg}`"),
+                        cx.file,
+                        at,
+                    ));
+                    return Res::Error;
+                };
+                cur = next;
+                walked = format!("{walked}::{seg}");
+            }
+            return cur;
+        }
         match self.walk(cx.module, path, at, Mode::Item) {
             Walk::Found(res, mut diags) => {
                 self.diags.append(&mut diags);
@@ -803,8 +919,9 @@ impl<'a> Resolver<'a> {
                 Some(res) => res,
                 None => {
                     let names = self.value_names(cx);
+                    let shown = if name == EMIT_CALLEE { "emit" } else { name };
                     let mut d = unresolved(
-                        format!("cannot find `{name}`"),
+                        format!("cannot find `{shown}`"),
                         name,
                         names.iter().map(String::as_str),
                         cx.file,
@@ -833,6 +950,26 @@ impl<'a> Resolver<'a> {
                 ));
                 Res::Error
             }
+            Res::Stage(_) => {
+                let name = path.join("::");
+                self.diags.push(error(
+                    "unresolved",
+                    format!("`{name}` is a stage: its value is `Stage::{name}`"),
+                    cx.file,
+                    at,
+                ));
+                Res::Error
+            }
+            Res::Quest(hir::QuestFn::Decline) if !cx.in_setup => {
+                self.diags.push(error(
+                    "decline-outside-setup",
+                    "`decline()` refuses a placement: it is allowed only in a `Setup` handler"
+                        .to_string(),
+                    cx.file,
+                    at,
+                ));
+                res
+            }
             Res::Namespace => {
                 let name = path.join("::");
                 self.diags.push(error(
@@ -855,8 +992,10 @@ impl<'a> Resolver<'a> {
             Res::Variant(d, i) => hir::ExprKind::Variant(d, i),
             Res::Host(h) => hir::ExprKind::Host(h),
             Res::Prelude(p) => hir::ExprKind::Prelude(p),
-            // A quest's names live only in deferred items, never seen by later stages.
-            Res::Mod(_) | Res::Namespace | Res::Deferred | Res::Error => hir::ExprKind::Error,
+            Res::Quest(f) => hir::ExprKind::Quest(f),
+            Res::Exit(d, i) => hir::ExprKind::Exit(d, i),
+            // Reported where they were found.
+            Res::Mod(_) | Res::Namespace | Res::Stage(_) | Res::Error => hir::ExprKind::Error,
         }
     }
 
@@ -879,12 +1018,15 @@ impl<'a> Resolver<'a> {
 
     fn type_name(&mut self, path: &[String], at: ast::Span, cx: &mut Cx) -> Option<TypeName> {
         let res = if let [name] = path {
-            if cx.quest.is_some_and(|q| q.names.contains_key(name)) {
-                return None;
-            }
-            let item = self
-                .entry(cx.module, name)
-                .map(|(r, _)| r.unwrap_or(Res::Error));
+            let quest = cx.quest.and_then(|q| q.names.get(name));
+            let item = match quest {
+                Some(QName::Def(d)) => Some(Res::Def(*d)),
+                Some(QName::Stage(s)) => Some(Res::Stage(*s)),
+                None => self
+                    .entry(cx.module, name)
+                    .map(|(r, _)| r.unwrap_or(Res::Error))
+                    .or_else(|| self.builtin_names.get(name.as_str()).map(|d| Res::Def(*d))),
+            };
             if let Some(res) = item
                 && Self::type_of(res, |d| self.tag(d)).is_some()
             {
@@ -1003,20 +1145,22 @@ impl<'a> Resolver<'a> {
             S::Return(e) => H::Return(e.as_ref().map(|e| self.expr(e, cx))),
             S::Raise(e) => H::Raise(self.raise(e, cx)),
             S::Jump(name) => {
-                let ok = cx.quest_fn && cx.quest.is_some_and(|q| q.has_stage(name));
-                if !ok {
-                    let message = if cx.quest_fn {
-                        format!("`-> {name}`: this quest has no stage `{name}`")
-                    } else {
-                        format!(
-                            "`-> {name}` changes a quest's stage: it belongs in a quest's handler"
-                        )
-                    };
-                    self.diags
-                        .push(error("jump-target", message, cx.file, s.span));
+                let stage = cx.quest.and_then(|q| q.stage(name)).filter(|_| cx.quest_fn);
+                match stage {
+                    Some(idx) => H::Stage(idx),
+                    None => {
+                        let message = if cx.quest_fn {
+                            format!("`-> {name}`: this quest has no stage `{name}`")
+                        } else {
+                            format!(
+                                "`-> {name}` changes a quest's stage: it belongs in a quest's handler"
+                            )
+                        };
+                        self.diags
+                            .push(error("jump-target", message, cx.file, s.span));
+                        H::Pass
+                    }
                 }
-                // A stage change lives only in a quest, which Phase 10 lowers.
-                H::Pass
             }
         };
         hir::Stmt { kind, span: s.span }
@@ -1039,7 +1183,7 @@ impl<'a> Resolver<'a> {
         };
         let kind = match res {
             Some(Res::Def(d)) if self.tag(d) == Some(Tag::Global) => hir::ExprKind::Def(d),
-            Some(Res::Error | Res::Deferred) => hir::ExprKind::Error,
+            Some(Res::Error) => hir::ExprKind::Error,
             _ => {
                 let name = path.join("::");
                 self.diags.push(error(
@@ -1192,7 +1336,7 @@ impl<'a> Resolver<'a> {
                 Some(Ctor::Def(d))
             }
             Res::Host(h @ (HostItem::Struct(_) | HostItem::Event(_))) => Some(Ctor::Host(h)),
-            Res::Error | Res::Deferred => None,
+            Res::Error => None,
             other => {
                 let what = match other {
                     Res::Def(d) => self.tag(d).map_or("an item", Tag::noun),
@@ -1296,6 +1440,29 @@ impl<'a> Resolver<'a> {
     /// `base.name`: a host namespace's function (`world.get`) when `base` is a namespace no binding or
     /// item hides, else a field or method.
     fn field(&mut self, base: &ast::Expr, name: &str, at: ast::Span, cx: &mut Cx) -> hir::ExprKind {
+        // `Stage.objective`: another stage's objective.
+        if let ast::ExprKind::Path(path) = &base.kind
+            && let [stage] = path.as_slice()
+            && cx.local(stage).is_none()
+            && let Some(q) = cx.quest
+            && q.stage(stage).is_some()
+        {
+            if let Some(d) = q.objectives.get(&(stage.clone(), name.to_string())) {
+                return hir::ExprKind::Def(*d);
+            }
+            let d = unresolved(
+                format!("stage `{stage}` has no objective `{name}`"),
+                name,
+                q.objectives
+                    .keys()
+                    .filter(|(s, _)| s == stage)
+                    .map(|(_, o)| o.as_str()),
+                cx.file,
+                at,
+            );
+            self.diags.push(d);
+            return hir::ExprKind::Error;
+        }
         if let ast::ExprKind::Path(path) = &base.kind
             && let [ns] = path.as_slice()
             && cx.local(ns).is_none()

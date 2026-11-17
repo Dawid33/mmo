@@ -13,9 +13,12 @@
 //! An expression, type or pattern whose resolution failed is `Error`. Its diagnostic was reported, as for
 //! the parser's `ast::ExprKind::Error`: later passes skip it silently and treat its type as unknown.
 //!
-//! Dialogues and quests (decision 19) are resolved and checked, but their contents are not kept here until
-//! Phase 10: each is a [`DefKind::Dialogue`] / [`DefKind::Quest`] with no body, listed in
-//! [`Crate::deferred`].
+//! Dialogues, scenes and quests (spec §5.11–5.12) are [`DefKind::Dialogue`] / [`DefKind::Quest`] items whose
+//! expressions are synthesised pure functions, plus the items a quest generates: see `hir/dialogue.rs`.
+
+mod dialogue;
+
+pub use dialogue::*;
 
 use crate::ast::{BinOp, PatLit, Receiver, Span, UnOp};
 use std::collections::BTreeMap;
@@ -53,10 +56,9 @@ pub struct Crate {
     /// The item of each host enum, by its index into `HostApi::enums`: an `enum` of the root with no
     /// source, after every script item (resolution's `collect_host_enums`).
     pub host_enums: Vec<DefId>,
-    /// The dialogue and quest items, in definition order: `check` answers each with `not-yet` until
-    /// Phase 10.
-    pub deferred: Vec<DefId>,
-    /// Every [`ExprId`] is below this (the ids inside dropped dialogues and quests are unused).
+    /// The compiler's own items every module sees.
+    pub builtins: Builtins,
+    /// Every [`ExprId`] is below this (a dialogue's constants — `pause`, `count` — leave unused ids).
     pub expr_count: u32,
     /// Every [`PatId`] is below this.
     pub pat_count: u32,
@@ -75,11 +77,19 @@ impl Crate {
         self.locals.get(id.0 as usize)
     }
 
-    /// The item's path from the crate root: `main`, `rewards::give_gold`, `npc::Ledger::total`.
+    /// The item's path from the crate root: `main`, `rewards::give_gold`, `npc::Ledger::total`; a quest's
+    /// item is under the quest's (`LostDog::stage`, `LostDog::plea$cond#0`).
     pub fn qualified_name(&self, id: DefId) -> String {
         let Some(def) = self.def(id) else {
             return String::new();
         };
+        // A parent is a quest, which has none: one step.
+        if let Some(parent) = def.parent
+            && parent != id
+            && self.def(parent).is_some_and(|p| p.parent.is_none())
+        {
+            return format!("{}::{}", self.qualified_name(parent), def.name);
+        }
         let mut parts: Vec<&str> = self
             .module(def.module)
             .map(|m| m.path.iter().map(String::as_str).collect())
@@ -99,7 +109,8 @@ pub struct Module {
     pub path: Vec<String>,
     pub file: String,
     pub parent: Option<ModId>,
-    /// The module's items in declaration order, methods included.
+    /// The module's items in declaration order, methods included; then, as resolution makes them, a quest's
+    /// members and generated names and the synthesised fns.
     pub defs: Vec<DefId>,
 }
 
@@ -110,6 +121,9 @@ pub struct Def {
     pub public: bool,
     /// The item, from its keyword.
     pub span: Span,
+    /// The quest a quest's item belongs to: a member (a part's too), a generated name, a synthesised fn of
+    /// one of its dialogues. (The quest's own synthesised fns, `Q$where#0`, are items of its module.)
+    pub parent: Option<DefId>,
     pub kind: DefKind,
 }
 
@@ -125,10 +139,9 @@ pub enum DefKind {
     Global(Global),
     /// A script `event`: a struct that handlers take.
     Event(Vec<Field>),
-    /// Lowered in Phase 10.
-    Dialogue,
-    /// Lowered in Phase 10.
-    Quest,
+    /// A conversation, bark or scene.
+    Dialogue(Dialogue),
+    Quest(Quest),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +157,8 @@ pub struct Fn {
     /// The event of an `@on(…)` handler.
     pub handler: Option<EventRef>,
     pub body: Vec<Stmt>,
+    /// Set on a synthesised pure fn: where it stands.
+    pub pure: Option<PureSite>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -318,6 +333,11 @@ pub enum Builtin {
     Dict,
     Option,
     Promise,
+    /// A dialogue's id (`DialogueEnded.dialogue`): opaque, compared with `==` / `!=`; not nameable in source
+    /// yet.
+    Dialogue,
+    /// A dialogue's exit (`confront::paid`): opaque, compared with `==` / `!=`; not nameable in source yet.
+    Exit,
 }
 
 /// Every built-in type by its name.
@@ -394,6 +414,10 @@ pub enum ExprKind {
     Raise(Box<Expr>),
     /// `e else err:` + block: the error's binding and the block.
     FallbackBlock(LocalId, Vec<Stmt>),
+    /// A function only the compiler lowers (`join`, `after`, `dialogue_depth`, …).
+    Quest(QuestFn),
+    /// A dialogue's exit `confront::paid`: the dialogue and the index into its `exits`.
+    Exit(DefId, u32),
 }
 
 // Statements.
@@ -427,6 +451,8 @@ pub enum StmtKind {
     Continue,
     Return(Option<Expr>),
     Raise(Expr),
+    /// `-> Stage` in a quest's handler: set the stage and end the handler.
+    Stage(StageIdx),
 }
 
 // Patterns.

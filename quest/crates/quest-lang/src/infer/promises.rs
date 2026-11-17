@@ -137,6 +137,7 @@ impl Infer<'_> {
                     }
                     StmtKind::Return(None)
                     | StmtKind::Pass
+                    | StmtKind::Stage(_)
                     | StmtKind::Break
                     | StmtKind::Continue => {}
                 },

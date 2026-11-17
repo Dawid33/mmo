@@ -148,13 +148,14 @@ impl<'a> Resolver<'a> {
             };
             let id = DefId(index_u32(self.metas.len()));
             self.metas.push(Meta {
-                name,
+                name: name.clone(),
                 module: ROOT,
                 public: true,
                 span: item.span,
                 tag: Tag::Enum,
-                item,
+                item: Some(item),
                 impl_index: None,
+                parent: None,
             });
             self.host.enums.entry(name.clone()).or_insert(id);
             self.host.enum_defs.push(id);
@@ -290,17 +291,153 @@ impl<'a> Resolver<'a> {
     ) -> DefId {
         let id = DefId(index_u32(self.metas.len()));
         self.metas.push(Meta {
-            name,
+            name: name.to_string(),
             module: m,
             public: item.public,
             span: item.span,
             tag,
-            item,
+            item: Some(item),
             impl_index,
+            parent: None,
         });
         if let Some(module) = self.modules.get_mut(m.0 as usize) {
             module.defs.push(id);
         }
+        id
+    }
+
+    /// A quest's member or generated item, or a synthesised fn: an item of module `m` (listed in its
+    /// `defs`) in no namespace, whose kind is set by its maker.
+    pub(super) fn add_member(
+        &mut self,
+        m: ModId,
+        name: String,
+        span: ast::Span,
+        tag: Tag,
+        item: Option<&'a ast::Item>,
+        parent: Option<DefId>,
+    ) -> DefId {
+        let id = DefId(index_u32(self.metas.len()));
+        self.metas.push(Meta {
+            name,
+            module: m,
+            public: false,
+            span,
+            tag,
+            item,
+            impl_index: None,
+            parent,
+        });
+        if let Some(module) = self.modules.get_mut(m.0 as usize) {
+            module.defs.push(id);
+        }
+        id
+    }
+
+    /// The compiler's own items (`hir::Builtins`), after the host enums: in the root, in no module's
+    /// namespace, found after a module's own items.
+    pub(super) fn collect_builtins(&mut self) {
+        use hir::{Builtin, Field, Type, TypeKind, TypeName, Variant};
+        let ty = |kind: TypeKind| Type {
+            kind,
+            span: ast::Span::default(),
+        };
+        let named = |n: TypeName| ty(TypeKind::Named(n, Vec::new()));
+        let host_struct = |name: &str| match self.host.structs.get(name) {
+            Some(i) => named(TypeName::HostStruct(*i)),
+            None => ty(TypeKind::Error),
+        };
+        let field = |name: &str, ty: Type| Field {
+            name: name.to_string(),
+            ty,
+            span: ast::Span::default(),
+        };
+        let variants = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| Variant {
+                    name: n.to_string(),
+                    fields: Vec::new(),
+                    span: ast::Span::default(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let (player, person) = (host_struct("Player"), host_struct("Person"));
+        let int = named(TypeName::Builtin(Builtin::Int));
+        let objective = self.add_builtin(
+            "Objective",
+            Tag::Struct,
+            hir::DefKind::Struct(vec![field("state", int.clone()), field("count", int)]),
+        );
+        let end_reason = self.add_builtin(
+            "EndReason",
+            Tag::Enum,
+            hir::DefKind::Enum(variants(&[
+                "Finished",
+                "Left",
+                "Timeout",
+                "TooDeep",
+                "Edited",
+                "OutOfRange",
+            ])),
+        );
+        let scene_end = self.add_builtin(
+            "SceneEnd",
+            Tag::Enum,
+            hir::DefKind::Enum(variants(&["Finished", "Interrupted", "ActorLost"])),
+        );
+        let dialogue = named(TypeName::Builtin(Builtin::Dialogue));
+        let talked = self.add_builtin(
+            "Talked",
+            Tag::Event,
+            hir::DefKind::Event(vec![
+                field("player", player.clone()),
+                field("npc", person.clone()),
+            ]),
+        );
+        let dialogue_ended = self.add_builtin(
+            "DialogueEnded",
+            Tag::Event,
+            hir::DefKind::Event(vec![
+                field("player", player),
+                field("npc", person),
+                field("dialogue", dialogue.clone()),
+                field("reason", named(TypeName::Def(end_reason))),
+                field("exit", named(TypeName::Builtin(Builtin::Exit))),
+            ]),
+        );
+        let scene_ended = self.add_builtin(
+            "SceneEnded",
+            Tag::Event,
+            hir::DefKind::Event(vec![
+                field("scene", dialogue),
+                field("reason", named(TypeName::Def(scene_end))),
+            ]),
+        );
+        self.builtins = hir::Builtins {
+            objective: Some(objective),
+            talked: Some(talked),
+            dialogue_ended: Some(dialogue_ended),
+            scene_ended: Some(scene_ended),
+            end_reason: Some(end_reason),
+            scene_end: Some(scene_end),
+        };
+    }
+
+    fn add_builtin(&mut self, name: &'static str, tag: Tag, kind: hir::DefKind) -> DefId {
+        let id = DefId(index_u32(self.metas.len()));
+        self.metas.push(Meta {
+            name: name.to_string(),
+            module: ROOT,
+            public: true,
+            span: ast::Span::default(),
+            tag,
+            item: None,
+            impl_index: None,
+            parent: None,
+        });
+        self.set_kind(id, kind);
+        self.builtin_names.insert(name, id);
         id
     }
 
@@ -451,7 +588,11 @@ impl<'a> Resolver<'a> {
             name => match self.entry(from, name) {
                 Some((Some(res), _)) => res,
                 Some((None, _)) => return Walk::Pending,
-                // A host enum (`Occupation::Smith`).
+                // A compiler builtin (`EndReason::Left`) or a host enum (`Occupation::Smith`).
+                None if mode == Mode::Item && self.builtin_names.contains_key(name) => self
+                    .builtin_names
+                    .get(name)
+                    .map_or(Res::Error, |d| Res::Def(*d)),
                 None if mode == Mode::Item && self.host.enums.contains_key(name) => self
                     .host
                     .enums
@@ -570,13 +711,25 @@ impl<'a> Resolver<'a> {
         Walk::Found(cur, diags)
     }
 
-    /// A struct's or enum's variant or method `name`.
-    fn member(&self, d: DefId, name: &str) -> Option<Res> {
+    /// A struct's or enum's variant or method `name`, or a dialogue's exit.
+    pub(super) fn member(&self, d: DefId, name: &str) -> Option<Res> {
         let meta = self.metas.get(d.0 as usize)?;
-        if let ast::ItemKind::Enum(_, variants) = &meta.item.kind
-            && let Some(i) = variants.iter().position(|v| v.name == name)
-        {
+        let variant = match meta.item.map(|i| &i.kind) {
+            Some(ast::ItemKind::Enum(_, variants)) => variants.iter().position(|v| v.name == name),
+            Some(_) => None,
+            // A generated enum: its kind was set when it was made.
+            None => match self.kinds.get(d.0 as usize) {
+                Some(Some(hir::DefKind::Enum(variants))) => {
+                    variants.iter().position(|v| v.name == name)
+                }
+                _ => None,
+            },
+        };
+        if let Some(i) = variant {
             return Some(Res::Variant(d, index_u32(i)));
+        }
+        if meta.tag == Tag::Dialogue {
+            return self.exit_index(d, name).map(|i| Res::Exit(d, i));
         }
         if !matches!(meta.tag, Tag::Struct | Tag::Enum) {
             return None;
@@ -641,9 +794,9 @@ impl<'a> Resolver<'a> {
                 let Some(meta) = self.metas.get(method.0 as usize) else {
                     continue;
                 };
-                let (mname, mspan) = (meta.name, meta.span);
+                let (mname, mspan) = (meta.name.clone(), meta.span);
                 let file = self.file_of(meta.module);
-                match self.methods.entry((owner, mname.to_string())) {
+                match self.methods.entry((owner, mname.clone())) {
                     std::collections::btree_map::Entry::Occupied(_) => {
                         self.diags.push(error(
                             "duplicate-def",

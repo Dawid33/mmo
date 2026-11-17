@@ -9,11 +9,11 @@ fn d(code: &str, file: &str, line: u32) -> (String, String, u32) {
     (code.to_string(), file.to_string(), line)
 }
 
-/// [`diags`] without the `not-yet` every dialogue and quest gets until Phase 10.
+/// [`diags`] without the warning `missing-line-id` every line written without an id gets.
 fn errs(files: &[(&str, &str)]) -> Vec<(String, String, u32)> {
     diags(files)
         .into_iter()
-        .filter(|(code, _, _)| code != "not-yet")
+        .filter(|(code, _, _)| code != "missing-line-id")
         .collect()
 }
 
@@ -462,18 +462,661 @@ dialogue greeting(p: Player, npc: Person) for innkeeper:
         => npc: "You again?"                                           @greet.c when once per p
 "#;
 
+/// The examples' Lost Dog (quests-examples §1) and Debt to Settle (§4), in one program, plus a read of
+/// another stage's objective (`Search.find_dog`).
+const LOST_DOG: &str = r#"let NIGHT_TICKS = 9000
+
+pub dialogue haggle(p: Player, npc: Person) exits agreed, refused:
+    npc: "Times are hard."                                              @trade.hard
+    choice:
+        "Half now, half at harvest?" @trade.half if p.skill("trade") >= 2:
+            return agreed
+        "Then I'll be back." @trade.back:
+            return refused
+
+quest LostDog:
+    requires act() >= 1
+    role farmer: Person where farmer.occupation == Occupation::Farmer and farmer.alive
+    role dog: Creature where dog.has_tag("pet") and dog.owner == farmer
+    optional role miller: Person where miller.occupation == Occupation::Miller and near(miller, farmer, regions=1)
+
+    let attempts = 0
+
+    event Accepted:
+        player: Player
+    event DogFound:
+        player: Player
+    event Nightfall:
+        attempt: int
+    event Reunited:
+        player: Player
+
+    stage Open:
+        dialogue worry(p: Player, npc: Person) for farmer:
+            node hi when once per p:
+                npc: "Stranger! Have you seen a brown dog?"             @lostdog.worry.first
+            node hi:
+                => npc: "Still no sign of him."                         @lostdog.worry.a
+                => npc: "I left the gate open."                         @lostdog.worry.b
+
+        dialogue plea(p: Player, npc: Person) for farmer topic f"About {dog.name}" @lostdog.topic:
+            npc: f"{dog.name} ran off toward the hills."                @lostdog.plea
+            choice:
+                "I'll find him." @lostdog.accept:
+                    emit Accepted(player=p)
+                "Not now." @lostdog.not_now
+
+        @on(Accepted)
+        fn accepted(e):
+            join(e.player)
+            -> Search
+
+    stage Search:
+        objective find_dog f"Find {dog.name}" @lostdog.find at dog
+        objective feed_dog "Coax him with food" @lostdog.feed at dog count 2
+        optional objective ask_miller "Ask at the mill" @lostdog.ask_mill at miller
+        -> Returning when find_dog.done and feed_dog.done
+
+        dialogue confront(p: Player, npc: Person) for miller topic "About the grain" @lostdog.grain exits paid, stalled:
+            npc: "Oh. You."                                             @lostdog.oh
+            detour haggle:
+                agreed:
+                    return paid
+                refused:
+                    return stalled
+
+        @on(Entered)
+        fn count_attempt(e):
+            attempts = attempts + 1
+
+        @on(DogFound)
+        fn found(e):
+            if not find_dog.done:
+                find_dog.finish()
+                after(NIGHT_TICKS, Nightfall(attempt=attempts))
+
+        @on(Nightfall)
+        fn bolted(e):
+            -> Search
+
+    stage Returning:
+        objective bring_home "Bring him home" @lostdog.return at farmer
+
+        @on(Reunited)
+        fn reunited(e):
+            if Search.find_dog.done:
+                bring_home.finish()
+            for q in participants:
+                give(q, Item(kind="carved_whistle", count=1))
+            complete()
+
+    @on(DialogueEnded)
+    fn after_talk(e):
+        if e.dialogue == confront and e.exit == confront::paid and e.reason == EndReason::Finished:
+            join(e.player)
+
+    @on(RoleLost)
+    fn lost(e):
+        match e.role:
+            case Role::miller:
+                pass
+            case _:
+                fail()
+
+    part dog_watch on dog:
+        let seen = 0
+
+        @on(PlayerNear)
+        fn spotted(e):
+            if stage == Stage::Search and e.player in participants and not find_dog.done:
+                emit DogFound(player=e.player)
+"#;
+
+fn resolved(files: &[(&str, &str)]) -> quest_lang::hir::Crate {
+    let (krate, _) = quest_lang::load_modules(&common::tree(files));
+    quest_lang::resolve(&krate, &quest_stub::stub_api()).0
+}
+
+fn find(program: &quest_lang::hir::Crate, qualified: &str) -> Option<quest_lang::hir::DefId> {
+    (0..program.defs.len())
+        .map(|i| quest_lang::hir::DefId(i as u32))
+        .find(|d| program.qualified_name(*d) == qualified)
+}
+
 #[test]
-fn not_yet_until_phase_10() {
+fn quest_names_resolve() {
+    use quest_lang::hir::{DefKind, PartAnchor, RoleIdx, StageIdx, StepKind};
+    let files = [("main.qs", LOST_DOG)];
+    assert_eq!(errs(&files), vec![]);
+    let program = resolved(&files);
+    for name in [
+        "LostDog::Stage",
+        "LostDog::Role",
+        "LostDog::stage",
+        "LostDog::participants",
+        "LostDog::Entered",
+        "LostDog::RoleLost",
+        "LostDog::Search.find_dog",
+        "LostDog::Returning.bring_home",
+        "LostDog::role.farmer",
+        "LostDog::role.miller",
+        "LostDog::attempts",
+        "LostDog::Accepted",
+        "LostDog::plea",
+        "LostDog::accepted",
+        "LostDog::dog_watch::seen",
+        "LostDog::dog_watch::spotted",
+    ] {
+        assert!(find(&program, name).is_some(), "no item {name}");
+    }
+    let quest = find(&program, "LostDog").expect("the quest");
+    let Some(DefKind::Quest(q)) = program.def(quest).map(|d| &d.kind) else {
+        panic!("not a quest");
+    };
+    let stages: Vec<&str> = q.stages.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(stages, ["Open", "Search", "Returning"]);
+    let roles: Vec<(&str, bool)> = q
+        .roles
+        .iter()
+        .map(|r| (r.name.as_str(), r.optional))
+        .collect();
+    assert_eq!(roles, [("farmer", false), ("dog", false), ("miller", true)]);
+    assert!(q.roles.iter().all(|r| r.cond.is_some()));
+    assert_eq!(q.requires.len(), 1);
+    assert_eq!(q.home, RoleIdx(0));
+    let search = &q.stages[1];
+    let objectives: Vec<(&str, Option<i64>, bool)> = search
+        .objectives
+        .iter()
+        .map(|o| (o.name.as_str(), o.count, o.optional))
+        .collect();
     assert_eq!(
-        diags(&[("main.qs", FARMER)]),
-        vec![
-            d("not-yet", "main.qs", 13),
-            d("not-yet", "main.qs", 28),
-            d("not-yet", "main.qs", 36),
+        objectives,
+        [
+            ("find_dog", None, false),
+            ("feed_dog", Some(2), false),
+            ("ask_miller", None, true)
         ]
     );
     assert_eq!(
-        diags(&[("main.qs", "quest Q:\n    let x = 1\n")]),
-        vec![d("not-yet", "main.qs", 1)]
+        search.objectives[0].global,
+        find(&program, "LostDog::Search.find_dog").unwrap()
     );
+    assert_eq!(search.transitions.len(), 1);
+    assert_eq!(search.transitions[0].0, StageIdx(2));
+    assert_eq!(search.handlers.len(), 3);
+    assert_eq!(q.handlers.len(), 2);
+    assert_eq!(q.parts.len(), 1);
+    assert_eq!(
+        (q.parts[0].anchor, q.parts[0].role),
+        (PartAnchor::On, RoleIdx(1))
+    );
+    // `-> Search` in a handler is a stage change.
+    let bolted = find(&program, "LostDog::bolted").unwrap();
+    let Some(DefKind::Fn(f)) = program.def(bolted).map(|d| &d.kind) else {
+        panic!("not a fn");
+    };
+    assert!(matches!(
+        f.body.as_slice(),
+        [quest_lang::hir::Stmt {
+            kind: quest_lang::hir::StmtKind::Stage(StageIdx(1)),
+            ..
+        }]
+    ));
+    // Exits: `done` first, then the declared ones; the detour's arms by the callee's exit index.
+    let confront = find(&program, "LostDog::confront").unwrap();
+    let Some(DefKind::Dialogue(dl)) = program.def(confront).map(|d| &d.kind) else {
+        panic!("not a dialogue");
+    };
+    assert_eq!(dl.exits, ["done", "paid", "stalled"]);
+    assert_eq!(dl.quest, Some(quest));
+    assert_eq!(dl.stage, Some(StageIdx(1)));
+    let haggle = find(&program, "haggle").unwrap();
+    let detour = &dl.nodes[0].steps[1].kind;
+    let StepKind::Detour(callee, arms) = detour else {
+        panic!("{detour:?}");
+    };
+    assert_eq!(*callee, haggle);
+    let arms: Vec<(u32, &StepKind)> = arms.iter().map(|(i, s)| (*i, &s[0].kind)).collect();
+    assert_eq!(arms, [(1, &StepKind::Return(1)), (2, &StepKind::Return(2))]);
+
+    // Another stage's objective that does not exist; a stage used as a value.
+    let bad = LOST_DOG
+        .replace("if Search.find_dog.done:", "if Search.lost_dog.done:")
+        .replace("attempts = attempts + 1", "let s = Open");
+    assert_eq!(
+        errs(&[("main.qs", &bad)]),
+        vec![
+            d("unresolved", "main.qs", 64),
+            d("unresolved", "main.qs", 81)
+        ]
+    );
+}
+
+/// Spec §5.11's farmer and greeting dialogues against the stub host, split over modules.
+const FARMER_MOD: &str = r#"pub let farmer = Person(id=1)
+let innkeeper = Person(id=2)
+let accepted = false
+let dog_name = "Rufus"
+
+event Accepted:
+    player: Player
+
+@pick(best)
+dialogue farmer_talk(p: Player, npc: Person) for farmer:
+    node start:
+        npc: "Have you seen my dog?"                                   @farmer.start
+        choice:
+            "I'll find him." @farmer.accept if not accepted:
+                emit Accepted(player=p)
+            "What does he look like?" @farmer.ask_dog:
+                npc: f"Brown, one ear up. He answers to {dog_name}."   @farmer.dog_desc
+                -> start
+            "Goodbye." @farmer.goodbye
+
+dialogue greeting(p: Player, npc: Person) for innkeeper:
+    node hello when p.has_tag("outlaw"):
+        npc: "Keep walking."                                           @greet.outlaw
+    node hello when once per p:
+        npc: "A new face! Welcome."                                    @greet.first
+    node hello:
+        => npc: "Morning."                                             @greet.a
+        => npc: "You again?"                                           @greet.c when once per p
+"#;
+
+#[test]
+fn synthesised_fns_are_named_stably() {
+    let other = "pub fn helper() -> int:\n    return 1\n";
+    let a = [
+        ("main.qs", "mod farm\nmod other\n"),
+        ("farm.qs", FARMER_MOD),
+        ("other.qs", other),
+    ];
+    let b = [
+        ("other.qs", other),
+        ("farm.qs", FARMER_MOD),
+        ("main.qs", "mod other\nmod farm\n"),
+    ];
+    assert_eq!(errs(&a), vec![]);
+    // The spec's own farmer (its `Person` a script struct) checks clean too.
+    assert_eq!(errs(&[("main.qs", FARMER)]), vec![]);
+    let sigs = |files: &[(&str, &str)]| {
+        quest_lang::signatures(&common::tree(files), &quest_stub::stub_api())
+    };
+    let (sa, sb) = (sigs(&a), sigs(&b));
+    assert_eq!(sa, sb);
+    let synthesised: Vec<(&str, &str)> = sa
+        .iter()
+        .filter(|(n, _)| n.contains('$'))
+        .map(|(n, s)| (n.as_str(), s.as_str()))
+        .collect();
+    assert_eq!(
+        synthesised,
+        [
+            ("farm::farmer_talk$cond#0", "fn(Player, Person) -> bool"),
+            (
+                "farm::farmer_talk$emit_arg#0",
+                "fn(Player, Person) -> Player"
+            ),
+            ("farm::farmer_talk$subst#0", "fn(Player, Person) -> str"),
+            ("farm::farmer_talk$target#0", "fn(Player, Person) -> Person"),
+            ("farm::greeting$cond#0", "fn(Player, Person) -> bool"),
+            ("farm::greeting$per#0", "fn(Player, Person) -> Player"),
+            ("farm::greeting$per#1", "fn(Player, Person) -> Player"),
+            ("farm::greeting$target#0", "fn(Player, Person) -> Person"),
+        ]
+    );
+}
+
+#[test]
+fn objective_shadowing_role_is_duplicate_def() {
+    // Quests-examples §6.
+    let main = "quest Q:\n    role dog: Creature\n    stage Search:\n        objective dog \"Find the dog\" at dog\n";
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![d("duplicate-def", "main.qs", 4)]
+    );
+    // An objective shadowing a `let` or another objective; two stages, parts or exits of one name.
+    let main = r#"quest Q:
+    role dog: Creature
+    let found = 0
+    stage A:
+        objective found "x"
+        objective seek "x"
+    stage B:
+        objective seek "y"
+    stage A:
+        objective other "z"
+    part p on dog:
+        let x = 1
+    part p at dog:
+        let y = 1
+    dialogue d(p: Player, npc: Person) exits gone, gone, done:
+        "x"
+"#;
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![
+            d("duplicate-def", "main.qs", 5),
+            d("duplicate-def", "main.qs", 8),
+            d("duplicate-def", "main.qs", 9),
+            d("duplicate-def", "main.qs", 13),
+            d("duplicate-def", "main.qs", 15),
+            d("duplicate-def", "main.qs", 15),
+        ]
+    );
+    // A name the quest generates.
+    let main = "quest Q:\n    let stage = 1\n    event Entered:\n        n: int\n";
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![
+            d("duplicate-def", "main.qs", 2),
+            d("duplicate-def", "main.qs", 3)
+        ]
+    );
+}
+
+#[test]
+fn entered_outside_stage() {
+    let main = r#"quest Q:
+    role dog: Creature
+    @on(Entered)
+    fn body(e):
+        pass
+    stage S:
+        @on(Entered)
+        fn ok(e):
+            pass
+    part watch on dog:
+        @on(Entered)
+        fn part_entered(e):
+            pass
+"#;
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![
+            d("entered-outside-stage", "main.qs", 3),
+            d("entered-outside-stage", "main.qs", 11),
+        ]
+    );
+}
+
+#[test]
+fn unknown_exit_in_return_and_arm() {
+    // Quests-examples §6, and a `return` of an undeclared exit.
+    let main = r#"pub dialogue haggle(p: Player, npc: Person) exits agreed, refused:
+    npc: "Well?"
+    return agreed
+
+dialogue offer(p: Player, npc: Person) exits sold:
+    detour haggle:
+        agreed:
+            npc: "Done."
+            return sold
+        cheated:
+            npc: "Hey!"
+        done:
+            return
+    return nope
+"#;
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![
+            d("unknown-exit", "main.qs", 10),
+            d("unknown-exit", "main.qs", 14)
+        ]
+    );
+}
+
+#[test]
+fn scene_choice_and_follow_up() {
+    let main = r#"scene quarrel(a: Person, b: Person):
+    a: "Well?"
+    choice:
+        "Yes"
+
+scene market(a: Person, b: Person) where a != b:
+    b: "How much?"
+    pause 20
+    a: "Two coppers."                     (ticks=90)
+    -> market_after
+
+scene market_after(a: Person, b: Person):
+    pause 40
+    b: "...Fine. Two."
+
+scene early(a: Person, b: Person):
+    -> market_after
+    a: "And then?"
+
+scene alone(a: Person):
+    a: "Hm."
+    -> market_after
+
+scene nested(a: Person, b: Person):
+    when a != b:
+        -> market_after
+
+scene caster(a: Person, x: int):
+    a: "x"
+    detour quarrel
+    p: "who?"
+
+dialogue crier(npc: Person):
+    npc: "Hear ye!"
+    choice:
+        "What?"
+"#;
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![
+            d("bark-choice", "main.qs", 35),
+            d("dialogue-signature", "main.qs", 28),
+            d("not-a-step", "main.qs", 30),
+            d("scene-choice", "main.qs", 3),
+            d("scene-follow-up", "main.qs", 17),
+            d("scene-follow-up", "main.qs", 22),
+            d("scene-follow-up", "main.qs", 26),
+            d("unresolved", "main.qs", 31),
+        ]
+    );
+    let program = resolved(&[("main.qs", main)]);
+    let market = find(&program, "market").unwrap();
+    let after = find(&program, "market_after").unwrap();
+    let Some(quest_lang::hir::DefKind::Dialogue(m)) = program.def(market).map(|d| &d.kind) else {
+        panic!("not a dialogue");
+    };
+    use quest_lang::hir::StepKind;
+    let steps: Vec<&StepKind> = m.nodes[0].steps.iter().map(|s| &s.kind).collect();
+    assert!(matches!(steps[1], StepKind::Pause(20)));
+    assert!(matches!(steps[2], StepKind::Line(l) if l.ticks == Some(90)));
+    assert_eq!(steps[3], &StepKind::FollowUp(after));
+    assert!(m.stateless && m.cast_cond.is_some());
+}
+
+#[test]
+fn bad_line_text() {
+    use quest_lang::ast;
+    let main = "dialogue d(p: Player, npc: Person):\n    npc: \"x\" @d.x\n";
+    let (mut krate, diags) = quest_lang::load_modules(&common::tree(&[("main.qs", main)]));
+    assert!(diags.is_empty(), "{diags:#?}");
+    // The grammar takes only literals: an analysis tool's tree may hold anything.
+    let item = &mut krate.modules[0].ast.items[0];
+    let ast::ItemKind::Dialogue(dl) = &mut item.kind else {
+        panic!("not a dialogue");
+    };
+    let ast::DialogueEntry::Step(step) = &mut dl.body[0] else {
+        panic!("not a step");
+    };
+    let ast::StepKind::Line(line) = &mut step.kind else {
+        panic!("not a line");
+    };
+    line.text.kind = ast::ExprKind::Int(3);
+    let (_, diags) = quest_lang::resolve(&krate, &quest_stub::stub_api());
+    let codes: Vec<(&str, u32)> = diags.iter().map(|d| (d.code, d.line)).collect();
+    assert_eq!(codes, [("bad-line-text", 2)]);
+}
+
+#[test]
+fn missing_line_id_is_a_warning() {
+    let main = r#"quest Q:
+    stage S:
+        objective o "Find it"
+        dialogue d(p: Player, npc: Person):
+            npc: "a"
+            npc: "b" @d.b
+            choice:
+                "c":
+                    pass
+"#;
+    let main = main.replace(
+        "                    pass\n",
+        "                    npc: \"e\"\n",
+    );
+    let all = diagnostics(&[("main.qs", &main)]);
+    let found: Vec<(&str, u32, &quest_lang::Severity)> =
+        all.iter().map(|d| (d.code, d.line, &d.severity)).collect();
+    let w = &quest_lang::Severity::Warning;
+    assert_eq!(
+        found,
+        [
+            ("missing-line-id", 3, w),
+            ("missing-line-id", 5, w),
+            ("missing-line-id", 8, w),
+            ("missing-line-id", 9, w),
+        ]
+    );
+    // The provisional ids: the owner's qualified name and the line's position among its lines.
+    assert!(all[0].message.contains("`@Q.0`"), "{}", all[0].message);
+    assert!(all[1].message.contains("`@Q.d.0`"), "{}", all[1].message);
+    assert!(all[2].message.contains("`@Q.d.2`"), "{}", all[2].message);
+    assert!(
+        quest_lang::check(
+            &common::tree(&[("main.qs", &main)]),
+            &quest_stub::stub_api()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn bad_part_item() {
+    let main = r#"quest Q:
+    role dog: Creature
+    part watch on dog:
+        stage S:
+            objective o "x" @q.o
+        objective p "x" @q.p
+        dialogue d(p: Player, npc: Person):
+            "x" @q.x
+        scene s(a: Person):
+            a: "x" @q.y
+        part inner at dog:
+            let x = 1
+        role cat: Creature
+        requires act() >= 1
+        let ok = 1
+        event Fine:
+            n: int
+"#;
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![
+            d("bad-part-item", "main.qs", 4),
+            d("bad-part-item", "main.qs", 6),
+            d("bad-part-item", "main.qs", 7),
+            d("bad-part-item", "main.qs", 9),
+            d("bad-part-item", "main.qs", 11),
+            d("bad-part-item", "main.qs", 13),
+            d("bad-part-item", "main.qs", 14),
+        ]
+    );
+}
+
+#[test]
+fn bad_quest_option() {
+    let quest = |header: &str| format!("{header}\n    role w: Person\n");
+    let one = |header: &str| errs(&[("main.qs", &quest(header))]);
+    assert_eq!(
+        one("quest Q(cooldown=10):"),
+        vec![d("bad-quest-option", "main.qs", 1)]
+    );
+    assert_eq!(
+        one("repeatable quest Q(nope=1):"),
+        vec![d("bad-quest-option", "main.qs", 1)]
+    );
+    assert_eq!(
+        one("repeatable quest Q(10):"),
+        vec![d("bad-quest-option", "main.qs", 1)]
+    );
+    assert_eq!(
+        one("repeatable quest Q(cooldown=act()):"),
+        vec![d("bad-quest-option", "main.qs", 1)]
+    );
+    assert_eq!(
+        one("repeatable quest Q(exclusive=1, cooldown=1, cooldown=2):"),
+        vec![
+            d("bad-quest-option", "main.qs", 1),
+            d("bad-quest-option", "main.qs", 1)
+        ]
+    );
+    let ok = quest("repeatable quest Q(cooldown=72000, exclusive=true) at w:");
+    assert_eq!(errs(&[("main.qs", &ok)]), vec![]);
+    let program = resolved(&[("main.qs", &ok)]);
+    let q = find(&program, "Q").unwrap();
+    let Some(quest_lang::hir::DefKind::Quest(q)) = program.def(q).map(|d| &d.kind) else {
+        panic!("not a quest");
+    };
+    assert_eq!(
+        q.repeatable,
+        Some(quest_lang::hir::RepeatOpts {
+            cooldown: 72000,
+            exclusive: true,
+            once_per_player: false
+        })
+    );
+}
+
+#[test]
+fn decline_outside_setup() {
+    let main = r#"quest Q:
+    role mine: Site
+    @on(Setup)
+    fn setup(e):
+        decline()
+    stage S:
+        @on(PlayerClicked)
+        fn clicked(e):
+            decline()
+    part depths at mine:
+        @on(Setup)
+        fn nest(e):
+            place(prefab("nest"), Place(id=1)) else:
+                decline()
+                return
+        @on(PlayerNear)
+        fn near(e):
+            decline()
+"#;
+    assert_eq!(
+        errs(&[("main.qs", main)]),
+        vec![
+            d("decline-outside-setup", "main.qs", 9),
+            d("decline-outside-setup", "main.qs", 18),
+        ]
+    );
+}
+
+#[test]
+fn emit_statement_names_the_hosts_emit() {
+    // A script's own `emit` does not capture the statement `emit Ev(…)`; a plain call still finds it.
+    let main = r#"fn emit(n: int) -> int:
+    return n
+
+@on(PlayerClicked)
+fn clicked(e):
+    emit PlayerEntered(player=e.player)
+    let x = emit(3)
+"#;
+    assert_eq!(errs(&[("main.qs", main)]), vec![]);
 }

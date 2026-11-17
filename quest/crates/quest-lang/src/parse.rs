@@ -200,8 +200,12 @@ pub(crate) fn ticks(
     e
 }
 
+/// The callee of the statement `emit Ev(…)`: a name no script can write, which resolution takes for the
+/// host's `emit` whatever a script names `emit`.
+pub const EMIT_CALLEE: &str = "$emit";
+
 /// `emit Event(args)` as a statement (the `emit` at token `l`, the `(` at `at`, the `)` before `r`):
-/// the prelude call `emit(Event(args))`.
+/// the call `$emit(Event(args))` of the host's `emit` ([`EMIT_CALLEE`]).
 pub(crate) fn emit_stmt(
     toks: &[Token],
     l: usize,
@@ -211,7 +215,12 @@ pub(crate) fn emit_stmt(
     args: Vec<Arg>,
 ) -> Result<StmtKind, PErr> {
     let start = l.saturating_add(1);
-    let callee = expr(toks, l, start, ExprKind::Path(vec!["emit".to_string()]))?;
+    let callee = expr(
+        toks,
+        l,
+        start,
+        ExprKind::Path(vec![EMIT_CALLEE.to_string()]),
+    )?;
     let event = expr(toks, start, at, ExprKind::Path(event))?;
     let value = expr(toks, start, r, ExprKind::Call(Box::new(event), args))?;
     let call = expr(

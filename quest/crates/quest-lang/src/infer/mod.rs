@@ -1073,6 +1073,8 @@ impl<'k> Infer<'k> {
                         Builtin::Option => (1, Ty::Option(TyId::ERROR)),
                         Builtin::Promise => (1, Ty::Promise(TyId::ERROR)),
                         Builtin::Dict => (2, Ty::Dict(TyId::ERROR, TyId::ERROR)),
+                        // Typed in Task 39 (opaque types); compatible with everything until then.
+                        Builtin::Dialogue | Builtin::Exit => (0, Ty::Error),
                     },
                     TypeName::Def(d) => (0, Ty::Adt(*d)),
                     TypeName::HostStruct(i) => (0, Ty::HostStruct(*i)),

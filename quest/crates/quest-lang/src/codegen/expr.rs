@@ -224,6 +224,9 @@ impl Emit<'_, '_, '_> {
             }
             // Never met: the checker reported it, or it is not a value (and was reported).
             ExprKind::Error | ExprKind::Host(_) => self.not_yet("this expression", e.span),
+            ExprKind::Quest(_) | ExprKind::Exit(_, _) => {
+                self.not_yet("dialogue and quest code", e.span)
+            }
         }
     }
 

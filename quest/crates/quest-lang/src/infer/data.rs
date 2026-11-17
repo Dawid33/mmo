@@ -519,6 +519,8 @@ impl Infer<'_> {
                 self.unknown_receiver(b, ty, x.span, &format!("the field `{name}`"));
                 return TyId::ERROR;
             }
+            // An objective's reads (`done`, `failed`, `count`) are typed with the quest checks (Task 39).
+            Ty::Adt(d) if Some(d) == self.krate.builtins.objective => return TyId::ERROR,
             Ty::Adt(d) => match self.krate.def(d).map(|def| &def.kind) {
                 Some(DefKind::Struct(_) | DefKind::Event(_)) => {
                     self.adts.get(&d).and_then(|s| s.first()).cloned()

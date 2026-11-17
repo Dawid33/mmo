@@ -83,35 +83,11 @@ pub struct Compiled {
 }
 
 /// The front end: modules, resolution and type inference; every diagnostic, sorted by file, line and
-/// column. Dialogues and quests (decision 19) are resolved and checked, then each gets one `not-yet` and is
-/// dropped before the later stages: the call graph and type inference ([`infer`]).
+/// column.
 fn front(tree: &SourceTree, host: &HostApi) -> (hir::Crate, Typed, Vec<Diagnostic>) {
     let (krate, mut diags) = load_modules(tree);
     let (program, mut resolved) = resolve(&krate, host);
     diags.append(&mut resolved);
-    for id in &program.deferred {
-        let Some(def) = program.def(*id) else {
-            continue;
-        };
-        let file = program
-            .module(def.module)
-            .map_or(String::new(), |m| m.file.clone());
-        let noun = match def.kind {
-            hir::DefKind::Quest => "quest",
-            _ => "dialogue",
-        };
-        diags.push(Diagnostic::error(
-            "not-yet",
-            format!(
-                "{noun} `{}` is checked but not compiled yet (dialogue and quests come in a later version)",
-                def.name
-            ),
-            &file,
-            def.span.line,
-            def.span.col,
-            def.span.len,
-        ));
-    }
     let (typed, mut inferred) = infer(&program, host);
     diags.append(&mut inferred);
     sort_diags(&mut diags);

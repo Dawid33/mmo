@@ -157,6 +157,8 @@ impl Emit<'_, '_, '_> {
             StmtKind::Continue => self.leave_loop(false),
             StmtKind::Return(value) => self.ret(value.as_ref()),
             StmtKind::Raise(x) => self.raise(s.span, x),
+            // Never met: a quest is `not-yet` before code generation starts.
+            StmtKind::Stage(_) => self.not_yet("a stage change", s.span),
         }
     }
 

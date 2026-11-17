@@ -395,7 +395,7 @@ impl Walk<'_, '_> {
                     self.expr(e);
                 }
             }
-            StmtKind::Pass | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Pass | StmtKind::Break | StmtKind::Continue | StmtKind::Stage(_) => {}
         }
     }
 
@@ -472,7 +472,9 @@ impl Walk<'_, '_> {
             | ExprKind::Prelude(_)
             | ExprKind::ErrorName(_)
             | ExprKind::Break
-            | ExprKind::Continue => {}
+            | ExprKind::Continue
+            | ExprKind::Quest(_)
+            | ExprKind::Exit(_, _) => {}
         }
     }
 }
