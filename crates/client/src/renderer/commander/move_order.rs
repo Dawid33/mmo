@@ -615,8 +615,9 @@ mod tests {
         let blocks = REGION_BLOCKS as i32;
         let start = [blocks - 4, 1, 12];
         region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
-        let mode = Order::SetMode { mode: game::PlayMode::Adventure, at: Some(start) };
-        region.handle_event(GameEventKind::Order(CLIENT, mode)).unwrap();
+        // A new body is already in Adventure (the default), so a `SetMode { at }` would not
+        // move it: place it as the server does for an adventure started in its region.
+        region.handle_event(GameEventKind::PlaceBody(CLIENT, start)).unwrap();
         for _ in 0..5 {
             region.handle_event(GameEventKind::Tick).unwrap();
         }
