@@ -7,7 +7,7 @@
 //! `InlineWorldLink::set_up`. Each test sweeps [`SEEDS`] seeds; a failure names the seed
 //! to replay.
 
-use crate::common::h;
+use crate::common::{h, populated_site};
 use std::sync::{Arc, Mutex};
 
 use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, land_map, years_before};
@@ -296,6 +296,46 @@ impl World {
         EmbarkRequest { civ: s.civ, people: s.members.iter().copied().take(2).collect(), region }
     }
 
+    /// The site an adventure may start at (the bootstrapped site).
+    fn site(&self) -> SiteId {
+        populated_site(self.history())
+    }
+
+    /// Where [`Self::site`] lies.
+    fn site_region(&self) -> RegionCoords {
+        self.history().site(self.site()).expect("the site").region
+    }
+
+    /// Every `AdventureResult` sent to `c` since the last call.
+    fn adventure_results(&mut self, c: ClientId) -> Vec<Result<SiteId, AdventureRefusal>> {
+        let mut out = Vec::new();
+        self.inbox.retain(|(to, p)| match p {
+            ServerPacket::AdventureResult(r) if *to == Some(c) => {
+                out.push(*r);
+                false
+            }
+            _ => true,
+        });
+        out
+    }
+
+    /// `c` starts an adventure at [`Self::site`], then the world drains: its one
+    /// `AdventureResult`.
+    fn start(&mut self, c: ClientId) -> Result<SiteId, AdventureRefusal> {
+        let site = self.site();
+        self.packet(c, ClientPacket::StartAdventure(site));
+        self.drain();
+        let results = self.adventure_results(c);
+        assert_eq!(results.len(), 1, "seed {}: one AdventureResult: {results:?}", self.seed);
+        results[0]
+    }
+
+    /// `ReleaseClaim`s of `c`'s player the coordinator was handed since `mark`.
+    fn releases_since(&self, mark: usize, c: ClientId) -> usize {
+        let player = PlayerId(c as u64);
+        self.sent_since(mark).iter().filter(|m| **m == HostMsg::ReleaseClaim { player }).count()
+    }
+
     fn player_sites(&self) -> Vec<SiteId> {
         self.history().sites().filter(|s| s.player_founded).map(|s| s.id).collect()
     }
@@ -356,26 +396,26 @@ fn embark_round_trip_moves_player_once() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn embark_reply_after_disconnect_releases_claim() {
-    each_seed("embark_reply_after_disconnect_releases_claim", |seed| {
+fn start_reply_after_disconnect_releases_claim() {
+    each_seed("start_reply_after_disconnect_releases_claim", |seed| {
         let mut w = World::with(seed, &[A, B]);
-        let req = w.embark_request();
-        // Down: the embark waits in the outbox; its player leaves before it is answered.
+        let (site, region) = (w.site(), w.site_region());
+        let mark = w.mark();
+        // Down: the start waits in the outbox; its player leaves before it is answered.
         w.set_up(false);
-        w.packet(A, ClientPacket::Embark(req.clone()));
+        w.packet(A, ClientPacket::StartAdventure(site));
         w.send(ServerEvent::ClientDisconnected(A));
         assert_eq!(w.manager.pending_world_requests(), 1);
         w.set_up(true);
         w.drain();
-        assert!(w.embark_results(A).is_empty(), "seed {seed}: nobody to tell");
-        let sites = w.player_sites();
-        assert_eq!(sites.len(), 1, "seed {seed}: the site is founded once");
-        let site = sites[0];
-        assert!(w.history().returnable(site), "seed {seed}: the site stays, returnable");
+        assert!(w.adventure_results(A).is_empty(), "seed {seed}: nobody to tell");
+        let starts = w.sent_since(mark).iter().filter(|m| matches!(m, HostMsg::Request { req: WorldRequest::StartAdventure(_), .. })).count();
+        assert_eq!(starts, 1, "seed {seed}: asked once");
+        assert_eq!(w.releases_since(mark, A), 1, "seed {seed}: the grant is given back once");
         assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: the claim was given back");
-        assert!(w.players_in(req.region).is_empty(), "seed {seed}: nobody moved in");
-        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: free for another player");
-        w.check_settled("returned");
+        assert!(w.players_in(region).is_empty(), "seed {seed}: nobody moved in");
+        assert_eq!(w.start(B), Ok(site), "seed {seed}: another player starts there");
+        w.check_settled("started");
     });
 }
 
@@ -384,16 +424,16 @@ fn embark_reply_after_disconnect_releases_claim() {
 fn requests_queue_while_link_down_and_replay_once() {
     each_seed("requests_queue_while_link_down_and_replay_once", |seed| {
         let mut w = World::with(seed, &[A]);
-        let req = w.embark_request();
+        let (site, region) = (w.site(), w.site_region());
         let query = LegendsQuery { filter: LegendsFilter::All, before: None, limit: 5 };
         w.set_up(false);
-        w.packet(A, ClientPacket::Embark(req.clone()));
+        w.packet(A, ClientPacket::StartAdventure(site));
         w.packet(A, ClientPacket::RequestLegends(query.clone()));
         assert_eq!(w.manager.world_outbox_len(), 2, "seed {seed}: both queued");
         for _ in 0..roll(seed, 1, 4) {
             w.tick();
         }
-        assert!(w.embark_results(A).is_empty() && w.legends(A) == 0, "seed {seed}: unanswered while down");
+        assert!(w.adventure_results(A).is_empty() && w.legends(A) == 0, "seed {seed}: unanswered while down");
         let mark = w.mark();
         w.set_up(true);
         w.drain();
@@ -407,29 +447,29 @@ fn requests_queue_while_link_down_and_replay_once() {
             })
             .collect();
         assert!(
-            matches!(requests[..], [WorldRequest::Embark(_), WorldRequest::Legends(_)]),
+            matches!(requests[..], [WorldRequest::StartAdventure(_), WorldRequest::Legends(_)]),
             "seed {seed}: each request once, in order: {requests:?}"
         );
-        assert_eq!(w.embark_results(A).len(), 1, "seed {seed}: one EmbarkResult");
+        assert_eq!(w.adventure_results(A), vec![Ok(site)], "seed {seed}: one AdventureResult");
         assert_eq!(w.legends(A), 1, "seed {seed}: one Legends page");
-        assert_eq!(w.player_sites().len(), 1, "seed {seed}: one site");
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), Some(game::Claim::Adventure(site)), "seed {seed}: one claim");
         assert_eq!(w.manager.world_outbox_len(), 0);
-        assert_eq!(w.players_in(req.region), vec![A]);
+        assert_eq!(w.players_in(region), vec![A]);
     });
 }
 
 /// A reconnect the host never saw as down (a QUIC link that dropped and came back
 /// between two pumps: `is_up` true both times, a new connection generation) still makes
 /// it attach again — a fresh `Attach` epoch, then the unanswered request resent — and
-/// the embark is answered once, one site.
+/// the start is answered once, one claim.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn reconnect_between_looks_reattaches() {
     each_seed("reconnect_between_looks_reattaches", |seed| {
         let mut w = World::with(seed, &[A]);
-        let req = w.embark_request();
+        let (site, region) = (w.site(), w.site_region());
         let mark = w.mark();
-        w.packet(A, ClientPacket::Embark(req.clone()));
+        w.packet(A, ClientPacket::StartAdventure(site));
         for _ in 0..roll(seed, 2, 4) {
             w.tick();
         }
@@ -444,11 +484,10 @@ fn reconnect_between_looks_reattaches() {
             })
             .collect();
         assert_eq!(epochs, vec![2], "seed {seed}: one fresh Attach after the reconnect");
-        let results = w.embark_results(A);
-        assert_eq!(results.len(), 1, "seed {seed}: one EmbarkResult: {results:?}");
-        assert!(results[0].is_ok(), "seed {seed}: embarked");
-        assert_eq!(w.player_sites().len(), 1, "seed {seed}: one site");
-        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: moved in once");
+        let results = w.adventure_results(A);
+        assert_eq!(results, vec![Ok(site)], "seed {seed}: one AdventureResult, a start");
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), Some(game::Claim::Adventure(site)), "seed {seed}: one claim");
+        assert_eq!(w.players_in(region), vec![A], "seed {seed}: moved in once");
         w.check_settled("reattached");
     });
 }
@@ -516,8 +555,8 @@ fn host_stamps_requests_with_the_players_hop() {
     let mark = w.mark();
     w.send(ServerEvent::connected(A));
     w.drain();
-    let req = w.embark_request();
-    w.packet(A, ClientPacket::Embark(req));
+    let site = w.site();
+    w.packet(A, ClientPacket::StartAdventure(site));
     w.drain();
     let sent = w.sent_since(mark);
     let placed: Vec<u64> = sent
@@ -530,13 +569,13 @@ fn host_stamps_requests_with_the_players_hop() {
     let stamped: Vec<u64> = sent
         .iter()
         .filter_map(|m| match m {
-            HostMsg::Request { hop, req: WorldRequest::Embark(_), .. } => Some(*hop),
+            HostMsg::Request { hop, req: WorldRequest::StartAdventure(_), .. } => Some(*hop),
             _ => None,
         })
         .collect();
     assert_eq!(placed.len(), 1, "A is placed once: {sent:?}");
     assert!(placed[0] > 0, "a placement has a number above the never-placed 0");
-    assert_eq!(stamped, placed, "the Embark carries the hop A was placed at");
+    assert_eq!(stamped, placed, "the StartAdventure carries the hop A was placed at");
 }
 
 /// A request already sent when the link drops — its reply lost with the connection, or
@@ -549,9 +588,10 @@ fn sent_request_replayed_after_reconnect_answers_once() {
     let replayed = std::sync::atomic::AtomicU64::new(0);
     each_seed("sent_request_replayed_after_reconnect_answers_once", |seed| {
         let mut w = World::with(seed, &[A]);
-        let req = w.embark_request();
+        let (site, region) = (w.site(), w.site_region());
+        let a = PlayerId(A as u64);
         let mark = w.mark();
-        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A), w.now_ms);
+        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::StartAdventure(site), A), w.now_ms);
         for _ in 0..roll(seed, 2, 3) {
             w.manager.pump_world(w.now_ms);
         }
@@ -564,25 +604,26 @@ fn sent_request_replayed_after_reconnect_answers_once() {
         w.tick();
         w.set_up(true);
         w.drain();
-        let embark_requests: Vec<HostMsg> = w
+        let start_requests: Vec<HostMsg> = w
             .sent_since(mark)
             .into_iter()
-            .filter(|m| matches!(m, HostMsg::Request { req: WorldRequest::Embark(_), .. }))
+            .filter(|m| matches!(m, HostMsg::Request { req: WorldRequest::StartAdventure(_), .. }))
             .collect();
-        if embark_requests.len() > 1 {
+        if start_requests.len() > 1 {
             replayed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let site = w.embark_results(A);
-        assert!(matches!(site[..], [Ok(_)]), "seed {seed}: one EmbarkResult: {site:?}");
-        assert_eq!(w.player_sites().len(), 1, "seed {seed}: one site");
-        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: one body");
+        let results = w.adventure_results(A);
+        assert_eq!(results, vec![Ok(site)], "seed {seed}: one AdventureResult, a start");
+        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Adventure(site)), "seed {seed}: one claim");
+        assert_eq!(w.players_in(region), vec![A], "seed {seed}: one body");
         // The same request once more (a replay racing its first reply): answered from
         // the memo, the second reply dropped by id.
-        w.link().send(embark_requests[0].clone());
+        w.link().send(start_requests[0].clone());
         w.drain();
-        assert!(w.embark_results(A).is_empty(), "seed {seed}: the second reply is dropped");
-        assert_eq!(w.player_sites().len(), 1, "seed {seed}: still one site");
-        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: still one body");
+        assert!(w.adventure_results(A).is_empty(), "seed {seed}: the second reply is dropped");
+        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Adventure(site)), "seed {seed}: still one claim");
+        assert_eq!(w.releases_since(mark, A), 0, "seed {seed}: nothing given back");
+        assert_eq!(w.players_in(region), vec![A], "seed {seed}: still one body");
     });
     assert!(replayed.into_inner() > 0, "no seed replayed a sent request");
 }
@@ -590,22 +631,22 @@ fn sent_request_replayed_after_reconnect_answers_once() {
 #[test]
 fn request_times_out_with_world_unavailable() {
     let mut w = World::with(0, &[A]);
-    let req = w.embark_request();
+    let site = w.site();
     w.set_up(false);
-    w.packet(A, ClientPacket::Embark(req.clone()));
+    w.packet(A, ClientPacket::StartAdventure(site));
     w.packet(A, ClientPacket::RequestLegends(LegendsQuery { filter: LegendsFilter::All, before: None, limit: 5 }));
     w.now_ms += WORLD_REQUEST_TIMEOUT_SECS * 1000 - TICK_RATE;
     w.tick();
-    assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::WorldUnavailable)]);
+    assert_eq!(w.adventure_results(A), vec![Err(AdventureRefusal::WorldUnavailable)]);
     assert_eq!(w.manager.pending_world_requests(), 0, "forgotten");
     assert_eq!(w.manager.world_outbox_len(), 0, "out of the outbox");
     w.set_up(true);
     w.drain();
-    assert!(w.embark_results(A).is_empty(), "never answered again");
+    assert!(w.adventure_results(A).is_empty(), "never answered again");
     assert_eq!(w.legends(A), 0, "a query just goes unanswered");
-    assert!(w.player_sites().is_empty(), "never founded");
-    // The world is back: the player may embark.
-    assert!(w.ask(A, ClientPacket::Embark(req)).is_ok());
+    assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "never granted");
+    // The world is back: the player may start.
+    assert_eq!(w.start(A), Ok(site));
 }
 
 #[test]
@@ -799,30 +840,28 @@ fn late_listing_region_is_attached_exactly() {
     });
 }
 
-/// An embark the coordinator applied whose reply was lost, the link down past the
-/// timeout: the player is told `WorldUnavailable`; after the link is back the request is
-/// sent again (answered from the memo), its claim given back, and the player may embark
-/// again. The first request founded exactly one site.
+/// A start the coordinator applied whose reply was lost, the link down past the timeout:
+/// the player is told `WorldUnavailable`; after the link is back the request is settled
+/// (answered from the memo), its claim given back once, and the player may start again.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn expired_sent_embark_gives_back_its_claim() {
+fn expired_sent_start_gives_back_its_claim() {
     let ran = std::sync::atomic::AtomicU64::new(0);
-    each_seed("expired_sent_embark_gives_back_its_claim", |seed| {
+    each_seed("expired_sent_start_gives_back_its_claim", |seed| {
         let mut w = World::with(seed, &[A]);
-        let req = w.embark_request();
-        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req), A), w.now_ms);
+        let site = w.site();
+        let mark = w.mark();
+        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::StartAdventure(site), A), w.now_ms);
         if w.manager.pending_world_requests() == 0 {
             return; // Answered at once (no lag by this seed): nothing in flight to lose.
         }
         ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         w.set_up(false);
         w.link().lose_in_transit();
-        let site = w.player_sites();
-        assert_eq!(site.len(), 1, "seed {seed}: the coordinator applied it");
-        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), Some(game::Claim::Fortress(site[0])));
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), Some(game::Claim::Adventure(site)), "seed {seed}: the coordinator applied it");
         w.now_ms += WORLD_REQUEST_TIMEOUT_SECS * 1000;
         w.tick();
-        assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::WorldUnavailable)], "seed {seed}");
+        assert_eq!(w.adventure_results(A), vec![Err(AdventureRefusal::WorldUnavailable)], "seed {seed}");
         assert_eq!(w.manager.pending_world_requests(), 0, "seed {seed}: forgotten toward the client");
         for _ in 0..roll(seed, 7, 4) {
             w.tick();
@@ -830,47 +869,45 @@ fn expired_sent_embark_gives_back_its_claim() {
         w.set_up(true);
         w.drain();
         assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: the claim was given back");
-        assert!(w.embark_results(A).is_empty(), "seed {seed}: the late reply is not shown");
-        assert_eq!(w.player_sites(), site, "seed {seed}: one site, the first request's");
-        assert!(w.history().returnable(site[0]), "seed {seed}: the site stays");
-        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed}: may embark again");
+        assert!(w.adventure_results(A).is_empty(), "seed {seed}: the late reply is not shown");
+        assert_eq!(w.releases_since(mark, A), 1, "seed {seed}: the first request's grant, given back once");
+        assert_eq!(w.start(A), Ok(site), "seed {seed}: may start again");
     });
     assert!(ran.into_inner() > 0, "no seed had the reply in flight");
 }
 
 /// The coordinator holds a claim the host does not (B-C1), with nothing of the player
-/// unsettled on the host: (a) it restarts from a save taken before A retired (the
-/// release lost); (b) an all-in-one crash after an embark: the coordinator saved the
-/// embark's reply, the restarted host has no record of the player. Either way the host's
-/// report is the truth: A is never locked out with `AlreadyHasFortress`, and the fortress
-/// has at most one player.
+/// unsettled on the host: (a) it restarts from a save taken before A ended its adventure
+/// (the release lost); (b) an all-in-one crash after a start: the coordinator saved the
+/// start's reply, the restarted host has no record of the player. Either way the host's
+/// report is the truth: A is never locked out with `AlreadyPlaying`.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn coordinator_claim_older_than_the_host_never_locks_out() {
     each_seed("coordinator_claim_older_than_the_host_never_locks_out", |seed| {
         let a = PlayerId(A as u64);
         let mut w = World::with(seed, &[A, B]);
-        let site = w.ask(A, ClientPacket::Embark(w.embark_request())).expect("embarked");
-        let embarked = w.coordinator().encode_projection();
+        let site = w.start(A).expect("started");
+        let started = w.coordinator().encode_projection();
         let load = |now_ms: u64| {
             let grid = SocietyGrid::from_world_map(&strip());
-            Coordinator::load(&embarked.0, &embarked.1, grid, game::coordinator::ProcessBoot(1), now_ms)
+            Coordinator::load(&started.0, &started.1, grid, game::coordinator::ProcessBoot(1), now_ms)
         };
-        // (a) A retires; the coordinator then restarts from the save before the release.
-        w.packet(A, ClientPacket::Retire);
+        // (a) A ends its adventure; the coordinator then restarts from the save before the
+        // release.
+        w.packet(A, ClientPacket::EndAdventure);
         w.drain();
         assert_eq!(w.coordinator().claim_of(a), None, "seed {seed}: released");
         let now_ms = w.now_ms;
         let older = load(now_ms);
         *w.link().coordinator_mut() = older.expect("the state loads");
-        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Fortress(site)), "seed {seed}: the old claim");
+        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Adventure(site)), "seed {seed}: the old claim");
         w.reconnect_between_looks();
         w.drain();
         assert_eq!(w.coordinator().claim_of(a), None, "seed {seed} (a): the stale claim is dropped");
-        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed} (a): the fortress is free");
-        assert_eq!(w.ask(A, ClientPacket::ReturnTo(site)), Err(EmbarkRefusal::InUse), "seed {seed} (a): one player");
-        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed} (a): A is not locked out");
-        // (b) A new host (no record of A) over the coordinator as saved with the embark.
+        assert_eq!(w.start(A), Ok(site), "seed {seed} (a): A is not locked out");
+        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Adventure(site)));
+        // (b) A new host (no record of A) over the coordinator as saved with the start.
         let mut w = World::new(seed);
         let restarted = load(0);
         *w.link().coordinator_mut() = restarted.expect("the state loads");
@@ -879,51 +916,51 @@ fn coordinator_claim_older_than_the_host_never_locks_out() {
         w.drain();
         w.inbox.clear();
         assert_eq!(w.coordinator().claim_of(a), None, "seed {seed} (b): the claim the host lost is dropped");
-        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed} (b): the fortress is free");
-        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed} (b): A is not locked out");
+        assert_eq!(w.start(A), Ok(site), "seed {seed} (b): A is not locked out");
     });
 }
 
-/// An embark sent on a connection that died unnoticed times out (its player told
+/// A start sent on a connection that died unnoticed times out (its player told
 /// `WorldUnavailable`); by the seed the old connection lost it or delivered it. After the
 /// re-attach the host only settles it (B-I1): lost, it is refused unapplied and never
-/// founds a site later; delivered, its memo answers and the claim is given back. Either
-/// way the player holds nothing and may embark again.
+/// grants a claim later; delivered, its memo answers and the claim is given back. Either
+/// way the player holds nothing and may start again.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn expired_embark_is_settled_never_executed() {
+fn expired_start_is_settled_never_executed() {
     let lost = std::sync::atomic::AtomicU64::new(0);
-    each_seed("expired_embark_is_settled_never_executed", |seed| {
+    each_seed("expired_start_is_settled_never_executed", |seed| {
         let mut w = World::with(seed, &[A]);
+        let site = w.site();
+        let a = PlayerId(A as u64);
+        let mark = w.mark();
         w.begin_stale();
-        w.packet(A, ClientPacket::Embark(w.embark_request()));
+        w.packet(A, ClientPacket::StartAdventure(site));
         w.now_ms += WORLD_REQUEST_TIMEOUT_SECS * 1000;
         w.tick();
-        assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::WorldUnavailable)], "seed {seed}");
+        assert_eq!(w.adventure_results(A), vec![Err(AdventureRefusal::WorldUnavailable)], "seed {seed}");
         let landed = w.end_stale();
-        let delivered = landed.iter().any(|m| matches!(m, HostMsg::Request { req: WorldRequest::Embark(_), .. }));
+        let delivered = landed.iter().any(|m| matches!(m, HostMsg::Request { req: WorldRequest::StartAdventure(_), .. }));
         w.drain();
-        assert!(w.embark_results(A).is_empty(), "seed {seed}: the settle's answer is not shown");
-        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: no claim");
+        assert!(w.adventure_results(A).is_empty(), "seed {seed}: the settle's answer is not shown");
+        assert_eq!(w.coordinator().claim_of(a), None, "seed {seed}: no claim");
         if delivered {
-            assert_eq!(w.player_sites().len(), 1, "seed {seed}: delivered, it founded its site once");
+            assert_eq!(w.releases_since(mark, A), 1, "seed {seed}: delivered, it was granted once and given back");
         } else {
             lost.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            assert!(w.player_sites().is_empty(), "seed {seed}: lost, it never runs");
+            assert_eq!(w.releases_since(mark, A), 0, "seed {seed}: lost, it never runs");
         }
-        let sites = w.player_sites().len();
-        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed}: may embark again");
-        assert_eq!(w.player_sites().len(), sites + 1, "seed {seed}: the new embark founds one site");
+        assert_eq!(w.start(A), Ok(site), "seed {seed}: may start again");
+        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Adventure(site)), "seed {seed}: the new start grants one claim");
     });
-    assert!(lost.into_inner() > 0, "no seed lost the embark with the old connection");
+    assert!(lost.into_inner() > 0, "no seed lost the start with the old connection");
 }
 
-/// The coordinator granted A's embark (fortress G) and the link dropped with the reply
-/// on it; meanwhile the embark's region became unavailable on the host. On the
-/// re-attach the host reports A with no claim and the request unsettled: `ClaimIs(G)` is
-/// applied, then the replayed request's memo answer finds the region unavailable and
-/// gives the claim back — the host must hold no claim for A afterwards (the client told
-/// `Fortress(None)`), so B's later return to G leaves one player in the fortress.
+/// The coordinator granted A's start (an adventure at G) and the link dropped with the
+/// reply on it; meanwhile G's region became unavailable on the host. On the re-attach the
+/// host reports A with no claim and the request unsettled: `ClaimIs(G)` is applied, then
+/// the replayed request's memo answer finds the region unavailable and gives the claim
+/// back — the host must hold no claim for A afterwards, also once B starts at G.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn refused_grant_after_a_claim_is_leaves_no_claim_on_the_host() {
@@ -931,43 +968,39 @@ fn refused_grant_after_a_claim_is_leaves_no_claim_on_the_host() {
     each_seed("refused_grant_after_a_claim_is_leaves_no_claim_on_the_host", |seed| {
         let a = PlayerId(A as u64);
         let mut w = World::with(seed, &[A, B]);
-        let req = w.embark_request();
-        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A), w.now_ms);
+        let (site, region) = (w.site(), w.site_region());
+        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::StartAdventure(site), A), w.now_ms);
         if w.manager.pending_world_requests() == 0 {
             return; // Answered at once (no lag by this seed): nothing in flight to lose.
         }
         ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         w.set_up(false);
         w.link().lose_in_transit();
-        let site = *w.player_sites().first().expect("the coordinator applied it");
-        // The fortress region cannot be loaded on the host now.
-        w.manager.spawner_mut().fail_next_start(req.region);
-        w.packet(B, ClientPacket::RequestRegionConnection(req.region));
+        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Adventure(site)), "seed {seed}: the coordinator applied it");
+        // The site's region cannot be loaded on the host now.
+        w.manager.spawner_mut().fail_next_start(region);
+        w.packet(B, ClientPacket::RequestRegionConnection(region));
         for _ in 0..DRAIN_ROUNDS {
             w.tick();
         }
-        assert!(w.manager.unavailable_regions().contains(&req.region), "seed {seed}: the region failed to load");
+        assert!(w.manager.unavailable_regions().contains(&region), "seed {seed}: the region failed to load");
         w.set_up(true);
         for _ in 0..DRAIN_ROUNDS {
             w.tick();
         }
-        assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::RegionUnavailable)], "seed {seed}");
+        assert_eq!(w.adventure_results(A), vec![Err(AdventureRefusal::RegionUnavailable)], "seed {seed}");
         assert_eq!(w.coordinator().claim_of(a), None, "seed {seed}: the grant was given back");
         assert_eq!(w.manager.client_claim(A), None, "seed {seed}: and the host holds no claim for A");
-        let last_fortress = w.inbox.iter().rev().find_map(|(to, p)| match p {
-            ServerPacket::Fortress(f) if *to == Some(A) => Some(*f),
-            _ => None,
-        });
-        assert!(matches!(last_fortress, None | Some(None)), "seed {seed}: A was last told no fortress: {last_fortress:?}");
-        // The region loads again; B returns to G: one player in it.
+        // The region loads again; B starts at G: A still holds nothing.
         for _ in 0..4 * game::STORE_LOAD_RETRY_TICKS {
             if w.manager.unavailable_regions().is_empty() {
                 break;
             }
             w.tick();
         }
-        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: the fortress is free");
-        assert_eq!(w.manager.client_claim(A), None, "seed {seed}: never two players in G");
+        assert_eq!(w.start(B), Ok(site), "seed {seed}: B starts at G");
+        assert_eq!(w.manager.client_claim(A), None, "seed {seed}: A's given-back claim never returns");
+        assert_eq!(w.coordinator().claim_of(a), None, "seed {seed}");
     });
     assert!(ran.into_inner() > 0, "no seed had the reply in flight");
 }
@@ -1020,9 +1053,9 @@ impl Scripted {
 /// coordinator is played by the test (the sequence needs a claim the host restored that
 /// the coordinator gives another player, crossed with an expired grant's give-back, which
 /// one real single-host coordinator does not produce in this order): A (no claim) asks to
-/// embark; the request times out (A told it failed). The coordinator says A plays S
-/// (`ClaimIs`, as after a restore from a record). The host re-attaches, reporting `{S}`
-/// with the request unsettled; the expired embark's late reply gives its grant G back
+/// start an adventure; the request times out (A told it failed). The coordinator says A
+/// plays S (`ClaimIs`, as after a restore from a record). The host re-attaches, reporting
+/// `{S}` with the request unsettled; the expired start's late reply gives its grant G back
 /// (a claim change) and only then the answer `ClaimIs(None)` to that report arrives —
 /// stale: ignored, and A reported again `{S}`; the answer to that, `ClaimIs(None)`, is
 /// applied.
@@ -1065,57 +1098,57 @@ fn ignored_stale_claim_is_triggers_a_re_report_and_converges() {
     manager.handle_server_event(ServerEvent::connected(A), now);
     settle(&mut manager, now);
     let r1 = *link.reports(a).last().expect("A reported");
-    // A asks to embark; nothing answers; it times out.
-    let req = EmbarkRequest { civ: history.sites().next().unwrap().civ, people: Vec::new(), region: rc(8, 0) };
-    manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req), A), now);
+    // A asks to start an adventure; nothing answers; it times out.
+    manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::StartAdventure(s), A), now);
     let id = link.sent.lock().unwrap().iter().find_map(|m| match m {
         HostMsg::Request { id, .. } => Some(*id),
         _ => None,
     });
-    let id = id.expect("the embark was asked");
+    let id = id.expect("the start was asked");
     now += WORLD_REQUEST_TIMEOUT_SECS * 1000;
     settle(&mut manager, now);
     // The coordinator: A plays S.
-    link.give(game::CoordMsg::ClaimIs { player: a, claim: Some(game::Claim::Fortress(s)), report: r1.report });
+    link.give(game::CoordMsg::ClaimIs { player: a, claim: Some(game::Claim::Adventure(s)), report: r1.report });
     settle(&mut manager, now);
-    assert_eq!(manager.client_claim(A), Some(game::Claim::Fortress(s)));
-    // A reconnect: the host re-attaches, reporting A {S} with the embark unsettled.
+    assert_eq!(manager.client_claim(A), Some(game::Claim::Adventure(s)));
+    // A reconnect: the host re-attaches, reporting A {S} with the start unsettled.
     link.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     settle(&mut manager, now);
     let r2 = *link.reports(a).last().unwrap();
-    assert!(r2.report > r1.report && r2.claim == Some(game::Claim::Fortress(s)) && r2.claim_pending, "{r2:?}");
+    assert!(r2.report > r1.report && r2.claim == Some(game::Claim::Adventure(s)) && r2.claim_pending, "{r2:?}");
     link.give(game::CoordMsg::Attached { epoch: attach_epoch(&link).unwrap() });
-    // The expired embark's reply (granted G), then the answer to report 2.
+    // The expired start's reply (granted G), then the answer to report 2.
     let g = game::history::SiteId(9);
-    link.give(game::CoordMsg::Reply { id, reply: game::WorldReply::Embarked { site: g, region: rc(8, 0) } });
+    link.give(game::CoordMsg::Reply { id, reply: game::WorldReply::AdventureStarted { site: g, region: rc(8, 0) } });
     link.give(game::CoordMsg::ClaimIs { player: a, claim: None, report: r2.report });
     settle(&mut manager, now);
     assert!(link.sent.lock().unwrap().contains(&HostMsg::ReleaseClaim { player: a }), "G was given back");
-    assert_eq!(manager.client_claim(A), Some(game::Claim::Fortress(s)), "the stale answer is not applied");
+    assert_eq!(manager.client_claim(A), Some(game::Claim::Adventure(s)), "the stale answer is not applied");
     let r3 = *link.reports(a).last().unwrap();
     assert!(r3.report > r2.report, "A was reported again: {r3:?}");
-    assert_eq!((r3.claim, r3.claim_pending), (Some(game::Claim::Fortress(s)), false));
+    assert_eq!((r3.claim, r3.claim_pending), (Some(game::Claim::Adventure(s)), false));
     // The answer to the re-report is applied: the host ends with the coordinator's claim.
+    let _ = packets.try_iter().count();
     link.give(game::CoordMsg::ClaimIs { player: a, claim: None, report: r3.report });
     settle(&mut manager, now);
     assert_eq!(manager.client_claim(A), None);
-    assert!(packets.try_iter().any(|(to, p)| to == Some(A) && matches!(p, ServerPacket::Fortress(None))));
+    assert!(packets.try_iter().any(|(to, p)| to == Some(A) && matches!(p, ServerPacket::Fortress(None))), "A is told it holds nothing");
 }
 
 /// R3 Task 11: the host acknowledges its answered requests (`Settled`), so after three
-/// state-changing round trips (embark, return, return — each retired after) the
-/// coordinator remembers none of this host's answers.
+/// state-changing round trips (start, then end and start twice) the coordinator remembers
+/// none of this host's answers.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn host_sends_settled_as_requests_complete() {
     each_seed("host_sends_settled_as_requests_complete", |seed| {
         let mut w = World::with(seed, &[A]);
         let mark = w.mark();
-        let site = w.ask(A, ClientPacket::Embark(w.embark_request())).expect("embarked");
+        let site = w.start(A).expect("started");
         for _ in 0..2 {
-            w.packet(A, ClientPacket::Retire);
+            w.packet(A, ClientPacket::EndAdventure);
             w.drain();
-            assert_eq!(w.ask(A, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: returned");
+            assert_eq!(w.start(A), Ok(site), "seed {seed}: started again");
         }
         let settled: Vec<u64> = w
             .sent_since(mark)
