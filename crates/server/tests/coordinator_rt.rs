@@ -657,6 +657,36 @@ fn a_conflict_with_its_own_lost_commit_is_written_over_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Elastic 2b Task 4 fix round 1 (I1): role `all` is one process — a restart within the replica
+/// lease (its registration is not `alone`: the old row still looks live) still leaves only
+/// itself in the live set: nothing watches or beats in-process, so a dead id kept there would
+/// stay for ever.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_all_in_one_restart_within_the_lease_keeps_no_dead_replica() {
+    let dir = scratch("allreplicas");
+    let map = land_map();
+    for life in 0..2 {
+        let store = open_store(&dir);
+        let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
+        assert_eq!(start.alone, life == 0, "the second start registers beside the first's row");
+        let me = start.coordinator.replica();
+        let (_link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, server::claims::Fenced::default()).unwrap();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let live = thread.inspect(|c| c.replicas_live().clone(), WAIT).expect("the coordinator answers");
+            if live == [me].into_iter().collect() && stored_core(&store, &map).is_some_and(|c| c.replicas_live() == &live) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "life {life}: the live set is {live:?}, not only {me}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
+        store.shutdown();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Elastic 2b (decision 1): another writer moves the coordinator row right before this
 /// coordinator's next write (the test hook writes the row's own projection at the next version):
 /// the write is a `Conflict` the row does not explain as this process's own lost commit. The

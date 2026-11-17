@@ -143,6 +143,18 @@ impl Coordinator {
         Ok(())
     }
 
+    /// A refresh (Elastic 2b: a version check found the row moved): [`Self::rebase`] onto the row
+    /// at `version` only if it is NEWER than this cache's — a row read before this cache's own
+    /// later commit is older, and rebasing onto it would regress the projection (Task 4 fix round
+    /// 1). Whether it rebased.
+    pub fn refresh(&mut self, core: &[u8], history: Option<&[u8]>, version: u64) -> Result<bool, HistoryLoadError> {
+        if version <= self.version {
+            log::debug!("coordinator: a refresh read version {version}, this cache holds {}: nothing to do", self.version);
+            return Ok(false);
+        }
+        self.rebase(core, history, version).map(|()| true)
+    }
+
     /// Whether the projection was changed outside the log since the last commit (a store's
     /// answer, a hand-out of a store call, a read of the hosts, the history changed directly):
     /// a rebase would lose it — the runtime stops instead, and the next start loads the row.

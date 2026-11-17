@@ -84,12 +84,16 @@ struct Seen {
 #[derive(Clone, Debug, Default)]
 pub struct ReplicaWatch {
     rows: BTreeMap<ReplicaId, Seen>,
+    /// The rows the latest successful read showed dead.
+    dead: BTreeSet<ReplicaId>,
+    /// The highest id the latest successful read returned (`None`: no read, or no row).
+    highest: Option<ReplicaId>,
 }
 
 impl ReplicaWatch {
     /// A successful read of every `coordinator_replicas` row, issued at monotonic `mono_ms`. A
-    /// live row whose `seen_ms` changed starts its count again; a dead or vanished row is
-    /// forgotten.
+    /// live row whose `seen_ms` changed starts its count again; a dead row is remembered as dead
+    /// until the next read ([`Self::gone`]); a vanished row is forgotten.
     pub fn observe(&mut self, rows: &[ReplicaRow], mono_ms: u64) {
         let mut next = BTreeMap::new();
         for row in rows.iter().filter(|r| r.live) {
@@ -100,12 +104,31 @@ impl ReplicaWatch {
             next.insert(row.replica, Seen { seen_ms: row.seen_ms, first_ms, last_ms: mono_ms });
         }
         self.rows = next;
+        self.dead = rows.iter().filter(|r| !r.live).map(|r| r.replica).collect();
+        self.highest = rows.iter().map(|r| r.replica).max();
     }
 
     /// A read that failed: every observation is forgotten (an outage is no evidence of anyone's
     /// death).
     pub fn observe_failed(&mut self) {
         self.rows.clear();
+        self.dead.clear();
+        self.highest = None;
+    }
+
+    /// The replicas of `core_live` (the core's live set) other than `me` whose rows the latest
+    /// read shows ended without any watch counting their lease — a registration marked them dead
+    /// (Elastic 2b Task 4 fix round 1): a row shown dead, or a row absent (pruned) whose id is
+    /// below the highest id the read returned (one above it registered after the read was
+    /// issued: never gone). By id.
+    pub fn gone(&self, core_live: &BTreeSet<ReplicaId>, me: ReplicaId) -> Vec<ReplicaId> {
+        let Some(highest) = self.highest else { return Vec::new() };
+        core_live
+            .iter()
+            .copied()
+            .filter(|r| *r != me)
+            .filter(|r| self.dead.contains(r) || (!self.rows.contains_key(r) && *r < highest))
+            .collect()
     }
 
     /// The live rows the reads show standing still for [`REPLICA_LEASE_MS`] by the reads issued

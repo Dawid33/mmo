@@ -1245,7 +1245,11 @@ impl CoordinatorRuntime {
         // Its first input: this replica registered (Elastic 2b Task 4) — live from its first
         // transition on; alone, every replica registered before it is gone.
         let me = core.replica();
-        core.apply(Input::ReplicaJoined { me, alone: start.alone }, store_ms);
+        // In-process (role `all`) there is one coordinator process: every replica registered
+        // before it is a previous start of it, dead — alone whatever the registration found
+        // (nothing beats or watches in-process to drop it later; fix round 1).
+        let alone = start.alone || !matches!(links.links, Links::Listener(_));
+        core.apply(Input::ReplicaJoined { me, alone }, store_ms);
         if let Some(c) = &cuts {
             core.set_world_cuts(c.every.as_millis() as u64);
         }
@@ -2111,7 +2115,7 @@ impl CoordinatorRuntime {
             };
             self.refresh_rx = None;
             match answer {
-                Ok(Some(row)) if row.version != self.core.version() => self.refresh_onto(row)?,
+                Ok(Some(row)) if row.version > self.core.version() => self.refresh_onto(row)?,
                 Ok(_) => {}
                 Err(e) => log::warn!("[coordinator] the row could not be read for a refresh: {e}"),
             }
@@ -2154,6 +2158,10 @@ impl CoordinatorRuntime {
     /// as after a conflict (a core holding a change outside its log, or a write that may be in
     /// the row, cannot be rebased: the process stops as fenced, the next start loads the row).
     fn refresh_onto(&mut self, row: world_store::StoredCoordinator) -> Result<(), End> {
+        if row.version <= self.core.version() {
+            // Read before this cache's own later commit: older, never rebased onto (fix round 1).
+            return Ok(());
+        }
         if self.core.unlogged_pending() || !self.unacked.is_empty() {
             log::error!(
                 "[coordinator] the row moved to version {} (this cache at {}) and the core cannot be rebased without a loss; \
@@ -2164,7 +2172,7 @@ impl CoordinatorRuntime {
             return Err(End::Conflict);
         }
         let history = (!row.history.is_empty()).then_some(row.history.as_slice());
-        if let Err(e) = self.core.rebase(&row.core, history, row.version) {
+        if let Err(e) = self.core.refresh(&row.core, history, row.version) {
             log::error!("[coordinator] the row at version {} does not load ({e}); stopping as fenced", row.version);
             return Err(End::Conflict);
         }
@@ -2231,6 +2239,12 @@ impl CoordinatorRuntime {
                 log::warn!("[coordinator] replica {l}'s row stood still for a lease: ending it");
                 self.core.apply(Input::ReplicaLapsed(l), now);
             }
+            // Fix round 1 (I1): a replica a registration ended (its row dead, or pruned) that no
+            // watch saw stand still — dropped too (its row is dead already: the end is a no-op).
+            for g in r.watch.gone(self.core.replicas_live(), me) {
+                log::warn!("[coordinator] replica {g}'s row is ended (a registration found it lapsed): dropping it");
+                self.core.apply(Input::ReplicaLapsed(g), now);
+            }
         }
         Ok(())
     }
@@ -2240,6 +2254,10 @@ impl CoordinatorRuntime {
     fn write_next(&mut self) -> bool {
         debug_assert!(self.writing.is_none());
         let Some(t) = self.core.take_transition() else { return false };
+        // The transition carries every output (its compare-and-set is their check): a version
+        // check or a refresh asked before it answers about an older cache — dropped (fix round 1).
+        self.version_rx = None;
+        self.refresh_rx = None;
         #[cfg(feature = "test-hooks")]
         {
             self.kill_at_commit = self.hooks.kill_after_commit.load(Ordering::SeqCst);

@@ -4795,6 +4795,49 @@ fn an_attachment_of_a_lapsed_replica_counts_detached() {
     assert!(b.hosts_attached_to(ReplicaId(1)).is_empty(), "nothing counts attached to an ended replica");
 }
 
+/// Elastic 2b Task 4 fix round 1 (I1): replica A dies and C registers beside B before B's watch
+/// counted a lease — the registration marks A's row dead, no watch ever sees A standing still.
+/// B's watch still names A gone (its row dead), and a replica the core holds whose row was
+/// pruned (absent from the read) when its id is below the highest id the read returned; never a
+/// replica registered after the read (above that id). Applied, A leaves the live set.
+#[test]
+fn a_replica_ended_by_a_registration_leaves_the_live_set() {
+    let (mut row, _a, mut b) = two_replicas();
+    let (a, b_id, c, pruned, newer) = (ReplicaId(1), ReplicaId(2), ReplicaId(3), ReplicaId(0), ReplicaId(9));
+    let seen = |r: ReplicaId, live: bool| ReplicaRow { replica: r, seen_ms: 100, live, addr: String::new() };
+    let mut watch = ReplicaWatch::default();
+    watch.observe(&[seen(a, true), seen(b_id, true)], 0);
+    // A dies; C registers beside B at once: A's row is dead (no lease counted by any watch).
+    watch.observe(&[seen(a, false), seen(b_id, true), seen(c, true)], 1_000);
+    assert!(watch.lapsed(1_000).is_empty(), "nobody stood still for a lease");
+    assert!(watch.ends_lapsed(b_id, 1_000), "B is the lowest live");
+    let core_live: std::collections::BTreeSet<ReplicaId> = [pruned, a, b_id, newer].into_iter().collect();
+    assert_eq!(watch.gone(&core_live, b_id), vec![pruned, a], "A (dead) and the pruned id below the read's highest; never a newer one");
+    b.apply(Input::ReplicaLapsed(a), 1_000);
+    row.write(&mut b).expect("B ends A");
+    assert!(!b.replicas_live().contains(&a), "A left the live set");
+    assert_eq!(b.ticker(), Some(b_id), "B ticks");
+}
+
+/// Elastic 2b Task 4 fix round 1 (I2): a refresh never moves a cache backwards — a row read
+/// before this cache's own later commit (an older version) changes nothing.
+#[test]
+fn a_refresh_onto_an_older_row_changes_nothing() {
+    let (mut row, mut a, _b) = two_replicas();
+    let older = Row { version: row.version, core: row.core.clone(), history: row.history.clone() };
+    let (_, _, people) = world();
+    a.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 100);
+    let _ = people;
+    row.write(&mut a).expect("A commits");
+    let before = a.encode_projection();
+    let moved = a.refresh(&older.core, Some(&older.history), older.version).expect("the row loads");
+    assert!(!moved, "an older row is no refresh");
+    assert!(a.encode_projection() == before, "the projection did not regress");
+    assert_eq!(a.version(), row.version);
+    let moved = a.refresh(&row.core, None, row.version).expect("the row loads");
+    assert!(!moved, "nor the same version");
+}
+
 /// Elastic 2b Task 4: a replica whose rebased core lacks its own id (another replica ended it)
 /// writes nothing and lets nothing leave — not even what it decided on its stale cache.
 #[test]
