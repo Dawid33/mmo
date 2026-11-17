@@ -1,7 +1,8 @@
 //! Statements and blocks, and whether the end of a block can be reached.
 //!
-//! A statement **diverges** when the code after it cannot run: `return`, `raise`, `break`, `continue`
-//! (statements, or the same as an expression statement), a call of a function that never returns (`-> !`);
+//! A statement **diverges** when the code after it cannot run: `return`, `-> Stage` (in a quest's handler),
+//! `raise`, `break`, `continue` (statements, or the same as an expression statement), a call of a function
+//! that never returns (`-> !`);
 //! an `if` with an `else` whose branches all diverge;
 //! a `match` whose arms all do (it is exhaustive: `non-exhaustive` otherwise); `while true` that no `break`
 //! leaves. A `for` loop never diverges.
@@ -101,8 +102,11 @@ impl Infer<'_> {
             }
             StmtKind::Match(scrutinee, cases) => self.match_stmt(b, s.span, scrutinee, cases),
             StmtKind::Pass => false,
-            // Typed with the quest's lowering checks (Task 39): the stage was resolved.
-            StmtKind::Stage(_) => false,
+            // `-> Stage` sets the stage and ends the handler, as `return` does.
+            StmtKind::Stage(_) => {
+                self.ret_value(b, None, s.span);
+                true
+            }
             StmtKind::Break => {
                 if let Some(seen) = b.loops.last_mut() {
                     *seen = true;

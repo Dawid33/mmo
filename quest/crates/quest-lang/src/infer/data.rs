@@ -320,7 +320,14 @@ impl Infer<'_> {
                 continue;
             }
             match self.types.get(t) {
-                Ty::Int | Ty::Bool | Ty::Str | Ty::Error | Ty::Never | Ty::Var(_) => {}
+                Ty::Int
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Dialogue
+                | Ty::Exit
+                | Ty::Error
+                | Ty::Never
+                | Ty::Var(_) => {}
                 Ty::Option(inner) => stack.push(inner),
                 Ty::Adt(d) => {
                     for shape in self.adts.get(&d).into_iter().flatten() {
@@ -519,8 +526,9 @@ impl Infer<'_> {
                 self.unknown_receiver(b, ty, x.span, &format!("the field `{name}`"));
                 return TyId::ERROR;
             }
-            // An objective's reads (`done`, `failed`, `count`) are typed with the quest checks (Task 39).
-            Ty::Adt(d) if Some(d) == self.krate.builtins.objective => return TyId::ERROR,
+            Ty::Adt(d) if Some(d) == self.krate.builtins.objective => {
+                return self.objective_read(b, e, name);
+            }
             Ty::Adt(d) => match self.krate.def(d).map(|def| &def.kind) {
                 Some(DefKind::Struct(_) | DefKind::Event(_)) => {
                     self.adts.get(&d).and_then(|s| s.first()).cloned()

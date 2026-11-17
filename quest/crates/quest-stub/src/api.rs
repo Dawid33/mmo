@@ -1,4 +1,4 @@
-//! The stub's host-API description (design D9, version 3) and the host-fn ids it implies: a host fn id is the
+//! The stub's host-API description (design D9, version 4) and the host-fn ids it implies: a host fn id is the
 //! index into [`stub_api`]`().fns`.
 //!
 //! Version 2 adds the quest host API of spec §9.1 ("Assumed host API" of the quest examples): the entity
@@ -9,6 +9,9 @@
 //! A `Dialogue` parameter is `Value` until the compiler has its own `Dialogue` type.
 //!
 //! Version 3 adds a fallible query, `Person.distance_to(other) -> Int raises OutOfReach`.
+//!
+//! Version 4 (the query subset's fact table): `Player.has_tag` is a fact like every other `has_tag`, `kind`
+//! is a fact, and the relation `related(a, b)` is added (a fact).
 
 use quest_vm::host::{
     HostApi, HostEnum, HostError, HostFn, HostFnKind, HostStruct, HostTy, PROMISE_ERRORS,
@@ -193,7 +196,8 @@ pub fn stub_api() -> HostApi {
             Command,
         ),
         f(None, false, "emit", &[("e", Event)], Unit, &[], Command),
-        f(
+        // A fact since version 4: tags are world data the coordinator holds.
+        fact(f(
             Some("Player"),
             true,
             "has_tag",
@@ -201,7 +205,7 @@ pub fn stub_api() -> HostApi {
             Bool,
             &[],
             Query,
-        ),
+        )),
         f(
             None,
             false,
@@ -277,7 +281,7 @@ pub fn stub_api() -> HostApi {
             property(owner, "occupation", Enum("Occupation".into()), true),
             property(owner, "site", site(), true),
             property(owner, "owner", person(), true),
-            property(owner, "kind", Str, false),
+            property(owner, "kind", Str, true),
             property(owner, "name", Str, false),
             fact(f(
                 Some(owner),
@@ -391,8 +395,18 @@ pub fn stub_api() -> HostApi {
         &["OutOfReach"],
         Query,
     ));
+    // Version 4: `has_tag` is a fact on every receiver, `kind` a fact, and the relation `related(a, b)`.
+    fns.push(fact(f(
+        None,
+        false,
+        "related",
+        &[("a", Value), ("b", Value)],
+        Bool,
+        &[],
+        Query,
+    )));
     HostApi {
-        version: 3,
+        version: 4,
         structs: vec![
             event("Player", &[("id", Int), ("name", Str)]),
             event("Item", &[("kind", Str), ("count", Int)]),

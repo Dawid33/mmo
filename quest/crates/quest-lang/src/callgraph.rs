@@ -22,10 +22,17 @@
 //!
 //! Every walk here is a loop (Tarjan's algorithm with an explicit stack), so a long call chain cannot
 //! overflow the native stack; the HIR walk is structural and bounded by the parser's depth limit.
+//!
+//! **The typed call graph** ([`facts`]), for the Phase 10 checks once inference is done: every body's
+//! calls (method calls too, by `Typed::methods`), global reads and effects (writes of globals, host
+//! calls, compiler builtins, objective commands, `await`, `-> Stage`), and [`search`] / [`reach`] over it.
 
 use crate::ast::Span;
 use crate::diag::Diagnostic;
-use crate::hir::{Crate, DefId, DefKind, Expr, ExprKind, FStrPart, Stmt, StmtKind};
+use crate::hir::{
+    Crate, DefId, DefKind, Expr, ExprKind, FStrPart, HostItem, QuestFn, Stmt, StmtKind,
+};
+use crate::infer::{BuiltinMethod, Method, ObjectiveOp, PlaceRoot, Typed};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// What inference needs from the graph.
@@ -475,6 +482,309 @@ impl Walk<'_, '_> {
             | ExprKind::Continue
             | ExprKind::Quest(_)
             | ExprKind::Exit(_, _) => {}
+        }
+    }
+}
+
+// The typed call graph (Phase 10 checks: `purity.rs`, `readset.rs`).
+
+/// What a body does that the Phase 10 checks look at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Effect {
+    /// Changes a top-level `let` (a quest's or a part's global included): assigns it or a part of it,
+    /// changes it in place (`xs.append(…)`), or takes a reference to it (`&g`, a `&self` receiver).
+    Write(DefId),
+    /// Calls the host fn (any kind: the checks decide by it), or reads its property.
+    Host(u32),
+    /// Calls a compiler builtin (never `dialogue_depth`, which only reads).
+    Quest(QuestFn),
+    /// An objective's command.
+    Objective(ObjectiveOp),
+    Await,
+    /// `-> Stage`.
+    Stage,
+}
+
+/// One body's calls, global reads and effects, each with its site, in source order.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Facts {
+    pub(crate) calls: Vec<(DefId, Span)>,
+    pub(crate) reads: Vec<(DefId, Span)>,
+    pub(crate) effects: Vec<(Effect, Span)>,
+}
+
+/// The facts of every function and method, from the typed program (method calls included, by
+/// `Typed::methods`).
+pub(crate) fn facts(krate: &Crate, typed: &Typed) -> BTreeMap<DefId, Facts> {
+    let mut out = BTreeMap::new();
+    for (i, def) in krate.defs.iter().enumerate() {
+        if let DefKind::Fn(f) = &def.kind {
+            let mut w = FactWalk {
+                krate,
+                typed,
+                facts: Facts::default(),
+            };
+            w.stmts(&f.body);
+            out.insert(DefId(u32::try_from(i).unwrap_or(u32::MAX)), w.facts);
+        }
+    }
+    out
+}
+
+/// What [`search`] found: `what`, in the body reached through `chain` (the callees after the start, empty
+/// when it is the start's own), and `at`, the site in the start (the effect itself, or the call that leads
+/// to it).
+#[derive(Debug, Clone)]
+pub(crate) struct Hit<T> {
+    pub(crate) what: T,
+    pub(crate) chain: Vec<DefId>,
+    pub(crate) at: Span,
+}
+
+/// Breadth-first from `start` along calls (each body's in source order): the first body for which `find`
+/// finds something, with the shortest chain to it. A cycle (already reported as recursion) is walked once.
+pub(crate) fn search<T>(
+    facts: &BTreeMap<DefId, Facts>,
+    start: DefId,
+    mut find: impl FnMut(DefId, &Facts) -> Option<(T, Span)>,
+) -> Option<Hit<T>> {
+    // Each reached body: who called it first, and where.
+    let mut parent: BTreeMap<DefId, (DefId, Span)> = BTreeMap::new();
+    let mut queue = VecDeque::from([start]);
+    let mut seen = BTreeSet::from([start]);
+    while let Some(d) = queue.pop_front() {
+        let Some(f) = facts.get(&d) else { continue };
+        if let Some((what, at)) = find(d, f) {
+            let mut chain = Vec::new();
+            let mut cur = d;
+            let mut site = at;
+            while cur != start {
+                chain.push(cur);
+                let Some((p, s)) = parent.get(&cur).copied() else {
+                    break;
+                };
+                cur = p;
+                site = s;
+            }
+            chain.reverse();
+            return Some(Hit {
+                what,
+                chain,
+                at: site,
+            });
+        }
+        for (callee, at) in &f.calls {
+            if seen.insert(*callee) {
+                parent.insert(*callee, (d, *at));
+                queue.push_back(*callee);
+            }
+        }
+    }
+    None
+}
+
+/// Every body reachable from `starts` along calls, the starts included.
+pub(crate) fn reach(facts: &BTreeMap<DefId, Facts>, starts: &[DefId]) -> BTreeSet<DefId> {
+    let mut seen: BTreeSet<DefId> = starts.iter().copied().collect();
+    let mut stack: Vec<DefId> = starts.to_vec();
+    while let Some(d) = stack.pop() {
+        for (callee, _) in facts.get(&d).map_or(&[][..], |f| f.calls.as_slice()) {
+            if seen.insert(*callee) {
+                stack.push(*callee);
+            }
+        }
+    }
+    seen
+}
+
+/// Collects one body's [`Facts`].
+struct FactWalk<'a> {
+    krate: &'a Crate,
+    typed: &'a Typed,
+    facts: Facts,
+}
+
+impl FactWalk<'_> {
+    fn is_global(&self, d: DefId) -> bool {
+        matches!(self.krate.def(d).map(|d| &d.kind), Some(DefKind::Global(_)))
+    }
+
+    fn effect(&mut self, e: Effect, at: Span) {
+        self.facts.effects.push((e, at));
+    }
+
+    fn stmts(&mut self, body: &[Stmt]) {
+        for s in body {
+            self.stmt(s);
+        }
+    }
+
+    fn stmt(&mut self, s: &Stmt) {
+        match &s.kind {
+            StmtKind::Let(_, _, e) | StmtKind::Expr(e) | StmtKind::Raise(e) => self.expr(e),
+            StmtKind::Assign(place, value) => {
+                self.place(place);
+                self.expr(value);
+            }
+            StmtKind::If(branches, other) => {
+                for (c, b) in branches {
+                    self.expr(c);
+                    self.stmts(b);
+                }
+                if let Some(b) = other {
+                    self.stmts(b);
+                }
+            }
+            StmtKind::While(c, b) | StmtKind::For(_, c, b) => {
+                self.expr(c);
+                self.stmts(b);
+            }
+            StmtKind::Match(e, cases) => {
+                self.expr(e);
+                for c in cases {
+                    if let Some(g) = &c.guard {
+                        self.expr(g);
+                    }
+                    self.stmts(&c.body);
+                }
+            }
+            StmtKind::Return(e) => {
+                if let Some(e) = e {
+                    self.expr(e);
+                }
+            }
+            StmtKind::Stage(_) => self.effect(Effect::Stage, s.span),
+            StmtKind::Pass | StmtKind::Break | StmtKind::Continue => {}
+        }
+    }
+
+    /// A place that is written: a global at its root is a write; indices and `*r`'s reference are read.
+    fn place(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Def(d) if self.is_global(*d) => self.effect(Effect::Write(*d), e.span),
+            ExprKind::Field(x, _) => self.place(x),
+            ExprKind::Index(x, i) => {
+                self.place(x);
+                self.expr(i);
+            }
+            _ => self.expr(e),
+        }
+    }
+
+    fn expr(&mut self, e: &Expr) {
+        if let Some(place) = self.typed.refs.get(&e.id)
+            && let PlaceRoot::Global(g) = place.root
+        {
+            self.effect(Effect::Write(g), e.span);
+        }
+        match &e.kind {
+            ExprKind::Call(callee, args) => {
+                self.call(e, callee);
+                for a in args {
+                    self.expr(&a.value);
+                }
+            }
+            ExprKind::Def(d) => {
+                if self.is_global(*d) {
+                    self.facts.reads.push((*d, e.span));
+                }
+            }
+            ExprKind::Field(x, _) => {
+                if let Some(Method::Host(f)) = self.typed.methods.get(&e.id) {
+                    self.effect(Effect::Host(*f), e.span);
+                }
+                self.expr(x);
+            }
+            ExprKind::Await(x) => {
+                self.effect(Effect::Await, e.span);
+                self.expr(x);
+            }
+            ExprKind::FStr(parts) => {
+                for p in parts {
+                    if let FStrPart::Expr(x) = p {
+                        self.expr(x);
+                    }
+                }
+            }
+            ExprKind::List(items) => {
+                for x in items {
+                    self.expr(x);
+                }
+            }
+            ExprKind::Dict(entries) => {
+                for (k, v) in entries {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
+            ExprKind::Unary(_, x) | ExprKind::Try(x) | ExprKind::Raise(x) => self.expr(x),
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Else(a, b) => {
+                self.expr(a);
+                self.expr(b);
+            }
+            ExprKind::Slice(x, a, b) => {
+                self.expr(x);
+                for y in [a, b].into_iter().flatten() {
+                    self.expr(y);
+                }
+            }
+            ExprKind::Return(x) => {
+                if let Some(x) = x {
+                    self.expr(x);
+                }
+            }
+            ExprKind::FallbackBlock(_, body) => self.stmts(body),
+            ExprKind::Error
+            | ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Str(_)
+            | ExprKind::Local(_)
+            | ExprKind::Variant(_, _)
+            | ExprKind::Host(_)
+            | ExprKind::Prelude(_)
+            | ExprKind::ErrorName(_)
+            | ExprKind::Break
+            | ExprKind::Continue
+            | ExprKind::Quest(_)
+            | ExprKind::Exit(_, _) => {}
+        }
+    }
+
+    /// The callee of the call `e`.
+    fn call(&mut self, e: &Expr, callee: &Expr) {
+        match &callee.kind {
+            ExprKind::Def(d)
+                if matches!(self.krate.def(*d).map(|d| &d.kind), Some(DefKind::Fn(_))) =>
+            {
+                self.facts.calls.push((*d, e.span));
+            }
+            ExprKind::Host(HostItem::Fn(f)) => self.effect(Effect::Host(*f), e.span),
+            ExprKind::Quest(QuestFn::DialogueDepth) => {}
+            ExprKind::Quest(f) => self.effect(Effect::Quest(*f), e.span),
+            ExprKind::Field(recv, _) => {
+                match self.typed.methods.get(&e.id) {
+                    Some(Method::Script(m)) => self.facts.calls.push((*m, e.span)),
+                    Some(Method::Host(f)) => self.effect(Effect::Host(*f), e.span),
+                    Some(Method::Objective(op)) if op.is_command() => {
+                        self.effect(Effect::Objective(*op), e.span);
+                    }
+                    Some(Method::Builtin(
+                        BuiltinMethod::Append
+                        | BuiltinMethod::Pop
+                        | BuiltinMethod::Insert
+                        | BuiltinMethod::Remove,
+                    )) => {
+                        // Changes its receiver in place.
+                        self.place(recv);
+                        return;
+                    }
+                    _ => {}
+                }
+                self.expr(recv);
+            }
+            _ => self.expr(callee),
         }
     }
 }

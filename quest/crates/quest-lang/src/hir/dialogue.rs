@@ -156,6 +156,8 @@ pub struct Node {
     /// The node group: nodes sharing a name share it (groups numbered by first appearance).
     pub group: u32,
     pub cond: Option<Cond>,
+    /// Its condition's conjunct count (spec §5.11 scoring; 0 without one).
+    pub score: u32,
     pub steps: Vec<Step>,
     pub span: Span,
 }
@@ -199,6 +201,8 @@ pub struct ChoiceOption {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupMember {
     pub line: Line,
+    /// Its line's condition's conjunct count (spec §5.11 scoring; 0 without one).
+    pub score: u32,
     pub steps: Vec<Step>,
     pub span: Span,
 }
@@ -256,6 +260,8 @@ pub struct Dialogue {
     pub uninterruptible: bool,
     /// A scene's `where` ([`PureSite::CastCond`]).
     pub cast_cond: Option<DefId>,
+    /// The `where`'s conjunct count: a scene's score as an ambient candidate (spec §5.11 scoring).
+    pub score: u32,
     pub nodes: Vec<Node>,
     /// Package-level content: a filter dialogue or a scene declared outside any quest (spec §5.11).
     pub stateless: bool,
@@ -419,3 +425,107 @@ pub const QUEST_FNS: [QuestFn; 5] = [
 
 /// The builtins every module sees.
 pub const SCRIPT_FNS: [QuestFn; 3] = [QuestFn::After, QuestFn::Cancel, QuestFn::Play];
+
+impl Cond {
+    /// Its synthesised fns: the `once per` key, then the guard.
+    pub fn fns(&self) -> Vec<DefId> {
+        self.once
+            .as_ref()
+            .and_then(|o| o.per)
+            .into_iter()
+            .chain(self.guard)
+            .collect()
+    }
+}
+
+impl Line {
+    /// Its synthesised fns: the speaker, the substitutions, the condition's.
+    pub fn fns(&self) -> Vec<DefId> {
+        let mut out: Vec<DefId> = match self.speaker {
+            Some(Speaker::Fn(d)) => vec![d],
+            _ => Vec::new(),
+        };
+        out.extend(self.text.subst());
+        out.extend(self.cond.iter().flat_map(Cond::fns));
+        out
+    }
+}
+
+impl Step {
+    /// The synthesised fns of this step alone (not of the steps it holds).
+    pub fn fns(&self) -> Vec<DefId> {
+        match &self.kind {
+            StepKind::Line(l) => l.fns(),
+            StepKind::Choice { options, .. } => options
+                .iter()
+                .flat_map(|o| {
+                    o.text
+                        .iter()
+                        .flat_map(LineRef::subst)
+                        .chain(o.guard)
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            StepKind::Group(members) => members.iter().flat_map(|m| m.line.fns()).collect(),
+            StepKind::When(c, _) => c.fns(),
+            StepKind::Once(o, _) => o.per.into_iter().collect(),
+            StepKind::Emit(_, args) => args.iter().map(|a| a.value).collect(),
+            StepKind::Jump(_)
+            | StepKind::FollowUp(_)
+            | StepKind::Detour(_, _)
+            | StepKind::Return(_)
+            | StepKind::Pause(_) => Vec::new(),
+        }
+    }
+
+    /// The steps this one holds (an option's, a group member's, a `when`'s, a `once`'s, a detour arm's).
+    pub fn inner(&self) -> Vec<&Step> {
+        match &self.kind {
+            StepKind::Choice { options, .. } => options.iter().flat_map(|o| &o.steps).collect(),
+            StepKind::Group(members) => members.iter().flat_map(|m| &m.steps).collect(),
+            StepKind::When(_, steps) | StepKind::Once(_, steps) => steps.iter().collect(),
+            StepKind::Detour(_, arms) => arms.iter().flat_map(|(_, s)| s).collect(),
+            StepKind::Line(_)
+            | StepKind::Jump(_)
+            | StepKind::FollowUp(_)
+            | StepKind::Emit(_, _)
+            | StepKind::Return(_)
+            | StepKind::Pause(_) => Vec::new(),
+        }
+    }
+}
+
+impl Dialogue {
+    /// Every step, nested ones included, in source order (a loop: steps nest as deep as the source).
+    pub fn steps(&self) -> Vec<&Step> {
+        let mut out = Vec::new();
+        for n in &self.nodes {
+            let mut stack: Vec<&Step> = n.steps.iter().rev().collect();
+            while let Some(s) = stack.pop() {
+                out.push(s);
+                stack.extend(s.inner().into_iter().rev());
+            }
+        }
+        out
+    }
+
+    /// Every synthesised fn of the dialogue, in source order: the target, filter, topic, scene `where`,
+    /// then each node's condition and steps.
+    pub fn pure_fns(&self) -> Vec<DefId> {
+        let mut out: Vec<DefId> = self.target.into_iter().chain(self.filter).collect();
+        if let Some(t) = &self.topic {
+            out.extend(t.text.subst());
+            out.extend(t.cond);
+        }
+        out.extend(self.cast_cond);
+        for n in &self.nodes {
+            out.extend(n.cond.iter().flat_map(Cond::fns));
+            let mut stack: Vec<&Step> = n.steps.iter().rev().collect();
+            while let Some(s) = stack.pop() {
+                out.extend(s.fns());
+                stack.extend(s.inner().into_iter().rev());
+            }
+        }
+        out
+    }
+}

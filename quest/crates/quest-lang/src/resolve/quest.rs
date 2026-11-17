@@ -347,7 +347,7 @@ impl<'a> Resolver<'a> {
                         .map(|e| self.synth(&mut qs, PureSite::Target, e, Ret::Inferred));
                 let count = o.count.as_ref().and_then(|e| {
                     let mut cx = Cx::new(m, file, Some(&scope));
-                    self.const_int(e, &mut cx, "`count`")
+                    self.const_int(e, &mut cx, "`count`", 1)
                 });
                 let value = self.objective_init(*ospan);
                 let ty = match self.builtins.objective {

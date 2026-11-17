@@ -106,8 +106,12 @@ impl Infer<'_> {
                     let name = self.krate.qualified_name(*d);
                     self.not_a_value(b, e, format!("`{name}` is an error set, not a value"))
                 }
-                // A dialogue's value (a `Dialogue`) is typed with the dialogue checks (Task 39).
-                Some(DefKind::Dialogue(_) | DefKind::Quest(_)) | None => TyId::ERROR,
+                Some(DefKind::Dialogue(_)) => self.types.intern(Ty::Dialogue),
+                Some(DefKind::Quest(_)) => {
+                    let name = self.krate.qualified_name(*d);
+                    self.not_a_value(b, e, format!("`{name}` is a quest, not a value"))
+                }
+                None => TyId::ERROR,
             },
             ExprKind::Variant(d, i) => {
                 let fields = self
@@ -169,8 +173,15 @@ impl Infer<'_> {
             },
             // Only the head of a `raise` (typed there).
             ExprKind::ErrorName(_) => TyId::ERROR,
-            // The compiler's own functions and exits are typed with the quest checks (Task 39).
-            ExprKind::Quest(_) | ExprKind::Exit(_, _) => TyId::ERROR,
+            ExprKind::Quest(f) => {
+                let name = f.name();
+                self.not_a_value(
+                    b,
+                    e,
+                    format!("`{name}` is a function, not a value: call it (`{name}(…)`)"),
+                )
+            }
+            ExprKind::Exit(_, _) => self.types.intern(Ty::Exit),
             ExprKind::List(items) => {
                 // The first element's type (a variable only for `[]`): no variable to follow later.
                 let mut elem = None;
@@ -286,7 +297,11 @@ impl Infer<'_> {
         self.no_ref(b, b.ret, at, "returned");
         if !self.unify(b.ret, ty) {
             let (want, found) = (self.show(b.ret), self.show(ty));
-            let message = format!("this function returns `{want}`, not `{found}`");
+            let message = if b.cond {
+                format!("a condition is a `{want}`, not `{found}`")
+            } else {
+                format!("this function returns `{want}`, not `{found}`")
+            };
             let ret = b.ret;
             self.disagree(b, ret, ty, at, message);
         }

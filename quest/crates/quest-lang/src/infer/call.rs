@@ -23,6 +23,8 @@ pub enum Method {
     Host(u32),
     /// A built-in method of `list`, `dict` or `str` (which one: the receiver's type).
     Builtin(BuiltinMethod),
+    /// An objective's command (`find_dog.finish()`, by the call) or read (`find_dog.done`, by the field).
+    Objective(super::ObjectiveOp),
 }
 
 /// The built-in methods (plan D11): `list`, `dict` and `str`.
@@ -141,6 +143,10 @@ impl Infer<'_> {
                 self.record(b, callee, TyId::ERROR);
                 self.prelude(b, e, *p, args)
             }
+            (ExprKind::Quest(f), _) => {
+                self.record(b, callee, TyId::ERROR);
+                self.quest_call(b, e, *f, args)
+            }
             (ExprKind::Field(x, name), _) => {
                 self.record(b, callee, TyId::ERROR);
                 self.method(b, e, x, name, args)
@@ -190,11 +196,8 @@ impl Infer<'_> {
                 self.sink_args(b, args);
                 TyId::ERROR
             }
-            // An objective's commands (`finish()`, `progress(n)`, …) are typed with the quest checks
-            // (Task 39).
             Ty::Adt(d) if Some(d) == self.krate.builtins.objective => {
-                self.sink_args(b, args);
-                TyId::ERROR
+                self.objective_method(b, e, x, name, args)
             }
             Ty::Adt(d) => {
                 let Some(m) = self.krate.methods.get(&(d, name.to_string())).copied() else {

@@ -9,11 +9,12 @@ fn d(code: &str, file: &str, line: u32) -> (String, String, u32) {
     (code.to_string(), file.to_string(), line)
 }
 
-/// [`diags`] without the warning `missing-line-id` every line written without an id gets.
+/// [`diags`] without the warnings `missing-line-id` (every line written without an id gets it) and
+/// `mirror-size` (a read set holding a `str` or a `list`, as `participants`, gets it).
 fn errs(files: &[(&str, &str)]) -> Vec<(String, String, u32)> {
     diags(files)
         .into_iter()
-        .filter(|(code, _, _)| code != "missing-line-id")
+        .filter(|(code, _, _)| code != "missing-line-id" && code != "mirror-size")
         .collect()
 }
 

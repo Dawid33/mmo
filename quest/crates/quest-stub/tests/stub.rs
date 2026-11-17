@@ -68,7 +68,7 @@ fn one(h: &mut StubHost, id: u64, f: u16, args: &[W]) -> Result<W, W> {
 #[test]
 fn stub_api_is_pinned() {
     let api = stub_api();
-    assert_eq!(api.version, 3);
+    assert_eq!(api.version, 4);
     assert_eq!(op_name(F_PLACE).as_deref(), Some("place"));
     assert_eq!(
         op_name(F_PERSON_DISTANCE_TO).as_deref(),
@@ -120,7 +120,7 @@ fn stub_api_is_pinned() {
         "event Setup",
         "fn Creature.alive property fact",
         "fn Creature.has_tag fact",
-        "fn Creature.kind property",
+        "fn Creature.kind property fact",
         "fn Creature.name property",
         "fn Creature.occupation property fact",
         "fn Creature.owner property fact",
@@ -128,14 +128,14 @@ fn stub_api_is_pinned() {
         "fn Person.alive property fact",
         "fn Person.distance_to",
         "fn Person.has_tag fact",
-        "fn Person.kind property",
+        "fn Person.kind property fact",
         "fn Person.name property",
         "fn Person.occupation property fact",
         "fn Person.owner property fact",
         "fn Person.site property fact",
         "fn Place.open_ground fact",
         "fn Player.add_tag",
-        "fn Player.has_tag",
+        "fn Player.has_tag fact",
         "fn Player.inventory_count",
         "fn Player.remove_tag",
         "fn Player.skill",
@@ -165,6 +165,7 @@ fn stub_api_is_pinned() {
         "fn quest.joined",
         "fn quest.left",
         "fn quest.play",
+        "fn related fact",
         "fn roll",
         "fn say",
         "fn site_kind fact",

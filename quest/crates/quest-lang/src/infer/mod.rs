@@ -53,14 +53,20 @@
 //!   (`promises.rs`): what an `await` fails with (by the promise's origin, decision 21), `await`, unused
 //!   promises, handler signatures.
 //!
+//! - **Dialogue, scene and quest code** (`dialogue.rs`): `Dialogue` and `Exit` values, the compiler's
+//!   builtins (`join`, `after`, `play`, …), objectives' commands and reads, and what a dialogue's
+//!   synthesised fns must give (`emit` arguments, targets, speakers). Once the program is typed, the Phase 10
+//!   checks run over it: `purity.rs`, `query.rs`, `readset.rs` (whose [`Typed::read_sets`] it fills).
+//!
 //! Files: `expr.rs` (expressions and operators), `stmt.rs` (statements, blocks, reachability), `call.rs`
 //! (calls: functions, methods, the prelude, the host), `data.rs` (user types, constructions, fields,
 //! collections), `errors.rs` (errors), `patterns.rs` (patterns and `match`), `refs.rs` (references),
-//! `promises.rs` (promises, `await`, handlers); this file holds the driver, unification and the end of a
-//! body.
+//! `promises.rs` (promises, `await`, handlers), `dialogue.rs` (dialogue and quest code); this file holds
+//! the driver, unification and the end of a body.
 
 mod call;
 mod data;
+mod dialogue;
 mod errors;
 mod expr;
 mod patterns;
@@ -70,6 +76,7 @@ mod stmt;
 
 pub use call::{BuiltinMethod, Method};
 pub use data::Shape;
+pub use dialogue::ObjectiveOp;
 pub use patterns::{PatCtor, PatInfo};
 pub use promises::Await;
 pub use refs::{Place, PlaceRoot, PlaceStep};
@@ -137,6 +144,8 @@ pub struct Typed {
     pub host_structs: Vec<Shape>,
     /// The fields of every host event, by its index in `HostApi::events`.
     pub host_events: Vec<Shape>,
+    /// The globals the dialogues and each part read (`readset.rs`).
+    pub read_sets: crate::readset::ReadSets,
 }
 
 impl Typed {
@@ -207,18 +216,21 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         refs: BTreeMap::new(),
         handlers: BTreeMap::new(),
         may_await: BTreeSet::new(),
+        objectives: BTreeMap::new(),
         diags,
     };
+    inf.collect_objectives();
     inf.user_types();
     inf.declared_errors();
     inf.annotated_globals();
     inf.self_typed_globals(&plan.cycles);
     inf.in_cycle.extend(plan.cycles.iter().flatten());
     let order = inf.run(plan.order);
+    inf.dialogue_checks();
     inf.typos();
     let sets: Vec<Vec<String>> = inf.sigs.values().map(|s| s.raises.clone()).collect();
     let errors = inf.error_table(&sets);
-    let typed = Typed {
+    let mut typed = Typed {
         types: inf.types,
         exprs: inf.exprs,
         locals: inf.locals,
@@ -235,8 +247,16 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         adts: inf.adts,
         host_structs: inf.host_structs,
         host_events: inf.host_events,
+        read_sets: crate::readset::ReadSets::default(),
     };
-    (typed, inf.diags)
+    let mut diags = inf.diags;
+    // The Phase 10 checks, over the typed program (spec §5.11–5.12).
+    diags.extend(crate::purity::purity(krate, &typed, host));
+    diags.extend(crate::query::query_subset(krate, &typed, host));
+    let (read_sets, mut mirror) = crate::readset::read_sets(krate, &typed);
+    typed.read_sets = read_sets;
+    diags.append(&mut mirror);
+    (typed, diags)
 }
 
 /// An operator's requirement on its operands' type, checked at the end of the body.
@@ -317,6 +337,8 @@ struct Body<'k> {
     /// The locals whose every assignment is a direct call of host promise functions raising one set, and
     /// that set (`promises.rs`).
     origins: BTreeMap<LocalId, SetId>,
+    /// A synthesised fn computing a condition (`bool`): a wrong return is worded as a condition's.
+    cond: bool,
 }
 
 impl<'k> Body<'k> {
@@ -343,6 +365,7 @@ impl<'k> Body<'k> {
             awaits: BTreeMap::new(),
             may_await: false,
             origins: BTreeMap::new(),
+            cond: false,
         }
     }
 }
@@ -386,6 +409,8 @@ struct Infer<'k> {
     handlers: BTreeMap<DefId, TyId>,
     /// The functions that may `await` (directly or through what they call).
     may_await: BTreeSet<DefId>,
+    /// Every objective's global, with its `count`.
+    objectives: BTreeMap<DefId, Option<i64>>,
     diags: Vec<Diagnostic>,
 }
 
@@ -514,6 +539,17 @@ impl<'k> Infer<'k> {
         let file = self.file_of(d);
         let mut b = Body::new(file, TyId::ERROR);
         b.origins = self.promise_origins(&f.body);
+        b.cond = matches!(
+            f.pure,
+            Some(
+                hir::PureSite::Cond
+                    | hir::PureSite::Filter
+                    | hir::PureSite::CastCond
+                    | hir::PureSite::Where(_)
+                    | hir::PureSite::Requires
+                    | hir::PureSite::Transition(_)
+            )
+        );
         b.ret = match &f.ret {
             Some(t) => self.lower_kept(t, file, &mut b.diags, "returned"),
             None => self.fresh(),
@@ -1073,8 +1109,8 @@ impl<'k> Infer<'k> {
                         Builtin::Option => (1, Ty::Option(TyId::ERROR)),
                         Builtin::Promise => (1, Ty::Promise(TyId::ERROR)),
                         Builtin::Dict => (2, Ty::Dict(TyId::ERROR, TyId::ERROR)),
-                        // Typed in Task 39 (opaque types); compatible with everything until then.
-                        Builtin::Dialogue | Builtin::Exit => (0, Ty::Error),
+                        Builtin::Dialogue => (0, Ty::Dialogue),
+                        Builtin::Exit => (0, Ty::Exit),
                     },
                     TypeName::Def(d) => (0, Ty::Adt(*d)),
                     TypeName::HostStruct(i) => (0, Ty::HostStruct(*i)),

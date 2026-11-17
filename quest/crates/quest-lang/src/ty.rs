@@ -83,6 +83,10 @@ pub enum Ty {
     Fallible(TyId, SetId),
     /// A caught error: one of the set's errors.
     Caught(SetId),
+    /// A dialogue's id (`farmer_talk`, `DialogueEnded.dialogue`): opaque, compared with `==` / `!=`.
+    Dialogue,
+    /// A dialogue's exit (`confront::paid`, `DialogueEnded.exit`): opaque, compared with `==` / `!=`.
+    Exit,
 }
 
 impl Ty {
@@ -261,6 +265,8 @@ impl Printer<'_> {
                     out.push_str(&self.types.names(set).join(" | "));
                 }
             }
+            Ty::Dialogue => out.push_str("Dialogue"),
+            Ty::Exit => out.push_str("Exit"),
             Ty::Caught(set) => {
                 out.push_str("error[");
                 out.push_str(&self.types.names(set).join(" | "));

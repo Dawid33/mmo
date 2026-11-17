@@ -48,6 +48,9 @@ pub const STRUCT_FIELDS_MAX: usize = 32;
 /// Expression / block nesting in source (`quest-lang`).
 pub const PARSE_DEPTH_MAX: usize = 256;
 
+/// A read set (dialogue or part) above this many static words gets the `mirror-size` warning (`quest-lang`).
+pub const MIRROR_WORDS_WARN: u32 = 256;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +73,6 @@ mod tests {
         assert_eq!(WORK_WORDS_MAX, 65_536);
         assert_eq!(STRUCT_FIELDS_MAX, 32);
         assert_eq!(PARSE_DEPTH_MAX, 256);
+        assert_eq!(MIRROR_WORDS_WARN, 256);
     }
 }

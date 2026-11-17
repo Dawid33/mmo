@@ -12,19 +12,26 @@ mod layout;
 pub mod lex;
 mod modules;
 pub mod parse;
+mod purity;
+mod query;
+mod readset;
 mod resolve;
 pub mod source;
 pub mod ty;
 
 pub use diag::{Diagnostic, Severity, render};
 pub use infer::{
-    Await, BuiltinMethod, Method, PatCtor, PatInfo, Place, PlaceRoot, PlaceStep, Sig, Typed, infer,
+    Await, BuiltinMethod, Method, ObjectiveOp, PatCtor, PatInfo, Place, PlaceRoot, PlaceStep, Sig,
+    Typed, infer,
 };
 pub use lex::{FPart, Tok, Token, lex};
 pub use modules::load_modules;
 pub use parse::parse_file;
 #[doc(hidden)]
 pub use parse::{parse_expr_str, parse_pattern_str, parse_type_str};
+pub use purity::purity;
+pub use query::query_subset;
+pub use readset::{ReadSets, read_sets};
 pub use resolve::resolve;
 pub use source::SourceTree;
 

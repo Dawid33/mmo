@@ -564,6 +564,7 @@ impl Emit<'_, '_, '_> {
             }
             Some(Method::Builtin(b)) => self.builtin_method(e, b, recv, args, dst),
             Some(Method::Host(f)) => self.host_call(e, f, Some(recv), args, dst),
+            Some(Method::Objective(_)) => self.not_yet("dialogue and quest code", e.span),
             None => self.not_yet("this call", e.span),
         }
     }

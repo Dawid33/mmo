@@ -211,6 +211,7 @@ impl<'a> Resolver<'a> {
                         name: n.name.clone(),
                         group: dcx.groups.get(n.name.as_str()).copied().unwrap_or(0),
                         cond,
+                        score: n.cond.as_ref().map_or(0, cond_score),
                         steps,
                         span: n.span,
                     });
@@ -237,6 +238,7 @@ impl<'a> Resolver<'a> {
                 name: String::new(),
                 group: 0,
                 cond: None,
+                score: 0,
                 steps: loose,
                 span: item.span,
             });
@@ -253,6 +255,7 @@ impl<'a> Resolver<'a> {
             pick,
             uninterruptible: d.uninterruptible,
             cast_cond,
+            score: d.cast_cond.as_ref().map_or(0, conjuncts),
             nodes,
             stateless: parent.is_none() && (filter.is_some() || kind == hir::DialogueKind::Scene),
         }
@@ -459,8 +462,14 @@ impl<'a> Resolver<'a> {
         let (ast::ItemKind::Dialogue(dl) | ast::ItemKind::Scene(dl)) = &item.kind else {
             return None;
         };
-        let i = dl.exits.iter().position(|(n, _)| n == name)?;
-        u32::try_from(i).ok()?.checked_add(1)
+        // As `Dialogue::exits`: `done` first, each name once.
+        let mut exits = vec![DONE];
+        for (n, _) in &dl.exits {
+            if !exits.contains(&n.as_str()) {
+                exits.push(n);
+            }
+        }
+        u32::try_from(exits.iter().position(|n| *n == name)?).ok()
     }
 
     fn line_id(&mut self, id: &ast::LineId, file: &str) -> String {
@@ -563,41 +572,40 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// An int constant (`pause n`, `(ticks=n)`, `timeout=n`, `count n`): an int literal, negated or not,
-    /// or a `let` whose value is one (`not-constant`).
-    pub(super) fn const_int(&mut self, e: &ast::Expr, cx: &mut Cx, what: &str) -> Option<i64> {
+    /// An int constant of at least `min` (`pause n`, `(ticks=n)`, `timeout=n`, `count n`): an int literal,
+    /// negated or not, or a `let` whose value is one (`not-constant`, also for a value below `min`).
+    pub(super) fn const_int(
+        &mut self,
+        e: &ast::Expr,
+        cx: &mut Cx,
+        what: &str,
+        min: i64,
+    ) -> Option<i64> {
         let value = match &e.kind {
             ast::ExprKind::Error => return None,
-            ast::ExprKind::Int(i) => Some(*i),
-            ast::ExprKind::Unary(ast::UnOp::Neg, x) => match &x.kind {
-                ast::ExprKind::Int(i) => i.checked_neg(),
-                _ => None,
-            },
             ast::ExprKind::Path(path) => match self.path_res(path, e.span, cx) {
                 Res::Error => return None,
                 Res::Def(d) => match self.metas.get(d.0 as usize).and_then(|m| m.item) {
                     Some(ast::Item {
                         kind: ast::ItemKind::Let(l),
                         ..
-                    }) => match l.value.kind {
-                        ast::ExprKind::Int(i) => Some(i),
-                        _ => None,
-                    },
+                    }) => int_literal(&l.value),
                     _ => None,
                 },
                 _ => None,
             },
-            _ => None,
+            _ => int_literal(e),
         };
-        if value.is_none() {
-            self.diags.push(error(
-                "not-constant",
-                format!("{what} takes an int constant: a literal, or a `let` of one"),
-                cx.file,
-                e.span,
-            ));
-        }
-        value
+        let message = match value {
+            None => format!("{what} takes an int constant: a literal, or a `let` of one"),
+            Some(v) if v < min => {
+                format!("{what} takes an int constant of {min} or more, not {v}")
+            }
+            Some(v) => return Some(v),
+        };
+        self.diags
+            .push(error("not-constant", message, cx.file, e.span));
+        None
     }
 
     fn line(&mut self, l: &ast::Line, s: &mut Synth, dcx: &DialogueCx) -> hir::Line {
@@ -629,7 +637,7 @@ impl<'a> Resolver<'a> {
         let text = self.line_ref(&l.text, l.id.as_ref(), l.span, s);
         let ticks = l.ticks.as_ref().and_then(|t| {
             let mut cx = s.cx();
-            self.const_int(t, &mut cx, "`(ticks=…)`")
+            self.const_int(t, &mut cx, "`(ticks=…)`", 0)
         });
         let cond = l.cond.as_ref().map(|c| self.cond(c, s));
         hir::Line {
@@ -687,7 +695,7 @@ impl<'a> Resolver<'a> {
                 for a in args {
                     let mut cx = s.cx();
                     if a.name.as_deref() == Some("timeout") && timeout.is_none() {
-                        timeout = self.const_int(&a.value, &mut cx, "`timeout=`");
+                        timeout = self.const_int(&a.value, &mut cx, "`timeout=`", 0);
                     } else {
                         self.diags.push(error(
                             "unresolved",
@@ -721,6 +729,7 @@ impl<'a> Resolver<'a> {
                     .iter()
                     .map(|m| hir::GroupMember {
                         line: self.line(&m.line, s, dcx),
+                        score: m.line.cond.as_ref().map_or(0, cond_score),
                         steps: self.steps(&m.steps, s, dcx, false),
                         span: m.span,
                     })
@@ -831,7 +840,7 @@ impl<'a> Resolver<'a> {
             }
             ast::StepKind::Pause(e) => {
                 let mut cx = s.cx();
-                hir::StepKind::Pause(self.const_int(e, &mut cx, "`pause`")?)
+                hir::StepKind::Pause(self.const_int(e, &mut cx, "`pause`", 0)?)
             }
         };
         Some(hir::Step {
@@ -917,4 +926,39 @@ impl<'a> Resolver<'a> {
             }
         }
     }
+}
+
+/// An int literal, negated or not.
+fn int_literal(e: &ast::Expr) -> Option<i64> {
+    match &e.kind {
+        ast::ExprKind::Int(i) => Some(*i),
+        ast::ExprKind::Unary(ast::UnOp::Neg, x) => match &x.kind {
+            ast::ExprKind::Int(i) => i.checked_neg(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A condition's score (spec §5.11): its top-level conjuncts; `once` and `once per` count 1.
+fn cond_score(c: &ast::Cond) -> u32 {
+    match c {
+        ast::Cond::Once { guard, .. } => 1 + guard.as_ref().map_or(0, conjuncts),
+        ast::Cond::Expr(e) => conjuncts(e),
+    }
+}
+
+/// The top-level conjuncts of `e`: `a and b and c` is 3; anything else (an `or`, a `not`, a call) is 1.
+/// The parser keeps no parentheses, so a parenthesised `and` counts its conjuncts. A loop: an `and` chain is
+/// as long as the source.
+pub(super) fn conjuncts(e: &ast::Expr) -> u32 {
+    let mut n = 0u32;
+    let mut stack = vec![e];
+    while let Some(x) = stack.pop() {
+        match &x.kind {
+            ast::ExprKind::Binary(ast::BinOp::And, l, r) => stack.extend([&**l, &**r]),
+            _ => n = n.saturating_add(1),
+        }
+    }
+    n
 }
