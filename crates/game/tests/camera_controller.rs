@@ -22,6 +22,8 @@ fn region_fps_ready() -> (Region, game::EntityKey, crossbeam::channel::Receiver<
     let (send, recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(None), Some(send), RegionCoords::new(0, 0), None);
     region.handle_event(GameEventKind::CreateClient(7)).unwrap();
+    // A new client is in its body, where E opens the inventory.
+    region.handle_event(GameEventKind::Order(7, game::Order::SetMode { mode: game::PlayMode::Overview, at: None })).unwrap();
     // Enable FPS cam: KeyE press, then a Tick toggles it on (controllers run
     // before the toggle on this tick, so no look happens yet).
     region

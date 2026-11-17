@@ -336,9 +336,9 @@ fn pickup_after_delay_only() {
 }
 
 #[test]
-fn fortress_clients_never_pick_up() {
+fn overview_clients_never_pick_up() {
     let (mut region, tile) = region_with_adventurers(&[0]);
-    region.with_data(|r| r.clients.get_mut(&0).unwrap().mode = PlayMode::Fortress);
+    region.with_data(|r| r.clients.get_mut(&0).unwrap().mode = PlayMode::Overview);
     deposit(&mut region, tile, stack(STICK, 5), 0);
     region.with_data(|r| r.tick_pickups_safe(1000));
     assert_eq!(piles(&region).len(), 1);

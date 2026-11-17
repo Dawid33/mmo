@@ -190,7 +190,7 @@ impl Scenario for BreakAcross {
         let d = WALK_START_BLOCKS;
         let at = offset(origin, d, 0, d);
         rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(at)) });
-        rig.order(Order::SetMode { mode: PlayMode::Fortress, at: None });
+        rig.order(Order::SetMode { mode: PlayMode::Overview, at: None });
         rig.key(Key::KeyE, true);
         rig.key(Key::KeyE, false);
         for _ in 0..6 {

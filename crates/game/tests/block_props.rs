@@ -196,6 +196,8 @@ fn floor_region() -> Region {
     let mut r = Region::new(game::Rollback::new(None), None, RegionCoords::new(0, 0), None);
     r.with_data(|d| d.seed_terrain_genesis(chunks));
     ev(&mut r, GameEventKind::CreateClient(0));
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    ev(&mut r, GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     for pressed in [true, false] {
         ev(&mut r, GameEventKind::PlayerInput(0, InputEvent::Key { key: Key::KeyE, pressed }));
     }

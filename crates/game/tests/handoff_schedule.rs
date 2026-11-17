@@ -86,6 +86,7 @@ fn walk_there_and_back_recorded(
     }
     // A late spawn region creates the player a round or two after connect.
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    rig.overview();
     if crowd {
         let far = REGION_SIZE - CROWD_INSET;
         for (rc, x, z) in [(north(), CROWD_INSET, far), (RegionCoords::new(-1, 0), far, CROWD_INSET)] {
@@ -315,6 +316,7 @@ fn walk_into_east(seed: u64, schedule: InlineSchedule) {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    rig.overview();
     let n = REGION_BLOCKS as i32;
     rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some([n - SEAM_GAP_BLOCKS, 1, WALK_Z_BLOCK]) });
     for _ in 0..PAST_SEAM_ROUNDS {
@@ -392,6 +394,7 @@ fn travel_north(seed: u64) {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    rig.overview();
     let j = history_mut_of(&mut rig.manager)
         .start_journey(vec![traveller], SiteId(0), north(), Purpose::Migrate { to: SiteId(1) })
         .expect("a route north");
@@ -469,6 +472,7 @@ fn hold_key_across_seam(schedule: Option<InlineSchedule>) {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    rig.overview();
     rig.key(Key::KeyE, true);
     rig.key(Key::KeyE, false);
     rig.start_trace();
@@ -559,6 +563,7 @@ fn rig_at_spawn(schedule: Option<InlineSchedule>) -> Rig {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    rig.overview();
     rig.key(Key::KeyE, true);
     rig.key(Key::KeyE, false);
     rig
@@ -827,7 +832,7 @@ const PLACE_ROUNDS: usize = 6;
 fn place_player(rig: &mut Rig, at: WorldBlockPos, fortress: bool) {
     rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(at)) });
     if fortress {
-        rig.order(Order::SetMode { mode: PlayMode::Fortress, at: None });
+        rig.order(Order::SetMode { mode: PlayMode::Overview, at: None });
         rig.key(Key::KeyE, true);
         rig.key(Key::KeyE, false);
     }

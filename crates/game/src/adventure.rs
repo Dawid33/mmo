@@ -1,5 +1,5 @@
 //! Adventure mode: a client either commands the fortress from the top-down
-//! camera ([`PlayMode::Fortress`]) or plays its one body
+//! camera ([`PlayMode::Overview`], a debug view) or plays its one body
 //! ([`PlayMode::Adventure`]), walked by `Order::MoveTo` goals rather than the
 //! keyboard (`fps_cam_mode` is untouched). The mode is per-client rollback
 //! state on [`crate::Client`], so it travels with the client's bundle across
@@ -14,11 +14,11 @@ use crate::{
     WorldBlockPos, BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
 };
 
-/// How a client plays: the commander camera or one walking body.
+/// How a client plays: the overview (commander camera, a debug view) or one walking body, the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub enum PlayMode {
+    Overview,
     #[default]
-    Fortress,
     Adventure,
 }
 
@@ -87,7 +87,7 @@ impl Rollback {
     /// Entering Adventure with `at` moves the body onto the standable tile
     /// nearest `at` in its column (`nearest_standable`), or to the region's
     /// spawn column when there is none; with no `at` the body stays where it
-    /// is. Fortress leaves the body where it stands and closes the survival
+    /// is. Overview leaves the body where it stands and closes the survival
     /// state ([`crate::Client::leave_survival`]: inventory, chest, mining;
     /// a cursor stack that no longer fits is dropped at the feet).
     pub fn set_play_mode_safe(&mut self, client: ClientId, mode: PlayMode, at: Option<TilePos>) -> bool {
@@ -109,7 +109,7 @@ impl Rollback {
         let mut rest = None;
         if let Some(c) = self.data.clients.get_mut(&client) {
             c.mode = mode;
-            if mode == PlayMode::Fortress {
+            if mode == PlayMode::Overview {
                 // The survival screens close and mining stops; the cursor
                 // stack goes back into the inventory.
                 rest = c.leave_survival();
@@ -124,7 +124,7 @@ impl Rollback {
                     self.place_body_safe(client, at);
                 }
             }
-            PlayMode::Fortress => {
+            PlayMode::Overview => {
                 if let Some(&key) = self.data.player_entites.get(&client) {
                     if self.data.ecs.walker.try_get(key).is_some() {
                         self.data.ecs.walker.set_safe(key, None);

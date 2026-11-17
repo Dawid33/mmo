@@ -43,6 +43,8 @@ fn walk_from(x: f32, y: f32, z: f32) -> Vec<(f32, f32, f32)> {
     }
     let mut r = Region::from_chunks(RegionCoords::new(0, 0), chunks);
     ev(&mut r, GameEventKind::CreateClient(0));
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    ev(&mut r, GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     for pressed in [true, false] {
         ev(&mut r, GameEventKind::PlayerInput(0, InputEvent::Key { key: Key::KeyE, pressed }));
     }

@@ -159,13 +159,14 @@ fn ui_click_event_undoes() {
     assert_eq!(before, game::state_hash(region.data()));
 }
 
-/// A region with client 0 (Fortress, no body needed) holding `slot0` in slot
+/// A region with client 0 (overview, no body needed) holding `slot0` in slot
 /// 0; setup forgotten.
 fn one_client(slot0: Option<ItemStack>) -> Region {
     let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.with_data(|d| {
         let c = d.clients.get_mut(&0).unwrap();
+        c.mode = game::PlayMode::Overview;
         c.inventory = Inventory::new();
         c.inventory.slots[0] = slot0;
     });
@@ -186,7 +187,7 @@ fn click_with_inventory_closed_is_noop() {
 }
 
 #[test]
-fn closing_in_fortress_returns_the_cursor() {
+fn closing_in_overview_returns_the_cursor() {
     let mut region = one_client(None);
     region.with_data(|d| {
         let c = d.clients.get_mut(&0).unwrap();
@@ -219,7 +220,7 @@ fn close_inventory_only_closes() {
 }
 
 #[test]
-fn fortress_mode_leaves_survival_state() {
+fn overview_leaves_survival_state() {
     let mut region = one_client(None);
     region.with_data(|d| {
         let c = d.clients.get_mut(&0).unwrap();
@@ -230,10 +231,10 @@ fn fortress_mode_leaves_survival_state() {
         c.mining = Some(game::Mining { target: [1, 1, 1], started_tick: 0, needed_ticks: 15 });
     });
     let before = game::state_hash(region.data());
-    let order = game::Order::SetMode { mode: game::PlayMode::Fortress, at: None };
+    let order = game::Order::SetMode { mode: game::PlayMode::Overview, at: None };
     region.handle_event(GameEventKind::Order(0, order)).unwrap();
     let c = region.data().clients[&0].clone();
-    assert_eq!(c.mode, game::PlayMode::Fortress);
+    assert_eq!(c.mode, game::PlayMode::Overview);
     assert!(!c.inventory_open);
     assert_eq!((c.open_container, c.mining, c.cursor), (None, None, None));
     assert_eq!(c.inventory.slots[0], st(2, 3), "the cursor stack went back into the inventory");

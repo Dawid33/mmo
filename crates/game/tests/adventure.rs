@@ -1,4 +1,4 @@
-//! Per-client play mode (`game::adventure`): Fortress by default, switched by
+//! Per-client play mode (`game::adventure`): the body by default, switched by
 //! `Order::SetMode`, which puts the adventurer's body on a tile; the switch
 //! undoes bit-exact and reaches the UI once. `Order::MoveTo` walks the body
 //! along an A* path (`Walker`, planned by `PathPlan`) to a world goal any
@@ -45,6 +45,8 @@ fn region_with_player_on(cells: &[(TilePos, Option<SlopeShape>)]) -> (Region, En
     }
     region.with_data(|r| r.seed_terrain_genesis(chunks));
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+    // A new client is in its body; these tests start from the overview (no walk, flight).
+    region.with_data(|r| r.clients.get_mut(&CLIENT).unwrap().mode = PlayMode::Overview);
     let e = *region.data().player_entites.get(&CLIENT).unwrap();
     for _ in 0..20 {
         tick(&mut region);
@@ -80,6 +82,7 @@ fn high_region() -> Region {
         r.seed_terrain_genesis(chunks);
     });
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+    region.with_data(|r| r.clients.get_mut(&CLIENT).unwrap().mode = PlayMode::Overview);
     region
 }
 
@@ -149,9 +152,10 @@ fn enter_adventure() -> Order {
 }
 
 #[test]
-fn new_client_is_fortress() {
-    let (region, _) = region_with_player();
-    assert_eq!(mode(&region), PlayMode::Fortress);
+fn new_client_is_in_a_body() {
+    let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
+    region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+    assert_eq!(mode(&region), PlayMode::Adventure);
 }
 
 #[test]
@@ -178,7 +182,7 @@ fn set_mode_undo_bit_exact() {
     assert_eq!(mode(&region), PlayMode::Adventure);
     region.rollback_last_event();
     assert_eq!(before, state_hash(region.data()), "SetMode must roll back bit-exact");
-    assert_eq!(mode(&region), PlayMode::Fortress);
+    assert_eq!(mode(&region), PlayMode::Overview);
 }
 
 #[test]
@@ -196,23 +200,23 @@ fn set_mode_adventure_twice_is_a_noop() {
 #[test]
 fn set_mode_emits_ui_update_once() {
     let (mut region, _) = region_with_player();
+    // The default is the body, so the helper's overview is news and the body is not.
     let mut prev = PlayMode::default();
-    assert_eq!(play_mode_update(&mut prev, region.data(), CLIENT), None, "Fortress is not news");
+    assert_eq!(prev, PlayMode::Adventure);
+    assert_eq!(
+        play_mode_update(&mut prev, region.data(), CLIENT),
+        Some(UiUpdate::PlayMode(PlayMode::Overview))
+    );
+    tick(&mut region);
+    assert_eq!(play_mode_update(&mut prev, region.data(), CLIENT), None, "sent only once");
     region.handle_event(GameEventKind::Order(CLIENT, enter_adventure())).unwrap();
     region.forget_last_event();
     assert_eq!(
         play_mode_update(&mut prev, region.data(), CLIENT),
         Some(UiUpdate::PlayMode(PlayMode::Adventure))
     );
-    tick(&mut region);
-    assert_eq!(play_mode_update(&mut prev, region.data(), CLIENT), None, "sent only once");
-    region
-        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Fortress, at: None }))
-        .unwrap();
-    assert_eq!(
-        play_mode_update(&mut prev, region.data(), CLIENT),
-        Some(UiUpdate::PlayMode(PlayMode::Fortress))
-    );
+    let mut prev = PlayMode::default();
+    assert_eq!(play_mode_update(&mut prev, region.data(), CLIENT), None, "Adventure (the default) is not news");
 }
 
 #[test]
@@ -340,7 +344,7 @@ fn first_person_ends_the_walk_and_the_keyboard_drives() {
 }
 
 #[test]
-fn move_to_refused_in_fortress_mode() {
+fn move_to_refused_in_overview() {
     let (mut region, e) = region_with_player();
     let before = state_hash(region.data());
     let mut accepted = true;
@@ -398,7 +402,7 @@ fn extreme_untrusted_coordinates_are_refused_without_panic() {
         let mut ok = true;
         region.with_data(|d| ok = d.apply_order_safe(CLIENT, order));
         assert!(!ok);
-        let order = Order::SetMode { mode: PlayMode::Fortress, at: Some([5, 1, v]) };
+        let order = Order::SetMode { mode: PlayMode::Overview, at: Some([5, 1, v]) };
         region.with_data(|d| ok = d.apply_order_safe(CLIENT, order));
         assert!(!ok);
     }
@@ -488,12 +492,12 @@ fn move_to_undo_bit_exact() {
 }
 
 #[test]
-fn fortress_mode_ends_the_walk() {
+fn overview_ends_the_walk() {
     let (mut region, e) = adventure_at([4, 1, 4]);
     move_to(&mut region, here_goal([20, 20], None));
     assert!(walker(&region, e).is_some());
     region
-        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Fortress, at: None }))
+        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Overview, at: None }))
         .unwrap();
     region.forget_last_event();
     assert!(walker(&region, e).is_none());
@@ -875,6 +879,8 @@ fn floored_adventurer(extent: Option<game::MapExtent>) -> (Region, EntityKey) {
     region.with_data(|r| r.seed_terrain_genesis(floor_chunks(0.0..size, 0.0..size, 16)));
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
     region.forget_last_event();
+    // Entering the body at a tile places it only from the overview.
+    region.with_data(|r| r.clients.get_mut(&CLIENT).unwrap().mode = PlayMode::Overview);
     let e = *region.data().player_entites.get(&CLIENT).unwrap();
     region
         .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(TILE) }))
@@ -995,12 +1001,12 @@ fn no_flight_in_adventure() {
 }
 
 #[test]
-fn fortress_body_still_flies() {
+fn overview_body_still_flies() {
     let (mut region, e) = region_with_player();
     send(&mut region, InputEvent::FpsCam(true));
     tick(&mut region);
     double_tap_space(&mut region);
-    assert!(motion_of(&region, e).flying, "a fortress body keeps creative flight");
+    assert!(motion_of(&region, e).flying, "an overview body keeps creative flight");
 }
 
 #[test]

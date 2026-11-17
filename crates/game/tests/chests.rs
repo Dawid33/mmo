@@ -641,6 +641,8 @@ fn break_chest_across_seam_spills_once_and_closes_both_views() {
     put_chest(&mut rig, cell, contents.clone());
     rig.manager.spawner_mut().with_region(west, |r| {
         r.handle_event(GameEventKind::CreateClient(1)).unwrap();
+        // An overview client: a body next to the spill would pick it up.
+        r.with_data(|d| d.data.clients.get_mut(&1).unwrap().mode = PlayMode::Overview);
         r.with_data(|d| {
             let e = *d.data.player_entites.get(&1).unwrap();
             let bv = game::BLOCK_VOXELS as f32;

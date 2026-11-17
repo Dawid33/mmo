@@ -23,6 +23,10 @@
 //!   flying forward and logs `autopilot_seam_wait` — turns to face the nearest point of that seam (away from its ends), flies
 //!   there, turns square to it and shuttles across it as above.
 //!
+//! A new player is in a body, which cannot fly (`camera.rs`: flight needs a
+//! mode other than Adventure). So before it holds any key the pilot writes one
+//! `ToggleModeRequest` (the F9 switch) and waits until the overview is in.
+//!
 //! `VOXEL_AUTOPILOT_SECONDS=N` closes the client N seconds after the climb.
 //!
 //! Hands off the desktop: the pilot never touches the keyboard state or the
@@ -139,6 +143,8 @@ pub struct Autopilot {
     /// Close the app this long after the cruise starts.
     cruise_for: Option<Duration>,
     started: Option<Duration>,
+    /// The switch to the overview was requested (once per run).
+    overview_asked: bool,
     next_step: usize,
     cruising: bool,
     leg: Option<Leg>,
@@ -198,6 +204,7 @@ impl Autopilot {
             mode,
             cruise_for,
             started: None,
+            overview_asked: false,
             next_step: 0,
             cruising: false,
             leg: None,
@@ -232,6 +239,8 @@ fn drive_autopilot(
     // The body's camera (it carries the sim pose), not the frontend's: an online
     // session keeps the menu's camera entity around, parked at the origin.
     cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<super::bridge::SimTarget>)>,
+    mode: Res<super::commander::adventure::ClientPlayMode>,
+    mut toggle: MessageWriter<super::commander::adventure::ToggleModeRequest>,
     mut pilot: ResMut<Autopilot>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -255,6 +264,16 @@ fn drive_autopilot(
     let (true, Some(player)) = (ready.0, player.0) else {
         return;
     };
+    // The body cannot fly: ask once for the overview, and start only when it is in.
+    if mode.adventure() {
+        if !pilot.overview_asked && pilot.started.is_none() {
+            pilot.overview_asked = true;
+            toggle.write(super::commander::adventure::ToggleModeRequest);
+        }
+        if pilot.started.is_none() {
+            return;
+        }
+    }
     let send = |input: InputEvent| {
         let _ = game.0.send(GameEventKind::PlayerInput(player, input));
     };

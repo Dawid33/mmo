@@ -2012,8 +2012,8 @@ pub(super) fn handoff_record(target: RegionCoords, bundle: &crate::EntityBundle,
 ///
 /// Leaving survival here differs from a local move in one way: what does not fit back
 /// into the inventory stays on the cursor (the record keeps it; the restore stows it
-/// again) instead of being dropped at the player's feet. Only an adventure ended while a
-/// move is in flight gets here (`end_adventure` otherwise sends its `SetMode` to the home
+/// again) instead of being dropped at the player's feet. Only a mode order sent while a
+/// move is in flight gets here (otherwise it reaches the home
 /// before the move, where the drop happens as locally), and by then the body is parked or
 /// being parked: there is no region and no feet to drop at.
 fn carry_event(carried: &mut crate::Client, kind: GameEventKind) {
@@ -2021,7 +2021,7 @@ fn carry_event(carried: &mut crate::Client, kind: GameEventKind) {
         GameEventKind::Order(_, Order::SetMode { mode, .. }) => {
             if carried.mode != mode {
                 carried.mode = mode;
-                if mode == PlayMode::Fortress {
+                if mode == PlayMode::Overview {
                     if let Some(rest) = carried.leave_survival() {
                         carried.cursor = Some(rest);
                     }

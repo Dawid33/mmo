@@ -1267,7 +1267,10 @@ fn held_key(rig: &mut MultiRig) {
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
-    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, WALK_START]));
+    // From the camera: E turns body control on there (in a body it opens the inventory).
+    let mut record = record_at(a, [REGION_SIZE / 2.0, WALK_START]);
+    record.client.mode = game::PlayMode::Overview;
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
     until_body(rig);
     for h in [ha, hb] {
         rig.hosts[h.0 as usize].events_seen = Some(Vec::new());
@@ -2463,7 +2466,7 @@ fn end_adventure_foreign(rig: &mut MultiRig) {
     rig.hosts[hs.0 as usize].manager.spawner_mut().with_region(game::SPAWN_REGION, |region| {
         mode = region.data().clients.get(&P_CLIENT).map(|c| c.mode);
     });
-    assert_eq!(mode, Some(game::PlayMode::Fortress), "back in Fortress mode");
+    assert_eq!(mode, Some(game::PlayMode::Adventure), "back in a body");
 }
 
 #[test]

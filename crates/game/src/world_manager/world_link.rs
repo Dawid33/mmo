@@ -1012,22 +1012,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_request(id, WorldRequest::StartAdventure(site), now_ms);
     }
 
-    /// End the adventure: back to Fortress mode, then to `SPAWN_REGION` like
+    /// End the adventure: the player returns to `SPAWN_REGION` in their body, like
     /// [`Self::retire`]. No adventure = no-op.
     pub(super) fn end_adventure(&mut self, id: ClientId, now_ms: u64) {
         // No move possible (no refusal exists for an adventure's end): it goes on.
         if !self.adventurer_of.contains_key(&id) || !self.can_move(id, SPAWN_REGION) {
             return;
-        }
-        // A move in flight to another host's region has no home here: the order goes with
-        // the move (`finish_move`).
-        let home = self.homes.get(&id).copied().or_else(|| self.moving.get(&id).map(|m| m.target));
-        if let Some(home) = home {
-            self.send_player_event(
-                id,
-                home,
-                GameEventKind::Order(id, Order::SetMode { mode: PlayMode::Fortress, at: None }),
-            );
         }
         self.adventurer_of.remove(&id);
         let landing = self.landing_in(SPAWN_REGION);

@@ -1,5 +1,6 @@
-//! Adventure mode on the client: mode switch requests (no UI sends one since
-//! the F9 panel went — Adventure has no entry point for now), the local body's
+//! Adventure mode on the client: mode switch requests (F9, the Debug tab's
+//! button and the autopilot write them; the body is the default, the overview
+//! a debug view), the local body's
 //! visibility and the fortress tools' off switch.
 //!
 //! The mode itself is sim state (`game::PlayMode` on the client's
@@ -8,7 +9,7 @@
 //! guessing ahead of the sim. The button sends `Order::SetMode`; entering
 //! Adventure puts the body on the tile under the camera focus
 //! ([`focus_tile`]). In Adventure the body is drawn (it is hidden in
-//! Fortress — the commander has no body) and can be selected
+//! Overview — the commander has no body) and can be selected
 //! (`selection::is_selectable`); the designation tools and the tool wheel
 //! are off.
 
@@ -34,17 +35,31 @@ impl ClientPlayMode {
     }
 }
 
-/// Switch Fortress ↔ Adventure. Nothing writes it at the moment (the F9
-/// panel's mode button was removed with the panel); kept for the next entry
-/// point.
+/// Switch Overview ↔ Adventure. Written by F9 ([`overview_key`]), the Debug tab's
+/// "Toggle overview" button (`DevAction::ToggleOverview`) and the autopilot.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct ToggleModeRequest;
+
+/// F9 switches between the overview and the body (a debug view; the Debug tab
+/// has the same button).
+pub const OVERVIEW_KEY: KeyCode = KeyCode::F9;
+
+/// F9 → one [`ToggleModeRequest`], unless a UI layer has the keyboard.
+pub fn overview_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    policy: Res<crate::renderer::cursor::CursorPolicy>,
+    mut requests: MessageWriter<ToggleModeRequest>,
+) {
+    if keys.just_pressed(OVERVIEW_KEY) && !policy.blocks_game() {
+        requests.write(ToggleModeRequest);
+    }
+}
 
 /// The other mode.
 pub fn toggled(mode: PlayMode) -> PlayMode {
     match mode {
-        PlayMode::Fortress => PlayMode::Adventure,
-        PlayMode::Adventure => PlayMode::Fortress,
+        PlayMode::Overview => PlayMode::Adventure,
+        PlayMode::Adventure => PlayMode::Overview,
     }
 }
 
@@ -70,7 +85,7 @@ pub fn toggle_order(mode: PlayMode, cam: &CommanderCamera, home: Option<RegionId
             t[2] = t[2].clamp(0, last);
             t
         }),
-        PlayMode::Fortress => None,
+        PlayMode::Overview => None,
     };
     Order::SetMode { mode: next, at }
 }
@@ -94,11 +109,11 @@ pub fn send_mode_toggle(
 }
 
 /// The body's visibility for a mode: drawn (inheriting) in Adventure,
-/// hidden in Fortress.
+/// hidden in Overview.
 pub fn body_visibility(mode: PlayMode) -> Visibility {
     match mode {
         PlayMode::Adventure => Visibility::Inherited,
-        PlayMode::Fortress => Visibility::Hidden,
+        PlayMode::Overview => Visibility::Hidden,
     }
 }
 
@@ -145,7 +160,7 @@ pub fn on_mode_change(
                 designate.set_tool(None);
             }
         }
-        PlayMode::Fortress => {
+        PlayMode::Overview => {
             // The body is hidden in Fortress: don't stay pinned to it.
             if follow.0 == Some(FollowTarget::LocalPlayer) {
                 follow.0 = None;
@@ -179,15 +194,15 @@ mod tests {
         let home = RegionCoords { x: 0, z: 0 };
         let cam = CommanderCamera { focus: Vec2::new(40.0, 56.0), ground_y: 32.0, ..Default::default() };
         assert_eq!(
-            toggle_order(PlayMode::Fortress, &cam, Some(home)),
+            toggle_order(PlayMode::Overview, &cam, Some(home)),
             Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 2, 3]) }
         );
-        assert_eq!(toggle_order(PlayMode::Adventure, &cam, Some(home)), Order::SetMode { mode: PlayMode::Fortress, at: None });
+        assert_eq!(toggle_order(PlayMode::Adventure, &cam, Some(home)), Order::SetMode { mode: PlayMode::Overview, at: None });
     }
 
     #[test]
     fn body_shows_only_in_adventure() {
         assert_eq!(body_visibility(PlayMode::Adventure), Visibility::Inherited);
-        assert_eq!(body_visibility(PlayMode::Fortress), Visibility::Hidden);
+        assert_eq!(body_visibility(PlayMode::Overview), Visibility::Hidden);
     }
 }

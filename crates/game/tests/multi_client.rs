@@ -302,6 +302,9 @@ const REST_Y: f32 = 8.0 + game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::mov
 /// A server player standing on the floor with input enabled (E pressed).
 fn grounded_player() -> World {
     let (mut server, _) = server_with_players(1);
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    server.handle_region_event(GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Overview, at: None }), r0()).unwrap();
+    server.forget_last_event(&r0());
     key(&mut server, Key::KeyE, true);
     key(&mut server, Key::KeyE, false);
     ticks(&mut server, 30);

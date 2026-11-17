@@ -810,7 +810,7 @@ fn fortress_and_adventure_exclusive() {
 }
 
 #[test]
-fn end_adventure_returns_to_spawn_in_fortress_mode() {
+fn end_adventure_returns_to_spawn_in_a_body() {
     let (mut w, home, civ, people, free) = embark_world();
     let region = w.history().site(home).unwrap().region;
     assert_eq!(w.adventure(A, home), Ok(home));
@@ -823,7 +823,7 @@ fn end_adventure_returns_to_spawn_in_fortress_mode() {
     w.tick();
     assert!(w.players_in(region).is_empty(), "the adventurer left the site");
     assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
-    assert_eq!(w.mode_in(SPAWN_REGION, A), Some(PlayMode::Fortress));
+    assert_eq!(w.mode_in(SPAWN_REGION, A), Some(PlayMode::Adventure));
     // Ending again changes nothing.
     w.packet(A, ClientPacket::EndAdventure);
     assert!(w.take(A).is_empty(), "no-op end sends nothing");
@@ -992,7 +992,7 @@ fn inventory_survives_move_client() {
     w.tick();
     let back = w.client_in(SPAWN_REGION, A).expect("back at spawn");
     assert_eq!(back.inventory, expected, "and back again");
-    assert_eq!(back.mode, PlayMode::Fortress);
+    assert_eq!(back.mode, PlayMode::Adventure);
     assert!(w.players_in(region).is_empty());
     assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
 }
@@ -1011,7 +1011,7 @@ fn move_retargeted_in_flight_keeps_one_body() {
     assert!(w.client_in(region, A).is_none(), "never created at the site");
     let back = w.client_in(SPAWN_REGION, A).expect("at spawn");
     assert_eq!(back.inventory, expected);
-    assert_eq!(back.mode, PlayMode::Fortress, "the adventure's start and end both applied, in order");
+    assert_eq!(back.mode, PlayMode::Adventure, "a body at spawn after the adventure's start and end");
     assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
 }
 

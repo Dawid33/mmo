@@ -424,6 +424,14 @@ impl Rig {
             self.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
         }
         self.walk_until_owned_by(SPAWN_REGION, "spawn");
+        self.overview();
+    }
+
+    /// The player to the overview: a new client is in its body, and these rigs'
+    /// scenarios start from the camera (flight, no walk) and place the body
+    /// themselves with `SetMode { Adventure, at }`, which a body ignores.
+    pub fn overview(&mut self) {
+        self.order(Order::SetMode { mode: game::PlayMode::Overview, at: None });
     }
 
     /// Rounds until `rc` owns the player; panics past the leg budget.

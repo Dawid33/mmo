@@ -162,6 +162,9 @@ pub fn world_of(
     world.load(&r0(), Region::from_chunks(r0(), chunks));
     world.handle_region_event(GameEventKind::CreateClient(0), r0()).unwrap();
     world.forget_last_event(&r0());
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    // (set in place, not by an order: the golden scene hashes this world's bytes)
+    world.regions.get_mut(&r0()).unwrap().with_data(|d| d.clients.get_mut(&0).unwrap().mode = game::PlayMode::Overview);
     key(&mut world, Key::KeyE, true);
     key(&mut world, Key::KeyE, false);
     // The spawn clearance is a few ticks of fall.

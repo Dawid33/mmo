@@ -395,6 +395,8 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
     // controls, then hold W: walk speed along -z from z=128 crosses the -z
     // boundary (past -FLIP_HYSTERESIS) after ~40 ticks, walking the floor
     // strip the whole way.
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     rig.event(key_event(Key::KeyE, true));
     rig.event(key_event(Key::KeyW, true));
 
@@ -486,6 +488,8 @@ fn diagonal_walk_crosses_a_corner_on_real_threads() {
     rig.wait_for_snapshots(&window, REGION_STARTUP_BUDGET);
     let _ = rig.packets.try_iter().count();
 
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     rig.event(key_event(Key::KeyE, true));
     rig.event(key_event(Key::KeyW, true));
     rig.event(key_event(Key::KeyA, true));
@@ -534,6 +538,8 @@ fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
     let north = RegionCoords::new(0, -1);
     assert!(!rig.manager.running_regions().contains(&north), "north starts cold");
 
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     rig.event(key_event(Key::KeyE, true));
     rig.event(key_event(Key::KeyW, true));
     let mut log = Vec::new();
@@ -785,6 +791,7 @@ fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
     let (between, far) = (RegionCoords::new(1, 0), RegionCoords::new(2, 0));
     assert!(!rig.manager.running_regions().contains(&between), "the region between starts cold");
+    rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Adventure, at: Some([n - 3, 1, 12]) }));
     let mut log = Vec::new();
     rig.pump_until(Duration::from_secs(1), &mut log, |_| false);

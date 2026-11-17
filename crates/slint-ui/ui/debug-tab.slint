@@ -38,6 +38,8 @@ export component DebugPage {
     callback complete-orders();
     // Drop a 1 m body above the ground last under the cursor (off the panel).
     callback drop-body();
+    // Switch between the overview camera and the body.
+    callback toggle-overview();
 
     out property <length> toggle-row-height: 22px;
     property <length> stat-row-height: 18px;
@@ -87,6 +89,14 @@ export component DebugPage {
                 drop := Button {
                     text: "Drop body at cursor";
                     clicked => { root.drop-body(); }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: start;
+                overview := Button {
+                    text: "Toggle overview (F9)";
+                    clicked => { root.toggle-overview(); }
                 }
             }
         }

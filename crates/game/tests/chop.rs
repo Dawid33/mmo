@@ -532,7 +532,7 @@ fn logs_lie_where_tree_landed() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn fortress_chop_still_yields_nothing() {
+fn overview_chop_still_yields_nothing() {
     let ids = ids();
     let mut region = forested_region(&ids);
     let cut = [x0(), 1, Z0];

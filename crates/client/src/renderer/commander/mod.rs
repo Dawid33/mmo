@@ -575,6 +575,7 @@ impl Plugin for CommanderPlugin {
             .add_systems(
                 Update,
                 (
+                    adventure::overview_key,
                     adventure::send_mode_toggle,
                     adventure::on_mode_change,
                     first_person::toggle_first_person,

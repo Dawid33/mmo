@@ -340,6 +340,8 @@ fn a_player_digging_down_lands_on_materialised_ground() {
     // The chunk columns around the (128, 128) spawn: blocks 6..12.
     let mut region = region_blocks(6..12, 6..12);
     forget(&mut region, GameEventKind::CreateClient(0));
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    forget(&mut region, GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     forget(&mut region, input(InputEvent::Key { key: Key::KeyE, pressed: true }));
     forget(&mut region, input(InputEvent::Key { key: Key::KeyE, pressed: false }));
     for _ in 0..12 {

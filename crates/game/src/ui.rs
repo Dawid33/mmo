@@ -96,8 +96,8 @@ pub fn build_inventory_view(
 
 /// The local client's play mode as `UiUpdate::PlayMode`, only when it
 /// differs from `*prev` (which it then updates). `*prev` starts at the
-/// default (Fortress), so nothing is sent until the mode first changes.
-/// Unknown client → Fortress.
+/// default (Adventure), so nothing is sent until the mode first changes.
+/// Unknown client → Adventure.
 pub fn play_mode_update(
     prev: &mut crate::PlayMode,
     data: &crate::GameData,

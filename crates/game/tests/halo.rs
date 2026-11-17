@@ -94,7 +94,7 @@ fn neighbour_edit_reaches_halo_next_tick() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walk_across_seam_never_dips() {
     let mut rig = joined();
-    // Body control on (Fortress: E toggles the first-person body).
+    // Body control on (the overview: E toggles the first-person body).
     rig.key(Key::KeyE, true);
     rig.key(Key::KeyE, false);
     for _ in 0..10 {

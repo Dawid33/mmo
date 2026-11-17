@@ -252,6 +252,8 @@ fn rollback_across_water_surface_restores_hash() {
         region.forget_last_event();
     };
     forget(&mut region, GameEventKind::CreateClient(0));
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    forget(&mut region, GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     let input = |key, pressed| GameEventKind::PlayerInput(0, game::InputEvent::Key { key, pressed });
     forget(&mut region, input(Key::KeyE, true));
     forget(&mut region, input(Key::KeyE, false));

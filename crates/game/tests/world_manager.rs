@@ -340,12 +340,12 @@ fn input_naming_another_client_is_dropped() {
         h.manager.spawner_mut().with_region(SPAWN_REGION, |r| out = r.data().clients.get(&c).map(|c| c.mode));
         out.expect("the client is in the spawn region")
     };
-    assert_ne!(mode(&mut h, 0), game::PlayMode::Adventure);
-    let adventure = |c| GameEventKind::Order(c, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None });
-    client_event(&mut h, 1, adventure(0));
-    assert_ne!(mode(&mut h, 0), game::PlayMode::Adventure, "client 1 drove client 0");
-    client_event(&mut h, 0, adventure(0));
-    assert_eq!(mode(&mut h, 0), game::PlayMode::Adventure, "its own order applies");
+    assert_eq!(mode(&mut h, 0), game::PlayMode::Adventure);
+    let overview = |c| GameEventKind::Order(c, game::Order::SetMode { mode: game::PlayMode::Overview, at: None });
+    client_event(&mut h, 1, overview(0));
+    assert_eq!(mode(&mut h, 0), game::PlayMode::Adventure, "client 1 drove client 0");
+    client_event(&mut h, 0, overview(0));
+    assert_eq!(mode(&mut h, 0), game::PlayMode::Overview, "its own order applies");
 }
 
 /// Connect client 0 and drain the join packets, returning the harness ready

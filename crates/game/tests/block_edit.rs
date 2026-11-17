@@ -37,6 +37,8 @@ fn region(floor: impl Fn() -> Chunk) -> Region {
     let mut region = Region::new(game::Rollback::new(Some(send.clone())), Some(send), r0(), None);
     region.with_data(|r| r.seed_terrain_genesis(chunks));
     forget(&mut region, GameEventKind::CreateClient(0));
+    // A new client is in its body, where E opens the inventory: start from the overview.
+    forget(&mut region, GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Overview, at: None }));
     forget(&mut region, input(InputEvent::Key { key: Key::KeyE, pressed: true }));
     forget(&mut region, input(InputEvent::Key { key: Key::KeyE, pressed: false }));
     for _ in 0..12 {
