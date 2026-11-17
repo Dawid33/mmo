@@ -312,9 +312,10 @@ def silent_hosts(client_logs, server_logs):
 def shuttle_window(client_logs):
     """`(first, last)` seconds of the day of the host run's shuttle: its first
     `event=autopilot_seam` and its `event=autopilot_done` (CLIENT_CLOCK); None when either is
-    missing or unstamped."""
+    missing or unstamped. The seam line always carries fields (`event=autopilot_seam boundary=…`):
+    matched with its trailing space, so an `event=autopilot_seam_wait` line never opens it."""
     text = clean(client_logs.get("host run", []))
-    first = next((clock_s(CLIENT_CLOCK, line) for line in text if "event=autopilot_seam" in line), None)
+    first = next((clock_s(CLIENT_CLOCK, line) for line in text if "event=autopilot_seam " in line), None)
     last = next((clock_s(CLIENT_CLOCK, line) for line in reversed(text) if "event=autopilot_done" in line), None)
     return None if first is None or last is None else (first, last)
 

@@ -227,6 +227,13 @@ class GoNoGo(unittest.TestCase):
             word, reasons, _ = self.succession_verdict(at)
             self.assertEqual(word, "GO", reasons)
 
+    def test_the_window_starts_at_the_seam_not_at_a_wait_for_it(self):
+        # An `autopilot_seam_wait` line before the seam is chosen does not open the window.
+        wait = "2026-11-13T12:00:02.000000Z  INFO game::perf: [perf] event=autopilot_seam_wait loaded=3"
+        client = [self.shuttle_client()[0], wait] + self.shuttle_client()[1:]
+        window = crossing_summary.shuttle_window({"host run": client})
+        self.assertEqual(window, (12 * 3600 + 10.0, 12 * 3600 + 70.0))
+
     def test_succession_inside_the_window_is_invalid(self):
         word, reasons, _ = self.succession_verdict("12:00:30")
         self.assertEqual(word, "INVALID")

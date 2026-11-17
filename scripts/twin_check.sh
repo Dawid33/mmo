@@ -196,6 +196,8 @@ live_id() {
 }
 # row_state <id>: live / dead, '' when there is no such row.
 row_state() { rows | awk -v i="$1" '$1 == i { print $3 }'; }
+# row_land <id>: the super-regions the row owns (`land=N`), '' when there is no such row.
+row_land() { rows | awk -v i="$1" '$1 == i { for (f = 5; f <= NF; f++) if ($f ~ /^land=/) { sub(/^land=/, "", $f); print $f } }'; }
 # has_new_live_id <name> <ids…>: host <name> has a live dirty row whose id is none of the given.
 has_new_live_id() {
     local name="$1" id
@@ -382,6 +384,10 @@ uid1=$(pod_uid "$pb")
 d0=$(coord_metric mmo_successions_declared_total) || fail "no mmo_successions_declared_total"
 s0=$(coord_metric mmo_successions_settled_total) || fail "no mmo_successions_settled_total"
 say "before: generation $gen, host-a pod $pa restarts $r0, successions declared $d0 settled $s0"
+# Decision 9's precondition (below): host b owns no land. A twin where a player made it claim some
+# would see a Crash succession instead — this phase checks the landless end only.
+land_b=$(row_land "$id_b")
+[ "$land_b" = 0 ] || fail "phase 5 needs host b (id $id_b) landless, it owns land=$land_b: the landless-end check does not apply (a landed host's death is a Crash succession)"
 t0=$SECONDS
 k delete pod "$pb" --grace-period=0 --force > /dev/null 2>&1
 # The new pod registers under a new id: Ready without waiting for the old row to be ended.

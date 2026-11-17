@@ -1482,8 +1482,9 @@ go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 # have hung), a host logged no counters or stopped logging them before the end, a client
 # lost its session early or never had its state hash checked, or a group has < 20 crossings.
 # Exit code: 0 GO, 1 NO-GO, 2 INVALID, anything else: no verdict (the recipe failed).
-# A run that did not stop cleanly (e.g. a second Ctrl-C) leaves a dirty host row: the next
-# run says so at its start and is likely INVALID (a host restarts once) — run it again.
+# A run that did not stop cleanly (e.g. a second Ctrl-C) may leave processes behind: the
+# next run says so at its start (its database is forged again, so no dirty row carries over)
+# — check for leftover server / login / client processes before trusting it.
 # Arguments are positional: `just go-nogo-r3 5`, `just adapter=6700 go-nogo-r3 2 90`.
 # Go / no-go for host seams: thread-seam vs host-seam shuttle on 2 hosts at `delay` ms.
 go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
@@ -1518,8 +1519,8 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     echo "  pins under $stack. Resets: that world's clock and the logs under $out/. Never touches the dev world"
     echo "  'mmo', target/dev-r3 or target/dev-login."
     if [ -e "$out/unclean" ]; then
-        echo "go-nogo-r3: NOTE: the previous run's stack did not stop cleanly ($(cat "$out/unclean")): its hosts' rows"
-        echo "  are dirty, so a host restarts once on this start and this run is likely INVALID - simply run it again."
+        echo "go-nogo-r3: NOTE: the previous run's stack did not stop cleanly ($(cat "$out/unclean")): check for"
+        echo "  leftover server / login / client processes (this run's database is forged again: no dirty row carries over)."
     fi
     # The dev Postgres (as `pg-up`, without printing its URL).
     docker compose -f deploy/dev/compose.yml up -d --wait postgres

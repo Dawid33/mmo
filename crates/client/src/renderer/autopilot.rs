@@ -215,8 +215,10 @@ impl Autopilot {
 
 pub fn plugin(app: &mut App, autopilot: Autopilot) {
     info!("autopilot: {:?} once the world is ready", autopilot.mode);
+    use crate::session::SessionResetExt as _;
+    // The map is per world (`session.rs`'s lifecycle rule): a next world starts it empty.
     app.insert_resource(autopilot)
-        .init_resource::<RegionHosts>()
+        .add_session_reset::<RegionHosts>()
         .add_systems(Update, drive_autopilot.run_if(crate::session::world_systems_enabled()));
 }
 

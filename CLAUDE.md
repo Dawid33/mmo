@@ -126,8 +126,9 @@ a total crash, the generation raised: such a change is `world-stop` → apply (w
 change (a `var.hosts` key, host resources) goes through cuts on a running world. **A host added after a release**
 starts on `var.images.server` (`:latest`) beside the released digest: right after the apply, `kubectl set image
 deploy/host-<k> host=<the coordinator's image>` (TODO.md, Elastic 1) — else the next release finds mixed images and
-records no previous release. A host pod that crash-loops AFTER registering no longer rolls the world back (each
-landless incarnation is ended, not succeeded — Succession below); every check that needs no id still runs
+records no previous release. A host pod that crash-loops AFTER registering no longer rolls the world back while it
+holds no land (a landless incarnation is ended, not succeeded); one that claims land during an open run, or is made
+heir, and dies before the settle still does (the residual, Succession below); every check that needs no id still runs
 before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
 rolling update**; it (and `world-stop` / `world-start`) brings a drained or marked host back as a NEW host. An `orion-apply world`
 owns the replica counts: applied while the world is stopped or mid-update it STARTS the world on whatever images are
@@ -279,10 +280,14 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   hold only its links, the decoded cache, observation timers (`LeaseWatch`, retry pacing, log limits) and the
   login relay queues. Attachments, a handed-out cut decision, a declaration and an end in flight carry a random
   `ProcessBoot`: another boot's count as detached / not in flight (a restart needs no forget step). The first
-  `Attach` at a newer generation parks every older-generation host's regions (`first_of_generation`).
+  `Attach` at a newer generation parks every older-generation host's regions and detaches those still attached
+  (`first_of_generation`). A store decision whose answer died with its process (a succession, a landless end)
+  still takes the dead host out of the view: a run new to the start read (`successions_open`), or a dead row
+  nobody here declared at the next `hosts` read (`observe_leases` → `host_ended`).
   **Store time**: the core's `now_ms` is the store's clock (`StoreClock`: sampled from each commit's `RETURNING`
   and each `hosts` read, extrapolated by the monotonic clock, never backwards). **Downtime is not caught up**:
-  after `CALENDAR_GAP_MS` (30 s) without a day turn the calendar re-anchors at its stored tick, and a stored cut
+  after `CALENDAR_GAP_MS` (30 s) without a sign of the calendar's life (a day turn, a view) it re-anchors where it
+  last stood (`calendar_resume`: never earlier than a host was told; the stored history's `now` lags), and a stored cut
   / succession deadline older than the gap restarts its count at load. An older core format, another world's
   row, or no projection beside saved regions is refused at start — re-forge (`just pg-reset`, `just run
   --reset`). Counters `mmo_coordinator_transitions_total`, `mmo_coordinator_written_bytes_total{part}`,
@@ -321,7 +326,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     timer thread (a hung loop must stop beating) — on a connection of its own (never the store's shared
     pool), each beat under a client-side deadline (`HEARTBEAT_DEADLINE_MS`), and once after each long boot
     step (`lease::beat_at_boot`); the coordinator declares it dead after `HOST_LEASE_MS`
-    (10 s) of its own unchanged reads (`LeaseWatch`: a database outage declares nobody). The Postgres lease
+    (10 s) of its own unchanged reads (`LeaseWatch`, on the process's MONOTONIC clock — a step of the store's clock
+    lapses nobody; the store's `PG_NOW_MS` check at the declaration is the second gate; a database outage
+    declares nobody). The Postgres lease
     clock is `clock_timestamp()`, never `now()`. A fenced transaction (a cut part, a region load) idle longer
     than the lease loses its session (`FENCED_TX_IDLE_MS`, set by the fence check): a frozen host's row
     locks do not outlive it.
@@ -350,7 +357,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     from: asked again after its commit (a restart before its transition was written) it moves it once.
   - **Registration** (`register_host`, `world-store/src/rows.rs`; `server/src/lease.rs`): a boot never waits.
     One transaction issues the id, lapses its name's old rows, refuses a `static` host beside a live row, and —
-    with nobody else live and a dirty row (a total crash) — abandons the open successions, takes every dirty
+    with nobody else live and a dirty row that is live, holds land or is an open run's predecessor (a total
+    crash; an ended row is none) — abandons the open successions, takes every dirty
     row's `super_regions` and `in_flight` rows at `epoch + 1` and raises the generation (the first host back
     holds all claimed land); otherwise the new host owns nothing. Rows owning nothing are pruned there. A
     registration stuck behind a lock exits 1 after `CLAIM_LOCK_TIMEOUT_MS` (60 s).

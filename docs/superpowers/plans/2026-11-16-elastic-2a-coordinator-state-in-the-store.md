@@ -839,3 +839,43 @@ is owed before E2b splits anything.
 | `just smoke` | ok |
 
 No red outside the known ones. Client tests were not run (Dawid's hand check).
+
+### Final review fix wave (2026-11-17)
+
+Three area reviews of `0985ab69..dbc0e8b9` (findings: `.superpowers/sdd/…/final-fix-wave-findings.md`); one fixer,
+base `dbc0e8b9`. Commits `1cd94ea9` (core), `e3152145` (runtime), `e578b8b5` (store) and the docs/scripts commit
+after them. Every new test was RED on the unfixed code first.
+
+- **C1 (conservation).** A coordinator that died between the store's commit of a decision and the transition
+  holding its answer left the predecessor in the view (people embodied in its regions, players online on it).
+  Now `successions_open` takes every run new to the core out of the view (`host_succeeded`) at a START read too,
+  and `observe_leases` ends every dirty dead row nobody here declared (`host_ended`, then the re-read as before).
+  Tests: `coordinator::a_store_decision_lost_with_its_transition_still_takes_the_dead_host_out` (both cases) and
+  the seeded `peer_schedule::a_coordinator_dying_between_a_store_decision_and_its_transition_conserves_the_world`
+  (an end, then a succession, each committed with the coordinator restarted before its answer;
+  `assert_conserved_world`, the run settles, the dead region restarts on the heir). The rig gained
+  `declare_unanswered` / `end_unanswered` and answers a re-read in `drive_leases` (as the runtime does).
+- **I1.** The calendar re-anchors where it last stood (`calendar_resume`: the anchor's tick at `calendar_seen_ms`,
+  or the history's `now` if later), at the load already; a view moves `calendar_seen_ms` (durable before it
+  leaves). Test `the_calendar_never_runs_backwards_across_a_load` (the reviewer's probe: was 16800000 < 16801200).
+  The history's own `now` follows at the first `maintain` (not advanced at the load: that could queue directives).
+- **I2.** `first_of_generation` also detaches every older host still attached. Test
+  `the_first_attach_of_a_new_generation_detaches_the_older_hosts`.
+- **S1 (ruling: monotonic).** The runtime stamps `hosts` reads on the process's monotonic clock; the core asks the
+  watch by its reads (`lapsed_by_reads`), never comparing the store-clock `now`. `StoreClock`'s forward step is NOT
+  bounded (decided): a sample is the store's word, the existing test asserts a forward sample is taken at once, and
+  what a step overtakes fails safe (a cut aborts, a succession deadline rolls back, the calendar re-anchors). Test
+  `takeover::a_forward_step_of_the_store_clock_lapses_nobody` (hook `step_store_clock`; RED with store-clock stamps).
+- **S-M1.** `register_in` counts a dirty row toward a total crash only if live, landed, or an open run's
+  predecessor. Test `succession::an_ended_row_is_no_total_crash_after_a_clean_stop`.
+- **G1** `take_transition` returns `None` while writing (four tests now acknowledge the writes they treated as
+  committed — `written()` — no assertion removed); **G2** `forget_absent_hosts` prunes `cuts.attached` and
+  `boots_seen`; **G3/G4** docs; **G5** `WorldGeneration::why` in the stop logs; **S-M2/S-M3** wording;
+  **S-M4** WATCH test diagnostics (message only); **D1** CLAUDE.md crash-loop sentence; **D2** go-nogo-r3 note;
+  **D3** `crossing_summary.py` matches `event=autopilot_seam ` (regression test) + TODO note; **D4** `RegionHosts`
+  is a session reset; **D5** `twin_check.sh` phase 5 asserts host b `land=0`; **D6** TODO notes.
+
+Gate (sequential): game lib 159 + the 3 known `lod::tests` reds, `it` 945; world-store SQLite and Postgres 141 + the
+known `golden_blobs_decode` (Postgres with ignored: 183 + it); server (test-hooks) ok, `coordinator_rt` 11/11,
+`login_link` 12/12; `test-threads` 291 + 3 + 10; r2 19/19; r3 44/44; r4 25/25 (WATCH test green); determinism-wasm,
+smoke, web-check, client `--no-run` ok; Python 21 ok; `bash -n scripts/twin_check.sh` ok (the twin was not run).
