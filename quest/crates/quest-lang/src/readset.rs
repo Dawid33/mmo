@@ -3,8 +3,8 @@
 //! - The **dialogue read set**: every global read by a dialogue's or scene's synthesised fns (conditions,
 //!   substitutions, `emit` arguments, targets, filters, speakers, `once per` keys) or a stage's transitions,
 //!   and by everything they call, transitively. Only these are mirrored to an NPC's region.
-//! - Each **part's read set**: the quest's globals (not the parts' own `let`s) its handlers read, and what
-//!   they call reads.
+//! - Each **part's read set**: the home's globals (the quest's and the program's top-level `let`s, not the
+//!   parts' own) its handlers read, and what they call reads.
 //!
 //! `mirror-size` (a warning) when a read set's static size exceeds `MIRROR_WORDS_WARN` words: each global
 //! counts its slot and its value's words; a value of unbounded size (a `str`, a `list`, a `dict`, a type
@@ -24,13 +24,22 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct ReadSets {
     /// Read by the dialogues', scenes' and transitions' synthesised fns (and what they call).
     pub dialogue: BTreeSet<DefId>,
-    /// Each part's (by its index in `Quest::parts`): the quest globals its handlers read.
+    /// Each part's (by its index in `Quest::parts`): the home's globals (quest and top-level `let`s) its
+    /// handlers read.
     pub parts: Vec<BTreeSet<DefId>>,
 }
 
 /// The read sets, and a `mirror-size` warning for each one that is too big.
 pub fn read_sets(krate: &Crate, typed: &Typed) -> (ReadSets, Vec<Diagnostic>) {
-    let facts = callgraph::facts(krate, typed);
+    read_sets_with(krate, typed, &callgraph::facts(krate, typed))
+}
+
+/// [`read_sets`] over the typed call graph `facts` (`callgraph::facts`), computed once by `infer`.
+pub(crate) fn read_sets_with(
+    krate: &Crate,
+    typed: &Typed,
+    facts: &BTreeMap<DefId, Facts>,
+) -> (ReadSets, Vec<Diagnostic>) {
     let mut starts: Vec<DefId> = Vec::new();
     let mut parts: Vec<(String, Vec<DefId>)> = Vec::new();
     let mut part_globals: BTreeSet<DefId> = BTreeSet::new();
@@ -53,7 +62,7 @@ pub fn read_sets(krate: &Crate, typed: &Typed) -> (ReadSets, Vec<Diagnostic>) {
         }
     }
     let reads = |starts: &[DefId]| -> BTreeSet<DefId> {
-        callgraph::reach(&facts, starts)
+        callgraph::reach(facts, starts)
             .iter()
             .filter_map(|d| facts.get(d))
             .flat_map(|f: &Facts| f.reads.iter().map(|(g, _)| *g))
@@ -66,9 +75,7 @@ pub fn read_sets(krate: &Crate, typed: &Typed) -> (ReadSets, Vec<Diagnostic>) {
     for (_, handlers) in &parts {
         let quest_state = reads(handlers)
             .into_iter()
-            .filter(|g| {
-                krate.def(*g).is_some_and(|def| def.parent.is_some()) && !part_globals.contains(g)
-            })
+            .filter(|g| !part_globals.contains(g))
             .collect();
         sets.parts.push(quest_state);
     }

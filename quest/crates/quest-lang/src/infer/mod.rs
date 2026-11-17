@@ -251,9 +251,10 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
     };
     let mut diags = inf.diags;
     // The Phase 10 checks, over the typed program (spec §5.11–5.12).
-    diags.extend(crate::purity::purity(krate, &typed, host));
+    let facts = crate::callgraph::facts(krate, &typed);
+    diags.extend(crate::purity::purity_with(krate, &typed, host, &facts));
     diags.extend(crate::query::query_subset(krate, &typed, host));
-    let (read_sets, mut mirror) = crate::readset::read_sets(krate, &typed);
+    let (read_sets, mut mirror) = crate::readset::read_sets_with(krate, &typed, &facts);
     typed.read_sets = read_sets;
     diags.append(&mut mirror);
     (typed, diags)

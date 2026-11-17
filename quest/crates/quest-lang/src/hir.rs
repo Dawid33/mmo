@@ -334,9 +334,10 @@ pub enum Builtin {
     Option,
     Promise,
     /// A dialogue's id (`DialogueEnded.dialogue`, a dialogue's name as a value): opaque, compared with `==` /
-    /// `!=`; not nameable in source yet.
+    /// `!=`. Not nameable in a type annotation (`BUILTIN_TYPES` has no `Dialogue`): inferred only.
     Dialogue,
-    /// A dialogue's exit (`confront::paid`): opaque, compared with `==` / `!=`; not nameable in source yet.
+    /// A dialogue's exit (`confront::paid`): opaque, compared with `==` / `!=`. Not nameable in a type
+    /// annotation: inferred only.
     Exit,
 }
 

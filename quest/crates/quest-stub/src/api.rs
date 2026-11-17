@@ -6,7 +6,8 @@
 //! subset) and other pure queries, the commands, the events, and in the namespace `quest` the host side of
 //! the quest builtins. The types and events a quest generates or the compiler owns (`Entered`, `RoleLost`,
 //! `Talked`, `DialogueEnded`, `SceneEnded`, `EndReason`, `SceneEnd`, `Exit`, `Stage`, `Role`) are not here.
-//! A `Dialogue` parameter is `Value` until the compiler has its own `Dialogue` type.
+//! A `Dialogue` parameter is still `Value` here: the compiler has a `Dialogue` type now, and the host side
+//! is tightened to it in Task 44 (a new `HostTy` variant).
 //!
 //! Version 3 adds a fallible query, `Person.distance_to(other) -> Int raises OutOfReach`.
 //!

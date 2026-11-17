@@ -291,6 +291,35 @@ fn bad_where_non_fact() {
 }
 
 #[test]
+fn bad_where_refusals() {
+    let main = r#"let occs = [Occupation::Farmer]
+
+quest Q:
+    role a: Person where not (a.alive and a.has_tag("x"))
+    role b: Person where b.occupation in occs
+    role c: Person where c.occupation in [a.occupation]
+    role d: Person where 1 == 1 and d.alive
+    role e: Person where abs(act()) > 1
+"#;
+    assert_eq!(
+        errs(main),
+        vec![
+            d("bad-where", 4),
+            d("bad-where", 5),
+            d("bad-where", 6),
+            d("bad-where", 7),
+            d("bad-where", 8),
+        ]
+    );
+    let all = messages(main, "bad-where");
+    assert!(all[0].contains("`not` applies to one atom"), "{all:?}");
+    assert!(all[1].contains("written out"), "{all:?}");
+    assert!(all[2].contains("lists constants"), "{all:?}");
+    assert!(all[3].contains("two constants"), "{all:?}");
+    assert!(all[4].contains("host's facts"), "{all:?}");
+}
+
+#[test]
 fn bad_where_later_role() {
     let main = r#"quest Q:
     role inn: Person where inn.site == farmer.site
@@ -371,6 +400,21 @@ fn part_write_assign() {
             d("part-write", 15),
         ]
     );
+}
+
+#[test]
+fn part_write_top_level_global() {
+    // A program's top-level `let`s are the home's state, as the quest's are.
+    let main = r#"let top = 0
+
+quest Q:
+    role dog: Creature
+    part watch on dog:
+        @on(PlayerNear)
+        fn near_dog(e):
+            top = top + 1
+"#;
+    assert_eq!(errs(main), vec![d("part-write", 8)]);
 }
 
 #[test]
@@ -495,7 +539,7 @@ quest Q:
         @on(PlayerNear)
         fn near_dog(e):
             seen = seen + 1
-            if stage == Stage::A and seen > found:
+            if stage == Stage::A and seen > found + a:
                 pass
 "#;
     assert_eq!(errs(main), vec![]);
@@ -508,7 +552,11 @@ quest Q:
     };
     assert_eq!(names(&typed.read_sets.dialogue), ["Q::found", "a", "b"]);
     assert_eq!(typed.read_sets.parts.len(), 1);
-    assert_eq!(names(&typed.read_sets.parts[0]), ["Q::found", "Q::stage"]);
+    // A top-level `let` is home state too: a part reads it through its mirror.
+    assert_eq!(
+        names(&typed.read_sets.parts[0]),
+        ["Q::found", "Q::stage", "a"]
+    );
 }
 
 #[test]

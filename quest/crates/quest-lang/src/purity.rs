@@ -12,7 +12,7 @@
 //!   is never assigned, changed in place or referred to by `&` in any code; only the builtins and an
 //!   objective's commands change them.
 //! - **A part never writes quest state** (`part-write`): a part's handlers, and what they call, assign no
-//!   quest global (its own `let`s are its own), call no objective command, no `join`, `leave`, `complete` or
+//!   quest global and no top-level global (home state, as quest `let`s; its own `let`s are its own), call no objective command, no `join`, `leave`, `complete` or
 //!   `fail`, and no `-> Stage`. Reported at the handler's site, naming the chain.
 
 use crate::ast::Span;
@@ -25,11 +25,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The Phase 10 write checks: `impure-condition`, `stateless-dialogue`, `role-assign`, `part-write`.
 pub fn purity(krate: &Crate, typed: &Typed, host: &HostApi) -> Vec<Diagnostic> {
-    let facts = callgraph::facts(krate, typed);
+    purity_with(krate, typed, host, &callgraph::facts(krate, typed))
+}
+
+/// [`purity`] over the typed call graph `facts` (`callgraph::facts`), computed once by `infer`.
+pub(crate) fn purity_with(
+    krate: &Crate,
+    typed: &Typed,
+    host: &HostApi,
+    facts: &BTreeMap<DefId, Facts>,
+) -> Vec<Diagnostic> {
     let mut c = Checker {
         krate,
         host,
-        facts: &facts,
+        facts,
         generated: generated(krate),
         diags: Vec::new(),
     };
@@ -245,7 +254,8 @@ impl Checker<'_> {
     fn parts(&mut self, q: &crate::hir::Quest) {
         let part_globals: BTreeSet<DefId> =
             q.parts.iter().flat_map(|p| &p.globals).copied().collect();
-        // The quest's own globals a part may not write (the generated ones are `role-assign` everywhere).
+        // The home's state a part may not write: the quest's `let`s and the program's top-level `let`s (both
+        // live in the home instance); the generated ones are `role-assign` everywhere.
         let quest_globals: BTreeSet<DefId> = self
             .krate
             .defs
@@ -253,11 +263,7 @@ impl Checker<'_> {
             .enumerate()
             .filter(|(_, def)| matches!(def.kind, DefKind::Global(_)))
             .map(|(i, _)| DefId(u32::try_from(i).unwrap_or(u32::MAX)))
-            .filter(|g| {
-                self.krate.def(*g).and_then(|def| def.parent).is_some()
-                    && !part_globals.contains(g)
-                    && !self.generated.contains(g)
-            })
+            .filter(|g| !part_globals.contains(g) && !self.generated.contains(g))
             .collect();
         for p in &q.parts {
             for h in &p.handlers {
