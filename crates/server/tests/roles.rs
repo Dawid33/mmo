@@ -19,10 +19,10 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{unbounded, Receiver};
 use game::history::log::LogKind;
 use game::history::{
-    CalendarTick, EmbarkRefusal, History, LegendsFilter, LegendsQuery, Location, PersonId, Sex, SiteId,
+    AdventureRefusal, CalendarTick, History, LegendsFilter, LegendsQuery, Location, PersonId, Sex, SiteId,
 };
 use game::{
-    ClientId, HostId, ClientPacket, EmbarkRequest, InlineLodBuilder, InlineSpawner, LodBuilder, Ownership, PlayerId,
+    Claim, ClientId, HostId, ClientPacket, InlineLodBuilder, InlineSpawner, LodBuilder, Ownership, PlayerId,
     RegionCoords, RegionOutput, RegionSpawner, ServerEvent, ServerPacket, WorldLink, WorldManager, WorldMap,
 };
 use server::claims::{Fenced, HostClaims, ServerExit};
@@ -132,15 +132,30 @@ fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
     out
 }
 
-/// Two members of the first site, into the first region (in a row from (2, 2)) where a
-/// player may found one.
-fn embark_request(h: &History) -> EmbarkRequest {
-    let s = h.sites().next().expect("a site");
-    let region = (2..46)
-        .flat_map(|z| (2..46).map(move |x| RegionCoords::new(x, z)))
-        .find(|r| h.player_embark_allowed(*r).is_ok())
-        .expect("room to embark");
-    EmbarkRequest { civ: s.civ, people: s.members.iter().copied().take(2).collect(), region }
+/// An adventure start at a populated site: the state-changing world request the downtime,
+/// memo, write-before-send and conservation guarantees are proven on.
+#[derive(Clone, Copy, Debug)]
+struct Start {
+    site: SiteId,
+    /// The site's region: where the player goes, and the region that runs its people.
+    region: RegionCoords,
+}
+
+impl Start {
+    fn packet(&self) -> ClientPacket {
+        ClientPacket::StartAdventure(self.site)
+    }
+}
+
+/// Whether `site` may be adventured at: not abandoned, a living member.
+fn populated(h: &History, site: SiteId) -> bool {
+    h.site(site).is_some_and(|s| s.abandoned.is_none()) && !h.living_members(site).is_empty()
+}
+
+/// An adventure at the first populated site.
+fn start_request(h: &History) -> Start {
+    let s = h.sites().find(|s| populated(h, s.id)).expect("a populated site");
+    Start { site: s.id, region: s.region }
 }
 
 /// The coordinator's saved history.
@@ -150,12 +165,12 @@ fn stored_history(store: &StoreHandle, map: &WorldMap) -> History {
     game::history::persist::decode(&row.history, grid).expect("its history decodes")
 }
 
-/// The player-founded sites in the coordinator's saved state.
-fn stored_player_sites(store: &StoreHandle, map: &WorldMap) -> Vec<SiteId> {
-    let Some(row) = store.load_coordinator().unwrap() else { return Vec::new() };
-    let grid = game::history::SocietyGrid::from_world_map(map);
-    let history = game::history::persist::decode(&row.history, grid).expect("its history decodes");
-    history.sites().filter(|s| s.player_founded).map(|s| s.id).collect()
+/// The players' claims in the coordinator's saved state (none before its first write).
+fn stored_claims(store: &StoreHandle, map: &WorldMap) -> Vec<(PlayerId, Claim)> {
+    if store.load_coordinator().unwrap().is_none() {
+        return Vec::new();
+    }
+    stored_core(store, map).claims()
 }
 
 // ---- the coordinator process ------------------------------------------------------------
@@ -337,15 +352,11 @@ impl Host {
         assert!(self.manager.handle_server_event(ev, now));
     }
 
-    fn has(&self, c: ClientId, pred: impl Fn(&ServerPacket) -> bool) -> bool {
-        self.inbox.iter().any(|(to, p)| *to == Some(c) && pred(p))
-    }
-
-    fn embark_results(&self, c: ClientId) -> Vec<Result<SiteId, EmbarkRefusal>> {
+    fn adventure_results(&self, c: ClientId) -> Vec<Result<SiteId, AdventureRefusal>> {
         self.inbox
             .iter()
             .filter_map(|(to, p)| match p {
-                ServerPacket::EmbarkResult(r) if *to == Some(c) => Some(*r),
+                ServerPacket::AdventureResult(r) if *to == Some(c) => Some(*r),
                 _ => None,
             })
             .collect()
@@ -378,29 +389,38 @@ impl Host {
     }
 }
 
-/// The script both runs play: A connects, embarks, asks the founded site's legends,
-/// retires, asks them again. Returns every packet A got (bar the regions' stream and
-/// the day's broadcasts), in order, as text.
-fn play_script(host: &mut Host, player: PlayerId, req: &EmbarkRequest) -> Vec<String> {
+/// The script both runs play: A connects, starts an adventure, asks the site's legends,
+/// ends the adventure, asks them again. Returns every packet A got (bar the regions' stream
+/// and the day's broadcasts), in order, as text, and the claims `store` held once the start
+/// was answered (its reply leaves only after its write).
+fn play_script(
+    host: &mut Host,
+    player: PlayerId,
+    start: Start,
+    store: &StoreHandle,
+    map: &WorldMap,
+) -> (Vec<String>, Vec<(PlayerId, Claim)>) {
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player, record: None });
     for _ in 0..3 {
         host.round();
     }
-    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
-    host.until("an EmbarkResult", |h| !h.embark_results(A).is_empty());
-    let site = host.embark_results(A)[0].expect("embarked");
+    host.send(ServerEvent::ClientPacket(start.packet(), A));
+    host.until("an AdventureResult", |h| !h.adventure_results(A).is_empty());
+    let site = host.adventure_results(A)[0].expect("started");
+    let claims = stored_claims(store, map);
     let query = LegendsQuery { filter: LegendsFilter::Site(site), before: None, limit: 20 };
     host.send(ServerEvent::ClientPacket(ClientPacket::RequestLegends(query.clone()), A));
     host.until("a Legends page", |h| h.legends_pages(A) == 1);
-    host.send(ServerEvent::ClientPacket(ClientPacket::Retire, A));
-    host.until("Fortress(None) after retiring", |h| h.has(A, |p| matches!(p, ServerPacket::Fortress(None))));
+    host.send(ServerEvent::ClientPacket(ClientPacket::EndAdventure, A));
+    host.until("the claim released after the end", |_| stored_claims(store, map).is_empty());
     host.send(ServerEvent::ClientPacket(ClientPacket::RequestLegends(query), A));
     host.until("a second Legends page", |h| h.legends_pages(A) == 2);
     for _ in 0..5 {
         host.round();
     }
-    host.inbox
+    let packets = host
+        .inbox
         .iter()
         .filter(|(to, _)| *to == Some(A) || to.is_none())
         .map(|(to, p)| match p {
@@ -408,12 +428,14 @@ fn play_script(host: &mut Host, player: PlayerId, req: &EmbarkRequest) -> Vec<St
             ServerPacket::WorldMap(m) => format!("{to:?} WorldMap {}x{}", m.width, m.height),
             p => format!("{to:?} {p:?}"),
         })
-        .collect()
+        .collect();
+    (packets, claims)
 }
 
 /// The world split in two processes plays like the same world in one: the same script
-/// (connect, embark, legends, retire, legends) gets the same packets, and the
-/// coordinator process — the only writer of history state — saved the one site.
+/// (connect, start an adventure, legends, end it, legends) gets the same packets, and the
+/// coordinator process — the only writer of history state — saved the same claim before
+/// answering, and its release.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn split_world_plays_like_all_in_one() {
@@ -426,14 +448,14 @@ fn split_world_plays_like_all_in_one() {
     let store = all_db.open();
     let (a, _) = StorePlayers(store.clone()).resolve(&a_key).unwrap();
     let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
-    let req = embark_request(start.coordinator.history());
+    let adventure = start_request(start.coordinator.history());
     let claims_fenced = Fenced::default();
     let (link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, claims_fenced).unwrap();
     let mut host = Host::start(&store, &map, |_| Box::new(game::AllInOne), |_| Box::new(link), Some(thread), 1);
-    let all_packets = play_script(&mut host, a, &req);
+    let (all_packets, all_claims) = play_script(&mut host, a, adventure, &store, &map);
     assert_eq!(host.exit(), ServerExit::Clean);
     let store = all_db.open();
-    let all_sites = stored_player_sites(&store, &map);
+    let all_after = stored_claims(&store, &map);
     store.shutdown();
 
     // Split: a coordinator process and a host process over the service link.
@@ -446,19 +468,20 @@ fn split_world_plays_like_all_in_one() {
     assert_eq!(a_split, a, "the same player id in both worlds");
     let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file, h(0), 1, reg)) };
     let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 1);
-    let split_packets = play_script(&mut host, a, &req);
+    let (split_packets, split_claims) = play_script(&mut host, a, adventure, &coordinator.store, &map);
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
     coordinator.stop();
     let split_store = split_db.open();
-    let split_sites = stored_player_sites(&split_store, &map);
+    let split_after = stored_claims(&split_store, &map);
     assert_eq!(split_store.load_history().unwrap(), None, "the host wrote no history row");
     split_store.shutdown();
 
-    assert!(all_packets.iter().any(|p| p.contains("EmbarkResult(Ok(")), "{all_packets:#?}");
+    assert!(all_packets.iter().any(|p| p.contains("AdventureResult(Ok(")), "{all_packets:#?}");
     assert_eq!(split_packets, all_packets, "the split world sends the client what the one-process world sends");
-    assert_eq!(all_sites.len(), 1, "one site founded: {all_sites:?}");
-    assert_eq!(split_sites, all_sites, "the coordinator process saved the same site");
+    assert_eq!(all_claims, vec![(a, Claim::Adventure(adventure.site))], "the start's claim, saved before its answer");
+    assert_eq!(split_claims, all_claims, "the coordinator process saved the same claim");
+    assert_eq!((all_after.len(), split_after.len()), (0, 0), "the end's release saved: {all_after:?} {split_after:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -796,11 +819,11 @@ fn host_survives_coordinator_absence_at_start() {
     let addr = free_udp_addr();
 
     // The bootstrap the coordinator will load, read ahead for the request.
-    let req = {
+    let adventure = {
         let store = db.open();
         let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
         store.shutdown();
-        embark_request(start.coordinator.history())
+        start_request(start.coordinator.history())
     };
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
@@ -814,7 +837,7 @@ fn host_survives_coordinator_absence_at_start() {
     }
     assert!(!host.manager.running_regions().is_empty(), "the host runs its player's region");
     assert!(host.manager.spawner_mut().world_tick() > tick_before, "and simulates without a coordinator");
-    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
+    host.send(ServerEvent::ClientPacket(adventure.packet(), A));
     let query = LegendsQuery { filter: LegendsFilter::All, before: None, limit: 5 };
     host.send(ServerEvent::ClientPacket(ClientPacket::RequestLegends(query), A));
     for _ in 0..10 {
@@ -823,22 +846,25 @@ fn host_survives_coordinator_absence_at_start() {
     assert!(!host.manager.world_attached(), "no coordinator: not attached");
     assert_eq!(host.manager.pending_world_requests(), 2, "both requests wait");
     assert_eq!(host.manager.world_outbox_len(), 3, "in the outbox, behind the player's PlayerOnline");
-    assert!(host.embark_results(A).is_empty() && host.legends_pages(A) == 0, "nothing answered yet");
+    assert!(host.adventure_results(A).is_empty() && host.legends_pages(A) == 0, "nothing answered yet");
 
     // The coordinator comes up (writing its pin): the host attaches, the queue drains.
     let (coordinator, _) = Coordinator::start(&db, &map, addr, cert_file);
     host.until("attached to the late coordinator", |h| h.manager.world_attached());
-    host.until("the embark answered", |h| !h.embark_results(A).is_empty());
+    host.until("the start answered", |h| !h.adventure_results(A).is_empty());
     host.until("the legends answered", |h| h.legends_pages(A) == 1);
     for _ in 0..10 {
         host.round();
     }
-    let results = host.embark_results(A);
-    assert_eq!(results.len(), 1, "one EmbarkResult: {results:?}");
-    let site = results[0].expect("embarked");
+    let results = host.adventure_results(A);
+    assert_eq!(results, vec![Ok(adventure.site)], "one AdventureResult");
     assert_eq!(host.legends_pages(A), 1, "one Legends page");
     assert_eq!(host.manager.pending_world_requests(), 0);
-    assert_eq!(stored_player_sites(&coordinator.store, &map), vec![site], "founded once, saved by the coordinator");
+    assert_eq!(
+        stored_claims(&coordinator.store, &map),
+        vec![(a, Claim::Adventure(adventure.site))],
+        "granted once, saved by the coordinator"
+    );
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
     coordinator.stop();
@@ -867,22 +893,69 @@ fn standing_in(region: RegionCoords) -> game::PlayerRecord {
     }
 }
 
-/// Two members of the first site, not taken in `taken`, into the first region from (2, 2)
-/// where a player may found one and host `ordinal` (of two) owns.
-fn embark_request_on(h: &History, s: u32, ordinal: HostId, taken: &[PersonId]) -> EmbarkRequest {
-    let site = h.sites().next().expect("a site");
+/// An adventure at the first populated site whose region host `ordinal` (of two) owns.
+fn start_request_on(h: &History, s: u32, ordinal: HostId) -> Start {
     let owner = |rc: RegionCoords| table(HostId(0), 2).owner_of(rc, s);
-    let region = (2..46)
-        .flat_map(|z| (2..46).map(move |x| RegionCoords::new(x, z)))
-        .find(|r| owner(*r) == ordinal && h.player_embark_allowed(*r).is_ok())
-        .expect("room to embark on the host");
-    let people = site.members.iter().copied().filter(|p| !taken.contains(p)).take(2).collect();
-    EmbarkRequest { civ: site.civ, people, region }
+    let site = h.sites().find(|x| populated(h, x.id) && owner(x.region) == ordinal).expect("a populated site on the host");
+    Start { site: site.id, region: site.region }
+}
+
+/// Where each started site's people are: every person the coordinator's history embodies in
+/// the site's region has one body, there, on the host of that census and on no other; no
+/// living member is left abstract at the site while its region runs; someone is there.
+fn placed(
+    coordinator: &Coordinator,
+    censuses: &[(BTreeMap<PersonId, Vec<RegionCoords>>, Start)],
+) -> Result<(), String> {
+    let starts: Vec<Start> = censuses.iter().map(|(_, s)| *s).collect();
+    let people = coordinator
+        .thread
+        .inspect(
+            move |c| {
+                let h = c.history();
+                starts
+                    .iter()
+                    .map(|s| {
+                        let embodied: Vec<PersonId> = h
+                            .people()
+                            .filter(|q| q.alive() && q.location == Location::InRegion(s.region))
+                            .map(|q| q.id)
+                            .collect();
+                        let abstract_here: Vec<PersonId> = h
+                            .living_members(s.site)
+                            .into_iter()
+                            .filter(|p| h.person(*p).is_some_and(|q| q.location == Location::AtSite(s.site)))
+                            .collect();
+                        (embodied, abstract_here)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            WAIT,
+        )
+        .expect("the coordinator answers");
+    for (k, ((census, start), (embodied, abstract_here))) in censuses.iter().zip(people).enumerate() {
+        if embodied.is_empty() {
+            return Err(format!("nobody embodied in {:?}", start.region));
+        }
+        if !abstract_here.is_empty() {
+            return Err(format!("{abstract_here:?} left abstract at {:?} while its region runs", start.site));
+        }
+        for p in &embodied {
+            if census.get(p) != Some(&vec![start.region]) {
+                let at = census.get(p);
+                return Err(format!("{p:?} is in {:?} in the history, bodies on host {k}: {at:?}", start.region));
+            }
+            if let Some((other, _)) = censuses.iter().enumerate().find(|(j, (c, _))| *j != k && c.contains_key(p)) {
+                return Err(format!("{p:?} of host {k}'s site has a body on host {other}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A coordinator serves two hosts (R3): both attach — host 1's `Attach` parks nothing of
-/// host 0's — and each one's player embarks into a region that host owns: the founding
-/// party of each fortress gets its bodies on the host that runs it, and keeps them.
+/// host 0's — and each one's player starts an adventure at a populated site in a region that
+/// host owns: the site's people get their bodies on the host that runs it, and keep them.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn two_hosts_attach_and_both_get_their_people() {
@@ -909,57 +982,39 @@ fn two_hosts_attach_and_both_get_their_people() {
     let mut h0 = Host::start(&store0, &map, |me| Box::new(table(me, 2)), link(h(0)), None, 10);
     h0.until("host 0 attached", |h| h.manager.world_attached());
 
-    // Host 0's player embarks into a region of host 0.
-    let req0 = embark_request_on(&stored_history(&coordinator.store, &map), s, h(0), &[]);
+    // Host 0's player starts an adventure at a site of host 0.
+    let start0 = start_request_on(&stored_history(&coordinator.store, &map), s, h(0));
     let owner = |rc: RegionCoords| table(h(0), 2).owner_of(rc, s);
     let spawn0 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == h(0)).expect("a region of host 0");
     h0.send(ServerEvent::ClientConnected { client: A, player: a, record: Some(standing_in(spawn0)) });
-    h0.send(ServerEvent::ClientPacket(ClientPacket::Embark(req0.clone()), A));
-    h0.until("host 0's embark", |h| !h.embark_results(A).is_empty());
-    let site0 = h0.embark_results(A)[0].expect("host 0's player embarked");
-    let party0 = req0.people.clone();
-    h0.until("host 0's party", |h| {
-        let census = bodies(&mut h.manager);
-        party0.iter().all(|p| census.get(p) == Some(&vec![req0.region]))
-    });
+    h0.send(ServerEvent::ClientPacket(start0.packet(), A));
+    h0.until("host 0's start", |h| !h.adventure_results(A).is_empty());
+    assert_eq!(h0.adventure_results(A), vec![Ok(start0.site)], "host 0's player started");
+    h0.until("host 0's site people", |h| placed(&coordinator, &[(bodies(&mut h.manager), start0)]).is_ok());
 
     // Host 1 attaches: nothing of host 0's parks.
     let mut h1 = Host::start(&store1, &map, |me| Box::new(table(me, 2)), link(h(1)), None, 11);
     until_both(&mut h0, &mut h1, "host 1 attached", |_, h1| h1.manager.world_attached());
-    let req1 = {
-        let taken = req0.people.clone();
-        coordinator.thread.inspect(move |c| embark_request_on(c.history(), s, h(1), &taken), WAIT).expect("the coordinator answers")
-    };
+    let start1 =
+        coordinator.thread.inspect(move |c| start_request_on(c.history(), s, h(1)), WAIT).expect("the coordinator answers");
+    assert_ne!(start0.region, start1.region);
     let spawn1 = (2..46).map(|x| RegionCoords::new(x, 2)).find(|r| owner(*r) == h(1)).expect("a region of host 1");
     h1.send(ServerEvent::ClientConnected { client: A, player: b, record: Some(standing_in(spawn1)) });
-    h1.send(ServerEvent::ClientPacket(ClientPacket::Embark(req1.clone()), A));
-    until_both(&mut h0, &mut h1, "host 1's embark", |_, h1| !h1.embark_results(A).is_empty());
-    let site1 = h1.embark_results(A)[0].expect("host 1's player embarked");
-    assert_ne!(site0, site1);
-    let (party0, party1) = (req0.people.clone(), req1.people.clone());
-    until_both(&mut h0, &mut h1, "both parties stand in their fortresses", |h0, h1| {
-        let (c0, c1) = (bodies(&mut h0.manager), bodies(&mut h1.manager));
-        party0.iter().all(|p| c0.get(p) == Some(&vec![req0.region]) && !c1.contains_key(p))
-            && party1.iter().all(|p| c1.get(p) == Some(&vec![req1.region]) && !c0.contains_key(p))
-    });
+    h1.send(ServerEvent::ClientPacket(start1.packet(), A));
+    until_both(&mut h0, &mut h1, "host 1's start", |_, h1| !h1.adventure_results(A).is_empty());
+    assert_eq!(h1.adventure_results(A), vec![Ok(start1.site)], "host 1's player started");
+    let both = |h0: &mut Host, h1: &mut Host| {
+        placed(&coordinator, &[(bodies(&mut h0.manager), start0), (bodies(&mut h1.manager), start1)])
+    };
+    until_both(&mut h0, &mut h1, "both sites' people stand on their hosts", |h0, h1| both(h0, h1).is_ok());
     for _ in 0..20 {
         h0.round();
         h1.round();
     }
-    let (c0, c1) = (bodies(&mut h0.manager), bodies(&mut h1.manager));
-    for p in &req0.people {
-        assert_eq!((c0.get(p), c1.get(p)), (Some(&vec![req0.region]), None), "{p:?} stays on host 0");
+    if let Err(e) = both(&mut h0, &mut h1) {
+        panic!("after 20 more rounds: {e}");
     }
-    for p in &req1.people {
-        assert_eq!((c0.get(p), c1.get(p)), (None, Some(&vec![req1.region])), "{p:?} stays on host 1");
-    }
-    let (r0, r1, all) = (req0.region, req1.region, [req0.people.clone(), req1.people.clone()]);
-    let locations = coordinator
-        .thread
-        .inspect(move |c| all.map(|ps| ps.iter().map(|p| c.history().person(*p).map(|q| q.location)).collect::<Vec<_>>()), WAIT)
-        .expect("the coordinator answers");
-    assert!(locations[0].iter().all(|l| *l == Some(Location::InRegion(r0))), "{locations:?}");
-    assert!(locations[1].iter().all(|l| *l == Some(Location::InRegion(r1))), "{locations:?}");
+    assert_eq!(h0.adventure_results(A).len() + h1.adventure_results(A).len(), 2, "one answer each");
     coordinator.stop();
     drop((h0, h1));
     store0.shutdown();
@@ -1174,31 +1229,36 @@ fn bodies(manager: &mut WorldManager<InlineSpawner>) -> BTreeMap<PersonId, Vec<R
     out
 }
 
-/// What must hold at every moment: at most one body per person, none for the dead or
-/// the unknown.
+/// What must hold at every moment: at most one body per person, none for the unknown. (A
+/// body of someone the history has just let die stands until its despawn directive arrives:
+/// none for the dead is [`settled`]'s.)
 fn never_twice(h: &History, bodies: &BTreeMap<PersonId, Vec<RegionCoords>>) -> Result<(), String> {
     for (p, at) in bodies {
         if at.len() > 1 {
             return Err(format!("{p:?} has bodies in {at:?}"));
         }
-        if !h.person(*p).is_some_and(|q| q.alive()) {
-            return Err(format!("a body for {p:?}, who is not alive"));
+        if h.person(*p).is_none() {
+            return Err(format!("a body for {p:?}, whom the history does not know"));
         }
     }
     Ok(())
 }
 
-/// The settled agreement: [`never_twice`]; every living person embodied in the history
-/// has their one body where the history has it, everyone else none; and the fortress
-/// region's population is its site's — every living member of `site` stands in `fortress`
-/// (a resident left abstract in its running fortress is a person missing).
+/// The settled agreement: [`never_twice`]; no body for the dead; every living person
+/// embodied in the history has their one body where the history has it, everyone else none;
+/// and the played region's population is its site's — no living member of `site` is left
+/// abstract at it while `played` runs (a resident left abstract in a running region is a
+/// person missing), and someone stands there.
 fn settled(
     h: &History,
     bodies: &BTreeMap<PersonId, Vec<RegionCoords>>,
     site: SiteId,
-    fortress: RegionCoords,
+    played: RegionCoords,
 ) -> Result<(), String> {
     never_twice(h, bodies)?;
+    if let Some(p) = bodies.keys().find(|p| !h.person(**p).is_some_and(|q| q.alive())) {
+        return Err(format!("a body for {p:?}, who is not alive"));
+    }
     for q in h.people().filter(|q| q.alive()) {
         let at = bodies.get(&q.id).map_or(&[][..], Vec::as_slice);
         match q.location {
@@ -1210,19 +1270,42 @@ fn settled(
             _ => {}
         }
     }
-    let s = h.site(site).ok_or("the fortress site is gone")?;
-    let members: BTreeSet<PersonId> =
-        s.members.iter().copied().filter(|p| h.person(*p).is_some_and(|q| q.alive())).collect();
-    let here: BTreeSet<PersonId> =
-        bodies.iter().filter(|(_, at)| at.contains(&fortress)).map(|(p, _)| *p).collect();
-    if !members.is_subset(&here) {
-        return Err(format!("site members {members:?} vs bodies in the fortress {here:?}"));
+    h.site(site).ok_or("the played site is gone")?;
+    let left: Vec<PersonId> = h
+        .living_members(site)
+        .into_iter()
+        .filter(|p| h.person(*p).is_some_and(|q| q.location == Location::AtSite(site)))
+        .collect();
+    if !left.is_empty() {
+        return Err(format!("site members {left:?} left abstract while {played:?} runs"));
+    }
+    if !bodies.values().any(|at| at.contains(&played)) {
+        return Err(format!("nobody stands in {played:?}"));
     }
     Ok(())
 }
 
-/// The births logged at `site`, each child once.
-fn births_at(h: &History, site: SiteId) -> Result<Vec<PersonId>, String> {
+/// An adventure at the smallest populated site with a young married couple among its members
+/// (both alive, she at most 35): few bodies to run, and children to come.
+fn start_at_young_couple(h: &History) -> Start {
+    let young_couple = |site: SiteId| {
+        h.living_members(site).into_iter().any(|m| {
+            let q = h.person(m).unwrap();
+            q.sex == Sex::Female
+                && q.age_years(h.now()) <= 35
+                && q.spouse.is_some_and(|f| h.living_members(site).contains(&f))
+        })
+    };
+    let s = h
+        .sites()
+        .filter(|s| populated(h, s.id) && young_couple(s.id))
+        .min_by_key(|s| h.living_members(s.id).len())
+        .expect("a populated site with a young couple");
+    Start { site: s.id, region: s.region }
+}
+
+/// The births logged at `site` after `after`, each child once: (child, birth tick).
+fn births_at(h: &History, site: SiteId, after: CalendarTick) -> Result<Vec<(PersonId, CalendarTick)>, String> {
     let mut seen = BTreeSet::new();
     for e in h.log() {
         if let LogKind::Born { person, site: Some(s), .. } = e.kind {
@@ -1231,26 +1314,11 @@ fn births_at(h: &History, site: SiteId) -> Result<Vec<PersonId>, String> {
             }
         }
     }
-    Ok(seen.into_iter().collect())
-}
-
-/// An embark of a young married couple (both alive, members of one site) into the first
-/// region a player may found one in: the fortress can have children.
-fn couple_embark_request(h: &History) -> EmbarkRequest {
-    let region = (2..46)
-        .flat_map(|z| (2..46).map(move |x| RegionCoords::new(x, z)))
-        .find(|r| h.player_embark_allowed(*r).is_ok())
-        .expect("room to embark");
-    for s in h.sites() {
-        for &m in &s.members {
-            let q = h.person(m).unwrap();
-            let Some(f) = q.spouse else { continue };
-            if q.sex == Sex::Female && q.alive() && q.age_years(h.now()) <= 35 && s.members.contains(&f) {
-                return EmbarkRequest { civ: s.civ, people: vec![m, f], region };
-            }
-        }
-    }
-    panic!("no young couple to embark");
+    Ok(seen
+        .into_iter()
+        .filter_map(|p| h.person(p).map(|q| (p, q.born)))
+        .filter(|(_, born)| *born > after)
+        .collect())
 }
 
 impl Coordinator {
@@ -1277,13 +1345,13 @@ impl Coordinator {
 impl Host {
     /// Rounds until the settled agreement holds against `coordinator` (at most [`WAIT`]),
     /// [`never_twice`] checked along the way.
-    fn until_settled(&mut self, coordinator: &Coordinator, when: &str, site: SiteId, fortress: RegionCoords) {
+    fn until_settled(&mut self, coordinator: &Coordinator, when: &str, site: SiteId, played: RegionCoords) {
         let deadline = Instant::now() + WAIT;
         loop {
             let census = bodies(&mut self.manager);
             let result = coordinator
                 .thread
-                .inspect(move |c| settled(c.history(), &census, site, fortress).map_err(|e| (e, never_twice(c.history(), &census))), WAIT)
+                .inspect(move |c| settled(c.history(), &census, site, played).map_err(|e| (e, never_twice(c.history(), &census))), WAIT)
                 .expect("the coordinator answers");
             match result {
                 Ok(()) => return,
@@ -1306,12 +1374,12 @@ fn seeds(n: u64) -> Vec<u64> {
     }
 }
 
-/// The coordinator process crashes while a host runs a populated fortress — after a
-/// save, and after a birth directive (seed 0: killed at once, the birth's save racing the
-/// crash; seed 1: after the child's body stands; seed 2: with saves failing, so the birth
-/// was never durable) — and restarts: after the host re-attaches every living person of
-/// the site has exactly one body (in the running fortress) or is abstract elsewhere, no
-/// dead person has a body, and no birth is applied twice.
+/// The coordinator process crashes while a host runs a populated site's region (its
+/// player's adventure there) — after a save, and after a birth directive (seed 0: killed at
+/// once, the birth's save racing the crash; seed 1: after the child's body stands; seed 2:
+/// with saves failing, so the birth was never durable) — and restarts: after the host
+/// re-attaches every living person has exactly one body (the site's residents in the running
+/// region) or is abstract elsewhere, no dead person has a body, and no birth is applied twice.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn coordinator_crash_mid_play_conserves_people() {
@@ -1328,7 +1396,7 @@ fn crash_mid_play(seed: u64) {
     let dir = scratch(&format!("crash{seed}"));
     let cert_file = dir.join("coordinator.cert-sha256");
     let (c1, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
-    let req = c1.thread.inspect(|c| couple_embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let adventure = c1.thread.inspect(|c| start_at_young_couple(c.history()), WAIT).expect("the coordinator answers");
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
@@ -1336,39 +1404,48 @@ fn crash_mid_play(seed: u64) {
     let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 1);
     host.until("attached", |h| h.manager.world_attached());
     host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
-    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
-    // The embark's reply is gated: once it is here, its save committed.
-    host.until("embarked", |h| !h.embark_results(A).is_empty());
-    let site = host.embark_results(A)[0].unwrap_or_else(|e| panic!("seed {seed}: embark refused: {e:?}"));
-    let fortress = req.region;
-    host.until_settled(&c1, &format!("seed {seed}: the founded fortress"), site, fortress);
+    host.send(ServerEvent::ClientPacket(adventure.packet(), A));
+    // The start's reply is gated: once it is here, its save committed.
+    host.until("started", |h| !h.adventure_results(A).is_empty());
+    let site = host.adventure_results(A)[0].unwrap_or_else(|e| panic!("seed {seed}: start refused: {e:?}"));
+    assert_eq!(site, adventure.site);
+    let played = adventure.region;
+    host.until_settled(&c1, &format!("seed {seed}: the played site"), site, played);
 
-    // A birth: the history runs on (month by month) until the couple has a child.
+    // A birth: the history runs on (month by month) until a resident of the played region
+    // has a child, who gets a body beside her.
     if seed == 2 {
         c1.store.fail_next_writes(1_000_000);
     }
-    let born = c1
+    let (from, born, child) = c1
         .thread
         .with_core(
             move |c| {
                 let h = c.history_mut();
+                let from = h.now();
+                let embodied_birth = |h: &History| {
+                    births_at(h, site, from)
+                        .unwrap()
+                        .into_iter()
+                        .map(|(p, _)| p)
+                        .find(|p| h.person(*p).is_some_and(|q| q.alive() && q.location == Location::InRegion(played)))
+                };
                 for _ in 0..12 * 30 {
-                    let next = CalendarTick(h.now().0 + 28 * game::history::TICKS_PER_DAY);
-                    h.advance(next);
-                    if !births_at(h, site).unwrap().is_empty() {
+                    if embodied_birth(h).is_some() {
                         break;
                     }
+                    let next = CalendarTick(h.now().0 + 28 * game::history::TICKS_PER_DAY);
+                    h.advance(next);
                 }
-                births_at(h, site).unwrap()
+                (from, births_at(h, site, from).unwrap(), embodied_birth(h))
             },
             WAIT,
         )
         .expect("the coordinator answers");
-    assert!(!born.is_empty(), "seed {seed}: the couple had a child within 30 years");
+    let child = child.unwrap_or_else(|| panic!("seed {seed}: no child born to a resident of {played:?} within 30 years"));
     match seed {
         0 => {}
         1 => {
-            let child = born[0];
             host.until("the child's body", |h| bodies(&mut h.manager).get(&child).is_some());
             for _ in 0..10 {
                 host.round();
@@ -1378,7 +1455,7 @@ fn crash_mid_play(seed: u64) {
             for _ in 0..40 {
                 host.round();
                 let census = bodies(&mut host.manager);
-                assert!(born.iter().all(|p| !census.contains_key(p)), "seed {seed}: a body for a birth never saved");
+                assert!(born.iter().all(|(p, _)| !census.contains_key(p)), "seed {seed}: a body for a birth never saved");
             }
         }
     }
@@ -1393,44 +1470,47 @@ fn crash_mid_play(seed: u64) {
     // Restarted on the same address (the same pin): the host re-attaches.
     let (c2, _) = Coordinator::start(&db, &map, addr, cert_file);
     host.until("re-attached", |h| h.manager.world_attached());
-    host.until_settled(&c2, &format!("seed {seed}: after the restart"), site, fortress);
+    host.until_settled(&c2, &format!("seed {seed}: after the restart"), site, played);
     for _ in 0..20 {
         host.round();
     }
-    host.until_settled(&c2, &format!("seed {seed}: settled after the restart"), site, fortress);
-    let born_before = born.clone();
+    host.until_settled(&c2, &format!("seed {seed}: settled after the restart"), site, played);
+    let born_before: BTreeSet<(PersonId, CalendarTick)> = born.iter().copied().collect();
     c2.check(&format!("seed {seed}: births"), move |h| {
-        let now = births_at(h, site)?;
+        // A birth the restarted history made on its own (a day's turn) has another tick: only
+        // the births of the run-on count.
+        let now: BTreeSet<(PersonId, CalendarTick)> = births_at(h, site, from)?.into_iter().collect();
+        let kept: BTreeSet<_> = now.intersection(&born_before).copied().collect();
         match seed {
             // Never durable: the restart's history has no such birth.
-            2 => (now.is_empty()).then_some(()).ok_or(format!("a birth never saved came back: {now:?}")),
+            2 => kept.is_empty().then_some(()).ok_or(format!("a birth never saved came back: {kept:?}")),
             // Durable (the save raced the crash) or not; never twice.
-            0 => (now.is_empty() || now == born_before).then_some(()).ok_or(format!("{now:?} vs {born_before:?}")),
-            _ => (now == born_before).then_some(()).ok_or(format!("{now:?} vs {born_before:?}")),
+            0 => (kept.is_empty() || kept == born_before).then_some(()).ok_or(format!("{kept:?} vs {born_before:?}")),
+            _ => (kept == born_before).then_some(()).ok_or(format!("{kept:?} vs {born_before:?}")),
         }
     });
-    let results = host.embark_results(A);
-    assert_eq!(results.len(), 1, "seed {seed}: one EmbarkResult: {results:?}");
+    let results = host.adventure_results(A);
+    assert_eq!(results.len(), 1, "seed {seed}: one AdventureResult: {results:?}");
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
     c2.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The coordinator is down (crashed) when the client embarks — and the client connected
-/// during the downtime too, so its region started unannounced: the request waits in the
-/// outbox; the coordinator restarts within 10 s and exactly one site is founded, one
-/// `EmbarkResult(Ok)` arrives.
+/// The coordinator is down (crashed) when the client starts an adventure — and the client
+/// connected during the downtime too, so its region started unannounced: the request waits
+/// in the outbox; the coordinator restarts within 10 s and the adventure is granted exactly
+/// once: one `AdventureResult(Ok)` arrives, one claim is saved.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn embark_during_downtime_completes_once() {
+fn start_during_downtime_completes_once() {
     install_props();
     let Some(db) = PgDb::create("downtime") else { return };
     let map = land_map();
     let dir = scratch("downtime");
     let cert_file = dir.join("coordinator.cert-sha256");
     let (c1, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
-    let req = c1.thread.inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let adventure = c1.thread.inspect(|c| start_request(c.history()), WAIT).expect("the coordinator answers");
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
@@ -1445,51 +1525,49 @@ fn embark_during_downtime_completes_once() {
     for _ in 0..10 {
         host.round();
     }
-    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
+    host.send(ServerEvent::ClientPacket(adventure.packet(), A));
     for _ in 0..20 {
         host.round();
     }
-    assert!(host.embark_results(A).is_empty(), "nothing answers while the coordinator is down");
-    assert_eq!(host.manager.pending_world_requests(), 1, "the embark waits");
+    assert!(host.adventure_results(A).is_empty(), "nothing answers while the coordinator is down");
+    assert_eq!(host.manager.pending_world_requests(), 1, "the start waits");
 
     let (c2, _) = Coordinator::start(&db, &map, addr, cert_file);
     assert!(down_at.elapsed() < Duration::from_secs(10), "the coordinator is back within 10 s");
     host.until("re-attached", |h| h.manager.world_attached());
-    host.until("the embark answered", |h| !h.embark_results(A).is_empty());
+    host.until("the start answered", |h| !h.adventure_results(A).is_empty());
     for _ in 0..20 {
         host.round();
     }
-    let results = host.embark_results(A);
-    assert_eq!(results.len(), 1, "one EmbarkResult: {results:?}");
-    let site = results[0].expect("embarked");
-    host.until_settled(&c2, "after the embark", site, req.region);
-    assert_eq!(c2.thread.inspect(|c| player_sites(c.history()), WAIT).unwrap(), vec![site], "one site founded");
+    let results = host.adventure_results(A);
+    assert_eq!(results, vec![Ok(adventure.site)], "one AdventureResult");
+    host.until_settled(&c2, "after the start", adventure.site, adventure.region);
+    let granted = vec![(a, Claim::Adventure(adventure.site))];
+    assert_eq!(c2.thread.inspect(|c| c.claims(), WAIT).unwrap(), granted, "one claim granted");
+    assert_eq!(host.manager.pending_world_requests(), 0, "nothing waits");
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
     c2.stop();
     let store = db.open();
-    assert_eq!(stored_player_sites(&store, &map), vec![site], "and saved once");
+    assert_eq!(stored_claims(&store, &map), granted, "and saved");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn player_sites(h: &History) -> Vec<SiteId> {
-    h.sites().filter(|s| s.player_founded).map(|s| s.id).collect()
-}
-
-/// The embark's reply was decided and its save committed, but the coordinator crashed
-/// before the reply left: after the restart the host's replayed request is answered from
-/// the saved memo — the site is not founded again, one `EmbarkResult(Ok)` of that site.
+/// The start's reply was decided and its save committed, but the coordinator crashed before
+/// the reply left: after the restart the host's replayed request is answered from the saved
+/// memo — not decided again (a second decision would refuse it `AlreadyPlaying`): one
+/// `AdventureResult(Ok)` of that site, the one claim.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn embark_answered_then_crash_is_not_refounded() {
+fn start_answered_then_crash_is_not_granted_twice() {
     install_props();
     let Some(db) = PgDb::create("memo") else { return };
     let map = land_map();
     let dir = scratch("memo");
     let cert_file = dir.join("coordinator.cert-sha256");
     let (c1, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
-    let req = c1.thread.inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let adventure = c1.thread.inspect(|c| start_request(c.history()), WAIT).expect("the coordinator answers");
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
@@ -1502,40 +1580,40 @@ fn embark_answered_then_crash_is_not_refounded() {
     }
 
     c1.thread.crash_before_claim_reply();
-    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
+    host.send(ServerEvent::ClientPacket(adventure.packet(), A));
     host.until("the coordinator crashed", |_| c1.thread.is_finished());
     c1.kill();
     let saved = {
         let store = db.open();
-        let sites = stored_player_sites(&store, &map);
+        let claims = stored_claims(&store, &map);
         store.shutdown();
-        sites
+        claims
     };
-    assert_eq!(saved.len(), 1, "the founding's save committed before the crash: {saved:?}");
+    assert_eq!(saved, vec![(a, Claim::Adventure(adventure.site))], "the grant's save committed before the crash");
     host.until("the link drops", |h| !h.manager.world_attached());
-    assert!(host.embark_results(A).is_empty(), "the reply never left");
+    assert!(host.adventure_results(A).is_empty(), "the reply never left");
 
     let (c2, _) = Coordinator::start(&db, &map, addr, cert_file);
     host.until("re-attached", |h| h.manager.world_attached());
-    host.until("the embark answered", |h| !h.embark_results(A).is_empty());
+    host.until("the start answered", |h| !h.adventure_results(A).is_empty());
     for _ in 0..20 {
         host.round();
     }
-    assert_eq!(host.embark_results(A), vec![Ok(saved[0])], "one EmbarkResult, of the saved site");
-    host.until_settled(&c2, "after the replayed embark", saved[0], req.region);
-    assert_eq!(c2.thread.inspect(|c| player_sites(c.history()), WAIT).unwrap(), saved, "not founded again");
+    assert_eq!(host.adventure_results(A), vec![Ok(adventure.site)], "one AdventureResult, of the saved grant");
+    host.until_settled(&c2, "after the replayed start", adventure.site, adventure.region);
+    assert_eq!(c2.thread.inspect(|c| c.claims(), WAIT).unwrap(), saved, "not granted again");
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
     c2.stop();
     let store = db.open();
-    assert_eq!(stored_player_sites(&store, &map), saved, "one site saved");
+    assert_eq!(stored_claims(&store, &map), saved, "one claim saved");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The coordinator stays down longer than the request timeout (shortened here by the
-/// manager's test dial): the embark is answered `WorldUnavailable` once and forgotten —
-/// no site after the coordinator returns — and a later embark works.
+/// manager's test dial): the start is answered `WorldUnavailable` once and forgotten — no
+/// claim after the coordinator returns, no late grant — and a later start works.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn request_timeout_answers_world_unavailable() {
@@ -1547,7 +1625,7 @@ fn request_timeout_answers_world_unavailable() {
     let dir = scratch("timeout");
     let cert_file = dir.join("coordinator.cert-sha256");
     let (c1, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
-    let req = c1.thread.inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let adventure = c1.thread.inspect(|c| start_request(c.history()), WAIT).expect("the coordinator answers");
     let host_store = db.open();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
     let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
@@ -1562,15 +1640,15 @@ fn request_timeout_answers_world_unavailable() {
 
     c1.kill();
     host.until("the link drops", |h| !h.manager.world_attached());
-    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
+    host.send(ServerEvent::ClientPacket(adventure.packet(), A));
     let asked = Instant::now();
-    host.until("the embark times out", |h| !h.embark_results(A).is_empty());
+    host.until("the start times out", |h| !h.adventure_results(A).is_empty());
     assert!(asked.elapsed() >= Duration::from_millis(TIMEOUT_MS), "answered no earlier than the timeout");
     let until = Instant::now() + Duration::from_millis(2 * TIMEOUT_MS);
     while Instant::now() < until {
         host.round();
     }
-    assert_eq!(host.embark_results(A), vec![Err(EmbarkRefusal::WorldUnavailable)], "WorldUnavailable, once");
+    assert_eq!(host.adventure_results(A), vec![Err(AdventureRefusal::WorldUnavailable)], "WorldUnavailable, once");
     assert_eq!(host.manager.pending_world_requests(), 0, "the request is forgotten");
 
     let (c2, _) = Coordinator::start(&db, &map, addr, cert_file);
@@ -1578,12 +1656,12 @@ fn request_timeout_answers_world_unavailable() {
     for _ in 0..40 {
         host.round();
     }
-    assert_eq!(host.embark_results(A).len(), 1, "no late answer to the timed-out embark");
-    assert!(c2.thread.inspect(|c| player_sites(c.history()), WAIT).unwrap().is_empty(), "no site founded");
-    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
-    host.until("the second embark answered", |h| h.embark_results(A).len() == 2);
-    let site = host.embark_results(A)[1].expect("the later embark works");
-    assert_eq!(c2.thread.inspect(|c| player_sites(c.history()), WAIT).unwrap(), vec![site]);
+    assert_eq!(host.adventure_results(A).len(), 1, "no late answer to the timed-out start");
+    assert!(c2.thread.inspect(|c| c.claims(), WAIT).unwrap().is_empty(), "no late grant");
+    host.send(ServerEvent::ClientPacket(adventure.packet(), A));
+    host.until("the second start answered", |h| h.adventure_results(A).len() == 2);
+    assert_eq!(host.adventure_results(A)[1], Ok(adventure.site), "the later start works");
+    assert_eq!(c2.thread.inspect(|c| c.claims(), WAIT).unwrap(), vec![(a, Claim::Adventure(adventure.site))]);
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
     c2.stop();
@@ -1616,10 +1694,10 @@ fn raw_attach(host: &world_store::Registered, epoch: u64, pending: bool, pending
     }
 }
 
-/// The raw host's embark request `seq`.
-fn raw_embark(host: &world_store::Registered, seq: u64, req: &EmbarkRequest) -> (game::RequestId, game::HostMsg) {
+/// The raw host's request `seq`: its player's adventure at `start`'s site.
+fn raw_start(host: &world_store::Registered, seq: u64, start: Start) -> (game::RequestId, game::HostMsg) {
     let id = game::RequestId { host: host.id, boot: 1, seq };
-    (id, game::HostMsg::Request { id, player: RAW_PLAYER, hop: RAW_HOP, req: game::WorldRequest::Embark(req.clone()) })
+    (id, game::HostMsg::Request { id, player: RAW_PLAYER, hop: RAW_HOP, req: game::WorldRequest::StartAdventure(start.site) })
 }
 
 /// The coordinator state the store holds, loaded as a restart loads it.
@@ -1809,10 +1887,10 @@ impl RawWorld {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn no_output_leaves_before_its_state_is_written() {
     let Some(mut w) = RawWorld::new("e2aheld", false) else { return };
-    let req = w.thread().inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
-    let (id, ask) = raw_embark(&w.host, 1, &req);
+    let start = w.thread().inspect(|c| start_request(c.history()), WAIT).expect("the coordinator answers");
+    let (id, ask) = raw_start(&w.host, 1, start);
     w.thread().fail_coordinator_writes(true);
-    w.link.send(game::HostMsg::RegionStarted { rc: req.region, incarnation: 1 }).unwrap();
+    w.link.send(game::HostMsg::RegionStarted { rc: start.region, incarnation: 1 }).unwrap();
     w.link.send(ask).unwrap();
     w.until_core("the grant decided", move |c| c.memo_ids().contains(&id));
     w.read_for(Duration::from_millis(1_500));
@@ -1826,14 +1904,14 @@ fn no_output_leaves_before_its_state_is_written() {
 
     w.thread().fail_coordinator_writes(false);
     w.read_until("the reply", |m| matches!(m, game::CoordMsg::Reply { id: got, .. } if *got == id));
-    let spawn = move |m: &game::CoordMsg| matches!(m, game::CoordMsg::SpawnPeople { rc, .. } if *rc == req.region);
+    let spawn = move |m: &game::CoordMsg| matches!(m, game::CoordMsg::SpawnPeople { rc, .. } if *rc == start.region);
     if !w.seen.iter().any(spawn) {
         w.read_until("the region's people", spawn);
     }
     w.read_for(Duration::from_millis(500));
     let replies = w.replies(id);
     assert_eq!(replies.len(), 1, "exactly one Reply: {replies:?}");
-    assert!(matches!(replies[0], game::WorldReply::Embarked { region, .. } if region == req.region), "{replies:?}");
+    assert_eq!(replies, vec![game::WorldReply::AdventureStarted { site: start.site, region: start.region }]);
     assert!(stored_core(&w.coordinator.as_ref().unwrap().store, &w.map).memo_ids().contains(&id), "the stored memo holds it");
     w.stop();
 }
@@ -1848,16 +1926,16 @@ fn no_output_leaves_before_its_state_is_written() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_coordinator_killed_after_the_commit_before_the_sends_loses_nothing() {
     let Some(mut w) = RawWorld::new("e2akill", true) else { return };
-    let req = w.thread().inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
+    let start = w.thread().inspect(|c| start_request(c.history()), WAIT).expect("the coordinator answers");
     let people_before: BTreeSet<PersonId> =
         w.thread().inspect(|c| c.history().people().map(|p| p.id).collect(), WAIT).expect("the coordinator answers");
     let cut = match w.read_until("a world cut begins", |m| matches!(m, game::CoordMsg::BeginCut { .. })) {
         game::CoordMsg::BeginCut { cut, .. } => cut,
         _ => unreachable!(),
     };
-    let (id, ask) = raw_embark(&w.host, 1, &req);
+    let (id, ask) = raw_start(&w.host, 1, start);
     w.kill_after_the_commit(|w| {
-        // Its part "prepared" (none is staged: the store records an abort), and the embark.
+        // Its part "prepared" (none is staged: the store records an abort), and the start.
         w.link.send(game::HostMsg::CutPrepared { cut }).unwrap();
         w.link.send(ask.clone()).unwrap();
         w.until_core("the grant decided", move |c| c.memo_ids().contains(&id));
@@ -1877,13 +1955,14 @@ fn a_coordinator_killed_after_the_commit_before_the_sends_loses_nothing() {
         w.seen
     );
     let decided = scalar(&w.db, &format!("SELECT committed::bigint FROM cut_decisions WHERE cut_id = {}", cut.0)) != 0;
-    let (site, memo) = {
+    let granted = vec![(RAW_PLAYER, Claim::Adventure(start.site))];
+    let (claims, memo) = {
         let store = w.db.open();
         let c = stored_core(&store, &w.map);
         store.shutdown();
-        (player_sites(c.history()), c.memo_ids())
+        (c.claims(), c.memo_ids())
     };
-    assert_eq!(site.len(), 1, "the founding was committed: {site:?}");
+    assert_eq!(claims, granted, "the grant was committed");
     assert!(memo.contains(&id), "with its reply memoised");
 
     w.restart();
@@ -1893,8 +1972,12 @@ fn a_coordinator_killed_after_the_commit_before_the_sends_loses_nothing() {
     assert!(matches!(done, game::CoordMsg::CutDone { committed, .. } if committed == decided), "{done:?} vs the store's {decided}");
     w.read_until("the replayed reply", |m| matches!(m, game::CoordMsg::Reply { id: got, .. } if *got == id));
     w.read_for(Duration::from_millis(1_000));
-    assert_eq!(w.replies(id), vec![game::WorldReply::Embarked { site: site[0], region: req.region }], "one reply, from the memo");
-    let (sites, people, twice) = w
+    assert_eq!(
+        w.replies(id),
+        vec![game::WorldReply::AdventureStarted { site: start.site, region: start.region }],
+        "one reply, from the memo (a second decision would refuse it AlreadyPlaying)"
+    );
+    let (claims, people, twice) = w
         .thread()
         .inspect(
             |c| {
@@ -1906,36 +1989,26 @@ fn a_coordinator_killed_after_the_commit_before_the_sends_loses_nothing() {
                     }
                 }
                 let twice: Vec<PersonId> = member.into_iter().filter(|(_, n)| *n > 1).map(|(p, _)| p).collect();
-                (player_sites(h), h.people().map(|p| p.id).collect::<BTreeSet<PersonId>>(), twice)
+                (c.claims(), h.people().map(|p| p.id).collect::<BTreeSet<PersonId>>(), twice)
             },
             WAIT,
         )
         .expect("the coordinator answers");
-    assert_eq!(sites, site, "no second grant: one site");
+    assert_eq!(claims, granted, "no second grant: the one claim");
     assert!(people_before.is_subset(&people), "nobody lost: {:?}", people_before.difference(&people).collect::<Vec<_>>());
     assert!(twice.is_empty(), "in two sites: {twice:?}");
-    for p in &req.people {
-        assert!(
-            w.thread().inspect({
-                let (p, s) = (*p, site[0]);
-                move |c| c.history().site(s).is_some_and(|s| s.members.contains(&p))
-            }, WAIT)
-            .unwrap(),
-            "{p:?} embarked into the founded site"
-        );
-    }
     w.stop();
 }
 
 /// Elastic 2a: a restart resumes from the last committed transition — the calendar tick (and
 /// anchor), the site markers and the legends' length are those of the transition written
-/// moments before the crash (a founding, then years of history), not of a periodic save.
+/// moments before the crash (an adventure's grant, then years of history), not of a periodic save.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_restart_resumes_exactly_where_the_last_transition_left() {
     let Some(mut w) = RawWorld::new("e2aresume", false) else { return };
-    let req = w.thread().inspect(|c| embark_request(c.history()), WAIT).expect("the coordinator answers");
-    let (id, ask) = raw_embark(&w.host, 1, &req);
+    let start = w.thread().inspect(|c| start_request(c.history()), WAIT).expect("the coordinator answers");
+    let (id, ask) = raw_start(&w.host, 1, start);
     w.link.send(ask).unwrap();
     w.read_until("the reply", |m| matches!(m, game::CoordMsg::Reply { id: got, .. } if *got == id));
     let changed_at = Instant::now();

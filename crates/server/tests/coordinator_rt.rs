@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver};
-use game::history::{EmbarkRefusal, History, SiteId};
+use game::history::{AdventureRefusal, History, Location, SiteId};
 use game::{
-    Claim, ClientId, ClientPacket, CoordMsg, EmbarkRequest, HostMsg, InlineLodBuilder, InlineSpawner, LodBuilder,
+    Claim, ClientId, ClientPacket, CoordMsg, HostMsg, InlineLodBuilder, InlineSpawner, LodBuilder,
     PlayerId, RegionCoords, RegionOutput, RegionSpawner, RequestId, ServerEvent, ServerPacket, WorldLink, WorldManager, WorldMap,
     WorldReply, WorldRequest,
 };
@@ -90,19 +90,18 @@ fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
     out
 }
 
-/// A player-founded site's request: two members of the first site, into the first
-/// region (in a row from (2, 2)) where a player may found one.
-fn embark_request(h: &History) -> EmbarkRequest {
-    let s = h.sites().next().expect("a site");
-    let region = (2..46)
-        .flat_map(|z| (2..46).map(move |x| RegionCoords::new(x, z)))
-        .find(|r| h.player_embark_allowed(*r).is_ok())
-        .expect("room to embark");
-    EmbarkRequest { civ: s.civ, people: s.members.iter().copied().take(2).collect(), region }
+/// The first populated site (not abandoned, a living member): where a player may start an
+/// adventure — the state-changing world request these tests prove durability on.
+fn start_site(h: &History) -> SiteId {
+    h.sites()
+        .find(|s| s.abandoned.is_none() && !h.living_members(s.id).is_empty())
+        .map(|s| s.id)
+        .expect("a populated site")
 }
 
-fn player_sites(h: &History) -> Vec<SiteId> {
-    h.sites().filter(|s| s.player_founded).map(|s| s.id).collect()
+/// A player's request to start an adventure at `site`.
+fn start_request(site: SiteId) -> WorldRequest {
+    WorldRequest::StartAdventure(site)
 }
 
 /// The coordinator's state as the store holds it, decoded (`None` before its first save).
@@ -221,11 +220,11 @@ impl Life {
         assert!(self.manager.handle_server_event(ev, now));
     }
 
-    /// `c`'s `EmbarkResult`s so far, taken out of the inbox.
-    fn embark_results(&mut self, c: ClientId) -> Vec<Result<SiteId, EmbarkRefusal>> {
+    /// `c`'s `AdventureResult`s so far, taken out of the inbox.
+    fn adventure_results(&mut self, c: ClientId) -> Vec<Result<SiteId, AdventureRefusal>> {
         let mut out = Vec::new();
         self.inbox.retain(|(to, p)| match p {
-            ServerPacket::EmbarkResult(r) if *to == Some(c) => {
+            ServerPacket::AdventureResult(r) if *to == Some(c) => {
                 out.push(*r);
                 false
             }
@@ -234,12 +233,12 @@ impl Life {
         out
     }
 
-    /// `c` sends `packet`; its one `EmbarkResult`.
-    fn ask(&mut self, c: ClientId, packet: ClientPacket) -> Result<SiteId, EmbarkRefusal> {
+    /// `c` sends `packet`; its one `AdventureResult`.
+    fn ask(&mut self, c: ClientId, packet: ClientPacket) -> Result<SiteId, AdventureRefusal> {
         self.send(ServerEvent::ClientPacket(packet, c));
-        self.until("an EmbarkResult", |l| l.inbox.iter().any(|(to, p)| *to == Some(c) && matches!(p, ServerPacket::EmbarkResult(_))));
-        let results = self.embark_results(c);
-        assert_eq!(results.len(), 1, "one EmbarkResult: {results:?}");
+        self.until("an AdventureResult", |l| l.inbox.iter().any(|(to, p)| *to == Some(c) && matches!(p, ServerPacket::AdventureResult(_))));
+        let results = self.adventure_results(c);
+        assert_eq!(results.len(), 1, "one AdventureResult: {results:?}");
         results[0]
     }
 
@@ -266,10 +265,10 @@ impl Life {
     }
 }
 
-/// An `AllInOne` life on a SQLite world: a player embarks, the server exits in order,
-/// the world restarts → the site exists, the player's record holds the fortress, the
-/// coordinator's saved claim comes back as `Fortress(site)` and holds once the player
-/// is online again (another player's return to it is refused `InUse`).
+/// An `AllInOne` life on a SQLite world: a player starts an adventure, the server exits in
+/// order, the world restarts → the player's record holds the adventure, the coordinator's
+/// saved claim comes back as `Adventure(site)` and holds once the player is online again (its
+/// session is told it; another start of A's is refused `AlreadyPlaying`).
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn state_survives_restart() {
@@ -277,23 +276,20 @@ fn state_survives_restart() {
     let dir = scratch("restart");
     let map = land_map();
     let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
-    let b_key = PlayerKey::Local(game::PlayerName::parse("b").unwrap());
 
-    // Life 1: bootstrapped, saved at once; A embarks.
+    // Life 1: bootstrapped, saved at once; A starts an adventure.
     let store = open_store(&dir);
     let (a, _) = StorePlayers(store.clone()).resolve(&a_key).unwrap();
-    let (b, _) = StorePlayers(store.clone()).resolve(&b_key).unwrap();
     let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
     assert_eq!(start.source, CoordinatorSource::Bootstrapped);
-    let req = embark_request(start.coordinator.history());
+    let site = start_site(start.coordinator.history());
     let mut life = Life::start(&store, &map, start, 1);
     life.send(ServerEvent::ClientConnected { client: 0, player: a, record: None });
     life.round();
-    let site = life.ask(0, ClientPacket::Embark(req.clone())).expect("embarked");
-    // Durable before visible: the reply came after the founding was saved.
-    let (saved, claims) = stored_state(&store, &map).expect("saved before the reply");
-    assert_eq!(player_sites(&saved), vec![site], "the site is in the store before the player hears of it");
-    assert_eq!(claims, vec![(a, Claim::Fortress(site))]);
+    assert_eq!(life.ask(0, ClientPacket::StartAdventure(site)), Ok(site), "started");
+    // Durable before visible: the reply came after the grant was saved.
+    let (_, claims) = stored_state(&store, &map).expect("saved before the reply");
+    assert_eq!(claims, vec![(a, Claim::Adventure(site))], "the claim is in the store before the player hears of it");
     for _ in 0..5 {
         life.round();
     }
@@ -304,35 +300,27 @@ fn state_survives_restart() {
     let (again, record) = StorePlayers(store.clone()).resolve(&a_key).unwrap();
     assert_eq!(again, a);
     let record = record.expect("the exit's cut saved A's record");
-    assert_eq!(record.fortress, Some(site), "A's record holds the fortress");
+    assert_eq!(record.adventure, Some(site), "A's record holds the adventure");
     assert_eq!(store.load_history().unwrap(), None, "no cut wrote the R1 history row");
     let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
     assert_eq!(start.source, CoordinatorSource::Stored);
-    assert_eq!(player_sites(start.coordinator.history()), vec![site], "the site exists after the restart");
-    assert!(start.coordinator.history().returnable(site));
-    assert_eq!(start.coordinator.claim_of(a), Some(Claim::Fortress(site)), "the claim comes back");
+    assert_eq!(start.coordinator.claim_of(a), Some(Claim::Adventure(site)), "the claim comes back");
     let mut life = Life::start(&store, &map, start, 2);
     life.send(ServerEvent::ClientConnected { client: 0, player: a, record: Some(record) });
     life.round();
-    assert!(
-        life.inbox.iter().any(|(to, p)| *to == Some(0)
-            && matches!(p, ServerPacket::Fortress(Some(held)) if held.site == site)),
-        "A is told its fortress: Fortress(Some)"
-    );
-    life.send(ServerEvent::ClientConnected { client: 1, player: b, record: None });
+    assert_eq!(life.adventure_results(0), vec![Ok(site)], "A is told its adventure: AdventureResult(Ok)");
     for _ in 0..5 {
         life.round();
     }
     assert_eq!(
-        life.ask(1, ClientPacket::ReturnTo(site)),
-        Err(EmbarkRefusal::InUse),
-        "A is online with its fortress: B may not take it"
+        life.ask(0, ClientPacket::StartAdventure(site)),
+        Err(AdventureRefusal::AlreadyPlaying),
+        "A is online with its adventure: it may not start another"
     );
     assert_eq!(life.exit(), ServerExit::Clean);
     let store = open_store(&dir);
-    let (saved, claims) = stored_state(&store, &map).expect("saved");
-    assert_eq!(player_sites(&saved), vec![site], "still one site");
-    assert_eq!(claims, vec![(a, Claim::Fortress(site))]);
+    let (_, claims) = stored_state(&store, &map).expect("saved");
+    assert_eq!(claims, vec![(a, Claim::Adventure(site))], "still the one claim");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -388,8 +376,9 @@ fn r1_world_migrates_history_row() {
 
 /// Writes that fail (`StoreHandle::fail_next_writes`) hold back every message (Elastic 2a:
 /// nothing leaves before its transition is written): no directive or claim-granting reply
-/// reaches the host before a write holding the founding has committed; once one commits they
-/// all arrive, the attach echo with them.
+/// reaches the host before a write holding what decided it has committed — the adventure's
+/// grant, and the birth (to a resident of the started region) whose spawn the directive
+/// carries; once writes commit they all arrive, the attach echo with them.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn directive_not_sent_before_save() {
@@ -398,7 +387,8 @@ fn directive_not_sent_before_save() {
     let map = land_map();
     let store = open_store(&dir);
     let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    let req = embark_request(start.coordinator.history());
+    let site = start_site(start.coordinator.history());
+    let rc = start.coordinator.history().site(site).expect("the site").region;
     store.fail_next_writes(FAILURES);
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
@@ -406,32 +396,59 @@ fn directive_not_sent_before_save() {
     let id = RequestId { host: h(0), boot: 1, seq: 1 };
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    // The fortress region runs: the founding embodies the party there by directives.
-    link.send(HostMsg::RegionStarted { rc: req.region, incarnation: 1 });
-    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req.clone()) });
+    // The site's region runs: its residents are embodied there; then the player's adventure.
+    link.send(HostMsg::RegionStarted { rc, incarnation: 1 });
+    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: start_request(site) });
+    // The history runs on (month by month) until a resident of the region has a child: a
+    // birth to an embodied mother is a spawn directive.
+    let child = thread
+        .with_core(
+            move |c| {
+                let h = c.history_mut();
+                let from = h.now();
+                for _ in 0..12 * 30 {
+                    if let Some(q) = h.people().find(|q| q.born > from && q.location == Location::InRegion(rc)) {
+                        return Some(q.id);
+                    }
+                    let next = game::history::CalendarTick(h.now().0 + 28 * game::history::TICKS_PER_DAY);
+                    h.advance(next);
+                }
+                None
+            },
+            WAIT,
+        )
+        .expect("the coordinator answers")
+        .expect("a child born in the running region within 30 years");
 
     let deadline = Instant::now() + WAIT;
-    let (mut directives, mut replies, mut attached) = (0, 0, false);
-    while directives < req.people.len() || replies == 0 {
-        assert!(Instant::now() < deadline, "timed out: {directives} directives, {replies} replies");
+    let (mut spawned, mut replies, mut attached) = (false, 0, false);
+    while !spawned || replies == 0 {
+        assert!(Instant::now() < deadline, "timed out: child spawned {spawned}, {replies} replies");
         let Some(msg) = link.recv() else {
             std::thread::sleep(Duration::from_millis(2));
             continue;
         };
         assert_eq!(store.failing_writes_left(), 0, "{msg:?} left while writes were still failing");
         if gated(&msg) {
-            assert_eq!(store.failing_writes_left(), 0, "{msg:?} left while saves were still failing");
-            let (saved, _) = stored_state(&store, &map).expect("a save committed");
-            assert_eq!(player_sites(&saved).len(), 1, "{msg:?} left before the founding was durable");
+            let (saved, claims) = stored_state(&store, &map).expect("a save committed");
+            assert_eq!(claims, vec![(player, Claim::Adventure(site))], "{msg:?} left before the grant was durable");
+            if let CoordMsg::Directive { directive, .. } = &msg {
+                if let game::GameEventKind::SpawnPerson(spawn) = &directive.event {
+                    assert!(saved.person(spawn.person).is_some(), "{msg:?} left before its person was durable");
+                }
+            }
         }
         match msg {
             CoordMsg::Attached { epoch: 1 } => attached = true,
-            CoordMsg::Directive { incarnation, .. } => {
+            CoordMsg::Directive { incarnation, directive } => {
                 assert_eq!(incarnation, 1);
-                directives += 1;
+                if matches!(&directive.event, game::GameEventKind::SpawnPerson(s) if s.person == child) {
+                    assert_eq!(directive.region, rc);
+                    spawned = true;
+                }
             }
-            CoordMsg::Reply { id: got, reply: WorldReply::Embarked { region, .. } } => {
-                assert_eq!((got, region), (id, req.region));
+            CoordMsg::Reply { id: got, reply: WorldReply::AdventureStarted { site: s, region } } => {
+                assert_eq!((got, s, region), (id, site, rc));
                 replies += 1;
             }
             _ => {}
@@ -454,7 +471,7 @@ fn fenced_coordinator_stops() {
     let map = land_map();
     let store = open_store(&dir);
     let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    let req = embark_request(start.coordinator.history());
+    let site = start_site(start.coordinator.history());
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     let deadline = Instant::now() + WAIT;
@@ -467,7 +484,7 @@ fn fenced_coordinator_stops() {
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: start_request(site) });
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the fenced coordinator kept running");
         std::thread::sleep(Duration::from_millis(10));
@@ -475,15 +492,15 @@ fn fenced_coordinator_stops() {
     assert!(fenced.is_set(), "the process is fenced");
     assert!(!link.is_up());
     assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
-    let (saved, _) = stored_state(&store, &map).unwrap();
-    assert!(player_sites(&saved).is_empty(), "the fenced founding was never written");
+    let (_, claims) = stored_state(&store, &map).unwrap();
+    assert!(claims.is_empty(), "the fenced grant was never written");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A second coordinator starts while the first still runs (an overlapping restart):
 /// `ensure_coordinator_state` claims the row BEFORE it loads, so the first one — its
-/// founding's save failing and retried — can commit nothing after that load: it is
+/// grant's save failing and retried — can commit nothing after that load: it is
 /// fenced, and the state the second one runs from is the last one committed (loading
 /// first would let the first commit a newer state the second never sees).
 #[test]
@@ -494,7 +511,7 @@ fn overlapping_start_claims_before_it_loads() {
     let store = open_store(&dir);
     let first = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
     let first_epoch = first.fence.epoch;
-    let req = embark_request(first.coordinator.history());
+    let site = start_site(first.coordinator.history());
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), first, fenced.clone()).unwrap();
     let deadline = Instant::now() + WAIT;
@@ -502,14 +519,14 @@ fn overlapping_start_claims_before_it_loads() {
         assert!(Instant::now() < deadline, "the bootstrap was never saved");
         std::thread::sleep(Duration::from_millis(10));
     }
-    // The founding's saves fail for a while (retried every 250 ms).
+    // The grant's saves fail for a while (retried every 250 ms).
     store.fail_next_writes(2);
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req) });
+    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: start_request(site) });
     while store.failing_writes_left() > 1 {
-        assert!(Instant::now() < deadline, "the founding's save was never tried");
+        assert!(Instant::now() < deadline, "the grant's save was never tried");
         std::thread::sleep(Duration::from_millis(5));
     }
     // The second coordinator starts now.
@@ -521,13 +538,9 @@ fn overlapping_start_claims_before_it_loads() {
     }
     assert!(fenced.is_set(), "the first is fenced");
     assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
-    let (saved, _) = stored_state(&store, &map).unwrap();
-    assert_eq!(
-        player_sites(&saved),
-        player_sites(second.coordinator.history()),
-        "the second runs from the last committed state"
-    );
-    assert!(player_sites(&saved).is_empty(), "the first committed nothing after the second's load");
+    let (_, claims) = stored_state(&store, &map).unwrap();
+    assert_eq!(claims, second.coordinator.claims(), "the second runs from the last committed state");
+    assert!(claims.is_empty(), "the first committed nothing after the second's load");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -546,11 +559,11 @@ fn coordinator_panic_skips_the_exit_cut() {
     let store = open_store(&dir);
     let (a, _) = StorePlayers(store.clone()).resolve(&a_key).unwrap();
     let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
-    let req = embark_request(start.coordinator.history());
+    let site = start_site(start.coordinator.history());
     let mut life = Life::start(&store, &map, start, 1);
     life.send(ServerEvent::ClientConnected { client: 0, player: a, record: None });
     life.round();
-    let site = life.ask(0, ClientPacket::Embark(req)).expect("embarked");
+    assert_eq!(life.ask(0, ClientPacket::StartAdventure(site)), Ok(site), "started");
     for _ in 0..5 {
         life.round();
     }
@@ -563,10 +576,10 @@ fn coordinator_panic_skips_the_exit_cut() {
 
     let store = open_store(&dir);
     let (_, record) = StorePlayers(store.clone()).resolve(&a_key).unwrap();
-    assert!(record.as_ref().is_none_or(|r| r.fortress.is_none()), "no exit cut wrote A's record: {record:?}");
+    assert!(record.as_ref().is_none_or(|r| r.adventure.is_none()), "no exit cut wrote A's record: {record:?}");
     assert!(store.stored_regions().unwrap().is_empty(), "no exit cut wrote a region");
-    let (saved, _) = stored_state(&store, &map).expect("the coordinator's own saves stand");
-    assert_eq!(player_sites(&saved), vec![site]);
+    let (_, claims) = stored_state(&store, &map).expect("the coordinator's own saves stand");
+    assert_eq!(claims, vec![(a, Claim::Adventure(site))]);
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -586,9 +599,9 @@ fn resumed(c: &game::Coordinator) -> Resumed {
 }
 
 /// Elastic 2a, single player (role `all`, SQLite): the bootstrap's first transition writes the
-/// row's version 1; a founding and years of history are written moments before the coordinator
-/// dies (after the commit, before its sends), and the restart resumes from exactly that
-/// transition — calendar, site markers, legends' length — not from a periodic save.
+/// row's version 1; an adventure's grant and years of history are written moments before the
+/// coordinator dies (after the commit, before its sends), and the restart resumes from exactly
+/// that transition — calendar, site markers, legends' length — not from a periodic save.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn single_player_restart_resumes_history_where_it_was() {
@@ -597,7 +610,7 @@ fn single_player_restart_resumes_history_where_it_was() {
     let store = open_store(&dir);
     let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
     assert_eq!(start.source, CoordinatorSource::Bootstrapped);
-    let req = embark_request(start.coordinator.history());
+    let site = start_site(start.coordinator.history());
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     let deadline = Instant::now() + WAIT;
@@ -613,9 +626,9 @@ fn single_player_restart_resumes_history_where_it_was() {
     let id = RequestId { host: h(0), boot: 1, seq: 1 };
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req.clone()) });
+    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: start_request(site) });
     loop {
-        assert!(Instant::now() < deadline, "the embark was never answered");
+        assert!(Instant::now() < deadline, "the start was never answered");
         match link.recv() {
             Some(CoordMsg::Reply { id: got, .. }) if got == id => break,
             Some(_) => {}
@@ -655,7 +668,7 @@ fn single_player_restart_resumes_history_where_it_was() {
     // before the write: a day's turn at most).
     assert!(last.now >= target && last.now >= decided.now && last.legends >= decided.legends, "{last:?} vs {decided:?}");
     assert_eq!(last.sites, decided.sites);
-    assert_eq!(player_sites(&stored_state(&store, &map).unwrap().0).len(), 1, "the founding is in it");
+    assert_eq!(stored_state(&store, &map).unwrap().1, vec![(player, Claim::Adventure(site))], "the grant is in it");
     store.shutdown();
 
     // The restart runs from exactly that transition.
@@ -668,13 +681,14 @@ fn single_player_restart_resumes_history_where_it_was() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Elastic 2a: the attach and an embark for a channel link's host `h(0)`; the request's id.
-fn attach_and_embark(link: &mut coordinator_rt::ChannelWorldLink, req: &EmbarkRequest) -> RequestId {
+/// Elastic 2a: the attach and an adventure start at `site` for a channel link's host `h(0)`;
+/// the request's id.
+fn attach_and_start(link: &mut coordinator_rt::ChannelWorldLink, site: SiteId) -> RequestId {
     let player = PlayerId(1);
     let id = RequestId { host: h(0), boot: 1, seq: 1 };
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
     link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: WorldRequest::Embark(req.clone()) });
+    link.send(HostMsg::Request { id, player, hop: ATTACHED_HOP, req: start_request(site) });
     id
 }
 
@@ -692,7 +706,7 @@ fn first_write(store: &StoreHandle) -> world_store::StoredCoordinator {
 
 /// Elastic 2a: a write that committed but whose answer was lost (the runtime took it as failed)
 /// makes the next write a `Conflict`; the row holds the runtime's own write, so it takes its
-/// version and writes again — once. The founding is written, its reply leaves exactly once, the
+/// version and writes again — once. The grant is written, its reply leaves exactly once, the
 /// coordinator runs on.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
@@ -701,12 +715,12 @@ fn a_conflict_with_its_own_lost_commit_is_written_over_once() {
     let map = land_map();
     let store = open_store(&dir);
     let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    let req = embark_request(start.coordinator.history());
+    let site = start_site(start.coordinator.history());
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     assert_eq!(first_write(&store).version, 1);
     thread.lose_next_write_answer();
-    let id = attach_and_embark(&mut link, &req);
+    let id = attach_and_start(&mut link, site);
     let deadline = Instant::now() + WAIT;
     let mut replies = 0;
     let quiet_from = loop {
@@ -731,7 +745,7 @@ fn a_conflict_with_its_own_lost_commit_is_written_over_once() {
     assert!(!thread.is_finished() && !fenced.is_set(), "the coordinator runs on");
     let row = store.load_coordinator().unwrap().unwrap();
     assert!(row.version >= 3, "the lost commit (2) was written over (3): {}", row.version);
-    assert_eq!(player_sites(&stored_state(&store, &map).unwrap().0).len(), 1, "one founding");
+    assert_eq!(stored_state(&store, &map).unwrap().1, vec![(PlayerId(1), Claim::Adventure(site))], "one grant");
     assert_eq!(thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
@@ -747,13 +761,13 @@ fn a_conflict_with_another_writer_stops_the_coordinator_as_fenced() {
     let map = land_map();
     let store = open_store(&dir);
     let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    let (fence, req) = (start.fence, embark_request(start.coordinator.history()));
+    let (fence, site) = (start.fence, start_site(start.coordinator.history()));
     let fenced = server::claims::Fenced::default();
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     let row = first_write(&store);
     let other = store.write_coordinator_later(fence, row.version, row.core.clone(), None).recv().unwrap().expect("the other write commits");
     assert_eq!(other.version, row.version + 1);
-    let id = attach_and_embark(&mut link, &req);
+    let id = attach_and_start(&mut link, site);
     let deadline = Instant::now() + WAIT;
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the coordinator ran on beside another writer");
