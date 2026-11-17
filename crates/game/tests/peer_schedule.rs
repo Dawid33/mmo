@@ -7266,6 +7266,225 @@ fn a_rebase_at_any_round_conserves_everything() {
     sweep("a_rebase_at_any_round_conserves_everything", 3, 1, SEEDS, rebase_at_any_round);
 }
 
+/// Rounds of [`two_replicas_replay`] and [`host_moving_between_replicas`].
+const REPLICA_ROUNDS: usize = 90;
+
+/// Rounds until nothing a replica released waits for its host (the store's outbox and the rows
+/// replicas hold are empty); panics past [`CROSS_ROUNDS`].
+fn until_relayed(rig: &mut MultiRig) {
+    for _ in 0..CROSS_ROUNDS {
+        if rig.core().undelivered().is_empty() {
+            return;
+        }
+        rig.cut_round();
+    }
+    panic!("the outbox never drained: {:?}", rig.core().undelivered());
+}
+
+/// A message's form for comparing what hosts got as multisets.
+fn shown(m: &game::CoordMsg) -> String {
+    format!("{m:?}")
+}
+
+/// A reference core (Elastic 2b handoff §4.1): ONE core fed every replica's committed inputs in
+/// commit order, its replica id set per transition — `events`, recorded by the rig's replicas —
+/// from the row they started at. What it releases, per host (a message for every host reaches
+/// the hosts linked to the replica that released it, as the rig delivers it).
+fn replay_one_core(reference: &mut game::Coordinator, events: Vec<game::coordinator::RigEvent>) -> std::collections::BTreeMap<HostId, Vec<String>> {
+    use game::coordinator::{RigEvent, StoreDecision, Target};
+    let mut got: std::collections::BTreeMap<HostId, Vec<String>> = std::collections::BTreeMap::new();
+    let mut put = |out: Vec<(Target, game::CoordMsg)>, outbox: Vec<game::coordinator::OutboxMsg>, linked: &std::collections::BTreeSet<HostId>| {
+        for (to, m) in out {
+            match to {
+                Target::Host(h) if linked.contains(&h) => got.entry(h).or_default().push(shown(&m)),
+                Target::Host(_) => {}
+                Target::Every => linked.iter().for_each(|h| got.entry(*h).or_default().push(shown(&m))),
+            }
+        }
+        for o in outbox {
+            got.entry(o.host).or_default().push(shown(&o.msg));
+        }
+    };
+    for e in events {
+        match e {
+            RigEvent::Tick(t) => reference.set_world_tick(t),
+            RigEvent::Commit { replica, version, inputs, decisions, linked } => {
+                reference.set_replica_for_test(replica);
+                for (now, input) in inputs {
+                    reference.apply(input, now);
+                }
+                if decisions.iter().any(|d| matches!(d, StoreDecision::DecideCut(_))) {
+                    reference.take_decision().expect("the one core decides the cut the replica decided");
+                }
+                reference.set_version(version - 1);
+                let t = reference.take_transition().unwrap_or_else(|| panic!("the one core has version {version}'s transition too"));
+                assert_eq!(t.decisions, decisions, "version {version}: the same store decisions");
+                reference.transition_written(version);
+                put(t.out, t.outbox, &linked);
+            }
+            RigEvent::Release { replica, version, inputs, linked } => {
+                reference.set_replica_for_test(replica);
+                for (now, input) in inputs {
+                    reference.apply(input, now);
+                }
+                reference.set_version(version);
+                if let Some(v) = reference.version_check_wanted() {
+                    assert!(reference.version_checked(v));
+                }
+                let free = reference.take_out();
+                put(free, Vec::new(), &linked);
+            }
+        }
+    }
+    for list in got.values_mut() {
+        list.sort();
+    }
+    got
+}
+
+/// Elastic 2b Task 5 (handoff §4.1, decision 1): three hosts, two coordinator replicas — hosts 0
+/// and 1 linked to replica 0, host 2 to replica 1. Slimes shuttle across host seams while world
+/// cuts run (replica 0 alone does the timed work); each replica applies its hosts' messages on its
+/// own cache and writes; a write that meets the other's row rebases and replays. Messages for a
+/// host of the other replica go through the outbox. The world is conserved every round, and it
+/// ends as ONE core fed the same inputs in commit order ends: the claims, the memo, and what each
+/// host got (as a multiset).
+fn two_replicas_replay(rig: &mut MultiRig) -> bool {
+    let chain = heir_world(rig);
+    rig.with_replicas(2);
+    rig.link_world_to(h(2), 1);
+    until_relayed(rig);
+    let shared = rig.coordinator.clone().expect("a coordinator");
+    let now = rig.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+    let mut reference = {
+        let mut c = shared.lock().unwrap();
+        let (core, history) = c.stored().expect("written");
+        let mut reference =
+            game::Coordinator::load(&core, &history, c.history().grid().clone(), game::coordinator::ReplicaId(0), now).expect("the row loads");
+        reference.set_version(c.row_version());
+        reference.set_crash_policy(c.crash_policy());
+        reference.set_expected_hosts(host_ids(rig.hosts.len() as u32).collect());
+        c.start_recording();
+        let tick = rig.hosts[0].manager.spawner_mut().world_tick();
+        c.set_world_tick(tick);
+        reference
+    };
+    let slimes: Vec<game::EntityId> = (0..4).map(|i| slime_in(rig, chain[i % chain.len()], i)).collect();
+    let (rebases_before, refreshes_before) = {
+        let c = rig.core();
+        (c.rebases(), c.refreshes())
+    };
+    for r in 0..REPLICA_ROUNDS {
+        let roll = crate::common::multi_rig::mix(rig.seed, 0x2C_0000 + r as u64);
+        if r % 3 == 0 {
+            let i = ((roll >> 16) % (chain.len() as u64 - 1)) as usize;
+            push_over(rig, slimes[(roll % slimes.len() as u64) as usize], chain[i], chain[i + 1]);
+        }
+        rig.cut_round();
+        rig.assert_conserved_world();
+        rig.assert_journals_explain_the_cut();
+    }
+    assert!(committed(rig) > 0, "cuts committed");
+    let (conflicts, refreshes) = {
+        let c = rig.core();
+        (c.rebases() - rebases_before, c.refreshes() - refreshes_before)
+    };
+    assert!(conflicts + refreshes > 0, "the replicas met each other's rows (seed {})", rig.seed);
+    let (events, mut got, undelivered) = {
+        let mut c = shared.lock().unwrap();
+        let got: std::collections::BTreeMap<HostId, Vec<String>> =
+            c.delivered().iter().map(|(h, l)| (*h, l.iter().map(|(_, m)| shown(m)).collect())).collect();
+        (c.take_events(), got, c.undelivered())
+    };
+    for (h, msgs) in undelivered {
+        got.entry(h).or_default().extend(msgs.iter().map(shown));
+    }
+    for list in got.values_mut() {
+        list.sort();
+    }
+    let expected = replay_one_core(&mut reference, events);
+    let row = {
+        let c = shared.lock().unwrap();
+        let (core, history) = c.stored().expect("written");
+        game::Coordinator::load(&core, &history, c.history().grid().clone(), game::coordinator::ReplicaId(0), now).expect("the row loads")
+    };
+    assert_eq!((row.claims(), row.memo_ids()), (reference.claims(), reference.memo_ids()), "the claims and the memo");
+    for host in host_ids(rig.hosts.len() as u32) {
+        let (a, b) = (got.remove(&host).unwrap_or_default(), expected.get(&host).cloned().unwrap_or_default());
+        assert!(a == b, "host {host} got another multiset than the one core released (seed {}):\n{a:#?}\n{b:#?}", rig.seed);
+    }
+    conflicts > 0
+}
+
+/// [`two_replicas_replay`] over every mode: a run may only refresh (no write met the other's
+/// row); every mode must meet a conflict — a write rebased and replayed — at least once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn two_replicas_replay_every_conflict_into_the_one_core_world() {
+    sweep_hits("two_replicas_replay_every_conflict_into_the_one_core_world", 3, 1, SEEDS, two_replicas_replay);
+}
+
+/// Elastic 2b Task 5 (Review Focus 2): three hosts, two replicas; host 0 stays with replica 0 (the
+/// ticker), and at seeded rounds host 1's or host 2's link moves to the other replica (down one
+/// round, then its `Attach` there) while cuts and crossings run. Every host reads its coordinator
+/// messages in commit order — the row versions that released them never decrease (so none is
+/// older than the `Attached` it read last: what the replica it left had on the way is lost with
+/// that link, and what other replicas left for it before its `Attach` is discarded). The world is
+/// conserved every round, and every cut is decided once.
+fn host_moving_between_replicas(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    rig.with_replicas(2);
+    let slimes: Vec<game::EntityId> = (0..4).map(|i| slime_in(rig, chain[i % chain.len()], i)).collect();
+    let mut moves = 0;
+    for r in 0..REPLICA_ROUNDS {
+        let roll = crate::common::multi_rig::mix(rig.seed, 0x2D_0000 + r as u64);
+        if r % 3 == 0 {
+            let i = ((roll >> 16) % (chain.len() as u64 - 1)) as usize;
+            push_over(rig, slimes[(roll % slimes.len() as u64) as usize], chain[i], chain[i + 1]);
+        }
+        // A participant's `Attach` aborts the cut it is in: moves are rare enough for cuts between.
+        if (roll >> 8) % 23 == 0 {
+            let mover = h(1 + (roll >> 24) % 2);
+            let to = 1 - rig.world_replica_of(mover);
+            rig.link_world_to(mover, to);
+            moves += 1;
+        }
+        rig.cut_round();
+        rig.assert_conserved_world();
+        rig.assert_journals_explain_the_cut();
+    }
+    assert!(moves > 0, "a host moved (seed {})", rig.seed);
+    // The hosts where the moves left them: a cut of every host commits.
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if committed(rig) > 0 {
+            break;
+        }
+        rig.cut_round();
+        rig.assert_conserved_world();
+    }
+    let (running, on_1) = {
+        let c = rig.core();
+        (c.world_cut_progress(), c.hosts_attached_to(game::coordinator::ReplicaId(2)))
+    };
+    assert!(
+        committed(rig) > 0,
+        "cuts committed (seed {}, {moves} moves): decided {:?}, running {running:?}, attached to replica 1 {on_1:?}",
+        rig.seed,
+        rig.decided,
+    );
+    for host in host_ids(rig.hosts.len() as u32) {
+        let read = rig.world_read_versions(host);
+        assert!(read.windows(2).all(|w| w[0] <= w[1]), "host {host} read out of commit order (seed {}): {read:?}", rig.seed);
+    }
+    assert!(rig.decide_executions.values().all(|n| *n == 1), "every cut decided once: {:?}", rig.decide_executions);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_moving_between_replicas_sees_commit_order() {
+    sweep("a_host_moving_between_replicas_sees_commit_order", 3, 1, SEEDS, host_moving_between_replicas);
+}
+
 /// Three hosts: a slime walks S1→D→S2 after the last committed cut, then D dies. S1's
 /// `Sent` entry is older than S2's `Received` one: nothing is replayed — the slime is on
 /// S2, once.
@@ -10827,18 +11046,21 @@ fn a_host_landed_adjacent_after_the_declaration_rolls_the_world_back_never_stuck
 
 #[test]
 fn the_rig_store_refuses_a_stale_version() {
-    use game::coordinator::{CallStamp, ReplicaId, StoreDecision};
+    use game::coordinator::{CallStamp, ReplicaId, RigWrite, StoreDecision};
     let mut store = game::coordinator::RigStore::default();
     let me = ReplicaId(1);
-    let v = store.write(0, vec![1], Some(vec![9]), Vec::new(), me).expect("the first write");
+    let write = |store: &mut game::coordinator::RigStore, v, core, history, decisions| {
+        store.write(RigWrite::of(v, core, history, decisions, me)).map(|(v, _)| v)
+    };
+    let v = write(&mut store, 0, vec![1], Some(vec![9]), Vec::new()).expect("the first write");
     assert_eq!(v, 1);
     // A stale write keeps none of its decisions (Elastic 2b Task 3: they ride in its transaction).
     let begin = StoreDecision::BeginCut { cut: game::CutId(5) };
-    assert_eq!(store.write(0, vec![2], None, vec![begin.clone()], me), Err(game::coordinator::RigConflict));
+    assert_eq!(write(&mut store, 0, vec![2], None, vec![begin.clone()]), Err(game::coordinator::RigConflict));
     assert!(store.take_committed().is_empty(), "a conflicting transition's decision is not committed");
     let row = store.row().expect("a row");
     assert_eq!((row.version, row.core.as_slice(), row.history.as_slice()), (1, &[1u8][..], &[9u8][..]));
-    assert_eq!(store.write(1, vec![3], None, vec![begin.clone()], me), Ok(2));
+    assert_eq!(write(&mut store, 1, vec![3], None, vec![begin.clone()]), Ok(2));
     assert_eq!(store.take_committed(), vec![(CallStamp { replica: me, version: 2 }, begin)], "committed with its transition");
     assert_eq!(store.row().unwrap().history, vec![9]);
 }

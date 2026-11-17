@@ -25,7 +25,7 @@ mod url;
 use std::fmt;
 
 pub use codec::*;
-pub use coordinator_tx::{AfterCommit, Bootstrapped, TransitionWrite, TransitionWritten};
+pub use coordinator_tx::{AfterCommit, Bootstrapped, OutboxRow, TransitionWrite, TransitionWritten};
 pub use counters::StoreCounters;
 pub use fence::{Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
@@ -33,8 +33,8 @@ pub use handle::{
     Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost, Registered, StoreHandle, StoredCoordinator, WorldInfo,
 };
 pub use listen::{
-    CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
-    WORLD_DB_DIRECT_ENV,
+    COORDINATOR_POLL_MS, COORDINATOR_ROW_CHANNEL, CutNotice, Notice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV,
+    TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL, WORLD_DB_DIRECT_ENV,
 };
 pub use open::{LockGuard, MIGRATE_LOCK_TIMEOUT_MS, OpenMode, Pool, newest_migration, open_pool, set_migrate_lock_timeout_ms};
 pub use operator::Vouched;

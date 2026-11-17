@@ -75,7 +75,14 @@ fn a_beat_of_an_ended_replica_answers_not_live() {
         h.bootstrap_coordinator(vec![1], vec![10]).unwrap();
         let version = h.load_coordinator().unwrap().unwrap().version;
         // B's transition ends A (Elastic 2b: the decision inside B's compare-and-set).
-        let w = TransitionWrite { version, core: vec![2], history: None, decisions: vec![StoreDecision::EndReplica(a.replica)], replica: b.replica };
+        let w = TransitionWrite {
+            version,
+            core: vec![2],
+            history: None,
+            decisions: vec![StoreDecision::EndReplica(a.replica)],
+            replica: b.replica,
+            ..Default::default()
+        };
         let written = h.write_transition_later(w).recv().unwrap().unwrap();
         assert_eq!(written.answers, vec![game::coordinator::DecisionAnswer::ReplicaEnded { replica: a.replica }]);
         assert!(!h.beat_replica(a.replica).unwrap(), "ended: not live");

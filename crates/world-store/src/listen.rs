@@ -1,12 +1,22 @@
-//! Stored-terrain notices (R3): each committed world cut is announced with
-//! `pg_notify('world_cut', '<cut>,<tick>')` ([`crate::StoreHandle::notify_cut`], its own
-//! transaction, never inside a cut's), and every host listens
-//! ([`crate::StoreHandle::listen_cuts`]) on one direct, unpooled connection of its own, on
-//! its own `terrain-listener` thread (its own current-thread runtime). A notice is only a
-//! hint to re-read committed rows: a missed one is covered by the [`CutNotice::Resync`]
-//! emitted on every (re)connect and every [`TERRAIN_POLL_SECS`]; a duplicate costs one read.
+//! `LISTEN` / `NOTIFY` channels of the store, each heard on one direct, unpooled connection of
+//! its own, on a listener thread of its own (its own current-thread runtime)
+//! ([`crate::StoreHandle::listen_channel`]). A notice is only a hint: a missed one is covered by
+//! the [`Notice::Resync`] emitted on every (re)connect and every poll period; a duplicate costs
+//! one read.
+//!
+//! Two channels:
+//! - **Stored-terrain notices** (R3): each committed world cut is announced with
+//!   `pg_notify('world_cut', '<cut>,<tick>')` ([`crate::StoreHandle::notify_cut`], its own
+//!   transaction, never inside a cut's), and every host listens
+//!   ([`crate::StoreHandle::listen_cuts`]: [`CutNotice`]s, a `Resync` every
+//!   [`TERRAIN_POLL_SECS`]).
+//! - **The coordinator's row** (Elastic 2b Task 5): every committed transition says
+//!   `pg_notify('coordinator_row', '<version>')` in its own transaction
+//!   ([`COORDINATOR_ROW_CHANNEL`]); each coordinator replica refreshes its cache on a version
+//!   newer than its own and relays the outbox rows other replicas left for its hosts (a
+//!   `Resync` every [`COORDINATOR_POLL_MS`]).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -15,8 +25,15 @@ use game::Tick;
 
 /// The `LISTEN` / `NOTIFY` channel of committed world cuts.
 pub const WORLD_CUT_CHANNEL: &str = "world_cut";
-/// How often a listener says [`CutNotice::Resync`] anyway: the backstop for a notice lost
-/// (a dropped connection, a notifier that died between its commit and its notify).
+/// The `LISTEN` / `NOTIFY` channel of the coordinator's row: the payload is the version a
+/// transition committed as.
+pub const COORDINATOR_ROW_CHANNEL: &str = "coordinator_row";
+/// How often a coordinator replica's row listener says [`Notice::Resync`] anyway, and the
+/// backstop of a replica's relay (only while more than one replica is live): a lost notice
+/// delays a relayed message at most this long.
+pub const COORDINATOR_POLL_MS: u64 = 1_000;
+/// How often a terrain listener says [`CutNotice::Resync`] anyway: the backstop for a notice
+/// lost (a dropped connection, a notifier that died between its commit and its notify).
 pub const TERRAIN_POLL_SECS: u64 = 30;
 /// The listener connection's `application_name` (what an operator, or a test, finds it by).
 pub const TERRAIN_LISTENER_APP: &str = "mmo-terrain-listener";
@@ -36,7 +53,16 @@ const LISTEN_MIN_LIFE: Duration = Duration::from_secs(1);
 /// user can `NOTIFY` the channel).
 const MALFORMED_WARN: Duration = Duration::from_secs(30);
 
-/// What a host's listener says.
+/// What a channel's listener says ([`crate::StoreHandle::listen_channel`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// One notice, its payload as sent (any database user can `NOTIFY`: parse it with care).
+    Payload(String),
+    /// Notices may have been missed (a (re)connect, or the poll period passed).
+    Resync,
+}
+
+/// What a host's terrain listener says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CutNotice {
     /// A world cut at `tick` committed: the regions saved at `tick` or later
@@ -47,10 +73,10 @@ pub enum CutNotice {
     Resync,
 }
 
-/// How a host learns of committed cuts.
+/// How a listener learns of notices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NotifyMode {
-    /// `LISTEN` on [`WORLD_CUT_CHANNEL`], plus the poll's `Resync`.
+    /// `LISTEN` on the channel, plus the poll's `Resync`.
     #[default]
     Listen,
     /// Only the poll's `Resync` (no listener connection).
@@ -89,6 +115,26 @@ fn notice_of(payload: &str) -> CutNotice {
     }
 }
 
+/// The terrain listener's reading of a [`Notice`] on [`WORLD_CUT_CHANNEL`]: a malformed payload
+/// is a `Resync`, warned about at most once per [`MALFORMED_WARN`].
+pub(crate) fn cut_notices() -> impl Fn(Notice) -> CutNotice + Send + Sync + 'static {
+    let warned: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    move |n| match n {
+        Notice::Resync => CutNotice::Resync,
+        Notice::Payload(p) => {
+            let notice = notice_of(&p);
+            if notice == CutNotice::Resync {
+                let mut warned = warned.lock().unwrap_or_else(|e| e.into_inner());
+                if warned.is_none_or(|w| w.elapsed() >= MALFORMED_WARN) {
+                    *warned = Some(std::time::Instant::now());
+                    log::warn!("[world-store] a malformed world_cut notice ({p:?}); resyncing");
+                }
+            }
+            notice
+        }
+    }
+}
+
 /// How long to wait before the next connection, after one that lived `lived`.
 fn reconnect_wait(lived: Duration) -> Duration {
     if lived < LISTEN_MIN_LIFE { LISTEN_RETRY } else { Duration::ZERO }
@@ -105,22 +151,35 @@ pub(crate) fn default_poll_ms() -> Arc<AtomicU64> {
     Arc::new(AtomicU64::new(TERRAIN_POLL_SECS * 1000))
 }
 
-/// Starts the `terrain-listener` thread: `url` is `None` for a store that cannot listen
-/// (SQLite: a receiver that never says anything). The thread ends once the receiver is
-/// dropped (seen at its next send).
-pub(crate) fn start(url: Option<String>, mode: NotifyMode, poll_ms: &AtomicU64) -> Receiver<CutNotice> {
+/// The terrain poll period of [`default_poll_ms`]'s cell.
+pub(crate) fn poll_period(poll_ms: &AtomicU64) -> Duration {
+    Duration::from_millis(poll_ms.load(Ordering::SeqCst).max(1))
+}
+
+/// Starts a listener thread named `name` on `channel`, each [`Notice`] read through `map`:
+/// `url` is `None` for a store that cannot listen (SQLite: a receiver that never says anything).
+/// A `Resync` every `period` in both modes. The thread ends once the receiver is dropped (seen at
+/// its next send).
+pub(crate) fn start<T: Send + 'static>(
+    url: Option<String>,
+    name: &str,
+    channel: &'static str,
+    mode: NotifyMode,
+    period: Duration,
+    map: impl Fn(Notice) -> T + Send + Sync + 'static,
+) -> Receiver<T> {
     let Some(url) = url else { return crossbeam::channel::never() };
-    let period = Duration::from_millis(poll_ms.load(Ordering::SeqCst).max(1));
     let (tx, rx) = crossbeam::channel::unbounded();
-    let spawned = std::thread::Builder::new().name("terrain-listener".into()).spawn(move || {
+    let map = Arc::new(map);
+    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
-            Err(e) => return log::error!("[world-store] the terrain listener's runtime: {e}; no cut notices"),
+            Err(e) => return log::error!("[world-store] the {channel} listener's runtime: {e}; no notices"),
         };
         rt.block_on(async move {
             if mode == NotifyMode::Listen {
-                tokio::spawn(listen(url, tx.clone()));
-            } else if tx.send(CutNotice::Resync).is_err() {
+                tokio::spawn(listen(url, channel, tx.clone(), map.clone()));
+            } else if tx.send(map(Notice::Resync)).is_err() {
                 return;
             }
             // The poll: ends the thread (and the listen task with its runtime) once nobody
@@ -128,29 +187,33 @@ pub(crate) fn start(url: Option<String>, mode: NotifyMode, poll_ms: &AtomicU64) 
             let mut every = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             loop {
                 every.tick().await;
-                if tx.send(CutNotice::Resync).is_err() {
+                if tx.send(map(Notice::Resync)).is_err() {
                     return;
                 }
             }
         });
     });
     if let Err(e) = spawned {
-        log::error!("[world-store] spawn the terrain listener: {e}; only the store reads at start");
+        log::error!("[world-store] spawn the {channel} listener: {e}; only the poll's reads");
     }
     rx
 }
 
-/// One listener connection after another: `Resync` once each is listening, `Cut` per notice.
-async fn listen(url: String, tx: Sender<CutNotice>) {
+/// One listener connection after another: `Resync` once each is listening, a `Payload` per
+/// notice.
+async fn listen<T, F>(url: String, channel: &'static str, tx: Sender<T>, map: Arc<F>)
+where
+    T: Send + 'static,
+    F: Fn(Notice) -> T + Send + Sync + 'static,
+{
     let at = describe(&url);
     let mut failing = false;
-    let mut malformed_warned: Option<std::time::Instant> = None;
     loop {
-        let mut listener = match connect(&url).await {
+        let mut listener = match connect(&url, channel).await {
             Ok(l) => l,
             Err(e) => {
                 if !failing {
-                    log::warn!("[world-store] the terrain listener cannot connect to {at} ({e}); retrying every {LISTEN_RETRY:?}");
+                    log::warn!("[world-store] the {channel} listener cannot connect to {at} ({e}); retrying every {LISTEN_RETRY:?}");
                 }
                 failing = true;
                 tokio::time::sleep(LISTEN_RETRY).await;
@@ -158,35 +221,28 @@ async fn listen(url: String, tx: Sender<CutNotice>) {
             }
         };
         if failing {
-            log::info!("[world-store] the terrain listener is connected to {at} again");
+            log::info!("[world-store] the {channel} listener is connected to {at} again");
         }
         failing = false;
-        if tx.send(CutNotice::Resync).is_err() {
+        if tx.send(map(Notice::Resync)).is_err() {
             return;
         }
         let connected = std::time::Instant::now();
         loop {
             let notice = match listener.try_recv().await {
-                Ok(Some(n)) => {
-                    let notice = notice_of(n.payload());
-                    if notice == CutNotice::Resync && malformed_warned.is_none_or(|w| w.elapsed() >= MALFORMED_WARN) {
-                        malformed_warned = Some(std::time::Instant::now());
-                        log::warn!("[world-store] a malformed world_cut notice ({:?}); resyncing", n.payload());
-                    }
-                    notice
-                }
+                Ok(Some(n)) => Notice::Payload(n.payload().to_string()),
                 // The connection was lost (not made again: `eager_reconnect(false)`); what
                 // is sent until the next one listens is lost — its `Resync` covers it.
                 Ok(None) => {
-                    log::warn!("[world-store] the terrain listener lost {at}; reconnecting");
+                    log::warn!("[world-store] the {channel} listener lost {at}; reconnecting");
                     break;
                 }
                 Err(e) => {
-                    log::warn!("[world-store] the terrain listener lost {at} ({e}); reconnecting");
+                    log::warn!("[world-store] the {channel} listener lost {at} ({e}); reconnecting");
                     break;
                 }
             };
-            if tx.send(notice).is_err() {
+            if tx.send(map(notice)).is_err() {
                 return;
             }
         }
@@ -195,8 +251,9 @@ async fn listen(url: String, tx: Sender<CutNotice>) {
     }
 }
 
-/// A listener on one connection of its own (a pool of one, never shared), listening.
-async fn connect(url: &str) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
+/// A listener on one connection of its own (a pool of one, never shared), listening on
+/// `channel`.
+async fn connect(url: &str, channel: &str) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
     let options = url.parse::<sqlx::postgres::PgConnectOptions>()?.application_name(TERRAIN_LISTENER_APP);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
@@ -209,7 +266,7 @@ async fn connect(url: &str) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
     listener.ignore_pool_close_event(true);
     // A lost connection is made again by `listen` (with its backoff), not inside `try_recv`.
     listener.eager_reconnect(false);
-    listener.listen(WORLD_CUT_CHANNEL).await?;
+    listener.listen(channel).await?;
     Ok(listener)
 }
 
@@ -224,6 +281,10 @@ mod tests {
         for bad in ["", "7", "7,", ",5", "x,5", "7,x", "7,-1", "7,5,6", "hello"] {
             assert_eq!(notice_of(bad), CutNotice::Resync, "{bad:?}");
         }
+        let read = cut_notices();
+        assert_eq!(read(Notice::Payload("3,40".into())), CutNotice::Cut { tick: 40 });
+        assert_eq!(read(Notice::Payload("nope".into())), CutNotice::Resync);
+        assert_eq!(read(Notice::Resync), CutNotice::Resync);
     }
 
     #[test]

@@ -846,6 +846,12 @@ impl Coordinator {
     /// both are participants (two different ones); dropped otherwise — a count of a decided
     /// cut (an abort for a lapsed participant included) is never used.
     pub(super) fn cut_peer_count(&mut self, host: HostId, cut: CutId, peer: HostId, received_through: u64, boot: u64) {
+        if self.cut_not_made_yet(cut) {
+            // Another replica began it: relayed from a refreshed cache (Elastic 2b Task 5).
+            log::info!("coordinator: host {host}'s count in cut {}, newer than this cache's last: refreshing first", cut.0);
+            self.stale_seen = true;
+            return;
+        }
         let running = self.cuts.run.as_ref().filter(|r| r.cut == cut && r.verdict.is_none());
         if !running.is_some_and(|r| host != peer && r.has(host) && r.has(peer)) {
             log::debug!("coordinator: host {host}'s count toward host {peer} in cut {} dropped: not between participants of it running", cut.0);
@@ -886,6 +892,11 @@ impl Coordinator {
     /// replica not in the live set (ended, or dropped by a lone registration) counts detached.
     pub(super) fn attached_hosts(&self) -> impl Iterator<Item = HostId> + '_ {
         self.cuts.attached.iter().filter(|(_, (_, p))| self.replicas.contains(p)).map(|(h, _)| *h)
+    }
+
+    /// Every attachment, whatever its replica: host → (its boot, the replica it attached to).
+    pub(super) fn attachments(&self) -> &BTreeMap<HostId, (u64, ReplicaId)> {
+        &self.cuts.attached
     }
 
     /// Every attachment's host, whatever its replica (a newer generation's first `Attach`
@@ -960,15 +971,34 @@ impl Coordinator {
 
     /// `host` asks about `cut`, which is not the cut running: its outcome if remembered,
     /// else the runtime looks it up.
+    ///
+    /// A cut above the last this cache made (Elastic 2b Task 5) is no unknown cut: another replica
+    /// committed its begin and this cache is stale — it is refreshed
+    /// ([`Coordinator::take_refresh_wanted`]) and the message applied again there; looked up now,
+    /// an undecided cut would be aborted (audit H3).
     fn answer_cut(&mut self, host: HostId, cut: CutId) {
+        if self.cut_not_made_yet(cut) {
+            log::info!("coordinator: host {host} names cut {}, newer than this cache's last: refreshing first", cut.0);
+            self.stale_cuts.push((host, cut));
+            return;
+        }
         match self.cuts.outcomes.get(&cut).copied() {
             Some(committed) => self.push(Target::Host(host), CoordMsg::CutDone { cut, committed }),
-            None => {
-                if !self.cuts.lookups.contains(&(host, cut)) {
-                    self.cuts.lookups.push((host, cut));
-                }
-            }
+            None => self.queue_cut_lookup(host, cut),
         }
+    }
+
+    /// `(host, cut)`'s outcome is to be looked up in the store (once).
+    pub(super) fn queue_cut_lookup(&mut self, host: HostId, cut: CutId) {
+        if !self.cuts.lookups.contains(&(host, cut)) {
+            self.cuts.lookups.push((host, cut));
+        }
+    }
+
+    /// Whether `cut` is above every cut id this cache made: a cut another replica began after the
+    /// row this cache holds (ids are durable and never repeat within a row's life).
+    fn cut_not_made_yet(&self, cut: CutId) -> bool {
+        cut.0 > ((self.cuts.epoch << 32) | self.cuts.next)
     }
 
     fn remember_outcome(&mut self, cut: CutId, committed: bool) {

@@ -132,14 +132,36 @@
 //!    (`55P03`, a staged part holding a predecessor's rows), a stale generation — is
 //!    `ROLLBACK TO SAVEPOINT` and that decision's answer: nothing of it is written, it is decided
 //!    again later, and the core still commits.
-//! 3. The commit.
+//! 3. The outbox (Elastic 2b Task 5): `INSERT INTO outbox` of each message for a host linked to
+//!    another replica (a new row each: no existing row locked).
+//! 4. `DELETE FROM outbox WHERE host = ANY($attached_now)` — the rows of the hosts whose `Attach`
+//!    this transition applied, discarded unsent (BEFORE the take: they are not delivered).
+//! 5. `DELETE FROM outbox WHERE host = ANY($my_hosts) RETURNING …` — this replica's own hosts'
+//!    rows taken, in `seq` order (a row of another boot than its host's link is deleted unsent).
+//!    Steps 4 and 5 lock `outbox` rows only, inserted by earlier transitions that committed
+//!    before this one could hold `coordinator`: no transaction holds them now (only a take between
+//!    transitions may — see below — and it holds nothing else).
+//! 6. `SELECT pg_notify('coordinator_row', '<version>')` (no row lock; delivered at the commit).
+//! 7. The commit.
+//!
+//! **A take between transitions** (`coordinator_tx::take_outbox_pg`, Elastic 2b Task 5): ONE
+//! statement, `DELETE FROM outbox WHERE host = ANY($my_hosts) RETURNING …` — the `outbox` rows
+//! only, no other lock: it holds them and wants nothing after them. A transition's step 4 or 5
+//! meeting a row it holds waits for its commit (one statement) and then skips it (the row is gone:
+//! READ COMMITTED re-checks the deleted row) — a wait, never a cycle (only these deletes lock
+//! `outbox` rows, each in one scan in the table's one order; should two ever meet in opposite
+//! orders, the `40P01` aborts the take — retried — or the transition — a failed write, retried —
+//! and nothing is lost: the rows stay until a take commits). Rows of one host are taken
+//! by the one replica linking it (its runtime issues a take only while no transition of its own
+//! is in flight), so a row is delivered at most once.
 //!
 //! Why no cycle: every statement that locks `coordinator` takes it FIRST (only the coordinator's
 //! transitions, its bootstrap's one-statement insert and a replica's registration touch it); hosts, claims, registrations,
 //! heartbeats, the drain mark and the operator never lock it. So nothing holds another lock and
 //! then waits for `coordinator`. After it each decision keeps its own walk (`world` → `hosts` →
 //! `super_regions`; `world` → `cut_decisions` → `hosts` → `successions`), which was already a
-//! suffix of `coordinator` first. Another transition of the coordinator (a second replica, Elastic
+//! suffix of `coordinator` first; the `outbox` rows come last and are locked only by
+//! coordinator statements (a transition, after `coordinator`; a take, alone). Another transition of the coordinator (a second replica, Elastic
 //! 2b) waits on the row and then finds `version` moved (READ COMMITTED re-evaluates the `WHERE`):
 //! a `Conflict`, never a deadlock. Cost: a decision holds the row for its `lock_timeout` at most
 //! (a declaration waiting for a staged part); another transition waits that long, then conflicts.

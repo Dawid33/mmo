@@ -61,7 +61,7 @@ use crate::history::persist::HistoryLoadError;
 use crate::history::{
     AdventureRefusal, CalendarTick, Directive, History, SiteId, SocietyGrid, TICKS_PER_DAY,
 };
-use crate::{PlayerId, RegionCoords};
+use crate::{CutId, PlayerId, RegionCoords};
 
 /// Answers of state-changing requests remembered for replay past which the coordinator
 /// logs an error (at most once per [`MEMO_WARN_SECS`]): answers are forgotten only when
@@ -244,6 +244,28 @@ pub struct Coordinator {
     /// The version check of the outputs free to leave with several live replicas (Elastic 2b
     /// departs 5): handed out ([`Self::version_check_wanted`]), confirmed or not.
     version_check: Option<VersionCheck>,
+    /// Messages for hosts attached to another live replica ([`Self::route_out`]), in order: they
+    /// leave with the next transition, through the store's outbox (Elastic 2b Task 5).
+    outbox: Vec<OutboxMsg>,
+    /// How many of `out`'s first messages [`Self::route_out`] routed already (a transition handed
+    /// back: its `Every`s were fanned out to `outbox` once — never twice).
+    routed: usize,
+    /// The hosts whose `Attach` was applied since the last transition was taken: that transition
+    /// discards their outbox rows (decided before the `Attach`, which reconciles them).
+    attached_now: BTreeSet<HostId>,
+    /// Hosts' messages about a world cut this cache cannot know yet — an id above its last one
+    /// ([`Self::take_refresh_wanted`]): the row moved past this cache (a host got the `BeginCut`
+    /// of a transition another replica committed). Never looked up while the cache may be stale
+    /// (a lookup would abort the cut, audit H3): the cache is refreshed and the log replayed.
+    stale_cuts: Vec<(HostId, CutId)>,
+    /// A relay of such a cut was dropped ([`HostMsg::CutPeerCount`]): the cache is stale.
+    stale_seen: bool,
+    /// [`Self::take_refresh_wanted`] answered `true` covering this many of `stale_cuts` (and
+    /// `stale_seen`): what [`Self::refresh_not_newer`] may resolve.
+    refresh_covers: Option<(usize, bool)>,
+    /// Test support ([`Self::record_inputs`]): the inputs that left the log by a commit or a
+    /// release, in that order.
+    recorded: Option<Vec<(u64, Input)>>,
 }
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
@@ -340,6 +362,7 @@ projection! {
             log = Vec::new(),
             unstored = false,
             joined = false,
+            recorded = None,
         }
         reset {
             out = Vec::new(),
@@ -354,6 +377,12 @@ projection! {
             decisions = Vec::new(),
             writing_stamp = None,
             version_check = None,
+            outbox = Vec::new(),
+            routed = 0,
+            attached_now = BTreeSet::new(),
+            stale_cuts = Vec::new(),
+            stale_seen = false,
+            refresh_covers = None,
         }
     }
 }
@@ -416,6 +445,13 @@ impl Coordinator {
             replicas: [replica].into_iter().collect(),
             joined: false,
             version_check: None,
+            outbox: Vec::new(),
+            routed: 0,
+            attached_now: BTreeSet::new(),
+            stale_cuts: Vec::new(),
+            stale_seen: false,
+            refresh_covers: None,
+            recorded: None,
         };
         c.push_view(Target::Every);
         c
@@ -648,6 +684,8 @@ impl Coordinator {
                 self.attach(host, epoch, running, online, handed);
                 self.cut_attach(host, pending_cut, boot);
                 self.succession_attach(host, successions);
+                // Its outbox rows, decided before this `Attach`, go with the transition holding it.
+                self.attached_now.insert(host);
             }
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
@@ -802,6 +840,11 @@ impl Coordinator {
             if self.writing || self.evicted() {
                 return Vec::new();
             }
+            if self.is_stale() {
+                // A host spoke of a cut this cache cannot know yet (Elastic 2b Task 5): the row
+                // moved past it. Nothing leaves and the log stays whole until it is refreshed.
+                return Vec::new();
+            }
             let clean = std::mem::take(&mut self.clean_checked) || !self.durable_pending();
             if !clean {
                 return Vec::new();
@@ -814,17 +857,135 @@ impl Coordinator {
                 self.version_check = None;
                 let n = check.out_len.min(self.out.len());
                 let logged = check.log_len.min(self.log.len());
-                self.log.drain(..logged);
+                let drained: Vec<(u64, Input)> = self.log.drain(..logged).collect();
+                self.record(drained);
                 self.unlogged_committed = self.unlogged;
+                self.routed = self.routed.saturating_sub(n);
                 return self.out.drain(..n).collect();
             }
         } else {
-            // No store: nothing to decide in (an unstored core runs no world cut nor succession).
+            // No store: nothing to decide in (an unstored core runs no world cut nor succession),
+            // and no other replica (nothing routed through an outbox).
             self.decisions.clear();
+            self.attached_now.clear();
         }
-        self.log.clear();
+        let drained = std::mem::take(&mut self.log);
+        self.record(drained);
         self.unlogged_committed = self.unlogged;
+        self.routed = 0;
         std::mem::take(&mut self.out)
+    }
+
+    /// Split what waits in `out` by attachment (Elastic 2b Task 5): a message for a host attached
+    /// to this replica (or to none: its link, if any, is here) stays in `out`, sent on this
+    /// replica's links; one for a host attached to ANOTHER live replica goes to the outbox, with
+    /// that host's boot (the store inserts it with the transition; the replica linking the host
+    /// relays it in commit order); one for a host attached to a replica no longer live is dropped
+    /// — as a detached host's: its next `Attach` (to a live replica) reconciles what it would
+    /// have carried. [`Target::Every`] stays in `out` for this replica's links and is fanned out
+    /// to the outbox once per host attached to another live replica. An answer to an `Attach`
+    /// on this replica's link ([`CoordMsg::Attached`], [`CoordMsg::Generation`]) always stays.
+    /// One live replica, every host attached to it (or to none): nothing changes. Run by
+    /// [`Self::take_transition`] over everything decided since the last one, at the attachments
+    /// its compare-and-set commits with.
+    fn route_out(&mut self) {
+        let me = self.replica;
+        let from = self.routed.min(self.out.len());
+        self.routed = self.out.len();
+        if self.unstored || self.attachments().values().all(|(_, r)| *r == me) {
+            return;
+        }
+        let elsewhere: BTreeMap<HostId, u64> = self
+            .attachments()
+            .iter()
+            .filter(|(_, (_, r))| *r != me && self.replicas.contains(r))
+            .map(|(h, (boot, _))| (*h, *boot))
+            .collect();
+        let out = self.out.split_off(from);
+        for (to, msg) in out {
+            let answers_link = matches!(msg, CoordMsg::Attached { .. } | CoordMsg::Generation(_));
+            match to {
+                Target::Host(h) if !answers_link => match self.attachments().get(&h).copied() {
+                    Some((boot, r)) if r != me && self.replicas.contains(&r) => self.outbox.push(OutboxMsg { host: h, boot, msg }),
+                    Some((_, r)) if r != me => {
+                        log::debug!("coordinator: host {h} is attached to replica {r}, not live: a message for it dropped");
+                    }
+                    _ => self.out.push((to, msg)),
+                },
+                Target::Host(_) => self.out.push((to, msg)),
+                Target::Every => {
+                    for (&host, &boot) in &elsewhere {
+                        self.outbox.push(OutboxMsg { host, boot, msg: msg.clone() });
+                    }
+                    self.out.push((to, msg));
+                }
+            }
+        }
+        self.routed = self.out.len();
+    }
+
+    /// Whether a host spoke of a world cut this cache cannot know yet: it is stale (the row moved
+    /// past it) until refreshed ([`Self::take_refresh_wanted`]).
+    fn is_stale(&self) -> bool {
+        !self.stale_cuts.is_empty() || self.stale_seen
+    }
+
+    /// Whether the runtime should refresh this cache now (Elastic 2b Task 5): a host's message
+    /// named a world cut above the last this cache made (a cut answer, a peer count) — another
+    /// replica committed it. `true` once per such finding; the runtime reads the row and rebases
+    /// onto it ([`Self::refresh`]: the message is applied again there, never looked up — a lookup
+    /// would abort the cut), or, found not newer, answers [`Self::refresh_not_newer`].
+    pub fn take_refresh_wanted(&mut self) -> bool {
+        if !self.is_stale() || self.refresh_covers.is_some() {
+            return false;
+        }
+        self.refresh_covers = Some((self.stale_cuts.len(), self.stale_seen));
+        true
+    }
+
+    /// The refresh [`Self::take_refresh_wanted`] asked for read the row at no newer version than
+    /// this cache's: the cuts it covered do not exist (a read after the host's message sees every
+    /// cut that host could have been told of) — each is looked up as an unknown cut is (the
+    /// store's decision, an undecided one aborted), and a dropped relay stays dropped.
+    pub fn refresh_not_newer(&mut self) {
+        let Some((cuts, seen)) = self.refresh_covers.take() else { return };
+        let covered: Vec<(HostId, CutId)> = self.stale_cuts.drain(..cuts.min(self.stale_cuts.len())).collect();
+        if seen {
+            self.stale_seen = false;
+        }
+        for (host, cut) in covered {
+            log::warn!("coordinator: host {host} named cut {}, which the row does not hold either: looked up", cut.0);
+            self.note_unlogged();
+            self.queue_cut_lookup(host, cut);
+        }
+    }
+
+    /// Test support: the inputs leaving the log from now on (by a commit, or a release) are kept
+    /// for [`Self::take_recorded`].
+    #[doc(hidden)]
+    pub fn record_inputs(&mut self) {
+        self.recorded.get_or_insert_with(Vec::new);
+    }
+
+    /// Test support: the inputs that left the log since the last call ([`Self::record_inputs`]),
+    /// in order.
+    #[doc(hidden)]
+    pub fn take_recorded(&mut self) -> Vec<(u64, Input)> {
+        self.recorded.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Test support: this core applies its next inputs as replica `r` (a reference core fed every
+    /// replica's committed inputs in commit order, Elastic 2b Task 5).
+    #[doc(hidden)]
+    pub fn set_replica_for_test(&mut self, r: ReplicaId) {
+        self.replica = r;
+    }
+
+    /// Inputs leaving the log, kept if recording.
+    fn record(&mut self, inputs: Vec<(u64, Input)>) {
+        if let Some(r) = self.recorded.as_mut() {
+            r.extend(inputs);
+        }
     }
 
     /// The version check the outputs free to leave wait for (Elastic 2b departs 5): with more
@@ -833,7 +994,7 @@ impl Coordinator {
     /// (`SELECT version`) and answer with [`Self::version_checked`]. It covers the outputs
     /// decided so far. `None`: no check wanted (one replica: none at all).
     pub fn version_check_wanted(&mut self) -> Option<u64> {
-        if self.unstored || self.writing || self.evicted() || self.replicas.len() <= 1 || self.out.is_empty() {
+        if self.unstored || self.writing || self.evicted() || self.replicas.len() <= 1 || self.out.is_empty() || self.is_stale() {
             return None;
         }
         if self.version_check.is_some_and(|c| c.version == self.version) || self.durable_pending() {
@@ -953,7 +1114,11 @@ impl Coordinator {
     /// Whether the projection differs from the one last handed out (or loaded), or the
     /// history changed since.
     fn durable_pending(&self) -> bool {
-        !self.decisions.is_empty() || self.history.content_dirty() || raw_core(&self.projection()) != self.committed_raw
+        !self.decisions.is_empty()
+            || !self.outbox.is_empty()
+            || !self.attached_now.is_empty()
+            || self.history.content_dirty()
+            || raw_core(&self.projection()) != self.committed_raw
     }
 
     /// The pending change as bytes plus the messages it releases; `None` when nothing durable
@@ -980,9 +1145,17 @@ impl Coordinator {
         // all, as the next version of the row it was read at (the compare-and-set).
         let stamp = CallStamp { replica: self.replica, version: self.version + 1 };
         self.stamp_pending_marks(stamp);
+        // Routed at the attachments this transition commits with (Elastic 2b Task 5): a message
+        // for another replica's host leaves through the outbox, written with it.
+        self.route_out();
         let raw = raw_core(&self.projection());
         let history_changed = self.history.content_dirty();
-        if !history_changed && raw == self.committed_raw && self.decisions.is_empty() {
+        if !history_changed
+            && raw == self.committed_raw
+            && self.decisions.is_empty()
+            && self.outbox.is_empty()
+            && self.attached_now.is_empty()
+        {
             self.clean_checked = true;
             return None;
         }
@@ -997,7 +1170,15 @@ impl Coordinator {
         self.unlogged_taken = self.unlogged;
         // Every output leaves with this transition: its compare-and-set is their version check.
         self.version_check = None;
-        Some(Transition { core, history, out: std::mem::take(&mut self.out), decisions: std::mem::take(&mut self.decisions) })
+        self.routed = 0;
+        Some(Transition {
+            core,
+            history,
+            out: std::mem::take(&mut self.out),
+            decisions: std::mem::take(&mut self.decisions),
+            outbox: std::mem::take(&mut self.outbox),
+            attached_now: std::mem::take(&mut self.attached_now).into_iter().collect(),
+        })
     }
 
     /// The write of the transition last taken committed as row version `version`: its messages
@@ -1015,7 +1196,8 @@ impl Coordinator {
         self.writing_stamp = None;
         self.version = version;
         let boundary = std::mem::take(&mut self.log_boundary).min(self.log.len());
-        self.log.drain(..boundary);
+        let drained: Vec<(u64, Input)> = self.log.drain(..boundary).collect();
+        self.record(drained);
         self.unlogged_committed = self.unlogged_taken;
     }
 
@@ -1065,8 +1247,13 @@ impl Coordinator {
             self.history.mark_content_dirty();
         }
         self.committed_raw.clear();
+        self.routed = t.out.len();
         let later = std::mem::replace(&mut self.out, t.out);
         self.out.extend(later);
+        // Routed already (an `Every` fanned out): back as they were, ahead of anything routed since.
+        let later = std::mem::replace(&mut self.outbox, t.outbox);
+        self.outbox.extend(later);
+        self.attached_now.extend(t.attached_now);
         t.decisions
     }
 
@@ -1224,7 +1411,18 @@ impl Coordinator {
     /// free to leave), superseded by its attach (`what` names them in the log).
     fn drop_unsent(&mut self, host: HostId, what: &str, drops: impl Fn(&CoordMsg) -> bool) {
         let before = self.out.len();
-        self.out.retain(|(to, m)| !(*to == Target::Host(host) && drops(m)));
+        let routed = self.routed;
+        let mut i = 0;
+        let mut routed_dropped = 0;
+        self.out.retain(|(to, m)| {
+            let keep = !(*to == Target::Host(host) && drops(m));
+            if !keep && i < routed {
+                routed_dropped += 1;
+            }
+            i += 1;
+            keep
+        });
+        self.routed -= routed_dropped;
         let dropped = before - self.out.len();
         if dropped > 0 {
             log::info!("coordinator: {dropped} unsent {what} for host {host} superseded by its attach");

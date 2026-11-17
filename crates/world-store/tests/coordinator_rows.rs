@@ -24,7 +24,14 @@ fn row(s: StoredCoordinator) -> (u64, Vec<u8>, Vec<u8>) {
 
 /// A transition of replica 1 at `version`: `core`, `history`, `decisions`.
 fn transition(version: u64, core: &[u8], history: Option<&[u8]>, decisions: Vec<StoreDecision>) -> TransitionWrite {
-    TransitionWrite { version, core: core.to_vec(), history: history.map(<[u8]>::to_vec), decisions, replica: ReplicaId(1) }
+    TransitionWrite {
+        version,
+        core: core.to_vec(),
+        history: history.map(<[u8]>::to_vec),
+        decisions,
+        replica: ReplicaId(1),
+        ..Default::default()
+    }
 }
 
 fn write(h: &StoreHandle, w: TransitionWrite) -> Result<TransitionWritten, StoreError> {
@@ -238,4 +245,103 @@ fn a_decision_lock_timeout_is_its_answer_not_the_writes() {
     assert!(!w.h.abort_cut(CutId(1), 100).unwrap());
     assert_eq!(prepared(&w.w), 0);
     w.shutdown();
+}
+
+// ---- the outbox (Elastic 2b Task 5) -------------------------------------------------------
+
+/// A fresh Postgres store (the outbox is Postgres only: one replica on SQLite), its row
+/// bootstrapped at version 1.
+fn pg_store(tag: &str) -> Option<(crate::common::PgTestDb, StoreHandle)> {
+    if crate::common::pg_admin_url().is_none() {
+        crate::common::skip_msg();
+        return None;
+    }
+    let db = crate::common::PgTestDb::create(&format!("mmo_test_outbox_{tag}")).expect("pg env var set");
+    let h = open(&world_store::StoreUrl::Postgres(db.url.clone()));
+    h.bootstrap_coordinator(vec![0], vec![10]).unwrap();
+    Some((db, h))
+}
+
+/// A transition of replica `replica` at `version` (core `[version]`) leaving `outbox` for other
+/// replicas' hosts, taking the rows of `take` (its own hosts, with their links' boots) and
+/// discarding the rows of `discard` (the hosts whose `Attach` it applied).
+fn relay(version: u64, replica: u64, outbox: &[(u64, u64, u8)], take: &[(u64, u64)], discard: &[u64]) -> TransitionWrite {
+    TransitionWrite {
+        version,
+        core: vec![version as u8],
+        replica: ReplicaId(replica),
+        outbox: outbox.iter().map(|(h, b, m)| (hid(*h), *b, vec![*m])).collect(),
+        take_for: take.iter().map(|(h, b)| (hid(*h), *b)).collect(),
+        discard_for: discard.iter().map(|h| hid(*h)).collect(),
+        ..Default::default()
+    }
+}
+
+/// The rows as `(version, host, boot, msg)`, in their order (`seq` rising).
+fn rows_of(rows: &[world_store::OutboxRow]) -> Vec<(u64, u64, u64, Vec<u8>)> {
+    assert!(rows.windows(2).all(|w| w[0].seq < w[1].seq), "in seq order: {rows:?}");
+    rows.iter().map(|r| (r.version, r.host.0, r.boot, r.msg.clone())).collect()
+}
+
+/// Review Focus 2 (decision 5): the transition that applies a host's `Attach` discards every
+/// outbox row for it — they were decided before the `Attach`, which reconciles what they
+/// carried — before it takes its hosts' rows: none is delivered. A row a later transition leaves
+/// for it is delivered.
+#[test]
+fn outbox_rows_older_than_an_attach_are_discarded() {
+    let Some((_db, h)) = pg_store("attach") else { return };
+    write(&h, relay(1, 1, &[(5, 9, 1), (5, 9, 2), (6, 3, 7)], &[], &[])).unwrap();
+    let attached = write(&h, relay(2, 2, &[], &[(5, 9)], &[5])).unwrap();
+    assert!(attached.taken.is_empty(), "the rows older than the Attach are discarded, never taken: {:?}", attached.taken);
+    write(&h, relay(3, 1, &[(5, 9, 3)], &[], &[])).unwrap();
+    let rows = h.take_outbox_later(vec![(hid(5), 9), (hid(6), 3)]).recv().unwrap().unwrap();
+    assert_eq!(rows_of(&rows), vec![(2, 6, 3, vec![7]), (4, 5, 9, vec![3])], "host 6's row stands; host 5's newer row is delivered");
+    assert!(h.take_outbox_later(vec![(hid(5), 9), (hid(6), 3)]).recv().unwrap().unwrap().is_empty(), "taken once");
+    h.shutdown();
+}
+
+/// Decision 5: a write takes the rows of its own hosts only (the ones it names, at its links'
+/// boots), in commit order (`seq`); a row whose boot is not its link's is deleted unsent; the
+/// other hosts' rows stay for the replica that links them.
+#[test]
+fn a_write_takes_only_its_own_hosts_rows_in_seq_order() {
+    let Some((_db, h)) = pg_store("take") else { return };
+    write(&h, relay(1, 1, &[(1, 10, 1), (2, 20, 2), (1, 10, 3)], &[], &[])).unwrap();
+    write(&h, relay(2, 1, &[(3, 30, 4), (1, 11, 5)], &[], &[])).unwrap();
+    let written = write(&h, relay(3, 2, &[(2, 20, 6)], &[(1, 10), (3, 30)], &[])).unwrap();
+    assert_eq!(written.version, 4);
+    assert_eq!(
+        rows_of(&written.taken),
+        vec![(2, 1, 10, vec![1]), (2, 1, 10, vec![3]), (3, 3, 30, vec![4])],
+        "hosts 1 and 3's rows at their links' boots, in seq order"
+    );
+    let rows = h.take_outbox_later(vec![(hid(2), 20)]).recv().unwrap().unwrap();
+    assert_eq!(rows_of(&rows), vec![(2, 2, 20, vec![2]), (4, 2, 20, vec![6])], "host 2's rows stayed for its replica");
+    assert!(h.take_outbox_later(vec![(hid(1), 11)]).recv().unwrap().unwrap().is_empty(), "host 1's row of another boot was deleted unsent");
+    h.shutdown();
+}
+
+/// Decision 4: a transition that meets a moved row (`Conflict`) inserts no outbox row, takes
+/// none and notifies nothing; a committed one notifies `coordinator_row` with its version.
+#[test]
+fn a_conflicting_write_inserts_no_outbox_row() {
+    let Some((_db, h)) = pg_store("conflict") else { return };
+    let notices = h.listen_channel(world_store::COORDINATOR_ROW_CHANNEL, world_store::NotifyMode::Listen);
+    // The listener is up once it says Resync.
+    assert_eq!(notices.recv_timeout(std::time::Duration::from_secs(5)), Ok(world_store::Notice::Resync));
+    write(&h, relay(1, 1, &[(7, 1, 1)], &[], &[])).unwrap();
+    assert_eq!(write(&h, relay(1, 2, &[(7, 1, 2)], &[(7, 1)], &[7])).unwrap_err(), StoreError::Conflict);
+    let next_payload = || loop {
+        match notices.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(world_store::Notice::Payload(p)) => return Some(p),
+            Ok(world_store::Notice::Resync) => continue,
+            Err(_) => return None,
+        }
+    };
+    assert_eq!(next_payload(), Some("2".to_string()), "the committed write's version");
+    write(&h, relay(2, 1, &[], &[], &[])).unwrap();
+    assert_eq!(next_payload(), Some("3".to_string()), "no notice of the conflicting write came between");
+    let rows = h.take_outbox_later(vec![(hid(7), 1)]).recv().unwrap().unwrap();
+    assert_eq!(rows_of(&rows), vec![(2, 7, 1, vec![1])], "only the committed write's row; the conflicting one discarded and took nothing");
+    h.shutdown();
 }

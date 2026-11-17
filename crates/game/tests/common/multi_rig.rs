@@ -389,8 +389,11 @@ pub struct MultiRig {
     /// dead with no succession.
     pub ended: BTreeSet<(HostId, u64)>,
     /// Coordinator processes started so far ([`Self::with_coordinator`], then one per
-    /// [`Self::restart_coordinator_from_store`]): each one's process boot and claim epoch.
+    /// [`Self::restart_coordinator_from_store`] or added replica): each one's process boot and claim epoch.
     pub coordinator_starts: u64,
+    /// How many times the rig store ran each cut's decision (Elastic 2b Task 5: once, whatever
+    /// replicas the world has).
+    pub decide_executions: BTreeMap<CutId, u32>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -519,6 +522,7 @@ impl MultiRig {
                 begins: BTreeMap::new(),
                 ended: BTreeSet::new(),
                 coordinator_starts: 0,
+                decide_executions: BTreeMap::new(),
             };
         for h in host_ids(keepers) {
             rig.keep(h);
@@ -657,6 +661,63 @@ impl MultiRig {
                 link.set_up(true);
             }
         }
+    }
+
+    /// Elastic 2b Task 5: `n` coordinator replicas over the rig's one row ([`Self::with_coordinator`]
+    /// first): each added one is a new process — a new replica id — that loads the row as it
+    /// stands, registered beside replica 0 (not alone), configured as the runtime configures every
+    /// replica (the crash policy), and joins the live set with its first transition. Its cache
+    /// holds nothing of the others' later writes until it rebases (a conflict) or refreshes. Hosts
+    /// stay linked to replica 0 until moved ([`Self::link_world_to`]). Timed work (the upkeep, the
+    /// cuts' and successions' hand-outs, the rig's drives) runs on replica 0 only.
+    pub fn with_replicas(&mut self, n: usize) {
+        let shared = self.coordinator.clone().expect("a coordinator");
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        // Replica 0's configuration (the cut period and epoch) is in the row first: a new replica
+        // reads the row, and replica 0 holds nothing outside its log when another writes.
+        shared.lock().unwrap_or_else(|e| e.into_inner()).commit();
+        assert!(!shared.lock().unwrap_or_else(|e| e.into_inner()).unlogged_pending(), "replica 0 committed everything");
+        for _ in 1..n {
+            self.coordinator_starts += 1;
+            let id = game::coordinator::ReplicaId(self.coordinator_starts);
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let (core, history) = guard.stored().expect("the coordinator wrote a transition");
+            let grid = guard.history().grid().clone();
+            let policy = guard.crash_policy();
+            let mut loaded = game::Coordinator::load(&core, &history, grid, id, now).expect("the projection loads");
+            loaded.set_version(guard.row_version());
+            loaded.apply(game::coordinator::Input::ReplicaJoined { me: id, alone: false }, now);
+            loaded.set_crash_policy(policy);
+            let r = guard.add_replica(loaded);
+            guard.pump_replica(r);
+        }
+    }
+
+    /// Host `h`'s world link moves to replica `to` (Elastic 2b Task 5): its link to the replica it
+    /// reached goes down there (what was on it lost), it stays down one round, then comes up to
+    /// `to`; rounds until the host is attached again.
+    pub fn link_world_to(&mut self, h: HostId, to: usize) {
+        let now = self.hosts[h.0 as usize].now_ms;
+        self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").move_to(to, now);
+        self.round();
+        self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").set_up(true);
+        for _ in 0..CONNECT_ROUNDS {
+            if self.hosts[h.0 as usize].manager.world_attached() {
+                return;
+            }
+            self.round();
+        }
+        panic!("host {h} never attached to replica {to}");
+    }
+
+    /// The replica host `h`'s world link reaches.
+    pub fn world_replica_of(&self, h: HostId) -> usize {
+        self.hosts[h.0 as usize].manager.world_link().and_then(|l| l.as_inline()).expect("an inline world link").replica_index()
+    }
+
+    /// The row version that released each coordinator message host `h` read so far, in order.
+    pub fn world_read_versions(&self, h: HostId) -> Vec<u64> {
+        self.hosts[h.0 as usize].manager.world_link().and_then(|l| l.as_inline()).expect("an inline world link").read_versions().to_vec()
     }
 
     /// A round ([`Self::round`]) with every host's upkeep ([`game::WorldManager::maintain`],
@@ -871,6 +932,7 @@ impl MultiRig {
         for (stamp, d) in committed {
             answers.push(match d {
                 StoreDecision::DecideCut(c) => {
+                    *self.decide_executions.entry(c.cut).or_default() += 1;
                     let stored = self.decide_settling(c.cut, c.commit, &c.hosts, &c.settles);
                     if stored {
                         // Their `hosts` rows are clean now (`decide_in`'s `leaving`).

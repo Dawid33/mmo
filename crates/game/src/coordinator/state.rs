@@ -23,6 +23,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{CoordMsg, StoreDecision, Target};
+use crate::HostId;
 use crate::history::persist::HistoryLoadError;
 
 /// The format byte leading an encoded core ([`encode_core`]). Worlds are re-forged, never
@@ -40,12 +41,30 @@ pub const COORDINATOR_STATE_VERSION: u8 = 5;
 /// runs the decisions in that same transaction, each in a savepoint after the row's update; it
 /// sends `out` only once that write committed: every output, a store decision included, is
 /// durable before it leaves.
+///
+/// With several replicas (Elastic 2b Task 5) `out` holds only what this replica sends on its
+/// own links — a message for a host attached to ANOTHER live replica is in `outbox` instead
+/// (the store inserts it in the same transaction; the replica linking that host relays it in
+/// commit order) — and `attached_now` names the hosts whose `Attach` it applied: their outbox
+/// rows, decided before that `Attach`, are discarded in the same transaction.
 #[derive(Debug, Clone)]
 pub struct Transition {
     pub core: Vec<u8>,
     pub history: Option<Vec<u8>>,
     pub out: Vec<(Target, CoordMsg)>,
     pub decisions: Vec<StoreDecision>,
+    pub outbox: Vec<OutboxMsg>,
+    pub attached_now: Vec<HostId>,
+}
+
+/// A message a transition decided for host `host` (at its boot `boot`, as its attachment names
+/// it), attached to another live replica than the one writing: it travels through the store's
+/// outbox (Elastic 2b Task 5, [`super::Coordinator::route_out`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutboxMsg {
+    pub host: HostId,
+    pub boot: u64,
+    pub msg: CoordMsg,
 }
 
 /// The bincode of the projection `body` (what a transition compares against the last one).

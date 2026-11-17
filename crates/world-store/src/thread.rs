@@ -127,6 +127,8 @@ pub(crate) enum Request {
     LoadCoordinatorSince(u64, Reply<Option<crate::StoredCoordinator>>),
     /// Elastic 2b Task 4: the row's version.
     RowVersion(Reply<u64>),
+    /// Elastic 2b Task 5: the outbox rows of these hosts (each with its link's boot), taken.
+    TakeOutbox(Vec<(HostId, u64)>, Reply<Vec<crate::OutboxRow>>),
     /// Elastic 2b Task 4: a coordinator replica registers (`replicas.rs`).
     RegisterReplica(String, Reply<crate::ReplicaRegistered>),
     /// Elastic 2b Task 4: a replica's beat (Postgres: the beat connection).
@@ -411,20 +413,24 @@ async fn serve(
                 tokio::spawn(async move {
                     let written = match &pool {
                         Pool::Pg(p) => match dials {
-                            Some(dials) => coordinator_tx::write_pg(p, &w, dials, &injected).await.map(|(version, store_ms, decided)| {
+                            Some(dials) => coordinator_tx::write_pg(p, &w, dials, &injected).await.map(|(version, store_ms, decided, taken)| {
                                 let (answers, after_commit) = coordinator_tx::answers(&w, version, decided);
-                                crate::TransitionWritten { version, store_ms, answers, after_commit }
+                                crate::TransitionWritten { version, store_ms, answers, after_commit, taken }
                             }),
                             None => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                         },
                         Pool::Sqlite(_) if !w.decisions.is_empty() => Err(StoreError::Unsupported(
                             "a coordinator transition with store decisions needs Postgres (several hosts)".into(),
                         )),
+                        Pool::Sqlite(_) if !w.outbox.is_empty() => Err(StoreError::Unsupported(
+                            "a coordinator transition with outbox messages needs Postgres (several coordinator replicas)".into(),
+                        )),
+                        // SQLite runs one replica: no other replica leaves a row, nothing to take.
                         Pool::Sqlite(_) => {
                             let _w = writer.lock().await;
-                            on_pool!(&pool, write_coordinator_cas(w.version, w.core.clone(), w.history.clone())).map(
-                                |(version, store_ms)| crate::TransitionWritten { version, store_ms, answers: Vec::new(), after_commit: Vec::new() },
-                            )
+                            on_pool!(&pool, write_coordinator_cas(w.version, w.core.clone(), w.history.clone())).map(|(version, store_ms)| {
+                                crate::TransitionWritten { version, store_ms, answers: Vec::new(), after_commit: Vec::new(), taken: Vec::new() }
+                            })
                         }
                     };
                     reply.send(written)
@@ -612,6 +618,14 @@ async fn serve(
                 tokio::spawn(async move { r.send(on_replicas!(&pool, load_coordinator_since(since))) })
             }
             Request::RowVersion(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, row_version())) }),
+            // No writer lock (as a transition on Postgres: the rows it deletes are only ever
+            // deleted by coordinator statements). SQLite: one replica, no row to take.
+            Request::TakeOutbox(for_hosts, r) => tokio::spawn(async move {
+                r.send(match &pool {
+                    Pool::Pg(p) => coordinator_tx::take_outbox_pg(p, &for_hosts).await,
+                    Pool::Sqlite(_) => Ok(Vec::new()),
+                })
+            }),
             Request::Replicas(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, replicas())) }),
             Request::RegisterReplica(addr, r) => {
                 let lease_ms = cuts.replica_lease_ms.load(Ordering::SeqCst);
@@ -952,11 +966,12 @@ async fn decide_alone(
             history: None,
             decisions: vec![d.clone()],
             replica: game::coordinator::ReplicaId(0),
+            ..Default::default()
         };
         match coordinator_tx::write_pg(p, &w, dials, &[injected]).await {
             Err(StoreError::Conflict) => continue,
             Err(e) => return Err(e),
-            Ok((version, _, mut decided)) => {
+            Ok((version, _, mut decided, _)) => {
                 let decided = decided.pop().expect("one decision");
                 let (_, effects) = coordinator_tx::answers(&w, version, Vec::new());
                 debug_assert!(effects.is_empty());

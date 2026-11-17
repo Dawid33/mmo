@@ -859,6 +859,7 @@ mod tests {
                     history,
                     decisions: Vec::new(),
                     replica: game::coordinator::ReplicaId(0),
+                    ..Default::default()
                 };
                 store.write_transition_later(w).recv().unwrap().expect("the projection writes");
             }

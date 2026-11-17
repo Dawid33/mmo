@@ -239,6 +239,7 @@ fn read_only_refuses_writes_and_unknown_schema() {
             history: None,
             decisions: vec![],
             replica: game::coordinator::ReplicaId(1),
+            ..Default::default()
         };
         let err = r.write_transition_later(t).recv().unwrap().unwrap_err();
         assert_eq!(err, StoreError::ReadOnly);

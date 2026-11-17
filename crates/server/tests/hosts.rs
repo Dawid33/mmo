@@ -2411,3 +2411,56 @@ fn a_lapsed_replica_is_ended_and_exits_fenced() {
     old.shutdown();
     w.stop(&dir);
 }
+
+/// Elastic 2b Task 5: host 0 is linked to replica A (the world's coordinator: it runs the cuts)
+/// and host 1 to replica B. A's `BeginCut` and `CutDone` for host 1 reach it through the outbox
+/// (B relays them in commit order), host 1's `CutPrepared` reaches A through the row (B's cache
+/// asks a refresh for a cut it cannot know yet, never a lookup that would abort it), cuts of both
+/// hosts commit, and a slime crossing from one host to the other is stored once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_cut_spans_hosts_on_two_replicas() {
+    install_props();
+    let Some(db) = PgDb::create("tworeps") else { return };
+    let dir = scratch("tworeps");
+    let mut w = world(&db, &dir);
+    let (b, b_store, b_cert) = spare_replica(&mut w, &db, &dir);
+    let b_id = *live_of(&b).iter().last().expect("B is live");
+    let one = HostId(1);
+    let (boot, reg) = (w.pair.sims[1].boot, w.pair.sims[1].reg);
+    w.switches[1].replace(quic_world_link(b.addr, b_cert.clone(), one, boot, reg));
+    let only_one: std::collections::BTreeSet<HostId> = [one].into_iter().collect();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let on_b = b.thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("B answers");
+        let a_sees = w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("A answers");
+        if on_b == only_one && a_sees == only_one {
+            break;
+        }
+        assert!(Instant::now() < deadline, "host 1 never attached to B as both replicas see it: B {on_b:?}, A {a_sees:?}");
+        w.pair.round();
+    }
+    w.pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+    let committed_before = || decisions(&db).into_iter().filter(|(_, _, k)| *k).map(|(c, _, _)| c).max().unwrap_or(0);
+    let last = committed_before();
+    w.until_committed_after(&db, last);
+
+    // A slime crosses from the host on A to the host on B (or back), then a cut commits.
+    let (a_rc, b_rc) = w.seam;
+    let (owner_a, owner_b) = if seam_of(&w, HostId(0)) == a_rc { (HostId(0), one) } else { (one, HostId(0)) };
+    let id = spawn_slime_in(&mut w, owner_a, a_rc, REGION_SIZE + game::FLIP_HYSTERESIS + 2.0);
+    w.pair.until("the slime crossed, nothing unacknowledged", |p| {
+        let held: Vec<(HostId, RegionCoords)> =
+            p.sims.iter_mut().flat_map(|s| { let h = s.ordinal; s.holders(id).into_iter().map(move |rc| (h, rc)) }).collect();
+        held == [(owner_b, b_rc)] && p.sims.iter().all(|s| s.manager.peer_unreceived() == 0)
+    });
+    let last = committed_before();
+    w.until_committed_after(&db, last);
+    assert_eq!(holders_all(&mut w, id), vec![(owner_b, b_rc)], "the slime is on one host, once");
+    let on_a = w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("A answers");
+    assert_eq!(on_a, only_one, "host 1 stayed with B throughout");
+
+    assert_eq!(b.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+    b_store.shutdown();
+    w.stop(&dir);
+}

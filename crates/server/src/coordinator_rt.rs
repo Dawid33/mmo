@@ -25,6 +25,19 @@
 //! its last commit (that write may be in the row: its inputs would be applied twice). Counted
 //! (`mmo_coordinator_*` in `/metrics`, the periodic `[coordinator] window=…` line): transitions
 //! written, their bytes, conflicts.
+//!
+//! **Several replicas: the outbox** (Elastic 2b Task 5). A message a transition decides for a
+//! host attached to ANOTHER replica leaves through the store's `outbox`, inserted in the same
+//! transaction ([`Coordinator::route_out`]); a transition also discards the rows of the hosts whose
+//! `Attach` it applied, and takes its own hosts' rows. What one write released goes out in commit
+//! order: the rows this replica held, the rows it took, then its own messages. Between writes the
+//! replica relays the rows other replicas left for its hosts: on a `coordinator_row` notice of a
+//! newer version (the row listener, `listen_channel`) its cache is refreshed and the rows taken,
+//! with a backstop every [`world_store::COORDINATOR_POLL_MS`] while more than one replica is
+//! live; a row newer than the cache is held until a refresh reaches it. The take, the write and
+//! the version read are one store call at a time. A host message about a cut the cache cannot
+//! know yet asks a refresh ([`Coordinator::take_refresh_wanted`]), never a lookup.
+//!
 //! Login orders are the exception (decision 1: a process-local relay of the login service's
 //! own state): each is relayed at once to the gate host chosen from the core's attachment state,
 //! which may not be written yet — a host takes orders in any attach state, and a lost order is
@@ -1090,6 +1103,26 @@ pub struct CoordinatorRuntime {
     refresh_rx: Option<Answer<Option<world_store::StoredCoordinator>>>,
     /// This replica's `ReplicaJoined` committed ([`Self::joined`]).
     joined: bool,
+    /// The `coordinator_row` notices (a split coordinator on Postgres; Elastic 2b Task 5).
+    notices: Option<Receiver<world_store::Notice>>,
+    /// The outbox take in flight between transitions (one store call at a time with the write).
+    outbox_rx: Option<Answer<Vec<world_store::OutboxRow>>>,
+    /// Outbox rows taken and not sent yet, in commit order: each leaves once the cache is at
+    /// least as new as its version.
+    relay: VecDeque<world_store::OutboxRow>,
+    /// A take between transitions is due (a notice, the backstop, a refresh).
+    take_wanted: bool,
+    /// A refresh of the cache is due (a notice of a newer version, a held row, a stale cut).
+    refresh_wanted: bool,
+    /// The core asked a refresh for a cut it cannot know ([`Coordinator::take_refresh_wanted`])
+    /// that no refresh issued since covers; the refresh in flight covers one.
+    stale_refresh: bool,
+    refresh_for_stale: bool,
+    /// A confirmed version check waits for a take before what it covers leaves (a row older than
+    /// the cache must reach the host before them).
+    check_take: bool,
+    /// The monotonic ms of the next backstop take (only while several replicas are live).
+    poll_next_mono: u64,
     /// Test hook ([`CoordinatorThread::hold_main_loop`]).
     #[cfg(feature = "test-hooks")]
     hold_main_loop: Arc<AtomicBool>,
@@ -1259,6 +1292,15 @@ impl CoordinatorRuntime {
             core.successions_unknown();
             SuccessionPump::default()
         });
+        // A split coordinator hears every other replica's commits (Elastic 2b Task 5; SQLite: a
+        // receiver that never says anything).
+        let notices = matches!(links.links, Links::Listener(_)).then(|| {
+            let mode = world_store::NotifyMode::from_env().unwrap_or_else(|e| {
+                log::warn!("[coordinator] {e}; listening for row notices");
+                world_store::NotifyMode::Listen
+            });
+            store.listen_channel(world_store::COORDINATOR_ROW_CHANNEL, mode)
+        });
         let runtime = CoordinatorRuntime {
             core,
             store,
@@ -1295,6 +1337,15 @@ impl CoordinatorRuntime {
             version_rx: None,
             refresh_rx: None,
             joined: false,
+            notices,
+            outbox_rx: None,
+            relay: VecDeque::new(),
+            take_wanted: false,
+            refresh_wanted: false,
+            stale_refresh: false,
+            refresh_for_stale: false,
+            check_take: false,
+            poll_next_mono: 0,
             #[cfg(feature = "test-hooks")]
             hold_main_loop: hold_main_loop.clone(),
         };
@@ -1452,6 +1503,12 @@ impl CoordinatorRuntime {
         }
         if let Some((_, written)) = &self.writing {
             sel.recv(written);
+        }
+        if let Some(notices) = &self.notices {
+            sel.recv(notices);
+        }
+        if let Some(taken) = &self.outbox_rx {
+            sel.recv(taken);
         }
         let _ = sel.ready_timeout(Duration::from_millis(COORDINATOR_TICK_MS));
     }
@@ -2075,17 +2132,121 @@ impl CoordinatorRuntime {
                 Settled::End(end) => return Err(end),
             }
         }
-        if self.writing.is_some() || now < self.retry_at_ms {
+        self.pump_outbox(&mut out);
+        // One store call at a time among the write and the take (their rows come in order).
+        if self.writing.is_some() || self.outbox_rx.is_some() || now < self.retry_at_ms {
             return Ok(out);
         }
         if !self.write_next() {
             if self.core.replicas_live().contains(&self.core.replica()) && !self.core.evicted() {
                 self.joined();
             }
+            self.pump_notices();
             self.pump_version_check(now)?;
-            out.extend(self.core.take_out());
+            let idle = self.version_rx.is_none() && self.refresh_rx.is_none();
+            if idle && (self.take_wanted || self.check_take) {
+                // The rows other replicas left for this replica's hosts, between transitions.
+                self.take_wanted = false;
+                self.outbox_rx = Some(self.store.take_outbox_later(self.take_for()));
+            }
+            if self.outbox_rx.is_none() && !self.check_take {
+                out.extend(self.core.take_out());
+            }
         }
         Ok(out)
+    }
+
+    /// This replica's own hosts with their links' boots (Elastic 2b Task 5): those its core has
+    /// attached to it and linked here now — what a take relays (a row of another boot is deleted
+    /// unsent). In-process (one host, one replica): none.
+    fn take_for(&self) -> Vec<(HostId, u64)> {
+        let Links::Listener(l) = &self.links.links else { return Vec::new() };
+        let mine = self.core.hosts_attached_to(self.core.replica());
+        l.routes
+            .live
+            .iter()
+            .filter(|(h, _)| mine.contains(h))
+            .filter_map(|(h, (peer, _))| l.routes.boots.get(peer).map(|boot| (*h, *boot)))
+            .collect()
+    }
+
+    /// The take in flight answered: its rows join the relay, in order. Then every held row the
+    /// cache is at least as new as leaves (into `out`, ahead of anything decided later); a row
+    /// newer than the cache asks a refresh.
+    fn pump_outbox(&mut self, out: &mut Vec<(Target, CoordMsg)>) {
+        if let Some(rx) = &self.outbox_rx {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Ok(Ok(rows)) => {
+                    self.outbox_rx = None;
+                    self.check_take = false;
+                    self.relay.extend(rows);
+                }
+                Ok(Err(e)) => {
+                    self.outbox_rx = None;
+                    self.take_wanted = true;
+                    log::warn!("[coordinator] the outbox could not be taken ({e}); trying again");
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.outbox_rx = None;
+                    self.take_wanted = true;
+                }
+            }
+        }
+        if self.relay.front().is_some_and(|row| row.version > self.core.version()) {
+            self.refresh_wanted = true;
+        }
+        out.extend(self.release_relay());
+    }
+
+    /// The held outbox rows whose version this cache has reached, in order, as messages for
+    /// their hosts (`game::decode_packet`; an undecodable row is an error, dropped).
+    fn release_relay(&mut self) -> Vec<(Target, CoordMsg)> {
+        let mut out = Vec::new();
+        while self.relay.front().is_some_and(|row| row.version <= self.core.version()) {
+            let row = self.relay.pop_front().expect("checked");
+            match game::decode_packet::<CoordMsg>(&row.msg) {
+                Ok(msg) => out.push((Target::Host(row.host), msg)),
+                Err(e) => log::error!("[coordinator] outbox row {} for host {} does not decode ({e:?}); dropped", row.seq, row.host),
+            }
+        }
+        out
+    }
+
+    /// The `coordinator_row` notices (a newer version: refresh, then take), the backstop take
+    /// (while several replicas are live), and the core's own finding of a stale cache (a cut it
+    /// cannot know).
+    fn pump_notices(&mut self) {
+        let version = self.core.version();
+        if let Some(rx) = &self.notices {
+            for n in rx.try_iter() {
+                match n {
+                    world_store::Notice::Payload(p) => match p.trim().parse::<u64>() {
+                        Ok(v) if v > version => {
+                            self.refresh_wanted = true;
+                            self.take_wanted = true;
+                        }
+                        Ok(_) => {}
+                        Err(_) => log::debug!("[coordinator] a malformed coordinator_row notice ({p:?}) ignored"),
+                    },
+                    world_store::Notice::Resync => self.take_wanted = true,
+                }
+            }
+        }
+        let several = self.core.replicas_live().len() > 1;
+        let mono = self.mono_ms();
+        if several && mono >= self.poll_next_mono {
+            self.poll_next_mono = mono + world_store::COORDINATOR_POLL_MS;
+            self.take_wanted = true;
+        }
+        if !several && self.relay.is_empty() {
+            // One replica: nobody else writes rows for its hosts, nor the row.
+            self.take_wanted = false;
+        }
+        if self.core.take_refresh_wanted() {
+            self.stale_refresh = true;
+            self.refresh_wanted = true;
+        }
     }
 
     /// This replica's `ReplicaJoined` is committed (Elastic 2b Task 4): a split coordinator is
@@ -2114,10 +2275,31 @@ impl CoordinatorRuntime {
                 Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
             };
             self.refresh_rx = None;
+            let for_stale = std::mem::take(&mut self.refresh_for_stale);
             match answer {
-                Ok(Some(row)) if row.version > self.core.version() => self.refresh_onto(row)?,
-                Ok(_) => {}
-                Err(e) => log::warn!("[coordinator] the row could not be read for a refresh: {e}"),
+                Ok(Some(row)) if row.version > self.core.version() => {
+                    if self.core.unlogged_pending() || !self.unacked.is_empty() {
+                        // Not rebased without a loss now: asked again once its change is written
+                        // (that write meets the newer row: a conflict decides).
+                        self.refresh_wanted = true;
+                        self.stale_refresh |= for_stale;
+                    } else {
+                        self.refresh_onto(row)?;
+                        // Held rows may leave now; rows newer still are taken.
+                        self.take_wanted = true;
+                    }
+                }
+                Ok(_) => {
+                    if for_stale {
+                        // Read after the host's message: the row holds no such cut either.
+                        self.core.refresh_not_newer();
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[coordinator] the row could not be read for a refresh: {e}");
+                    self.refresh_wanted = true;
+                    self.stale_refresh |= for_stale;
+                }
             }
             return Ok(());
         }
@@ -2129,14 +2311,15 @@ impl CoordinatorRuntime {
             };
             self.version_rx = None;
             match answer {
-                Ok(v) if self.core.version_checked(v) => {}
+                // Confirmed: a take first (Elastic 2b Task 5), so that the rows older than the
+                // cache reach their hosts before what the check covers.
+                Ok(v) if self.core.version_checked(v) => self.check_take = true,
                 Ok(v) => {
                     log::info!(
                         "[coordinator] version check: the row is at {v}, this cache at {}: refreshing before anything leaves",
                         self.core.version()
                     );
-                    let since = if self.core.history_dirty() { 0 } else { self.history_version };
-                    self.refresh_rx = Some(self.store.load_coordinator_since_later(since));
+                    self.refresh_wanted = true;
                 }
                 Err(e) => {
                     // Nothing leaves on it; the next pass asks again.
@@ -2145,6 +2328,16 @@ impl CoordinatorRuntime {
                 }
             }
             let _ = now;
+            return Ok(());
+        }
+        if self.outbox_rx.is_some() {
+            return Ok(());
+        }
+        if self.refresh_wanted {
+            self.refresh_wanted = false;
+            self.refresh_for_stale = std::mem::take(&mut self.stale_refresh);
+            let since = if self.core.history_dirty() { 0 } else { self.history_version };
+            self.refresh_rx = Some(self.store.load_coordinator_since_later(since));
             return Ok(());
         }
         if self.core.version_check_wanted().is_some() {
@@ -2256,8 +2449,13 @@ impl CoordinatorRuntime {
         let Some(t) = self.core.take_transition() else { return false };
         // The transition carries every output (its compare-and-set is their check): a version
         // check or a refresh asked before it answers about an older cache — dropped (fix round 1).
+        // Its own take relays the rows a check would have waited for (Elastic 2b Task 5).
         self.version_rx = None;
-        self.refresh_rx = None;
+        if self.refresh_rx.take().is_some() {
+            // Asked again after the write (if still needed: the write's conflict refreshes anyway).
+            self.stale_refresh |= std::mem::take(&mut self.refresh_for_stale);
+        }
+        self.check_take = false;
         #[cfg(feature = "test-hooks")]
         {
             self.kill_at_commit = self.hooks.kill_after_commit.load(Ordering::SeqCst);
@@ -2276,18 +2474,28 @@ impl CoordinatorRuntime {
                         history: None,
                         decisions: Vec::new(),
                         replica: game::coordinator::ReplicaId(u64::MAX),
+                        ..Default::default()
                     };
                     let moved = self.store.write_transition_later(foreign).recv();
                     log::warn!("[coordinator] test hook: another writer moved the row from version {}: {moved:?}", row.version);
                 }
             }
         }
+        // Messages for other replicas' hosts as `game::encode_packet` bytes (the wire's framing).
+        let outbox = t
+            .outbox
+            .iter()
+            .map(|o| (o.host, o.boot, game::encode_packet(&o.msg).expect("a coordinator message encodes")))
+            .collect();
         let w = TransitionWrite {
             version: self.core.version(),
             core: t.core.clone(),
             history: t.history.clone(),
             decisions: t.decisions.clone(),
             replica: self.core.replica(),
+            outbox,
+            take_for: self.take_for(),
+            discard_for: t.attached_now.clone(),
         };
         let written = self.store.write_transition_later(w);
         self.writing = Some((t, written));
@@ -2367,7 +2575,12 @@ impl CoordinatorRuntime {
                     self.core.apply(Input::Decision(a), now);
                 }
                 self.after.extend(w.after_commit.into_iter().map(|a| AfterJob { a, rx: None, retry_at: now }));
-                Settled::Released(t.out)
+                // In commit order (Elastic 2b Task 5): the rows held from an earlier take, the rows
+                // this transaction took (every one older than it), then its own messages.
+                self.relay.extend(w.taken);
+                let mut released = self.release_relay();
+                released.extend(t.out);
+                Settled::Released(released)
             }
             Err(StoreError::Fenced { .. }) => Settled::End(End::Fenced),
             Err(StoreError::Conflict) => {

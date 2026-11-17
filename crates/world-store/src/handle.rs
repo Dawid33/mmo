@@ -450,13 +450,47 @@ impl StoreHandle {
     /// every [`crate::TERRAIN_POLL_SECS`]. SQLite: a receiver that never says anything. The
     /// thread ends once the receiver is dropped.
     pub fn listen_cuts(&self, mode: crate::NotifyMode) -> crossbeam::channel::Receiver<crate::CutNotice> {
-        let url = match &self.url {
+        let period = crate::listen::poll_period(&self.poll_ms);
+        crate::listen::start(self.listen_url(), "terrain-listener", crate::WORLD_CUT_CHANNEL, mode, period, crate::listen::cut_notices())
+    }
+
+    /// The notices on `channel` (`listen.rs`): in [`crate::NotifyMode::Listen`] one direct,
+    /// unpooled connection — as [`Self::listen_cuts`]'s — says [`crate::Notice::Payload`] per
+    /// notice and [`crate::Notice::Resync`] on every (re)connect; in both modes a `Resync` every
+    /// poll period: [`crate::COORDINATOR_POLL_MS`] for [`crate::COORDINATOR_ROW_CHANNEL`], the
+    /// terrain poll for any other. SQLite: a receiver that never says anything. The thread ends
+    /// once the receiver is dropped.
+    pub fn listen_channel(&self, channel: &'static str, mode: crate::NotifyMode) -> crossbeam::channel::Receiver<crate::Notice> {
+        let period = if channel == crate::COORDINATOR_ROW_CHANNEL {
+            std::time::Duration::from_millis(crate::COORDINATOR_POLL_MS)
+        } else {
+            crate::listen::poll_period(&self.poll_ms)
+        };
+        crate::listen::start(self.listen_url(), "row-listener", channel, mode, period, |n| n)
+    }
+
+    /// Where a listener connects: [`crate::WORLD_DB_DIRECT_ENV`]'s URL if set, else the store's
+    /// (`None`: SQLite, which cannot listen).
+    fn listen_url(&self) -> Option<String> {
+        match &self.url {
             StoreUrl::Postgres(url) => Some(
                 std::env::var(crate::WORLD_DB_DIRECT_ENV).ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| url.clone()),
             ),
             StoreUrl::Sqlite(_) | StoreUrl::Memory => None,
-        };
-        crate::listen::start(url, mode, &self.poll_ms)
+        }
+    }
+
+    /// Takes the outbox rows other replicas left for `for_hosts` (Elastic 2b Task 5: this
+    /// replica's hosts, each with its link's boot) between transitions — one `DELETE … RETURNING`
+    /// of the rows only (`coordinator_tx.rs`), answered on the receiver in `seq` (commit) order; a
+    /// row of another boot is deleted unsent. The caller issues it only while no transition of its
+    /// own is in flight (a transition takes the same rows inside its own transaction). SQLite:
+    /// nothing (one replica).
+    pub fn take_outbox_later(
+        &self,
+        for_hosts: Vec<(HostId, u64)>,
+    ) -> crossbeam::channel::Receiver<Result<Vec<crate::OutboxRow>, StoreError>> {
+        self.ask_later(|r| Request::TakeOutbox(for_hosts, r))
     }
 
     /// Test hook: the poll period of this handle's later [`Self::listen_cuts`] (default

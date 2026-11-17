@@ -4883,3 +4883,111 @@ fn free_outputs_wait_for_the_version_check_with_two_replicas() {
     let out: Vec<CoordMsg> = c.take_out().into_iter().map(|(_, m)| m).collect();
     assert!(matches!(reply_to(&out, 2), WorldReply::PersonInfo(_)), "{out:?}");
 }
+
+// ---- Elastic 2b Task 5: the outbox ---------------------------------------------------------
+
+/// [`two_replicas`] with hosts 0 and 1 attached to A (boots 7, 8) and host 2 to B (boot 9), every
+/// attach committed, both caches at the row's version.
+fn three_hosts_on_two_replicas() -> (Row, Coordinator, Coordinator) {
+    let (mut row, mut a, mut b) = two_replicas();
+    a.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 0);
+    a.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 0);
+    let t = a.take_transition().expect("the attaches are durable");
+    assert_eq!(t.attached_now, vec![h(0), h(1)], "the transition names the hosts it attached");
+    assert!(t.outbox.is_empty(), "nothing for another replica's host yet: {:?}", t.outbox);
+    row.version += 1;
+    row.core = t.core;
+    a.transition_written(row.version);
+    row.rebase(&mut b);
+    b.handle(h(2), claim_attach(h(2), 9, Vec::new(), Vec::new()), 0);
+    row.write(&mut b).expect("B's attach commits");
+    row.rebase(&mut a);
+    (row, a, b)
+}
+
+/// Elastic 2b Task 5 (decision 5): a message for every host leaves A on A's own links (its hosts
+/// 0 and 1) and, for host 2 — attached to B — through the outbox, once, with host 2's boot; a
+/// message for one of A's hosts stays direct.
+#[test]
+fn every_is_fanned_out_per_attached_host() {
+    let (_row, mut a, _b) = three_hosts_on_two_replicas();
+    let site = site_of(&a);
+    a.handle(h(0), adventure(1, A, site), 100);
+    let t = a.take_transition().expect("the grant is durable");
+    let markers = |m: &CoordMsg| matches!(m, CoordMsg::SiteMarkers(_));
+    assert!(t.out.iter().any(|(to, m)| *to == Target::Every && markers(m)), "the markers stay for A's links: {:?}", t.out);
+    assert!(t.out.iter().any(|(to, m)| *to == Target::Host(h(0)) && matches!(m, CoordMsg::Reply { .. })), "the reply is A's host's");
+    let routed: Vec<(HostId, u64)> = t.outbox.iter().map(|o| (o.host, o.boot)).collect();
+    assert_eq!(routed, vec![(h(2), 9)], "one copy, for B's host, at its boot: {:?}", t.outbox);
+    assert!(markers(&t.outbox[0].msg));
+}
+
+/// Elastic 2b Task 5: a host attached to a replica that is no longer live gets nothing — no
+/// outbox row (no live replica relays it), no fan-out of a message for every host; its next
+/// `Attach` to a live replica reconciles.
+#[test]
+fn a_host_of_no_live_replica_gets_nothing() {
+    let (mut row, mut a, mut b) = three_hosts_on_two_replicas();
+    // Host 2 has B online (its own report, hop 1).
+    b.handle(h(2), HostMsg::PlayerOnline(report(B, None, false)), 10);
+    row.write(&mut b).expect("B's report commits");
+    row.rebase(&mut a);
+    a.apply(Input::ReplicaLapsed(ReplicaId(2)), 50);
+    // B moves to host 0 (hop 2): host 2 would be told (`HopIs`), and every host the markers.
+    a.handle(h(0), HostMsg::PlayerOnline(OnlinePlayer { player: B, claim: None, claim_pending: false, report: 1, hop: 2 }), 60);
+    let site = site_of(&a);
+    a.handle(h(0), adventure(1, A, site), 100);
+    let t = a.take_transition().expect("the lapse and the grant are durable");
+    assert!(t.outbox.is_empty(), "nothing for host 2 through the outbox: {:?}", t.outbox);
+    assert!(t.out.iter().all(|(to, _)| *to != Target::Host(h(2))), "nothing for host 2 on A's links: {:?}", t.out);
+    assert!(t.out.iter().all(|(_, m)| !matches!(m, CoordMsg::HopIs { .. })), "the HopIs for host 2 is dropped: {:?}", t.out);
+    assert!(t.out.iter().any(|(to, m)| *to == Target::Every && matches!(m, CoordMsg::SiteMarkers(_))), "A's own hosts get the markers");
+}
+
+/// Elastic 2b Task 5 (audit H3): host 1 — attached to B — prepares a cut A began, before B's cache
+/// holds it. B never looks the cut up (the store would record it aborted): it asks for a refresh,
+/// lets nothing leave meanwhile, and, rebased onto the row, counts the part. A cut the row does
+/// not hold either (the refresh found nothing newer) is looked up as any unknown cut.
+#[test]
+fn a_cut_answer_for_an_unknown_future_cut_asks_a_refresh_not_a_lookup() {
+    let (mut row, mut a, mut b) = two_replicas();
+    a.set_cut_epoch(3);
+    a.set_expected_hosts([0, 1].into_iter().map(h).collect());
+    a.set_world_cuts(CUT_EVERY_MS);
+    a.set_world_tick(100);
+    a.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 0);
+    row.write(&mut a).expect("A's attach");
+    row.rebase(&mut b);
+    b.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 0);
+    row.write(&mut b).expect("B's attach");
+    row.rebase(&mut a);
+    a.apply(Input::Maintain, 10 * CUT_EVERY_MS);
+    let (cut, _, _) = a.world_cut_progress().expect("A began a cut of both hosts");
+    let t = a.take_transition().expect("the cut's begin is durable");
+    let begun = |m: &CoordMsg| matches!(m, CoordMsg::BeginCut { cut: c, .. } if *c == cut);
+    assert!(t.out.iter().any(|(to, m)| *to == Target::Host(h(0)) && begun(m)), "host 0's BeginCut on A's link");
+    assert!(t.outbox.iter().any(|o| o.host == h(1) && o.boot == 8 && begun(&o.msg)), "host 1's through the outbox: {:?}", t.outbox);
+    row.version += 1;
+    row.core = t.core;
+    a.transition_written(row.version);
+
+    // Host 1's part reaches B, whose cache is a version behind.
+    b.handle(h(1), HostMsg::CutPrepared { cut }, 10 * CUT_EVERY_MS + 5);
+    assert!(b.take_cut_lookups().is_empty(), "never looked up");
+    assert!(b.take_refresh_wanted(), "a refresh is asked");
+    assert!(!b.take_refresh_wanted(), "once");
+    assert!(b.take_out().is_empty(), "nothing leaves a cache known stale");
+    assert!(b.refresh(&row.core, Some(&row.history), row.version).expect("the row loads"), "the row is newer");
+    let (_, prepared, verdict) = b.world_cut_progress().expect("the refreshed cache holds the cut");
+    assert_eq!((prepared, verdict), (vec![h(1)], None), "host 1's part counts, the cut runs on");
+    assert!(!b.take_refresh_wanted(), "no longer stale");
+
+    // A cut no row holds: looked up, once the refresh found nothing newer.
+    let mut c = row.replica(3);
+    let bogus = game::CutId((3 << 32) | 99);
+    c.handle(h(0), HostMsg::CutPrepared { cut: bogus }, 20 * CUT_EVERY_MS);
+    assert!(c.take_refresh_wanted());
+    assert!(c.take_cut_lookups().is_empty(), "not before the refresh");
+    c.refresh_not_newer();
+    assert_eq!(c.take_cut_lookups(), vec![(h(0), bogus)], "looked up as any unknown cut");
+}
