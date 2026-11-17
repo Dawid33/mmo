@@ -922,7 +922,7 @@ fn legends_unknown_filters_and_cursor_clamp() {
 /// alike to both histories; what it hands out is collected in `out` for comparison.
 fn scripted_input(h: &mut History, step: u32, out: &mut Vec<String>) {
     let site = h.sites().find(|s| s.abandoned.is_none()).map(|s| (s.id, s.region));
-    let Some((sid, r0)) = site else { return };
+    let Some((_, r0)) = site else { return };
     let r1 = RegionCoords::new(r0.x + 1, r0.z);
     let embodied = |h: &History, rc: RegionCoords| -> Vec<(PersonId, [f32; 3])> {
         h.people()
@@ -952,18 +952,6 @@ fn scripted_input(h: &mut History, step: u32, out: &mut Vec<String>) {
             out.push(format!("reattach {:?}", h.reattach_regions(&[(r0, present)])));
         }
         70 => out.push(format!("started {:?}", h.region_started(r1))),
-        80 => {
-            let options = h.embark_options();
-            let pick = options.civs.iter().find_map(|c| {
-                c.sites.iter().find(|s| s.site != sid).map(|s| (c.civ, s.people[0].person))
-            });
-            let region = (2..40).flat_map(|x| (2..40).map(move |z| RegionCoords::new(x, z)))
-                .find(|r| h.player_embark_allowed(*r).is_ok());
-            if let (Some((civ, person)), Some(region)) = (pick, region) {
-                let req = game::EmbarkRequest { civ, people: vec![person], region };
-                out.push(format!("embark {:?}", h.player_embark(&req)));
-            }
-        }
         _ => {}
     }
     h.advance(CalendarTick(h.now().0 + TICKS_PER_DAY));
@@ -973,18 +961,9 @@ fn scripted_input(h: &mut History, step: u32, out: &mut Vec<String>) {
     }
 }
 
-/// [`big_land`] flat enough for a player's embark.
-fn gentle_land() -> WorldMap {
-    let mut map = big_land();
-    for t in &mut map.tiles {
-        t.relief_m = 1.0;
-    }
-    map
-}
-
 #[test]
 fn a_history_reloaded_after_every_input_is_identical() {
-    let map = gentle_land();
+    let map = big_land();
     let grid = SocietyGrid::from_world_map(&map);
     let mut a = bootstrap(&map, &params(2)).unwrap();
     let mut b = decode(&encode(&a), grid.clone()).unwrap();
@@ -996,7 +975,6 @@ fn a_history_reloaded_after_every_input_is_identical() {
         assert_eq!(encode(&a), encode(&b), "the histories part at step {step}");
     }
     assert_eq!(out_a, out_b);
-    assert!(out_a.iter().any(|l| l.starts_with("embark Ok")), "the script must embark: {out_a:?}");
     assert!(out_a.iter().any(|l| l.starts_with("reattach")), "the script must reattach");
     let page = |h: &History| h.legends(&LegendsQuery { filter: LegendsFilter::All, before: None, limit: 200 });
     assert_eq!(page(&a), page(&b));

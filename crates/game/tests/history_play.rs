@@ -2,7 +2,7 @@
 //! calendar / notice broadcasts and person info — driven through a real `WorldManager`
 //! over `InlineSpawner` regions with a bootstrapped history.
 
-use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, install_history, land_map};
+use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, install_history, land_map, years_before};
 use crossbeam::channel::{unbounded, Receiver};
 use game::history::bootstrap::{bootstrap, BootstrapParams};
 use game::history::log::LogKind;
@@ -265,6 +265,16 @@ fn notices_in(packets: &[ServerPacket]) -> Vec<String> {
         .collect()
 }
 
+/// A site of `civ` the history founds in `region` (an NPC founding, from the bootstrapped
+/// site), with `n` new grown founders: the site and its founders.
+fn npc_site(w: &mut World, civ: CivId, region: RegionCoords, n: usize) -> (SiteId, Vec<PersonId>) {
+    let from = w.history().sites().next().map(|s| s.id);
+    let h = history_mut_of(&mut w.manager);
+    let born = years_before(h.now(), 20);
+    let founders: Vec<PersonId> = (0..n).map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, born)).collect();
+    (h.found_site(civ, region, &founders, from, false), founders)
+}
+
 /// A connected world with player `A`; the bootstrapped site, its civ and people, and the
 /// free regions.
 fn embark_world() -> (World, SiteId, CivId, Vec<PersonId>, Vec<RegionCoords>) {
@@ -520,43 +530,48 @@ fn return_refuses_other_players_fortress() {
 fn notices_only_to_home_region() {
     let (mut w, home, civ, people, free) = embark_world();
     w.connect(B);
-    let a_site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).unwrap();
-    let b_site = w.embark(B, EmbarkRequest { civ, people: people[2..4].to_vec(), region: free[1] }).unwrap();
+    // Two adventurers at two sites, and a third site nobody plays.
+    let (b_site, b_people) = npc_site(&mut w, civ, free[0], 2);
+    let (far_site, far_people) = npc_site(&mut w, civ, free[1], 2);
+    assert_eq!(w.adventure(A, home), Ok(home));
+    assert_eq!(w.adventure(B, b_site), Ok(b_site));
     w.tick();
     w.take(A);
     w.take(B);
-    // A death in A's fortress: only A hears of it.
+    // A death at A's site: only A hears of it.
     let victim = people[0];
     history_mut_of(&mut w.manager).record_death(victim, DeathCause::OldAge);
     w.tick();
     let (to_a, to_b) = (notices_in(&w.take(A)), notices_in(&w.take(B)));
     assert_eq!(to_a.len(), 1, "{to_a:?}");
     assert!(to_a[0].contains("died"), "{to_a:?}");
-    assert!(to_b.is_empty(), "B is not in A's fortress: {to_b:?}");
-    // One at the unplayed bootstrap site: nobody hears.
-    let far_away = people[5];
-    assert_eq!(w.history().person(far_away).unwrap().location, Location::AtSite(home));
+    assert!(to_b.is_empty(), "B is not at A's site: {to_b:?}");
+    // One at the unplayed site: nobody hears.
+    let far_away = far_people[0];
+    assert_eq!(w.history().person(far_away).unwrap().location, Location::AtSite(far_site));
     history_mut_of(&mut w.manager).record_death(far_away, DeathCause::OldAge);
     w.tick();
     assert!(notices_in(&w.take(A)).is_empty());
     assert!(notices_in(&w.take(B)).is_empty());
-    // One in B's: only B.
-    history_mut_of(&mut w.manager).record_death(people[2], DeathCause::OldAge);
+    // One at B's: only B.
+    history_mut_of(&mut w.manager).record_death(b_people[0], DeathCause::OldAge);
     w.tick();
     assert!(notices_in(&w.take(A)).is_empty());
     assert_eq!(notices_in(&w.take(B)).len(), 1);
-    assert_ne!(a_site, b_site);
 }
 
 #[test]
 fn client_cannot_spoof_server_events() {
     let (mut w, home, civ, people, free) = embark_world();
-    let target = free[0];
-    w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
+    // An unplayed site's founder: the outsider.
+    let (far, far_people) = npc_site(&mut w, civ, free[0], 2);
+    let target = w.history().site(home).unwrap().region;
+    assert_eq!(w.adventure(A, home), Ok(home));
     w.tick();
     let before = bodies(&mut w.manager);
-    let outsider = people[5];
-    assert_eq!(w.history().person(outsider).unwrap().location, Location::AtSite(home));
+    let outsider = far_people[0];
+    assert_eq!(w.history().person(outsider).unwrap().location, Location::AtSite(far));
+    assert_eq!(w.history().person(people[0]).unwrap().location, Location::InRegion(target), "A's site has bodies");
     let spoofs = [
         GameEventKind::SpawnPerson(PersonSpawn { person: outsider, at: SpawnAt::Column([20, 30]), walk_to: None }),
         GameEventKind::DespawnPerson(people[0]),
@@ -603,12 +618,13 @@ fn person_info_lists_family() {
 
 #[test]
 fn calendar_and_sites_broadcast_daily() {
-    let (mut w, _, civ, people, free) = embark_world();
+    let (mut w, _, civ, _, free) = embark_world();
     w.connect(B);
     let on_connect = w.take(B);
     assert!(on_connect.iter().any(|p| matches!(p, ServerPacket::Calendar(_))), "calendar on connect");
     assert_eq!(sites_in(&on_connect).expect("sites on connect").len(), 1);
-    let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).unwrap();
+    // The history founds a site (an NPC founding): the sites changed.
+    let (site, _) = npc_site(&mut w, civ, free[0], 2);
     w.take(B);
     // Within the day nothing more is broadcast; at the day's turn the calendar and the
     // changed sites go to everyone.
@@ -623,7 +639,7 @@ fn calendar_and_sites_broadcast_daily() {
         .collect();
     assert_eq!(calendars.len(), 1, "{to_b:?}");
     let sites = sites_in(&to_b).expect("the new site is broadcast");
-    assert!(sites.iter().any(|m| m.site == site && m.returnable));
+    assert!(sites.iter().any(|m| m.site == site), "{sites:?}");
     // Nothing changed: the next day sends the calendar only.
     w.wait(DAY_MS);
     let to_b = w.take(B);
@@ -644,13 +660,11 @@ fn embark_allowed_in_matches_history() {
 #[test]
 fn embark_allowed_in_matches_history_with_an_abandoned_site() {
     let mut h = history();
-    let (home, civ, people) = home_site(&h);
-    // Two embarks take every member, so the bootstrapped site is abandoned.
-    let max = EMBARK_PLAYER_PARTY_MAX as usize;
-    let first = free_regions(&h)[0];
-    h.player_embark(&EmbarkRequest { civ, people: people[..max].to_vec(), region: first }).unwrap();
-    let second = (0..16).map(|x| rc(x, 0)).find(|r| h.embark_allowed(*r).is_ok()).expect("room for a second embark");
-    h.player_embark(&EmbarkRequest { civ, people: people[max..].to_vec(), region: second }).unwrap();
+    let (home, _, people) = home_site(&h);
+    // Every member dies, so the bootstrapped site is abandoned.
+    for p in people {
+        h.record_death(p, DeathCause::OldAge);
+    }
     assert!(h.site(home).unwrap().abandoned.is_some(), "the emptied site is abandoned");
     let sites: Vec<_> = h.sites().map(|s| (s.id, s.region, s.abandoned.is_some())).collect();
     for x in -1..17 {
@@ -767,16 +781,11 @@ fn adventure_in_the_home_region_lands_the_body_on_the_site() {
 #[test]
 fn adventure_refuses_unpopulated_and_abandoned() {
     let (mut w, home, civ, people, free) = embark_world();
-    w.connect(B);
-    // B's two embarks take every member of the bootstrapped site: it is abandoned.
-    let max = EMBARK_PLAYER_PARTY_MAX as usize;
-    let first = w.embark(B, EmbarkRequest { civ, people: people[..max].to_vec(), region: free[0] }).unwrap();
-    assert!(w.history().site(home).unwrap().abandoned.is_none());
-    w.packet(B, ClientPacket::Retire);
-    w.tick();
-    w.wait(UNLOAD_GRACE_MS);
-    let second = free_regions(w.history())[0];
-    w.embark(B, EmbarkRequest { civ, people: people[max..].to_vec(), region: second }).unwrap();
+    let (first, _) = npc_site(&mut w, civ, free[0], 2);
+    // Every member of the bootstrapped site dies: it is abandoned.
+    for p in people {
+        history_mut_of(&mut w.manager).record_death(p, DeathCause::OldAge);
+    }
     assert!(w.history().site(home).unwrap().abandoned.is_some(), "the emptied site is abandoned");
     w.take(A);
     assert_eq!(w.adventure(A, home), Err(AdventureRefusal::SiteAbandoned));
@@ -810,8 +819,8 @@ fn fortress_and_adventure_exclusive() {
 }
 
 #[test]
-fn end_adventure_returns_to_spawn_in_a_body() {
-    let (mut w, home, civ, people, free) = embark_world();
+fn end_adventure_returns_to_spawn_and_frees_the_claim() {
+    let (mut w, home, _, _, _) = embark_world();
     let region = w.history().site(home).unwrap().region;
     assert_eq!(w.adventure(A, home), Ok(home));
     w.tick();
@@ -824,13 +833,15 @@ fn end_adventure_returns_to_spawn_in_a_body() {
     assert!(w.players_in(region).is_empty(), "the adventurer left the site");
     assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
     assert_eq!(w.mode_in(SPAWN_REGION, A), Some(PlayMode::Adventure));
+    assert_eq!(w.manager.client_claim(A), None, "the claim is freed on the host");
     // Ending again changes nothing.
     w.packet(A, ClientPacket::EndAdventure);
     assert!(w.take(A).is_empty(), "no-op end sends nothing");
-    // The site region parks, so its people may embark.
+    // Free again: a second adventure starts.
     w.wait(UNLOAD_GRACE_MS);
-    assert!(w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).is_ok());
-    w.check("embarked after an adventure");
+    assert_eq!(w.adventure(A, home), Ok(home), "a second adventure starts");
+    assert_eq!(w.manager.client_claim(A), Some(game::Claim::Adventure(home)));
+    w.check("adventuring again");
 }
 
 #[test]
