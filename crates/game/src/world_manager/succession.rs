@@ -334,7 +334,7 @@ macro_rules! host_fields {
             world_live, world_attach, attach_epoch, world_generation, host_generation, world_boot,
             next_request_seq, settled_below, pending_requests, expired_requests, claim_seq, claim_changes,
             claim_reported, player_hop, hop_renumbers, outbox, world_request_timeout_ms, world_counters,
-            site_regions, society_grid, world_ms, world_notices, fortress_of, adventurer_of, player_of,
+            site_regions, society_grid, world_ms, world_notices, adventurer_of, player_of,
             parking, moving, parked_players, awaiting_park, deferred_packets, clock_ms, unavailable, ownership,
             creating, out, region_out_send, lod_subscribers, lod_cache, lod_cache_max, lod_access_counter,
             lod_in_flight, lod_submitted_at, perf, lod_pending_terrain, lod_tile_waiting, lod_builder,

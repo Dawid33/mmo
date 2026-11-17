@@ -234,7 +234,6 @@ fn assert_no_world_state(app: &mut App, fresh_ui: &[(&'static str, String)], fre
             && hv.calendar.is_none()
             && hv.notices.is_empty()
             && hv.people.is_empty()
-            && hv.fortress.is_none()
             && !hv.adventure_pending
             && hv.adventure_refusal.is_none(),
         "HistoryView"
@@ -299,10 +298,9 @@ fn second_session_starts_clean() {
     app.update();
     assert_ne!(live_game_ui(&app), fresh_ui, "the first session showed itself in the game UI");
     assert_eq!(active_ui_cameras(&mut app), vec![(false, true)], "in the world the commander camera has the UI");
-    // A played fortress and a half-made adventure request, which must not reach the next world.
+    // A half-made adventure request, which must not reach the next world.
     {
         let mut hv = app.world_mut().resource_mut::<HistoryView>();
-        hv.fortress = Some(game::history::SiteId(3));
         hv.adventure_pending = true;
         hv.adventure_refusal = Some((game::history::AdventureRefusal::NoHistory, 1.0));
     }
@@ -382,7 +380,6 @@ fn rejoin_starts_clean() {
     assert!(count::<With<SessionScoped>>(&mut app) > 0, "the first session spawned its region");
     {
         let mut hv = app.world_mut().resource_mut::<HistoryView>();
-        hv.fortress = Some(game::history::SiteId(3));
         hv.adventure_refusal = Some((game::history::AdventureRefusal::NoHistory, 1.0));
     }
 

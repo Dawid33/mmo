@@ -1157,7 +1157,6 @@ fn record_at(rc: RegionCoords, xz: [f32; 2]) -> game::PlayerRecord {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(xz[0], y, xz[1])),
         region: rc,
-        fortress: None,
         adventure: None,
     }
 }
@@ -1830,8 +1829,9 @@ fn player_with_a_pending_world_request_is_clamped_back_until_it_is_answered() {
 
 /// The site the test player starts its adventures at through the scripted coordinator.
 const ADVENTURE_SITE: game::history::SiteId = game::history::SiteId(41);
-/// The fortress the retiring test player holds.
-const RETIRED_SITE: game::history::SiteId = game::history::SiteId(42);
+/// The site of the adventure the test player is restored on (`adventure_setup`, the stale
+/// `ClaimIs` test).
+const RESTORED_SITE: game::history::SiteId = game::history::SiteId(42);
 
 /// What the scripted coordinator was sent, and what it answers.
 #[derive(Default)]
@@ -1994,42 +1994,6 @@ fn start_into_a_foreign_host_moves_the_player_once() {
 /// A region near the origin host `h` owns.
 fn region_of(rig: &MultiRig, h: HostId) -> RegionCoords {
     (1..64).map(|x| RegionCoords::new(x, 0)).find(|rc| rig.owner(*rc) == h).expect("a region of the host near the origin")
-}
-
-/// The test player holding [`RETIRED_SITE`] in a region of the host that does NOT own
-/// the spawn region: `(its region, its host, the spawn host)`.
-fn retire_setup(rig: &mut MultiRig) -> (RegionCoords, HostId, HostId) {
-    let hs = rig.owner(game::SPAWN_REGION);
-    let ha = HostId(1 - hs.0);
-    let a = region_of(rig, ha);
-    rig.run(a);
-    rig.record_packets();
-    let record = game::PlayerRecord { fortress: Some(RETIRED_SITE), ..centre_of(a) };
-    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
-    until_body(rig);
-    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(RETIRED_SITE)));
-    (a, ha, hs)
-}
-
-fn retire(rig: &mut MultiRig, h: HostId) {
-    rig.hosts[h.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Retire, P_CLIENT));
-}
-
-/// Retire to a spawn region another host owns: the fortress is given up here, the player
-/// moves to the spawn host with no claim.
-fn retire_foreign(rig: &mut MultiRig) {
-    let (_, ha, hs) = retire_setup(rig);
-    retire(rig, ha);
-    until_player_settled_in(rig, game::SPAWN_REGION);
-    assert_moved(rig, ha, hs, game::SPAWN_REGION, None);
-    let told = packets_to(rig, ha).iter().any(|p| matches!(p, game::ServerPacket::Fortress(None)));
-    assert!(told, "the client was told it holds no fortress");
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn retire_to_a_foreign_spawn_region() {
-    sweep("retire_to_a_foreign_spawn_region", 2, 1, SEEDS / 4, retire_foreign);
 }
 
 /// The other host becomes unreachable while the start is with the coordinator: the
@@ -2452,7 +2416,7 @@ fn move_into_an_unavailable_region_parks_and_tells_the_sender() {
     sweep("move_into_an_unavailable_region_parks_and_tells_the_sender", 2, 1, SEEDS / 4, move_into_unavailable);
 }
 
-/// The test player on an adventure (at [`RETIRED_SITE`]) in a region of the host that does
+/// The test player on an adventure (at [`RESTORED_SITE`]) in a region of the host that does
 /// NOT own the spawn region: `(its region, its host, the spawn host)`.
 fn adventure_setup(rig: &mut MultiRig) -> (RegionCoords, HostId, HostId) {
     let hs = rig.owner(game::SPAWN_REGION);
@@ -2461,10 +2425,10 @@ fn adventure_setup(rig: &mut MultiRig) -> (RegionCoords, HostId, HostId) {
     rig.run(a);
     rig.record_packets();
     let client = game::Client { mode: game::PlayMode::Adventure, ..game::Client::default() };
-    let record = game::PlayerRecord { client, adventure: Some(RETIRED_SITE), ..centre_of(a) };
+    let record = game::PlayerRecord { client, adventure: Some(RESTORED_SITE), ..centre_of(a) };
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
     until_body(rig);
-    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Adventure(RETIRED_SITE)));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Adventure(RESTORED_SITE)));
     (a, ha, hs)
 }
 
@@ -2550,12 +2514,9 @@ fn history_with_site(at: RegionCoords, n: usize) -> (game::history::History, gam
     let civ = h.add_civ(Race::Dwarf);
     let people: Vec<_> =
         (0..n).map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20))).collect();
-    h.found_site(civ, at, &people, None, false);
+    h.found_site(civ, at, &people, None);
     (h, civ, people)
 }
-
-/// A site far from the regions the tests play in (near the origin).
-const FAR_SITE: RegionCoords = RegionCoords { x: -14, z: 44 };
 
 /// Every body of `person` in a running region of a host: `(host, region, id)`.
 fn person_bodies(rig: &mut MultiRig, person: game::history::PersonId) -> Vec<(HostId, RegionCoords, game::EntityId)> {
@@ -2737,17 +2698,6 @@ fn person_crosses_host_seam_into_a_parked_region() {
 const P2_CLIENT: game::ClientId = 9;
 const P2_PLAYER: game::PlayerId = game::PlayerId(101);
 
-/// The `EmbarkResult`s host `h` sent `client` since recording began.
-fn embark_results_to(rig: &MultiRig, h: HostId, client: game::ClientId) -> Vec<Result<game::history::SiteId, game::history::EmbarkRefusal>> {
-    let seen = rig.hosts[h.0 as usize].packets_seen.as_ref().expect("recording packets");
-    seen.iter()
-        .filter_map(|(to, p)| match p {
-            game::ServerPacket::EmbarkResult(r) if *to == Some(client) => Some(*r),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The `AdventureResult`s host `h` sent `client` since recording began.
 fn adventure_results_to(rig: &MultiRig, h: HostId, client: game::ClientId) -> Vec<Result<game::history::SiteId, game::history::AdventureRefusal>> {
     let seen = rig.hosts[h.0 as usize].packets_seen.as_ref().expect("recording packets");
@@ -2824,57 +2774,6 @@ fn claim_travels(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn claim_travels_with_the_player_across_hosts() {
     sweep("claim_travels_with_the_player_across_hosts", 2, 1, SEEDS / 2, claim_travels);
-}
-
-/// The test player on host A embarks (through the real coordinator) into `b`, a region of
-/// host B — running there already (`running`: the founding's spawn directives) or not
-/// (its start's catch-up): the founding party's bodies stand in `b` on host B only, host
-/// B knows the new site's region, and the claim is held on host B only.
-fn embark_foreign_founders(rig: &mut MultiRig, running: bool) {
-    let (a, b) = host_seam(2, 1);
-    let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let (history, civ, founders) = history_with_site(FAR_SITE, 4);
-    rig.run(a);
-    if running {
-        rig.run(b);
-    }
-    rig.with_coordinator(history);
-    rig.record_packets();
-    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
-    until_body(rig);
-    let party = founders[0..2].to_vec();
-    let req = game::EmbarkRequest { civ, people: party.clone(), region: b };
-    rig.hosts[ha.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
-    until_player_settled_in(rig, b);
-    let site = embark_results_to(rig, ha, P_CLIENT).first().copied().expect("answered").expect("embarked");
-    rounds_until(rig, "the founders stand in their fortress", |rig| {
-        party.iter().all(|p| person_bodies(rig, *p).iter().map(|(h, rc, _)| (*h, *rc)).collect::<Vec<_>>() == [(hb, b)])
-            && coordinator_quiet(rig)
-    });
-    assert_moved(rig, ha, hb, b, Some(game::Claim::Fortress(site)));
-    for p in &party {
-        let at: Vec<(HostId, RegionCoords)> = person_bodies(rig, *p).iter().map(|(h, rc, _)| (*h, *rc)).collect();
-        assert_eq!(at, [(hb, b)], "{p:?} stands in {b:?} on host {hb}, once");
-        assert_eq!(rig.core().history().person(*p).unwrap().location, game::history::Location::InRegion(b));
-    }
-    assert_eq!(rig.hosts[hb.0 as usize].manager.site_region(site), Some(b), "host {hb} knows the new site");
-    assert_eq!(rig.core().online_on(P_PLAYER), Some(hb));
-    assert_eq!(rig.core().claim_of(P_PLAYER), Some(game::Claim::Fortress(site)));
-}
-
-fn embark_foreign_running(rig: &mut MultiRig) {
-    embark_foreign_founders(rig, true);
-}
-
-fn embark_foreign_parked(rig: &mut MultiRig) {
-    embark_foreign_founders(rig, false);
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn embark_into_a_foreign_host_spawns_the_founders_there() {
-    sweep("embark_into_a_foreign_host_spawns_the_founders_there (running)", 2, 1, SEEDS / 4, embark_foreign_running);
-    sweep("embark_into_a_foreign_host_spawns_the_founders_there (parked)", 2, 1, SEEDS / 4, embark_foreign_parked);
 }
 
 /// The test player (on host `ha`) on an adventure at `site` in `a`, where it stands:
@@ -2963,47 +2862,66 @@ fn handoff_parked_on_arrival_releases_the_online_state() {
     sweep("handoff_parked_on_arrival_releases_the_online_state", 2, 1, SEEDS / 4, handed_and_parked);
 }
 
-/// A `ClaimIs` answering the player's report on host A arrives (held back on A's link)
-/// only after the player went A → B → A: it answers an old report and is not applied —
-/// the player keeps the fortress the coordinator gave it meanwhile.
+/// The reports of `player` the host on `coordinator`'s link sent, in order.
+fn script_reports(coordinator: &ScriptedCoordinator, player: game::PlayerId) -> Vec<game::OnlinePlayer> {
+    coordinator
+        .script()
+        .sent
+        .iter()
+        .flat_map(|m| match m {
+            game::HostMsg::Attach { online, .. } => online.clone(),
+            game::HostMsg::PlayerOnline(p) => vec![*p],
+            _ => Vec::new(),
+        })
+        .filter(|p| p.player == player)
+        .collect()
+}
+
+/// A `ClaimIs` answering the player's report on host A arrives only after the player went
+/// A → B → A: it answers an old report and is not applied — the player keeps its adventure.
+/// (A scripted coordinator on A's link: it delivers the stale answer when the test says.)
+/// The answer to A's latest report is applied, so the stale one was refused for its age.
 fn old_claim_is_after_round_trip(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
-    let (history, _, _) = history_with_site(FAR_SITE, 2);
-    let site = game::history::SiteId(0);
-    let other = game::PlayerId(55);
     rig.run(a);
     rig.run(b);
-    rig.with_coordinator(history);
-    // Another player, online on a host outside the rig, plays the site.
-    let held = game::OnlinePlayer { player: other, claim: Some(game::Claim::Fortress(site)), claim_pending: false, report: 1, hop: 1 };
-    rig.core().handle(h(9), game::HostMsg::PlayerOnline(held), 0);
-    // A's answers are held back: the coordinator's answer to the report below waits.
-    rig.hold_world(ha, true);
-    let record = game::PlayerRecord { fortress: Some(site), ..centre_of(a) };
+    let coordinator = install_coordinator(rig, ha, false);
+    let client = game::Client { mode: game::PlayMode::Adventure, ..game::Client::default() };
+    let record = game::PlayerRecord { client, adventure: Some(RESTORED_SITE), ..centre_of(a) };
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
     let (_, _, id) = until_body(rig);
-    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)), "the early guess");
-    rounds_until(rig, "the report is answered", |rig| rig.coordinator_pending().is_empty());
-    // The other player leaves: the fortress is the test player's to take up.
-    rig.core().handle(h(9), game::HostMsg::PlayerOffline { player: other, hop: 1 }, 0);
+    let claim = Some(game::Claim::Adventure(RESTORED_SITE));
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), claim, "restored from the record");
+    rounds_until(rig, "host A reported the player", |_| !script_reports(&coordinator, P_PLAYER).is_empty());
+    let old = *script_reports(&coordinator, P_PLAYER).last().expect("reported");
+    assert_eq!(old.claim, claim);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
-    rounds_until(rig, "host B's report is answered", |rig| rig.coordinator_pending().is_empty());
-    assert_eq!(rig.core().claim_of(P_PLAYER), Some(game::Claim::Fortress(site)), "taken up from host B");
+    assert_eq!(rig.hosts[hb.0 as usize].manager.client_claim(P_CLIENT), claim, "the claim went along to host B");
     let (_, _, id) = rig.player_body(P_CLIENT).expect("a body");
     assert!(rig.teleport(b, id, past_seam(b, a, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, a);
-    rounds_until(rig, "host A's new report is handled", |rig| rig.coordinator_pending().is_empty());
-    rig.hold_world(ha, false);
-    rounds_until(rig, "the coordinator settles", |rig| coordinator_quiet(rig));
+    rounds_until(rig, "host A reported the player again", |_| {
+        script_reports(&coordinator, P_PLAYER).last().is_some_and(|r| r.report > old.report)
+    });
+    let latest = *script_reports(&coordinator, P_PLAYER).last().expect("reported");
+    assert_eq!(latest.claim, claim, "back on host A with its claim");
+    // The coordinator's answer to the report from before the round trip arrives now.
+    coordinator.script().inbox.push_back(game::CoordMsg::ClaimIs { player: P_PLAYER, claim: None, report: old.report });
     for _ in 0..WAIT_ROUNDS {
         rig.round();
     }
-    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)), "kept");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), claim, "kept");
     assert_eq!(rig.hosts[hb.0 as usize].manager.client_claim(P_CLIENT), None);
-    assert_eq!(rig.core().claim_of(P_PLAYER), Some(game::Claim::Fortress(site)));
-    assert_eq!(rig.core().online_on(P_PLAYER), Some(ha));
+    assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "one body, back on host A");
+    // The answer to the latest report is final.
+    let latest = *script_reports(&coordinator, P_PLAYER).last().expect("reported");
+    coordinator.script().inbox.push_back(game::CoordMsg::ClaimIs { player: P_PLAYER, claim: None, report: latest.report });
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.hosts[ha.0 as usize].manager.client_claim(P_CLIENT), None, "the current answer is applied");
 }
 
 #[test]
@@ -9649,7 +9567,6 @@ fn a_message_for_a_forgotten_host_is_never_lost_silently() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(zero),
         region: target,
-        fortress: None,
         adventure: None,
     };
     let handoff = game::PlayerHandoff { client: 7, player: game::PlayerId(9), claim: None, login: None, park: false, hop: 1 };

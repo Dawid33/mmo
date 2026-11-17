@@ -235,7 +235,7 @@ fn commit_cut_is_atomic() {
             in_flight: vec![],
             players: vec![(first.players[0].0, {
                 let mut p = player();
-                p.fortress = None;
+                p.adventure = None;
                 p
             })],
             history: Some(vec![9]),

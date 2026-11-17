@@ -23,8 +23,8 @@
 //! observer. The leaving host remembers where it sent the player (`departed`): input the
 //! client still sends there follows the body ([`Volatile::Input`]). A client that never
 //! connects to the new host is parked there after [`HANDOFF_SESSION_GRACE_MS`]. A body
-//! heading for an unreachable host is handed back to its source. A **move** (Play, embark,
-//! return, an adventure, retire) into a region another host owns parks the body here as
+//! heading for an unreachable host is handed back to its source. A **move** (Play, an
+//! adventure's start or end) into a region another host owns parks the body here as
 //! a local move does, then hands the player over as a record ([`Reliable::PlayerMove`] —
 //! queued whether or not that host is reachable: the record waits there, conserved); the
 //! receiving host creates its body at the target's landing. A host that parks a player
@@ -320,9 +320,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.homes.get(&client).copied()
     }
 
-    /// The fortress or adventure `client`'s player plays here, if any.
+    /// The adventure `client`'s player plays here, if any.
     pub fn client_claim(&self, client: ClientId) -> Option<Claim> {
-        claim_of(self.fortress_of.get(&client).copied(), self.adventurer_of.get(&client).copied())
+        claim_of(self.adventurer_of.get(&client).copied())
     }
 
     /// The region of `site` as this host knows it (the coordinator's view and answers).
@@ -414,10 +414,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         let owner = self.foreign_host(target).expect("can_hand_off: another host owns the target");
         let (player, claim, park) = match self.parking.remove(&client) {
             // Disconnected, its park on the way to `rc`: parked where it lands.
-            Some(p) => (p.player, claim_of(p.fortress, p.adventure), true),
+            Some(p) => (p.player, claim_of(p.adventure), true),
             None => {
                 let player = self.player_of.remove(&client).expect("can_hand_off: online or parking");
-                let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
+                let claim = claim_of(self.adventurer_of.remove(&client));
                 // Not offline: in transit, its claim kept in use until `owner` reports it.
                 self.world_handed(player, owner);
                 self.forget_claim_reports(player);
@@ -470,7 +470,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.drop_arriving_copy(from, h.player, h.hop);
         }
         self.placed_by_handoff(h.player, h.hop);
-        let (fortress, adventure) = split_claim(h.claim);
+        let adventure = split_claim(h.claim);
         let login = h.login.clone();
         if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
             // Its stored state could not be read (retry not come), the region is not this
@@ -491,15 +491,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         if h.park {
             // `accept_arrival` parks it where it lands (`ParkPlayer` behind the arrival).
-            self.parking.insert(c, Parking { player: h.player, region: target, fortress, adventure });
+            self.parking.insert(c, Parking { player: h.player, region: target, adventure });
             self.accept_arrival(None, target, stamp, bundle, now_ms);
             self.login_parked_on_arrival(login);
             return;
         }
         self.player_of.insert(c, h.player);
-        if let Some(site) = fortress {
-            self.fortress_of.insert(c, site);
-        }
         if let Some(site) = adventure {
             self.adventurer_of.insert(c, site);
         }
@@ -532,7 +529,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             debug_assert!(false, "a move with no player");
             return;
         };
-        let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
+        let claim = claim_of(self.adventurer_of.remove(&client));
         // Not offline: in transit, its claim kept in use until `owner` reports it.
         self.world_handed(player, owner);
         self.forget_claim_reports(player);
@@ -550,10 +547,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         for kind in m.then {
             carry_event(&mut carried, kind);
         }
-        let (fortress, adventure) = split_claim(claim);
+        let adventure = split_claim(claim);
         let (x, z) = crate::block_column_xz(m.landing);
         let pose = crate::Pose::from_translation(rapier3d::math::Vector::new(x, y, z));
-        let record = PlayerRecord { client: carried, pose, region: m.target, fortress, adventure };
+        let record = PlayerRecord { client: carried, pose, region: m.target, adventure };
         log::info!(
             "[server] player {} (client {client}) moves from {:?} into {:?}: handed to host {owner}",
             player.0,
@@ -602,11 +599,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         self.player_of.insert(c, h.player);
-        let (fortress, adventure) = split_claim(h.claim);
-        if let Some(site) = fortress {
-            self.fortress_of.insert(c, site);
-        }
-        if let Some(site) = adventure {
+        if let Some(site) = split_claim(h.claim) {
             self.adventurer_of.insert(c, site);
         }
         let promoted = self.promote_session(c, from, now_ms);
@@ -1984,26 +1977,22 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 }
 
-/// The claim a player's fortress / adventure is (it holds one at most).
-fn claim_of(fortress: Option<SiteId>, adventure: Option<SiteId>) -> Option<Claim> {
-    fortress.map(Claim::Fortress).or(adventure.map(Claim::Adventure))
+/// The claim a player's adventure is.
+fn claim_of(adventure: Option<SiteId>) -> Option<Claim> {
+    adventure.map(Claim::Adventure)
 }
 
-/// A claim as the fortress / adventure pair of a record.
-fn split_claim(claim: Option<Claim>) -> (Option<SiteId>, Option<SiteId>) {
-    match claim {
-        Some(Claim::Fortress(s)) => (Some(s), None),
-        Some(Claim::Adventure(s)) => (None, Some(s)),
-        None => (None, None),
-    }
+/// A claim as the adventure of a record.
+fn split_claim(claim: Option<Claim>) -> Option<SiteId> {
+    claim.map(Claim::site)
 }
 
 /// The record of a player handed over in `bundle` (its body, in `target`'s frame), as the
 /// receiving host parks it: `None` if the bundle carries no player.
 pub(super) fn handoff_record(target: RegionCoords, bundle: &crate::EntityBundle, h: &crate::PlayerHandoff) -> Option<PlayerRecord> {
     let (_, carried) = bundle.client.as_ref()?;
-    let (fortress, adventure) = split_claim(h.claim);
-    Some(PlayerRecord { client: crate::parked_client(carried), pose: bundle.body.pose, region: target, fortress, adventure })
+    let adventure = split_claim(h.claim);
+    Some(PlayerRecord { client: crate::parked_client(carried), pose: bundle.body.pose, region: target, adventure })
 }
 
 /// A server-authored event that was to follow a moved player's creation, applied to the

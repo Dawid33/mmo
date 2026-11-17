@@ -27,7 +27,6 @@ fn record(x: i32) -> PlayerRecord {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::math::Vec3::new(1.5, 20.0, -3.0)),
         region: game::RegionCoords::new(x, -1),
-        fortress: None,
         adventure: Some(game::history::SiteId(3)),
     }
 }

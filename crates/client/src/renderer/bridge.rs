@@ -878,7 +878,6 @@ pub fn drain_client_updates(
             }
             ClientUpdateEvent::Sites(v) => history_out.write(HistoryMsg::Sites(v)),
             ClientUpdateEvent::Calendar(c) => history_out.write(HistoryMsg::Calendar(c)),
-            ClientUpdateEvent::Fortress(f) => history_out.write(HistoryMsg::Fortress(f)),
             ClientUpdateEvent::RegionTickTimes(stats) => {
                 if let Some(times) = tick_times.as_mut() {
                     times.0 = stats;
@@ -901,8 +900,6 @@ pub fn drain_client_updates(
             ClientUpdateEvent::RegionHosts(_) => {
                 let _ = &mut region_hosts;
             }
-            // No UI reads them any more; the variants are deleted in the embark removal's Task 6.
-            ClientUpdateEvent::EmbarkOptions(_) | ClientUpdateEvent::EmbarkResult(_) => {}
             ClientUpdateEvent::PersonInfo(p) => history_out.write(HistoryMsg::PersonInfo(p)),
             ClientUpdateEvent::Civs(c) => history_out.write(HistoryMsg::Civs(c)),
             ClientUpdateEvent::Legends(p) => history_out.write(HistoryMsg::Legends(p)),

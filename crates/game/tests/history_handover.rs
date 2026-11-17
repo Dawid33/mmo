@@ -72,8 +72,8 @@ fn two_sites() -> (History, Vec<PersonId>, Vec<PersonId>) {
     let civ = h.add_civ(Race::Dwarf);
     let a: Vec<_> = (0..3).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
     let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
-    h.found_site(civ, rc(0, 0), &a, None, false);
-    h.found_site(civ, rc(6, 0), &b, None, false);
+    h.found_site(civ, rc(0, 0), &a, None);
+    h.found_site(civ, rc(6, 0), &b, None);
     (h, a, b)
 }
 
@@ -202,7 +202,7 @@ fn birth_in_running_region_spawns_near_mother() {
     let civ = h.add_civ(Race::Dwarf);
     let m = h.add_founder(Sex::Female, years_before(s, 20));
     let f = h.add_founder(Sex::Male, years_before(s, 20));
-    h.found_site(civ, rc(1, 1), &[m, f], None, false);
+    h.found_site(civ, rc(1, 1), &[m, f], None);
     h.people.get_mut(&m).unwrap().spouse = Some(f);
     h.people.get_mut(&f).unwrap().spouse = Some(m);
     h.region_started(rc(1, 1));
@@ -385,8 +385,8 @@ fn diagonal_entry_spawns_from_orthogonal_neighbour() {
     let civ = h.add_civ(Race::Dwarf);
     let a = h.add_founder(Sex::Female, years_before(s, 20));
     let b = h.add_founder(Sex::Male, years_before(s, 20));
-    h.found_site(civ, rc(0, 0), &[a], None, false);
-    h.found_site(civ, rc(5, 5), &[b], None, false);
+    h.found_site(civ, rc(0, 0), &[a], None);
+    h.found_site(civ, rc(5, 5), &[b], None);
     let j = h.start_journey(vec![a], SiteId(0), rc(5, 5), Purpose::Migrate { to: SiteId(1) }).unwrap();
     assert_eq!(h.journey(j).unwrap().route[1], rc(1, 1));
     h.region_started(rc(1, 1));
@@ -405,7 +405,7 @@ fn diagonal_entry_spawns_from_orthogonal_neighbour() {
 
 #[test]
 fn a_load_keeps_embodied_state() {
-    assert_eq!(persist::HISTORY_FILE_VERSION, 4);
+    assert_eq!(persist::HISTORY_FILE_VERSION, 5);
     let (h, a, j) = walking_out_of_running_site();
     assert_eq!(h.journey(j).unwrap().held_in, Some(rc(0, 0)));
     assert_eq!(h.pending_journey_legs(), 0);
@@ -595,7 +595,7 @@ fn sole_citizen_walking_home_keeps_their_site() {
     let mut h = History::new(5, s, SocietyGrid::from_world_map(&land_map(8, 3)));
     let civ = h.add_civ(Race::Dwarf);
     let a = h.add_founder(Sex::Female, years_before(s, 20));
-    h.found_site(civ, rc(0, 0), &[a], None, false);
+    h.found_site(civ, rc(0, 0), &[a], None);
     h.region_started(rc(0, 0));
     // Their body wanders over the seam into unloaded (1, 0): they walk home.
     assert!(!h.person_crossed(a, rc(1, 0)));
@@ -615,7 +615,7 @@ fn sole_citizen_dying_on_the_walk_home_abandons_their_site() {
     let mut h = History::new(5, s, SocietyGrid::from_world_map(&land_map(8, 3)));
     let civ = h.add_civ(Race::Dwarf);
     let a = h.add_founder(Sex::Female, years_before(s, 20));
-    h.found_site(civ, rc(0, 0), &[a], None, false);
+    h.found_site(civ, rc(0, 0), &[a], None);
     h.region_started(rc(0, 0));
     assert!(!h.person_crossed(a, rc(1, 0)));
     h.record_death(a, DeathCause::OldAge);
@@ -628,7 +628,7 @@ fn catch_up_spread_grows_with_the_crowd() {
     let mut h = History::new(5, s, SocietyGrid::from_world_map(&land_map(8, 3)));
     let civ = h.add_civ(Race::Dwarf);
     let people: Vec<_> = (0..100).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
-    h.found_site(civ, rc(0, 0), &people, None, false);
+    h.found_site(civ, rc(0, 0), &people, None);
     let events = h.region_started(rc(0, 0));
     // ceil(sqrt(100)) * 2 = 20 blocks either way.
     let spread = 20i64;
@@ -649,7 +649,7 @@ fn site_founded_in_running_region_is_embodied() {
     let civ = h.add_civ(Race::Dwarf);
     let founders: Vec<_> = (0..3).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
     assert!(h.region_started(rc(3, 0)).is_empty());
-    let site = h.found_site(civ, rc(3, 0), &founders, None, true);
+    let site = h.found_site(civ, rc(3, 0), &founders, None);
     let d = h.take_directives();
     assert_eq!(d.len(), founders.len());
     for (f, d) in founders.iter().zip(&d) {
@@ -663,7 +663,7 @@ fn site_founded_in_running_region_is_embodied() {
     assert!(h.take_directives().is_empty());
     // Not running: no change.
     let other: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
-    let far = h.found_site(civ, rc(6, 0), &other, None, false);
+    let far = h.found_site(civ, rc(6, 0), &other, None);
     h.embody_site(far);
     assert!(h.take_directives().is_empty());
     assert_eq!(h.person(other[0]).unwrap().location, Location::AtSite(far));
@@ -684,8 +684,8 @@ fn civ_population_counts_strays() {
     let civ = h.add_civ(Race::Dwarf);
     let a: Vec<_> = (0..3).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
     let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
-    h.found_site(civ, rc(0, 0), &a, None, false);
-    h.found_site(civ, rc(6, 0), &b, None, false);
+    h.found_site(civ, rc(0, 0), &a, None);
+    h.found_site(civ, rc(6, 0), &b, None);
     h.region_started(rc(6, 0));
     assert!(!h.person_crossed(b[1], rc(7, 0)));
     let p = h.person(b[1]).unwrap();
@@ -907,8 +907,8 @@ fn manager_history() -> (History, Vec<PersonId>, Vec<PersonId>) {
         .map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20)))
         .collect();
     let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
-    h.found_site(civ, rc(0, 0), &a, None, false);
-    h.found_site(civ, rc(2, 0), &b, None, false);
+    h.found_site(civ, rc(0, 0), &a, None);
+    h.found_site(civ, rc(2, 0), &b, None);
     (h, a, b)
 }
 
@@ -1210,7 +1210,7 @@ fn site_founded_in_running_region_has_bodies() {
     let history = history_mut_of(&mut w.manager);
     let born = years_before(history.now(), 20);
     let founders: Vec<_> = (0..4).map(|_| history.add_founder(Sex::Male, born)).collect();
-    let site = history.found_site(CivId(0), rc(1, 0), &founders, None, true);
+    let site = history.found_site(CivId(0), rc(1, 0), &founders, None);
     w.tick();
     let census = bodies(&mut w.manager);
     for f in &founders {

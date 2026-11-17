@@ -474,7 +474,6 @@ impl Takeover {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, above_ground_y(), REGION_SIZE / 2.0)),
             region: rc,
-            fortress: None,
             adventure: None,
         };
         self.login.as_ref().unwrap().roster.lock().unwrap().insert(token.clone(), record);
@@ -745,7 +744,6 @@ fn host_killed_mid_crossing_keeps_every_id_once() {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, above_ground_y(), REGION_SIZE / 4.0)),
             region: a0,
-            fortress: None,
             adventure: None,
         };
         let now = t.w.pair.now();

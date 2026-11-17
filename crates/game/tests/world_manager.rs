@@ -861,7 +861,6 @@ fn fast_reconnect_waits_for_park() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(body_on_tile([1, 1, 1])),
         region: SPAWN_REGION,
-        fortress: None,
         adventure: None,
     };
     h.manager.handle_server_event(session(1, 0, Some(stale)), 11);
@@ -951,7 +950,6 @@ fn starting_kit_only_for_new_player() {
         client: game::Client { inventory: game::Inventory::new(), ..game::Client::default() },
         pose: game::Pose::from_translation(body_on_tile([3, 1, 3])),
         region: SPAWN_REGION,
-        fortress: None,
         adventure: None,
     };
     h.event(session(1, 1, Some(record)), 0);
@@ -1330,7 +1328,6 @@ fn record_of_a_restore_into_a_failed_region_is_kept() {
         client,
         pose: game::Pose::from_translation(body_on_tile([5, 1, 7])),
         region: east,
-        fortress: None,
         adventure: None,
     };
     h.event(session(0, 4, Some(stored.clone())));
@@ -1367,7 +1364,6 @@ fn off_map_record_refused_at_an_unavailable_spawn_is_not_parked() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(body_on_tile([5, 1, 7])),
         region: off_map,
-        fortress: None,
         adventure: None,
     };
     h.event(session(0, 4, Some(stored.clone())));
@@ -1483,7 +1479,6 @@ fn foreign_region_play_moves_and_login_is_still_refused() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(body_on_tile([3, 1, 3])),
         region: target,
-        fortress: None,
         adventure: None,
     };
     h.event(session(1, 1, Some(record)), 20);
@@ -1558,7 +1553,7 @@ fn claim_is_sets_the_host_claim() {
         let mut hist = History::new(5, s, SocietyGrid::from_world_map(&map));
         let civ = hist.add_civ(Race::Dwarf);
         let people: Vec<_> = (0..4).map(|i| hist.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20))).collect();
-        hist.found_site(civ, RegionCoords::new(8, 0), &people, None, false);
+        hist.found_site(civ, RegionCoords::new(8, 0), &people, None);
         let site = crate::common::populated_site(&hist);
         let core = Coordinator::new(hist, 0);
         let mut h = floored_harness();
@@ -1574,7 +1569,6 @@ fn claim_is_sets_the_host_claim() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(body_on_tile([3, 1, 3])),
         region: SPAWN_REGION,
-        fortress: None,
         adventure: Some(site),
     };
     h.event(session(0, 1, Some(record)), 0);

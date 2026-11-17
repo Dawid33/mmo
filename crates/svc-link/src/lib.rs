@@ -51,7 +51,9 @@ pub use target::LinkTarget;
 /// (`PeerHello`, `PeerRole::Host`, `HostEndpoint`, `RequestId`); the hello names its world
 /// ([`LinkHello::world`]); the login service links to the coordinator, which relays its orders
 /// to a live host and their answers back (`CoordMsg::Login`, `HostMsg::Login`).
-pub const LINK_PROTOCOL_VERSION: u32 = 7;
+/// 8: embark, return and retire are gone — `WorldRequest` / `WorldReply` lose their embark and
+/// return variants, `Claim` is an adventure only, and `PlayerHandoff` carries no fortress.
+pub const LINK_PROTOCOL_VERSION: u32 = 8;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

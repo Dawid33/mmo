@@ -241,7 +241,6 @@ mod tests {
             name: format!("s{id}"),
             population,
             abandoned,
-            returnable: false,
         }
     }
 

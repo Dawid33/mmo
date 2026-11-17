@@ -45,7 +45,6 @@ fn player_move(player: u64) -> Reliable {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::rapier3d::math::Vector::ZERO),
         region: rc(1, 0),
-        fortress: None,
         adventure: None,
     };
     Reliable::PlayerMove { handoff: handoff(player), record: Box::new(record), target: rc(1, 0) }

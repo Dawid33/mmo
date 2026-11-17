@@ -130,7 +130,6 @@ fn a_block_broken_across_a_host_seam_changes_the_owner_and_the_halo() {
             (mid as f32 + 0.5) * voxels,
         )),
         region: a,
-        fortress: None,
         adventure: None,
     };
     let now = pair.now();
@@ -1407,7 +1406,6 @@ impl LoginWorld {
                 REGION_SIZE / 2.0,
             )),
             region: rc,
-            fortress: None,
             adventure: None,
         });
         self.roster.lock().unwrap().insert(token.clone(), (player, record));

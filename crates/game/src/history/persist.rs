@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 /// 3: `History::positions` (autosave-noted body positions).
 /// 4: every field but the grid (running and stopping regions, directives, bounced
 ///    directives, stray candidates, hold times, notices): a load is not a restart.
+/// 5: a site no longer records whether a player founded it (embark and return removed).
 ///    Older files are refused (`OldVersion`): worlds are re-forged, never migrated.
-pub const HISTORY_FILE_VERSION: u32 = 4;
-const OLDEST_LOADABLE_VERSION: u32 = 4;
+pub const HISTORY_FILE_VERSION: u32 = 5;
+const OLDEST_LOADABLE_VERSION: u32 = 5;
 pub const HISTORY_MAGIC: [u8; 8] = *b"MMOHIST\0";
 
 /// Largest decompressed history body a file may claim; a bigger size prefix is refused

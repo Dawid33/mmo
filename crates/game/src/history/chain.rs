@@ -8,35 +8,13 @@ use super::rules::*;
 use super::grid::{route, ROUTE_MAX_NODES};
 use super::History;
 
-/// Why a region cannot take a new site, or (the player's embark and return) why the
-/// request is refused.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+/// Why a region cannot take a new site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EmbarkRefusal {
     OffMap,
     NotHabitable,
     Occupied,
     TooClose { site: SiteId },
-    /// The world has no history.
-    NoHistory,
-    /// The player already plays a fortress: retire it first.
-    AlreadyHasFortress,
-    /// The party is empty or bigger than `EMBARK_PLAYER_PARTY_MAX`.
-    PartySize,
-    /// Dead, unknown, of another civ, travelling, embodied in a running region, or
-    /// listed twice.
-    UnavailablePerson(PersonId),
-    /// Return: not a living player-founded site.
-    NotPlayerFounded,
-    /// Return: another connected player plays it.
-    InUse,
-    /// The player's embark: the region is a mountainside
-    /// ([`crate::too_steep_to_embark`]).
-    TooSteep,
-    /// The region's stored state could not be read from the world store; it
-    /// is retried after `STORE_LOAD_RETRY_SECS`.
-    RegionUnavailable,
-    /// The world coordinator did not answer within `WORLD_REQUEST_TIMEOUT_SECS`.
-    WorldUnavailable,
 }
 
 /// Why the server refuses `ClientPacket::StartAdventure`.
@@ -50,7 +28,7 @@ pub enum AdventureRefusal {
     SiteAbandoned,
     /// No living person belongs to the site.
     Unpopulated,
-    /// The player already plays a fortress or an adventure.
+    /// The player already plays an adventure.
     AlreadyPlaying,
     /// The site's region could not be loaded from the world store.
     RegionUnavailable,
@@ -66,7 +44,7 @@ impl AdventureRefusal {
             Self::UnknownSite => "No such site",
             Self::SiteAbandoned => "That site is abandoned",
             Self::Unpopulated => "Nobody lives there",
-            Self::AlreadyPlaying => "Already playing: retire or end it first",
+            Self::AlreadyPlaying => "Already playing: end the adventure first",
             Self::RegionUnavailable => "That region could not be loaded; try again shortly",
             Self::WorldUnavailable => "The world is not answering; try again shortly",
         }
@@ -277,18 +255,9 @@ impl History {
         }
     }
 
-    /// Whether a new site may be founded in `region`; plan 3's player embark shares the rule.
+    /// Whether a new site may be founded in `region`.
     pub fn embark_allowed(&self, region: crate::RegionCoords) -> Result<(), EmbarkRefusal> {
         embark_allowed_in(self.grid(), self.sites.values().map(|s| (s.id, s.region, s.abandoned.is_some())), region)
-    }
-
-    /// [`player_embark_allowed_in`] over this history's sites.
-    pub fn player_embark_allowed(&self, region: crate::RegionCoords) -> Result<(), EmbarkRefusal> {
-        player_embark_allowed_in(
-            self.grid(),
-            self.sites.values().map(|s| (s.id, s.region, s.abandoned.is_some())),
-            region,
-        )
     }
 
     /// The best region to found a site in from `from_region`: allowed, reachable, scored
@@ -452,21 +421,6 @@ pub fn embark_allowed_in(
         .find(|(_, r, abandoned)| !*abandoned && chebyshev(*r, region) < EMBARK_MIN_DISTANCE_REGIONS)
     {
         return Err(EmbarkRefusal::TooClose { site: *id });
-    }
-    Ok(())
-}
-
-/// The player's embark rule: [`embark_allowed_in`] (shared with the civs), and the
-/// region must not be [`too steep`](crate::too_steep_to_embark) — the player is put
-/// down on its landing spot, which must not be the side of a mountain.
-pub fn player_embark_allowed_in(
-    grid: &super::grid::SocietyGrid,
-    sites: impl Iterator<Item = (SiteId, crate::RegionCoords, bool)>,
-    region: crate::RegionCoords,
-) -> Result<(), EmbarkRefusal> {
-    embark_allowed_in(grid, sites, region)?;
-    if grid.too_steep(region) {
-        return Err(EmbarkRefusal::TooSteep);
     }
     Ok(())
 }

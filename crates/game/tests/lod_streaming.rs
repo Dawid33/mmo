@@ -295,7 +295,6 @@ fn tile_build_overlays_regions_with_authoritative_state() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::body_on_tile([8, 1, 8])),
         region: RegionCoords::new(5, 5),
-        fortress: None,
         adventure: None,
     };
     m.handle_server_event(

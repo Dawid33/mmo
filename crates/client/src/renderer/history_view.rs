@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, VecDeque};
 use bevy::prelude::*;
 
 use game::history::{CalendarTick, CivId, PersonId, SiteId};
-use game::RegionCoords;
 use game::history::{
     AdventureRefusal, LegendLine, LegendsFilter, LegendsPage, LegendsQuery, LEGENDS_PAGE_DEFAULT,
 };
@@ -31,13 +30,6 @@ pub struct HistoryView {
     pub notices: VecDeque<(String, f32)>,
     /// Person info and when it was received (secs).
     pub people: BTreeMap<PersonId, (PersonInfo, f32)>,
-    /// The player's fortress (the server's `Fortress` packet; deleted with the
-    /// embark types).
-    pub fortress: Option<SiteId>,
-    /// The region the fortress stands in, from the server's `Fortress` packet
-    /// : the centre of the simulated
-    /// fortress neighbourhood (`world_scale::FORTRESS_NEAR_RADIUS`).
-    pub fortress_region: Option<RegionCoords>,
     /// Every civ's name (server `Civs`, on connect).
     pub civs: Vec<CivMarker>,
     /// The embark screen's tab.
@@ -208,7 +200,6 @@ pub enum HistoryMsg {
     Calendar(CalendarTick),
     Notice(String),
     PersonInfo(PersonInfo),
-    Fortress(Option<game::HeldFortress>),
     Civs(Vec<CivMarker>),
     Legends(LegendsPage),
     AdventureResult(Result<SiteId, AdventureRefusal>),
@@ -268,10 +259,6 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
                 view.sites = v.clone();
                 view.sites_received = true;
             }
-            HistoryMsg::Fortress(f) => {
-                view.fortress = f.map(|f| f.site);
-                view.fortress_region = f.map(|f| f.region);
-            }
             HistoryMsg::Calendar(c) => view.calendar = Some(*c),
             HistoryMsg::Notice(n) => {
                 view.notices.push_back((n.clone(), now));
@@ -294,6 +281,7 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use game::RegionCoords;
 
     fn site(id: u32, civ: u32, population: u32, abandoned: bool) -> SiteMarker {
         SiteMarker {
@@ -303,7 +291,6 @@ mod tests {
             name: format!("s{id}"),
             population,
             abandoned,
-            returnable: false,
         }
     }
 

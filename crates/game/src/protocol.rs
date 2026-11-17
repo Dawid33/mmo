@@ -761,15 +761,6 @@ pub enum ClientPacket {
     PlayRegion(RegionCoords),
     /// The client is leaving this world; treat as disconnected now.
     Leave,
-    /// Ask for the people who may embark: answered by `ServerPacket::EmbarkOptions`.
-    RequestEmbarkOptions,
-    /// Embark: found a fortress with these people in this region; answered by
-    /// `ServerPacket::EmbarkResult` (and, on success, `PlayerRegion`).
-    Embark(EmbarkRequest),
-    /// Stop playing the fortress: the player leaves it, it parks as usual.
-    Retire,
-    /// Play a retired fortress again; answered by `ServerPacket::EmbarkResult`.
-    ReturnTo(crate::history::SiteId),
     /// Answered by `ServerPacket::PersonInfo`; ignored for an unknown person.
     RequestPersonInfo(crate::history::PersonId),
     /// One page of the world's legends; answered by `ServerPacket::Legends`.
@@ -777,25 +768,8 @@ pub enum ClientPacket {
     /// Start an adventure at a populated site; answered by `ServerPacket::AdventureResult`
     /// (and, on success, `PlayerRegion`).
     StartAdventure(crate::history::SiteId),
-    /// End the adventure: the player goes back to fortress mode at the spawn region.
+    /// End the adventure: the player goes back to the spawn region.
     EndAdventure,
-}
-
-/// The player's embark: a civ, people of that civ's sites, and the region to found in.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct EmbarkRequest {
-    pub civ: crate::history::CivId,
-    pub people: Vec<crate::history::PersonId>,
-    pub region: RegionCoords,
-}
-
-/// The fortress a client plays: its site and the region it stands in (the
-/// client centres its simulated neighbourhood on that region in both play
-/// modes, so it needs it without waiting for the next `Sites` broadcast).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct HeldFortress {
-    pub site: crate::history::SiteId,
-    pub region: RegionCoords,
 }
 
 /// A site as the world map shows it.
@@ -808,45 +782,13 @@ pub struct SiteMarker {
     /// Living members.
     pub population: u32,
     pub abandoned: bool,
-    /// Player-founded and not abandoned: a player may return to it.
-    pub returnable: bool,
 }
 
-/// A civilisation's name, as the embark tabs show it.
+/// A civilisation's name, as the legends show it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CivMarker {
     pub civ: crate::history::CivId,
     pub name: String,
-}
-
-/// Who may embark: per civ, per site, its people free to leave.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct EmbarkOptions {
-    pub civs: Vec<CivOption>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CivOption {
-    pub civ: crate::history::CivId,
-    pub name: String,
-    pub sites: Vec<SiteOption>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SiteOption {
-    pub site: crate::history::SiteId,
-    pub name: String,
-    pub region: RegionCoords,
-    pub people: Vec<PersonOption>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PersonOption {
-    pub person: crate::history::PersonId,
-    pub name: String,
-    pub age_years: u32,
-    pub sex: crate::history::Sex,
-    pub spouse: Option<crate::history::PersonId>,
 }
 
 /// One person, for the inspector: names rather than ids.
@@ -902,12 +844,7 @@ pub enum ServerPacket {
     Calendar(crate::history::CalendarTick),
     /// A history log line about the site of the client's home region.
     Notice(String),
-    EmbarkOptions(EmbarkOptions),
-    /// The answer to `ClientPacket::Embark` and `ClientPacket::ReturnTo`: the site played.
-    EmbarkResult(Result<crate::history::SiteId, crate::history::EmbarkRefusal>),
     PersonInfo(PersonInfo),
-    /// The site this client plays (`None`: none): on connect and after Embark / Return / Retire.
-    Fortress(Option<HeldFortress>),
     /// Every civilisation's name, by id: on connect, next to `Sites`.
     Civs(Vec<CivMarker>),
     /// The answer to `ClientPacket::RequestLegends`.
@@ -1020,8 +957,8 @@ pub enum GameEventKind {
     ClientLeft(ClientId),
     /// Server-authored: like `CreateClient`, but the body lands over the
     /// region-local block column `[bx, bz]` instead of the spawn column. A
-    /// player moved from another region (Play, embark, adventure start /
-    /// end) carries its `Client` — inventory, cursor, mode — taken from its
+    /// player moved from another region (Play, adventure start / end)
+    /// carries its `Client` — inventory, cursor, mode — taken from its
     /// park there; `None` = a player new to the world (the starting kit).
     CreateClientAt(ClientId, [u32; 2], Option<Box<crate::Client>>),
     /// Server-authored: give a history person a body here (and optionally

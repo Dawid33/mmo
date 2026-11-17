@@ -851,7 +851,6 @@ mod tests {
             name: String::new(),
             population,
             abandoned,
-            returnable: false,
         };
         let sites = [site(0, 1, 5, false), site(1, 0, 0, false), site(2, 0, 4, true), site(3, 0, 2, false), site(4, 0, 9, false)];
         assert_eq!(choose_adventure_site(&sites), Some(SiteId(3)));
@@ -867,7 +866,6 @@ mod tests {
             name: String::new(),
             population: 4,
             abandoned: false,
-            returnable: false,
         };
         assert_eq!(adventure_start(&[], true), Start::PlayHere);
         assert_eq!(adventure_start(&[populated_site(3)], true), Start::Adventure(SiteId(3)));

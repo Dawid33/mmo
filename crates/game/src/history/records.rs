@@ -123,7 +123,6 @@ pub struct Site {
     pub abandoned: Option<CalendarTick>,
     pub capacity: u32,
     pub members: BTreeSet<PersonId>,
-    pub player_founded: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

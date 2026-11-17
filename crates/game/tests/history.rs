@@ -153,7 +153,7 @@ fn growing_world() -> History {
         founders.push(h.add_founder(Sex::Female, years_before(s, 20)));
         founders.push(h.add_founder(Sex::Male, years_before(s, 20)));
     }
-    h.found_site(civ, RegionCoords::new(3, 3), &founders, None, false);
+    h.found_site(civ, RegionCoords::new(3, 3), &founders, None);
     h
 }
 
@@ -180,7 +180,7 @@ fn old_people_die() {
     let mut h = History::new(1, s, land_grid());
     let civ = h.add_civ(Race::Dwarf);
     let p = h.add_founder(Sex::Female, years_before(s, 170));
-    h.found_site(civ, RegionCoords::new(1, 1), &[p], None, false);
+    h.found_site(civ, RegionCoords::new(1, 1), &[p], None);
     h.advance(s.plus_days(1));
     assert_eq!(h.person(p).unwrap().died.map(|d| d.1), Some(DeathCause::OldAge));
     assert!(h.log().iter().any(|e| matches!(e.kind, LogKind::Died { person, .. } if person == p)));
@@ -223,7 +223,7 @@ fn no_marriage_between_siblings() {
         p.mother = Some(mother);
         p.father = Some(father);
     }
-    h.found_site(civ, RegionCoords::new(1, 1), &[son, daughter], None, false);
+    h.found_site(civ, RegionCoords::new(1, 1), &[son, daughter], None);
     h.advance(s.plus_days(10 * DAYS_PER_YEAR));
     assert_eq!(h.person(son).unwrap().spouse, None);
     assert_eq!(h.person(daughter).unwrap().spouse, None);
@@ -237,7 +237,7 @@ fn unrelated_adults_do_marry() {
     let civ = h.add_civ(Race::Dwarf);
     let a = h.add_founder(Sex::Female, years_before(s, 20));
     let b = h.add_founder(Sex::Male, years_before(s, 20));
-    h.found_site(civ, RegionCoords::new(1, 1), &[a, b], None, false);
+    h.found_site(civ, RegionCoords::new(1, 1), &[a, b], None);
     h.advance(s.plus_days(30 * DAYS_PER_YEAR));
     assert_eq!(h.person(a).unwrap().spouse, Some(b));
 }
@@ -258,7 +258,7 @@ fn unplaced_founder_until_found_site() {
     let civ = h.add_civ(Race::Dwarf);
     let p = h.add_founder(Sex::Female, years_before(s, 20));
     assert_eq!(h.person(p).unwrap().location, Location::Unplaced);
-    let site = h.found_site(civ, RegionCoords::new(1, 1), &[p], None, false);
+    let site = h.found_site(civ, RegionCoords::new(1, 1), &[p], None);
     assert_eq!(h.person(p).unwrap().location, Location::AtSite(site));
 }
 
@@ -274,8 +274,8 @@ fn two_site_world(sea: impl Fn(i32, i32) -> bool) -> (History, Vec<PersonId>, Ve
     let civ = h.add_civ(Race::Dwarf);
     let a: Vec<_> = (0..3).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
     let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
-    h.found_site(civ, RegionCoords::new(0, 0), &a, None, false);
-    h.found_site(civ, RegionCoords::new(6, 0), &b, None, false);
+    h.found_site(civ, RegionCoords::new(0, 0), &a, None);
+    h.found_site(civ, RegionCoords::new(6, 0), &b, None);
     (h, a, b)
 }
 
@@ -379,7 +379,7 @@ fn add_site_with(h: &mut History, civ: CivId, region: RegionCoords, n: usize) ->
     for i in 0..n {
         f.push(h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20)));
     }
-    h.found_site(civ, region, &f, None, false)
+    h.found_site(civ, region, &f, None)
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn household_of_is_spouse_and_young_children() {
         h.people.get_mut(&m).unwrap().children.push(c);
         h.people.get_mut(&f).unwrap().children.push(c);
     }
-    h.found_site(civ, RegionCoords::new(1, 1), &[m, f, kid, grown, other], None, false);
+    h.found_site(civ, RegionCoords::new(1, 1), &[m, f, kid, grown, other], None);
     assert_eq!(household_of(&h, m), vec![m, f, kid]);
     assert_eq!(household_of(&h, f), vec![m, f, kid]);
     assert_eq!(household_of(&h, other), vec![other]);
@@ -411,7 +411,7 @@ fn embark_allowed_rules() {
     let mut h = History::new(2, s, SocietyGrid::from_world_map(&test_map(12, 3, |x, _| x == 11)));
     let civ = h.add_civ(Race::Dwarf);
     let p = h.add_founder(Sex::Female, years_before(s, 20));
-    let site = h.found_site(civ, RegionCoords::new(0, 0), &[p], None, false);
+    let site = h.found_site(civ, RegionCoords::new(0, 0), &[p], None);
     assert_eq!(h.embark_allowed(RegionCoords::new(-1, 0)), Err(EmbarkRefusal::OffMap));
     assert_eq!(h.embark_allowed(RegionCoords::new(11, 0)), Err(EmbarkRefusal::NotHabitable));
     assert_eq!(h.embark_allowed(RegionCoords::new(0, 0)), Err(EmbarkRefusal::Occupied));
@@ -471,7 +471,7 @@ fn extinct_civ_leaves_no_live_steps() {
     let civ = h.add_civ(Race::Dwarf);
     let a = h.add_founder(Sex::Female, years_before(s, 159));
     let b = h.add_founder(Sex::Male, years_before(s, 159));
-    h.found_site(civ, RegionCoords::new(2, 2), &[a, b], None, false);
+    h.found_site(civ, RegionCoords::new(2, 2), &[a, b], None);
     h.advance(s.plus_days(3 * DAYS_PER_YEAR));
     assert!(h.people().all(|p| !p.alive()));
     assert!(h.sites().all(|s| s.abandoned.is_some()));
@@ -527,7 +527,7 @@ fn embark_party_with_nowhere_to_go_wanders() {
     // The target gets taken by another civ, and the origin dies out.
     let other = h.add_civ(Race::Dwarf);
     let o = h.add_founder(Sex::Female, years_before(s, 20));
-    h.found_site(other, RegionCoords::new(4, 0), &[o], None, false);
+    h.found_site(other, RegionCoords::new(4, 0), &[o], None);
     for p in h.living_members(origin) {
         h.record_death(p, DeathCause::OldAge);
     }
@@ -1006,10 +1006,10 @@ fn advancing_with_nothing_due_is_not_a_content_change() {
 }
 
 #[test]
-fn a_v3_file_is_refused() {
+fn a_v4_file_is_refused() {
     let map = big_land();
     let mut bytes = encode(&bootstrap(&map, &params(0)).unwrap());
-    bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&4u32.to_le_bytes());
     let err = decode(&bytes, SocietyGrid::from_world_map(&map)).unwrap_err();
-    assert!(matches!(err, HistoryLoadError::OldVersion { found: 3 }), "{err:?}");
+    assert!(matches!(err, HistoryLoadError::OldVersion { found: 4 }), "{err:?}");
 }

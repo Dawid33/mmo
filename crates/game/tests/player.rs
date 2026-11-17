@@ -26,8 +26,7 @@ fn player_record_round_trips_through_bincode() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::math::Vec3::new(1.0, 2.0, 3.0)),
         region: game::RegionCoords::new(-2, 5),
-        fortress: Some(game::history::SiteId(4)),
-        adventure: None,
+        adventure: Some(game::history::SiteId(4)),
     };
     let bytes = bincode::serialize(&(PlayerId(9), &record)).unwrap();
     let (id, back): (PlayerId, PlayerRecord) = bincode::deserialize(&bytes).unwrap();

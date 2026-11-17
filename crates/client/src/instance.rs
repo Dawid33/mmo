@@ -43,14 +43,6 @@ pub enum ClientRequest {
     /// Play this region: the server moves our session there (or refuses,
     /// answered as `ClientUpdateEvent::PlayRefused`).
     PlayRegion(RegionCoords),
-    /// Ask who may embark (answered as `ClientUpdateEvent::EmbarkOptions`).
-    RequestEmbarkOptions,
-    /// Found a fortress (answered as `ClientUpdateEvent::EmbarkResult`).
-    Embark(game::EmbarkRequest),
-    /// Stop playing the fortress.
-    Retire,
-    /// Play a retired fortress again (answered as `EmbarkResult`).
-    ReturnTo(game::history::SiteId),
     /// Ask for one person (answered as `ClientUpdateEvent::PersonInfo`).
     RequestPersonInfo(game::history::PersonId),
     /// Leaving the world (back to the main menu): tell the server now, so it
@@ -270,12 +262,6 @@ pub struct GameInstanceManager {
     /// Headless suites shrink it to 0 — each region costs a full worldgen +
     /// collider genesis on the server AND a deserialized copy on the client.
     near_radius: i32,
-    /// Radius of the simulated neighbourhood around `fortress_region`
-    /// (`WorldScale::fortress_radius`, applied by `set_world_scale`; 0 here so
-    /// headless suites keep their one-region world).
-    fortress_radius: i32,
-    /// The region of the fortress this client plays (`ServerPacket::Fortress`).
-    fortress_region: Option<RegionCoords>,
     /// LOD keys we have requested and not released.
     lod_subscribed: std::collections::BTreeSet<game::lod::LodKey>,
     /// One-shot join milestones for the `[perf]` timeline.
@@ -841,25 +827,15 @@ fn window_recenter_margin() -> f32 {
 /// missing region) and it anchors viewer_region's pose read; this also
 /// mirrors the server's keep-alive rule, which pins a client's home region
 /// regardless of its window.
-///
-/// Plus the **fortress neighbourhood**: the fortress region and every region
-/// within `fortress_radius` of it, in both play modes — wherever the viewer
-/// (the adventurer, in Adventure) is, the fortress and its surroundings keep
-/// running on the server and predicted here.
 fn desired_window(
     center: RegionCoords,
     home: Option<RegionCoords>,
     radius: i32,
-    fortress: Option<RegionCoords>,
-    fortress_radius: i32,
 ) -> std::collections::BTreeSet<RegionCoords> {
     let mut desired: std::collections::BTreeSet<RegionCoords> =
         center.window_radius(radius).into_iter().collect();
     if let Some(home) = home {
         desired.insert(home);
-    }
-    if let Some(fortress) = fortress {
-        desired.extend(fortress.window_radius(fortress_radius.max(0)));
     }
     desired
 }
@@ -979,8 +955,6 @@ impl GameInstanceManager {
             lod_desired: None,
             lod_table: game::lod::LOD_RING_TABLE,
             near_radius: 1,
-            fortress_radius: 0,
-            fortress_region: None,
             lod_subscribed: std::collections::BTreeSet::new(),
             join: JoinTimeline::default(),
             pending_events: BTreeMap::new(),
@@ -1085,13 +1059,6 @@ impl GameInstanceManager {
                 info!("[client] requesting Play in region {rc:?}");
                 self.send_out(Outgoing::Home(ClientPacket::PlayRegion(rc)));
             }
-            ClientRequest::RequestEmbarkOptions => {
-                self.send_out(Outgoing::Home(ClientPacket::RequestEmbarkOptions));
-            }
-            ClientRequest::Embark(req) => {
-                info!("[client] embarking in region {:?}", req.region);
-                self.send_out(Outgoing::Home(ClientPacket::Embark(req)));
-            }
             ClientRequest::RequestLegends(q) => {
                 self.send_out(Outgoing::Home(ClientPacket::RequestLegends(q)));
             }
@@ -1100,12 +1067,6 @@ impl GameInstanceManager {
             }
             ClientRequest::EndAdventure => {
                 self.send_out(Outgoing::Home(ClientPacket::EndAdventure));
-            }
-            ClientRequest::Retire => {
-                self.send_out(Outgoing::Home(ClientPacket::Retire));
-            }
-            ClientRequest::ReturnTo(site) => {
-                self.send_out(Outgoing::Home(ClientPacket::ReturnTo(site)));
             }
             ClientRequest::RequestPersonInfo(person) => {
                 self.send_out(Outgoing::Home(ClientPacket::RequestPersonInfo(person)));
@@ -1156,13 +1117,6 @@ impl GameInstanceManager {
         info!("[client] world scale: {scale}");
         self.lod_table = scale.lod_table;
         self.near_radius = scale.near_radius;
-        self.fortress_radius = scale.fortress_radius;
-    }
-
-    /// Simulate `radius` regions around the fortress (test/harness hook; the
-    /// binaries take it from `WorldScale` via `set_world_scale`).
-    pub fn set_fortress_radius(&mut self, radius: i32) {
-        self.fortress_radius = radius;
     }
 
     /// Push a game event as if it came from local input (test/harness hook).
@@ -1687,13 +1641,7 @@ impl GameInstanceManager {
     /// [`desired_window`]); `update_window` and `update_lod_window` share it,
     /// so streamed LOD never covers a simulated region.
     fn window_for(&self, center: RegionCoords) -> std::collections::BTreeSet<RegionCoords> {
-        let mut window = desired_window(
-            center,
-            self.home_region,
-            self.near_radius,
-            self.fortress_region,
-            self.fortress_radius,
-        );
+        let mut window = desired_window(center, self.home_region, self.near_radius);
         // A move's target, until its `PlayerRegion` makes it the home.
         window.extend(self.pending_move);
         window
@@ -1874,7 +1822,7 @@ impl GameInstanceManager {
     /// The home's `RegionElsewhere` for `region` (`ConnectionSet::on_region_named` acts on
     /// it). One no longer wanted that answers a subscribe is late, as is one naming the home
     /// (a move comes as `PlayerRegion`); an unasked one naming another host is a move — the
-    /// home moved the player to that host's region (a Play, an embark there): subscribed
+    /// home moved the player to that host's region (a Play, an adventure there): subscribed
     /// there and held in the window until that host's `PlayerRegion` makes it the home
     /// (only for [`AMBIGUOUS_MOVE_HOLD_MS`] when the region was just released while another
     /// host served it: the home's late re-answer reads the same).
@@ -2612,11 +2560,6 @@ impl GameInstanceManager {
             game::ServerPacket::Calendar(c) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Calendar(c));
             }
-            game::ServerPacket::Fortress(f) => {
-                // The window diff picks the neighbourhood up on the next tick.
-                self.fortress_region = f.map(|f| f.region);
-                let _ = self.client_event_send.send(ClientUpdateEvent::Fortress(f));
-            }
             game::ServerPacket::Civs(c) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Civs(c));
             }
@@ -2628,12 +2571,6 @@ impl GameInstanceManager {
             }
             game::ServerPacket::Notice(n) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Notice(n));
-            }
-            game::ServerPacket::EmbarkOptions(o) => {
-                let _ = self.client_event_send.send(ClientUpdateEvent::EmbarkOptions(o));
-            }
-            game::ServerPacket::EmbarkResult(r) => {
-                let _ = self.client_event_send.send(ClientUpdateEvent::EmbarkResult(r));
             }
             game::ServerPacket::PersonInfo(p) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::PersonInfo(p));
@@ -3688,7 +3625,7 @@ mod manager_tests {
     fn desired_window_pins_home_outside_3x3() {
         let home = RegionCoords::new(0, 0);
         let far = RegionCoords::new(5, -3);
-        let desired = desired_window(far, Some(home), 1, None, 0);
+        let desired = desired_window(far, Some(home), 1);
         assert!(desired.contains(&home), "home must never leave the window");
         assert_eq!(desired.len(), 10, "3x3 around viewer plus distant home");
         for rc in far.window_3x3() {
@@ -3702,38 +3639,14 @@ mod manager_tests {
     fn desired_window_home_inside_does_not_duplicate() {
         let home = RegionCoords::new(0, 0);
         // Home adjacent to centre: inside the 3x3.
-        let desired = desired_window(RegionCoords::new(1, 0), Some(home), 1, None, 0);
+        let desired = desired_window(RegionCoords::new(1, 0), Some(home), 1);
         assert_eq!(desired.len(), 9);
         assert!(desired.contains(&home));
         // Home at centre.
-        let desired = desired_window(home, Some(home), 1, None, 0);
+        let desired = desired_window(home, Some(home), 1);
         assert_eq!(desired.len(), 9);
         // No home yet: plain 3x3.
-        assert_eq!(desired_window(RegionCoords::new(2, 2), None, 1, None, 0).len(), 9);
-    }
-
-    /// The fortress neighbourhood is simulated whatever the viewer does:
-    /// Fortress mode (viewer at the fortress, one-region near window) gets the
-    /// 3x3, and an adventurer far away keeps it next to its own window.
-    #[test]
-    fn desired_window_keeps_fortress_neighbourhood() {
-        let fort = RegionCoords::new(4, 4);
-        let at_home = desired_window(fort, Some(fort), 0, Some(fort), 1);
-        let expected: std::collections::BTreeSet<_> = fort.window_3x3().into_iter().collect();
-        assert_eq!(at_home, expected);
-
-        let away = RegionCoords::new(9, 4);
-        let roaming = desired_window(away, Some(away), 0, Some(fort), 1);
-        assert_eq!(roaming.len(), 10, "3x3 around the fortress plus the adventurer's region");
-        assert!(roaming.contains(&away));
-        assert!(expected.is_subset(&roaming));
-
-        // Next door: the adventurer's region is part of the neighbourhood.
-        let next = RegionCoords::new(5, 4);
-        assert_eq!(desired_window(next, Some(next), 0, Some(fort), 1), expected);
-        // Radius 0 / no fortress: only the near window.
-        assert_eq!(desired_window(away, Some(away), 0, Some(fort), 0).len(), 2);
-        assert_eq!(desired_window(away, Some(away), 0, None, 1).len(), 1);
+        assert_eq!(desired_window(RegionCoords::new(2, 2), None, 1).len(), 9);
     }
 
     /// PlayerRegion must trigger subscription requests for the full 3x3
@@ -4318,7 +4231,7 @@ mod manager_tests {
         let home = RegionCoords::new(0, 0);
         manager.home_region = Some(home);
         let packets = manager.client_packet_recv();
-        let excluded = desired_window(home, Some(home), manager.near_radius, None, 0);
+        let excluded = desired_window(home, Some(home), manager.near_radius);
         let (_, expected) = desired_lod(
             home,
             &excluded,

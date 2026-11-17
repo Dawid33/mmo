@@ -6,11 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::HostId;
 use crate::history::{
-    AdventureRefusal, CalendarTick, Directive, EmbarkRefusal, LegendsPage, LegendsQuery, PersonId, SiteId,
+    AdventureRefusal, CalendarTick, Directive, LegendsPage, LegendsQuery, PersonId, SiteId,
 };
 use crate::{
-    CivMarker, CutId, EmbarkOptions, EmbarkRequest, GameEventKind, PersonInfo, PlayerId, RegionCoords, SiteMarker,
-    SuccessionId, SuccessionKind, SuperRegion, Tick,
+    CivMarker, CutId, GameEventKind, PersonInfo, PlayerId, RegionCoords, SiteMarker, SuccessionId, SuccessionKind, SuperRegion, Tick,
 };
 
 /// One host's world request, unique across the host's restarts: `boot` is random per
@@ -25,29 +24,22 @@ pub struct RequestId {
 /// A player's request of the world services, sent by its host.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum WorldRequest {
-    EmbarkOptions,
-    Embark(EmbarkRequest),
-    ReturnTo(SiteId),
     StartAdventure(SiteId),
     Legends(LegendsQuery),
     PersonInfo(PersonId),
 }
 
 impl WorldRequest {
-    /// Whether the request may change world state (found a site, take a claim): its
+    /// Whether the request may change world state (take a claim): its
     /// answer is memoised and replayed for a repeated [`RequestId`], never re-executed.
     pub fn changes_state(&self) -> bool {
-        matches!(self, Self::Embark(_) | Self::ReturnTo(_) | Self::StartAdventure(_))
+        matches!(self, Self::StartAdventure(_))
     }
 }
 
 /// The coordinator's answer to a [`WorldRequest`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum WorldReply {
-    EmbarkOptions(EmbarkOptions),
-    Embarked { site: SiteId, region: RegionCoords },
-    EmbarkRefused(EmbarkRefusal),
-    Returned { site: SiteId, region: RegionCoords },
     AdventureStarted { site: SiteId, region: RegionCoords },
     AdventureRefused(AdventureRefusal),
     Legends(LegendsPage),
@@ -58,22 +50,20 @@ impl WorldReply {
     /// A reply that hands out a claim (like every output, sent only once the state deciding it
     /// is written: `Coordinator::take_transition`).
     pub fn grants_claim(&self) -> bool {
-        matches!(self, Self::Embarked { .. } | Self::Returned { .. } | Self::AdventureStarted { .. })
+        matches!(self, Self::AdventureStarted { .. })
     }
 }
 
-/// What a player plays: a fortress (exclusive per site while its player is online) or an
-/// adventure at a site.
+/// What a player plays: an adventure at a site.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Claim {
-    Fortress(SiteId),
     Adventure(SiteId),
 }
 
 impl Claim {
     pub fn site(self) -> SiteId {
         match self {
-            Self::Fortress(s) | Self::Adventure(s) => s,
+            Self::Adventure(s) => s,
         }
     }
 }
@@ -182,13 +172,13 @@ pub enum HostMsg {
     PlayerOnline(OnlinePlayer),
     /// The player's placement here (`hop`) ended: it disconnected or parked.
     PlayerOffline { player: PlayerId, hop: u64 },
-    /// The player gave up its claim (retired, ended the adventure, or left before the
-    /// claim's reply reached it). The site stays.
+    /// The player gave up its claim (ended the adventure, or left before the claim's
+    /// reply reached it). The site stays.
     ReleaseClaim { player: PlayerId },
     /// The player left this host for host `to` (a walking hand-off or a move), its claim
     /// going along: it stays online — in transit — until host `to` reports it
     /// (`PlayerOnline`, or `PlayerOffline` if it parks there on arrival). Sent instead of
-    /// `PlayerOffline`, so nobody takes the fortress of a player crossing hosts. `hop`: the
+    /// `PlayerOffline`, so a player crossing hosts never reads as offline. `hop`: the
     /// one it had here (host `to` places it at `hop + 1`).
     PlayerHandedTo { player: PlayerId, to: HostId, hop: u64 },
     /// Every request of this host's `boot` with `seq < below` has been answered and
@@ -277,9 +267,9 @@ pub enum CoordMsg {
     /// The sites changed (founded, abandoned, a population crossing a multiple of 10).
     Sites(Vec<SiteMarker>),
     /// The sites as they stand right after a request granted a claim, for the host's view
-    /// of them (the region of a founded site). Not fanned out at once: connected clients
-    /// get [`CoordMsg::Sites`] at the day's turn, but the host's view reaches a player who
-    /// retires or ends an adventure and every new connection straight away.
+    /// of them. Not fanned out at once: connected clients get [`CoordMsg::Sites`] at the
+    /// day's turn, but the host's view reaches a player who ends an adventure and every
+    /// new connection straight away.
     SiteMarkers(Vec<SiteMarker>),
     /// The claim the host reported for `player` (`PlayerOnline`, or an `Attach`'s online
     /// entry) differs from the coordinator's, which is final: the host sets the player's

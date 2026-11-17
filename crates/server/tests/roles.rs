@@ -888,7 +888,6 @@ fn standing_in(region: RegionCoords) -> game::PlayerRecord {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(half, 40.0, half)),
         region,
-        fortress: None,
         adventure: None,
     }
 }

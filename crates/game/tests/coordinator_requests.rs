@@ -1,4 +1,4 @@
-//! R2b Task 6: a player's world requests (embark, return, adventure, legends, …) are
+//! R2b Task 6: a player's world requests (adventure, legends, …) are
 //! coordinator requests with ids, queued in the host's outbox while the world link is
 //! down and replayed after its `Attach`, answered once, or `WorldUnavailable` after the
 //! timeout. Driven through a `WorldManager` over `InlineSpawner` regions and an inline
@@ -15,7 +15,7 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::history::bootstrap::{bootstrap, BootstrapParams};
 use game::history::*;
 use game::{
-    Biome, ClientId, ClientPacket, Coordinator, EmbarkRequest, HostMsg, InlineLodBuilder, InlineSchedule, InlineSpawner,
+    Biome, ClientId, ClientPacket, Coordinator, HostMsg, InlineLodBuilder, InlineSchedule, InlineSpawner,
     InlineWorldLink, LodBuilder, PlayerId, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldLink,
     WorldManager, WorldMap, WorldRequest, TICK_RATE, UNLOAD_GRACE_MS, WORLD_REQUEST_TIMEOUT_SECS,
 };
@@ -29,8 +29,6 @@ const DRAIN_ROUNDS: usize = 10;
 
 const A: ClientId = 0;
 const B: ClientId = 1;
-/// Player `A` again after a reconnect: client ids are per connection.
-const A2: ClientId = 2;
 
 fn rc(x: i32, z: i32) -> RegionCoords {
     RegionCoords::new(x, z)
@@ -259,41 +257,11 @@ impl World {
         self.link().coordinator()
     }
 
-    /// Every `EmbarkResult` sent to `c` since the last call.
-    fn embark_results(&mut self, c: ClientId) -> Vec<Result<SiteId, EmbarkRefusal>> {
-        let mut out = Vec::new();
-        self.inbox.retain(|(to, p)| match p {
-            ServerPacket::EmbarkResult(r) if *to == Some(c) => {
-                out.push(*r);
-                false
-            }
-            _ => true,
-        });
-        out
-    }
-
     /// Every `Legends` page sent to `c` since the last call.
     fn legends(&mut self, c: ClientId) -> usize {
         let before = self.inbox.len();
         self.inbox.retain(|(to, p)| !(matches!(p, ServerPacket::Legends(_)) && *to == Some(c)));
         before - self.inbox.len()
-    }
-
-    /// `c` asks `packet`, then the world drains: its one `EmbarkResult`.
-    fn ask(&mut self, c: ClientId, packet: ClientPacket) -> Result<SiteId, EmbarkRefusal> {
-        self.packet(c, packet);
-        self.drain();
-        let results = self.embark_results(c);
-        assert_eq!(results.len(), 1, "seed {}: one EmbarkResult: {results:?}", self.seed);
-        results[0]
-    }
-
-    /// The bootstrapped site's civ and people, and a region a new site may go in.
-    fn embark_request(&self) -> EmbarkRequest {
-        let h = self.history();
-        let s = h.sites().next().expect("a site");
-        let region = (0..16).map(|x| rc(x, 0)).find(|r| h.embark_allowed(*r).is_ok()).expect("room to embark");
-        EmbarkRequest { civ: s.civ, people: s.members.iter().copied().take(2).collect(), region }
     }
 
     /// The site an adventure may start at (the bootstrapped site).
@@ -336,10 +304,6 @@ impl World {
         self.sent_since(mark).iter().filter(|m| **m == HostMsg::ReleaseClaim { player }).count()
     }
 
-    fn player_sites(&self) -> Vec<SiteId> {
-        self.history().sites().filter(|s| s.player_founded).map(|s| s.id).collect()
-    }
-
     fn players_in(&mut self, r: RegionCoords) -> Vec<ClientId> {
         let mut out = Vec::new();
         if self.manager.running_regions().contains(&r) {
@@ -372,26 +336,6 @@ impl World {
         let census = bodies(&mut self.manager);
         assert_one_place(history_of(&self.manager), &census, &format!("seed {} {when}", self.seed));
     }
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn embark_round_trip_moves_player_once() {
-    each_seed("embark_round_trip_moves_player_once", |seed| {
-        let mut w = World::with(seed, &[A]);
-        let req = w.embark_request();
-        let site = w.ask(A, ClientPacket::Embark(req.clone())).expect("embarked");
-        assert_eq!(w.player_sites(), vec![site], "seed {seed}: one site founded");
-        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), Some(game::Claim::Fortress(site)));
-        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: the player moved in once");
-        for p in &req.people {
-            assert_eq!(bodies(&mut w.manager).get(p), Some(&vec![req.region]), "seed {seed}: {p:?} in the fortress");
-        }
-        w.check_settled("embarked");
-        // A second embark of the same player: refused by the host, nothing sent.
-        let again = w.ask(A, ClientPacket::Embark(req));
-        assert_eq!(again, Err(EmbarkRefusal::AlreadyHasFortress));
-    });
 }
 
 #[test]
@@ -649,23 +593,6 @@ fn request_times_out_with_world_unavailable() {
     assert_eq!(w.start(A), Ok(site));
 }
 
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn return_in_use_across_reconnect() {
-    each_seed("return_in_use_across_reconnect", |seed| {
-        let mut w = World::with(seed, &[A, B]);
-        let site = w.ask(A, ClientPacket::Embark(w.embark_request())).expect("embarked");
-        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Err(EmbarkRefusal::InUse), "seed {seed}: A plays it");
-        w.send(ServerEvent::ClientDisconnected(A));
-        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: A is offline");
-        // A comes back with its record's claim: B plays the fortress now.
-        w.send(ServerEvent::ClientConnected { client: A2, player: PlayerId(A as u64), record: None });
-        w.drain();
-        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: A's claim is gone");
-        assert_eq!(w.ask(A2, ClientPacket::ReturnTo(site)), Err(EmbarkRefusal::InUse), "seed {seed}");
-    });
-}
-
 /// A history directive on the link when it drops (a spawn into a running region) reaches
 /// the host after its `Attach`: the attach re-decided the region from its bodies, so the
 /// host drops it rather than make a second body; restarted, the region spawns the person
@@ -686,7 +613,7 @@ fn directive_on_the_link_at_reconnect_is_dropped() {
         let born = years_before(history.now(), 20);
         let founder = history.add_founder(Sex::Male, born);
         let civ = history.sites().next().unwrap().civ;
-        let new_site = history.found_site(civ, site_region, &[founder], None, true);
+        let new_site = history.found_site(civ, site_region, &[founder], None);
         for _ in 0..roll(seed, 3, 3) {
             w.manager.pump_world(w.now_ms);
         }
@@ -1132,7 +1059,10 @@ fn ignored_stale_claim_is_triggers_a_re_report_and_converges() {
     link.give(game::CoordMsg::ClaimIs { player: a, claim: None, report: r3.report });
     settle(&mut manager, now);
     assert_eq!(manager.client_claim(A), None);
-    assert!(packets.try_iter().any(|(to, p)| to == Some(A) && matches!(p, ServerPacket::Fortress(None))), "A is told it holds nothing");
+    assert!(
+        !packets.try_iter().any(|(to, p)| to == Some(A) && matches!(p, ServerPacket::AdventureResult(Ok(_)))),
+        "A is never told it plays one"
+    );
 }
 
 /// R3 Task 11: the host acknowledges its answered requests (`Settled`), so after three

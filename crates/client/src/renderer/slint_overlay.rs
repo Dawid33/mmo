@@ -2446,7 +2446,6 @@ mod tests {
             name: format!("S{site}"),
             population: 5,
             abandoned,
-            returnable: false,
         };
         let mut view = HistoryView::default();
         view.sites = vec![

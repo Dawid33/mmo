@@ -63,8 +63,8 @@ fn strip_history() -> (History, Vec<PersonId>, Vec<PersonId>) {
         .map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20)))
         .collect();
     let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
-    h.found_site(civ, rc(1, 0), &a, None, false);
-    h.found_site(civ, rc(2, 0), &b, None, false);
+    h.found_site(civ, rc(1, 0), &a, None);
+    h.found_site(civ, rc(2, 0), &b, None);
     (h, a, b)
 }
 
@@ -372,7 +372,7 @@ fn directive_for_stopping_region_bounces_and_lands_once() {
         let history = history_mut_of(&mut w.manager);
         let born = years_before(history.now(), 20);
         let founders: Vec<PersonId> = vec![history.add_founder(Sex::Male, born)];
-        let site = history.found_site(CivId(0), rc(1, 0), &founders, None, true);
+        let site = history.found_site(CivId(0), rc(1, 0), &founders, None);
         w.manager.pump_world(w.now_ms);
         // The stop: what is still on the link reaches a stopping region and bounces.
         w.now_ms += UNLOAD_GRACE_MS;

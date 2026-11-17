@@ -526,7 +526,7 @@ mod tests {
             rc(1, 0),
         );
         set.route(Outgoing::Home(ClientPacket::GameEventAfterTick(input.clone(), 3)));
-        set.route(Outgoing::Home(ClientPacket::RequestEmbarkOptions));
+        set.route(Outgoing::Home(ClientPacket::PlayRegion(rc(1, 0))));
         set.route(Outgoing::Home(ClientPacket::RequestLod(game::lod::LodKey::for_region(2, rc(1, 0)))));
         assert_eq!(home.try_iter().count(), 3, "input, UI and LOD go home, whatever region they are about");
         assert!(opener.packets(h(1)).is_empty());
@@ -629,8 +629,8 @@ mod tests {
         assert_eq!((set.home(), set.home_ordinal()), (one, Some(h(1))));
         assert_eq!(host_of(&set, rc(0, 0)), Some(h(0)), "the old home still serves its region");
         assert!(set.accepts(LOGIN_CONN, rc(0, 0)));
-        set.route(Outgoing::Home(ClientPacket::RequestEmbarkOptions));
-        assert_eq!(opener.packets(h(1)), vec![dbg(&ClientPacket::RequestEmbarkOptions)], "home packets follow the home");
+        set.route(Outgoing::Home(ClientPacket::PlayRegion(rc(0, 0))));
+        assert_eq!(opener.packets(h(1)), vec![dbg(&ClientPacket::PlayRegion(rc(0, 0)))], "home packets follow the home");
         assert!(sent(&home).is_empty());
         // The old home's host is an observer's now: a region of it found through the new
         // home reuses the connection there.

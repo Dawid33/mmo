@@ -185,7 +185,9 @@ fn client_id_above_u32_round_trips() {
 /// The variants R3 appended (`ServerPacket::Host`, `RegionElsewhere`,
 /// `Credential::Observer`) cross the codec, and every older variant keeps its encoded tag
 /// (bincode's little-endian `u32` variant index), so an older peer still reads them: the
-/// tags of `LodData` and `Jwt` as they were before the append.
+/// tags of `LodData` and `Jwt` as they were before the append. (The embark removal took
+/// three variants out before `Host` — link protocol 8 — so its tag and those after it moved
+/// down by three.)
 #[test]
 fn new_variants_round_trip_and_old_indices_are_unchanged() {
     use game::{Credential, HostEndpoint, ObserverTicket};
@@ -201,7 +203,7 @@ fn new_variants_round_trip_and_old_indices_are_unchanged() {
         cert_hash: Some("ab12".into()),
     };
     let host = ServerPacket::Host(endpoint.clone());
-    assert_eq!(tag(&bincode::serialize(&host).unwrap()), 19, "Host is appended last");
+    assert_eq!(tag(&bincode::serialize(&host).unwrap()), 16, "Host is appended last");
     match decode_packet::<ServerPacket>(&encode_packet(&host).unwrap()).unwrap() {
         ServerPacket::Host(e) => assert_eq!(e, endpoint),
         other => panic!("wrong variant {other:?}"),
@@ -209,7 +211,7 @@ fn new_variants_round_trip_and_old_indices_are_unchanged() {
     let ticket = ObserverTicket { client: 9, nonce: 0xDEAD_BEEF_0123_4567 };
     let elsewhere =
         ServerPacket::RegionElsewhere { region: RegionCoords::new(-4, 2), endpoint: endpoint.clone(), ticket: ticket.clone() };
-    assert_eq!(tag(&bincode::serialize(&elsewhere).unwrap()), 20, "RegionElsewhere after it");
+    assert_eq!(tag(&bincode::serialize(&elsewhere).unwrap()), 17, "RegionElsewhere after it");
     match decode_packet::<ServerPacket>(&encode_packet(&elsewhere).unwrap()).unwrap() {
         ServerPacket::RegionElsewhere { region, endpoint: e, ticket: t } => {
             assert_eq!((region, e, t), (RegionCoords::new(-4, 2), endpoint, ticket.clone()));
@@ -217,7 +219,7 @@ fn new_variants_round_trip_and_old_indices_are_unchanged() {
         other => panic!("wrong variant {other:?}"),
     }
     let hop = ServerPacket::HomeHop(7);
-    assert_eq!(tag(&bincode::serialize(&hop).unwrap()), 21, "HomeHop after it");
+    assert_eq!(tag(&bincode::serialize(&hop).unwrap()), 18, "HomeHop after it");
     assert!(matches!(decode_packet::<ServerPacket>(&encode_packet(&hop).unwrap()).unwrap(), ServerPacket::HomeHop(7)));
     let observer = Credential::Observer { client: 9, nonce: 42 };
     assert_eq!(tag(&bincode::serialize(&observer).unwrap()), 2, "Observer is appended last");

@@ -6,7 +6,7 @@
 use crate::common::{h, populated_site, start_request};
 use game::coordinator::*;
 use game::history::*;
-use game::{EmbarkRequest, HostId, GameEventKind, InlineSchedule, PlayerId, RegionCoords};
+use game::{HostId, GameEventKind, InlineSchedule, PlayerId, RegionCoords};
 
 use crate::history_handover::{land_map, start, years_before};
 
@@ -73,7 +73,7 @@ fn world() -> (History, CivId, Vec<PersonId>) {
     let people: Vec<PersonId> = (0..6)
         .map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20)))
         .collect();
-    h.found_site(civ, rc(0, 0), &people, None, false);
+    h.found_site(civ, rc(0, 0), &people, None);
     (h, civ, people)
 }
 
@@ -84,10 +84,6 @@ fn coordinator() -> (Coordinator, CivId, Vec<PersonId>) {
     let first = c.take_msgs();
     assert!(matches!(first.as_slice(), [CoordMsg::View { .. }]), "a new coordinator opens with its view: {first:?}");
     (c, civ, people)
-}
-
-fn embark(id: u64, player: PlayerId, civ: CivId, people: &[PersonId], region: RegionCoords) -> HostMsg {
-    HostMsg::Request { id: rid(id), player, hop: PLACED, req: WorldRequest::Embark(EmbarkRequest { civ, people: people.to_vec(), region }) }
 }
 
 fn request(id: u64, player: PlayerId, req: WorldRequest) -> HostMsg {
@@ -110,7 +106,7 @@ fn coordinator_two_sites() -> (Coordinator, SiteId, SiteId) {
     let (mut h, civ, _) = world();
     let s = start();
     let people: Vec<PersonId> = (0..2).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
-    let s2 = h.found_site(civ, rc(14, 0), &people, None, false);
+    let s2 = h.found_site(civ, rc(14, 0), &people, None);
     let s1 = populated_site(&h);
     assert_ne!(s1, s2);
     let mut c = Coordinator::new(h, 0);
@@ -125,7 +121,7 @@ fn npc_founding(c: &mut Coordinator, civ: CivId, region: RegionCoords, n: usize)
     let from = site_of(c);
     let h = c.history_mut();
     let founders: Vec<PersonId> = (0..n).map(|_| h.add_founder(Sex::Male, years_before(start(), 20))).collect();
-    h.found_site(civ, region, &founders, Some(from), false);
+    h.found_site(civ, region, &founders, Some(from));
     founders
 }
 
@@ -165,35 +161,6 @@ fn events_about(msgs: &[CoordMsg], person: PersonId) -> Vec<GameEventKind> {
         }
     }
     out
-}
-
-#[test]
-fn embark_validates_and_claims_once() {
-    let (mut c, civ, people) = coordinator();
-    let sites = c.history().sites().count();
-    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
-    c.handle(h(0), embark(2, B, civ, &people[2..4], rc(8, 0)), 0);
-    let out = commit(&mut c);
-    let WorldReply::Embarked { site, region } = reply_to(&out, 1) else { panic!("A's embark founds: {out:?}") };
-    assert_eq!(region, rc(8, 0));
-    assert!(
-        matches!(
-            reply_to(&out, 2),
-            WorldReply::EmbarkRefused(EmbarkRefusal::Occupied | EmbarkRefusal::TooClose { .. })
-        ),
-        "B's embark onto the same tile is refused: {out:?}"
-    );
-    assert_eq!(replies(&out)[0].0, rid(1), "replies leave in request order");
-    assert_eq!(c.history().sites().count(), sites + 1, "one site founded");
-    assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
-    assert_eq!(c.claim_of(B), None);
-    // One claim per player.
-    c.handle(h(0), embark(3, A, civ, &people[4..6], rc(14, 0)), 0);
-    let out = commit(&mut c);
-    assert_eq!(reply_to(&out, 3), WorldReply::EmbarkRefused(EmbarkRefusal::AlreadyHasFortress));
-    c.handle(h(0), request(4, A, WorldRequest::StartAdventure(SiteId(0))), 0);
-    let out = commit(&mut c);
-    assert_eq!(reply_to(&out, 4), WorldReply::AdventureRefused(AdventureRefusal::AlreadyPlaying));
 }
 
 /// Elastic 2a: nothing a durable change decided leaves before its transition — not even what
@@ -268,40 +235,6 @@ fn request_replay_answers_from_memo() {
     c2.handle(h(0), adventure(1, A, site), 5_000);
     assert_eq!(reply_to(&commit(&mut c2), 1), first, "the restarted coordinator answers from its memo");
     assert_eq!(c2.claim_of(A), Some(Claim::Adventure(site)), "and grants nothing more");
-}
-
-#[test]
-fn return_in_use_only_while_online() {
-    let (mut c, civ, people) = coordinator();
-    c.handle(h(0), embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
-    let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(h(0), request(2, B, WorldRequest::ReturnTo(site)), 0);
-    assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
-    c.handle(h(0), request(3, B, WorldRequest::ReturnTo(SiteId(0))), 0);
-    assert_eq!(
-        reply_to(&commit(&mut c), 3),
-        WorldReply::EmbarkRefused(EmbarkRefusal::NotPlayerFounded),
-        "only player-founded sites"
-    );
-    c.handle(h(0), HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
-    c.handle(h(0), request(4, B, WorldRequest::ReturnTo(site)), 0);
-    assert_eq!(reply_to(&commit(&mut c), 4), WorldReply::Returned { site, region });
-    assert_eq!(c.claim_of(B), Some(Claim::Fortress(site)));
-    assert_eq!(c.claim_of(A), None, "the offline claimant lost it");
-    // A comes back holding the old claim in its record: it is B's now. (Its placement is
-    // numbered 2, and its requests from here carry that.)
-    c.handle(h(0), online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
-    assert_eq!(c.claim_of(A), None);
-    assert!(
-        c.take_msgs().iter().any(|m| matches!(m, CoordMsg::ClaimIs { player: A, claim: None, .. })),
-        "A's host is told to drop the fortress B plays"
-    );
-    c.handle(h(0), HostMsg::Request { id: rid(5), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
-    assert_eq!(reply_to(&commit(&mut c), 5), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
-    // B retires: the site is free again.
-    c.handle(h(0), HostMsg::ReleaseClaim { player: B }, 0);
-    c.handle(h(0), HostMsg::Request { id: rid(6), player: A, hop: 2, req: WorldRequest::ReturnTo(site) }, 0);
-    assert_eq!(reply_to(&commit(&mut c), 6), WorldReply::Returned { site, region });
 }
 
 #[test]
@@ -417,6 +350,7 @@ fn state_round_trips() {
     };
     assert_eq!(started, site);
     assert_eq!(t.core[0], COORDINATOR_STATE_VERSION);
+    assert_eq!(COORDINATOR_STATE_VERSION, 4, "core v4: the fortress claims are gone");
     let mut c2 = reload(&t, &history, ProcessBoot(1), 0);
     assert_eq!(c2.claims(), vec![(A, Claim::Adventure(site)), (B, Claim::Adventure(site))]);
     assert_eq!(c2.memo_ids().len(), 2);
@@ -424,7 +358,7 @@ fn state_round_trips() {
     let refuse = |bytes: &[u8]| Coordinator::load(bytes, &history, grid(), ProcessBoot(1), 0).err();
     assert!(matches!(refuse(&[COORDINATOR_STATE_VERSION + 1]), Some(game::history::persist::HistoryLoadError::Corrupt(_))), "an unknown format is refused");
     assert!(matches!(refuse(&[]), Some(game::history::persist::HistoryLoadError::Corrupt(_))));
-    for old in [1, 2] {
+    for old in [1, 2, 3] {
         assert!(
             matches!(refuse(&[old, 0, 0]), Some(game::history::persist::HistoryLoadError::OldVersion { found }) if found == u32::from(old)),
             "format {old} is refused as old: re-forge"
@@ -3205,8 +3139,8 @@ fn a_rollback_ordered_here_starts_the_hops_over() {
 }
 
 /// Final review C minor 4 (ii): a hand-over to a host that was succeeded (its `PlayerHandedTo`
-/// handled after the declaration) leaves the player offline — "online on" a dead host would
-/// keep its fortress in use for nobody.
+/// handled after the declaration) leaves the player offline — never "online on" a dead
+/// host.
 #[test]
 fn a_player_handed_to_a_succeeded_host_is_offline() {
     let mut c = succeeding(3);

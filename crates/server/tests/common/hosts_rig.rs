@@ -385,7 +385,6 @@ impl Sim {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0)),
             region: rc,
-            fortress: None,
             adventure: None,
         };
         let ev = ServerEvent::ClientConnected { client, player, record: Some(record) };

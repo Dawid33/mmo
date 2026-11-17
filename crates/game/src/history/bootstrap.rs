@@ -125,7 +125,7 @@ fn seed_civ(h: &mut History, civ: CivId, region: crate::RegionCoords, n: u32, st
         }
         all.push(c);
     }
-    h.found_site(civ, region, &all, None, false);
+    h.found_site(civ, region, &all, None);
 }
 
 /// Seed civs on `map`, then run `p.years` of history. Play starts at the result's `now()`.

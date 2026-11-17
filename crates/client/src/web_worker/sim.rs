@@ -60,7 +60,6 @@ pub const DRIVE_INTERVAL_MS: i32 = 4;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScaleWire {
     pub near_radius: i32,
-    pub fortress_radius: i32,
     pub lod_table: Vec<(i32, u32)>,
 }
 
@@ -68,7 +67,6 @@ impl From<WorldScale> for ScaleWire {
     fn from(scale: WorldScale) -> Self {
         Self {
             near_radius: scale.near_radius,
-            fortress_radius: scale.fortress_radius,
             lod_table: scale.lod_table.to_vec(),
         }
     }
@@ -80,7 +78,6 @@ impl ScaleWire {
     fn into_scale(self) -> WorldScale {
         WorldScale {
             near_radius: self.near_radius,
-            fortress_radius: self.fortress_radius,
             lod_table: Box::leak(self.lod_table.into_boxed_slice()),
         }
     }

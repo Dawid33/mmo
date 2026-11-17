@@ -142,8 +142,6 @@ pub struct PlayerRecord {
     pub pose: Pose,
     /// The region the body stood in.
     pub region: RegionCoords,
-    /// The fortress the player held.
-    pub fortress: Option<SiteId>,
     /// The site the player's adventure started at.
     pub adventure: Option<SiteId>,
 }
@@ -185,7 +183,7 @@ impl Rollback {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let pose = *self.data.physics.bodies.get(handle)?.position();
         let c = self.data.clients.get(&client)?;
-        Some(PlayerRecord { client: parked_client(c), pose, region, fortress: None, adventure: None })
+        Some(PlayerRecord { client: parked_client(c), pose, region, adventure: None })
     }
 
     /// Puts a returning player back, undo-safely: its `Client` (session state

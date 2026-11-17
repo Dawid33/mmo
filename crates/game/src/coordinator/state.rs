@@ -27,8 +27,9 @@ use crate::history::persist::HistoryLoadError;
 /// The format byte leading an encoded core ([`encode_core`]). Worlds are re-forged, never
 /// migrated (Dawid, 2026-11-15): a core of an older format is refused `OldVersion` (the
 /// server refuses the start beside saved regions and says to re-forge); a newer or unknown one
-/// is `Corrupt`. Formats 1 and 2 were the whole state in one blob (history, claims, memo).
-pub const COORDINATOR_STATE_VERSION: u8 = 3;
+/// is `Corrupt`. Formats 1 and 2 were the whole state in one blob (history, claims, memo); 3
+/// still held the fortress claims (site → player).
+pub const COORDINATOR_STATE_VERSION: u8 = 4;
 
 /// The coordinator process's boot: a random `u64` drawn at process start (the runtime; tests
 /// pick one). An attachment stamped with another process boot counts as detached, and a store

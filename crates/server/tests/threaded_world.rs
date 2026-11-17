@@ -705,7 +705,6 @@ fn player_is_restored_by_a_restarted_server() {
         client: seeded,
         pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(512.0, 2000.0, 512.0)),
         region: SPAWN_REGION,
-        fortress: None,
         adventure: None,
     };
     let (mut rig, claims) = stored_rig(&store);

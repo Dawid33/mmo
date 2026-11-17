@@ -328,7 +328,6 @@ impl World {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0)),
             region: a,
-            fortress: None,
             adventure: None,
         };
         let now = self.now();
@@ -617,11 +616,12 @@ fn wrong_nonce_is_refused_at_the_edge() {
     assert_eq!(w.b.manager.session_kind(CLIENT), None);
 }
 
-/// An observer may only subscribe and send input for its own body: `PlayRegion`, `Embark`,
-/// embark options, `Leave` and a `Quit` produce nothing on B and touch nothing on A.
+/// An observer may only subscribe and send input for its own body: `PlayRegion`, an
+/// adventure start, a legends query, `Leave` and a `Quit` produce nothing on B and touch
+/// nothing on A.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn observer_cannot_play_or_embark() {
+fn observer_cannot_play() {
     let mut w = World::new();
     w.connect_home_on_a();
     let ticket = w.ticket_from_a();
@@ -633,8 +633,12 @@ fn observer_cannot_play_or_embark() {
     let quit = game::GameEvent { kind: game::GameEventKind::Quit, id: 0, region_id: b };
     for packet in [
         ClientPacket::PlayRegion(b),
-        ClientPacket::Embark(game::EmbarkRequest { civ: game::history::CivId(0), people: Vec::new(), region: b }),
-        ClientPacket::RequestEmbarkOptions,
+        ClientPacket::StartAdventure(game::history::SiteId(0)),
+        ClientPacket::RequestLegends(game::history::LegendsQuery {
+            filter: game::history::LegendsFilter::All,
+            before: None,
+            limit: 5,
+        }),
         ClientPacket::RequestPlayerRegion,
         ClientPacket::GameEventAfterTick(quit, 0),
         ClientPacket::Leave,
@@ -752,8 +756,8 @@ fn idle_observer_is_closed() {
 }
 
 /// The body arrives on B by hand-off (the player plays B's region from A): B's observer
-/// session becomes the home and is told `PlayerRegion`, then `Fortress`, `Calendar`,
-/// `Sites` — never the world map or the civs again.
+/// session becomes the home and is told `PlayerRegion`, then `Calendar`, `Sites` — never
+/// the world map or the civs again.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn observer_becomes_home_when_the_body_arrives() {
@@ -771,13 +775,13 @@ fn observer_becomes_home_when_the_body_arrives() {
     w.until_received(&mut client, "the home state", |p| matches!(p, ServerPacket::Sites(_)));
     let sent: Vec<String> = w.b.to(CLIENT).into_iter().map(name).collect();
     let at = sent.iter().position(|n| n == "PlayerRegion").expect("PlayerRegion sent");
-    assert_eq!(sent[at..at + 4], ["PlayerRegion", "Fortress", "Calendar", "Sites"], "{sent:?}");
+    assert_eq!(sent[at..at + 3], ["PlayerRegion", "Calendar", "Sites"], "{sent:?}");
     assert!(!sent.iter().any(|n| n == "WorldMap" || n == "Civs"), "no world map or civs: {sent:?}");
     assert_eq!(w.a.manager.session_kind(CLIENT), Some(game::SessionKind::Observer), "A's session is the observer now");
     assert_eq!(w.a.manager.home_of(CLIENT), None, "no body left on A");
     let received = names(&client.seen);
     let at = received.iter().position(|n| n == "PlayerRegion").expect("PlayerRegion received");
-    assert_eq!(received[at..at + 4], ["PlayerRegion", "Fortress", "Calendar", "Sites"], "{received:?}");
+    assert_eq!(received[at..at + 3], ["PlayerRegion", "Calendar", "Sites"], "{received:?}");
 }
 
 /// The body arrives (B's observer session is promoted to Home); then the same ticket is

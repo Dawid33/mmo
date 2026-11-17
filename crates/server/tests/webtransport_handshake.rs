@@ -128,10 +128,6 @@ async fn webtransport_client_full_handshake() {
                     | ClientPacket::ReleaseLod(_)
                     | ClientPacket::PlayRegion(_)
                     | ClientPacket::Leave
-                    | ClientPacket::RequestEmbarkOptions
-                    | ClientPacket::Embark(_)
-                    | ClientPacket::Retire
-                    | ClientPacket::ReturnTo(_)
                     | ClientPacket::RequestPersonInfo(_)
                     | ClientPacket::RequestLegends(_)
                     | ClientPacket::StartAdventure(_)

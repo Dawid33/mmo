@@ -293,20 +293,13 @@ pub enum ClientUpdateEvent {
     Calendar(history::CalendarTick),
     /// World history: a one-line notice for the player.
     Notice(String),
-    /// World history: who may embark.
-    EmbarkOptions(EmbarkOptions),
-    /// World history: the answer to an embark / return request.
-    EmbarkResult(Result<history::SiteId, history::EmbarkRefusal>),
     /// World history: one person, for the inspector.
     PersonInfo(PersonInfo),
-    /// World history: the fortress this client plays (`None` = none), from the server's
-    /// `ServerPacket::Fortress` (sent on connect, embark, retire and return).
-    Fortress(Option<HeldFortress>),
     /// Every live predicted region's recent tick times (the F3 Debug tab),
     /// every `perf::TICK_TIME_REPORT_INTERVAL`; native only (no clock on
     /// wasm32). A region missing from the list is no longer live.
     RegionTickTimes(Vec<(RegionId, perf::TickTimeStats)>),
-    /// World history: every civ's name (on connect), for the embark tabs.
+    /// World history: every civ's name (on connect), for the legends.
     Civs(Vec<CivMarker>),
     /// World history: one page of the legends log (answer to `RequestLegends`).
     Legends(history::LegendsPage),

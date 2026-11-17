@@ -927,7 +927,6 @@ fn foreign_record_does_not_fence_a_healthy_host() {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::math::Vec3::new(1.5, 20.0, -3.0)),
         region: foreign,
-        fortress: None,
         adventure: None,
     };
     let cut = game::WorldCut {

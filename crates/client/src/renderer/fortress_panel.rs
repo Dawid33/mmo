@@ -93,7 +93,6 @@ mod tests {
             name: "Ustuth".into(),
             population: 7,
             abandoned: false,
-            returnable: true,
         };
         assert_eq!(governance_lines(None, Some(&site)), ["Residents 7"]);
     }

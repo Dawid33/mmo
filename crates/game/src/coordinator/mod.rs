@@ -1,7 +1,6 @@
 //! The world coordinator: the services that do not partition by region — the history and
-//! its calendar, site claims (fortress / adventure exclusivity per player), embark / return /
-//! adventure validation, embark options, legends, person info, the daily calendar / site
-//! broadcasts and notices. A host talks to it only through [`HostMsg`] / [`CoordMsg`] over a
+//! its calendar, claims (one adventure per player), adventure validation, legends, person
+//! info, the daily calendar / site broadcasts and notices. A host talks to it only through [`HostMsg`] / [`CoordMsg`] over a
 //! [`WorldLink`]. Threadless and IO-free: time arrives as `now_ms` — the store's clock in
 //! milliseconds (`clock.rs`: [`StoreClock`], [`CALENDAR_GAP_MS`]) — and writing is the caller's
 //! ([`Coordinator::take_transition`]).
@@ -47,9 +46,9 @@ use state::{decode_core, raw_core, seal_core};
 use crate::HostId;
 use crate::history::persist::HistoryLoadError;
 use crate::history::{
-    AdventureRefusal, CalendarTick, Directive, EmbarkRefusal, History, SiteId, SocietyGrid, TICKS_PER_DAY,
+    AdventureRefusal, CalendarTick, Directive, History, SiteId, SocietyGrid, TICKS_PER_DAY,
 };
-use crate::{EmbarkRequest, PlayerId, RegionCoords};
+use crate::{PlayerId, RegionCoords};
 
 /// Answers of state-changing requests remembered for replay past which the coordinator
 /// logs an error (at most once per [`MEMO_WARN_SECS`]): answers are forgotten only when
@@ -104,8 +103,8 @@ impl RenumberBudget {
 }
 /// The sites as last broadcast, bucketed: a broadcast goes out when a site is founded or
 /// abandoned, or a population crosses a multiple of 10.
-fn sites_key(history: &History) -> Vec<(SiteId, bool, u32, bool)> {
-    history.site_markers().into_iter().map(|m| (m.site, m.abandoned, m.population / 10, m.returnable)).collect()
+fn sites_key(history: &History) -> Vec<(SiteId, bool, u32)> {
+    history.site_markers().into_iter().map(|m| (m.site, m.abandoned, m.population / 10)).collect()
 }
 
 /// The world coordinator's core.
@@ -116,10 +115,7 @@ fn sites_key(history: &History) -> Vec<(SiteId, bool, u32, bool)> {
 /// compile until it is classified.
 pub struct Coordinator {
     history: History,
-    /// Fortress claims: site → (its player, whether that player is online). A return to a
-    /// site claimed by an online player is refused `InUse`; an offline claimant loses it.
-    claims: BTreeMap<SiteId, (PlayerId, bool)>,
-    /// What each player plays (one fortress or one adventure at a time).
+    /// What each player plays (one adventure at a time).
     player_claims: BTreeMap<PlayerId, Claim>,
     /// Each region's latest incarnation seen start (`RegionStarted`, `Attach`): the stamp
     /// on its directives, and the bar a bounce must meet to be deferred.
@@ -177,7 +173,7 @@ pub struct Coordinator {
     /// The calendar day last broadcast.
     calendar_day: u64,
     /// The sites as last broadcast ([`sites_key`]).
-    sites_key: Vec<(SiteId, bool, u32, bool)>,
+    sites_key: Vec<(SiteId, bool, u32)>,
     /// The world cuts of the `claim` hosts, any number (`world_cut.rs`).
     cuts: WorldCuts,
     /// Which hosts lost their lease (`succession.rs`), fed by the runtime's `hosts` reads.
@@ -239,7 +235,6 @@ macro_rules! projection {
 
 projection! {
     durable {
-        claims: BTreeMap<SiteId, (PlayerId, bool)>,
         player_claims: BTreeMap<PlayerId, Claim>,
         incarnations: BTreeMap<RegionCoords, u64>,
         memo: BTreeMap<RequestId, WorldReply>,
@@ -255,7 +250,7 @@ projection! {
         calendar_anchor: (u64, CalendarTick),
         calendar_seen_ms: u64,
         calendar_day: u64,
-        sites_key: Vec<(SiteId, bool, u32, bool)>,
+        sites_key: Vec<(SiteId, bool, u32)>,
         cuts: WorldCuts,
         successions: SuccessionRuns,
         rolled_back_to: Option<u64>,
@@ -292,7 +287,6 @@ impl Coordinator {
             calendar_day: history.now().0 / TICKS_PER_DAY,
             sites_key: sites_key(&history),
             history,
-            claims: BTreeMap::new(),
             player_claims: BTreeMap::new(),
             incarnations: BTreeMap::new(),
             memo: BTreeMap::new(),
@@ -938,7 +932,6 @@ impl Coordinator {
             self.online_on.remove(&p);
             self.online_reported.remove(&p);
             self.displaced_told.retain(|(q, _, _)| *q != p);
-            self.set_online(p, false);
         }
         self.push_view(Target::Host(host));
     }
@@ -948,9 +941,7 @@ impl Coordinator {
     /// claim stands (that request's answer, or the host's `ReleaseClaim` after it, settles
     /// it); without one the host's claim is the truth: the coordinator's own may be a save
     /// behind (a crash lost a grant) or ahead (a crash lost a release). A claim the host
-    /// reports and the coordinator lacks is taken unless another *online* player holds its
-    /// fortress (an offline claimant loses it, as to a return) — one fortress never has two
-    /// players. Whenever the claim the coordinator ends with differs from the report, the
+    /// reports and the coordinator lacks is taken. Whenever the claim the coordinator ends with differs from the report, the
     /// host is told it ([`CoordMsg::ClaimIs`]): the coordinator's answer is final.
     ///
     /// A report whose hop is lower than the player's latest is stale and ignored; the
@@ -987,7 +978,6 @@ impl Coordinator {
             (None, Some(theirs)) => self.adopt_claim(player, theirs),
             (None, None) => {}
         }
-        self.set_online(player, true);
         let now = self.player_claims.get(&player).copied();
         if now != claim {
             log::info!("coordinator: host {host} reported {player:?} with {claim:?}; the claim is {now:?}");
@@ -1015,7 +1005,6 @@ impl Coordinator {
         self.hop_of.insert(player, hop);
         self.online_on.remove(&player);
         self.online_reported.remove(&player);
-        self.set_online(player, false);
     }
 
     /// A message of `by` at `hop` (above the known one) moves `player` away from the host
@@ -1054,58 +1043,24 @@ impl Coordinator {
         if self.host_is_succeeded(to) {
             // Handed to a host declared dead (this message was on its way when the
             // declaration came): nobody will report the player there — offline, not "online
-            // on" a dead ordinal (its fortress would stay in use for nobody). If the hand-off
+            // on" a dead ordinal. If the hand-off
             // reached the dead host's journal the heir parks it and reports it offline too.
             log::info!("coordinator: {player:?} handed by host {host} to host {to}, which was succeeded: offline");
             self.online_on.remove(&player);
-            self.set_online(player, false);
             return;
         }
         self.online_on.insert(player, to);
-        self.set_online(player, true);
     }
 
     /// Take the claim the host reports for `player` (who holds none here).
     fn adopt_claim(&mut self, player: PlayerId, claim: Claim) {
-        match claim {
-            Claim::Fortress(site) => match self.claims.get(&site).copied() {
-                Some((other, true)) if other != player => {
-                    log::info!("coordinator: {player:?}'s fortress {site:?} is {other:?}'s now; the host drops it");
-                }
-                claimed => {
-                    if let Some((other, _)) = claimed.filter(|(o, _)| *o != player) {
-                        log::info!("coordinator: {player:?} comes back to {site:?}; offline {other:?} loses it");
-                        self.player_claims.remove(&other);
-                    }
-                    self.claims.insert(site, (player, true));
-                    self.player_claims.insert(player, Claim::Fortress(site));
-                }
-            },
-            Claim::Adventure(_) => {
-                self.player_claims.insert(player, claim);
-            }
-        }
-    }
-
-    fn set_online(&mut self, player: PlayerId, online: bool) {
-        if let Some(Claim::Fortress(site)) = self.player_claims.get(&player) {
-            if let Some((p, on)) = self.claims.get_mut(site) {
-                if *p == player {
-                    *on = online;
-                }
-            }
-        }
+        self.player_claims.insert(player, claim);
     }
 
     /// `player` gives up what it plays (durable with the transition of the message that
     /// released it).
     fn release_claim(&mut self, player: PlayerId) {
-        let Some(claim) = self.player_claims.remove(&player) else { return };
-        if let Claim::Fortress(site) = claim {
-            if self.claims.get(&site).is_some_and(|(p, _)| *p == player) {
-                self.claims.remove(&site);
-            }
-        }
+        self.player_claims.remove(&player);
     }
 
     /// Settle a timed-out state-changing request ([`HostMsg::Settle`]): its memoised
@@ -1116,9 +1071,6 @@ impl Coordinator {
             Some(reply) => reply.clone(),
             None => {
                 let refusal = match req {
-                    WorldRequest::Embark(_) | WorldRequest::ReturnTo(_) => {
-                        WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)
-                    }
                     WorldRequest::StartAdventure(_) => WorldReply::AdventureRefused(AdventureRefusal::WorldUnavailable),
                     other => {
                         log::warn!("coordinator: settle of {id:?} for a query {other:?}: nothing to settle");
@@ -1155,9 +1107,6 @@ impl Coordinator {
         }
         let memoise = req.changes_state();
         let reply = match req {
-            WorldRequest::EmbarkOptions => WorldReply::EmbarkOptions(self.history.embark_options()),
-            WorldRequest::Embark(r) => self.embark(player, &r),
-            WorldRequest::ReturnTo(site) => self.return_to(player, site),
             WorldRequest::StartAdventure(site) => self.start_adventure(player, site),
             WorldRequest::Legends(q) => WorldReply::Legends(self.history.legends(&q)),
             WorldRequest::PersonInfo(p) => WorldReply::PersonInfo(self.history.person_info(p)),
@@ -1179,9 +1128,8 @@ impl Coordinator {
         }
         self.push(Target::Host(host), CoordMsg::Reply { id, reply });
         if granted {
-            // Every host's view of the sites follows at once (a founded site, its claim:
-            // the player may play it on another host); clients still get them at the
-            // day's turn.
+            // Every host's view of the sites follows at once (the player may play on
+            // another host); clients still get them at the day's turn.
             self.push(Target::Every, CoordMsg::SiteMarkers(self.history.site_markers()));
         }
     }
@@ -1220,45 +1168,6 @@ impl Coordinator {
             self.memo_order.retain(|id| !forget(id));
             log::debug!("coordinator: {} answers of host {host} acknowledged", before - self.memo.len());
         }
-    }
-
-    /// The player's embark (`WorldManager::embark`'s checks): one claim per player; the
-    /// history validates and founds the site at once.
-    fn embark(&mut self, player: PlayerId, req: &EmbarkRequest) -> WorldReply {
-        if self.player_claims.contains_key(&player) {
-            return WorldReply::EmbarkRefused(EmbarkRefusal::AlreadyHasFortress);
-        }
-        match self.history.player_embark(req) {
-            Ok(site) => {
-                self.claims.insert(site, (player, true));
-                self.player_claims.insert(player, Claim::Fortress(site));
-                WorldReply::Embarked { site, region: req.region }
-            }
-            Err(e) => WorldReply::EmbarkRefused(e),
-        }
-    }
-
-    /// Return to a retired fortress (`WorldManager::return_to`'s checks): only to a
-    /// player-founded site no other *online* player plays; an offline claimant loses it.
-    fn return_to(&mut self, player: PlayerId, site: SiteId) -> WorldReply {
-        if self.player_claims.contains_key(&player) {
-            return WorldReply::EmbarkRefused(EmbarkRefusal::AlreadyHasFortress);
-        }
-        if !self.history.returnable(site) {
-            return WorldReply::EmbarkRefused(EmbarkRefusal::NotPlayerFounded);
-        }
-        match self.claims.get(&site).copied() {
-            Some((other, true)) if other != player => return WorldReply::EmbarkRefused(EmbarkRefusal::InUse),
-            Some((other, false)) if other != player => {
-                log::info!("coordinator: {player:?} returns to {site:?}; offline {other:?} loses it");
-                self.player_claims.remove(&other);
-            }
-            _ => {}
-        }
-        let region = self.history.site(site).expect("returnable").region;
-        self.claims.insert(site, (player, true));
-        self.player_claims.insert(player, Claim::Fortress(site));
-        WorldReply::Returned { site, region }
     }
 
     /// Start an adventure at a populated site (`WorldManager::start_adventure`'s checks).

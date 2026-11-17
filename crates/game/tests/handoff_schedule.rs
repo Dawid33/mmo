@@ -384,8 +384,8 @@ fn travel_north(seed: u64) {
     let civ = h.add_civ(Race::Dwarf);
     let traveller = h.add_founder(Sex::Female, years_before(s, 20));
     let host = h.add_founder(Sex::Male, years_before(s, 20));
-    h.found_site(civ, SPAWN_REGION, &[traveller], None, false);
-    h.found_site(civ, north(), &[host], None, false);
+    h.found_site(civ, SPAWN_REGION, &[traveller], None);
+    h.found_site(civ, north(), &[host], None);
 
     let mut rig = Rig::with_floor(Some(InlineSchedule::jittery(seed)), floored_region);
     install_history(&mut rig.manager, h, rig.now_ms);

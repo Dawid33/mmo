@@ -978,7 +978,6 @@ impl super::Coordinator {
             self.online_on.remove(p);
             self.online_reported.remove(p);
             self.displaced_told.retain(|(q, _, _)| q != p);
-            self.set_online(*p, false);
         }
         log::warn!("coordinator: host {host} succeeded: {} region(s) parked, {} player(s) offline", parked.len(), gone.len());
         self.push_directives();

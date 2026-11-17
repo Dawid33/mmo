@@ -1841,7 +1841,6 @@ impl MultiRig {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0)),
             region: home,
-            fortress: None,
             adventure: None,
         };
         let rig = &mut self.hosts[h.0 as usize];

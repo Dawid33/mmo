@@ -285,7 +285,7 @@ impl History {
         }
         if self.embark_allowed(region).is_ok() {
             self.journeys.remove(&j);
-            self.found_site(civ, region, &party, Some(from), false);
+            self.found_site(civ, region, &party, Some(from));
             return;
         }
         if let Some(target) = self.embark_target(civ, region) {
@@ -376,8 +376,8 @@ mod tests {
         let born = CalendarTick(start.0 - 20 * DAYS_PER_YEAR * TICKS_PER_DAY);
         let a = h.add_founder(Sex::Female, born);
         let b = h.add_founder(Sex::Male, born);
-        h.found_site(civ, RegionCoords::new(0, 0), &[a], None, false);
-        let to = h.found_site(civ, RegionCoords::new(6, 0), &[b], None, false);
+        h.found_site(civ, RegionCoords::new(0, 0), &[a], None);
+        let to = h.found_site(civ, RegionCoords::new(6, 0), &[b], None);
         let j = h.start_journey(vec![a], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to }).unwrap();
         (h, j)
     }

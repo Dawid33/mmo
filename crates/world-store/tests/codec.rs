@@ -203,7 +203,6 @@ pub(crate) fn player() -> PlayerRecord {
         client,
         pose: Pose::from_translation(Vector::new(10.0, 30.0, 12.0)),
         region: RegionCoords::new(-1, 4),
-        fortress: Some(game::history::SiteId(4)),
         adventure: Some(game::history::SiteId(9)),
     }
 }

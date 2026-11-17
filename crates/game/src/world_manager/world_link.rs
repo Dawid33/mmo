@@ -1,14 +1,14 @@
 //! The world-link half of [`WorldManager`]: the host's side of the conversation with
-//! the world coordinator (attach, lifecycle messages, claims, embark / return /
-//! adventure requests). Split out of `mod.rs`; the core calls in through the
+//! the world coordinator (attach, lifecycle messages, claims, adventure and other world
+//! requests). Split out of `mod.rs`; the core calls in through the
 //! `pub(super)` methods here.
 
 use crate::HostId;
 use super::*;
 
-/// Seconds a player's world request (embark, return, adventure, legends, person info,
-/// embark options) waits for the coordinator's answer, queued while the link is down
-/// included; past it an embark / return / adventure start is answered `WorldUnavailable`
+/// Seconds a player's world request (adventure, legends, person info) waits for the
+/// coordinator's answer, queued while the link is down included; past it an adventure
+/// start is answered `WorldUnavailable`
 /// and the request forgotten (a query just goes unanswered).
 pub const WORLD_REQUEST_TIMEOUT_SECS: u64 = 120;
 
@@ -293,10 +293,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// What `client` plays, as a claim.
     fn claim_of_client(&self, client: ClientId) -> Option<Claim> {
-        self.fortress_of
-            .get(&client)
-            .map(|&s| Claim::Fortress(s))
-            .or_else(|| self.adventurer_of.get(&client).map(|&s| Claim::Adventure(s)))
+        self.adventurer_of.get(&client).map(|&s| Claim::Adventure(s))
     }
 
     /// The link came up (at start, or after it was down): the host attaches. Every region
@@ -685,7 +682,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             // Routed at the end of the client event or upkeep that made it, to the homes
-            // as they stand then (a player embarking moves home after its region starts).
+            // as they stand then (a player starting an adventure moves home after its region
+            // starts).
             CoordMsg::Notice { region, line } => self.world_notices.push((region, line)),
             CoordMsg::Reply { id, reply } => {
                 self.world_reply(id, reply, now_ms);
@@ -816,8 +814,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// `player` gives up the claim `granted` (a grant it cannot use, or one its player was
     /// told failed): the coordinator is told, and every client of the player here that
-    /// plays exactly that claim — handed to it by a `ClaimIs` meanwhile — drops it and is
-    /// told so.
+    /// plays exactly that claim — handed to it by a `ClaimIs` meanwhile — drops it.
     fn give_back(&mut self, player: PlayerId, granted: Option<Claim>) {
         self.world_send(HostMsg::ReleaseClaim { player });
         let holders: Vec<ClientId> = self
@@ -828,14 +825,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect();
         for c in holders {
             log::info!("client {c}: gives back {granted:?}");
-            self.fortress_of.remove(&c);
             self.adventurer_of.remove(&c);
-            self.send_fortress(c);
         }
     }
 
     /// The coordinator's answer (`ClaimIs`) to report `report` of `player`: final. The
-    /// player's client here plays exactly `claim` from now on, and is told so — unless the
+    /// player's client here plays exactly `claim` from now on — unless the
     /// answer is not to the latest report, or the claim changed here since (a release, a
     /// grant, a crossing): stale. If no newer report is on its way the player is reported
     /// again at once, so the coordinator answers the claim as it stands now.
@@ -866,18 +861,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 continue;
             }
             log::info!("client {c}: plays {:?}; the coordinator says {claim:?}", self.claim_of_client(c));
-            self.fortress_of.remove(&c);
             self.adventurer_of.remove(&c);
-            match claim {
-                Some(Claim::Fortress(site)) => {
-                    self.fortress_of.insert(c, site);
-                }
-                Some(Claim::Adventure(site)) => {
-                    self.adventurer_of.insert(c, site);
-                }
-                None => {}
+            if let Some(Claim::Adventure(site)) = claim {
+                self.adventurer_of.insert(c, site);
             }
-            self.send_fortress(c);
         }
     }
 
@@ -930,80 +917,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    pub(super) fn send_fortress(&self, id: ClientId) {
-        let held = self.fortress_of.get(&id).and_then(|&site| {
-            let region = *self.site_regions.get(&site)?;
-            Some(crate::HeldFortress { site, region })
-        });
-        let _ = self.out.send((Some(id), ServerPacket::Fortress(held)));
-    }
-
-    fn embark_result(&self, id: ClientId, r: Result<SiteId, EmbarkRefusal>) {
-        let _ = self.out.send((Some(id), ServerPacket::EmbarkResult(r)));
-    }
-
-    /// The player's embark: one fortress per player (checked here and by the coordinator,
-    /// which validates and founds the site); the move happens when the coordinator's
-    /// answer comes ([`Self::world_reply`]).
-    pub(super) fn embark(&mut self, id: ClientId, req: EmbarkRequest, now_ms: u64) {
-        if self.world.is_none() {
-            return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
-        }
-        if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
-            return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
-        }
-        if self.is_unavailable(req.region) {
-            return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
-        }
-        self.world_request(id, WorldRequest::Embark(req), now_ms);
-    }
-
-    /// Retire: the player stops playing its fortress (its claim given back; the site
-    /// stays, returnable) and moves back where a fresh connection starts (`SPAWN_REGION`);
-    /// the fortress region parks by the usual grace rule (its people go back to the
-    /// abstract history). No fortress = no-op.
-    pub(super) fn retire(&mut self, id: ClientId, now_ms: u64) {
-        // No move possible (no refusal exists for a retire): the fortress stays.
-        if !self.fortress_of.contains_key(&id) || !self.can_move(id, SPAWN_REGION) {
-            return;
-        }
-        self.fortress_of.remove(&id);
-        let landing = self.landing_in(SPAWN_REGION);
-        self.move_client(id, SPAWN_REGION, landing, now_ms);
-        self.release_claim_of(id);
-        if self.world.is_some() {
-            let _ = self.out.send((Some(id), ServerPacket::Sites(self.world_sites())));
-        }
-        self.send_fortress(id);
-    }
-
-    /// Return to a retired fortress: asked of the coordinator, which allows it only to a
-    /// **player-founded** site no other *online* player plays (an offline claimant loses
-    /// it, and finds it gone when it comes back).
-    pub(super) fn return_to(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
-        if self.world.is_none() {
-            return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
-        }
-        if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
-            return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
-        }
-        if self.site_regions.get(&site).is_some_and(|&rc| self.is_unavailable(rc)) {
-            return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
-        }
-        self.world_request(id, WorldRequest::ReturnTo(site), now_ms);
-    }
-
     fn adventure_result(&self, id: ClientId, r: Result<SiteId, AdventureRefusal>) {
         let _ = self.out.send((Some(id), ServerPacket::AdventureResult(r)));
     }
 
     /// Start an adventure at a populated site (the coordinator validates it): one at a
-    /// time, no adventure while a fortress or another adventure is held.
+    /// time.
     pub(super) fn start_adventure(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
         if self.world.is_none() {
             return self.adventure_result(id, Err(AdventureRefusal::NoHistory));
         }
-        if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
+        if self.adventurer_of.contains_key(&id) {
             return self.adventure_result(id, Err(AdventureRefusal::AlreadyPlaying));
         }
         if self.site_regions.get(&site).is_some_and(|&rc| self.is_unavailable(rc)) {
@@ -1012,8 +936,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_request(id, WorldRequest::StartAdventure(site), now_ms);
     }
 
-    /// End the adventure: the player returns to `SPAWN_REGION` in their body, like
-    /// [`Self::retire`]. No adventure = no-op.
+    /// End the adventure: the player returns in their body to `SPAWN_REGION`, where a
+    /// fresh connection starts (its claim given back; the site stays); the adventure's
+    /// region parks by the usual grace rule. No adventure = no-op.
     pub(super) fn end_adventure(&mut self, id: ClientId, now_ms: u64) {
         // No move possible (no refusal exists for an adventure's end): it goes on.
         if !self.adventurer_of.contains_key(&id) || !self.can_move(id, SPAWN_REGION) {
@@ -1053,11 +978,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The answer a request gets when the world services cannot give one.
     fn answer_unavailable(&self, client: ClientId, req: &WorldRequest) {
         match req {
-            WorldRequest::Embark(_) | WorldRequest::ReturnTo(_) => {
-                self.embark_result(client, Err(EmbarkRefusal::WorldUnavailable))
-            }
             WorldRequest::StartAdventure(_) => self.adventure_result(client, Err(AdventureRefusal::WorldUnavailable)),
-            WorldRequest::EmbarkOptions | WorldRequest::Legends(_) | WorldRequest::PersonInfo(_) => {}
+            WorldRequest::Legends(_) | WorldRequest::PersonInfo(_) => {}
         }
     }
 
@@ -1107,7 +1029,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The coordinator answered request `id`. The first answer wins (a replayed request
     /// may be answered twice); an answer for a client that has gone gives back the claim
-    /// it grants (the site stays, returnable).
+    /// it grants (the site stays).
     fn world_reply(&mut self, id: RequestId, reply: WorldReply, now_ms: u64) {
         let Some(p) = self.pending_requests.remove(&id) else {
             match self.expired_requests.remove(&id) {
@@ -1132,9 +1054,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         match reply {
-            WorldReply::EmbarkOptions(options) => {
-                let _ = self.out.send((Some(client), ServerPacket::EmbarkOptions(options)));
-            }
             WorldReply::Legends(page) => {
                 let _ = self.out.send((Some(client), ServerPacket::Legends(page)));
             }
@@ -1143,33 +1062,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let _ = self.out.send((Some(client), ServerPacket::PersonInfo(info)));
                 }
             }
-            WorldReply::EmbarkRefused(e) => self.embark_result(client, Err(e)),
             WorldReply::AdventureRefused(e) => self.adventure_result(client, Err(e)),
-            WorldReply::Embarked { site, region } | WorldReply::Returned { site, region } => {
-                self.site_regions.insert(site, region);
-                if self.is_unavailable(region) || !self.can_move(client, region) {
-                    self.give_back(p.player, Some(Claim::Fortress(site)));
-                    return self.embark_result(client, Err(EmbarkRefusal::RegionUnavailable));
-                }
-                // The site is founded (or taken up): the player moves in (the region's
-                // catch-up, or the founding itself when it already runs, spawns the party).
-                let landing = self.landing_in(region);
-                self.move_client(client, region, landing, now_ms);
-                self.fortress_of.insert(client, site);
-                self.claim_changed(p.player);
-                self.embark_result(client, Ok(site));
-                self.send_fortress(client);
-                if let WorldRequest::Embark(req) = &p.req {
-                    crate::perf_event!(
-                        "embark",
-                        "client={client} site={} people={} to={},{}",
-                        site.0,
-                        req.people.len(),
-                        region.x,
-                        region.z
-                    );
-                }
-            }
             WorldReply::AdventureStarted { site, region } => {
                 self.site_regions.insert(site, region);
                 if self.is_unavailable(region) || !self.can_move(client, region) {
@@ -1192,14 +1085,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.adventurer_of.insert(client, site);
                 self.claim_changed(p.player);
                 self.adventure_result(client, Ok(site));
-                self.send_fortress(client);
                 crate::perf_event!("adventure_start", "client={client} site={} to={},{}", site.0, region.x, region.z);
             }
         }
     }
 
     /// `id`'s player is online with what it plays (its claims are settled: restored, or
-    /// none): the coordinator counts its fortress as in use. A player handed here whose
+    /// none). A player handed here whose
     /// session has not come yet counts as online (its body is here).
     pub(super) fn world_player_online(&mut self, id: ClientId) {
         if self.world.is_none() || !(self.sessions.contains_key(&id) || self.awaiting_session.contains_key(&id)) {
@@ -1218,14 +1110,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             || self.expired_requests.values().any(|(p, _)| *p == player)
     }
 
-    /// What a session holds, told on connect: its fortress (`Fortress`), and a
-    /// restored claim as the answer an embark / adventure start would have had,
-    /// so the client leaves the arrival map without embarking again.
+    /// What a session holds, told on connect: a restored adventure as the answer its
+    /// start would have had, so the client leaves the arrival map without starting
+    /// again.
     pub(super) fn send_claims(&self, id: ClientId) {
-        self.send_fortress(id);
-        if let Some(&site) = self.fortress_of.get(&id) {
-            self.embark_result(id, Ok(site));
-        }
         if let Some(&site) = self.adventurer_of.get(&id) {
             self.adventure_result(id, Ok(site));
         }
@@ -1235,7 +1123,6 @@ impl<S: RegionSpawner> WorldManager<S> {
 /// The claim a granting reply hands out.
 fn granted_claim(reply: &WorldReply) -> Option<Claim> {
     match *reply {
-        WorldReply::Embarked { site, .. } | WorldReply::Returned { site, .. } => Some(Claim::Fortress(site)),
         WorldReply::AdventureStarted { site, .. } => Some(Claim::Adventure(site)),
         _ => None,
     }

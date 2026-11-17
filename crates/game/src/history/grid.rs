@@ -22,8 +22,6 @@ pub struct SocietyGrid {
     component: Vec<u32>,
     /// Per tile: the world map's landing column (region-local blocks), if any.
     landing: Vec<Option<[u32; 2]>>,
-    /// Per tile: [`crate::too_steep_to_embark`].
-    too_steep: Vec<bool>,
     world_id: u32,
 }
 
@@ -88,7 +86,6 @@ impl SocietyGrid {
         }
         let component = label_components(&passable, map.width);
         let landing = map.tiles.iter().map(|t| t.landing).collect();
-        let too_steep = map.tiles.iter().map(crate::too_steep_to_embark).collect();
         let bytes = bincode::serialize(map).expect("world map serialises");
         SocietyGrid {
             origin: map.origin,
@@ -99,7 +96,6 @@ impl SocietyGrid {
             step_cost,
             component,
             landing,
-            too_steep,
             world_id: crc32fast::hash(&bytes),
         }
     }
@@ -137,12 +133,6 @@ impl SocietyGrid {
     /// off the grid or with no dry land.
     pub fn landing(&self, rc: RegionCoords) -> Option<[u32; 2]> {
         self.index(rc).and_then(|i| self.landing[i])
-    }
-
-    /// Too steep for the player to embark on ([`crate::too_steep_to_embark`]); `false`
-    /// off the grid.
-    pub fn too_steep(&self, rc: RegionCoords) -> bool {
-        self.index(rc).is_some_and(|i| self.too_steep[i])
     }
 
     pub fn step_cost(&self, rc: RegionCoords) -> u32 {

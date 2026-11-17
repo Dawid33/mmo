@@ -11,7 +11,8 @@ pub const FORMAT_REGION_META: u8 = 1;
 pub const FORMAT_CHUNK: u8 = 1;
 pub const FORMAT_COLUMN_GROUND: u8 = 1;
 pub const FORMAT_ENTITY_BUNDLE: u8 = 1;
-pub const FORMAT_PLAYER_RECORD: u8 = 1;
+/// 2: `PlayerRecord::fortress` gone.
+pub const FORMAT_PLAYER_RECORD: u8 = 2;
 pub const FORMAT_INTENT_MSG: u8 = 1;
 /// `regions.ground`: a region's `Vec<(ColumnCoords, ColumnGround)>`.
 pub const FORMAT_REGION_GROUND: u8 = 1;

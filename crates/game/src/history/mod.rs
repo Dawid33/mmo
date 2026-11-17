@@ -16,7 +16,7 @@ pub mod rng;
 pub mod rules;
 
 pub use calendar::*;
-pub use chain::{embark_allowed_in, player_embark_allowed_in, AdventureRefusal, EmbarkRefusal};
+pub use chain::{embark_allowed_in, AdventureRefusal, EmbarkRefusal};
 pub use handover::Directive;
 pub use grid::*;
 pub use legends::{LegendLine, LegendsFilter, LegendsPage, LegendsQuery, LEGENDS_PAGE_DEFAULT, LEGENDS_PAGE_MAX};
@@ -197,7 +197,6 @@ impl History {
         region: crate::RegionCoords,
         founders: &[PersonId],
         from: Option<SiteId>,
-        player_founded: bool,
     ) -> SiteId {
         for f in founders {
             debug_assert!(
@@ -226,7 +225,6 @@ impl History {
                 abandoned: None,
                 capacity,
                 members,
-                player_founded,
             },
         );
         if let Some(c) = self.civs.get_mut(&civ) {
@@ -240,7 +238,7 @@ impl History {
         }
         self.log_event(LogKind::SiteFounded { site: id, civ, founders: founders.to_vec(), from });
         self.schedule(self.now.plus_days(DAYS_PER_MONTH), Step::SiteMonth(id));
-        // Founded into a running region (an embark into a played region): bodies at once.
+        // Founded into a running region: bodies at once.
         self.embody_site(id);
         id
     }

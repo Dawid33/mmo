@@ -1,16 +1,14 @@
-//! Plan 3: the player's side of the world history — embark, retire, return, the sites /
-//! calendar / notice broadcasts and person info — driven through a real `WorldManager`
+//! Plan 3: the player's side of the world history — adventures, the sites / calendar /
+//! notice broadcasts and person info — driven through a real `WorldManager`
 //! over `InlineSpawner` regions with a bootstrapped history.
 
 use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, install_history, land_map, years_before};
 use crossbeam::channel::{unbounded, Receiver};
 use game::history::bootstrap::{bootstrap, BootstrapParams};
-use game::history::log::LogKind;
 use game::history::persist;
-use game::history::rules::EMBARK_PLAYER_PARTY_MAX;
 use game::history::*;
 use game::{
-    Biome, ClientId, ClientPacket, EmbarkRequest, GameEvent, GameEventKind, InlineLodBuilder, InlineSpawner,
+    Biome, ClientId, ClientPacket, GameEvent, GameEventKind, InlineLodBuilder, InlineSpawner,
     LodBuilder, PersonSpawn, PlayMode, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SiteMarker, SpawnAt, WorldManager,
     WorldMap, SPAWN_REGION, TICK_RATE, UNLOAD_GRACE_MS,
 };
@@ -132,16 +130,6 @@ impl World {
         mine.into_iter().map(|(_, p)| p).collect()
     }
 
-    fn embark(&mut self, c: ClientId, req: EmbarkRequest) -> Result<SiteId, EmbarkRefusal> {
-        self.packet(c, ClientPacket::Embark(req));
-        self.result(c)
-    }
-
-    fn return_to(&mut self, c: ClientId, site: SiteId) -> Result<SiteId, EmbarkRefusal> {
-        self.packet(c, ClientPacket::ReturnTo(site));
-        self.result(c)
-    }
-
     fn adventure(&mut self, c: ClientId, site: SiteId) -> Result<SiteId, AdventureRefusal> {
         self.packet(c, ClientPacket::StartAdventure(site));
         let mut results = Vec::new();
@@ -179,20 +167,6 @@ impl World {
             });
         }
         out
-    }
-
-    /// The one `EmbarkResult` sent to `c` since the last call (other packets stay).
-    fn result(&mut self, c: ClientId) -> Result<SiteId, EmbarkRefusal> {
-        let mut results = Vec::new();
-        self.inbox.retain(|(to, p)| match p {
-            ServerPacket::EmbarkResult(r) if *to == Some(c) => {
-                results.push(*r);
-                false
-            }
-            _ => true,
-        });
-        assert_eq!(results.len(), 1, "one EmbarkResult: {results:?}");
-        results[0]
     }
 
     fn tick(&mut self) {
@@ -272,263 +246,24 @@ fn npc_site(w: &mut World, civ: CivId, region: RegionCoords, n: usize) -> (SiteI
     let h = history_mut_of(&mut w.manager);
     let born = years_before(h.now(), 20);
     let founders: Vec<PersonId> = (0..n).map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, born)).collect();
-    (h.found_site(civ, region, &founders, from, false), founders)
+    (h.found_site(civ, region, &founders, from), founders)
 }
 
 /// A connected world with player `A`; the bootstrapped site, its civ and people, and the
-/// free regions.
-fn embark_world() -> (World, SiteId, CivId, Vec<PersonId>, Vec<RegionCoords>) {
+/// regions free for a new site.
+fn bootstrap_world() -> (World, SiteId, CivId, Vec<PersonId>, Vec<RegionCoords>) {
     let mut w = World::new();
     w.connect(A);
     let (site, civ, people) = home_site(w.history());
     let free = free_regions(w.history());
-    assert!(free.len() >= 2, "room for two embarks: {free:?}");
+    assert!(free.len() >= 2, "room for two new sites: {free:?}");
     w.take(A);
     (w, site, civ, people, free)
 }
 
 #[test]
-fn embark_founds_site_with_chosen_people() {
-    let (mut w, home, civ, people, free) = embark_world();
-    // The options list the civ's site and every one of its people.
-    w.packet(A, ClientPacket::RequestEmbarkOptions);
-    let options = w
-        .take(A)
-        .into_iter()
-        .find_map(|p| match p {
-            ServerPacket::EmbarkOptions(o) => Some(o),
-            _ => None,
-        })
-        .expect("options sent");
-    assert_eq!(options.civs.len(), 1);
-    assert_eq!(options.civs[0].civ, civ);
-    assert_eq!(options.civs[0].sites.len(), 1);
-    let listed: Vec<PersonId> = options.civs[0].sites[0].people.iter().map(|p| p.person).collect();
-    assert_eq!(listed, people);
-
-    let chosen = people[..3].to_vec();
-    let target = free[0];
-    let log_before = w.history().log().len();
-    let site = w.embark(A, EmbarkRequest { civ, people: chosen.clone(), region: target }).expect("embark accepted");
-    let h = w.history();
-    let s = h.site(site).unwrap();
-    assert!(s.player_founded);
-    assert_eq!((s.region, s.civ, s.from), (target, civ, Some(home)));
-    assert_eq!(s.members.iter().copied().collect::<Vec<_>>(), chosen);
-    for p in &chosen {
-        assert!(!h.site(home).unwrap().members.contains(p), "{p:?} left the old site");
-        assert_eq!(h.person(*p).unwrap().site, Some(site));
-    }
-    let log = &h.log()[log_before..];
-    assert!(log.iter().any(|e| matches!(&e.kind, LogKind::Departed { from, people, purpose: Purpose::Embark { .. } }
-        if *from == home && *people == chosen)));
-    assert!(log.iter().any(|e| matches!(&e.kind, LogKind::SiteFounded { site: s, .. } if *s == site)));
-    // The fortress runs, the player and the party are in it.
-    assert!(w.running(target));
-    let census = bodies(&mut w.manager);
-    for p in &chosen {
-        assert_eq!(census.get(p), Some(&vec![target]), "{p:?} spawned in the fortress");
-    }
-    let to_a = w.take(A);
-    assert_eq!(player_region(&to_a), Some(Some(target)));
-    assert!(notices_in(&to_a).iter().any(|n| n.contains("was founded")), "{to_a:?}");
-    w.check("embarked");
-    w.tick();
-    w.check("a tick later");
-}
-
-#[test]
-fn embark_refuses_unavailable_people() {
-    let (mut w, home, civ, people, free) = embark_world();
-    w.connect(B);
-    let target = free[0];
-    let req = |people: Vec<PersonId>, region| EmbarkRequest { civ, people, region };
-    // Region rules first: off the map, uninhabitable, taken.
-    assert_eq!(w.embark(A, req(vec![people[0]], rc(40, 0))), Err(EmbarkRefusal::OffMap));
-    assert_eq!(w.embark(A, req(vec![people[0]], rc(0, 0))), Err(EmbarkRefusal::NotHabitable));
-    let home_region = w.history().site(home).unwrap().region;
-    assert_eq!(w.embark(A, req(vec![people[0]], home_region)), Err(EmbarkRefusal::Occupied));
-    // Party size.
-    assert_eq!(w.embark(A, req(vec![], target)), Err(EmbarkRefusal::PartySize));
-    let eight = people[..EMBARK_PLAYER_PARTY_MAX as usize + 1].to_vec();
-    assert_eq!(w.embark(A, req(eight, target)), Err(EmbarkRefusal::PartySize));
-    // A wrong civ, someone unknown, a duplicate.
-    let other_civ = EmbarkRequest { civ: CivId(9), people: vec![people[0]], region: target };
-    assert_eq!(w.embark(A, other_civ), Err(EmbarkRefusal::UnavailablePerson(people[0])));
-    assert_eq!(w.embark(A, req(vec![people[0], PersonId(999)], target)), Err(EmbarkRefusal::UnavailablePerson(PersonId(999))));
-    assert_eq!(w.embark(A, req(vec![people[0], people[0]], target)), Err(EmbarkRefusal::UnavailablePerson(people[0])));
-    // People who stopped being available since the options were sent: died, left on a
-    // journey, or now embodied in a running region.
-    let dead = people[1];
-    let traveller = people[2];
-    {
-        let h = history_mut_of(&mut w.manager);
-        h.record_death(dead, DeathCause::OldAge);
-        h.start_journey(vec![traveller], home, free[1], Purpose::Embark { civ, from: home }).expect("a route");
-    }
-    assert_eq!(w.embark(A, req(vec![people[0], dead], target)), Err(EmbarkRefusal::UnavailablePerson(dead)));
-    assert_eq!(w.embark(A, req(vec![people[0], traveller], target)), Err(EmbarkRefusal::UnavailablePerson(traveller)));
-    let sites_before = w.history().sites().count();
-    let log_before = w.history().log().len();
-    w.packet(B, ClientPacket::RequestRegionConnection(home_region));
-    assert!(w.running(home_region));
-    assert_eq!(w.embark(A, req(vec![people[0]], target)), Err(EmbarkRefusal::UnavailablePerson(people[0])));
-    // No partial embark: nothing founded, nobody moved, nothing logged.
-    let h = w.history();
-    assert_eq!(h.sites().count(), sites_before);
-    assert_eq!(h.log().len(), log_before);
-    assert!(h.site(home).unwrap().members.contains(&people[0]));
-    assert_eq!(h.person(people[0]).unwrap().abstract_location(), Location::AtSite(home));
-    assert!(!w.running(target));
-    // Once the site region parks again its people may embark.
-    w.packet(B, ClientPacket::ReleaseRegionConnection(home_region));
-    w.wait(UNLOAD_GRACE_MS);
-    assert!(!w.running(home_region));
-    assert!(w.embark(A, req(vec![people[0]], target)).is_ok());
-    w.check("embarked after all");
-}
-
-#[test]
-fn second_embark_too_close() {
-    let (mut w, home, civ, people, free) = embark_world();
-    w.connect(B);
-    // A free region with a neighbour on the map at least the embark distance from the
-    // bootstrapped site, so only the new fortress is too close to it.
-    let home_x = w.history().site(home).unwrap().region.x;
-    let (target, near) = free
-        .iter()
-        .find_map(|r| {
-            [r.x - 1, r.x + 1].into_iter().find(|&n| (1..16).contains(&n) && (n - home_x).abs() >= 4).map(|n| (*r, rc(n, 0)))
-        })
-        .expect("a free region with such a neighbour");
-    let first = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
-    // The other player, on the same tile or next to it.
-    let req = |region| EmbarkRequest { civ, people: people[2..4].to_vec(), region };
-    assert_eq!(w.embark(B, req(target)), Err(EmbarkRefusal::Occupied));
-    assert_eq!(w.embark(B, req(near)), Err(EmbarkRefusal::TooClose { site: first }));
-    let far = *free_regions(w.history()).first().expect("a region far from both sites");
-    let second = w.embark(B, req(far)).expect("far enough");
-    assert_ne!(first, second);
-    w.check("two fortresses");
-}
-
-#[test]
-fn one_fortress_per_player() {
-    let (mut w, _, civ, people, free) = embark_world();
-    let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).unwrap();
-    let again = EmbarkRequest { civ, people: people[2..4].to_vec(), region: free[1] };
-    assert_eq!(w.embark(A, again.clone()), Err(EmbarkRefusal::AlreadyHasFortress));
-    assert_eq!(w.return_to(A, site), Err(EmbarkRefusal::AlreadyHasFortress));
-    assert!(!w.running(free[1]));
-    w.packet(A, ClientPacket::Retire);
-    assert!(w.embark(A, again).is_ok(), "a retired player may embark again");
-    w.check("second fortress");
-}
-
-#[test]
-fn retire_then_return() {
-    let (mut w, _, civ, people, free) = embark_world();
-    let chosen = people[..3].to_vec();
-    let target = free[0];
-    let site = w.embark(A, EmbarkRequest { civ, people: chosen.clone(), region: target }).unwrap();
-    w.tick();
-    w.take(A);
-    w.packet(A, ClientPacket::Retire);
-    let to_a = w.take(A);
-    assert_eq!(player_region(&to_a), Some(Some(SPAWN_REGION)), "back where a connection starts");
-    let marker = sites_in(&to_a).expect("fresh sites").into_iter().find(|m| m.site == site).unwrap();
-    assert!(marker.returnable && !marker.abandoned);
-    assert_eq!((marker.region, marker.population, marker.civ), (target, 3, civ));
-    // The fortress parks by the usual grace rule; its people carry on abstractly.
-    w.tick();
-    w.wait(UNLOAD_GRACE_MS);
-    assert!(!w.running(target), "the retired fortress parked");
-    for p in &chosen {
-        assert_eq!(w.history().person(*p).unwrap().location, Location::AtSite(site));
-    }
-    w.check("parked");
-    // Reconnect (a new connection, a new client id): the site is listed as returnable.
-    w.send(ServerEvent::ClientDisconnected(A));
-    w.connect(A2);
-    let to_a2 = w.take(A2);
-    assert_eq!(fortress_in(&to_a2), Some(None), "a new connection plays no fortress");
-    let marker = sites_in(&to_a2).expect("sites on connect").into_iter().find(|m| m.site == site).unwrap();
-    assert!(marker.returnable);
-    // Return: the fortress starts again with its people, the player in it.
-    assert_eq!(w.return_to(A2, site), Ok(site));
-    assert!(w.running(target));
-    let census = bodies(&mut w.manager);
-    for p in &chosen {
-        assert_eq!(census.get(p), Some(&vec![target]));
-    }
-    w.packet(A2, ClientPacket::RequestPlayerRegion);
-    assert_eq!(player_region(&w.take(A2)), Some(Some(target)));
-    w.check("returned");
-}
-
-#[test]
-fn retire_moves_player_to_spawn() {
-    let (mut w, _, civ, people, free) = embark_world();
-    let target = free[0];
-    w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
-    w.tick();
-    assert_eq!(w.players_in(target), vec![A]);
-    w.take(A);
-    w.packet(A, ClientPacket::Retire);
-    let to_a = w.take(A);
-    assert!(
-        to_a.iter().any(|p| matches!(p, ServerPacket::PlayerRegion(Some(r), _) if *r == SPAWN_REGION)),
-        "{to_a:?}"
-    );
-    assert_eq!(fortress_in(&to_a), Some(None));
-    w.packet(A, ClientPacket::RequestPlayerRegion);
-    assert_eq!(player_region(&w.take(A)), Some(Some(SPAWN_REGION)), "home is the spawn region");
-    w.tick();
-    assert!(w.players_in(target).is_empty(), "the player left the fortress");
-    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
-    w.wait(UNLOAD_GRACE_MS);
-    assert!(!w.running(target), "the retired fortress parked");
-    w.check("retired");
-    // Retiring again, with no fortress, changes nothing.
-    w.packet(A, ClientPacket::Retire);
-    assert!(w.take(A).is_empty(), "no-op retire sends nothing");
-    w.tick();
-    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
-}
-
-#[test]
-fn return_after_reconnect_leaves_one_player_body() {
-    let (mut w, _, civ, people, free) = embark_world();
-    let target = free[0];
-    let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
-    w.tick();
-    w.send(ServerEvent::ClientDisconnected(A));
-    w.connect(A2);
-    assert_eq!(fortress_in(&w.take(A2)), Some(None));
-    assert_eq!(w.return_to(A2, site), Ok(site));
-    w.tick();
-    assert_eq!(w.players_in(target), vec![A2], "one player body: the returning player's");
-    w.check("returned after reconnect");
-}
-
-#[test]
-fn return_refuses_other_players_fortress() {
-    let (mut w, home, civ, people, free) = embark_world();
-    w.connect(B);
-    let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).unwrap();
-    assert_eq!(w.return_to(B, site), Err(EmbarkRefusal::InUse));
-    assert_eq!(w.return_to(B, home), Err(EmbarkRefusal::NotPlayerFounded), "not founded by a player");
-    assert_eq!(w.return_to(B, SiteId(999)), Err(EmbarkRefusal::NotPlayerFounded));
-    // Its player gone (no accounts: identity is the connection), it may be taken up.
-    w.send(ServerEvent::ClientDisconnected(A));
-    assert_eq!(w.return_to(B, site), Ok(site));
-    w.connect(A);
-    assert_eq!(w.return_to(A, site), Err(EmbarkRefusal::InUse));
-}
-
-#[test]
 fn notices_only_to_home_region() {
-    let (mut w, home, civ, people, free) = embark_world();
+    let (mut w, home, civ, people, free) = bootstrap_world();
     w.connect(B);
     // Two adventurers at two sites, and a third site nobody plays.
     let (b_site, b_people) = npc_site(&mut w, civ, free[0], 2);
@@ -562,7 +297,7 @@ fn notices_only_to_home_region() {
 
 #[test]
 fn client_cannot_spoof_server_events() {
-    let (mut w, home, civ, people, free) = embark_world();
+    let (mut w, home, civ, people, free) = bootstrap_world();
     // An unplayed site's founder: the outsider.
     let (far, far_people) = npc_site(&mut w, civ, free[0], 2);
     let target = w.history().site(home).unwrap().region;
@@ -590,7 +325,7 @@ fn client_cannot_spoof_server_events() {
 
 #[test]
 fn person_info_lists_family() {
-    let (mut w, home, _, _, _) = embark_world();
+    let (mut w, home, _, _, _) = bootstrap_world();
     let h = w.history();
     let kid = h.people().find(|p| p.mother.is_some() && p.father.is_some()).expect("a founder's child");
     let (kid, mother, father) = (kid.id, kid.mother.unwrap(), kid.father.unwrap());
@@ -618,7 +353,7 @@ fn person_info_lists_family() {
 
 #[test]
 fn calendar_and_sites_broadcast_daily() {
-    let (mut w, _, civ, _, free) = embark_world();
+    let (mut w, _, civ, _, free) = bootstrap_world();
     w.connect(B);
     let on_connect = w.take(B);
     assert!(on_connect.iter().any(|p| matches!(p, ServerPacket::Calendar(_))), "calendar on connect");
@@ -673,60 +408,9 @@ fn embark_allowed_in_matches_history_with_an_abandoned_site() {
     }
 }
 
-/// A mountainside refuses the player's embark (with no state change) while the civs'
-/// own rule still allows it; the client's tile check agrees.
-#[test]
-fn embark_refuses_a_too_steep_region() {
-    let mut map = strip();
-    let steep_relief = game::EMBARK_MAX_RELIEF_PER_REGION_M * game::REGION_BLOCKS as f32 + 1.0;
-    for t in &mut map.tiles[8..] {
-        t.relief_m = steep_relief;
-        assert!(game::too_steep_to_embark(t));
-    }
-    let p = BootstrapParams { seed: 7, civs: 1, founders_per_civ: 10, years: 0, ..BootstrapParams::default() };
-    let mut h = bootstrap(&map, &p).expect("the strip holds a civ");
-    let (_, civ, people) = home_site(&h);
-    let steep = (8..16).map(|x| rc(x, 0)).find(|r| h.embark_allowed(*r).is_ok()).expect("a steep region civs may settle");
-    let sites: Vec<_> = h.sites().map(|s| (s.id, s.region, s.abandoned.is_some())).collect();
-    assert_eq!(player_embark_allowed_in(h.grid(), sites.iter().copied(), steep), Err(EmbarkRefusal::TooSteep));
-    let log_before = h.log().len();
-    let req = EmbarkRequest { civ, people: people[..2].to_vec(), region: steep };
-    assert_eq!(h.player_embark(&req), Err(EmbarkRefusal::TooSteep));
-    assert_eq!(h.log().len(), log_before, "a refusal changes nothing");
-    let gentle = (1..8).map(|x| rc(x, 0)).find(|r| h.player_embark_allowed(*r).is_ok()).expect("a gentle free region");
-    h.player_embark(&EmbarkRequest { region: gentle, ..req }).expect("gentle ground is fine");
-}
-
-fn fortress_in(packets: &[ServerPacket]) -> Option<Option<SiteId>> {
-    packets.iter().rev().find_map(|p| match p {
-        ServerPacket::Fortress(f) => Some(f.map(|f| f.site)),
-        _ => None,
-    })
-}
-
-#[test]
-fn fortress_packet_follows_embark_retire_and_reconnect() {
-    let (mut w, _, civ, people, free) = embark_world();
-    let site = w.embark(A, EmbarkRequest { civ, people: people[..3].to_vec(), region: free[0] }).unwrap();
-    assert_eq!(fortress_in(&w.take(A)), Some(Some(site)), "embark");
-    w.packet(A, ClientPacket::Retire);
-    assert_eq!(fortress_in(&w.take(A)), Some(None), "retire");
-    assert_eq!(w.return_to(A, site), Ok(site));
-    assert_eq!(fortress_in(&w.take(A)), Some(Some(site)), "return");
-    // A reconnect is a new connection, so a new client id: it plays no fortress until
-    // it returns to one.
-    w.send(ServerEvent::ClientDisconnected(A));
-    w.connect(A2);
-    assert_eq!(fortress_in(&w.take(A2)), Some(None), "a reconnect starts with none");
-    assert_eq!(w.return_to(A2, site), Ok(site));
-    assert_eq!(fortress_in(&w.take(A2)), Some(Some(site)), "return after reconnect");
-    w.connect(B);
-    assert_eq!(fortress_in(&w.take(B)), Some(None), "a new player has none");
-}
-
 #[test]
 fn connect_sends_civ_names() {
-    let (mut w, _, _, _, _) = embark_world();
+    let (mut w, _, _, _, _) = bootstrap_world();
     w.connect(B);
     let civs: Vec<_> = w.take(B).into_iter().filter_map(|p| if let ServerPacket::Civs(c) = p { Some(c) } else { None }).collect();
     assert_eq!(civs.len(), 1, "one Civs packet");
@@ -738,7 +422,7 @@ fn connect_sends_civ_names() {
 
 #[test]
 fn legends_request_answered() {
-    let (mut w, _, _, _, _) = embark_world();
+    let (mut w, _, _, _, _) = bootstrap_world();
     w.connect(B);
     w.take(B);
     let q = LegendsQuery { filter: LegendsFilter::All, before: None, limit: 5 };
@@ -750,12 +434,11 @@ fn legends_request_answered() {
 
 #[test]
 fn adventure_starts_at_populated_site() {
-    let (mut w, home, _, _, _) = embark_world();
+    let (mut w, home, _, _, _) = bootstrap_world();
     let region = w.history().site(home).unwrap().region;
     assert_eq!(w.adventure(A, home), Ok(home));
     let to_a = w.take(A);
     assert_eq!(player_region(&to_a), Some(Some(region)));
-    assert_eq!(fortress_in(&to_a), Some(None), "an adventurer holds no fortress");
     w.settle();
     assert_eq!(w.mode_in(region, A), Some(PlayMode::Adventure));
     w.tick();
@@ -766,7 +449,7 @@ fn adventure_starts_at_populated_site() {
 
 #[test]
 fn adventure_in_the_home_region_lands_the_body_on_the_site() {
-    let (mut w, home, _, _, _) = embark_world();
+    let (mut w, home, _, _, _) = bootstrap_world();
     let region = w.history().site(home).unwrap().region;
     // Dev Play puts the player's body in the site's region first, off the landing.
     w.packet(A, ClientPacket::PlayRegion(region));
@@ -780,7 +463,7 @@ fn adventure_in_the_home_region_lands_the_body_on_the_site() {
 
 #[test]
 fn adventure_refuses_unpopulated_and_abandoned() {
-    let (mut w, home, civ, people, free) = embark_world();
+    let (mut w, home, civ, people, free) = bootstrap_world();
     let (first, _) = npc_site(&mut w, civ, free[0], 2);
     // Every member of the bootstrapped site dies: it is abandoned.
     for p in people {
@@ -804,23 +487,8 @@ fn adventure_refuses_unpopulated_and_abandoned() {
 }
 
 #[test]
-fn fortress_and_adventure_exclusive() {
-    let (mut w, home, civ, people, free) = embark_world();
-    w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).unwrap();
-    assert_eq!(w.adventure(A, home), Err(AdventureRefusal::AlreadyPlaying));
-    w.connect(B);
-    assert_eq!(w.adventure(B, home), Ok(home));
-    assert_eq!(w.adventure(B, home), Err(AdventureRefusal::AlreadyPlaying), "one adventure at a time");
-    let req = EmbarkRequest { civ, people: people[2..4].to_vec(), region: free[1] };
-    assert_eq!(w.embark(B, req), Err(EmbarkRefusal::AlreadyHasFortress));
-    w.packet(A, ClientPacket::Retire);
-    let site = w.history().sites().find(|s| s.player_founded).unwrap().id;
-    assert_eq!(w.return_to(B, site), Err(EmbarkRefusal::AlreadyHasFortress));
-}
-
-#[test]
 fn end_adventure_returns_to_spawn_and_frees_the_claim() {
-    let (mut w, home, _, _, _) = embark_world();
+    let (mut w, home, _, _, _) = bootstrap_world();
     let region = w.history().site(home).unwrap().region;
     assert_eq!(w.adventure(A, home), Ok(home));
     w.tick();
@@ -846,7 +514,7 @@ fn end_adventure_returns_to_spawn_and_frees_the_claim() {
 
 #[test]
 fn adventure_kept_across_reconnect() {
-    let (mut w, home, _, _, _) = embark_world();
+    let (mut w, home, _, _, _) = bootstrap_world();
     let region = w.history().site(home).unwrap().region;
     assert_eq!(w.adventure(A, home), Ok(home));
     w.send(ServerEvent::ClientDisconnected(A));
@@ -858,44 +526,6 @@ fn adventure_kept_across_reconnect() {
     w.settle();
     assert_eq!(w.mode_in(region, A2), Some(PlayMode::Adventure));
     assert_eq!(w.adventure(A2, home), Err(AdventureRefusal::AlreadyPlaying), "still adventuring");
-}
-
-/// A player's fortress claim is part of its record: after an orderly exit and a
-/// restart, the same player (a new client id) holds its fortress again without
-/// embarking, and is told so on connect.
-#[test]
-fn fortress_claim_survives_restart() {
-    let (mut w, _, civ, people, free) = embark_world();
-    let target = free[0];
-    let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
-    w.tick();
-    w.take(A);
-    // The server's orderly exit: park every player, then every region; a
-    // save cut (nothing runs, so it is complete at once) holds them all.
-    w.manager.park_all_players(w.now_ms);
-    w.manager.shutdown_all();
-    w.settle();
-    assert!(w.manager.running_regions().is_empty());
-    w.manager.begin_cut(0).expect("no cut pending");
-    let cut = w.manager.take_cut().expect("nothing runs: the cut is complete");
-    let mut store = crate::common::cut_store::CutStore::default();
-    store.apply(&cut);
-    let record = store.players.get(&game::PlayerId(A as u64)).cloned().expect("A's record");
-    assert_eq!(record.fortress, Some(site));
-    let history = w.history().clone();
-    drop(w);
-
-    let mut w = World::over(history, InlineSpawner::with_portable(store.regions));
-    w.send(ServerEvent::ClientConnected { client: 0, player: game::PlayerId(A as u64), record: Some(record) });
-    let to_a = w.take(0);
-    assert_eq!(fortress_in(&to_a), Some(Some(site)), "the fortress is held again: {to_a:?}");
-    assert!(to_a.iter().any(|p| matches!(p, ServerPacket::EmbarkResult(Ok(s)) if *s == site)), "{to_a:?}");
-    assert_eq!(player_region(&to_a), Some(Some(target)));
-    assert_eq!(w.players_in(target), vec![0], "the body is back in the fortress");
-    assert_eq!(w.return_to(0, site), Err(EmbarkRefusal::AlreadyHasFortress), "no second embark");
-    // Nobody else may take it up.
-    w.connect(B);
-    assert_eq!(w.return_to(B, site), Err(EmbarkRefusal::InUse));
 }
 
 fn spawn_at(events: &[GameEventKind], who: PersonId) -> Option<SpawnAt> {
@@ -987,7 +617,7 @@ fn mark_inventory(w: &mut World, r: RegionCoords, c: ClientId) -> game::Inventor
 
 #[test]
 fn inventory_survives_move_client() {
-    let (mut w, home, _, _, _) = embark_world();
+    let (mut w, home, _, _, _) = bootstrap_world();
     let region = w.history().site(home).unwrap().region;
     assert_ne!(region, SPAWN_REGION);
     let expected = mark_inventory(&mut w, SPAWN_REGION, A);
@@ -1012,7 +642,7 @@ fn inventory_survives_move_client() {
 /// goes straight to the second target, once, with its inventory.
 #[test]
 fn move_retargeted_in_flight_keeps_one_body() {
-    let (mut w, home, _, _, _) = embark_world();
+    let (mut w, home, _, _, _) = bootstrap_world();
     let region = w.history().site(home).unwrap().region;
     let expected = mark_inventory(&mut w, SPAWN_REGION, A);
     assert!(w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::StartAdventure(home), A), w.now_ms));
@@ -1035,7 +665,6 @@ fn off_map_record_restores_at_spawn_with_its_client() {
         client,
         pose: game::Pose::from_translation(game::body_on_tile([3, 1, 3])),
         region: rc(0, 5),
-        fortress: None,
         adventure: None,
     };
     w.send(ServerEvent::ClientConnected { client: A, player: game::PlayerId(42), record: Some(record) });
