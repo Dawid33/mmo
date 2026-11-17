@@ -324,7 +324,8 @@ pub fn attach_fog(
 ) {
     let view = view.as_deref().copied().unwrap_or_default();
     for e in &cameras {
-        commands.entity(e).insert(distance_fog(&view));
+        // `try_`: a session camera may be despawned before this applies.
+        commands.entity(e).try_insert(distance_fog(&view));
     }
 }
 

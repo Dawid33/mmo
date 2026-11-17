@@ -249,7 +249,10 @@ impl Plugin for SimBridgePlugin {
                 // Per-frame mouse look replaces the per-tick sim look that
                 // interpolate_transforms just snapped the camera to.
                 look::apply_local_look.after(interpolate::interpolate_transforms),
-                motion_probe::probe_camera_motion.after(look::apply_local_look),
+                // It measures the eye: before the third-person camera leaves it.
+                motion_probe::probe_camera_motion
+                    .after(look::apply_local_look)
+                    .before(commander::first_person::place_third_person_camera),
                 motion_probe::probe_still_frames.after(look::apply_local_look),
                 join_timeline::track_join_timeline,
                 avatar::attach_avatars,

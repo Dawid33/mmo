@@ -573,6 +573,7 @@ impl Plugin for CommanderPlugin {
             .add_systems(
                 Update,
                 (
+                    adventure::ask_for_adventure,
                     adventure::send_mode_toggle,
                     adventure::on_mode_change,
                     first_person::ensure_first_person,

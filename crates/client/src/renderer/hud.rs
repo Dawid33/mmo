@@ -21,9 +21,11 @@ pub struct RegionTickTimes(pub Vec<(game::RegionId, game::perf::TickTimeStats)>)
 
 /// Show the crosshair only while the cursor is locked for mouse look (not
 /// when free for menus or the commander camera, nor held for its right-drag
-/// orbit). Drawn by the HUD layer (`HudUi`).
-pub fn crosshair_visible(grab: CursorGrabMode, orbit: bool) -> bool {
-    !orbit && grab == CursorGrabMode::Locked
+/// orbit), and not in third person: edits aim from the eye, not from the
+/// camera behind it, so a centre mark would point elsewhere (Minecraft hides
+/// it there too). Drawn by the HUD layer (`HudUi`).
+pub fn crosshair_visible(grab: CursorGrabMode, orbit: bool, third_person: bool) -> bool {
+    !orbit && !third_person && grab == CursorGrabMode::Locked
 }
 
 #[cfg(test)]
@@ -32,8 +34,13 @@ mod tests {
 
     #[test]
     fn crosshair_shows_only_when_locked_and_not_orbiting() {
-        assert!(crosshair_visible(CursorGrabMode::Locked, false));
-        assert!(!crosshair_visible(CursorGrabMode::Locked, true));
-        assert!(!crosshair_visible(CursorGrabMode::None, false));
+        assert!(crosshair_visible(CursorGrabMode::Locked, false, false));
+        assert!(!crosshair_visible(CursorGrabMode::Locked, true, false));
+        assert!(!crosshair_visible(CursorGrabMode::None, false, false));
+    }
+
+    #[test]
+    fn no_crosshair_in_third_person() {
+        assert!(!crosshair_visible(CursorGrabMode::Locked, false, true));
     }
 }

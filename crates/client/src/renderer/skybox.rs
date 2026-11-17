@@ -132,7 +132,8 @@ pub fn attach_skybox(
 ) {
     let Some(cubemap) = cubemap else { return };
     for e in &cameras {
-        commands.entity(e).insert(Skybox {
+        // `try_`: a session camera may be despawned before this applies.
+        commands.entity(e).try_insert(Skybox {
             image: Some(cubemap.0.clone()),
             brightness: BRIGHTNESS,
             ..Default::default()

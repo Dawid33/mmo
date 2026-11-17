@@ -634,7 +634,9 @@ fn push_hud_state(
     let ui = hud.overlay.ui();
 
     // The hotbar strip and the mining bar: Adventure first person only.
-    let hotbar_on = adventure.is_some_and(|m| m.adventure()) && first_person.is_some_and(|f| f.on);
+    let hotbar_on = adventure.is_some_and(|m| m.adventure()) && first_person.as_ref().is_some_and(|f| f.on);
+    let third_person = first_person.as_ref().and_then(|f| f.body_view())
+        == Some(super::commander::first_person::BodyView::Third);
     let hotbar_shown = hotbar_shown.get();
     match items {
         Some(items) if hotbar_on => {
@@ -678,7 +680,7 @@ fn push_hud_state(
     }
 
     let grab = cursor.iter().next().map_or(CursorGrabMode::None, |c| c.grab_mode);
-    let crosshair = crosshair_visible(grab, policy.is_some_and(|p| p.orbit));
+    let crosshair = crosshair_visible(grab, policy.is_some_and(|p| p.orbit), third_person);
     if ui.get_crosshair_visible() != crosshair {
         ui.set_crosshair_visible(crosshair);
     }

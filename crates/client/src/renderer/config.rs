@@ -159,10 +159,12 @@ pub fn configure_native_antialiasing(
     >,
 ) {
     for (entity, smaa) in &cameras {
+        // `try_`: a session camera (the first-person eyes) can be despawned by
+        // `session::end_session` before these commands are applied.
         let mut entity_commands = commands.entity(entity);
-        entity_commands.insert(bevy::prelude::Msaa::Off);
+        entity_commands.try_insert(bevy::prelude::Msaa::Off);
         if smaa.is_none() {
-            entity_commands.insert(bevy::anti_alias::smaa::Smaa::default());
+            entity_commands.try_insert(bevy::anti_alias::smaa::Smaa::default());
         }
     }
 }

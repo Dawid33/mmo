@@ -52,6 +52,9 @@ pub const FIRST_PERSON_NEAR_M: f32 = 0.05;
 pub const THIRD_PERSON_DISTANCE_M: f32 = 4.0;
 /// Third person: how far short of terrain behind the eyes the camera stops, metres.
 pub const THIRD_PERSON_WALL_MARGIN_M: f32 = 0.25;
+/// Third person: a camera pulled in closer than this to the eyes (metres)
+/// would sit inside the head, so the body is hidden as in first person.
+pub const THIRD_PERSON_HIDE_BODY_M: f32 = 0.5;
 
 /// Where the body view looks from: the eyes, or behind the body.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +81,9 @@ pub struct FirstPerson {
     pub on: bool,
     /// First or third person (F5); kept while `on` is off.
     pub view: BodyView,
+    /// Third person: terrain pulled the camera inside the head
+    /// ([`third_person_hides_body`]); written by [`place_third_person_camera`].
+    pub camera_in_body: bool,
     /// The cut and the x-ray switch as they were on entry.
     saved: Option<(bool, bool)>,
 }
@@ -86,6 +92,15 @@ impl FirstPerson {
     /// The body view's camera, while the body view is on.
     pub fn body_view(&self) -> Option<BodyView> {
         self.on.then_some(self.view)
+    }
+
+    /// The body view as the body's model sees it: a third-person camera
+    /// pulled inside the head counts as first person (the model is hidden).
+    pub fn view_for_body(&self) -> Option<BodyView> {
+        match self.body_view() {
+            Some(BodyView::Third) if self.camera_in_body => Some(BodyView::First),
+            view => view,
+        }
     }
 }
 
@@ -228,7 +243,9 @@ pub fn sync_first_person_camera(
 ) {
     if !fp.on || crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref()) {
         for (e, _) in &eyes {
-            commands.entity(e).despawn();
+            // `try_`: the session's end may despawn them (`SessionScoped`)
+            // in the same frame the frontend takes the screen.
+            commands.entity(e).try_despawn();
         }
         return;
     }
@@ -320,12 +337,18 @@ fn third_person_hit(eye: Vec3, dir: Vec3, solid: impl Fn(game::TilePos) -> bool)
     Some(box_entry_distance(eye, dir, min, min + Vec3::splat(size)))
 }
 
+/// Whether a third-person camera at `camera` is close enough to the eye at
+/// `eye` to sit inside the head ([`THIRD_PERSON_HIDE_BODY_M`]).
+pub fn third_person_hides_body(eye: Vec3, camera: Vec3) -> bool {
+    camera.distance(eye) < THIRD_PERSON_HIDE_BODY_M * UNITS_PER_METER
+}
+
 /// Third person: moves the [`Eyes`] camera from the eye to
 /// [`third_person_position`] (after `look::apply_local_look` wrote the look
 /// rotation, which it keeps), pulled in toward the eye when the home region's
 /// terrain (or its halo) is in the way.
 pub fn place_third_person_camera(
-    fp: Res<FirstPerson>,
+    mut fp: ResMut<FirstPerson>,
     mirror: Res<TileMirror>,
     mut eyes: Query<(&mut Transform, &mut ThirdPersonPull), With<Eyes>>,
 ) {
@@ -345,6 +368,11 @@ pub fn place_third_person_camera(
         let at = third_person_position(eye, yaw, pitch, hit);
         tf.translation = at;
         pull.0 = at - eye;
+        // Written only on a change: `sync_body_visibility` reacts to it.
+        let inside = third_person_hides_body(eye, at);
+        if fp.camera_in_body != inside {
+            fp.camera_in_body = inside;
+        }
     }
 }
 
@@ -494,6 +522,27 @@ mod tests {
         assert!(close(at, eye), "a hit inside the margin: at the eye");
         let at = third_person_position(eye, 0.0, 0.0, Some(10.0 * M));
         assert!(close(at, Vec3::new(0.0, 0.0, 4.0 * M)), "a hit beyond the distance changes nothing");
+    }
+
+    #[test]
+    fn a_camera_pulled_into_the_head_hides_the_body() {
+        let eye = Vec3::ZERO;
+        let clear = third_person_position(eye, 0.0, 0.0, None);
+        assert!(!third_person_hides_body(eye, clear), "4 m back: the body shows");
+        let near_wall = third_person_position(eye, 0.0, 0.0, Some(0.6 * M));
+        assert!(third_person_hides_body(eye, near_wall), "0.35 m back: inside the head");
+        let wall = third_person_position(eye, 0.0, 0.0, Some(0.8 * M));
+        assert!(!third_person_hides_body(eye, wall), "0.55 m back: still outside");
+
+        let mut fp = FirstPerson { on: true, view: BodyView::Third, ..default() };
+        assert_eq!(fp.view_for_body(), Some(BodyView::Third));
+        fp.camera_in_body = true;
+        assert_eq!(fp.view_for_body(), Some(BodyView::First), "hidden as in first person");
+        fp.view = BodyView::First;
+        fp.camera_in_body = false;
+        assert_eq!(fp.view_for_body(), Some(BodyView::First));
+        fp.on = false;
+        assert_eq!(fp.view_for_body(), None);
     }
 
     #[test]

@@ -231,6 +231,8 @@ pub fn plugin(app: &mut App, autopilot: Autopilot) {
     use crate::session::SessionResetExt as _;
     // The map is per world (`session.rs`'s lifecycle rule): a next world starts it empty.
     app.insert_resource(autopilot)
+        // It flies in the overview: the client's ask back into Adventure stands aside.
+        .insert_resource(super::commander::adventure::AutopilotFlies)
         .add_session_reset::<RegionHosts>()
         .add_systems(Update, drive_autopilot.run_if(crate::session::world_systems_enabled()));
 }

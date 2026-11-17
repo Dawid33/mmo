@@ -1,6 +1,7 @@
 //! Adventure mode on the client: mode switch requests (only the autopilot
 //! writes them — the player has no way into the overview: Adventure is the
-//! default and the body view, `first_person`, is always on in it), the local
+//! default, the body view, `first_person`, is always on in it, and a client
+//! that comes back in Overview is asked back out, [`ask_for_adventure`]), the local
 //! body's visibility and the fortress tools' off switch.
 //!
 //! The mode itself is sim state (`game::PlayMode` on the client's
@@ -42,6 +43,56 @@ impl ClientPlayMode {
 /// key or button for it.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct ToggleModeRequest;
+
+/// How often [`ask_for_adventure`] asks again while the mode still reads
+/// Overview (as the autopilot paces its ask for the overview).
+pub const ADVENTURE_ASK_EVERY_MS: u64 = 2_000;
+
+/// Present while the autopilot drives the session (`renderer/autopilot.rs`
+/// inserts it): it flies in the overview, so [`ask_for_adventure`] stands
+/// aside.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct AutopilotFlies;
+
+/// The player has no way into the overview, and none out of it either: a
+/// client saved in Overview (`PlayMode` is per-client sim state and survives
+/// parking) would come back in the commander camera, stranded. While the mode
+/// reads Overview in a world that has the screen — and no autopilot wants it
+/// — this asks the sim for Adventure (`Order::SetMode`, the body staying where
+/// it stands), again every [`ADVENTURE_ASK_EVERY_MS`] until the mode says so.
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
+pub fn ask_for_adventure(
+    time: Res<Time<Real>>,
+    mode: Res<ClientPlayMode>,
+    state: Option<Res<State<crate::session::AppState>>>,
+    in_play: Option<Res<crate::session::InPlay>>,
+    autopilot: Option<Res<AutopilotFlies>>,
+    local: Res<LocalPlayer>,
+    events: Res<GameEvents>,
+    mut asked: crate::session::SessionLocal<Option<std::time::Duration>>,
+) {
+    let asked = asked.get();
+    if mode.adventure() || autopilot.is_some() {
+        *asked = None;
+        return;
+    }
+    if crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref()) {
+        return;
+    }
+    let Some(client) = local.0 else { return };
+    let now = time.elapsed();
+    if !ask_due(*asked, now) {
+        return;
+    }
+    *asked = Some(now);
+    let order = Order::SetMode { mode: PlayMode::Adventure, at: None };
+    let _ = events.0.send(game::GameEventKind::Order(client, order));
+}
+
+/// Whether to ask again: never asked, or [`ADVENTURE_ASK_EVERY_MS`] since.
+pub fn ask_due(last: Option<std::time::Duration>, now: std::time::Duration) -> bool {
+    last.is_none_or(|at| now.saturating_sub(at) >= std::time::Duration::from_millis(ADVENTURE_ASK_EVERY_MS))
+}
 
 /// The other mode.
 pub fn toggled(mode: PlayMode) -> PlayMode {
@@ -117,7 +168,7 @@ pub fn sync_body_visibility(
     first_person: Res<super::first_person::FirstPerson>,
     mut bodies: Query<(Ref<LocalBody>, &mut Visibility)>,
 ) {
-    let want = body_visibility(mode.0, first_person.body_view());
+    let want = body_visibility(mode.0, first_person.view_for_body());
     for (body, mut vis) in &mut bodies {
         if mode.is_changed() || first_person.is_changed() || body.is_added() {
             vis.set_if_neq(want);
@@ -184,6 +235,81 @@ mod tests {
             Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 2, 3]) }
         );
         assert_eq!(toggle_order(PlayMode::Adventure, &cam, Some(home)), Order::SetMode { mode: PlayMode::Overview, at: None });
+    }
+
+    #[test]
+    fn the_ask_for_adventure_is_paced() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert!(ask_due(None, ms(0)), "the first ask at once");
+        assert!(!ask_due(Some(ms(1_000)), ms(2_999)));
+        assert!(ask_due(Some(ms(1_000)), ms(3_000)), "again after ADVENTURE_ASK_EVERY_MS");
+    }
+
+    /// A session that starts in Overview (a client saved there) without the
+    /// autopilot: asks for Adventure once per interval, never every frame, and
+    /// once the mode reads Adventure the body view is on.
+    #[test]
+    fn a_client_back_in_the_overview_asks_for_adventure_and_ends_in_the_body() {
+        use super::super::first_person::{ensure_first_person, FirstPerson};
+        use super::super::level::WorkingLevel;
+        use crate::renderer::cursor::CursorPolicy;
+        let (send, recv) = crossbeam::channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(500)))
+            .insert_resource(ClientPlayMode(PlayMode::Overview))
+            .init_resource::<CursorPolicy>()
+            .init_resource::<FirstPerson>()
+            .init_resource::<WorkingLevel>()
+            .init_resource::<TileMirror>()
+            .init_resource::<CommanderCamera>()
+            .insert_resource(LocalPlayer(Some(7)))
+            .insert_resource(GameEvents(send))
+            .add_systems(Update, (ask_for_adventure, ensure_first_person).chain());
+        let asks = |recv: &crossbeam::channel::Receiver<game::GameEventKind>| {
+            recv.try_iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        game::GameEventKind::Order(7, Order::SetMode { mode: PlayMode::Adventure, at: None })
+                    )
+                })
+                .count()
+        };
+        // 4 frames of 0.5 s (the first frame's delta is zero): within one interval.
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(asks(&recv), 1, "one ask, not one a frame");
+        assert!(!app.world().resource::<FirstPerson>().on, "no body view in the overview");
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(asks(&recv), 1, "asked again after the interval");
+        // The sim switched.
+        app.world_mut().resource_mut::<ClientPlayMode>().0 = PlayMode::Adventure;
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(asks(&recv), 0, "no more asks in Adventure");
+        assert!(app.world().resource::<FirstPerson>().on, "in the body view");
+    }
+
+    #[test]
+    fn the_autopilot_keeps_its_overview() {
+        let (send, recv) = crossbeam::channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(ClientPlayMode(PlayMode::Overview))
+            .insert_resource(AutopilotFlies)
+            .insert_resource(LocalPlayer(Some(7)))
+            .insert_resource(GameEvents(send))
+            .add_systems(Update, ask_for_adventure);
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(recv.try_iter().count(), 0, "the autopilot wants the overview: no ask");
     }
 
     #[test]
