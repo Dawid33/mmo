@@ -67,7 +67,7 @@ impl DevToggle {
     pub fn label(self) -> &'static str {
         match self {
             DevToggle::Boundaries => "Region boundaries (F8)",
-            DevToggle::ChunkGrid => "Chunk grid (F5)",
+            DevToggle::ChunkGrid => "Chunk grid (F10)",
             DevToggle::CaveCulling => "Cave culling (F4)",
             DevToggle::HideLod => "Hide LOD (F6)",
             DevToggle::HideNear => "Hide near terrain (F7)",
@@ -87,9 +87,6 @@ pub enum DevAction {
     /// Drops a 1 m dynamic body (`Order::DevDropBody`) above the ground the
     /// cursor last pointed at off the panel ([`DevDropTarget`]).
     DropBody,
-    /// Switches the local player between the overview camera and the body
-    /// (one `ToggleModeRequest`, as F9 does).
-    ToggleOverview,
 }
 
 /// The ground point (`GroundPick`) the cursor last pointed at while it was
@@ -133,8 +130,6 @@ pub fn connect_debug_tab(ui: &GameUi, world: &mut World) {
     ui.on_dev_complete_orders(move || queue.borrow_mut().push(DevAction::CompleteOrders));
     let queue = actions.clone();
     ui.on_dev_drop_body(move || queue.borrow_mut().push(DevAction::DropBody));
-    let queue = actions.clone();
-    ui.on_dev_toggle_overview(move || queue.borrow_mut().push(DevAction::ToggleOverview));
     world.insert_non_send(DevActions(actions));
 }
 
@@ -197,9 +192,6 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
                 let order = game::GameEventKind::Order(client, game::Order::DevCompleteAll);
                 let _ = world.resource::<GameEvents>().0.send(order);
             }
-        }
-        DevAction::ToggleOverview => {
-            world.write_message(super::commander::adventure::ToggleModeRequest);
         }
         DevAction::DropBody => {
             let target = world.get_resource::<DevDropTarget>().and_then(|t| t.0);
@@ -404,7 +396,7 @@ mod tests {
             DevToggle::ALL.map(DevToggle::label),
             [
                 "Region boundaries (F8)",
-                "Chunk grid (F5)",
+                "Chunk grid (F10)",
                 "Cave culling (F4)",
                 "Hide LOD (F6)",
                 "Hide near terrain (F7)",

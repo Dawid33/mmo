@@ -30,6 +30,7 @@ use client::renderer::bridge::{RegionRoots, SimEntity, SimEntityMap};
 use client::renderer::bricks::BrickOf;
 use client::renderer::commander::selection::Selection;
 use client::renderer::commander::tiles::TileMirror;
+use client::renderer::commander::first_person::Eyes;
 use client::renderer::commander::{CameraMode, CommanderCamera, CommanderView};
 use client::renderer::hud::HudStatus;
 use client::renderer::join_timeline::WorldReady;
@@ -292,9 +293,14 @@ fn second_session_starts_clean() {
     first.join(&mut app);
     assert!(count::<With<SessionScoped>>(&mut app) > 0, "the first session spawned its region");
     assert!(!app.world().resource::<ChunkGrid>().0.is_empty(), "the first session meshed terrain");
-    // A new client is in its body, which the fresh UI already shows: the session
-    // switches to the overview so the game UI has something of its own.
+    // A new client is in its body, seen from its eyes once the world has the screen.
+    assert_eq!(active_ui_cameras(&mut app), vec![(false, false)], "in the world the body's eyes have the UI");
+    assert_eq!(count::<With<Eyes>>(&mut app), 1, "the body view is on without anyone asking");
+    // The fresh UI already shows the body: the session switches to the overview
+    // so the game UI has something of its own (the frame after, the commander
+    // camera takes the screen back from the eyes).
     app.world_mut().resource_mut::<client::renderer::commander::adventure::ClientPlayMode>().0 = game::PlayMode::Overview;
+    app.update();
     app.update();
     assert_ne!(live_game_ui(&app), fresh_ui, "the first session showed itself in the game UI");
     assert_eq!(active_ui_cameras(&mut app), vec![(false, true)], "in the world the commander camera has the UI");
@@ -322,9 +328,10 @@ fn second_session_starts_clean() {
     second.join(&mut app);
     assert!(app.world().resource::<WorldReady>().0, "the second session reaches world_ready");
     assert_eq!(app.world().resource::<RegionRoots>().0.len(), 1, "one region, the second session's");
-    assert_eq!(count::<With<SessionScoped>>(&mut app), 2, "region root + bodies root");
+    assert_eq!(count::<With<SessionScoped>>(&mut app), 3, "region root + bodies root + the eyes");
     assert_entities_belong_to_session(&mut app);
-    assert_eq!(active_ui_cameras(&mut app), vec![(false, true)], "the world has the screen again");
+    assert_eq!(active_ui_cameras(&mut app), vec![(false, false)], "the world has the screen again: the eyes");
+    assert_eq!(count::<With<Eyes>>(&mut app), 1, "the second session is in the body view too");
 }
 
 #[test]

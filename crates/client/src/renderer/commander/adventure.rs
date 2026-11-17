@@ -1,15 +1,16 @@
-//! Adventure mode on the client: mode switch requests (F9, the Debug tab's
-//! button and the autopilot write them; the body is the default, the overview
-//! a debug view), the local body's
-//! visibility and the fortress tools' off switch.
+//! Adventure mode on the client: mode switch requests (only the autopilot
+//! writes them — the player has no way into the overview: Adventure is the
+//! default and the body view, `first_person`, is always on in it), the local
+//! body's visibility and the fortress tools' off switch.
 //!
 //! The mode itself is sim state (`game::PlayMode` on the client's
 //! `game::Client`); the client mirrors it in [`ClientPlayMode`] from the
 //! sim's `UiUpdate::PlayMode` (`slint_overlay::drain_ui_updates`), never
-//! guessing ahead of the sim. The button sends `Order::SetMode`; entering
+//! guessing ahead of the sim. A request sends `Order::SetMode`; entering
 //! Adventure puts the body on the tile under the camera focus
-//! ([`focus_tile`]). In Adventure the body is drawn (it is hidden in
-//! Overview — the commander has no body) and can be selected
+//! ([`focus_tile`]). In Adventure the body is drawn in third person (it is
+//! hidden in first person, where the view is inside it, and in Overview — the
+//! commander has no body) and can be selected
 //! (`selection::is_selectable`); the designation tools and the tool wheel
 //! are off.
 
@@ -18,6 +19,7 @@ use game::rapier3d::math::Vector;
 use game::{Order, PlayMode, RegionId, TilePos, REGION_BLOCKS};
 
 use super::designate::DesignateState;
+use super::first_person::BodyView;
 use super::follow::{Follow, FollowTarget};
 use super::selection::Selection;
 use super::tiles::TileMirror;
@@ -35,25 +37,11 @@ impl ClientPlayMode {
     }
 }
 
-/// Switch Overview ↔ Adventure. Written by F9 ([`overview_key`]), the Debug tab's
-/// "Toggle overview" button (`DevAction::ToggleOverview`) and the autopilot.
+/// Switch Overview ↔ Adventure. Written only by the autopilot
+/// (`renderer/autopilot.rs`), which flies in the overview; the player has no
+/// key or button for it.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct ToggleModeRequest;
-
-/// F9 switches between the overview and the body (a debug view; the Debug tab
-/// has the same button).
-pub const OVERVIEW_KEY: KeyCode = KeyCode::F9;
-
-/// F9 → one [`ToggleModeRequest`], unless a UI layer has the keyboard.
-pub fn overview_key(
-    keys: Res<ButtonInput<KeyCode>>,
-    policy: Res<crate::renderer::cursor::CursorPolicy>,
-    mut requests: MessageWriter<ToggleModeRequest>,
-) {
-    if keys.just_pressed(OVERVIEW_KEY) && !policy.blocks_game() {
-        requests.write(ToggleModeRequest);
-    }
-}
 
 /// The other mode.
 pub fn toggled(mode: PlayMode) -> PlayMode {
@@ -90,7 +78,7 @@ pub fn toggle_order(mode: PlayMode, cam: &CommanderCamera, home: Option<RegionId
     Order::SetMode { mode: next, at }
 }
 
-/// Mode button → `Order::SetMode`. The mode changes when the sim says so.
+/// Mode request → `Order::SetMode`. The mode changes when the sim says so.
 pub fn send_mode_toggle(
     mut requests: MessageReader<ToggleModeRequest>,
     mode: Res<ClientPlayMode>,
@@ -108,17 +96,20 @@ pub fn send_mode_toggle(
     let _ = events.0.send(game::GameEventKind::Order(client, order));
 }
 
-/// The body's visibility for a mode: drawn (inheriting) in Adventure,
-/// hidden in Overview.
-pub fn body_visibility(mode: PlayMode) -> Visibility {
-    match mode {
-        PlayMode::Adventure => Visibility::Inherited,
-        PlayMode::Overview => Visibility::Hidden,
+/// The body's visibility for a mode and the body view (`None` = off): drawn
+/// (inheriting) in Adventure — but not in first person, where the view is
+/// inside it and its model would fill it — hidden in Overview.
+pub fn body_visibility(mode: PlayMode, view: Option<BodyView>) -> Visibility {
+    match (mode, view) {
+        (PlayMode::Adventure, Some(BodyView::First)) => Visibility::Hidden,
+        (PlayMode::Adventure, _) => Visibility::Inherited,
+        (PlayMode::Overview, _) => Visibility::Hidden,
     }
 }
 
 /// Show or hide the local body (and its rig, a child that inherits) with
-/// the mode. Writes only on a mode change or a newly tagged body (the bridge
+/// the mode and the body view. Writes only on a change of either or a newly
+/// tagged body (the bridge
 /// tags it `Hidden`), so the z-level cut (`cut_entities`), which watches for
 /// other writers, is not disturbed every frame.
 pub fn sync_body_visibility(
@@ -126,8 +117,7 @@ pub fn sync_body_visibility(
     first_person: Res<super::first_person::FirstPerson>,
     mut bodies: Query<(Ref<LocalBody>, &mut Visibility)>,
 ) {
-    // In first person the view is inside the body: its model would fill it.
-    let want = if first_person.on { Visibility::Hidden } else { body_visibility(mode.0) };
+    let want = body_visibility(mode.0, first_person.body_view());
     for (body, mut vis) in &mut bodies {
         if mode.is_changed() || first_person.is_changed() || body.is_added() {
             vis.set_if_neq(want);
@@ -136,26 +126,22 @@ pub fn sync_body_visibility(
 }
 
 /// On a mode change: Adventure puts the designate tool down; Overview drops
-/// the body from the selection (it is not selectable there).
+/// the body from the selection (it is not selectable there). The body view
+/// is not entered here: `first_person::ensure_first_person` keeps it on in
+/// Adventure every frame (a one-shot request from here was lost when it ran
+/// before the local player was known).
 pub fn on_mode_change(
     mode: Res<ClientPlayMode>,
     mut designate: ResMut<DesignateState>,
     mut selection: ResMut<Selection>,
     mut follow: ResMut<Follow>,
     bodies: Query<&SimEntity, With<LocalBody>>,
-    first_person: Res<super::first_person::FirstPerson>,
-    mut to_first_person: MessageWriter<super::first_person::ToggleFirstPersonRequest>,
 ) {
     if !mode.is_changed() {
         return;
     }
     match mode.0 {
         PlayMode::Adventure => {
-            // Survival is played from the eyes (F5 returns to the overhead
-            // view); `toggle_first_person` also drops the cut and x-ray.
-            if !first_person.on {
-                to_first_person.write(super::first_person::ToggleFirstPersonRequest);
-            }
             if designate.tool.is_some() {
                 designate.set_tool(None);
             }
@@ -202,7 +188,14 @@ mod tests {
 
     #[test]
     fn body_shows_only_in_adventure() {
-        assert_eq!(body_visibility(PlayMode::Adventure), Visibility::Inherited);
-        assert_eq!(body_visibility(PlayMode::Overview), Visibility::Hidden);
+        assert_eq!(body_visibility(PlayMode::Adventure, None), Visibility::Inherited);
+        assert_eq!(body_visibility(PlayMode::Overview, None), Visibility::Hidden);
+    }
+
+    #[test]
+    fn body_shows_in_third_person_not_in_first() {
+        assert_eq!(body_visibility(PlayMode::Adventure, Some(BodyView::Third)), Visibility::Inherited);
+        assert_eq!(body_visibility(PlayMode::Adventure, Some(BodyView::First)), Visibility::Hidden, "the view is inside it");
+        assert_eq!(body_visibility(PlayMode::Overview, Some(BodyView::Third)), Visibility::Hidden);
     }
 }

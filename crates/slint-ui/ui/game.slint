@@ -47,7 +47,6 @@ export component GameUi inherits Window {
     callback dev-toggle(int, bool);
     callback dev-complete-orders();
     callback dev-drop-body();
-    callback dev-toggle-overview();
     out property <length> dev-toggles-x: fortress.dev-toggles-x;
     out property <length> dev-toggles-y: fortress.dev-toggles-y;
     out property <length> dev-toggle-row-height: fortress.dev-toggle-row-height;
@@ -307,7 +306,6 @@ export component GameUi inherits Window {
             dev-toggle(i, on) => { root.dev-toggle(i, on); }
             dev-complete-orders => { root.dev-complete-orders(); }
             dev-drop-body => { root.dev-drop-body(); }
-            dev-toggle-overview => { root.dev-toggle-overview(); }
         }
     }
 

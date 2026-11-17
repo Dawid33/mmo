@@ -17,7 +17,7 @@ const DEBUG_TAB: i32 = 4;
 fn toggles(checked: bool) -> ModelRc<DevToggle> {
     ModelRc::new(VecModel::from(vec![
         DevToggle { label: "Region boundaries (F8)".into(), checked },
-        DevToggle { label: "Chunk grid (F5)".into(), checked: false },
+        DevToggle { label: "Chunk grid (F10)".into(), checked: false },
     ]))
 }
 

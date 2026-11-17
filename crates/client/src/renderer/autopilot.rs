@@ -25,7 +25,8 @@
 //!
 //! A new player is in a body, which cannot fly (`camera.rs`: flight needs a
 //! mode other than Adventure). So before it holds any key the pilot writes one
-//! `ToggleModeRequest` (the F9 switch) and waits until the overview is in.
+//! `ToggleModeRequest` (the overview switch — the autopilot's alone, the
+//! player has none) and waits until the overview is in.
 //!
 //! `VOXEL_AUTOPILOT_SECONDS=N` closes the client N seconds after the climb.
 //!

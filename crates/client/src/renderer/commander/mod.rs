@@ -501,8 +501,6 @@ impl Plugin for CommanderPlugin {
             .add_session_reset::<follow::Follow>()
             .add_session_reset::<first_person::FirstPerson>()
             .add_session_reset::<top_down::TopDown>()
-            .add_message::<first_person::ToggleFirstPersonRequest>()
-            .add_session_message_clear::<first_person::ToggleFirstPersonRequest>()
             .add_session_reset::<RightPress>()
             .add_session_reset::<move_order::PathPreview>()
             .add_session_reset::<move_order::SentPath>()
@@ -575,17 +573,28 @@ impl Plugin for CommanderPlugin {
             .add_systems(
                 Update,
                 (
-                    adventure::overview_key,
                     adventure::send_mode_toggle,
                     adventure::on_mode_change,
-                    first_person::toggle_first_person,
+                    first_person::ensure_first_person,
+                    first_person::cycle_body_view,
                     // Before the eyes are moved toward their new target.
                     first_person::sync_first_person_camera.before(super::interpolate::interpolate_transforms),
+                    // The glide works on the eye: last frame's third-person
+                    // pull comes off first.
+                    first_person::restore_eye_point.before(super::interpolate::interpolate_transforms),
                     adventure::sync_body_visibility,
                 )
                     .chain()
                     .before(designate::designate_keys)
                     .before(cut_entities::hide_cut_entities)
+                    .run_if(world_systems_enabled()),
+            )
+            .add_systems(
+                Update,
+                // After the look rotation is written, which it keeps.
+                first_person::place_third_person_camera
+                    .after(super::look::apply_local_look)
+                    .after(super::interpolate::interpolate_transforms)
                     .run_if(world_systems_enabled()),
             )
             .add_systems(
