@@ -2,8 +2,9 @@
 //! declares and runs for them. The coordinator declares a host dead only from what it read
 //! itself — the same `seen_ms` over [`HOST_LEASE_MS`] of its own clock, every read in
 //! between a successful one — so a database outage never looks like every host dying. Pure:
-//! the runtime reads the `hosts` rows, executes the declarations and rollbacks in the store
-//! and passes its clock in.
+//! the runtime reads the `hosts` rows and passes its clock in; the declarations, ends and
+//! rollbacks the core hands out run in the store inside the transaction of the transition
+//! carrying them (Elastic 2b Task 3, `decisions.rs`), and their answers come back as inputs.
 //!
 //! **The runs** ([`SuccessionRuns`], `CrashPolicy::Succession` only — `Static` never
 //! declares, its crash policy is the world rollback):
@@ -93,7 +94,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{CoordMsg, ReplicaId, Target};
+use super::{CallStamp, CoordMsg, DECISION_RETRY_MS, StoreDecision, Target};
 use crate::HostId;
 use crate::{
     CrashPolicy, Declared, Succession, SuccessionId, SuccessionKind, HOST_LEASE_MS, HOST_LIVE, SUCCESSION_DEADLINE_MS,
@@ -235,13 +236,15 @@ pub struct EndLandless {
     pub boot: u64,
 }
 
-/// A declaration of successions for the runtime to execute in the store
-/// ([`Coordinator::declare_wanted`]): `dead[i]` (ordinal, boot) to heir `heirs[i]`.
+/// A declaration of successions for the store ([`Coordinator::declare_wanted`]): `dead[i]`
+/// (ordinal, boot) to heir `heirs[i]`, decided at world `generation` (the one the hosts attach
+/// at: the store refuses it `StaleGeneration` at another).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declare {
     pub dead: Vec<(HostId, u64)>,
     pub heirs: Vec<HostId>,
     pub kind: SuccessionKind,
+    pub generation: u64,
 }
 
 /// One open succession and its answers.
@@ -304,14 +307,21 @@ pub(super) struct SuccessionRuns {
     /// The store's open successions are known (a restarted coordinator reads them first:
     /// until then nothing is declared and no cut begins — "wait, never guess").
     known: bool,
-    /// A declaration was handed to the runtime and is not answered yet: by which replica
-    /// ([`super::Coordinator::declaring`]).
-    declaring: Option<ReplicaId>,
+    /// A declaration was handed out and is not answered yet: its mark (`decisions.rs`).
+    declaring: Option<CallStamp>,
     open: BTreeMap<SuccessionId, Run>,
     /// A world rollback is wanted ([`Coordinator::rollback_wanted`]), decided at this world
     /// generation: the store rolls back only from it ([`Coordinator::rollback_from`]), so a
     /// rollback that committed before a crash is never done twice.
     rollback: Option<u64>,
+    /// The rollback handed out ([`Coordinator::take_rollback`]) and not answered yet: its mark.
+    rolling: Option<CallStamp>,
+    /// A rollback's answer was lost: the world generation is to be read
+    /// ([`Coordinator::take_generation_lookup`]); no rollback is handed out until it is.
+    generation_lookup: bool,
+    /// `clock_ms` before which no rollback is handed out again (after a failed one).
+    #[serde(skip)]
+    rollback_retry_ms: Option<u64>,
     /// The predecessors declared, `(ordinal, boot)`: never lapsed or declared again.
     declared: BTreeSet<(HostId, u64)>,
     /// [`LeaseWatch::reads`] when the declaration in flight was handed out.
@@ -341,10 +351,9 @@ pub(super) struct SuccessionRuns {
     /// Hosts that left cleanly whose land is wanted ([`Coordinator::land_wanted`]): given
     /// away at the next [`Coordinator::declare_wanted`] between cuts.
     land_wanted: BTreeSet<HostId>,
-    /// The landless host handed to the runtime to end ([`Coordinator::take_end_landless`]),
-    /// not answered yet, with the replica that handed it out
-    /// ([`super::Coordinator::ending`]).
-    ending: Option<(HostId, u64, ReplicaId)>,
+    /// The landless host handed out to end ([`Coordinator::take_end_landless`]), not answered
+    /// yet, with its mark.
+    ending: Option<(HostId, u64, CallStamp)>,
     /// [`LeaseWatch::reads`] when `ending` was handed out.
     #[serde(skip)]
     ending_at_read: u64,
@@ -362,6 +371,9 @@ impl Default for SuccessionRuns {
             declaring: None,
             open: BTreeMap::new(),
             rollback: None,
+            rolling: None,
+            generation_lookup: false,
+            rollback_retry_ms: None,
             declared: BTreeSet::new(),
             declared_at_read: 0,
             deadline_ms: None,
@@ -390,6 +402,9 @@ impl SuccessionRuns {
             declaring: _,
             open: _,
             rollback: _,
+            rolling: _,
+            generation_lookup: _,
+            rollback_retry_ms,
             declared: _,
             declared_at_read,
             deadline_ms,
@@ -405,6 +420,7 @@ impl SuccessionRuns {
             end_refused_at_read,
         } = from;
         self.enabled = *enabled;
+        self.rollback_retry_ms = *rollback_retry_ms;
         self.declared_at_read = *declared_at_read;
         self.deadline_ms = *deadline_ms;
         self.refused_at_read = *refused_at_read;
@@ -466,14 +482,60 @@ impl super::Coordinator {
         }
     }
 
-    /// A declaration handed out by this replica is in flight.
+    /// A declaration is in flight (its mark set; one whose answer was lost is looked up and
+    /// cleared, never counted as in flight for ever).
     fn declaring(&self) -> bool {
-        self.successions.declaring == Some(self.replica)
+        self.successions.declaring.is_some()
     }
 
-    /// The end of a landless host handed out by this replica, in flight.
+    /// The end of a landless host in flight.
     fn ending(&self) -> Option<(HostId, u64)> {
-        self.successions.ending.filter(|(_, _, p)| *p == self.replica).map(|(h, b, _)| (h, b))
+        self.successions.ending.map(|(h, b, _)| (h, b))
+    }
+
+    /// The succession marks whose stamp `matches` take `to`.
+    pub(super) fn successions_stamp_marks(&mut self, matches: &dyn Fn(&CallStamp) -> bool, to: CallStamp) {
+        let r = &mut self.successions;
+        for stamp in [r.declaring.as_mut(), r.ending.as_mut().map(|(_, _, s)| s), r.rolling.as_mut()].into_iter().flatten() {
+            if matches(stamp) {
+                *stamp = to;
+            }
+        }
+    }
+
+    /// The succession marks whose stamp `matches` lost their answers (`why`, for the log):
+    /// looked up, never issued again ([`super::Coordinator::orphan_marks`]) — a declaration or an
+    /// end makes the open successions be read again (a run the store opened is then run, its
+    /// predecessor out of the view; a row the store marked dead is taken out of the view at the
+    /// next `hosts` read showing it, C1), and is not handed out again on the read it was handed
+    /// out at; a rollback makes the world generation be read. Whether any matched.
+    pub(super) fn successions_orphan_marks(&mut self, matches: &dyn Fn(&CallStamp) -> bool, why: &str) -> bool {
+        let reads = self.leases.reads();
+        let mut any = false;
+        if self.successions.declaring.as_ref().is_some_and(|s| matches(s)) {
+            log::warn!("coordinator: the answer to a declaration is lost ({why}): the open successions are read again");
+            self.successions.declaring = None;
+            self.successions.refused_at_read = Some(reads);
+            self.reread_successions();
+            any = true;
+        }
+        if let Some((host, boot, _)) = self.successions.ending.filter(|(_, _, s)| matches(s)) {
+            log::warn!(
+                "coordinator: the answer to ending host {host} (boot {boot:#x}) is lost ({why}): the open successions are \
+                 read again, its row at the next read"
+            );
+            self.successions.ending = None;
+            self.successions.end_refused_at_read = Some(reads);
+            self.reread_successions();
+            any = true;
+        }
+        if self.successions.rolling.as_ref().is_some_and(|s| matches(s)) {
+            log::warn!("coordinator: the answer to a world rollback is lost ({why}): the world generation is read");
+            self.successions.rolling = None;
+            self.successions.generation_lookup = true;
+            any = true;
+        }
+        any
     }
 
     /// The store's open successions (a coordinator starting, `open_successions()`, or a
@@ -563,9 +625,14 @@ impl super::Coordinator {
 
     /// The lapsed hosts to declare dead now, in ONE batch, each with its heir — or `None`
     /// (the module docs). A running cut with a lapsed participant is decided abort here
-    /// first (the declaration follows once that decision is recorded). The runtime executes
-    /// the batch and answers [`Self::declared`] (or [`Self::declare_failed`]).
+    /// first (the declaration follows once that decision is recorded). The batch leaves with
+    /// the next transition and runs in its transaction; its answer is an input
+    /// ([`super::DecisionAnswer::Declared`]).
     pub fn declare_wanted(&mut self, now_ms: u64) -> Option<Declare> {
+        self.unlogged_guard("declare_wanted", |c| c.declare_wanted_now(now_ms))
+    }
+
+    fn declare_wanted_now(&mut self, now_ms: u64) -> Option<Declare> {
         // The lapses are the lease watch's, on its own clock ([`LeaseWatch`]); `now_ms` only
         // moves the core's.
         self.clock_ms = self.clock_ms.max(now_ms);
@@ -601,25 +668,49 @@ impl super::Coordinator {
         let heirs: Vec<HostId> =
             lapsed.iter().map(|(h, _)| crate::heir_of(*h, &live).expect("a live host other than the predecessor")).collect();
         log::warn!("coordinator: hosts {lapsed:?} lost their lease: declaring them dead, heirs {heirs:?}");
-        self.note_unlogged();
-        self.successions.declaring = Some(self.replica);
-        self.successions.declared_at_read = self.leases.reads();
-        Some(Declare { dead: lapsed, heirs, kind: SuccessionKind::Crash })
+        let generation = self.generation_seen;
+        Some(self.hand_out_declaration(Declare { dead: lapsed, heirs, kind: SuccessionKind::Crash, generation }))
     }
 
-    /// The store's answer to the batch [`Self::declare_wanted`] handed out (the module docs).
+    /// Declaration `d` handed out: its mark set (pending until its transition is taken), the
+    /// decision into the next transition (`decisions.rs`).
+    fn hand_out_declaration(&mut self, d: Declare) -> Declare {
+        self.successions.declaring = Some(CallStamp::pending(self.replica));
+        self.successions.declared_at_read = self.leases.reads();
+        self.push_decision(StoreDecision::Declare(d.clone()));
+        d
+    }
+
+    /// Test support: the store's answer to the batch [`Self::declare_wanted`] handed out (the
+    /// module docs) — an input carrying the declaration's mark (with none in flight it is
+    /// ignored).
+    #[doc(hidden)]
     pub fn declared(&mut self, outcome: Declared, now_ms: u64) {
-        self.note_unlogged();
-        self.clock_ms = self.clock_ms.max(now_ms);
-        if !self.declaring() {
-            // No declaration is in flight any more: a rollback cleared it ([`Self::rolled_back`])
-            // while the runtime still held the store's answer — its transaction abandoned every
-            // open run, this one included. Running it would end in a second rollback at its
-            // deadline (the hosts restart for the first one and never answer).
-            log::warn!("coordinator: a declaration's answer came with none in flight (rolled back meanwhile): ignored");
+        let stamp = self.successions.declaring.unwrap_or(CallStamp::pending(self.replica));
+        self.apply(super::Input::Decision(super::DecisionAnswer::Declared { stamp, outcome: Ok(outcome) }), now_ms);
+    }
+
+    /// The store's answer to the declaration handed out as `stamp` (the module docs): its
+    /// outcome, or its refusal (nothing written: a lock timeout behind a staged part, a store
+    /// error) — forgotten, declared again after the runtime's retry wait. An answer with another
+    /// stamp changes nothing.
+    pub(super) fn declare_answered(&mut self, stamp: CallStamp, outcome: Result<Declared, String>, now_ms: u64) {
+        if self.successions.declaring != Some(stamp) {
+            // Not this mark's: another call's, or none in flight any more — a rollback cleared
+            // it ([`Self::rolled_back`]): its transaction abandoned every open run, this one
+            // included. Running it would end in a second rollback at its deadline (the hosts
+            // restart for the first one and never answer).
+            log::warn!("coordinator: a declaration's answer ({stamp:?}) that no mark here awaits: ignored");
             return;
         }
         self.successions.declaring = None;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                log::debug!("coordinator: the declaration could not be executed ({e}); declared again later");
+                return;
+            }
+        };
         match outcome {
             Declared::Done(list) => {
                 for s in list {
@@ -665,15 +756,19 @@ impl super::Coordinator {
     #[doc(hidden)]
     pub fn declaring_by_hand(&mut self) {
         self.note_unlogged();
-        self.successions.declaring = Some(self.replica);
+        self.successions.declaring = Some(CallStamp::pending(self.replica));
         self.successions.declared_at_read = self.leases.reads();
     }
 
-    /// The batch [`Self::declare_wanted`] handed out could not be executed (a store error, a
-    /// lock timeout): forgotten; the runtime asks again after its retry wait.
+    /// Test support: the batch [`Self::declare_wanted`] handed out could not be executed (a
+    /// store error, a lock timeout) — the refusal as an input carrying its mark: forgotten,
+    /// asked again after the runtime's retry wait.
+    #[doc(hidden)]
     pub fn declare_failed(&mut self) {
-        self.note_unlogged();
-        self.successions.declaring = None;
+        let stamp = self.successions.declaring.unwrap_or(CallStamp::pending(self.replica));
+        let now = self.clock_ms;
+        let failed = super::DecisionAnswer::Declared { stamp, outcome: Err("test: the declaration failed".into()) };
+        self.apply(super::Input::Decision(failed), now);
     }
 
     /// The store's open successions may have changed behind this coordinator's back (the
@@ -711,9 +806,75 @@ impl super::Coordinator {
     }
 
     /// Whether the world must roll back to its last committed cut (the module docs): the
-    /// runtime calls `rollback_world` and then [`Self::rolled_back`].
+    /// runtime hands the rollback out ([`Self::take_rollback`]); its answer rolls the core back
+    /// ([`Self::rolled_back`]).
     pub fn rollback_wanted(&self) -> bool {
         self.successions.rollback.is_some()
+    }
+
+    /// The wanted rollback, handed out ONCE (none in flight, none being looked up, not before
+    /// [`DECISION_RETRY_MS`] after a failed one): it leaves with the next transition and runs in
+    /// its transaction (`decisions.rs`), conditional on the generation it was decided at — that
+    /// generation, for the log and the tests.
+    pub fn take_rollback(&mut self) -> Option<u64> {
+        let r = &self.successions;
+        let from = r.rollback?;
+        if r.rolling.is_some() || r.generation_lookup || r.rollback_retry_ms.is_some_and(|at| self.clock_ms < at) {
+            return None;
+        }
+        self.successions.rolling = Some(CallStamp::pending(self.replica));
+        self.push_decision(StoreDecision::Rollback { from });
+        Some(from)
+    }
+
+    /// The store's answer to the rollback handed out as `stamp`: the world's generation after
+    /// it ([`Self::rolled_back`]), or its refusal (nothing written) — handed out again after
+    /// [`DECISION_RETRY_MS`]. An answer with another stamp changes nothing.
+    pub(super) fn rollback_answered(&mut self, stamp: CallStamp, outcome: Result<u64, String>, now_ms: u64) {
+        if self.successions.rolling != Some(stamp) {
+            log::warn!("coordinator: a rollback's answer ({stamp:?}) that no mark here awaits: ignored");
+            return;
+        }
+        self.successions.rolling = None;
+        match outcome {
+            Ok(generation) => self.rolled_back_to_generation(generation),
+            Err(e) => {
+                log::warn!("coordinator: the world rollback could not be recorded ({e}); trying again");
+                self.successions.rollback_retry_ms = Some(now_ms + DECISION_RETRY_MS);
+            }
+        }
+    }
+
+    /// A rollback whose answer was lost is to be looked up: the generation it was decided at,
+    /// once — read the world generation and answer [`Self::generation_looked_up`].
+    pub fn take_generation_lookup(&mut self) -> Option<u64> {
+        if !std::mem::take(&mut self.successions.generation_lookup) {
+            return None;
+        }
+        self.note_unlogged();
+        Some(self.successions.rollback.unwrap_or(self.generation_seen))
+    }
+
+    /// The generation read [`Self::take_generation_lookup`] asked for failed: asked for again.
+    pub fn generation_lookup_failed(&mut self) {
+        if self.successions.rolling.is_none() && self.successions.rollback.is_some() {
+            self.note_unlogged();
+            self.successions.generation_lookup = true;
+        }
+    }
+
+    /// The world generation as the store holds it (a lookup's answer,
+    /// [`Self::take_generation_lookup`]): past the one the rollback was decided at, it rolled
+    /// back ([`Self::rolled_back`]); otherwise it did not, and the rollback is handed out again.
+    pub fn generation_looked_up(&mut self, generation: u64) {
+        let from = self.successions.rollback.unwrap_or(self.generation_seen);
+        if generation > from {
+            log::warn!("coordinator: the lost rollback committed: the world is at generation {generation}");
+            self.note_unlogged();
+            self.rolled_back_to_generation(generation);
+        } else {
+            log::info!("coordinator: the lost rollback did not commit (generation {generation}): it is handed out again");
+        }
     }
 
     /// The world generation the wanted rollback was decided at: the store rolls back only from
@@ -737,13 +898,43 @@ impl super::Coordinator {
     /// answer) is not rolled back again here: the flags clear and its runs go (every host is
     /// told each is abandoned, `SuccessionDone` unsettled — a host of the new generation holds
     /// none and ignores it), but no `Generation` is sent and nobody is detached.
+    ///
+    /// Test support: the answer to the rollback handed out (one is handed out first if none
+    /// is), an input carrying its mark; with no rollback wanted, applied directly.
+    #[doc(hidden)]
     pub fn rolled_back(&mut self, generation: u64) {
-        self.note_unlogged();
+        let stamp = match self.successions.rolling {
+            Some(stamp) => Some(stamp),
+            None => {
+                // Not paced: the test answers at once.
+                self.successions.rollback_retry_ms = None;
+                self.successions.generation_lookup = false;
+                self.take_rollback().and(self.successions.rolling)
+            }
+        };
+        match stamp {
+            Some(stamp) => {
+                let now = self.clock_ms;
+                self.apply(super::Input::Decision(super::DecisionAnswer::RolledBack { stamp, outcome: Ok(generation) }), now);
+            }
+            None => {
+                self.note_unlogged();
+                self.rolled_back_to_generation(generation);
+            }
+        }
+    }
+
+    /// The world was rolled back to `generation` ([`Self::rolled_back`]).
+    fn rolled_back_to_generation(&mut self, generation: u64) {
         let open = std::mem::take(&mut self.successions.open);
         for id in open.into_keys() {
             self.push(Target::Every, CoordMsg::SuccessionDone { id, settled: false });
         }
         self.successions.rollback = None;
+        self.successions.rolling = None;
+        self.successions.generation_lookup = false;
+        self.successions.rollback_retry_ms = None;
+        // A declaration in flight is abandoned with the runs: its answer is ignored.
         self.successions.declaring = None;
         if generation <= self.generation_seen && self.attached_generation >= generation {
             log::warn!("coordinator: the world is at generation {generation} already and its hosts attach there: nothing more to roll back");
@@ -1079,11 +1270,13 @@ impl super::Coordinator {
     /// The super-regions hosts asked for since the last call: the runtime reads their owners
     /// in the store and answers [`Self::land_wanted`] for each owned one.
     pub fn take_land_lookups(&mut self) -> Vec<crate::SuperRegion> {
-        let lookups: Vec<crate::SuperRegion> = std::mem::take(&mut self.successions.land_lookups).into_iter().collect();
-        if !lookups.is_empty() {
-            self.note_unlogged();
-        }
-        lookups
+        self.unlogged_guard("take_land_lookups", |c| {
+            let lookups: Vec<crate::SuperRegion> = std::mem::take(&mut c.successions.land_lookups).into_iter().collect();
+            if !lookups.is_empty() {
+                c.note_unlogged();
+            }
+            lookups
+        })
     }
 
     /// Host `owner` holds a super-region a host asked for (the runtime's lookup): if it left
@@ -1173,10 +1366,8 @@ impl super::Coordinator {
             return None;
         };
         log::warn!("coordinator: host {owner} (boot {boot:#x}) left and its land is wanted: giving it all to heir {heir}");
-        self.note_unlogged();
-        self.successions.declaring = Some(self.replica);
-        self.successions.declared_at_read = self.leases.reads();
-        Some(Declare { dead: vec![(owner, boot)], heirs: vec![heir], kind: SuccessionKind::Leave })
+        let generation = self.generation_seen;
+        Some(self.hand_out_declaration(Declare { dead: vec![(owner, boot)], heirs: vec![heir], kind: SuccessionKind::Leave, generation }))
     }
 
     /// A successful read of the `hosts` rows, issued at `issued_ms` and received at
@@ -1193,11 +1384,13 @@ impl super::Coordinator {
             let beats: usize = c.successions.open.values().map(|r| r.beat.len()).sum();
             (c.cut_memory_sizes(), c.boots_seen.len(), c.successions.declared.len(), c.successions.reread_for.len(), beats)
         };
-        let before = sizes(self);
-        self.observe_leases_inner(rows, issued_ms, received_ms);
-        if sizes(self) != before {
-            self.note_unlogged();
-        }
+        self.unlogged_guard("observe_leases", |c| {
+            let before = sizes(c);
+            c.observe_leases_inner(rows, issued_ms, received_ms);
+            if sizes(c) != before {
+                c.note_unlogged();
+            }
+        })
     }
 
     fn observe_leases_inner(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
@@ -1244,7 +1437,7 @@ impl super::Coordinator {
 
     /// A failed read of the `hosts` rows ([`LeaseWatch::observe_failed`]).
     pub fn leases_unread(&mut self) {
-        self.leases.observe_failed();
+        self.unlogged_guard("leases_unread", |c| c.leases.observe_failed())
     }
 
     /// The lease watch (Task 8 declares successions from [`LeaseWatch::lapsed`]).
@@ -1285,6 +1478,10 @@ impl super::Coordinator {
     /// rollback is under way, and not again on the read the store refused it at. The runtime
     /// answers [`Self::landless_ended`] (or [`Self::end_failed`]).
     pub fn take_end_landless(&mut self, now_ms: u64) -> Option<EndLandless> {
+        self.unlogged_guard("take_end_landless", |c| c.take_end_landless_now(now_ms))
+    }
+
+    fn take_end_landless_now(&mut self, now_ms: u64) -> Option<EndLandless> {
         // As [`Self::declare_wanted`]: the lapses are the lease watch's own.
         self.clock_ms = self.clock_ms.max(now_ms);
         let (declaring, ending) = (self.declaring(), self.ending().is_some());
@@ -1308,32 +1505,47 @@ impl super::Coordinator {
             return None;
         }
         log::warn!("coordinator: host {host} (boot {boot:#x}) lost its lease holding no land: ending it (no succession)");
-        self.note_unlogged();
-        self.successions.ending = Some((host, boot, self.replica));
+        self.successions.ending = Some((host, boot, CallStamp::pending(self.replica)));
         self.successions.ending_at_read = self.leases.reads();
-        Some(EndLandless { host, boot })
+        let end = EndLandless { host, boot };
+        self.push_decision(StoreDecision::EndLandless(end));
+        Some(end)
     }
 
-    /// The store's answer to the end [`Self::take_end_landless`] handed out: `Ended` takes the
-    /// host out of the view ([`Self::host_ended`]); `OwnsLand` (it won land after the read),
-    /// `NotLapsed` and `Gone` wait for a newer read, which decides again; `Recipient` (an open
-    /// run names it) is a second failure before the settle — a rollback while a run is open
-    /// here, a re-read of the open successions otherwise (the store knows one this coordinator
-    /// does not).
+    /// Test support: the store's answer to the end [`Self::take_end_landless`] handed out — an
+    /// input carrying its mark (with no such end in flight it is ignored).
+    #[doc(hidden)]
     pub fn landless_ended(&mut self, end: EndLandless, outcome: crate::LandlessEnd, now_ms: u64) {
-        self.note_unlogged();
-        self.clock_ms = self.clock_ms.max(now_ms);
-        if self.ending() != Some((end.host, end.boot)) {
-            log::warn!("coordinator: an answer to ending host {} came with no such end in flight: ignored", end.host);
+        let stamp = self.successions.ending.map_or(CallStamp::pending(self.replica), |(_, _, s)| s);
+        self.apply(super::Input::Decision(super::DecisionAnswer::Ended { stamp, end, outcome: Ok(outcome) }), now_ms);
+    }
+
+    /// The store's answer to the end handed out as `stamp`: `Ended` takes the host out of the
+    /// view ([`Self::host_ended`]); `OwnsLand` (it won land after the read), `NotLapsed` and
+    /// `Gone` wait for a newer read, which decides again; `Recipient` (an open run names it) is
+    /// a second failure before the settle — a rollback while a run is open here, a re-read of
+    /// the open successions otherwise (the store knows one this coordinator does not). A
+    /// refusal (nothing written: a lock timeout, a store error) is forgotten: the runtime asks
+    /// again after its retry wait. An answer with another stamp changes nothing.
+    pub(super) fn end_answered(&mut self, stamp: CallStamp, end: EndLandless, outcome: Result<crate::LandlessEnd, String>, _now_ms: u64) {
+        if self.successions.ending != Some((end.host, end.boot, stamp)) {
+            log::warn!("coordinator: an answer to ending host {} ({stamp:?}) that no mark here awaits: ignored", end.host);
             return;
         }
         self.successions.ending = None;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                log::debug!("coordinator: host {} could not be ended ({e}); ended again later", end.host);
+                return;
+            }
+        };
         match outcome {
             crate::LandlessEnd::Ended => self.host_ended(end.host, end.boot),
             crate::LandlessEnd::Recipient => {
                 if self.successions.open.is_empty() {
                     log::warn!("coordinator: host {} is named by a succession this coordinator does not know: re-read", end.host);
-                    self.successions_reread();
+                    self.reread_successions();
                 } else {
                     log::error!(
                         "coordinator: host {} lost its lease and an open succession names it: the world rolls back",
@@ -1350,11 +1562,15 @@ impl super::Coordinator {
         }
     }
 
-    /// The end [`Self::take_end_landless`] handed out could not be executed (a store error, a
-    /// lock timeout): forgotten; the runtime asks again after its retry wait.
+    /// Test support: the end [`Self::take_end_landless`] handed out could not be executed (a
+    /// store error, a lock timeout) — the refusal as an input carrying its mark.
+    #[doc(hidden)]
     pub fn end_failed(&mut self) {
-        self.note_unlogged();
-        self.successions.ending = None;
+        let Some((host, boot, stamp)) = self.successions.ending else { return };
+        let now = self.clock_ms;
+        let end = EndLandless { host, boot };
+        let failed = super::DecisionAnswer::Ended { stamp, end, outcome: Err("test: the end failed".into()) };
+        self.apply(super::Input::Decision(failed), now);
     }
 
     /// Host `host`'s boot `boot` was ended (its landless row is dead): never lapsed or ended

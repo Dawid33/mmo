@@ -25,6 +25,9 @@ use std::sync::{Arc, Mutex};
 pub const RIG_GENERATION: u64 = 1;
 /// Most rounds [`MultiRig::connect`] waits for every session to be up.
 pub const CONNECT_ROUNDS: usize = 40;
+/// Times one drive hands the core's cut decision out again after its transition met a foreign
+/// version (the rig's `arm_foreign_version` arms one at a time).
+const DECISION_ROUNDS: usize = 4;
 
 /// splitmix64 of `seed` and `i`: the rig's per-host and per-link seeds.
 pub fn mix(seed: u64, i: u64) -> u64 {
@@ -370,6 +373,11 @@ pub struct MultiRig {
     /// Whether the rig coordinator gives a departed host's land away when a host asks for
     /// it ([`Self::with_land_on_demand`], [`Self::drive_land`]).
     pub land_on_demand: bool,
+    /// The next cut decision [`Self::drive_world_cuts`] commits has its answer dropped (the
+    /// coordinator dies after the commit: call [`Self::restart_coordinator_from_store`] next);
+    /// the cut and its stored decision land in [`Self::cut_answer_dropped`].
+    pub drop_next_cut_answer: bool,
+    pub cut_answer_dropped: Option<(CutId, bool)>,
     /// The successions [`Self::drive_land`] declared, in order.
     pub land_declared: Vec<game::Succession>,
     /// The rig store's `cut_begins` (Elastic 1 Task 4): per world cut, the next host id when
@@ -505,6 +513,8 @@ impl MultiRig {
                 generation: RIG_GENERATION,
                 left: BTreeMap::new(),
                 land_on_demand: false,
+                drop_next_cut_answer: false,
+                cut_answer_dropped: None,
                 land_declared: Vec::new(),
                 begins: BTreeMap::new(),
                 ended: BTreeSet::new(),
@@ -578,14 +588,16 @@ impl MultiRig {
     pub fn with_world_cuts(&mut self, every_ms: u64) {
         let hosts: BTreeSet<HostId> = host_ids(self.hosts.len() as u32).collect();
         let mut core = self.core();
-        core.set_cut_epoch(self.coordinator_starts);
+        // The cut ids' high half, once: the row's bootstrap epoch (Elastic 2b Task 3).
+        core.set_cut_epoch(1);
         core.set_expected_hosts(hosts);
         core.set_world_cuts(every_ms);
     }
 
-    /// The coordinator process crashes and a new one starts (Elastic 2a): it claims the row
-    /// (the next epoch), loads the LAST TRANSITION written ([`game::coordinator::RigCluster::stored`])
-    /// as a new process boot, is configured as the runtime configures it (the cut period
+    /// The coordinator process crashes and a new one starts (Elastic 2a): the store decisions its
+    /// committed transitions carried ran with them (their answers lost), and the new one loads the
+    /// LAST TRANSITION written ([`game::coordinator::RigCluster::stored`]) as a new replica — the
+    /// marks whose answers it lacks are looked up (Elastic 2b Task 3) — is configured as the runtime configures it (the cut period
     /// continues from the projection, the crash policy, the hosts a cut expects — every live
     /// host whose row is not clean — and the store's open successions read again), and
     /// replaces the old core. Whatever the old process had not written or handed to a link is
@@ -596,6 +608,9 @@ impl MultiRig {
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         self.coordinator_starts += 1;
         let process = game::coordinator::ReplicaId(self.coordinator_starts);
+        // What the old process committed is in the store (its decisions ran with their
+        // transitions); their answers die with it.
+        self.execute_committed(false);
         let open: Vec<game::Succession> = self
             .successions
             .iter()
@@ -611,7 +626,6 @@ impl MultiRig {
             let grid = guard.history().grid().clone();
             let policy = guard.crash_policy();
             let mut loaded = game::Coordinator::load(&core, &history, grid, process, now).expect("the projection loads");
-            loaded.set_cut_epoch(self.coordinator_starts);
             loaded.set_crash_policy(policy);
             loaded.set_expected_hosts(expected);
             if policy == game::CrashPolicy::Succession {
@@ -709,12 +723,16 @@ impl MultiRig {
             }
         }
         let wanted = self.core().declare_wanted(now);
-        let Some(d) = wanted else { return };
-        let outcome = self.declare_in_store(&d);
-        if let game::Declared::Done(list) = &outcome {
-            self.land_declared.extend(list.iter().cloned());
+        if wanted.is_none() {
+            return;
         }
-        self.core().declared(outcome, now);
+        // Handed out: it leaves with the transition, executed and answered with it.
+        self.core().commit();
+        for a in self.execute_committed(true) {
+            if let game::coordinator::DecisionAnswer::Declared { outcome: Ok(game::Declared::Done(list)), .. } = a {
+                self.land_declared.extend(list);
+            }
+        }
     }
 
     /// What a server and the coordinator runtime do with a world cut, against the rig's
@@ -725,12 +743,9 @@ impl MultiRig {
     /// undecided cut aborted).
     pub fn drive_world_cuts(&mut self) {
         let Some(core) = self.coordinator.clone() else { return };
-        // The runtime records each cut's begin (`record_cut_begin`): the next id to issue.
-        let running = core.lock().unwrap_or_else(|e| e.into_inner()).world_cut_running();
-        if let Some((cut, _)) = running {
-            let next = self.hosts.len() as u64;
-            self.begins.entry(cut).or_insert(next);
-        }
+        // What the transitions since the last drive committed (a cut's begin, recorded by the
+        // transition that starts it), executed and answered.
+        self.execute_committed(true);
         for h in host_ids(self.hosts.len() as u32) {
             let m = &mut self.hosts[h.0 as usize].manager;
             // Only a world cut's part (a test's one-phase cut stays for the test to take).
@@ -754,17 +769,30 @@ impl MultiRig {
                 }
             }
         }
-        loop {
+        // The core's decision, handed out, leaves with its transition and is executed with it
+        // (a transition that met a foreign version committed nothing: handed out again).
+        for _ in 0..DECISION_ROUNDS {
             let decision = core.lock().unwrap_or_else(|e| e.into_inner()).take_decision();
-            let Some(d) = decision else { break };
-            let stored = self.decide_settling(d.cut, d.commit, &d.hosts, &d.settles);
-            if stored {
-                // Their `hosts` rows are clean now (`decide_cut`'s `leaving`).
-                for &h in &d.leaving {
-                    self.left.insert(h, self.boots[h.0 as usize]);
+            if decision.is_none() {
+                break;
+            }
+            core.lock().unwrap_or_else(|e| e.into_inner()).commit();
+            let answer = !std::mem::take(&mut self.drop_next_cut_answer);
+            for a in self.execute_committed(answer) {
+                if let (false, game::coordinator::DecisionAnswer::Cut { cut, committed: Ok(stored), .. }) = (answer, a) {
+                    self.cut_answer_dropped = Some((cut, stored));
                 }
             }
-            core.lock().unwrap_or_else(|e| e.into_inner()).decided(d.cut, stored);
+            if !answer {
+                // The coordinator is dead: nothing more of it runs until its restart.
+                return;
+            }
+        }
+        // A decision whose answer was lost (a restarted coordinator's): looked up.
+        let lost = core.lock().unwrap_or_else(|e| e.into_inner()).take_decision_lookup();
+        if let Some((cut, _)) = lost {
+            let stored = self.decide(cut, false, &[]);
+            core.lock().unwrap_or_else(|e| e.into_inner()).decision_looked_up(cut, stored);
         }
         let lookups = core.lock().unwrap_or_else(|e| e.into_inner()).take_cut_lookups();
         for (host, cut) in lookups {
@@ -825,6 +853,62 @@ impl MultiRig {
         self.prepared.push((cut.id, h));
         self.parts.insert((cut.id, h), cut);
         Ok(())
+    }
+
+    /// The rig store's side of the transitions committed since the last call (Elastic 2b Task 3,
+    /// `world_store` `coordinator_tx.rs`): each store decision they carried executed in order, as
+    /// the store runs it inside the transition's transaction, and its answer — with `answer`,
+    /// applied to the core as an input (the runtime's next pass); without, dropped (the replica
+    /// dies after the commit, before it applied them: its successor looks the marks up). The
+    /// answers.
+    pub fn execute_committed(&mut self, answer: bool) -> Vec<game::coordinator::DecisionAnswer> {
+        use game::coordinator::{DecisionAnswer, StoreDecision};
+        let committed = self.core().take_committed();
+        let mut answers = Vec::with_capacity(committed.len());
+        for (stamp, d) in committed {
+            answers.push(match d {
+                StoreDecision::DecideCut(c) => {
+                    let stored = self.decide_settling(c.cut, c.commit, &c.hosts, &c.settles);
+                    if stored {
+                        // Their `hosts` rows are clean now (`decide_in`'s `leaving`).
+                        for &h in &c.leaving {
+                            self.left.insert(h, self.boots[h.0 as usize]);
+                        }
+                    }
+                    DecisionAnswer::Cut { stamp, cut: c.cut, committed: Ok(stored) }
+                }
+                StoreDecision::BeginCut { cut } => {
+                    // `begin_in`: the next id to issue.
+                    let next = self.hosts.len() as u64;
+                    let bound = *self.begins.entry(cut).or_insert(next);
+                    DecisionAnswer::Begin { cut, bound: Ok(HostId(bound)) }
+                }
+                StoreDecision::Declare(d) => {
+                    let outcome = self.declare_in_store(&d);
+                    DecisionAnswer::Declared { stamp, outcome: Ok(outcome) }
+                }
+                StoreDecision::EndLandless(end) => {
+                    let outcome = self.end_landless_in_store(end);
+                    DecisionAnswer::Ended { stamp, end, outcome: Ok(outcome) }
+                }
+                StoreDecision::Rollback { .. } => {
+                    // Every open succession abandoned, the generation raised.
+                    let open = self.open_successions();
+                    self.abandoned.extend(open);
+                    self.generation += 1;
+                    DecisionAnswer::RolledBack { stamp, outcome: Ok(self.generation) }
+                }
+                StoreDecision::EndReplica(replica) => DecisionAnswer::ReplicaEnded { replica },
+            });
+        }
+        if answer {
+            let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+            let mut core = self.core();
+            for a in &answers {
+                core.apply(game::coordinator::Input::Decision(a.clone()), now);
+            }
+        }
+        answers
     }
 
     /// The decision on `cut` (as `decide_cut` / `abort_cut`): the stored one if any (first
@@ -1504,18 +1588,24 @@ impl MultiRig {
             self.cut_round();
         }
         let d = d.expect("declared");
-        let outcome = self.declare_in_store(&d);
+        // The declaration leaves with its transition and runs in it; its answer is applied (or,
+        // `!answer`, dropped: the coordinator dies after the commit).
+        self.core().commit();
+        let outcome = self
+            .execute_committed(answer)
+            .into_iter()
+            .find_map(|a| match a {
+                game::coordinator::DecisionAnswer::Declared { outcome, .. } => Some(outcome.expect("the rig store answers")),
+                _ => None,
+            })
+            .expect("the declaration committed with its transition");
         if !answer {
             let game::Declared::Done(list) = outcome else { panic!("the rig store refused the declaration: {outcome:?}") };
             return list;
         }
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         let live: BTreeSet<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && !d.dead.iter().any(|(p, _)| p == h)).collect();
-        let mut core = self.core();
-        core.declared(outcome.clone(), now);
         // The predecessor's row is dead: not expected by world cuts any more.
-        core.set_expected_hosts(live);
-        drop(core);
+        self.core().set_expected_hosts(live);
         match outcome {
             game::Declared::Done(list) => list,
             other => panic!("the rig store refused the declaration: {other:?}"),
@@ -1664,10 +1754,16 @@ impl MultiRig {
         let end = core.take_end_landless(now);
         drop(core);
         let end = end?;
-        let outcome = self.end_landless_in_store(end);
-        if answer {
-            self.core().landless_ended(end, outcome, now);
-        }
+        // The end leaves with its transition and runs in it; its answer applied or dropped.
+        self.core().commit();
+        let outcome = self
+            .execute_committed(answer)
+            .into_iter()
+            .find_map(|a| match a {
+                game::coordinator::DecisionAnswer::Ended { outcome, .. } => Some(outcome.expect("the rig store answers")),
+                _ => None,
+            })
+            .expect("the end committed with its transition");
         Some((end, outcome))
     }
 
@@ -1749,6 +1845,7 @@ impl MultiRig {
             dead: vec![(dead, self.boots[dead.0 as usize])],
             heirs: vec![heir],
             kind: game::SuccessionKind::Leave,
+            generation: self.generation,
         };
         let outcome = self.declare_in_store(&d);
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
@@ -1790,12 +1887,12 @@ impl MultiRig {
             assert!(r + 1 < SUCCESSION_DECLARE_ROUNDS, "the coordinator never wanted a rollback (seed {})", self.seed);
             self.cut_round();
         }
-        let open = self.open_successions();
-        self.abandoned.extend(open);
-        self.generation += 1;
-        let generation = self.generation;
-        self.core().rolled_back(generation);
-        generation
+        // The rollback leaves with its transition and runs in it (every open succession
+        // abandoned, the generation raised); its answer tells every host.
+        assert!(self.core().take_rollback().is_some(), "the rollback is handed out (seed {})", self.seed);
+        self.core().commit();
+        self.execute_committed(true);
+        self.generation
     }
 
     /// The rig's coordinator, locked ([`Self::with_coordinator`]).

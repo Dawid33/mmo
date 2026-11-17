@@ -22,7 +22,7 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::{CoordMsg, Target};
+use super::{CoordMsg, StoreDecision, Target};
 use crate::history::persist::HistoryLoadError;
 
 /// The format byte leading an encoded core ([`encode_core`]). Worlds are re-forged, never
@@ -35,14 +35,17 @@ use crate::history::persist::HistoryLoadError;
 pub const COORDINATOR_STATE_VERSION: u8 = 5;
 
 /// One transition of the core ([`super::Coordinator::take_transition`]): the projection as
-/// bytes — `core`, and `history` when it changed — and the messages it released. The runtime
-/// writes the bytes (compare-and-set) and sends `out` only once that write committed: every
-/// output is durable before it leaves.
+/// bytes — `core`, and `history` when it changed — the messages it released, and the store
+/// decisions it issues (Elastic 2b Task 3). The runtime writes the bytes (compare-and-set) and
+/// runs the decisions in that same transaction, each in a savepoint after the row's update; it
+/// sends `out` only once that write committed: every output, a store decision included, is
+/// durable before it leaves.
 #[derive(Debug, Clone)]
 pub struct Transition {
     pub core: Vec<u8>,
     pub history: Option<Vec<u8>>,
     pub out: Vec<(Target, CoordMsg)>,
+    pub decisions: Vec<StoreDecision>,
 }
 
 /// The bincode of the projection `body` (what a transition compares against the last one).

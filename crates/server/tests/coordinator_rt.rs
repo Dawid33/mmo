@@ -334,7 +334,12 @@ fn r1_world_migrates_history_row() {
     let dir = scratch("migrate");
     let map = land_map();
     let store = open_store(&dir);
-    let mut history = ensure_coordinator_state(&store, &map, None).unwrap().unwrap().coordinator.history().clone();
+    // A history (from another store: a start bootstraps its row).
+    let other_dir = scratch("migrate-src");
+    let other = open_store(&other_dir);
+    let mut history = ensure_coordinator_state(&other, &map, None).unwrap().unwrap().coordinator.history().clone();
+    other.shutdown();
+    let _ = std::fs::remove_dir_all(&other_dir);
     history.advance(game::history::CalendarTick(history.now().0 + 2 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY));
     let r1 = game::history::persist::encode(&history);
     let cut = game::WorldCut {
@@ -458,89 +463,6 @@ fn directive_not_sent_before_save() {
     assert_eq!(thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
     assert!(!fenced.is_set());
     assert!(!link.is_up(), "the link goes down with the coordinator");
-    store.shutdown();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A coordinator whose row another coordinator claimed is fenced at its next save: the
-/// process-wide flag is set, its link goes down and the thread ends `Fenced`.
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn fenced_coordinator_stops() {
-    let dir = scratch("fenced");
-    let map = land_map();
-    let store = open_store(&dir);
-    let start = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    let site = start_site(start.coordinator.history());
-    let fenced = server::claims::Fenced::default();
-    let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
-    let deadline = Instant::now() + WAIT;
-    while store.load_coordinator().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "the bootstrap was never saved");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    // Another coordinator takes the row; this one's next save is refused.
-    store.claim_coordinator().unwrap();
-    let player = PlayerId(1);
-    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: start_request(site) });
-    while !thread.is_finished() {
-        assert!(Instant::now() < deadline, "the fenced coordinator kept running");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(fenced.is_set(), "the process is fenced");
-    assert!(!link.is_up());
-    assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
-    let (_, claims) = stored_state(&store, &map).unwrap();
-    assert!(claims.is_empty(), "the fenced grant was never written");
-    store.shutdown();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A second coordinator starts while the first still runs (an overlapping restart):
-/// `ensure_coordinator_state` claims the row BEFORE it loads, so the first one — its
-/// grant's save failing and retried — can commit nothing after that load: it is
-/// fenced, and the state the second one runs from is the last one committed (loading
-/// first would let the first commit a newer state the second never sees).
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn overlapping_start_claims_before_it_loads() {
-    let dir = scratch("overlap");
-    let map = land_map();
-    let store = open_store(&dir);
-    let first = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    let first_epoch = first.fence.epoch;
-    let site = start_site(first.coordinator.history());
-    let fenced = server::claims::Fenced::default();
-    let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), first, fenced.clone()).unwrap();
-    let deadline = Instant::now() + WAIT;
-    while store.load_coordinator().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "the bootstrap was never saved");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    // The grant's saves fail for a while (retried every 250 ms).
-    store.fail_next_writes(2);
-    let player = PlayerId(1);
-    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: ATTACHED_HOP }];
-    link.send(HostMsg::Attach { host: h(0), epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None, successions: Vec::new(), policy: game::CrashPolicy::Rollback });
-    link.send(HostMsg::Request { id: RequestId { host: h(0), boot: 1, seq: 1 }, player, hop: ATTACHED_HOP, req: start_request(site) });
-    while store.failing_writes_left() > 1 {
-        assert!(Instant::now() < deadline, "the grant's save was never tried");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    // The second coordinator starts now.
-    let second = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
-    assert!(second.fence.epoch > first_epoch, "claimed over the first");
-    while !thread.is_finished() {
-        assert!(Instant::now() < deadline, "the first coordinator kept running after the second claimed");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(fenced.is_set(), "the first is fenced");
-    assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
-    let (_, claims) = stored_state(&store, &map).unwrap();
-    assert_eq!(claims, second.coordinator.claims(), "the second runs from the last committed state");
-    assert!(claims.is_empty(), "the first committed nothing after the second's load");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }

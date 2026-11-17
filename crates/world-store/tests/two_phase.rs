@@ -168,7 +168,6 @@ fn prepared_part_is_invisible_until_decided() {
     let h = open(&w.url);
     h.two_phase_ready().expect("the dev Postgres runs with max_prepared_transactions > 0");
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let done = h.prepare_cut(part(1, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
     assert_eq!(done.id, CutId(1));
     assert_eq!(prepared(&w), 1);
@@ -179,7 +178,7 @@ fn prepared_part_is_invisible_until_decided() {
     assert!(other.load_in_flight(None).unwrap().is_empty());
     assert_eq!(other.world_info().unwrap().world_tick, 0);
     assert_eq!(other.cut_decision(CutId(1)).unwrap(), None);
-    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
     assert!(other.load_region(A, &f0).unwrap().is_some());
     assert_eq!(other.world_info().unwrap().world_tick, 100);
     assert_eq!(prepared(&w), 0);
@@ -192,11 +191,10 @@ fn commit_decision_applies_every_part_and_the_world_tick() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let h1 = open(&w.url);
     prepare_both(&h, &h1, 2, &f0, &f1);
     assert_eq!(prepared(&w), 2);
-    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert!(h.load_region(A, &f0).unwrap().is_some());
     assert!(h.load_region(B, &f1).unwrap().is_some());
     assert_eq!(h.load_in_flight(None).unwrap().len(), 2, "both hosts' in-flight rows");
@@ -205,7 +203,7 @@ fn commit_decision_applies_every_part_and_the_world_tick() {
     assert_eq!(h.last_committed_cut().unwrap(), CutId(2), "the peer journal's boot base");
     assert_eq!(prepared(&w), 0);
     // Deciding again changes nothing and finds nothing left to commit.
-    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     h.shutdown();
 }
 
@@ -217,7 +215,6 @@ fn a_cut_part_writes_only_its_own_regions_chunks() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let h1 = open(&w.url);
     let at = ChunkCoords::new(0, 0, 0);
     let edited = |id: u16| {
@@ -231,7 +228,7 @@ fn a_cut_part_writes_only_its_own_regions_chunks() {
     };
     h.prepare_cut(with_chunks(part(3, hid(0)), vec![(at, edited(5))]), f0.clone(), 0).recv().unwrap().unwrap();
     h1.prepare_cut(with_chunks(part(3, hid(1)), vec![(at, edited(6))]), f1.clone(), 0).recv().unwrap().unwrap();
-    assert!(h.decide_cut(CutId(3), 300, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(3), 300, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert_eq!(h.load_region(A, &f0).unwrap().unwrap().chunks, vec![(at, edited(5))], "host 0's edit in A");
     assert_eq!(h.load_region(B, &f1).unwrap().unwrap().chunks, vec![(at, edited(6))], "host 1's edit in B");
     assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM chunks WHERE rx = 0 AND rz = 0"), 1);
@@ -258,10 +255,9 @@ fn abort_decision_leaves_nothing_and_no_prepared_xact() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let h1 = open(&w.url);
     prepare_both(&h, &h1, 3, &f0, &f1);
-    assert!(!h.decide_cut(CutId(3), 300, false, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(!h.decide_cut(CutId(3), 300, false, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert!(h.stored_regions().unwrap().is_empty());
     assert!(h.load_in_flight(None).unwrap().is_empty());
     assert_eq!(h.world_info().unwrap().world_tick, 0);
@@ -276,12 +272,11 @@ fn first_decision_wins() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let h1 = open(&w.url);
     prepare_both(&h, &h1, 4, &f0, &f1);
     assert!(!h.abort_cut(CutId(4), 400).unwrap(), "a host's abort is the first decision");
     assert!(!h.abort_cut(CutId(4), 400).unwrap());
-    assert!(!h.decide_cut(CutId(4), 400, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap(), "the later commit loses");
+    assert!(!h.decide_cut(CutId(4), 400, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap(), "the later commit loses");
     assert!(h.stored_regions().unwrap().is_empty());
     assert_eq!(h.world_info().unwrap().world_tick, 0);
     assert_eq!(prepared(&w), 0, "the losing commit rolled the parts back");
@@ -290,7 +285,7 @@ fn first_decision_wins() {
     assert_eq!(h1.cut_decided(CutId(4)).unwrap(), Some(false));
     // And the other way round: a decided commit is not undone by a late abort.
     prepare_both(&h, &h1, 5, &f0, &f1);
-    assert!(h.decide_cut(CutId(5), 500, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(5), 500, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert!(h.abort_cut(CutId(5), 500).unwrap());
     h.shutdown();
 }
@@ -300,11 +295,10 @@ fn resolve_finishes_a_decided_cut_stopped_between_commits() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let h1 = open(&w.url);
     prepare_both(&h, &h1, 6, &f0, &f1);
     h.stop_after_commit_prepared(1);
-    let err = h.decide_cut(CutId(6), 600, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap_err();
+    let err = h.decide_cut(CutId(6), 600, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap_err();
     assert_eq!(err, StoreError::Backend("test stop".into()));
     assert_eq!(prepared(&w), 1, "one part is still prepared");
     // A process starting later (here: another handle) finishes it.
@@ -427,36 +421,15 @@ fn stale_generation_cannot_decide_a_commit() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     h.prepare_cut(part(13, hid(0)), f0, 0).recv().unwrap().unwrap();
     exec(&w, "UPDATE world SET generation = 1 WHERE id = 1");
-    let err = h.decide_cut(CutId(13), 1300, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap_err();
+    let err = h.decide_cut(CutId(13), 1300, true, vec![hid(0)], vec![], 0, vec![]).unwrap_err();
     assert_eq!(err, StoreError::StaleGeneration { stored: 1, mine: 0 });
     assert_eq!(h.cut_decision(CutId(13)).unwrap(), None, "nothing recorded");
     assert_eq!(prepared(&w), 1, "nothing committed");
     assert_eq!(h.world_info().unwrap().world_tick, 0);
     assert_eq!(h.resolve_prepared().unwrap(), vec![(CutId(13), false)]);
     assert!(h.stored_regions().unwrap().is_empty());
-    h.shutdown();
-}
-
-#[test]
-fn stale_coordinator_cannot_decide() {
-    let Some(w) = pg_world() else { return };
-    let h = open(&w.url);
-    let (f0, _) = fences(&h);
-    let stale = h.claim_coordinator().unwrap();
-    let newer = h.claim_coordinator().unwrap();
-    h.prepare_cut(part(14, hid(0)), f0, 0).recv().unwrap().unwrap();
-    let err = h.decide_cut(CutId(14), 1400, true, vec![hid(0)], vec![], stale, 0, vec![]).unwrap_err();
-    assert_eq!(err, StoreError::Fenced { sr: None });
-    assert_eq!(h.cut_decision(CutId(14)).unwrap(), None, "nothing recorded");
-    assert_eq!(prepared(&w), 1, "nothing committed or rolled back");
-    let err = h.decide_cut(CutId(14), 1400, false, vec![hid(0)], vec![], stale, 0, vec![]).unwrap_err();
-    assert_eq!(err, StoreError::Fenced { sr: None }, "an abort decision is fenced too");
-    assert_eq!(prepared(&w), 1);
-    assert!(h.decide_cut(CutId(14), 1400, true, vec![hid(0)], vec![], newer, 0, vec![]).unwrap());
-    assert_eq!(prepared(&w), 0);
     h.shutdown();
 }
 
@@ -468,7 +441,6 @@ fn claim_waits_for_the_prepared_part_and_proceeds_after_the_decision() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     h.prepare_cut(part(15, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
     let other = open(&w.url);
     let (done_tx, done_rx) = crossbeam::channel::bounded(1);
@@ -480,7 +452,7 @@ fn claim_waits_for_the_prepared_part_and_proceeds_after_the_decision() {
         })
     };
     assert!(done_rx.recv_timeout(BLOCKED_FOR).is_err(), "the claim waits for the prepared part");
-    assert!(h.decide_cut(CutId(15), 1500, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(15), 1500, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
     let new = done_rx.recv_timeout(Duration::from_secs(10)).expect("the claim finishes after the decision").unwrap();
     claimer.join().unwrap();
     let sr = game::super_region_of(A, h.super_region_regions());
@@ -497,16 +469,15 @@ fn leaving_host_is_clean_only_if_committed() {
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
     register_from_zero(&w, &h, 2);
-    let c = h.claim_coordinator().unwrap();
     let clean = |h: &StoreHandle| h.hosts().unwrap().iter().map(|r| (r.id, r.clean)).collect::<Vec<_>>();
     let h1 = open(&w.url);
     prepare_both(&h, &h1, 16, &f0, &f1);
-    assert!(!h.decide_cut(CutId(16), 1600, false, vec![hid(0), hid(1)], vec![hid(1)], c, 0, vec![]).unwrap());
+    assert!(!h.decide_cut(CutId(16), 1600, false, vec![hid(0), hid(1)], vec![hid(1)], 0, vec![]).unwrap());
     assert_eq!(clean(&h), vec![(hid(0), false), (hid(1), false)], "an aborted cut leaves nobody clean");
     h.cut_decided(CutId(16)).unwrap();
     h1.cut_decided(CutId(16)).unwrap();
     prepare_both(&h, &h1, 17, &f0, &f1);
-    assert!(h.decide_cut(CutId(17), 1700, true, vec![hid(0), hid(1)], vec![hid(1)], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(17), 1700, true, vec![hid(0), hid(1)], vec![hid(1)], 0, vec![]).unwrap());
     assert_eq!(clean(&h), vec![(hid(0), false), (hid(1), true)], "only the leaving host");
     assert_eq!(prepared(&w), 0);
     h.shutdown();
@@ -523,9 +494,8 @@ fn commit_beside_a_dirty_unlisted_host_becomes_an_abort() {
     let (f0, f1) = fences(&h);
     h.claim_super_regions(hid(2), vec![(7, 7)]).unwrap();
     register_from_zero(&w, &h, 3);
-    let c = h.claim_coordinator().unwrap();
     prepare_both(&h, &h1, 40, &f0, &f1);
-    assert!(!h.decide_cut(CutId(40), 4000, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(!h.decide_cut(CutId(40), 4000, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert_eq!(h.cut_decision(CutId(40)).unwrap(), Some(false), "an abort is recorded");
     assert!(h.stored_regions().unwrap().is_empty(), "nothing visible");
     assert_eq!(h.world_info().unwrap().world_tick, 0);
@@ -544,24 +514,23 @@ fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
     register_from_zero(&w, &h, 2);
-    let c = h.claim_coordinator().unwrap();
     let settle = |cut: u64| {
         h.cut_decided(CutId(cut)).unwrap();
         h1.cut_decided(CutId(cut)).unwrap();
     };
     // Host 1 leaves: listed, dirty until this decision marks it clean.
     prepare_both(&h, &h1, 50, &f0, &f1);
-    assert!(h.decide_cut(CutId(50), 5000, true, vec![hid(0), hid(1)], vec![hid(1)], c, 0, vec![]).unwrap(), "the leave cut commits");
+    assert!(h.decide_cut(CutId(50), 5000, true, vec![hid(0), hid(1)], vec![hid(1)], 0, vec![]).unwrap(), "the leave cut commits");
     settle(50);
     // Host 0 alone: host 1's row is clean, unlisted is fine.
     h.prepare_cut(part(51, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
-    assert!(h.decide_cut(CutId(51), 5100, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap(), "a clean row need not be listed");
+    assert!(h.decide_cut(CutId(51), 5100, true, vec![hid(0)], vec![], 0, vec![]).unwrap(), "a clean row need not be listed");
     settle(51);
     // Host 1's process comes back — a new host, id 2 — while cut 52 of host 0 is pending.
     h.prepare_cut(part(52, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
     let back = register(&h1, "host-1", 2).unwrap();
     assert_eq!((back.id, back.bumped), (hid(2), false));
-    assert!(!h.decide_cut(CutId(52), 5200, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap(), "host 2 is dirty and unlisted");
+    assert!(!h.decide_cut(CutId(52), 5200, true, vec![hid(0)], vec![], 0, vec![]).unwrap(), "host 2 is dirty and unlisted");
     settle(52);
     assert_eq!(h.world_info().unwrap().world_tick, 5100, "cut 52 is not visible");
     // The next cut lists it (its part saves no region: it owns no land): commits.
@@ -569,7 +538,7 @@ fn host_returning_from_a_leave_aborts_a_commit_that_excludes_it() {
     let landless = Fence { owner: back.id, epochs: Default::default(), all_hosts: false };
     let empty = WorldCut { regions: vec![], in_flight: vec![], ..part(53, back.id) };
     h1.prepare_cut(empty, landless, 0).recv().unwrap().unwrap();
-    assert!(h.decide_cut(CutId(53), 5300, true, vec![hid(0), back.id], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(53), 5300, true, vec![hid(0), back.id], vec![], 0, vec![]).unwrap());
     settle(53);
     assert_eq!(prepared(&w), 0);
     h1.shutdown();
@@ -588,32 +557,28 @@ fn a_host_registered_after_the_cuts_begin_need_not_be_listed() {
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
     register_from_zero(&w, &h, 2);
-    let c = h.claim_coordinator().unwrap();
     // Cut 60: begun with hosts 0 and 1 issued (bound 2); host 2 registers after it.
-    assert_eq!(h.record_cut_begin(CutId(60), c).unwrap(), hid(2), "the next id to issue");
+    assert_eq!(h.record_cut_begin(CutId(60)).unwrap(), hid(2), "the next id to issue");
     let late = register(&h1, "late", 3).unwrap();
     assert_eq!(late.id, hid(2));
-    assert_eq!(h.record_cut_begin(CutId(60), c).unwrap(), hid(2), "first writer wins");
+    assert_eq!(h.record_cut_begin(CutId(60)).unwrap(), hid(2), "first writer wins");
     prepare_both(&h, &h1, 60, &f0, &f1);
-    assert!(h.decide_cut(CutId(60), 6000, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap(), "host 2 joined after the begin");
+    assert!(h.decide_cut(CutId(60), 6000, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap(), "host 2 joined after the begin");
     h.cut_decided(CutId(60)).unwrap();
     h1.cut_decided(CutId(60)).unwrap();
     // Cut 61: begun AFTER host 2 registered (bound 3): host 2 must be listed.
-    assert_eq!(h.record_cut_begin(CutId(61), c).unwrap(), hid(3));
+    assert_eq!(h.record_cut_begin(CutId(61)).unwrap(), hid(3));
     prepare_both(&h, &h1, 61, &f0, &f1);
-    assert!(!h.decide_cut(CutId(61), 6100, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap(), "host 2 registered before the begin");
+    assert!(!h.decide_cut(CutId(61), 6100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap(), "host 2 registered before the begin");
     h.cut_decided(CutId(61)).unwrap();
     h1.cut_decided(CutId(61)).unwrap();
     // Cut 62: no begin recorded — every dirty host listed, as before.
     prepare_both(&h, &h1, 62, &f0, &f1);
-    assert!(!h.decide_cut(CutId(62), 6200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap(), "no begin: the rule before");
+    assert!(!h.decide_cut(CutId(62), 6200, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap(), "no begin: the rule before");
     h.cut_decided(CutId(62)).unwrap();
     h1.cut_decided(CutId(62)).unwrap();
     assert_eq!(h.world_info().unwrap().world_tick, 6000, "only cut 60 is visible");
-    // A stale coordinator records nothing.
-    let newer = h1.claim_coordinator().unwrap();
-    assert!(matches!(h.record_cut_begin(CutId(63), c), Err(StoreError::Fenced { .. })));
-    assert_eq!(h.record_cut_begin(CutId(63), newer).unwrap(), hid(3));
+    assert_eq!(h.record_cut_begin(CutId(63)).unwrap(), hid(3));
     assert_eq!(prepared(&w), 0);
     h1.shutdown();
     h.shutdown();
@@ -628,19 +593,18 @@ fn a_decision_prunes_older_begins_and_keeps_every_decision() {
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
     register_from_zero(&w, &h, 2);
-    let c = h.claim_coordinator().unwrap();
     for cut in [70, 71] {
-        h.record_cut_begin(CutId(cut), c).unwrap();
+        h.record_cut_begin(CutId(cut)).unwrap();
         prepare_both(&h, &h1, cut, &f0, &f1);
-        assert!(h.decide_cut(CutId(cut), 100 * cut, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+        assert!(h.decide_cut(CutId(cut), 100 * cut, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
         h.cut_decided(CutId(cut)).unwrap();
         h1.cut_decided(CutId(cut)).unwrap();
     }
     // A begin recorded for a later cut is not touched by an older decision.
-    h.record_cut_begin(CutId(73), c).unwrap();
-    h.record_cut_begin(CutId(72), c).unwrap();
+    h.record_cut_begin(CutId(73)).unwrap();
+    h.record_cut_begin(CutId(72)).unwrap();
     prepare_both(&h, &h1, 72, &f0, &f1);
-    assert!(h.decide_cut(CutId(72), 7200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(72), 7200, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     h.cut_decided(CutId(72)).unwrap();
     h1.cut_decided(CutId(72)).unwrap();
     let begins = |cut: u64| scalar_i64(&w, &format!("SELECT COUNT(*) FROM cut_begins WHERE cut_id = {cut}"));
@@ -656,7 +620,6 @@ fn a_decision_prunes_older_begins_and_keeps_every_decision() {
 fn sqlite_is_not_two_phase_ready() {
     let h = open(&StoreUrl::Memory);
     let f = h.claim_super_regions(hid(0), vec![(0, 0)]).unwrap();
-    let c = h.claim_coordinator().unwrap();
     fn unsupported<T>(r: Result<T, StoreError>) -> bool {
         matches!(r, Err(StoreError::Unsupported(_)))
     }
@@ -664,7 +627,7 @@ fn sqlite_is_not_two_phase_ready() {
     assert!(err.to_string().contains("max_prepared_transactions"), "{err}");
     assert!(matches!(err, StoreError::Unsupported(_)));
     assert!(unsupported(h.prepare_cut(part(1, hid(0)), f, 0).recv().unwrap()));
-    assert!(unsupported(h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], c, 0, vec![])));
+    assert!(unsupported(h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], 0, vec![])));
     assert!(unsupported(h.abort_cut(CutId(1), 100)));
     assert!(unsupported(h.resolve_prepared()));
     assert_eq!(h.cut_decision(CutId(1)).unwrap(), None);
@@ -678,9 +641,8 @@ fn read_only_refuses_two_phase_writes() {
     each_backend("two_phase_ro", true, |url| {
         open(url).shutdown();
         let r = StoreHandle::open(url, Dials::BUILT, OpenMode::ReadOnly).unwrap();
-        let c = world_store::CoordinatorFence { epoch: 1 };
         assert_eq!(r.prepare_cut(part(1, hid(0)), Fence::default(), 0).recv().unwrap().unwrap_err(), StoreError::ReadOnly);
-        assert_eq!(r.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap_err(), StoreError::ReadOnly);
+        assert_eq!(r.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], 0, vec![]).unwrap_err(), StoreError::ReadOnly);
         assert_eq!(r.abort_cut(CutId(1), 100).unwrap_err(), StoreError::ReadOnly);
         assert_eq!(r.resolve_prepared().unwrap_err(), StoreError::ReadOnly);
         assert_eq!(r.cut_decision(CutId(1)).unwrap(), None);
@@ -696,9 +658,8 @@ fn commit_with_a_missing_part_becomes_an_abort() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     h.prepare_cut(part(20, hid(0)), f0, 0).recv().unwrap().unwrap();
-    assert!(!h.decide_cut(CutId(20), 2000, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(!h.decide_cut(CutId(20), 2000, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert_eq!(h.cut_decision(CutId(20)).unwrap(), Some(false), "an abort is recorded");
     assert!(h.stored_regions().unwrap().is_empty(), "nothing visible");
     assert_eq!(h.world_info().unwrap().world_tick, 0);
@@ -714,9 +675,8 @@ fn commit_with_an_unlisted_part_becomes_an_abort() {
     let h = open(&w.url);
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     prepare_both(&h, &h1, 21, &f0, &f1);
-    assert!(!h.decide_cut(CutId(21), 2100, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap());
+    assert!(!h.decide_cut(CutId(21), 2100, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
     assert_eq!(h.cut_decision(CutId(21)).unwrap(), Some(false));
     assert!(h.stored_regions().unwrap().is_empty(), "nothing visible");
     assert_eq!(prepared(&w), 0, "the listed and the unlisted part are rolled back");
@@ -731,9 +691,8 @@ fn decide_finishes_parts_outside_the_listed_hosts() {
     let h = open(&w.url);
     let h1 = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     prepare_both(&h, &h1, 22, &f0, &f1);
-    assert!(!h.decide_cut(CutId(22), 2200, false, vec![hid(0)], vec![], c, 0, vec![]).unwrap());
+    assert!(!h.decide_cut(CutId(22), 2200, false, vec![hid(0)], vec![], 0, vec![]).unwrap());
     assert_eq!(prepared(&w), 0, "host 1's unlisted part is rolled back too");
     h1.shutdown();
     h.shutdown();
@@ -760,8 +719,7 @@ fn part_prepared_after_its_abort_rolls_itself_back() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
-    assert!(!h.decide_cut(CutId(24), 2400, false, vec![hid(0)], vec![], c, 0, vec![]).unwrap());
+    assert!(!h.decide_cut(CutId(24), 2400, false, vec![hid(0)], vec![], 0, vec![]).unwrap());
     let err = h.prepare_cut(part(24, hid(0)), f0.clone(), 0).recv().unwrap().unwrap_err();
     assert_eq!(err, StoreError::CutAborted(CutId(24)));
     assert_eq!(prepared(&w), 0, "nothing staged");
@@ -797,11 +755,10 @@ fn cut_decided_clears_the_pending_part() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     h.prepare_cut(part(32, hid(0)), f0.clone(), 0).recv().unwrap().unwrap();
     assert_eq!(h.cut_decided(CutId(32)).unwrap(), None, "undecided: the part stays pending");
     assert!(matches!(h.commit_cut(part(33, hid(0)), f0.clone()).recv().unwrap(), Err(StoreError::CutPending(_))));
-    assert!(h.decide_cut(CutId(32), 3200, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(32), 3200, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
     assert_eq!(h.cut_decided(CutId(32)).unwrap(), Some(true));
     h.commit_cut(part(33, hid(0)), f0.clone()).recv().unwrap().expect("accepted once the cut is seen decided");
     // A decision recorded while this handle's part is still staged (the decider died
@@ -886,7 +843,6 @@ fn entity_crossing_between_two_parts_prepares_without_waiting() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let h1 = open(&w.url);
     let e = crate::codec::bundle();
     let with = |id: u64, host: game::HostId, entities: Vec<game::EntityBundle>| {
@@ -896,7 +852,7 @@ fn entity_crossing_between_two_parts_prepares_without_waiting() {
     };
     h.prepare_cut(with(1, hid(0), vec![e.clone()]), f0.clone(), 0).recv().unwrap().unwrap();
     h1.prepare_cut(with(1, hid(1), vec![]), f1.clone(), 0).recv().unwrap().unwrap();
-    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     settled(&h, &h1, CutId(1));
     assert_eq!(h.load_region(A, &f0).unwrap().unwrap().entities, vec![e.clone()], "stored in host 0's region");
     // Cut 2: host 0's part first (it holds its deleted rows' locks while prepared), then
@@ -909,7 +865,7 @@ fn entity_crossing_between_two_parts_prepares_without_waiting() {
         .expect("host 1's part is answered")
         .expect("host 1's part prepares beside host 0's");
     assert_eq!(prepared(&w), 2);
-    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     settled(&h, &h1, CutId(2));
     assert_eq!(prepared(&w), 0);
     assert!(h.load_region(A, &f0).unwrap().unwrap().entities.is_empty(), "gone from host 0's region");
@@ -920,7 +876,7 @@ fn entity_crossing_between_two_parts_prepares_without_waiting() {
     // And back the other way, host 1's part prepared first.
     h1.prepare_cut(with(3, hid(1), vec![]), f1.clone(), 0).recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
     h.prepare_cut(with(3, hid(0), vec![e.clone()]), f0.clone(), 0).recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
-    assert!(h.decide_cut(CutId(3), 300, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(3), 300, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     settled(&h, &h1, CutId(3));
     assert_eq!(h.load_region(A, &f0).unwrap().unwrap().entities, vec![e]);
     assert!(h.load_region(B, &f1).unwrap().unwrap().entities.is_empty());
@@ -967,7 +923,6 @@ fn claim_holding_the_world_row_does_not_block_a_decision() {
     // The boot below is host 0, whose part the decisions list.
     exec(&w, "UPDATE world SET next_host_id = 0");
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut conn = rt.block_on(sqlx::PgConnection::connect(&w.db.url)).unwrap();
     for (id, lock, blocks) in [(50u64, "FOR KEY SHARE", false), (52, "FOR UPDATE", true)] {
@@ -975,7 +930,14 @@ fn claim_holding_the_world_row_does_not_block_a_decision() {
         let mut tx = rt.block_on(conn.begin()).unwrap();
         rt.block_on(sqlx::query(&format!("SELECT super_region_regions FROM world WHERE id = 1 {lock}")).fetch_all(&mut *tx))
             .unwrap();
-        let decided = h.decide_cut_later(CutId(id), 100 * id, true, vec![hid(0)], vec![], c, 0, vec![]);
+        let decided = {
+            let (tx_d, rx_d) = crossbeam::channel::bounded(1);
+            let h = h.clone();
+            std::thread::spawn(move || {
+                let _ = tx_d.send(h.decide_cut(CutId(id), 100 * id, true, vec![hid(0)], vec![], 0, vec![]));
+            });
+            rx_d
+        };
         if blocks {
             assert!(decided.recv_timeout(BLOCKED_FOR).is_err(), "{lock}: the decision waits");
             rt.block_on(tx.rollback()).unwrap();
@@ -1014,12 +976,11 @@ fn prepared_part_saving_an_entity_its_host_still_stores_elsewhere_is_refused() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, _) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let e = crate::codec::bundle();
     let mut first = part(1, hid(0));
     first.regions[0].1.entities = vec![e.clone()];
     h.prepare_cut(first, f0.clone(), 0).recv().unwrap().unwrap();
-    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
     assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
     let mut second = part(2, hid(0));
     let mut other = region();
@@ -1051,7 +1012,6 @@ fn stale_row_across_hosts_commits_and_is_reported() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
     let (f0, f1) = fences(&h);
-    let c = h.claim_coordinator().unwrap();
     let h1 = open(&w.url);
     let e = crate::codec::bundle();
     let with = |id: u64, host: game::HostId, entities: Vec<game::EntityBundle>| {
@@ -1061,7 +1021,7 @@ fn stale_row_across_hosts_commits_and_is_reported() {
     };
     h.prepare_cut(with(1, hid(0), vec![e.clone()]), f0.clone(), 0).recv().unwrap().unwrap();
     h1.prepare_cut(with(1, hid(1), vec![]), f1.clone(), 0).recv().unwrap().unwrap();
-    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     settled(&h, &h1, CutId(1));
     until_checked(&h, 1);
     assert_eq!(h.cuts_with_entities_twice(), 0, "a healthy cut reports nothing");
@@ -1070,7 +1030,7 @@ fn stale_row_across_hosts_commits_and_is_reported() {
     empty.regions.clear();
     h.prepare_cut(empty, f0.clone(), 0).recv().unwrap().unwrap();
     h1.prepare_cut(with(2, hid(1), vec![e.clone()]), f1.clone(), 0).recv().unwrap().expect("host 1 cannot judge A's row");
-    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], c, 0, vec![]).unwrap());
+    assert!(h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     settled(&h, &h1, CutId(2));
     until_checked(&h, 2);
     assert_eq!(h.cuts_with_entities_twice(), 1, "the decider reports the cut");

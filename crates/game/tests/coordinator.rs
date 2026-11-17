@@ -4014,6 +4014,8 @@ fn a_core_reloaded_after_every_input_is_identical() {
         b
     };
     let mut b = load(&t0, &history, start);
+    // Loaded at the row's version (the marks of its decisions are stamped by it).
+    b.set_version(a.version());
     let mut last = t0;
     let (mut sent, mut transitions) = (Vec::new(), 0usize);
     // One runtime pass per input: the input, then the upkeep at the pass's store time.
@@ -4046,6 +4048,7 @@ fn a_core_reloaded_after_every_input_is_identical() {
         }
         // Reloaded after EVERY input, from the last transition written: what is not in it is lost.
         b = load(&last, &history, *now);
+        b.set_version(a.version());
     }
     let kinds = |f: fn(&CoordMsg) -> bool| sent.iter().filter(|m| f(m)).count();
     assert!(transitions > 20, "a life worth comparing: {transitions} transitions");
@@ -4066,8 +4069,9 @@ fn a_core_reloaded_after_every_input_is_identical() {
 /// loaded by a new process has no host attached (no gate host, no cut begins, no order goes
 /// out) until each host attaches again, and each `Attach` corrects what the projection holds
 /// of that host alone: its live regions it does not list park, another host's stand until
-/// that host attaches. A decision handed to the dead process is handed out again. Loaded by
-/// the same process boot (a cache reloaded) every attachment stands.
+/// that host attaches. A decision the dead process handed out (it committed with that process's
+/// transition, its answer lost) is looked up, never handed out again (Elastic 2b Task 3). Loaded
+/// by the same process boot (a cache reloaded) every attachment stands.
 #[test]
 fn an_attachment_of_another_process_boot_is_detached() {
     let (hist, _, people) = world();
@@ -4095,12 +4099,14 @@ fn an_attachment_of_another_process_boot_is_detached() {
     assert_eq!(same.gate_host(), Some(h(0)), "a cache reloaded keeps its hosts attached");
     assert!(same.take_decision().is_none(), "the decision is in flight in this process");
 
-    // A new process boot: nobody is attached, the decision is handed out again.
+    // A new process boot: nobody is attached, the decision is looked up, never handed out again.
     let mut c = reload(&t, &history, new, 20 * CUT_EVERY_MS);
     configure(&mut c, true);
     assert_eq!(c.gate_host(), None, "no host attached to the new process");
-    assert!(c.take_decision().is_some_and(|d| d.cut == cut && d.commit), "handed out again by the new process");
-    c.decided(cut, true);
+    assert!(c.take_decision().is_none(), "never handed out again");
+    assert_eq!(c.take_decision_lookup().map(|(c, _)| c), Some(cut), "looked up instead");
+    assert_eq!(c.take_decision_lookup(), None, "once");
+    c.decision_looked_up(cut, true);
     c.maintain(60 * CUT_EVERY_MS);
     assert!(c.world_cut_running().is_none(), "no cut begins with no host attached");
     // Host 1 attaches again running nothing: ITS region parks; host 0's stands.
@@ -4639,4 +4645,92 @@ fn a_link_down_of_a_host_attached_elsewhere_changes_nothing() {
     assert!(a.take_transition().is_none(), "nothing to write");
     b.apply(Input::LinkDown { host: h(0) }, 10 * CUT_EVERY_MS);
     assert_eq!(b.world_cut_progress().map(|(_, _, verdict)| verdict), Some(Some(false)), "aborted where it was attached");
+}
+
+// ---- store decisions in the transition (Elastic 2b Task 3) ---------------------------------
+
+/// Elastic 2b Task 3: an answer counts only for the call it answers — its stamp is the mark's.
+/// An answer with another stamp (another replica's call, or an older one of this replica's)
+/// changes nothing: `declared`, a failed declaration, `landless_ended`, a failed end, and
+/// `rolled_back`.
+#[test]
+fn an_answer_with_another_stamp_changes_nothing() {
+    let other = CallStamp { replica: ReplicaId(77), version: 3 };
+    let unchanged = |c: &mut Coordinator, a: DecisionAnswer, what: &str| {
+        let before = c.encode_projection();
+        c.apply(Input::Decision(a), 1_000);
+        assert!(c.encode_projection() == before, "{what}: the projection changed: {}", c.projection_debug());
+    };
+
+    // A declaration in flight: neither its success nor its failure answered by another stamp.
+    let mut c = succeeding(3);
+    read_leases(&mut c, 3, &[h(2)], &[], 1_000);
+    let d = c.declare_wanted(1_000).expect("a lapsed host is declared");
+    let t = written(&mut c).expect("the declaration's transition");
+    assert_eq!(t.decisions, vec![StoreDecision::Declare(d.clone())], "the declaration rides in its transition");
+    let done = game::Declared::Done(store_declares(&d, 3, 1, game::CutId(0)));
+    unchanged(&mut c, DecisionAnswer::Declared { stamp: other, outcome: Ok(done.clone()) }, "declared");
+    unchanged(&mut c, DecisionAnswer::Declared { stamp: other, outcome: Err("lock timeout".into()) }, "declare_failed");
+    read_leases(&mut c, 3, &[h(2)], &[], 1_100);
+    assert_eq!(c.declare_wanted(1_100), None, "still in flight: nothing declared twice");
+    let mine = CallStamp { replica: c.replica(), version: c.version() };
+    c.apply(Input::Decision(DecisionAnswer::Declared { stamp: mine, outcome: Ok(done) }), 1_200);
+    assert_eq!(c.successions_open_count(), 1, "its own answer opens the run");
+
+    // An end in flight.
+    let mut c = succeeding(3);
+    read_land(&mut c, 3, &[h(2)], &[], &[h(2)], 10);
+    let end = c.take_end_landless(10).expect("a landless lapse is ended");
+    let t = written(&mut c).expect("the end's transition");
+    assert_eq!(t.decisions, vec![StoreDecision::EndLandless(end)]);
+    unchanged(&mut c, DecisionAnswer::Ended { stamp: other, end, outcome: Ok(game::LandlessEnd::Ended) }, "landless_ended");
+    unchanged(&mut c, DecisionAnswer::Ended { stamp: other, end, outcome: Err("lock timeout".into()) }, "end_failed");
+    assert_eq!(c.take_end_landless(20), None, "still in flight");
+
+    // A rollback in flight.
+    let mut c = succeeding(3);
+    declare_one(&mut c, 3, h(2), 100);
+    commit_routed(&mut c);
+    c.apply(Input::Decision(DecisionAnswer::Declared { stamp: other, outcome: Ok(game::Declared::SuccessionOpen) }), 150);
+    read_land(&mut c, 3, &[h(1)], &[h(2)], &[], 200);
+    c.maintain(200);
+    assert!(c.rollback_wanted(), "a second landed lapse before the settle");
+    let from = c.take_rollback().expect("the rollback is handed out");
+    let t = written(&mut c).expect("the rollback's transition");
+    assert_eq!(t.decisions, vec![StoreDecision::Rollback { from }]);
+    unchanged(&mut c, DecisionAnswer::RolledBack { stamp: other, outcome: Ok(from + 1) }, "rolled_back");
+    unchanged(&mut c, DecisionAnswer::RolledBack { stamp: other, outcome: Err("lock timeout".into()) }, "a failed rollback");
+    assert!(c.rollback_wanted() && c.take_rollback().is_none(), "the rollback is still in flight");
+}
+
+/// Elastic 2b Task 3: a declaration committed with its transition whose answer was lost (the
+/// write's answer never came; the core then rebased onto the row) is looked up — the open
+/// successions are read again — and never handed out a second time (a second declaration
+/// would meet the first one's open run and roll the world back).
+#[test]
+fn a_mark_whose_answer_was_lost_is_looked_up_not_reissued() {
+    let mut c = succeeding(3);
+    read_leases(&mut c, 3, &[h(2)], &[], 1_000);
+    let d = c.declare_wanted(1_000).expect("a lapsed host is declared");
+    let t = c.take_transition().expect("the declaration's transition");
+    assert_eq!(t.decisions, vec![StoreDecision::Declare(d.clone())]);
+    // It committed; its answers were lost on the way back.
+    let committed = c.version() + 1;
+    c.transition_written(committed);
+    assert!(!c.take_successions_reread(), "nothing is looked up while the answer may still come");
+    // Another writer moves the row (its projection as written): the core rebases onto it.
+    c.rebase(&t.core, t.history.as_deref(), committed + 1).expect("the row loads");
+    assert!(c.take_successions_reread(), "the lost answer is looked up: the open successions are read again");
+    read_leases(&mut c, 3, &[h(2)], &[], 2_000);
+    assert_eq!(c.declare_wanted(2_000), None, "no second declaration before the re-read answers");
+    let t = c.take_transition();
+    assert!(t.as_ref().is_none_or(|t| t.decisions.is_empty()), "nothing re-issued: {t:?}");
+    if t.is_some() {
+        c.transition_written(c.version() + 1);
+    }
+    c.successions_open(store_declares(&d, 3, 1, game::CutId(0)), 2_100);
+    read_leases(&mut c, 3, &[h(2)], &[h(2)], 3_000);
+    assert_eq!(c.declare_wanted(3_000), None, "nor after it: the declared run is open");
+    assert_eq!(c.successions_open_count(), 1, "one run");
+    assert!(!c.rollback_wanted(), "never rolled back");
 }

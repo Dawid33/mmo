@@ -5,7 +5,7 @@ use crate::HostId;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::{CoordMsg, Coordinator, HostMsg, Input, Target};
+use super::{CallStamp, CoordMsg, Coordinator, HostMsg, Input, ReplicaId, StoreDecision, Target};
 
 /// The host's end of the link to the world coordinator: messages out, messages in, in
 /// order (FIFO each way while the link is up).
@@ -78,13 +78,26 @@ pub struct RigStore {
     seq: u64,
     /// Writes that committed.
     writes: u64,
+    /// The store decisions committed with their transitions (Elastic 2b Task 3), stamped with
+    /// the call they are, in commit order, not executed yet: the test's simulated world store
+    /// (`MultiRig`) executes them — as part of the commit, before anything else touches it — and
+    /// answers them, or drops the answers (a replica killed after the commit).
+    committed: Vec<(CallStamp, StoreDecision)>,
 }
 
 impl RigStore {
-    /// Write the projection over the row as read at `version` (0 = no row yet): the new
-    /// version, or `Err(RigConflict)` when `version` is not the row's. `history` `None`
-    /// keeps the row's.
-    pub fn write(&mut self, version: u64, core: Vec<u8>, history: Option<Vec<u8>>) -> Result<u64, RigConflict> {
+    /// Write the projection over the row as read at `version` (0 = no row yet), with the store
+    /// decisions of its transition (written by `replica`): the new version, or
+    /// `Err(RigConflict)` when `version` is not the row's — nothing written, no decision kept.
+    /// `history` `None` keeps the row's.
+    pub fn write(
+        &mut self,
+        version: u64,
+        core: Vec<u8>,
+        history: Option<Vec<u8>>,
+        decisions: Vec<StoreDecision>,
+        replica: ReplicaId,
+    ) -> Result<u64, RigConflict> {
         let current = self.row.as_ref().map_or(0, |r| r.version);
         if version != current {
             return Err(RigConflict);
@@ -92,7 +105,14 @@ impl RigStore {
         let history = history.unwrap_or_else(|| self.row.take().map(|r| r.history).unwrap_or_default());
         self.row = Some(RigRow { version: current + 1, core, history });
         self.writes += 1;
+        let stamp = CallStamp { replica, version: current + 1 };
+        self.committed.extend(decisions.into_iter().map(|d| (stamp, d)));
         Ok(current + 1)
+    }
+
+    /// The store decisions committed since the last call, with their stamps, in order.
+    pub fn take_committed(&mut self) -> Vec<(CallStamp, StoreDecision)> {
+        std::mem::take(&mut self.committed)
     }
 
     pub fn row(&self) -> Option<&RigRow> {
@@ -199,6 +219,19 @@ impl RigCluster {
         self.store.as_ref().map_or(0, RigStore::writes)
     }
 
+    /// Replica 0's pending transition written now (and what may leave routed), as a runtime
+    /// pass ends: the store decisions it handed out are committed with it
+    /// ([`Self::take_committed`]).
+    pub fn commit(&mut self) {
+        self.route(0);
+    }
+
+    /// The store decisions committed with transitions since the last call (Elastic 2b Task 3):
+    /// for the test's simulated world store to execute and answer.
+    pub fn take_committed(&mut self) -> Vec<(CallStamp, StoreDecision)> {
+        self.store.as_mut().map(RigStore::take_committed).unwrap_or_default()
+    }
+
     /// A restart of replica 0's process: the core is replaced by `coordinator` (loaded
     /// from [`Self::stored`]), which has read the row as it stands, and whatever the old
     /// process had not handed to a link yet — its outgoing queue, the hosts' mailboxes — is
@@ -225,11 +258,14 @@ impl RigCluster {
                     if self.foreign_armed && !replica.core.unlogged_pending() {
                         if let Some(row) = store.row().cloned() {
                             self.foreign_armed = false;
-                            store.write(row.version, row.core, None).expect("the foreign writer writes at the row's version");
+                            store
+                                .write(row.version, row.core, None, Vec::new(), ReplicaId(u64::MAX))
+                                .expect("the foreign writer writes at the row's version");
                         }
                     }
                     // A store that never fails, written at the version this replica read.
-                    match store.write(replica.version, t.core, t.history) {
+                    let me = replica.core.replica();
+                    match store.write(replica.version, t.core, t.history, t.decisions, me) {
                         Ok(version) => {
                             replica.version = version;
                             replica.core.transition_written(version);

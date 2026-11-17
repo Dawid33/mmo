@@ -1,8 +1,9 @@
 //! The coordinator's half of the world cut (several hosts, R3 Task 13): it picks ONE world
 //! tick for a cut, asks every expected host for its part ([`CoordMsg::BeginCut`]), and
-//! once every part is staged ([`HostMsg::CutPrepared`]) hands the runtime a decision
-//! ([`Coordinator::take_decision`]) to record in the store; the outcome goes to every
-//! participant ([`CoordMsg::CutDone`]). Any [`HostMsg::CutFailed`], a participant
+//! once every part is staged ([`HostMsg::CutPrepared`]) hands out a decision
+//! ([`Coordinator::take_decision`]) that the store records inside the transaction of the
+//! transition carrying it (Elastic 2b Task 3, `decisions.rs`); the STORED decision comes back
+//! as an input and goes to every participant ([`CoordMsg::CutDone`]). Any [`HostMsg::CutFailed`], a participant
 //! detaching or re-attaching, or [`WORLD_CUT_DEADLINE_MS`] passing decides an abort. One
 //! cut at a time: a new one starts only once the last is decided, a period
 //! ([`Coordinator::set_world_cuts`]) after it, and only while every expected host is
@@ -18,15 +19,16 @@
 //! exit without a cut: the world rolls back to the last cut when they return).
 //!
 //! **A host joining during a cut (Elastic 1 Task 4).** A host that attaches while a cut it is
-//! not in runs does not abort it; the runtime records each cut's begin in the store
-//! ([`Coordinator::world_cut_running`] → `record_cut_begin`), so the decision may leave out a
-//! host registered after it. The next cut lists the newcomer (its dirty row is read).
+//! not in runs does not abort it; each cut's begin is recorded in the store by the transition
+//! that starts it ([`StoreDecision::BeginCut`], whose `BeginCut` messages leave only once it
+//! committed), so the decision may leave out a host registered after it. The next cut lists the
+//! newcomer (its dirty row is read).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{CoordMsg, Coordinator, CutFailure, ReplicaId, Target};
+use super::{CallStamp, CoordMsg, Coordinator, CutFailure, ReplicaId, StoreDecision, Target};
 use crate::HostId;
 use crate::{CutId, SuccessionId, Tick};
 
@@ -152,12 +154,14 @@ struct CutRun {
     prepared: BTreeSet<HostId>,
     /// `clock_ms` past which it is aborted.
     deadline_ms: u64,
-    /// Decided here (`Some(commit)`), waiting for the runtime.
+    /// Decided here (`Some(commit)`), waiting for the store.
     verdict: Option<bool>,
-    /// The decision was handed to the runtime ([`Coordinator::take_decision`]) by this replica:
-    /// one handed out by another (a restart) is handed out again — the store's `decide_cut`
-    /// keeps its first decision, so a repeated record answers the stored one.
-    taken: Option<ReplicaId>,
+    /// The decision's mark: handed out ([`Coordinator::take_decision`]) in the transition
+    /// stamped so. Never handed out twice: an answer that does not come is looked up.
+    taken: Option<CallStamp>,
+    /// The decision's answer was lost (`decisions.rs`): its stored decision is to be read
+    /// ([`Coordinator::take_decision_lookup`]).
+    lookup: bool,
 }
 
 impl CutRun {
@@ -175,14 +179,16 @@ impl CutRun {
 /// runtime's configuration and observations (`#[serde(skip)]`: set again by every runtime that
 /// loads it, kept by a rebase — [`WorldCuts::carry_process_fields`]). A restarted coordinator
 /// runs on: an undecided cut aborts at its participants' `Attach`es (their links dropped), a
-/// decision handed to the dead process is recorded again.
+/// decision the dead process handed out (it committed with that process's transition) is
+/// looked up.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct WorldCuts {
     /// The period between cuts (`None`: world cuts off). Kept in the projection so a loaded
     /// core's period runs on ([`Coordinator::set_world_cuts`] restarts it only on a change).
     every_ms: Option<u64>,
-    /// The high half of every cut id made ([`Coordinator::set_cut_epoch`]): durable (Elastic
-    /// 2b), so a rebased or reloaded core never makes an id it made before.
+    /// The high half of every cut id made ([`Coordinator::set_cut_epoch`]): set once, when the
+    /// row is bootstrapped, from its epoch, and durable (Elastic 2b) — `next` is too, and an id
+    /// leaves only with the transition that made it, so ids never repeat within a row's life.
     epoch: u64,
     /// The low half of the last cut id made.
     next: u64,
@@ -319,19 +325,20 @@ impl Coordinator {
     /// A loaded core whose period is the same runs on from its stored last cut; a changed
     /// period (or cuts turned on) counts from now.
     pub fn set_world_cuts(&mut self, every_ms: u64) {
-        let every = (every_ms > 0).then_some(every_ms);
-        if self.cuts.every_ms != every {
-            self.note_unlogged();
-            self.cuts.every_ms = every;
-            self.cuts.last_ms = self.clock_ms;
-        }
+        self.unlogged_guard("set_world_cuts", |c| {
+            let every = (every_ms > 0).then_some(every_ms);
+            if c.cuts.every_ms != every {
+                c.note_unlogged();
+                c.cuts.every_ms = every;
+                c.cuts.last_ms = c.clock_ms;
+            }
+        })
     }
 
-    /// The high half of the cut ids from now on: `epoch` if it is higher than the one held (it
-    /// is durable: a loaded or rebased core keeps its own), so no id is ever made twice. The
-    /// runtime gives it its claim epoch at every start (Elastic 2b Task 3 sets it once, at the
-    /// row's bootstrap: until then a cut may begin, and its begin be recorded, in a transition
-    /// that never commits — a restart must not make that id again).
+    /// The high half of the cut ids from now on: `epoch` if it is higher than the one held.
+    /// Set ONCE, from the row's epoch when the runtime bootstraps the row (Elastic 2b Task 3):
+    /// it is durable, `next` too, and a cut's begin and decision commit only with the transition
+    /// that made its id — a loaded or rebased core never makes an id it made before.
     pub fn set_cut_epoch(&mut self, epoch: u64) {
         if epoch > self.cuts.epoch {
             self.note_unlogged();
@@ -341,14 +348,16 @@ impl Coordinator {
 
     /// The hosts every world cut needs a part of (those whose `hosts` row is not clean).
     pub fn set_expected_hosts(&mut self, hosts: BTreeSet<HostId>) {
-        self.cuts.expected = hosts;
-        self.cuts.expected_known = true;
+        self.unlogged_guard("set_expected_hosts", |c| {
+            c.cuts.expected = hosts;
+            c.cuts.expected_known = true;
+        })
     }
 
     /// The hosts a cut needs could not be read: no cut begins until they are again
     /// ([`Self::set_expected_hosts`]).
     pub fn expected_hosts_unknown(&mut self) {
-        self.cuts.expected_known = false;
+        self.unlogged_guard("expected_hosts_unknown", |c| c.cuts.expected_known = false)
     }
 
     /// The world tick now (the coordinator's clock): a cut is placed a lead past it.
@@ -378,11 +387,13 @@ impl Coordinator {
     /// The boot each host's `hosts` row names: a host that left as another boot has
     /// registered again, and is expected again.
     pub fn set_host_boots(&mut self, boots: BTreeMap<HostId, u64>) {
-        let before = (self.cuts.left.len(), self.cuts.succeeded.len());
-        self.set_host_boots_inner(&boots);
-        if (self.cuts.left.len(), self.cuts.succeeded.len()) != before {
-            self.note_unlogged();
-        }
+        self.unlogged_guard("set_host_boots", |c| {
+            let before = (c.cuts.left.len(), c.cuts.succeeded.len());
+            c.set_host_boots_inner(&boots);
+            if (c.cuts.left.len(), c.cuts.succeeded.len()) != before {
+                c.note_unlogged();
+            }
+        })
     }
 
     fn set_host_boots_inner(&mut self, boots: &BTreeMap<HostId, u64>) {
@@ -478,13 +489,15 @@ impl Coordinator {
     }
 
     /// The decision of the running cut, once there is one (all parts staged: commit;
-    /// a failure, a detach or the deadline: abort). Record it in the store and call
-    /// [`Self::decided`] with the stored decision.
+    /// a failure, a detach or the deadline: abort), handed out ONCE: it leaves with the next
+    /// transition and is recorded inside its transaction (`decisions.rs`); the stored
+    /// decision comes back as [`super::DecisionAnswer::Cut`]. What was handed out, for the log
+    /// and the tests.
     pub fn take_decision(&mut self) -> Option<CutDecide> {
         let replica = self.replica;
-        let run = self.cuts.run.as_mut().filter(|r| r.taken != Some(replica))?;
+        let run = self.cuts.run.as_mut().filter(|r| r.taken.is_none())?;
         let commit = run.verdict?;
-        run.taken = Some(replica);
+        run.taken = Some(CallStamp::pending(replica));
         let run = self.cuts.run.as_ref().expect("taken above");
         let d = CutDecide {
             cut: run.cut,
@@ -495,14 +508,94 @@ impl Coordinator {
             generation: run.generation,
             settles: run.settles.clone(),
         };
-        self.note_unlogged();
+        self.push_decision(StoreDecision::DecideCut(d.clone()));
         Some(d)
+    }
+
+    /// Test support: the store recorded `committed` for cut `cut` — the answer to the decision
+    /// handed out ([`Self::take_decision`]), an input carrying its mark's stamp; with none
+    /// handed out, applied as the stored decision directly (outside the log).
+    #[doc(hidden)]
+    pub fn decided(&mut self, cut: CutId, committed: bool) {
+        match self.cuts.run.as_ref().filter(|r| r.cut == cut).and_then(|r| r.taken) {
+            Some(stamp) => {
+                let now = self.clock_ms;
+                self.apply(super::Input::Decision(super::DecisionAnswer::Cut { stamp, cut, committed: Ok(committed) }), now);
+            }
+            None => {
+                self.note_unlogged();
+                self.decided_as_stored(cut, committed);
+            }
+        }
+    }
+
+    /// The store's answer to the decision of cut `cut` handed out as `stamp`: the stored
+    /// decision is applied; a refusal (nothing recorded: a stale generation, a store error, a
+    /// lock timeout) is looked up — the store's decision read, an undecided cut aborted there
+    /// — and the open successions read again (a stale generation: the world rolled back behind
+    /// this coordinator's back, `worldctl rollback`). An answer with another stamp changes
+    /// nothing.
+    pub(super) fn cut_answered(&mut self, stamp: CallStamp, cut: CutId, committed: Result<bool, String>) {
+        let Some(run) = self.cuts.run.as_mut().filter(|r| r.cut == cut && r.taken == Some(stamp)) else {
+            log::debug!("coordinator: an answer to cut {}'s decision ({stamp:?}) that no mark here awaits: ignored", cut.0);
+            return;
+        };
+        match committed {
+            Ok(committed) => {
+                if run.verdict == Some(true) && !committed {
+                    log::warn!("coordinator: world cut {}: a commit was asked, the store recorded an abort", cut.0);
+                }
+                self.decided_as_stored(cut, committed);
+            }
+            Err(e) => {
+                log::warn!("coordinator: world cut {}: its decision could not be recorded ({e}); looking it up", cut.0);
+                run.lookup = true;
+                self.reread_successions();
+            }
+        }
+    }
+
+    /// The decision of the running cut whose answer was lost, to look up in the store (read
+    /// it; an undecided cut aborted there), once: `(cut, tick)`. Answer
+    /// [`Self::decision_looked_up`].
+    pub fn take_decision_lookup(&mut self) -> Option<(CutId, Tick)> {
+        let run = self.cuts.run.as_mut().filter(|r| r.lookup && r.taken.is_some())?;
+        run.lookup = false;
+        let found = (run.cut, run.tick);
+        self.note_unlogged();
+        Some(found)
+    }
+
+    /// The decision of cut `cut` as the store holds it (a lookup's answer,
+    /// [`Self::take_decision_lookup`]): applied if it is the running cut's, handed out.
+    pub fn decision_looked_up(&mut self, cut: CutId, committed: bool) {
+        if self.cuts.run.as_ref().is_some_and(|r| r.cut == cut && r.taken.is_some()) {
+            self.note_unlogged();
+            self.decided_as_stored(cut, committed);
+        } else {
+            log::debug!("coordinator: cut {}'s looked-up decision ({committed}): not the running cut any more", cut.0);
+        }
+    }
+
+    /// The marks of the running cut's decision whose stamp `matches` take `to`.
+    pub(super) fn cuts_stamp_marks(&mut self, matches: &dyn Fn(&CallStamp) -> bool, to: CallStamp) {
+        if let Some(t) = self.cuts.run.as_mut().and_then(|r| r.taken.as_mut()).filter(|t| matches(t)) {
+            *t = to;
+        }
+    }
+
+    /// The running cut's decision, if its mark `matches`, lost its answer: looked up
+    /// ([`Coordinator::orphan_marks`]). Whether it matched.
+    pub(super) fn cuts_orphan_marks(&mut self, matches: &dyn Fn(&CallStamp) -> bool, why: &str) -> bool {
+        let Some(run) = self.cuts.run.as_mut().filter(|r| r.taken.as_ref().is_some_and(|t| matches(t))) else { return false };
+        log::warn!("coordinator: world cut {}: the answer to its decision is lost ({why}); looking it up", run.cut.0);
+        run.lookup = true;
+        true
     }
 
     /// Cut `cut` is decided as stored (`committed`): every participant is told
     /// ([`CoordMsg::CutDone`]), and the next cut may start a period from now.
-    pub fn decided(&mut self, cut: CutId, committed: bool) {
-        self.note_unlogged();
+    fn decided_as_stored(&mut self, cut: CutId, committed: bool) {
         let Some(run) = self.cuts.run.take_if(|r| r.cut == cut) else {
             log::warn!("coordinator: cut {} decided ({committed}), but it is not the cut running", cut.0);
             self.remember_outcome(cut, committed);
@@ -541,11 +634,13 @@ impl Coordinator {
     /// `(host, cut)` pairs whose outcome is not known here: look each up in the store
     /// (an undecided one aborted) and answer with [`Self::cut_outcome`].
     pub fn take_cut_lookups(&mut self) -> Vec<(HostId, CutId)> {
-        let lookups = std::mem::take(&mut self.cuts.lookups);
-        if !lookups.is_empty() {
-            self.note_unlogged();
-        }
-        lookups
+        self.unlogged_guard("take_cut_lookups", |c| {
+            let lookups = std::mem::take(&mut c.cuts.lookups);
+            if !lookups.is_empty() {
+                c.note_unlogged();
+            }
+            lookups
+        })
     }
 
     /// The stored outcome of `cut`, for `host` (a lookup's answer).
@@ -553,6 +648,11 @@ impl Coordinator {
         self.note_unlogged();
         self.remember_outcome(cut, committed);
         self.push(Target::Host(host), CoordMsg::CutDone { cut, committed });
+    }
+
+    /// The successions running cut `cut` settles if it commits (none: not the running cut).
+    pub fn settles_of_running(&self, cut: CutId) -> Vec<SuccessionId> {
+        self.cuts.run.as_ref().filter(|r| r.cut == cut).map(|r| r.settles.clone()).unwrap_or_default()
     }
 
     /// The world cut running (not decided yet): its id and tick.
@@ -718,6 +818,9 @@ impl Coordinator {
             let msg = CoordMsg::BeginCut { cut, tick, hosts: hosts.clone(), leaving: leaving.clone(), generation };
             self.push(Target::Host(h), msg);
         }
+        // Its begin is recorded by the transition that starts it (Elastic 1 Task 4: the decision
+        // may then leave out a host registered after it), before any `BeginCut` leaves.
+        self.push_decision(StoreDecision::BeginCut { cut });
         self.cuts.run = Some(CutRun {
             cut,
             tick,
@@ -729,6 +832,7 @@ impl Coordinator {
             deadline_ms: now_ms + WORLD_CUT_DEADLINE_MS,
             verdict: None,
             taken: None,
+            lookup: false,
         });
     }
 

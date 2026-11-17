@@ -11,12 +11,17 @@ use game::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use game::coordinator::StoreDecision;
+
+use crate::coordinator_tx::Decided;
 use crate::counters::{Counters, StoreCounters};
 use crate::thread::{self, Reply, Request, Stamped};
-use crate::{
-    CoordinatorFence, Declared, Dials, Fence, OpenMode, StoreError, StoreUrl, Succession, SuccessionId, SuccessionKind,
-    SuperRegion,
-};
+use crate::{Declared, Dials, Fence, OpenMode, StoreError, StoreUrl, Succession, SuccessionId, SuccessionKind, SuperRegion};
+
+/// A lone decision's outcome of another kind than asked (a bug of the store thread).
+fn unexpected(d: Decided) -> StoreError {
+    StoreError::Backend(format!("a lone decision answered as another kind: {d:?}"))
+}
 
 /// The world row and whether a forged artifact is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,14 +96,6 @@ pub struct StoredCoordinator {
     pub version: u64,
     pub core: Vec<u8>,
     pub history: Vec<u8>,
-}
-
-/// A coordinator write committed ([`StoreHandle::write_coordinator_later`]): the row's new
-/// version and the database clock at the write (ms since the epoch).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CoordinatorWritten {
-    pub version: u64,
-    pub store_ms: u64,
 }
 
 /// What one lease beat ([`StoreHandle::heartbeat`]) found.
@@ -572,9 +569,9 @@ impl StoreHandle {
         rx
     }
 
-    /// The coordinator's decision on `cut`, whose parts hosts `hosts` prepared: one
-    /// transaction, fenced by `fence` (`Fenced { sr: None }`, nothing recorded or
-    /// finished, if another coordinator claimed the row since), records `commit` unless
+    /// Test support (Elastic 2b Task 3: the coordinator decides only inside its transition,
+    /// [`Self::write_transition_later`]): the decision on `cut`, whose parts hosts `hosts`
+    /// prepared, in a transition of its own over the row as it stands (`decide_in`): records `commit` unless
     /// the cut is decided already (a host's [`StoreHandle::abort_cut`] may have won).
     /// A commit is refused with `StaleGeneration` (nothing recorded) unless the world is
     /// at `generation`. If this call records a commit it also writes the world tick
@@ -591,6 +588,7 @@ impl StoreHandle {
     /// settles them in the same transaction — each gets `settled_cut = cut` and its
     /// predecessor's row (of the boot that died) turns clean. Pass an empty `settles` while
     /// none is open.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn decide_cut(
         &self,
@@ -599,50 +597,35 @@ impl StoreHandle {
         commit: bool,
         hosts: Vec<HostId>,
         leaving: Vec<HostId>,
-        fence: CoordinatorFence,
         generation: u64,
         settles: Vec<SuccessionId>,
     ) -> Result<bool, StoreError> {
-        if let Some(e) = self.injected_decision_failure() {
-            return Err(e);
+        let d = StoreDecision::DecideCut(game::coordinator::CutDecide { cut, tick, commit, hosts, leaving, generation, settles });
+        match self.decide_alone(d)? {
+            Decided::Cut { committed, .. } => committed,
+            other => Err(unexpected(other)),
         }
-        let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after };
-        self.ask(|r| Request::DecideCut(Box::new(d), r))
     }
 
-    /// [`Self::decide_cut`], answered on the receiver (the coordinator's loop never waits).
-    #[allow(clippy::too_many_arguments)]
-    pub fn decide_cut_later(
-        &self,
-        cut: CutId,
-        tick: Tick,
-        commit: bool,
-        hosts: Vec<HostId>,
-        leaving: Vec<HostId>,
-        fence: CoordinatorFence,
-        generation: u64,
-        settles: Vec<SuccessionId>,
-    ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
-        if let Some(e) = self.injected_decision_failure() {
-            return Self::answered(Err(e));
+    /// Test support: records that world cut `cut` began (Elastic 1 Task 4), in a transition of
+    /// its own (`begin_in`): the bound under which every host id was issued before now. A host
+    /// whose id is at or above it may be absent from the cut's decision. First writer wins.
+    /// Postgres only.
+    #[doc(hidden)]
+    pub fn record_cut_begin(&self, cut: CutId) -> Result<HostId, StoreError> {
+        match self.decide_alone(StoreDecision::BeginCut { cut })? {
+            Decided::Begin { bound, .. } => bound,
+            other => Err(unexpected(other)),
         }
-        let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after };
-        self.ask_later(|r| Request::DecideCut(Box::new(d), r))
     }
 
-    /// The coordinator records that world cut `cut` began (Elastic 1 Task 4): the bound under
-    /// which every host id was issued before now. A host whose id is at or above it may be
-    /// absent from the cut's decision ([`Self::decide_cut`]). Fenced on the coordinator's
-    /// epoch; first writer wins. Postgres only.
-    pub fn record_cut_begin(&self, cut: CutId, fence: CoordinatorFence) -> Result<HostId, StoreError> {
-        self.ask(|r| Request::RecordCutBegin(cut, fence, r))
-    }
-
-    /// [`Self::record_cut_begin`], answered on the receiver.
-    pub fn record_cut_begin_later(&self, cut: CutId, fence: CoordinatorFence) -> crossbeam::channel::Receiver<Result<HostId, StoreError>> {
-        self.ask_later(|r| Request::RecordCutBegin(cut, fence, r))
+    /// One store decision in a transition of its own over the row as it stands (test support;
+    /// the decision test hooks apply as to the coordinator's).
+    fn decide_alone(&self, d: StoreDecision) -> Result<Decided, StoreError> {
+        let cut = matches!(d, StoreDecision::DecideCut(_));
+        let injected = cut && self.injected_decision_failure().is_some();
+        let stop_after = if cut { self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take() } else { None };
+        self.ask(|reply| Request::DecideAlone { d: Box::new(d), injected, stop_after, reply })
     }
 
     /// A host's "abort unless decided": records an abort of `cut` if it has no
@@ -709,10 +692,11 @@ impl StoreHandle {
         self.ask_later(|r| Request::CutDecided(cut, r))
     }
 
-    /// R4: the coordinator declares hosts `dead` (`(ordinal, boot)`: the boot it judged) and
-    /// gives each one's land to the heir at the same index of `heirs`, in ONE transaction
-    /// (`lock_timeout` this handle's cut lock timeout, [`crate::CUT_LOCK_TIMEOUT_MS`]):
-    /// fenced by `fence` (`Fenced { sr: None }`) under the world row's lock at `generation`
+    /// Test support (Elastic 2b Task 3: the coordinator declares only inside its transition):
+    /// declares hosts `dead` (`(ordinal, boot)`: the boot it judged) and
+    /// gives each one's land to the heir at the same index of `heirs`, in ONE transaction of its
+    /// own over the row as it stands (`lock_timeout` this handle's cut lock timeout,
+    /// [`crate::CUT_LOCK_TIMEOUT_MS`]), under the world row's lock at `generation`
     /// (`StaleGeneration`). Any open succession → [`Declared::SuccessionOpen`]. Each
     /// predecessor row must be of its boot and live, not succeeded before (else `Gone`); a
     /// `Crash` needs it dirty and lapsed — `seen_ms = 0` (vouched) or older than
@@ -726,45 +710,33 @@ impl StoreHandle {
     /// next fenced write or load is refused. The moved rows wait for a staged part holding
     /// them: declare only between cuts; a lock timeout (a `Backend` error, nothing written)
     /// is a retry. Postgres only (`Unsupported` on SQLite). Nothing but `Done` writes.
+    #[doc(hidden)]
     pub fn declare_succession(
         &self,
         dead: Vec<(HostId, u64)>,
         heirs: Vec<HostId>,
         kind: SuccessionKind,
-        fence: CoordinatorFence,
         generation: u64,
     ) -> Result<Declared, StoreError> {
-        let d = thread::Declare { dead, heirs, kind, fence, generation };
-        self.ask(|r| Request::DeclareSuccession(Box::new(d), r))
+        match self.decide_alone(StoreDecision::Declare(game::coordinator::Declare { dead, heirs, kind, generation }))? {
+            Decided::Declared(declared) => declared,
+            other => Err(unexpected(other)),
+        }
     }
 
-    /// [`Self::declare_succession`], answered on the receiver.
-    pub fn declare_succession_later(
-        &self,
-        dead: Vec<(HostId, u64)>,
-        heirs: Vec<HostId>,
-        kind: SuccessionKind,
-        fence: CoordinatorFence,
-        generation: u64,
-    ) -> crossbeam::channel::Receiver<Result<Declared, StoreError>> {
-        let d = thread::Declare { dead, heirs, kind, fence, generation };
-        self.ask_later(|r| Request::DeclareSuccession(Box::new(d), r))
-    }
-
-    /// R4: the world restarts from its last committed cut — `world.generation + 1` (every host
-    /// of the old generation is refused from then on) and every open succession abandoned
-    /// (the land stays with the heirs), in one transaction fenced by `fence` under the world
-    /// row's lock — only from generation `from`, the one the coordinator decided the rollback
-    /// at (Elastic 2a): a world past it was rolled back already (a rollback that committed
-    /// before its coordinator recorded it), nothing is written. Idempotent. Returns the world's
-    /// generation after it. Postgres only.
-    pub fn rollback_world(&self, fence: CoordinatorFence, from: u64) -> Result<u64, StoreError> {
-        self.ask(|r| Request::RollbackWorld(fence, from, r))
-    }
-
-    /// [`Self::rollback_world`], answered on the receiver.
-    pub fn rollback_world_later(&self, fence: CoordinatorFence, from: u64) -> crossbeam::channel::Receiver<Result<u64, StoreError>> {
-        self.ask_later(|r| Request::RollbackWorld(fence, from, r))
+    /// Test support (the coordinator rolls back only inside its transition): the world restarts
+    /// from its last committed cut — `world.generation + 1` (every host of the old generation is
+    /// refused from then on) and every open succession abandoned (the land stays with the
+    /// heirs), in one transaction of its own under the world row's lock — only from generation
+    /// `from`, the one the coordinator decided the rollback at (Elastic 2a): a world past it was
+    /// rolled back already, nothing is written. Idempotent. Returns the world's generation after
+    /// it. Postgres only.
+    #[doc(hidden)]
+    pub fn rollback_world(&self, from: u64) -> Result<u64, StoreError> {
+        match self.decide_alone(StoreDecision::Rollback { from })? {
+            Decided::RolledBack(generation) => generation,
+            other => Err(unexpected(other)),
+        }
     }
 
     /// R4, `worldctl rollback` (the operator, who holds no coordinator fence): as
@@ -781,26 +753,21 @@ impl StoreHandle {
 
     /// Elastic 2a, the crash-loop rule: host `host`'s row of boot `boot` lapsed and it holds no
     /// land — its row is marked [`HOST_DEAD`] with NO succession and the world generation
-    /// untouched (nobody inherits, nobody reports, nothing rolls back), in one transaction
-    /// fenced by `fence` under the `world` row's lock (the declaration's), bounded by the cut
+    /// untouched (nobody inherits, nobody reports, nothing rolls back) — test support: the
+    /// coordinator ends one only inside its transition — in one transaction of its own over the
+    /// row as it stands, under the `world` row's lock (the declaration's), bounded by the cut
     /// lock timeout. Refused, nothing written: [`crate::LandlessEnd::Gone`] (no row, another
     /// boot's, not live), [`crate::LandlessEnd::NotLapsed`] (it beat within the lease by the
     /// database clock and was not vouched), [`crate::LandlessEnd::OwnsLand`] (a `super_regions`
     /// or `in_flight` row of it), [`crate::LandlessEnd::Recipient`] (an open succession names it
     /// heir or survivor). The lock walk is in `succession.rs`. Postgres only (`Unsupported` on
     /// SQLite).
-    pub fn end_landless_host(&self, host: HostId, boot: u64, fence: CoordinatorFence) -> Result<crate::LandlessEnd, StoreError> {
-        self.ask(|r| Request::EndLandlessHost(host, boot, fence, r))
-    }
-
-    /// [`Self::end_landless_host`], answered on the receiver.
-    pub fn end_landless_host_later(
-        &self,
-        host: HostId,
-        boot: u64,
-        fence: CoordinatorFence,
-    ) -> crossbeam::channel::Receiver<Result<crate::LandlessEnd, StoreError>> {
-        self.ask_later(|r| Request::EndLandlessHost(host, boot, fence, r))
+    #[doc(hidden)]
+    pub fn end_landless_host(&self, host: HostId, boot: u64) -> Result<crate::LandlessEnd, StoreError> {
+        match self.decide_alone(StoreDecision::EndLandless(game::coordinator::EndLandless { host, boot }))? {
+            Decided::Ended { outcome, .. } => outcome,
+            other => Err(unexpected(other)),
+        }
     }
 
     /// R4, `worldctl retire-host` while other hosts live: host `ordinal`'s dirty live row gets
@@ -950,34 +917,50 @@ impl StoreHandle {
         self.ask(|r| Request::Release(fence.clone(), r))
     }
 
-    /// Claims the coordinator row (its epoch up by one), fencing the coordinator that held it.
-    pub fn claim_coordinator(&self) -> Result<CoordinatorFence, StoreError> {
-        self.ask(Request::ClaimCoordinator)
+    /// The coordinator row's first write (Elastic 2b Task 3): `core` and `history` at version 1,
+    /// epoch 1 — or [`crate::Bootstrapped::Exists`] when a row with a projection is there
+    /// (first writer wins; nothing written: load it). There is no claim: the row's version is
+    /// the coordinator's fence.
+    pub fn bootstrap_coordinator(&self, core: Vec<u8>, history: Vec<u8>) -> Result<crate::Bootstrapped, StoreError> {
+        self.ask(|r| Request::BootstrapCoordinator(core, history, r))
     }
 
-    /// Queues a write of the coordinator's projection (Elastic 2a) and returns at once: `core`,
-    /// and `history` unless `None` (the stored one stays), if `fence` still holds the row and it
-    /// is at `version`. The answer arrives on the receiver: the new version and the database
-    /// clock, `Fenced` when another coordinator claimed the row since, `Conflict` when the
-    /// epoch is ours but the version moved (a second writer).
-    pub fn write_coordinator_later(
-        &self,
-        fence: CoordinatorFence,
-        version: u64,
-        core: Vec<u8>,
-        history: Option<Vec<u8>>,
-    ) -> crossbeam::channel::Receiver<Result<CoordinatorWritten, StoreError>> {
+    /// Queues a coordinator transition (Elastic 2b Task 3, `coordinator_tx.rs`) and returns at
+    /// once: its projection written with a compare-and-set on `w.version` and its store
+    /// decisions run in the same transaction. The answer arrives on the receiver: the new
+    /// version, the database clock, each decision's answer and the post-commit effects;
+    /// `Conflict` when the version moved (nothing written, no decision run); any other error:
+    /// whether it committed is not known. SQLite: `Unsupported` for a transition with
+    /// decisions.
+    pub fn write_transition_later(&self, w: crate::TransitionWrite) -> crossbeam::channel::Receiver<Result<crate::TransitionWritten, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
         if let Some(e) = self.injected_failure() {
             let _ = tx.send(Err(e));
             return rx;
         }
-        if let Err(req) = self.send(Request::WriteCoordinator { fence, version, core, history, reply: Reply::sync(tx) }) {
-            if let Request::WriteCoordinator { reply, .. } = req {
-                reply.send(Err(stopped()));
-            }
+        let injected: Vec<bool> = w
+            .decisions
+            .iter()
+            .map(|d| matches!(d, StoreDecision::DecideCut(_)) && self.injected_decision_failure().is_some())
+            .collect();
+        let req = Request::WriteTransition { w: Box::new(w), injected, reply: Reply::sync(tx) };
+        if let Err(Request::WriteTransition { reply, .. }) = self.send(req) {
+            reply.send(Err(stopped()));
         }
         rx
+    }
+
+    /// A committed transition's post-commit effect ([`crate::AfterCommit`]): a decided cut's
+    /// staged parts finished (the test hook [`Self::stop_after_commit_prepared`] applies), or a
+    /// committed cut announced. Answered on the receiver; a failure is retried by the caller (or
+    /// left to the lookups: a host's `cut_decided`, a start's `resolve_prepared`, the listeners'
+    /// poll).
+    pub fn after_commit_later(&self, a: crate::AfterCommit) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
+        let stop_after = match a {
+            crate::AfterCommit::FinishCut { .. } => self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take(),
+            crate::AfterCommit::NotifyCut { .. } => None,
+        };
+        self.ask_later(|r| Request::AfterCommit(a, stop_after, r))
     }
 
     /// The coordinator's last written projection; `None` before the first write.
@@ -1106,6 +1089,12 @@ impl StoreHandle {
     /// The world's generation: how many dirty host restarts the world has seen.
     pub fn world_generation(&self) -> Result<u64, StoreError> {
         self.ask(Request::WorldGeneration)
+    }
+
+    /// [`Self::world_generation`], answered on the receiver (the coordinator's lookup of a
+    /// rollback whose answer was lost).
+    pub fn world_generation_later(&self) -> crossbeam::channel::Receiver<Result<u64, StoreError>> {
+        self.ask_later(Request::WorldGeneration)
     }
 
     /// Commits everything queued before this call, then stops the thread and

@@ -1,11 +1,12 @@
 //! Two-phase save cuts (R3, Postgres only). Each host writes its fenced part of a
 //! cut and ends the transaction with `PREPARE TRANSACTION '<gid>'`
 //! ([`crate::rows::CutEnd::Prepare`]); the coordinator then records ONE decision
-//! row (`cut_decisions`, first writer wins on the cut id) and finishes
-//! (`COMMIT PREPARED` / `ROLLBACK PREPARED`) every part of the cut that is staged.
+//! row (`cut_decisions`, first writer wins on the cut id) inside the transaction of its
+//! transition ([`decide_in`]), and after that commit finishes ([`finish_staged`]:
+//! `COMMIT PREPARED` / `ROLLBACK PREPARED`) every part of the cut that is staged.
 //! A commit is recorded only if exactly the listed hosts' parts are staged, every
 //! host whose `hosts` row is not clean is listed — but one registered after the cut's begin
-//! was recorded ([`record_cut_begin`], Elastic 1 Task 4) — and it settles exactly the open
+//! was recorded ([`begin_in`], Elastic 1 Task 4) — and it settles exactly the open
 //! successions (R4, `crate::succession`); otherwise
 //! the decision becomes an abort. A host that gives up records an abort the same way
 //! ([`abort_cut`]); a part that prepares after its cut was decided finishes itself
@@ -16,7 +17,8 @@
 //! Locks: a prepared part keeps every row lock it took — `FOR SHARE` on its host's
 //! `super_regions` rows (so a claim of them waits for the decision) and the rows it
 //! wrote — but none on `world` (it reads the generation without a lock and writes no
-//! world tick). The decision locks `coordinator` (`FOR SHARE`), then `world`
+//! world tick). The decision runs in the coordinator's transition (Elastic 2b Task 3,
+//! `coordinator_tx.rs`), after its compare-and-set holds the `coordinator` row: then `world`
 //! (`FOR NO KEY UPDATE`, a commit only — it never waits for a claim's `FOR KEY SHARE`),
 //! `cut_decisions`, `hosts` and (settling) `successions`: no row a prepared part holds
 //! (an heir's part reads `successions` without a lock), so a decision never waits
@@ -34,7 +36,7 @@ use sqlx::PgPool;
 
 use crate::rows::i;
 use crate::rows::pg::cut_decision;
-use crate::{CoordinatorFence, StoreError, SuccessionId};
+use crate::{StoreError, SuccessionId};
 
 /// What every store that cannot prepare a cut answers.
 pub(crate) const TWO_PHASE_UNSUPPORTED: &str = "several hosts need max_prepared_transactions > 0 (Postgres)";
@@ -182,30 +184,28 @@ fn no_decision(cut: CutId) -> StoreError {
     StoreError::Corrupt(format!("cut {} has no decision after its insert", cut.0))
 }
 
-/// The coordinator's decision on `cut` (see [`crate::StoreHandle::decide_cut`]).
-/// `stop_after`: the test hook — fail after that many `COMMIT PREPARED`s.
+/// The coordinator's decision on `cut` (Elastic 2b Task 3: a store decision of a transition,
+/// `game::coordinator::StoreDecision::DecideCut`), inside `tx` — the transaction of the
+/// transition that decided it, its `coordinator` row already held by the compare-and-set
+/// (`coordinator_tx.rs`): records `commit` unless the cut is decided already (a host's
+/// [`abort_cut`] may have won), and returns the STORED decision. A commit is refused with
+/// `StaleGeneration` (nothing recorded) unless the world is at `generation`; a commit that
+/// cannot be one (a part missing or unlisted, a dirty host unlisted, other open successions)
+/// is recorded as an abort. A commit this call records also writes the world tick, marks
+/// `leaving` clean and settles `settles`. The staged parts are finished after the commit
+/// ([`finish_staged`], `crate::AfterCommit::FinishCut`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn decide_cut(
-    pool: &PgPool,
+pub(crate) async fn decide_in(
+    tx: &mut sqlx::PgConnection,
     world_tag: u32,
     cut: CutId,
     tick: Tick,
     commit: bool,
-    hosts: Vec<HostId>,
-    leaving: Vec<HostId>,
-    fence: CoordinatorFence,
+    hosts: &[HostId],
+    leaving: &[HostId],
     generation: u64,
-    settles: Vec<SuccessionId>,
-    stop_after: Option<u32>,
+    settles: &[SuccessionId],
 ) -> Result<bool, StoreError> {
-    let mut tx = pool.begin().await?;
-    // Held to the end: a newer coordinator's claim waits for this decision.
-    let epoch: Option<i64> = sqlx::query_scalar("SELECT epoch FROM coordinator WHERE id = 1 FOR SHARE")
-        .fetch_optional(&mut *tx)
-        .await?;
-    if epoch.map(|e| e as u64) != Some(fence.epoch) {
-        return Err(StoreError::Fenced { sr: None });
-    }
     let decided = match cut_decision(&mut *tx, cut).await? {
         Some(d) => d,
         None => {
@@ -289,7 +289,7 @@ pub(crate) async fn decide_cut(
                 // names fewer would let the heir's adoption commit unsettled (its next boot
                 // would adopt again); one that names more settles what is not open.
                 if commit {
-                    let open = crate::succession::open_ids(&mut tx).await?;
+                    let open = crate::succession::open_ids(&mut *tx).await?;
                     let named: BTreeSet<u64> = settles.iter().map(|s| s.0).collect();
                     if open != named || named.len() != settles.len() {
                         log::warn!(
@@ -318,34 +318,26 @@ pub(crate) async fn decide_cut(
                     .bind(leaving)
                     .execute(&mut *tx)
                     .await?;
-                crate::succession::settle(&mut tx, cut, &settles).await?;
+                crate::succession::settle(&mut *tx, cut, settles).await?;
             }
             d
         }
     };
-    tx.commit().await?;
-    finish_staged(pool, world_tag, cut, decided, stop_after).await?;
     Ok(decided)
 }
 
-/// The coordinator records that world cut `cut` began (Elastic 1 Task 4): `world.next_host_id`
-/// as it reads now goes into `cut_begins` (first writer wins); every host id at or above it is
-/// issued later — a host registered after this record — and [`decide_cut`] lets such a host be
-/// absent from the cut's decision. Returns the recorded bound.
+/// The coordinator records that world cut `cut` began (Elastic 1 Task 4; Elastic 2b Task 3: a
+/// store decision of the transition that starts the cut, inside its `tx`):
+/// `world.next_host_id` as it reads now goes into `cut_begins` (first writer wins); every host
+/// id at or above it is issued later — a host registered after this record — and [`decide_in`]
+/// lets such a host be absent from the cut's decision. Returns the recorded bound.
 ///
-/// Locks: the coordinator row `FOR SHARE` (the fence, as [`decide_cut`] takes it first), then a
-/// PLAIN read of the world row — no lock: a registration holding the world row commits its id
-/// either before this read (below the bound: it must be listed) or after it (at or above: it
+/// Locks: after the coordinator row (held by the transition's compare-and-set), a PLAIN read
+/// of the world row — no lock: a registration holding the world row commits its id either
+/// before this read (below the bound: it must be listed) or after it (at or above: it
 /// registered after the record) — and the insert of this cut's own `cut_begins` row, which no
 /// other statement locks. No new edge in the lock order (`succession.rs` module notes).
-pub(crate) async fn record_cut_begin(pool: &PgPool, cut: CutId, fence: CoordinatorFence) -> Result<HostId, StoreError> {
-    let mut tx = pool.begin().await?;
-    let epoch: Option<i64> = sqlx::query_scalar("SELECT epoch FROM coordinator WHERE id = 1 FOR SHARE")
-        .fetch_optional(&mut *tx)
-        .await?;
-    if epoch.map(|e| e as u64) != Some(fence.epoch) {
-        return Err(StoreError::Fenced { sr: None });
-    }
+pub(crate) async fn begin_in(tx: &mut sqlx::PgConnection, cut: CutId) -> Result<HostId, StoreError> {
     let next: i64 = sqlx::query_scalar("SELECT next_host_id FROM world WHERE id = 1")
         .fetch_optional(&mut *tx)
         .await?
@@ -360,7 +352,6 @@ pub(crate) async fn record_cut_begin(pool: &PgPool, cut: CutId, fence: Coordinat
         .bind(cut.0 as i64)
         .fetch_one(&mut *tx)
         .await?;
-    tx.commit().await?;
     Ok(HostId(stored as u64))
 }
 
@@ -412,8 +403,10 @@ pub(crate) async fn is_staged(pool: &PgPool, gid: &str) -> Result<bool, StoreErr
     Ok(n > 0)
 }
 
-/// Finishes every staged part of `cut` (whoever's) as `decided` says.
-async fn finish_staged(
+/// Finishes every staged part of `cut` (whoever's) as `decided` says (also the coordinator's
+/// post-commit effect of a decision, `crate::AfterCommit::FinishCut`). `stop_after`: the test
+/// hook — fail after that many `COMMIT PREPARED`s.
+pub(crate) async fn finish_staged(
     pool: &PgPool,
     world_tag: u32,
     cut: CutId,

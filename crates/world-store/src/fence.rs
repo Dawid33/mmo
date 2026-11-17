@@ -1,11 +1,11 @@
 //! Owner-epoch fencing: a host claims super-regions (`super_regions` rows:
-//! owner + an epoch bumped by every claim) and the coordinator claims its one
-//! row; every fenced write or load then checks, in its own transaction, that
-//! the epochs it claimed are still the stored ones. A second process claiming
-//! the same super-region (or the coordinator) bumps the epoch, so the first
-//! one's next write is refused with [`crate::StoreError::Fenced`] and writes
-//! nothing. The epoch replaces Postgres' old advisory "world lock": many
-//! processes may open one database, each writes only what it holds.
+//! owner + an epoch bumped by every claim); every fenced write or load then checks, in its
+//! own transaction, that the epochs it claimed are still the stored ones. A second process
+//! claiming the same super-region bumps the epoch, so the first one's next write is refused
+//! with [`crate::StoreError::Fenced`] and writes nothing. The epoch replaces Postgres' old
+//! advisory "world lock": many processes may open one database, each writes only what it
+//! holds. (The coordinator claims nothing since Elastic 2b Task 3: its fence is its row's
+//! `version` compare-and-set, `coordinator_tx.rs`.)
 
 use game::HostId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,12 +48,6 @@ impl Fence {
     pub fn claim_epoch(&self) -> u64 {
         self.epochs.values().copied().max().unwrap_or(0)
     }
-}
-
-/// What the coordinator claimed: the epoch of its row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CoordinatorFence {
-    pub epoch: u64,
 }
 
 /// Every super-region a cut writes into: its regions (whose rows also hold

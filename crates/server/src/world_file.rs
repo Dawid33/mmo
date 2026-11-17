@@ -363,30 +363,19 @@ pub enum CoordinatorSource {
     Bootstrapped,
 }
 
-impl CoordinatorSource {
-    /// Whether the store does not hold this state yet (its first transition writes it all).
-    pub fn needs_save(self) -> bool {
-        self != CoordinatorSource::Stored
-    }
-}
-
 /// The world coordinator to start ([`crate::coordinator_rt::CoordinatorRuntime`]).
 pub struct CoordinatorStart {
     /// Its clock at [`Self::store_time`]'s store ms (loaded or built at it: the calendar of a
     /// loaded core continues from its stored anchor, a new one anchors there).
     pub coordinator: game::Coordinator,
-    /// The database clock sampled after the claim and the row's read (ms since the epoch), and
-    /// when: the core's clock is the store's (Elastic 2a); the runtime extrapolates it by the
-    /// monotonic clock from that instant until its first `hosts` read re-samples it.
+    /// The database clock sampled after the row's read (ms since the epoch), and when: the
+    /// core's clock is the store's (Elastic 2a); the runtime extrapolates it by the monotonic
+    /// clock from that instant until its first `hosts` read re-samples it.
     pub store_time: (u64, Instant),
     pub source: CoordinatorSource,
-    /// The coordinator row's fence, claimed BEFORE the state was loaded: a coordinator
-    /// still running can commit nothing after that load, so the state loaded is the
-    /// last one any coordinator committed (loading first would let it commit a newer
-    /// state — a site, a claim, a released reply — that this start then runs without).
-    pub fence: world_store::CoordinatorFence,
-    /// The row's version the state was read at: what the first write names (0 for a row with
-    /// no projection yet).
+    /// The row's version the state was read (or bootstrapped) at: what the first write names.
+    /// There is no claim (Elastic 2b Task 3): a coordinator still running that commits after
+    /// this read moves the version, and this start's first write meets a `Conflict` and rebases.
     pub version: u64,
 }
 
@@ -412,12 +401,13 @@ fn refuse_old_world(what: &str) -> String {
     )
 }
 
-/// Claims the coordinator row ([`StoreHandle::claim_coordinator`], fencing any coordinator
-/// that held it), then loads the world coordinator's state: its row's projection (Elastic 2a:
-/// `core` + `history`), else an R1 world's `history` row migrated into one (claims empty — a
-/// player's record claim is taken back when the player comes online — and no memo), else a
-/// history bootstrapped from the world map. A migrated or bootstrapped core's first transition
-/// writes it all ([`CoordinatorSource::needs_save`]).
+/// Loads the world coordinator's state: its row's projection (Elastic 2a: `core` + `history`),
+/// else an R1 world's `history` row migrated into one (claims empty — a player's record claim
+/// is taken back when the player comes online — and no memo), else a history bootstrapped from
+/// the world map. A migrated or bootstrapped core is written at once as the row's first version
+/// ([`StoreHandle::bootstrap_coordinator`], Elastic 2b Task 3: first writer wins — a replica
+/// that finds the row there loads it instead), its cut ids' high half set once from the row's
+/// epoch. There is no claim any more: the row's version is the coordinator's fence.
 ///
 /// A stored state of another world or an older format (the world id is derived from
 /// code-built map summaries, so a code change can orphan it), or a row with no projection, is
@@ -436,28 +426,50 @@ pub fn ensure_coordinator_state(
     use game::history::SocietyGrid;
     let grid = SocietyGrid::from_world_map(map);
     let replaceable = |e: &HistoryLoadError| matches!(e, HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. });
-    // Claim first, then load (see `CoordinatorStart::fence`).
-    let fence = store.claim_coordinator().map_err(|e| format!("claiming the world coordinator: {e}"))?;
-    log::info!("[coordinator] claimed the world coordinator (epoch {})", fence.epoch);
     let process = replica_id();
     let saved_regions = || -> Result<bool, String> {
         store.stored_regions().map(|r| !r.is_empty()).map_err(|e| format!("reading the world's saved regions: {e}"))
     };
-    // The core's clock is the store's: sampled once the row is read, still after the claim.
+    // The core's clock is the store's: sampled once the row is read.
     let store_ms = || store.db_now_ms().map_err(|e| format!("reading the world store's clock: {e}"));
     let started = |coordinator: game::Coordinator, store_ms: u64, source: CoordinatorSource, version: u64| CoordinatorStart {
         coordinator,
         store_time: (store_ms, Instant::now()),
         source,
-        fence,
         version,
     };
+    // A new core (migrated or bootstrapped): the row's first version, unless one is there (a
+    // replaced state: the first transition writes over it at its version), or another replica
+    // bootstrapped it meanwhile (`None`: load that instead).
+    let first = |mut coordinator: game::Coordinator, replacing: Option<u64>| -> Result<Option<(game::Coordinator, u64)>, String> {
+        if let Some(version) = replacing {
+            coordinator.set_cut_epoch(1);
+            return Ok(Some((coordinator, version)));
+        }
+        coordinator.set_cut_epoch(1);
+        let (core, history) = coordinator.encode_projection();
+        match store.bootstrap_coordinator(core, history).map_err(|e| format!("bootstrapping the world coordinator's row: {e}"))? {
+            world_store::Bootstrapped::Written { version, epoch } => {
+                // Its cut ids' high half, once: the row's epoch (1, or past a row an older build
+                // claimed and never wrote — then its first transition writes the raised one).
+                if epoch == 1 {
+                    coordinator.bootstrapped(version);
+                } else {
+                    coordinator.set_cut_epoch(epoch);
+                    coordinator.set_version(version);
+                }
+                log::info!("[coordinator] bootstrapped the world coordinator's row (version {version}, epoch {epoch})");
+                Ok(Some((coordinator, version)))
+            }
+            world_store::Bootstrapped::Exists => Ok(None),
+        }
+    };
     let stored = store.load_coordinator().map_err(|e| e.to_string())?;
-    let version = stored.as_ref().map_or(0, |s| s.version);
+    let replacing = stored.as_ref().map(|s| s.version);
     if let Some(row) = stored {
         let now = store_ms()?;
         match game::Coordinator::load(&row.core, &row.history, grid.clone(), process, now) {
-            Ok(coordinator) => return Ok(Some(started(coordinator, now, CoordinatorSource::Stored, version))),
+            Ok(coordinator) => return Ok(Some(started(coordinator, now, CoordinatorSource::Stored, row.version))),
             Err(e) if replaceable(&e) => {
                 if saved_regions()? {
                     return Err(refuse_old_world(&format!("does not load ({e})")));
@@ -475,8 +487,10 @@ pub fn ensure_coordinator_state(
             Ok(history) => {
                 log::info!("[server] migrating the world's history row into the coordinator's state");
                 let now = store_ms()?;
-                let coordinator = game::Coordinator::new_for(history, now, process);
-                return Ok(Some(started(coordinator, now, CoordinatorSource::Migrated, version)));
+                return match first(game::Coordinator::new_for(history, now, process), replacing)? {
+                    Some((coordinator, version)) => Ok(Some(started(coordinator, now, CoordinatorSource::Migrated, version))),
+                    None => ensure_coordinator_state(store, map, sqlite_db),
+                };
             }
             Err(e) if replaceable(&e) => keep_replaced("history", &e, &bytes, sqlite_db.map(history_backup_path))?,
             Err(e) => return Err(format!("the world store's history does not load: {e}")),
@@ -484,7 +498,11 @@ pub fn ensure_coordinator_state(
     }
     let Some(history) = bootstrap_history(map, grid) else { return Ok(None) };
     let now = store_ms()?;
-    Ok(Some(started(game::Coordinator::new_for(history, now, process), now, CoordinatorSource::Bootstrapped, version)))
+    match first(game::Coordinator::new_for(history, now, process), replacing)? {
+        Some((coordinator, version)) => Ok(Some(started(coordinator, now, CoordinatorSource::Bootstrapped, version))),
+        // Another replica bootstrapped the row since this one read it: load it.
+        None => ensure_coordinator_state(store, map, sqlite_db),
+    }
 }
 
 /// A stored `what` that is replaced by a bootstrap: copied to `backup` first (a write
@@ -795,7 +813,8 @@ mod tests {
         ensure_coordinator_state(store, map, db).unwrap().expect("a habitable world has a history")
     }
 
-    /// Writes `coordinator`'s projection as the coordinator row's (a fresh claim, version as stored).
+    /// Writes `coordinator`'s projection as the coordinator row's (at the version stored, or the
+    /// row's bootstrap).
     fn write_projection(store: &StoreHandle, coordinator: &game::Coordinator) -> (Vec<u8>, Vec<u8>) {
         let (core, history) = coordinator.encode_projection();
         write_raw(store, core.clone(), Some(history.clone()));
@@ -803,9 +822,22 @@ mod tests {
     }
 
     fn write_raw(store: &StoreHandle, core: Vec<u8>, history: Option<Vec<u8>>) {
-        let version = store.load_coordinator().unwrap().map_or(0, |s| s.version);
-        let fence = store.claim_coordinator().unwrap();
-        store.write_coordinator_later(fence, version, core, history).recv().unwrap().expect("the projection writes");
+        match store.load_coordinator().unwrap() {
+            None => {
+                let written = store.bootstrap_coordinator(core, history.unwrap_or_default()).unwrap();
+                assert!(matches!(written, world_store::Bootstrapped::Written { .. }), "{written:?}");
+            }
+            Some(row) => {
+                let w = world_store::TransitionWrite {
+                    version: row.version,
+                    core,
+                    history,
+                    decisions: Vec::new(),
+                    replica: game::coordinator::ReplicaId(0),
+                };
+                store.write_transition_later(w).recv().unwrap().expect("the projection writes");
+            }
+        }
     }
 
     #[test]
@@ -815,11 +847,11 @@ mod tests {
         let first = ensure(&store, &map, None);
         let second = ensure(&store, &map, None);
         assert_eq!(first.source, CoordinatorSource::Bootstrapped);
-        assert!(first.source.needs_save());
-        assert_eq!((first.version, second.version), (0, 0), "a claimed row with no projection");
+        assert_eq!(second.source, CoordinatorSource::Stored, "the first start wrote the row (Elastic 2b: bootstrapped at once)");
+        assert_eq!((first.version, second.version), (1, 1), "the row's first version");
         assert_ne!(first.coordinator.replica(), game::coordinator::ReplicaId(0), "a replica id of its own");
         assert_ne!(first.coordinator.replica(), second.coordinator.replica(), "drawn per start");
-        assert_eq!(history_bytes(&first), history_bytes(&second), "a bootstrap is deterministic (until it is saved)");
+        assert_eq!(history_bytes(&first), history_bytes(&second), "the bootstrap's history, as written");
         store.shutdown();
     }
 
@@ -859,7 +891,8 @@ mod tests {
     fn coordinator_state_migrates_an_r1_history_row_then_prefers_its_own() {
         let store = memory_store();
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let mut history = ensure(&store, &map, None).coordinator.history().clone();
+        // A history (from another store: a start writes its row).
+        let mut history = ensure(&memory_store(), &map, None).coordinator.history().clone();
         // Time passes: the stored history is not the bootstrap's.
         let later = game::history::CalendarTick(history.now().0 + 3 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY);
         history.advance(later);
@@ -874,8 +907,7 @@ mod tests {
         write_projection(&store, &game::Coordinator::new(ahead.clone(), 0));
         let stored = ensure(&store, &map, None);
         assert_eq!(stored.source, CoordinatorSource::Stored);
-        assert!(!stored.source.needs_save());
-        assert_eq!(stored.version, 1, "the version it was read at");
+        assert_eq!(stored.version, 2, "the version it was read at (the migration's bootstrap, then this write)");
         assert_eq!(history_bytes(&stored), game::history::persist::encode(&ahead));
         assert_eq!(store.load_history().unwrap(), Some(r1), "the history row is left as it is");
         store.shutdown();
@@ -911,7 +943,8 @@ mod tests {
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
         // No projection beside a saved region.
         let store = memory_store();
-        let start = ensure(&store, &map, None);
+        // A core (from another store: a start writes its row).
+        let start = ensure(&memory_store(), &map, None);
         store_a_region(&store);
         let err = ensure_coordinator_state(&store, &map, None).err().expect("refused");
         assert!(err.contains("re-forge") && err.contains("missing"), "{err}");
@@ -935,7 +968,7 @@ mod tests {
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
         // A corrupt R1 history row.
         let store = memory_store();
-        let history = ensure(&store, &map, None).coordinator.history().clone();
+        let history = ensure(&memory_store(), &map, None).coordinator.history().clone();
         let mut bytes = game::history::persist::encode(&history);
         bytes.truncate(bytes.len() / 2);
         store_history(&store, bytes);

@@ -7162,6 +7162,7 @@ fn coordinator_restart_at_any_round(rig: &mut MultiRig) {
     let restart_at = 3 + (roll % 80) as usize;
     let kill_at = restart_at + 5 + ((roll >> 16) % 80) as usize;
     let mut committed_before = None;
+    let mut decided_before = None;
     for r in 0..kill_at {
         let roll = crate::common::multi_rig::mix(rig.seed, r as u64);
         if r % 3 == 0 {
@@ -7170,6 +7171,7 @@ fn coordinator_restart_at_any_round(rig: &mut MultiRig) {
         }
         if r == restart_at {
             committed_before = Some(committed(rig));
+            decided_before = rig.decided.keys().max().copied();
             let written = rig.core().written();
             assert!(written > 0, "the coordinator wrote transitions before its crash");
             rig.restart_coordinator_from_store();
@@ -7184,8 +7186,13 @@ fn coordinator_restart_at_any_round(rig: &mut MultiRig) {
     }
     assert_eq!(rig.core().replica(), game::coordinator::ReplicaId(2), "the restarted process runs");
     assert!(rig.core().gate_host().is_some(), "the hosts attached to the restarted process");
-    let epochs: std::collections::BTreeSet<u64> = rig.decided.keys().map(|c| c.0 >> 32).collect();
-    assert!(epochs.contains(&2), "a cut of the restarted coordinator (epoch 2) was decided: {:?}", rig.decided);
+    // Elastic 2b Task 3: the cut ids' high half is the row's (set once); the restarted
+    // coordinator's ids continue from the row's durable count.
+    assert!(
+        rig.decided.keys().any(|c| Some(*c) > decided_before),
+        "a cut of the restarted coordinator (an id past every one before) was decided: {:?}",
+        rig.decided
+    );
     // A landed host dies; its succession runs to the settle on the restarted coordinator.
     let dead = rig.owner(chain[1]);
     let live: Vec<game::EntityId> =
@@ -10567,6 +10574,90 @@ fn a_coordinator_dying_between_a_store_decision_and_its_transition_conserves_the
     );
 }
 
+/// Elastic 2b Task 3 (Review Focus 1): a coordinator replica is killed right after a transition
+/// carrying a store decision commits — the decision ran in the transition's transaction, its
+/// answer never applied — and a new one starts from the row. The marks it finds are LOOKED UP,
+/// never issued again: a declaration (the open successions read back: the run settles, one
+/// succession, no rollback), an end of a landless host (its dead row taken out of the view at
+/// the next hosts read), a cut's decision (its stored decision read back: the cut stands as
+/// stored, the next cut commits). The world is conserved throughout.
+fn replica_killed_after_a_decision_commits(rig: &mut MultiRig, case: u64) {
+    let chain = heir_world(rig);
+    let (rs, rd) = (chain[0], chain[1]);
+    let dead = rig.owner(rd);
+    rig.core().set_crash_policy(game::CrashPolicy::Succession);
+    let (a, b) = (slime_in(rig, rs, 0), slime_in(rig, rd, 1));
+    until_committed(rig, 1);
+    match case {
+        0 => {
+            // A declaration commits; its answer is lost with the replica.
+            rig.kill(dead);
+            let s = rig.declare_unanswered(dead).remove(0);
+            rig.restart_coordinator_from_store();
+            rig.cut_round();
+            rig.assert_conserved_world();
+            assert_settled_whole(rig, &s, &[a]);
+            assert_back_on_the_heir(rig, rd, b);
+            assert_eq!(rig.successions.len(), 1, "one succession: never declared twice (seed {})", rig.seed);
+        }
+        1 => {
+            // An end of a landless host commits; its answer is lost with the replica.
+            let x = rig.start("x");
+            let running: std::collections::BTreeSet<HostId> =
+                host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+            rig.core().set_expected_hosts(running);
+            for _ in 0..FLAP_ROUNDS {
+                rig.cut_round();
+            }
+            rig.kill(x);
+            let mut ended = None;
+            for _ in 0..FLAP_ROUNDS {
+                if let Some(done) = rig.end_unanswered() {
+                    ended = Some(done);
+                    break;
+                }
+                rig.cut_round();
+            }
+            let (end, outcome) = ended.unwrap_or_else(|| panic!("host {x} was never ended (seed {})", rig.seed));
+            assert_eq!((end.host, outcome), (x, game::LandlessEnd::Ended));
+            rig.restart_coordinator_from_store();
+            rig.cut_round();
+            assert_eq!(rig.drive_leases(), None, "never ended twice (seed {})", rig.seed);
+            assert!(rig.core().host_mentions(x).contains(&"succeeded"), "out of the view (seed {})", rig.seed);
+            assert_eq!(rig.ended.len(), 1, "one end");
+            until_committed(rig, 1);
+        }
+        _ => {
+            // A cut's decision commits; its answer is lost with the replica.
+            rig.drop_next_cut_answer = true;
+            for _ in 0..SUCCESSION_ROUNDS {
+                if rig.cut_answer_dropped.is_some() {
+                    break;
+                }
+                rig.cut_round();
+            }
+            let (cut, stored) = rig.cut_answer_dropped.unwrap_or_else(|| panic!("no decision committed (seed {})", rig.seed));
+            assert_eq!(rig.decided.get(&cut), Some(&stored), "the decision is in the store");
+            let decided = rig.decided.len();
+            rig.restart_coordinator_from_store();
+            until_committed(rig, 1);
+            assert!(rig.decided.len() > decided, "cuts go on after the lookup");
+            assert_eq!(rig.decided.get(&cut), Some(&stored), "the lost decision stands as stored (first writer wins)");
+        }
+    }
+    rig.assert_conserved_world();
+    assert!(!rig.core().rollback_wanted() && rig.abandoned.is_empty(), "never rolled back (seed {})", rig.seed);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_replica_killed_after_a_decision_commits_is_recovered_by_lookup() {
+    let name = "a_replica_killed_after_a_decision_commits_is_recovered_by_lookup";
+    sweep(name, 2, 1, HEIR_SWEEP_SEEDS, |rig| replica_killed_after_a_decision_commits(rig, 0));
+    sweep(name, 2, 1, HEIR_SWEEP_SEEDS, |rig| replica_killed_after_a_decision_commits(rig, 1));
+    sweep(name, 2, 1, HEIR_SWEEP_SEEDS, |rig| replica_killed_after_a_decision_commits(rig, 2));
+}
+
 /// A landless host runs beside two landed ones when one of them dies: it is no survivor (the
 /// store's rule). It wins land after the declaration; it is still no recipient — no order, no
 /// report — and the settle cut, which it takes part in, commits: the world whole.
@@ -10736,12 +10827,18 @@ fn a_host_landed_adjacent_after_the_declaration_rolls_the_world_back_never_stuck
 
 #[test]
 fn the_rig_store_refuses_a_stale_version() {
+    use game::coordinator::{CallStamp, ReplicaId, StoreDecision};
     let mut store = game::coordinator::RigStore::default();
-    let v = store.write(0, vec![1], Some(vec![9])).expect("the first write");
+    let me = ReplicaId(1);
+    let v = store.write(0, vec![1], Some(vec![9]), Vec::new(), me).expect("the first write");
     assert_eq!(v, 1);
-    assert_eq!(store.write(0, vec![2], None), Err(game::coordinator::RigConflict));
+    // A stale write keeps none of its decisions (Elastic 2b Task 3: they ride in its transaction).
+    let begin = StoreDecision::BeginCut { cut: game::CutId(5) };
+    assert_eq!(store.write(0, vec![2], None, vec![begin.clone()], me), Err(game::coordinator::RigConflict));
+    assert!(store.take_committed().is_empty(), "a conflicting transition's decision is not committed");
     let row = store.row().expect("a row");
     assert_eq!((row.version, row.core.as_slice(), row.history.as_slice()), (1, &[1u8][..], &[9u8][..]));
-    assert_eq!(store.write(1, vec![3], None), Ok(2));
+    assert_eq!(store.write(1, vec![3], None, vec![begin.clone()], me), Ok(2));
+    assert_eq!(store.take_committed(), vec![(CallStamp { replica: me, version: 2 }, begin)], "committed with its transition");
     assert_eq!(store.row().unwrap().history, vec![9]);
 }

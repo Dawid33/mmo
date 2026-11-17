@@ -10,7 +10,7 @@ use game::{
     ChunkCoords, CrashPolicy, CutId, EntityBundle, EntityId, InFlightRow, PortableRegion, RegionCoords, WorldCut,
 };
 use world_store::{
-    CoordinatorFence, Declared, Fence, HOST_DEAD, HOST_LIVE, LandlessEnd, StoreError, StoreHandle, StoreUrl, Succession,
+    Declared, Fence, HOST_DEAD, HOST_LIVE, LandlessEnd, StoreError, StoreHandle, StoreUrl, Succession,
     SuccessionKind,
 };
 
@@ -70,7 +70,7 @@ pub(crate) fn in_flight(rc: RegionCoords) -> InFlightRow {
 }
 
 /// A world of `n` hosts (0..n), each registered (named `host-<o>`, boot [`boot_of`]) after
-/// claiming its own fence (host 1 also holds [`FAR`]), and a claimed coordinator. Each host
+/// claiming its own fence (host 1 also holds [`FAR`]), and a bootstrapped coordinator row. Each host
 /// gets its own store handle. The ids are issued from 0 (`world.next_host_id` set to 0
 /// first, as a world migrated from fixed ordinals continues): these tests are about
 /// successions and cuts, not about how ids are issued (`hosts.rs`).
@@ -80,7 +80,6 @@ pub(crate) struct World {
     pub(crate) h: StoreHandle,
     pub(crate) hosts: Vec<StoreHandle>,
     pub(crate) fences: Vec<Fence>,
-    pub(crate) c: CoordinatorFence,
 }
 
 impl World {
@@ -104,8 +103,8 @@ impl World {
             hosts.push(hh);
             fences.push(f);
         }
-        let c = h.claim_coordinator().unwrap();
-        Some(World { w, h, hosts, fences, c })
+        assert_eq!(h.bootstrap_coordinator(vec![0], Vec::new()).unwrap(), world_store::Bootstrapped::Written { version: 1, epoch: 1 });
+        Some(World { w, h, hosts, fences })
     }
 
     /// Host `o`'s row looks lapsed: its last beat lies two leases back.
@@ -119,7 +118,7 @@ impl World {
     }
 
     pub(crate) fn declare(&self, dead: game::HostId, heir: game::HostId, kind: SuccessionKind) -> Result<Declared, StoreError> {
-        self.h.declare_succession(vec![(dead, boot_of(dead))], vec![heir], kind, self.c, 0)
+        self.h.declare_succession(vec![(dead, boot_of(dead))], vec![heir], kind, 0)
     }
 
     /// Declares `dead` crashed with `heir` and returns the one succession.
@@ -194,7 +193,7 @@ fn declare_refuses_a_row_that_heartbeated() {
     assert_eq!(w.declare(hid(1), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(1)]));
     // Another boot of the ordinal is not the one the caller judged dead.
     w.lapse(hid(1));
-    let other = w.h.declare_succession(vec![(hid(1), 999)], vec![hid(0)], SuccessionKind::Crash, w.c, 0).unwrap();
+    let other = w.h.declare_succession(vec![(hid(1), 999)], vec![hid(0)], SuccessionKind::Crash, 0).unwrap();
     assert_eq!(other, Declared::Gone(vec![hid(1)]));
     // Nothing changed.
     assert_eq!(w.h.owned_by(hid(1)).unwrap(), w.fences[1]);
@@ -228,14 +227,14 @@ fn second_declare_while_one_is_open_says_so() {
     w.shutdown();
 }
 
+/// A declaration decided at another world generation is refused (Elastic 2b Task 3: there is no
+/// coordinator epoch to fence on any more — a stale replica's declaration never runs, its
+/// transition's compare-and-set fails first, `coordinator_rows.rs`).
 #[test]
-fn stale_coordinator_cannot_declare() {
+fn a_declaration_at_another_generation_is_refused() {
     let Some(w) = World::new(2) else { return };
     w.vouch(hid(1));
-    let newer = w.h.claim_coordinator().unwrap();
-    let err = w.declare(hid(1), hid(0), SuccessionKind::Crash).unwrap_err();
-    assert_eq!(err, StoreError::Fenced { sr: None });
-    let err = w.h.declare_succession(vec![(hid(1), boot_of(hid(1)))], vec![hid(0)], SuccessionKind::Crash, newer, 7).unwrap_err();
+    let err = w.h.declare_succession(vec![(hid(1), boot_of(hid(1)))], vec![hid(0)], SuccessionKind::Crash, 7).unwrap_err();
     assert_eq!(err, StoreError::StaleGeneration { stored: 0, mine: 7 });
     assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
     assert_eq!(w.h.owned_by(hid(1)).unwrap(), w.fences[1]);
@@ -341,14 +340,14 @@ fn a_settle_whose_heir_part_did_not_adopt_is_reported() {
         let Some(w) = World::new(2) else { return };
         w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
         w.hosts[1].prepare_cut(part(1, hid(1), vec![in_flight(A)]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-        assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], w.c, 0, vec![]).unwrap());
+        assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
         assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
         w.vouch(hid(1));
         let s = w.declared(hid(1), hid(0));
         let heir = w.h.owned_by(hid(0)).unwrap();
         let adopts = if adopting { vec![hid(1)] } else { vec![] };
         w.hosts[0].prepare_cut(WorldCut { adopts, ..part(2, hid(0), vec![]) }, heir, 0).recv().unwrap().unwrap();
-        assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![s.id]).unwrap());
+        assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], 0, vec![s.id]).unwrap());
         // The post-commit checks run after the decision is answered.
         let deadline = Instant::now() + Duration::from_secs(10);
         while w.h.cuts_checked_for_entities_twice() < 2 {
@@ -367,11 +366,11 @@ fn commit_without_naming_the_open_succession_becomes_an_abort() {
     let s = w.declared(hid(1), hid(0));
     let heir = w.h.owned_by(hid(0)).unwrap();
     w.hosts[0].prepare_cut(part(1, hid(0), vec![]), heir.clone(), 0).recv().unwrap().unwrap();
-    assert!(!w.h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], w.c, 0, vec![]).unwrap(), "settles nothing");
+    assert!(!w.h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], 0, vec![]).unwrap(), "settles nothing");
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(false));
     w.hosts[0].prepare_cut(part(2, hid(0), vec![]), heir, 0).recv().unwrap().unwrap();
     let wrong = world_store::SuccessionId(s.id.0 + 1);
-    assert!(!w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![s.id, wrong]).unwrap(), "settles one too many");
+    assert!(!w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], 0, vec![s.id, wrong]).unwrap(), "settles one too many");
     assert_eq!(prepared(&w.w), 0);
     assert_eq!(w.h.open_successions().unwrap(), vec![s]);
     assert_eq!(w.state_of(hid(1)), (HOST_DEAD, false));
@@ -384,14 +383,14 @@ fn commit_settles_and_cleans_the_predecessor() {
     // A committed cut first: the succession's base.
     w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], w.c, 0, vec![]).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
     w.vouch(hid(1));
     let s = w.declared(hid(1), hid(0));
     assert_eq!(s.base_cut, CutId(1));
     let heir = w.h.owned_by(hid(0)).unwrap();
     w.hosts[0].prepare_cut(part(2, hid(0), vec![]), heir, 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![s.id]).unwrap());
+    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], 0, vec![s.id]).unwrap());
     assert!(w.h.open_successions().unwrap().is_empty());
     assert_eq!(scalar_i64(&w.w, &format!("SELECT settled_cut FROM successions WHERE id = {}", s.id.0)), 2);
     assert_eq!(w.state_of(hid(1)), (HOST_DEAD, true), "the predecessor's row is clean");
@@ -415,16 +414,13 @@ fn a_rollback_asked_again_after_its_commit_moves_the_generation_once() {
     let Some(w) = World::new(2) else { return };
     w.vouch(hid(1));
     let s = w.declared(hid(1), hid(0));
-    assert_eq!(w.h.rollback_world(w.c, 0).unwrap(), 1, "the rollback commits");
-    // The coordinator dies here; a new one claims the row and asks again from generation 0.
-    let next = w.h.claim_coordinator().unwrap();
-    assert_eq!(w.h.rollback_world(next, 0).unwrap(), 1, "rolled back already: its generation");
+    assert_eq!(w.h.rollback_world(0).unwrap(), 1, "the rollback commits");
+    // The coordinator dies here; a new one loads the row and asks again from generation 0.
+    assert_eq!(w.h.rollback_world(0).unwrap(), 1, "rolled back already: its generation");
     assert_eq!(w.h.world_generation().unwrap(), 1, "the generation moved once");
     assert_eq!(scalar_i64(&w.w, &format!("SELECT abandoned FROM successions WHERE id = {}", s.id.0)), 1);
-    // The old process's fence still refuses it.
-    assert_eq!(w.h.rollback_world(w.c, 1).unwrap_err(), StoreError::Fenced { sr: None });
     // From the current generation it rolls back again (a new failure).
-    assert_eq!(w.h.rollback_world(next, 1).unwrap(), 2);
+    assert_eq!(w.h.rollback_world(1).unwrap(), 2);
     w.shutdown();
 }
 
@@ -433,10 +429,8 @@ fn rollback_abandons_open_ones_and_keeps_the_land_with_the_heir() {
     let Some(w) = World::new(2) else { return };
     w.vouch(hid(1));
     let s = w.declared(hid(1), hid(0));
-    let stale = CoordinatorFence { epoch: w.c.epoch - 1 };
-    assert_eq!(w.h.rollback_world(stale, 0).unwrap_err(), StoreError::Fenced { sr: None });
     assert_eq!(w.h.world_generation().unwrap(), 0);
-    assert_eq!(w.h.rollback_world(w.c, 0).unwrap(), 1);
+    assert_eq!(w.h.rollback_world(0).unwrap(), 1);
     assert_eq!(w.h.world_generation().unwrap(), 1);
     assert!(w.h.open_successions().unwrap().is_empty());
     assert_eq!(scalar_i64(&w.w, &format!("SELECT abandoned FROM successions WHERE id = {}", s.id.0)), 1);
@@ -454,7 +448,7 @@ fn heir_adopts_the_dead_hosts_in_flight_rows_once() {
     let dead_rows: Vec<InFlightRow> = (1..=3).map(|z| in_flight(RegionCoords::new(1, z))).collect();
     w.hosts[0].prepare_cut(part(1, hid(0), vec![own.clone()]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     w.hosts[1].prepare_cut(part(1, hid(1), dead_rows.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], w.c, 0, vec![]).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
     w.vouch(hid(1));
     let s = w.declared(hid(1), hid(0));
@@ -464,7 +458,7 @@ fn heir_adopts_the_dead_hosts_in_flight_rows_once() {
     let kept = vec![own.clone(), dead_rows[1].clone(), dead_rows[2].clone()];
     let adopting = WorldCut { adopts: vec![hid(1)], ..part(2, hid(0), kept.clone()) };
     w.hosts[0].prepare_cut(adopting, heir.clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![s.id]).unwrap());
+    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], 0, vec![s.id]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(2)).unwrap(), Some(true));
     assert_eq!(w.h.load_in_flight(Some(hid(0))).unwrap(), kept);
     assert!(w.h.load_in_flight(Some(hid(1))).unwrap().is_empty(), "host 1 has no rows left");
@@ -532,7 +526,7 @@ fn leave_kind_needs_a_clean_row() {
     // Host 1 leaves clean (its leave cut).
     w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![hid(1)], w.c, 0, vec![]).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![hid(1)], 0, vec![]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
     let s = match w.declare(hid(1), hid(0), SuccessionKind::Leave).unwrap() {
         Declared::Done(mut s) => s.remove(0),
@@ -543,7 +537,7 @@ fn leave_kind_needs_a_clean_row() {
     assert_eq!(s.moved.len(), 2);
     let heir = w.h.owned_by(hid(0)).unwrap();
     w.hosts[0].prepare_cut(part(2, hid(0), vec![]), heir, 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![s.id]).unwrap());
+    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], 0, vec![s.id]).unwrap());
     // Succeeded already.
     assert_eq!(w.declare(hid(1), hid(0), SuccessionKind::Leave).unwrap(), Declared::Gone(vec![hid(1)]));
     w.shutdown();
@@ -553,11 +547,10 @@ fn leave_kind_needs_a_clean_row() {
 #[test]
 fn sqlite_declares_nothing() {
     let h = open(&StoreUrl::Memory);
-    let c = h.claim_coordinator().unwrap();
-    let err = h.declare_succession(vec![(hid(1), 1)], vec![hid(0)], SuccessionKind::Crash, c, 0).unwrap_err();
+    let err = h.declare_succession(vec![(hid(1), 1)], vec![hid(0)], SuccessionKind::Crash, 0).unwrap_err();
     assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
-    assert!(matches!(h.rollback_world(c, 0), Err(StoreError::Unsupported(_))));
-    assert!(matches!(h.end_landless_host(hid(1), 1, c), Err(StoreError::Unsupported(_))), "nor ends a host");
+    assert!(matches!(h.rollback_world(0), Err(StoreError::Unsupported(_))));
+    assert!(matches!(h.end_landless_host(hid(1), 1), Err(StoreError::Unsupported(_))), "nor ends a host");
     assert!(h.open_successions().unwrap().is_empty());
     // The hosts read answers both engines' columns.
     assert!(h.hosts().unwrap().is_empty());
@@ -623,7 +616,7 @@ fn several_predecessors_in_one_call() {
     let Some(w) = World::new(3) else { return };
     w.vouch(hid(1));
     w.vouch(hid(2));
-    let done = w.h.declare_succession(vec![(hid(2), boot_of(hid(2))), (hid(1), boot_of(hid(1)))], vec![hid(0), hid(0)], SuccessionKind::Crash, w.c, 0).unwrap();
+    let done = w.h.declare_succession(vec![(hid(2), boot_of(hid(2))), (hid(1), boot_of(hid(1)))], vec![hid(0), hid(0)], SuccessionKind::Crash, 0).unwrap();
     let Declared::Done(s) = done else { panic!("{done:?}") };
     assert_eq!(s.iter().map(|s| (s.predecessor, s.heir)).collect::<Vec<_>>(), vec![(hid(2), hid(0)), (hid(1), hid(0))], "the call's order");
     assert!(s[0].id != s[1].id);
@@ -636,13 +629,13 @@ fn several_predecessors_in_one_call() {
     // Settled together.
     w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.h.owned_by(hid(0)).unwrap(), 0).recv().unwrap().unwrap();
     let ids: Vec<_> = s.iter().map(|s| s.id).collect();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], w.c, 0, ids).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], 0, ids).unwrap());
     assert!(w.h.open_successions().unwrap().is_empty());
     w.shutdown();
 
     let Some(w) = World::new(4) else { return };
     exec(&w.w, "UPDATE hosts SET seen_ms = 0 WHERE id IN (1, 2)");
-    let done = w.h.declare_succession(vec![(hid(1), boot_of(hid(1))), (hid(2), boot_of(hid(2)))], vec![hid(0), hid(3)], SuccessionKind::Crash, w.c, 0).unwrap();
+    let done = w.h.declare_succession(vec![(hid(1), boot_of(hid(1))), (hid(2), boot_of(hid(2)))], vec![hid(0), hid(3)], SuccessionKind::Crash, 0).unwrap();
     let Declared::Done(s) = done else { panic!("{done:?}") };
     assert_eq!(s.iter().map(|s| (s.predecessor, s.heir)).collect::<Vec<_>>(), vec![(hid(1), hid(0)), (hid(2), hid(3))]);
     assert_eq!(s[0].survivors, vec![hid(0), hid(3)]);
@@ -674,7 +667,7 @@ fn a_stale_heir_or_a_dead_predecessor_is_gone() {
 fn malformed_declarations_are_unsupported() {
     let Some(w) = World::new(3) else { return };
     let unsupported = |dead: Vec<(game::HostId, u64)>, heirs: Vec<game::HostId>| {
-        let r = w.h.declare_succession(dead, heirs, SuccessionKind::Crash, w.c, 0);
+        let r = w.h.declare_succession(dead, heirs, SuccessionKind::Crash, 0);
         assert!(matches!(r, Err(StoreError::Unsupported(_))), "{r:?}");
     };
     unsupported(vec![], vec![]);
@@ -697,7 +690,7 @@ fn a_cleanly_left_boot_claims_nothing() {
     let own: Vec<_> = w.fences[1].epochs.keys().copied().collect();
     w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![hid(1)], w.c, 0, vec![]).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![hid(1)], 0, vec![]).unwrap());
     assert_eq!(w.hosts[1].cut_decided(CutId(1)).unwrap(), Some(true));
     assert_eq!(w.state_of(hid(1)), (HOST_LIVE, true), "left clean");
     let free = (9, 9);
@@ -724,7 +717,7 @@ fn a_cleanly_left_boot_claims_nothing() {
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
     let heir = w.h.owned_by(hid(0)).unwrap();
     w.hosts[0].prepare_cut(WorldCut { adopts: vec![hid(1)], ..part(2, hid(0), vec![]) }, heir, 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![s.id]).unwrap());
+    assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], 0, vec![s.id]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(2)).unwrap(), Some(true));
     let next = w.hosts[1].register_host(crate::hosts::new_host("host-1", 9001), CrashPolicy::Succession).unwrap();
     assert_eq!((next.id, next.bumped), (hid(2), false));
@@ -751,13 +744,13 @@ fn rollback_leaves_no_in_flight_row_without_a_reader() {
         for (h, rows) in [(0, &own0), (1, &dead1), (2, &own2)] {
             w.hosts[h].prepare_cut(part(1, hid(h as u64), rows.clone()), w.fences[h].clone(), 0).recv().unwrap().unwrap();
         }
-        assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1), hid(2)], vec![], w.c, 0, vec![]).unwrap());
+        assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1), hid(2)], vec![], 0, vec![]).unwrap());
         for h in &w.hosts {
             assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
         }
         w.vouch(hid(1));
         let s = w.declared(hid(1), hid(0));
-        let generation = if operator { w.h.rollback_world_operator().unwrap().0 } else { w.h.rollback_world(w.c, 0).unwrap() };
+        let generation = if operator { w.h.rollback_world_operator().unwrap().0 } else { w.h.rollback_world(0).unwrap() };
         assert_eq!(generation, 1, "operator {operator}");
         assert!(w.h.open_successions().unwrap().is_empty());
         assert!(w.h.load_in_flight(Some(hid(1))).unwrap().is_empty(), "operator {operator}: no row without a reader under host 1");
@@ -774,8 +767,7 @@ fn rollback_leaves_no_in_flight_row_without_a_reader() {
         // The heir's first part (after its restart at the new generation) replaces them all.
         w.hosts[0].prepare_cut(part(2, hid(0), own0.clone()), heir, 1).recv().unwrap().unwrap();
         w.hosts[2].prepare_cut(part(2, hid(2), own2.clone()), w.fences[2].clone(), 1).recv().unwrap().unwrap();
-        let c = w.h.claim_coordinator().unwrap();
-        assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(2)], vec![], c, 1, vec![]).unwrap(), "operator {operator}");
+        assert!(w.h.decide_cut(CutId(2), 200, true, vec![hid(0), hid(2)], vec![], 1, vec![]).unwrap(), "operator {operator}");
         assert_eq!(w.h.load_in_flight(Some(hid(0))).unwrap(), own0);
         assert_eq!(prepared(&w.w), 0);
         w.shutdown();
@@ -826,19 +818,19 @@ fn a_landless_lapsed_host_is_ended_without_a_generation_change() {
     let row = |o: game::HostId| w.h.hosts().unwrap().into_iter().find(|r| r.id == o).unwrap();
     assert!(!row(hid(2)).owns_land && row(hid(1)).owns_land);
     let boot2 = boot_of(hid(2));
-    assert_eq!(w.h.end_landless_host(hid(2), boot2, w.c), Ok(LandlessEnd::NotLapsed), "it beats");
+    assert_eq!(w.h.end_landless_host(hid(2), boot2), Ok(LandlessEnd::NotLapsed), "it beats");
     w.lapse(hid(2));
-    assert_eq!(w.h.end_landless_host(hid(2), 999, w.c), Ok(LandlessEnd::Gone), "another boot");
-    assert_eq!(w.h.end_landless_host(hid(9), 1, w.c), Ok(LandlessEnd::Gone), "no row");
+    assert_eq!(w.h.end_landless_host(hid(2), 999), Ok(LandlessEnd::Gone), "another boot");
+    assert_eq!(w.h.end_landless_host(hid(9), 1), Ok(LandlessEnd::Gone), "no row");
     assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false), "nothing written");
     let land_before: Vec<_> = (0..2).map(|o| w.h.owned_by(hid(o)).unwrap()).collect();
-    assert_eq!(w.h.end_landless_host(hid(2), boot2, w.c), Ok(LandlessEnd::Ended));
+    assert_eq!(w.h.end_landless_host(hid(2), boot2), Ok(LandlessEnd::Ended));
     assert_eq!(w.state_of(hid(2)), (HOST_DEAD, false), "dead, no succession to clean it");
     assert_eq!(w.h.world_generation().unwrap(), 0, "the generation untouched");
     assert!(w.h.open_successions().unwrap().is_empty(), "no succession");
     assert_eq!((0..2).map(|o| w.h.owned_by(hid(o)).unwrap()).collect::<Vec<_>>(), land_before, "nothing moved");
     assert!(!w.hosts[2].heartbeat(hid(2), boot2).unwrap().live, "its next beat finds it replaced");
-    assert_eq!(w.h.end_landless_host(hid(2), boot2, w.c), Ok(LandlessEnd::Gone), "dead already");
+    assert_eq!(w.h.end_landless_host(hid(2), boot2), Ok(LandlessEnd::Gone), "dead already");
     // A claim of a free row by the ended boot (a zombie) is refused.
     let err = w.hosts[2].claim_free(hid(2), boot2, vec![(40, 40)]);
     assert!(err.is_err() || err.as_ref().is_ok_and(|f| f.epochs.is_empty()), "{err:?}");
@@ -859,7 +851,7 @@ fn an_ended_row_is_no_total_crash_after_a_clean_stop() {
     let Some(w) = World::new(2) else { return };
     free_land(&w, hid(1));
     w.lapse(hid(1));
-    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1)), w.c), Ok(LandlessEnd::Ended));
+    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1))), Ok(LandlessEnd::Ended));
     // Host 0 leaves in its committed leave cut: its row clean.
     exec(&w.w, "UPDATE hosts SET clean = 1 WHERE id = 0");
     let next = w.hosts[0].register_host(crate::hosts::new_host("host-0", 900), CrashPolicy::Succession).unwrap();
@@ -875,20 +867,20 @@ fn an_ended_row_is_no_total_crash_after_a_clean_stop() {
 fn a_landed_host_is_not_ended() {
     let Some(w) = World::new(3) else { return };
     w.lapse(hid(1));
-    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1)), w.c), Ok(LandlessEnd::OwnsLand));
+    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1))), Ok(LandlessEnd::OwnsLand));
     assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
     // Host 2's committed part leaves an in-flight row; then its super-regions go free.
     w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
     w.hosts[2].prepare_cut(part(1, hid(2), vec![in_flight(RegionCoords::new(3, 3))]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1), hid(2)], vec![], w.c, 0, vec![]).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1), hid(2)], vec![], 0, vec![]).unwrap());
     for h in &w.hosts {
         assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
     }
     free_land(&w, hid(2));
     w.lapse(hid(2));
     assert!(w.h.hosts().unwrap()[2].owns_land, "an in-flight row is land");
-    assert_eq!(w.h.end_landless_host(hid(2), boot_of(hid(2)), w.c), Ok(LandlessEnd::OwnsLand));
+    assert_eq!(w.h.end_landless_host(hid(2), boot_of(hid(2))), Ok(LandlessEnd::OwnsLand));
     assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false));
     w.shutdown();
 }
@@ -906,21 +898,9 @@ fn a_recipient_is_not_ended() {
     free_land(&w, hid(0));
     for o in [0, 2] {
         w.lapse(hid(o));
-        assert_eq!(w.h.end_landless_host(hid(o), boot_of(hid(o)), w.c), Ok(LandlessEnd::Recipient), "host {o}");
+        assert_eq!(w.h.end_landless_host(hid(o), boot_of(hid(o))), Ok(LandlessEnd::Recipient), "host {o}");
         assert_eq!(w.state_of(hid(o)), (HOST_LIVE, false));
     }
-    w.shutdown();
-}
-
-/// Ending is fenced on the coordinator's epoch: a stale coordinator writes nothing.
-#[test]
-fn ending_is_fenced() {
-    let Some(w) = World::new(2) else { return };
-    free_land(&w, hid(1));
-    w.lapse(hid(1));
-    let _newer = w.h.claim_coordinator().unwrap();
-    assert_eq!(w.h.end_landless_host(hid(1), boot_of(hid(1)), w.c), Err(StoreError::Fenced { sr: None }));
-    assert_eq!(w.state_of(hid(1)), (HOST_LIVE, false));
     w.shutdown();
 }
 
@@ -934,7 +914,7 @@ fn a_landless_host_ends_while_a_succession_is_open() {
     let s = w.declared(hid(1), hid(0));
     assert_eq!(s.survivors, vec![hid(0), hid(2)]);
     w.lapse(hid(3));
-    assert_eq!(w.h.end_landless_host(hid(3), boot_of(hid(3)), w.c), Ok(LandlessEnd::Ended));
+    assert_eq!(w.h.end_landless_host(hid(3), boot_of(hid(3))), Ok(LandlessEnd::Ended));
     assert_eq!(w.state_of(hid(3)), (HOST_DEAD, false));
     assert_eq!(w.h.open_successions().unwrap(), vec![s.clone()], "still open");
     assert_eq!(w.h.world_generation().unwrap(), 0);
@@ -943,7 +923,7 @@ fn a_landless_host_ends_while_a_succession_is_open() {
     let heir_part = game::WorldCut { adopts: vec![hid(1)], ..part(1, hid(0), vec![]) };
     w.hosts[0].prepare_cut(heir_part, heir, 0).recv().unwrap().unwrap();
     w.hosts[2].prepare_cut(part(1, hid(2), vec![]), w.fences[2].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(2)], vec![], w.c, 0, vec![s.id]).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(2)], vec![], 0, vec![s.id]).unwrap());
     assert!(w.h.open_successions().unwrap().is_empty(), "settled");
     assert_eq!(w.h.world_generation().unwrap(), 0);
     w.shutdown();

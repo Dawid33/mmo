@@ -14,7 +14,7 @@ use game::{
 };
 
 use crate::codec::*;
-use crate::fence::{CoordinatorFence, Fence, SuperRegion, commit_check_set, load_check};
+use crate::fence::{Fence, SuperRegion, commit_check_set, load_check};
 use crate::forged::{ForgedHead, TiledRows};
 use game::HostId;
 use game::ClockAnchor;
@@ -1004,55 +1004,63 @@ macro_rules! engine_rows {
                 Ok(u(g))
             }
 
-            /// Claims the coordinator row: epoch 1 on a new store, else epoch + 1
-            /// (a coordinator that held it is fenced). Callers hold the writer lock.
-            pub(crate) async fn claim_coordinator(pool: &Pool) -> Result<CoordinatorFence, StoreError> {
-                let epoch: i64 = sqlx::query(
-                    "INSERT INTO coordinator (id, epoch) VALUES (1, 1) \
-                     ON CONFLICT (id) DO UPDATE SET epoch = coordinator.epoch + 1 RETURNING epoch",
+            /// Bootstraps the coordinator row (Elastic 2b Task 3): writes `core` and `history`
+            /// at version 1, epoch 1 — unless a row with a projection exists (first writer wins:
+            /// [`crate::Bootstrapped::Exists`], nothing written; the caller loads it). A row with
+            /// no projection (claimed by a build before Elastic 2b and never written) is filled
+            /// at its next version and epoch, so no cut id of its older epochs is made again. One
+            /// statement on the one `coordinator` row (lock notes: `succession.rs`). Callers hold
+            /// the writer lock.
+            pub(crate) async fn bootstrap_coordinator(
+                pool: &Pool,
+                core: Vec<u8>,
+                history: Vec<u8>,
+            ) -> Result<crate::Bootstrapped, StoreError> {
+                let row = sqlx::query(
+                    "INSERT INTO coordinator (id, epoch, version, core, history, saved_utc) VALUES (1, 1, 1, $1, $2, $3) \
+                     ON CONFLICT (id) DO UPDATE SET epoch = coordinator.epoch + 1, version = coordinator.version + 1, \
+                     core = excluded.core, history = excluded.history, saved_utc = excluded.saved_utc \
+                     WHERE coordinator.core IS NULL RETURNING version, epoch",
                 )
-                .fetch_one(pool)
-                .await?
-                .try_get(0)?;
-                Ok(CoordinatorFence { epoch: u(epoch) })
+                .bind(core)
+                .bind(history)
+                .bind(crate::open::utc_now())
+                .fetch_optional(pool)
+                .await?;
+                Ok(match row {
+                    Some(r) => crate::Bootstrapped::Written { version: u(r.try_get(0)?), epoch: u(r.try_get(1)?) },
+                    None => crate::Bootstrapped::Exists,
+                })
             }
 
-            /// Writes the coordinator's projection (Elastic 2a): `core`, and `history` unless
-            /// `None` (the stored one is kept), if `fence` still holds the row AND it is at
-            /// `version` — the compare-and-set is the update's own `WHERE`; the version goes up by
-            /// one. Returns the new version and the database clock. No row: the epoch is read
-            /// again — another one is [`StoreError::Fenced`], the same one
-            /// [`StoreError::Conflict`] (the version moved: a second writer). One statement on
-            /// the one `coordinator` row; it wants nothing else (lock notes: `succession.rs`).
-            /// Callers hold the writer lock.
-            pub(crate) async fn write_coordinator(
+            /// Writes the coordinator's projection (Elastic 2a) with NO store decision (on
+            /// SQLite every write is one: a transition with decisions is refused before this):
+            /// `core`, and `history` unless `None` (the stored one is kept), if the row is at
+            /// `version` — the compare-and-set is the update's own `WHERE` (Elastic 2b Task 3: the
+            /// version is the coordinator's fence, no epoch is compared); the version goes up by
+            /// one. Returns the new version and the database clock; no row matched (the version
+            /// moved: a second writer, or no row) is [`StoreError::Conflict`]. One statement on the
+            /// one `coordinator` row (lock notes: `succession.rs`). Callers hold the writer lock.
+            pub(crate) async fn write_coordinator_cas(
                 pool: &Pool,
-                fence: CoordinatorFence,
                 version: u64,
                 core: Vec<u8>,
                 history: Option<Vec<u8>>,
-            ) -> Result<crate::CoordinatorWritten, StoreError> {
+            ) -> Result<(u64, u64), StoreError> {
                 let sql = format!(
                     "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, \
-                     saved_utc = $3 WHERE id = 1 AND epoch = $4 AND version = $5 RETURNING version, {NOW_MS}"
+                     saved_utc = $3 WHERE id = 1 AND version = $4 RETURNING version, {NOW_MS}"
                 );
                 let row = sqlx::query(&sql)
                     .bind(core)
                     .bind(history)
                     .bind(crate::open::utc_now())
-                    .bind(i(fence.epoch))
                     .bind(i(version))
                     .fetch_optional(pool)
                     .await?;
-                if let Some(r) = row {
-                    return Ok(crate::CoordinatorWritten { version: u(r.try_get(0)?), store_ms: u(r.try_get(1)?) });
-                }
-                let epoch: Option<i64> =
-                    sqlx::query_scalar("SELECT epoch FROM coordinator WHERE id = 1").fetch_optional(pool).await?;
-                if epoch.map(u) == Some(fence.epoch) {
-                    Err(StoreError::Conflict)
-                } else {
-                    Err(StoreError::Fenced { sr: None })
+                match row {
+                    Some(r) => Ok((u(r.try_get(0)?), u(r.try_get(1)?))),
+                    None => Err(StoreError::Conflict),
                 }
             }
 

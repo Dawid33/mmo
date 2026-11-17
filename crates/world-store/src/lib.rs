@@ -6,6 +6,7 @@
 
 pub mod ctl;
 mod codec;
+mod coordinator_tx;
 mod counters;
 mod fence;
 mod forged;
@@ -23,11 +24,12 @@ mod url;
 use std::fmt;
 
 pub use codec::*;
+pub use coordinator_tx::{AfterCommit, Bootstrapped, TransitionWrite, TransitionWritten};
 pub use counters::StoreCounters;
-pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
+pub use fence::{Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{
-    Beat, CoordinatorWritten, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost, Registered, StoreHandle, StoredCoordinator, WorldInfo,
+    Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost, Registered, StoreHandle, StoredCoordinator, WorldInfo,
 };
 pub use listen::{
     CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
@@ -202,9 +204,9 @@ pub enum StoreError {
     Unsupported(String),
     Corrupt(String),
     /// A fenced write or load whose claim is no longer the stored one:
-    /// another process claimed the super-region (`sr`) — or, with `sr` `None`,
-    /// the coordinator row — since; also (`sr` `None`) a host's claim whose boot's
-    /// `hosts` row is no longer live (declared dead or replaced). Nothing was written.
+    /// another process claimed the super-region (`sr`) since; also (`sr` `None`) a host's
+    /// claim whose boot's `hosts` row is no longer live (declared dead or replaced). Nothing
+    /// was written. (The coordinator is fenced by its row's version instead: [`Self::Conflict`].)
     Fenced { sr: Option<SuperRegion> },
     /// A cut prepared by a host whose generation (`mine`) is behind the world's
     /// (`stored`): the world restarted from another save since; nothing was written.
@@ -233,9 +235,10 @@ pub enum StoreError {
     /// A drain mark ([`StoreHandle::drain_host`]) for a row that is not a dirty live one —
     /// absent, dead or left cleanly: why, naming the host by its bare number. Nothing written.
     NotDrainable(String),
-    /// A coordinator write ([`StoreHandle::write_coordinator_later`]) whose epoch still holds
-    /// the row but whose version moved since it was read: a second writer (Elastic 2a has one
-    /// coordinator, so a bug or a takeover in progress). Nothing was written.
+    /// A coordinator transition ([`StoreHandle::write_transition_later`]) whose row's version
+    /// moved since it was read: another writer (Elastic 2b: another replica, or this one's own
+    /// commit whose answer was lost). Nothing was written — the transition's store decisions
+    /// neither.
     Conflict,
 }
 
@@ -325,8 +328,7 @@ impl fmt::Display for StoreError {
             ),
             StoreError::Fenced { sr: None } => write!(
                 f,
-                "the world coordinator was claimed by another process since this one claimed it, or (a host's claim) \
-                 this boot's hosts row was declared dead or replaced; nothing was written"
+                "this boot's hosts row was declared dead or replaced since its claim; nothing was written"
             ),
             StoreError::StaleGeneration { stored, mine } => write!(
                 f,
@@ -352,8 +354,8 @@ impl fmt::Display for StoreError {
             StoreError::NotDrainable(why) => write!(f, "{why}"),
             StoreError::Conflict => write!(
                 f,
-                "the world coordinator's row changed since this process read it (its version moved under the same \
-                 claim: a second writer); nothing was written"
+                "the world coordinator's row changed since this process read it (its version moved: another \
+                 writer); nothing was written, its store decisions neither"
             ),
             StoreError::NotAlone { live } => write!(
                 f,

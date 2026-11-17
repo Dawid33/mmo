@@ -18,7 +18,9 @@
 //! **Replicas over one row (Elastic 2b, `input.rs`):** every input arrives through
 //! [`Coordinator::apply`], which logs it until its transition commits; a write that meets a
 //! newer row is followed by [`Coordinator::rebase`]: the newer projection, the log applied
-//! again onto it. Attachments and store calls are stamped with the [`ReplicaId`].
+//! again onto it. Attachments are stamped with the [`ReplicaId`], store calls with a
+//! [`CallStamp`]: every store decision runs inside the transaction of the transition that
+//! decided it (`decisions.rs`), its answer an input of the next pass.
 //!
 //! **Many hosts:** every outgoing message carries its [`Target`]: a region's messages go to
 //! the host that announced the region (`RegionStarted`, its `Attach`, a delivered
@@ -29,6 +31,7 @@
 //! never comes back is ended by its succession.
 
 mod clock;
+mod decisions;
 mod input;
 mod link;
 mod msg;
@@ -38,6 +41,7 @@ mod succession;
 mod world_cut;
 
 pub use clock::*;
+pub use decisions::*;
 pub use input::*;
 pub use link::*;
 pub use msg::*;
@@ -225,6 +229,12 @@ pub struct Coordinator {
     /// yet ([`Self::transition_written`] / [`Self::transition_failed`]): nothing leaves by
     /// [`Self::take_out`] meanwhile — a message decided after it may depend on its state.
     writing: bool,
+    /// Store decisions handed out and not taken yet, in order (`decisions.rs`): they leave with
+    /// the next transition ([`Self::take_transition`]), never on their own.
+    decisions: Vec<StoreDecision>,
+    /// The stamp of the transition in flight: the row version it commits as, by this replica.
+    /// The marks it carries hold it ([`Self::transition_failed`] resolves them).
+    writing_stamp: Option<CallStamp>,
 }
 
 /// The classification of every [`Coordinator`] field: the projection's (durable, written by
@@ -319,6 +329,8 @@ projection! {
             clean_checked = false,
             committed_raw = Vec::new(),
             writing = false,
+            decisions = Vec::new(),
+            writing_stamp = None,
         }
     }
 }
@@ -375,6 +387,8 @@ impl Coordinator {
             committed_raw: Vec::new(),
             unstored: false,
             writing: false,
+            decisions: Vec::new(),
+            writing_stamp: None,
         };
         c.push_view(Target::Every);
         c
@@ -386,10 +400,14 @@ impl Coordinator {
     /// anchor: a quick restart skips no day and repeats no day turn; a longer silence than
     /// [`CALENDAR_GAP_MS`] is downtime, re-anchored at the load where the calendar last stood,
     /// never earlier than a host was told — [`Self::calendar_resume`]), but:
-    /// - an attachment, and a store call handed out, of another replica count as detached / not
-    ///   in flight ([`ReplicaId`]): every host attaches again, and its `Attach` corrects what
-    ///   the projection holds of it (its unlisted regions park, its unlisted players go
-    ///   offline); a host that never comes back is ended by its succession;
+    /// - an attachment of another replica counts as detached ([`ReplicaId`]): every host
+    ///   attaches again, and its `Attach` corrects what the projection holds of it (its unlisted
+    ///   regions park, its unlisted players go offline); a host that never comes back is ended
+    ///   by its succession;
+    /// - a store decision another replica handed out (its mark, `decisions.rs`) committed with
+    ///   the transition holding it, and its answer died with that process: it is LOOKED UP,
+    ///   never issued again ([`Self::orphan_marks`]; until Elastic 2b Task 4's live set, every
+    ///   other replica is a dead process);
     /// - a stored deadline more than [`CALENDAR_GAP_MS`] in the past restarts its count
     ///   ([`rebase_deadline`] / [`rebase_since`]): never earlier than stored.
     ///
@@ -407,6 +425,11 @@ impl Coordinator {
         let history = crate::history::persist::decode(history, grid)?;
         let mut c = Coordinator::from_projection(p, history, replica, now_ms);
         c.committed_raw = raw_core(&c.projection());
+        if c.orphan_marks(|stamp| stamp.replica != replica, "it was handed out by a process that is gone") {
+            // Outside the log: a rebase before the next commit would lose it (the runtime then
+            // stops, and the next start looks it up again).
+            c.note_unlogged();
+        }
         c.rebase_deadlines(now_ms);
         if c.calendar_gap(now_ms) {
             // Downtime: re-anchored at once where the calendar last stood (never the stored
@@ -424,6 +447,18 @@ impl Coordinator {
     /// set it themselves).
     pub fn set_version(&mut self, version: u64) {
         self.version = version;
+    }
+
+    /// The row was bootstrapped (Elastic 2b Task 3) with this core's projection exactly as
+    /// [`Self::encode_projection`] encodes it now, at row `version`: that is its last commit —
+    /// what it holds is not written again (its outputs still wait for the next transition, or
+    /// leave with [`Self::take_out`]).
+    pub fn bootstrapped(&mut self, version: u64) {
+        self.version = version;
+        self.committed_raw = raw_core(&self.projection());
+        self.history.clear_content_dirty();
+        self.unlogged_committed = self.unlogged;
+        self.clean_checked = false;
     }
 
     /// The row version this core holds: as loaded ([`Self::set_version`]), last committed
@@ -721,7 +756,11 @@ impl Coordinator {
     /// ([`Self::commit_unstored`]) frees them at once. Released, the inputs logged since the
     /// last commit changed nothing durable: they are dropped from the log (the row holds all
     /// they did). Right after a [`Self::take_transition`] that found nothing to write, the
-    /// projection is not encoded again.
+    /// projection is not encoded again: that verdict (`clean_checked`) holds only while nothing
+    /// changed since — call this right after that [`Self::take_transition`], with no input,
+    /// hand-out or answer in between (each of those clears the verdict anyway: every input
+    /// through [`Self::apply`], every change outside the log through `note_unlogged`, every
+    /// store decision handed out through `push_decision`).
     pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
         if !self.unstored {
             if self.writing {
@@ -731,6 +770,10 @@ impl Coordinator {
             if !clean {
                 return Vec::new();
             }
+            debug_assert!(self.decisions.is_empty(), "a store decision waits, yet nothing durable is pending");
+        } else {
+            // No store: nothing to decide in (an unstored core runs no world cut nor succession).
+            self.decisions.clear();
         }
         self.log.clear();
         self.unlogged_committed = self.unlogged;
@@ -772,7 +815,7 @@ impl Coordinator {
     /// Whether the projection differs from the one last handed out (or loaded), or the
     /// history changed since.
     fn durable_pending(&self) -> bool {
-        self.history.content_dirty() || raw_core(&self.projection()) != self.committed_raw
+        !self.decisions.is_empty() || self.history.content_dirty() || raw_core(&self.projection()) != self.committed_raw
     }
 
     /// The pending change as bytes plus the messages it releases; `None` when nothing durable
@@ -791,9 +834,13 @@ impl Coordinator {
             // One at a time (final review G1): the one handed out is not answered yet.
             return None;
         }
+        // The marks handed out since the last transition are this one's: it commits, if at
+        // all, as the next version of the row it was read at (the compare-and-set).
+        let stamp = CallStamp { replica: self.replica, version: self.version + 1 };
+        self.stamp_pending_marks(stamp);
         let raw = raw_core(&self.projection());
         let history_changed = self.history.content_dirty();
-        if !history_changed && raw == self.committed_raw {
+        if !history_changed && raw == self.committed_raw && self.decisions.is_empty() {
             self.clean_checked = true;
             return None;
         }
@@ -802,37 +849,126 @@ impl Coordinator {
         let core = seal_core(&raw);
         self.committed_raw = raw;
         self.writing = true;
+        self.writing_stamp = Some(stamp);
         self.clean_checked = false;
         self.log_boundary = self.log.len();
         self.unlogged_taken = self.unlogged;
-        Some(Transition { core, history, out: std::mem::take(&mut self.out) })
+        Some(Transition { core, history, out: std::mem::take(&mut self.out), decisions: std::mem::take(&mut self.decisions) })
     }
 
     /// The write of the transition last taken committed as row version `version`: its messages
     /// may leave (the caller sends them), the inputs it holds leave the log, and
-    /// [`Self::take_out`] frees again what was decided with nothing durable pending.
+    /// [`Self::take_out`] frees again what was decided with nothing durable pending. Its store
+    /// decisions' answers come next, as inputs ([`Input::Decision`]); an answer that never comes
+    /// leaves its mark to a lookup (a rebase, a restart: [`Self::orphan_marks`]).
     pub fn transition_written(&mut self, version: u64) {
+        debug_assert!(
+            self.writing_stamp.is_none_or(|s| s.version == version),
+            "the transition was stamped {:?} and committed as version {version}",
+            self.writing_stamp
+        );
         self.writing = false;
+        self.writing_stamp = None;
         self.version = version;
         let boundary = std::mem::take(&mut self.log_boundary).min(self.log.len());
         self.log.drain(..boundary);
         self.unlogged_committed = self.unlogged_taken;
     }
 
-    /// The write of transition `t` failed (not committed, not fenced): its messages go back to
-    /// the head of the outgoing queue, in order, and the next [`Self::take_transition`] writes
-    /// the whole projection again (the history too if `t` carried it). Nothing is decided
-    /// twice: the inputs were applied once, and their state is in the next transition; they
-    /// stay in the log.
+    /// The write of transition `t` failed, and whether it committed is not known (not
+    /// fenced, not a conflict: a store error, a lost answer): its messages go back to the head
+    /// of the outgoing queue, in order, and the next [`Self::take_transition`] writes the whole
+    /// projection again (the history too if `t` carried it). Nothing is decided twice: the
+    /// inputs were applied once, and their state is in the next transition; they stay in the
+    /// log. Its store decisions may have committed with it: never issued again — each mark it
+    /// carries is looked up ([`Self::orphan_marks`]).
     pub fn transition_failed(&mut self, t: Transition) {
+        let stamp = self.writing_stamp;
+        self.hand_back(t);
+        if let Some(stamp) = stamp {
+            self.orphan_marks(|s| *s == stamp, "its write failed and may have committed");
+        }
+    }
+
+    /// The write of transition `t` certainly did not commit (a `Conflict` before the row is
+    /// rebased, or a write refused before it reached the store): as [`Self::transition_failed`],
+    /// but its store decisions were never issued — they go back, ahead of any handed out since,
+    /// their marks pending again, and leave with the next transition.
+    pub fn transition_refused(&mut self, t: Transition) {
+        let stamp = self.writing_stamp;
+        let decisions = self.hand_back(t);
+        if let Some(stamp) = stamp {
+            self.stamp_marks(|s| *s == stamp, CallStamp::pending(self.replica));
+        }
+        let later = std::mem::replace(&mut self.decisions, decisions);
+        self.decisions.extend(later);
+    }
+
+    /// `t` back in the core (not committed as far as this replica knows): its messages ahead of
+    /// what was decided since, the whole projection (and the history if `t` carried it) to be
+    /// written again. Its decisions, to the caller.
+    fn hand_back(&mut self, t: Transition) -> Vec<StoreDecision> {
         self.writing = false;
+        self.writing_stamp = None;
         self.log_boundary = 0;
+        self.clean_checked = false;
         if t.history.is_some() {
             self.history.mark_content_dirty();
         }
         self.committed_raw.clear();
         let later = std::mem::replace(&mut self.out, t.out);
         self.out.extend(later);
+        t.decisions
+    }
+
+    /// A store decision handed out (its mark set by the caller, stamped pending): it leaves
+    /// with the next transition.
+    fn push_decision(&mut self, d: StoreDecision) {
+        self.clean_checked = false;
+        self.decisions.push(d);
+    }
+
+    /// Every mark stamped pending takes `stamp` (the transition being taken).
+    fn stamp_pending_marks(&mut self, stamp: CallStamp) {
+        let replica = self.replica;
+        self.stamp_marks(|s| s.is_pending() && s.replica == replica, stamp);
+    }
+
+    /// Every mark whose stamp `matches` takes `to`.
+    fn stamp_marks(&mut self, matches: impl Fn(&CallStamp) -> bool, to: CallStamp) {
+        self.cuts_stamp_marks(&matches, to);
+        self.successions_stamp_marks(&matches, to);
+    }
+
+    /// Every mark whose stamp `matches` lost its answer (`why`, for the log): resolved by a
+    /// lookup, never issued again (`decisions.rs`) — a cut's decision is read back, a
+    /// declaration or an end makes the open successions be read again (and the next `hosts`
+    /// read takes a dead row nobody here declared out of the view), a rollback reads the world
+    /// generation. Whether any mark matched.
+    pub(super) fn orphan_marks(&mut self, matches: impl Fn(&CallStamp) -> bool, why: &str) -> bool {
+        let cut = self.cuts_orphan_marks(&matches, why);
+        let successions = self.successions_orphan_marks(&matches, why);
+        cut || successions
+    }
+
+    /// One answer of a store decision ([`Input::Decision`]): applied only if its stamp is the
+    /// mark's (`decisions.rs`).
+    fn on_decision(&mut self, answer: DecisionAnswer, now_ms: u64) {
+        self.clock_ms = self.clock_ms.max(now_ms);
+        match answer {
+            DecisionAnswer::Cut { stamp, cut, committed } => self.cut_answered(stamp, cut, committed),
+            DecisionAnswer::Begin { cut, bound } => match bound {
+                Ok(bound) => log::debug!("coordinator: world cut {}: its begin is recorded (hosts below {bound} take part)", cut.0),
+                Err(e) => log::warn!(
+                    "coordinator: world cut {}: its begin could not be recorded ({e}); a host joining during it aborts it",
+                    cut.0
+                ),
+            },
+            DecisionAnswer::Declared { stamp, outcome } => self.declare_answered(stamp, outcome, now_ms),
+            DecisionAnswer::Ended { stamp, end, outcome } => self.end_answered(stamp, end, outcome, now_ms),
+            DecisionAnswer::RolledBack { stamp, outcome } => self.rollback_answered(stamp, outcome, now_ms),
+            DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica:?}'s row is dead"),
+        }
     }
 
     /// For a link with no store behind it (the inline link): the state as it stands counts as

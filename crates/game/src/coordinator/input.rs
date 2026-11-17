@@ -10,17 +10,20 @@
 //! recorded ([`Coordinator::clock_floor`]).
 //!
 //! Never logged: what a host tells the login service ([`crate::HostMsg::Login`], forwarded at
-//! once into the process's login relay: a replay would tell it twice). Not logged yet (Elastic
-//! 2b Tasks 3 and 6 make them inputs): the store's answers and the runtime's reads — they
-//! change the projection outside the log, so a core holding such a change since its last commit
-//! cannot be rebased ([`Coordinator::unlogged_pending`]); the runtime then stops as Elastic 2a
-//! did, and the next start loads the row.
+//! once into the process's login relay: a replay would tell it twice). The answers of the store
+//! DECISIONS are inputs (Elastic 2b Task 3, [`Input::Decision`]). Not logged yet (Elastic 2b
+//! Task 6 makes them inputs): the answers of the store's READS and lookups (the `hosts` rows,
+//! the open successions, a cut's stored decision, owners, the generation) — they change the
+//! projection outside the log, so a core holding such a change since its last commit cannot be
+//! rebased ([`Coordinator::unlogged_pending`]); the runtime then stops as Elastic 2a did, and the
+//! next start loads the row. A decision handed out (its mark, `decisions.rs`) is no such change:
+//! a rebase drops it with the transition it was in, which did not commit.
 
 use crate::HostId;
 use crate::history::persist::HistoryLoadError;
 
 use super::state::{decode_core, raw_core};
-use super::{Coordinator, HostMsg, Projection};
+use super::{Coordinator, DecisionAnswer, HostMsg, Projection};
 
 /// One input of the coordinator core, as a replica applies it ([`Coordinator::apply`]) and
 /// replays it at a rebase.
@@ -35,6 +38,10 @@ pub enum Input {
     /// The upkeep: the calendar, the history's directives and notices, the cuts' and the
     /// successions' timers ([`Coordinator::apply`]).
     Maintain,
+    /// The store's answer to one decision of a committed transition (`decisions.rs`): applied
+    /// only if its stamp is the mark's — at a replay too, so a rebase onto a row holding the
+    /// mark applies it there, and onto one without it changes nothing.
+    Decision(DecisionAnswer),
 }
 
 impl Coordinator {
@@ -70,6 +77,7 @@ impl Coordinator {
                 }
             }
             Input::Maintain => self.on_maintain(now),
+            Input::Decision(answer) => self.on_decision(answer, now),
         }
     }
 
@@ -110,6 +118,13 @@ impl Coordinator {
             self.apply_logged(input.clone(), *now);
         }
         self.log = log;
+        // A mark of this replica still set now was committed in the row by an earlier
+        // transition of it whose answer was never applied (nothing is in flight after a
+        // rebase: the transition that met the conflict did not commit): looked up, never
+        // issued again. (Another replica's marks are its own to answer; Elastic 2b Task 4
+        // looks up those of a replica no longer live.)
+        let me = self.replica;
+        self.orphan_marks(|stamp| stamp.replica == me, "its answer was never applied before a rebase");
         Ok(())
     }
 
@@ -124,6 +139,27 @@ impl Coordinator {
     pub(super) fn note_unlogged(&mut self) {
         self.unlogged += 1;
         self.clean_checked = false;
+    }
+
+    /// `f`, the body of a public entry point that is no input (`what`, for the message): in
+    /// debug builds, it may change the projection only if it says so (`note_unlogged`) or hands
+    /// a store decision out (its mark) — while store answers are still applied outside the log
+    /// (Elastic 2b Task 6 makes them inputs), a change that says nothing would be lost by a
+    /// rebase unnoticed.
+    pub(super) fn unlogged_guard<R>(&mut self, what: &str, f: impl FnOnce(&mut Self) -> R) -> R {
+        #[cfg(debug_assertions)]
+        let before = (raw_core(&self.projection()), self.unlogged, self.decisions.len());
+        let r = f(self);
+        #[cfg(debug_assertions)]
+        if self.unlogged == before.1 && self.decisions.len() == before.2 {
+            debug_assert!(
+                raw_core(&self.projection()) == before.0,
+                "coordinator: {what} changed the projection outside the log without noting it"
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = what;
+        r
     }
 
     /// Inputs logged since the last commit (test support).

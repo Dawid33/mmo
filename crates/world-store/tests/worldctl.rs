@@ -445,7 +445,7 @@ fn rollback_needs_yes_and_bumps_once() {
     let rows1 = vec![in_flight(RegionCoords::new(1, 5))];
     w.hosts[0].prepare_cut(part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
     w.hosts[1].prepare_cut(part(1, hid(1), rows1.clone()), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], w.c, 0, vec![]).unwrap());
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
     w.vouch(hid(1));
     let s = w.declared(hid(1), hid(0));
@@ -467,7 +467,7 @@ fn rollback_needs_yes_and_bumps_once() {
     // The running processes learn it at their next write.
     let err = w.hosts[0].prepare_cut(part(2, hid(0), vec![]), heir.clone(), 0).recv().unwrap().unwrap_err();
     assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
-    let err = w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], w.c, 0, vec![]).unwrap_err();
+    let err = w.h.decide_cut(CutId(2), 200, true, vec![hid(0)], vec![], 0, vec![]).unwrap_err();
     assert_eq!(err, world_store::StoreError::StaleGeneration { stored: 1, mine: 0 });
     assert_eq!(w.h.abort_cut(CutId(2), 200), Ok(false), "the coordinator still records its abort");
     // A second run bumps once more (each run is one rollback).

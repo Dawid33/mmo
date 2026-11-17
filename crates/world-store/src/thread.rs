@@ -14,13 +14,13 @@ use game::HostId;
 use game::{CutId, PlayerId, PlayerRecord, RegionCoords, Tick, WorldCut};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+use crate::coordinator_tx::{self, Decided};
 use crate::counters::Counters;
 use crate::rows::{self, i, CutEnd};
-use crate::succession::{self, SUCCESSION_UNSUPPORTED};
+use crate::succession::SUCCESSION_UNSUPPORTED;
 use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 use crate::{
-    CoordinatorFence, CutCommitted, Dials, Fence, LockGuard, OpenMode, Pool, StoreError, StoreUrl, SuperRegion,
-    WorldInfo, open_pool,
+    CutCommitted, Dials, Fence, LockGuard, OpenMode, Pool, StoreError, StoreUrl, SuperRegion, WorldInfo, open_pool,
 };
 
 thread_local! {
@@ -110,15 +110,18 @@ pub(crate) enum Request {
     ClaimFree(HostId, u64, Vec<SuperRegion>, Reply<Fence>),
     /// Free the fence's super-regions.
     Release(Fence, Reply<()>),
-    ClaimCoordinator(Reply<CoordinatorFence>),
-    /// Elastic 2a: the coordinator's projection, compare-and-set on `version`.
-    WriteCoordinator {
-        fence: CoordinatorFence,
-        version: u64,
-        core: Vec<u8>,
-        history: Option<Vec<u8>>,
-        reply: Reply<crate::CoordinatorWritten>,
-    },
+    /// Elastic 2b Task 3: the coordinator row's first write (first writer wins).
+    BootstrapCoordinator(Vec<u8>, Vec<u8>, Reply<crate::Bootstrapped>),
+    /// Elastic 2b Task 3: a coordinator transition — the compare-and-set of its row and its
+    /// store decisions, one transaction (`coordinator_tx.rs`). `injected[i]`: decision `i`
+    /// fails without running (the decision test hook).
+    WriteTransition { w: Box<crate::TransitionWrite>, injected: Vec<bool>, reply: Reply<crate::TransitionWritten> },
+    /// Test support: ONE decision in a transition of its own that rewrites the row's core
+    /// as it stands (bootstrapping an empty row if there is none), its post-commit effect
+    /// run at once; the typed outcome.
+    DecideAlone { d: Box<game::coordinator::StoreDecision>, injected: bool, stop_after: Option<u32>, reply: Reply<Decided> },
+    /// A committed transition's post-commit effect (`coordinator_tx.rs`).
+    AfterCommit(crate::AfterCommit, Option<u32>, Reply<()>),
     LoadCoordinator(Reply<Option<crate::StoredCoordinator>>),
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
@@ -134,25 +137,15 @@ pub(crate) enum Request {
     TwoPhaseReady(Reply<()>),
     /// A host's part of a two-phase cut, at the host's world generation.
     PrepareCut(Box<WorldCut>, Fence, u64, Reply<CutCommitted>),
-    DecideCut(Box<Decision>, Reply<bool>),
     AbortCut(CutId, Tick, Reply<bool>),
-    /// Elastic 1: the coordinator records a world cut's begin (Postgres).
-    RecordCutBegin(CutId, crate::CoordinatorFence, Reply<HostId>),
     ResolvePrepared(Reply<Vec<(CutId, bool)>>),
     StagedCutParts(Reply<Vec<(CutId, HostId)>>),
     CutDecision(CutId, Reply<Option<bool>>),
     CutDecided(CutId, Reply<Option<bool>>),
     LastCommittedCut(Reply<CutId>),
-    /// R4: the coordinator declares a succession (Postgres).
-    DeclareSuccession(Box<Declare>, Reply<crate::Declared>),
-    /// R4: the coordinator rolls the world back (Postgres).
-    /// From the generation given (idempotent: a world past it answers its generation).
-    RollbackWorld(CoordinatorFence, u64, Reply<u64>),
     /// R4: the operator rolls the world back (`worldctl rollback`; Postgres): `(generation,
     /// successions abandoned)`.
     RollbackWorldOperator(Reply<(u64, u64)>),
-    /// Elastic 2a: the coordinator ends a lapsed landless host (no succession; Postgres).
-    EndLandlessHost(HostId, u64, CoordinatorFence, Reply<crate::LandlessEnd>),
     /// R4: the operator vouches for a lapsed host's death (`worldctl retire-host`; Postgres).
     VouchHost(HostId, Reply<crate::Vouched>),
     OpenSuccessions(Reply<Vec<crate::Succession>>),
@@ -163,30 +156,6 @@ pub(crate) enum Request {
     TestHook(TestHook, Reply<()>),
     /// Finish the queued commits, then stop.
     Shutdown,
-}
-
-/// [`crate::StoreHandle::decide_cut`]'s arguments.
-pub(crate) struct Decision {
-    pub cut: CutId,
-    pub tick: Tick,
-    pub commit: bool,
-    pub hosts: Vec<HostId>,
-    pub leaving: Vec<HostId>,
-    pub fence: CoordinatorFence,
-    pub generation: u64,
-    /// The open successions a commit settles (R4).
-    pub settles: Vec<crate::SuccessionId>,
-    /// Test hook: fail after this many `COMMIT PREPARED`s.
-    pub stop_after: Option<u32>,
-}
-
-/// [`crate::StoreHandle::declare_succession`]'s arguments.
-pub(crate) struct Declare {
-    pub dead: Vec<(HostId, u64)>,
-    pub heirs: Vec<HostId>,
-    pub kind: crate::SuccessionKind,
-    pub fence: CoordinatorFence,
-    pub generation: u64,
 }
 
 /// Cut state shared by a handle (and its clones) and its store thread.
@@ -408,42 +377,54 @@ async fn serve(
                     Pool::Sqlite(_) => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                 })
             }),
-            // No writer lock for the decision, the abort or the sweep: a prepare
-            // queued behind a prepared part's row lock waits for the decision.
-            Request::DecideCut(d, r) => {
-                let cuts = cuts.clone();
+            // Postgres: no writer lock for a transition (its compare-and-set serialises it) nor
+            // for the abort or the sweep: a decision in it may wait (its lock timeout) for a
+            // staged part, and a prepare queued behind that part's row lock must not wait for it
+            // in-process. SQLite: the writer lock, as every write (and no decision).
+            Request::WriteTransition { w, injected, reply } => {
+                let dials = decision_dials(world_tag, &cuts);
                 tokio::spawn(async move {
-                    let (cut, tick) = (d.cut, d.tick);
-                    let decided = match (&pool, world_tag) {
-                        (Pool::Pg(p), Some(tag)) => {
-                            let Decision { cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after } = *d;
-                            two_phase::decide_cut(
-                                p, tag, cut, tick, commit, hosts, leaving, fence, generation, settles, stop_after,
+                    let written = match &pool {
+                        Pool::Pg(p) => match dials {
+                            Some(dials) => coordinator_tx::write_pg(p, &w, dials, &injected).await.map(|(version, store_ms, decided)| {
+                                let (answers, after_commit) = coordinator_tx::answers(&w, version, decided);
+                                crate::TransitionWritten { version, store_ms, answers, after_commit }
+                            }),
+                            None => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                        },
+                        Pool::Sqlite(_) if !w.decisions.is_empty() => Err(StoreError::Unsupported(
+                            "a coordinator transition with store decisions needs Postgres (several hosts)".into(),
+                        )),
+                        Pool::Sqlite(_) => {
+                            let _w = writer.lock().await;
+                            on_pool!(&pool, write_coordinator_cas(w.version, w.core.clone(), w.history.clone())).map(
+                                |(version, store_ms)| crate::TransitionWritten { version, store_ms, answers: Vec::new(), after_commit: Vec::new() },
                             )
-                            .await
                         }
-                        _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                     };
-                    let committed = matches!(decided, Ok(true));
-                    // Answered first: the checks below never delay or fail the decision.
-                    r.send(decided);
-                    if let (true, Pool::Pg(p)) = (committed, &pool) {
-                        if two_phase::report_settled_unadopted(p, cut).await {
-                            cuts.settled_unadopted_cuts.fetch_add(1, Ordering::SeqCst);
-                        }
-                        if two_phase::report_entities_twice(p, cut, tick).await {
-                            cuts.entities_twice_cuts.fetch_add(1, Ordering::SeqCst);
-                        }
-                        cuts.entities_checked_cuts.fetch_add(1, Ordering::SeqCst);
-                    }
+                    reply.send(written)
                 })
             }
-            Request::RecordCutBegin(cut, fence, r) => tokio::spawn(async move {
-                r.send(match &pool {
-                    Pool::Pg(p) => two_phase::record_cut_begin(p, cut, fence).await,
-                    Pool::Sqlite(_) => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+            Request::DecideAlone { d, injected, stop_after, reply } => {
+                let dials = decision_dials(world_tag, &cuts);
+                let cuts = cuts.clone();
+                tokio::spawn(async move {
+                    let decided = match (&pool, dials) {
+                        (Pool::Pg(p), Some(dials)) => decide_alone(p, *d, injected, stop_after, dials, &cuts).await,
+                        _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                    };
+                    reply.send(decided)
                 })
-            }),
+            }
+            Request::AfterCommit(a, stop_after, r) => {
+                let cuts = cuts.clone();
+                tokio::spawn(async move {
+                    r.send(match &pool {
+                        Pool::Pg(p) => after_commit(p, world_tag, a, stop_after, &cuts).await,
+                        Pool::Sqlite(_) => Ok(()),
+                    })
+                })
+            }
             Request::AbortCut(cut, tick, r) => tokio::spawn(async move {
                 r.send(match &pool {
                     Pool::Pg(p) => two_phase::abort_cut(p, world_tag.expect("set on Postgres"), cut, tick).await,
@@ -478,44 +459,11 @@ async fn serve(
             }),
             // No writer lock (as a decision): a declaration waits, bounded by the cut lock
             // timeout, for a staged part holding the predecessor's super-regions.
-            Request::DeclareSuccession(d, r) => {
-                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
-                let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
-                tokio::spawn(async move {
-                    r.send(match &pool {
-                        Pool::Pg(p) => {
-                            let Declare { dead, heirs, kind, fence, generation } = *d;
-                            succession::declare(p, dead, heirs, kind, fence, generation, lock_timeout_ms, lease_ms).await
-                        }
-                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
-                    })
-                })
-            }
-            Request::RollbackWorld(fence, from, r) => {
-                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
-                tokio::spawn(async move {
-                    r.send(match &pool {
-                        Pool::Pg(p) => succession::rollback_world(p, fence, from, lock_timeout_ms).await,
-                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
-                    })
-                })
-            }
             Request::RollbackWorldOperator(r) => {
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
                         Pool::Pg(p) => crate::operator::rollback_world_operator(p, lock_timeout_ms).await,
-                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
-                    })
-                })
-            }
-            // No writer lock (as a declaration): bounded by the cut lock timeout.
-            Request::EndLandlessHost(host, boot, fence, r) => {
-                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
-                let lease_ms = cuts.host_lease_ms.load(Ordering::SeqCst);
-                tokio::spawn(async move {
-                    r.send(match &pool {
-                        Pool::Pg(p) => succession::end_landless_host(p, host, boot, fence, lock_timeout_ms, lease_ms).await,
                         Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
                     })
                 })
@@ -630,13 +578,9 @@ async fn serve(
                     r.send(on_pool!(&pool, release(fence, lock_ms)))
                 })
             }
-            Request::ClaimCoordinator(r) => tokio::spawn(async move {
+            Request::BootstrapCoordinator(core, history, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
-                r.send(on_pool!(&pool, claim_coordinator()))
-            }),
-            Request::WriteCoordinator { fence, version, core, history, reply } => tokio::spawn(async move {
-                let _w = writer.lock().await;
-                reply.send(on_pool!(&pool, write_coordinator(fence, version, core, history)))
+                r.send(on_pool!(&pool, bootstrap_coordinator(core, history)))
             }),
             Request::LoadCoordinator(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) }),
             Request::EnsureClockAnchor(proposed, r) => tokio::spawn(async move {
@@ -844,6 +788,83 @@ fn queue_cut(commit_tx: &mpsc::UnboundedSender<QueuedCut>, queued: QueuedCut) {
 /// On a read-only store, answers a write request with `ReadOnly` (`None`);
 /// passes every other request through. A player resolve is a read unless the
 /// key is new — that case is refused where it is served.
+/// The dials of the coordinator's store decisions (Postgres: `world_tag` is set).
+fn decision_dials(world_tag: Option<u32>, cuts: &CutState) -> Option<coordinator_tx::DecisionDials> {
+    Some(coordinator_tx::DecisionDials {
+        world_tag: world_tag?,
+        lock_timeout_ms: cuts.lock_timeout_ms.load(Ordering::SeqCst),
+        lease_ms: cuts.host_lease_ms.load(Ordering::SeqCst),
+    })
+}
+
+/// A post-commit effect ([`crate::AfterCommit`]); a committed cut's checks run after its
+/// parts are finished (detect only: they never fail the effect).
+async fn after_commit(
+    p: &sqlx::PgPool,
+    world_tag: Option<u32>,
+    a: crate::AfterCommit,
+    stop_after: Option<u32>,
+    cuts: &CutState,
+) -> Result<(), StoreError> {
+    let finished_committed = coordinator_tx::after_commit_pg(p, world_tag, a, stop_after).await?;
+    if let (true, crate::AfterCommit::FinishCut { cut, tick, .. }) = (finished_committed, a) {
+        if two_phase::report_settled_unadopted(p, cut).await {
+            cuts.settled_unadopted_cuts.fetch_add(1, Ordering::SeqCst);
+        }
+        if two_phase::report_entities_twice(p, cut, tick).await {
+            cuts.entities_twice_cuts.fetch_add(1, Ordering::SeqCst);
+        }
+        cuts.entities_checked_cuts.fetch_add(1, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+/// Conflicts a test's lone decision rewrites the row through before it gives up.
+const DECIDE_ALONE_TRIES: u32 = 8;
+
+/// [`Request::DecideAlone`]: `d` in a transition of its own over the row as it stands (an
+/// empty row bootstrapped first), its post-commit effects run at once.
+async fn decide_alone(
+    p: &sqlx::PgPool,
+    d: game::coordinator::StoreDecision,
+    injected: bool,
+    stop_after: Option<u32>,
+    dials: coordinator_tx::DecisionDials,
+    cuts: &CutState,
+) -> Result<Decided, StoreError> {
+    for _ in 0..DECIDE_ALONE_TRIES {
+        let row = match rows::pg::load_coordinator(p).await? {
+            Some(row) => row,
+            None => {
+                rows::pg::bootstrap_coordinator(p, vec![0], Vec::new()).await?;
+                continue;
+            }
+        };
+        let w = crate::TransitionWrite {
+            version: row.version,
+            core: row.core,
+            history: None,
+            decisions: vec![d.clone()],
+            replica: game::coordinator::ReplicaId(0),
+        };
+        match coordinator_tx::write_pg(p, &w, dials, &[injected]).await {
+            Err(StoreError::Conflict) => continue,
+            Err(e) => return Err(e),
+            Ok((version, _, mut decided)) => {
+                let decided = decided.pop().expect("one decision");
+                let (_, effects) = coordinator_tx::answers(&w, version, Vec::new());
+                debug_assert!(effects.is_empty());
+                if let Decided::Cut { cut, tick, committed: Ok(committed) } = &decided {
+                    let finish = crate::AfterCommit::FinishCut { cut: *cut, tick: *tick, committed: *committed };
+                    after_commit(p, Some(dials.world_tag), finish, stop_after, cuts).await?;
+                }
+                return Ok(decided);
+            }
+        }
+    }
+    Err(StoreError::Backend(format!("the coordinator row moved {DECIDE_ALONE_TRIES} times under a lone decision")))
+}
+
 fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option<Request> {
     if !read_only {
         return Some(req);
@@ -854,8 +875,10 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::ClaimSuperRegions(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimFree(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::Release(_, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::ClaimCoordinator(r) => r.send(Err(StoreError::ReadOnly)),
-        Request::WriteCoordinator { reply, .. } => reply.send(Err(StoreError::ReadOnly)),
+        Request::BootstrapCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::WriteTransition { reply, .. } => reply.send(Err(StoreError::ReadOnly)),
+        Request::DecideAlone { reply, .. } => reply.send(Err(StoreError::ReadOnly)),
+        Request::AfterCommit(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SetSuperRegionRegions(_, r) => r.send(Err(StoreError::ReadOnly)),
@@ -864,15 +887,10 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
             cuts.settle(c.id);
             r.send(Err(StoreError::ReadOnly))
         }
-        Request::DecideCut(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::AbortCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::RecordCutBegin(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ResolvePrepared(r) => r.send(Err(StoreError::ReadOnly)),
         Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::DeclareSuccession(_, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::RollbackWorld(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RollbackWorldOperator(r) => r.send(Err(StoreError::ReadOnly)),
-        Request::EndLandlessHost(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::VouchHost(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::DrainHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         // A read-only handle sends nothing, a notice included.

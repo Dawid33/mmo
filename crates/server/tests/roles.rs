@@ -1938,14 +1938,22 @@ fn a_coordinator_killed_after_the_commit_before_the_sends_loses_nothing() {
         w.link.send(game::HostMsg::CutPrepared { cut }).unwrap();
         w.link.send(ask.clone()).unwrap();
         w.until_core("the grant decided", move |c| c.memo_ids().contains(&id));
-        let deadline = Instant::now() + WAIT;
-        while scalar(&w.db, &format!("SELECT COUNT(*) FROM cut_decisions WHERE cut_id = {}", cut.0)) == 0 {
-            assert!(Instant::now() < deadline, "the cut was never decided");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // The decision reached the core (its CutDone queued behind the failing writes).
+        // The cut's decision is taken in the core; it is recorded only with the transition that
+        // carries it (Elastic 2b Task 3) — not while the writes fail.
+        w.until_core("the cut's verdict", move |c| c.world_cut_progress().is_some_and(|(c, _, v)| c == cut && v.is_some()));
         w.read_for(Duration::from_millis(600));
+        assert_eq!(
+            scalar(&w.db, &format!("SELECT COUNT(*) FROM cut_decisions WHERE cut_id = {}", cut.0)),
+            0,
+            "no decision without its transition"
+        );
     });
+    // The killed transition carried the grant AND the cut's decision: both committed together.
+    assert_eq!(
+        scalar(&w.db, &format!("SELECT COUNT(*) FROM cut_decisions WHERE cut_id = {}", cut.0)),
+        1,
+        "the decision committed with its transition"
+    );
     w.read_for(Duration::from_millis(300));
     assert!(w.replies(id).is_empty(), "the reply never left: {:?}", w.seen);
     assert!(

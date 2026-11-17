@@ -1,23 +1,27 @@
 //! The world coordinator's runtime: the threadless core ([`game::Coordinator`]) on its own
-//! `coordinator` thread, persisting its state into the world store under its own fence
-//! ([`CoordinatorFence`]) — the **only writer** of history state. *Durable before
-//! visible* (Elastic 2a): every pass takes the core's transition
-//! ([`Coordinator::take_transition`]: its whole projection when anything durable changed) and
-//! writes it with a compare-and-set on the row's version
-//! ([`StoreHandle::write_coordinator_later`]); the messages it released are sent only once
-//! that write committed. One write in flight at a time: whatever is decided meanwhile waits
-//! for the next transition. A failed write hands its transition back to the core (its
-//! messages wait; the inputs stay applied once, never again) and is retried after
-//! [`COORDINATOR_SAVE_RETRY_MS`]. A write refused as a `Conflict` (the row's version moved, its
-//! epoch did not) re-reads the row: if it holds this process's own unacknowledged write (its
-//! commit's answer was lost), the version is taken from it and the cached core — that write plus
-//! every input applied since, each once — is written again at once. Anything else is another
-//! writer (Elastic 2b): the core is REBASED onto the row ([`Coordinator::rebase`]: the newer
-//! projection, every input logged since the last commit applied again) and written again — up to
+//! `coordinator` thread, persisting its state into the world store — the **only writer** of
+//! history state. *Durable before visible* (Elastic 2a): every pass takes the core's transition
+//! ([`Coordinator::take_transition`]: its whole projection when anything durable changed, and
+//! the store decisions it issues) and writes it in ONE transaction: a compare-and-set on the
+//! row's version, the decisions after it, each in a savepoint
+//! ([`StoreHandle::write_transition_later`], Elastic 2b Task 3 — the version is the
+//! coordinator's only fence); the messages it released are sent only once that write
+//! committed, the decisions' answers are applied as inputs at once, and the post-commit effects
+//! (a decided cut's staged parts finished, its notice) run after. One write in flight at a time:
+//! whatever is decided meanwhile waits for the next transition. A failed write (not known to
+//! have committed) hands its transition back to the core (its messages wait; the inputs stay
+//! applied once, never again; its decisions are looked up, never issued again) and is retried
+//! after [`COORDINATOR_SAVE_RETRY_MS`]. A write refused as a `Conflict` (the row's version moved)
+//! re-reads the row: if it holds this process's own unacknowledged write (its commit's answer
+//! was lost), the version is taken from it and the cached core — that write plus every input
+//! applied since, each once — is written again at once (the conflicting transition did not
+//! commit: its decisions go out again with it). Anything else is another writer (Elastic 2b):
+//! the core is REBASED onto the row ([`Coordinator::rebase`]: the newer projection, every input
+//! logged since the last commit applied again) and written again — up to
 //! [`COORDINATOR_CONFLICT_RETRIES`] in a row, then after [`COORDINATOR_SAVE_RETRY_MS`]. Only a
 //! core that cannot be rebased without a loss ends the process as fenced, as Elastic 2a did (the
 //! next start loads the row): one holding a change made outside its log since its last commit (a
-//! store's answer: Elastic 2b Tasks 3 and 6 make those inputs), or one with a failed write since
+//! store READ's answer: Elastic 2b Task 6 makes those inputs), or one with a failed write since
 //! its last commit (that write may be in the row: its inputs would be applied twice). Counted
 //! (`mmo_coordinator_*` in `/metrics`, the periodic `[coordinator] window=…` line): transitions
 //! written, their bytes, conflicts.
@@ -34,21 +38,20 @@
 //!
 //! **World cuts** (`claim` hosts, any number of them; R3 Task 13; [`WorldCuts`]): the core picks the tick and
 //! collects the hosts' parts; the runtime feeds it the world tick and the hosts the cut
-//! needs (those whose `hosts` row is not clean), records each decision in the store
-//! ([`StoreHandle::decide_cut`], under the coordinator's fence) and broadcasts the
-//! decision the STORE returned. A `decide_cut` that fails (a stale generation, a store
-//! error) is followed by `abort_cut`, retried ([`WORLD_CUT_DECISION_RETRY_MS`], slower
-//! past the cut's deadline) until a decision is stored: no outcome is ever announced that
-//! the store does not hold. A host's question about a cut the core does not remember is
-//! answered from the store (`cut_decision`; an undecided one aborted). Every store call of
-//! the world cuts is answered on a receiver: the loop never waits for the database. While
-//! the coordinator is down no cut runs.
+//! needs (those whose `hosts` row is not clean); the core's decision is recorded inside its
+//! transition and the core broadcasts the decision the STORE returned. A decision refused
+//! there, or whose answer was lost, is looked up (`cut_decision`; an undecided one aborted by
+//! `abort_cut`, retried [`WORLD_CUT_LOOKUP_RETRY_MS`]) until a decision is stored: no outcome is
+//! ever announced that the store does not hold. A host's question about a cut the core does not
+//! remember is answered from the store the same way. Every store call of the world cuts is
+//! answered on a receiver: the loop never waits for the database. While the coordinator is down
+//! no cut runs.
 //!
 //! Each decision stored as committed is announced to the hosts' terrain listeners
-//! ([`StoreHandle::notify_cut`], after the decision's transaction; Task 19).
+//! ([`AfterCommit::NotifyCut`], after the transition's commit; Task 19).
 //!
-//! A save refused as `Fenced` (another coordinator claimed the row) fences the whole
-//! process: the shared [`Fenced`] flag is set — the server's main loop sees it and exits
+//! A core that cannot be rebased onto a newer row ends the process as fenced: the shared
+//! [`Fenced`] flag is set — the server's main loop sees it and exits
 //! [`crate::claims::EXIT_FENCED`] through `cuts::exit_world` — the link goes down and the
 //! thread ends with [`ServerExit::Fenced`]. Library code never calls `process::exit`.
 
@@ -63,7 +66,7 @@ use game::coordinator::{Input, Target};
 use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
 use login_api::{HostToLogin, LoginToHost};
 use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
-use world_store::{CoordinatorFence, CoordinatorWritten, StoreError, StoreHandle};
+use world_store::{AfterCommit, StoreError, StoreHandle, TransitionWrite, TransitionWritten};
 
 use crate::claims::{Fenced, ServerExit};
 use crate::world_file::CoordinatorStart;
@@ -755,8 +758,8 @@ impl CoordinatorThread {
         self.hold_hosts_reads.store(held, Ordering::SeqCst);
     }
 
-    /// Test hook: a world cut decision whose write failed is not tried again (no abort is
-    /// recorded for it) — a coordinator that dies right after the failure.
+    /// Test hook: a decided cut's post-commit finish (its staged parts' `COMMIT PREPARED`) that
+    /// failed is not tried again — a coordinator that dies right after the failure.
     #[doc(hidden)]
     #[cfg(feature = "test-hooks")]
     pub fn hold_decision_retries(&self) {
@@ -857,21 +860,21 @@ pub const DECLARE_FAILING_WARN_AFTER_MS: u64 = 3_000;
 /// A store answer on its way.
 type Answer<T> = Receiver<Result<T, StoreError>>;
 
-/// A decision of the core being recorded: its `decide_cut`, then (if that failed)
-/// `abort_cut` until one is stored.
-struct Recording {
-    d: game::CutDecide,
-    /// The answer awaited (`None`: waiting to try `abort_cut` at `retry_at`).
-    rx: Option<Answer<bool>>,
-    aborting: bool,
-    taken_ms: u64,
+/// A post-commit effect of a committed transition ([`AfterCommit`]), run until it succeeds.
+struct AfterJob {
+    a: AfterCommit,
+    /// The answer awaited (`None`: waiting to try again at `retry_at`).
+    rx: Option<Answer<()>>,
     retry_at: u64,
 }
 
-/// A host's question about a cut's outcome, being answered from the store.
+/// A question about a cut's outcome, being answered from the store: a host's (`host`), or the
+/// running cut's own decision whose answer was lost (`None`, the core's
+/// [`Coordinator::take_decision_lookup`]).
 struct Lookup {
-    host: HostId,
+    host: Option<HostId>,
     cut: game::CutId,
+    tick: game::Tick,
     rx: Option<Answer<Option<bool>>>,
     /// The cut was undecided: `abort_cut`'s answer.
     abort_rx: Option<Answer<bool>>,
@@ -887,15 +890,15 @@ pub struct WorldCuts {
     pub tick: Box<dyn Fn() -> game::Tick + Send>,
 }
 
-/// The coordinator for an `AllInOne` process: runs `start` (its row claimed before its
-/// state was loaded, [`CoordinatorStart::fence`]) on its thread over a fresh
+/// The coordinator for an `AllInOne` process: runs `start` (its row read or bootstrapped at
+/// [`CoordinatorStart::version`]) on its thread over a fresh
 /// [`ChannelWorldLink`] — the host's end, to install with `WorldManager::set_world_link`.
 pub fn start_all_in_one(
     store: StoreHandle,
     start: CoordinatorStart,
     fenced: Fenced,
 ) -> Result<(ChannelWorldLink, CoordinatorThread), String> {
-    log::info!("[coordinator] the world coordinator (epoch {}), state {:?}", start.fence.epoch, start.source);
+    log::info!("[coordinator] the world coordinator (row version {}), state {:?}", start.version, start.source);
     let (link, host) = channel_link();
     let thread = CoordinatorRuntime::spawn(store, start, LinkSet::one(host), fenced, None);
     Ok((link, thread))
@@ -921,8 +924,8 @@ impl ListeningCoordinator {
     }
 }
 
-/// The coordinator for a `VOXEL_ROLE=coordinator` process (its row claimed before its
-/// state was loaded, [`CoordinatorStart::fence`]): listens on `bind` for hosts presenting
+/// The coordinator for a `VOXEL_ROLE=coordinator` process (its row read or bootstrapped at
+/// [`CoordinatorStart::version`]): listens on `bind` for hosts presenting
 /// `token` (the certificate's pin written to `cert_hash_file`, its cert and key kept
 /// beside it), and runs `start` on its thread serving them.
 pub fn start_listening(
@@ -993,8 +996,8 @@ pub fn start_listening_as(
             .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
     let (addr, cert_sha256) = (listener.local_addr(), listener.cert_sha256().to_string());
     log::info!(
-        "[coordinator] the world coordinator (epoch {}), state {:?}; hosts dial {addr} (pin {cert_sha256}{})",
-        start.fence.epoch,
+        "[coordinator] the world coordinator (row version {}), state {:?}; hosts dial {addr} (pin {cert_sha256}{})",
+        start.version,
         start.source,
         cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
     );
@@ -1004,13 +1007,12 @@ pub fn start_listening_as(
     Ok(ListeningCoordinator { thread, addr, cert_sha256, login: login_at, login_tally })
 }
 
-/// The coordinator core with its store and fence (see the module docs).
+/// The coordinator core with its store (see the module docs).
 pub struct CoordinatorRuntime {
     core: Coordinator,
     store: StoreHandle,
-    fence: CoordinatorFence,
     /// The transition being written and the store's answer on its way (one at a time).
-    writing: Option<(game::coordinator::Transition, Receiver<Result<CoordinatorWritten, StoreError>>)>,
+    writing: Option<(game::coordinator::Transition, Receiver<Result<TransitionWritten, StoreError>>)>,
     /// The hashes of the cores of the writes that failed since the last commit (at most
     /// [`COORDINATOR_UNACKED_MAX`]): one of them may have committed with its answer lost. While
     /// any is remembered a rebase could apply that write's inputs twice: none is done.
@@ -1053,11 +1055,8 @@ pub struct CoordinatorRuntime {
     /// Its first field is the MONOTONIC ms ([`Self::mono_ms`]) the read was issued at: the
     /// lease watch's clock (Elastic 2a final review, S1).
     hosts_rx: Option<(u64, Answer<world_store::HostsRead>)>,
-    /// The decision being recorded (one at a time: the core runs one cut at a time).
-    recording: Option<Recording>,
-    /// The world cut whose begin was last sent to the store (`record_cut_begin`, Elastic 1
-    /// Task 4), and its answer while it is on its way.
-    begin_recorded: Option<(game::CutId, Option<Answer<HostId>>)>,
+    /// Post-commit effects of committed transitions, in flight or waiting to be tried again.
+    after: Vec<AfterJob>,
     /// Lookups of cut outcomes in flight or waiting to be tried again.
     lookups: Vec<Lookup>,
     /// `now_ms` of the last warning about a failing world-cut store call.
@@ -1070,25 +1069,27 @@ pub struct CoordinatorRuntime {
     policy: game::CrashPolicy,
 }
 
-/// The store calls of the core's successions ([`CoordinatorRuntime::pump_successions`]):
-/// each answered on a receiver, at most one of each kind in flight, a failure tried again
-/// after [`WORLD_CUT_DECISION_RETRY_MS`].
+/// The store reads of the core's successions ([`CoordinatorRuntime::pump_successions`]) and
+/// the pacing of its hand-outs (the declarations, ends and rollbacks themselves run inside the
+/// transitions): each read answered on a receiver, at most one of each kind in flight, a
+/// failure tried again after [`WORLD_CUT_DECISION_RETRY_MS`].
 #[derive(Default)]
 struct SuccessionPump {
     /// The open successions were read at start ([`Coordinator::successions_open`]).
     open_known: bool,
     open_rx: Option<Answer<Vec<game::Succession>>>,
     open_retry_at: u64,
-    declare_rx: Option<Answer<game::Declared>>,
+    /// No declaration is handed out before this (after a refused one).
     declare_retry_at: u64,
     /// `now_ms` since which every declaration failed (`None`: the last one was answered).
     declare_failing_since: Option<u64>,
-    rollback_rx: Option<Answer<u64>>,
-    rollback_retry_at: u64,
+    /// The world generation read for a rollback whose answer was lost (the core's
+    /// [`Coordinator::take_generation_lookup`]).
+    generation_rx: Option<Answer<u64>>,
+    generation_retry_at: u64,
     /// The owners read for the super-regions hosts asked for (`LandWanted`), with them.
     land_rx: Option<(Vec<game::SuperRegion>, Answer<Vec<(game::SuperRegion, i64, u64)>>)>,
-    /// The end of a lapsed landless host in flight (Elastic 2a, `end_landless_host`), with it.
-    end_rx: Option<(game::coordinator::EndLandless, Answer<game::LandlessEnd>)>,
+    /// No end of a landless host is handed out before this (after a refused one).
     end_retry_at: u64,
 }
 
@@ -1110,7 +1111,8 @@ impl WriteTally {
 
 /// Why the coordinator thread ends from inside a pass.
 enum End {
-    /// A write (or another fenced store call) was refused as fenced.
+    /// A store call was refused as fenced (none of the coordinator's is any more: kept for a
+    /// store that answers so).
     Fenced,
     /// A `Conflict` with another writer that the core cannot be rebased through without a loss
     /// (a change outside its log, or a failed write that may be in the row, since its last
@@ -1130,6 +1132,10 @@ enum Settled {
     Held { now: bool },
     End(End),
 }
+
+/// The error a write refused by the test hook [`CoordinatorThread::fail_coordinator_writes`]
+/// carries: it never reached the store (certainly not committed — its decisions go out again).
+const HOOK_REFUSED: &str = "test hook: coordinator writes fail (refused before the store)";
 
 /// A hash of a written core: what a re-read row is compared with ([`CoordinatorRuntime::unacked`]).
 fn core_hash(core: &[u8]) -> u64 {
@@ -1177,16 +1183,15 @@ impl CoordinatorRuntime {
         let hold_hosts_reads = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "test-hooks")]
         let hooks = WriteHooks::default();
-        let fence = start.fence;
         let (store_ms, started) = start.store_time;
         let mut clock = game::coordinator::StoreClock::default();
         clock.sample(store_ms, 0);
-        // A migrated or bootstrapped core is wholly unwritten: its first transition writes it.
+        // A bootstrapped core is written whole again by its first transition (its encoding
+        // bootstrapped the row; its outputs leave with that transition). Its cut ids' high half
+        // was set once, at the bootstrap (`world_file::ensure_coordinator_state`).
         let mut core = start.coordinator;
         core.set_version(start.version);
         if let Some(c) = &cuts {
-            // Raised only (it is durable): a loaded core's ids never repeat another start's.
-            core.set_cut_epoch(fence.epoch);
             core.set_world_cuts(c.every.as_millis() as u64);
         }
         let successions = (cuts.is_some() && policy == game::CrashPolicy::Succession).then(|| {
@@ -1198,7 +1203,6 @@ impl CoordinatorRuntime {
         let runtime = CoordinatorRuntime {
             core,
             store,
-            fence,
             writing: None,
             unacked: VecDeque::new(),
             conflicts_in_a_row: 0,
@@ -1222,8 +1226,7 @@ impl CoordinatorRuntime {
             cuts,
             hosts_read_ms: None,
             hosts_rx: None,
-            recording: None,
-            begin_recorded: None,
+            after: Vec::new(),
             lookups: Vec::new(),
             warned_ms: None,
             successions,
@@ -1566,7 +1569,7 @@ impl CoordinatorRuntime {
                     // A host that left and registered again (another boot) is expected again.
                     self.core.set_host_boots(rows.iter().map(|r| (r.id, r.boot)).collect());
                     // A row marked dead (a takeover declared it) runs nothing: not expected
-                    // (`decide_cut` reads the same predicate).
+                    // (`decide_in` reads the same predicate).
                     let live: BTreeSet<HostId> =
                         rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).map(|r| r.id).collect();
                     crate::health::Health::global().hosts_live(live.len() as u64);
@@ -1618,113 +1621,32 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// Record the core's world-cut decision in the store and tell the core the STORED
-    /// decision; answer the hosts' questions about cuts the core does not remember. Never
-    /// waits. `Err`: fenced.
+    /// The world cuts' store work outside the transitions: the core's decision is handed out
+    /// (it leaves with the next transition and is recorded in its transaction); a decision whose
+    /// answer was lost or refused, and the hosts' questions about cuts the core does not
+    /// remember, are looked up; the post-commit effects of committed decisions run (retried
+    /// until they succeed). Never waits. `Err`: fenced.
     fn pump_cuts(&mut self, now: u64) -> Result<(), ()> {
         if self.cuts.is_none() {
             return Ok(());
         }
-        // Every cut's begin is recorded in the store (Elastic 1 Task 4): the decision may then
-        // leave out a host registered after it (it owned nothing at the cut's tick, and the
-        // participants froze their sessions with it). Not waited for: a decision taken before
-        // the record lands lists every dirty host, as before — safe, a newcomer then aborts it.
-        if let Some((cut, _)) = self.core.world_cut_running() {
-            if self.begin_recorded.as_ref().is_none_or(|(c, _)| *c != cut) {
-                self.begin_recorded = Some((cut, Some(self.store.record_cut_begin_later(cut, self.fence))));
-            }
+        // `settles`: the open successions this cut settles if it commits — the core names them
+        // only once every survivor applied and the heir ADOPTED (the heir's part then carries
+        // `WorldCut::adopts`, Task 9); the store does not check that pairing.
+        if let Some(d) = self.core.take_decision() {
+            log::debug!("[coordinator] world cut {}: its decision ({}) goes with the next transition", d.cut.0, d.commit);
         }
-        if let Some((cut, Some(rx))) = self.begin_recorded.as_mut() {
-            let cut = *cut;
-            match rx.try_recv() {
-                Err(TryRecvError::Empty) => {}
-                Ok(Ok(bound)) => {
-                    log::debug!("[coordinator] world cut {}: begin recorded (hosts below {bound} must take part)", cut.0);
-                    self.begin_recorded = Some((cut, None));
-                }
-                Ok(Err(StoreError::Fenced { .. })) => return Err(()),
-                Ok(Err(e)) => {
-                    self.begin_recorded = Some((cut, None));
-                    self.warn_cuts(now, &format!("world cut {}: its begin could not be recorded ({e}); a host joining during it aborts it", cut.0));
-                }
-                Err(TryRecvError::Disconnected) => self.begin_recorded = Some((cut, None)),
+        self.pump_after_commit(now);
+        if let Some((cut, tick)) = self.core.take_decision_lookup() {
+            if !self.lookups.iter().any(|l| l.host.is_none() && l.cut == cut) {
+                let rx = Some(self.store.cut_decision_later(cut));
+                self.lookups.push(Lookup { host: None, cut, tick, rx, abort_rx: None, retry_at: now });
             }
-        }
-        if self.recording.is_none() {
-            if let Some(d) = self.core.take_decision() {
-                // `settles`: the open successions this cut settles if it commits — the core names
-                // them only once every survivor applied and the heir ADOPTED (the heir's part then
-                // carries `WorldCut::adopts`, Task 9); the store does not check that pairing.
-                let rx = self.store.decide_cut_later(
-                    d.cut,
-                    d.tick,
-                    d.commit,
-                    d.hosts.clone(),
-                    d.leaving.clone(),
-                    self.fence,
-                    d.generation,
-                    d.settles.clone(),
-                );
-                self.recording = Some(Recording { d, rx: Some(rx), aborting: false, taken_ms: now, retry_at: now });
-            }
-        }
-        if let Some(r) = self.recording.as_mut() {
-            let answer = match r.rx.as_ref().map(|rx| rx.try_recv()) {
-                None | Some(Err(TryRecvError::Empty)) => None,
-                Some(Ok(answer)) => Some(answer),
-                Some(Err(TryRecvError::Disconnected)) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
-            };
-            match answer {
-                None => {}
-                Some(Ok(stored)) => {
-                    let d = self.recording.take().expect("recording").d;
-                    if d.commit && !stored {
-                        log::warn!("[coordinator] world cut {}: a commit was asked, the store recorded an abort", d.cut.0);
-                    }
-                    game::perf_event!("world_cut_decided", "cut={} tick={} committed={stored}", d.cut.0, d.tick);
-                    let health = crate::health::Health::global();
-                    health.cut_decided(stored);
-                    if stored {
-                        // Its commit settles the successions it names (`settles`).
-                        for _ in &d.settles {
-                            health.succession_settled();
-                        }
-                    }
-                    if stored {
-                        // The hosts' listeners re-read what it saved (Task 19). After the
-                        // decision's own transaction, not waited for: a lost notice is
-                        // covered by their poll, a duplicate costs a read.
-                        let _ = self.store.notify_cut_later(d.cut, d.tick);
-                    }
-                    self.core.decided(d.cut, stored);
-                }
-                Some(Err(StoreError::Fenced { .. })) => return Err(()),
-                Some(Err(e)) => {
-                    if matches!(e, StoreError::StaleGeneration { .. }) {
-                        // The world rolled back without this coordinator (`worldctl rollback`):
-                        // the successions it runs may be abandoned.
-                        self.core.successions_reread();
-                    }
-                    let (cut, aborting) = (r.d.cut.0, r.aborting);
-                    let slow = now.saturating_sub(r.taken_ms) >= game::WORLD_CUT_DEADLINE_MS;
-                    r.rx = None;
-                    r.aborting = true;
-                    r.retry_at = now + if slow { WORLD_CUT_DECISION_SLOW_RETRY_MS } else { WORLD_CUT_DECISION_RETRY_MS };
-                    let what = if aborting { "its abort" } else { "the decision" };
-                    self.warn_cuts(now, &format!("world cut {cut}: {what} could not be recorded ({e}); aborting it again"));
-                }
-            }
-        }
-        #[cfg(feature = "test-hooks")]
-        let held = self.hold_decision_retries.load(Ordering::SeqCst);
-        #[cfg(not(feature = "test-hooks"))]
-        let held = false;
-        if let Some(r) = self.recording.as_mut().filter(|r| !held && r.rx.is_none() && now >= r.retry_at) {
-            r.rx = Some(self.store.abort_cut_later(r.d.cut, r.d.tick));
         }
         for (host, cut) in self.core.take_cut_lookups() {
-            if !self.lookups.iter().any(|l| l.host == host && l.cut == cut) {
-                self.lookups.push(Lookup { host, cut, rx: Some(self.store.cut_decision_later(cut)), abort_rx: None, retry_at: now });
+            if !self.lookups.iter().any(|l| l.host == Some(host) && l.cut == cut) {
+                let rx = Some(self.store.cut_decision_later(cut));
+                self.lookups.push(Lookup { host: Some(host), cut, tick: 0, rx, abort_rx: None, retry_at: now });
             }
         }
         let mut answered = Vec::new();
@@ -1742,7 +1664,7 @@ impl CoordinatorRuntime {
                     Ok(Ok(Some(stored))) => answered.push((i, stored)),
                     Ok(Ok(None)) => {
                         l.rx = None;
-                        l.abort_rx = Some(self.store.abort_cut_later(l.cut, 0));
+                        l.abort_rx = Some(self.store.abort_cut_later(l.cut, l.tick));
                     }
                     Ok(Err(e)) => failed.push((i, e.to_string())),
                     Err(TryRecvError::Disconnected) => failed.push((i, "the world-store thread has stopped".into())),
@@ -1761,23 +1683,89 @@ impl CoordinatorRuntime {
             l.rx = None;
             l.abort_rx = None;
             l.retry_at = now + WORLD_CUT_LOOKUP_RETRY_MS;
-            let (cut, host) = (l.cut.0, l.host);
-            self.warn_cuts(now, &format!("the outcome of cut {cut} for host {host} could not be read ({e}); asking again"));
+            let (cut, host) = (l.cut.0, l.host.map_or_else(|| "the coordinator".to_string(), |h| format!("host {h}")));
+            self.warn_cuts(now, &format!("the outcome of cut {cut} for {host} could not be read ({e}); asking again"));
         }
         for (i, stored) in answered.iter().rev() {
             let l = self.lookups.remove(*i);
-            self.core.cut_outcome(l.host, l.cut, *stored);
+            match l.host {
+                Some(host) => self.core.cut_outcome(host, l.cut, *stored),
+                None => {
+                    // The running cut's own decision, as stored: its post-commit effects may not
+                    // have run (the answer that carried them was lost) — run again, idempotent.
+                    self.cut_decided(l.cut, l.tick, *stored, &[]);
+                    self.after.push(AfterJob { a: AfterCommit::FinishCut { cut: l.cut, tick: l.tick, committed: *stored }, rx: None, retry_at: now });
+                    if *stored {
+                        self.after.push(AfterJob { a: AfterCommit::NotifyCut { cut: l.cut, tick: l.tick }, rx: None, retry_at: now });
+                    }
+                    self.core.decision_looked_up(l.cut, *stored);
+                }
+            }
         }
         Ok(())
     }
 
+    /// A decision on cut `cut` stored as `committed` reached this runtime (with its transition,
+    /// or by a lookup): counted. `settles`: the successions its commit settles (when known).
+    fn cut_decided(&mut self, cut: game::CutId, tick: game::Tick, committed: bool, settles: &[game::SuccessionId]) {
+        game::perf_event!("world_cut_decided", "cut={} tick={tick} committed={committed}", cut.0);
+        let health = crate::health::Health::global();
+        health.cut_decided(committed);
+        if committed {
+            for _ in settles {
+                health.succession_settled();
+            }
+        }
+    }
+
+    /// The post-commit effects ([`AfterCommit`]): each run until it succeeds, a failure tried
+    /// again after [`WORLD_CUT_DECISION_RETRY_MS`] (never, under the test hook
+    /// [`CoordinatorThread::hold_decision_retries`]). One that never runs is left to the
+    /// lookups: a host's `cut_decided`, a start's `resolve_prepared`, the listeners' poll.
+    fn pump_after_commit(&mut self, now: u64) {
+        #[cfg(feature = "test-hooks")]
+        let held = self.hold_decision_retries.load(Ordering::SeqCst);
+        #[cfg(not(feature = "test-hooks"))]
+        let held = false;
+        let mut failed = Vec::new();
+        self.after.retain_mut(|job| {
+            if let Some(rx) = &job.rx {
+                let answer = match rx.try_recv() {
+                    Err(TryRecvError::Empty) => return true,
+                    Ok(answer) => answer,
+                    Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                };
+                job.rx = None;
+                match answer {
+                    Ok(()) => return false,
+                    Err(e) => {
+                        failed.push(format!("{:?}: {e}", job.a));
+                        if held {
+                            return false;
+                        }
+                        job.retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                        return true;
+                    }
+                }
+            }
+            true
+        });
+        for e in failed {
+            self.warn_cuts(now, &format!("a decided cut's post-commit effect failed ({e}); trying again"));
+        }
+        for job in self.after.iter_mut().filter(|j| j.rx.is_none() && now >= j.retry_at) {
+            job.rx = Some(self.store.after_commit_later(job.a));
+        }
+    }
+
     /// The successions' store calls (`CrashPolicy::Succession`; the core decides, see
     /// `game::coordinator::succession`): first the open successions are read (a restart
-    /// re-sends their orders); then a wanted rollback is executed (`rollback_world`, the core
-    /// tells every host the new generation); else the core's next declaration is executed
-    /// (`declare_succession`) and its answer handed back. Never waits; a failure (a lock
-    /// timeout behind a staged part, the store down) is tried again after
-    /// [`WORLD_CUT_DECISION_RETRY_MS`]. `Err`: fenced.
+    /// re-sends their orders) and the owners of land asked for; a rollback whose answer was lost
+    /// is looked up (the world generation); then a wanted rollback is handed out, else the core's
+    /// next end of a landless host and next declaration — each runs in the next transition, its
+    /// answer comes with the commit ([`Self::answered`]). Never waits; a read that fails, or a
+    /// decision refused (a lock timeout behind a staged part, the store down), is tried again
+    /// after [`WORLD_CUT_DECISION_RETRY_MS`]. `Err`: fenced.
     fn pump_successions(&mut self, now: u64) -> Result<(), ()> {
         let Some(p) = self.successions.as_mut() else { return Ok(()) };
         // The core wants the open successions read again (the store changed them behind its
@@ -1848,113 +1836,125 @@ impl CoordinatorRuntime {
             self.warn_cuts(now, &format!("the owners of land asked for could not be read ({e}); the hosts ask again"));
         }
         let Some(p) = self.successions.as_mut() else { return Ok(()) };
-        if self.core.rollback_wanted() {
-            if p.rollback_rx.is_none() && now >= p.rollback_retry_at {
-                let from = self.core.rollback_from().unwrap_or_default();
-                p.rollback_rx = Some(self.store.rollback_world_later(self.fence, from));
-            }
-            let answer = match p.rollback_rx.as_ref().map(|rx| rx.try_recv()) {
-                None | Some(Err(TryRecvError::Empty)) => return Ok(()),
-                Some(Ok(answer)) => answer,
-                Some(Err(TryRecvError::Disconnected)) => Err(StoreError::Backend("the world-store thread has stopped".into())),
-            };
-            p.rollback_rx = None;
-            match answer {
-                Ok(generation) => {
-                    game::perf_event!("world_rollback", "generation={generation}");
-                    crate::health::Health::global().world_generation(generation);
-                    self.core.rolled_back(generation);
-                }
-                Err(StoreError::Fenced { .. }) => return Err(()),
-                Err(e) => {
-                    p.rollback_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
-                    self.warn_cuts(now, &format!("the world rollback could not be recorded ({e}); trying again"));
-                }
-            }
-            return Ok(());
-        }
-        // A lapsed landless host is ended (Elastic 2a): its own store call, beside a declaration
-        // (the store serialises the two on the world row) — never a succession, never a rollback.
-        if let Some((end, rx)) = &p.end_rx {
-            let end = *end;
-            let answer = match rx.try_recv() {
-                Err(TryRecvError::Empty) => None,
-                Ok(answer) => Some(answer),
-                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
-            };
-            if let Some(answer) = answer {
-                p.end_rx = None;
-                match answer {
-                    Ok(outcome) => {
-                        if outcome == game::LandlessEnd::Ended {
-                            self.close_succeeded(&[(end.host, end.boot)]);
-                        }
-                        self.core.landless_ended(end, outcome, now);
-                    }
-                    Err(StoreError::Fenced { .. }) => return Err(()),
-                    Err(e) => {
-                        self.core.end_failed();
-                        let Some(p) = self.successions.as_mut() else { return Ok(()) };
-                        p.end_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
-                        self.warn_cuts(now, &format!("host {} could not be ended ({e}); trying again", end.host));
-                    }
-                }
-            }
-        }
-        let Some(p) = self.successions.as_mut() else { return Ok(()) };
-        if p.end_rx.is_none() && now >= p.end_retry_at {
-            if let Some(end) = self.core.take_end_landless(now) {
-                p.end_rx = Some((end, self.store.end_landless_host_later(end.host, end.boot, self.fence)));
-            }
-        }
-        if let Some(rx) = &p.declare_rx {
+        // A rollback whose answer was lost: the world generation is read (the rollback is
+        // conditional on its generation: the core hands it out again only if it did not commit).
+        if let Some(rx) = &p.generation_rx {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return Ok(()),
                 Ok(answer) => answer,
                 Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
             };
-            p.declare_rx = None;
+            p.generation_rx = None;
             match answer {
-                Ok(declared) => {
-                    p.declare_failing_since = None;
-                    if let game::Declared::Done(list) = &declared {
-                        for _ in list {
-                            crate::health::Health::global().succession_declared();
-                        }
-                        let dead: Vec<(HostId, u64)> = list.iter().map(|s| (s.predecessor, s.predecessor_boot)).collect();
-                        self.close_succeeded(&dead);
-                    }
-                    self.core.declared(declared, now);
-                }
-                Err(StoreError::Fenced { .. }) => return Err(()),
+                Ok(generation) => self.core.generation_looked_up(generation),
                 Err(e) => {
-                    // A lock timeout behind a staged part is a retry, not an error — but one
-                    // that keeps failing is why nothing is saved and nobody inherits (a host
-                    // frozen inside a transaction, a store that is down): said, throttled.
-                    self.core.declare_failed();
-                    p.declare_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
-                    let since = *p.declare_failing_since.get_or_insert(now);
-                    if now.saturating_sub(since) >= DECLARE_FAILING_WARN_AFTER_MS {
-                        let what = format!(
-                            "a succession could not be declared for {} s ({e}); still trying — until it is, no world cut \
-                             begins and the dead host's land has no owner",
-                            now.saturating_sub(since) / 1000
-                        );
-                        self.warn_cuts(now, &what);
-                    } else {
-                        log::debug!("[coordinator] a succession could not be declared yet ({e}); trying again");
-                    }
+                    p.generation_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                    // Asked again: the core's lookup is taken once.
+                    self.core.generation_lookup_failed();
+                    self.warn_cuts(now, &format!("the world generation could not be read ({e}); asking again"));
                 }
             }
             return Ok(());
         }
+        if now >= p.generation_retry_at {
+            if let Some(from) = self.core.take_generation_lookup() {
+                log::info!("[coordinator] a rollback from generation {from} lost its answer: reading the world generation");
+                p.generation_rx = Some(self.store.world_generation_later());
+                return Ok(());
+            }
+        }
+        if self.core.rollback_wanted() {
+            // Handed out (paced by the core after a refused one); it runs in the next transition.
+            if let Some(from) = self.core.take_rollback() {
+                log::warn!("[coordinator] the world rolls back from generation {from} with the next transition");
+            }
+            return Ok(());
+        }
+        // A lapsed landless host is ended (Elastic 2a), beside a declaration (the store
+        // serialises the two on the world row) — never a succession, never a rollback. Both are
+        // handed out here and run in the next transition; their answers come with its commit
+        // ([`Self::answered`]). The core holds one of each in flight at most.
+        if now >= p.end_retry_at {
+            if let Some(end) = self.core.take_end_landless(now) {
+                log::debug!("[coordinator] host {} is ended with the next transition", end.host);
+            }
+        }
+        let Some(p) = self.successions.as_mut() else { return Ok(()) };
         if now >= p.declare_retry_at {
             if let Some(d) = self.core.declare_wanted(now) {
-                let generation = self.core.world_generation();
-                p.declare_rx = Some(self.store.declare_succession_later(d.dead, d.heirs, d.kind, self.fence, generation));
+                log::debug!("[coordinator] hosts {:?} are declared with the next transition", d.dead);
             }
         }
         Ok(())
+    }
+
+    /// The answers of a committed transition's store decisions, as the runtime takes them
+    /// before the core applies them (inputs): counted, the zombie connections of the hosts
+    /// declared or ended closed, a refused declaration or end paced.
+    fn answered(&mut self, answers: &[game::coordinator::DecisionAnswer], now: u64) {
+        use game::coordinator::DecisionAnswer;
+        for a in answers {
+            match a {
+                DecisionAnswer::Cut { cut, committed: Ok(committed), .. } => {
+                    let settles = self.core.settles_of_running(*cut);
+                    let tick = self.core.world_cut_running().map_or(0, |(_, t)| t);
+                    self.cut_decided(*cut, tick, *committed, &settles);
+                }
+                DecisionAnswer::Cut { cut, committed: Err(e), .. } => {
+                    self.warn_cuts(now, &format!("world cut {}: its decision could not be recorded ({e}); looking it up", cut.0));
+                }
+                DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } => {}
+                DecisionAnswer::Declared { outcome, .. } => {
+                    let Some(p) = self.successions.as_mut() else { continue };
+                    match outcome {
+                        Ok(declared) => {
+                            p.declare_failing_since = None;
+                            if let game::Declared::Done(list) = declared {
+                                for _ in list {
+                                    crate::health::Health::global().succession_declared();
+                                }
+                                let dead: Vec<(HostId, u64)> = list.iter().map(|s| (s.predecessor, s.predecessor_boot)).collect();
+                                self.close_succeeded(&dead);
+                            }
+                        }
+                        Err(e) => {
+                            // A lock timeout behind a staged part is a retry, not an error — but one
+                            // that keeps failing is why nothing is saved and nobody inherits (a host
+                            // frozen inside a transaction, a store that is down): said, throttled.
+                            p.declare_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                            let since = *p.declare_failing_since.get_or_insert(now);
+                            if now.saturating_sub(since) >= DECLARE_FAILING_WARN_AFTER_MS {
+                                let what = format!(
+                                    "a succession could not be declared for {} s ({e}); still trying — until it is, no world \
+                                     cut begins and the dead host's land has no owner",
+                                    now.saturating_sub(since) / 1000
+                                );
+                                self.warn_cuts(now, &what);
+                            } else {
+                                log::debug!("[coordinator] a succession could not be declared yet ({e}); trying again");
+                            }
+                        }
+                    }
+                }
+                DecisionAnswer::Ended { end, outcome, .. } => match outcome {
+                    Ok(game::LandlessEnd::Ended) => self.close_succeeded(&[(end.host, end.boot)]),
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let Some(p) = self.successions.as_mut() {
+                            p.end_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
+                        }
+                        self.warn_cuts(now, &format!("host {} could not be ended ({e}); trying again", end.host));
+                    }
+                },
+                DecisionAnswer::RolledBack { outcome, .. } => match outcome {
+                    Ok(generation) => {
+                        game::perf_event!("world_rollback", "generation={generation}");
+                        crate::health::Health::global().world_generation(*generation);
+                    }
+                    Err(e) => self.warn_cuts(now, &format!("the world rollback could not be recorded ({e}); trying again")),
+                },
+            }
+        }
     }
 
     /// The live connections of hosts just succeeded (`(ordinal, boot)`), if a zombie of that
@@ -2011,19 +2011,33 @@ impl CoordinatorRuntime {
             self.kill_at_commit = self.hooks.kill_after_commit.load(Ordering::SeqCst);
             if self.hooks.fail.load(Ordering::SeqCst) {
                 let (tx, rx) = crossbeam::channel::bounded(1);
-                let _ = tx.send(Err(StoreError::Backend("test hook: coordinator writes fail".into())));
+                let _ = tx.send(Err(StoreError::Backend(HOOK_REFUSED.into())));
                 self.writing = Some((t, rx));
                 return true;
             }
             if self.hooks.conflict_once.swap(false, Ordering::SeqCst) {
                 // Another writer moves the row first: its own projection, at the next version.
                 if let Ok(Some(row)) = self.store.load_coordinator() {
-                    let moved = self.store.write_coordinator_later(self.fence, row.version, row.core, None).recv();
+                    let foreign = TransitionWrite {
+                        version: row.version,
+                        core: row.core,
+                        history: None,
+                        decisions: Vec::new(),
+                        replica: game::coordinator::ReplicaId(u64::MAX),
+                    };
+                    let moved = self.store.write_transition_later(foreign).recv();
                     log::warn!("[coordinator] test hook: another writer moved the row from version {}: {moved:?}", row.version);
                 }
             }
         }
-        let written = self.store.write_coordinator_later(self.fence, self.core.version(), t.core.clone(), t.history.clone());
+        let w = TransitionWrite {
+            version: self.core.version(),
+            core: t.core.clone(),
+            history: t.history.clone(),
+            decisions: t.decisions.clone(),
+            replica: self.core.replica(),
+        };
+        let written = self.store.write_transition_later(w);
         self.writing = Some((t, written));
         true
     }
@@ -2044,15 +2058,17 @@ impl CoordinatorRuntime {
     }
 
     /// The answer of the write of transition `t` (decision 2): committed → its messages, the
-    /// store clock sampled from the commit; `Fenced` → the end; `Conflict` → the row re-read
-    /// (until `deadline`, if any): this process's own lost commit is written over at once;
-    /// another writer's row is rebased onto ([`Self::rebase_onto`]); any other failure hands `t`
-    /// back to the core — its messages wait, its inputs stay applied once — and the next write
-    /// is tried after [`COORDINATOR_SAVE_RETRY_MS`].
+    /// store clock sampled from the commit, its decisions' answers applied as inputs at once and
+    /// its post-commit effects queued; `Fenced` → the end; `Conflict` → the row re-read (until
+    /// `deadline`, if any): this process's own lost commit is written over at once; another
+    /// writer's row is rebased onto ([`Self::rebase_onto`]); any other failure hands `t` back to
+    /// the core — its messages wait, its inputs stay applied once, its decisions are looked up
+    /// (whether it committed is not known) — and the next write is tried after
+    /// [`COORDINATOR_SAVE_RETRY_MS`].
     fn settle(
         &mut self,
         t: game::coordinator::Transition,
-        answer: Result<CoordinatorWritten, StoreError>,
+        answer: Result<TransitionWritten, StoreError>,
         now: u64,
         deadline: Option<Instant>,
     ) -> Settled {
@@ -2077,8 +2093,16 @@ impl CoordinatorRuntime {
                 crate::health::Health::global().coordinator_written(core, history);
                 #[cfg(feature = "test-hooks")]
                 if std::mem::take(&mut self.kill_at_commit) {
+                    // Its decisions' answers and post-commit effects die with the process.
                     return Settled::End(End::Killed);
                 }
+                // The decisions' answers: inputs of the core (logged), applied before anything
+                // else; then their post-commit effects.
+                self.answered(&w.answers, now);
+                for a in w.answers {
+                    self.core.apply(Input::Decision(a), now);
+                }
+                self.after.extend(w.after_commit.into_iter().map(|a| AfterJob { a, rx: None, retry_at: now }));
                 Settled::Released(t.out)
             }
             Err(StoreError::Fenced { .. }) => Settled::End(End::Fenced),
@@ -2091,14 +2115,16 @@ impl CoordinatorRuntime {
                 match self.reread_row(deadline) {
                     Ok(Some(row)) if row.version == mine + 1 && self.unacked.contains(&core_hash(&row.core)) => {
                         // Lost-commit recognition (decision 1): our own write; the cached core
-                        // holds it and every input applied since — written over it at once.
+                        // holds it and every input applied since — written over it at once. (That
+                        // write's decisions were looked up at its failure; `t` met the conflict,
+                        // so it did not commit: its own decisions go out again with the next.)
                         log::warn!(
                             "[coordinator] write conflict: the row holds this process's own write at version {} (its \
                              commit's answer was lost); writing again over it",
                             row.version
                         );
                         self.core.set_version(row.version);
-                        self.core.transition_failed(t);
+                        self.core.transition_refused(t);
                         self.retry_at_ms = now;
                         Settled::Held { now: true }
                     }
@@ -2107,10 +2133,13 @@ impl CoordinatorRuntime {
                         log::error!("[coordinator] write conflict, and the coordinator row is gone; stopping as fenced");
                         Settled::End(End::Conflict)
                     }
-                    // Not known yet: as any failed write (the next one meets the conflict again).
-                    Err(e) => self.failed(t, &format!("a conflict, and the row could not be re-read: {e}"), now),
+                    // Not known yet: `t` met the conflict, so it provably did not commit — handed
+                    // back without being remembered as a write that may be in the row (the next
+                    // write meets the conflict again).
+                    Err(e) => self.refused(t, &format!("a conflict, and the row could not be re-read: {e}"), now),
                 }
             }
+            Err(StoreError::Backend(e)) if e == HOOK_REFUSED => self.refused(t, &e, now),
             Err(e) => self.failed(t, &e.to_string(), now),
         }
     }
@@ -2160,15 +2189,30 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// A write of `t` that failed with `why` (not fenced): `t` back in the core, the next write
-    /// after [`COORDINATOR_SAVE_RETRY_MS`], saving reported stuck after
-    /// [`COORDINATOR_FAILURES_BEFORE_STUCK`] in a row.
+    /// A write of `t` that failed with `why` and may have committed (not fenced, not a
+    /// conflict): remembered by its core's hash (a later conflict may find it in the row), `t`
+    /// back in the core (its decisions looked up, never issued again), the next write after
+    /// [`COORDINATOR_SAVE_RETRY_MS`].
     fn failed(&mut self, t: game::coordinator::Transition, why: &str, now: u64) -> Settled {
         if self.unacked.len() == COORDINATOR_UNACKED_MAX {
             self.unacked.pop_front();
         }
         self.unacked.push_back(core_hash(&t.core));
         self.core.transition_failed(t);
+        self.held_back(why, now)
+    }
+
+    /// A write of `t` that provably did not commit (it met a conflict, or never reached the
+    /// store): `t` back in the core, its decisions with it, NOT remembered as a write that may be
+    /// in the row; the next write after [`COORDINATOR_SAVE_RETRY_MS`].
+    fn refused(&mut self, t: game::coordinator::Transition, why: &str, now: u64) -> Settled {
+        self.core.transition_refused(t);
+        self.held_back(why, now)
+    }
+
+    /// A write that did not commit (as far as this process knows): counted; saving reported
+    /// stuck after [`COORDINATOR_FAILURES_BEFORE_STUCK`] in a row.
+    fn held_back(&mut self, why: &str, now: u64) -> Settled {
         self.failed_in_a_row += 1;
         self.tally.failures += 1;
         self.retry_at_ms = now + COORDINATOR_SAVE_RETRY_MS;

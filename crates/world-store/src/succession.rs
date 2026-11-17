@@ -1,11 +1,11 @@
 //! Successions (R4): when a host of a multi-host world dies (its lease lapsed, or its row
 //! was vouched dead by its next boot) or left clean, the coordinator declares it in ONE
-//! fenced transaction ([`declare`]) that marks a crashed host's row dead, inserts the
+//! transaction — its own transition's, Elastic 2b Task 3 ([`declare_in`]) — that marks a crashed host's row dead, inserts the
 //! `successions` row and moves every super-region of the predecessor to one heir with
 //! `epoch + 1` — that update is the claim; the heir only reads its new fence. Nothing else
 //! is written until the next committed world cut, whose decision settles the open
-//! successions in its own transaction (`two_phase::decide_cut`'s `settles`). A world
-//! rollback ([`rollback_world`]) abandons the open ones; the land stays with the heirs.
+//! successions in its own transaction (`two_phase::decide_in`'s `settles`). A world
+//! rollback ([`rollback_world_in`]) abandons the open ones; the land stays with the heirs.
 //! Postgres only: several hosts need it (SQLite answers `Unsupported`).
 //!
 //! A `Leave` declaration needs the predecessor's row clean and does not mark it dead; a claim
@@ -13,8 +13,9 @@
 //! the claimer's row live AND dirty, so a cleanly-left boot claims nothing from its leave
 //! cut's commit on, and its next boot registers dirty and claims normally.
 //!
-//! Locks (the declaration): `coordinator` `FOR SHARE`, then `world` `FOR NO KEY UPDATE`
-//! (it serialises with `decide_cut`, `register_host` and `rollback_world`, which take the
+//! Locks (the declaration): `coordinator` (held `FOR NO KEY UPDATE` by its transition's
+//! compare-and-set, below), then `world` `FOR NO KEY UPDATE`
+//! (it serialises with `decide_in`, `register_host` and `rollback_world_in`, which take the
 //! same lock in the same order, and never waits for a claim's `FOR KEY SHARE`), then the
 //! predecessors' `hosts` rows `FOR NO KEY UPDATE` in id order (a heartbeat waits for
 //! the declaration, so a beat between the lapse check and the update cannot be lost), then
@@ -78,9 +79,9 @@
 //! settle (the residual Elastic 2a accepts): a rollback, never a loss, never a world that stops
 //! saving.
 //!
-//! **Ending a landless host** (`end_landless_host`, Elastic 2a): ONE transaction, fenced, under
-//! `lock_timeout` = the cut lock timeout. The lock walk, in this order: `coordinator` `FOR SHARE`
-//! (the epoch compared: `Fenced`), `world` `FOR NO KEY UPDATE` (no generation compared — it does
+//! **Ending a landless host** ([`end_landless_in`], Elastic 2a): in the coordinator's
+//! transition, under `lock_timeout` = the cut lock timeout. The lock walk, in this order:
+//! `coordinator` (the transition's compare-and-set), `world` `FOR NO KEY UPDATE` (no generation compared — it does
 //! not touch the generation), then the host's one `hosts` row `FOR NO KEY UPDATE`. That is a
 //! prefix of the declaration's walk (`coordinator` → `world` → the predecessors' `hosts` rows),
 //! so it adds no cycle: it serialises with every declaration, registration, rollback and
@@ -100,35 +101,57 @@
 //! re-claims nothing for a landless host. A drain mark and a vouch wait for the row as for a
 //! declaration. Nothing waits for a lock the end holds while that holder waits for it.
 //!
-//! **A cut's begin** (`two_phase::record_cut_begin`, Elastic 1 Task 4): `coordinator` `FOR
-//! SHARE` (the fence, as `decide_cut` takes it first), a PLAIN read of `world.next_host_id`
+//! **A cut's begin** (`two_phase::begin_in`, Elastic 1 Task 4): in the transition that starts
+//! the cut, after its compare-and-set holds `coordinator`, a PLAIN read of `world.next_host_id`
 //! (no lock: a registration holding the world row commits its id before the read — below the
 //! bound — or after it — at or above), the insert of the cut's own `cut_begins` row. No lock on
-//! `world`, `hosts` or `super_regions`: it joins no cycle. `decide_cut` reads that row plainly
+//! `world`, `hosts` or `super_regions`: it joins no cycle. `decide_in` reads that row plainly
 //! after its `world` lock (it was committed before the decision began, or is absent: the
 //! stricter rule then).
 //!
-//! **The prune of older begins** (Elastic 2a, `two_phase::decide_cut`): right after a decision
+//! **The prune of older begins** (Elastic 2a, `two_phase::decide_in`): right after a decision
 //! row is inserted, in the decision's transaction, `DELETE FROM cut_begins WHERE cut_id < $cut`.
 //! It locks only `cut_begins` rows of OLDER cuts — rows nothing reads or writes again (a cut
-//! runs one at a time; only the cut being decided reads its own row, `record_cut_begin` inserts
+//! runs one at a time; only the cut being decided reads its own row, `begin_in` inserts
 //! only the newer cut's row, `resolve_prepared` reads none) — after every lock the decision
 //! already holds (`coordinator`, `world`, …) and wants nothing after them: it joins no cycle.
 //! `cut_decisions` is never pruned.
 //!
-//! **The coordinator's write** (Elastic 2a, `rows.rs` `write_coordinator`): ONE statement,
-//! `UPDATE coordinator SET core, history = COALESCE($h, history), version = version + 1 …
-//! WHERE id = 1 AND epoch = $e AND version = $v`, autocommitted — the one `coordinator` row
-//! locked `FOR NO KEY UPDATE` (an `UPDATE` of non-key columns; it conflicts with `FOR SHARE`)
-//! for that statement and nothing else. Every other statement on that row takes it `FOR SHARE`
-//! as its FIRST lock (`decide_cut`, `record_cut_begin`, a declaration, an end of a landless
-//! host, `rollback_world`): the write waits for such a transaction to commit (at most that
-//! transaction's length — the write sets no `lock_timeout` of its own, so it waits as long as
-//! the holder's own timeouts let the holder run, holding the store thread's writer mutex
-//! meanwhile) and none of them waits for the write while holding something the write wants —
-//! it wants nothing else: no cycle. A claim (`claim_coordinator`: `epoch + 1`)
-//! serialises with it on the row: after the claim the write finds another epoch (`Fenced`). With
-//! no row matched it reads the epoch again (a plain read): the same epoch is `Conflict`.
+//! **The coordinator's transition** (Elastic 2b Task 3, `coordinator_tx.rs` `write_pg`): ONE
+//! transaction, in this order:
+//! 1. `UPDATE coordinator SET core, history = COALESCE($h, history), version = version + 1 …
+//!    WHERE id = 1 AND version = $v RETURNING version, <now>` — the one `coordinator` row locked
+//!    `FOR NO KEY UPDATE` to the commit. Zero rows (the version moved): rolled back, `Conflict`,
+//!    nothing below ran. No epoch is compared: the version is the coordinator's only fence.
+//! 2. With decisions, `SET LOCAL lock_timeout` (the cut lock timeout), then each decision of the
+//!    transition, in order, in its own `SAVEPOINT`, its body WITHOUT a `coordinator` lock of its
+//!    own (the row is held already, in a stronger mode than the `FOR SHARE` each took before):
+//!    `two_phase::decide_in` (minus `finish_staged`, a post-commit effect), `two_phase::begin_in`,
+//!    [`declare_in`], [`end_landless_in`], [`rollback_world_in`] (conditional on its generation).
+//!    A domain refusal or an error inside — a SQL error, a deadlock (`40P01`), a `lock_timeout`
+//!    (`55P03`, a staged part holding a predecessor's rows), a stale generation — is
+//!    `ROLLBACK TO SAVEPOINT` and that decision's answer: nothing of it is written, it is decided
+//!    again later, and the core still commits.
+//! 3. The commit.
+//!
+//! Why no cycle: every statement that locks `coordinator` takes it FIRST (only the coordinator's
+//! transitions and its bootstrap's one-statement insert touch it); hosts, claims, registrations,
+//! heartbeats, the drain mark and the operator never lock it. So nothing holds another lock and
+//! then waits for `coordinator`. After it each decision keeps its own walk (`world` → `hosts` →
+//! `super_regions`; `world` → `cut_decisions` → `hosts` → `successions`), which was already a
+//! suffix of `coordinator` first. Another transition of the coordinator (a second replica, Elastic
+//! 2b) waits on the row and then finds `version` moved (READ COMMITTED re-evaluates the `WHERE`):
+//! a `Conflict`, never a deadlock. Cost: a decision holds the row for its `lock_timeout` at most
+//! (a declaration waiting for a staged part); another transition waits that long, then conflicts.
+//! On Postgres the transition takes no writer mutex of the store thread (a host's prepare queued
+//! behind a staged part must not wait for it in-process); on SQLite every transition is one
+//! statement, has no decision, and holds the writer lock.
+//!
+//! **The coordinator's bootstrap** (`rows.rs` `bootstrap_coordinator`, Elastic 2b Task 3): ONE
+//! statement, `INSERT INTO coordinator … ON CONFLICT (id) DO UPDATE … WHERE coordinator.core IS
+//! NULL` — first writer wins; the one row and nothing else. It replaces the claim
+//! (`claim_coordinator`, `epoch + 1` at every start), which no longer exists: there is nothing to
+//! claim, a replica that finds the row loads it.
 //!
 //! **A registration** (`rows.rs` `register_host`, Elastic 1) — ONE transaction, UNFENCED: it
 //! creates the identity a fence is built from; it writes no row a cut part writes except the
@@ -199,7 +222,7 @@
 //! `hosts` row, and the declaration, the end of a landless host, rollback and decision all wait for `world`
 //! before anything a registration holds.
 
-//! **After a world rollback** (the coordinator's [`rollback_world`] or the operator's
+//! **After a world rollback** (the coordinator's [`rollback_world_in`] or the operator's
 //! [`rollback_world_operator`], both through [`rollback_in`]): every host restarts from the
 //! last committed cut K — no cut commits between a declaration and its settle, so that is the
 //! abandoned succession's base. The land stays with the heir, and so do the predecessor's
@@ -213,7 +236,7 @@
 //! same way and then re-keys every dirty row's rows (the heirs' among them) to the new host.
 //!
 //! The coordinator's rollback is conditional (Elastic 2a): under the same locks (`coordinator`
-//! `FOR SHARE`, then `world` `FOR NO KEY UPDATE`) it compares the world's generation with the one
+//! held by its transition, then `world` `FOR NO KEY UPDATE`) it compares the world's generation with the one
 //! it decided the rollback at, and with another one writes nothing (a rollback that committed
 //! before its coordinator recorded it is never done twice). No new lock, no new edge.
 //!
@@ -223,10 +246,10 @@ use std::collections::BTreeSet;
 
 use game::HostId;
 use game::{CutId, HOST_DEAD, HOST_LIVE};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 use crate::rows::i;
-use crate::{CoordinatorFence, StoreError, SuperRegion};
+use crate::{StoreError, SuperRegion};
 
 pub use game::{Declared, LandlessEnd, Succession, SuccessionId, SuccessionKind};
 
@@ -286,20 +309,11 @@ pub(crate) fn declare_error(what: &str, e: sqlx::Error, lock_timeout_ms: u64) ->
     }
 }
 
-/// The coordinator row `FOR SHARE` (`Fenced { sr: None }` unless `fence` holds it), then
-/// the world row `FOR NO KEY UPDATE` (`StaleGeneration` unless at `generation`, when given).
-/// Returns the stored generation.
-async fn lock_coordinator_and_world(
-    tx: &mut sqlx::PgConnection,
-    fence: CoordinatorFence,
-    generation: Option<u64>,
-) -> Result<u64, DeclareError> {
-    let epoch: Option<i64> = sqlx::query_scalar("SELECT epoch FROM coordinator WHERE id = 1 FOR SHARE")
-        .fetch_optional(&mut *tx)
-        .await?;
-    if epoch.map(|e| e as u64) != Some(fence.epoch) {
-        return Err(StoreError::Fenced { sr: None }.into());
-    }
+/// The world row `FOR NO KEY UPDATE` (`StaleGeneration` unless at `generation`, when given),
+/// in a coordinator transition whose compare-and-set already holds the `coordinator` row
+/// (Elastic 2b Task 3: the row's version is the fence, no epoch is compared). Returns the
+/// stored generation.
+async fn lock_world_at(tx: &mut sqlx::PgConnection, generation: Option<u64>) -> Result<u64, DeclareError> {
     let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
         .fetch_optional(&mut *tx)
         .await?
@@ -317,21 +331,13 @@ async fn lock_coordinator_and_world(
 pub(crate) const PG_NOW_MS: &str = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
 
 /// What a declaration's lock timeout names.
-const DECLARING: &str = "a succession's declaration";
+pub(crate) const DECLARING: &str = "a succession's declaration";
 /// What a rollback's lock timeout names.
-const ROLLING_BACK: &str = "a world rollback";
+pub(crate) const ROLLING_BACK: &str = "a world rollback";
 
-/// [`crate::StoreHandle::declare_succession`] (Postgres): see the module docs for the locks.
-pub(crate) async fn declare(
-    pool: &PgPool,
-    dead: Vec<(HostId, u64)>,
-    heirs: Vec<HostId>,
-    kind: SuccessionKind,
-    fence: CoordinatorFence,
-    generation: u64,
-    lock_timeout_ms: u64,
-    lease_ms: u64,
-) -> Result<Declared, StoreError> {
+/// A declaration's arguments, checked before any statement: one heir per predecessor, each
+/// predecessor once, no heir among them.
+pub(crate) fn check_declare(dead: &[(HostId, u64)], heirs: &[HostId]) -> Result<BTreeSet<HostId>, StoreError> {
     let predecessors: BTreeSet<HostId> = dead.iter().map(|(o, _)| *o).collect();
     if dead.is_empty() || heirs.len() != dead.len() || predecessors.len() != dead.len() {
         return Err(StoreError::Unsupported(format!(
@@ -341,20 +347,7 @@ pub(crate) async fn declare(
     if let Some(h) = heirs.iter().find(|h| predecessors.contains(h)) {
         return Err(StoreError::Unsupported(format!("host {h} cannot inherit while it is declared dead itself")));
     }
-    let mut tx = pool.begin().await?;
-    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
-    let declared = declare_in(&mut tx, &dead, &heirs, &predecessors, kind, fence, generation, lease_ms).await;
-    match declared {
-        Ok(Declared::Done(s)) => {
-            tx.commit().await.map_err(|e| declare_error(DECLARING, e, lock_timeout_ms))?;
-            Ok(Declared::Done(s))
-        }
-        Ok(other) => {
-            tx.rollback().await?;
-            Ok(other)
-        }
-        Err(e) => Err(e.into_store(DECLARING, lock_timeout_ms)),
-    }
+    Ok(predecessors)
 }
 
 /// A declaration's statement error, kept raw so a lock timeout is named as one.
@@ -384,20 +377,21 @@ impl From<StoreError> for DeclareError {
     }
 }
 
-/// The declaration's statements inside `tx`; anything but `Done` is rolled back by the caller.
-/// `lease_ms`: a row lapsed past it ([`game::HOST_LEASE_MS`] unless a test shortened it).
+/// The declaration's statements inside `tx` — a coordinator transition's, its `coordinator`
+/// row held by the compare-and-set (Elastic 2b Task 3; see the module docs for the locks);
+/// anything but `Done` is rolled back by the caller (to its savepoint). `lease_ms`: a row
+/// lapsed past it ([`game::HOST_LEASE_MS`] unless a test shortened it).
 #[allow(clippy::too_many_arguments)]
-async fn declare_in(
+pub(crate) async fn declare_in(
     tx: &mut sqlx::PgConnection,
     dead: &[(HostId, u64)],
     heirs: &[HostId],
     predecessors: &BTreeSet<HostId>,
     kind: SuccessionKind,
-    fence: CoordinatorFence,
     generation: u64,
     lease_ms: u64,
 ) -> Result<Declared, DeclareError> {
-    lock_coordinator_and_world(&mut *tx, fence, Some(generation)).await?;
+    lock_world_at(&mut *tx, Some(generation)).await?;
     let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
         .fetch_one(&mut *tx)
         .await?;
@@ -552,47 +546,21 @@ async fn declare_in(
 }
 
 /// What ending a landless host's lock timeout names.
-const ENDING: &str = "ending a landless host";
+pub(crate) const ENDING: &str = "ending a landless host";
 
-/// [`crate::StoreHandle::end_landless_host`] (Postgres): see the module docs for the locks.
-pub(crate) async fn end_landless_host(
-    pool: &PgPool,
-    host: HostId,
-    boot: u64,
-    fence: CoordinatorFence,
-    lock_timeout_ms: u64,
-    lease_ms: u64,
-) -> Result<LandlessEnd, StoreError> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
-    match end_landless_in(&mut tx, host, boot, fence, lease_ms).await {
-        Ok(LandlessEnd::Ended) => {
-            tx.commit().await.map_err(|e| declare_error(ENDING, e, lock_timeout_ms))?;
-            log::warn!(
-                "[world-store] host {host} (boot {boot:#x}) lost its lease holding no land: its row is dead, no succession, \
-                 the generation untouched"
-            );
-            Ok(LandlessEnd::Ended)
-        }
-        Ok(other) => {
-            tx.rollback().await?;
-            Ok(other)
-        }
-        Err(e) => Err(e.into_store(ENDING, lock_timeout_ms)),
-    }
-}
-
-/// [`end_landless_host`]'s statements inside `tx`; anything but `Ended` is rolled back.
-async fn end_landless_in(
+/// Ending a landless host (Elastic 2a; `crate::StoreHandle::end_landless_host`), its
+/// statements inside `tx` — a coordinator transition's, its `coordinator` row held by the
+/// compare-and-set (see the module docs for the locks); anything but `Ended` is rolled back by
+/// the caller (to its savepoint).
+pub(crate) async fn end_landless_in(
     tx: &mut sqlx::PgConnection,
     host: HostId,
     boot: u64,
-    fence: CoordinatorFence,
     lease_ms: u64,
 ) -> Result<LandlessEnd, DeclareError> {
-    // The declaration's prefix: the fence, then the world row (no generation compared: the
-    // generation is not touched — a host of an older one is refused anyway).
-    lock_coordinator_and_world(&mut *tx, fence, None).await?;
+    // The declaration's prefix: the world row (no generation compared: the generation is not
+    // touched — a host of an older one is refused anyway).
+    lock_world_at(&mut *tx, None).await?;
     // The host's row: a heartbeat waits for this transaction, so a beat between the lapse check
     // and the update cannot be lost; a claim's `check_live` (`FOR SHARE`, its last statement)
     // waits too and then finds the row dead — the zombie's claim is refused.
@@ -642,37 +610,22 @@ async fn end_landless_in(
     Ok(LandlessEnd::Ended)
 }
 
-/// [`crate::StoreHandle::rollback_world`] (Postgres): under the coordinator fence and the
+/// The coordinator's world rollback (`crate::StoreHandle::rollback_world`) inside `tx` — a
+/// coordinator transition's, its `coordinator` row held by the compare-and-set — under the
 /// world row's lock (the declaration's order), [`rollback_in`] — only from generation `from`
 /// (the one the coordinator decided the rollback at, Elastic 2a): a world past it was rolled
 /// back already (this rollback committed before its coordinator could record it, or the
-/// operator's), nothing is written and its generation is the answer. Idempotent. Returns the
-/// world's generation after it.
-pub(crate) async fn rollback_world(
-    pool: &PgPool,
-    fence: CoordinatorFence,
-    from: u64,
-    lock_timeout_ms: u64,
-) -> Result<u64, StoreError> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
-    let rolled = async {
-        let stored = lock_coordinator_and_world(&mut tx, fence, None).await?;
-        if stored != from {
-            return Ok((stored, None));
-        }
-        rollback_in(&mut tx, stored).await.map(|(g, abandoned)| (g, Some(abandoned)))
+/// operator's), nothing is written (`None`) and its generation is the answer. Idempotent.
+/// Returns the world's generation after it, and the successions it abandoned when it wrote.
+pub(crate) async fn rollback_world_in(tx: &mut sqlx::PgConnection, from: u64) -> Result<(u64, Option<u64>), DeclareError> {
+    let stored = lock_world_at(&mut *tx, None).await?;
+    if stored != from {
+        log::warn!("[world-store] the world is at generation {stored}, not {from}: rolled back already, nothing written");
+        return Ok((stored, None));
     }
-    .await;
-    let (generation, abandoned) = rolled.map_err(|e| e.into_store(ROLLING_BACK, lock_timeout_ms))?;
-    let Some(abandoned) = abandoned else {
-        tx.rollback().await?;
-        log::warn!("[world-store] the world is at generation {generation}, not {from}: rolled back already, nothing written");
-        return Ok(generation);
-    };
-    tx.commit().await.map_err(|e| declare_error(ROLLING_BACK, e, lock_timeout_ms))?;
-    log::warn!("[world-store] world rolled back to generation {generation}; {abandoned} open successions abandoned");
-    Ok(generation)
+    let (generation, abandoned) = rollback_in(&mut *tx, stored).await?;
+    log::warn!("[world-store] world rolled back to generation {generation} (with its coordinator's transition); {abandoned} open successions abandoned");
+    Ok((generation, Some(abandoned)))
 }
 
 /// The world row `FOR NO KEY UPDATE` (the lock every declaration, rollback, registration and
@@ -721,7 +674,7 @@ pub(crate) async fn rollback_in(tx: &mut sqlx::PgConnection, stored: u64) -> Res
     Ok((generation, abandoned.len() as u64))
 }
 
-/// The ids of the open successions, in `tx` (no lock: `decide_cut` reads them under the
+/// The ids of the open successions, in `tx` (no lock: `decide_in` reads them under the
 /// world row's lock, which every declaration and rollback takes first).
 pub(crate) async fn open_ids(tx: &mut sqlx::PgConnection) -> Result<BTreeSet<u64>, StoreError> {
     let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
