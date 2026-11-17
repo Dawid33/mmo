@@ -480,9 +480,11 @@ worldgen-bench:
 # (no client, no LOD): `just genesis-probe 9 30 -9,-6` starts the 3x3 around
 # region (-9,-6), keeps it ticking 30 s and prints RSS. Builds at the play
 # region size; serves `world_file` if set (e.g. worlds/debug-world/terrain.world).
-genesis-probe regions="1" hold="0" center="0,0":
+# `people=N` spawns N people in the center region and prints its `[region …] avg= max=`
+# tick metrics every 5 s: `just genesis-probe 1 30 0,0 80` = resident cost on real terrain.
+genesis-probe regions="1" hold="0" center="0,0" people="0":
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release -p server --example genesis_probe
-    VOXEL_WORLD_FILE="{{world_file}}" ./target/release/examples/genesis_probe {{regions}} {{hold}} {{center}}
+    VOXEL_WORLD_FILE="{{world_file}}" ./target/release/examples/genesis_probe {{regions}} {{hold}} {{center}} {{people}}
 
 # Time one region's collider genesis build + determinism check.
 collider-bench:

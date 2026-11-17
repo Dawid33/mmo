@@ -19,6 +19,11 @@ pub const WANDER_MIN_TICKS: u64 = 100;
 pub const WANDER_RANGE_TICKS: u64 = 200;
 /// A wander goal lies within this many blocks (per axis) of the person's home column.
 pub const WANDER_RADIUS_BLOCKS: i32 = 8;
+/// The search budget, in nodes, of a wander's plan. A goal within
+/// [`WANDER_RADIUS_BLOCKS`] that a search this size cannot reach is skipped: with the long-walk
+/// budget ([`crate::MAX_PATH_NODES`]) an unreachable wander goal (past a cliff, on a ledge) cost a
+/// whole-neighbourhood search every wander of every resident.
+pub const WANDER_PATH_NODES: u32 = 2_048;
 /// A standing person re-runs the character controller every this many ticks (it is
 /// skipped while they stand grounded), so one whose ground was dug away falls.
 pub const IDLE_RESETTLE_TICKS: u64 = 20;
@@ -219,7 +224,7 @@ impl Rollback {
         // plans across seams (`PathPlan`), and finds the goal's standable
         // tile nearest the person's own level or gives up.
         let goal = Goal { column: [home[0] + dx, home[1] + dz], y: Some(from[1]) };
-        self.walk_entity_safe(e, goal, here, map);
+        self.walk_entity_within_safe(e, goal, here, map, WANDER_PATH_NODES);
     }
 
     fn steer_person_safe(&mut self, e: EntityKey, tick: u64) {

@@ -201,16 +201,37 @@ impl Rollback {
     /// resolved, shared with people. `false` with no change when it has no
     /// body or there is no path.
     pub fn walk_entity_safe(&mut self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> bool {
-        let Some(walker) = self.plan_walker(e, goal, here, map) else { return false };
+        self.walk_entity_within_safe(e, goal, here, map, MAX_PATH_NODES)
+    }
+
+    /// [`Self::walk_entity_safe`] with the first plan's search budget capped at `max_nodes`
+    /// (a short walk's goal that needs more is unreachable for it; re-plans keep the full
+    /// budget).
+    pub fn walk_entity_within_safe(
+        &mut self,
+        e: crate::EntityKey,
+        goal: Goal,
+        here: RegionCoords,
+        map: Option<&RouteMap>,
+        max_nodes: u32,
+    ) -> bool {
+        let Some(walker) = self.plan_walker(e, goal, here, map, max_nodes) else { return false };
         self.data.ecs.walker.set_safe(e, Some(walker));
         true
     }
 
     /// A fresh walk for entity `e` toward `goal`, from the tile its body
     /// stands on; `None` without a body or a path.
-    pub(crate) fn plan_walker(&self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> Option<Walker> {
+    pub(crate) fn plan_walker(
+        &self,
+        e: crate::EntityKey,
+        goal: Goal,
+        here: RegionCoords,
+        map: Option<&RouteMap>,
+        max_nodes: u32,
+    ) -> Option<Walker> {
         let from = current_tile(self, self.body_feet(e)?)?;
-        let plan = PathPlan::plan(self, from, &goal, here, map, MAX_PATH_NODES)?;
+        let plan = PathPlan::plan(self, from, &goal, here, map, max_nodes)?;
         let walk_up = walk_ups(self, &plan.local_path(here));
         Some(Walker::new(goal, plan, walk_up))
     }
@@ -263,7 +284,7 @@ impl Rollback {
             if at_end {
                 // The end of a stretch into the next region of the route
                 // (normally the arrival there plans the next one first).
-                let next = self.plan_walker(key, w.goal, here, map);
+                let next = self.plan_walker(key, w.goal, here, map, MAX_PATH_NODES);
                 self.data.ecs.walker.set_safe(key, next);
                 continue;
             }
@@ -282,7 +303,7 @@ impl Rollback {
                 // Re-plan once from where the body stands. With no new
                 // path the old one is kept: a body still stuck after
                 // another STUCK_TICKS gives up.
-                if let Some(fresh) = self.plan_walker(key, w.goal, here, map) {
+                if let Some(fresh) = self.plan_walker(key, w.goal, here, map, MAX_PATH_NODES) {
                     w = Walker { replanned: w.replanned, ..fresh };
                 }
                 w.replanned = true;

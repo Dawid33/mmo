@@ -384,7 +384,7 @@ impl Rollback {
         if old.to_goal && !rest.is_empty() && walkable {
             return;
         }
-        if let Some(new) = self.plan_walker(e, old.goal, here, map) {
+        if let Some(new) = self.plan_walker(e, old.goal, here, map, crate::MAX_PATH_NODES) {
             self.data.ecs.walker.set_safe(e, Some(new));
             return;
         }

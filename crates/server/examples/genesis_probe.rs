@@ -6,8 +6,12 @@
 //! first output and prints the process RSS as they come up, then keeps them
 //! ticking for `hold` seconds, sampling RSS.
 //!
-//!   just genesis-probe [regions=1] [hold_secs=0] [center_x,center_z]
+//!   just genesis-probe [regions=1] [hold_secs=0] [center_x,center_z] [people=0]
 //!   (`just world_file=<file> genesis-probe …` for a forged world)
+//!
+//! `people=N` spawns N people (`SpawnPerson` on a 4-block column grid) in the center region
+//! once it is up, so the hold measures resident cost on real terrain: the region thread's
+//! `[region …] avg= max= budget= lag_ticks=` line every 5 s (the server's own tick metrics).
 //!
 //! `regions=9` starts a 3x3 window at once, like a production-scale join (or
 //! the fortress neighbourhood). `VOXEL_WORLD_FILE=<file>` serves a forged
@@ -41,6 +45,8 @@ fn main() {
             Some(RegionCoords::new(x.trim().parse().ok()?, z.trim().parse().ok()?))
         })
         .unwrap_or(RegionCoords::new(0, 0));
+    let people: u32 = args.next().and_then(|a| a.parse().ok()).unwrap_or(0);
+    simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
 
     // The server's block registry and materials (biome blocks, trees).
     let manifest = include_str!("../../../assets/blocks/blocks.ron");
@@ -68,10 +74,11 @@ fn main() {
         rss_mib()
     );
 
-    let regions: Vec<RegionCoords> = (-1..=1)
-        .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(center.x + x, center.z + z)))
-        .take(count.max(1))
-        .collect();
+    // The center first, so `regions=1` runs the center itself.
+    let mut window: Vec<RegionCoords> =
+        (-1..=1).flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(center.x + x, center.z + z))).collect();
+    window.sort_by_key(|rc| rc != &center);
+    let regions: Vec<RegionCoords> = window.into_iter().take(count.max(1)).collect();
     let (out_send, out_recv) = crossbeam::channel::unbounded();
     // Production path: region threads generate their own columns.
     let generator: server::region_threads::SharedRegionGenerator =
@@ -93,6 +100,22 @@ fn main() {
                 rss_mib()
             );
         }
+    }
+    if people > 0 {
+        let at = regions.iter().position(|&rc| rc == center).expect("the center region runs");
+        let edge = game::REGION_BLOCKS as u32;
+        let grid: Vec<[u32; 2]> =
+            (4..edge - 4).step_by(4).flat_map(|z| (4..edge - 4).step_by(4).map(move |x| [x, z])).collect();
+        assert!(people as usize <= grid.len(), "at most {} people fit the grid", grid.len());
+        for (i, &column) in grid.iter().take(people as usize).enumerate() {
+            let spawn = game::PersonSpawn {
+                person: game::history::PersonId(i as u32),
+                at: game::SpawnAt::Column(column),
+                walk_to: None,
+            };
+            inputs[at].send(game::RegionInput::Event(game::GameEventKind::SpawnPerson(spawn))).expect("region input");
+        }
+        println!("spawned {people} people in {center:?}");
     }
     let hold = Instant::now();
     while hold.elapsed() < Duration::from_secs(hold_secs) {
