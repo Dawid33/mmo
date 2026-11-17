@@ -238,7 +238,7 @@ impl World {
         );
         let history =
             game::history::History::new(9, start, game::history::SocietyGrid::from_world_map(&land_map()));
-        let core = game::coordinator::SharedCore::new(game::Coordinator::new(history, 0));
+        let core = game::coordinator::RigCluster::new(game::Coordinator::new(history, 0));
         let links: Vec<_> = (0..u64::from(HOSTS)).map(|n| game::InlineWorldLink::shared(core.clone(), h(n))).collect();
         for (h, link) in links.into_iter().enumerate() {
             let host = if h == 0 { &mut a } else { &mut b };

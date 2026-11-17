@@ -10683,3 +10683,15 @@ fn a_host_landed_adjacent_after_the_declaration_rolls_the_world_back_never_stuck
         landed_adjacent_after_the_declaration,
     );
 }
+
+#[test]
+fn the_rig_store_refuses_a_stale_version() {
+    let mut store = game::coordinator::RigStore::default();
+    let v = store.write(0, vec![1], Some(vec![9])).expect("the first write");
+    assert_eq!(v, 1);
+    assert_eq!(store.write(0, vec![2], None), Err(game::coordinator::RigConflict));
+    let row = store.row().expect("a row");
+    assert_eq!((row.version, row.core.as_slice(), row.history.as_slice()), (1, &[1u8][..], &[9u8][..]));
+    assert_eq!(store.write(1, vec![3], None), Ok(2));
+    assert_eq!(store.row().unwrap().history, vec![9]);
+}

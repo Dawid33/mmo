@@ -2,7 +2,7 @@
 //! [`Coordinator`] in the host's own thread (single-player on wasm, tests).
 
 use crate::HostId;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use super::{CoordMsg, Coordinator, HostMsg, Target};
@@ -43,79 +43,169 @@ fn mix(seed: u64, i: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// One [`Coordinator`] several hosts' inline links share ([`InlineWorldLink::shared`]),
-/// with each host's messages not read by its link yet. Derefs to the coordinator.
-///
-/// With a store ([`SharedCore::with_store`], the seeded rig) every pump drives the core's
-/// transitions ([`Coordinator::take_transition`]): the projection of each is kept as the
-/// store's row would hold it ([`SharedCore::stored`]) — committed at once, as a store that never
-/// fails — before its messages are routed. Without one the core is unstored
-/// ([`Coordinator::commit_unstored`]).
-pub struct SharedCore {
-    coordinator: Coordinator,
-    boxes: BTreeMap<HostId, VecDeque<CoordMsg>>,
-    /// The last projection written, `(core, history)`, when a store stands behind the core.
-    stored: Option<(Vec<u8>, Vec<u8>)>,
-    /// Transitions written so far.
-    written: u64,
+/// A row of the rig's stand-in for the `coordinator` table: the version a compare-and-set
+/// writes against, and the two parts of the projection.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RigRow {
+    pub version: u64,
+    pub core: Vec<u8>,
+    pub history: Vec<u8>,
 }
 
-impl SharedCore {
-    pub fn new(coordinator: Coordinator) -> Arc<Mutex<SharedCore>> {
-        Arc::new(Mutex::new(SharedCore { coordinator, boxes: BTreeMap::new(), stored: None, written: 0 }))
+/// A write at a version that is no longer the row's ([`RigStore::write`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RigConflict;
+
+/// A message a transition left in the store's outbox, for the host `host` at its `boot`.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct RigOutboxRow {
+    pub seq: u64,
+    pub version: u64,
+    pub host: HostId,
+    pub boot: u64,
+    pub msg: CoordMsg,
+}
+
+/// The seeded rig's store: one versioned row written by compare-and-set, and an outbox.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct RigStore {
+    row: Option<RigRow>,
+    outbox: Vec<RigOutboxRow>,
+    seq: u64,
+    /// Writes that committed.
+    writes: u64,
+}
+
+impl RigStore {
+    /// Write the projection over the row as read at `version` (0 = no row yet): the new
+    /// version, or `Err(RigConflict)` when `version` is not the row's. `history` `None`
+    /// keeps the row's.
+    pub fn write(&mut self, version: u64, core: Vec<u8>, history: Option<Vec<u8>>) -> Result<u64, RigConflict> {
+        let current = self.row.as_ref().map_or(0, |r| r.version);
+        if version != current {
+            return Err(RigConflict);
+        }
+        let history = history.unwrap_or_else(|| self.row.take().map(|r| r.history).unwrap_or_default());
+        self.row = Some(RigRow { version: current + 1, core, history });
+        self.writes += 1;
+        Ok(current + 1)
     }
 
-    /// [`Self::new`] with a store behind the core: every transition is kept as the store's
-    /// row would hold it, and a message leaves only with (or after) its transition.
-    pub fn with_store(coordinator: Coordinator) -> Arc<Mutex<SharedCore>> {
+    pub fn row(&self) -> Option<&RigRow> {
+        self.row.as_ref()
+    }
+
+    /// Writes committed so far.
+    pub fn writes(&self) -> u64 {
+        self.writes
+    }
+
+    /// Leave a message in the outbox, numbered in order; its `seq`.
+    pub fn push_outbox(&mut self, version: u64, host: HostId, boot: u64, msg: CoordMsg) -> u64 {
+        self.seq += 1;
+        self.outbox.push(RigOutboxRow { seq: self.seq, version, host, boot, msg });
+        self.seq
+    }
+
+    pub fn outbox(&self) -> &[RigOutboxRow] {
+        &self.outbox
+    }
+}
+
+/// One coordinator process of the rig: its core, the row version it last read or wrote, and
+/// the hosts linked to it.
+#[doc(hidden)]
+pub struct RigReplica {
+    pub core: Coordinator,
+    pub version: u64,
+    pub hosts: BTreeSet<HostId>,
+}
+
+/// The replicas several hosts' inline links share ([`InlineWorldLink::shared`]), the store
+/// behind them, and each host's messages not read by its link yet. Derefs to replica 0's
+/// coordinator.
+///
+/// With a store ([`RigCluster::with_store`], the seeded rig) every pump drives a replica's
+/// transitions ([`Coordinator::take_transition`]): each is written to the row at the version
+/// the replica last read, as a store that never fails, before its messages are routed.
+/// Without one the core is unstored ([`Coordinator::commit_unstored`]).
+#[doc(hidden)]
+pub struct RigCluster {
+    replicas: Vec<RigReplica>,
+    store: Option<RigStore>,
+    boxes: BTreeMap<HostId, VecDeque<CoordMsg>>,
+}
+
+impl RigCluster {
+    pub fn new(coordinator: Coordinator) -> Arc<Mutex<RigCluster>> {
+        let replica = RigReplica { core: coordinator, version: 0, hosts: BTreeSet::new() };
+        Arc::new(Mutex::new(RigCluster { replicas: vec![replica], store: None, boxes: BTreeMap::new() }))
+    }
+
+    /// [`Self::new`] with a store behind the core: every transition is written to its row,
+    /// and a message leaves only with (or after) its transition.
+    pub fn with_store(coordinator: Coordinator) -> Arc<Mutex<RigCluster>> {
         let core = Self::new(coordinator);
-        lock(&core).stored = Some((Vec::new(), Vec::new()));
+        lock(&core).store = Some(RigStore::default());
         core
+    }
+
+    pub fn replicas(&self) -> &[RigReplica] {
+        &self.replicas
+    }
+
+    pub fn store(&self) -> Option<&RigStore> {
+        self.store.as_ref()
     }
 
     /// The projection as the store holds it: `(core, history)` of the last transition (`None`
     /// without a store, or before the first transition).
     pub fn stored(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        self.stored.clone().filter(|(core, _)| !core.is_empty())
+        self.store.as_ref()?.row().filter(|r| !r.core.is_empty()).map(|r| (r.core.clone(), r.history.clone()))
     }
 
     /// Transitions written so far (with a store).
     pub fn written(&self) -> u64 {
-        self.written
+        self.store.as_ref().map_or(0, RigStore::writes)
     }
 
-    /// A restart of the coordinator process: the core is replaced by `coordinator` (loaded
-    /// from [`Self::stored`]), and whatever the old process had not handed to a link yet —
-    /// its outgoing queue, the hosts' mailboxes — is lost with it.
+    /// A restart of replica 0's process: the core is replaced by `coordinator` (loaded
+    /// from [`Self::stored`]), which has read the row as it stands, and whatever the old
+    /// process had not handed to a link yet — its outgoing queue, the hosts' mailboxes — is
+    /// lost with it.
     pub fn restart(&mut self, coordinator: Coordinator) {
-        self.coordinator = coordinator;
+        let version = self.store.as_ref().and_then(|s| s.row()).map_or(0, |r| r.version);
+        self.replicas[0].core = coordinator;
+        self.replicas[0].version = version;
         for b in self.boxes.values_mut() {
             b.clear();
         }
     }
 
-    /// What may leave goes to the mailboxes of the hosts it is for (a message for a host
-    /// with no link is lost, as on a real link).
-    fn route(&mut self) {
-        let out = match self.stored.as_mut() {
-            Some(stored) => {
+    /// What may leave replica `r` goes to the mailboxes of the hosts it is for (a message
+    /// for a host with no link is lost, as on a real link).
+    fn route(&mut self, r: usize) {
+        let out = match self.store.as_mut() {
+            Some(store) => {
+                let replica = &mut self.replicas[r];
                 let mut out = Vec::new();
-                if let Some(t) = self.coordinator.take_transition() {
-                    // A store that never fails: committed at once.
-                    self.coordinator.transition_written();
-                    stored.0 = t.core;
-                    if let Some(h) = t.history {
-                        stored.1 = h;
-                    }
-                    self.written += 1;
+                if let Some(t) = replica.core.take_transition() {
+                    // A store that never fails, written at the version this replica read.
+                    replica.version = store.write(replica.version, t.core, t.history).expect("one replica writes at the version it read");
+                    replica.core.transition_written();
                     out = t.out;
                 }
-                out.extend(self.coordinator.take_out());
+                out.extend(replica.core.take_out());
                 out
             }
             None => {
-                self.coordinator.commit_unstored();
-                self.coordinator.take_out()
+                let core = &mut self.replicas[r].core;
+                core.commit_unstored();
+                core.take_out()
             }
         };
         for (to, msg) in out {
@@ -134,13 +224,13 @@ impl SharedCore {
     }
 }
 
-impl SharedCore {
+impl RigCluster {
     /// An order of the login service, as the coordinator runtime handles one
     /// ([`Coordinator::login_order`]): into the gate host's mailbox (read at its link's next
     /// pumps, after what is already there). The gate host, or `None` (dropped: no gate host).
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<HostId> {
-        self.route();
-        let (gate, msg) = self.coordinator.login_order(order)?;
+        self.route(0);
+        let (gate, msg) = self.replicas[0].core.login_order(order)?;
         match self.boxes.get_mut(&gate) {
             Some(b) => b.push_back(msg),
             None => log::debug!("shared inline coordinator: no link for gate host {gate}; a login order lost"),
@@ -149,24 +239,24 @@ impl SharedCore {
     }
 }
 
-impl std::ops::Deref for SharedCore {
+impl std::ops::Deref for RigCluster {
     type Target = Coordinator;
     fn deref(&self) -> &Coordinator {
-        &self.coordinator
+        &self.replicas[0].core
     }
 }
 
-impl std::ops::DerefMut for SharedCore {
+impl std::ops::DerefMut for RigCluster {
     fn deref_mut(&mut self) -> &mut Coordinator {
-        &mut self.coordinator
+        &mut self.replicas[0].core
     }
 }
 
-/// The coordinator behind an inline link: its own, or one core several hosts' links share
-/// ([`InlineWorldLink::shared`]).
+/// The coordinator behind an inline link: its own, or the replicas several hosts' links
+/// share ([`InlineWorldLink::shared`]).
 enum Core {
     Owned(Coordinator),
-    Shared(Arc<Mutex<SharedCore>>),
+    Shared(Arc<Mutex<RigCluster>>),
 }
 
 /// Salt of the roll behind a shared link's input delay (the output delay rolls unsalted).
@@ -191,6 +281,8 @@ pub struct InlineWorldLink {
     core: Core,
     /// The host the core is told the messages are from.
     host: HostId,
+    /// The replica a shared link reaches.
+    replica: usize,
     /// Messages for the core, with the pump step from which they may be handled.
     in_q: VecDeque<(u64, HostMsg)>,
     /// Outputs with the pump step from which they may be read.
@@ -215,15 +307,27 @@ impl InlineWorldLink {
     /// Host `host`'s link to `core`, which other hosts' links share: each host reads only
     /// what the core sends it (or every host). Make every host's link before any of them
     /// is pumped: a host whose link does not exist yet misses what is sent to every host.
-    pub fn shared(core: Arc<Mutex<SharedCore>>, host: HostId) -> Self {
-        lock(&core).boxes.entry(host).or_default();
-        Self::over(Core::Shared(core), host)
+    pub fn shared(core: Arc<Mutex<RigCluster>>, host: HostId) -> Self {
+        Self::shared_at(core, 0, host)
+    }
+
+    /// [`Self::shared`], to replica `replica` of the cluster.
+    pub fn shared_at(core: Arc<Mutex<RigCluster>>, replica: usize, host: HostId) -> Self {
+        {
+            let mut c = lock(&core);
+            c.boxes.entry(host).or_default();
+            c.replicas[replica].hosts.insert(host);
+        }
+        let mut link = Self::over(Core::Shared(core), host);
+        link.replica = replica;
+        link
     }
 
     fn over(core: Core, host: HostId) -> Self {
         InlineWorldLink {
             core,
             host,
+            replica: 0,
             in_q: VecDeque::new(),
             out_q: VecDeque::new(),
             delay: None,
@@ -266,7 +370,7 @@ impl InlineWorldLink {
     }
 
     /// The core a shared link shares; `None` for a link of its own.
-    pub fn shared_core(&self) -> Option<Arc<Mutex<SharedCore>>> {
+    pub fn shared_core(&self) -> Option<Arc<Mutex<RigCluster>>> {
         match &self.core {
             Core::Owned(_) => None,
             Core::Shared(c) => Some(c.clone()),
@@ -306,7 +410,7 @@ impl InlineWorldLink {
     }
 }
 
-fn lock(core: &Mutex<SharedCore>) -> std::sync::MutexGuard<'_, SharedCore> {
+fn lock(core: &Mutex<RigCluster>) -> std::sync::MutexGuard<'_, RigCluster> {
     core.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -357,14 +461,15 @@ impl WorldLink for InlineWorldLink {
                 coord.take_out().into_iter().map(|(_, m)| m).collect()
             }
             Core::Shared(core) => {
-                let mut coord = lock(core);
+                let mut cluster = lock(core);
+                let r = self.replica;
                 while self.in_q.front().is_some_and(|(due, _)| *due <= step) {
                     let (_, msg) = self.in_q.pop_front().expect("checked");
-                    coord.handle(self.host, msg, now_ms);
+                    cluster.replicas[r].core.handle(self.host, msg, now_ms);
                 }
-                coord.maintain(now_ms);
-                coord.route();
-                coord.boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
+                cluster.replicas[r].core.maintain(now_ms);
+                cluster.route(r);
+                cluster.boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
             }
         };
         // Never before the output ahead of it: the order is kept.

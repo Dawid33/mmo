@@ -278,7 +278,7 @@ pub struct MultiRig {
     pub seed: u64,
     pub link_delay: u32,
     /// The world coordinator every host's world link reaches ([`Self::with_coordinator`]).
-    pub coordinator: Option<Arc<Mutex<game::coordinator::SharedCore>>>,
+    pub coordinator: Option<Arc<Mutex<game::coordinator::RigCluster>>>,
     /// What each host sent its coordinator (while its link was up), by host.
     pub world_sent: Vec<Arc<Mutex<Vec<game::HostMsg>>>>,
     /// Each host's [`RigWorldLink`] hold flag.
@@ -526,7 +526,7 @@ impl MultiRig {
         let process = game::coordinator::ProcessBoot(self.coordinator_starts);
         // A store stands behind it (Elastic 2a): every output leaves with its transition, and
         // the last transition is what a restarted coordinator loads.
-        let core = game::coordinator::SharedCore::with_store(game::Coordinator::new_for(history, now, process));
+        let core = game::coordinator::RigCluster::with_store(game::Coordinator::new_for(history, now, process));
         // Every link before any is installed (an install pumps it): none misses the view.
         let links: Vec<game::InlineWorldLink> = host_ids(self.hosts.len() as u32)
             .map(|h| game::InlineWorldLink::shared(core.clone(), h).with_delay(mix(self.seed, 3000 + h.0), self.link_delay))
@@ -583,7 +583,7 @@ impl MultiRig {
     }
 
     /// The coordinator process crashes and a new one starts (Elastic 2a): it claims the row
-    /// (the next epoch), loads the LAST TRANSITION written ([`game::coordinator::SharedCore::stored`])
+    /// (the next epoch), loads the LAST TRANSITION written ([`game::coordinator::RigCluster::stored`])
     /// as a new process boot, is configured as the runtime configures it (the cut period
     /// continues from the projection, the crash policy, the hosts a cut expects — every live
     /// host whose row is not clean — and the store's open successions read again), and
@@ -1798,7 +1798,7 @@ impl MultiRig {
     }
 
     /// The rig's coordinator, locked ([`Self::with_coordinator`]).
-    pub fn core(&self) -> std::sync::MutexGuard<'_, game::coordinator::SharedCore> {
+    pub fn core(&self) -> std::sync::MutexGuard<'_, game::coordinator::RigCluster> {
         self.coordinator.as_ref().expect("a rig coordinator").lock().unwrap_or_else(|e| e.into_inner())
     }
 
