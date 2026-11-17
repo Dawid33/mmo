@@ -468,13 +468,13 @@ impl<'a> Resolver<'a> {
                     let value = self.expr(&l.value, &mut cx);
                     DefKind::Global(hir::Global { ty, value })
                 }
-                ast::ItemKind::Dialogue(d) => {
+                ast::ItemKind::Dialogue(d) | ast::ItemKind::Scene(d) => {
                     self.dialogue(d, item, m, None);
                     self.deferred.push(id);
                     DefKind::Dialogue
                 }
-                ast::ItemKind::Quest(_, members) => {
-                    self.quest(members, item, m);
+                ast::ItemKind::Quest(q) => {
+                    self.quest(&q.body, item, m);
                     self.deferred.push(id);
                     DefKind::Quest
                 }

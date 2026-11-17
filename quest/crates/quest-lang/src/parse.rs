@@ -5,8 +5,8 @@
 //! the token's line, column and length.
 
 use crate::ast::{
-    BinOp, Cond, Decorator, DialogueEntry, Expr, ExprKind, FStrPart, File, Item, ItemKind, Line,
-    LineId, PatLit, Path, Pattern, PatternKind, Span, Step, StepKind, Stmt, StmtKind, Type,
+    Arg, BinOp, Cond, Decorator, DialogueEntry, Expr, ExprKind, FStrPart, File, Item, ItemKind,
+    Line, LineId, PatLit, Path, Pattern, PatternKind, Span, Step, StepKind, Stmt, StmtKind, Type,
     TypeKind, UnOp,
 };
 use crate::diag::Diagnostic;
@@ -174,6 +174,55 @@ pub(crate) fn raises(
     set
 }
 
+/// The `ticks=n` of a line (token `at` is the word): `word` must be `ticks`.
+pub(crate) fn ticks(
+    errs: &mut Vec<Diagnostic>,
+    toks: &[Token],
+    file: &str,
+    at: usize,
+    word: &str,
+    e: Expr,
+) -> Expr {
+    if word != "ticks" {
+        let (line, col, len) = token_at(toks, at);
+        record(
+            errs,
+            Diagnostic::error(
+                "syntax",
+                format!("expected `ticks=…`, found the name `{word}`"),
+                file,
+                line,
+                col,
+                len,
+            ),
+        );
+    }
+    e
+}
+
+/// `emit Event(args)` as a statement (the `emit` at token `l`, the `(` at `at`, the `)` before `r`):
+/// the prelude call `emit(Event(args))`.
+pub(crate) fn emit_stmt(
+    toks: &[Token],
+    l: usize,
+    at: usize,
+    r: usize,
+    event: Path,
+    args: Vec<Arg>,
+) -> Result<StmtKind, PErr> {
+    let start = l.saturating_add(1);
+    let callee = expr(toks, l, start, ExprKind::Path(vec!["emit".to_string()]))?;
+    let event = expr(toks, start, at, ExprKind::Path(event))?;
+    let value = expr(toks, start, r, ExprKind::Call(Box::new(event), args))?;
+    let call = expr(
+        toks,
+        l,
+        r,
+        ExprKind::Call(Box::new(callee), vec![Arg { name: None, value }]),
+    )?;
+    Ok(StmtKind::Expr(call))
+}
+
 /// Builds a statement over the tokens `l..r`, refusing one deeper than `PARSE_DEPTH_MAX`.
 pub(crate) fn stmt(toks: &[Token], l: usize, r: usize, kind: StmtKind) -> Result<Stmt, PErr> {
     let depth = check_depth(kind.child_depth().saturating_add(1), l)?;
@@ -217,6 +266,7 @@ pub(crate) fn item(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn line(
     toks: &[Token],
     l: usize,
@@ -224,12 +274,14 @@ pub(crate) fn line(
     speaker: Option<String>,
     text: Expr,
     id: Option<LineId>,
+    ticks: Option<Expr>,
     cond: Option<Cond>,
 ) -> Line {
     Line {
         speaker,
         text,
         id,
+        ticks,
         cond,
         span: span(toks, l, r),
     }
@@ -503,7 +555,7 @@ pub(crate) fn recovered(
                 *i,
                 format!(
                     "only items (`fn`, `struct`, `impl`, `enum`, `error`, `event`, `mod`, `use`, \
-                     `dialogue`, `quest`) and `let` may stand at the top level; found {}",
+                     `dialogue`, `scene`, `quest`) and `let` may stand at the top level; found {}",
                     describe(tok)
                 ),
             )),
@@ -514,7 +566,7 @@ pub(crate) fn recovered(
                     format!(
                         "a dialogue holds steps, not statements: found {what}; a step is a line \
                          (`npc: \"…\"`), `choice:`, `=> line`, `when cond:`, `once:`, `-> node`, \
-                         `detour name`, `emit Event(…)` or `return`"
+                         `detour name`, `emit Event(…)`, `pause n` or `return`"
                     ),
                 )
             }),
@@ -797,6 +849,16 @@ fn spelling(tok: &Tok) -> &'static str {
         Tok::AtKw => "at",
         Tok::Topic => "topic",
         Tok::Priority => "priority",
+        Tok::Part => "part",
+        Tok::Scene => "scene",
+        Tok::Requires => "requires",
+        Tok::Pause => "pause",
+        Tok::Optional => "optional",
+        Tok::Repeatable => "repeatable",
+        Tok::Exits => "exits",
+        Tok::Count => "count",
+        Tok::Uninterruptible => "uninterruptible",
+        Tok::On => "on",
         Tok::LParen => "(",
         Tok::RParen => ")",
         Tok::LBracket => "[",

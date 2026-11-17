@@ -112,103 +112,264 @@ fn is_ident(t: Option<&Token>, word: &str) -> bool {
     matches!(t, Some(Token { kind: Tok::Ident(s), .. }) if s == word)
 }
 
-/// Turns the contextual words into their own tokens where the grammar allows them (spec 5.13).
-fn contextual_words(out: &mut [Token]) {
-    for i in 0..out.len() {
-        let at_line_start =
-            i == 0 || matches!(out[i - 1].kind, Tok::Newline | Tok::Indent | Tok::Dedent);
-        if out[i].kind == Tok::Once && is_ident(out.get(i + 1), "per") {
-            out[i + 1].kind = Tok::Per;
-        }
-        // A dialogue header: `dialogue …` or `pub dialogue …` first on its line.
-        if at_line_start
-            && (out[i].kind == Tok::Dialogue
-                || (out[i].kind == Tok::Pub
-                    && out.get(i + 1).is_some_and(|t| t.kind == Tok::Dialogue)))
-        {
-            dialogue_header(&mut out[i..]);
-        }
-        // A quest header: `quest Name:` or `pub quest Name:`; anywhere else `quest` is a plain name.
-        let header_at = if at_line_start && out[i].kind == Tok::Pub {
-            i + 1
-        } else {
-            i
-        };
-        if (at_line_start || header_at != i)
-            && is_ident(out.get(header_at), "quest")
-            && matches!(out.get(header_at + 1).map(|t| &t.kind), Some(Tok::Ident(_)))
-            && matches!(out.get(header_at + 2).map(|t| &t.kind), Some(Tok::Colon))
-        {
-            out[header_at].kind = Tok::Quest;
-        }
-        if at_line_start {
-            let Tok::Ident(word) = &out[i].kind else {
-                continue;
-            };
-            let next = out.get(i + 1).map(|t| &t.kind);
-            let operand = matches!(next, Some(Tok::Ident(_) | Tok::Str(_) | Tok::FString(_)));
-            let kind = match word.as_str() {
-                "node" if operand => Tok::Node,
-                "stage" if operand => Tok::Stage,
-                "role" if operand => Tok::Role,
-                "objective" if operand => Tok::Objective,
-                "event" if operand => Tok::Event,
-                "emit" if operand => Tok::Emit,
-                "detour" if operand => Tok::Detour,
-                "default"
-                    if matches!(next, Some(Tok::Str(_) | Tok::FString(_)))
-                        || (matches!(next, Some(Tok::Colon))
-                            && matches!(out.get(i + 2).map(|t| &t.kind), Some(Tok::Newline))) =>
-                {
-                    Tok::Default
-                }
-                _ => continue,
-            };
-            out[i].kind = kind;
-            if out[i].kind == Tok::Objective {
-                let end = out[i + 1..]
-                    .iter()
-                    .position(|t| matches!(t.kind, Tok::Newline | Tok::Indent | Tok::Dedent))
-                    .map_or(out.len(), |p| i + 1 + p);
-                if let Some(at) = (i + 1..end).find(|&j| is_ident(out.get(j), "at")) {
-                    out[at].kind = Tok::AtKw;
-                }
-            }
-        }
-    }
+fn kind_at(out: &[Token], i: usize) -> Option<&Tok> {
+    out.get(i).map(|t| &t.kind)
 }
 
-/// On a line begun by `dialogue` (or `pub dialogue`), after the parameter list: `topic` before a string or an f-string and
-/// `priority` before a number become their own tokens (spec 5.13).
-fn dialogue_header(line: &mut [Token]) {
-    let end = line
-        .iter()
-        .position(|t| matches!(t.kind, Tok::Newline | Tok::Indent | Tok::Dedent))
-        .unwrap_or(line.len());
-    let Some(params) = line[..end].iter().position(|t| t.kind == Tok::LParen) else {
-        return;
-    };
+/// The index of the token that ends the logical line `out[from..]` is on (a `Newline`, `Indent` or
+/// `Dedent`), or `out.len()`.
+fn line_end(out: &[Token], from: usize) -> usize {
+    out.get(from..)
+        .and_then(|rest| {
+            rest.iter()
+                .position(|t| matches!(t.kind, Tok::Newline | Tok::Indent | Tok::Dedent))
+        })
+        .map_or(out.len(), |p| from + p)
+}
+
+/// The index after the bracket group that opens at `open` (a `(`) and before `end`, or `None` when no
+/// `(` stands there or it is not closed on the line.
+fn after_group(out: &[Token], open: usize, end: usize) -> Option<usize> {
+    if kind_at(out, open) != Some(&Tok::LParen) {
+        return None;
+    }
     let mut depth = 0u32;
-    let mut after = end;
-    for (j, t) in line[..end].iter().enumerate().skip(params) {
+    for (j, t) in out.get(open..end)?.iter().enumerate() {
         match t.kind {
             Tok::LParen | Tok::LBracket | Tok::LBrace => depth = depth.saturating_add(1),
             Tok::RParen | Tok::RBracket | Tok::RBrace => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    after = j + 1;
-                    break;
+                    return Some(open + j + 1);
                 }
             }
             _ => {}
         }
     }
+    None
+}
+
+/// Whether `t` can begin the expression after `requires` / `pause` without also continuing a name (so
+/// `pause(x)`, `pause = 1`, `requires.x` and `pause - 1` stay ordinary code).
+fn begins_operand(t: Option<&Tok>) -> bool {
+    matches!(
+        t,
+        Some(
+            Tok::Ident(_)
+                | Tok::Int(_)
+                | Tok::Float(_)
+                | Tok::Str(_)
+                | Tok::FString(_)
+                | Tok::True
+                | Tok::False
+                | Tok::Not
+                | Tok::Await
+                | Tok::SelfKw
+                | Tok::Crate
+                | Tok::Super
+        )
+    )
+}
+
+/// Whether `t` can end an expression (what may stand before a trailing `uninterruptible`).
+fn ends_operand(t: Option<&Tok>) -> bool {
+    matches!(
+        t,
+        Some(
+            Tok::Ident(_)
+                | Tok::Int(_)
+                | Tok::Float(_)
+                | Tok::Str(_)
+                | Tok::FString(_)
+                | Tok::True
+                | Tok::False
+                | Tok::SelfKw
+                | Tok::RParen
+                | Tok::RBracket
+                | Tok::RBrace
+                | Tok::Question
+        )
+    )
+}
+
+/// Turns the contextual words into their own tokens where the grammar allows them (spec 5.13).
+fn contextual_words(out: &mut [Token]) {
+    for i in 0..out.len() {
+        if out[i].kind == Tok::Once && is_ident(out.get(i + 1), "per") {
+            out[i + 1].kind = Tok::Per;
+        }
+        let at_line_start =
+            i == 0 || matches!(out[i - 1].kind, Tok::Newline | Tok::Indent | Tok::Dedent);
+        if !at_line_start {
+            continue;
+        }
+        if out[i].kind == Tok::Pub {
+            // `pub` may stand before `dialogue`, `scene`, `quest` and `repeatable quest`.
+            headers(out, i + 1);
+        } else {
+            headers(out, i);
+            line_word(out, i);
+        }
+    }
+}
+
+/// The headers that may follow `pub`, at token `h`: `dialogue`, `scene`, `[repeatable] quest`.
+fn headers(out: &mut [Token], h: usize) {
+    match kind_at(out, h) {
+        Some(Tok::Dialogue) => dialogue_header(out, h),
+        Some(Tok::Ident(w))
+            if w == "scene" && matches!(kind_at(out, h + 1), Some(Tok::Ident(_))) =>
+        {
+            out[h].kind = Tok::Scene;
+            scene_header(out, h);
+        }
+        Some(Tok::Ident(w))
+            if w == "repeatable"
+                && is_ident(out.get(h + 1), "quest")
+                && matches!(kind_at(out, h + 2), Some(Tok::Ident(_))) =>
+        {
+            out[h].kind = Tok::Repeatable;
+            quest_header(out, h + 1);
+        }
+        Some(Tok::Ident(w))
+            if w == "quest" && matches!(kind_at(out, h + 1), Some(Tok::Ident(_))) =>
+        {
+            quest_header(out, h);
+        }
+        _ => {}
+    }
+}
+
+/// The words that begin a line of their own, at token `i` (first on its line, no `pub`).
+fn line_word(out: &mut [Token], i: usize) {
+    let Some(Tok::Ident(word)) = kind_at(out, i) else {
+        return;
+    };
+    let next = kind_at(out, i + 1);
+    let operand = matches!(next, Some(Tok::Ident(_) | Tok::Str(_) | Tok::FString(_)));
+    let kind = match word.as_str() {
+        "node" if operand => Tok::Node,
+        "stage" if operand => Tok::Stage,
+        "role" if operand => Tok::Role,
+        "objective" if operand => Tok::Objective,
+        "event" if operand => Tok::Event,
+        "emit" if operand => Tok::Emit,
+        "detour" if operand => Tok::Detour,
+        "part" if operand => Tok::Part,
+        "requires" if begins_operand(next) => Tok::Requires,
+        "pause" if begins_operand(next) => Tok::Pause,
+        "optional"
+            if (is_ident(out.get(i + 1), "role") || is_ident(out.get(i + 1), "objective"))
+                && matches!(
+                    kind_at(out, i + 2),
+                    Some(Tok::Ident(_) | Tok::Str(_) | Tok::FString(_))
+                ) =>
+        {
+            Tok::Optional
+        }
+        "default"
+            if matches!(next, Some(Tok::Str(_) | Tok::FString(_)))
+                || (matches!(next, Some(Tok::Colon))
+                    && matches!(kind_at(out, i + 2), Some(Tok::Newline))) =>
+        {
+            Tok::Default
+        }
+        _ => return,
+    };
+    out[i].kind = kind;
+    match out[i].kind {
+        Tok::Optional => {
+            let role = is_ident(out.get(i + 1), "role");
+            out[i + 1].kind = if role { Tok::Role } else { Tok::Objective };
+            if !role {
+                objective_line(out, i + 1);
+            }
+        }
+        Tok::Objective => objective_line(out, i),
+        Tok::Part => {
+            // `part name on role` / `part name at role`.
+            if is_ident(out.get(i + 2), "on") {
+                out[i + 2].kind = Tok::On;
+            } else if is_ident(out.get(i + 2), "at") {
+                out[i + 2].kind = Tok::AtKw;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// On a line begun by `objective` (token `o`): the first `at` and the first `count` outside brackets
+/// that are not a field or path segment (`@q.at` is a line id) become their own tokens.
+fn objective_line(out: &mut [Token], o: usize) {
+    let end = line_end(out, o + 1);
+    let (mut at, mut count) = (false, false);
+    let mut depth = 0u32;
+    for j in o + 1..end {
+        match out[j].kind {
+            Tok::LParen | Tok::LBracket | Tok::LBrace => depth = depth.saturating_add(1),
+            Tok::RParen | Tok::RBracket | Tok::RBrace => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        let segment = matches!(
+            kind_at(out, j - 1),
+            Some(Tok::Dot | Tok::ColonColon | Tok::At)
+        );
+        if depth > 0 || segment {
+            continue;
+        }
+        if !at && is_ident(out.get(j), "at") {
+            out[j].kind = Tok::AtKw;
+            at = true;
+        } else if !count && is_ident(out.get(j), "count") {
+            out[j].kind = Tok::Count;
+            count = true;
+        }
+    }
+}
+
+/// `quest Name[(options)] [at role]:` (token `q` is the word `quest`).
+fn quest_header(out: &mut [Token], q: usize) {
+    out[q].kind = Tok::Quest;
+    let end = line_end(out, q);
+    let after = after_group(out, q + 2, end).unwrap_or(q + 2);
+    if is_ident(out.get(after), "at") {
+        out[after].kind = Tok::AtKw;
+    }
+}
+
+/// `scene name(cast) [where pred] [uninterruptible]:` (token `s` is `scene`): `uninterruptible` right
+/// before the header's closing `:`.
+fn scene_header(out: &mut [Token], s: usize) {
+    let end = line_end(out, s);
+    let Some(after) = after_group(out, s + 2, end) else {
+        return;
+    };
+    if end >= 2
+        && end - 2 >= after
+        && kind_at(out, end - 1) == Some(&Tok::Colon)
+        && is_ident(out.get(end - 2), "uninterruptible")
+        && (end - 2 == after || ends_operand(kind_at(out, end - 3)))
+    {
+        out[end - 2].kind = Tok::Uninterruptible;
+    }
+}
+
+/// On a line begun by `dialogue` (token `d`), after the parameter list: `topic` before a string or an
+/// f-string, `priority` before a number and `exits` before a name become their own tokens (spec 5.13).
+fn dialogue_header(out: &mut [Token], d: usize) {
+    let end = line_end(out, d);
+    let Some(params) = (d..end).find(|&j| out[j].kind == Tok::LParen) else {
+        return;
+    };
+    let after = after_group(out, params, end).unwrap_or(end);
     for j in after..end {
-        let next = line.get(j + 1).map(|t| &t.kind);
-        if is_ident(line.get(j), "topic") && matches!(next, Some(Tok::Str(_) | Tok::FString(_))) {
-            line[j].kind = Tok::Topic;
-        } else if is_ident(line.get(j), "priority") && matches!(next, Some(Tok::Int(_))) {
-            line[j].kind = Tok::Priority;
+        let next = kind_at(out, j + 1);
+        if is_ident(out.get(j), "topic") && matches!(next, Some(Tok::Str(_) | Tok::FString(_))) {
+            out[j].kind = Tok::Topic;
+        } else if is_ident(out.get(j), "priority") && matches!(next, Some(Tok::Int(_))) {
+            out[j].kind = Tok::Priority;
+        } else if is_ident(out.get(j), "exits") && matches!(next, Some(Tok::Ident(_))) {
+            out[j].kind = Tok::Exits;
         }
     }
 }

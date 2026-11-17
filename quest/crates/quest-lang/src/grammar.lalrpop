@@ -19,16 +19,16 @@
 // reached only from their own positions, so `list[int]` never meets indexing.
 
 use crate::ast::{
-    Arg, BinOp, Case, ChoiceOption, Cond, Decorator, Dialogue, DialogueEntry, Expr, ExprKind, Field, File,
-    FnDef, GroupMember, Item, ItemKind, Let, LineId, Node, OptionMark, Param, Path, PatField, PatLit,
-    Pattern, PatternKind, Receiver, Step, StepKind, Stmt, StmtKind, Topic, Type, TypeKind, UnOp, UseImport,
-    Variant,
+    Arg, BinOp, Case, ChoiceOption, Cond, Decorator, Dialogue, DialogueEntry, DialogueKind, ExitArm, Expr,
+    ExprKind, Field, File, FnDef, GroupMember, Item, ItemKind, Let, LineId, Node, Objective, OptionMark,
+    Param, Part, PartAnchor, Path, PatField, PatLit, Pattern, PatternKind, Quest, Receiver, Role, Span,
+    Step, StepKind, Stmt, StmtKind, Topic, Type, TypeKind, UnOp, UseImport, Variant,
 };
 use crate::diag::Diagnostic;
 use crate::lex::{FPart, Tok, Token};
 use crate::parse::{
-    binary, chained, expr, fstring, group_entries, group_steps, item, line, lit_pat, paren, pat, path_pat,
-    raises, recovered, span, step, stmt, suffix, ty, unary, Ctx, ParseFail, Suffix,
+    binary, chained, emit_stmt, expr, fstring, group_entries, group_steps, item, line, lit_pat, paren, pat,
+    path_pat, raises, recovered, span, step, stmt, suffix, ticks, ty, unary, Ctx, ParseFail, Suffix,
 };
 
 grammar<'t, 'e>(toks: &'t [Token], file: &'t str, errs: &'e mut Vec<Diagnostic>);
@@ -92,6 +92,16 @@ extern {
         "at" => Tok::AtKw,
         "topic" => Tok::Topic,
         "priority" => Tok::Priority,
+        "part" => Tok::Part,
+        "scene" => Tok::Scene,
+        "requires" => Tok::Requires,
+        "pause" => Tok::Pause,
+        "optional" => Tok::Optional,
+        "repeatable" => Tok::Repeatable,
+        "exits" => Tok::Exits,
+        "count" => Tok::Count,
+        "uninterruptible" => Tok::Uninterruptible,
+        "on" => Tok::On,
         "(" => Tok::LParen,
         ")" => Tok::RParen,
         "[" => Tok::LBracket,
@@ -176,6 +186,11 @@ Reserved: String = {
     "once" => "once".to_string(),
     "when" => "when".to_string(),
     "where" => "where".to_string(),
+};
+
+FieldName: String = {
+    NAME,
+    Reserved,
 };
 
 /// A segment after `::`, where nothing but a segment can follow.
@@ -304,7 +319,8 @@ Plain: Expr = {
 
 Suffix: Suffix = {
     "(" <Comma<Arg>> ")" => Suffix::Call(<>),
-    "." <NAME> => Suffix::Field(<>),
+    // A field may be named by a reserved dialogue word (`DialogueEnded`'s `e.dialogue`).
+    "." <FieldName> => Suffix::Field(<>),
     "[" <i:Expr> "]" => Suffix::Index(i),
     "[" <a:Expr?> ":" <b:Expr?> "]" => Suffix::Slice(a, b),
 };
@@ -458,6 +474,16 @@ LineTok: () = {
     "at",
     "topic",
     "priority",
+    "part",
+    "scene",
+    "requires",
+    "pause",
+    "optional",
+    "repeatable",
+    "exits",
+    "count",
+    "uninterruptible",
+    "on",
     "(",
     ")",
     "[",
@@ -535,6 +561,8 @@ SimpleStmt: StmtKind = {
     "return" <Expr?> => StmtKind::Return(<>),
     "raise" <Expr> => StmtKind::Raise(<>),
     "->" <NAME> => StmtKind::Jump(<>),
+    // `emit Event(args)` in a handler is the prelude call `emit(Event(args))`.
+    <l:@L> "emit" <p:Path> <at:@L> "(" <args:Comma<Arg>> ")" <r:@R> =>? emit_stmt(toks, l, at, r, p, args),
 };
 
 /// A statement that ends with an indented block.
@@ -573,6 +601,8 @@ BlockFallback: Expr = {
 
 BlockFallbackTail: Expr = {
     <l:@L> <n:NAME> ":" NEWLINE <b:Block<Stmt, StmtErr>> <r:@R> =>? expr(toks, l, r, ExprKind::FallbackBlock(n, b)),
+    // `e else:` + block: the error is not bound (its binding is `_`).
+    <l:@L> ":" NEWLINE <b:Block<Stmt, StmtErr>> <r:@R> =>? expr(toks, l, r, ExprKind::FallbackBlock("_".to_string(), b)),
     BlockFallback,
 };
 
@@ -588,6 +618,7 @@ TopItem: Item = {
 ItemBody: ItemKind = {
     FnItem,
     DialogueItem,
+    SceneItem,
     StructItem,
     ImplItem,
     EnumItem,
@@ -605,6 +636,7 @@ ItemBody: ItemKind = {
 DecoratedBody: ItemKind = {
     FnItem,
     DialogueItem,
+    SceneItem,
 };
 
 Decorator: Decorator = {
@@ -729,13 +761,16 @@ LetItem: ItemKind = {
 // Quests (spec 5.12).
 
 QuestItem: ItemKind = {
-    "quest" <name:NAME> ":" NEWLINE <members:Block<QuestMember, OtherErr>> => ItemKind::Quest(name, members),
+    <rep:"repeatable"?> "quest" <name:NAME> <options:("(" <Comma<Arg>> ")")?> <at:("at" <NAME>)?> ":" NEWLINE <body:Block<QuestMember, OtherErr>> => {
+        ItemKind::Quest(Quest { name, repeatable: rep.is_some(), options: options.unwrap_or_default(), at, body })
+    },
 };
 
-/// A member of a quest. An `objective` parses here too, so resolution can say it belongs in a stage.
+/// A member of a quest (or a part: resolution says which members a part may not hold). An `objective`
+/// parses here too, so resolution can say it belongs in a stage.
 QuestMember: Item = {
     <l:@L> <k:QuestOnly> <r:@R> =>? item(toks, l, r, Vec::new(), false, k),
-    <d:Decorator*> <l:@L> <k:DialogueItem> <r:@R> =>? item(toks, l, r, d, false, k),
+    <d:Decorator*> <l:@L> <k:DialogueLike> <r:@R> =>? item(toks, l, r, d, false, k),
     <d:Decorator+> <l:@L> <k:FnItem> <r:@R> =>? item(toks, l, r, d, false, k),
 };
 
@@ -745,10 +780,23 @@ QuestOnly: ItemKind = {
     EventItem,
     StageItem,
     ObjectiveItem,
+    RequiresItem,
+    PartItem,
+};
+
+DialogueLike: ItemKind = {
+    DialogueItem,
+    SceneItem,
+};
+
+RequiresItem: ItemKind = {
+    "requires" <Expr> NEWLINE => ItemKind::Requires(<>),
 };
 
 RoleItem: ItemKind = {
-    "role" <name:NAME> ":" <t:Type> <req:("where" <Expr>)?> NEWLINE => ItemKind::Role(name, t, req),
+    <opt:"optional"?> "role" <name:NAME> ":" <ty:Type> <cond:("where" <Expr>)?> NEWLINE => {
+        ItemKind::Role(Role { name, ty, cond, optional: opt.is_some() })
+    },
 };
 
 StageItem: ItemKind = {
@@ -757,19 +805,82 @@ StageItem: ItemKind = {
 
 StageMember: Item = {
     <l:@L> <k:ObjectiveItem> <r:@R> =>? item(toks, l, r, Vec::new(), false, k),
-    <d:Decorator*> <l:@L> <k:DialogueItem> <r:@R> =>? item(toks, l, r, d, false, k),
+    <l:@L> <k:TransitionItem> <r:@R> =>? item(toks, l, r, Vec::new(), false, k),
+    <d:Decorator*> <l:@L> <k:DialogueLike> <r:@R> =>? item(toks, l, r, d, false, k),
     <d:Decorator+> <l:@L> <k:FnItem> <r:@R> =>? item(toks, l, r, d, false, k),
 };
 
+/// `-> Stage when cond` as a stage member (inside a handler `-> Stage` is a statement).
+TransitionItem: ItemKind = {
+    "->" <stage:NAME> "when" <cond:Expr> NEWLINE => ItemKind::Transition(stage, cond),
+};
+
 ObjectiveItem: ItemKind = {
-    "objective" <text:LineText> <id:LineId?> <at:("at" <Expr>)?> NEWLINE => ItemKind::Objective(text, id, at),
+    <opt:"optional"?> "objective" <name:NAME> <text:LineText> <id:LineId?> <at:("at" <Expr>)?> <count:("count" <Expr>)?> NEWLINE => {
+        ItemKind::Objective(Objective { name, text, id, at, count, optional: opt.is_some() })
+    },
+};
+
+PartItem: ItemKind = {
+    "part" <name:NAME> <anchor:PartAnchor> <role:NAME> ":" NEWLINE <body:Block<QuestMember, OtherErr>> => {
+        ItemKind::Part(Part { name, anchor, role, body })
+    },
+};
+
+PartAnchor: PartAnchor = {
+    "on" => PartAnchor::On,
+    "at" => PartAnchor::At,
 };
 
 // Dialogue (spec 5.11): a body of nodes or steps, never statements.
 
 DialogueItem: ItemKind = {
-    "dialogue" <name:NAME> "(" <params:Comma<Param>> ")" <target:("for" <Expr>)?> <topic:Topic?> ":" NEWLINE <body:Block<DialogueEntry, StepErr>> => {
-        ItemKind::Dialogue(Dialogue { name, params, target, topic, body: group_entries(body) })
+    "dialogue" <name:NAME> "(" <params:Comma<Param>> ")" <target:DialogueTarget?> <topic:Topic?> <exits:("exits" <Comma1<ExitName>>)?> ":" NEWLINE <body:Block<DialogueEntry, StepErr>> => {
+        let (target, filter) = match target {
+            Some((t, f)) => (Some(t), f),
+            None => (None, None),
+        };
+        ItemKind::Dialogue(Dialogue {
+            kind: DialogueKind::Conversation,
+            name,
+            params,
+            target,
+            filter,
+            topic,
+            exits: exits.unwrap_or_default(),
+            cast_cond: None,
+            uninterruptible: false,
+            body: group_entries(body),
+        })
+    },
+};
+
+/// `for target [where filter]`. Before `where` the target is an `OrExpr`: after `for a else return`, a
+/// `where` would begin a path (`where::x`), so the target takes no `else` when a filter follows.
+DialogueTarget: (Expr, Option<Expr>) = {
+    "for" <Expr> => (<>, None),
+    "for" <t:OrExpr> "where" <f:Expr> => (t, Some(f)),
+};
+
+ExitName: (String, Span) = {
+    <l:@L> <n:NAME> <r:@R> => (n, span(toks, l, r)),
+};
+
+/// `scene name(cast) [where cond] [uninterruptible]:` + steps.
+SceneItem: ItemKind = {
+    "scene" <name:NAME> "(" <params:Comma<Param>> ")" <cast_cond:("where" <Expr>)?> <u:"uninterruptible"?> ":" NEWLINE <body:Block<DialogueEntry, StepErr>> => {
+        ItemKind::Scene(Dialogue {
+            kind: DialogueKind::Scene,
+            name,
+            params,
+            target: None,
+            filter: None,
+            topic: None,
+            exits: Vec::new(),
+            cast_cond,
+            uninterruptible: u.is_some(),
+            body: group_entries(body),
+        })
     },
 };
 
@@ -811,14 +922,26 @@ Step: Step = {
     <l:@L> "when" <c:Cond> <r:@R> ":" NEWLINE <steps:StepBlock> =>? step(toks, l, r, StepKind::When(c, steps)),
     <l:@L> "once" <per:("per" <Expr>)?> <r:@R> ":" NEWLINE <steps:StepBlock> =>? step(toks, l, r, StepKind::Once(per, steps)),
     <l:@L> "->" <n:NAME> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Jump(n)),
-    <l:@L> "detour" <n:NAME> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Detour(n)),
+    <l:@L> "detour" <n:NAME> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Detour(n, Vec::new())),
+    <l:@L> "detour" <n:NAME> <r:@R> ":" NEWLINE <arms:Block<ExitArm, OtherErr>> =>? step(toks, l, r, StepKind::Detour(n, arms)),
     <l:@L> "emit" <p:Path> "(" <args:Comma<Arg>> ")" <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Emit(p, args)),
-    <l:@L> "return" <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Return),
+    <l:@L> "return" <exit:NAME?> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Return(exit)),
+    <l:@L> "pause" <e:Expr> <r:@R> NEWLINE =>? step(toks, l, r, StepKind::Pause(e)),
 };
 
-/// `[speaker:] "text" [@id] [when cond]`.
+/// An arm of `detour name:`: `exit:` + steps.
+ExitArm: ExitArm = {
+    <l:@L> <exit:NAME> <r:@R> ":" NEWLINE <steps:StepBlock> => ExitArm { exit, steps, span: span(toks, l, r) },
+};
+
+/// `[speaker:] "text" [@id] [(ticks=n)] [when cond]`.
 Line: crate::ast::Line = {
-    <l:@L> <speaker:(<NAME> ":")?> <text:LineText> <id:LineId?> <cond:("when" <Cond>)?> <r:@R> => line(toks, l, r, speaker, text, id, cond),
+    <l:@L> <speaker:(<NAME> ":")?> <text:LineText> <id:LineId?> <ticks:("(" <Ticks> ")")?> <cond:("when" <Cond>)?> <r:@R> => line(toks, l, r, speaker, text, id, ticks, cond),
+};
+
+/// `ticks=n` (`ticks` is not a keyword: the action checks the word).
+Ticks: Expr = {
+    <at:@L> <word:NAME> "=" <e:Expr> => ticks(errs, toks, file, at, &word, e),
 };
 
 /// A string or f-string literal: the text of a line, an option, an objective or a topic.
@@ -891,6 +1014,16 @@ IdSeg: String = {
     "at" => "at".to_string(),
     "topic" => "topic".to_string(),
     "priority" => "priority".to_string(),
+    "part" => "part".to_string(),
+    "scene" => "scene".to_string(),
+    "requires" => "requires".to_string(),
+    "pause" => "pause".to_string(),
+    "optional" => "optional".to_string(),
+    "repeatable" => "repeatable".to_string(),
+    "exits" => "exits".to_string(),
+    "count" => "count".to_string(),
+    "uninterruptible" => "uninterruptible".to_string(),
+    "on" => "on".to_string(),
 };
 
 /// `once [per e] [if e]`, or an expression. The language has no conditional expression, so `if` ends

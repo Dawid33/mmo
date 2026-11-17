@@ -391,3 +391,122 @@ fn contextual_words() {
         ]
     );
 }
+
+#[test]
+fn phase10_contextual_words() {
+    use Tok::*;
+    assert_eq!(
+        toks("repeatable quest B(cooldown=1) at camp:")[..3],
+        [Repeatable, Quest, ident("B")]
+    );
+    assert_eq!(
+        toks("repeatable quest B(cooldown=1) at camp:")[8..11],
+        [AtKw, ident("camp"), Colon]
+    );
+    assert_eq!(
+        toks("quest S at elder:"),
+        vec![Quest, ident("S"), AtKw, ident("elder"), Colon, Newline, Eof]
+    );
+    assert_eq!(
+        toks("pub scene s(a: Person) uninterruptible:")[..2],
+        [Pub, Scene]
+    );
+    assert_eq!(
+        toks("scene s(a: Person) where a.idle uninterruptible:")[7..],
+        [
+            Where,
+            ident("a"),
+            Dot,
+            ident("idle"),
+            Uninterruptible,
+            Colon,
+            Newline,
+            Eof
+        ]
+    );
+    assert_eq!(
+        toks("part watch on dog:"),
+        vec![Part, ident("watch"), On, ident("dog"), Colon, Newline, Eof]
+    );
+    assert_eq!(
+        toks("part depths at mine:"),
+        vec![
+            Part,
+            ident("depths"),
+            AtKw,
+            ident("mine"),
+            Colon,
+            Newline,
+            Eof
+        ]
+    );
+    assert_eq!(toks("requires act() >= 1")[..2], [Requires, ident("act")]);
+    assert_eq!(toks("pause 30"), vec![Pause, Int(30), Newline, Eof]);
+    assert_eq!(
+        toks("optional role m: Person"),
+        vec![
+            Optional,
+            Role,
+            ident("m"),
+            Colon,
+            ident("Person"),
+            Newline,
+            Eof
+        ]
+    );
+    assert_eq!(
+        toks("optional objective b \"x\" @q.at at camp count 6"),
+        vec![
+            Optional,
+            Objective,
+            ident("b"),
+            Str("x".into()),
+            At,
+            ident("q"),
+            Dot,
+            ident("at"),
+            AtKw,
+            ident("camp"),
+            Count,
+            Int(6),
+            Newline,
+            Eof
+        ]
+    );
+    let header = toks("dialogue d(p: Player, npc: Person) exits a, b:");
+    assert_eq!(
+        header[header.len() - 7..],
+        [Exits, ident("a"), Comma, ident("b"), Colon, Newline, Eof]
+    );
+    // Everywhere else they are names.
+    for text in [
+        "let scene = 1",
+        "let part = 2",
+        "count = 3",
+        "pause(x)",
+        "requires = 1",
+        "optional = 1",
+        "repeatable = 1",
+        "scene.x = 1",
+        "let on = exits",
+        "uninterruptible = 1",
+    ] {
+        let found = toks(text);
+        assert!(
+            !found.iter().any(|t| matches!(
+                t,
+                Part | Scene
+                    | Requires
+                    | Pause
+                    | Optional
+                    | Repeatable
+                    | Exits
+                    | Count
+                    | Uninterruptible
+                    | On
+            )),
+            "{text}: {found:?}"
+        );
+    }
+    assert_eq!(toks("fn pause(x):")[..2], [Fn, ident("pause")]);
+}

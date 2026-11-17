@@ -65,7 +65,9 @@ impl<'a> Resolver<'a> {
         let mut cx = Cx::new(m, file, quest);
         cx.in_dialogue = true;
         self.dialogue_decorators(item, &cx);
-        let bark = self.dialogue_signature(d, item.span, file);
+        // A scene's cast is checked with the rest of the scene rules (Phase 10).
+        let bark = d.kind == ast::DialogueKind::Conversation
+            && self.dialogue_signature(d, item.span, file);
         if let Some(target) = &d.target {
             self.expr(target, &mut cx);
         }
@@ -294,7 +296,7 @@ impl<'a> Resolver<'a> {
                     ));
                 }
             }
-            ast::StepKind::Detour(name) => {
+            ast::StepKind::Detour(name, arms) => {
                 let ok = match cx.quest.and_then(|q| q.names.get(name.as_str())) {
                     Some(k) => *k == QuestName::Dialogue,
                     None => matches!(self.entry(cx.module, name),
@@ -308,12 +310,15 @@ impl<'a> Resolver<'a> {
                         s.span,
                     ));
                 }
+                for arm in arms {
+                    self.steps(&arm.steps, cx, dcx);
+                }
             }
             ast::StepKind::Emit(path, args) => {
                 self.emitted(path, s.span, cx);
                 self.args(args, cx);
             }
-            ast::StepKind::Return => {}
+            ast::StepKind::Return(_) | ast::StepKind::Pause(_) => {}
         }
     }
 
@@ -370,9 +375,9 @@ impl<'a> Resolver<'a> {
         for member in members {
             let mut cx = Cx::new(m, file, Some(&scope));
             match &member.kind {
-                ast::ItemKind::Role(_, ty, req) => {
-                    self.ty(ty, &mut cx);
-                    if let Some(req) = req {
+                ast::ItemKind::Role(r) => {
+                    self.ty(&r.ty, &mut cx);
+                    if let Some(req) = &r.cond {
                         self.expr(req, &mut cx);
                     }
                 }
@@ -385,7 +390,8 @@ impl<'a> Resolver<'a> {
                 ast::ItemKind::Event(_, fields) => {
                     self.fields(fields, &mut cx);
                 }
-                ast::ItemKind::Stage(_, inner) => {
+                ast::ItemKind::Stage(_, inner)
+                | ast::ItemKind::Part(ast::Part { body: inner, .. }) => {
                     for sm in inner {
                         self.quest_member(sm, m, &scope);
                     }
@@ -404,11 +410,11 @@ impl<'a> Resolver<'a> {
     /// Enters a quest member's name in the quest's scope.
     fn quest_name(&mut self, member: &ast::Item, scope: &mut QuestScope, file: &str) {
         let (name, kind) = match &member.kind {
-            ast::ItemKind::Role(n, ..) => (n, QuestName::Role),
+            ast::ItemKind::Role(r) => (&r.name, QuestName::Role),
             ast::ItemKind::Let(l) => (&l.name, QuestName::Global),
             ast::ItemKind::Event(n, _) => (n, QuestName::Event),
             ast::ItemKind::Stage(n, _) => (n, QuestName::Stage),
-            ast::ItemKind::Dialogue(d) => (&d.name, QuestName::Dialogue),
+            ast::ItemKind::Dialogue(d) | ast::ItemKind::Scene(d) => (&d.name, QuestName::Dialogue),
             ast::ItemKind::Fn(f) => (&f.name, QuestName::Fn),
             _ => return,
         };
@@ -429,16 +435,18 @@ impl<'a> Resolver<'a> {
         let file = self.file_of(m);
         let mut cx = Cx::new(m, file, Some(scope));
         match &member.kind {
-            ast::ItemKind::Objective(text, id, at) => {
-                self.expr(text, &mut cx);
-                if let Some(id) = id {
+            ast::ItemKind::Objective(o) => {
+                self.expr(&o.text, &mut cx);
+                if let Some(id) = &o.id {
                     self.line_id(id, file);
                 }
-                if let Some(at) = at {
+                if let Some(at) = &o.at {
                     self.expr(at, &mut cx);
                 }
             }
-            ast::ItemKind::Dialogue(d) => self.dialogue(d, member, m, Some(scope)),
+            ast::ItemKind::Dialogue(d) | ast::ItemKind::Scene(d) => {
+                self.dialogue(d, member, m, Some(scope));
+            }
             ast::ItemKind::Fn(f) => {
                 cx.quest_fn = true;
                 self.func(f, member, None, false, &mut cx);

@@ -456,17 +456,38 @@ impl Item {
                 out.push(')');
             }
             ItemKind::Let(l) => l.dump_into(out),
-            ItemKind::Dialogue(d) => d.dump_into(out),
-            ItemKind::Quest(name, items) => {
-                let _ = write!(out, "(quest {name}");
-                dump_items(out, items);
+            ItemKind::Dialogue(d) | ItemKind::Scene(d) => d.dump_into(out),
+            ItemKind::Quest(q) => {
+                let _ = write!(out, "(quest {}", q.name);
+                if q.repeatable {
+                    out.push_str(" repeatable");
+                }
+                for a in &q.options {
+                    out.push(' ');
+                    match &a.name {
+                        Some(n) => {
+                            let _ = write!(out, "({n} ");
+                            a.value.dump_into(out);
+                            out.push(')');
+                        }
+                        None => a.value.dump_into(out),
+                    }
+                }
+                if let Some(at) = &q.at {
+                    let _ = write!(out, " at {at}");
+                }
+                dump_items(out, &q.body);
                 out.push(')');
             }
-            ItemKind::Role(name, ty, req) => {
-                let _ = write!(out, "(role {name} {}", ty.dump());
-                if let Some(req) = req {
+            ItemKind::Role(r) => {
+                let _ = write!(out, "(role {}", r.name);
+                if r.optional {
+                    out.push_str(" optional");
+                }
+                let _ = write!(out, " {}", r.ty.dump());
+                if let Some(cond) = &r.cond {
                     out.push_str(" (where ");
-                    req.dump_into(out);
+                    cond.dump_into(out);
                     out.push(')');
                 }
                 out.push(')');
@@ -476,15 +497,40 @@ impl Item {
                 dump_items(out, items);
                 out.push(')');
             }
-            ItemKind::Objective(text, id, at) => {
-                out.push_str("(objective ");
-                text.dump_into(out);
-                dump_line_id(out, id.as_ref());
-                if let Some(at) = at {
-                    out.push_str(" (at ");
-                    at.dump_into(out);
-                    out.push(')');
+            ItemKind::Objective(o) => {
+                let _ = write!(out, "(objective {}", o.name);
+                if o.optional {
+                    out.push_str(" optional");
                 }
+                out.push(' ');
+                o.text.dump_into(out);
+                dump_line_id(out, o.id.as_ref());
+                for (word, e) in [("at", &o.at), ("count", &o.count)] {
+                    if let Some(e) = e {
+                        let _ = write!(out, " ({word} ");
+                        e.dump_into(out);
+                        out.push(')');
+                    }
+                }
+                out.push(')');
+            }
+            ItemKind::Requires(cond) => {
+                out.push_str("(requires ");
+                cond.dump_into(out);
+                out.push(')');
+            }
+            ItemKind::Transition(stage, cond) => {
+                let _ = write!(out, "(transition {stage} ");
+                cond.dump_into(out);
+                out.push(')');
+            }
+            ItemKind::Part(p) => {
+                let anchor = match p.anchor {
+                    PartAnchor::On => "on",
+                    PartAnchor::At => "at",
+                };
+                let _ = write!(out, "(part {} {anchor} {}", p.name, p.role);
+                dump_items(out, &p.body);
                 out.push(')');
             }
         }
@@ -525,7 +571,7 @@ impl Cond {
 }
 
 impl Line {
-    /// `(line npc "text" farmer.start (when …))`.
+    /// `(line npc "text" farmer.start (ticks 60) (when …))`.
     fn dump_into(&self, out: &mut String) {
         out.push_str("(line ");
         if let Some(speaker) = &self.speaker {
@@ -534,6 +580,11 @@ impl Line {
         }
         self.text.dump_into(out);
         dump_line_id(out, self.id.as_ref());
+        if let Some(ticks) = &self.ticks {
+            out.push_str(" (ticks ");
+            ticks.dump_into(out);
+            out.push(')');
+        }
         if let Some(cond) = &self.cond {
             out.push_str(" (when ");
             cond.dump_into(out);
@@ -545,12 +596,25 @@ impl Line {
 
 impl Dialogue {
     fn dump_into(&self, out: &mut String) {
-        let _ = write!(out, "(dialogue {} ", self.name);
+        let word = match self.kind {
+            DialogueKind::Conversation => "dialogue",
+            DialogueKind::Scene => "scene",
+        };
+        let _ = write!(out, "({word} {} ", self.name);
         dump_params(out, None, &self.params);
-        if let Some(target) = &self.target {
-            out.push_str(" (for ");
-            target.dump_into(out);
-            out.push(')');
+        for (word, e) in [
+            ("for", &self.target),
+            ("where", &self.filter),
+            ("where", &self.cast_cond),
+        ] {
+            if let Some(e) = e {
+                let _ = write!(out, " ({word} ");
+                e.dump_into(out);
+                out.push(')');
+            }
+        }
+        if self.uninterruptible {
+            out.push_str(" uninterruptible");
         }
         if let Some(topic) = &self.topic {
             out.push_str(" (topic ");
@@ -563,6 +627,14 @@ impl Dialogue {
             }
             if let Some(priority) = topic.priority {
                 let _ = write!(out, " (priority {priority})");
+            }
+            out.push(')');
+        }
+        if !self.exits.is_empty() {
+            out.push_str(" (exits");
+            for (exit, _) in &self.exits {
+                out.push(' ');
+                out.push_str(exit);
             }
             out.push(')');
         }
@@ -651,15 +723,29 @@ impl Step {
             StepKind::Jump(name) => {
                 let _ = write!(out, "(jump {name})");
             }
-            StepKind::Detour(name) => {
-                let _ = write!(out, "(detour {name})");
+            StepKind::Detour(name, arms) => {
+                let _ = write!(out, "(detour {name}");
+                for a in arms {
+                    let _ = write!(out, " (arm {}", a.exit);
+                    dump_steps(out, &a.steps);
+                    out.push(')');
+                }
+                out.push(')');
             }
             StepKind::Emit(path, args) => {
                 let _ = write!(out, "(emit {}", path_text(path));
                 dump_args(out, args);
                 out.push(')');
             }
-            StepKind::Return => out.push_str("(return)"),
+            StepKind::Return(None) => out.push_str("(return)"),
+            StepKind::Return(Some(exit)) => {
+                let _ = write!(out, "(return {exit})");
+            }
+            StepKind::Pause(e) => {
+                out.push_str("(pause ");
+                e.dump_into(out);
+                out.push(')');
+            }
         }
     }
 }

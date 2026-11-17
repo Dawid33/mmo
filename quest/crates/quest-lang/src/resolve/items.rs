@@ -115,8 +115,10 @@ impl<'a> Resolver<'a> {
             ast::ItemKind::ErrorSet(n, _) => Some(def(n, Tag::ErrorSet)),
             ast::ItemKind::Event(n, _) => Some(def(n, Tag::Event)),
             ast::ItemKind::Let(l) => Some(def(&l.name, Tag::Global)),
-            ast::ItemKind::Dialogue(d) => Some(def(&d.name, Tag::Dialogue)),
-            ast::ItemKind::Quest(n, _) => Some(def(n, Tag::Quest)),
+            ast::ItemKind::Dialogue(d) | ast::ItemKind::Scene(d) => {
+                Some(def(&d.name, Tag::Dialogue))
+            }
+            ast::ItemKind::Quest(q) => Some(def(&q.name, Tag::Quest)),
             ast::ItemKind::Mod(name) => {
                 // `mod self` and the like were reported by `load_modules`.
                 if !PATH_WORDS.contains(&name.as_str()) {
@@ -194,6 +196,16 @@ impl<'a> Resolver<'a> {
                 self.diags.push(error(
                     "quest-only",
                     "an `objective` belongs in a quest's `stage`".to_string(),
+                    file,
+                    item.span,
+                ));
+                None
+            }
+            // The grammar takes these only inside a quest.
+            ast::ItemKind::Requires(_) | ast::ItemKind::Transition(..) | ast::ItemKind::Part(_) => {
+                self.diags.push(error(
+                    "quest-only",
+                    "this belongs in a `quest`".to_string(),
                     file,
                     item.span,
                 ));

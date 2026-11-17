@@ -199,35 +199,61 @@ dialogue greeting(p: Player, npc: Person) for innkeeper:
 
 const S5_12: &str = r#"
 quest LostDog:
-    role farmer: Person
-    role dog: Creature where dog.has_tag("pet")
+    requires act() >= 1
+    role farmer: Person where farmer.occupation == Occupation::Farmer and farmer.alive
+    role dog: Creature where dog.has_tag("pet") and dog.owner == farmer
+    optional role miller: Person where miller.occupation == Occupation::Miller
 
-    let found_by: Option[Player] = None
+    let attempts = 0
 
     event Accepted:
         player: Player
+    event DogFound:
+        player: Player
+    event Nightfall:
+        attempt: int
 
     stage Open:
-        objective f"Find {dog.name}" @lostdog.find at dog
-        dialogue ask(p: Player, npc: Person) for farmer topic f"About {dog.name}" @lostdog.topic:
-            npc: f"Have you seen {dog.name}?"                          @lostdog.ask
+        dialogue plea(p: Player, npc: Person) for farmer topic f"About {dog.name}" @lostdog.topic:
+            npc: f"{dog.name} ran off toward the hills."                @lostdog.plea
             choice:
-                "I'll look for him." @lostdog.accept:
+                "I'll find him." @lostdog.accept:
                     emit Accepted(player=p)
                 "Not now." @lostdog.not_now
+        @on(Accepted)
+        fn accepted(e):
+            join(e.player)
+            -> Search
+
+    stage Search:
+        objective find_dog f"Find {dog.name}" @lostdog.find at dog
+        objective feed_dog f"Coax {dog.name} with food" @lostdog.feed at dog
+        optional objective ask_miller "Ask at the mill" @lostdog.mill at miller
+        -> Returning when find_dog.done and feed_dog.done
+        @on(Entered)
+        fn count_attempt(e):
+            attempts = attempts + 1
         @on(DogFound)
         fn found(e):
-            found_by = Some(e.player)
-            -> Returning
+            if not find_dog.done:
+                find_dog.finish()
+                after(9000, Nightfall(attempt=attempts))
+        @on(Nightfall)
+        fn bolted(e):
+            -> Search                       # a failed attempt: re-entering re-opens the objectives
+
     stage Returning:
-        objective f"Bring {dog.name} to {farmer.name}" @lostdog.return at farmer
+        objective bring_home f"Bring {dog.name} home" @lostdog.return at farmer
         @on(DogDelivered)
         fn delivered(e):
-            complete([e.player])
+            bring_home.finish()
+            complete()                      # for every participant
 
-    @on(DogDied)
-    fn died(e):
-        fail()
+    part dog_watch on dog:
+        @on(PlayerNear)
+        fn spotted(e):
+            if stage == Stage::Search and e.player in participants:
+                emit DogFound(player=e.player)
 "#;
 
 const EX1: &str = r#"
@@ -732,16 +758,20 @@ fn spec_dialogue_and_quest_parse() {
 
     let dump = parse_ok(S5_12);
     for part in [
-        "(quest LostDog (role farmer Person) (role dog Creature (where (call (field dog has_tag) \"pet\")))",
-        "(let found_by: (Option Player) None)",
-        "(event Accepted (player Player))",
-        r#"(stage Open (objective (fstr "Find " (field dog name)) lostdog.find (at dog))"#,
-        r#"(dialogue ask (p: Player, npc: Person) (for farmer) (topic (fstr "About " (field dog name)) lostdog.topic) (line npc (fstr "Have you seen " (field dog name) "?") lostdog.ask)"#,
+        "(quest LostDog (requires (>= (call act) 1)) (role farmer Person (where (and (== (field farmer occupation) Occupation::Farmer) (field farmer alive))))",
+        "(role miller optional Person (where (== (field miller occupation) Occupation::Miller)))",
+        "(let attempts 0)",
+        "(event Nightfall (attempt int))",
+        r#"(stage Open (dialogue plea (p: Player, npc: Person) (for farmer) (topic (fstr "About " (field dog name)) lostdog.topic) (line npc (fstr (field dog name) " ran off toward the hills.") lostdog.plea)"#,
         r#"(option "Not now." lostdog.not_now)"#,
-        "(@on DogFound) (fn found (e) (= found_by (call Some (field e player))) (jump Returning))",
-        r#"(stage Returning (objective (fstr "Bring " (field dog name) " to " (field farmer name)) lostdog.return (at farmer))"#,
-        "(@on DogDelivered) (fn delivered (e) (call complete (list (field e player)))))",
-        "(@on DogDied) (fn died (e) (call fail)))",
+        "(@on Accepted) (fn accepted (e) (call join (field e player)) (jump Search))",
+        r#"(stage Search (objective find_dog (fstr "Find " (field dog name)) lostdog.find (at dog))"#,
+        r#"(objective ask_miller optional "Ask at the mill" lostdog.mill (at miller))"#,
+        "(transition Returning (and (field find_dog done) (field feed_dog done)))",
+        "(@on Nightfall) (fn bolted (e) (jump Search))",
+        r#"(stage Returning (objective bring_home (fstr "Bring " (field dog name) " home") lostdog.return (at farmer))"#,
+        "(part dog_watch on dog (@on PlayerNear) (fn spotted (e)",
+        "(call emit (call DogFound player=(field e player)))",
     ] {
         assert_has(&dump, part);
     }
@@ -817,4 +847,661 @@ fn dialogue_grammar_has_no_conflicts() {
          (group (=> (line npc \"a\" (when (once per p if y))) (detour other))) \
          (once per p (emit E a=1)) (when x (line \"b\")))"
     );
+}
+// The python blocks of `2026-11-16-quest-examples.md`, copied verbatim (fixtures QX1…QX6).
+
+const QX1: &str = r##"
+# Package errantry/lost-dog — src/main.qs
+
+let NIGHT_TICKS = 9000                  # from finding the dog to it bolting, unless fed
+
+quest LostDog:
+    requires act() >= 1
+    role farmer: Person where farmer.occupation == Occupation::Farmer and farmer.alive
+    role dog: Creature where dog.has_tag("pet") and dog.owner == farmer
+    optional role miller: Person where miller.occupation == Occupation::Miller and near(miller, farmer, regions=1)
+
+    let attempts = 0                    # quest state: how often the dog was found and lost again
+
+    event Accepted:
+        player: Player
+    event AskedMiller:
+        player: Player
+    event DogFound:
+        player: Player
+    event DogFed:
+        player: Player
+    event Nightfall:
+        attempt: int
+    event Reunited:
+        player: Player
+
+    # ── Open: the farmer asks anyone who talks to him ─────────────────────────
+    stage Open:
+        dialogue worry(p: Player, npc: Person) for farmer:          # a greeting: no topic
+            node hi when once per p:
+                npc: "Stranger! Have you seen a brown dog on the road?"         @lostdog.worry.first
+            node hi:
+                => npc: "Still no sign of him."                                 @lostdog.worry.a
+                => npc: "I left the gate open. My own fault."                   @lostdog.worry.b
+
+        dialogue plea(p: Player, npc: Person) for farmer topic f"About {dog.name}" @lostdog.topic:
+            npc: f"{dog.name} ran off toward the hills two days ago."           @lostdog.plea
+            npc: "He's never been gone a night before."                         @lostdog.plea2
+            choice:
+                "I'll find him."                                                @lostdog.accept:
+                    emit Accepted(player=p)
+                    npc: "Bless you. Take something to eat. He's skittish."     @lostdog.hint
+                "What does he look like?"                                       @lostdog.ask_look:
+                    npc: "Brown, one ear up. Answers to his name, mostly."      @lostdog.look
+                "Not now."                                                      @lostdog.not_now
+
+        @on(Accepted)
+        fn accepted(e):
+            join(e.player)
+            -> Search
+
+    # ── Search: two objectives in parallel, one optional ─────────────────────
+    stage Search:
+        objective find_dog f"Find {dog.name}"                    @lostdog.find     at dog
+        objective feed_dog f"Coax {dog.name} with food"          @lostdog.feed     at dog
+        optional objective ask_miller "Ask at the mill"          @lostdog.ask_mill at miller
+        -> Returning when find_dog.done and feed_dog.done
+
+        dialogue join_in(p: Player, npc: Person) for farmer topic "Can I help look?" @lostdog.join if not (p in participants):
+            npc: "Every pair of eyes helps."                                    @lostdog.join_ok
+            emit Accepted(player=p)
+
+        dialogue lost_again(p: Player, npc: Person) for farmer:
+            node hi when attempts >= 2:
+                npc: f"Found and lost {attempts} times now. He's frightened."   @lostdog.again
+            node hi:
+                npc: "Any luck?"                                                @lostdog.any_luck
+
+        dialogue tip(p: Player, npc: Person) for miller topic f"Seen {dog.name}?" @lostdog.mill_topic if p in participants:
+            npc: "Something's been at my grain sacks down by the weir."         @lostdog.mill_tip
+            emit AskedMiller(player=p)
+
+        @on(Entered)
+        fn count_attempt(e):
+            attempts = attempts + 1
+
+        @on(Accepted)
+        fn joined_late(e):
+            join(e.player)
+
+        @on(AskedMiller)
+        fn asked(e):
+            ask_miller.finish()
+
+        @on(DogFound)
+        fn found(e):
+            if not find_dog.done:       # two players may spot him in one tick
+                find_dog.finish()
+                after(NIGHT_TICKS, Nightfall(attempt=attempts))
+
+        @on(DogFed)
+        fn fed(e):
+            if find_dog.done:
+                feed_dog.finish()
+                follow(dog, e.player)
+
+        @on(Nightfall)
+        fn bolted(e):
+            -> Search                   # a failed attempt: re-entering re-opens both objectives
+
+    # ── Returning: bring him home ────────────────────────────────────────────
+    stage Returning:
+        objective bring_home f"Bring {dog.name} home to {farmer.name}"   @lostdog.return at farmer
+
+        dialogue reunion(p: Player, npc: Person) for farmer topic f"{dog.name} is back" @lostdog.back_topic if near(dog, farmer, blocks=8):
+            npc: f"{dog.name}! You daft mutt."                                  @lostdog.reunion
+            npc: "Take this. My father carved it. It's all I have of worth."    @lostdog.reward
+            emit Reunited(player=p)
+
+        @on(Reunited)
+        fn reunited(e):
+            bring_home.finish()
+            for q in participants:
+                give(q, Item(kind="carved_whistle", count=1))
+            complete()                  # for every participant
+
+    # ── In any stage ─────────────────────────────────────────────────────────
+    @on(RoleLost)
+    fn lost(e):
+        match e.role:
+            case Role::miller:
+                pass                    # optional: the tip is simply gone
+            case _:
+                fail()                  # the farmer or the dog: the quest cannot be done
+
+    # ── The part that rides with the dog ─────────────────────────────────────
+    part dog_watch on dog:
+        @on(PlayerNear)
+        fn spotted(e):
+            if stage == Stage::Search and e.player in participants and not find_dog.done:
+                emit DogFound(player=e.player)
+
+        @on(ItemGiven)
+        fn offered(e):
+            if stage == Stage::Search and e.item.kind == "meat":
+                emit DogFed(player=e.player)
+"##;
+
+const QX2: &str = r##"
+# Package errantry/act-two — src/sealed_mine.qs
+
+quest SealedMine at elder:
+    requires act() == 2
+    role elder: Person where elder.occupation == Occupation::Elder and elder.alive
+    role foreman: Person where foreman.occupation == Occupation::Miner and foreman.site == elder.site
+    role mine: Site where site_kind(mine) == SiteKind::Mine and near(mine, elder, regions=2)
+
+    event HeardOut:
+        player: Player
+    event LurkerSlain:
+        player: Player
+    event SealSet:
+        player: Player
+
+    scene argument(a: Person, b: Person) uninterruptible:
+        a: "The seal held for forty years. You will not break it for silver."
+        b: "Silver feeds this village, old man."
+        pause 30
+        a: "Silver did not feed the eleven we lost."
+        b: "..."                                                      (ticks=60)
+        a: "Then let the stranger decide what they find down there."
+
+    stage Council:
+        objective hear_out "Hear the elder and the foreman out" at elder
+        -> Depths when hear_out.done
+
+        dialogue ask(p: Player, npc: Person) for elder topic "The mine?":
+            npc: "Brann wants it open. Stand here and listen to him lie."
+            emit HeardOut(player=p)
+
+        @on(HeardOut)
+        fn convene(e):
+            join(e.player)
+            play(argument, a=elder, b=foreman)
+
+        @on(SceneEnded)
+        fn heard(e):
+            if e.scene == argument and e.reason == SceneEnd::Finished:
+                hear_out.finish()
+
+    stage Depths:
+        objective lurkers "Clear the lurkers from the mine" at mine count 6
+        objective seal "Set the seal stone" at mine
+
+        dialogue foreman_sulk(p: Player, npc: Person) for foreman:
+            => npc: "Go on then. Bury our living."
+            => npc: "Mind the third shaft. It floods."
+
+        @on(LurkerSlain)
+        fn slain(e):
+            join(e.player)              # anyone who fights down there takes part
+            lurkers.progress(1)
+
+        @on(SealSet)
+        fn sealed(e):
+            if lurkers.done:
+                seal.finish()
+                complete()
+
+    part depths at mine:
+        @on(Setup)
+        fn nest(e):
+            place(prefab("lurker_nest"), mine) else:
+                decline()               # no room at this mine: the whole quest is not placed
+                return
+
+        @on(Killed)
+        fn killed(e):
+            if stage == Stage::Depths and ours(e.victim):
+                match e.by:
+                    case Some(p):
+                        emit LurkerSlain(player=p)
+                    case None:
+                        pass            # drowned in the third shaft: no one's kill
+
+        @on(BlockUsed)
+        fn used(e):
+            if stage == Stage::Depths and e.tag == "seal_stone":
+                emit SealSet(player=e.player)
+"##;
+
+const QX3: &str = r##"
+# Package errantry/bandits — src/main.qs
+
+repeatable quest BanditCamp(cooldown=72000, exclusive=true) at camp:
+    role watch: Person where watch.occupation == Occupation::Guard and watch.alive
+    role camp: Place where camp.open_ground(blocks=20) and near(camp, watch, regions=1)
+
+    let veteran = false                 # re-initialised on every reset; set from the namespace in Setup
+    let paid: list[Player] = []
+
+    event Hired:
+        player: Player
+    event Paid:
+        player: Player
+
+    @on(Setup)
+    fn pitch_camp(e):
+        let beaten = await world.get("times_beaten") else 0     # the namespace survives resets
+        veteran = beaten >= 3
+        let camp_prefab = prefab("bandit_camp")
+        if veteran:
+            camp_prefab = prefab("bandit_camp_veteran")
+        place(camp_prefab, camp) else:
+            decline()
+            return
+
+    stage Notice:
+        dialogue hire(p: Player, npc: Person) for watch topic "Any work going?":
+            when veteran:
+                npc: "Them again. Better blades this time, I hear."
+            npc: "Bandits in the hollow. Clear them out and the village pays thirty silver."
+            choice:
+                "Consider it done.":
+                    emit Hired(player=p)
+                "Not today."
+
+        @on(Hired)
+        fn hired(e):
+            join(e.player)
+            -> Assault
+
+    stage Assault:
+        objective bandits "Drive the bandits from the hollow" at camp count 5
+        optional objective banner "Take their banner" at camp
+        -> Payday when bandits.done
+
+        @on(Killed)
+        fn killed(e):
+            if ours(e.victim):
+                bandits.progress(1)
+
+        @on(PlayerDefeated)
+        fn down(e):
+            leave(e.player)
+            if participants.len() == 0:
+                -> Notice               # everyone is down: the attempt failed; the job is open again
+
+        @on(BlockUsed)
+        fn banner_taken(e):
+            if e.tag == "bandit_banner":
+                banner.finish()
+
+    stage Payday:
+        dialogue pay(p: Player, npc: Person) for watch topic "The hollow is clear." if p in participants and not (p in paid):
+            npc: "Good work. Thirty, as promised."
+            when banner.done:
+                npc: "And the banner? The reeve will want that. Five more."
+            emit Paid(player=p)
+
+        @on(Paid)
+        fn pay_out(e):
+            let silver = 30
+            if banner.done:
+                silver = 35
+            give(e.player, Item(kind="silver", count=silver))
+            paid.append(e.player)
+            if paid.len() == participants.len():
+                await world.add("times_beaten", 1)
+                complete()
+"##;
+
+const QX4_LIBRARY: &str = r##"
+# Package errantry/trade — src/haggle.qs   (a library: no quest)
+
+pub dialogue haggle(p: Player, npc: Person) exits agreed, refused:
+    npc: "Times are hard. You know how it is."
+    choice:
+        "Half now, half at harvest?" if p.skill("trade") >= 2:
+            npc: "...Half now. Fine."
+            return agreed
+        "Pay, or I take it from your stock." if p.skill("intimidate") >= 3:
+            npc: "All right! All right."
+            return agreed
+        "Then I'll be back.":
+            return refused
+    # falling off the end would be the implicit exit `done`; every option returns here
+"##;
+
+const QX4: &str = r##"
+# Package errantry/old-debts — src/main.qs   (depends on errantry/trade)
+use trade::haggle::haggle          # `trade`: the dependency's crate name, as in Rust
+
+quest OldDebt:
+    role lender: Person where lender.occupation == Occupation::Merchant
+    role debtor: Person where debtor.site == lender.site and debtor != lender and debtor.alive
+
+    event Collected:
+        player: Player
+
+    stage Collect:
+        objective collect f"Collect {lender.name}'s money from {debtor.name}" at debtor
+
+        dialogue confront(p: Player, npc: Person) for debtor topic f"{lender.name} sent me" exits paid, stalled:
+            npc: "Oh. Them."
+            detour haggle:
+                agreed:
+                    npc: "Here. Tell them we're square."
+                    return paid
+                refused:
+                    npc: "Come back when you're less... you."
+                    return stalled
+
+        dialogue thanks(p: Player, npc: Person) for lender topic "About the debt" if collect.done:
+            npc: "You got it? Then here's your cut."
+            emit Collected(player=p)
+
+        @on(DialogueEnded)
+        fn after_talk(e):
+            if e.dialogue == confront and e.exit == confront::paid:
+                join(e.player)
+                collect.finish()
+
+        @on(Collected)
+        fn reward(e):
+            give(e.player, Item(kind="silver", count=10))
+            complete()
+"##;
+
+const QX5: &str = r##"
+# Package errantry/town-life — src/main.qs   (no quest: package-level content)
+
+dialogue smith_hello(p: Player, npc: Person) for npc where npc.occupation == Occupation::Smith:
+    node hello when once per p:
+        npc: "Mind the sparks. New faces always stand too close."
+    node hello when p.inventory_count("broken_tool") > 0:
+        npc: "That's a sorry tool you're carrying. Leave it with me."
+    node hello:
+        => npc: "Hot work, this."
+        => npc: "Need something mended?"
+        => npc: "Iron's dear since the mine closed." when act() >= 3
+
+scene market_haggle(a: Person, b: Person) where a.occupation == Occupation::Merchant and b.site == a.site and a != b:
+    b: "How much for the turnips?"
+    a: "Two coppers."
+    b: "Two? They're half rot."
+    pause 20
+    a: "Then it's one copper of turnip and one of rot."                     (ticks=90)
+    -> market_haggle_after
+
+scene market_haggle_after(a: Person, b: Person):
+    pause 40
+    b: "...Fine. Two."
+
+scene crier(npc: Person) where npc.has_tag("town_crier"):                 # a one-actor scene: a bark
+    => npc: "Hear ye, hear ye!"
+    => npc: "The hollow road is closed by order of the reeve!" when act() == 1
+    => npc: "The old mine is sealed again! Praise the stranger!" when completed("errantry/act-two::SealedMine")
+"##;
+
+const QX6_BAD_WHERE: &str = r##"
+fn wealthy(x: Person) -> bool:
+    return x.skill("trade") > 5
+
+quest Q:
+    role buyer: Person where wealthy(buyer)            # bad-where: a script fn is not a fact query
+"##;
+
+const QX6_STATELESS: &str = r##"
+let rumour = "wolves"                                  # a global in a package with no quest
+
+dialogue gossip(p: Player, npc: Person) for npc where npc.has_tag("gossip"):
+    npc: f"They say {rumour}."                         # stateless-dialogue: reads a script global
+    emit Gossiped(player=p)                            # stateless-dialogue: no instance to emit to
+"##;
+
+const QX6_UNKNOWN_EXIT: &str = r##"
+dialogue offer(p: Player, npc: Person) for trader:
+    detour haggle:
+        agreed:
+            npc: "Done."
+        cheated:                                       # unknown-exit: haggle exits agreed, refused
+            npc: "Hey!"
+"##;
+
+const QX6_SCENE_CHOICE: &str = r##"
+scene quarrel(a: Person, b: Person):
+    a: "Well?"
+    choice:                                            # scene-choice: a scene has nobody to choose
+        "Yes"
+"##;
+
+const QX6_DUPLICATE: &str = r##"
+quest Q:
+    role dog: Creature
+    stage Search:
+        objective dog "Find the dog" at dog            # duplicate-def: the objective `dog` shadows the role
+    @on(Entered)                                       # entered-outside-stage: whose stage was entered?
+    fn entered(e):
+        pass
+"##;
+
+#[test]
+fn quest_header_forms() {
+    let dump = parse_ok(
+        "repeatable quest B(cooldown=72000, exclusive=true) at camp:\n    let x = 1\n\
+         quest C at elder:\n    let y = 1\n\
+         pub quest D:\n    let z = 1\n\
+         pub repeatable quest E:\n    let w = 1\n",
+    );
+    assert_eq!(
+        dump,
+        "(quest B repeatable (cooldown 72000) (exclusive true) at camp (let x 1))\n\
+         (quest C at elder (let y 1))\n\
+         pub (quest D (let z 1))\n\
+         pub (quest E repeatable (let w 1))"
+    );
+}
+
+#[test]
+fn objectives_named_counted_optional() {
+    let dump = parse_ok(
+        "quest Q:\n    stage S:\n        objective lurkers \"Clear the lurkers\" at mine count 6\n\
+         \x20       optional objective banner \"Take their banner\" @b.banner at camp\n\
+         \x20       objective seal f\"Seal {mine.name}\" @q.at\n",
+    );
+    assert_eq!(
+        dump,
+        "(quest Q (stage S \
+         (objective lurkers \"Clear the lurkers\" (at mine) (count 6)) \
+         (objective banner optional \"Take their banner\" b.banner (at camp)) \
+         (objective seal (fstr \"Seal \" (field mine name)) q.at)))"
+    );
+}
+
+#[test]
+fn transition_is_a_stage_member() {
+    let dump = parse_ok(
+        "quest Q:\n    stage S:\n        -> T when a.done and b.done\n\
+         \x20       @on(X)\n        fn go(e):\n            -> T\n\
+         \x20   stage T:\n        -> S when false\n",
+    );
+    assert_eq!(
+        dump,
+        "(quest Q (stage S (transition T (and (field a done) (field b done))) \
+         (@on X) (fn go (e) (jump T))) (stage T (transition S false)))"
+    );
+    // A transition needs its condition; a bare `-> T` belongs in a handler.
+    assert_eq!(
+        codes("quest Q:\n    stage S:\n        -> T\n"),
+        vec![("syntax", 3)]
+    );
+}
+
+#[test]
+fn part_on_and_at() {
+    let dump = parse_ok(
+        "quest Q:\n    part watch on dog:\n        let seen = 0\n        event Spotted:\n            p: Player\n\
+         \x20       @on(PlayerNear)\n        fn near(e):\n            emit Spotted(p=e.player)\n\
+         \x20   part depths at mine:\n        @on(Setup)\n        fn nest(e):\n            pass\n",
+    );
+    assert_eq!(
+        dump,
+        "(quest Q (part watch on dog (let seen 0) (event Spotted (p Player)) \
+         (@on PlayerNear) (fn near (e) (call emit (call Spotted p=(field e player))))) \
+         (part depths at mine (@on Setup) (fn nest (e) (pass))))"
+    );
+}
+
+#[test]
+fn scene_with_where_pause_ticks() {
+    let dump = parse_ok(
+        "scene haggle(a: Person, b: Person) where a != b:\n    b: \"How much?\"\n    pause 20\n\
+         \x20   a: \"Two.\" @h.two (ticks=60) when x\n    -> after\n\
+         pub scene argue(a: Person) uninterruptible:\n    => a: \"...\" (ticks=90)\n\
+         scene both(a: Person) where a.idle uninterruptible:\n    a: \"x\"\n",
+    );
+    assert_eq!(
+        dump,
+        "(scene haggle (a: Person, b: Person) (where (!= a b)) (line b \"How much?\") (pause 20) \
+         (line a \"Two.\" h.two (ticks 60) (when x)) (jump after))\n\
+         pub (scene argue (a: Person) uninterruptible (group (=> (line a \"...\" (ticks 90)))))\n\
+         (scene both (a: Person) (where (field a idle)) uninterruptible (line a \"x\"))"
+    );
+    // Inside a quest, and with `@pick`.
+    let dump = parse_ok("quest Q:\n    @pick(first)\n    scene s(a: Person):\n        a: \"x\"\n");
+    assert_eq!(
+        dump,
+        "(quest Q (@pick first) (scene s (a: Person) (line a \"x\")))"
+    );
+    // `(ticks=n)` takes only `ticks`.
+    assert_eq!(
+        codes("scene s(a: Person):\n    a: \"x\" (tick=3)\n"),
+        vec![("syntax", 2)]
+    );
+}
+
+#[test]
+fn dialogue_exits_and_detour_arms() {
+    let dump = parse_ok(
+        "dialogue d(p: Player, npc: Person) for debtor topic \"Debt\" exits paid, stalled:\n\
+         \x20   detour haggle:\n        agreed:\n            npc: \"Here.\"\n            return paid\n\
+         \x20       refused:\n            return stalled\n    detour other\n",
+    );
+    assert_eq!(
+        dump,
+        "(dialogue d (p: Player, npc: Person) (for debtor) (topic \"Debt\") (exits paid stalled) \
+         (detour haggle (arm agreed (line npc \"Here.\") (return paid)) (arm refused (return stalled))) \
+         (detour other))"
+    );
+    let dump =
+        parse_ok("pub dialogue h(p: Player, npc: Person) exits agreed, refused,:\n    return\n");
+    assert_eq!(
+        dump,
+        "pub (dialogue h (p: Player, npc: Person) (exits agreed refused) (return))"
+    );
+}
+
+#[test]
+fn return_exit() {
+    let dump = parse_ok(
+        "dialogue d(p: Player, npc: Person) exits a:\n    choice:\n        \"x\":\n            return a\n        \"y\":\n            return\n",
+    );
+    assert_eq!(
+        dump,
+        "(dialogue d (p: Player, npc: Person) (exits a) (choice (option \"x\" (return a)) (option \"y\" (return))))"
+    );
+}
+
+#[test]
+fn for_npc_where() {
+    let dump = parse_ok(
+        "dialogue s(p: Player, npc: Person) for npc where npc.occupation == Occupation::Smith topic \"Work?\":\n    npc: \"x\"\n",
+    );
+    assert_eq!(
+        dump,
+        "(dialogue s (p: Player, npc: Person) (for npc) (where (== (field npc occupation) Occupation::Smith)) \
+         (topic \"Work?\") (line npc \"x\"))"
+    );
+}
+
+#[test]
+fn contextual_words_stay_identifiers() {
+    let dump = parse_ok(
+        "fn pause(x):\n    return x\n\
+         fn main():\n    let scene = 1\n    let part = 2\n    count = 3\n    pause(4)\n    scene = part\n\
+         \x20   let requires = optional\n    repeatable = exits + on + uninterruptible\n    requires.x = 1\n",
+    );
+    assert_eq!(
+        dump,
+        "(fn pause (x) (return x))\n\
+         (fn main () (let scene 1) (let part 2) (= count 3) (call pause 4) (= scene part) \
+         (let requires optional) (= repeatable (+ (+ exits on) uninterruptible)) (= (field requires x) 1))"
+    );
+    assert_eq!(
+        parse_ok("let scene = 1\nlet part = 2\nlet count = 3\n"),
+        "(let scene 1)\n(let part 2)\n(let count 3)"
+    );
+}
+
+#[test]
+fn quest_examples_doc_parses() {
+    for text in [
+        QX1,
+        QX2,
+        QX3,
+        QX4_LIBRARY,
+        QX4,
+        QX5,
+        QX6_BAD_WHERE,
+        QX6_STATELESS,
+        QX6_UNKNOWN_EXIT,
+        QX6_SCENE_CHOICE,
+        QX6_DUPLICATE,
+    ] {
+        parse_ok(text);
+    }
+    let dump = parse_ok(QX1);
+    assert_has(&dump, "(role miller optional Person (where (and");
+    assert_has(&dump, "(part dog_watch on dog (@on PlayerNear)");
+    let dump = parse_ok(QX2);
+    assert_has(
+        &dump,
+        "(quest SealedMine at elder (requires (== (call act) 2))",
+    );
+    assert_has(
+        &dump,
+        r#"(scene argument (a: Person, b: Person) uninterruptible (line a "The seal held for forty years. You will not break it for silver.")"#,
+    );
+    assert_has(
+        &dump,
+        r#"(pause 30) (line a "Silver did not feed the eleven we lost.") (line b "..." (ticks 60))"#,
+    );
+    assert_has(
+        &dump,
+        r#"(objective lurkers "Clear the lurkers from the mine" (at mine) (count 6))"#,
+    );
+    assert_has(&dump, "(transition Depths (field hear_out done))");
+    assert_has(&dump, "(fallback _ (block (call decline) (return)))");
+    let dump = parse_ok(QX3);
+    assert_has(
+        &dump,
+        "(quest BanditCamp repeatable (cooldown 72000) (exclusive true) at camp",
+    );
+    let dump = parse_ok(QX4_LIBRARY);
+    assert_has(
+        &dump,
+        "pub (dialogue haggle (p: Player, npc: Person) (exits agreed refused)",
+    );
+    let dump = parse_ok(QX4);
+    assert_has(
+        &dump,
+        "(exits paid stalled) (line npc \"Oh. Them.\") (detour haggle (arm agreed",
+    );
+    let dump = parse_ok(QX5);
+    assert_has(
+        &dump,
+        "(for npc) (where (== (field npc occupation) Occupation::Smith))",
+    );
+    assert_has(&dump, "(jump market_haggle_after))");
+    let dump = parse_ok(QX6_UNKNOWN_EXIT);
+    assert_has(&dump, "(arm cheated (line npc \"Hey!\"))");
+    let dump = parse_ok(QX6_DUPLICATE);
+    assert_has(&dump, "(objective dog \"Find the dog\" (at dog))");
 }

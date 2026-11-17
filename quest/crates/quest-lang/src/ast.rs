@@ -440,15 +440,74 @@ pub enum ItemKind {
     /// A top-level (or quest) `let`.
     Let(Let),
     Event(String, Vec<Field>),
+    /// A conversation or a bark: `dialogue name(…) …:`.
     Dialogue(Dialogue),
-    /// `quest Name:` and its members.
-    Quest(String, Vec<Item>),
-    /// `role name: Type [where requirement]`.
-    Role(String, Type, Option<Expr>),
+    /// A `scene` item; its `Dialogue.kind` is [`DialogueKind::Scene`].
+    Scene(Dialogue),
+    /// `[repeatable] quest Name[(options)] [at role]:` and its members.
+    Quest(Quest),
+    /// `[optional] role name: Type [where requirement]`.
+    Role(Role),
     /// `stage Name:` and its members.
     Stage(String, Vec<Item>),
-    /// `objective "text" [@id] [at target]`.
-    Objective(Expr, Option<LineId>, Option<Expr>),
+    /// `[optional] objective name "text" [@id] [at target] [count n]`.
+    Objective(Objective),
+    /// `requires cond`, a requirement on the whole quest definition.
+    Requires(Expr),
+    /// `-> Stage when cond` as a direct member of a stage: a completion transition (the stage it goes
+    /// to, the condition).
+    Transition(String, Expr),
+    /// `part name on|at role:` and its members.
+    Part(Part),
+}
+
+/// `[repeatable] quest Name[(options)] [at role]:` + body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Quest {
+    pub name: String,
+    pub repeatable: bool,
+    /// `cooldown=…`, `exclusive=…`, `once_per_player=…` (checked later).
+    pub options: Vec<Arg>,
+    /// The role the home is anchored to; `None` = the first role.
+    pub at: Option<String>,
+    pub body: Vec<Item>,
+}
+
+/// `[optional] role name: Type [where cond]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Role {
+    pub name: String,
+    pub ty: Type,
+    pub cond: Option<Expr>,
+    pub optional: bool,
+}
+
+/// `[optional] objective name "text" [@id] [at target] [count n]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Objective {
+    pub name: String,
+    /// A string or an f-string literal.
+    pub text: Expr,
+    pub id: Option<LineId>,
+    pub at: Option<Expr>,
+    pub count: Option<Expr>,
+    pub optional: bool,
+}
+
+/// `part name on role:` / `part name at role:` + body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Part {
+    pub name: String,
+    pub anchor: PartAnchor,
+    pub role: String,
+    pub body: Vec<Item>,
+}
+
+/// What a part is anchored to: the role's entity (`on`) or the region it was bound in (`at`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartAnchor {
+    On,
+    At,
 }
 
 fn fields_depth(fields: &[Field]) -> u32 {
@@ -469,9 +528,9 @@ impl ItemKind {
                 .chain(f.ret.as_ref().map(|t| t.depth))
                 .fold(block_depth(&f.body), u32::max),
             ItemKind::Struct(_, fields) | ItemKind::Event(_, fields) => fields_depth(fields),
-            ItemKind::Impl(_, items) | ItemKind::Quest(_, items) | ItemKind::Stage(_, items) => {
-                items_depth(items)
-            }
+            ItemKind::Impl(_, items) | ItemKind::Stage(_, items) => items_depth(items),
+            ItemKind::Quest(q) => items_depth(&q.body).max(args_depth(&q.options)),
+            ItemKind::Part(p) => items_depth(&p.body),
             ItemKind::Enum(_, variants) | ItemKind::ErrorSet(_, variants) => variants
                 .iter()
                 .map(|v| fields_depth(&v.fields))
@@ -479,23 +538,47 @@ impl ItemKind {
                 .unwrap_or(0),
             ItemKind::Mod(_) | ItemKind::Use(_) => 0,
             ItemKind::Let(l) => l.depth(),
-            ItemKind::Dialogue(d) => d.depth(),
-            ItemKind::Role(_, ty, req) => ty.depth.max(opt_depth(req.as_ref())),
-            ItemKind::Objective(text, _, at) => text.depth.max(opt_depth(at.as_ref())),
+            ItemKind::Dialogue(d) | ItemKind::Scene(d) => d.depth(),
+            ItemKind::Role(r) => r.ty.depth.max(opt_depth(r.cond.as_ref())),
+            ItemKind::Objective(o) => o
+                .text
+                .depth
+                .max(opt_depth(o.at.as_ref()))
+                .max(opt_depth(o.count.as_ref())),
+            ItemKind::Requires(e) | ItemKind::Transition(_, e) => e.depth,
         }
     }
 }
 
 // Dialogue (spec 5.11).
 
-/// `dialogue name(params) [for target] [topic …]:` + body.
+/// `dialogue name(params) [for target [where filter]] [topic …] [exits a, b]:` + body, or
+/// `scene name(cast) [where cast_cond] [uninterruptible]:` + body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dialogue {
+    pub kind: DialogueKind,
     pub name: String,
     pub params: Vec<Param>,
     pub target: Option<Expr>,
+    /// `for npc where pred`: the predicate.
+    pub filter: Option<Expr>,
     pub topic: Option<Topic>,
+    /// The declared exits (the implicit `done` is not listed).
+    pub exits: Vec<(String, Span)>,
+    /// A scene's `where`.
+    pub cast_cond: Option<Expr>,
+    /// A scene's `uninterruptible`.
+    pub uninterruptible: bool,
     pub body: Vec<DialogueEntry>,
+}
+
+/// Which item a [`Dialogue`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogueKind {
+    /// `dialogue`: a conversation (or, with `(npc: Person)`, a bark).
+    Conversation,
+    /// `scene`.
+    Scene,
 }
 
 /// `topic "text" [@id] [if cond] [priority n]`: the dialogue is a topic of the NPC's menu.
@@ -531,13 +614,15 @@ pub struct LineId {
     pub span: Span,
 }
 
-/// `[speaker:] "text" [@id] [when cond]`.
+/// `[speaker:] "text" [@id] [(ticks=n)] [when cond]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
     pub speaker: Option<String>,
     /// A string or an f-string literal.
     pub text: Expr,
     pub id: Option<LineId>,
+    /// `(ticks=n)`: overrides the line's derived duration.
+    pub ticks: Option<Expr>,
     pub cond: Option<Cond>,
     pub span: Span,
 }
@@ -571,12 +656,24 @@ pub enum StepKind {
     When(Cond, Vec<Step>),
     /// `once [per e]:` + steps.
     Once(Option<Expr>, Vec<Step>),
-    /// `-> node`.
+    /// `-> node` (in a scene, a last step `-> other_scene` is a follow-up).
     Jump(String),
-    Detour(String),
+    /// `detour name`, or `detour name:` + exit arms (empty = a plain detour).
+    Detour(String, Vec<ExitArm>),
     /// `emit Event(args)`.
     Emit(Path, Vec<Arg>),
-    Return,
+    /// `return [exit]`.
+    Return(Option<String>),
+    /// `pause n`.
+    Pause(Expr),
+}
+
+/// An arm of `detour name:`: `exit:` + the steps run when the callee left through it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExitArm {
+    pub exit: String,
+    pub steps: Vec<Step>,
+    pub span: Span,
 }
 
 /// `=> line` and the steps that follow it when it is picked.
@@ -628,6 +725,7 @@ impl Line {
     pub fn depth(&self) -> u32 {
         self.text
             .depth
+            .max(opt_depth(self.ticks.as_ref()))
             .max(self.cond.as_ref().map_or(0, Cond::depth))
     }
 }
@@ -651,7 +749,13 @@ impl Dialogue {
                     .iter()
                     .filter_map(|p| p.ty.as_ref().map(|t| t.depth)),
             )
-            .fold(opt_depth(self.target.as_ref()).max(topic), u32::max)
+            .fold(
+                opt_depth(self.target.as_ref())
+                    .max(opt_depth(self.filter.as_ref()))
+                    .max(opt_depth(self.cast_cond.as_ref()))
+                    .max(topic),
+                u32::max,
+            )
     }
 }
 
@@ -675,7 +779,13 @@ impl StepKind {
             StepKind::When(cond, steps) => cond.depth().max(steps_depth(steps)),
             StepKind::Once(per, steps) => opt_depth(per.as_ref()).max(steps_depth(steps)),
             StepKind::Emit(_, args) => args_depth(args),
-            StepKind::Jump(_) | StepKind::Detour(_) | StepKind::Return => 0,
+            StepKind::Detour(_, arms) => arms
+                .iter()
+                .map(|a| steps_depth(&a.steps))
+                .max()
+                .unwrap_or(0),
+            StepKind::Pause(e) => e.depth,
+            StepKind::Jump(_) | StepKind::Return(_) => 0,
         }
     }
 }

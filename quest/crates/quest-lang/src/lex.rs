@@ -6,7 +6,7 @@ use crate::diag::Diagnostic;
 use crate::indent::Layout;
 use logos::{Lexer, Logos};
 
-/// A token kind. The contextual words (`Node` … `Priority`) are produced only by the layout pass, where the
+/// A token kind. The contextual words (`Node` … `On`) are produced only by the layout pass, where the
 /// grammar allows them; elsewhere those words stay `Ident`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
@@ -64,10 +64,22 @@ pub enum Tok {
     Detour,
     Default,
     Per,
-    /// The word `at` on an `objective` line (`At` is the `@` token).
+    /// The word `at` on an `objective` line, after a `quest` header's name or options, or after a `part`
+    /// name (`At` is the `@` token).
     AtKw,
     Topic,
     Priority,
+    Part,
+    Scene,
+    Requires,
+    Pause,
+    Optional,
+    Repeatable,
+    Exits,
+    Count,
+    Uninterruptible,
+    /// The word `on` after a `part` name.
+    On,
     // Punctuation.
     LParen,
     RParen,

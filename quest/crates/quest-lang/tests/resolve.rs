@@ -302,7 +302,7 @@ fn take() -> int:
 #[test]
 fn dialogue_placement() {
     // `objective` outside a stage, `role` outside a quest.
-    let main = "objective \"x\"\nrole r: Player\nquest Q:\n    objective \"y\"\n";
+    let main = "objective x \"x\"\nrole r: Player\nquest Q:\n    objective y \"y\"\n";
     assert_eq!(
         errs(&[("main.qs", main)]),
         vec![
@@ -336,7 +336,7 @@ quest Q:
         fn go(e):
             -> Two
     stage Two:
-        objective "x"
+        objective x "x"
 
 fn other():
     -> Two
