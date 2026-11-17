@@ -339,6 +339,18 @@ impl ProgramBuilder {
         params: Vec<TypeId>,
         ret: TypeId,
     ) -> u16 {
+        self.fallible_host_site(host_fn, kind, params, ret, Vec::new())
+    }
+
+    /// A host site that can fail with `raises` (empty: [`Self::host_site`]).
+    pub fn fallible_host_site(
+        &mut self,
+        host_fn: u16,
+        kind: HostFnKind,
+        params: Vec<TypeId>,
+        ret: TypeId,
+        raises: Vec<String>,
+    ) -> u16 {
         let Some(i) = id16(self.host_sites.len()) else {
             self.fail("more than 65536 host sites");
             return 0;
@@ -348,6 +360,7 @@ impl ProgramBuilder {
             kind,
             params,
             ret,
+            raises,
         });
         i
     }
@@ -426,18 +439,32 @@ impl ProgramBuilder {
                 }
                 _ => (Opnd::Imm(0), 0),
             };
-            match first {
-                Opnd::Slot(SlotRef::Frame { func, word }) => {
-                    if let Some(w) = words.get_mut(usize::from(func.0)) {
-                        *w = (*w).max(u32::from(word) + extra);
+            // A fallible host call's result: the error word follows the result word.
+            let pair = match (p.op, p.a, p.rest) {
+                (Op::CallHost, Opnd::Imm(site), Wideness::Two(_, c))
+                    if self
+                        .host_sites
+                        .get(usize::from(site))
+                        .is_some_and(HostSite::fallible) =>
+                {
+                    Some((c, 2))
+                }
+                _ => None,
+            };
+            for (first, extra) in std::iter::once((first, extra)).chain(pair) {
+                match first {
+                    Opnd::Slot(SlotRef::Frame { func, word }) => {
+                        if let Some(w) = words.get_mut(usize::from(func.0)) {
+                            *w = (*w).max(u32::from(word) + extra);
+                        }
                     }
+                    Opnd::Slot(SlotRef::Global(_)) => {
+                        return invalid(
+                            "an argument run or await result is in a global (it must be in a frame)",
+                        );
+                    }
+                    _ => {}
                 }
-                Opnd::Slot(SlotRef::Global(_)) => {
-                    return invalid(
-                        "an argument run or await result is in a global (it must be in a frame)",
-                    );
-                }
-                _ => {}
             }
             let opnds = match p.rest {
                 Wideness::Two(b, c) => [Some(p.a), Some(b), Some(c)],
@@ -587,6 +614,19 @@ impl FnBuilder<'_> {
         ret: TypeId,
     ) -> u16 {
         self.pb.host_site(host_fn, kind, params, ret)
+    }
+
+    /// [`ProgramBuilder::fallible_host_site`], while this body is open.
+    pub fn fallible_host_site(
+        &mut self,
+        host_fn: u16,
+        kind: HostFnKind,
+        params: Vec<TypeId>,
+        ret: TypeId,
+        raises: Vec<String>,
+    ) -> u16 {
+        self.pb
+            .fallible_host_site(host_fn, kind, params, ret, raises)
     }
 
     /// This function's own frame.

@@ -46,6 +46,7 @@ fn stub() -> impl Strategy<Value = StubConfig> {
         latency,
         failures: rule.into_iter().collect(),
         chest: Vec::new(),
+        ..StubConfig::default()
     })
 }
 

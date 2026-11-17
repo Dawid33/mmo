@@ -16,10 +16,28 @@ pub struct SrcLoc {
     pub col: u32,
 }
 
+/// Why a host query (or a fallible command's check) did not answer a value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QueryError {
+    /// An error the function declares (`raises`): a `WireValue::Variant` naming it. The script takes its
+    /// fallible path (`?`, `else`, `match`). An error the function does not declare is the fault
+    /// `HostFault`.
+    Raised(WireValue),
+    /// A host bug (bad arguments, no answer): the fault `HostFault` with this message.
+    Failed(String),
+}
+
 pub trait Host {
-    /// Read-only, answered at once; a pure function of the arguments and the host's state this tick.
-    fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, String>;
-    /// World-changing call, handed over when its segment commits, in the order issued.
+    /// Read-only, answered at once; a pure function of the arguments and the host's state this tick. Only a
+    /// query that declares errors may answer `Raised`.
+    fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, QueryError>;
+    /// Checks the fallible command `f` against this tick's state when it is issued (a pure read, like a
+    /// query): `Ok` buffers it, `Raised` takes the script's fallible path and buffers nothing. Never asked
+    /// of a command that declares no errors.
+    fn check(&mut self, f: u16, args: &[WireValue]) -> Result<(), QueryError>;
+    /// World-changing call, handed over when its segment commits, in the order issued. A command that
+    /// passed its check may still fail when applied (the state changed within the segment): the host
+    /// reports that through its own error channel (spec §6.6), never to the script.
     fn command(&mut self, f: u16, args: &[WireValue]);
     /// A promise request, handed over when its segment commits. Answer later with `Vm::resolve`.
     fn request(&mut self, id: PromiseId, f: u16, args: &[WireValue]);

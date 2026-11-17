@@ -6,7 +6,7 @@ use std::sync::Arc;
 use quest_vm::Op;
 use quest_vm::asm::{FnBuilder, ProgramBuilder, SlotRef};
 use quest_vm::consts::MEM_BYTES_DEFAULT;
-use quest_vm::host::{Host, HostFnKind, PromiseId, Report};
+use quest_vm::host::{Host, HostFnKind, PromiseId, QueryError, Report};
 use quest_vm::program::Program;
 use quest_vm::types::TypeDesc;
 use quest_vm::vm::{DebugRun, RunEnd, Vm, VmConfig};
@@ -18,33 +18,39 @@ pub const API: u32 = 1;
 /// The host's event names every test instance is configured with.
 pub const EVENTS: &[&str] = &["Ping", "Pong", "Big", "Quiet"];
 
-type QueryFn = Box<dyn FnMut(u16, &[WireValue]) -> Result<WireValue, String>>;
+type QueryFn = Box<dyn FnMut(u16, &[WireValue]) -> Result<WireValue, QueryError>>;
+type CheckFn = Box<dyn FnMut(u16, &[WireValue]) -> Result<(), QueryError>>;
 
-/// Records every call; `query` is answered by `answer` (default `Ok(Unit)`).
+/// Records every call; `query` is answered by `answer` (default `Ok(Unit)`), `check` by `check_answer`
+/// (default `Ok`).
 #[derive(Default)]
 pub struct RecordingHost {
     pub queries: Vec<(u16, Vec<WireValue>)>,
+    pub checks: Vec<(u16, Vec<WireValue>)>,
     pub commands: Vec<(u16, Vec<WireValue>)>,
     pub requests: Vec<(PromiseId, u16, Vec<WireValue>)>,
     pub prints: Vec<String>,
     pub reports: Vec<Report>,
     pub answer: Option<QueryFn>,
+    pub check_answer: Option<CheckFn>,
 }
 
 impl Clone for RecordingHost {
     /// The records; a host answering queries with a closure cannot be cloned.
     fn clone(&self) -> RecordingHost {
         assert!(
-            self.answer.is_none(),
+            self.answer.is_none() && self.check_answer.is_none(),
             "clone of a host with an answer closure"
         );
         RecordingHost {
             queries: self.queries.clone(),
+            checks: self.checks.clone(),
             commands: self.commands.clone(),
             requests: self.requests.clone(),
             prints: self.prints.clone(),
             reports: self.reports.clone(),
             answer: None,
+            check_answer: None,
         }
     }
 }
@@ -53,18 +59,25 @@ impl RecordingHost {
     /// Every call recorded so far, as text (for comparing two hosts).
     pub fn transcript(&self) -> String {
         format!(
-            "queries {:?}\ncommands {:?}\nrequests {:?}\nprints {:?}\nreports {:?}",
-            self.queries, self.commands, self.requests, self.prints, self.reports
+            "queries {:?}\nchecks {:?}\ncommands {:?}\nrequests {:?}\nprints {:?}\nreports {:?}",
+            self.queries, self.checks, self.commands, self.requests, self.prints, self.reports
         )
     }
 }
 
 impl Host for RecordingHost {
-    fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, String> {
+    fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, QueryError> {
         self.queries.push((f, args.to_vec()));
         match &mut self.answer {
             Some(a) => a(f, args),
             None => Ok(WireValue::Unit),
+        }
+    }
+    fn check(&mut self, f: u16, args: &[WireValue]) -> Result<(), QueryError> {
+        self.checks.push((f, args.to_vec()));
+        match &mut self.check_answer {
+            Some(a) => a(f, args),
+            None => Ok(()),
         }
     }
     fn command(&mut self, f: u16, args: &[WireValue]) {

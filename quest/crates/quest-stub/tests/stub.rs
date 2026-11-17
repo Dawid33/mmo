@@ -44,6 +44,7 @@ fn cfg() -> StubConfig {
         latency: 0,
         failures: vec![],
         chest: vec![],
+        ..StubConfig::default()
     }
 }
 
@@ -67,7 +68,12 @@ fn one(h: &mut StubHost, id: u64, f: u16, args: &[W]) -> Result<W, W> {
 #[test]
 fn stub_api_is_pinned() {
     let api = stub_api();
-    assert_eq!(api.version, 2);
+    assert_eq!(api.version, 3);
+    assert_eq!(op_name(F_PLACE).as_deref(), Some("place"));
+    assert_eq!(
+        op_name(F_PERSON_DISTANCE_TO).as_deref(),
+        Some("Person.distance_to")
+    );
     let mut names: Vec<String> = Vec::new();
     names.extend(api.structs.iter().map(|x| format!("struct {}", x.name)));
     names.extend(api.enums.iter().map(|x| format!("enum {}", x.name)));
@@ -100,6 +106,7 @@ fn stub_api_is_pinned() {
         "error NoRoom",
         "error NotEnough",
         "error NotFound",
+        "error OutOfReach",
         "error Timeout",
         "error WrongType",
         "event BlockUsed",
@@ -119,6 +126,7 @@ fn stub_api_is_pinned() {
         "fn Creature.owner property fact",
         "fn Creature.site property fact",
         "fn Person.alive property fact",
+        "fn Person.distance_to",
         "fn Person.has_tag fact",
         "fn Person.kind property",
         "fn Person.name property",

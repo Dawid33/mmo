@@ -94,12 +94,14 @@ impl Gen<'_> {
         kind: HostFnKind,
         params: Vec<TypeId>,
         ret: TypeId,
+        raises: Vec<String>,
     ) -> u16 {
         let key: SiteKey = (host_fn, kind_code(kind), params, ret);
         if let Some(&s) = self.sites.get(&key) {
             return s;
         }
-        let s = fb.host_site(host_fn, kind, key.2.clone(), ret);
+        // One host fn declares one set, so the key need not hold it.
+        let s = fb.fallible_host_site(host_fn, kind, key.2.clone(), ret, raises);
         self.sites.insert(key, s);
         s
     }
@@ -150,21 +152,29 @@ impl Emit<'_, '_, '_> {
             params.push(t);
         }
         let ty = self.ty_of(e);
+        // A fallible call writes its error into the word after `dst` ([`Emit::host_outcome`]).
+        let fallible = !hf.raises.is_empty() && hf.kind != HostFnKind::Promise;
+        if fallible && dst.is_none() {
+            return self.not_yet("this fallible host call", e.span);
+        }
         let result = match (hf.kind, self.g.typed.types.get(ty)) {
             (HostFnKind::Promise, Ty::Promise(v)) => v,
-            // A fallible command too: it is buffered until its segment commits, so the call itself
-            // always succeeds ([`Emit::host_outcome`]).
             (HostFnKind::Command, _) => TyId::UNIT,
-            // A host query that can fail: the VM's `CallHost` has no error result yet.
-            (HostFnKind::Promise, _) | (HostFnKind::Query, Ty::Fallible(_, _)) => {
-                return self.not_yet("this host call", e.span);
-            }
+            (HostFnKind::Query, Ty::Fallible(v, _)) => v,
+            (HostFnKind::Promise, _) => return self.not_yet("this host call", e.span),
             (HostFnKind::Query, _) => ty,
         };
         let Some(ret) = self.type_id(result, e.span) else {
             return;
         };
-        let site = self.g.site(&mut self.fb, host_fn, hf.kind, params, ret);
+        let raises = if fallible {
+            hf.raises.clone()
+        } else {
+            Vec::new()
+        };
+        let site = self
+            .g
+            .site(&mut self.fb, host_fn, hf.kind, params, ret, raises);
 
         let kinds: Vec<bool> = operands
             .iter()
@@ -192,8 +202,10 @@ impl Emit<'_, '_, '_> {
         } else {
             self.word(run)
         };
-        // The result word: `dst`, else a temporary (a command writes none).
+        // The result word: `dst`, else a temporary (an infallible command writes none; a fallible one
+        // writes the error word after `dst`).
         let (c, scratch) = match (hf.kind, dst) {
+            (HostFnKind::Command, Some(d)) if fallible => (d, None),
             (HostFnKind::Command, _) => (base, None),
             (_, Some(d)) => (d, None),
             (HostFnKind::Query, None) => {
@@ -228,9 +240,10 @@ impl Emit<'_, '_, '_> {
         }
     }
 
-    /// A call of the fallible host command `f` (`x`): the command is buffered like any other, and the
-    /// call succeeds — the VM has no answer for a command until its segment commits, so the error is
-    /// always none here. `None` when it was reported.
+    /// A call of the fallible host query or command `f` (`x`), its result left in two adjacent temporaries:
+    /// the value (a command's is `()`) and the error the VM writes (0: none). A query's error is the host's
+    /// answer; a command is checked by the host when issued and buffered only when the check passes.
+    /// `None` when it was reported.
     pub(super) fn host_outcome(
         &mut self,
         x: &Expr,
@@ -238,17 +251,24 @@ impl Emit<'_, '_, '_> {
         recv: Option<&Expr>,
         args: &[Arg],
     ) -> Option<Outcome> {
-        if self.g.host.fns.get(f as usize).map(|hf| hf.kind) != Some(HostFnKind::Command) {
-            self.not_yet("this fallible host call", x.span);
-            return None;
-        }
-        let run = self.slots.run(&[false, true]);
+        let value_ty = match (
+            self.g.host.fns.get(f as usize).map(|hf| hf.kind),
+            self.g.typed.types.get(self.ty_of(x)),
+        ) {
+            (Some(HostFnKind::Command), _) => TyId::UNIT,
+            (Some(HostFnKind::Query), Ty::Fallible(v, _)) => v,
+            _ => {
+                self.not_yet("this fallible host call", x.span);
+                return None;
+            }
+        };
+        let heap = self.heap_ty(value_ty);
+        let run = self.slots.run(&[heap, true]);
         let (value, err) = (self.word(run), self.word(run + 1));
         self.host_call(x, f, recv, args, Some(value));
-        self.fb.emit(Op::LoadSmall, err, 0u16, 0u16);
         Some(Outcome {
             value,
-            heap: false,
+            heap,
             err,
             temps: Some(run),
         })

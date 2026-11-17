@@ -909,7 +909,7 @@ impl Vm {
     }
 
     /// The program's error value for the wire variant `e`; a program without that error is `HostFault`.
-    fn error_value(&mut self, e: &WireValue, m: &mut Meter) -> Exec<u64> {
+    pub(crate) fn error_value(&mut self, e: &WireValue, m: &mut Meter) -> Exec<u64> {
         let missing = || Fault {
             kind: FaultKind::HostFault,
             message: match e {

@@ -5,7 +5,7 @@ use std::hash::Hasher;
 
 use quest_vm::Fnv64;
 use quest_vm::consts::PROMISE_TIMEOUT_TICKS;
-use quest_vm::host::{Host, PromiseId, Report};
+use quest_vm::host::{Host, PromiseId, QueryError, Report};
 use quest_vm::wire::WireValue;
 
 use crate::api::*;
@@ -52,6 +52,11 @@ pub struct StubConfig {
     pub latency: u64,
     pub failures: Vec<FailureRule>,
     pub chest: Vec<(String, i64)>,
+    /// The people the stub knows, by id, with their block position: `Person.distance_to` of anyone else is
+    /// `OutOfReach`.
+    pub people: Vec<(i64, [i64; 3])>,
+    /// The places (by id) with no room: `place(…, at)` of one fails its check with `NoRoom`.
+    pub full_places: Vec<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +88,8 @@ pub struct StubHost {
     namespace_gone: bool,
     tags: BTreeMap<i64, BTreeSet<String>>,
     chest: BTreeMap<String, i64>,
+    people: BTreeMap<i64, [i64; 3]>,
+    full_places: BTreeSet<i64>,
     namespace: Namespace,
     pending: BTreeMap<u64, Pending>,
 }
@@ -130,6 +137,8 @@ impl StubHost {
             namespace_gone: false,
             tags: BTreeMap::new(),
             chest,
+            people: cfg.people.into_iter().collect(),
+            full_places: cfg.full_places.into_iter().collect(),
             namespace: Namespace::default(),
             pending: BTreeMap::new(),
         }
@@ -257,8 +266,8 @@ fn item(kind: &str, count: i64) -> WireValue {
 }
 
 impl Host for StubHost {
-    fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, String> {
-        let bad = || format!("bad arguments to host fn {f}");
+    fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, QueryError> {
+        let bad = || QueryError::Failed(format!("bad arguments to host fn {f}"));
         match f {
             F_HAS_TAG => {
                 let id = player_id(args.first()).ok_or_else(bad)?;
@@ -282,7 +291,38 @@ impl Host for StubHost {
                 let kind = str_of(args.first()).ok_or_else(bad)?;
                 Ok(WireValue::Int(self.chest.get(kind).copied().unwrap_or(0)))
             }
-            _ => Err(format!("host fn {f} is not a query")),
+            F_PERSON_DISTANCE_TO => {
+                let (a, b) = player_id(args.first())
+                    .zip(player_id(args.get(1)))
+                    .ok_or_else(bad)?;
+                match self.people.get(&a).zip(self.people.get(&b)) {
+                    // Blocks apart along the axis they differ most on.
+                    Some((pa, pb)) => Ok(WireValue::Int(
+                        (0..3)
+                            .map(|i| pa[i].abs_diff(pb[i]))
+                            .max()
+                            .map_or(0, |d| i64::try_from(d).unwrap_or(i64::MAX)),
+                    )),
+                    None => Err(QueryError::Raised(error("OutOfReach", vec![]))),
+                }
+            }
+            _ => Err(QueryError::Failed(format!("host fn {f} is not a query"))),
+        }
+    }
+
+    fn check(&mut self, f: u16, args: &[WireValue]) -> Result<(), QueryError> {
+        match f {
+            F_PLACE => {
+                let at = player_id(args.get(1))
+                    .ok_or_else(|| QueryError::Failed(format!("bad arguments to host fn {f}")))?;
+                if self.full_places.contains(&at) {
+                    return Err(QueryError::Raised(error("NoRoom", vec![])));
+                }
+                Ok(())
+            }
+            _ => Err(QueryError::Failed(format!(
+                "host fn {f} is not a fallible command"
+            ))),
         }
     }
 
@@ -326,6 +366,11 @@ impl Host for StubHost {
                     return;
                 }
                 None
+            }
+            F_PLACE => {
+                let name = str_of(args.first().and_then(|p| field(p, "name")));
+                let at = player_id(args.get(1));
+                name.zip(at).map(|(n, at)| format!("place {n} at {at}"))
             }
             F_EMIT => {
                 if let Some(e @ WireValue::Struct { .. }) = args.first() {

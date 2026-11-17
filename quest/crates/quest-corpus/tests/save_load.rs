@@ -37,6 +37,7 @@ fn runner(program: &Arc<Program>, cfg: &CaseConfig) -> Runner {
         latency: cfg.latency,
         failures: cfg.failures.clone(),
         chest: cfg.chest.clone(),
+        ..StubConfig::default()
     };
     let mut r = Runner::new(program.clone(), MEM_BYTES_DEFAULT, stub).expect("the case loads");
     r.vm.start_main();

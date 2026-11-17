@@ -39,6 +39,7 @@ fn finish(tree: &SourceTree, cfg: &CaseConfig, fuel: u64, ticks: u64) -> Option<
         latency: cfg.latency,
         failures: cfg.failures.clone(),
         chest: cfg.chest.clone(),
+        ..StubConfig::default()
     };
     let mut runner = Runner::new(Arc::new(program), MEM_BYTES_DEFAULT, stub).expect("loads");
     runner.vm.start_main();

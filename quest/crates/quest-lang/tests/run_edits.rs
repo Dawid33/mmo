@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use common::compile;
 use quest_stub::{RunOutcome, Runner, StubConfig, stub_api};
-use quest_vm::host::{FaultKind, Host, PromiseId, Report};
+use quest_vm::host::{FaultKind, Host, PromiseId, QueryError, Report};
 use quest_vm::migrate::{MigrateError, MigrationReport, Orphan};
 use quest_vm::wire::WireValue;
 use quest_vm::{Program, Resolved, Status, Vm, VmConfig};
@@ -397,8 +397,11 @@ fn reset_revives_a_failed_instance() {
 struct Ids(Vec<u64>);
 
 impl Host for Ids {
-    fn query(&mut self, _: u16, _: &[WireValue]) -> Result<WireValue, String> {
-        Err("no queries".into())
+    fn query(&mut self, _: u16, _: &[WireValue]) -> Result<WireValue, QueryError> {
+        Err(QueryError::Failed("no queries".into()))
+    }
+    fn check(&mut self, _: u16, _: &[WireValue]) -> Result<(), QueryError> {
+        Err(QueryError::Failed("no checks".into()))
     }
     fn command(&mut self, _: u16, _: &[WireValue]) {}
     fn request(&mut self, id: PromiseId, _: u16, _: &[WireValue]) {

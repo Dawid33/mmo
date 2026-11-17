@@ -1,9 +1,10 @@
-//! The host description of Phase 10 (plan Task 37; spec §9.1): host enums, properties, facts, named
-//! arguments with defaults, fallible commands.
+//! The host description of Phase 10 (plans Task 37 and 37b; spec §9.1): host enums, properties, facts, named
+//! arguments with defaults, fallible commands (checked when issued) and fallible queries.
 
 mod common;
 
-use common::{compile, diags, run};
+use common::{compile, diags, run, run_with};
+use quest_vm::host::{AbortCause, FaultKind, QueryError, Report};
 use quest_vm::types::TypeDesc;
 
 /// One expected diagnostic: code, file, line.
@@ -144,20 +145,29 @@ fn quest_namespace_is_not_a_script_name() {
     assert_eq!(found, vec![d("unresolved", 2)]);
 }
 
-/// A host that records every query and command and answers the few queries `host_calls_reach_the_host`
-/// makes.
+/// A host that records every query, check and command and answers the few queries the tests make;
+/// `distance_to` raises `NoRoom`, which it does not declare, and `refuse` fails every check with `NoRoom`.
 #[derive(Default)]
 struct Recorder {
     calls: Vec<String>,
     output: Vec<String>,
     reports: Vec<quest_vm::host::Report>,
+    refuse: bool,
+}
+
+fn no_room() -> W {
+    W::Variant {
+        name: "NoRoom".into(),
+        fields: vec![],
+    }
 }
 
 impl quest_vm::host::Host for Recorder {
-    fn query(&mut self, f: u16, args: &[W]) -> Result<W, String> {
+    fn query(&mut self, f: u16, args: &[W]) -> Result<W, QueryError> {
         let hf = &quest_stub::stub_api().fns[usize::from(f)];
         self.calls.push(format!("query {} {args:?}", hf.name));
         Ok(match hf.name.as_str() {
+            "distance_to" => return Err(QueryError::Raised(no_room())),
             "near" | "alive" => W::Bool(true),
             "occupation" => W::Variant {
                 name: "Occupation::Smith".into(),
@@ -167,8 +177,17 @@ impl quest_vm::host::Host for Recorder {
                 name: "Prefab".into(),
                 fields: vec![("name".into(), args[0].clone())],
             },
-            _ => return Err(format!("no answer for {}", hf.name)),
+            _ => return Err(QueryError::Failed(format!("no answer for {}", hf.name))),
         })
+    }
+
+    fn check(&mut self, f: u16, args: &[W]) -> Result<(), QueryError> {
+        let hf = &quest_stub::stub_api().fns[usize::from(f)];
+        self.calls.push(format!("check {} {args:?}", hf.name));
+        if self.refuse {
+            return Err(QueryError::Raised(no_room()));
+        }
+        Ok(())
     }
 
     fn command(&mut self, f: u16, args: &[W]) {
@@ -204,25 +223,8 @@ fn host_calls_reach_the_host() {
         return
     print("placed")
 "#;
-    let api = quest_stub::stub_api();
-    let mut vm = quest_vm::Vm::new(
-        std::sync::Arc::new(compile(&[("main.qs", main)])),
-        quest_vm::vm::VmConfig {
-            mem_bytes: quest_vm::consts::MEM_BYTES_DEFAULT,
-            epoch: 1,
-            host_api_version: api.version,
-            events: api.events.into_iter().map(|e| e.name).collect(),
-        },
-    )
-    .expect("the program loads");
     let mut host = Recorder::default();
-    vm.start_main();
-    for now in 0..100 {
-        vm.tick(now, 2_000, &mut host);
-        if vm.is_idle() {
-            break;
-        }
-    }
+    record(main, &mut host, 2_000, 100);
     assert_eq!(host.reports, vec![]);
     assert_eq!(host.output, ["smith", "placed"]);
     let person = W::Struct {
@@ -246,7 +248,181 @@ fn host_calls_reach_the_host() {
             format!("query alive {:?}", std::slice::from_ref(&person)),
             format!("query occupation {:?}", [person]),
             format!("query prefab {:?}", [W::Str("nest".into())]),
+            format!("check place {:?}", [prefab.clone(), place.clone()]),
             format!("command place {:?}", [prefab, place]),
         ]
     );
+}
+
+/// Starts `main` of `main` against `host` and runs at most `ticks` ticks of `fuel`, stopping once idle.
+fn record(main: &str, host: &mut Recorder, fuel: u64, ticks: u64) -> quest_vm::Vm {
+    let api = quest_stub::stub_api();
+    let mut vm = quest_vm::Vm::new(
+        std::sync::Arc::new(compile(&[("main.qs", main)])),
+        quest_vm::vm::VmConfig {
+            mem_bytes: quest_vm::consts::MEM_BYTES_DEFAULT,
+            epoch: 1,
+            host_api_version: api.version,
+            events: api.events.into_iter().map(|e| e.name).collect(),
+        },
+    )
+    .expect("the program loads");
+    vm.start_main();
+    for now in 0..ticks {
+        vm.tick(now, fuel, host);
+        if vm.is_idle() {
+            break;
+        }
+    }
+    vm
+}
+
+/// The stub's people: 1 and 2 are 5 blocks apart; nobody else is in reach.
+fn people() -> quest_stub::StubConfig {
+    quest_stub::StubConfig {
+        people: vec![(1, [0, 0, 0]), (2, [3, -5, 1])],
+        full_places: vec![9],
+        ..quest_stub::StubConfig::default()
+    }
+}
+
+#[test]
+fn fallible_query_must_be_handled() {
+    assert_eq!(
+        main_diags("fn f(a: Person, b: Person) -> int:\n    return a.distance_to(b)\n"),
+        vec![d("unhandled-fallible", 2)]
+    );
+    let main = "fn f(a: Person, b: Person) -> int:\n    return a.distance_to(b) else 0\n\nfn main():\n    pass\n";
+    assert_eq!(main_diags(main), vec![]);
+    compile(&[("main.qs", main)]);
+}
+
+#[test]
+fn fallible_query_else_and_match() {
+    let main = r#"fn far(a: Person, b: Person) -> int:
+    return a.distance_to(b) else -1
+
+fn twice(a: Person, b: Person) -> int:
+    return a.distance_to(b)? * 2
+
+fn main():
+    let a = Person(id=1)
+    let b = Person(id=2)
+    let c = Person(id=9)
+    print(str(far(a, b)))
+    print(str(far(a, c)))
+    match a.distance_to(c):
+        case Ok(d):
+            print(str(d))
+        case OutOfReach:
+            print("out of reach")
+    print(str(twice(a, b) else 0))
+    print(str(twice(c, a) else 0))
+"#;
+    assert_eq!(main_diags(main), vec![]);
+    // The inferred set is exactly what the query declares.
+    let sigs = quest_lang::signatures(&common::tree(&[("main.qs", main)]), &quest_stub::stub_api());
+    assert_eq!(sigs["twice"], "fn(Person, Person) -> int raises OutOfReach");
+    let out = run_with(&[("main.qs", main)], people(), 2_000);
+    assert_eq!(out.reports, vec![]);
+    assert_eq!(out.lines, ["5", "-1", "out of reach", "10", "0"]);
+}
+
+#[test]
+fn query_raising_undeclared_error_faults() {
+    let main = r#"fn main():
+    let d = Person(id=1).distance_to(Person(id=2)) else -1
+    print(str(d))
+"#;
+    let mut host = Recorder::default();
+    record(main, &mut host, 2_000, 100);
+    assert_eq!(host.output, Vec::<String>::new());
+    match host.reports.as_slice() {
+        [
+            Report::HandlerAborted {
+                cause: AbortCause::Fault { kind, message, .. },
+                ..
+            },
+        ] => {
+            assert_eq!(*kind, FaultKind::HostFault);
+            assert!(message.contains("raised NoRoom"), "{message}");
+        }
+        other => panic!("expected one host fault, got {other:?}"),
+    }
+}
+
+#[test]
+fn fallible_command_error_takes_the_else_path() {
+    let main = r#"fn build(at: Place) -> str:
+    place(Prefab(name="nest"), at) else:
+        return "no room"
+    return "placed"
+
+fn main():
+    print(build(Place(id=9)))
+    print(build(Place(id=4)))
+"#;
+    let out = run_with(&[("main.qs", main)], people(), 2_000);
+    assert_eq!(out.reports, vec![]);
+    // The refused `place` buffered nothing; the other reached the host when the segment committed.
+    assert_eq!(out.lines, ["no room", "place nest at 4", "placed"]);
+}
+
+#[test]
+fn fallible_command_ok_is_buffered_until_commit() {
+    let main = r#"fn main():
+    place(Prefab(name="nest"), Place(id=4)) else:
+        return
+    let i = 0
+    while i < 200:
+        i = i + 1
+    print("done")
+"#;
+    let args = format!(
+        "{:?}",
+        [
+            W::Struct {
+                name: "Prefab".into(),
+                fields: vec![("name".into(), W::Str("nest".into()))],
+            },
+            W::Struct {
+                name: "Place".into(),
+                fields: vec![("id".into(), W::Int(4))],
+            },
+        ]
+    );
+    // Checked when issued; the segment is still running after a tick, so nothing is handed over yet.
+    let mut host = Recorder::default();
+    let mut vm = record(main, &mut host, 200, 1);
+    assert_eq!(host.calls, [format!("check place {args}")]);
+    for now in 1..100 {
+        vm.tick(now, 200, &mut host);
+        if vm.is_idle() {
+            break;
+        }
+    }
+    assert_eq!(
+        host.calls,
+        [
+            format!("check place {args}"),
+            format!("command place {args}")
+        ]
+    );
+    assert_eq!(host.output, ["done"]);
+
+    // A segment that aborts after a passing check hands nothing over.
+    let aborts = main.replace("print(\"done\")", "assert(false)");
+    let mut host = Recorder::default();
+    record(&aborts, &mut host, 2_000, 100);
+    assert_eq!(host.calls, [format!("check place {args}")]);
+    assert_eq!(host.reports.len(), 1);
+
+    // A refused check takes the `else` path and hands nothing over either.
+    let mut host = Recorder {
+        refuse: true,
+        ..Recorder::default()
+    };
+    record(main, &mut host, 2_000, 100);
+    assert_eq!(host.calls, [format!("check place {args}")]);
+    assert_eq!((host.output, host.reports), (vec![], vec![]));
 }

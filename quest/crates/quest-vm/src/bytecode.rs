@@ -20,14 +20,14 @@
 //! | `Await` | value (error in `a + 1`) | promise slot | expected type id |
 //! | `AwaitAll` | results (error in `a + 1`) | slot of the list of promises | the result's type (`list[T]`) |
 //! | `PromiseDetach` | promise slot | - | - |
-//! | `CallHost` | host site | first argument slot | result slot (a query's answer; a command leaves it) |
+//! | `CallHost` | host site | first argument slot | result slot (a query's answer; a command leaves it); a fallible site's error in `c + 1` |
 //! | `ListLen`, `GetTag`, `NegI`, `Not`, ... two-operand ops | destination | source | - |
 //!
 //! Builtins are numbered in the order of design D5's list, then the ones added after it, each appended
 //! so no earlier number moves: `ModF` (41, float `%`) and `StrCmp` (42, string ordering).
 
 /// Version of the instruction set, builtin ids, fuel table and memory layout.
-pub const BYTECODE_VERSION: u32 = 1;
+pub const BYTECODE_VERSION: u32 = 2;
 
 macro_rules! numbered {
     ($(#[$m:meta])* $name:ident, $repr:ty, $from:ident, [$($v:ident),* $(,)?]) => {

@@ -95,8 +95,12 @@ structs and events, and enums of data-less variants (`Occupation::Smith`; a scri
 enums; the host sees `Occupation::Smith` as the variant's name). A host *property* is read without parentheses
 (`npc.alive`; `npc.alive()` is `not-callable`, `p.has_tag` without its call is `missing-call`, assigning one is
 `not-assignable`). Host functions take arguments by position, then by name (`near(a, b, blocks=8)`); a
-parameter with a default may be left out. A fallible host command (`place(...) else: ...`) must be handled like
-any fallible call; the VM hands a command over when its segment commits, so the call itself never fails yet.
+parameter with a default may be left out. A fallible host query (`a.distance_to(b) else -1`, `OutOfReach`) or
+command (`place(...) else: ...`, `NoRoom`) is handled like any fallible call, its error set exactly what the host
+declares (an error it does not declare is a fault). The host checks a fallible command against the current tick
+when it is issued: a refusal takes the fallible path and nothing is buffered; a command that passes is handed
+over when its segment commits, like any other, and a failure when it is applied (the world changed in between)
+goes to the host's own error channel, never back to the script.
 
 **Promises.** Host reads and writes that answer later (`world.get`, `world.set`, `world.compare_and_set`,
 `chest.take`, ...) return a promise; `await p` parks the handler until it resolves (other events run
@@ -145,7 +149,7 @@ assurance comes from fuzzing, planned later.
 
 ## Known MVP limits
 
-- **`not-yet` compile errors**: fallible host queries,
+- **`not-yet` compile errors**: a fallible host property (`x.p` of a property that declares errors),
   an unawaited `all(...)`, and `dialogue` / `quest` items: they parse, resolve and type-check, then report
   `not-yet` until Phase 10 lowers them.
 - Float `==` inside collections compares bits; `to_upper` is ASCII only.

@@ -288,6 +288,7 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
         latency: opts.latency,
         failures: opts.failures,
         chest: opts.chest,
+        ..StubConfig::default()
     };
     let mut runner = match Runner::new(program.clone(), opts.mem, cfg.clone()) {
         Ok(r) => r,

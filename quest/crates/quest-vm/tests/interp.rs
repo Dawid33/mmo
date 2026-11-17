@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use common::*;
 use quest_vm::asm::ProgramBuilder;
-use quest_vm::fuel::FUEL_CALL;
+use quest_vm::fuel::{FUEL_CALL, FUEL_HOST_QUERY, FUEL_SIMPLE};
+use quest_vm::vm::DebugRun;
 use quest_vm::vm::{RunEnd, Vm, VmConfig};
 use quest_vm::{FaultKind, LoadError, Op};
 
@@ -246,4 +247,160 @@ fn version_mismatch_refused() {
             found: q.bytecode_version
         })
     );
+}
+
+/// The host fn of [`fallible_query`]: `q(n: int) -> int raises OutOfReach`.
+const Q: u16 = 4;
+
+/// `main` (fn 0): word 4 = 99, then `word 4 = q(5)` (the error in word 5), and returns the error word. The
+/// program's errors are `Gone` and `OutOfReach`; `q` declares only `OutOfReach`.
+fn fallible_query() -> Arc<quest_vm::Program> {
+    let mut pb = ProgramBuilder::new(API);
+    let int = pb.ty(quest_vm::types::TypeDesc::Int);
+    pb.ty(quest_vm::types::TypeDesc::Enum {
+        name: quest_vm::types::ERROR_ENUM_NAME.into(),
+        variants: vec![("Gone".into(), vec![]), ("OutOfReach".into(), vec![])],
+    });
+    let site = pb.fallible_host_site(
+        Q,
+        quest_vm::host::HostFnKind::Query,
+        vec![int],
+        int,
+        vec!["OutOfReach".into()],
+    );
+    let mut f = pb.func("main", 0);
+    let (arg, value, err, ret) = (f.local(0), f.local(1), f.local(2), f.ret());
+    f.emit(Op::LoadSmall, arg, 5u16, 0u16);
+    f.emit(Op::LoadSmall, value, 99u16, 0u16);
+    f.line(7);
+    f.emit(Op::CallHost, site, arg, value);
+    f.emit(Op::Copy, ret, err, 0u16);
+    f.emit(Op::Ret, 0u16, 0u16, 0u16);
+    f.end();
+    Arc::new(pb.finish().expect("fallible query program"))
+}
+
+fn error(name: &str) -> quest_vm::wire::WireValue {
+    quest_vm::wire::WireValue::Variant {
+        name: name.into(),
+        fields: vec![],
+    }
+}
+
+/// Runs [`fallible_query`] with `q` answered by `answer`: the run, then (value word, error word).
+fn ask(
+    p: &Arc<quest_vm::Program>,
+    answer: Result<quest_vm::wire::WireValue, quest_vm::host::QueryError>,
+) -> (DebugRun, u64, u64) {
+    let mut vm = vm(p);
+    let mut host = RecordingHost {
+        answer: Some(Box::new(move |f, args| {
+            assert_eq!((f, args), (Q, &[quest_vm::wire::WireValue::Int(5)][..]));
+            answer.clone()
+        })),
+        ..RecordingHost::default()
+    };
+    vm.debug_start(0);
+    let r = vm.debug_run(u64::MAX, &mut host);
+    assert_eq!(host.queries.len(), 1);
+    (
+        r,
+        vm.slot(frame_slot(p, 0, 4)),
+        vm.slot(frame_slot(p, 0, 5)),
+    )
+}
+
+#[test]
+fn query_error_takes_the_error_path_and_costs_fixed_fuel() {
+    use quest_vm::host::QueryError;
+    let p = fallible_query();
+    let (ok, value, err) = ask(&p, Ok(quest_vm::wire::WireValue::Int(7)));
+    assert_eq!((ok.end.clone(), value, err), (RunEnd::Returned, 7, 0));
+
+    // A declared error: the error word holds `OutOfReach` (tag 1, data-less: `1 << 1 | 1`), the value word
+    // is untouched, and the call costs what the answered one did.
+    let (raised, value, err) = ask(&p, Err(QueryError::Raised(error("OutOfReach"))));
+    assert_eq!((raised.end, value, err), (RunEnd::Returned, 99, 3));
+    assert_eq!(raised.fuel_used, ok.fuel_used);
+    // LoadSmall ×2, CallHost (+1 for its argument, +1 for the value or error it loads), Copy, Ret.
+    assert_eq!(
+        ok.fuel_used,
+        2 * FUEL_SIMPLE + FUEL_HOST_QUERY + 2 + FUEL_SIMPLE + FUEL_CALL
+    );
+
+    // An error the function does not declare, and a host bug, are faults at the call.
+    for (answer, message) in [
+        (
+            QueryError::Raised(error("Gone")),
+            format!("host fn {Q} raised Gone, which it does not declare"),
+        ),
+        (
+            QueryError::Failed("no such person".into()),
+            "no such person".into(),
+        ),
+    ] {
+        match ask(&p, Err(answer)).0.end {
+            RunEnd::Faulted {
+                kind,
+                message: m,
+                stack,
+            } => {
+                assert_eq!((kind, m, stack[0].line), (FaultKind::HostFault, message, 7));
+            }
+            other => panic!("expected a host fault, got {other:?}"),
+        }
+    }
+}
+
+/// fn 0 issues the command `c(5)` (host fn 6, no errors); fn 1 the command `p(5)` (host fn 7, raises
+/// `NoRoom`), its error in word 5.
+fn two_commands() -> Arc<quest_vm::Program> {
+    use quest_vm::host::HostFnKind::Command;
+    let mut pb = ProgramBuilder::new(API);
+    let int = pb.ty(quest_vm::types::TypeDesc::Int);
+    let unit = pb.ty(quest_vm::types::TypeDesc::Unit);
+    pb.ty(quest_vm::types::TypeDesc::Enum {
+        name: quest_vm::types::ERROR_ENUM_NAME.into(),
+        variants: vec![("NoRoom".into(), vec![])],
+    });
+    let plain = pb.host_site(6, Command, vec![int], unit);
+    let checked = pb.fallible_host_site(7, Command, vec![int], unit, vec!["NoRoom".into()]);
+    for site in [plain, checked] {
+        let mut f = pb.func("issue", 0);
+        let (arg, value) = (f.local(0), f.local(1));
+        f.emit(Op::LoadSmall, arg, 5u16, 0u16);
+        f.emit(Op::CallHost, site, arg, value);
+        f.emit(Op::Ret, 0u16, 0u16, 0u16);
+        f.end();
+    }
+    Arc::new(pb.finish().expect("two commands program"))
+}
+
+#[test]
+fn infallible_command_is_never_checked() {
+    let p = two_commands();
+    let run = |f: u16, refuse: bool| {
+        let mut vm = vm(&p);
+        let mut host = RecordingHost::default();
+        if refuse {
+            host.check_answer = Some(Box::new(|_, _| {
+                Err(quest_vm::host::QueryError::Raised(error("NoRoom")))
+            }));
+        }
+        vm.debug_start(f);
+        let r = vm.debug_run(u64::MAX, &mut host);
+        assert_eq!(r.end, RunEnd::Returned);
+        (r.fuel_used, host.checks, vm.slot(frame_slot(&p, f, 5)))
+    };
+    let (plain, checks, _) = run(0, false);
+    assert_eq!(checks, vec![]);
+    let (checked, checks, err) = run(1, false);
+    assert_eq!(
+        (checks, err),
+        (vec![(7, vec![quest_vm::wire::WireValue::Int(5)])], 0)
+    );
+    // The check is the only difference in cost.
+    assert_eq!(checked, plain + quest_vm::fuel::FUEL_HOST_CHECK);
+    // Refused: the error word holds `NoRoom` (tag 0: `0 << 1 | 1`).
+    assert_eq!(run(1, true).2, 1);
 }

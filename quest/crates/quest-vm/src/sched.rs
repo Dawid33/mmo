@@ -56,7 +56,9 @@ use crate::bytecode::Instr;
 use crate::consts::{ERR_TRACE_MAX, QUEUE_LEN};
 use crate::fault::FaultKind;
 use crate::fuel::FUEL_DISPATCH;
-use crate::host::{AbortCause, DropReason, Host, HostFnKind, PromiseId, Report, SrcLoc};
+use crate::host::{
+    AbortCause, DropReason, Host, HostFnKind, PromiseId, QueryError, Report, SrcLoc,
+};
 use crate::interp::{Exec, Fault, Meter};
 use crate::layout::{
     H_ARRIVAL, H_CMD_LEN, H_CURRENT_FN, H_EV_ARRIVAL, H_EV_HANDLER, H_EV_PAYLOAD, H_FUEL_DEBT,
@@ -65,6 +67,7 @@ use crate::layout::{
     QUEUE_REC_WORDS, STATUS_IDLE, STATUS_RUNNING,
 };
 use crate::object::{capacity, hdr, obj, ptr_of, read_slot, write_slot};
+use crate::program::HostSite;
 use crate::types::{ERROR_ENUM_NAME, TypeDesc, TypeId, TypeTable};
 use crate::vm::{RunEnd, Vm};
 use crate::wire::{self, FromWire, WireValue, from_wire, to_wire};
@@ -819,6 +822,11 @@ impl Vm {
     /// `CallHost a, b, c`: the arguments (types from site `a`) from the slots at `b`. A query is asked
     /// at once and its answer loaded into `c`; a command is buffered (it does not write `c`); a promise
     /// request is buffered and its id written to `c` (`promise`).
+    ///
+    /// A fallible site (one that declares errors) also writes the error word `c + 1`: 0 when the call
+    /// succeeded, else the error, `c` left as it was. A fallible command is checked by the host first
+    /// (`Host::check`) and buffered only when the check passes. An error the site does not declare, and a
+    /// host's `Failed`, are the fault `HostFault`.
     pub(crate) fn call_host(&mut self, ins: Instr, m: &mut Meter, host: &mut dyn Host) -> Exec<()> {
         let p = Arc::clone(&self.program);
         let Some(site) = p.host_sites.get(usize::from(ins.a)) else {
@@ -836,21 +844,28 @@ impl Vm {
         }
         match site.kind {
             HostFnKind::Command => {
+                if site.fallible()
+                    && let Err(e) = host.check(site.host_fn, &args)
+                {
+                    return self.host_error(site, e, ins.c, m);
+                }
                 let mut bytes = Vec::new();
                 WireValue::List(args).encode(&mut bytes);
-                return self.buffer(CMD_COMMAND, site.host_fn, &bytes, m);
+                self.buffer(CMD_COMMAND, site.host_fn, &bytes, m)?;
+                return self.host_succeeded(site, ins.c);
             }
             HostFnKind::Promise => return self.issue_request(site.host_fn, args, ins.c, m),
             HostFnKind::Query => {}
         }
-        let answer = host.query(site.host_fn, &args).map_err(|message| Fault {
-            kind: FaultKind::HostFault,
-            message,
-        })?;
+        let answer = match host.query(site.host_fn, &args) {
+            Ok(w) => w,
+            Err(e) => return self.host_error(site, e, ins.c, m),
+        };
         match from_wire(&mut self.store, self.heap, &p.types, site.ret, &answer) {
             Ok((v, words)) => {
                 m.words(words);
-                self.put(ins.c, v, p.types.is_ref(site.ret))
+                self.put(ins.c, v, p.types.is_ref(site.ret))?;
+                self.host_succeeded(site, ins.c)
             }
             Err(FromWire::WrongType) => Err(Fault {
                 kind: FaultKind::HostFault,
@@ -858,6 +873,50 @@ impl Vm {
             }),
             Err(FromWire::Fault(k)) => Err(k.into()),
         }
+    }
+
+    /// The error word of a fallible site's call with result word `c`.
+    fn host_err_slot(c: u16) -> Exec<u16> {
+        c.checked_add(1)
+            .ok_or_else(|| Fault::corrupt("CallHost's error slot out of range"))
+    }
+
+    /// A fallible site's call succeeded: its error word is 0. Nothing for an infallible site.
+    fn host_succeeded(&mut self, site: &HostSite, c: u16) -> Exec<()> {
+        if !site.fallible() {
+            return Ok(());
+        }
+        self.put(Self::host_err_slot(c)?, 0, true)
+    }
+
+    /// The host refused a query or a fallible command's check with `e`: a declared error goes to the
+    /// error word (`c` is left as it was); anything else is `HostFault`.
+    fn host_error(&mut self, site: &HostSite, e: QueryError, c: u16, m: &mut Meter) -> Exec<()> {
+        let fault = |message: String| Fault {
+            kind: FaultKind::HostFault,
+            message,
+        };
+        let w = match e {
+            QueryError::Failed(message) => return Err(fault(message)),
+            QueryError::Raised(w) => w,
+        };
+        match &w {
+            WireValue::Variant { name, .. } if site.raises.contains(name) => {}
+            WireValue::Variant { name, .. } => {
+                return Err(fault(format!(
+                    "host fn {} raised {name}, which it does not declare",
+                    site.host_fn
+                )));
+            }
+            _ => {
+                return Err(fault(format!(
+                    "host fn {} raised a value that is not an error",
+                    site.host_fn
+                )));
+            }
+        }
+        let v = self.error_value(&w, m)?;
+        self.put(Self::host_err_slot(c)?, v, true)
     }
 
     /// `Print`: the text joins the segment's buffered effects.

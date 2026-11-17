@@ -19,7 +19,7 @@ use crate::host::{HostFnKind, SrcLoc};
 use crate::object::FrameMaps;
 use std::hash::Hasher;
 
-use crate::types::{TypeDesc, TypeId, TypeTable};
+use crate::types::{ERROR_ENUM_NAME, TypeDesc, TypeId, TypeTable};
 
 /// Most elements of a table indexed by a `u16` id.
 const ID_TABLE_MAX: u32 = 65_536;
@@ -96,6 +96,16 @@ pub struct HostSite {
     pub kind: HostFnKind,
     pub params: Vec<TypeId>,
     pub ret: TypeId,
+    /// The errors a fallible query or command declares (names of `$Error` variants); empty when it cannot
+    /// fail. A fallible site's `CallHost` writes the error word `c + 1` too.
+    pub raises: Vec<String>,
+}
+
+impl HostSite {
+    /// Whether the call can fail (it declares errors).
+    pub fn fallible(&self) -> bool {
+        !self.raises.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,6 +387,10 @@ impl Program {
                 w.u16(*p);
             }
             w.u16(s.ret);
+            w.count(s.raises.len());
+            for e in &s.raises {
+                w.str(e);
+            }
         }
         w.count(self.lines.len());
         for l in &self.lines {
@@ -459,6 +473,7 @@ impl Program {
                 kind,
                 params: r.vec(|r| r.u16())?,
                 ret: r.u16()?,
+                raises: r.vec(|r| r.str())?,
             })
         })?;
         let lines = r.vec(|r| {
@@ -660,6 +675,20 @@ impl Program {
             if usize::from(s.ret) >= ntypes || s.params.iter().any(|&p| usize::from(p) >= ntypes) {
                 return invalid(format!("host site {i} names a type out of range"));
             }
+            if s.fallible() {
+                if s.kind == HostFnKind::Promise {
+                    return invalid(format!("host site {i} is a promise that declares errors"));
+                }
+                // Every declared error is a variant of the program's `$Error`.
+                let errors = self.types.0.iter().find_map(|d| match d {
+                    TypeDesc::Enum { name, variants } if name == ERROR_ENUM_NAME => Some(variants),
+                    _ => None,
+                });
+                let known = |e: &String| errors.is_some_and(|v| v.iter().any(|(n, _)| n == e));
+                if !s.raises.iter().all(known) {
+                    return invalid(format!("host site {i} raises an error the program lacks"));
+                }
+            }
         }
         for w in self.lines.windows(2) {
             if w[0].pc > w[1].pc {
@@ -741,9 +770,13 @@ impl Program {
                 _ => Ok(()),
             },
             Op::CallHost => {
-                let n = self.host_sites[usize::from(ins.a)].params.len() as u64;
+                let site = &self.host_sites[usize::from(ins.a)];
+                let n = site.params.len() as u64;
                 if u64::from(ins.b) + n > u64::from(static_words) {
                     Err("CallHost arguments run outside the static region".into())
+                } else if site.fallible() && u32::from(ins.c) + 1 >= static_words {
+                    // the error word follows the result word
+                    Err("CallHost's error slot is outside the static region".into())
                 } else {
                     Ok(())
                 }

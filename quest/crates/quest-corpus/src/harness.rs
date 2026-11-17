@@ -168,6 +168,7 @@ pub fn trace_of(case: &Case, cfg: &CaseConfig) -> Result<Trace, String> {
         latency: cfg.latency,
         failures: cfg.failures.clone(),
         chest: cfg.chest.clone(),
+        ..StubConfig::default()
     };
     let mut runner = Runner::new(program, MEM_BYTES_DEFAULT, stub)
         .map_err(|e| format!("load failed: {e:?}\n"))?;

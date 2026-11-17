@@ -18,6 +18,8 @@ pub const FUEL_BUILTIN: u64 = 4;
 pub const FUEL_HOST_QUERY: u64 = 10;
 /// `CallHost` of a command (+ argument size).
 pub const FUEL_HOST_COMMAND: u64 = 10;
+/// Added to `CallHost` of a fallible command: the host checks it when it is issued.
+pub const FUEL_HOST_CHECK: u64 = 10;
 /// `CallHost` of a promise request (+ argument size).
 pub const FUEL_HOST_REQUEST: u64 = 20;
 /// Parking a task (+ frame words).

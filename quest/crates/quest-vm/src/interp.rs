@@ -29,8 +29,8 @@ use crate::bytecode::{Instr, Op};
 use crate::consts::ERR_TRACE_MAX;
 use crate::fault::FaultKind;
 use crate::fuel::{
-    FUEL_ALLOC, FUEL_AWAIT, FUEL_BUILTIN, FUEL_CALL, FUEL_HEAP, FUEL_HOST_COMMAND, FUEL_HOST_QUERY,
-    FUEL_HOST_REQUEST, FUEL_KEY, FUEL_REAP, FUEL_SIMPLE,
+    FUEL_ALLOC, FUEL_AWAIT, FUEL_BUILTIN, FUEL_CALL, FUEL_HEAP, FUEL_HOST_CHECK, FUEL_HOST_COMMAND,
+    FUEL_HOST_QUERY, FUEL_HOST_REQUEST, FUEL_KEY, FUEL_REAP, FUEL_SIMPLE,
 };
 use crate::host::{Host, HostFnKind, SrcLoc};
 use crate::layout::{
@@ -160,10 +160,14 @@ pub(crate) fn base_fuel(p: &Program, ins: Instr) -> u64 {
         GetKey | TakeKey | SetKey => FUEL_KEY,
         CallBuiltin => FUEL_BUILTIN,
         // `validate` checked the site; an unknown one faults when it executes.
-        CallHost => match p.host_sites.get(usize::from(ins.a)).map(|s| s.kind) {
-            Some(HostFnKind::Command) => FUEL_HOST_COMMAND,
-            Some(HostFnKind::Promise) => FUEL_HOST_REQUEST,
-            Some(HostFnKind::Query) | None => FUEL_HOST_QUERY,
+        // A fallible query costs what an infallible one does, whichever way it answers.
+        CallHost => match p.host_sites.get(usize::from(ins.a)) {
+            Some(s) if s.kind == HostFnKind::Command && s.fallible() => {
+                FUEL_HOST_COMMAND + FUEL_HOST_CHECK
+            }
+            Some(s) if s.kind == HostFnKind::Command => FUEL_HOST_COMMAND,
+            Some(s) if s.kind == HostFnKind::Promise => FUEL_HOST_REQUEST,
+            _ => FUEL_HOST_QUERY,
         },
         Await | AwaitAll => FUEL_AWAIT,
     }

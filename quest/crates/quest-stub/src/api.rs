@@ -1,4 +1,4 @@
-//! The stub's host-API description (design D9, version 2) and the host-fn ids it implies: a host fn id is the
+//! The stub's host-API description (design D9, version 3) and the host-fn ids it implies: a host fn id is the
 //! index into [`stub_api`]`().fns`.
 //!
 //! Version 2 adds the quest host API of spec §9.1 ("Assumed host API" of the quest examples): the entity
@@ -7,6 +7,8 @@
 //! the quest builtins. The types and events a quest generates or the compiler owns (`Entered`, `RoleLost`,
 //! `Talked`, `DialogueEnded`, `SceneEnded`, `EndReason`, `SceneEnd`, `Exit`, `Stage`, `Role`) are not here.
 //! A `Dialogue` parameter is `Value` until the compiler has its own `Dialogue` type.
+//!
+//! Version 3 adds a fallible query, `Person.distance_to(other) -> Int raises OutOfReach`.
 
 use quest_vm::host::{
     HostApi, HostEnum, HostError, HostFn, HostFnKind, HostStruct, HostTy, PROMISE_ERRORS,
@@ -29,6 +31,8 @@ pub const F_WORLD_SET: u16 = 12;
 pub const F_WORLD_ADD: u16 = 13;
 pub const F_WORLD_CAS: u16 = 14;
 pub const F_WORLD_DELETE: u16 = 15;
+pub const F_PLACE: u16 = 42;
+pub const F_PERSON_DISTANCE_TO: u16 = 56;
 
 fn p(name: &str, ty: HostTy) -> (String, HostTy) {
     (name.to_string(), ty)
@@ -377,8 +381,18 @@ pub fn stub_api() -> HostApi {
             Query,
         ),
     ]);
+    // Version 3: a fallible query.
+    fns.push(f(
+        Some("Person"),
+        true,
+        "distance_to",
+        &[("other", Value)],
+        Int,
+        &["OutOfReach"],
+        Query,
+    ));
     HostApi {
-        version: 2,
+        version: 3,
         structs: vec![
             event("Player", &[("id", Int), ("name", Str)]),
             event("Item", &[("kind", Str), ("count", Int)]),
@@ -437,6 +451,7 @@ pub fn stub_api() -> HostApi {
             err("Lost", &[]),
             err("NamespaceGone", &[]),
             err("NoRoom", &[]),
+            err("OutOfReach", &[]),
         ],
     }
 }
