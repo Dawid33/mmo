@@ -261,6 +261,21 @@ pub fn h(n: u64) -> game::HostId {
     game::HostId(n)
 }
 
+/// The first site of `h` an adventure may start at: not abandoned, with a living member (the
+/// coordinator's `SiteAbandoned` / `Unpopulated` rules).
+pub fn populated_site(h: &game::history::History) -> game::history::SiteId {
+    h.sites()
+        .find(|s| s.abandoned.is_none() && !h.living_members(s.id).is_empty())
+        .map(|s| s.id)
+        .expect("a populated site")
+}
+
+/// A player's request to start an adventure at `site`: the state-changing world request the
+/// request, settle and hand-off guarantees are proven on.
+pub fn start_request(site: game::history::SiteId) -> game::coordinator::WorldRequest {
+    game::coordinator::WorldRequest::StartAdventure(site)
+}
+
 /// The rendezvous owner of `sr` among the hosts `h(0)..h(n)` (the seeded rig's fixed table;
 /// `n` 0 counts as 1).
 pub fn rendezvous_owner(sr: game::SuperRegion, n: u32) -> game::HostId {
