@@ -18,7 +18,10 @@
 //!
 //! The stub models every instance, and every NPC, as standing in a region of its own: whatever crosses
 //! between them (an `emit`, a mirror, a runner's event) lands at the next tick, as it would across a seam.
-//! Conditions are evaluated over the live instance (`Vm::eval_pure`) after its tick ran.
+//! Conditions, substitutions, `for` targets, filters and the stage the attached set depends on are evaluated
+//! over each instance's **dialogue mirror** (its dialogue read set, `QuestInfo::read_set`, and its stage; every
+//! global for a program without a quest), taken after the instances ran each tick from what they committed (an
+//! instance paused mid-segment keeps its last one), with `Vm::eval_pure` on a scratch instance holding it.
 //!
 //! **Talking** (spec §5.11): an NPC's attached set is the home's dialogues of the current stage and the
 //! program's other dialogues whose `for` target is that NPC, the in-scope filter dialogues whose `where`
@@ -29,9 +32,9 @@
 //! `[t] menu: 1) … 2) …`, the end as `[t] end Hal: Finished`.
 //!
 //! **The quest's end:** `complete(ps)` records the completions; a one-off quest is then over
-//! ([`Outcome::Completed`]), a repeatable one resets every instance (`Vm::reset`), is reaped, has its roles
-//! checked again (a failing `where` reaps it for good, [`Outcome::Reaped`]) and is given `Setup` after its
-//! `cooldown`. `fail()` ends it ([`Outcome::Failed`]), `decline()` refuses it ([`Outcome::Declined`]); an
+//! ([`Outcome::Completed`]); a repeatable one ends its conversations (`Left`) and scenes, drops its
+//! attachments, resets every instance (`Vm::reset`), is reaped, has its roles checked again (a failing
+//! `where` reaps it for good, [`Outcome::Reaped`]) and is given `Setup` after its `cooldown`. `fail()` ends it ([`Outcome::Failed`]), `decline()` refuses it ([`Outcome::Declined`]); an
 //! instance that is over is neither run nor delivered to (conversations and scenes play out).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +61,14 @@ use crate::host::StubConfig;
 use crate::namespace::Namespace;
 use crate::people::{Input, People, QueryCtx, field, id_of, parse_wire, str_of};
 use crate::runner::{Runner, vm_config};
+
+mod env;
+mod inputs;
+mod scenes;
+mod talk;
+
+use env::Core;
+use talk::{Talk, conv_quiet};
 
 /// Compiles the script directory an `edit` input names: the new program and its lines table.
 pub type EditFn = Box<dyn FnMut(&str) -> Result<(Arc<Program>, BTreeMap<String, String>), String>>;
@@ -95,144 +106,6 @@ struct Inst {
     runner: Runner,
     /// `home`, or the part's name.
     name: String,
-}
-
-/// What the runners read through ([`DialogueEnv`]): everything but the conversations and scenes.
-struct Core {
-    program: Arc<Program>,
-    program_key: u64,
-    insts: Vec<Inst>,
-    people: People,
-    completed_by: BTreeSet<i64>,
-    now: u64,
-    faults: Vec<(u32, PureFault)>,
-    api_events: Vec<HostStruct>,
-}
-
-/// The host a pure evaluation sees: the people's queries only.
-struct EvalHost<'a> {
-    people: &'a People,
-    completed_by: &'a BTreeSet<i64>,
-    tick: u64,
-    depth: u32,
-}
-
-impl Host for EvalHost<'_> {
-    fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, QueryError> {
-        let ctx = QueryCtx {
-            tick: self.tick,
-            depth: self.depth,
-            completed_by: self.completed_by,
-        };
-        self.people.query(f, args, &ctx).unwrap_or_else(|| {
-            Err(QueryError::Failed(format!(
-                "the stub answers no query {} in a condition",
-                op_name(f).unwrap_or_else(|| format!("(host fn {f})"))
-            )))
-        })
-    }
-    fn check(&mut self, f: u16, _: &[WireValue]) -> Result<(), QueryError> {
-        Err(QueryError::Failed(format!(
-            "host fn {f} checked in a condition"
-        )))
-    }
-    fn command(&mut self, _: u16, _: &[WireValue]) {}
-    fn request(&mut self, _: PromiseId, _: u16, _: &[WireValue]) {}
-    fn print(&mut self, _: &str) {}
-    fn report(&mut self, _: Report) {}
-    fn route(&mut self, _: &str, _: &WireValue) {}
-}
-
-impl Core {
-    fn eval_at(
-        &mut self,
-        i: usize,
-        f: u16,
-        args: &[WireValue],
-        depth: u32,
-    ) -> Result<WireValue, PureFault> {
-        let Core {
-            insts,
-            people,
-            completed_by,
-            now,
-            ..
-        } = self;
-        let Some(inst) = insts.get_mut(i) else {
-            return Err(PureFault::BadCall);
-        };
-        let mut host = EvalHost {
-            people,
-            completed_by,
-            tick: *now,
-            depth,
-        };
-        inst.runner.vm.eval_pure(f, args, COND_FUEL, &mut host)
-    }
-
-    /// The first parameters of fn `f` from `cast` (a target, a filter, a condition takes the cast).
-    fn cast_args(&self, f: u16, cast: &[WireValue]) -> Vec<WireValue> {
-        let n = self
-            .program
-            .fns
-            .get(usize::from(f))
-            .and_then(|x| x.sig.as_ref())
-            .map_or(0, |s| s.params.len());
-        cast.iter().take(n).cloned().collect()
-    }
-}
-
-impl DialogueEnv for Core {
-    fn graph(&self, i: InstanceId) -> Option<&quest_vm::dialogue::DialogueGraph> {
-        let k = usize::try_from(i.0).ok()?;
-        (k < self.insts.len()).then_some(&self.program.dialogues)
-    }
-
-    fn eval(
-        &mut self,
-        i: InstanceId,
-        f: u16,
-        args: &[WireValue],
-        depth: u32,
-    ) -> Result<WireValue, PureFault> {
-        match usize::try_from(i.0) {
-            Ok(k) => self.eval_at(k, f, args, depth),
-            Err(_) => Err(PureFault::BadCall),
-        }
-    }
-
-    fn report(&mut self, i: InstanceId, fault: PureFault) {
-        self.faults.push((i.0, fault));
-    }
-
-    fn event(&self, _: InstanceId, event: u16, script: bool) -> Option<EventShape> {
-        if !script {
-            let e = self.api_events.get(usize::from(event))?;
-            return Some(EventShape {
-                name: e.name.clone(),
-                fields: e.fields.iter().map(|f| f.0.clone()).collect(),
-            });
-        }
-        let p = &self.program;
-        let e = p.events.get(usize::from(event))?;
-        match p.types.desc(e.ty).ok()? {
-            TypeDesc::Struct { fields, .. } => Some(EventShape {
-                name: e.name.clone(),
-                fields: fields.iter().map(|f| f.0.clone()).collect(),
-            }),
-            _ => None,
-        }
-    }
-
-    fn program_key(&self, i: InstanceId) -> Option<u64> {
-        self.graph(i).map(|_| self.program_key)
-    }
-}
-
-/// A player's conversation with an NPC.
-struct Talk {
-    player: i64,
-    conv: Conversation,
 }
 
 pub struct World {
@@ -295,105 +168,6 @@ fn hash_of<T: StateHash + ?Sized>(t: &T) -> u64 {
     h.finish()
 }
 
-/// A value as a line shows it.
-fn show(v: &WireValue) -> String {
-    match v {
-        WireValue::Unit => "()".into(),
-        WireValue::Bool(b) => b.to_string(),
-        WireValue::Int(i) => i.to_string(),
-        WireValue::Float(f) => f.to_string(),
-        WireValue::Str(s) => s.clone(),
-        WireValue::List(items) => {
-            let items: Vec<String> = items.iter().map(show).collect();
-            format!("[{}]", items.join(", "))
-        }
-        WireValue::Struct { name, fields } => match (field(v, "name"), field(v, "id")) {
-            (Some(WireValue::Str(n)), _) => n.clone(),
-            (_, Some(WireValue::Int(id))) => format!("{name}({id})"),
-            _ => {
-                let fs: Vec<String> = fields
-                    .iter()
-                    .map(|(n, v)| format!("{n}={}", show(v)))
-                    .collect();
-                format!("{name}({})", fs.join(", "))
-            }
-        },
-        WireValue::Variant { name, fields } => match fields.as_slice() {
-            [] => name.clone(),
-            fs => {
-                let fs: Vec<String> = fs.iter().map(|(_, v)| show(v)).collect();
-                format!("{name}({})", fs.join(", "))
-            }
-        },
-        other => format!("{other:?}"),
-    }
-}
-
-/// `template`'s `{n}` holes filled from `args` (`{{` and `}}` are braces).
-fn fill(template: &str, args: &[WireValue]) -> String {
-    let mut out = String::new();
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '{' if chars.peek() == Some(&'{') => {
-                chars.next();
-                out.push('{');
-            }
-            '}' if chars.peek() == Some(&'}') => {
-                chars.next();
-                out.push('}');
-            }
-            '{' => {
-                let mut n = String::new();
-                for d in chars.by_ref() {
-                    if d == '}' {
-                        break;
-                    }
-                    n.push(d);
-                }
-                if let Some(v) = n.parse::<usize>().ok().and_then(|k| args.get(k)) {
-                    out.push_str(&show(v));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn end_name(r: EndReason) -> &'static str {
-    match r {
-        EndReason::Finished => "Finished",
-        EndReason::Left => "Left",
-        EndReason::Timeout => "Timeout",
-        EndReason::TooDeep => "TooDeep",
-        EndReason::Edited => "Edited",
-        EndReason::OutOfRange => "OutOfRange",
-    }
-}
-
-fn scene_reason_name(r: SceneReason) -> &'static str {
-    match r {
-        SceneReason::Finished => "Finished",
-        SceneReason::Interrupted => "Interrupted",
-        SceneReason::ActorLost => "ActorLost",
-    }
-}
-
-/// A conversation with nothing more to happen without input: closed, or waiting for a pick with no timeout.
-fn conv_quiet(c: &Conversation) -> bool {
-    match c.state() {
-        ConvState::Closed => true,
-        ConvState::AwaitingPick => c.offer().is_none_or(|o| o.timeout_at.is_none()),
-        _ => false,
-    }
-}
-
-/// Over: ended or closed.
-fn conv_over(c: &Conversation) -> bool {
-    matches!(c.state(), ConvState::Ended { .. } | ConvState::Closed)
-}
-
 fn load_error(e: LoadError) -> String {
     match e {
         LoadError::Role(r) => {
@@ -441,6 +215,8 @@ impl World {
                 now: 0,
                 faults: Vec::new(),
                 api_events: stub_api().events,
+                roles: roles.clone(),
+                mirrors: BTreeMap::new(),
             },
             lines: BTreeMap::new(),
             show_ids: false,
@@ -491,7 +267,7 @@ impl World {
             return Ok(());
         };
         for (k, &f) in q.requires.iter().enumerate() {
-            match self.core.eval_at(0, f, &[], 1) {
+            match self.core.eval_live(0, f, &[], 1) {
                 Ok(WireValue::Bool(true)) => {}
                 other => {
                     return Err(format!(
@@ -534,7 +310,7 @@ impl World {
                 });
             }
             args.push(value.clone());
-            match self.core.eval_at(0, f, &args, 1) {
+            match self.core.eval_live(0, f, &args, 1) {
                 Ok(WireValue::Bool(true)) => {}
                 other => {
                     return Err(format!(
@@ -722,6 +498,8 @@ impl World {
                 self.world_command(i, f, &args);
             }
         }
+        // What the conversations and scenes read: each instance's committed dialogue read set.
+        self.core.take_mirrors();
         // 4. Conversations and scenes.
         for input in talk {
             self.talk_input(&input);
@@ -793,203 +571,21 @@ impl World {
             self.report.reports.push((i16, r));
         }
         for (event, value) in routed {
-            if let Some(to) = self.owner_of(&event, Some(i16)) {
-                self.pending.push((u32::from(to), event, value));
+            match self.owner_of(&event, Some(i16)) {
+                Some(to) => self.pending.push((u32::from(to), event, value)),
+                // The VM routes only what another instance of the program handles; one this world
+                // does not have is reported, not lost silently.
+                None => self.report.reports.push((
+                    i16,
+                    Report::EventDropped {
+                        event,
+                        reason: DropReason::NoHandler,
+                    },
+                )),
             }
         }
         self.cmds
             .extend(cmds.into_iter().map(|(f, args)| (i16, f, args)));
-    }
-
-    // ---- inputs -------------------------------------------------------------------------------------
-
-    fn event_input(&mut self, name: &str, fields: &[(String, String)], part: &Option<String>) {
-        let mut values = Vec::new();
-        for (f, text) in fields {
-            match parse_wire(text, &self.core.people) {
-                Ok(v) => values.push((f.clone(), v)),
-                Err(e) => return self.say(format!("event {name}: {e}")),
-            }
-        }
-        let to = match part {
-            None => Some(0),
-            Some(p) => self
-                .core
-                .insts
-                .iter()
-                .position(|x| x.name == *p)
-                .and_then(|k| u16::try_from(k).ok()),
-        };
-        let Some(to) = to else {
-            return self.say(format!(
-                "event {name}: no part {}",
-                part.as_deref().unwrap_or("")
-            ));
-        };
-        let value = WireValue::Struct {
-            name: name.into(),
-            fields: values,
-        };
-        self.deliver(to, name, &value, false);
-    }
-
-    /// The parts anchored on `entity` (`part … on role`, the role bound to it).
-    fn parts_on(&self, entity: i64) -> Vec<u16> {
-        let Some(q) = self.core.program.quest.as_ref() else {
-            return Vec::new();
-        };
-        q.parts
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.anchor == Anchor::On)
-            .filter(|(_, p)| {
-                q.roles.get(usize::from(p.role)).is_some_and(|r| {
-                    self.roles
-                        .iter()
-                        .any(|(n, v)| *n == r.name && id_of(Some(v)) == Some(entity))
-                })
-            })
-            .filter_map(|(k, _)| u16::try_from(k + 1).ok())
-            .collect()
-    }
-
-    fn near(&mut self, player: i64, entity: i64) {
-        let Some(p) = self.core.people.handle(player) else {
-            return self.say(format!("near: no entity {player}"));
-        };
-        let value = unit_struct("PlayerNear", vec![("player", p)]);
-        for i in self.parts_on(entity) {
-            self.deliver(i, "PlayerNear", &value, true);
-        }
-    }
-
-    fn kill(&mut self, victim: i64, by: Option<i64>) {
-        if let Some(e) = self.core.people.entities.get_mut(&victim) {
-            e.alive = false;
-        }
-        let by = match by.map(|b| self.core.people.handle(b)) {
-            Some(Some(p)) => WireValue::Variant {
-                name: "Some".into(),
-                fields: vec![("value".into(), p)],
-            },
-            Some(None) => return self.say("kill: an unknown killer".into()),
-            None => bare("None"),
-        };
-        let value = unit_struct(
-            "Killed",
-            vec![
-                (
-                    "victim",
-                    unit_struct("Entity", vec![("id", WireValue::Int(victim))]),
-                ),
-                ("by", by),
-            ],
-        );
-        for i in self.owners_of("Killed") {
-            self.deliver(i, "Killed", &value, true);
-        }
-        let ended: Vec<SceneOut> = self
-            .scenes
-            .iter_mut()
-            .filter(|s| !s.ended() && s.cast().iter().any(|c| id_of(Some(c)) == Some(victim)))
-            .map(ScenePlay::actor_lost)
-            .collect();
-        for out in ended {
-            self.scene_out(out);
-        }
-        self.lose(victim);
-    }
-
-    /// `RoleLost` to the home for each role bound to `entity`.
-    fn lose(&mut self, entity: i64) {
-        let program = Arc::clone(&self.core.program);
-        let Some(q) = program.quest.as_ref() else {
-            return;
-        };
-        let Some(ev) = program
-            .events
-            .iter()
-            .find(|e| e.name == format!("{}::RoleLost", q.name) || e.name.ends_with("::RoleLost"))
-        else {
-            return;
-        };
-        let field = match program.types.desc(ev.ty) {
-            Ok(TypeDesc::Struct { fields, .. }) => fields.first().map(|f| f.0.clone()),
-            _ => None,
-        }
-        .unwrap_or_else(|| "role".into());
-        for r in &q.roles {
-            let bound = self
-                .roles
-                .iter()
-                .any(|(n, v)| *n == r.name && id_of(Some(v)) == Some(entity));
-            if bound {
-                let value = WireValue::Struct {
-                    name: ev.name.clone(),
-                    fields: vec![(field.clone(), bare(&r.name))],
-                };
-                self.deliver(0, &ev.name, &value, false);
-            }
-        }
-    }
-
-    fn edit_input(&mut self, dir: &str) {
-        let Some(mut f) = self.edit.take() else {
-            return self.say(format!("edit {dir}: no compiler"));
-        };
-        let result = f(dir);
-        self.edit = Some(f);
-        match result {
-            Ok((program, lines)) => {
-                if let Err(e) = self.edit(program, lines) {
-                    self.say(format!("edit {dir}: {e}"));
-                }
-            }
-            Err(e) => self.say(format!("edit {dir}: {e}")),
-        }
-    }
-
-    /// The script is edited (spec §6.9): every instance migrates to `program` (all or none: one refused
-    /// leaves them all as they were), then every conversation and scene finds its place again.
-    pub fn edit(
-        &mut self,
-        program: Arc<Program>,
-        lines: BTreeMap<String, String>,
-    ) -> Result<(), String> {
-        let mut vms = Vec::new();
-        for (k, inst) in self.core.insts.iter().enumerate() {
-            let id = u16::try_from(k).map_err(|_| "too many instances".to_string())?;
-            let cfg = vm_config(MEM_BYTES_DEFAULT, id, self.roles.clone());
-            match inst.runner.vm.migrate(Arc::clone(&program), cfg) {
-                Ok((vm, _)) => vms.push(vm),
-                Err(e) => return Err(format!("the {} refused the edit: {e:?}", inst.name)),
-            }
-        }
-        for (inst, vm) in self.core.insts.iter_mut().zip(vms) {
-            inst.runner.vm = vm;
-        }
-        self.core.program_key = program.content_hash();
-        self.core.program = program;
-        self.lines = lines;
-        self.say("edited".into());
-        let npcs: Vec<i64> = self.talks.keys().copied().collect();
-        for npc in npcs {
-            let Some(tk) = self.talks.get_mut(&npc) else {
-                continue;
-            };
-            if let Some(b) = tk.conv.rebind(&mut self.core) {
-                self.print_batch(npc, b);
-            }
-        }
-        let outs: Vec<SceneOut> = self
-            .scenes
-            .iter_mut()
-            .filter_map(|s| s.rebind(&mut self.core))
-            .collect();
-        for out in outs {
-            self.scene_out(out);
-        }
-        Ok(())
     }
 
     // ---- the commands the world acts on -------------------------------------------------------------
@@ -1078,6 +674,27 @@ impl World {
             self.outcome = Outcome::Completed;
             return;
         };
+        // The run's conversations end (`Left`) and its scenes stop (no `SceneEnded`: the instance it would
+        // reach is reset), and what its handlers attached or detached is dropped. Every conversation and scene
+        // of this world is the quest's: there is only its program.
+        let now = self.core.now;
+        let npcs: Vec<i64> = self.talks.keys().copied().collect();
+        for npc in npcs {
+            if let Some(tk) = self.talks.get_mut(&npc) {
+                let b = tk.conv.leave(now);
+                self.print_batch(npc, b);
+            }
+        }
+        for play in std::mem::take(&mut self.scenes) {
+            let name = program
+                .dialogues
+                .dialogues
+                .get(usize::from(play.scene()))
+                .map_or("", |d| d.name.as_str());
+            self.say(format!("end scene {name}: reset"));
+        }
+        self.attached.clear();
+        self.detached.clear();
         for k in 0..self.core.insts.len() {
             let inst = &mut self.core.insts[k];
             if let Err(e) = inst.runner.vm.reset() {
@@ -1095,400 +712,6 @@ impl World {
             return;
         }
         self.setup_at = Some(self.core.now.saturating_add(repeat.cooldown.max(1)));
-    }
-
-    // ---- conversations ------------------------------------------------------------------------------
-
-    /// The home's current stage (an index into `QuestInfo::stages`).
-    fn stage(&self) -> Option<u16> {
-        let q = self.core.program.quest.as_ref()?;
-        let home = &self.core.insts.first()?.runner.vm;
-        let m = home.mirror(&[q.stage_global]);
-        match m.globals.get(&q.stage_global)? {
-            WireValue::Variant { name, .. } => q
-                .stages
-                .iter()
-                .position(|s| s == name)
-                .and_then(|k| u16::try_from(k).ok()),
-            _ => None,
-        }
-    }
-
-    /// What is attached to `npc` for `player` now (module docs).
-    fn attachments(&mut self, player: &WireValue, npc: &WireValue) -> Vec<Attachment> {
-        if self.outcome != Outcome::Running {
-            return Vec::new();
-        }
-        let Some(npc_id) = id_of(Some(npc)) else {
-            return Vec::new();
-        };
-        let stage = self.stage();
-        let program = Arc::clone(&self.core.program);
-        let cast = [player.clone(), npc.clone()];
-        let in_stage =
-            |d: &quest_vm::dialogue::DialogueDef| d.stage.is_none_or(|s| Some(s) == stage);
-        let mut out = Vec::new();
-        for (k, d) in program.dialogues.dialogues.iter().enumerate() {
-            let Ok(k) = u16::try_from(k) else { break };
-            if d.kind != DialogueKind::Conversation || d.cast != 2 || !in_stage(d) {
-                continue;
-            }
-            if self.detached.contains(&(0, npc_id, d.name.clone())) {
-                continue;
-            }
-            // A fault counts as false and is reported, as in any condition.
-            let holds = match d.target.or(d.filter) {
-                Some(f) => match self.core.eval_at(0, f, &self.core.cast_args(f, &cast), 1) {
-                    Ok(v) if d.target.is_some() => id_of(Some(&v)) == Some(npc_id),
-                    Ok(v) => v == WireValue::Bool(true),
-                    Err(fault) => {
-                        self.core.faults.push((0, fault));
-                        false
-                    }
-                },
-                None => false,
-            };
-            if holds {
-                out.push(Attachment {
-                    instance: InstanceId(0),
-                    dialogue: k,
-                });
-            }
-        }
-        for (i, n, name) in &self.attached {
-            if *n != npc_id {
-                continue;
-            }
-            let found = program
-                .dialogues
-                .dialogues
-                .iter()
-                .position(|d| d.name == *name && in_stage(d))
-                .and_then(|k| u16::try_from(k).ok());
-            if let Some(k) = found {
-                out.push(Attachment {
-                    instance: InstanceId(*i),
-                    dialogue: k,
-                });
-            }
-        }
-        out
-    }
-
-    /// The NPC `player` is talking to (a conversation not over).
-    fn talking_to(&self, player: i64) -> Option<i64> {
-        self.talks
-            .iter()
-            .find(|(_, tk)| tk.player == player && !conv_over(&tk.conv))
-            .map(|(npc, _)| *npc)
-    }
-
-    fn talk_input(&mut self, input: &Input) {
-        match *input {
-            Input::Talk { player, npc } => self.talk(player, npc),
-            Input::Pick { player, option } => self.pick(player, option),
-            Input::Leave { player } => {
-                if let Some(npc) = self.talking_to(player) {
-                    let now = self.core.now;
-                    if let Some(tk) = self.talks.get_mut(&npc) {
-                        let b = tk.conv.leave(now);
-                        self.print_batch(npc, b);
-                    }
-                }
-            }
-            Input::Done { player } => {
-                for tk in self.talks.values_mut().filter(|tk| tk.player == player) {
-                    tk.conv.done();
-                }
-                self.talks
-                    .retain(|_, tk| *tk.conv.state() != ConvState::Closed);
-            }
-            Input::Ambient { ref npcs } => self.ambient(npcs),
-            _ => {}
-        }
-    }
-
-    fn talk(&mut self, player: i64, npc: i64) {
-        let (Some(p), Some(n)) = (
-            self.core.people.handle(player),
-            self.core.people.handle(npc),
-        ) else {
-            return self.say(format!("talk: no entity {player} or {npc}"));
-        };
-        // A cast member: an interruptible scene ends; an uninterruptible one keeps the NPC busy.
-        if let Some(k) = self
-            .scenes
-            .iter()
-            .position(|s| !s.ended() && s.cast().iter().any(|c| id_of(Some(c)) == Some(npc)))
-        {
-            match self.scenes[k].interrupt() {
-                Some(out) => self.scene_out(out),
-                None => return,
-            }
-        }
-        if let Some(tk) = self.talks.get(&npc)
-            && *tk.conv.state() != ConvState::Closed
-            && (tk.player != player || !conv_over(&tk.conv))
-        {
-            return;
-        }
-        if self.talking_to(player).is_some() {
-            return;
-        }
-        let attached = self.attachments(&p, &n);
-        let talked = unit_struct("Talked", vec![("player", p.clone()), ("npc", n.clone())]);
-        for i in self.owners_of("Talked") {
-            self.pending
-                .push((u32::from(i), "Talked".into(), talked.clone()));
-        }
-        let now = self.core.now;
-        let rec = self.records.entry(npc).or_default();
-        let (conv, batch) = Conversation::start(&mut self.core, &attached, rec, p, n, now);
-        self.talks.insert(npc, Talk { player, conv });
-        self.print_batch(npc, batch);
-        self.talks
-            .retain(|_, tk| *tk.conv.state() != ConvState::Closed);
-    }
-
-    fn pick(&mut self, player: i64, option: u32) {
-        let Some(npc) = self
-            .talks
-            .iter()
-            .find(|(_, tk)| tk.player == player && tk.conv.offer().is_some())
-            .map(|(npc, _)| *npc)
-        else {
-            return;
-        };
-        let (Some(p), Some(n)) = (
-            self.core.people.handle(player),
-            self.core.people.handle(npc),
-        ) else {
-            return;
-        };
-        let attached = self.attachments(&p, &n);
-        let now = self.core.now;
-        let Some(tk) = self.talks.get_mut(&npc) else {
-            return;
-        };
-        let Some(serial) = tk.conv.offer().map(|o| o.serial) else {
-            return;
-        };
-        let rec = self.records.entry(npc).or_default();
-        let result = tk.conv.pick(
-            &mut self.core,
-            &attached,
-            rec,
-            serial,
-            option.saturating_sub(1),
-            now,
-        );
-        match result {
-            Ok(b) => self.print_batch(npc, b),
-            Err(PickRefused::Stale { resent } | PickRefused::OutOfRange { resent }) => {
-                self.print_offer(&resent)
-            }
-            Err(PickRefused::NoOffer) => {}
-        }
-    }
-
-    fn tick_talks(&mut self) {
-        let now = self.core.now;
-        let npcs: Vec<i64> = self.talks.keys().copied().collect();
-        for npc in npcs {
-            let Some(tk) = self.talks.get_mut(&npc) else {
-                continue;
-            };
-            let rec = self.records.entry(npc).or_default();
-            if let Some(b) = tk.conv.tick(&mut self.core, rec, now) {
-                self.print_batch(npc, b);
-            }
-        }
-        self.talks
-            .retain(|_, tk| *tk.conv.state() != ConvState::Closed);
-    }
-
-    fn speaker(&self, v: &WireValue) -> String {
-        match (str_of(field(v, "name")), id_of(Some(v))) {
-            (Some(n), _) => n.to_string(),
-            (None, Some(id)) => self.core.people.name_of(id),
-            _ => show(v),
-        }
-    }
-
-    fn text(&self, line: &SaidLine) -> String {
-        match self.lines.get(&line.id) {
-            Some(t) if !self.show_ids => fill(t, &line.args),
-            _ if line.args.is_empty() => format!("@{}", line.id),
-            _ => {
-                let args: Vec<String> = line.args.iter().map(show).collect();
-                format!("@{}({})", line.id, args.join(", "))
-            }
-        }
-    }
-
-    fn print_offer(&mut self, offer: &Offer) {
-        let options: Vec<String> = offer
-            .options
-            .iter()
-            .enumerate()
-            .map(|(k, o)| format!("{}) {}", k + 1, self.text(o)))
-            .collect();
-        self.say(format!("menu: {}", options.join(" ")));
-    }
-
-    /// Prints a conversation's batch and sends what it raised.
-    fn print_batch(&mut self, npc: i64, b: Batch) {
-        for line in &b.lines {
-            let said = format!("{}: {}", self.speaker(&line.speaker), self.text(line));
-            self.say(said);
-        }
-        if let Some(offer) = &b.offer {
-            self.print_offer(offer);
-        }
-        for e in b.emits {
-            self.send(e.instance.0, e.event, e.value);
-        }
-        let player = self.talks.get(&npc).map(|tk| tk.player);
-        let (p, n) = (
-            player.and_then(|p| self.core.people.handle(p)),
-            self.core.people.handle(npc),
-        );
-        for e in b.ended {
-            let (Some(p), Some(n)) = (p.clone(), n.clone()) else {
-                continue;
-            };
-            let value = unit_struct(
-                "DialogueEnded",
-                vec![
-                    ("player", p),
-                    ("npc", n),
-                    ("dialogue", WireValue::Str(e.dialogue.clone())),
-                    ("reason", bare(end_name(e.reason))),
-                    (
-                        "exit",
-                        WireValue::Str(format!("{}::{}", e.dialogue, e.exit)),
-                    ),
-                ],
-            );
-            self.pending
-                .push((e.instance.0, "DialogueEnded".into(), value));
-        }
-        if let Some(end) = b.end {
-            let who = self.core.people.name_of(npc);
-            self.say(format!("end {who}: {}", end_name(end)));
-        }
-    }
-
-    // ---- scenes -------------------------------------------------------------------------------------
-
-    fn start_scene(&mut self, i: u16, scene: &str, cast: Vec<WireValue>) {
-        let found = self
-            .core
-            .program
-            .dialogues
-            .dialogues
-            .iter()
-            .position(|d| d.name == scene && d.kind == DialogueKind::Scene)
-            .and_then(|k| u16::try_from(k).ok());
-        let Some(k) = found else {
-            return self.say(format!("play: no scene {scene}"));
-        };
-        let now = self.core.now;
-        let play = ScenePlay::start(&mut self.core, InstanceId(u32::from(i)), k, cast, now);
-        self.scenes.push(play);
-    }
-
-    /// Who is in a conversation or a scene.
-    fn busy(&self, id: i64) -> bool {
-        self.talks.contains_key(&id)
-            || self
-                .scenes
-                .iter()
-                .any(|s| !s.ended() && s.cast().iter().any(|c| id_of(Some(c)) == Some(id)))
-    }
-
-    fn ambient(&mut self, npcs: &[i64]) {
-        if self.outcome != Outcome::Running {
-            return;
-        }
-        let idle: Vec<WireValue> = npcs
-            .iter()
-            .filter(|id| !self.busy(**id))
-            .filter_map(|id| self.core.people.handle(*id))
-            .collect();
-        let stage = self.stage();
-        let candidates: Vec<Attachment> = self
-            .core
-            .program
-            .dialogues
-            .dialogues
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| {
-                d.kind == DialogueKind::Scene && d.stage.is_none_or(|s| Some(s) == stage)
-            })
-            .filter_map(|(k, _)| {
-                Some(Attachment {
-                    instance: InstanceId(0),
-                    dialogue: u16::try_from(k).ok()?,
-                })
-            })
-            .collect();
-        let now = self.core.now;
-        let Some((att, cast)) = cast_ambient(&mut self.core, &candidates, &idle, &self.played, now)
-        else {
-            return;
-        };
-        let name = self
-            .core
-            .program
-            .dialogues
-            .dialogues
-            .get(usize::from(att.dialogue))
-            .map(|d| d.name.clone())
-            .unwrap_or_default();
-        self.played.insert((Some(self.core.program_key), name), now);
-        let play = ScenePlay::start(&mut self.core, att.instance, att.dialogue, cast, now);
-        self.scenes.push(play);
-    }
-
-    fn tick_scenes(&mut self) {
-        let now = self.core.now;
-        let mut outs = Vec::new();
-        for s in &mut self.scenes {
-            if s.ended() {
-                continue;
-            }
-            let lead = s.cast().first().and_then(|c| id_of(Some(c))).unwrap_or(0);
-            let rec = self.records.entry(lead).or_default();
-            outs.push(s.tick(&mut self.core, rec, now));
-        }
-        for out in outs {
-            self.scene_out(out);
-        }
-        self.scenes.retain(|s| !s.ended());
-    }
-
-    /// Prints a scene's lines and sends what it raised.
-    fn scene_out(&mut self, out: SceneOut) {
-        for line in &out.lines {
-            let said = format!("{}: {}", self.speaker(&line.speaker), self.text(line));
-            self.say(said);
-        }
-        for e in out.emits {
-            self.send(e.instance.0, e.event, e.value);
-        }
-        if let Some(end) = out.ended {
-            let value = unit_struct(
-                "SceneEnded",
-                vec![
-                    ("scene", WireValue::Str(end.name.clone())),
-                    ("reason", bare(scene_reason_name(end.reason))),
-                ],
-            );
-            self.pending
-                .push((end.instance.0, "SceneEnded".into(), value));
-        }
     }
 
     // ---- mirrors ------------------------------------------------------------------------------------
@@ -1593,6 +816,11 @@ impl World {
         self.pending.state_hash(&mut h);
         self.pending_mirrors.state_hash(&mut h);
         self.sent.state_hash(&mut h);
+        (self.core.mirrors.len() as u64).state_hash(&mut h);
+        for (i, d) in &self.core.mirrors {
+            i.state_hash(&mut h);
+            d.mirror.state_hash(&mut h);
+        }
         h.finish()
     }
 }

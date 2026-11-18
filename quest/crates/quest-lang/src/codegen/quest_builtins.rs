@@ -278,7 +278,10 @@ impl Emit<'_, '_, '_> {
             _ => None,
         };
         let Some(event) = event else {
-            return self.not_yet("`after` of a host event", ev.value.span);
+            return self.not_yet(
+                "`after` of a host event (a timer delivers a script `event` only)",
+                ev.value.span,
+            );
         };
         let id_field = self
             .g

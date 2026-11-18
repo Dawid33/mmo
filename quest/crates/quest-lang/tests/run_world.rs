@@ -288,6 +288,17 @@ fn role_of_wrong_type_is_refused() {
         .err()
         .expect("refused");
     assert!(e.contains("role farmer"), "{e}");
+    // The same shape (`{ id }`) of another kind: a site is no creature.
+    let mut roles = LOST_DOG_ROLES.to_vec();
+    roles[1] = ("dog", "Site(1)");
+    let e = world(LOST_DOG, LOST_DOG_PEOPLE, &roles)
+        .err()
+        .expect("refused");
+    assert!(e.contains("role dog"), "{e}");
+    let e = world(PART_QUEST, PART_PEOPLE, &[("pet", "Site(1)")])
+        .err()
+        .expect("refused");
+    assert!(e.contains("role pet"), "{e}");
 }
 
 #[test]
@@ -616,6 +627,7 @@ creature 23 name="lurker" ours
 creature 24 name="lurker" ours
 creature 25 name="lurker" ours
 creature 26 name="wolf"
+creature 27 name="lurker" ours
 player 1 name="Ana"
 "#;
 
@@ -638,7 +650,8 @@ fn sealed_mine_end_to_end() {
 500 kill 20 by 1
 500 kill 26 by 1
 501 kill 21 by 1
-502 kill 22
+502 kill 27
+502 kill 27 by 1
 503 kill 22 by 1
 504 kill 23 by 1
 505 kill 24 by 1
@@ -646,14 +659,30 @@ fn sealed_mine_end_to_end() {
 510 event BlockUsed player=Player(1) tag=\"seal_stone\" @depths
 ",
     );
-    let text = out.join("\n");
-    assert!(text.contains("[0] place lurker_nest at 9"), "{text}");
-    assert!(text.contains("[3] joined Ana"), "{text}");
-    // The argument is uninterruptible: a talk to the foreman meanwhile gets nothing.
-    assert!(!text.contains("[30] "), "{text}");
-    assert!(text.contains("Brann: ..."), "{text}");
-    assert!(text.contains("completed Ana"), "{text}");
-    assert_eq!(w.outcome(), Outcome::Completed, "{text}");
+    assert_eq!(
+        out,
+        [
+            "[0] place lurker_nest at 9",
+            "[1] menu: 1) The mine?",
+            "[2] Odo: Brann wants it open. Stand here and listen to him lie.",
+            "[2] menu: 1) The mine?",
+            "[3] joined Ana",
+            "[3] end Odo: Left",
+            // The argument, timed: each line holds 30 + its characters ticks (64 → 94, 35 → 65, 39 → 69),
+            // `pause 30` after the second, `(ticks=60)` for Brann's "...". The talk to Brann at 30 gets
+            // nothing: the scene is uninterruptible.
+            "[3] Odo: The seal held for forty years. You will not break it for silver.",
+            "[97] Brann: Silver feeds this village, old man.",
+            "[192] Odo: Silver did not feed the eleven we lost.",
+            "[261] Brann: ...",
+            "[321] Odo: Then let the stranger decide what they find down there.",
+            // Six kills by Ana count; the wolf is not `ours`, the drowned lurker is no one's kill, and
+            // killing it again raises nothing.
+            "[502] kill: 27 is already dead",
+            "[511] completed Ana",
+        ]
+    );
+    assert_eq!(w.outcome(), Outcome::Completed);
 }
 
 #[test]
@@ -919,4 +948,108 @@ fn mirror_waits_while_the_part_is_mid_segment() {
         .expect("a tick");
     assert!(at > 3, "{printed}");
     assert_eq!(installed, [1, at + 1]);
+}
+
+#[test]
+fn open_event_fields_and_after_of_a_host_event_say_why() {
+    let mut api = stub_api();
+    api.events.push(quest_vm::host::HostStruct {
+        name: "Odd".into(),
+        fields: vec![("x".into(), quest_vm::host::HostTy::Value)],
+    });
+    let messages = |src: &str| -> Vec<String> {
+        match quest_lang::compile(&tree(&[("main.qs", src)]), &api) {
+            Ok(_) => Vec::new(),
+            Err(d) => d.into_iter().map(|d| d.message).collect(),
+        }
+    };
+    let m = messages("@on(Odd)\nfn odd(e):\n    pass\n");
+    assert!(m.iter().any(|m| m.contains("open type (`Value`)")), "{m:?}");
+    let m = messages(
+        "quest Q:\n    role a: Person\n    stage S:\n        @on(Entered)\n        fn e(e):\n            after(5, Setup())\n",
+    );
+    assert!(
+        m.iter()
+            .any(|m| m.contains("a timer delivers a script `event` only")),
+        "{m:?}"
+    );
+}
+
+const ATTACHING: &str = r#"repeatable quest R(cooldown=5):
+    role watch: Person
+    event Go:
+        player: Player
+    dialogue chat(p: Player, npc: Person):
+        npc: "Well met." @r.hi
+        choice:
+            "Bye." @r.bye
+    @on(Setup)
+    fn setup(e):
+        attach_dialogue(watch, chat)
+    stage A:
+        @on(Go)
+        fn go(e):
+            complete([e.player])
+"#;
+
+#[test]
+fn repeatable_reset_clears_attachments_and_conversations() {
+    let mut w = world(ATTACHING, SMITH_PEOPLE, &[("watch", "Person(3)")]).expect("placed");
+    let out = run(
+        &mut w,
+        "2 talk 1 3\n3 event R::Go player=Player(1)\n4 done 1\n5 talk 1 3\n6 done 1\n10 talk 2 3\n",
+    );
+    assert_eq!(
+        out,
+        [
+            "[2] Hal: Well met.",
+            "[2] menu: 1) Bye.",
+            "[3] completed Ana",
+            // The reset ends the open conversation (`Left`) and drops the run's attachment: nothing to
+            // say at 5, until the next `Setup` (at 8) attaches it again.
+            "[3] end Hal: Left",
+            "[3] reaped",
+            "[10] Hal: Well met.",
+            "[10] menu: 1) Bye.",
+        ]
+    );
+}
+
+const SLOW_HOME: &str = r#"quest D:
+    role keeper: Person
+    let flag = 0
+    event Go:
+        n: int
+    @on(Go)
+    fn go(e):
+        flag = e.n
+        let i = 0
+        while i < 300:
+            i = i + 1
+    stage S:
+        dialogue hi(p: Player, npc: Person) for keeper:
+            npc: f"flag is {flag}" @d.hi
+"#;
+
+#[test]
+fn conversation_reads_the_dialogue_mirror_not_uncommitted_state() {
+    let (p, lines) = compiled(SLOW_HOME);
+    let people = parse_people(SMITH_PEOPLE).expect("people");
+    let roles = roles(SMITH_PEOPLE, &[("keeper", "Person(3)")]);
+    let mut w = World::new(p, people, roles, StubConfig::default(), 200).expect("placed");
+    w.set_lines(lines);
+    // `go` writes `flag` at 2 and runs on for several ticks: a talk meanwhile sees the committed 0.
+    let out = run(
+        &mut w,
+        "2 event D::Go n=7\n3 talk 1 3\n4 done 1\n40 talk 2 3\n41 done 2\n",
+    );
+    assert_eq!(
+        out,
+        [
+            "[3] Hal: flag is 0",
+            "[3] end Hal: Finished",
+            "[40] Hal: flag is 7",
+            "[40] end Hal: Finished",
+        ]
+    );
 }

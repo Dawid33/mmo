@@ -379,6 +379,17 @@ impl<'a> Gen<'a> {
                     };
                     shapes.iter().flat_map(|s| s.tys.iter().copied()).collect()
                 }
+                // Checking leaves no error type in a program it accepts but one: a host struct's or event's
+                // field of an open kind (`Value`), which has no VM type.
+                Ty::Error => {
+                    self.not_yet(
+                        "a host type with a field of an open type (`Value`): the host must give it a concrete \
+                         type (the stub's `Entity` is any entity)",
+                        file,
+                        at,
+                    );
+                    return None;
+                }
                 _ => {
                     self.not_yet("a value of an error or reference type", file, at);
                     return None;

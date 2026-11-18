@@ -30,6 +30,9 @@ fact completed=errantry/x::Q
 #[test]
 fn people_and_script_parse() {
     let p = parse_people(PEOPLE).expect("parses");
+    // A `#` inside a string, after an escaped quote, is no comment.
+    let q = parse_people(r#"person 1 name="a \" # b" # a comment"#).expect("parses");
+    assert_eq!(q.entities[&1].name, "a \" # b");
     let hal = &p.entities[&3];
     assert_eq!(hal.kind, EntityKind::Person);
     assert_eq!(hal.name, "Hal Brook");
@@ -176,6 +179,10 @@ fn parse_errors_name_the_line() {
     assert!(e("person 1 name=\"Hal").starts_with("people line 1:"));
     assert!(e("person 1 pos=1,2").contains("x,y,z"));
     assert!(e("fact era=3").contains("unknown fact"));
+    assert!(
+        e("\nperson 1 occupation=Wizard").starts_with("people line 2: `Wizard` is no occupation")
+    );
+    assert!(e("site 1 kind=Castle").starts_with("people line 1: `Castle` is no site kind"));
 
     let e = |text: &str| parse_script(text).expect_err("refused");
     assert!(e("1 talk 1").starts_with("script line 1:"));
@@ -295,6 +302,15 @@ fn people_answer_the_quest_queries() {
         q(&mut h, F_OURS, std::slice::from_ref(&rufus)),
         Ok(W::Bool(false))
     );
+    // No site, no owner: refused, never a made-up `Site(0)` / `Person(0)`.
+    assert!(matches!(
+        q(&mut h, F_CREATURE_SITE, std::slice::from_ref(&rufus)),
+        Err(QueryError::Failed(_))
+    ));
+    assert!(matches!(
+        q(&mut h, F_PERSON_OWNER, &[handle("Person", 1)]),
+        Err(QueryError::Failed(_))
+    ));
     // An unknown entity is a fault, not a guess; a query the stub does not answer says which.
     assert!(matches!(
         q(&mut h, F_PERSON_ALIVE, &[handle("Person", 99)]),

@@ -98,8 +98,9 @@ pub(crate) fn check_program(program: &Program, host_api_version: u32) -> Result<
 }
 
 /// Whether `roles` (`VmConfig::roles`) are the roles of `program`'s quest: each given role is one of them
-/// and given once, each required one is given, each value fits its role's type. Else
-/// [`LoadError::Role`] naming the first role at fault. A program without a quest takes none.
+/// and given once, each required one is given, each value fits its role's type (a struct by its name too,
+/// [`names_fit`]). Else [`LoadError::Role`] naming the first role at fault. A program without a quest takes
+/// none.
 pub(crate) fn check_roles(
     program: &Program,
     roles: &[(String, WireValue)],
@@ -115,7 +116,7 @@ pub(crate) fn check_roles(
     }
     for r in quest_roles {
         let ok = match roles.iter().find(|(n, _)| n == &r.name) {
-            Some((_, v)) => fits(&program.types, r.ty, v),
+            Some((_, v)) => fits(&program.types, r.ty, v) && names_fit(program, r.ty, v),
             None => r.optional,
         };
         if !ok {
@@ -123,6 +124,21 @@ pub(crate) fn check_roles(
         }
     }
     Ok(())
+}
+
+/// The struct type an entity of any kind fits (a host's `Entity { id }`): a role of it takes any handle.
+pub const ANY_ENTITY: &str = "Entity";
+
+/// Whether a role value's struct name is its type's: `fits` compares shapes only, and the entity handles
+/// (`Person`, `Creature`, `Site`, …) share one, so a `Site` would pass for a `Creature`. A struct type named
+/// [`ANY_ENTITY`] takes a struct of any name; a value of another type is left to `fits`.
+fn names_fit(program: &Program, t: TypeId, v: &WireValue) -> bool {
+    match (program.types.desc(t), v) {
+        (Ok(TypeDesc::Struct { name, .. }), WireValue::Struct { name: given, .. }) => {
+            name == ANY_ENTITY || name == given
+        }
+        _ => true,
+    }
 }
 
 /// The result of one [`Vm::debug_run`].

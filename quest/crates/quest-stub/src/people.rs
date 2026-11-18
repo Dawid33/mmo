@@ -30,6 +30,11 @@ use state_hash::StateHash;
 use crate::api::*;
 use crate::namespace::error;
 
+mod script;
+
+pub use script::{Input, parse_script, parse_wire};
+use script::{ids, int, strip_comment, unquote, words};
+
 /// What an entity is: its handle's struct name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EntityKind {
@@ -273,8 +278,9 @@ impl People {
         };
         let b = WireValue::Bool;
         let n = WireValue::Int;
-        let answer = (|| -> Result<WireValue, QueryError> {
-            Ok(match f {
+        // `Ok(None)`: not a query the people answer.
+        let answer = (|| -> Result<Option<WireValue>, QueryError> {
+            Ok(Some(match f {
                 F_HAS_TAG | F_PERSON_HAS_TAG | F_CREATURE_HAS_TAG => {
                     b(self.has_tag(id(0)?, text(1)?))
                 }
@@ -283,7 +289,7 @@ impl People {
                         .zip(int_of(args.get(1)))
                         .ok_or_else(bad)?;
                     if sides <= 0 {
-                        return Ok(n(0));
+                        return Ok(Some(n(0)));
                     }
                     // `sides > 0`: the remainder is below `i64::MAX`.
                     n((roll(ctx.tick, salt as u64, 0) % sides as u64) as i64)
@@ -304,8 +310,22 @@ impl People {
                     "Occupation::{}",
                     ent(0)?.occupation.as_deref().unwrap_or("None")
                 )),
-                F_PERSON_SITE | F_CREATURE_SITE => handle("Site", ent(0)?.site.unwrap_or(0)),
-                F_PERSON_OWNER | F_CREATURE_OWNER => handle("Person", ent(0)?.owner.unwrap_or(0)),
+                // The API's `site` and `owner` are not optional: an entity without one is refused (a
+                // condition counts the fault as false), never given a made-up `Site(0)`.
+                F_PERSON_SITE | F_CREATURE_SITE => {
+                    let i = id(0)?;
+                    let site = ent(0)?
+                        .site
+                        .ok_or_else(|| QueryError::Failed(format!("{i} has no site")))?;
+                    handle("Site", site)
+                }
+                F_PERSON_OWNER | F_CREATURE_OWNER => {
+                    let i = id(0)?;
+                    let owner = ent(0)?
+                        .owner
+                        .ok_or_else(|| QueryError::Failed(format!("{i} has no owner")))?;
+                    handle("Person", owner)
+                }
                 F_PERSON_KIND | F_CREATURE_KIND => {
                     let e = ent(0)?;
                     WireValue::Str(e.kind_word.clone().unwrap_or_else(|| e.kind.word().into()))
@@ -346,13 +366,10 @@ impl People {
                     };
                     b(rel(x, y) || rel(y, x))
                 }
-                _ => return Err(QueryError::Failed(String::new())),
-            })
+                _ => return Ok(None),
+            }))
         })();
-        match answer {
-            Err(QueryError::Failed(m)) if m.is_empty() => None,
-            other => Some(other),
-        }
+        answer.transpose()
     }
 }
 
@@ -388,93 +405,18 @@ impl StateHash for People {
     }
 }
 
-// ---- text ---------------------------------------------------------------------------------------------
-
-/// Splits a line into words at whitespace outside quotes and brackets; `None` on an unclosed one.
-fn words(line: &str) -> Option<Vec<&str>> {
-    let mut out = Vec::new();
-    let (mut depth, mut quoted, mut start) = (0i32, false, None);
-    let mut escaped = false;
-    for (i, c) in line.char_indices() {
-        if quoted {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => quoted = false,
-                _ => {}
-            }
-            continue;
-        }
-        match c {
-            '"' => quoted = true,
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            c if c.is_whitespace() && depth == 0 => {
-                if let Some(s) = start.take() {
-                    out.push(&line[s..i]);
-                }
-                continue;
-            }
-            _ => {}
-        }
-        if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if quoted || depth != 0 {
-        return None;
-    }
-    if let Some(s) = start {
-        out.push(&line[s..]);
-    }
-    Some(out)
-}
-
-/// A line without its comment (a `#` outside quotes).
-fn strip_comment(line: &str) -> &str {
-    let mut quoted = false;
-    for (i, c) in line.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            '#' if !quoted => return &line[..i],
-            _ => {}
-        }
-    }
-    line
-}
-
-/// A quoted string's contents (`\"` and `\\` unescaped), or the word itself.
-fn unquote(s: &str) -> Result<String, String> {
-    let Some(inner) = s.strip_prefix('"') else {
-        return Ok(s.to_string());
-    };
-    let inner = inner
-        .strip_suffix('"')
-        .ok_or_else(|| format!("unclosed string {s}"))?;
-    let mut out = String::new();
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            out.push(chars.next().ok_or("a string ends in `\\`")?);
-        } else {
-            out.push(c);
-        }
-    }
-    Ok(out)
-}
-
-fn int(s: &str) -> Result<i64, String> {
-    s.parse::<i64>()
-        .map_err(|_| format!("`{s}` is not an integer"))
-}
-
-fn ids(s: &str) -> Result<BTreeSet<i64>, String> {
-    s.split(',').filter(|x| !x.is_empty()).map(int).collect()
-}
-
 /// Parses a `people.txt` (module docs). An error names its line (1-based).
 pub fn parse_people(text: &str) -> Result<People, String> {
     let mut people = People::default();
+    let api = stub_api();
+    let variants = |name: &str| -> Vec<String> {
+        api.enums
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.variants.clone())
+            .unwrap_or_default()
+    };
+    let (occupations, site_kinds) = (variants("Occupation"), variants("SiteKind"));
     for (k, raw) in text.lines().enumerate() {
         let at = |e: String| format!("people line {}: {e}", k + 1);
         let line = strip_comment(raw);
@@ -530,9 +472,21 @@ pub fn parse_people(text: &str) -> Result<People, String> {
             let value = unquote(value).map_err(at)?;
             match key {
                 "name" => e.name = value,
+                "occupation" if !occupations.contains(&value) => {
+                    return Err(at(format!(
+                        "`{value}` is no occupation ({})",
+                        occupations.join(", ")
+                    )));
+                }
                 "occupation" => e.occupation = Some(value),
                 "site" => e.site = Some(int(&value).map_err(at)?),
                 "owner" => e.owner = Some(int(&value).map_err(at)?),
+                "kind" if kind == EntityKind::Site && !site_kinds.contains(&value) => {
+                    return Err(at(format!(
+                        "`{value}` is no site kind ({})",
+                        site_kinds.join(", ")
+                    )));
+                }
                 "kind" => e.kind_word = Some(value),
                 "open_ground" => e.open_ground = Some(int(&value).map_err(at)?),
                 "region" => e.region = int(&value).map_err(at)?,
@@ -567,362 +521,4 @@ pub fn parse_people(text: &str) -> Result<People, String> {
         people.entities.insert(id, e);
     }
     Ok(people)
-}
-
-/// One scripted input (`script.txt`, or the CLI), at a tick.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Input {
-    /// `talk <player> <npc>`.
-    Talk { player: i64, npc: i64 },
-    /// `pick <player> <n>`: option `n` (1-based) of the offer the player has.
-    Pick { player: i64, option: u32 },
-    /// `leave <player>`: walks away from the conversation.
-    Leave { player: i64 },
-    /// `done <player>`: the end acknowledgement.
-    Done { player: i64 },
-    /// `event <Name> <field>=<wire>… [@<part>]`: a host or script event to the home, or to the part.
-    Event {
-        name: String,
-        /// Each field's wire literal, parsed when delivered (a `Player(1)` takes its name then).
-        fields: Vec<(String, String)>,
-        part: Option<String>,
-    },
-    /// `near <player> <entity>`: `PlayerNear` to the parts anchored on the entity.
-    Near { player: i64, entity: i64 },
-    /// `kill <victim> [by <player>]`.
-    Kill { victim: i64, by: Option<i64> },
-    /// `lose <entity>`: the role bound to it stops resolving.
-    Lose { entity: i64 },
-    /// `ambient <npc> <npc>…`: the ambient schedule casts from these idle people.
-    Ambient { npcs: Vec<i64> },
-    /// `edit <dir>`: the script is edited (the world's edit hook compiles it).
-    Edit { dir: String },
-}
-
-/// Parses a `script.txt`: `<tick> <verb> <args>` per line (`#` comments). Ticks may not go down. An error
-/// names its line (1-based).
-pub fn parse_script(text: &str) -> Result<Vec<(u64, Input)>, String> {
-    let mut out: Vec<(u64, Input)> = Vec::new();
-    for (k, raw) in text.lines().enumerate() {
-        let at = |e: String| format!("script line {}: {e}", k + 1);
-        let ws =
-            words(strip_comment(raw)).ok_or_else(|| at("an unclosed quote or bracket".into()))?;
-        let Some((&tick, rest)) = ws.split_first() else {
-            continue;
-        };
-        let tick: u64 = tick
-            .parse()
-            .map_err(|_| at(format!("`{tick}` is not a tick")))?;
-        if out.last().is_some_and(|(t, _)| *t > tick) {
-            return Err(at(format!("tick {tick} is earlier than the line before")));
-        }
-        let (&verb, args) = rest
-            .split_first()
-            .ok_or_else(|| at("an input is missing".into()))?;
-        let arg = |i: usize| -> Result<i64, String> {
-            int(args
-                .get(i)
-                .ok_or_else(|| at(format!("`{verb}` needs more arguments")))?)
-            .map_err(at)
-        };
-        let exact = |n: usize| -> Result<(), String> {
-            if args.len() == n {
-                Ok(())
-            } else {
-                Err(at(format!("`{verb}` takes {n} arguments")))
-            }
-        };
-        let input = match verb {
-            "talk" => {
-                exact(2)?;
-                Input::Talk {
-                    player: arg(0)?,
-                    npc: arg(1)?,
-                }
-            }
-            "pick" => {
-                exact(2)?;
-                let option = u32::try_from(arg(1)?)
-                    .ok()
-                    .filter(|n| *n >= 1)
-                    .ok_or_else(|| at("an option is numbered from 1".into()))?;
-                Input::Pick {
-                    player: arg(0)?,
-                    option,
-                }
-            }
-            "leave" | "done" => {
-                exact(1)?;
-                let player = arg(0)?;
-                if verb == "leave" {
-                    Input::Leave { player }
-                } else {
-                    Input::Done { player }
-                }
-            }
-            "near" => {
-                exact(2)?;
-                Input::Near {
-                    player: arg(0)?,
-                    entity: arg(1)?,
-                }
-            }
-            "kill" => {
-                let by = match args.len() {
-                    1 => None,
-                    3 if args[1] == "by" => Some(arg(2)?),
-                    _ => return Err(at("`kill <victim> [by <player>]`".into())),
-                };
-                Input::Kill {
-                    victim: arg(0)?,
-                    by,
-                }
-            }
-            "lose" => {
-                exact(1)?;
-                Input::Lose { entity: arg(0)? }
-            }
-            "ambient" => {
-                if args.is_empty() {
-                    return Err(at("`ambient` names the idle people".into()));
-                }
-                Input::Ambient {
-                    npcs: (0..args.len()).map(arg).collect::<Result<_, _>>()?,
-                }
-            }
-            "edit" => {
-                exact(1)?;
-                Input::Edit {
-                    dir: unquote(args[0]).map_err(at)?,
-                }
-            }
-            "event" => {
-                let (&name, mut rest) = args
-                    .split_first()
-                    .ok_or_else(|| at("`event` names the event".into()))?;
-                let mut part = None;
-                if let Some((last, init)) = rest.split_last()
-                    && let Some(p) = last.strip_prefix('@')
-                {
-                    part = Some(p.to_string());
-                    rest = init;
-                }
-                let mut fields = Vec::new();
-                for w in rest {
-                    let (f, v) = w
-                        .split_once('=')
-                        .ok_or_else(|| at(format!("`{w}` is not field=value")))?;
-                    parse_wire(v, &People::default()).map_err(at)?;
-                    fields.push((f.to_string(), v.to_string()));
-                }
-                Input::Event {
-                    name: name.to_string(),
-                    fields,
-                    part,
-                }
-            }
-            other => return Err(at(format!("unknown input `{other}`"))),
-        };
-        out.push((tick, input));
-    }
-    Ok(out)
-}
-
-/// Most nesting a wire literal may have.
-const WIRE_DEPTH_MAX: u32 = 32;
-
-/// Parses a wire literal: an int, a float with a `.`, a `"string"`, `true` / `false`, `None`, `Some(v)`,
-/// `[a, b]`, `Enum::Variant` (a host enum keeps its qualified name, `Occupation::Smith`; another is the
-/// bare variant), an entity handle `Person(3)` (`Player(1)` takes its name from `people`), and a struct
-/// `Name(field=v, …)`.
-pub fn parse_wire(text: &str, people: &People) -> Result<WireValue, String> {
-    let mut p = WireParser {
-        s: text.as_bytes(),
-        at: 0,
-        people,
-    };
-    let v = p.value(0)?;
-    p.ws();
-    if p.at != p.s.len() {
-        return Err(format!("`{text}`: unexpected text after the value"));
-    }
-    Ok(v)
-}
-
-struct WireParser<'a> {
-    s: &'a [u8],
-    at: usize,
-    people: &'a People,
-}
-
-impl WireParser<'_> {
-    fn ws(&mut self) {
-        while self.s.get(self.at).is_some_and(u8::is_ascii_whitespace) {
-            self.at += 1;
-        }
-    }
-
-    fn eat(&mut self, c: u8) -> bool {
-        self.ws();
-        if self.s.get(self.at) == Some(&c) {
-            self.at += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn word(&mut self) -> String {
-        self.ws();
-        let start = self.at;
-        while self
-            .s
-            .get(self.at)
-            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b':' | b'-' | b'.'))
-        {
-            self.at += 1;
-        }
-        String::from_utf8_lossy(&self.s[start..self.at]).into_owned()
-    }
-
-    fn value(&mut self, depth: u32) -> Result<WireValue, String> {
-        if depth > WIRE_DEPTH_MAX {
-            return Err("a wire literal nests too deeply".into());
-        }
-        self.ws();
-        match self.s.get(self.at) {
-            Some(b'"') => self.string(),
-            Some(b'[') => {
-                self.at += 1;
-                let items = self.list(b']', depth)?;
-                Ok(WireValue::List(items))
-            }
-            Some(_) => {
-                let w = self.word();
-                if w.is_empty() {
-                    return Err("a value is missing".into());
-                }
-                self.after_word(w, depth)
-            }
-            None => Err("a value is missing".into()),
-        }
-    }
-
-    fn string(&mut self) -> Result<WireValue, String> {
-        let start = self.at;
-        self.at += 1;
-        let mut escaped = false;
-        while let Some(&c) = self.s.get(self.at) {
-            self.at += 1;
-            match c {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
-                b'"' => {
-                    let text = String::from_utf8_lossy(&self.s[start..self.at]);
-                    return unquote(&text).map(WireValue::Str);
-                }
-                _ => {}
-            }
-        }
-        Err("an unclosed string".into())
-    }
-
-    fn list(&mut self, close: u8, depth: u32) -> Result<Vec<WireValue>, String> {
-        let mut items = Vec::new();
-        if self.eat(close) {
-            return Ok(items);
-        }
-        loop {
-            items.push(self.value(depth + 1)?);
-            if self.eat(close) {
-                return Ok(items);
-            }
-            if !self.eat(b',') {
-                return Err("expected `,` or a closing bracket".into());
-            }
-        }
-    }
-
-    fn after_word(&mut self, w: String, depth: u32) -> Result<WireValue, String> {
-        match w.as_str() {
-            "true" => return Ok(WireValue::Bool(true)),
-            "false" => return Ok(WireValue::Bool(false)),
-            "None" => return Ok(variant("None".into())),
-            _ => {}
-        }
-        if w.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
-            if w.contains('.') {
-                return w
-                    .parse::<f64>()
-                    .map(WireValue::Float)
-                    .map_err(|_| format!("`{w}` is not a number"));
-            }
-            return int(&w).map(WireValue::Int);
-        }
-        if !self.eat(b'(') {
-            return Ok(match w.split_once("::") {
-                Some((e, v)) if !stub_api().enums.iter().any(|x| x.name == e) => {
-                    variant(v.to_string())
-                }
-                _ => variant(w),
-            });
-        }
-        // `Name(…)`: positional (an entity handle, `Some`, `Prefab`) or named fields.
-        let save = self.at;
-        let named = {
-            let f = self.word();
-            !f.is_empty() && self.eat(b'=')
-        };
-        self.at = save;
-        if !named {
-            let args = self.list(b')', depth)?;
-            return match (w.as_str(), args.as_slice()) {
-                ("Some", [v]) => Ok(WireValue::Variant {
-                    name: "Some".into(),
-                    fields: vec![("value".into(), v.clone())],
-                }),
-                ("Player", [WireValue::Int(id)]) => Ok(WireValue::Struct {
-                    name: "Player".into(),
-                    fields: vec![
-                        ("id".into(), WireValue::Int(*id)),
-                        (
-                            "name".into(),
-                            WireValue::Str(
-                                self.people
-                                    .entities
-                                    .get(id)
-                                    .map(|e| e.name.clone())
-                                    .unwrap_or_default(),
-                            ),
-                        ),
-                    ],
-                }),
-                ("Prefab", [WireValue::Str(n)]) => Ok(WireValue::Struct {
-                    name: "Prefab".into(),
-                    fields: vec![("name".into(), WireValue::Str(n.clone()))],
-                }),
-                (_, [WireValue::Int(id)]) => Ok(handle(&w, *id)),
-                (_, []) => Ok(WireValue::Struct {
-                    name: w,
-                    fields: vec![],
-                }),
-                _ => Err(format!("`{w}(…)`: give its fields by name")),
-            };
-        }
-        let mut fields = Vec::new();
-        loop {
-            let f = self.word();
-            if f.is_empty() || !self.eat(b'=') {
-                return Err(format!("`{w}(…)`: expected `field=value`"));
-            }
-            fields.push((f, self.value(depth + 1)?));
-            if self.eat(b')') {
-                break;
-            }
-            if !self.eat(b',') {
-                return Err(format!("`{w}(…)`: expected `,` or `)`"));
-            }
-        }
-        Ok(WireValue::Struct { name: w, fields })
-    }
 }
