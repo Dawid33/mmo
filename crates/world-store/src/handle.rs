@@ -817,6 +817,21 @@ impl StoreHandle {
         }
     }
 
+    /// Elastic 3: super-region `a.sr` given to host `a.host` of boot `a.boot` if the row is
+    /// absent (epoch 1) or free (epoch + 1) and that boot's `hosts` row is live, dirty and not
+    /// draining — test support: the coordinator assigns only inside its transition
+    /// ([`StoreDecision::AssignLand`]); here in a transition of its own over the row as it
+    /// stands. Refused, nothing written: [`game::coordinator::Assigned::Owned`],
+    /// [`game::coordinator::Assigned::HostNotLive`], [`game::coordinator::Assigned::HostDraining`].
+    /// The lock walk is in `succession.rs`. Postgres only (`Unsupported` on SQLite).
+    #[doc(hidden)]
+    pub fn assign_land(&self, a: game::coordinator::AssignLand) -> Result<game::coordinator::Assigned, StoreError> {
+        match self.decide_alone(StoreDecision::AssignLand(a))? {
+            Decided::Assigned { outcome, .. } => outcome,
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// R4, `worldctl retire-host` while other hosts live: host `ordinal`'s dirty live row gets
     /// `seen_ms = 0` (vouched dead, as a boot of its ordinal would), unless it beat within the
     /// lease ([`crate::Vouched::Running`]) — one statement under the row's lock, so a beat

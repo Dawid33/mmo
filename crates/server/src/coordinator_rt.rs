@@ -2122,7 +2122,7 @@ impl CoordinatorRuntime {
                 DecisionAnswer::Cut { cut, committed: Err(e), .. } => {
                     self.warn_cuts(now, &format!("world cut {}: its decision could not be recorded ({e}); looking it up", cut.0));
                 }
-                DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } => {}
+                DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } | DecisionAnswer::Assigned { .. } => {}
                 DecisionAnswer::Declared { outcome, .. } => {
                     let Some(p) = self.successions.as_mut() else { continue };
                     match outcome {

@@ -102,6 +102,40 @@
 //! re-claims nothing for a landless host. A drain mark and a vouch wait for the row as for a
 //! declaration. Nothing waits for a lock the end holds while that holder waits for it.
 //!
+//! **Assigning a free super-region** (`assign.rs` `assign_land_in`, Elastic 3): in the
+//! coordinator's transition, in its savepoint, under `lock_timeout` = the cut lock timeout. The
+//! `coordinator` row is already held (the compare-and-set). Then, in this order:
+//! 1. `SELECT drain_at_ms FROM hosts WHERE id = $h AND boot = $b AND state = LIVE AND clean = 0
+//!    FOR SHARE`. No row → `HostNotLive`; a drain mark → `HostDraining`.
+//! 2. `INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $h, 1) ON CONFLICT (sx,
+//!    sz) DO NOTHING RETURNING epoch`.
+//! 3. If that inserted no row: `UPDATE super_regions SET owner = $h, epoch = epoch + 1 WHERE sx
+//!    = $1 AND sz = $2 AND owner = -1 RETURNING epoch`. No row → `Owned`.
+//!
+//! Why no cycle:
+//! - Every coordinator decision runs under the `coordinator` row, so an assignment never runs
+//!   beside a declaration, an end of a landless host or another assignment.
+//! - Its walk is `coordinator` → `hosts` (one row, share) → `super_regions` (one row). The
+//!   declaration's is `coordinator` → `world` → `hosts` → `super_regions`; a registration's is
+//!   `world` → `hosts` → `successions` → `hosts` → `super_regions`. `hosts` before
+//!   `super_regions` in all three.
+//! - A host's re-claim of its own rows (`claim_super_regions_live`: `super_regions`, then its
+//!   `hosts` row) locks only rows it owns; an assignment writes only a free or absent row. They
+//!   share no `super_regions` row.
+//! - Statements 2 and 3 never wait for a staged part. A row a part holds is owned in every
+//!   committed snapshot: `ON CONFLICT DO NOTHING` sees it, and the `UPDATE`'s `WHERE owner = -1`
+//!   does not match it, so no row lock is requested. A part that RELEASES the row is the same
+//!   case until its `COMMIT PREPARED`.
+//! - The share lock on the assignee's `hosts` row is held until the transition commits. The
+//!   assignee's beat (`UPDATE hosts SET seen_ms …`) waits behind it, under its own 1 s
+//!   `lock_timeout`, as it does behind a declaration. A total-crash registration that would
+//!   mark the row dead waits too, then reads `super_regions` in a later statement and sees the
+//!   assignment. A drain mark (one `UPDATE` of that row) waits likewise: one that committed
+//!   first is seen (`HostDraining`), one after it finds land the host then leaves with.
+//!
+//! Cost: at most `ASSIGN_PER_PASS_MAX` (64) assignments per transition; each is three
+//! single-row statements.
+//!
 //! **A cut's begin** (`two_phase::begin_in`, Elastic 1 Task 4): in the transition that starts
 //! the cut, after its compare-and-set holds `coordinator`, a PLAIN read of `world.next_host_id`
 //! (no lock: a registration holding the world row commits its id before the read — below the
@@ -134,7 +168,8 @@
 //!    transition, in order, in its own `SAVEPOINT`, its body WITHOUT a `coordinator` lock of its
 //!    own (the row is held already, in a stronger mode than the `FOR SHARE` each took before):
 //!    `two_phase::decide_in` (minus `finish_staged`, a post-commit effect), `two_phase::begin_in`,
-//!    [`declare_in`], [`end_landless_in`], [`rollback_world_in`] (conditional on its generation).
+//!    [`declare_in`], [`end_landless_in`], [`rollback_world_in`] (conditional on its generation),
+//!    `assign::assign_land_in` (Elastic 3).
 //!    A domain refusal or an error inside — a SQL error, a deadlock (`40P01`), a `lock_timeout`
 //!    (`55P03`, a staged part holding a predecessor's rows), a stale generation — is
 //!    `ROLLBACK TO SAVEPOINT` and that decision's answer: nothing of it is written, it is decided

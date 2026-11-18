@@ -5,6 +5,7 @@
 //! [`StoreHandle`]; `fence` is the owner-epoch fencing of writes; `rows` is the SQL.
 
 pub mod ctl;
+mod assign;
 mod codec;
 mod coordinator_tx;
 mod counters;

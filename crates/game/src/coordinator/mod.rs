@@ -1360,6 +1360,8 @@ impl Coordinator {
             DecisionAnswer::Ended { stamp, end, .. } => self.successions_ending() == Some((end.host, end.boot, *stamp)),
             DecisionAnswer::RolledBack { stamp, .. } => self.successions_rolling() == Some(*stamp),
             DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } => true,
+            // Elastic 3 Task 3 gives assignments their mark.
+            DecisionAnswer::Assigned { .. } => true,
         }
     }
 
@@ -1386,6 +1388,10 @@ impl Coordinator {
             DecisionAnswer::Ended { stamp, end, outcome } => self.end_answered(stamp, end, outcome, now_ms),
             DecisionAnswer::RolledBack { stamp, outcome } => self.rollback_answered(stamp, outcome, now_ms),
             DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica}'s row is ended"),
+            // Elastic 3 Task 3 acts on it; nothing issues one before.
+            DecisionAnswer::Assigned { assign, outcome, .. } => {
+                log::debug!("coordinator: super-region {:?} assigned to host {}: {outcome:?}", assign.sr, assign.host)
+            }
         }
     }
 

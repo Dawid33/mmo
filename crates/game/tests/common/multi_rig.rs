@@ -1071,6 +1071,10 @@ impl MultiRig {
                     DecisionAnswer::RolledBack { stamp, outcome: Ok(self.generation) }
                 }
                 StoreDecision::EndReplica(replica) => DecisionAnswer::ReplicaEnded { replica },
+                StoreDecision::AssignLand(assign) => {
+                    let outcome = self.assign_in_store(assign);
+                    DecisionAnswer::Assigned { stamp, assign, outcome: Ok(outcome) }
+                }
             });
         }
         if answer {
@@ -1872,6 +1876,28 @@ impl MultiRig {
     /// succession names it heir or survivor, else its row is dead — no succession, the
     /// generation untouched. The lapse is the caller's to have seen (the rig vouches a killed
     /// host in its reads, [`Self::drive_leases`]).
+    /// `assign_land_in` against the rig's `super_regions` table ([`Self::with_claims`]): `Done`
+    /// for an absent (epoch 1) or free (epoch + 1) row when the host's row is that live,
+    /// dirty boot and not draining; otherwise the matching refusal, nothing written.
+    pub fn assign_in_store(&mut self, a: game::coordinator::AssignLand) -> game::coordinator::Assigned {
+        use game::coordinator::Assigned;
+        let h = a.host;
+        if self.boots.get(h.0 as usize) != Some(&a.boot) || self.row_dead(h) || self.left.get(&h) == Some(&a.boot) {
+            return Assigned::HostNotLive;
+        }
+        if self.draining.contains(&h) {
+            return Assigned::HostDraining;
+        }
+        let store = self.claim_store.as_mut().expect("with_claims: the rig's super_regions table");
+        let epoch = match store.get(&a.sr).copied() {
+            None => 1,
+            Some((None, epoch)) => epoch + 1,
+            Some((Some(_), _)) => return Assigned::Owned,
+        };
+        store.insert(a.sr, (Some(h), epoch));
+        Assigned::Done { epoch }
+    }
+
     pub fn end_landless_in_store(&mut self, end: game::coordinator::EndLandless) -> game::LandlessEnd {
         let (h, boot) = (end.host, end.boot);
         if self.boots[h.0 as usize] != boot || self.row_dead(h) || self.left.get(&h) == Some(&boot) {

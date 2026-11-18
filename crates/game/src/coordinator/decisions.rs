@@ -1,5 +1,6 @@
 //! The coordinator's store decisions (Elastic 2b Task 3): deciding a world cut, recording a
-//! cut's begin, declaring a succession, ending a landless host, rolling the world back. Each
+//! cut's begin, declaring a succession, ending a landless host, rolling the world back,
+//! assigning a free super-region (Elastic 3). Each
 //! is handed out by the core as part of a transition ([`super::Transition::decisions`]) and
 //! runs INSIDE the transaction that writes that transition's projection — a savepoint after the
 //! compare-and-set of the row (`world_store` `coordinator_tx.rs`). The core and its decisions
@@ -66,6 +67,31 @@ pub enum StoreDecision {
     Rollback { from: u64 },
     /// Mark a replica's row dead (Elastic 2b Task 4).
     EndReplica(ReplicaId),
+    /// Give a free (or absent) super-region to a live host (Elastic 3; `world_store`
+    /// `assign::assign_land_in`).
+    AssignLand(AssignLand),
+}
+
+/// Elastic 3: super-region `sr` given to host `host` of boot `boot` — only if the row is free
+/// or absent and that boot's `hosts` row is live, dirty and not draining.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignLand {
+    pub sr: crate::SuperRegion,
+    pub host: HostId,
+    pub boot: u64,
+}
+
+/// What an [`AssignLand`] did. Only `Done` wrote anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Assigned {
+    /// The row is the host's now, at `epoch` (1 for an absent row, else the free row's + 1).
+    Done { epoch: u64 },
+    /// Another host holds the row (or a staged part's release is not committed yet).
+    Owned,
+    /// The host's row is not that boot's, dead, or cleanly left.
+    HostNotLive,
+    /// The host's row carries a drain mark: it takes no new land.
+    HostDraining,
 }
 
 /// The store's answer to one [`StoreDecision`] of a committed transition. An `Err` is the
@@ -79,4 +105,5 @@ pub enum DecisionAnswer {
     Ended { stamp: CallStamp, end: EndLandless, outcome: Result<LandlessEnd, String> },
     RolledBack { stamp: CallStamp, outcome: Result<u64, String> },
     ReplicaEnded { replica: ReplicaId },
+    Assigned { stamp: CallStamp, assign: AssignLand, outcome: Result<Assigned, String> },
 }

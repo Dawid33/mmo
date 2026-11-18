@@ -1,7 +1,7 @@
 //! The coordinator's transition (Elastic 2b Task 3): ONE transaction holding the
 //! compare-and-set of its row and every store decision the transition carries — deciding a
 //! world cut, recording a cut's begin, declaring a succession, ending a landless host, rolling
-//! the world back. The core and its decisions commit or fail together: the store never holds a
+//! the world back, assigning a free super-region (Elastic 3). The core and its decisions commit or fail together: the store never holds a
 //! decision no committed core knows, and a replica whose cache is stale issues nothing (its
 //! compare-and-set fails first — issuing IS committing). The row's `version` is the
 //! coordinator's only fence; its `epoch` column is read by nothing but the bootstrap.
@@ -29,7 +29,7 @@
 //! same effect, never beside it — a committed cut announced to the terrain listeners. A replica that dies first leaves them to the existing
 //! lookups (a host's `cut_decided`, a start's `resolve_prepared`, the listeners' poll).
 
-use game::coordinator::{CallStamp, DecisionAnswer, ReplicaId, StoreDecision};
+use game::coordinator::{AssignLand, Assigned, CallStamp, DecisionAnswer, ReplicaId, StoreDecision};
 use game::{CutId, Declared, HostId, LandlessEnd, Tick};
 use sqlx::{PgPool, Row};
 
@@ -120,6 +120,7 @@ pub(crate) enum Decided {
     Ended { end: game::coordinator::EndLandless, outcome: Result<LandlessEnd, StoreError> },
     RolledBack(Result<u64, StoreError>),
     ReplicaEnded { replica: ReplicaId, #[allow(dead_code)] outcome: Result<(), StoreError> },
+    Assigned { assign: AssignLand, outcome: Result<Assigned, StoreError> },
 }
 
 /// The dials a decision runs with (the store thread's).
@@ -273,6 +274,7 @@ fn refused(d: &StoreDecision, e: StoreError) -> Decided {
         StoreDecision::EndLandless(end) => Decided::Ended { end: *end, outcome: Err(e) },
         StoreDecision::Rollback { .. } => Decided::RolledBack(Err(e)),
         StoreDecision::EndReplica(replica) => Decided::ReplicaEnded { replica: *replica, outcome: Err(e) },
+        StoreDecision::AssignLand(a) => Decided::Assigned { assign: *a, outcome: Err(e) },
     }
 }
 
@@ -343,6 +345,11 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
             let keep = ended.is_ok();
             (Decided::ReplicaEnded { replica: *replica, outcome: ended.map(|_| ()) }, keep)
         }
+        StoreDecision::AssignLand(a) => {
+            let outcome = crate::assign::assign_land_in(&mut *tx, a).await;
+            let keep = matches!(outcome, Ok(Assigned::Done { .. }));
+            (Decided::Assigned { assign: *a, outcome }, keep)
+        }
     }
 }
 
@@ -367,6 +374,7 @@ pub(crate) fn answers(w: &TransitionWrite, version: u64, decided: Vec<Decided>) 
             Decided::Ended { end, outcome } => DecisionAnswer::Ended { stamp, end, outcome: outcome.map_err(text) },
             Decided::RolledBack(outcome) => DecisionAnswer::RolledBack { stamp, outcome: outcome.map_err(text) },
             Decided::ReplicaEnded { replica, .. } => DecisionAnswer::ReplicaEnded { replica },
+            Decided::Assigned { assign, outcome } => DecisionAnswer::Assigned { stamp, assign, outcome: outcome.map_err(text) },
         });
     }
     (answers, after)

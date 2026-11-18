@@ -101,9 +101,12 @@ fn a_decision_on_sqlite_is_unsupported() {
     let h = open(&world_store::StoreUrl::Memory);
     h.bootstrap_coordinator(vec![1], vec![10]).unwrap();
     let begin = StoreDecision::BeginCut { cut: CutId(1) };
-    let err = write(&h, transition(1, &[2], None, vec![begin])).unwrap_err();
-    assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
-    assert_eq!(h.load_coordinator().unwrap().map(row), stored(1, &[1], &[10]), "nothing written");
+    let assign = StoreDecision::AssignLand(game::coordinator::AssignLand { sr: (0, 0), host: hid(0), boot: 1 });
+    for d in [begin, assign] {
+        let err = write(&h, transition(1, &[2], None, vec![d])).unwrap_err();
+        assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
+        assert_eq!(h.load_coordinator().unwrap().map(row), stored(1, &[1], &[10]), "nothing written");
+    }
     h.shutdown();
 }
 
