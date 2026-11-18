@@ -439,6 +439,7 @@ impl Vm {
                 RunEnd::OutOfFuel => break,
                 RunEnd::Returned => self.end_task(m, host)?,
                 RunEnd::Parked => self.commit_segment(host)?,
+                RunEnd::Impure => return corrupt("an impure stop outside a pure evaluation"),
                 RunEnd::Faulted {
                     kind,
                     message,

@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand as Kind, Wide};
 use crate::host::HostFnKind;
 use crate::program::{
-    EventInfo, FnInfo, GlobalInfo, HandlerInfo, HostSite, LineEntry, Program, ProgramError,
+    EventInfo, FnInfo, FnSig, GlobalInfo, HandlerInfo, HostSite, LineEntry, Program, ProgramError,
     QuestInfo, Shape,
 };
 use crate::types::{TypeDesc, TypeId, TypeTable};
@@ -225,8 +225,18 @@ impl ProgramBuilder {
             frame_base: 0,
             frame_words: 0, // resolved by finish
             ref_slots: Vec::new(),
+            sig: None,
         });
         FnRef(id)
+    }
+
+    /// Gives a declared function its signature (`FnInfo::sig`): one type per parameter, and the return
+    /// type. Needed by a fn the host evaluates ([`crate::vm::Vm::eval_pure`]).
+    pub fn set_sig(&mut self, f: FnRef, params: Vec<TypeId>, ret: TypeId) {
+        match self.fns.get_mut(usize::from(f.0)) {
+            Some(i) => i.sig = Some(FnSig { params, ret }),
+            None => self.fail("set_sig of an undeclared fn"),
+        }
     }
 
     /// `declare` and start its body.

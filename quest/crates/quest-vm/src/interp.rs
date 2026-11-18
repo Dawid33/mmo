@@ -177,6 +177,31 @@ pub(crate) fn base_fuel(p: &Program, ins: Instr) -> u64 {
     }
 }
 
+/// Whether `ins` has an effect beyond the memory a pure evaluation rolls back (spec §5.11 "Purity"): a
+/// host command (a fallible one's check included) or request, an `await` or a promise's detach, an
+/// `Enqueue`, a timer set or cancelled. A host query, a print and an assertion are pure (a print's
+/// buffered text is rolled back with the rest). Every op is listed: a new one does not compile until it
+/// is classified.
+pub(crate) fn impure(p: &Program, ins: Instr) -> bool {
+    use Op::*;
+    match ins.op {
+        CallHost => p
+            .host_sites
+            .get(usize::from(ins.a))
+            .is_some_and(|s| s.kind != HostFnKind::Query),
+        Await | AwaitAll | PromiseDetach | Enqueue | After | CancelTimer | CancelStageTimers => {
+            true
+        }
+        Nop | LoadSmall | LoadConst | Copy | AddI | SubI | MulI | DivI | RemI | NegI | EqI
+        | NeI | LtI | LeI | AddF | SubF | MulF | DivF | NegF | EqF | NeF | LtF | LeF
+        | IntToFloat | FloatToInt | Not | Jmp | JmpIf | JmpIfNot | TracePush | GetTag | ListLen
+        | Eq | Call | Ret | Dup | Move | Drop | GetField | TakeField | SetField | MakeUnique
+        | GetIndex | TakeIndex | SetIndex | RefLoad | RefTake | RefStore | LoadStr | NewObj
+        | NewList | NewDict | RefMake | RefField | RefIndex | RefKey | GetKey | TakeKey
+        | SetKey | CallBuiltin => false,
+    }
+}
+
 /// Whether a fault of `op` is undone back to the checkpoint taken just before it (module docs): every
 /// `HeapFull`, every fault of the reference instructions, whose walk may have cloned part of a path, and
 /// of the awaits, which park nothing unless they park everything.
@@ -380,6 +405,9 @@ impl Vm {
                 Ok(i) => i,
                 Err(f) => break Stop::Fault(f),
             };
+            if self.pure_eval && impure(&self.program, ins) {
+                break Stop::Impure;
+            }
             m.charge(base_fuel(&self.program, ins));
             let before = self.store.mem.checkpoint();
             match self.exec(fn_id, pc, ins, m, host) {
@@ -402,13 +430,14 @@ impl Vm {
         self.set_header(H_CURRENT_FN, u64::from(fn_id))?;
         let status = match stop {
             Stop::Fuel => STATUS_RUNNING,
-            Stop::Returned | Stop::Parked | Stop::Fault(_) => STATUS_IDLE,
+            Stop::Returned | Stop::Parked | Stop::Impure | Stop::Fault(_) => STATUS_IDLE,
         };
         self.set_header(H_STATUS, status)?;
         Ok(match stop {
             Stop::Fuel => RunEnd::OutOfFuel,
             Stop::Returned => RunEnd::Returned,
             Stop::Parked => RunEnd::Parked,
+            Stop::Impure => RunEnd::Impure,
             Stop::Fault(f) => RunEnd::Faulted {
                 kind: f.kind,
                 message: f.message,
@@ -632,5 +661,7 @@ enum Stop {
     Fuel,
     Returned,
     Parked,
+    /// At an impure instruction of a pure evaluation, before it ran.
+    Impure,
     Fault(Fault),
 }

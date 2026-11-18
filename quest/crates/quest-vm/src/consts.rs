@@ -51,6 +51,10 @@ pub const STRUCT_FIELDS_MAX: usize = 32;
 /// Expression / block nesting in source (`quest-lang`).
 pub const PARSE_DEPTH_MAX: usize = 256;
 
+/// Fuel of one pure evaluation by the dialogue runner (a condition, a substitution): running out counts
+/// as false.
+pub const COND_FUEL: u64 = 500;
+
 /// A read set (dialogue or part) above this many static words gets the `mirror-size` warning (`quest-lang`).
 pub const MIRROR_WORDS_WARN: u32 = 256;
 
@@ -78,5 +82,6 @@ mod tests {
         assert_eq!(STRUCT_FIELDS_MAX, 32);
         assert_eq!(PARSE_DEPTH_MAX, 256);
         assert_eq!(MIRROR_WORDS_WARN, 256);
+        assert_eq!(COND_FUEL, 500);
     }
 }

@@ -73,6 +73,9 @@ pub struct Vm {
     pub(crate) roles: Vec<(String, WireValue)>,
     /// Values an edit kept aside (`migrate`): state outside the memory, saved and hashed with it.
     pub(crate) orphans: Vec<Orphan>,
+    /// Set only for the length of a [`Vm::eval_pure`] (`pure`): the run loop stops at an impure
+    /// instruction. Never state: false whenever no `eval_pure` is running.
+    pub(crate) pure_eval: bool,
 }
 
 /// What [`Vm::new`] and [`Vm::load`] require of a program: this VM's bytecode version, the host's API
@@ -138,6 +141,9 @@ pub enum RunEnd {
     Returned,
     /// The task parked at an `await`: its frames wait in the heap for the promise (`promise`).
     Parked,
+    /// Only in a pure evaluation ([`Vm::eval_pure`]): the next instruction would have had an effect (a
+    /// host command or request, an `await`, `Enqueue`, a timer); it did not run.
+    Impure,
     /// `stack[0]` is the faulting instruction, then each caller's call site, innermost first.
     Faulted {
         kind: FaultKind,
@@ -304,6 +310,7 @@ impl Vm {
             instance,
             roles,
             orphans: Vec::new(),
+            pure_eval: false,
         }
     }
 

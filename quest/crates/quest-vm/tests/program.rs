@@ -5,7 +5,8 @@ use quest_vm::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op};
 use quest_vm::fuel::*;
 use quest_vm::host::HostFnKind;
 use quest_vm::program::{
-    Anchor, FnInfo, GlobalInfo, PartInfo, Program, ProgramError, QuestInfo, RepeatInfo, RoleInfo,
+    Anchor, FnInfo, FnSig, GlobalInfo, PartInfo, Program, ProgramError, QuestInfo, RepeatInfo,
+    RoleInfo,
 };
 use quest_vm::types::TypeDesc;
 
@@ -485,6 +486,7 @@ fn validate_is_fast_on_many_globals_and_frames() {
             frame_base: (i * 3) as u16,
             frame_words: 3,
             ref_slots: vec![],
+            sig: None,
         });
     }
     for i in 0..50_000u32 {
@@ -499,6 +501,29 @@ fn validate_is_fast_on_many_globals_and_frames() {
     let q = Program::from_bytes(&p.to_bytes()).unwrap();
     assert_eq!(q, p);
     assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+}
+
+#[test]
+fn validate_rejects_bad_signature() {
+    // `callee` (fn 1) takes one int; type 0 is `int`.
+    let sig = |params: Vec<u16>, ret: u16| {
+        let mut p = base();
+        p.fns[1].sig = Some(FnSig { params, ret });
+        p
+    };
+    sig(vec![0], 0).validate().unwrap();
+    assert!(invalid(&sig(vec![], 0)).contains("arity"));
+    assert!(invalid(&sig(vec![0, 0], 0)).contains("arity"));
+    assert!(invalid(&sig(vec![9], 0)).contains("out of range"));
+    assert!(invalid(&sig(vec![0], 9)).contains("out of range"));
+    // a heap-kind parameter in a word that is not a ref slot
+    let mut p = sig(vec![0], 0);
+    p.types.0.push(TypeDesc::Str);
+    p.fns[1].sig = Some(FnSig {
+        params: vec![1],
+        ret: 0,
+    });
+    assert!(invalid(&p).contains("ref slot"));
 }
 
 #[test]
@@ -608,6 +633,7 @@ fn full() -> Program {
     let req = pb.declare("$requires::Q", 0);
     let cond = pb.declare("$where::Q::miller", 2);
     let start = pb.declare("$start::Q", 0);
+    pb.set_sig(cond, vec![int, st], int);
     for f in [req, start] {
         let mut b = pb.body(f);
         b.emit(Op::Ret, 0, 0, 0);
@@ -693,9 +719,10 @@ fn roundtrip_bytes_identical() {
 }
 
 #[test]
-fn program_v3_roundtrip() {
+fn program_v4_roundtrip() {
     let p = full();
-    assert_eq!(p.bytecode_version, 3);
+    assert_eq!(p.bytecode_version, 4);
+    assert!(p.fns.iter().any(|f| f.sig.is_some()) && p.fns.iter().any(|f| f.sig.is_none()));
     let q = p.quest.as_ref().expect("a quest");
     assert_eq!(p.events.len(), 1);
     assert_eq!(q.roles.len(), 2);

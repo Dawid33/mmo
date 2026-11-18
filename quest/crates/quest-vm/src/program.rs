@@ -4,7 +4,8 @@
 //! `QSPROG01`, `bytecode_version: u32`, `host_api_version: u32`, `static_words: u16`, `main_fn` (a `u8`
 //! flag, then a `u16` that is 0 when the flag is 0), then each table as a `u32` count followed by its
 //! elements, in the order of the struct's fields: `code` (8 bytes per instruction, see [`Instr::encode`]),
-//! `consts`, `strings` (`u32` length + UTF-8), `shapes`, `types`, `fns`, `globals`, `handlers` (each
+//! `consts`, `strings` (`u32` length + UTF-8), `shapes`, `types`, `fns` (each with an optional
+//! signature), `globals`, `handlers` (each
 //! with its owner and an optional stage), `events`, then `quest` (a `u8` flag, then the [`QuestInfo`] when
 //! it is 1), `host_sites`, `lines`, `files`. Nothing may follow. Every flag and optional is a `u8` 0 or 1
 //! (an optional's value follows a 1 only). The encoding is canonical: bytes that parse are exactly
@@ -74,6 +75,16 @@ pub struct FnInfo {
     pub frame_words: u16,
     /// Frame-relative words holding heap kinds.
     pub ref_slots: Vec<u16>,
+    /// The parameter and return types, when the fn can be called from outside the program
+    /// ([`crate::vm::Vm::eval_pure`] needs them); `None` for a fn only the program itself calls.
+    pub sig: Option<FnSig>,
+}
+
+/// A fn's parameter types (one per parameter slot) and return type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FnSig {
+    pub params: Vec<TypeId>,
+    pub ret: TypeId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -570,6 +581,11 @@ impl Program {
             for s in &f.ref_slots {
                 w.u16(*s);
             }
+            w.flag(f.sig.is_some());
+            if let Some(sig) = &f.sig {
+                w.u16s(&sig.params);
+                w.u16(sig.ret);
+            }
         }
         w.count(self.globals.len());
         for g in &self.globals {
@@ -660,6 +676,14 @@ impl Program {
                 frame_base: r.u16()?,
                 frame_words: r.u16()?,
                 ref_slots: r.vec(|r| r.u16())?,
+                sig: if r.flag()? {
+                    Some(FnSig {
+                        params: r.vec(|r| r.u16())?,
+                        ret: r.u16()?,
+                    })
+                } else {
+                    None
+                },
             })
         })?;
         let globals = r.vec_ids(|r| {
@@ -830,6 +854,24 @@ impl Program {
             }
             if f.ref_slots.iter().any(|&s| s >= f.frame_words) {
                 return invalid(format!("fn {i} has a ref slot outside its frame"));
+            }
+            if let Some(sig) = &f.sig {
+                if sig.params.len() != usize::from(f.params) {
+                    return invalid(format!("fn {i}: its signature's arity is not its own"));
+                }
+                if usize::from(sig.ret) >= ntypes
+                    || sig.params.iter().any(|&t| usize::from(t) >= ntypes)
+                {
+                    return invalid(format!("fn {i}: its signature names a type out of range"));
+                }
+                // A parameter word holds a heap kind exactly when its type is one.
+                for (w, &t) in (3u16..).zip(&sig.params) {
+                    if f.ref_slots.binary_search(&w).is_ok() != self.types.is_ref(t) {
+                        return invalid(format!(
+                            "fn {i}: a parameter's ref slot disagrees with its signature"
+                        ));
+                    }
+                }
             }
         }
         let mut by_code: Vec<(u32, u32)> = self.fns.iter().map(|f| (f.entry, f.end)).collect();

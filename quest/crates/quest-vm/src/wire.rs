@@ -36,6 +36,8 @@ use crate::object::{check_obj_shape, hdr, obj, release};
 use crate::store::Store;
 use crate::string;
 use crate::types::{TypeDesc, TypeId, TypeTable};
+use state_hash::{StateHash, hash_len};
+use std::hash::Hasher;
 
 const NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
 
@@ -1211,5 +1213,86 @@ fn fields_fit<'w>(
 fn drop_value(st: &mut Store, heap: Heap, types: &TypeTable, t: TypeId, v: u64) {
     if types.is_ref(t) {
         let _ = release(st, heap, v);
+    }
+}
+
+// ---- state hash --------------------------------------------------------------------------------------
+
+/// Kinds of [`WireValue`] in its state hash.
+const H_UNIT: u8 = 0;
+const H_BOOL: u8 = 1;
+const H_INT: u8 = 2;
+const H_FLOAT: u8 = 3;
+const H_STR: u8 = 4;
+const H_LIST: u8 = 5;
+const H_DICT: u8 = 6;
+const H_STRUCT: u8 = 7;
+const H_VARIANT: u8 = 8;
+
+impl StateHash for WireValue {
+    /// Pre-order: each value's kind, then its scalar, or its length (and name) before its children (a
+    /// struct's field names with them). Floats by canonical bits. From an explicit stack: a value can
+    /// nest arbitrarily deep.
+    fn state_hash<H: Hasher>(&self, h: &mut H) {
+        enum Tok<'a> {
+            Val(&'a WireValue),
+            Name(&'a str),
+        }
+        let mut stack = vec![Tok::Val(self)];
+        while let Some(tok) = stack.pop() {
+            let v = match tok {
+                Tok::Name(n) => {
+                    n.state_hash(h);
+                    continue;
+                }
+                Tok::Val(v) => v,
+            };
+            match v {
+                WireValue::Unit => h.write_u8(H_UNIT),
+                WireValue::Bool(b) => {
+                    h.write_u8(H_BOOL);
+                    b.state_hash(h);
+                }
+                WireValue::Int(i) => {
+                    h.write_u8(H_INT);
+                    i.state_hash(h);
+                }
+                WireValue::Float(x) => {
+                    h.write_u8(H_FLOAT);
+                    x.state_hash(h);
+                }
+                WireValue::Str(s) => {
+                    h.write_u8(H_STR);
+                    s.state_hash(h);
+                }
+                WireValue::List(items) => {
+                    h.write_u8(H_LIST);
+                    hash_len(items.len(), h);
+                    stack.extend(items.iter().rev().map(Tok::Val));
+                }
+                WireValue::Dict(pairs) => {
+                    h.write_u8(H_DICT);
+                    hash_len(pairs.len(), h);
+                    for (k, v) in pairs.iter().rev() {
+                        stack.push(Tok::Val(v));
+                        stack.push(Tok::Val(k));
+                    }
+                }
+                WireValue::Struct { name, fields } | WireValue::Variant { name, fields } => {
+                    let kind = if matches!(v, WireValue::Struct { .. }) {
+                        H_STRUCT
+                    } else {
+                        H_VARIANT
+                    };
+                    h.write_u8(kind);
+                    name.state_hash(h);
+                    hash_len(fields.len(), h);
+                    for (n, v) in fields.iter().rev() {
+                        stack.push(Tok::Val(v));
+                        stack.push(Tok::Name(n));
+                    }
+                }
+            }
+        }
     }
 }
