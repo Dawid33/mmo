@@ -40,6 +40,7 @@ mod handlers;
 mod matching;
 mod place;
 mod quest;
+mod quest_builtins;
 mod refs;
 mod stmt;
 
@@ -143,8 +144,8 @@ pub(crate) fn generate(
     g.handlers(&mut pb);
     g.script_events(&mut pb);
     g.pure_sigs(&mut pb);
-    let lines = g.dialogues(&mut pb);
-    g.quest_info(&mut pb);
+    let mut lines = g.dialogues(&mut pb);
+    g.quest_info(&mut pb, &mut lines);
 
     // Frame sizes, for `too-many-slots`: (words, the function's index in `plan.fns`).
     let mut frames: Vec<(u32, usize)> = Vec::with_capacity(plan.fns.len());
@@ -604,11 +605,6 @@ pub(crate) struct Emit<'g, 'a, 'p> {
     line: (u32, u32),
     /// Whether the function writes its error word (a `raise` or a `?` on a fallible result).
     fails: bool,
-    /// Whether the function is a home handler of the quest: it evaluates the stage transitions at its
-    /// segment ends (`quest.rs`).
-    home_handler: bool,
-    /// Whether the function is a part's handler: its `emit`s go to the host, which routes them to the home.
-    part_handler: bool,
 }
 
 impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
@@ -626,8 +622,6 @@ impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
             loops: Vec::new(),
             line: (0, 0),
             fails: false,
-            home_handler: false,
-            part_handler: false,
         }
     }
 

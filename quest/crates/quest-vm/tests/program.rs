@@ -9,8 +9,8 @@ use quest_vm::dialogue::{
 use quest_vm::fuel::*;
 use quest_vm::host::HostFnKind;
 use quest_vm::program::{
-    Anchor, FnInfo, FnSig, GlobalInfo, PartInfo, Program, ProgramError, QuestInfo, RepeatInfo,
-    RoleInfo,
+    Anchor, FnInfo, FnSig, GlobalInfo, ObjectiveInfo, PartInfo, Program, ProgramError, QuestInfo,
+    RepeatInfo, RoleInfo,
 };
 use quest_vm::types::TypeDesc;
 
@@ -702,6 +702,19 @@ fn full() -> Program {
         requires: vec![req.0],
         start_fn: start.0,
         read_set: vec![stage.0],
+        transitions_fn: req.0,
+        objectives: vec![
+            vec![],
+            vec![ObjectiveInfo {
+                name: "find".into(),
+                global: stage.0,
+                line: "q.find".into(),
+                subst: vec![cond.0],
+                at: Some(cond.0),
+                optional: true,
+                count: Some(3),
+            }],
+        ],
     });
 
     // A dialogue graph: a conversation declared in a stage, with a guarded node, a choice and an emit,
@@ -802,9 +815,10 @@ fn roundtrip_bytes_identical() {
 }
 
 #[test]
-fn program_v5_roundtrip() {
+fn program_v6_roundtrip() {
     let p = full();
-    assert_eq!(p.bytecode_version, 5);
+    assert_eq!(p.bytecode_version, 6);
+    assert_eq!(p.quest.as_ref().map(|q| q.objectives[1].len()), Some(1));
     assert_eq!(p.dialogues.dialogues.len(), 2);
     assert!(p.fns.iter().any(|f| f.sig.is_some()) && p.fns.iter().any(|f| f.sig.is_none()));
     let q = p.quest.as_ref().expect("a quest");
@@ -882,6 +896,20 @@ fn hostile_quest_info_is_err() {
         }),
         // fns out of range or of the wrong arity
         Box::new(move |p| p.quest.as_mut().unwrap().start_fn = nf),
+        Box::new(move |p| p.quest.as_mut().unwrap().transitions_fn = nf),
+        // objectives: not one list per stage, a global out of range, a fn without a signature
+        Box::new(|p| {
+            p.quest.as_mut().unwrap().objectives.pop();
+        }),
+        Box::new(move |p| p.quest.as_mut().unwrap().objectives[1][0].global = ng),
+        Box::new(|p| {
+            let s = p.quest.as_ref().unwrap().start_fn;
+            p.quest.as_mut().unwrap().objectives[1][0].at = Some(s);
+        }),
+        Box::new(|p| {
+            let s = p.quest.as_ref().unwrap().start_fn;
+            p.quest.as_mut().unwrap().objectives[1][0].subst = vec![s];
+        }),
         Box::new(move |p| p.quest.as_mut().unwrap().requires = vec![nf]),
         Box::new(|p| {
             let c = p.quest.as_ref().unwrap().roles[1].cond.unwrap();

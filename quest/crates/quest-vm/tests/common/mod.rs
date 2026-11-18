@@ -31,6 +31,8 @@ pub struct RecordingHost {
     pub requests: Vec<(PromiseId, u16, Vec<WireValue>)>,
     pub prints: Vec<String>,
     pub reports: Vec<Report>,
+    /// `Host::route`: (event, value).
+    pub routes: Vec<(String, WireValue)>,
     pub answer: Option<QueryFn>,
     pub check_answer: Option<CheckFn>,
 }
@@ -49,6 +51,7 @@ impl Clone for RecordingHost {
             requests: self.requests.clone(),
             prints: self.prints.clone(),
             reports: self.reports.clone(),
+            routes: self.routes.clone(),
             answer: None,
             check_answer: None,
         }
@@ -59,8 +62,14 @@ impl RecordingHost {
     /// Every call recorded so far, as text (for comparing two hosts).
     pub fn transcript(&self) -> String {
         format!(
-            "queries {:?}\nchecks {:?}\ncommands {:?}\nrequests {:?}\nprints {:?}\nreports {:?}",
-            self.queries, self.checks, self.commands, self.requests, self.prints, self.reports
+            "queries {:?}\nchecks {:?}\ncommands {:?}\nrequests {:?}\nprints {:?}\nreports {:?}\nroutes {:?}",
+            self.queries,
+            self.checks,
+            self.commands,
+            self.requests,
+            self.prints,
+            self.reports,
+            self.routes
         )
     }
 }
@@ -91,6 +100,9 @@ impl Host for RecordingHost {
     }
     fn report(&mut self, report: Report) {
         self.reports.push(report);
+    }
+    fn route(&mut self, event: &str, value: &WireValue) {
+        self.routes.push((event.to_string(), value.clone()));
     }
 }
 

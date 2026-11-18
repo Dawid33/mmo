@@ -1013,6 +1013,8 @@ fn quest_info(
         requires: vec![],
         start_fn: start.0,
         read_set: vec![],
+        transitions_fn: start.0,
+        objectives: vec![vec![], vec![]],
     }
 }
 
@@ -1287,6 +1289,7 @@ fn quest_start_runs_after_the_initialisers_in_the_home_only() {
         s
     };
     let start = say(&mut pb, "$start::Q", 9);
+    let transitions = say(&mut pb, "$transitions::Q", 6);
     let main = say(&mut pb, "main", 8);
     let init = say(&mut pb, "init", 7);
     let dog = pb.global("Q::role.dog", q.t.int);
@@ -1300,7 +1303,8 @@ fn quest_start_runs_after_the_initialisers_in_the_home_only() {
         optional: false,
         cond: None,
     };
-    let info = quest_info(&mut pb, &q, zero, vec![role], 1, start);
+    let mut info = quest_info(&mut pb, &q, zero, vec![role], 1, start);
+    info.transitions_fn = transitions.0;
     pb.main(main);
     pb.set_quest(info);
     let p = Arc::new(pb.finish().expect("program"));
@@ -1313,7 +1317,9 @@ fn quest_start_runs_after_the_initialisers_in_the_home_only() {
         at(vm, host, 1);
         assert!(vm.is_idle());
     }
-    assert_eq!(logged(&hh), [(0, 7), (0, 9), (0, 8)]);
+    // The transitions run after the start's and `main`'s segments (not after an initialiser's, nor after
+    // their own), in the home only.
+    assert_eq!(logged(&hh), [(0, 7), (0, 9), (0, 6), (0, 8), (0, 6)]);
     assert_eq!(logged(&ph), [(0, 7), (0, 8)]);
     // an edit does not start the quest again
     let (mut next, _) = home.migrate(p.clone(), dog_cfg(0)).expect("migrates");
@@ -1324,7 +1330,7 @@ fn quest_start_runs_after_the_initialisers_in_the_home_only() {
     home.reset().expect("reset");
     let mut rh = RecordingHost::default();
     at(&mut home, &mut rh, 3);
-    assert_eq!(logged(&rh), [(0, 7), (0, 9)]);
+    assert_eq!(logged(&rh), [(0, 7), (0, 9), (0, 6)]);
 }
 
 #[test]
@@ -1807,4 +1813,49 @@ fn misfit_role_refused() {
         refused(&[("farmer", WireValue::Int(1)), ("miller", some)]),
         Some(LoadError::Role("miller".into()))
     );
+}
+
+#[test]
+fn enqueue_without_own_handler_is_routed() {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    let zero = zero_fn(&mut pb);
+    let start = noop_fn(&mut pb, "$start::Q");
+    let dog = pb.global("Q::role.dog", q.t.int);
+    pb.set_global_init(dog, zero);
+    let role = RoleInfo {
+        name: "dog".into(),
+        global: dog.0,
+        ty: q.t.int,
+        optional: false,
+        cond: None,
+    };
+    let info = quest_info(&mut pb, &q, zero, vec![role], 1, start);
+    // The home's Ping { n }: emit Ring(n + 10), which only the part handles.
+    let h = pb.declare("ping", 1);
+    {
+        let mut f = pb.body(h);
+        let ev = f.param(0);
+        f.mark_ref(ev);
+        let (n, val) = (f.local(0), f.local(1));
+        f.mark_ref(val);
+        f.emit(Op::GetField, n, ev, 0u16);
+        make_ring(&mut f, &q, n, 10, val, 2);
+        f.emit(Op::Enqueue, q.ring_event, val, 0u16);
+        f.emit(Op::Drop, val, 0u16, 0u16);
+        ret(&mut f);
+        f.end();
+    }
+    pb.handler("Ping", q.t.ping, h);
+    logger(&mut pb, &q, "part_ring", "Ring", q.ring, 1, None, 2);
+    pb.set_quest(info);
+    let p = Arc::new(pb.finish().expect("program"));
+
+    let mut home = Vm::new(p, dog_cfg(0)).expect("home");
+    let mut host = RecordingHost::default();
+    assert_eq!(home.deliver("Ping", &ping(1)), Delivery::Accepted);
+    at(&mut home, &mut host, 1);
+    assert!(logged(&host).is_empty());
+    assert_eq!(host.routes, [("Ring".to_string(), ring(11))]);
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
 }

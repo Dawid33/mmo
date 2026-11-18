@@ -80,6 +80,8 @@ fn builder() -> (ProgramBuilder, Fns) {
         requires: vec![],
         start_fn: start.0,
         read_set: vec![stage.0],
+        transitions_fn: start.0,
+        objectives: vec![vec![], vec![]],
     });
     (pb, fns)
 }

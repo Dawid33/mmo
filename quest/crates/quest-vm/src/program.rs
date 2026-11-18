@@ -136,8 +136,30 @@ pub struct QuestInfo {
     pub requires: Vec<u16>,
     /// Enters the first stage: run once, after the initialisers and before `main`, in the home only.
     pub start_fn: u16,
+    /// Evaluates the current stage's completion transitions: run by the VM after every committed segment
+    /// of the home's handlers, `main` and the start (never after its own).
+    pub transitions_fn: u16,
+    /// Each stage's objectives (one list per stage, in source order): the journal's data.
+    pub objectives: Vec<Vec<ObjectiveInfo>>,
     /// The globals dialogues read (strictly increasing).
     pub read_set: Vec<u16>,
+}
+
+/// An objective of a stage (spec §5.12): what the journal shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectiveInfo {
+    pub name: String,
+    /// Its state (`Objective { state, count }`): an index into `Program::globals`.
+    pub global: u16,
+    /// The text's line id (the lines table has the text, holes as `{0}`, `{1}`, …).
+    pub line: String,
+    /// The holes' substitution fns, in order.
+    pub subst: Vec<u16>,
+    /// The marker's target fn.
+    pub at: Option<u16>,
+    pub optional: bool,
+    /// The count `progress` reaches it at.
+    pub count: Option<i64>,
 }
 
 /// A role: [`crate::vm::Vm::new`] writes its value (`VmConfig::roles`) into `global` before the
@@ -404,6 +426,23 @@ fn write_quest(w: &mut Writer, q: &QuestInfo) {
     w.u16s(&q.requires);
     w.u16(q.start_fn);
     w.u16s(&q.read_set);
+    w.u16(q.transitions_fn);
+    w.count(q.objectives.len());
+    for stage in &q.objectives {
+        w.count(stage.len());
+        for o in stage {
+            w.str(&o.name);
+            w.u16(o.global);
+            w.str(&o.line);
+            w.u16s(&o.subst);
+            w.opt_u16(o.at);
+            w.flag(o.optional);
+            w.flag(o.count.is_some());
+            if let Some(n) = o.count {
+                w.u64(n as u64);
+            }
+        }
+    }
 }
 
 fn read_quest(r: &mut Reader) -> Parse<QuestInfo> {
@@ -454,6 +493,24 @@ fn read_quest(r: &mut Reader) -> Parse<QuestInfo> {
         requires: r.u16s()?,
         start_fn: r.u16()?,
         read_set: r.u16s()?,
+        transitions_fn: r.u16()?,
+        objectives: r.vec_ids(|r| {
+            r.vec_ids(|r| {
+                Ok(ObjectiveInfo {
+                    name: r.str()?,
+                    global: r.u16()?,
+                    line: r.str()?,
+                    subst: r.u16s()?,
+                    at: r.opt_u16()?,
+                    optional: r.flag()?,
+                    count: if r.flag()? {
+                        Some(r.u64()? as i64)
+                    } else {
+                        None
+                    },
+                })
+            })
+        })?,
     })
 }
 
@@ -1113,7 +1170,31 @@ impl Program {
         for &f in &q.requires {
             fn_of(f, 0, "a requirement")?;
         }
-        fn_of(q.start_fn, 0, "the start")
+        fn_of(q.start_fn, 0, "the start")?;
+        fn_of(q.transitions_fn, 0, "the transitions")?;
+        if q.objectives.len() != q.stages.len() {
+            return invalid(format!(
+                "quest {}: the objectives are not one list per stage",
+                q.name
+            ));
+        }
+        let has_sig = |f: u16| {
+            self.fns
+                .get(usize::from(f))
+                .is_some_and(|i| i.sig.is_some())
+        };
+        for o in q.objectives.iter().flatten() {
+            if usize::from(o.global) >= nglobals
+                || !o.subst.iter().copied().all(has_sig)
+                || !o.at.is_none_or(has_sig)
+            {
+                return invalid(format!(
+                    "objective {}: its global or a fn is out of range",
+                    o.name
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Whether a role's global holds its type: `T`, or for an optional role `Option[T]` (the enum

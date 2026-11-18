@@ -204,6 +204,10 @@ impl quest_vm::host::Host for Recorder {
     fn report(&mut self, report: quest_vm::host::Report) {
         self.reports.push(report);
     }
+
+    fn route(&mut self, event: &str, _: &W) {
+        self.calls.push(format!("route {event}"));
+    }
 }
 
 use quest_vm::wire::WireValue as W;

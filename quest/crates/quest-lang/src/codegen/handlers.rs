@@ -116,12 +116,9 @@ impl Gen<'_> {
 
 impl Emit<'_, '_, '_> {
     /// `emit(e)` (the statement `emit Ev(…)`) of a script event: `Enqueue` to this instance's own queue.
-    /// `false` when `f` is not the host's `emit`, the event is the host's, or the emit is a part's (a host
-    /// call, then: the host routes a part's events to the home).
+    /// `false` when `f` is not the host's `emit` or the event is the host's (a host call, then). An event
+    /// no handler of the instance takes is routed by the VM at the commit (a part's `emit` for the home).
     pub(super) fn script_emit(&mut self, f: u32, args: &[Arg], dst: Option<SlotRef>) -> bool {
-        if self.part_handler {
-            return false;
-        }
         let is_emit = self
             .g
             .host
@@ -353,8 +350,6 @@ impl Emit<'_, '_, '_> {
             Some(l) => (Op::AwaitAll, self.val(l)),
             None => (Op::Await, self.val(x)),
         };
-        // A home handler's segment ends here.
-        self.segment_end();
         let run = self.slots.run(&[heap, true]);
         let (a, err) = (self.word(run), self.word(run + 1));
         self.at(e.span);

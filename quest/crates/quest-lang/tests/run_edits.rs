@@ -413,6 +413,9 @@ impl Host for Ids {
     fn report(&mut self, r: Report) {
         panic!("{r:?}");
     }
+    fn route(&mut self, event: &str, _: &WireValue) {
+        panic!("routed {event}");
+    }
 }
 
 #[test]

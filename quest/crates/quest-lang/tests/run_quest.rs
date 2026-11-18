@@ -61,7 +61,11 @@ fn settle(r: &mut Runner) {
 
 /// Instance `instance` of `p`, its initialisers and the quest's start run.
 fn start_as(p: &Arc<Program>, instance: u16) -> Runner {
-    let mut r = Runner::for_instance(Arc::clone(p), MEM, StubConfig::default(), instance, roles())
+    start_with(p, instance, StubConfig::default())
+}
+
+fn start_with(p: &Arc<Program>, instance: u16, cfg: StubConfig) -> Runner {
+    let mut r = Runner::for_instance(Arc::clone(p), MEM, cfg, instance, roles())
         .expect("the program loads");
     settle(&mut r);
     r
@@ -369,6 +373,12 @@ fn progress_counts() {
         n: int
     event Undo:
         n: int
+    event More:
+        n: int
+
+    @on(More)
+    fn more(e):
+        wood.progress(e.n)
 
     stage Gather:
         objective wood "Gather wood" @q.wood count 3
@@ -398,9 +408,13 @@ fn progress_counts() {
     // The transition is taken at the end of `got`'s segment: `Done` is current when the event's next
     // handler, `late`, is looked at, so it runs.
     assert_eq!(lines(&r), ["2 false", "1 false", "3 true", "late"]);
-    // Progress on a done objective changes nothing.
-    ev(&mut r, "Got", 5);
+    // Progress on a done objective changes nothing (a quest-body handler: it runs in any stage).
+    ev(&mut r, "More", 5);
     assert_eq!(objective(&r.vm, &p, "Gather.wood"), (1, 3));
+    assert_eq!(
+        p.quest.as_ref().map(|q| q.objectives[0][0].count),
+        Some(Some(3))
+    );
 }
 
 #[test]
@@ -675,4 +689,349 @@ fn quest_without_stage_is_refused() {
         Err(diags) => diags.into_iter().map(|d| d.code.to_string()).collect(),
     };
     assert_eq!(codes, ["no-stage"]);
+}
+
+#[test]
+fn transition_after_await_in_helper_fn() {
+    let src = r#"fn helper():
+    await world.set("k", 1) else ()
+    print("after await")
+
+quest Q:
+    role farmer: Person
+
+    event Go:
+        n: int
+
+    stage Search:
+        objective find_dog "Find the dog" @q.find
+        -> Done when find_dog.done
+        @on(Go)
+        fn go(e):
+            find_dog.finish()
+            helper()
+            print("handler done")
+
+    stage Done:
+        @on(Entered)
+        fn done(e):
+            print("entered Done")
+"#;
+    let p = program(src);
+    let cfg = StubConfig {
+        latency: 5,
+        ..StubConfig::default()
+    };
+    let mut r = start_with(&p, 0, cfg);
+    ev(&mut r, "Go", 0);
+    // The helper's `await` ends the handler's segment: the transition is taken there.
+    assert_eq!(lines(&r), ["entered Done", "after await", "handler done"]);
+    assert_eq!(stage(&r.vm, &p), "Done");
+}
+
+/// Lost Dog's objectives (spec §5.12 / the quest examples §1), with what they need around them.
+const OBJECTIVES: &str = r#"quest Q:
+    role farmer: Person
+    role dog: Creature
+    optional role miller: Person
+
+    stage Search:
+        objective find_dog f"Find {dog.name}"                    @lostdog.find     at dog
+        objective feed_dog f"Coax {dog.name} with food"          @lostdog.feed     at dog
+        optional objective ask_miller "Ask at the mill"          @lostdog.ask_mill at miller
+        -> Returning when find_dog.done and feed_dog.done
+
+    stage Returning:
+        objective bring_home f"Bring {dog.name} home to {farmer.name}"   @lostdog.return at farmer
+        objective sticks "Gather {sticks}" @lostdog.sticks count 3
+"#;
+
+/// An objective's (name, global, line id, holes, has `at`, optional, count).
+type Row<'a> = (&'a str, &'a str, &'a str, usize, bool, bool, Option<i64>);
+
+#[test]
+fn objective_table_and_lines() {
+    let t = common::tree(&[("main.qs", OBJECTIVES)]);
+    let c = match quest_lang::compile(&t, &stub_api()) {
+        Ok(c) => c,
+        Err(d) => panic!("{d:?}"),
+    };
+    let p = &c.program;
+    let q = p.quest.as_ref().expect("a quest");
+    let table: Vec<Vec<Row<'_>>> = q
+        .objectives
+        .iter()
+        .map(|stage| {
+            stage
+                .iter()
+                .map(|o| {
+                    (
+                        o.name.as_str(),
+                        p.globals[usize::from(o.global)].name.as_str(),
+                        o.line.as_str(),
+                        o.subst.len(),
+                        o.at.is_some(),
+                        o.optional,
+                        o.count,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        table,
+        [
+            vec![
+                (
+                    "find_dog",
+                    "Q::Search.find_dog",
+                    "lostdog.find",
+                    1,
+                    true,
+                    false,
+                    None
+                ),
+                (
+                    "feed_dog",
+                    "Q::Search.feed_dog",
+                    "lostdog.feed",
+                    1,
+                    true,
+                    false,
+                    None
+                ),
+                (
+                    "ask_miller",
+                    "Q::Search.ask_miller",
+                    "lostdog.ask_mill",
+                    0,
+                    true,
+                    true,
+                    None
+                ),
+            ],
+            vec![
+                (
+                    "bring_home",
+                    "Q::Returning.bring_home",
+                    "lostdog.return",
+                    2,
+                    true,
+                    false,
+                    None
+                ),
+                (
+                    "sticks",
+                    "Q::Returning.sticks",
+                    "lostdog.sticks",
+                    0,
+                    false,
+                    false,
+                    Some(3)
+                ),
+            ],
+        ]
+    );
+    // Each hole's fn is a synthesised pure fn with a signature.
+    for o in q.objectives.iter().flatten() {
+        for f in o.subst.iter().chain(&o.at) {
+            assert!(p.fns[usize::from(*f)].sig.is_some(), "{}", o.name);
+        }
+    }
+    let line = |id: &str| c.lines.get(id).map(String::as_str);
+    assert_eq!(line("lostdog.find"), Some("Find {0}"));
+    assert_eq!(line("lostdog.feed"), Some("Coax {0} with food"));
+    assert_eq!(line("lostdog.ask_mill"), Some("Ask at the mill"));
+    assert_eq!(line("lostdog.return"), Some("Bring {0} home to {1}"));
+    assert_eq!(line("lostdog.sticks"), Some("Gather {{sticks}}"));
+}
+
+/// A quest whose part `emit`s `Spotted`, and `Tell` through a top-level fn.
+const PART_EMIT: &str = r#"event Tell:
+    n: int
+
+fn tell(n: int):
+    emit Tell(n=n)
+
+quest Q:
+    role farmer: Person
+
+    event Spotted:
+        n: int
+
+    @on(Tell)
+    fn told(e):
+        print(f"told {e.n}")
+
+    stage Open:
+        @on(Spotted)
+        fn spotted(e):
+            print(f"spotted {e.n}")
+
+    part watch on farmer:
+        @on(PlayerNear)
+        fn near(e):
+            emit Spotted(n=1)
+        @on(PlayerClicked)
+        fn clicked(e):
+            tell(2)
+"#;
+
+/// The `Spotted` the part routes.
+fn spotted(n: i64) -> (String, WireValue) {
+    (
+        "Q::Spotted".to_string(),
+        WireValue::Struct {
+            name: "Spotted".into(),
+            fields: vec![("n".into(), WireValue::Int(n))],
+        },
+    )
+}
+
+#[test]
+fn part_emit_is_routed_with_its_qualified_name() {
+    let p = program(PART_EMIT);
+    let mut part = start_as(&p, 1);
+    host_ev(&mut part, "PlayerNear", player(1, "Ann"));
+    assert_eq!(part.host.routed, [spotted(1)]);
+    assert!(lines(&part).is_empty());
+    // The home takes it by that name.
+    let mut home = start_as(&p, 0);
+    let (name, value) = spotted(1);
+    assert_eq!(home.vm.deliver(&name, &value), Delivery::Accepted);
+    settle(&mut home);
+    assert_eq!(lines(&home), ["spotted 1"]);
+    assert!(home.host.routed.is_empty(), "{:?}", home.host.routed);
+}
+
+#[test]
+fn emit_from_helper_called_by_part_is_routed() {
+    let p = program(PART_EMIT);
+    let mut part = start_as(&p, 1);
+    host_ev(&mut part, "PlayerClicked", player(1, "Ann"));
+    let tell = WireValue::Struct {
+        name: "Tell".into(),
+        fields: vec![("n".into(), WireValue::Int(2))],
+    };
+    assert_eq!(part.host.routed, [("Tell".to_string(), tell.clone())]);
+    // The home handles it under that name.
+    let mut home = start_as(&p, 0);
+    assert_eq!(home.vm.deliver("Tell", &tell), Delivery::Accepted);
+    settle(&mut home);
+    assert_eq!(lines(&home), ["told 2"]);
+}
+
+#[test]
+fn role_lost_default_runs_in_stages_without_a_handler() {
+    let src = r#"quest Q:
+    role farmer: Person
+
+    event Go:
+        n: int
+
+    stage Open:
+        @on(RoleLost)
+        fn open_lost(e):
+            print("open lost")
+        @on(Go)
+        fn go(e):
+            -> Search
+
+    stage Search:
+        @on(Go)
+        fn again(e):
+            print("go")
+
+    part watch on farmer:
+        @on(RoleLost)
+        fn part_lost(e):
+            print("part lost")
+"#;
+    let (mut r, p) = start(src);
+    assert!(p.fns.iter().any(|f| f.name == "$role_lost::Q"));
+    let lost = WireValue::Struct {
+        name: "RoleLost".into(),
+        fields: vec![(
+            "role".into(),
+            WireValue::Variant {
+                name: "farmer".into(),
+                fields: vec![],
+            },
+        )],
+    };
+    // `Open` handles it itself: the default does nothing there.
+    assert_eq!(r.vm.deliver("Q::RoleLost", &lost), Delivery::Accepted);
+    settle(&mut r);
+    assert_eq!(lines(&r), ["open lost"]);
+    ev(&mut r, "Go", 0);
+    assert_eq!(r.vm.deliver("Q::RoleLost", &lost), Delivery::Accepted);
+    settle(&mut r);
+    // (`Go`'s next handler, `again`, runs in `Search`, now current.)
+    assert_eq!(lines(&r), ["open lost", "go", "quest.fail"]);
+}
+
+#[test]
+fn join_once_per_player_complete_some_and_decline() {
+    let src = r#"repeatable quest Q(once_per_player=true, cooldown=10):
+    role farmer: Person
+
+    @on(Setup)
+    fn setup(e):
+        decline()
+
+    stage Open:
+        @on(PlayerClicked)
+        fn clicked(e):
+            join(e.player)
+        @on(PlayerNear)
+        fn near(e):
+            complete([e.player])
+"#;
+    let (mut r, p) = start(src);
+    r.host.completed_by.insert(1);
+    host_ev(&mut r, "PlayerClicked", player(1, "Ann"));
+    host_ev(&mut r, "PlayerClicked", player(2, "Bob"));
+    host_ev(&mut r, "PlayerNear", player(2, "Bob"));
+    let setup = WireValue::Struct {
+        name: "Setup".into(),
+        fields: vec![],
+    };
+    assert_eq!(r.vm.deliver("Setup", &setup), Delivery::Accepted);
+    settle(&mut r);
+    assert_eq!(
+        lines(&r),
+        [
+            "quest.join_refused Ann",
+            "quest.joined Bob",
+            "quest.complete Bob",
+            "quest.decline",
+        ]
+    );
+    let repeat = p.quest.as_ref().and_then(|q| q.repeat).expect("repeatable");
+    assert_eq!(
+        (repeat.cooldown, repeat.exclusive, repeat.once_per_player),
+        (10, false, true)
+    );
+}
+
+#[test]
+fn play_of_an_unnamed_scene_is_not_yet() {
+    let src = r#"quest Q:
+    role farmer: Person
+
+    scene argue(a: Person, b: Person):
+        a: "You!" @q.you
+
+    stage Open:
+        @on(PlayerClicked)
+        fn clicked(e):
+            let s = argue
+            play(s, a=farmer, b=farmer)
+"#;
+    let t = common::tree(&[("main.qs", src)]);
+    let codes: Vec<String> = match quest_lang::compile(&t, &stub_api()) {
+        Ok(_) => panic!("compiled"),
+        Err(diags) => diags.into_iter().map(|d| d.code.to_string()).collect(),
+    };
+    assert_eq!(codes, ["not-yet"]);
 }

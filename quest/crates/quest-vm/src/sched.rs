@@ -33,7 +33,13 @@
 //! which: only handlers whose `owner` is that instance register. [`Vm::deliver`] takes the host's events
 //! and the program's script events alike. `Enqueue` buffers its event like a command; the commit delivers
 //! it to the instance's own queue, with the overflow rules of a host delivery (a drop is reported as
-//! `EventDropped`; an event no handler of this instance takes goes silently: another instance's).
+//! `EventDropped`); an event no handler of this instance takes but another instance's does goes to
+//! `Host::route` with its qualified name (one no instance takes goes nowhere).
+//!
+//! # Quest transitions
+//! In the home of a quest program (`H_OWNER` 0), every committed segment of a handler, of `main` or of the
+//! start sets `H_TRANSITIONS`; the next task to start is then `QuestInfo::transitions_fn` (after any
+//! pending initialiser), in the same tick and on the same fuel. Its own segment does not set it again.
 //!
 //! # Tasks and segments
 //! A task runs one function from its entry until its `Ret` on the sentinel link: the pending
@@ -76,7 +82,7 @@ use crate::layout::{
     H_ARRIVAL, H_CMD_LEN, H_CURRENT_FN, H_EV_ARRIVAL, H_EV_HANDLER, H_EV_PAYLOAD, H_FUEL_DEBT,
     H_INIT_CURSOR, H_INIT_SKIP, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEST_START, H_QUEUE_COUNT,
     H_QUEUE_HEAD, H_RESUME_PARKED, H_STATUS, H_TASK, H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN,
-    LINK_SENTINEL, QUEUE_REC_WORDS, STATUS_IDLE, STATUS_RUNNING,
+    H_TRANSITIONS, LINK_SENTINEL, QUEUE_REC_WORDS, STATUS_IDLE, STATUS_RUNNING,
 };
 use crate::object::{capacity, hdr, obj, ptr_of, read_slot, write_slot};
 use crate::program::HostSite;
@@ -121,6 +127,8 @@ pub(crate) const TASK_MAIN: u64 = 2;
 pub(crate) const TASK_HANDLER: u64 = 3;
 /// The quest's start (`QuestInfo::start_fn`).
 pub(crate) const TASK_START: u64 = 4;
+/// The quest's transitions (`QuestInfo::transitions_fn`).
+const TASK_TRANSITIONS: u64 = 5;
 // `H_QUEST_START`.
 pub(crate) const QSTART_NONE: u64 = 0;
 pub(crate) const QSTART_WANTED: u64 = 1;
@@ -216,6 +224,7 @@ impl Vm {
         Ok(self.task_in_progress()?
             || init_pending
             || self.header(H_QUEST_START)? == QSTART_WANTED
+            || self.header(H_TRANSITIONS)? != 0
             || self.header(H_MAIN)? == MAIN_WANTED
             || self.header(H_EV_HANDLER)? != 0
             || self.header(H_QUEUE_COUNT)? != 0
@@ -471,6 +480,14 @@ impl Vm {
         if cursor != p.globals.len() as u64 {
             return corrupt("init cursor out of range");
         }
+        if self.header(H_TRANSITIONS)? != 0 {
+            let Some(q) = &p.quest else {
+                return corrupt("quest transitions in a program without a quest");
+            };
+            self.set_header(H_TRANSITIONS, 0)?;
+            self.begin_task(TASK_TRANSITIONS, 0, q.transitions_fn)?;
+            return Ok(true);
+        }
         if self.header(H_QUEST_START)? == QSTART_WANTED {
             let Some(q) = &p.quest else {
                 return corrupt("a quest start in a program without a quest");
@@ -705,6 +722,7 @@ impl Vm {
             TASK_MAIN => p.main_fn,
             TASK_HANDLER => p.handlers.get(i).map(|h| h.fn_id),
             TASK_START => p.quest.as_ref().map(|q| q.start_fn),
+            TASK_TRANSITIONS => p.quest.as_ref().map(|q| q.transitions_fn),
             _ => None,
         };
         match fn_id {
@@ -762,6 +780,14 @@ impl Vm {
         let now = self.header(H_NOW)?;
         self.commit_promises(now)?;
         self.commit_timers()?;
+        // The home's handlers, `main` and the start: the quest's transitions are due (spec §5.12).
+        let kind = self.header(H_TASK)?;
+        if self.instance == 0
+            && self.program.quest.is_some()
+            && matches!(kind, TASK_HANDLER | TASK_MAIN | TASK_START)
+        {
+            self.set_header(H_TRANSITIONS, 1)?;
+        }
         self.store.segment_commit();
         self.clear_task()?;
         for b in buffered {
@@ -784,7 +810,17 @@ impl Vm {
         let event = ev.name.clone();
         match self.sched_deliver(&event, value) {
             Delivery::Accepted | Delivery::Queued => {}
-            Delivery::Dropped(DropReason::NoHandler) => {}
+            // Another instance's: the host routes it (an event no instance handles goes nowhere).
+            Delivery::Dropped(DropReason::NoHandler) => {
+                if self
+                    .program
+                    .handlers
+                    .iter()
+                    .any(|h| h.event == event && h.owner != self.instance)
+                {
+                    host.route(&event, value);
+                }
+            }
             // Not failed while a segment commits: the memory did not parse.
             Delivery::Dropped(DropReason::InstanceFailed) => {
                 return corrupt("the queue does not parse");

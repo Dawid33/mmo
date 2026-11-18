@@ -85,6 +85,8 @@ pub struct StubHost {
     pub emitted: Vec<WireValue>,
     /// The players (by id) who completed the quest: `quest.completed_by` answers from it.
     pub completed_by: BTreeSet<i64>,
+    /// Events routed to another instance (`Host::route`): recorded only (the world comes later).
+    pub routed: Vec<(String, WireValue)>,
     latency: u64,
     rules: Vec<(FailureRule, u32)>,
     namespace_gone: bool,
@@ -135,6 +137,7 @@ impl StubHost {
             tick: 0,
             emitted: Vec::new(),
             completed_by: BTreeSet::new(),
+            routed: Vec::new(),
             latency: cfg.latency,
             rules: cfg.failures.into_iter().map(|r| (r, 0)).collect(),
             namespace_gone: false,
@@ -444,5 +447,9 @@ impl Host for StubHost {
 
     fn report(&mut self, report: Report) {
         self.reports.push(report);
+    }
+
+    fn route(&mut self, event: &str, value: &WireValue) {
+        self.routed.push((event.to_string(), value.clone()));
     }
 }

@@ -183,6 +183,34 @@ fn first_line(steps: &[Step]) -> Option<&str> {
     None
 }
 
+/// A line's text as the lines table keeps it (holes `{0}`, `{1}`, … in order, a literal brace doubled), and
+/// its length for `line_ticks`: the text's characters, each hole by its source length with its braces.
+pub(super) fn stored_text(text: &LineRef) -> (String, u32) {
+    let mut stored = String::new();
+    let mut chars: u32 = 0;
+    let mut holes = 0usize;
+    for part in &text.parts {
+        match part {
+            LinePart::Text(t) => {
+                chars = chars.saturating_add(u32::try_from(t.chars().count()).unwrap_or(u32::MAX));
+                for c in t.chars() {
+                    match c {
+                        '{' => stored.push_str("{{"),
+                        '}' => stored.push_str("}}"),
+                        c => stored.push(c),
+                    }
+                }
+            }
+            LinePart::Subst(_, span) => {
+                stored.push_str(&format!("{{{holes}}}"));
+                holes += 1;
+                chars = chars.saturating_add(span.len.saturating_add(2));
+            }
+        }
+    }
+    (stored, chars)
+}
+
 fn sat_u8(n: u32) -> u8 {
     u8::try_from(n).unwrap_or(u8::MAX)
 }
@@ -372,29 +400,8 @@ impl<'a> Lower<'_, 'a> {
 
     /// A line's definition; its text joins the lines table.
     fn line_def(&mut self, text: &LineRef, speaker: Speaker, ticks_n: Option<i64>) -> LineDef {
-        let mut stored = String::new();
-        let mut chars: u32 = 0;
-        let mut subst = Vec::new();
-        for part in &text.parts {
-            match part {
-                LinePart::Text(t) => {
-                    chars =
-                        chars.saturating_add(u32::try_from(t.chars().count()).unwrap_or(u32::MAX));
-                    for c in t.chars() {
-                        match c {
-                            '{' => stored.push_str("{{"),
-                            '}' => stored.push_str("}}"),
-                            c => stored.push(c),
-                        }
-                    }
-                }
-                LinePart::Subst(d, span) => {
-                    stored.push_str(&format!("{{{}}}", subst.len()));
-                    chars = chars.saturating_add(span.len.saturating_add(2));
-                    subst.push(self.f(*d));
-                }
-            }
-        }
+        let (stored, chars) = stored_text(text);
+        let subst = text.subst().into_iter().map(|d| self.f(d)).collect();
         self.lines.insert(text.id.path.clone(), stored);
         LineDef {
             id: text.id.path.clone(),

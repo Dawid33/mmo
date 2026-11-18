@@ -10,8 +10,8 @@
 //!   (the root first), and a cycle of modules (allowed, spec §5.10) is broken where the walk meets it.
 //! - **`main`** is the root module's free function `main`.
 //! - **A quest's generated fns** (`codegen/quest.rs`): `$enter::Q::<Stage>` for each stage, `$start::Q`,
-//!   `$transitions::Q`, and `$role_lost::Q` (the default `RoleLost` handler) when the quest has a required
-//!   role and no `RoleLost` handler of its own. They sort with the others by name.
+//!   `$transitions::Q`, and `$role_lost::Q` (the default `RoleLost` handler) unless the quest body has a
+//!   `RoleLost` handler of its own. They sort with the others by name.
 
 use crate::hir::{
     Crate, DefId, DefKind, EventRef, Expr, ExprKind, FStrPart, ModId, Quest, StageIdx, Stmt,
@@ -123,15 +123,13 @@ pub(crate) fn def_of(k: FnKind) -> DefId {
     }
 }
 
-/// Whether the quest gets the default `RoleLost` handler: it has a required role and no handler of its
-/// own for `RoleLost` (in the body, a stage or a part).
+/// Whether the quest gets the default `RoleLost` handler: unless the quest body has a `RoleLost` handler
+/// of its own (a stage's handler only takes the stage out of the default's reach; a part's never counts).
 pub(crate) fn needs_role_lost(krate: &Crate, q: &Quest) -> bool {
     let lost = EventRef::Script(q.generated.role_lost);
-    let handles = |d: &DefId| matches!(krate.def(*d).map(|d| &d.kind), Some(DefKind::Fn(f)) if f.handler == Some(lost));
-    let own = q.handlers.iter().any(handles)
-        || q.stages.iter().flat_map(|s| &s.handlers).any(handles)
-        || q.parts.iter().flat_map(|p| &p.handlers).any(handles);
-    q.roles.iter().any(|r| !r.optional) && !own
+    !q.handlers.iter().any(|d| {
+        matches!(krate.def(*d).map(|d| &d.kind), Some(DefKind::Fn(f)) if f.handler == Some(lost))
+    })
 }
 
 /// Every module, each after the modules it depends on (a depth-first walk in path order, children of a

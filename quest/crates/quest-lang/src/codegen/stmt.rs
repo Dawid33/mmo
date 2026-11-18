@@ -76,14 +76,10 @@ impl Emit<'_, '_, '_> {
             let ret = self.fb.ret();
             self.fb.mark_ref(ret);
         }
-        self.home_handler = self.home_handler_of(d);
-        let (owner, stage) = self.g.handler_place(d);
-        self.part_handler = owner > 0;
-        if let Some(s) = stage {
+        if let (_, Some(s)) = self.g.handler_place(d) {
             self.stage_prologue(s);
         }
         self.block(&f.body);
-        self.segment_end();
         self.ret_now();
     }
 
@@ -189,7 +185,6 @@ impl Emit<'_, '_, '_> {
             let ret = self.fb.ret();
             self.eval_into(v, ret);
         }
-        self.segment_end();
         self.ret_now();
     }
 

@@ -43,6 +43,10 @@ pub trait Host {
     fn request(&mut self, id: PromiseId, f: u16, args: &[WireValue]);
     fn print(&mut self, text: &str);
     fn report(&mut self, report: Report);
+    /// A committed `Enqueue` of a script event no handler of this instance takes and another instance's
+    /// does (a part's `emit` for the home, say): the host routes it, by the event's qualified name (`Program::events`), to the instance
+    /// that has a handler for it.
+    fn route(&mut self, event: &str, value: &WireValue);
 }
 
 /// The errors the VM itself fails an awaited promise with, whatever the host function declares: `Lost` (the

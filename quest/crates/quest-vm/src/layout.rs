@@ -92,6 +92,9 @@ pub const H_TIMER_SERIAL: u32 = 43;
 pub const H_OWNER: u32 = 44;
 /// The quest's start (`QuestInfo::start_fn`, `sched`): `QSTART_*`.
 pub const H_QUEST_START: u32 = 45;
+/// 1 when the quest's transitions (`QuestInfo::transitions_fn`, `sched`) are to run: set by every committed
+/// segment of the home's handlers, `main` and the start; cleared when they start.
+pub const H_TRANSITIONS: u32 = 46;
 
 /// `H_STATUS`: nothing is running.
 pub const STATUS_IDLE: u64 = 0;
@@ -104,7 +107,7 @@ pub const LINK_SENTINEL: u64 = u64::MAX;
 
 /// Every header field; a new `H_*` const must be added here, which checks it fits (words past
 /// the last field up to `HEADER_WORDS` stay zero and reserved).
-const H_ALL: [u32; 46] = [
+const H_ALL: [u32; 47] = [
     H_MAGIC,
     H_BYTECODE_VERSION,
     H_HOST_API_VERSION,
@@ -151,6 +154,7 @@ const H_ALL: [u32; 46] = [
     H_TIMER_SERIAL,
     H_OWNER,
     H_QUEST_START,
+    H_TRANSITIONS,
 ];
 
 const _: () = {
