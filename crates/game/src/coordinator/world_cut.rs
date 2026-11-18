@@ -222,6 +222,10 @@ pub(super) struct WorldCuts {
     left: BTreeMap<HostId, Option<u64>>,
     /// Each host's boot as its latest `Attach` named it.
     boots: BTreeMap<HostId, u64>,
+    /// Each host's newest `Attach` applied, as `(boot, epoch)` (final review G-I1): an `Attach`
+    /// of the same boot with a lower epoch, and a message of the link it opened, is superseded
+    /// (`input.rs`, [`Coordinator::superseded`]) — at a replay too.
+    attach_epochs: BTreeMap<HostId, (u64, u64)>,
     /// `clock_ms` since which a due cut has been blocked by a host mismatch (report pacing).
     #[serde(skip)]
     blocked_since: Option<u64>,
@@ -254,6 +258,7 @@ impl Default for WorldCuts {
             leave_requests: BTreeMap::new(),
             left: BTreeMap::new(),
             boots: BTreeMap::new(),
+            attach_epochs: BTreeMap::new(),
             blocked_since: None,
             blocked_noted: None,
             blocked: None,
@@ -283,6 +288,7 @@ impl WorldCuts {
             leave_requests: _,
             left: _,
             boots: _,
+            attach_epochs: _,
             blocked_since,
             blocked_noted,
             blocked,
@@ -443,6 +449,7 @@ impl Coordinator {
         self.cuts.left.retain(|h, _| keep(h));
         self.cuts.succeeded.retain(|h, _| keep(h));
         self.cuts.boots.retain(|h, _| keep(h));
+        self.cuts.attach_epochs.retain(|h, _| keep(h));
         self.cuts.attached.retain(|h, _| keep(h));
         self.boots_seen.retain(|h, _| keep(h));
     }
@@ -458,6 +465,9 @@ impl Coordinator {
         }
         if self.cuts.boots.contains_key(&host) {
             out.push("boots");
+        }
+        if self.cuts.attach_epochs.contains_key(&host) {
+            out.push("attach_epochs");
         }
         out
     }
@@ -968,6 +978,17 @@ impl Coordinator {
     /// The boot host `host`'s latest `Attach` named (`None`: it never attached).
     pub(super) fn attached_boot(&self, host: HostId) -> Option<u64> {
         self.cuts.boots.get(&host).copied()
+    }
+
+    /// Host `host`'s newest `Attach` applied, as `(boot, epoch)` (final review G-I1).
+    pub(super) fn newest_attach(&self, host: HostId) -> Option<(u64, u64)> {
+        self.cuts.attach_epochs.get(&host).copied()
+    }
+
+    /// Host `host`'s `Attach` of `(boot, epoch)` is applied: the newest of its boot (an older one
+    /// was refused as superseded before it got here).
+    pub(super) fn note_attach_epoch(&mut self, host: HostId, boot: u64, epoch: u64) {
+        self.cuts.attach_epochs.insert(host, (boot, epoch));
     }
 
     /// The successions a commit decided here and not yet answered by the runtime would

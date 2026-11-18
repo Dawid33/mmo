@@ -4670,6 +4670,47 @@ fn a_link_down_of_a_host_attached_elsewhere_changes_nothing() {
     assert_eq!(b.world_cut_progress().map(|(_, _, verdict)| verdict), Some(Some(false)), "aborted where it was attached");
 }
 
+/// Final review G-I1: replica A applies host 0's `Attach` (its epoch 1) and a `RegionStarted` that
+/// came on that link; A's write is held up. Host 0's link to A drops, it attaches to replica B
+/// (epoch 2) and B commits first. A's write conflicts: rebased onto B's row, its replay drops the
+/// older `Attach` and the old link's start (they are not applied after the newer `Attach`), and its
+/// link down leaves host 0 attached to B — never detached while it is linked to B.
+#[test]
+fn a_replayed_attach_never_overtakes_a_newer_one_committed_elsewhere() {
+    let (base, _, _) = coordinator();
+    let (r0, r1) = (rc(0, 0), rc(14, 0));
+    let mut row = Row::of(&base);
+    let mut a = row.replica(1);
+    a.apply(Input::ReplicaJoined { me: ReplicaId(1), alone: true }, 0);
+    row.write(&mut a).expect("A joins");
+    let mut b = row.replica(2);
+    b.apply(Input::ReplicaJoined { me: ReplicaId(2), alone: false }, 0);
+    row.write(&mut b).expect("B joins");
+    row.rebase(&mut a);
+    let running = |rc| vec![RunningRegion { rc, incarnation: 1, people: Vec::new() }];
+    // On A, held: the Attach of epoch 1 and a start on its link.
+    a.apply(Input::Host { host: h(0), msg: attach(h(0), 1, running(r0), Vec::new()) }, 10);
+    a.apply(Input::Host { host: h(0), msg: HostMsg::RegionStarted { rc: r1, incarnation: 1 } }, 11);
+    // The host's link moved: its Attach of epoch 2 on B, committed first (r1 never started there).
+    b.apply(Input::Host { host: h(0), msg: attach(h(0), 2, running(r0), Vec::new()) }, 20);
+    row.write(&mut b).expect("B writes first");
+    a.apply(Input::LinkDown { host: h(0) }, 30);
+    let _lost = row.write(&mut a).expect_err("A's write conflicts: the row moved");
+    row.rebase(&mut a);
+    let out = row.write(&mut a).expect("A writes after its rebase");
+    assert!(
+        !out.iter().any(|(_, m)| matches!(m, CoordMsg::SpawnPeople { rc, .. } if *rc == r1)),
+        "the old link's start was not replayed: {out:?}"
+    );
+    let stored = row.replica(3);
+    for (what, c) in [("A's cache", &a), ("the row", &stored)] {
+        assert_eq!(c.hosts_attached_to(ReplicaId(2)), [h(0)].into_iter().collect(), "{what}: host 0 is attached to B");
+        assert_eq!(c.region_host(r1), None, "{what}: r1 runs nowhere");
+        assert_eq!(c.region_host(r0), Some(h(0)), "{what}: r0 runs on host 0");
+    }
+    assert_eq!(a.logged(), 0, "the superseded inputs left the log");
+}
+
 // ---- store decisions in the transition (Elastic 2b Task 3) ---------------------------------
 
 /// Elastic 2b Task 3: an answer counts only for the call it answers — its stamp is the mark's.

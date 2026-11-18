@@ -7492,6 +7492,73 @@ fn a_host_moving_between_replicas_sees_commit_order() {
     sweep("a_host_moving_between_replicas_sees_commit_order", 3, 1, SEEDS, host_moving_between_replicas);
 }
 
+/// Final review G-I1: three hosts, two replicas. Replica 1's writes are held up (a write waiting
+/// on the row lock, a stalled store) while host 2 attaches to it — applied there, logged, never
+/// written. Host 2's link then moves to replica 0, which commits its newer `Attach`. Released,
+/// replica 1's write conflicts and replays its log onto replica 0's row: the older `Attach` (and
+/// its link's messages, and the link down that followed) must not overtake the newer one — host 2
+/// stays attached to replica 0 in the row, cuts of every host commit again, and the world is
+/// conserved throughout.
+fn replayed_attach_behind_a_newer_one(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    rig.with_replicas(2);
+    let mover = h(2);
+    let slime = slime_in(rig, chain[0], 0);
+    rig.cut_round();
+    rig.core().hold_writes(1, true);
+    // Host 2 dials replica 1: its `Attach` is applied there, held.
+    let now = rig.hosts[mover.0 as usize].now_ms;
+    fn link(rig: &mut MultiRig, h: HostId) -> &mut game::coordinator::InlineWorldLink {
+        rig.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link")
+    }
+    link(rig, mover).move_to(1, now);
+    rig.round();
+    link(rig, mover).set_up(true);
+    for _ in 0..4 {
+        rig.round();
+        rig.assert_conserved_world();
+    }
+    assert!(rig.core().replica_core(1).logged() > 0, "replica 1 applied host 2's Attach and holds it (seed {})", rig.seed);
+    // Its link moves to replica 0, which commits the newer `Attach`; then replica 1 writes.
+    rig.link_world_to(mover, 0);
+    push_over(rig, slime, chain[0], chain[1]);
+    let (r0, r1) = {
+        let mut c = rig.core();
+        c.hold_writes(1, false);
+        c.pump_replica(1);
+        (c.replica_core(0).replica(), c.replica_core(1).replica())
+    };
+    let row = {
+        let c = rig.core();
+        let (core, history) = c.stored().expect("written");
+        let now = rig.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        game::Coordinator::load(&core, &history, c.history().grid().clone(), r1, now).expect("the row loads")
+    };
+    assert!(
+        row.hosts_attached_to(r0).contains(&mover),
+        "host 2 is attached to replica 0 in the row after replica 1's replay (seed {}): to 0 {:?}, to 1 {:?}",
+        rig.seed,
+        row.hosts_attached_to(r0),
+        row.hosts_attached_to(r1),
+    );
+    let before = committed(rig);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if committed(rig) > before {
+            break;
+        }
+        rig.cut_round();
+        rig.assert_conserved_world();
+    }
+    assert!(committed(rig) > before, "a cut of every host commits after the replay (seed {}): decided {:?}", rig.seed, rig.decided);
+    rig.assert_journals_explain_the_cut();
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_replayed_attach_never_overtakes_a_newer_one() {
+    sweep("a_replayed_attach_never_overtakes_a_newer_one", 3, 1, SEEDS, replayed_attach_behind_a_newer_one);
+}
+
 /// Three hosts: a slime walks S1→D→S2 after the last committed cut, then D dies. S1's
 /// `Sent` entry is older than S2's `Received` one: nothing is replayed — the slime is on
 /// S2, once.

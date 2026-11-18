@@ -24,6 +24,16 @@
 //! store DECISIONS are logged inputs ([`Input::Decision`], Elastic 2b Task 3), and so is a cut's
 //! stored decision read back ([`Input::CutLookedUp`]: a recorded decision never changes, so a
 //! replay is what applying it there first would have done).
+//!
+//! **A superseded link's messages** (final review G-I1): a replica applies a host's `Attach`
+//! (and what follows it on that link), its write is held up, the host's link drops and it
+//! attaches to another replica, which commits first — the replay would put the OLD `Attach` (and
+//! its link's later messages) after the newer one. So the projection keeps, per host, the
+//! `(boot, epoch)` of the newest `Attach` applied ([`HostMsg::Attach`]'s `epoch` grows by one per
+//! link up of a host process), every logged host message carries the `(boot, epoch)` of the
+//! `Attach` its link opened with on this replica ([`Logged::link`]), and a message of an older
+//! link of the same boot is dropped — at its first apply and at a replay, and out of the log: the
+//! newer `Attach` re-reported everything, and the host resends what was never answered.
 
 use crate::{CutId, HostId, Succession, Tick};
 use crate::history::persist::HistoryLoadError;
@@ -82,6 +92,18 @@ pub enum Input {
     CutLookedUp { host: Option<HostId>, cut: CutId, committed: bool },
 }
 
+/// The `(boot, epoch)` of a host's `Attach`: what a link to a replica opened with.
+pub(super) type LinkStamp = (u64, u64);
+
+/// One input in the log: the store time it was applied at, the input, and — for a host's
+/// message — the `Attach` its link opened with on this replica (`None`: none seen; never dropped).
+#[derive(Debug, Clone)]
+pub(super) struct Logged {
+    pub(super) now: u64,
+    pub(super) input: Input,
+    pub(super) link: Option<LinkStamp>,
+}
+
 impl Input {
     /// Whether this input is the ticker's store-read answer: refused on a non-ticker, never
     /// logged, never replayed.
@@ -107,17 +129,56 @@ impl Coordinator {
             log::trace!("coordinator: replica {} is not the ticker: {input:?} refused", self.replica);
             return;
         }
+        // The link a host's message came on: the `Attach` it opened with here (an `Attach` opens
+        // one). Messages of one link arrive in order, its `Attach` first.
+        let link = match &input {
+            Input::Host { host, msg: HostMsg::Attach { boot, epoch, .. } } => {
+                self.link_attach.insert(*host, (*boot, *epoch));
+                Some((*boot, *epoch))
+            }
+            Input::Host { host, .. } => self.link_attach.get(host).copied(),
+            _ => None,
+        };
+        if self.superseded(&input, link) {
+            return;
+        }
         self.clean_checked = false;
         if !self.unstored && !input.is_ticker_read() {
             // No store, no row to move under it (the inline link): nothing to replay.
-            self.log.push((now_ms, input.clone()));
+            self.log.push(Logged { now: now_ms, input: input.clone(), link });
         }
-        self.apply_logged(input, now_ms);
+        self.apply_logged(input, now_ms, link);
+    }
+
+    /// Whether `input` is a message of host `h` that came on a link older than the newest
+    /// `Attach` of the same boot the projection holds (`link`: the `Attach` its link opened with;
+    /// an `Attach` is its own): dropped, with a log line (final review G-I1, the module notes). A
+    /// message of another boot is never dropped here (host ids are never reused: only the solo
+    /// host's process restarts under one id, with one replica).
+    pub(super) fn superseded(&self, input: &Input, link: Option<LinkStamp>) -> bool {
+        let Input::Host { host, msg } = input else { return false };
+        let Some((boot, newest)) = self.newest_attach(*host) else { return false };
+        let older = match msg {
+            HostMsg::Attach { boot: b, epoch, .. } => *b == boot && *epoch < newest,
+            _ => link.is_some_and(|(b, e)| b == boot && e < newest),
+        };
+        if older {
+            log::info!(
+                "coordinator: host {host}'s message of its link opened by attach {:?} is superseded by its attach {newest} (boot {boot}): dropped",
+                link.map(|(_, e)| e)
+            );
+        }
+        older
     }
 
     /// One input, applied (first, or again at a rebase) at `now_ms` lifted to the projection's
-    /// clock floor.
-    fn apply_logged(&mut self, input: Input, now_ms: u64) {
+    /// clock floor; `link` as logged ([`Logged::link`]). Whether it was applied — a host's message
+    /// of a superseded link is not ([`Self::superseded`]: at a replay, the row it is replayed onto
+    /// holds a newer `Attach` of the host).
+    fn apply_logged(&mut self, input: Input, now_ms: u64, link: Option<LinkStamp>) -> bool {
+        if self.superseded(&input, link) {
+            return false;
+        }
         let now = now_ms.max(self.clock_floor());
         match input {
             Input::Host { host, msg } => self.on_host(host, msg, now),
@@ -143,6 +204,7 @@ impl Coordinator {
             }
             Input::CutLookedUp { host, cut, committed } => self.on_cut_looked_up(host, cut, committed),
         }
+        true
     }
 
     /// The newest store time the projection recorded: the calendar's anchor and last sign of
@@ -194,13 +256,15 @@ impl Coordinator {
         let log = std::mem::take(&mut self.log);
         log::info!("coordinator: rebased onto version {version}; {} logged input(s) applied again", log.len());
         let mut kept = Vec::with_capacity(log.len());
-        for (now, input) in log {
-            if matches!(input, Input::Maintain) && !self.ticking_now() {
+        for entry in log {
+            if matches!(entry.input, Input::Maintain) && !self.ticking_now() {
                 log::debug!("coordinator: replica {} is not the ticker of the rebased core: its upkeep is dropped", self.replica);
                 continue;
             }
-            self.apply_logged(input.clone(), now);
-            kept.push((now, input));
+            // A host's message of a link the row holds superseded (G-I1) leaves the log too.
+            if self.apply_logged(entry.input.clone(), entry.now, entry.link) {
+                kept.push(entry);
+            }
         }
         self.log = kept;
         // A mark of this replica still set now was committed in the row by an earlier

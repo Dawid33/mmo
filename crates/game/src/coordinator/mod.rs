@@ -206,7 +206,11 @@ pub struct Coordinator {
     replica: ReplicaId,
     /// Every input applied since the last commit, with the store time it was applied at
     /// (`input.rs`): what a rebase applies again onto a newer row.
-    log: Vec<(u64, Input)>,
+    log: Vec<input::Logged>,
+    /// Per host, the `(boot, epoch)` of the `Attach` its link to this replica opened with (final
+    /// review G-I1): what each of its later messages is logged with ([`input::Logged::link`]).
+    /// The process's own (its links'), kept by a rebase.
+    link_attach: BTreeMap<HostId, input::LinkStamp>,
     /// `log`'s length when the transition in flight was taken: its commit drops the log up to
     /// here ([`Self::transition_written`]).
     log_boundary: usize,
@@ -379,6 +383,7 @@ projection! {
             login_out = Vec::new(),
             replica = replica,
             log = Vec::new(),
+            link_attach = BTreeMap::new(),
             unstored = false,
             joined = false,
             recorded = None,
@@ -452,6 +457,7 @@ impl Coordinator {
             login_out: Vec::new(),
             replica,
             log: Vec::new(),
+            link_attach: BTreeMap::new(),
             log_boundary: 0,
             version: 0,
             // The replica that bootstraps the row is its ticker from the start: nothing to read
@@ -688,6 +694,7 @@ impl Coordinator {
                 if named != host {
                     log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");
                 }
+                self.note_attach_epoch(host, boot, epoch);
                 if generation > self.generation_seen {
                     // A newer world generation: every host started its hops over.
                     if !self.hop_of.is_empty() {
@@ -885,7 +892,7 @@ impl Coordinator {
                 self.version_check = None;
                 let n = check.out_len.min(self.out.len());
                 let logged = check.log_len.min(self.log.len());
-                let drained: Vec<(u64, Input)> = self.log.drain(..logged).collect();
+                let drained: Vec<input::Logged> = self.log.drain(..logged).collect();
                 self.record(drained);
                 self.reads_committed = self.reads_applied;
                 self.routed = self.routed.saturating_sub(n);
@@ -1012,9 +1019,9 @@ impl Coordinator {
     }
 
     /// Inputs leaving the log, kept if recording.
-    fn record(&mut self, inputs: Vec<(u64, Input)>) {
+    fn record(&mut self, inputs: Vec<input::Logged>) {
         if let Some(r) = self.recorded.as_mut() {
-            r.extend(inputs);
+            r.extend(inputs.into_iter().map(|l| (l.now, l.input)));
         }
     }
 
@@ -1237,7 +1244,7 @@ impl Coordinator {
         self.writing_stamp = None;
         self.version = version;
         let boundary = std::mem::take(&mut self.log_boundary).min(self.log.len());
-        let drained: Vec<(u64, Input)> = self.log.drain(..boundary).collect();
+        let drained: Vec<input::Logged> = self.log.drain(..boundary).collect();
         self.record(drained);
         self.reads_committed = self.reads_taken;
     }

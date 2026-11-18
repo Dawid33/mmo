@@ -239,6 +239,9 @@ pub struct RigCluster {
     events: Option<Vec<RigEvent>>,
     /// While recording: what each host's mailbox got, with the version that released it.
     delivered: BTreeMap<HostId, Vec<(u64, CoordMsg)>>,
+    /// [`Self::hold_writes`]: replicas whose writes (and so everything they would release) are
+    /// held up, as a write waiting on the row lock or a stalled store.
+    held_writes: BTreeSet<usize>,
 }
 
 impl RigCluster {
@@ -252,7 +255,19 @@ impl RigCluster {
             refreshes: 0,
             events: None,
             delivered: BTreeMap::new(),
+            held_writes: BTreeSet::new(),
         }))
+    }
+
+    /// Test hook (final review G-I1): replica `r`'s writes are held up (`true`) — it applies what
+    /// its links bring and logs it, writes nothing, releases nothing — or go on (`false`; its next
+    /// pass writes, and meets whatever other replicas committed meanwhile).
+    pub fn hold_writes(&mut self, r: usize, hold: bool) {
+        if hold {
+            self.held_writes.insert(r);
+        } else {
+            self.held_writes.remove(&r);
+        }
     }
 
     /// Test hook: right before the next write of a replica, a foreign writer writes the row's
@@ -503,7 +518,7 @@ impl RigCluster {
     /// for a host not linked to it is lost, as on a real link), each tagged with the row version
     /// that released it.
     fn route(&mut self, r: usize) {
-        if self.replicas[r].dead {
+        if self.replicas[r].dead || self.held_writes.contains(&r) {
             return;
         }
         let mut out: Vec<(u64, Target, CoordMsg)> = Vec::new();
