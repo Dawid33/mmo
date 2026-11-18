@@ -149,9 +149,12 @@ pub fn diagnostics_of(case: &Case) -> String {
 /// Whether the case runs in the stub's `World`: its program has a quest, or it has `people.txt` or
 /// `script.txt` (as `quest run` decides).
 pub fn is_world(case: &Case) -> bool {
-    case.people.is_some()
-        || case.script.is_some()
-        || compile(&tree_of(case), &quest_stub::stub_api()).is_ok_and(|c| c.program.quest.is_some())
+    compile(&tree_of(case), &quest_stub::stub_api()).is_ok_and(|c| runs_in_world(case, &c.program))
+}
+
+/// The world-case rule over the case's compiled `program` ([`is_world`]).
+fn runs_in_world(case: &Case, program: &quest_vm::Program) -> bool {
+    case.people.is_some() || case.script.is_some() || program.quest.is_some()
 }
 
 /// What one run of a case produced: the golden trace's parts ([`Trace::golden`]).
@@ -201,8 +204,7 @@ pub fn trace_of_tree(case: &Case, tree: &SourceTree, cfg: &CaseConfig) -> Result
         }
     };
     let warnings = compiled.warnings.iter().map(warning_line).collect();
-    let world = case.people.is_some() || case.script.is_some() || compiled.program.quest.is_some();
-    let mut trace = if world {
+    let mut trace = if runs_in_world(case, &compiled.program) {
         world_trace(case, compiled, cfg)?
     } else {
         runner_trace(compiled, cfg)?

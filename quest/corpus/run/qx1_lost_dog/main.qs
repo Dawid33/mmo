@@ -1,6 +1,6 @@
 #! role=farmer=Person(3) role=dog=Creature(7) role=miller=Person(4)
 # Quest examples §1: The Lost Dog — one-off, a home and an entity part (`dog_watch` on the dog), two players,
-# a bolt at nightfall and a retry. Its opening is quest examples §7's table (batch 1: the greeting and the
+# a bolt at nightfall and a retry; a double sighting in one tick sets one timer (one more bolt, not two). Its opening is quest examples §7's table (batch 1: the greeting and the
 # menu; batch 2: the plea; batch 3: the hint and the stale menu; the stale pick refused — see script.txt).
 # Adapted: `NIGHT_TICKS` is 300, not 9000 (the golden holds a line per tick).
 

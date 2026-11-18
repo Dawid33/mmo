@@ -12,13 +12,14 @@
 3 done 2
 # Ana is down: nobody is left, the attempt failed, the job is open again; Bo takes it.
 12 event PlayerDefeated player=Player(1)
-# Bo takes the banner and clears the hollow (a wolf does not count); he is paid 35.
-15 kill 50 by 2
+# Bo takes the job, the banner, and clears the hollow (the wolf, killed in `Assault`, is not `ours` and does
+# not count); he is paid 35.
 20 talk 2 3
 21 pick 2 1
 22 pick 2 1
 23 leave 2
 24 done 2
+26 kill 50 by 2
 30 event BlockUsed player=Player(2) tag="bandit_banner"
 31 kill 20 by 2
 32 kill 21 by 2

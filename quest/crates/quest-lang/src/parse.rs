@@ -660,8 +660,8 @@ fn diagnose(file: &str, toks: &[Token], end: End, err: PErr) -> Vec<Diagnostic> 
                 return vec![Diagnostic::error(
                     "bad-line-text",
                     format!(
-                        "a line's text is a string or an f-string literal (it is translated by its id), \
-                         not {}",
+                        "a text (a line's, an option's, a topic's or an objective's) is a string or an \
+                         f-string literal (it is translated by its id): found {}",
                         describe(&tok)
                     ),
                     file,

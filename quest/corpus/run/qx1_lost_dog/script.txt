@@ -7,8 +7,8 @@
 # built again is empty (Ana, a participant, is offered no `join_in`), so the conversation ends. (§7's farmer
 # also has the site's own topics, so there the menu is re-sent.)
 4 pick 1 1
-5 leave 1
-6 done 1
+# The conversation ended at 4: acknowledge it.
+5 done 1
 # Bo, later: `Search`'s greeting (`lost_again`), and `join_in` offered to a non-participant.
 7 talk 2 3
 8 pick 2 1
@@ -24,12 +24,17 @@
 323 pick 1 1
 324 leave 1
 325 done 1
-# Both spot him in one tick: two `DogFound`s, one finish, one timer. Ana feeds him: he follows her.
+# Both spot him in one tick: two `DogFound`s, one finish (`found`'s guard), one timer.
 330 near 1 7
 330 near 2 7
-332 event ItemGiven player=Player(1) to=Creature(7) item=Item(kind="meat",count=1) @dog_watch
+# Unfed: one timer, one bolt at nightfall — `attempts` 3 (without the guard a second timer bolts him again: 4).
+640 talk 1 3
+641 done 1
+# Found again and fed: he follows Ana.
+650 near 1 7
+652 event ItemGiven player=Player(1) to=Creature(7) item=Item(kind="meat",count=1) @dog_watch
 # Returning: the reunion topic (the dog near the farmer); both participants get the whistle.
-340 talk 1 3
-341 pick 1 1
-342 leave 1
-343 done 1
+660 talk 1 3
+661 pick 1 1
+662 leave 1
+663 done 1

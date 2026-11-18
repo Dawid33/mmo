@@ -1,10 +1,10 @@
-error[bad-line-text]: a line's text is a string or an f-string literal (it is translated by its id), not the name `refusal`
+error[bad-line-text]: a text (a line's, an option's, a topic's or an objective's) is a string or an f-string literal (it is translated by its id): found the name `refusal`
   --> main.qs:11:10
    |
 11 |     npc: refusal @bad.var
    |          ^^^^^^^
 
-error[bad-line-text]: a line's text is a string or an f-string literal (it is translated by its id), not the name `polite`
+error[bad-line-text]: a text (a line's, an option's, a topic's or an objective's) is a string or an f-string literal (it is translated by its id): found the name `polite`
   --> main.qs:12:8
    |
 12 |     p: polite() @bad.call

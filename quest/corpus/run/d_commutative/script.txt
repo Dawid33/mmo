@@ -5,7 +5,11 @@
 4 pick 1 3
 5 leave 1
 6 done 1
-# Ana again: the plain greeting.
+# Ana again: the two plain greetings (score 0, never picked) tie: the stable key, `a::hello` before
+# `c::evening`; then the less often picked, `c::evening`.
 7 talk 1 5
 8 leave 1
 9 done 1
+10 talk 1 5
+11 leave 1
+12 done 1

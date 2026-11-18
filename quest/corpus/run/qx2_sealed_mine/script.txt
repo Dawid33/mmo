@@ -14,5 +14,8 @@
 503 kill 22 by 1
 504 kill 23 by 1
 505 kill 24 by 1
+# The seal after the fifth counted kill: `lurkers` is 5 of 6 (the wolf and the drowned lurker did not count),
+# so `sealed` does not complete.
+505 event BlockUsed player=Player(1) tag="seal_stone" @depths
 506 kill 25 by 1
 510 event BlockUsed player=Player(1) tag="seal_stone" @depths
