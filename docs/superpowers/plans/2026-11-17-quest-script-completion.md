@@ -2095,13 +2095,18 @@ README "Fuzzing" says how to run, re-seed and turn a crash into a regression. Wh
   changes how far another handler got: README "Known limits"); the unlimited run unbounded in fuel (a heavy
   generated program, 258 M fuel, past libFuzzer's timeout under the sanitizer: `UNLIMITED_FUEL_MAX`); a world
   loaded back mid-cooldown lost its repeatable's due `Setup` (the target claimed it was had; `World::setup_due`).
-  The inputs are kept under `quest/fuzz/regressions/invariants/` for `cargo fuzz run` (a target's own bug has no
-  crate test to hold it).
+  The inputs are kept under `quest/fuzz/regressions/invariants/` for `just quest-fuzz-replay invariants` (a target's
+  own bug has no crate test to hold it).
 - **Known bugs fixed first** (Task 52/54 reviews), each with a crate regression test: a transition cycle whose
-  stages handle `Entered` re-armed every round (the chain count is kept across handler commits, reset per tick);
+  stages handle `Entered` re-armed every round (the chain's count kept by `Entered` handlers, across ticks — a
+  per-tick reset left it fuel-dependent, final review; another handler begins a new chain);
   a late scene catch-up past `RUNNER_EVALS_MAX` ended `Finished` instead of yielding (the beat is put back and
   walked again); the home's initialisers' commands ran before placement was accepted and outside the world (held
-  until accepted; Task 62 says the game does the same); `World::load_vms` forgot which mirror each part was sent,
-  so an unchanged mirror was installed again and the world's hash parted (Task 54's
-  `crash-world-load-vms-remirror`; a record kept while the part bears it out; Task 63 says the game keeps it).
+  until accepted, at every placement — the first, a repeatable's re-placement, a reset; Task 62 says the game
+  does the same); `World::load_vms` forgot which mirror each part was sent, so an unchanged mirror was installed
+  again and the world's hash parted (Task 54's `crash-world-load-vms-remirror`): what each part was sent, the
+  dialogue mirrors and the due `Setup` are saved state kept as is (`WorldSaved`, a `QSSTATE3` file), saves
+  mid-segment included (final review); Task 63 says the game keeps them.
   `BYTECODE_VERSION` stays 7: no fix changed the format, no golden changed.
+- **Final review fix wave:** `just quest-fuzz-replay <target>` replays the kept inputs; `quest-check` checks the
+  fuzz crate; the Timeout exemption narrowed to runs where the rule fired.
