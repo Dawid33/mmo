@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use common::tree;
 use quest_stub::{Runner, StubConfig, stub_api};
-use quest_vm::consts::{COND_FUEL, MEM_BYTES_DEFAULT};
+use quest_vm::consts::{BATCH_STEPS_MAX, COND_FUEL, MEM_BYTES_DEFAULT, SCENE_FOLLOW_UPS_MAX};
 use quest_vm::dialogue::{DialogueGraph, DialogueKind, line_ticks};
 use quest_vm::dialogue_run::{Attachment, DialogueEnv, EventShape, InstanceId, Records};
 use quest_vm::host::{Host, PromiseId, QueryError, Report};
@@ -501,7 +501,8 @@ fn cast_ambient_deterministic() {
     let idle = [person(3), person(1), person(2)];
 
     // Every rotation and the reverse of the candidates: the same pick.
-    let pick_all = |env: &mut Env, played: &BTreeMap<String, u64>| {
+    let key = Some(prog.content_hash());
+    let pick_all = |env: &mut Env, played: &BTreeMap<(Option<u64>, String), u64>| {
         let first = cast_ambient(env, &cands, &idle, played, 1_000);
         for k in 0..cands.len() {
             let mut c = cands.clone();
@@ -521,12 +522,23 @@ fn cast_ambient_deterministic() {
     assert_eq!(cast, [person(1), person(2)]);
 
     // Least recently played next: `gossip` was just played.
-    played.insert("gossip".to_string(), 900);
+    played.insert((key, "gossip".to_string()), 900);
     let (att, cast) = pick_all(&mut env, &played);
     assert_eq!(att, env.att(1, "market_haggle"));
     assert_eq!(cast, [person(1), person(2)]);
-    played.insert("market_haggle".to_string(), 950);
+    played.insert((key, "market_haggle".to_string()), 950);
     assert_eq!(pick_all(&mut env, &played).0, env.att(1, "gossip"));
+    // Another program's scene of the same name shares no recency.
+    let mut other = played.clone();
+    other.remove(&(key, "gossip".to_string()));
+    other.insert((key.map(|k| k ^ 1), "gossip".to_string()), 1);
+    assert_eq!(pick_all(&mut env, &other).0, env.att(1, "gossip"));
+    // A person repeated in `idle` counts once, at their first place.
+    let repeated = [person(3), person(1), person(1), person(2), person(1)];
+    assert_eq!(
+        cast_ambient(&mut env, &cands, &repeated, &played, 1_000),
+        cast_ambient(&mut env, &cands, &idle, &played, 1_000)
+    );
 
     // With no merchants idle, the crier.
     let crier_only = [person(3)];
@@ -546,4 +558,157 @@ fn cast_ambient_deterministic() {
     ];
     assert_eq!(cast_ambient(&mut env, &junk, &idle, &played, 1_000), None);
     assert!(env.reports.is_empty(), "{:?}", env.reports);
+}
+
+const TALK_V1: &str = r#"scene talk(a: Person, b: Person):
+    a: "One."                                       @t.one
+    b: "Two."                                       @t.two
+    a: "Three."                                     @t.three
+"#;
+
+/// The same scene behind another one: every step of `talk` sits at other indices of the flat table.
+const TALK_V2: &str = r#"scene other(a: Person):
+    a: "Other."                                     @o.one
+    a: "Other again."                               @o.two
+    a: "Other once more."                           @o.three
+
+scene talk(a: Person, b: Person):
+    a: "One."                                       @t.one
+    b: "Two."                                       @t.two
+    a: "Three."                                     @t.three
+"#;
+
+const TALK_GONE: &str = r#"scene other(a: Person):
+    a: "Other."                                     @o.one
+"#;
+
+#[test]
+fn scene_rebind_after_edit_ends_or_continues() {
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", TALK_V1)]));
+    let mut rec = Records::default();
+    let mut play = env.play(1, "talk", vec![person(1), person(2)], 0);
+    let out = play.tick(&mut env, &mut rec, 0);
+    assert_eq!(out.lines[0].id, "t.one");
+
+    // An edit that keeps the node: the play goes on with its next line.
+    env.add(1, &compiled(&[("main.qs", TALK_V2)]));
+    assert_eq!(play.rebind(&mut env), None);
+    assert_eq!(play.scene(), env.index(1, "talk"));
+    let log = run(&mut env, &mut rec, &mut play, 1, 1_000);
+    assert_eq!(log.ids(), ["t.two", "t.three"]);
+    assert_eq!(log.ends[0].2, SceneReason::Finished);
+
+    // An edit that removes the scene: the play ends `Finished`.
+    env.add(1, &compiled(&[("main.qs", TALK_V2)]));
+    let mut play = env.play(1, "talk", vec![person(1), person(2)], 0);
+    play.tick(&mut env, &mut rec, 0);
+    env.add(1, &compiled(&[("main.qs", TALK_GONE)]));
+    let out = play.rebind(&mut env).expect("ended");
+    let end = out.ended.expect("an end");
+    assert_eq!(
+        (end.name.as_str(), end.reason),
+        ("talk", SceneReason::Finished)
+    );
+    assert!(play.ended());
+    assert_eq!(play.rebind(&mut env), None);
+    assert_eq!(play.tick(&mut env, &mut rec, 10_000), SceneOut::default());
+}
+
+/// Plays `scene` of `src` once at tick 0 and returns what the first call did.
+fn first_call(src: &str, scene: &str) -> (ScenePlay, SceneOut) {
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", src)]));
+    let mut rec = Records::default();
+    let mut play = env.play(1, scene, vec![person(1)], 0);
+    let out = play.tick(&mut env, &mut rec, 0);
+    (play, out)
+}
+
+#[test]
+fn zero_tick_loop_ends() {
+    let src = r#"scene spin(a: Person):
+    node start:
+        a: "Again."                                 @z.again (ticks=0)
+        -> start
+"#;
+    let (play, out) = first_call(src, "spin");
+    assert!(play.ended());
+    assert_eq!(out.ended.map(|e| e.reason), Some(SceneReason::Finished));
+    assert!(!out.lines.is_empty() && out.lines.len() <= BATCH_STEPS_MAX as usize);
+}
+
+#[test]
+fn pause_zero_loop_ends() {
+    let src = r#"scene idle(a: Person):
+    node start:
+        pause 0
+        -> start
+"#;
+    let (play, out) = first_call(src, "idle");
+    assert!(play.ended());
+    assert_eq!(out.ended.map(|e| e.reason), Some(SceneReason::Finished));
+}
+
+#[test]
+fn lineless_loop_ends() {
+    let src = r#"scene mute(a: Person):
+    node start:
+        a: "Never."                                 @m.never when act() == 99
+        -> start
+"#;
+    let (play, out) = first_call(src, "mute");
+    assert!(play.ended());
+    assert!(out.lines.is_empty());
+    assert_eq!(out.ended.map(|e| e.reason), Some(SceneReason::Finished));
+}
+
+#[test]
+fn follow_up_cycle_stops_at_the_cap() {
+    let src = r#"scene ping(a: Person):
+    a: "Ping."                                      @p.ping
+    -> pong
+
+scene pong(a: Person):
+    a: "Pong."                                      @p.pong
+    -> ping
+"#;
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", src)]));
+    let mut rec = Records::default();
+    let mut play = env.play(1, "ping", vec![person(1)], 0);
+    let log = run(&mut env, &mut rec, &mut play, 0, 100_000);
+    let plays = SCENE_FOLLOW_UPS_MAX as usize + 1;
+    assert_eq!(log.lines.len(), plays);
+    assert_eq!(log.ends.len(), plays);
+    assert!(log.ends.iter().all(|e| e.2 == SceneReason::Finished));
+}
+
+#[test]
+fn late_catch_up_yields_and_goes_on() {
+    let src = r#"scene tick(a: Person):
+    node start:
+        a: "Tock."                                  @c.tock (ticks=1)
+        -> start
+"#;
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", src)]));
+    let mut rec = Records::default();
+    let mut play = env.play(1, "tick", vec![person(1)], 0);
+    let late = 10_000;
+    let first = play.tick(&mut env, &mut rec, late);
+    assert!(!first.lines.is_empty() && first.lines.len() < late as usize);
+    assert!(!play.ended(), "a yield is not an end");
+    // Further calls at the same tick catch up the rest: one line per tick 0..=late in all.
+    let mut total = first.lines.len();
+    loop {
+        let out = play.tick(&mut env, &mut rec, late);
+        if out.lines.is_empty() {
+            break;
+        }
+        total += out.lines.len();
+    }
+    assert_eq!(total, late as usize + 1);
+    assert_eq!(play.tick(&mut env, &mut rec, late + 1).lines.len(), 1);
+    assert!(!play.ended());
 }

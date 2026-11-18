@@ -50,8 +50,8 @@ use state_hash::StateHash;
 use crate::consts::{BATCH_STEPS_MAX, CONVERSATION_LINGER_TICKS, DIALOGUE_STACK_MAX};
 use crate::dialogue::{Block, DialogueGraph, DialogueKind, StepDef};
 use crate::dialogue_eval::{
-    Advance, Common, Cursor, Eval, Frame, OnceRec, PickKey, advance, find, group, len_u32, step_at,
-    with_def,
+    Advance, Common, Eval, Frame, OnceRec, PickKey, Rebound, advance, group, len_u32, rebind_frame,
+    step_at, with_def,
 };
 pub use crate::dialogue_eval::{Records, roll};
 use crate::pure::PureFault;
@@ -538,67 +538,6 @@ impl Conversation {
             linger_until: self.now.saturating_add(CONVERSATION_LINGER_TICKS),
         };
         ended
-    }
-}
-
-enum Rebound {
-    Kept,
-    Restarted,
-    Gone,
-}
-
-/// Finds frame `f`'s dialogue, node and blocks again in its instance's (edited) graph.
-fn rebind_frame(env: &dyn DialogueEnv, f: &mut Frame) -> Rebound {
-    let Some(g) = env.graph(f.instance) else {
-        return Rebound::Gone;
-    };
-    let Some((di, d)) = find(g, &f.name) else {
-        return Rebound::Gone;
-    };
-    let Some(node) = d
-        .nodes
-        .iter()
-        .filter(|n| n.name == f.node)
-        .nth(usize::try_from(f.member).unwrap_or(usize::MAX))
-    else {
-        return Rebound::Gone;
-    };
-    f.dialogue = di;
-    let mut blocks = vec![node.body];
-    for k in 1..f.cursors.len() {
-        let parent = f.cursors[k - 1];
-        let child = parent
-            .next
-            .checked_sub(1)
-            .and_then(|o| blocks[k - 1].first.checked_add(o))
-            .and_then(|s| g.steps.get(usize::try_from(s).ok()?))
-            .and_then(|s| {
-                s.blocks()
-                    .get(usize::try_from(f.cursors[k].via).ok()?)
-                    .copied()
-            });
-        match child {
-            Some(b) => blocks.push(b),
-            None => break,
-        }
-    }
-    let fits = blocks.len() == f.cursors.len()
-        && blocks
-            .iter()
-            .zip(&f.cursors)
-            .all(|(b, c)| c.next <= b.len && b.range(g.steps.len()).is_some());
-    if fits {
-        for (c, b) in f.cursors.iter_mut().zip(blocks) {
-            c.block = b;
-        }
-        Rebound::Kept
-    } else {
-        f.cursors = vec![Cursor {
-            block: node.body,
-            next: 0,
-            via: 0,
-        }];
-        Rebound::Restarted
     }
 }
 

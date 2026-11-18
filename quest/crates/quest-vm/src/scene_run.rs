@@ -13,7 +13,9 @@
 //! ticks. Lines, `=>` groups (by the scene's `@pick`), `when`, `once` and `emit` are walked as in a
 //! conversation, at detour depth 1; `->` jumps to a node group (an empty one ends the scene), `return`
 //! ends it. The end of its last node is its end, `Finished`, when its last line has been held. A tick past
-//! several beats walks each of them in order at its own tick (the lines all come in its [`SceneOut`]).
+//! several beats walks each of them in order at its own tick; its [`SceneOut`] then carries all their
+//! lines as one burst, in order, without each line's own tick (a caller that ticks every tick never sees
+//! one).
 //!
 //! **Follow-ups.** A scene's `-> other_scene` ends it `Finished` and plays `other_scene` with the cast's
 //! first members (by parameter position); its first beat is walked by the next tick, at the follow-up's
@@ -24,8 +26,14 @@
 //! `Interrupted`, and is refused by an `uninterruptible` one; [`ScenePlay::actor_lost`] (a cast member died,
 //! left `HALO_BLOCKS` of the lead, or was removed) ends it `ActorLost`. A play started with fewer cast
 //! members than its scene's cast ends `ActorLost` at its first beat (more are cut to the scene's cast); one
-//! of no scene, or whose steps are gone (an edit), ends `Finished`. `SceneEnd` has no `TooDeep`: a beat
-//! walking more than [`BATCH_STEPS_MAX`] steps without a line or a pause ends the scene `Finished`.
+//! of no scene ends `Finished`. `SceneEnd` has no `TooDeep`: a call that walks [`BATCH_STEPS_MAX`] steps
+//! without the clock moving (no line or pause that takes a tick: a line-less loop, `(ticks=0)` lines or
+//! `pause 0` in a loop) ends the scene `Finished`.
+//!
+//! **Edits.** After the instance's graph is replaced, [`ScenePlay::rebind`] finds the scene again by its
+//! qualified name and its position by its path (the node's name and member index, then each nested block
+//! by its index), as a conversation does. A scene or node that is gone ends the play `Finished` (the
+//! language's `SceneEnd` has no `Edited`); a path that no longer resolves restarts its node.
 //!
 //! **Bounded.** One call walks at most [`BATCH_STEPS_MAX`] steps; a late tick that has more to catch up on
 //! goes on at the next call.
@@ -41,7 +49,9 @@ use state_hash::StateHash;
 
 use crate::consts::{BATCH_STEPS_MAX, SCENE_FOLLOW_UPS_MAX};
 use crate::dialogue::{DialogueKind, StepDef};
-use crate::dialogue_eval::{Advance, Common, Eval, Frame, advance, group, with_def};
+use crate::dialogue_eval::{
+    Advance, Common, Eval, Frame, Rebound, advance, find, group, rebind_frame, with_def,
+};
 use crate::dialogue_run::{Attachment, DialogueEnv, Emitted, InstanceId, Records, SaidLine};
 use crate::pure::PureFault;
 use crate::wire::WireValue;
@@ -144,7 +154,10 @@ impl ScenePlay {
             match self.beat(env, rec, base, &mut out, &mut budget, fresh) {
                 Beat::Wait(at) => {
                     self.next_at = at;
-                    fresh = false;
+                    // Only a wait that moves the clock: a zero-tick loop must not pass for progress.
+                    if at > base {
+                        fresh = false;
+                    }
                 }
                 Beat::Yield => break,
                 Beat::End(reason) => self.end(reason, &mut out),
@@ -157,6 +170,33 @@ impl ScenePlay {
             }
         }
         out
+    }
+
+    /// After an edit (the env's graphs replaced): the scene and its position found again (module docs).
+    /// `Some` with the end when the scene or its node is gone; `None` when the play goes on (or had ended).
+    pub fn rebind(&mut self, env: &mut dyn DialogueEnv) -> Option<SceneOut> {
+        if self.state == State::Ended {
+            return None;
+        }
+        let found = env
+            .graph(self.instance)
+            .and_then(|g| find(g, &self.name))
+            .map(|(k, _)| k);
+        let kept = match (found, self.frame.as_mut()) {
+            (None, _) => false,
+            (Some(_), Some(f)) => !matches!(rebind_frame(&*env, f), Rebound::Gone),
+            (Some(_), None) => true,
+        };
+        if !kept {
+            let mut out = SceneOut::default();
+            self.end(SceneReason::Finished, &mut out);
+            return Some(out);
+        }
+        if let Some(k) = found {
+            self.scene = k;
+        }
+        self.describe(&*env);
+        None
     }
 
     /// A player talks to a cast member: an interruptible scene ends `Interrupted` (nothing more once it
@@ -279,8 +319,8 @@ impl ScenePlay {
         Ok(())
     }
 
-    /// One beat at tick `at` (module docs). `budget` counts the call's steps; `fresh`: no beat of this
-    /// call has waited yet.
+    /// One beat at tick `at` (module docs). `budget` counts the call's steps; `fresh`: the clock has not
+    /// moved in this call yet.
     fn beat(
         &mut self,
         env: &mut dyn DialogueEnv,
@@ -297,7 +337,7 @@ impl ScenePlay {
         }
         loop {
             if *budget >= BATCH_STEPS_MAX {
-                // A whole call's steps without a wait: a beat that never says a line.
+                // A whole call's steps without the clock moving: a loop that never takes a tick.
                 return if fresh {
                     Beat::End(SceneReason::Finished)
                 } else {
@@ -342,9 +382,9 @@ impl ScenePlay {
                         with_def(&*env, i, &name, |di, d| Frame::at(i, di, d, node)).flatten();
                 }
                 // Not in a scene (the graph refuses them): walked past.
-                StepDef::Choice { .. }
-                | StepDef::Detour { .. }
-                | StepDef::Line { .. }
+                StepDef::Choice { .. } | StepDef::Detour { .. } => {}
+                // Walked by `common_step` above; never here.
+                StepDef::Line { .. }
                 | StepDef::Group { .. }
                 | StepDef::When { .. }
                 | StepDef::Once { .. }
@@ -362,16 +402,18 @@ type AmbientRank = (i32, Option<u64>, String, Option<u64>, InstanceId, u16);
 /// `idle` in order, where the scene's `where` holds. Deterministic given its inputs.
 ///
 /// `candidates` are attachments of scenes (anything else is ignored), in any order; `idle` the idle people
-/// near enough, distinct, in the caller's (deterministic) order; `played` the tick each scene (by qualified
-/// name) was last played. A candidate's cast is the first tuple of distinct idle people, in the order of
-/// their positions in `idle`, for which its `where` holds (no `where`: the first). At most
+/// near enough, in the caller's (deterministic) order (a repeated person counts once, at its first place);
+/// `played` the tick each scene was last played, keyed by (its program's key, `DialogueEnv::program_key`,
+/// and its qualified name): two programs' scenes of one name do not share recency. A candidate's cast is
+/// the first tuple of distinct idle people, in the order of their positions in `idle`, for which its
+/// `where` holds (no `where`: the first). At most
 /// [`BATCH_STEPS_MAX`] `where` evaluations are made in all; a fault counts as false and is reported once per
 /// fn. `_now` is reserved for a random tie-break (none today).
 pub fn cast_ambient(
     env: &mut dyn DialogueEnv,
     candidates: &[Attachment],
     idle: &[WireValue],
-    played: &BTreeMap<String, u64>,
+    played: &BTreeMap<(Option<u64>, String), u64>,
     _now: u64,
 ) -> Option<(Attachment, Vec<WireValue>)> {
     let mut ranked: Vec<(AmbientRank, usize, Option<u16>)> = candidates
@@ -382,11 +424,12 @@ pub fn cast_ambient(
                 .dialogues
                 .get(usize::from(a.dialogue))?;
             (d.kind == DialogueKind::Scene).then(|| {
+                let key = env.program_key(a.instance);
                 let rank = (
                     -i32::from(d.score),
-                    played.get(&d.name).copied(),
+                    played.get(&(key, d.name.clone())).copied(),
                     d.name.clone(),
-                    env.program_key(a.instance),
+                    key,
                     a.instance,
                     a.dialogue,
                 );
@@ -396,15 +439,21 @@ pub fn cast_ambient(
         .collect();
     ranked.sort();
     ranked.dedup();
+    let mut people: Vec<WireValue> = Vec::with_capacity(idle.len());
+    for p in idle {
+        if !people.contains(p) {
+            people.push(p.clone());
+        }
+    }
     let mut b = Binder {
         env,
-        idle,
+        idle: &people,
         evals: 0,
         reported: BTreeSet::new(),
     };
     for ((_, _, _, _, instance, dialogue), n, cond) in ranked {
         let mut cast = Vec::with_capacity(n);
-        if n <= idle.len() && b.bind(instance, cond, n, &mut cast) {
+        if n <= b.idle.len() && b.bind(instance, cond, n, &mut cast) {
             return Some((Attachment { instance, dialogue }, cast));
         }
         if b.evals >= BATCH_STEPS_MAX {

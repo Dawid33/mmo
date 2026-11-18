@@ -254,6 +254,71 @@ pub(crate) fn step_at(
     g.steps.get(s).cloned()
 }
 
+/// What [`rebind_frame`] found.
+pub(crate) enum Rebound {
+    /// Same node, same position.
+    Kept,
+    /// Same node; the position no longer resolves: the frame is at its node's start.
+    Restarted,
+    /// The dialogue or the node is gone.
+    Gone,
+}
+
+/// Finds frame `f`'s dialogue, node and blocks again in its instance's (edited) graph.
+pub(crate) fn rebind_frame(env: &dyn DialogueEnv, f: &mut Frame) -> Rebound {
+    let Some(g) = env.graph(f.instance) else {
+        return Rebound::Gone;
+    };
+    let Some((di, d)) = find(g, &f.name) else {
+        return Rebound::Gone;
+    };
+    let Some(node) = d
+        .nodes
+        .iter()
+        .filter(|n| n.name == f.node)
+        .nth(usize::try_from(f.member).unwrap_or(usize::MAX))
+    else {
+        return Rebound::Gone;
+    };
+    f.dialogue = di;
+    let mut blocks = vec![node.body];
+    for k in 1..f.cursors.len() {
+        let parent = f.cursors[k - 1];
+        let child = parent
+            .next
+            .checked_sub(1)
+            .and_then(|o| blocks[k - 1].first.checked_add(o))
+            .and_then(|s| g.steps.get(usize::try_from(s).ok()?))
+            .and_then(|s| {
+                s.blocks()
+                    .get(usize::try_from(f.cursors[k].via).ok()?)
+                    .copied()
+            });
+        match child {
+            Some(b) => blocks.push(b),
+            None => break,
+        }
+    }
+    let fits = blocks.len() == f.cursors.len()
+        && blocks
+            .iter()
+            .zip(&f.cursors)
+            .all(|(b, c)| c.next <= b.len && b.range(g.steps.len()).is_some());
+    if fits {
+        for (c, b) in f.cursors.iter_mut().zip(blocks) {
+            c.block = b;
+        }
+        Rebound::Kept
+    } else {
+        f.cursors = vec![Cursor {
+            block: node.body,
+            next: 0,
+            via: 0,
+        }];
+        Rebound::Restarted
+    }
+}
+
 /// What [`advance`] found.
 pub(crate) enum Advance {
     /// The next step (the cursor moved past it).
