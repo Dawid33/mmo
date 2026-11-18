@@ -258,9 +258,7 @@ impl World {
         w.core.insts.append(&mut insts);
         // The home's initialisers set the state `requires` and `where` read; their commands are held until
         // the placement is accepted (a refused one acts on none of them).
-        if let Some(home) = w.core.insts.first_mut() {
-            home.runner.host.holding = true;
-        }
+        w.hold();
         w.initialise();
         w.check_placement()?;
         for (k, name) in parts.into_iter().enumerate() {
@@ -279,12 +277,7 @@ impl World {
             inst.runner.host.in_world = true;
         }
         // Placed: the home's held commands are acted on, as at a tick (the world's commands at the first).
-        w.with_world(0, |r| {
-            r.host.holding = false;
-            for (f, args) in std::mem::take(&mut r.host.held) {
-                r.host.command(f, &args);
-            }
-        });
+        w.release();
         w.initialise();
         // The placed state is what a talk before the first commit reads (a `Setup` running over several
         // ticks takes no mirror until it ends).
@@ -303,6 +296,35 @@ impl World {
                     r.vm.initialise(now, fuel, &mut r.host);
                 }
             });
+        }
+    }
+
+    /// Every instance's commands held from now ([`StubHost`]'s `holding`): a placement's initialisers run
+    /// before `requires` and `where` decide it.
+    fn hold(&mut self) {
+        for inst in &mut self.core.insts {
+            inst.runner.host.holding = true;
+        }
+    }
+
+    /// The placement accepted: each instance's held commands acted on, in order, as at a tick (the world's
+    /// own commands at the next one).
+    fn release(&mut self) {
+        for i in 0..self.core.insts.len() {
+            self.with_world(i, |r| {
+                r.host.holding = false;
+                for (f, args) in std::mem::take(&mut r.host.held) {
+                    r.host.command(f, &args);
+                }
+            });
+        }
+    }
+
+    /// The placement refused: the held commands dropped, none acted on.
+    fn drop_held(&mut self) {
+        for inst in &mut self.core.insts {
+            inst.runner.host.holding = false;
+            inst.runner.host.held.clear();
         }
     }
 
@@ -471,8 +493,9 @@ impl World {
         true
     }
 
-    /// Every instance re-initialised (`Vm::reset`, `--reset`): as if the quest had just been placed; `Setup`
-    /// is due at the next tick.
+    /// Every instance re-initialised (`Vm::reset`, `--reset`): as if the quest had just been placed — its
+    /// `requires` and `where` checked again (`Err` when one does not hold, its initialisers' commands
+    /// dropped); `Setup` is due at the next tick.
     pub fn reset(&mut self) -> Result<(), String> {
         for inst in &mut self.core.insts {
             inst.runner
@@ -484,7 +507,14 @@ impl World {
         self.pending.clear();
         self.pending_mirrors.clear();
         self.sent.clear();
+        // As a placement: the initialisers' commands are held until `requires` and `where` hold again.
+        self.hold();
         self.initialise();
+        if let Err(e) = self.check_placement() {
+            self.drop_held();
+            return Err(e);
+        }
+        self.release();
         self.core.env.clear_mirrors();
         self.core.take_mirrors();
         Ok(())
@@ -862,12 +892,16 @@ impl World {
         self.pending_mirrors.clear();
         self.sent.clear();
         self.say("reaped".into());
+        // A placement again: the initialisers' commands are held until it is accepted.
+        self.hold();
         self.initialise();
         if let Err(e) = self.check_placement() {
+            self.drop_held();
             self.say(format!("reaped for good: {e}"));
             self.outcome = Outcome::Reaped;
             return;
         }
+        self.release();
         self.setup_at = Some(self.core.env.now.saturating_add(repeat.cooldown.max(1)));
     }
 

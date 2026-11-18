@@ -1382,3 +1382,40 @@ fn a_world_state_file_keeps_what_was_sent_and_the_mirrors() {
     fresh.load_vms(vms, setup).expect("the saves load");
     assert_eq!(fresh.saved(), saved);
 }
+
+const REPEATABLE_GIVES: &str = r#"fn welcome(p: Player) -> int:
+    give(p, Item(kind="bread", count=1))
+    return 1
+
+repeatable quest R(cooldown=5):
+    role watch: Person where watch.alive
+    role hero: Player
+    let welcomed = welcome(hero)
+    event Go:
+        player: Player
+    @on(RoleLost)
+    fn lost(e):
+        pass
+    stage A:
+        @on(Go)
+        fn go(e):
+            join(e.player)
+            complete()
+"#;
+
+/// Task 55 final review: a repeatable's re-placement after its completion ran the initialisers' commands
+/// before its `where` / `requires` were checked, so a re-placement that is refused (reaped for good) still
+/// gave. They are held until the re-placement is accepted, as at the first placement.
+#[test]
+fn a_refused_re_placement_acts_on_no_initialiser() {
+    let roles_text = [("watch", "Person(3)"), ("hero", "Player(1)")];
+    let mut w = world(REPEATABLE_GIVES, SMITH_PEOPLE, &roles_text).expect("placed");
+    let out = run(&mut w, "2 kill 3\n3 event R::Go player=Player(1)\n");
+    assert_eq!(w.outcome(), Outcome::Reaped, "{out:?}");
+    assert_eq!(w.people().entities[&1].inventory.get("bread"), Some(&1), "{out:?}");
+    // Accepted, the re-placement gives again.
+    let mut w = world(REPEATABLE_GIVES, SMITH_PEOPLE, &roles_text).expect("placed");
+    let out = run(&mut w, "3 event R::Go player=Player(1)\n");
+    assert_eq!(w.outcome(), Outcome::Running, "{out:?}");
+    assert_eq!(w.people().entities[&1].inventory.get("bread"), Some(&2), "{out:?}");
+}

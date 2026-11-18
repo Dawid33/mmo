@@ -1444,8 +1444,9 @@ GameDataUpdate::DialogueBatch { npc: EntityId, batch: Batch }
   `Program::check_api(&HostApi)` (**built in the Task 52 fix wave**, A6) and refuses a program that does not fit;
   the stub's `quest_stub::bind` is the model. A placement runs the initialisers first (`Vm::initialise`, built in
   the same wave) so `requires`, `where` and the first mirror read set globals, not zeros. Their host commands
-  are held until the placement is accepted (a refused one acts on none of them), then acted on as a tick's — the
-  stub's rule (`StubHost::holding`, Task 55).
+  are held until the placement is accepted (a refused one acts on none of them), then acted on as a tick's — at
+  every placement: the first, a repeatable's re-placement when it is reaped, and a reset (the stub's
+  `World::hold` / `release`, Task 55).
 - Ends: `Finished`; `Left` (`LeaveTalk`, or the talker's client gone); `OutOfRange` (talker and NPC more than
   `TALK_RANGE_BLOCKS` apart through `WorldView`, checked each tick); `Timeout`; `TooDeep`; `Edited` (Task 71).
   `DialogueEnded` is delivered at the end; the NPC is released at `TalkDone` or after `CONVERSATION_LINGER_TICKS`.
