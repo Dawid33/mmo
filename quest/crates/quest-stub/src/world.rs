@@ -499,7 +499,25 @@ impl World {
         if !setup {
             self.setup_at = None;
         }
-        self.sent.clear();
+        // What each part was sent stays known while the part still holds it (the same world's own state
+        // loaded back): sending an unchanged mirror again would install equal values anew, and the part's
+        // memory, not its values, would part from a run that was never saved. A record the loaded state
+        // does not bear out (another state, a migrated program) is dropped, and that part sent the home's.
+        let program = Arc::clone(&self.core.env.program);
+        let parts = program
+            .quest
+            .as_ref()
+            .map(|q| q.parts.as_slice())
+            .unwrap_or_default();
+        let sent = std::mem::take(&mut self.sent);
+        for (id, h) in sent {
+            let Some(part) = usize::from(id).checked_sub(1).and_then(|k| parts.get(k)) else {
+                continue;
+            };
+            if self.mirror_held(id, &part.read_set) == Some(h) {
+                self.sent.insert(id, h);
+            }
+        }
         self.core.env.clear_mirrors();
         self.core.take_mirrors();
         Ok(())
@@ -861,6 +879,20 @@ impl World {
                 self.sent.insert(id, h);
                 self.pending_mirrors.insert(id, m);
             }
+        }
+    }
+
+    /// The part's mirror last sent that it still holds: the one on its way, else the values it holds (a
+    /// part never writes them, `part-write`); `None` while it cannot say (mid-segment, initialising).
+    fn mirror_held(&self, id: u16, read_set: &[u16]) -> Option<u64> {
+        match self.pending_mirrors.get(&id) {
+            Some(on_its_way) => Some(hash_of(on_its_way)),
+            None => self
+                .core
+                .insts
+                .get(usize::from(id))
+                .and_then(|x| x.runner.vm.mirror(read_set).ok())
+                .map(|m| hash_of(&m)),
         }
     }
 

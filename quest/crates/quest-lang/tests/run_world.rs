@@ -1208,3 +1208,45 @@ fn an_initialisers_commands_act_once_placed() {
     assert!(w.people().has_tag(1, "marked"));
     assert_eq!(w.people().entities[&7].following, Some(1));
 }
+
+/// Task 55 (the Task 54 invariants finding `crash-world-load-vms-remirror`): `World::load_vms` forgot which
+/// mirror each part had been sent, so the home's unchanged mirror was sent and installed again, the install
+/// allocated equal values anew, and the part's state (and the world's hash) parted from an uninterrupted
+/// world's for good. Saved and loaded before any tick, the world goes on with the same hash every tick.
+#[test]
+fn a_loaded_world_goes_on_with_the_same_hash() {
+    let roles_text = [("pet", "Creature(7)")];
+    let script =
+        parse_script("2 event Q::Bump n=5\n6 near 1 7\n9 event Q::Bump n=1\n").expect("script");
+    for at in [0, 1, 3, 4, 8] {
+        let mut plain = world(PART_QUEST, PART_PEOPLE, &roles_text).expect("placed");
+        let mut resumed = world(PART_QUEST, PART_PEOPLE, &roles_text).expect("placed");
+        for tick in 0..14 {
+            if tick == at {
+                let program = Arc::clone(resumed.program());
+                let vms = (0..resumed.instances())
+                    .map(|k| {
+                        let id = u16::try_from(k).unwrap();
+                        let cfg = quest_stub::vm_config(MEM, id, roles(PART_PEOPLE, &roles_text));
+                        let bytes = resumed.vm(id).expect("an instance").save();
+                        quest_vm::Vm::load(Arc::clone(&program), cfg, &bytes).expect("loads")
+                    })
+                    .collect();
+                resumed.load_vms(vms, tick == 0).expect("the saves load");
+            }
+            let inputs: Vec<Input> = script
+                .iter()
+                .filter(|(t, _)| *t == tick)
+                .map(|(_, i)| i.clone())
+                .collect();
+            plain.step(&inputs);
+            resumed.step(&inputs);
+            assert_eq!(
+                resumed.hash64(),
+                plain.hash64(),
+                "saved before tick {at}: the hash after tick {tick}"
+            );
+        }
+        assert_eq!(resumed.output(), plain.output());
+    }
+}
