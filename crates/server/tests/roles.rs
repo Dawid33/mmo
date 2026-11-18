@@ -875,6 +875,57 @@ fn host_survives_coordinator_absence_at_start() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A host's `/readyz` follows its attach (Elastic 2b Task 9): registered but unattached it
+/// answers 503 `attaching`; once the coordinator acknowledged its `Attach` (the loop's
+/// `set_attached(manager.world_attached())`) it answers 200.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_is_ready_only_after_its_attach_is_acknowledged() {
+    use std::io::{Read, Write};
+    install_props();
+    let Some(db) = PgDb::create("readyattach") else { return };
+    let map = land_map();
+    let dir = scratch("readyattach");
+    let cert_file = dir.join("coordinator.cert-sha256");
+    let addr = free_udp_addr();
+    let get = |http: std::net::SocketAddr| -> (u16, String) {
+        let mut stream = std::net::TcpStream::connect(http).expect("connect");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        write!(stream, "GET /readyz HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n").expect("request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("response");
+        let status = response.split(' ').nth(1).and_then(|s| s.parse().ok()).expect("a status line");
+        (status, response.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default())
+    };
+    let health = server::health::Health::for_test();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let http = listener.local_addr().unwrap();
+    server::health::serve_for_test(listener, "host", health).unwrap();
+    health.require_attach();
+    health.set_registered(true);
+
+    let host_store = db.open();
+    let link = |reg| -> Box<dyn WorldLink + Send> { Box::new(quic_link(addr, cert_file.clone(), h(0), 7, reg)) };
+    let mut host = Host::start(&host_store, &map, |me| Box::new(alone(me)), link, None, 7);
+    for _ in 0..10 {
+        host.round();
+        health.set_attached(host.manager.world_attached());
+    }
+    assert!(!host.manager.world_attached(), "no coordinator yet");
+    assert_eq!(get(http), (503, "attaching".to_string()), "registered, not attached");
+
+    let (coordinator, _) = Coordinator::start(&db, &map, addr, cert_file);
+    host.until("attached to the coordinator", |h| {
+        health.set_attached(h.manager.world_attached());
+        h.manager.world_attached()
+    });
+    assert_eq!(get(http).0, 200, "attached: ready");
+    assert_eq!(host.exit(), ServerExit::Clean);
+    host_store.shutdown();
+    coordinator.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Rounds of both hosts until `done` holds (at most [`WAIT`]).
 fn until_both(h0: &mut Host, h1: &mut Host, what: &str, done: impl Fn(&mut Host, &mut Host) -> bool) {
     let deadline = Instant::now() + WAIT;

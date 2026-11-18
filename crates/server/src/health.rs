@@ -44,6 +44,10 @@ const WAITING: [&str; 2] = ["forge", DRAINED];
 /// [`WAITING`]'s word for a drained host: `/readyz`'s body, `mmo_waiting{why="drained"}`.
 pub const DRAINED: &str = "drained";
 
+/// How long a host stays Ready after its coordinator attachment lapsed: one host lease
+/// (`HOST_LEASE_MS`, 10 s), so a coordinator replica's restart does not unready every host.
+pub const ATTACH_GRACE_MS: i64 = 10_000;
+
 /// `last_beat_ms` before the first [`Health::loop_beat`].
 const NEVER: i64 = i64::MIN;
 
@@ -54,6 +58,13 @@ pub struct Health {
     /// The last loop pass, ms after `epoch` ([`NEVER`]: none yet).
     last_beat_ms: AtomicI64,
     registered: AtomicBool,
+    /// A host (not role `all`, not the coordinator): `/readyz` also waits for the attach
+    /// ([`Health::require_attach`]).
+    requires_attach: AtomicBool,
+    /// A coordinator replica has acknowledged the host's latest `Attach`, now.
+    attached: AtomicBool,
+    /// The last pass that saw it attached, ms after `epoch` ([`NEVER`]: never).
+    attached_ms: AtomicI64,
     /// [`WAITING`] index + 1; 0: not waiting.
     waiting: AtomicU8,
     cuts_committed: AtomicU64,
@@ -80,6 +91,9 @@ impl Health {
             epoch: Instant::now(),
             last_beat_ms: AtomicI64::new(NEVER),
             registered: AtomicBool::new(false),
+            requires_attach: AtomicBool::new(false),
+            attached: AtomicBool::new(false),
+            attached_ms: AtomicI64::new(NEVER),
             waiting: AtomicU8::new(0),
             cuts_committed: AtomicU64::new(0),
             cuts_aborted: AtomicU64::new(0),
@@ -125,6 +139,39 @@ impl Health {
     /// coordinator: its store is open and its listener bound. `false`: stopping.
     pub fn set_registered(&self, yes: bool) {
         self.registered.store(yes, Ordering::Relaxed);
+    }
+
+    /// A registered host is Ready only once a coordinator replica acknowledged its `Attach`,
+    /// and stays Ready for [`ATTACH_GRACE_MS`] after it detaches (Elastic 2b Task 9).
+    pub fn require_attach(&self) {
+        self.requires_attach.store(true, Ordering::Relaxed);
+    }
+
+    /// The host's main loop, each pass: whether its attach is acknowledged now.
+    pub fn set_attached(&self, yes: bool) {
+        if yes {
+            self.attached_ms.store(self.now_ms(), Ordering::Relaxed);
+        }
+        self.attached.store(yes, Ordering::Relaxed);
+    }
+
+    /// Test support: attached, `ago` ago, and not now.
+    #[cfg(test)]
+    fn set_detached_since(&self, ago: std::time::Duration) {
+        let ago = i64::try_from(ago.as_millis()).expect("a short span");
+        self.attached_ms.store(self.now_ms() - ago, Ordering::Relaxed);
+        self.attached.store(false, Ordering::Relaxed);
+    }
+
+    fn ready(&self) -> bool {
+        if !self.registered.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !self.requires_attach.load(Ordering::Relaxed) || self.attached.load(Ordering::Relaxed) {
+            return true;
+        }
+        let at = self.attached_ms.load(Ordering::Relaxed);
+        at != NEVER && self.now_ms() - at <= ATTACH_GRACE_MS
     }
 
     /// Why the process is not registered yet: `"forge"` or [`DRAINED`] (anything else is taken
@@ -421,8 +468,10 @@ async fn livez(State(s): State<Served>) -> impl IntoResponse {
 }
 
 async fn readyz(State(s): State<Served>) -> impl IntoResponse {
-    if s.health.registered.load(Ordering::Relaxed) {
+    if s.health.ready() {
         (StatusCode::OK, "ok")
+    } else if s.health.registered.load(Ordering::Relaxed) {
+        (StatusCode::SERVICE_UNAVAILABLE, "attaching")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, s.health.waiting().unwrap_or("starting"))
     }
@@ -485,6 +534,27 @@ mod tests {
         health.set_waiting(None);
         health.set_registered(true);
         assert_eq!(get(health, "/readyz").0, 200);
+    }
+
+    #[test]
+    fn a_registered_host_is_unready_until_attached() {
+        let health = fresh();
+        health.require_attach();
+        health.set_registered(true);
+        assert_eq!(get(health, "/readyz"), (503, "attaching".to_string()));
+        health.set_attached(true);
+        assert_eq!(get(health, "/readyz").0, 200);
+    }
+
+    #[test]
+    fn a_detached_host_stays_ready_for_one_lease() {
+        let health = fresh();
+        health.require_attach();
+        health.set_registered(true);
+        health.set_detached_since(Duration::from_millis(ATTACH_GRACE_MS as u64 - 2_000));
+        assert_eq!(get(health, "/readyz").0, 200, "inside the lease");
+        health.set_detached_since(Duration::from_millis(ATTACH_GRACE_MS as u64 + 1));
+        assert_eq!(get(health, "/readyz"), (503, "attaching".to_string()));
     }
 
     /// Elastic 1 Task 8: a drained host is not ready (`drained`), its idle loop keeps `/livez`

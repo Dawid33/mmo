@@ -908,6 +908,8 @@ pub fn run() -> claims::ServerExit {
             world_generation = claims::WorldGeneration::new(registered.generation);
             health::Health::global().world_generation(registered.generation);
             health::Health::global().set_registered(true);
+            // A host is Ready once a coordinator replica acknowledged its attach.
+            health::Health::global().require_attach();
             registered.id
         }
         _ => HostId::SOLO,
@@ -1299,6 +1301,7 @@ pub fn run() -> claims::ServerExit {
     let mut static_drain_warned = false;
     'main: loop {
         health::Health::global().loop_beat();
+        health::Health::global().set_attached(manager.world_attached());
         let now_ms = start.elapsed().as_millis() as u64;
         crossbeam::channel::select! {
             recv(client_packet_recv) -> ev => match ev {
