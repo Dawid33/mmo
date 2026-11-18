@@ -325,8 +325,11 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
             }
         }
     }
-    if opts.reset {
-        runner.vm.reset();
+    if opts.reset
+        && let Err(e) = runner.vm.reset()
+    {
+        eprintln!("error: cannot reset: {e:?}");
+        return ExitCode::from(EXIT_ABORTED);
     }
     if program_has_main {
         // A loaded state that already ran `main` is asked to run it again; one still in the middle of it

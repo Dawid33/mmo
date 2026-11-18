@@ -173,7 +173,11 @@ impl Vm {
     /// the next epoch — the variables initialise again, the queue, parked handlers, promises and orphans
     /// are gone, a failed instance is no longer failed, and the undo log is empty. Promise ids then carry
     /// the new epoch, so none repeats (decision 13). At the last epoch the epoch stays `u32::MAX`.
-    pub fn reset(&mut self) {
+    ///
+    /// The instance is rebuilt from its own configuration, which [`Vm::new`] or [`Vm::load`] checked (the
+    /// roles included), so this does not fail on a valid instance; should it, the `Err` is returned and
+    /// the instance is left as it was.
+    pub fn reset(&mut self) -> Result<(), LoadError> {
         let epoch = self
             .header(H_EPOCH)
             .ok()
@@ -188,14 +192,13 @@ impl Vm {
             instance: self.instance,
             roles: self.roles.clone(),
         };
-        // The program and the memory size built this instance, so they build a fresh one.
-        if let Ok(vm) = Vm::new(Arc::clone(&self.program), cfg) {
-            *self = vm;
-        }
+        *self = Vm::new(Arc::clone(&self.program), cfg)?;
+        Ok(())
     }
 
     /// A new instance of `new`, the edited script's program, holding this instance's state (the module
-    /// docs give the steps), and what happened to each variable. `cfg` configures it as in [`Vm::new`],
+    /// docs give the steps), and what happened to each variable. `cfg` configures it as in [`Vm::new`]
+    /// and must name this instance (`cfg.instance`; another is `Refused(Invalid)`),
     /// except that the epoch is this instance's (`cfg.epoch` is not used). Never changes `self`: on an
     /// error the edit is refused and this instance runs on as it was.
     pub fn migrate(
@@ -205,6 +208,12 @@ impl Vm {
     ) -> Result<(Vm, MigrationReport), MigrateError> {
         let epoch = u32::try_from(self.header(H_EPOCH).map_err(invalid)?)
             .map_err(|_| MigrateError::Corrupt("epoch out of range".into()))?;
+        if cfg.instance != self.instance {
+            return Err(MigrateError::Refused(LoadError::Invalid(format!(
+                "instance {} cannot take the state of instance {}",
+                cfg.instance, self.instance
+            ))));
+        }
         let mut next = Vm::fresh(new, VmConfig { epoch, ..cfg }).map_err(MigrateError::Refused)?;
         let mut skip = next.install_roles().map_err(MigrateError::Refused)?;
         let mut report = MigrationReport::default();

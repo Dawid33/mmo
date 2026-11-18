@@ -359,7 +359,7 @@ fn reset_equals_fresh() {
     click(&mut r, "bo");
     click(&mut r, "cy");
     assert_eq!(r.vm.status(), Status::Busy);
-    r.vm.reset();
+    r.vm.reset().expect("reset");
     let fresh = Vm::new(p, vm_cfg(2)).expect("fresh");
     assert!(r.vm.orphans().is_empty());
     assert_eq!(r.vm.mem_bytes(), fresh.mem_bytes());
@@ -384,7 +384,7 @@ fn reset_revives_a_failed_instance() {
     let (mut r, p) = start(src, StubConfig::default());
     assert_eq!(r.vm.status(), Status::Failed);
     assert!(matches!(r.host.reports[..], [Report::InitFailed { .. }]));
-    r.vm.reset();
+    r.vm.reset().expect("reset");
     r.host = quest_stub::StubHost::new(StubConfig {
         chest: vec![("gold".into(), 5)],
         ..StubConfig::default()
@@ -425,7 +425,7 @@ fn promise_ids_after_reset_do_not_repeat() {
         vm.deliver("PlayerClicked", &event("PlayerClicked", "ana"));
         vm.tick(t, FUEL, &mut ids);
     }
-    vm.reset();
+    vm.reset().expect("reset");
     vm.tick(3, FUEL, &mut ids);
     for t in 4..6 {
         vm.deliver("PlayerClicked", &event("PlayerClicked", "ana"));

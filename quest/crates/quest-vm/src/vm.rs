@@ -94,6 +94,34 @@ pub(crate) fn check_program(program: &Program, host_api_version: u32) -> Result<
         .map_err(|e| LoadError::Invalid(e.to_string()))
 }
 
+/// Whether `roles` (`VmConfig::roles`) are the roles of `program`'s quest: each given role is one of them
+/// and given once, each required one is given, each value fits its role's type. Else
+/// [`LoadError::Role`] naming the first role at fault. A program without a quest takes none.
+pub(crate) fn check_roles(
+    program: &Program,
+    roles: &[(String, WireValue)],
+) -> Result<(), LoadError> {
+    let quest_roles = program
+        .quest
+        .as_ref()
+        .map_or(&[][..], |q| q.roles.as_slice());
+    for (i, (name, _)) in roles.iter().enumerate() {
+        if !quest_roles.iter().any(|r| &r.name == name) || roles[..i].iter().any(|g| &g.0 == name) {
+            return Err(LoadError::Role(name.clone()));
+        }
+    }
+    for r in quest_roles {
+        let ok = match roles.iter().find(|(n, _)| n == &r.name) {
+            Some((_, v)) => fits(&program.types, r.ty, v),
+            None => r.optional,
+        };
+        if !ok {
+            return Err(LoadError::Role(r.name.clone()));
+        }
+    }
+    Ok(())
+}
+
 /// The result of one [`Vm::debug_run`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct DebugRun {
@@ -195,19 +223,14 @@ impl Vm {
     pub(crate) fn install_roles(&mut self) -> Result<Vec<u64>, LoadError> {
         let p = Arc::clone(&self.program);
         let given = self.roles.clone();
+        check_roles(&p, &given)?;
         let mut skip = vec![0u64; p.globals.len().div_ceil(64)];
         let roles = p.quest.as_ref().map_or(&[][..], |q| q.roles.as_slice());
-        for (i, (name, _)) in given.iter().enumerate() {
-            if !roles.iter().any(|r| &r.name == name) || given[..i].iter().any(|g| &g.0 == name) {
-                return Err(LoadError::Role(name.clone()));
-            }
-        }
         for r in roles {
             let refused = || LoadError::Role(r.name.clone());
             // `validate` checked the global and, for an optional role, its `Option[T]` type
             let g = &p.globals[usize::from(r.global)];
             let value = match given.iter().find(|(n, _)| n == &r.name) {
-                Some((_, v)) if !fits(&p.types, r.ty, v) => return Err(refused()),
                 Some((_, v)) if r.optional => {
                     let field = match p.types.desc(g.ty) {
                         Ok(TypeDesc::Enum { variants, .. }) => variants
@@ -285,7 +308,8 @@ impl Vm {
     }
 
     /// The live timers as (due tick, id, event name), in (due, id) order — those the open segment set or
-    /// is cancelling included (`timers`).
+    /// is cancelling included (`timers`). Empty when the timer table does not parse: such memory is
+    /// corrupt, and the next tick fails the instance (`Status::Failed`, a `Corrupt` fault report).
     pub fn timers(&self) -> Vec<(u64, u64, String)> {
         self.timers_list()
     }

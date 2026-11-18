@@ -6,9 +6,12 @@ use std::sync::Arc;
 
 use common::*;
 use quest_vm::asm::{FnBuilder, ProgramBuilder, SlotRef};
+use quest_vm::consts::MEM_BYTES_DEFAULT;
 use quest_vm::consts::{TIMERS_MAX, WORK_WORDS_MAX};
+use quest_vm::fuel::{FUEL_AFTER, FUEL_CANCEL, FUEL_ENQUEUE};
 use quest_vm::host::{AbortCause, DropReason, HostFnKind, Report};
-use quest_vm::layout::LoadError;
+use quest_vm::layout::{Layout, LoadError};
+use quest_vm::migrate::MigrateError;
 use quest_vm::program::{Anchor, PartInfo, Program, QuestInfo, RoleInfo};
 use quest_vm::types::{TypeDesc, TypeId};
 use quest_vm::vm::{Delivery, Status, Vm, VmConfig};
@@ -1094,6 +1097,9 @@ fn fault_kinds(host: &RecordingHost) -> Vec<FaultKind> {
         .collect()
 }
 
+/// A save's bytes before its memory: magic, two versions, the program hash, the memory length.
+const SAVE_HEADER_BYTES: usize = 8 + 4 + 4 + 8 + 4;
+
 /// The id of the `serial`-th timer of epoch 1.
 fn timer_id(serial: u64) -> u64 {
     1 << 32 | serial
@@ -1315,7 +1321,7 @@ fn quest_start_runs_after_the_initialisers_in_the_home_only() {
     at(&mut next, &mut nh, 2);
     assert!(logged(&nh).is_empty());
     // a reset does
-    home.reset();
+    home.reset().expect("reset");
     let mut rh = RecordingHost::default();
     at(&mut home, &mut rh, 3);
     assert_eq!(logged(&rh), [(0, 7), (0, 9)]);
@@ -1464,14 +1470,26 @@ fn timer_survives_save_load_and_is_hashed() {
     let mut vm = vm(&p);
     let mut host = RecordingHost::default();
     at(&mut vm, &mut host, 1);
-    let mut other = common::vm(&p);
-    at(&mut other, &mut RecordingHost::default(), 1);
     vm.deliver("Pong", &ping(3));
     at(&mut vm, &mut host, 2);
-    other.deliver("Pong", &ping(4));
-    at(&mut other, &mut RecordingHost::default(), 2);
-    // the timers are all that differs (their due ticks and payloads): the hashes differ
-    assert_ne!(vm.hash64(), other.hash64());
+
+    // The same state but for the timer's due tick (word 2 of record 0, in the save's copy of the memory):
+    // the hash differs, and the timer fires at the new tick.
+    let mut save = vm.save();
+    let layout = Layout::plan(u32::from(p.static_words), MEM_BYTES_DEFAULT).expect("layout");
+    let at_due = SAVE_HEADER_BYTES + layout.timers_base as usize + 2 * 8;
+    assert_eq!(save[at_due..at_due + 8], 5u64.to_le_bytes());
+    save[at_due..at_due + 8].copy_from_slice(&6u64.to_le_bytes());
+    let mut later = Vm::load(p.clone(), cfg(), &save).expect("loads");
+    assert_eq!(later.timers(), [(6, timer_id(1), "Ring".to_string())]);
+    assert_ne!(later.hash64(), vm.hash64());
+    let mut th = RecordingHost::default();
+    for now in 3..=5 {
+        at(&mut later, &mut th, now);
+    }
+    assert!(logged(&th).is_empty());
+    at(&mut later, &mut th, 6);
+    assert_eq!(logged(&th), [(103, 1)]);
 
     let mut loaded = Vm::load(p.clone(), cfg(), &vm.save()).expect("loads");
     assert_eq!(loaded.hash64(), vm.hash64());
@@ -1533,7 +1551,7 @@ fn reset_clears_timers() {
     vm.deliver("Ping", &ping(3));
     at(&mut vm, &mut host, 2);
     assert_eq!(vm.timers().len(), 2);
-    vm.reset();
+    vm.reset().expect("reset");
     assert!(vm.timers().is_empty());
     for now in 3..=8 {
         at(&mut vm, &mut host, now);
@@ -1648,13 +1666,98 @@ fn role_values_installed() {
     };
     assert_eq!(value(&vm, "Q::role.miller"), some);
     // a reset installs them again; a save keeps them
-    vm.reset();
+    vm.reset().expect("reset");
     at(&mut vm, &mut host, 2);
     assert!(host.reports.is_empty(), "{:?}", host.reports);
     assert_eq!(value(&vm, "Q::role.miller"), some);
     assert_eq!(value(&vm, "seen"), WireValue::Int(10));
-    let loaded = Vm::load(p.clone(), cfg(), &vm.save()).expect("loads");
+    let loaded = Vm::load(
+        p.clone(),
+        with_roles(&[("farmer", WireValue::Int(9))]),
+        &vm.save(),
+    )
+    .expect("loads");
     assert_eq!(value(&loaded, "Q::role.farmer"), WireValue::Int(9));
+}
+
+#[test]
+fn load_with_missing_roles_is_refused() {
+    let p = roles_program();
+    let farmer = || with_roles(&[("farmer", WireValue::Int(4))]);
+    let vm = Vm::new(p.clone(), farmer()).expect("loads");
+    let save = vm.save();
+    // checked as `Vm::new` checks them: missing, misfitting, unknown
+    for (roles, at_fault) in [
+        (vec![], "farmer"),
+        (vec![("farmer", WireValue::Str("x".into()))], "farmer"),
+        (
+            vec![("farmer", WireValue::Int(4)), ("baker", WireValue::Int(1))],
+            "baker",
+        ),
+    ] {
+        assert_eq!(
+            Vm::load(p.clone(), with_roles(&roles), &save).err(),
+            Some(LoadError::Role(at_fault.into()))
+        );
+    }
+    // a load with its roles resets into a real fresh instance (the next epoch, its roles installed)
+    let mut loaded = Vm::load(p.clone(), farmer(), &save).expect("loads");
+    loaded.reset().expect("reset");
+    let fresh = Vm::new(
+        p.clone(),
+        VmConfig {
+            epoch: 2,
+            ..farmer()
+        },
+    )
+    .expect("fresh");
+    assert_eq!(loaded.mem_bytes(), fresh.mem_bytes());
+}
+
+#[test]
+fn migrate_keeps_its_instance() {
+    let p = owners_program();
+    let part = Vm::new(p.clone(), dog_cfg(1)).expect("part");
+    assert!(matches!(
+        part.migrate(p.clone(), dog_cfg(0)),
+        Err(MigrateError::Refused(LoadError::Invalid(_)))
+    ));
+    let (mut next, _) = part.migrate(p.clone(), dog_cfg(1)).expect("migrates");
+    let mut host = RecordingHost::default();
+    next.deliver("Ping", &ping(5));
+    at(&mut next, &mut host, 1);
+    assert_eq!(logged(&host), [(5, 1)]);
+}
+
+/// `Enqueue`, `After` and `CancelTimer` of a one-field event: each its base cost plus one for the payload's
+/// walk (`ceil(words / 8)`), `Enqueue` one more for the bytes it buffers.
+#[test]
+fn timer_and_enqueue_fuel_pinned() {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    let f = pb.declare("ops", 0);
+    {
+        let mut b = pb.body(f);
+        let (n, ticks, val, id) = (b.local(0), b.local(1), b.local(2), b.local(3));
+        b.mark_ref(val);
+        b.emit(Op::LoadSmall, n, 7u16, 0u16);
+        b.emit(Op::Copy, ticks, n, 0u16);
+        make_ring(&mut b, &q, n, 0, val, 4);
+        b.emit(Op::Enqueue, q.ring_event, val, 0u16);
+        b.emit(Op::After, id, ticks, q.ring_event);
+        b.emit(Op::CancelTimer, id, 0u16, 0u16);
+        b.emit(Op::Drop, val, 0u16, 0u16);
+        ret(&mut b); // 2
+        b.end();
+    }
+    let p = Arc::new(pb.finish().expect("program"));
+    let mut vm = vm(&p);
+    let r = run_fn(&mut vm, 0);
+    assert_eq!(r.end, quest_vm::vm::RunEnd::Returned);
+    // The rest of the fn (loads, the event's construction, its drop, the return) costs 20.
+    let ops = (FUEL_ENQUEUE + 1 + 1) + (FUEL_AFTER + 1) + FUEL_CANCEL;
+    assert_eq!(ops, 28);
+    assert_eq!(r.fuel_used, 20 + ops);
 }
 
 #[test]

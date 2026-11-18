@@ -36,7 +36,7 @@ use crate::mem::Mem;
 use crate::migrate::Orphan;
 use crate::program::Program;
 use crate::store::Store;
-use crate::vm::{Vm, VmConfig, check_program};
+use crate::vm::{Vm, VmConfig, check_program, check_roles};
 use crate::wire::WireValue;
 
 /// The first bytes of every save.
@@ -136,7 +136,8 @@ impl Vm {
     /// The instance saved in `bytes`, resumed exactly where it was, with an empty undo log. `program`
     /// must be the one it was saved with (`ProgramMismatch`), `cfg.host_api_version` the program's and
     /// `cfg.instance` the instance it was saved as (`Invalid`); `cfg.events` and `cfg.roles` configure it as
-    /// in [`Vm::new`] (the roles are not installed again: the memory holds them; [`Vm::reset`] uses them).
+    /// in [`Vm::new`]. The roles are checked as `Vm::new` checks them ([`LoadError::Role`]) but not
+    /// installed again (the memory holds them); [`Vm::reset`] installs them.
     /// `cfg.mem_bytes` and `cfg.epoch` are not used: the memory carries both.
     pub fn load(program: Arc<Program>, cfg: VmConfig, bytes: &[u8]) -> Result<Vm, LoadError> {
         let mut r = Reader { rest: bytes };
@@ -156,6 +157,8 @@ impl Vm {
             });
         }
         check_program(&program, cfg.host_api_version)?;
+        // Not installed (the memory holds the values), but `reset` installs them again.
+        check_roles(&program, &cfg.roles)?;
         let program_hash = program.content_hash();
         if r.u64()? != program_hash {
             return Err(LoadError::ProgramMismatch);

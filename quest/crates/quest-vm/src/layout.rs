@@ -84,6 +84,7 @@ pub const H_RESUME_PARKED: u32 = 40;
 /// block of the inbox heap holding one bit per global; 0 = none. Freed once the init cursor is past the
 /// last global.
 pub const H_INIT_SKIP: u32 = 41;
+/// The timers region's base (`timers`): `TIMERS_MAX` records of `TIMER_REC_WORDS` words.
 pub const H_TIMERS_BASE: u32 = 42;
 /// The last timer serial issued (`timers`).
 pub const H_TIMER_SERIAL: u32 = 43;
