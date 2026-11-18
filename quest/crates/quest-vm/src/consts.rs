@@ -55,6 +55,16 @@ pub const PARSE_DEPTH_MAX: usize = 256;
 /// as false.
 pub const COND_FUEL: u64 = 500;
 
+/// The deepest a conversation's return stack may grow (detours): one more ends it `TooDeep`.
+pub const DIALOGUE_STACK_MAX: usize = 16;
+
+/// Ticks an ended conversation stays open (the NPC facing the player) without the client's `Done`.
+pub const CONVERSATION_LINGER_TICKS: u64 = 200;
+
+/// Steps the dialogue runner walks for one batch: a walk that reaches neither a choice, a pause nor an end
+/// within it (`-> start` with no choice in between) ends the conversation `TooDeep`.
+pub const BATCH_STEPS_MAX: u32 = 4_096;
+
 /// A timed line's duration: this many ticks, plus [`LINE_TICKS_PER_CHAR`] per character of its text.
 pub const LINE_BASE_TICKS: u32 = 30;
 
@@ -98,6 +108,9 @@ mod tests {
         assert_eq!(PARSE_DEPTH_MAX, 256);
         assert_eq!(MIRROR_WORDS_WARN, 256);
         assert_eq!(COND_FUEL, 500);
+        assert_eq!(DIALOGUE_STACK_MAX, 16);
+        assert_eq!(CONVERSATION_LINGER_TICKS, 200);
+        assert_eq!(BATCH_STEPS_MAX, 4_096);
         assert_eq!(LINE_BASE_TICKS, 30);
         assert_eq!(LINE_TICKS_PER_CHAR, 1);
         assert_eq!(LINE_MIN_TICKS, 30);
