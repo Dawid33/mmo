@@ -713,6 +713,12 @@ struct WriteHooks {
     conflicts: Arc<std::sync::atomic::AtomicU64>,
     /// Ms added to every store-clock sample from now on.
     store_clock_step: Arc<std::sync::atomic::AtomicU64>,
+    /// [`CoordinatorThread::hold_write_answers`] is armed.
+    hold_answers: Arc<AtomicBool>,
+    /// Writes whose answer [`CoordinatorThread::hold_write_answers`] held.
+    answers_held: Arc<std::sync::atomic::AtomicU64>,
+    /// Passes of the main loop so far ([`CoordinatorThread::passes`]).
+    passes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CoordinatorThread {
@@ -765,6 +771,29 @@ impl CoordinatorThread {
     #[cfg(feature = "test-hooks")]
     pub fn step_store_clock(&self, ms: u64) {
         self.hooks.store_clock_step.fetch_add(ms, Ordering::SeqCst);
+    }
+
+    /// Test hook (final review S-I1): while `held`, the answer of every write issued is held back
+    /// on its way (a write waiting on the row lock, a database stall): the write stays in flight
+    /// until released.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn hold_write_answers(&self, held: bool) {
+        self.hooks.hold_answers.store(held, Ordering::SeqCst);
+    }
+
+    /// Test hook: the writes whose answer [`Self::hold_write_answers`] held so far.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn answers_held(&self) -> u64 {
+        self.hooks.answers_held.load(Ordering::SeqCst)
+    }
+
+    /// Test hook: the passes of the coordinator's main loop so far.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn passes(&self) -> u64 {
+        self.hooks.passes.load(Ordering::SeqCst)
     }
 
     /// Test hook: while `held`, the `hosts` read in flight is not answered (one is issued if
@@ -1416,6 +1445,8 @@ impl CoordinatorRuntime {
                 #[cfg(feature = "test-hooks")]
                 &inspect,
             );
+            #[cfg(feature = "test-hooks")]
+            self.hooks.passes.fetch_add(1, Ordering::SeqCst);
             // The stop is read before the hosts are drained: whatever a host sent
             // before asking to stop is already queued and is handled below.
             let stopping = match stop.try_recv() {
@@ -2150,7 +2181,14 @@ impl CoordinatorRuntime {
         let mut out = Vec::new();
         if let Some((_, written)) = &self.writing {
             let answer = match written.try_recv() {
-                Err(TryRecvError::Empty) => return Ok(out),
+                Err(TryRecvError::Empty) => {
+                    // Final review S-I1: whatever `wait` selects on is taken off its channel before
+                    // this early return — a notice left there would wake every wait at once (a
+                    // busy loop logging an upkeep per spin for as long as the write is out). The
+                    // notices only set what is due; nothing is issued while the write is out.
+                    self.pump_notices();
+                    return Ok(out);
+                }
                 Ok(answer) => answer,
                 Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
             };
@@ -2591,6 +2629,25 @@ impl CoordinatorRuntime {
             discard_for: t.attached_now.clone(),
         };
         let written = self.store.write_transition_later(w);
+        #[cfg(feature = "test-hooks")]
+        let written = if self.hooks.hold_answers.load(Ordering::SeqCst) {
+            // The answer waits on its way until the hook is released.
+            self.hooks.answers_held.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = crossbeam::channel::bounded(1);
+            let hold = self.hooks.hold_answers.clone();
+            std::thread::spawn(move || {
+                let answer = written.recv();
+                while hold.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if let Ok(answer) = answer {
+                    let _ = tx.send(answer);
+                }
+            });
+            rx
+        } else {
+            written
+        };
         self.writing = Some((t, written));
         true
     }

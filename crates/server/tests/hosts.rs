@@ -2439,6 +2439,60 @@ fn a_lapsed_replica_is_ended_and_exits_fenced() {
     w.stop(&dir);
 }
 
+/// Final review S-I1: a write held in flight (a declaration behind a staged part, a database
+/// stall) while the row listener's notices arrive (its resync every second, another replica's
+/// commit): the coordinator's loop does not spin — the notices are taken off their channel into
+/// what is due, so a wait does not wake at once on every pass — and its input log does not grow
+/// with an upkeep per spin. Released, the write answers and the claim it holds is granted.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_write_in_flight_while_notices_arrive_does_not_spin_the_loop() {
+    install_props();
+    let Some(db) = PgDb::create("spinwrite") else { return };
+    let dir = scratch("spinwrite");
+    let mut w = world(&db, &dir);
+    let (player, _) = w.claims[0].store().resolve_player("spin-test-player").unwrap();
+    let c = w.coordinator.as_ref().expect("the coordinator runs");
+    c.thread.hold_write_answers(true);
+    // A durable change (a claim asked as host 0 would): its transition's write is held.
+    let site = c
+        .thread
+        .with_core(
+            move |c| {
+                let h = c.history();
+                let site = h.sites().find(|s| s.abandoned.is_none() && !h.living_members(s.id).is_empty()).expect("a populated site").id;
+                let id = game::RequestId { host: HostId(0), boot: 1000, seq: 9_200 };
+                let req = game::WorldRequest::StartAdventure(site);
+                let now = c.clock_floor();
+                c.apply(game::coordinator::Input::Host { host: HostId(0), msg: game::HostMsg::Request { id, player, hop: 1, req } }, now);
+                site
+            },
+            WAIT,
+        )
+        .expect("the coordinator answers");
+    let deadline = Instant::now() + WAIT;
+    while c.thread.answers_held() == 0 {
+        assert!(Instant::now() < deadline, "no write was issued");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let before = c.thread.passes();
+    // Past two of the row listener's resyncs (one a second).
+    std::thread::sleep(Duration::from_millis(2 * world_store::COORDINATOR_POLL_MS + 500));
+    let passes = c.thread.passes() - before;
+    let logged = c.thread.inspect(|c| c.logged(), WAIT).expect("the coordinator answers");
+    c.thread.hold_write_answers(false);
+    let bound = 4 * (2 * world_store::COORDINATOR_POLL_MS + 500) / server::coordinator_rt::COORDINATOR_TICK_MS;
+    assert!(passes < bound, "the loop spun while the write was in flight: {passes} passes (bound {bound})");
+    assert!((logged as u64) < bound, "the input log grew while the write was in flight: {logged} inputs");
+    let claim = game::Claim::Adventure(site);
+    let deadline = Instant::now() + WAIT;
+    while w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.claim_of(player), WAIT).flatten() != Some(claim) {
+        assert!(Instant::now() < deadline, "the claim was never granted after the release");
+        w.pair.round();
+    }
+    w.stop(&dir);
+}
+
 /// Elastic 2b Task 5: host 0 is linked to replica A (the world's coordinator: it runs the cuts)
 /// and host 1 to replica B. A's `BeginCut` and `CutDone` for host 1 reach it through the outbox
 /// (B relays them in commit order), host 1's `CutPrepared` reaches A through the row (B's cache
