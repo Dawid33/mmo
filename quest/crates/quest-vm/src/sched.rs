@@ -42,7 +42,9 @@
 //! pending initialiser), in the same tick and on the same fuel. Its own segment sets it again only when it
 //! entered a stage (the stage word changed), so a chain of transitions that already hold runs at once — up
 //! to as many stages as the quest has: one more is a cycle (`A → B → A`), which stops where it stands,
-//! reported (`FaultKind::TransitionCycle`).
+//! reported (`FaultKind::TransitionCycle`). A handler of the quest's `Entered` (raised by the chain) keeps
+//! the chain's count, across ticks, and does not re-arm a stopped chain; any other handler, `main` or the
+//! start begins a new chain. So where a cycle stops does not depend on the fuel per tick.
 //!
 //! # Tasks and segments
 //! A task runs one function from its entry until its `Ret` on the sentinel link: the pending
@@ -437,11 +439,6 @@ impl Vm {
         let last = self.header(H_NOW)?;
         let now = now.max(last);
         self.set_header(H_NOW, now)?;
-        if now > last {
-            // A new tick: a chain stopped as a cycle may run again (once something re-arms it).
-            let transitions = self.header(H_TRANSITIONS)?;
-            self.set_header(H_TRANSITIONS, transitions & TRANSITIONS_ARMED)?;
-        }
         self.expire_promises(now)?;
         self.fire_timers(now)?;
         let Some(fresh) = self.meter_after_debt(fuel)? else {
@@ -826,7 +823,7 @@ impl Vm {
                             },
                         );
                         host.report(report);
-                        // Stopped for this tick: the count stays at the cap, so no handler re-arms it.
+                        // Stopped: the count stays at the cap, so no `Entered` handler re-arms it.
                         self.set_header(H_TRANSITIONS, (chain + 1) << 1)?;
                     } else {
                         self.set_header(H_TRANSITIONS, (chain + 1) << 1 | TRANSITIONS_ARMED)?;
@@ -846,16 +843,25 @@ impl Vm {
         let now = self.header(H_NOW)?;
         self.commit_promises(now)?;
         self.commit_timers()?;
-        // The home's handlers, `main` and the start: the quest's transitions are due (spec §5.12). The
-        // chain's count is kept (a stage's handlers run between the runs of one chain), and a chain stopped
-        // as a cycle stays stopped until the next tick.
+        // The home's handlers, `main` and the start: the quest's transitions are due (spec §5.12). A handler
+        // of the quest's `Entered` (an event the chain itself raised) keeps the chain's count, over ticks
+        // too: a round that does not fit one tick's fuel is the same round. A chain stopped as a cycle stays
+        // stopped until something else commits — any other handler, `main` or the start — which begins a
+        // new chain.
         let kind = self.header(H_TASK)?;
         if self.instance == 0
             && let Some(q) = &self.program.quest
             && matches!(kind, TASK_HANDLER | TASK_MAIN | TASK_START)
         {
+            let of_chain = kind == TASK_HANDLER
+                && usize::try_from(self.header(H_TASK_ARG)?)
+                    .ok()
+                    .and_then(|i| self.program.handlers.get(i))
+                    .is_some_and(|h| is_entered_of(&h.event, &q.name));
             let transitions = self.header(H_TRANSITIONS)?;
-            if transitions >> 1 < q.stages.len() as u64 {
+            if !of_chain {
+                self.set_header(H_TRANSITIONS, TRANSITIONS_ARMED)?;
+            } else if transitions >> 1 < q.stages.len() as u64 {
                 self.set_header(H_TRANSITIONS, transitions | TRANSITIONS_ARMED)?;
             }
         }
@@ -1230,4 +1236,13 @@ impl Vm {
         }
         Ok(out)
     }
+}
+
+/// Whether `event` (a handler's qualified event name) is the generated `Entered` of quest `quest`: `Q::Entered`,
+/// or `m::Q::Entered` for a quest in module `m`.
+fn is_entered_of(event: &str, quest: &str) -> bool {
+    event
+        .strip_suffix("::Entered")
+        .and_then(|q| q.strip_suffix(quest))
+        .is_some_and(|rest| rest.is_empty() || rest.ends_with("::"))
 }

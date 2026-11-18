@@ -1115,15 +1115,15 @@ fn a_transition_cycle_stops_and_is_reported() {
     );
 }
 
+const CYCLE_WITH_HANDLERS: &str = "quest Q:\n    role farmer: Person\n    let flip = true\n    stage A:\n        -> B when flip\n        @on(Entered)\n        fn a(e):\n            print(f\"A {e.stage}\")\n    stage B:\n        -> A when flip\n        @on(Entered)\n        fn b(e):\n            print(f\"B {e.stage}\")\n";
+
 /// Task 55 (carried from the Task 54 review): each stage handler's commit stored `H_TRANSITIONS = 1`,
 /// resetting the chain's count, so an A ↔ B cycle whose stages handle `Entered` re-armed every round — one
 /// `TransitionCycle` report after another and `Entered` dropped from a full queue. The cycle stops once,
 /// reported once, and the instance goes idle.
 #[test]
 fn a_transition_cycle_with_entered_handlers_stops_once() {
-    let p = program(
-        "quest Q:\n    role farmer: Person\n    let flip = true\n    stage A:\n        -> B when flip\n        @on(Entered)\n        fn a(e):\n            print(f\"A {e.stage}\")\n    stage B:\n        -> A when flip\n        @on(Entered)\n        fn b(e):\n            print(f\"B {e.stage}\")\n",
-    );
+    let p = program(CYCLE_WITH_HANDLERS);
     let mut r = Runner::for_instance(Arc::clone(&p), MEM, StubConfig::default(), 0, roles())
         .expect("the program loads");
     for _ in 0..20 {
@@ -1147,4 +1147,34 @@ fn a_transition_cycle_with_entered_handlers_stops_once() {
         "{:?}",
         r.host.reports
     );
+}
+
+/// Task 55 final review: the chain's count was reset at every tick, so a cycle whose round does not fit one
+/// tick's fuel was reported once per tick (and flooded the queue with `Entered`), or never at all. At any
+/// fuel the cycle stops once, reported once, where the unlimited run stops it.
+#[test]
+fn a_transition_cycle_stops_once_at_any_fuel() {
+    let p = program(CYCLE_WITH_HANDLERS);
+    let mut ends = Vec::new();
+    for fuel in [FUEL, 200, 100, 40, 20, 5] {
+        let mut r = Runner::for_instance(Arc::clone(&p), MEM, StubConfig::default(), 0, roles())
+            .expect("the program loads");
+        for _ in 0..400 {
+            r.step(fuel);
+        }
+        assert_eq!(r.vm.status(), Status::Idle, "fuel {fuel}");
+        let cycles = r
+            .host
+            .reports
+            .iter()
+            .filter(|x| matches!(x, Report::HandlerAborted { task, .. } if task.contains("transitions")))
+            .count();
+        assert_eq!(cycles, 1, "fuel {fuel}: {:?}", r.host.reports);
+        assert!(
+            !r.host.reports.iter().any(|x| matches!(x, Report::EventDropped { .. })),
+            "fuel {fuel}"
+        );
+        ends.push((stage(&r.vm, &p), r.host.output.len()));
+    }
+    assert!(ends.iter().all(|e| *e == ends[0]), "{ends:?}");
 }

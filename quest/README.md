@@ -236,8 +236,8 @@ built" (`docs/superpowers/plans/2026-11-17-quest-script-completion.md`).
   not across a promise **timeout**: it is counted in ticks (`PROMISE_TIMEOUT_TICKS`), so a budget changes how
   much another handler did before it fires.
 - A quest's transitions that chain into as many stages as the quest has (a cycle, `A → B → A`, both holding)
-  stop where they stand, reported (`TransitionCycle`), instead of running every tick; the stages' handlers
-  re-arm them no earlier than the next tick.
+  stop where they stand, reported (`TransitionCycle`), instead of running every tick, at any fuel per tick; the
+  stages' `Entered` handlers do not start them again, another handler (or `main`) does.
 - A handler that changes the stage in the middle of an event: each later handler of that event checks the stage
   when it starts, so a handler of the new stage may run for the same event.
 - An edit whose current stage no longer exists falls back to the first stage, without cancelling the removed
