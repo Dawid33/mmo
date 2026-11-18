@@ -669,14 +669,14 @@ impl MultiRig {
     /// replica (the crash policy), and joins the live set with its first transition. Its cache
     /// holds nothing of the others' later writes until it rebases (a conflict) or refreshes. Hosts
     /// stay linked to replica 0 until moved ([`Self::link_world_to`]). Timed work (the upkeep, the
-    /// cuts' and successions' hand-outs, the rig's drives) runs on replica 0 only.
+    /// cuts' and successions' hand-outs, the rig's drives) runs on the ticker — replica 0, the
+    /// lowest id, until it dies (Elastic 2b Task 6).
     pub fn with_replicas(&mut self, n: usize) {
         let shared = self.coordinator.clone().expect("a coordinator");
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
         // Replica 0's configuration (the cut period and epoch) is in the row first: a new replica
         // reads the row, and replica 0 holds nothing outside its log when another writes.
         shared.lock().unwrap_or_else(|e| e.into_inner()).commit();
-        assert!(!shared.lock().unwrap_or_else(|e| e.into_inner()).unlogged_pending(), "replica 0 committed everything");
         for _ in 1..n {
             self.coordinator_starts += 1;
             let id = game::coordinator::ReplicaId(self.coordinator_starts);
@@ -715,6 +715,85 @@ impl MultiRig {
         self.hosts[h.0 as usize].manager.world_link().and_then(|l| l.as_inline()).expect("an inline world link").replica_index()
     }
 
+    /// Elastic 2b Task 6: replica `r`'s process dies ([`game::coordinator::RigCluster::kill_replica`])
+    /// — what it held and what its links carried is lost — and every live host's world link dials
+    /// replica `to` instead (down one round, then up, as a host's dialer rotates); rounds until
+    /// every live host is attached again.
+    pub fn kill_replica(&mut self, r: usize, to: usize) {
+        self.core().kill_replica(r);
+        let live: Vec<HostId> = host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h)).collect();
+        for h in &live {
+            self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").relink_to(to);
+        }
+        self.round();
+        for h in &live {
+            self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").set_up(true);
+        }
+        for _ in 0..CONNECT_ROUNDS {
+            if live.iter().all(|h| self.hosts[h.0 as usize].manager.world_attached()) {
+                return;
+            }
+            self.round();
+        }
+        panic!("the hosts never attached to replica {to} (seed {})", self.seed);
+    }
+
+    /// Elastic 2b Task 6: replica `by` ends replica `r` — its own watch saw `r`'s row stand
+    /// still for a lease ([`game::coordinator::Input::ReplicaLapsed`], `r`'s row ended in the
+    /// same transaction) — and writes it.
+    pub fn end_replica(&mut self, by: usize, r: usize) {
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let mut c = self.core();
+        let lapsed = c.replica_core(r).replica();
+        c.replica_core_mut(by).apply(game::coordinator::Input::ReplicaLapsed(lapsed), now);
+        c.pump_replica(by);
+    }
+
+    /// One pass of the ticker's runtime over the hosts and successions (Elastic 2b Task 6): a
+    /// `hosts` read ([`game::coordinator::Input::HostsRead`]: every live host beating, `deads`
+    /// vouched — `seen_ms = 0`, lapsed at once —, the rows of declared predecessors dead), the open
+    /// successions read when the ticker owes one (the rig store's), and a declaration the ticker
+    /// hands out committed with its transition and executed in the rig store — its answer applied
+    /// (`answer`) or lost with the replica. Whatever replica the ticker is (none: nothing). The
+    /// declaration handed out.
+    pub fn drive_declaration(&mut self, deads: &[HostId], answer: bool) -> Option<game::coordinator::Declare> {
+        let n = self.hosts.len() as u32;
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let declared_dead: BTreeSet<(HostId, u64)> =
+            self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
+        let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
+            .filter(|h| !self.dead.contains(h) || deads.contains(h))
+            .map(|h| {
+                let boot = self.boots[h.0 as usize];
+                let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
+                let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
+                game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, landed: self.landed(h) }
+            })
+            .collect();
+        let open: Vec<game::Succession> = self
+            .successions
+            .iter()
+            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
+            .map(|(s, _)| s.clone())
+            .collect();
+        let live = host_ids(n).find(|h| !self.dead.contains(h)).expect("a live host");
+        let world_tick = self.hosts[live.0 as usize].manager.spawner_mut().world_tick();
+        let mut core = self.core();
+        if !core.is_ticker() {
+            return None;
+        }
+        core.apply(game::coordinator::Input::HostsRead { rows, next_host_id: u64::from(n), issued_mono: now, received_mono: now, world_tick }, now);
+        if core.take_successions_reread() {
+            core.successions_open(open, now);
+        }
+        let d = core.declare_wanted(now);
+        drop(core);
+        let d = d?;
+        self.core().commit();
+        self.execute_committed(answer);
+        Some(d)
+    }
+
     /// The row version that released each coordinator message host `h` read so far, in order.
     pub fn world_read_versions(&self, h: HostId) -> Vec<u64> {
         self.hosts[h.0 as usize].manager.world_link().and_then(|l| l.as_inline()).expect("an inline world link").read_versions().to_vec()
@@ -735,9 +814,30 @@ impl MultiRig {
             rig.settle();
         }
         self.drive_world_cuts();
+        self.answer_successions_read();
         self.drive_land();
         for rig in &mut self.hosts {
             rig.settle();
+        }
+    }
+
+    /// The ticker's read of the open successions, when it owes or was asked one (Elastic 2b Task
+    /// 6: a loaded core, a new ticker, a rebase that dropped a read, a dead row nobody declared),
+    /// answered from the rig store as the runtime does every pass.
+    pub fn answer_successions_read(&mut self) {
+        if self.coordinator.is_none() {
+            return;
+        }
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let open: Vec<game::Succession> = self
+            .successions
+            .iter()
+            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
+            .map(|(s, _)| s.clone())
+            .collect();
+        let mut core = self.core();
+        if core.take_successions_reread() {
+            core.successions_open(open, now);
         }
     }
 
@@ -929,7 +1029,9 @@ impl MultiRig {
         use game::coordinator::{DecisionAnswer, StoreDecision};
         let committed = self.core().take_committed();
         let mut answers = Vec::with_capacity(committed.len());
+        let mut issuers = Vec::with_capacity(committed.len());
         for (stamp, d) in committed {
+            issuers.push(stamp.replica);
             answers.push(match d {
                 StoreDecision::DecideCut(c) => {
                     *self.decide_executions.entry(c.cut).or_default() += 1;
@@ -967,10 +1069,12 @@ impl MultiRig {
             });
         }
         if answer {
+            // Each to the replica that issued it (Elastic 2b Task 6: whoever was the ticker); one
+            // whose process died never gets it.
             let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
             let mut core = self.core();
-            for a in &answers {
-                core.apply(game::coordinator::Input::Decision(a.clone()), now);
+            for (replica, a) in issuers.into_iter().zip(&answers) {
+                core.answer(replica, a.clone(), now);
             }
         }
         answers
@@ -1631,6 +1735,7 @@ impl MultiRig {
             self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
         let mut d = None;
         for r in 0..SUCCESSION_DECLARE_ROUNDS {
+            self.answer_successions_read();
             let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
             let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
                 .filter(|h| !self.dead.contains(h) || deads.contains(h))
@@ -1934,6 +2039,7 @@ impl MultiRig {
     pub fn roll_back(&mut self, dead: HostId) -> u64 {
         let n = self.hosts.len() as u32;
         for r in 0..SUCCESSION_DECLARE_ROUNDS {
+            self.answer_successions_read();
             let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
             let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
                 .filter(|h| !self.dead.contains(h) || *h == dead)

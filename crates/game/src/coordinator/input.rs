@@ -9,21 +9,27 @@
 //! reconciles against it), each at its own store time, never earlier than a time the newer row
 //! recorded ([`Coordinator::clock_floor`]).
 //!
-//! Never logged: what a host tells the login service ([`crate::HostMsg::Login`], forwarded at
-//! once into the process's login relay: a replay would tell it twice). The answers of the store
-//! DECISIONS are inputs (Elastic 2b Task 3, [`Input::Decision`]). Not logged yet (Elastic 2b
-//! Task 6 makes them inputs): the answers of the store's READS and lookups (the `hosts` rows,
-//! the open successions, a cut's stored decision, owners, the generation) — they change the
-//! projection outside the log, so a core holding such a change since its last commit cannot be
-//! rebased ([`Coordinator::unlogged_pending`]); the runtime then stops as Elastic 2a did, and the
-//! next start loads the row. A decision handed out (its mark, `decisions.rs`) is no such change:
-//! a rebase drops it with the transition it was in, which did not commit.
+//! **The ticker's inputs** (Elastic 2b Task 6, plan departs 2): ONE replica — the ticker, the
+//! lowest id of the durable live set ([`Coordinator::is_ticker`]) — runs the timed and lease
+//! work: the upkeep ([`Input::Maintain`], logged: a rebase drops it from the log when the rebased
+//! core's ticker is another replica), and the answers of the store READS it alone issues —
+//! [`Input::HostsRead`], [`Input::SuccessionsOpen`], [`Input::LandOwners`]. Those three are
+//! observations, never logged and never replayed: a non-ticker refuses them, and a rebase drops
+//! their effect — re-derived at the ticker's next read (a ticker whose rebase dropped a
+//! successions read owes one, as a loaded core and a new ticker do; the `hosts` read comes every
+//! few seconds; the hosts ask for land again).
+//!
+//! Never logged either: what a host tells the login service ([`crate::HostMsg::Login`], forwarded
+//! at once into the process's login relay: a replay would tell it twice). The answers of the
+//! store DECISIONS are logged inputs ([`Input::Decision`], Elastic 2b Task 3), and so is a cut's
+//! stored decision read back ([`Input::CutLookedUp`]: a recorded decision never changes, so a
+//! replay is what applying it there first would have done).
 
-use crate::HostId;
+use crate::{CutId, HostId, Succession, Tick};
 use crate::history::persist::HistoryLoadError;
 
 use super::state::{decode_core, raw_core};
-use super::{Coordinator, DecisionAnswer, HostMsg, Projection, ReplicaId};
+use super::{Coordinator, DecisionAnswer, HostMsg, HostSeen, Projection, ReplicaId};
 
 /// One input of the coordinator core, as a replica applies it ([`Coordinator::apply`]) and
 /// replays it at a rebase.
@@ -36,7 +42,9 @@ pub enum Input {
     /// with this replica (one to another replica stands).
     LinkDown { host: HostId },
     /// The upkeep: the calendar, the history's directives and notices, the cuts' and the
-    /// successions' timers ([`Coordinator::apply`]).
+    /// successions' timers ([`Coordinator::apply`]). The ticker's only (refused elsewhere, not
+    /// logged); a rebase drops it from the log once this replica is not the ticker of the
+    /// rebased core.
     Maintain,
     /// The store's answer to one decision of a committed transition (`decisions.rs`): applied
     /// only if its stamp is the mark's — at a replay too, so a rebase onto a row holding the
@@ -52,29 +60,63 @@ pub enum Input {
     /// ([`super::StoreDecision::EndReplica`]). Idempotent: a replay onto a row that dropped it
     /// does nothing.
     ReplicaLapsed(ReplicaId),
+    /// The ticker's read of every `hosts` row (Elastic 2b Task 6): `rows`, the next host id the
+    /// store would issue when the read began (`world.next_host_id`, read before the rows), the
+    /// read's issue and receipt on the process's MONOTONIC clock (the lease watch's,
+    /// [`super::LeaseWatch`]), and the world tick. It feeds the lease watch, the hosts a cut
+    /// needs (the dirty live rows), the boots a departed host came back as, the drain marks, and
+    /// forgets the ids the read shows pruned. Ticker only; never logged nor replayed.
+    HostsRead { rows: Vec<HostSeen>, next_host_id: u64, issued_mono: u64, received_mono: u64, world_tick: Tick },
+    /// The ticker's read of the store's open successions, issued when this cache stood at row
+    /// version `issued_at_version` ([`Coordinator::take_successions_reread`]): a run it does not
+    /// list is abandoned only if it opened at or before that version (audit H5). Ticker only;
+    /// never logged nor replayed.
+    SuccessionsOpen { list: Vec<Succession>, issued_at_version: u64 },
+    /// The ticker's owners read for the super-regions hosts asked for
+    /// ([`Coordinator::take_land_lookups`]): the hosts owning one. Ticker only; never logged nor
+    /// replayed (the hosts ask again).
+    LandOwners { owners: Vec<HostId> },
+    /// A world cut's decision as the store holds it, read back (a lookup: its answer was lost,
+    /// or a host named a cut this core does not remember): for host `host`, or (`None`) the
+    /// running cut's own decision. Logged and replayed — a recorded decision never changes.
+    CutLookedUp { host: Option<HostId>, cut: CutId, committed: bool },
+}
+
+impl Input {
+    /// Whether this input is the ticker's store-read answer: refused on a non-ticker, never
+    /// logged, never replayed.
+    fn is_ticker_read(&self) -> bool {
+        matches!(self, Input::HostsRead { .. } | Input::SuccessionsOpen { .. } | Input::LandOwners { .. })
+    }
 }
 
 impl Coordinator {
     /// Apply `input` at store time `now_ms` (never earlier than [`Self::clock_floor`]), and log
     /// it for a rebase. What it decides waits for the transition holding its effect
     /// ([`Self::take_transition`]), or leaves with [`Self::take_out`] when nothing durable
-    /// changed.
+    /// changed. The ticker's work ([`Input::Maintain`] and the ticker's reads) is refused on a
+    /// replica that is not the ticker; the reads are never logged.
     pub fn apply(&mut self, input: Input, now_ms: u64) {
         if let Input::Host { host, msg: HostMsg::Login(out) } = input {
             // For the login service, forwarded as it is — never logged, never replayed.
             self.forward_login(host, out);
             return;
         }
+        let ticker_work = matches!(input, Input::Maintain) || input.is_ticker_read();
+        if ticker_work && !self.ticking_now() {
+            log::trace!("coordinator: replica {} is not the ticker: {input:?} refused", self.replica);
+            return;
+        }
         self.clean_checked = false;
-        if !self.unstored {
+        if !self.unstored && !input.is_ticker_read() {
             // No store, no row to move under it (the inline link): nothing to replay.
             self.log.push((now_ms, input.clone()));
         }
         self.apply_logged(input, now_ms);
     }
 
-    /// One logged input, applied (first, or again at a rebase) at `now_ms` lifted to the
-    /// projection's clock floor.
+    /// One input, applied (first, or again at a rebase) at `now_ms` lifted to the projection's
+    /// clock floor.
     fn apply_logged(&mut self, input: Input, now_ms: u64) {
         let now = now_ms.max(self.clock_floor());
         match input {
@@ -90,6 +132,16 @@ impl Coordinator {
             Input::Decision(answer) => self.on_decision(answer, now),
             Input::ReplicaJoined { me, alone } => self.on_replica_joined(me, alone),
             Input::ReplicaLapsed(r) => self.on_replica_lapsed(r),
+            Input::HostsRead { rows, next_host_id, issued_mono, received_mono, world_tick } => {
+                self.on_hosts_read(&rows, next_host_id, issued_mono, received_mono, world_tick)
+            }
+            Input::SuccessionsOpen { list, issued_at_version } => self.on_successions_open(list, issued_at_version, now),
+            Input::LandOwners { owners } => {
+                for owner in owners {
+                    self.on_land_owner(owner, now);
+                }
+            }
+            Input::CutLookedUp { host, cut, committed } => self.on_cut_looked_up(host, cut, committed),
         }
     }
 
@@ -106,30 +158,49 @@ impl Coordinator {
     /// history IS the row's, kept as it is) — at row `version`, keep the process's own fields
     /// (the links' and the watches' observations, the login relay, the log), clear what was
     /// decided and not handed out (`out`) and the write in flight, and apply every logged input
-    /// again, in order, each at its logged store time. Called on a write's `Conflict`; the
-    /// transition that met it is dropped (its messages are decided again by the replay). Only
-    /// for a core with nothing changed outside the log since its last commit
-    /// ([`Self::unlogged_pending`]): what such a change held would be lost. A row that does not
-    /// decode is an error and changes nothing.
+    /// again, in order, each at its logged store time. Called on a write's `Conflict` (and by a
+    /// refresh); the transition that met it is dropped (its messages are decided again by the
+    /// replay). A row that does not decode is an error and changes nothing.
+    ///
+    /// What changed outside the log is the row's again: the ticker's reads and hand-outs
+    /// (Elastic 2b Task 6) are re-derived — a hand-out the rebased row still wants is handed out
+    /// again, a read comes again. A logged upkeep is applied again only while this replica is
+    /// the ticker of the core it is replayed onto (at its turn in the log: a replayed lapse may
+    /// make it one); otherwise it leaves the log. A ticker whose rebase dropped a successions read
+    /// it applied since its last commit owes one again ([`Self::take_successions_reread`]); the
+    /// configuration the runtime set (the cut period) holds.
     pub fn rebase(&mut self, core: &[u8], history: Option<&[u8]>, version: u64) -> Result<(), HistoryLoadError> {
-        debug_assert!(!self.unlogged_pending(), "a rebase would lose what changed outside the log");
         let mut p: Projection = decode_core(core)?;
         let history = match history {
             Some(bytes) => Some(crate::history::persist::decode(bytes, self.history.grid().clone())?),
             None => None,
         };
         p.cuts.carry_process_fields(&mut self.cuts);
-        p.successions.carry_process_fields(&mut self.successions);
+        p.successions.carry_process_fields(&self.successions);
         self.replace_projection(p, history);
         self.committed_raw = raw_core(&self.projection());
         self.history.clear_content_dirty();
         self.version = version;
+        self.reapply_cut_config();
+        if self.reads_applied != self.reads_committed {
+            // A successions read applied since the last commit is lost with the rebase: owed
+            // again — before the replay, so that no replayed `Attach` is answered from it.
+            // (Everything else the row says of the successions reached it committed.)
+            self.successions_owed();
+            self.reads_committed = self.reads_applied;
+        }
         let log = std::mem::take(&mut self.log);
         log::info!("coordinator: rebased onto version {version}; {} logged input(s) applied again", log.len());
-        for (now, input) in &log {
-            self.apply_logged(input.clone(), *now);
+        let mut kept = Vec::with_capacity(log.len());
+        for (now, input) in log {
+            if matches!(input, Input::Maintain) && !self.ticking_now() {
+                log::debug!("coordinator: replica {} is not the ticker of the rebased core: its upkeep is dropped", self.replica);
+                continue;
+            }
+            self.apply_logged(input.clone(), now);
+            kept.push((now, input));
         }
-        self.log = log;
+        self.log = kept;
         // A mark of this replica still set now was committed in the row by an earlier
         // transition of it whose answer was never applied (nothing is in flight after a
         // rebase: the transition that met the conflict did not commit): looked up, never
@@ -155,38 +226,30 @@ impl Coordinator {
         self.rebase(core, history, version).map(|()| true)
     }
 
-    /// Whether the projection was changed outside the log since the last commit (a store's
-    /// answer, a hand-out of a store call, a read of the hosts, the history changed directly):
-    /// a rebase would lose it — the runtime stops instead, and the next start loads the row.
-    pub fn unlogged_pending(&self) -> bool {
-        self.unlogged != self.unlogged_committed
+    /// Whether this replica is the ticker: the lowest id of the live set this core holds
+    /// (Elastic 2b Task 6) — the one replica that runs the upkeep, reads the `hosts` rows and the
+    /// open successions, looks land and cuts up and hands out the store decisions. A stale cache
+    /// may believe it wrongly; the row's compare-and-set then refuses its write, and its rebase
+    /// replays without the ticker's work.
+    pub fn is_ticker(&self) -> bool {
+        self.ticker() == Some(self.replica)
     }
 
-    /// The projection changed outside the log (see [`Self::unlogged_pending`]).
-    pub(super) fn note_unlogged(&mut self) {
-        self.unlogged += 1;
-        self.clean_checked = false;
-    }
-
-    /// `f`, the body of a public entry point that is no input (`what`, for the message): in
-    /// debug builds, it may change the projection only if it says so (`note_unlogged`) or hands
-    /// a store decision out (its mark) — while store answers are still applied outside the log
-    /// (Elastic 2b Task 6 makes them inputs), a change that says nothing would be lost by a
-    /// rebase unnoticed.
-    pub(super) fn unlogged_guard<R>(&mut self, what: &str, f: impl FnOnce(&mut Self) -> R) -> R {
-        #[cfg(debug_assertions)]
-        let before = (raw_core(&self.projection()), self.unlogged, self.decisions.len());
-        let r = f(self);
-        #[cfg(debug_assertions)]
-        if self.unlogged == before.1 && self.decisions.len() == before.2 {
-            debug_assert!(
-                raw_core(&self.projection()) == before.0,
-                "coordinator: {what} changed the projection outside the log without noting it"
-            );
+    /// [`Self::is_ticker`], noting a change of role: a replica that becomes the ticker starts its
+    /// lease watch from zero (a new ticker never hastens a declaration: it delays one by a lease
+    /// at most), knows no `hosts` read yet (no cut begins before one) and owes a successions read.
+    pub(super) fn ticking_now(&mut self) -> bool {
+        let ticker = self.is_ticker();
+        if ticker && !self.ticking {
+            log::info!("coordinator: replica {} is the ticker now", self.replica);
+            self.leases = self.leases.restarted();
+            self.cuts_unread();
+            self.successions_owed();
+        } else if !ticker && self.ticking {
+            log::info!("coordinator: replica {} is no longer the ticker", self.replica);
         }
-        #[cfg(not(debug_assertions))]
-        let _ = what;
-        r
+        self.ticking = ticker;
+        ticker
     }
 
     /// Inputs logged since the last commit (test support).

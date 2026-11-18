@@ -61,7 +61,17 @@
 //!   decision is refused at a stale generation (`worldctl rollback`). Until the answer no
 //!   cut begins and nothing is declared; then a new one runs as at a restart (its predecessor
 //!   taken out of the view), and a run no longer open is dropped as abandoned (every host
-//!   told `SuccessionDone { settled: false }`).
+//!   told `SuccessionDone { settled: false }`) — only a run that opened at or before the row
+//!   version the read was issued at (Elastic 2b Task 6, audit H5: a run opened later may be
+//!   missing from a read that ran before its row committed).
+//! - **The ticker** (Elastic 2b Task 6): of several coordinator replicas only the ticker (the
+//!   lowest live id) reads the `hosts` rows and the open successions, watches the leases and
+//!   hands out declarations, ends and rollbacks. Its lease watch and its knowledge of the open
+//!   successions are its process's: a new ticker counts every lease from zero (it never
+//!   hastens a declaration) and reads the open successions first; a store call the previous
+//!   ticker handed out is looked up (its marks, `decisions.rs`), never issued again. A replica
+//!   that does not know the open successions buffers an `Attach`'s listing in the projection
+//!   for the ticker to answer.
 //!
 //! **The crash-loop rule** (Elastic 2a, decision 9: recipients own land). The store's survivors
 //! are the dirty live hosts holding land (a `super_regions` or `in_flight` row) plus the heirs;
@@ -156,10 +166,6 @@ pub struct LeaseWatch {
     /// Successful reads observed so far: a declaration the store refused waits for a newer
     /// one ([`Coordinator::declared`]).
     reads: u64,
-    /// The hosts the latest successful read showed marked draining — KEPT across a failed
-    /// read (a mark is never lifted, so it is no evidence that goes stale as a beat does):
-    /// [`Self::draining`].
-    draining: BTreeSet<HostId>,
 }
 
 impl LeaseWatch {
@@ -177,13 +183,13 @@ impl LeaseWatch {
         }
         self.rows = next;
         self.reads += 1;
-        self.draining = rows.iter().filter(|r| r.draining).map(|r| r.ordinal).collect();
     }
 
-    /// Host `host` was marked draining by the latest successful read (also after a failed
-    /// one). Before the first successful read nothing is known: `false`.
-    pub fn draining(&self, host: HostId) -> bool {
-        self.draining.contains(&host)
+    /// The watch of a replica that just became the ticker (Elastic 2b Task 6): nothing observed
+    /// — every lease counts from zero, so a new ticker never hastens a declaration — under the
+    /// same lease dial. The read count goes on (the refusals noted against it stay comparable).
+    pub(super) fn restarted(&self) -> LeaseWatch {
+        LeaseWatch { rows: BTreeMap::new(), lease_ms: self.lease_ms, reads: self.reads }
     }
 
     /// Host `ordinal`'s row as the latest successful read showed it.
@@ -198,7 +204,7 @@ impl LeaseWatch {
 
     /// A read that failed: every observation is forgotten, so a lapse needs a whole lease
     /// of successful reads again (an outage is no evidence of anyone's death). The drain
-    /// marks are kept ([`Self::draining`]).
+    /// marks are the projection's, and stay.
     pub fn observe_failed(&mut self) {
         self.rows.clear();
     }
@@ -260,6 +266,10 @@ struct Run {
     /// `Attach` after): the boot whose journal the run counts on. Another boot of it means that
     /// journal is gone — the run can never be answered: a rollback.
     boots: BTreeMap<HostId, u64>,
+    /// The row version of the cache that opened it here (Elastic 2b Task 6, audit H5): never
+    /// earlier than the commit of its `successions` row — a read issued at an older version may
+    /// not list it, and abandons it only if issued at this version or later.
+    opened_at: u64,
     /// `clock_ms` past which a run not answered by everyone rolls the world back. An offline
     /// run's (no survivors) counts from when its order first went to the heir: `u64::MAX`
     /// until then — the heir may boot long after the operator retired the host.
@@ -293,20 +303,32 @@ fn recipients(s: &Succession) -> BTreeSet<HostId> {
     s.survivors.iter().copied().chain(std::iter::once(s.heir)).collect()
 }
 
-/// The coordinator's successions, in its projection (Elastic 2a) but for the configuration
-/// and the counts of lease reads (`#[serde(skip)]`: the lease watch is an observation a
-/// restart counts again; a rebase keeps them, [`SuccessionRuns::carry_process_fields`]). The
-/// store's open `successions` rows stay the truth: a starting coordinator reads them again
-/// ([`super::Coordinator::successions_unknown`]) and drops a run they no longer list. A store
-/// call handed out by another replica (a declaration, an end) counts as not in flight.
+/// The coordinator's successions, in its projection (Elastic 2a) but for the configuration,
+/// the counts of lease reads and the ticker's reads of the open successions (`#[serde(skip)]`:
+/// observations of this process — a restart counts again and reads again; a rebase keeps them,
+/// [`SuccessionRuns::carry_process_fields`]). The store's open `successions` rows stay the
+/// truth: the ticker reads them again (a starting, rebased or new ticker owes one read) and
+/// drops a run they no longer list. A store call handed out by another replica (a declaration,
+/// an end) counts as not in flight.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct SuccessionRuns {
     /// `CrashPolicy::Succession`: the runs are on (configuration).
     #[serde(skip)]
     enabled: bool,
-    /// The store's open successions are known (a restarted coordinator reads them first:
-    /// until then nothing is declared and no cut begins — "wait, never guess").
+    /// This replica read the store's open successions and nothing asked for another read since
+    /// (Elastic 2b Task 6: process-local — a loaded core, a rebased ticker or a new ticker owes
+    /// a read; a replica that is not the ticker never reads). Until then nothing is declared, no
+    /// cut begins and an `Attach`'s listing waits — "wait, never guess".
+    #[serde(skip)]
     known: bool,
+    /// A read of the open successions is handed out ([`Coordinator::take_successions_reread`])
+    /// and not answered.
+    #[serde(skip)]
+    reading: bool,
+    /// Runs this replica settled or abandoned while a read was out: a read that still lists one
+    /// (it ran before the close) does not open it again.
+    #[serde(skip)]
+    closed_while_reading: BTreeSet<SuccessionId>,
     /// A declaration was handed out and is not answered yet: its mark (`decisions.rs`).
     declaring: Option<CallStamp>,
     open: BTreeMap<SuccessionId, Run>,
@@ -337,12 +359,12 @@ pub(super) struct SuccessionRuns {
     #[serde(skip)]
     refused_at_read: Option<u64>,
     /// Ids an `Attach` listed before the open successions were known, with the listing boot:
-    /// answered then — only if that boot is still the host's current one.
+    /// answered then — only if that boot is still the host's current one. Durable: a listing
+    /// another replica took (it never reads) is answered by the ticker.
     listed_early: Vec<(HostId, u64, SuccessionId, bool)>,
-    /// The open successions are to be read again ([`Coordinator::take_successions_reread`]).
+    /// The open successions are to be read again ([`Coordinator::take_successions_reread`]):
+    /// asked by an input on any replica, durable so the ticker sees it.
     reread: bool,
-    /// The read asked for is a RE-read (not a start's): runs it does not list are dropped.
-    rereading: bool,
     /// Dead rows nobody here declared that already asked for a re-read (asked once each).
     reread_for: BTreeSet<(HostId, u64)>,
     /// Super-regions hosts asked for ([`crate::HostMsg::LandWanted`]) that the runtime is to
@@ -368,6 +390,8 @@ impl Default for SuccessionRuns {
         SuccessionRuns {
             enabled: false,
             known: true,
+            reading: false,
+            closed_while_reading: BTreeSet::new(),
             declaring: None,
             open: BTreeMap::new(),
             rollback: None,
@@ -380,7 +404,6 @@ impl Default for SuccessionRuns {
             refused_at_read: None,
             listed_early: Vec::new(),
             reread: false,
-            rereading: false,
             reread_for: BTreeSet::new(),
             land_lookups: BTreeSet::new(),
             land_wanted: BTreeSet::new(),
@@ -398,7 +421,9 @@ impl SuccessionRuns {
     pub(super) fn carry_process_fields(&mut self, from: &SuccessionRuns) {
         let SuccessionRuns {
             enabled,
-            known: _,
+            known,
+            reading,
+            closed_while_reading,
             declaring: _,
             open: _,
             rollback: _,
@@ -411,7 +436,6 @@ impl SuccessionRuns {
             refused_at_read,
             listed_early: _,
             reread: _,
-            rereading: _,
             reread_for: _,
             land_lookups: _,
             land_wanted: _,
@@ -420,6 +444,9 @@ impl SuccessionRuns {
             end_refused_at_read,
         } = from;
         self.enabled = *enabled;
+        self.known = *known;
+        self.reading = *reading;
+        self.closed_while_reading = closed_while_reading.clone();
         self.rollback_retry_ms = *rollback_retry_ms;
         self.declared_at_read = *declared_at_read;
         self.deadline_ms = *deadline_ms;
@@ -465,13 +492,27 @@ impl super::Coordinator {
     }
 
     /// The store's open successions are not known yet (a coordinator starting): nothing is
-    /// declared and no cut begins until [`Self::successions_open`]. A loaded core holding runs
-    /// reads them as a RE-read: a run the store no longer lists (a `worldctl rollback` while no
-    /// coordinator ran) is dropped, every host told.
+    /// declared and no cut begins until the ticker read them ([`Input::SuccessionsOpen`]). A run
+    /// the read does not list (a `worldctl rollback` while no coordinator ran) is dropped, every
+    /// host told.
+    ///
+    /// [`Input::SuccessionsOpen`]: super::Input::SuccessionsOpen
     pub fn successions_unknown(&mut self) {
-        self.note_unlogged();
-        self.successions.rereading |= !self.successions.open.is_empty();
+        self.successions_owed();
+    }
+
+    /// This replica owes a read of the open successions (a start, a rebase of the ticker, a new
+    /// ticker): until it is answered they are not known here.
+    pub(super) fn successions_owed(&mut self) {
         self.successions.known = false;
+        self.successions.reading = false;
+    }
+
+    /// Whether this replica knows the store's open successions: read and nothing asked for a
+    /// re-read since (always, with the runs off).
+    pub(super) fn successions_known(&self) -> bool {
+        let r = &self.successions;
+        !r.enabled || (r.known && !r.reread)
     }
 
     /// A loaded core's run deadlines at store time `now_ms` ([`super::rebase_deadline`]).
@@ -538,42 +579,57 @@ impl super::Coordinator {
         any
     }
 
-    /// The store's open successions (a coordinator starting, `open_successions()`, or a
-    /// re-read): each is run again — its order re-sent to every recipient as it attaches (they
-    /// answer from memory), its deadline counted from `now_ms`. After a re-read a run it does
-    /// not list is dropped (the store abandoned it: every host told). A run this core did not
-    /// hold — at a re-read, or at a start (its declaration's answer died with the process that
-    /// asked) — has its predecessor taken out of the view as a declaration's is.
+    /// Test support: [`super::Input::SuccessionsOpen`] of `list`, read as of this cache's version.
+    #[doc(hidden)]
     pub fn successions_open(&mut self, list: Vec<Succession>, now_ms: u64) {
-        self.note_unlogged();
+        let issued_at_version = self.version;
+        self.apply(super::Input::SuccessionsOpen { list, issued_at_version }, now_ms);
+    }
+
+    /// The store's open successions, as the ticker's read issued at this cache's row version
+    /// `issued_at` lists them ([`super::Input::SuccessionsOpen`]; a coordinator starting, or a
+    /// re-read): each is run again — its order re-sent to every recipient as it attaches (they
+    /// answer from memory), its deadline counted from `now_ms`. A run it does not list is
+    /// dropped (the store abandoned it: every host told) — only if it opened at or before
+    /// `issued_at` (Elastic 2b Task 6, audit H5: a run opened later, its row perhaps committed
+    /// after the read ran, is no abandoned run), and never one a commit decided here settles. A
+    /// run this core did not hold — at a re-read, or at a start (its declaration's answer died
+    /// with the process that asked) — has its predecessor taken out of the view as a
+    /// declaration's is; never one this replica settled or abandoned while the read was out.
+    pub(super) fn on_successions_open(&mut self, list: Vec<Succession>, issued_at: u64, now_ms: u64) {
+        self.reads_applied += 1;
         self.clock_ms = self.clock_ms.max(now_ms);
         self.successions.known = true;
-        let rereading = std::mem::take(&mut self.successions.rereading);
-        // Dropping an unlisted run below relies on the store thread answering in the order it
-        // was asked: a declaration handed out before this read was asked is answered before
-        // it, so a run that declaration opened is in `open` AND in the list. (The runtime's
-        // succession pump asks for no declaration while a read is out.)
-        if rereading {
-            let listed: BTreeSet<SuccessionId> = list.iter().map(|s| s.id).collect();
-            // A run a commit decided here settles is not listed either once the store holds the
-            // commit: its decision's answer settles it ([`Self::successions_settled`]).
-            let settling: BTreeSet<SuccessionId> = self.settles_pending().into_iter().collect();
-            let gone: Vec<SuccessionId> =
-                self.successions.open.keys().copied().filter(|id| !listed.contains(id) && !settling.contains(id)).collect();
-            for id in gone {
-                let run = self.successions.open.remove(&id).expect("listed above");
-                log::warn!(
-                    "coordinator: succession {} (host {} → heir {}) is no longer open in the store (abandoned by a world \
-                     rollback): dropped",
-                    id.0,
-                    run.s.predecessor,
-                    run.s.heir
-                );
-                self.push(Target::Every, CoordMsg::SuccessionDone { id, settled: false });
-            }
+        self.successions.reading = false;
+        let closed = std::mem::take(&mut self.successions.closed_while_reading);
+        let listed: BTreeSet<SuccessionId> = list.iter().map(|s| s.id).collect();
+        // A run a commit decided here settles is not listed either once the store holds the
+        // commit: its decision's answer settles it ([`Self::successions_settled`]).
+        let settling: BTreeSet<SuccessionId> = self.settles_pending().into_iter().collect();
+        let gone: Vec<SuccessionId> = self
+            .successions
+            .open
+            .iter()
+            .filter(|(id, run)| !listed.contains(id) && !settling.contains(id) && run.opened_at <= issued_at)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in gone {
+            let run = self.successions.open.remove(&id).expect("listed above");
+            log::warn!(
+                "coordinator: succession {} (host {} → heir {}) is no longer open in the store (abandoned by a world \
+                 rollback): dropped",
+                id.0,
+                run.s.predecessor,
+                run.s.heir
+            );
+            self.push(Target::Every, CoordMsg::SuccessionDone { id, settled: false });
         }
         for s in list {
             if self.successions.open.contains_key(&s.id) {
+                continue;
+            }
+            if closed.contains(&s.id) {
+                log::debug!("coordinator: succession {} was closed here while the read ran: not opened again", s.id.0);
                 continue;
             }
             log::info!(
@@ -591,6 +647,15 @@ impl super::Coordinator {
             // holding players) — takes the predecessor out of the view as a declaration's
             // answer does. Idempotent: only what is still the predecessor's.
             self.host_succeeded(predecessor);
+        }
+        self.drain_listed_early();
+    }
+
+    /// The successions `Attach`es listed while the open ones were not known (any replica's: a
+    /// non-ticker never knows them), answered once they are here.
+    pub(super) fn drain_listed_early(&mut self) {
+        if !self.successions_known() || self.successions.listed_early.is_empty() {
+            return;
         }
         let early = std::mem::take(&mut self.successions.listed_early);
         for (host, boot, id, adopted) in early {
@@ -628,17 +693,18 @@ impl super::Coordinator {
     /// first (the declaration follows once that decision is recorded). The batch leaves with
     /// the next transition and runs in its transaction; its answer is an input
     /// ([`super::DecisionAnswer::Declared`]).
+    ///
+    /// The ticker's hand-out (Elastic 2b Task 6): on any other replica, nothing.
     pub fn declare_wanted(&mut self, now_ms: u64) -> Option<Declare> {
-        self.unlogged_guard("declare_wanted", |c| c.declare_wanted_now(now_ms))
-    }
-
-    fn declare_wanted_now(&mut self, now_ms: u64) -> Option<Declare> {
+        if !self.ticking_now() {
+            return None;
+        }
         // The lapses are the lease watch's, on its own clock ([`LeaseWatch`]); `now_ms` only
         // moves the core's.
         self.clock_ms = self.clock_ms.max(now_ms);
-        let (declaring, ending) = (self.declaring(), self.ending().is_some());
+        let (declaring, ending, known) = (self.declaring(), self.ending().is_some(), self.successions_known());
         let r = &self.successions;
-        if !r.enabled || !r.known || declaring || r.rollback.is_some() || ending || !r.open.is_empty() {
+        if !r.enabled || !known || declaring || r.rollback.is_some() || ending || !r.open.is_empty() {
             return None;
         }
         if r.refused_at_read.is_some_and(|at| self.leases.reads() <= at) {
@@ -768,7 +834,7 @@ impl super::Coordinator {
     /// in flight — its answer ([`Self::declared`]) is taken.
     #[doc(hidden)]
     pub fn declaring_by_hand(&mut self) {
-        self.note_unlogged();
+        self.clean_checked = false;
         self.successions.declaring = Some(CallStamp::pending(self.replica));
         self.successions.declared_at_read = self.leases.reads();
     }
@@ -786,15 +852,16 @@ impl super::Coordinator {
 
     /// The store's open successions may have changed behind this coordinator's back (the
     /// module docs): read them again — no cut begins and nothing is declared until
-    /// [`Self::successions_open`] answers ([`Self::take_successions_reread`] asks the runtime).
-    /// Nothing under the `Rollback` policy. The runtime's call (a store's answer: outside the
-    /// log); the core's own inputs ask [`Self::reread_successions`].
+    /// the read answers ([`Self::take_successions_reread`] asks the ticker's runtime). Nothing
+    /// under the `Rollback` policy. The runtime's call (a store's answer: outside the log); the
+    /// core's own inputs ask [`Self::reread_successions`].
     pub fn successions_reread(&mut self) {
-        self.note_unlogged();
+        self.clean_checked = false;
         self.reread_successions();
     }
 
-    /// [`Self::successions_reread`], as an input's (or an answer's) own step.
+    /// [`Self::successions_reread`], as an input's (or an answer's) own step: asked in the
+    /// projection, so the ticker sees an ask any replica's input made.
     pub(super) fn reread_successions(&mut self) {
         if !self.successions.enabled {
             return;
@@ -802,18 +869,25 @@ impl super::Coordinator {
         if !self.successions.reread {
             log::info!("coordinator: the open successions are read again");
         }
-        // A start's first read not answered yet holds no run to drop: it stays a start's.
-        self.successions.rereading |= self.successions.known;
-        self.successions.known = false;
         self.successions.reread = true;
     }
 
-    /// Whether the runtime is to read the open successions again (once per ask) and answer
-    /// [`Self::successions_open`].
+    /// Whether the ticker's runtime is to read the open successions (again) now and answer
+    /// [`super::Input::SuccessionsOpen`], issued at this cache's version: asked (once per ask),
+    /// or owed (a start, a rebase of the ticker, a new ticker) with no read out. A read already
+    /// out is dropped by the runtime (it may predate the ask). Never on a replica that is not the
+    /// ticker (Elastic 2b Task 6).
     pub fn take_successions_reread(&mut self) -> bool {
-        let asked = std::mem::take(&mut self.successions.reread);
+        if !self.ticking_now() || !self.successions.enabled {
+            return false;
+        }
+        let r = &mut self.successions;
+        let asked = std::mem::take(&mut r.reread) || (!r.known && !r.reading);
         if asked {
-            self.note_unlogged();
+            r.known = false;
+            r.reading = true;
+            r.closed_while_reading.clear();
+            self.clean_checked = false;
         }
         asked
     }
@@ -828,8 +902,11 @@ impl super::Coordinator {
     /// The wanted rollback, handed out ONCE (none in flight, none being looked up, not before
     /// [`DECISION_RETRY_MS`] after a failed one): it leaves with the next transition and runs in
     /// its transaction (`decisions.rs`), conditional on the generation it was decided at — that
-    /// generation, for the log and the tests.
+    /// generation, for the log and the tests. The ticker's hand-out (Elastic 2b Task 6).
     pub fn take_rollback(&mut self) -> Option<u64> {
+        if !self.ticking_now() {
+            return None;
+        }
         let r = &self.successions;
         let from = r.rollback?;
         if r.rolling.is_some() || r.generation_lookup || r.rollback_retry_ms.is_some_and(|at| self.clock_ms < at) {
@@ -859,19 +936,20 @@ impl super::Coordinator {
     }
 
     /// A rollback whose answer was lost is to be looked up: the generation it was decided at,
-    /// once — read the world generation and answer [`Self::generation_looked_up`].
+    /// once — read the world generation and answer [`Self::generation_looked_up`]. The ticker's
+    /// hand-out (Elastic 2b Task 6).
     pub fn take_generation_lookup(&mut self) -> Option<u64> {
-        if !std::mem::take(&mut self.successions.generation_lookup) {
+        if !self.ticking_now() || !std::mem::take(&mut self.successions.generation_lookup) {
             return None;
         }
-        self.note_unlogged();
+        self.clean_checked = false;
         Some(self.successions.rollback.unwrap_or(self.generation_seen))
     }
 
     /// The generation read [`Self::take_generation_lookup`] asked for failed: asked for again.
     pub fn generation_lookup_failed(&mut self) {
         if self.successions.rolling.is_none() && self.successions.rollback.is_some() {
-            self.note_unlogged();
+            self.clean_checked = false;
             self.successions.generation_lookup = true;
         }
     }
@@ -879,11 +957,14 @@ impl super::Coordinator {
     /// The world generation as the store holds it (a lookup's answer,
     /// [`Self::take_generation_lookup`]): past the one the rollback was decided at, it rolled
     /// back ([`Self::rolled_back`]); otherwise it did not, and the rollback is handed out again.
+    /// Outside the log (Elastic 2b Task 6): a rebase before the next commit drops it — the
+    /// wanted rollback is then handed out again, conditional on its generation (one that
+    /// committed is answered as done, never done twice).
     pub fn generation_looked_up(&mut self, generation: u64) {
         let from = self.successions.rollback.unwrap_or(self.generation_seen);
         if generation > from {
             log::warn!("coordinator: the lost rollback committed: the world is at generation {generation}");
-            self.note_unlogged();
+            self.clean_checked = false;
             self.rolled_back_to_generation(generation);
         } else {
             log::info!("coordinator: the lost rollback did not commit (generation {generation}): it is handed out again");
@@ -931,9 +1012,17 @@ impl super::Coordinator {
                 self.apply(super::Input::Decision(super::DecisionAnswer::RolledBack { stamp, outcome: Ok(generation) }), now);
             }
             None => {
-                self.note_unlogged();
+                self.clean_checked = false;
                 self.rolled_back_to_generation(generation);
             }
+        }
+    }
+
+    /// Run `id` was settled or abandoned here: a successions read out now (it may have run
+    /// before) does not open it again.
+    fn closed_here(&mut self, id: SuccessionId) {
+        if self.successions.reading {
+            self.successions.closed_while_reading.insert(id);
         }
     }
 
@@ -941,6 +1030,7 @@ impl super::Coordinator {
     fn rolled_back_to_generation(&mut self, generation: u64) {
         let open = std::mem::take(&mut self.successions.open);
         for id in open.into_keys() {
+            self.closed_here(id);
             self.push(Target::Every, CoordMsg::SuccessionDone { id, settled: false });
         }
         self.successions.rollback = None;
@@ -978,6 +1068,13 @@ impl super::Coordinator {
     /// How many successions are open (declared or read back, not yet settled or abandoned).
     pub fn successions_open_count(&self) -> usize {
         self.successions.open.len()
+    }
+
+    /// Test support: the open successions as a store holding exactly this core's runs would list
+    /// them (what a reloaded copy of this core reads).
+    #[doc(hidden)]
+    pub fn successions_listed(&self) -> Vec<Succession> {
+        self.successions.open.values().map(|r| r.s.clone()).collect()
     }
 
     /// Test support: every open succession with the survivors that applied it and whether
@@ -1059,7 +1156,7 @@ impl super::Coordinator {
         }
         for (id, adopted) in answered {
             if !self.successions.open.contains_key(&id) {
-                if self.successions.known {
+                if self.successions_known() {
                     self.answer_closed(host, id);
                 } else {
                     self.successions.listed_early.push((host, boot.unwrap_or_default(), id, adopted));
@@ -1142,7 +1239,7 @@ impl super::Coordinator {
         }
         let current = |h: HostId| self.attached_boot(h);
         let waiting: Vec<SuccessionId> = r.open.values().filter(|run| !run.answered(current)).map(|run| run.s.id).collect();
-        (!r.known || self.declaring() || r.rollback.is_some() || !waiting.is_empty()).then_some(waiting)
+        (!self.successions_known() || self.declaring() || r.rollback.is_some() || !waiting.is_empty()).then_some(waiting)
     }
 
     /// Whether an open succession is answered by everyone and nothing else holds cuts back: a
@@ -1174,6 +1271,7 @@ impl super::Coordinator {
     pub(super) fn successions_settled(&mut self, settles: &[SuccessionId]) {
         for id in settles {
             let Some(run) = self.successions.open.remove(id) else { continue };
+            self.closed_here(*id);
             log::info!("coordinator: succession {} (host {} → heir {}) settled", id.0, run.s.predecessor, run.s.heir);
             for h in recipients(&run.s) {
                 self.push(Target::Host(h), CoordMsg::SuccessionDone { id: *id, settled: true });
@@ -1210,7 +1308,8 @@ impl super::Coordinator {
             // boot registered but has not attached); it is recorded at its first `Attach`.
             recipients(&s).into_iter().filter(|h| self.is_attached(*h)).filter_map(|h| self.attached_boot(h).map(|b| (h, b))).collect()
         };
-        let run = Run { s: s.clone(), applied: BTreeMap::new(), adopted: None, deadline_ms, beat: BTreeSet::new(), boots };
+        let run =
+            Run { s: s.clone(), applied: BTreeMap::new(), adopted: None, deadline_ms, beat: BTreeSet::new(), boots, opened_at: self.version };
         self.successions.open.insert(run.s.id, run);
         for h in attached {
             self.order_sent(&s, h);
@@ -1280,22 +1379,32 @@ impl super::Coordinator {
         self.successions.land_lookups.insert(sr);
     }
 
-    /// The super-regions hosts asked for since the last call: the runtime reads their owners
-    /// in the store and answers [`Self::land_wanted`] for each owned one.
+    /// The super-regions hosts asked for since the last call (on any replica: queued in the
+    /// projection): the ticker's runtime reads their owners in the store and answers
+    /// [`super::Input::LandOwners`]. Nothing on a replica that is not the ticker (Elastic 2b Task
+    /// 6; a rebase before the next commit hands them out again — the hosts ask again anyway).
     pub fn take_land_lookups(&mut self) -> Vec<crate::SuperRegion> {
-        self.unlogged_guard("take_land_lookups", |c| {
-            let lookups: Vec<crate::SuperRegion> = std::mem::take(&mut c.successions.land_lookups).into_iter().collect();
-            if !lookups.is_empty() {
-                c.note_unlogged();
-            }
-            lookups
-        })
+        if !self.ticking_now() {
+            return Vec::new();
+        }
+        let lookups: Vec<crate::SuperRegion> = std::mem::take(&mut self.successions.land_lookups).into_iter().collect();
+        if !lookups.is_empty() {
+            self.clean_checked = false;
+        }
+        lookups
     }
 
-    /// Host `owner` holds a super-region a host asked for (the runtime's lookup): if it left
-    /// cleanly, ALL its land goes to one heir at the next [`Self::declare_wanted`] between
-    /// cuts — at once: a host that left never returns as itself (the module docs).
+    /// Test support: [`super::Input::LandOwners`] naming `owner`.
+    #[doc(hidden)]
     pub fn land_wanted(&mut self, owner: HostId, now_ms: u64) {
+        self.apply(super::Input::LandOwners { owners: vec![owner] }, now_ms);
+    }
+
+    /// Host `owner` holds a super-region a host asked for (the ticker's lookup,
+    /// [`super::Input::LandOwners`]): if it left cleanly, ALL its land goes to one heir at the
+    /// next [`Self::declare_wanted`] between cuts — at once: a host that left never returns as
+    /// itself (the module docs).
+    pub(super) fn on_land_owner(&mut self, owner: HostId, now_ms: u64) {
         if !self.successions.enabled {
             return;
         }
@@ -1309,7 +1418,6 @@ impl super::Coordinator {
             return;
         }
         if self.successions.land_wanted.insert(owner) {
-            self.note_unlogged();
             log::info!("coordinator: host {owner} left and its land is wanted: it goes to an heir");
         }
     }
@@ -1351,7 +1459,6 @@ impl super::Coordinator {
         }
         let attached: BTreeSet<HostId> = self.attached_live().into_iter().collect();
         let (leases, declared) = (&self.leases, &self.successions.declared);
-        let wanted = self.successions.land_wanted.len();
         self.successions.land_wanted.retain(|owner| {
             let row = leases.row(*owner);
             // Declared already (an owners lookup answered just after the declaration): done.
@@ -1364,9 +1471,6 @@ impl super::Coordinator {
             }
             !back
         });
-        if self.successions.land_wanted.len() != wanted {
-            self.note_unlogged();
-        }
         let (owner, boot) =
             self.successions.land_wanted.iter().find_map(|&owner| self.leases.row(owner).map(|row| (owner, row.boot)))?;
         if self.cuts_running_participants().is_some() {
@@ -1383,30 +1487,41 @@ impl super::Coordinator {
         Some(self.hand_out_declaration(Declare { dead: vec![(owner, boot)], heirs: vec![heir], kind: SuccessionKind::Leave, generation }))
     }
 
-    /// A successful read of the `hosts` rows, issued at `issued_ms` and received at
-    /// `received_ms` — the process's MONOTONIC clock, never the store's ([`LeaseWatch`]).
-    /// A dirty dead row this coordinator never declared (an end or a declaration whose answer
-    /// a dead process never wrote, a total crash's registration) is taken out of the view at
-    /// once ([`Self::host_ended`]) and asks, once, for the open successions to be read again
-    /// ([`Self::successions_reread`]).
+    /// Test support: the lease part of a [`super::Input::HostsRead`] (`rows`, issued at
+    /// `issued_ms` and received at `received_ms` on the monotonic clock), as a read whose next
+    /// id is unknown (every absent id was pruned): the lease watch, the drain marks, the ids
+    /// forgotten, the dead rows nobody here declared. Refused on a replica that is not the
+    /// ticker.
     pub fn observe_leases(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
-        // A read is no input (Elastic 2b Task 6 makes it the ticker's): what it changes in the
-        // projection is a change outside the log — only removals of per-host memories and beats
-        // added below, or a dead row taken out of the view (which asks for a re-read).
-        let sizes = |c: &Self| {
-            let beats: usize = c.successions.open.values().map(|r| r.beat.len()).sum();
-            (c.cut_memory_sizes(), c.boots_seen.len(), c.successions.declared.len(), c.successions.reread_for.len(), beats)
-        };
-        self.unlogged_guard("observe_leases", |c| {
-            let before = sizes(c);
-            c.observe_leases_inner(rows, issued_ms, received_ms);
-            if sizes(c) != before {
-                c.note_unlogged();
-            }
-        })
+        if self.ticking_now() {
+            self.clean_checked = false;
+            self.observe_leases_inner(rows, u64::MAX, issued_ms, received_ms);
+        }
     }
 
-    fn observe_leases_inner(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
+    /// The ticker's read of every `hosts` row ([`super::Input::HostsRead`]): the boots a
+    /// departed host came back as, the hosts a cut needs (the dirty live rows: a row marked dead
+    /// runs nothing — `decide_in` reads the same predicate), the world tick, and the leases
+    /// ([`Self::observe_leases`]).
+    pub(super) fn on_hosts_read(&mut self, rows: &[HostSeen], next_host_id: u64, issued_mono: u64, received_mono: u64, world_tick: crate::Tick) {
+        let boots: BTreeMap<HostId, u64> = rows.iter().map(|r| (r.ordinal, r.boot)).collect();
+        self.set_host_boots_inner(&boots);
+        let expected: BTreeSet<HostId> = rows.iter().filter(|r| !r.clean && r.state == HOST_LIVE).map(|r| r.ordinal).collect();
+        self.set_expected_hosts(expected);
+        self.set_world_tick(world_tick);
+        self.observe_leases_inner(rows, next_host_id, issued_mono, received_mono);
+    }
+
+    /// A successful read of the `hosts` rows, issued at `issued_ms` and received at
+    /// `received_ms` — the process's MONOTONIC clock, never the store's ([`LeaseWatch`]) — when
+    /// the store's next host id was `next_host_id`. The drain marks it shows are the gate's. A
+    /// dirty dead row this coordinator never declared (an end or a declaration whose answer a
+    /// dead process never wrote, a total crash's registration) is taken out of the view at once
+    /// ([`Self::host_ended`]) and asks, once, for the open successions to be read again. What it
+    /// changes in the projection is outside the log (Elastic 2b Task 6: a rebase drops it, the
+    /// next read derives it again — the dead rows' asks are in the projection, so the rebased
+    /// core asks again).
+    fn observe_leases_inner(&mut self, rows: &[HostSeen], next_host_id: u64, issued_ms: u64, received_ms: u64) {
         // Beats since the last read (a boot's `seen_ms` moved): what an offline run counts.
         let beating: Vec<(HostId, u64)> = rows
             .iter()
@@ -1417,15 +1532,21 @@ impl super::Coordinator {
             run.beat.extend(beating.iter().copied());
         }
         self.leases.observe(rows, issued_ms, received_ms);
+        let draining: BTreeSet<HostId> = rows.iter().filter(|r| r.draining).map(|r| r.ordinal).collect();
+        if draining != self.draining {
+            self.draining = draining;
+        }
         // An id absent from the read was pruned (a clean or dead row owning nothing, named by no
         // open succession): nothing kept of it any more (B-M5) — an id is never issued again.
+        // Not an id the read could not show (registered after it began, audit H7).
         let present: BTreeSet<HostId> = rows.iter().map(|r| r.ordinal).collect();
-        self.forget_absent_hosts(&present);
-        self.successions.declared.retain(|(h, _)| present.contains(h));
-        self.successions.reread_for.retain(|(h, _)| present.contains(h));
+        self.forget_absent_hosts(&present, next_host_id);
+        let keep = |h: &HostId| present.contains(h) || h.0 >= next_host_id;
+        self.successions.declared.retain(|(h, _)| keep(h));
+        self.successions.reread_for.retain(|(h, _)| keep(h));
         // Before the open successions are known, their pending read lists it anyway.
         // A declaration in flight explains a dead row its answer will open.
-        if !self.successions.enabled || !self.successions.known || self.declaring() {
+        if !self.successions.enabled || !self.successions_known() || self.declaring() {
             return;
         }
         let unknown: Vec<(HostId, u64)> = rows
@@ -1444,13 +1565,13 @@ impl super::Coordinator {
                 self.host_ended(host, boot);
             }
             self.successions.reread_for.extend(unknown);
-            self.successions_reread();
+            self.reread_successions();
         }
     }
 
     /// A failed read of the `hosts` rows ([`LeaseWatch::observe_failed`]).
     pub fn leases_unread(&mut self) {
-        self.unlogged_guard("leases_unread", |c| c.leases.observe_failed())
+        self.leases.observe_failed();
     }
 
     /// The lease watch (Task 8 declares successions from [`LeaseWatch::lapsed`]).
@@ -1489,17 +1610,17 @@ impl super::Coordinator {
     /// open, and with none open instead of a succession. One at a time, only between cuts (a
     /// running cut it takes part in is decided abort first), never while a declaration or a
     /// rollback is under way, and not again on the read the store refused it at. The runtime
-    /// answers [`Self::landless_ended`] (or [`Self::end_failed`]).
+    /// answers [`Self::landless_ended`] (or [`Self::end_failed`]). The ticker's hand-out (Elastic
+    /// 2b Task 6).
     pub fn take_end_landless(&mut self, now_ms: u64) -> Option<EndLandless> {
-        self.unlogged_guard("take_end_landless", |c| c.take_end_landless_now(now_ms))
-    }
-
-    fn take_end_landless_now(&mut self, now_ms: u64) -> Option<EndLandless> {
+        if !self.ticking_now() {
+            return None;
+        }
         // As [`Self::declare_wanted`]: the lapses are the lease watch's own.
         self.clock_ms = self.clock_ms.max(now_ms);
-        let (declaring, ending) = (self.declaring(), self.ending().is_some());
+        let (declaring, ending, known) = (self.declaring(), self.ending().is_some(), self.successions_known());
         let r = &self.successions;
-        if !r.enabled || !r.known || declaring || r.rollback.is_some() || ending {
+        if !r.enabled || !known || declaring || r.rollback.is_some() || ending {
             return None;
         }
         if r.end_refused_at_read.is_some_and(|at| self.leases.reads() <= at) {

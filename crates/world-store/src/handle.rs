@@ -87,6 +87,10 @@ pub struct HostsRead {
     /// The database clock (ms since the epoch, the lease's clock) right after the rows were
     /// read: the world coordinator's clock is re-sampled from it (`game::coordinator::StoreClock`).
     pub store_ms: u64,
+    /// `world.next_host_id`, read BEFORE the rows (Elastic 2b Task 6, audit H7): every id below
+    /// it was issued before the rows were read, so one absent from them was pruned; an id at or
+    /// above it may have registered after.
+    pub next_host_id: u64,
 }
 
 /// The world coordinator's row as stored ([`StoreHandle::load_coordinator`], Elastic 2a): its

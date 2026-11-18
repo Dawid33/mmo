@@ -325,14 +325,23 @@ impl Coordinator {
     /// A loaded core whose period is the same runs on from its stored last cut; a changed
     /// period (or cuts turned on) counts from now.
     pub fn set_world_cuts(&mut self, every_ms: u64) {
-        self.unlogged_guard("set_world_cuts", |c| {
-            let every = (every_ms > 0).then_some(every_ms);
-            if c.cuts.every_ms != every {
-                c.note_unlogged();
-                c.cuts.every_ms = every;
-                c.cuts.last_ms = c.clock_ms;
-            }
-        })
+        self.cut_every_config = Some(every_ms);
+        self.clean_checked = false;
+        let every = (every_ms > 0).then_some(every_ms);
+        if self.cuts.every_ms != every {
+            self.cuts.every_ms = every;
+            self.cuts.last_ms = self.clock_ms;
+        }
+    }
+
+    /// The cut period the runtime configured, set again on a rebased projection
+    /// ([`super::Coordinator::rebase`]): a row written by a replica configured otherwise (or
+    /// before this one's first commit) does not turn this process's cuts off.
+    pub(super) fn reapply_cut_config(&mut self) {
+        if let Some(every_ms) = self.cut_every_config {
+            self.set_world_cuts(every_ms);
+        }
+        self.set_cut_epoch(self.cut_epoch_config);
     }
 
     /// The high half of the cut ids from now on: `epoch` if it is higher than the one held.
@@ -340,24 +349,34 @@ impl Coordinator {
     /// it is durable, `next` too, and a cut's begin and decision commit only with the transition
     /// that made its id — a loaded or rebased core never makes an id it made before.
     pub fn set_cut_epoch(&mut self, epoch: u64) {
+        self.cut_epoch_config = self.cut_epoch_config.max(epoch);
         if epoch > self.cuts.epoch {
-            self.note_unlogged();
+            self.clean_checked = false;
             self.cuts.epoch = epoch;
         }
     }
 
-    /// The hosts every world cut needs a part of (those whose `hosts` row is not clean).
+    /// The hosts every world cut needs a part of (those whose `hosts` row is not clean): what a
+    /// `hosts` read tells the ticker ([`super::Input::HostsRead`]; this alone: tests, tools).
+    /// Refused on a replica that is not the ticker.
     pub fn set_expected_hosts(&mut self, hosts: BTreeSet<HostId>) {
-        self.unlogged_guard("set_expected_hosts", |c| {
-            c.cuts.expected = hosts;
-            c.cuts.expected_known = true;
-        })
+        if !self.ticking_now() {
+            return;
+        }
+        self.cuts.expected = hosts;
+        self.cuts.expected_known = true;
     }
 
     /// The hosts a cut needs could not be read: no cut begins until they are again
     /// ([`Self::set_expected_hosts`]).
     pub fn expected_hosts_unknown(&mut self) {
-        self.unlogged_guard("expected_hosts_unknown", |c| c.cuts.expected_known = false)
+        self.cuts_unread();
+    }
+
+    /// No `hosts` read is known (a failed read, or a replica that just became the ticker): no
+    /// cut begins until the next good one.
+    pub(super) fn cuts_unread(&mut self) {
+        self.cuts.expected_known = false;
     }
 
     /// The world tick now (the coordinator's clock): a cut is placed a lead past it.
@@ -385,18 +404,15 @@ impl Coordinator {
     }
 
     /// The boot each host's `hosts` row names: a host that left as another boot has
-    /// registered again, and is expected again.
+    /// registered again, and is expected again (part of [`super::Input::HostsRead`]; this alone:
+    /// tests). Refused on a replica that is not the ticker.
     pub fn set_host_boots(&mut self, boots: BTreeMap<HostId, u64>) {
-        self.unlogged_guard("set_host_boots", |c| {
-            let before = (c.cuts.left.len(), c.cuts.succeeded.len());
-            c.set_host_boots_inner(&boots);
-            if (c.cuts.left.len(), c.cuts.succeeded.len()) != before {
-                c.note_unlogged();
-            }
-        })
+        if self.ticking_now() {
+            self.set_host_boots_inner(&boots);
+        }
     }
 
-    fn set_host_boots_inner(&mut self, boots: &BTreeMap<HostId, u64>) {
+    pub(super) fn set_host_boots_inner(&mut self, boots: &BTreeMap<HostId, u64>) {
         self.cuts.left.retain(|h, left_as| match (boots.get(h), *left_as) {
             (Some(b), Some(l)) if *b != l => {
                 log::info!("coordinator: host {h} registered again (boot {b}): expected again");
@@ -413,27 +429,22 @@ impl Coordinator {
         });
     }
 
-    /// The ids of a successful `hosts` read (`present`): an id absent from it was pruned and is
-    /// never issued again, so nothing is kept of it (B-M5) — not as left, succeeded, its boot,
-    /// the boots its `Attach`es named (`boots_seen`), nor an attachment of an older coordinator
-    /// process (final review G2: a crash-looping pod across coordinator restarts never grows
-    /// the projection). An id ATTACHED to this process keeps all of it: a host registered after
-    /// the read was issued attaches before the next read shows it (its answers count per boot),
-    /// and a zombie still attached stays marked until its link drops.
-    pub(super) fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>) {
+    /// The ids of a successful `hosts` read (`present`), which began when the store's next id was
+    /// `next_host_id`: an id below it absent from the read was pruned and is never issued again,
+    /// so nothing is kept of it (B-M5) — not as left, succeeded, its boot, the boots its
+    /// `Attach`es named (`boots_seen`), nor an attachment of an older coordinator process (final
+    /// review G2: a crash-looping pod across coordinator restarts never grows the projection).
+    /// Kept (Elastic 2b Task 6, audit H7): an id at or above `next_host_id` (registered after the
+    /// read began: the read could not show it), and an id ATTACHED to any live replica — this
+    /// one or another (a zombie still attached stays marked until its link drops).
+    pub(super) fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>, next_host_id: u64) {
         let attached: BTreeSet<HostId> = self.attached_hosts().collect();
-        let keep = |h: &HostId| present.contains(h) || attached.contains(h);
+        let keep = |h: &HostId| present.contains(h) || h.0 >= next_host_id || attached.contains(h);
         self.cuts.left.retain(|h, _| keep(h));
         self.cuts.succeeded.retain(|h, _| keep(h));
         self.cuts.boots.retain(|h, _| keep(h));
         self.cuts.attached.retain(|h, _| keep(h));
         self.boots_seen.retain(|h, _| keep(h));
-    }
-
-    /// The sizes of the per-host memories a `hosts` read may shrink ([`Self::forget_absent_hosts`])
-    /// or a death grow: `left`, `succeeded`, `boots`, `attached`.
-    pub(super) fn cut_memory_sizes(&self) -> [usize; 4] {
-        [self.cuts.left.len(), self.cuts.succeeded.len(), self.cuts.boots.len(), self.cuts.attached.len()]
     }
 
     /// Which of `left`, `succeeded` and `boots` hold host `host` ([`Self::host_mentions`]).
@@ -494,6 +505,11 @@ impl Coordinator {
     /// decision comes back as [`super::DecisionAnswer::Cut`]. What was handed out, for the log
     /// and the tests.
     pub fn take_decision(&mut self) -> Option<CutDecide> {
+        if !self.ticking_now() {
+            // The ticker's (Elastic 2b Task 6): it hands the decision out once its cache holds the
+            // verdict another replica's input reached.
+            return None;
+        }
         let replica = self.replica;
         let run = self.cuts.run.as_mut().filter(|r| r.taken.is_none())?;
         let commit = run.verdict?;
@@ -523,7 +539,7 @@ impl Coordinator {
                 self.apply(super::Input::Decision(super::DecisionAnswer::Cut { stamp, cut, committed: Ok(committed) }), now);
             }
             None => {
-                self.note_unlogged();
+                self.clean_checked = false;
                 self.decided_as_stored(cut, committed);
             }
         }
@@ -562,23 +578,40 @@ impl Coordinator {
 
     /// The decision of the running cut whose answer was lost, to look up in the store (read
     /// it; an undecided cut aborted there), once: `(cut, tick)`. Answer
-    /// [`Self::decision_looked_up`].
+    /// [`super::Input::CutLookedUp`] (`host: None`). The ticker's hand-out (Elastic 2b Task 6;
+    /// a rebase before the next commit hands it out again: the lookup is idempotent).
     pub fn take_decision_lookup(&mut self) -> Option<(CutId, Tick)> {
+        if !self.ticking_now() {
+            return None;
+        }
         let run = self.cuts.run.as_mut().filter(|r| r.lookup && r.taken.is_some())?;
         run.lookup = false;
         let found = (run.cut, run.tick);
-        self.note_unlogged();
+        self.clean_checked = false;
         Some(found)
     }
 
-    /// The decision of cut `cut` as the store holds it (a lookup's answer,
-    /// [`Self::take_decision_lookup`]): applied if it is the running cut's, handed out.
+    /// Test support: [`super::Input::CutLookedUp`] of the running cut's own decision.
+    #[doc(hidden)]
     pub fn decision_looked_up(&mut self, cut: CutId, committed: bool) {
-        if self.cuts.run.as_ref().is_some_and(|r| r.cut == cut && r.taken.is_some()) {
-            self.note_unlogged();
-            self.decided_as_stored(cut, committed);
-        } else {
-            log::debug!("coordinator: cut {}'s looked-up decision ({committed}): not the running cut any more", cut.0);
+        let now = self.clock_ms;
+        self.apply(super::Input::CutLookedUp { host: None, cut, committed }, now);
+    }
+
+    /// The decision of cut `cut` as the store holds it, read back ([`super::Input::CutLookedUp`]):
+    /// for `host`, remembered and told to it ([`CoordMsg::CutDone`]); for none, the running
+    /// cut's own (its answer was lost, [`Self::take_decision_lookup`]) — applied if it is the
+    /// running cut's, handed out.
+    pub(super) fn on_cut_looked_up(&mut self, host: Option<HostId>, cut: CutId, committed: bool) {
+        match host {
+            Some(host) => {
+                self.remember_outcome(cut, committed);
+                self.push(Target::Host(host), CoordMsg::CutDone { cut, committed });
+            }
+            None if self.cuts.run.as_ref().is_some_and(|r| r.cut == cut && r.taken.is_some()) => {
+                self.decided_as_stored(cut, committed);
+            }
+            None => log::debug!("coordinator: cut {}'s looked-up decision ({committed}): not the running cut any more", cut.0),
         }
     }
 
@@ -637,22 +670,25 @@ impl Coordinator {
     }
 
     /// `(host, cut)` pairs whose outcome is not known here: look each up in the store
-    /// (an undecided one aborted) and answer with [`Self::cut_outcome`].
+    /// (an undecided one aborted) and answer with [`super::Input::CutLookedUp`]. The ticker's
+    /// hand-out (Elastic 2b Task 6): the pairs any replica queued (in the projection), taken by
+    /// the ticker once its cache holds them.
     pub fn take_cut_lookups(&mut self) -> Vec<(HostId, CutId)> {
-        self.unlogged_guard("take_cut_lookups", |c| {
-            let lookups = std::mem::take(&mut c.cuts.lookups);
-            if !lookups.is_empty() {
-                c.note_unlogged();
-            }
-            lookups
-        })
+        if !self.ticking_now() {
+            return Vec::new();
+        }
+        let lookups = std::mem::take(&mut self.cuts.lookups);
+        if !lookups.is_empty() {
+            self.clean_checked = false;
+        }
+        lookups
     }
 
-    /// The stored outcome of `cut`, for `host` (a lookup's answer).
+    /// Test support: [`super::Input::CutLookedUp`] of `cut`'s stored outcome, for `host`.
+    #[doc(hidden)]
     pub fn cut_outcome(&mut self, host: HostId, cut: CutId, committed: bool) {
-        self.note_unlogged();
-        self.remember_outcome(cut, committed);
-        self.push(Target::Host(host), CoordMsg::CutDone { cut, committed });
+        let now = self.clock_ms;
+        self.apply(super::Input::CutLookedUp { host: Some(host), cut, committed }, now);
     }
 
     /// The successions running cut `cut` settles if it commits (none: not the running cut).
@@ -869,13 +905,11 @@ impl Coordinator {
 
     /// A participant `host` of the running cut lost its lease: the cut, not decided yet, is
     /// aborted (a succession is declared only between cuts).
-    /// Reached from the runtime's store-call hand-outs (not an input): a change outside the log.
+    /// Reached from the ticker's store-call hand-outs (not an input): a change outside the log —
+    /// a rebase before the next commit drops it, and the ticker decides it again.
     pub(super) fn abort_cut_for_lapse(&mut self, host: HostId) {
-        let before = self.cuts.run.as_ref().map(|r| r.verdict);
+        self.clean_checked = false;
         self.abort_for(host, "lost its lease");
-        if self.cuts.run.as_ref().map(|r| r.verdict) != before {
-            self.note_unlogged();
-        }
     }
 
     /// Whether `host` asked to leave (its request waits, or the cut it leaves in runs).

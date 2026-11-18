@@ -2231,9 +2231,10 @@ fn live_of(c: &server::coordinator_rt::ListeningCoordinator) -> std::collections
 }
 
 /// A second coordinator replica (B) beside the world's (A), as `run_coordinator` starts one —
-/// registered first, then the row — with no world cuts (a spare: no host dials it until a test
-/// switches one to it), its own store handle and pin file. Rounds until both replicas' cores
-/// hold both. B, its store and its pin file.
+/// registered first, then the row — configured as A is (world cuts every [`CUT_EVERY`]: Elastic
+/// 2b Task 6 — only the ticker, A while it lives, runs them), its own store handle and pin file;
+/// no host dials it until a test switches one to it. Rounds until both replicas' cores hold
+/// both. B, its store and its pin file.
 fn spare_replica(
     w: &mut World,
     db: &PgDb,
@@ -2244,6 +2245,11 @@ fn spare_replica(
     assert!(!start.alone, "A beats its row: B is not alone");
     let cert = dir.join("replica-b").join("coordinator.cert-sha256");
     std::fs::create_dir_all(cert.parent().unwrap()).unwrap();
+    let tick = w.pair.tick.clone();
+    let cuts = server::coordinator_rt::WorldCuts {
+        every: CUT_EVERY,
+        tick: Box::new(move || tick.load(std::sync::atomic::Ordering::SeqCst)),
+    };
     let b = server::coordinator_rt::start_listening_as(
         store.clone(),
         start,
@@ -2251,7 +2257,7 @@ fn spare_replica(
         TOKEN.into(),
         Some(cert.clone()),
         server::claims::Fenced::default(),
-        None,
+        Some(cuts),
         CrashPolicy::Rollback,
         RIG_WORLD,
         None,

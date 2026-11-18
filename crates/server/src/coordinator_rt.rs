@@ -1114,6 +1114,12 @@ pub struct CoordinatorRuntime {
     take_wanted: bool,
     /// A refresh of the cache is due (a notice of a newer version, a held row, a stale cut).
     refresh_wanted: bool,
+    /// The notices may have been missed (`Notice::Resync`, Task 5 review m1): the row's version is
+    /// read, and the cache refreshed if the row moved — also on a cache that believes it is alone
+    /// (another replica's join may be the notice it missed).
+    resync_wanted: bool,
+    /// That version read, in flight.
+    resync_rx: Option<Answer<u64>>,
     /// The core asked a refresh for a cut it cannot know ([`Coordinator::take_refresh_wanted`])
     /// that no refresh issued since covers; the refresh in flight covers one.
     stale_refresh: bool,
@@ -1134,9 +1140,12 @@ pub struct CoordinatorRuntime {
 /// failure tried again after [`WORLD_CUT_DECISION_RETRY_MS`].
 #[derive(Default)]
 struct SuccessionPump {
-    /// The open successions were read at start ([`Coordinator::successions_open`]).
+    /// No read of the open successions is wanted ([`Coordinator::take_successions_reread`]): the
+    /// last one wanted was answered ([`Input::SuccessionsOpen`]), or this replica is not the
+    /// ticker.
     open_known: bool,
-    open_rx: Option<Answer<Vec<game::Succession>>>,
+    /// The read in flight, with the row version this cache stood at when it was issued.
+    open_rx: Option<(u64, Answer<Vec<game::Succession>>)>,
     open_retry_at: u64,
     /// No declaration is handed out before this (after a refused one).
     declare_retry_at: u64,
@@ -1174,8 +1183,8 @@ enum End {
     /// store that answers so).
     Fenced,
     /// A `Conflict` with another writer that the core cannot be rebased through without a loss
-    /// (a change outside its log, or a failed write that may be in the row, since its last
-    /// commit), or a row that does not load: the next start loads the row.
+    /// (a failed write since its last commit that may be in the row: its inputs would apply
+    /// twice), or a row that is gone or does not load: the next start loads the row.
     Conflict,
     /// Test hook: [`CoordinatorThread::kill_after_commit_before_send`].
     #[cfg(feature = "test-hooks")]
@@ -1342,6 +1351,8 @@ impl CoordinatorRuntime {
             relay: VecDeque::new(),
             take_wanted: false,
             refresh_wanted: false,
+            resync_wanted: false,
+            resync_rx: None,
             stale_refresh: false,
             refresh_for_stale: false,
             check_take: false,
@@ -1683,13 +1694,22 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// The world tick, and (every [`WORLD_CUT_HOSTS_REFRESH_MS`]) the hosts a cut needs:
-    /// those whose `hosts` row is not clean and live. A read that fails stops cuts until a good
-    /// one ([`Coordinator::expected_hosts_unknown`]). Every read feeds the lease watch
-    /// ([`game::coordinator::LeaseWatch`]); a failed one makes it forget what it saw.
+    /// The world tick, and (every [`WORLD_CUT_HOSTS_REFRESH_MS`]) the ticker's read of the
+    /// `hosts` rows ([`Input::HostsRead`]: the hosts a cut needs — those whose row is not clean
+    /// and live —, the lease watch [`game::coordinator::LeaseWatch`], the drain marks, the ids
+    /// pruned). A read that fails stops cuts until a good one
+    /// ([`Coordinator::expected_hosts_unknown`]) and makes the watch forget what it saw. A
+    /// replica that is not the ticker reads nothing (Elastic 2b Task 6): a read in flight is
+    /// dropped, and a new ticker's watch counts from zero.
     fn feed_cuts(&mut self, now: u64) {
         let Some(cuts) = &self.cuts else { return };
-        self.core.set_world_tick((cuts.tick)());
+        let world_tick = (cuts.tick)();
+        self.core.set_world_tick(world_tick);
+        if !self.core.is_ticker() {
+            self.hosts_rx = None;
+            self.hosts_read_ms = None;
+            return;
+        }
         #[cfg(feature = "test-hooks")]
         if self.hold_hosts_reads.load(Ordering::SeqCst) && self.hosts_rx.is_some() {
             return;
@@ -1698,7 +1718,7 @@ impl CoordinatorRuntime {
             let issued_mono = *issued_mono;
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok(world_store::HostsRead { rows, store_ms })) => {
+                Ok(Ok(world_store::HostsRead { rows, store_ms, next_host_id })) => {
                     // The lease watch's receipt stamp: the monotonic clock, taken before the
                     // sample below (a forward step of the store's clock never reaches the watch).
                     let received_mono = self.mono_ms();
@@ -1708,14 +1728,8 @@ impl CoordinatorRuntime {
                     // and the lease watch's spans would grow by). The core's `now` follows from
                     // the next pass.
                     self.sample_store_clock(store_ms);
-                    // A host that left and registered again (another boot) is expected again.
-                    self.core.set_host_boots(rows.iter().map(|r| (r.id, r.boot)).collect());
-                    // A row marked dead (a takeover declared it) runs nothing: not expected
-                    // (`decide_in` reads the same predicate).
-                    let live: BTreeSet<HostId> =
-                        rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).map(|r| r.id).collect();
-                    crate::health::Health::global().hosts_live(live.len() as u64);
-                    self.core.set_expected_hosts(live);
+                    let live = rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).count();
+                    crate::health::Health::global().hosts_live(live as u64);
                     let seen: Vec<game::coordinator::HostSeen> = rows
                         .iter()
                         .map(|r| game::coordinator::HostSeen {
@@ -1732,8 +1746,11 @@ impl CoordinatorRuntime {
                     // stall of this thread never stretches the span (`LeaseWatch::observe`). On
                     // the MONOTONIC clock (Elastic 2a final review, S1): a forward step of the
                     // store's clock between two reads never stretches it either; the store's
-                    // own lapse check at the declaration stays the second gate.
-                    self.core.observe_leases(&seen, issued_mono, received_mono);
+                    // own lapse check at the declaration stays the second gate. A host that
+                    // left and registered again (another boot) is expected again; a row marked
+                    // dead runs nothing (`decide_in` reads the same predicate).
+                    let read = Input::HostsRead { rows: seen, next_host_id, issued_mono, received_mono, world_tick };
+                    self.core.apply(read, now);
                 }
                 Ok(Err(e)) => {
                     self.core.expected_hosts_unknown();
@@ -1830,17 +1847,15 @@ impl CoordinatorRuntime {
         }
         for (i, stored) in answered.iter().rev() {
             let l = self.lookups.remove(*i);
-            match l.host {
-                Some(host) => self.core.cut_outcome(host, l.cut, *stored),
-                None => {
-                    // The running cut's own decision, as stored: its post-commit effects may not
-                    // have run (the answer that carried them was lost) — run again, idempotent.
-                    self.cut_decided(l.cut, l.tick, *stored, &[]);
-                    // A committed one is announced by the finish, once its parts are committed.
-                    self.after.push(AfterJob { a: AfterCommit::FinishCut { cut: l.cut, tick: l.tick, committed: *stored }, rx: None, retry_at: now });
-                    self.core.decision_looked_up(l.cut, *stored);
-                }
+            if l.host.is_none() {
+                // The running cut's own decision, as stored: its post-commit effects may not
+                // have run (the answer that carried them was lost) — run again, idempotent.
+                self.cut_decided(l.cut, l.tick, *stored, &[]);
+                // A committed one is announced by the finish, once its parts are committed.
+                self.after.push(AfterJob { a: AfterCommit::FinishCut { cut: l.cut, tick: l.tick, committed: *stored }, rx: None, retry_at: now });
             }
+            // A recorded decision never changes: a logged input (Elastic 2b Task 6).
+            self.core.apply(Input::CutLookedUp { host: l.host, cut: l.cut, committed: *stored }, now);
         }
         Ok(())
     }
@@ -1908,29 +1923,39 @@ impl CoordinatorRuntime {
     /// after [`WORLD_CUT_DECISION_RETRY_MS`]. `Err`: fenced.
     fn pump_successions(&mut self, now: u64) -> Result<(), ()> {
         let Some(p) = self.successions.as_mut() else { return Ok(()) };
-        // The core wants the open successions read again (the store changed them behind its
-        // back: an offline `worldctl retire-host`, a `worldctl rollback`): a read in flight is
-        // dropped — it may predate the change.
+        // The ticker's work (Elastic 2b Task 6): another replica reads, looks up and hands out
+        // nothing (its core refuses the answers anyway); a new ticker owes the read below.
+        let ticker = self.core.is_ticker();
+        // The core wants the open successions read (again): it owes one (a start, a rebase, a
+        // new ticker) or the store changed them behind its back (an offline `worldctl
+        // retire-host`, a `worldctl rollback`) — a read in flight is dropped: it may predate the
+        // change.
         if self.core.take_successions_reread() {
             p.open_known = false;
             p.open_rx = None;
         }
+        if !ticker {
+            p.open_known = true;
+            p.open_rx = None;
+            return Ok(());
+        }
         if !p.open_known {
             if p.open_rx.is_none() && now >= p.open_retry_at {
-                p.open_rx = Some(self.store.open_successions_later());
+                // Issued at this cache's version: a run opened later is no abandoned one (H5).
+                p.open_rx = Some((self.core.version(), self.store.open_successions_later()));
             }
-            let answer = p.open_rx.as_ref().map(|rx| rx.try_recv());
+            let answer = p.open_rx.as_ref().map(|(at, rx)| (*at, rx.try_recv()));
             let failed = match answer {
-                None | Some(Err(TryRecvError::Empty)) => None,
-                Some(Ok(Ok(list))) => {
+                None | Some((_, Err(TryRecvError::Empty))) => None,
+                Some((issued_at_version, Ok(Ok(list)))) => {
                     p.open_known = true;
                     p.open_rx = None;
                     log::info!("[coordinator] {} open succession(s) in the store", list.len());
-                    self.core.successions_open(list, now);
+                    self.core.apply(Input::SuccessionsOpen { list, issued_at_version }, now);
                     None
                 }
-                Some(Ok(Err(e))) => Some(e.to_string()),
-                Some(Err(TryRecvError::Disconnected)) => Some("the world-store thread has stopped".into()),
+                Some((_, Ok(Err(e)))) => Some(e.to_string()),
+                Some((_, Err(TryRecvError::Disconnected))) => Some("the world-store thread has stopped".into()),
             };
             if let Some(e) = failed {
                 p.open_rx = None;
@@ -1956,9 +1981,7 @@ impl CoordinatorRuntime {
                         let owners: BTreeMap<game::SuperRegion, i64> = rows.into_iter().map(|(sr, o, _)| (sr, o)).collect();
                         let wanted: BTreeSet<HostId> =
                             srs.iter().filter_map(|sr| owners.get(sr)).filter_map(|o| u64::try_from(*o).ok().map(HostId)).collect();
-                        for owner in wanted {
-                            self.core.land_wanted(owner, now);
-                        }
+                        self.core.apply(Input::LandOwners { owners: wanted.into_iter().collect() }, now);
                     }
                     Err(e) => failed = Some(e),
                 }
@@ -2133,6 +2156,9 @@ impl CoordinatorRuntime {
             }
         }
         self.pump_outbox(&mut out);
+        // Every pass, whatever is in flight: the notices only set what is due, and one left in
+        // its channel would wake every wait at once (a busy loop while a write retries).
+        self.pump_notices();
         // One store call at a time among the write and the take (their rows come in order).
         if self.writing.is_some() || self.outbox_rx.is_some() || now < self.retry_at_ms {
             return Ok(out);
@@ -2141,9 +2167,8 @@ impl CoordinatorRuntime {
             if self.core.replicas_live().contains(&self.core.replica()) && !self.core.evicted() {
                 self.joined();
             }
-            self.pump_notices();
             self.pump_version_check(now)?;
-            let idle = self.version_rx.is_none() && self.refresh_rx.is_none();
+            let idle = self.version_rx.is_none() && self.refresh_rx.is_none() && self.resync_rx.is_none();
             if idle && (self.take_wanted || self.check_take) {
                 // The rows other replicas left for this replica's hosts, between transitions.
                 self.take_wanted = false;
@@ -2200,11 +2225,25 @@ impl CoordinatorRuntime {
     }
 
     /// The held outbox rows whose version this cache has reached, in order, as messages for
-    /// their hosts (`game::decode_packet`; an undecodable row is an error, dropped).
+    /// their hosts (`game::decode_packet`; an undecodable row is an error, dropped). A row for
+    /// another boot than the one the host's link here is of now is dropped unsent (Task 5 review
+    /// m3: the host reconnected while the row was held — its `Attach` reconciles what it said).
     fn release_relay(&mut self) -> Vec<(Target, CoordMsg)> {
         let mut out = Vec::new();
         while self.relay.front().is_some_and(|row| row.version <= self.core.version()) {
             let row = self.relay.pop_front().expect("checked");
+            if let Links::Listener(l) = &self.links.links {
+                let linked = l.routes.peer_of(row.host).and_then(|peer| l.routes.boots.get(&peer).copied());
+                if linked != Some(row.boot) {
+                    log::debug!(
+                        "[coordinator] outbox row {} for host {} (boot {:#x}): its link here is {linked:?} now; dropped unsent",
+                        row.seq,
+                        row.host,
+                        row.boot
+                    );
+                    continue;
+                }
+            }
             match game::decode_packet::<CoordMsg>(&row.msg) {
                 Ok(msg) => out.push((Target::Host(row.host), msg)),
                 Err(e) => log::error!("[coordinator] outbox row {} for host {} does not decode ({e:?}); dropped", row.seq, row.host),
@@ -2219,7 +2258,22 @@ impl CoordinatorRuntime {
     fn pump_notices(&mut self) {
         let version = self.core.version();
         if let Some(rx) = &self.notices {
-            for n in rx.try_iter() {
+            let mut notices = Vec::new();
+            let gone = loop {
+                match rx.try_recv() {
+                    Ok(n) => notices.push(n),
+                    Err(TryRecvError::Empty) => break false,
+                    Err(TryRecvError::Disconnected) => break true,
+                }
+            };
+            if gone {
+                // Its listener ended: a disconnected receiver would wake every wait at once (a
+                // busy loop). Without notices the backstop take and a resync read stand in.
+                log::warn!("[coordinator] the coordinator_row listener stopped; relying on the backstop poll");
+                self.notices = None;
+                notices.push(world_store::Notice::Resync);
+            }
+            for n in notices {
                 match n {
                     world_store::Notice::Payload(p) => match p.trim().parse::<u64>() {
                         Ok(v) if v > version => {
@@ -2229,7 +2283,12 @@ impl CoordinatorRuntime {
                         Ok(_) => {}
                         Err(_) => log::debug!("[coordinator] a malformed coordinator_row notice ({p:?}) ignored"),
                     },
-                    world_store::Notice::Resync => self.take_wanted = true,
+                    world_store::Notice::Resync => {
+                        // Notices may have been missed: the row's version read (a refresh if it
+                        // moved), and a take.
+                        self.resync_wanted = true;
+                        self.take_wanted = true;
+                    }
                 }
             }
         }
@@ -2278,7 +2337,7 @@ impl CoordinatorRuntime {
             let for_stale = std::mem::take(&mut self.refresh_for_stale);
             match answer {
                 Ok(Some(row)) if row.version > self.core.version() => {
-                    if self.core.unlogged_pending() || !self.unacked.is_empty() {
+                    if !self.unacked.is_empty() {
                         // Not rebased without a loss now: asked again once its change is written
                         // (that write meets the newer row: a conflict decides).
                         self.refresh_wanted = true;
@@ -2330,7 +2389,32 @@ impl CoordinatorRuntime {
             let _ = now;
             return Ok(());
         }
+        if let Some(rx) = &self.resync_rx {
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(()),
+                Ok(answer) => answer,
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            self.resync_rx = None;
+            match answer {
+                Ok(v) if v > self.core.version() => {
+                    log::info!("[coordinator] after missed notices the row is at {v}, this cache at {}: refreshing", self.core.version());
+                    self.refresh_wanted = true;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    log::warn!("[coordinator] the row's version could not be read after missed notices ({e}); asking again");
+                    self.resync_wanted = true;
+                }
+            }
+            return Ok(());
+        }
         if self.outbox_rx.is_some() {
+            return Ok(());
+        }
+        if self.resync_wanted {
+            self.resync_wanted = false;
+            self.resync_rx = Some(self.store.row_version_later());
             return Ok(());
         }
         if self.refresh_wanted {
@@ -2347,15 +2431,15 @@ impl CoordinatorRuntime {
     }
 
     /// A newer row a version check found (decision 1's rebase, without a conflict): the core
-    /// rebased onto it — its history kept unless the row's is newer — under the same conditions
-    /// as after a conflict (a core holding a change outside its log, or a write that may be in
-    /// the row, cannot be rebased: the process stops as fenced, the next start loads the row).
+    /// rebased onto it — its history kept unless the row's is newer — under the same condition
+    /// as after a conflict (a write that may be in the row cannot be rebased through: its inputs
+    /// would apply twice — the process stops as fenced, the next start loads the row).
     fn refresh_onto(&mut self, row: world_store::StoredCoordinator) -> Result<(), End> {
         if row.version <= self.core.version() {
             // Read before this cache's own later commit: older, never rebased onto (fix round 1).
             return Ok(());
         }
-        if self.core.unlogged_pending() || !self.unacked.is_empty() {
+        if !self.unacked.is_empty() {
             log::error!(
                 "[coordinator] the row moved to version {} (this cache at {}) and the core cannot be rebased without a loss; \
                  stopping as fenced — the next start loads it",
@@ -2451,6 +2535,9 @@ impl CoordinatorRuntime {
         // check or a refresh asked before it answers about an older cache — dropped (fix round 1).
         // Its own take relays the rows a check would have waited for (Elastic 2b Task 5).
         self.version_rx = None;
+        // A write meets any commit a missed notice was about (its compare-and-set conflicts).
+        self.resync_rx = None;
+        self.resync_wanted = false;
         if self.refresh_rx.take().is_some() {
             // Asked again after the write (if still needed: the write's conflict refreshes anyway).
             self.stale_refresh |= std::mem::take(&mut self.refresh_for_stale);
@@ -2625,23 +2712,17 @@ impl CoordinatorRuntime {
     /// Another writer's `row` (decision 1): the core is rebased onto it — `t` dropped, its
     /// messages decided again by the replay — and written again, at once up to
     /// [`COORDINATOR_CONFLICT_RETRIES`] conflicts in a row, then after
-    /// [`COORDINATOR_SAVE_RETRY_MS`]. A core holding a change outside its log since its last
-    /// commit, or a failed write that may be in the row (its inputs would apply twice), cannot
-    /// be rebased without a loss: the process stops as Elastic 2a did, and the next start loads
-    /// the row.
+    /// [`COORDINATOR_SAVE_RETRY_MS`]. What the core changed outside its log (the ticker's reads
+    /// and hand-outs, Elastic 2b Task 6) is dropped and derived again. A failed write that may be
+    /// in the row (its inputs would apply twice) cannot be rebased through: the process stops as
+    /// Elastic 2a did, and the next start loads the row.
     fn rebase_onto(&mut self, t: game::coordinator::Transition, row: world_store::StoredCoordinator, now: u64) -> Settled {
         let mine = self.core.version();
-        let why = if self.core.unlogged_pending() {
-            Some("it holds a store's answer applied since its last commit (not in its log)")
-        } else if !self.unacked.is_empty() {
-            Some("a write of it failed since its last commit and may be in the row")
-        } else {
-            None
-        };
-        if let Some(why) = why {
+        if !self.unacked.is_empty() {
             log::error!(
                 "[coordinator] write conflict: the row is at version {}, written by another writer (this process holds \
-                 version {mine}); it cannot be rebased onto it: {why}; stopping as fenced — the next start loads it",
+                 version {mine}); it cannot be rebased onto it: a write of it failed since its last commit and may be in \
+                 the row; stopping as fenced — the next start loads it",
                 row.version
             );
             return Settled::End(End::Conflict);

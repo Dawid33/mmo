@@ -4022,6 +4022,9 @@ fn a_core_reloaded_after_every_input_is_identical() {
     let mut b = load(&t0, &history, start);
     // Loaded at the row's version (the marks of its decisions are stamped by it).
     b.set_version(a.version());
+    // Elastic 2b Task 6: a loaded ticker owes a read of the open successions (the process's to
+    // know): answered as the store holds them (an ask the projection carries stays asked).
+    b.successions_open(Vec::new(), start);
     let mut last = t0;
     let (mut sent, mut transitions) = (Vec::new(), 0usize);
     // One runtime pass per input: the input, then the upkeep at the pass's store time.
@@ -4055,6 +4058,9 @@ fn a_core_reloaded_after_every_input_is_identical() {
         // Reloaded after EVERY input, from the last transition written: what is not in it is lost.
         b = load(&last, &history, *now);
         b.set_version(a.version());
+        // Elastic 2b Task 6: a loaded ticker owes a read of the open successions (they are the
+        // process's to know); the store holds what A holds.
+        b.successions_open(a.successions_listed(), *now);
     }
     let kinds = |f: fn(&CoordMsg) -> bool| sent.iter().filter(|m| f(m)).count();
     assert!(transitions > 20, "a life worth comparing: {transitions} transitions");
@@ -4308,6 +4314,8 @@ fn a_store_decision_lost_with_its_transition_still_takes_the_dead_host_out() {
         };
         // The store committed it; the process dies before its answer is applied and written.
         let mut c = Coordinator::load(&core, &history, grid(), ReplicaId(2), 20).expect("the projection loads");
+        // Its first input (Elastic 2b Task 4): it registered alone — the ticker.
+        c.apply(Input::ReplicaJoined { me: ReplicaId(2), alone: true }, 20);
         c.set_cut_epoch(4);
         c.set_world_cuts(CUT_EVERY_MS);
         c.set_crash_policy(game::CrashPolicy::Succession);
@@ -4589,12 +4597,17 @@ fn a_login_message_is_never_replayed() {
 /// Elastic 2b (Review Focus 3, decision 3's clock): two replicas a few milliseconds apart take
 /// turns at the upkeep across two day turns — B 3 ms ahead, A 3 ms behind — each on its own
 /// cache, rebased onto the other's row (its upkeep replayed) before it writes. Every day turns
-/// once, in order, and no replica's calendar day ever goes back.
+/// once, in order, and no replica's calendar day ever goes back. (Task 6: the upkeep is the
+/// ticker's — two processes that both believe they tick, as two caches across a handover can.)
 #[test]
 fn two_replicas_a_tick_apart_turn_each_day_once() {
     let (base, _, _) = coordinator();
     let mut row = Row::of(&base);
     let (mut a, mut b) = (row.replica(1), row.replica(2));
+    for c in [&mut a, &mut b] {
+        // The ticker of the row (replica 0), as each process believes.
+        c.set_replica_for_test(ReplicaId(0));
+    }
     let ((anchor_ms, anchor_tick), _) = base.calendar_anchor();
     let first = anchor_tick.0 / TICKS_PER_DAY + 1;
     let turn = |d: u64| anchor_ms + (d * TICKS_PER_DAY - anchor_tick.0) * game::TICK_RATE;
@@ -4637,9 +4650,10 @@ fn a_link_down_of_a_host_attached_elsewhere_changes_nothing() {
         c.set_world_tick(100);
     };
     let mut b = row.replica(2);
-    configure(&mut b);
-    // B is the live replica (Elastic 2b Task 4: an attachment counts while its replica is live).
+    // B is the live replica (Elastic 2b Task 4: an attachment counts while its replica is live),
+    // the ticker (Task 6: the cuts are its).
     b.apply(Input::ReplicaJoined { me: ReplicaId(2), alone: true }, 0);
+    configure(&mut b);
     b.apply(Input::Host { host: h(0), msg: attach(h(0), 1, Vec::new(), Vec::new()) }, 0);
     b.apply(Input::Host { host: h(1), msg: attach(h(1), 1, Vec::new(), Vec::new()) }, 0);
     b.apply(Input::Maintain, 10 * CUT_EVERY_MS);
@@ -4982,12 +4996,160 @@ fn a_cut_answer_for_an_unknown_future_cut_asks_a_refresh_not_a_lookup() {
     assert_eq!((prepared, verdict), (vec![h(1)], None), "host 1's part counts, the cut runs on");
     assert!(!b.take_refresh_wanted(), "no longer stale");
 
-    // A cut no row holds: looked up, once the refresh found nothing newer.
+    // A cut no row holds: looked up (by the ticker: replica 3 registered alone), once the refresh
+    // found nothing newer.
     let mut c = row.replica(3);
+    c.apply(Input::ReplicaJoined { me: ReplicaId(3), alone: true }, 20 * CUT_EVERY_MS);
     let bogus = game::CutId((3 << 32) | 99);
     c.handle(h(0), HostMsg::CutPrepared { cut: bogus }, 20 * CUT_EVERY_MS);
     assert!(c.take_refresh_wanted());
     assert!(c.take_cut_lookups().is_empty(), "not before the refresh");
     c.refresh_not_newer();
     assert_eq!(c.take_cut_lookups(), vec![(h(0), bogus)], "looked up as any unknown cut");
+}
+
+// ---- Elastic 2b Task 6: the ticker alone runs the timed and lease work --------------------
+
+/// A `hosts` read of hosts `0..n` at `now` as the runtime hands it to the core: `dead` vouched
+/// (lapsed at once), every other one beating, the next id to issue `n`.
+fn hosts_read(n: u32, dead: &[HostId], now: u64) -> Input {
+    let rows = (0..u64::from(n)).map(h).map(|o| seen(o, if dead.contains(&o) { 0 } else { now + 1 })).collect();
+    Input::HostsRead { rows, next_host_id: u64::from(n), issued_mono: now, received_mono: now, world_tick: 100 }
+}
+
+/// Elastic 2b Task 6 (plan departs 2): a replica that is not the ticker runs none of the timed
+/// and lease work — its upkeep, a `hosts` read, a successions read and an owners read are refused
+/// and not logged, and it hands out no store call (no read, no lookup, no declaration, no end, no
+/// cut decision). The ticker, fed the same, does that work.
+#[test]
+fn a_non_ticker_never_hands_out_timed_work() {
+    let (mut row, mut a, mut b) = two_replicas();
+    for c in [&mut a, &mut b] {
+        c.set_cut_epoch(3);
+        c.set_world_cuts(CUT_EVERY_MS);
+        c.set_crash_policy(game::CrashPolicy::Succession);
+        c.set_world_tick(100);
+    }
+    for n in 0..3 {
+        a.handle(h(n), claim_attach(h(n), 100 + n, Vec::new(), Vec::new()), 0);
+    }
+    row.write(&mut a).expect("the attaches commit");
+    row.rebase(&mut b);
+    assert!(a.is_ticker() && !b.is_ticker(), "A, the lowest live replica, ticks");
+    // A host wants land on B: an input any replica applies (queued in the projection).
+    b.handle(h(1), HostMsg::LandWanted { sr: (7, 0) }, 10);
+    let logged = b.logged();
+    let before = b.encode_projection();
+    let late = 10 * CUT_EVERY_MS;
+    b.apply(Input::Maintain, late);
+    b.apply(hosts_read(3, &[h(2)], late), late);
+    b.apply(Input::SuccessionsOpen { list: Vec::new(), issued_at_version: b.version() }, late);
+    b.apply(Input::LandOwners { owners: vec![h(5)] }, late);
+    assert_eq!(b.logged(), logged, "nothing of the ticker's work is logged on B");
+    assert!(b.encode_projection() == before, "nor applied: {}", b.projection_debug());
+    assert!(b.world_cut_running().is_none(), "no cut begins on B");
+    assert!(!b.take_successions_reread(), "B reads no successions");
+    assert!(b.take_land_lookups().is_empty(), "B looks no land up");
+    assert!(b.take_cut_lookups().is_empty(), "B looks no cut up");
+    assert_eq!(b.declare_wanted(late), None, "B declares nobody");
+    assert_eq!(b.take_end_landless(late), None, "B ends nobody");
+    assert_eq!(b.take_decision(), None, "B decides no cut");
+    let t = b.take_transition();
+    assert!(t.as_ref().is_none_or(|t| t.decisions.is_empty()), "B issues no store decision: {t:?}");
+
+    // The ticker, fed the same, does that work.
+    assert!(a.take_successions_reread(), "A owes a read of the open successions");
+    a.apply(Input::SuccessionsOpen { list: Vec::new(), issued_at_version: a.version() }, late);
+    a.apply(hosts_read(3, &[h(2)], late), late);
+    let d = a.declare_wanted(late).expect("A declares host 2");
+    assert_eq!(d.dead, vec![(h(2), 102)]);
+}
+
+/// Elastic 2b Task 6 (audit H5): a successions read abandons a run it does not list only if the
+/// run opened at or before the version the read was issued at — a run opened later (its store
+/// row committed after the read began, perhaps by another replica's transition) is not in the read
+/// and is no abandoned run.
+#[test]
+fn a_reread_abandons_only_runs_opened_before_it() {
+    let mut c = succeeding(3);
+    let issued = c.version();
+    read_leases(&mut c, 3, &[h(2)], &[], 1_000);
+    let d = c.declare_wanted(1_000).expect("host 2 is declared");
+    written(&mut c).expect("the declaration commits with its transition");
+    let mine = CallStamp { replica: c.replica(), version: c.version() };
+    let list = store_declares(&d, 3, 1, game::CutId(0));
+    c.apply(Input::Decision(DecisionAnswer::Declared { stamp: mine, outcome: Ok(game::Declared::Done(list)) }), 1_100);
+    commit_routed(&mut c);
+    assert_eq!(c.successions_open_count(), 1, "the run is open");
+    c.apply(Input::SuccessionsOpen { list: Vec::new(), issued_at_version: issued }, 1_200);
+    assert_eq!(c.successions_open_count(), 1, "a read issued before the run opened abandons nothing");
+    assert!(succession_done(&commit_routed(&mut c)).is_empty(), "nobody is told");
+    c.apply(Input::SuccessionsOpen { list: Vec::new(), issued_at_version: c.version() }, 1_300);
+    assert_eq!(c.successions_open_count(), 0, "a read issued after it that does not list it: abandoned");
+    assert_eq!(succession_done(&commit_routed(&mut c)), vec![(Target::Every, game::SuccessionId(1), false)]);
+}
+
+/// Elastic 2b Task 6 (audit H7): a `hosts` read forgets an absent id only if the read could have
+/// shown it (below the read's next id: it was pruned) and no live replica's attachment holds it —
+/// never a host attached to another replica, nor one registered after the read was issued.
+#[test]
+fn a_hosts_read_forgets_no_host_attached_to_another_replica() {
+    let (mut row, mut a, mut b) = two_replicas();
+    b.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 0);
+    row.write(&mut b).expect("host 0 attaches to B");
+    row.rebase(&mut a);
+    a.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 0);
+    a.handle(h(3), claim_attach(h(3), 9, Vec::new(), Vec::new()), 0);
+    a.apply(Input::LinkDown { host: h(3) }, 0);
+    row.write(&mut a).expect("hosts 1 and 3 attach to A, host 3's link drops");
+    assert!(a.is_ticker());
+    let read = |next: u64, at: u64| Input::HostsRead {
+        rows: vec![seen(h(1), at + 1)],
+        next_host_id: next,
+        issued_mono: at,
+        received_mono: at,
+        world_tick: 100,
+    };
+    a.apply(read(3, 50), 50);
+    assert!(a.host_mentions(h(3)).contains(&"boots"), "host 3 registered after the read was issued: kept");
+    assert!(a.host_mentions(h(0)).contains(&"boots"), "host 0, attached to B, is kept");
+    assert_eq!(a.hosts_attached_to(ReplicaId(2)), [h(0)].into_iter().collect(), "and stays B's");
+    a.apply(read(4, 60), 60);
+    assert_eq!(a.host_mentions(h(3)), Vec::<&str>::new(), "below the read's next id and attached nowhere: pruned");
+    assert!(a.host_mentions(h(0)).contains(&"boots"), "host 0 is still B's");
+    a.apply(Input::ReplicaLapsed(ReplicaId(2)), 70);
+    a.apply(read(4, 80), 80);
+    assert_eq!(a.host_mentions(h(0)), Vec::<&str>::new(), "attached to an ended replica: forgotten");
+}
+
+/// Elastic 2b Task 6 (plan decision 3, `Maintain`): B believed replica 0 lapsed and ticked on its
+/// own cache — its upkeep turned the calendar's day. A (a lower id) committed first; B's write
+/// conflicts and its rebase onto A's row finds A the ticker: the logged upkeep is dropped, its day
+/// turn is not replayed, and nobody is told the day by B.
+#[test]
+fn a_rebase_that_loses_the_ticker_drops_its_maintain() {
+    let (base, _, _) = coordinator();
+    let mut row = Row::of(&base);
+    let ((anchor_ms, anchor_tick), _) = base.calendar_anchor();
+    let day = anchor_tick.0 / TICKS_PER_DAY + 1;
+    let turn = anchor_ms + (day * TICKS_PER_DAY - anchor_tick.0) * game::TICK_RATE;
+    let mut b = row.replica(2);
+    b.apply(Input::ReplicaJoined { me: ReplicaId(2), alone: false }, 0);
+    b.apply(Input::ReplicaLapsed(ReplicaId(0)), 0);
+    assert!(b.is_ticker(), "B ticks on its own cache");
+    b.apply(Input::Maintain, turn + 10);
+    assert_eq!(b.calendar_day(), day, "B's upkeep turned the day");
+    let logged = b.logged();
+    let mut a = row.replica(1);
+    a.apply(Input::ReplicaJoined { me: ReplicaId(1), alone: false }, 0);
+    a.apply(Input::ReplicaLapsed(ReplicaId(0)), 0);
+    row.write(&mut a).expect("A commits first");
+    let _lost = row.write(&mut b).expect_err("B's write conflicts");
+    row.rebase(&mut b);
+    assert_eq!(b.ticker(), Some(ReplicaId(1)), "A ticks on the rebased row");
+    assert!(!b.is_ticker());
+    assert_eq!(b.logged(), logged - 1, "B's upkeep left its log");
+    assert!(b.calendar_day() < day, "its day turn is not replayed");
+    let out = row.write(&mut b).expect("B writes on A's row");
+    assert!(out.iter().all(|(_, m)| !matches!(m, CoordMsg::Calendar(_))), "B tells nobody the day: {out:?}");
 }

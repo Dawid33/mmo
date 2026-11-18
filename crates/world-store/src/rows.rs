@@ -845,6 +845,14 @@ macro_rules! engine_rows {
             /// subqueries read without locks. With the database clock read right after the rows
             /// ([`crate::HostsRead::store_ms`]: the coordinator's clock is the store's).
             pub(crate) async fn hosts(pool: &Pool) -> Result<crate::HostsRead, StoreError> {
+                // First, a plain read of the next id (no lock; Elastic 2b Task 6): every id below
+                // it is issued before the rows below are read — absent from them, it was pruned.
+                let next: i64 = sqlx::query("SELECT next_host_id FROM world WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await?
+                    .map(|r| r.try_get(0))
+                    .transpose()?
+                    .unwrap_or(0);
                 let sql = format!(
                     "SELECT id, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, \
                      seen_ms, name, drain_at_ms - {NOW_MS}, \
@@ -878,7 +886,7 @@ macro_rules! engine_rows {
                     })
                     .collect::<Result<Vec<HostRow>, StoreError>>()?;
                 let store_ms = db_now_ms(pool).await?;
-                Ok(crate::HostsRead { rows, store_ms })
+                Ok(crate::HostsRead { rows, store_ms, next_host_id: u(next) })
             }
 
             /// One lease beat. UNFENCED on purpose: one statement over the caller's own `hosts` row.

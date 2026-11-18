@@ -2173,3 +2173,59 @@ fn a_crash_looping_pod_beside_a_healthy_host_never_raises_the_generation() {
     assert_eq!(t.w.store.world_generation().unwrap(), generation);
     t.stop(&db, &dir);
 }
+
+/// Elastic 2b Task 6 (Review Focus 4): two coordinator replicas over one row — A the ticker (the
+/// lowest id), B beside it, configured alike — and two hosts linked to A. During a world cut A
+/// dies (no stop, no last write); the hosts dial B; two seconds later host 1 dies. B ends A after
+/// the replica lease and becomes the ticker — its lease watch counting from zero — and declares
+/// host 1 ONCE: the run settles, the world generation is unchanged, and each slime is live once and
+/// stored once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn the_ticker_killed_mid_cut_hands_over_without_a_double_declaration() {
+    install_props();
+    let Some(db) = PgDb::create("tk_ticker") else { return };
+    let dir = scratch("tk_ticker");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let generation = t.w.store.world_generation().unwrap();
+    let b_store = open(&db);
+    let b_cert = dir.join("replica-b").join("coordinator.cert-sha256");
+    std::fs::create_dir_all(b_cert.parent().unwrap()).unwrap();
+    let b = start_coordinator(b_store.clone(), b_cert.clone(), t.w.pair.tick.clone(), CrashPolicy::Succession);
+    let live = |c: &server::coordinator_rt::ListeningCoordinator| c.thread.inspect(|c| c.replicas_live().clone(), WAIT).expect("it answers");
+    t.until("both replicas hold both", WAIT, |t| live(t.w.coordinator.as_ref().unwrap()).len() == 2 && live(&b).len() == 2);
+    assert!(t.w.coordinator.as_ref().unwrap().thread.inspect(|c| c.is_ticker(), WAIT).unwrap(), "A, the lowest id, ticks");
+    assert!(!b.thread.inspect(|c| c.is_ticker(), WAIT).unwrap(), "B does not");
+    let (a0, b1) = (t.seams[0], t.seams[1]);
+    let ids = [slime(&mut t, h(0), a0, 0.0), slime(&mut t, h(1), b1, 0.0)];
+    let _ = t.until_committed_after(&db, 0);
+    t.until("a world cut runs", LONG, |t| t.w.pair.sims.iter().any(|s| s.manager.world_cut().is_some()));
+
+    // A dies mid-cut; the hosts dial B. Two seconds later host 1 dies.
+    kill_coordinator(&mut t.w);
+    for sim in &t.w.pair.sims {
+        t.w.switches[sim.ordinal.0 as usize].replace(quic_world_link(b.addr, b_cert.clone(), sim.ordinal, sim.boot, sim.reg));
+    }
+    let killed = Instant::now();
+    t.until("two seconds after A died", WAIT, |_| killed.elapsed() >= Duration::from_secs(2));
+    t.kill(h(1));
+    t.until("B ended A and ticks", LONG, |_| b.thread.inspect(|c| c.is_ticker(), WAIT).unwrap_or(false));
+    let row = t.until_settled(&db, h(1));
+    assert_eq!((row[2], row[5]), (0, 0), "host 0 inherits; settled, not abandoned: {row:?}");
+    assert_eq!(successions(&db).len(), 1, "host 1 declared once: {:?}", successions(&db));
+    assert_eq!(b_store.world_generation().unwrap(), generation, "the generation is unchanged");
+    t.w.coordinator = Some(b);
+    let old = std::mem::replace(&mut t.w.store, b_store);
+    old.shutdown();
+    t.watch(h(0), b1);
+    t.until("b1 runs on the heir", WAIT, |t| t.sim(h(0)).manager.running_regions().contains(&b1));
+    let k = t.until_committed_after(&db, row[4]);
+    let _ = t.until_committed_after(&db, k);
+    for id in ids {
+        assert_eq!(t.live(id).len(), 1, "{id:?} live once: {:?}", t.live(id));
+        stored_once(&t, &db, id, "after the handover");
+    }
+    assert_eq!(successions(&db).len(), 1, "never declared again");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation);
+    t.stop(&db, &dir);
+}

@@ -20,7 +20,9 @@
 //! newer row is followed by [`Coordinator::rebase`]: the newer projection, the log applied
 //! again onto it. Attachments are stamped with the [`ReplicaId`], store calls with a
 //! [`CallStamp`]: every store decision runs inside the transaction of the transition that
-//! decided it (`decisions.rs`), its answer an input of the next pass.
+//! decided it (`decisions.rs`), its answer an input of the next pass. ONE replica, the ticker
+//! ([`Coordinator::is_ticker`]: the lowest live id), runs the timed and lease work — the upkeep,
+//! the `hosts` and successions reads, every store-call hand-out (Elastic 2b Task 6, `input.rs`).
 //!
 //! **Many hosts:** every outgoing message carries its [`Target`]: a region's messages go to
 //! the host that announced the region (`RegionStarted`, its `Attach`, a delivered
@@ -210,11 +212,27 @@ pub struct Coordinator {
     log_boundary: usize,
     /// The row version this core holds (as loaded, last committed, or rebased onto).
     version: u64,
-    /// Changes of the projection outside the log so far ([`Self::unlogged_pending`]), the count
-    /// when the transition in flight was taken, and the count its last commit covered.
-    unlogged: u64,
-    unlogged_taken: u64,
-    unlogged_committed: u64,
+    /// This replica acted as the ticker at its last ticker work ([`Self::ticking_now`]): a
+    /// change of role restarts what the ticker observes (Elastic 2b Task 6).
+    ticking: bool,
+    /// The cut period the runtime configured ([`Self::set_world_cuts`]; `None`: never): it holds
+    /// across a rebase onto a row written with another.
+    cut_every_config: Option<u64>,
+    /// The cut ids' high half the runtime configured ([`Self::set_cut_epoch`]; 0: never): a
+    /// rebase onto a row written before it was committed raises the row's to it again.
+    cut_epoch_config: u64,
+    /// The ticker's successions reads applied so far ([`Input::SuccessionsOpen`]), the count when
+    /// the transition in flight was taken, and the count its last commit (or a release with
+    /// nothing durable pending) covered: a rebase that drops an answer not covered owes a read
+    /// (Elastic 2b Task 6).
+    reads_applied: u64,
+    reads_taken: u64,
+    reads_committed: u64,
+    /// The hosts the latest successful `hosts` read showed marked draining (`worldctl drain`):
+    /// never the gate host ([`Self::takes_logins`]). Durable, so every replica's gate knows the
+    /// marks the ticker read (a non-ticker reads no `hosts` rows); a failed read keeps them (a
+    /// mark is never lifted).
+    draining: BTreeSet<HostId>,
     /// [`Self::take_transition`] just found the projection as committed, and nothing was
     /// applied since: [`Self::take_out`] needs no encode of its own.
     clean_checked: bool,
@@ -351,6 +369,7 @@ projection! {
         successions: SuccessionRuns,
         rolled_back_to: Option<u64>,
         replicas: BTreeSet<ReplicaId>,
+        draining: BTreeSet<HostId>,
     }
     process(replica, now_ms) {
         kept {
@@ -363,14 +382,17 @@ projection! {
             unstored = false,
             joined = false,
             recorded = None,
+            ticking = false,
+            cut_every_config = None,
+            cut_epoch_config = 0,
+            reads_applied = 0,
+            reads_taken = 0,
+            reads_committed = 0,
         }
         reset {
             out = Vec::new(),
             log_boundary = 0,
             version = 0,
-            unlogged = 0,
-            unlogged_taken = 0,
-            unlogged_committed = 0,
             clean_checked = false,
             committed_raw = Vec::new(),
             writing = false,
@@ -432,9 +454,15 @@ impl Coordinator {
             log: Vec::new(),
             log_boundary: 0,
             version: 0,
-            unlogged: 0,
-            unlogged_taken: 0,
-            unlogged_committed: 0,
+            // The replica that bootstraps the row is its ticker from the start: nothing to read
+            // yet (a new world has no successions, no host lapsed).
+            ticking: true,
+            cut_every_config: None,
+            cut_epoch_config: 0,
+            reads_applied: 0,
+            reads_taken: 0,
+            reads_committed: 0,
+            draining: BTreeSet::new(),
             clean_checked: false,
             committed_raw: Vec::new(),
             unstored: false,
@@ -491,11 +519,8 @@ impl Coordinator {
         let mut c = Coordinator::from_projection(p, history, replica, now_ms);
         c.committed_raw = raw_core(&c.projection());
         let live = c.replicas.clone();
-        if c.orphan_marks(|stamp| !live.contains(&stamp.replica), "it was handed out by a replica that is not live") {
-            // Outside the log: a rebase before the next commit would lose it (the runtime then
-            // stops, and the next start looks it up again).
-            c.note_unlogged();
-        }
+        // Outside the log: a rebase before the next commit orphans them again (its own rule).
+        c.orphan_marks(|stamp| !live.contains(&stamp.replica), "it was handed out by a replica that is not live");
         c.rebase_deadlines(now_ms);
         if c.calendar_gap(now_ms) {
             // Downtime: re-anchored at once where the calendar last stood (never the stored
@@ -523,7 +548,6 @@ impl Coordinator {
         self.version = version;
         self.committed_raw = raw_core(&self.projection());
         self.history.clear_content_dirty();
-        self.unlogged_committed = self.unlogged;
         self.clean_checked = false;
     }
 
@@ -543,11 +567,11 @@ impl Coordinator {
         &self.history
     }
 
-    /// The history, to change directly (tests, tools): a change outside the log
-    /// ([`Self::unlogged_pending`]). What it decides goes out at the next [`Self::apply`].
+    /// The history, to change directly (tests, tools): a change outside the log — a rebase
+    /// before the next commit drops it. What it decides goes out at the next [`Self::apply`].
     /// Never call its region lifecycle methods through it: the hosts' messages own them.
     pub fn history_mut(&mut self) -> &mut History {
-        self.note_unlogged();
+        self.clean_checked = false;
         self.history.mark_content_dirty();
         &mut self.history
     }
@@ -813,6 +837,9 @@ impl Coordinator {
             let to = self.region_host.get(&region).map_or(Target::Every, |h| Target::Host(*h));
             self.push(to, CoordMsg::Notice { region, line });
         }
+        // Successions listed by `Attach`es while this replica did not know the open ones (on any
+        // replica: a non-ticker never does), answered once the ticker does.
+        self.drain_listed_early();
         self.maintain_successions(now_ms);
         self.maintain_cuts(now_ms);
     }
@@ -827,8 +854,9 @@ impl Coordinator {
     /// projection is not encoded again: that verdict (`clean_checked`) holds only while nothing
     /// changed since — call this right after that [`Self::take_transition`], with no input,
     /// hand-out or answer in between (each of those clears the verdict anyway: every input
-    /// through [`Self::apply`], every change outside the log through `note_unlogged`, every
-    /// store decision handed out through `push_decision`).
+    /// through [`Self::apply`], every store decision handed out through `push_decision`; a
+    /// lookup handed out between the two is released with what it took, as it would be by the
+    /// next transition).
     ///
     /// With more than one live replica (Elastic 2b departs 5) a cache may be stale: outputs
     /// leave only once the row was read at this cache's version — the ones decided before
@@ -859,7 +887,7 @@ impl Coordinator {
                 let logged = check.log_len.min(self.log.len());
                 let drained: Vec<(u64, Input)> = self.log.drain(..logged).collect();
                 self.record(drained);
-                self.unlogged_committed = self.unlogged;
+                self.reads_committed = self.reads_applied;
                 self.routed = self.routed.saturating_sub(n);
                 return self.out.drain(..n).collect();
             }
@@ -871,7 +899,7 @@ impl Coordinator {
         }
         let drained = std::mem::take(&mut self.log);
         self.record(drained);
-        self.unlogged_committed = self.unlogged;
+        self.reads_committed = self.reads_applied;
         self.routed = 0;
         std::mem::take(&mut self.out)
     }
@@ -955,7 +983,7 @@ impl Coordinator {
         }
         for (host, cut) in covered {
             log::warn!("coordinator: host {host} named cut {}, which the row does not hold either: looked up", cut.0);
-            self.note_unlogged();
+            self.clean_checked = false;
             self.queue_cut_lookup(host, cut);
         }
     }
@@ -979,6 +1007,8 @@ impl Coordinator {
     #[doc(hidden)]
     pub fn set_replica_for_test(&mut self, r: ReplicaId) {
         self.replica = r;
+        // No process changes role here: what the ticker observed stays (a reference core).
+        self.ticking = self.is_ticker();
     }
 
     /// Inputs leaving the log, kept if recording.
@@ -1089,10 +1119,10 @@ impl Coordinator {
 
     /// Whether attached live host `host` may be the gate host: not leaving (its leave asked
     /// for: it refuses every spawn order) and not draining (the latest successful hosts read
-    /// showed its row marked, `worldctl drain` — no read of its own; a failed read keeps the
-    /// marks, [`LeaseWatch::draining`]).
+    /// showed its row marked, `worldctl drain`; a failed read keeps the marks — durable, so a
+    /// replica that reads no `hosts` rows knows them too).
     fn takes_logins(&self, host: HostId) -> bool {
-        !self.leave_asked(host) && !self.leases.draining(host)
+        !self.leave_asked(host) && !self.draining.contains(&host)
     }
 
     /// An order of the login service: for the gate host of this moment ([`Self::gate_host`]),
@@ -1167,7 +1197,7 @@ impl Coordinator {
         self.writing_stamp = Some(stamp);
         self.clean_checked = false;
         self.log_boundary = self.log.len();
-        self.unlogged_taken = self.unlogged;
+        self.reads_taken = self.reads_applied;
         // Every output leaves with this transition: its compare-and-set is their version check.
         self.version_check = None;
         self.routed = 0;
@@ -1198,7 +1228,7 @@ impl Coordinator {
         let boundary = std::mem::take(&mut self.log_boundary).min(self.log.len());
         let drained: Vec<(u64, Input)> = self.log.drain(..boundary).collect();
         self.record(drained);
-        self.unlogged_committed = self.unlogged_taken;
+        self.reads_committed = self.reads_taken;
     }
 
     /// The write of transition `t` failed, and whether it committed is not known (not

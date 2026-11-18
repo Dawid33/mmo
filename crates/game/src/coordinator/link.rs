@@ -179,11 +179,13 @@ pub struct RigReplica {
     pub hosts: BTreeSet<HostId>,
     pub boots: BTreeMap<HostId, u64>,
     pub held: VecDeque<RigOutboxRow>,
+    /// Its process died ([`RigCluster::kill_replica`]): it handles, writes and sends nothing more.
+    pub dead: bool,
 }
 
 impl RigReplica {
     fn of(core: Coordinator) -> RigReplica {
-        RigReplica { core, hosts: BTreeSet::new(), boots: BTreeMap::new(), held: VecDeque::new() }
+        RigReplica { core, hosts: BTreeSet::new(), boots: BTreeMap::new(), held: VecDeque::new(), dead: false }
     }
 }
 
@@ -207,7 +209,7 @@ const ROUTE_PASSES: usize = 8;
 
 /// The replicas several hosts' inline links share ([`InlineWorldLink::shared`]), the store
 /// behind them, and each host's messages not read by its link yet (with the row version that
-/// released each). Derefs to replica 0's coordinator.
+/// released each). Derefs to the ticker's coordinator ([`RigCluster::ticker_index`]).
 ///
 /// With a store ([`RigCluster::with_store`], the seeded rig) every pump drives the transitions of
 /// the replica its link reaches ([`Coordinator::take_transition`]): each is written to the row at
@@ -218,8 +220,9 @@ const ROUTE_PASSES: usize = 8;
 /// a message for a host attached to another replica goes through the store's outbox and is relayed
 /// by the replica linking that host — taken in its writes, and between them (as on a notice) — once
 /// its cache is at least as new as the row's version; a cache found stale (a version check, a cut
-/// it cannot know) is refreshed from the row. Timed work (the upkeep) runs on replica 0 only.
-/// Without a store the core is unstored ([`Coordinator::commit_unstored`]).
+/// it cannot know) is refreshed from the row. Timed work (the upkeep, the drives of the test
+/// rig) runs on the replica whose core says it is the ticker ([`Coordinator::is_ticker`], Elastic
+/// 2b Task 6). Without a store the core is unstored ([`Coordinator::commit_unstored`]).
 #[doc(hidden)]
 pub struct RigCluster {
     replicas: Vec<RigReplica>,
@@ -252,10 +255,9 @@ impl RigCluster {
         }))
     }
 
-    /// Test hook: right before the next write of a replica holding nothing changed outside its
-    /// log ([`Coordinator::unlogged_pending`]: one the runtime would rebase rather than stop), a
-    /// foreign writer writes the row's own projection at the next version — the row moves, its
-    /// content does not — so that write conflicts and the replica rebases.
+    /// Test hook: right before the next write of a replica, a foreign writer writes the row's
+    /// own projection at the next version — the row moves, its content does not — so that write
+    /// conflicts and the replica rebases.
     pub fn arm_foreign_version(&mut self) {
         self.foreign_armed = true;
     }
@@ -320,16 +322,51 @@ impl RigCluster {
         self.store.as_ref().map_or(0, RigStore::writes)
     }
 
-    /// Replica 0's pending transition written now (and what may leave routed), as a runtime
+    /// The ticker's pending transition written now (and what may leave routed), as a runtime
     /// pass ends: the store decisions it handed out are committed with it
     /// ([`Self::take_committed`]).
     pub fn commit(&mut self) {
-        self.route(0);
+        let r = self.ticker_index();
+        self.route(r);
     }
 
     /// Replica `r`'s pass without a host's input: its transitions written, its relays taken.
     pub fn pump_replica(&mut self, r: usize) {
         self.route(r);
+    }
+
+    /// The replica that does the timed work (Elastic 2b Task 6): the first live process whose
+    /// core says it is the ticker — or, while none does (the ticker died and nobody ended it
+    /// yet), the first live process (whose core then hands nothing out).
+    pub fn ticker_index(&self) -> usize {
+        let alive = || self.replicas.iter().enumerate().filter(|(_, r)| !r.dead);
+        alive().find(|(_, r)| r.core.is_ticker()).or_else(|| alive().next()).map_or(0, |(i, _)| i)
+    }
+
+    /// Test hook (Elastic 2b Task 6): replica `r`'s process dies — it handles, writes and sends
+    /// nothing more; what it held (its outgoing queue, the rows it took) and what its links
+    /// carried is lost. The hosts linked to it stay linked to nothing until moved
+    /// ([`InlineWorldLink::move_to`]); the others end it ([`Input::ReplicaLapsed`]) at their
+    /// own pace.
+    pub fn kill_replica(&mut self, r: usize) {
+        let replica = &mut self.replicas[r];
+        replica.dead = true;
+        replica.held.clear();
+        for h in std::mem::take(&mut replica.hosts) {
+            if let Some(b) = self.boxes.get_mut(&h) {
+                b.clear();
+            }
+        }
+        self.replicas[r].boots.clear();
+    }
+
+    /// The store's answer `a` to a decision replica `replica` issued (Elastic 2b Task 3), applied
+    /// on that replica as an input at `now_ms` — none if its process died (the answer dies with
+    /// it: its successor looks the mark up). Whether a live replica took it.
+    pub fn answer(&mut self, replica: ReplicaId, a: super::DecisionAnswer, now_ms: u64) -> bool {
+        let Some(r) = self.replicas.iter_mut().find(|r| !r.dead && r.core.replica() == replica) else { return false };
+        r.core.apply(Input::Decision(a), now_ms);
+        true
     }
 
     /// The store decisions committed with transitions since the last call (Elastic 2b Task 3):
@@ -351,12 +388,15 @@ impl RigCluster {
         }
     }
 
-    /// Replica 0's world tick (its process configuration), recorded for a reference core.
+    /// Every live replica's world tick (each process's configuration), recorded for a reference
+    /// core.
     pub fn set_world_tick(&mut self, tick: crate::Tick) {
         if let Some(events) = self.events.as_mut() {
             events.push(RigEvent::Tick(tick));
         }
-        self.replicas[0].core.set_world_tick(tick);
+        for r in self.replicas.iter_mut().filter(|r| !r.dead) {
+            r.core.set_world_tick(tick);
+        }
     }
 
     /// From now on every replica's commits and releases (with the inputs they hold) and replica
@@ -409,6 +449,19 @@ impl RigCluster {
         from
     }
 
+    /// Host `host`, linked to a replica whose process died ([`Self::kill_replica`]) — or to none —
+    /// is linked to replica `to` (its next `Attach` goes there).
+    pub fn relink_host(&mut self, host: HostId, to: usize) {
+        for r in &mut self.replicas {
+            r.hosts.remove(&host);
+            r.boots.remove(&host);
+        }
+        if let Some(b) = self.boxes.get_mut(&host) {
+            b.clear();
+        }
+        self.replicas[to].hosts.insert(host);
+    }
+
     /// The hosts replica `r` takes outbox rows for: those its core has attached to it and that
     /// are linked to it, at the boots their links' `Attach`es named.
     fn take_for(&self, r: usize) -> Vec<(HostId, u64)> {
@@ -427,7 +480,7 @@ impl RigCluster {
     fn refresh(&mut self, r: usize) -> bool {
         let Some(row) = self.store.as_ref().and_then(|s| s.row()).cloned() else { return false };
         let core = &mut self.replicas[r].core;
-        if row.version <= core.version() || core.unlogged_pending() {
+        if row.version <= core.version() {
             return false;
         }
         let moved = core.refresh(&row.core, Some(&row.history), row.version).expect("the row loads");
@@ -450,6 +503,9 @@ impl RigCluster {
     /// for a host not linked to it is lost, as on a real link), each tagged with the row version
     /// that released it.
     fn route(&mut self, r: usize) {
+        if self.replicas[r].dead {
+            return;
+        }
         let mut out: Vec<(u64, Target, CoordMsg)> = Vec::new();
         if self.store.is_none() {
             let core = &mut self.replicas[r].core;
@@ -516,7 +572,7 @@ impl RigCluster {
             let take_for = self.take_for(r);
             let store = self.store.as_mut().expect("a store");
             let core = &mut self.replicas[r].core;
-            if self.foreign_armed && !core.unlogged_pending() {
+            if self.foreign_armed {
                 if let Some(row) = store.row().cloned() {
                     self.foreign_armed = false;
                     let foreign = RigWrite::of(row.version, row.core, None, Vec::new(), ReplicaId(u64::MAX));
@@ -550,7 +606,6 @@ impl RigCluster {
                 }
                 Err(RigConflict) => {
                     // The row moved: rebased onto it, the log replayed, written again.
-                    assert!(!core.unlogged_pending(), "a conflict with changes outside the log: the runtime would stop here");
                     let row = store.row().cloned().expect("a conflict is with a row");
                     core.rebase(&row.core, Some(&row.history), row.version).expect("the row loads");
                     self.rebases += 1;
@@ -591,9 +646,10 @@ impl RigCluster {
     /// ([`Coordinator::login_order`]): into the gate host's mailbox (read at its link's next
     /// pumps, after what is already there). The gate host, or `None` (dropped: no gate host).
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<HostId> {
-        self.route(0);
-        let (gate, msg) = self.replicas[0].core.login_order(order)?;
-        let version = self.replicas[0].core.version();
+        let r = self.ticker_index();
+        self.route(r);
+        let (gate, msg) = self.replicas[r].core.login_order(order)?;
+        let version = self.replicas[r].core.version();
         match self.boxes.get_mut(&gate) {
             Some(b) => b.push_back((version, msg)),
             None => log::debug!("shared inline coordinator: no link for gate host {gate}; a login order lost"),
@@ -605,13 +661,14 @@ impl RigCluster {
 impl std::ops::Deref for RigCluster {
     type Target = Coordinator;
     fn deref(&self) -> &Coordinator {
-        &self.replicas[0].core
+        &self.replicas[self.ticker_index()].core
     }
 }
 
 impl std::ops::DerefMut for RigCluster {
     fn deref_mut(&mut self) -> &mut Coordinator {
-        &mut self.replicas[0].core
+        let r = self.ticker_index();
+        &mut self.replicas[r].core
     }
 }
 
@@ -767,6 +824,18 @@ impl InlineWorldLink {
         self.up = false;
     }
 
+    /// Test hook (Elastic 2b Task 6): this shared link, whose replica's process died
+    /// ([`RigCluster::kill_replica`]), dials replica `to` instead — what was on it is lost, and it
+    /// is down until [`Self::set_up`]; the host then attaches to `to`.
+    pub fn relink_to(&mut self, to: usize) {
+        let Core::Shared(core) = &self.core else { panic!("only a shared link moves between replicas") };
+        lock(core).relink_host(self.host, to);
+        self.replica = to;
+        self.in_q.clear();
+        self.out_q.clear();
+        self.up = false;
+    }
+
     /// The row version that released each message this link read so far, in reading order (a
     /// host reads in commit order: never decreasing).
     pub fn read_versions(&self) -> &[u64] {
@@ -862,6 +931,11 @@ impl WorldLink for InlineWorldLink {
             Core::Shared(core) => {
                 let mut cluster = lock(core);
                 let r = self.replica;
+                if cluster.replicas[r].dead {
+                    // Its process died: what this link sends is lost until it is moved.
+                    self.in_q.clear();
+                    return;
+                }
                 while self.in_q.front().is_some_and(|(due, _)| *due <= step) {
                     let (_, msg) = self.in_q.pop_front().expect("checked");
                     if let HostMsg::Attach { boot, .. } = &msg {
@@ -870,8 +944,9 @@ impl WorldLink for InlineWorldLink {
                     }
                     cluster.replicas[r].core.apply(Input::Host { host: self.host, msg }, now_ms);
                 }
-                // Timed work runs on replica 0 only (the rig's ticker, Elastic 2b decision 2).
-                if r == 0 {
+                // Timed work runs on the ticker only (Elastic 2b decision 2, Task 6): the core
+                // says whether it is the one.
+                if cluster.replicas[r].core.is_ticker() {
                     cluster.replicas[r].core.apply(Input::Maintain, now_ms);
                 }
                 cluster.route(r);

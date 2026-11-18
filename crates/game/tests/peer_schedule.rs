@@ -7310,6 +7310,7 @@ fn replay_one_core(reference: &mut game::Coordinator, events: Vec<game::coordina
             RigEvent::Tick(t) => reference.set_world_tick(t),
             RigEvent::Commit { replica, version, inputs, decisions, linked } => {
                 reference.set_replica_for_test(replica);
+                let applied = format!("{inputs:?}");
                 for (now, input) in inputs {
                     reference.apply(input, now);
                 }
@@ -7317,7 +7318,9 @@ fn replay_one_core(reference: &mut game::Coordinator, events: Vec<game::coordina
                     reference.take_decision().expect("the one core decides the cut the replica decided");
                 }
                 reference.set_version(version - 1);
-                let t = reference.take_transition().unwrap_or_else(|| panic!("the one core has version {version}'s transition too"));
+                let t = reference.take_transition().unwrap_or_else(|| {
+                    panic!("the one core has version {version}'s transition too (replica {replica}, {decisions:?}, inputs {applied})")
+                });
                 assert_eq!(t.decisions, decisions, "version {version}: the same store decisions");
                 reference.transition_written(version);
                 put(t.out, t.outbox, &linked);
@@ -7359,11 +7362,14 @@ fn two_replicas_replay(rig: &mut MultiRig) -> bool {
     let mut reference = {
         let mut c = shared.lock().unwrap();
         let (core, history) = c.stored().expect("written");
-        let mut reference =
-            game::Coordinator::load(&core, &history, c.history().grid().clone(), game::coordinator::ReplicaId(0), now).expect("the row loads");
+        // As the ticker (Elastic 2b Task 6): its configuration is the ticker's to take.
+        let ticker = c.ticker().expect("a live replica");
+        let mut reference = game::Coordinator::load(&core, &history, c.history().grid().clone(), ticker, now).expect("the row loads");
         reference.set_version(c.row_version());
         reference.set_crash_policy(c.crash_policy());
         reference.set_expected_hosts(host_ids(rig.hosts.len() as u32).collect());
+        // A loaded ticker owes a read of the open successions (Elastic 2b Task 6): none is open.
+        reference.successions_open(Vec::new(), now);
         c.start_recording();
         let tick = rig.hosts[0].manager.spawner_mut().world_tick();
         c.set_world_tick(tick);
@@ -7390,15 +7396,16 @@ fn two_replicas_replay(rig: &mut MultiRig) -> bool {
         (c.rebases() - rebases_before, c.refreshes() - refreshes_before)
     };
     assert!(conflicts + refreshes > 0, "the replicas met each other's rows (seed {})", rig.seed);
+    // Every row relayed before comparing (Task 5 review m2): the oracle sees only what reached a
+    // host, so a row never relayed must not pass unseen.
+    until_relayed(rig);
     let (events, mut got, undelivered) = {
         let mut c = shared.lock().unwrap();
         let got: std::collections::BTreeMap<HostId, Vec<String>> =
             c.delivered().iter().map(|(h, l)| (*h, l.iter().map(|(_, m)| shown(m)).collect())).collect();
         (c.take_events(), got, c.undelivered())
     };
-    for (h, msgs) in undelivered {
-        got.entry(h).or_default().extend(msgs.iter().map(shown));
-    }
+    assert!(undelivered.is_empty(), "every outbox row reached its host (seed {}): {undelivered:?}", rig.seed);
     for list in got.values_mut() {
         list.sort();
     }
@@ -10875,6 +10882,97 @@ fn a_replica_killed_after_a_decision_commits_is_recovered_by_lookup() {
     sweep(name, 2, 1, HEIR_SWEEP_SEEDS, |rig| replica_killed_after_a_decision_commits(rig, 0));
     sweep(name, 2, 1, HEIR_SWEEP_SEEDS, |rig| replica_killed_after_a_decision_commits(rig, 1));
     sweep(name, 2, 1, HEIR_SWEEP_SEEDS, |rig| replica_killed_after_a_decision_commits(rig, 2));
+}
+
+/// Rounds a dead replica's row stands still before the other replica's watch ends it (the rig's
+/// replica lease).
+const REPLICA_LEASE_ROUNDS: usize = 6;
+/// The rounds the seeded deaths of the ticker and of the landed host are drawn from.
+const HANDOVER_ROUNDS: u64 = 10;
+
+/// Elastic 2b Task 6 (Review Focus 4): three hosts, two coordinator replicas, every host linked to
+/// replica 0 — the ticker. At a seeded round inside a world cut replica 0 dies (or, by a seed bit,
+/// right after a declaration it handed out committed — its answer lost with it); every host dials
+/// replica 1 instead. At another seeded round a landed host dies. Replica 1 ends replica 0 after
+/// the rig's replica lease and becomes the ticker: its lease watch counts from zero, it owes a
+/// read of the open successions (a declaration replica 0 committed is found there, never issued
+/// again). Exactly one succession, never a rollback, the world conserved every round, and the run
+/// settles whole.
+fn ticker_killed_mid_cut(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    rig.core().set_crash_policy(game::CrashPolicy::Succession);
+    rig.with_replicas(2);
+    let slimes: Vec<game::EntityId> = chain.iter().enumerate().map(|(i, rc)| slime_in(rig, *rc, i)).collect();
+    until_committed(rig, 1);
+    let roll = crate::common::multi_rig::mix(rig.seed, 0x2E_0000);
+    let rd = chain[1 + (roll % 2) as usize];
+    let dead = rig.owner(rd);
+    let host_at = ((roll >> 8) % HANDOVER_ROUNDS) as usize;
+    let ticker_from = ((roll >> 16) % HANDOVER_ROUNDS) as usize;
+    let rounds_into_cut = (roll >> 24) % 3;
+    let lose_answer = (roll >> 32) % 2 == 0;
+    let (mut killed_at, mut ended, mut in_cut) = (None::<usize>, false, 0);
+    for r in 0..SUCCESSION_ROUNDS {
+        if r == host_at {
+            rig.kill(dead);
+        }
+        rig.cut_round();
+        rig.assert_conserved_world();
+        if let Some(k) = killed_at.filter(|k| !ended && r >= k + REPLICA_LEASE_ROUNDS) {
+            assert!(!rig.core().replica_core(1).is_ticker(), "replica 1 ticks only once it ended replica 0 (killed at {k})");
+            rig.end_replica(1, 0);
+            assert!(rig.core().replica_core(1).is_ticker(), "replica 1 is the ticker (seed {})", rig.seed);
+            ended = true;
+        }
+        let deads: Vec<HostId> = if rig.dead.contains(&dead) { vec![dead] } else { Vec::new() };
+        let ticker_lives = killed_at.is_none();
+        let declared = rig.drive_declaration(&deads, !(ticker_lives && lose_answer));
+        if ticker_lives && lose_answer && declared.is_some() {
+            // The declaration committed with replica 0's transition; its answer dies with it.
+            rig.kill_replica(0, 1);
+            killed_at = Some(r);
+            TICKER_KILLED_ANSWER_LOST.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        } else if ticker_lives && r >= ticker_from && rig.core().world_cut_progress().is_some_and(|(_, _, verdict)| verdict.is_none()) {
+            if in_cut == rounds_into_cut {
+                rig.kill_replica(0, 1);
+                killed_at = Some(r);
+                TICKER_KILLED_MID_CUT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                in_cut += 1;
+            }
+        }
+        if ended && rig.successions.len() == 1 {
+            break;
+        }
+    }
+    assert!(ended, "the ticker died and was ended (seed {}): killed at {killed_at:?}", rig.seed);
+    assert_eq!(rig.successions.len(), 1, "host {dead} declared once (seed {}): {:?}", rig.seed, rig.successions);
+    let s = rig.successions[0].0.clone();
+    assert_eq!(s.predecessor, dead);
+    // The slimes of the live hosts live and stored once; the dead host's back on the heir, once.
+    let (on_dead, live): (Vec<_>, Vec<_>) = chain.iter().zip(&slimes).partition(|(rc, _)| **rc == rd);
+    let live: Vec<game::EntityId> = live.into_iter().map(|(_, id)| *id).collect();
+    assert_settled_whole(rig, &s, &live);
+    for (_, id) in on_dead {
+        assert_back_on_the_heir(rig, rd, *id);
+    }
+    assert_eq!(rig.successions.len(), 1, "never declared again (seed {})", rig.seed);
+    assert!(!rig.core().rollback_wanted() && rig.abandoned.is_empty(), "never rolled back (seed {})", rig.seed);
+    assert!(rig.decide_executions.values().all(|n| *n == 1), "every cut decided once: {:?}", rig.decide_executions);
+}
+
+/// Runs of [`ticker_killed_mid_cut`] whose ticker died inside a cut, and between a declaration's
+/// commit and its answer: the sweep must meet both.
+static TICKER_KILLED_MID_CUT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TICKER_KILLED_ANSWER_LOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn the_ticker_killed_mid_cut_hands_over_without_a_double_declaration() {
+    sweep("the_ticker_killed_mid_cut_hands_over_without_a_double_declaration", 3, 1, HEIR_SWEEP_SEEDS, ticker_killed_mid_cut);
+    let (mid_cut, lost) =
+        (TICKER_KILLED_MID_CUT.load(std::sync::atomic::Ordering::SeqCst), TICKER_KILLED_ANSWER_LOST.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(mid_cut > 0 && lost > 0, "both deaths met: {mid_cut} inside a cut, {lost} with a declaration's answer lost");
 }
 
 /// A landless host runs beside two landed ones when one of them dies: it is no survivor (the

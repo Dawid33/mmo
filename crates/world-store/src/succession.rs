@@ -109,6 +109,12 @@
 //! after its `world` lock (it was committed before the decision began, or is absent: the
 //! stricter rule then).
 //!
+//! **The coordinator's `hosts` read** (`rows::hosts`, the ticker's, Elastic 2b Task 6): a PLAIN
+//! read of `world.next_host_id`, then a PLAIN `SELECT` over `hosts` (its `EXISTS` subqueries on
+//! `super_regions`, `in_flight`, `successions`), then the database clock — no transaction, no
+//! lock: it joins no cycle. An id below the first read's value was issued before the rows were
+//! read; one at or above it may register after.
+//!
 //! **The prune of older begins** (Elastic 2a, `two_phase::decide_in`): right after a decision
 //! row is inserted, in the decision's transaction, `DELETE FROM cut_begins WHERE cut_id < $cut`.
 //! It locks only `cut_begins` rows of OLDER cuts — rows nothing reads or writes again (a cut
