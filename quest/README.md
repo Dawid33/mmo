@@ -136,6 +136,15 @@ command buffer 8192 bytes; inbox 8192 bytes; error trace 16 entries; reference p
 variant fields 32; one structural walk (compare, hash, format) at most 65536 words (`ValueTooLarge`);
 source nesting 256.
 
+Dialogues and quests: a condition or substitution 500 fuel (`COND_FUEL`; running out counts as false); a
+conversation's detour stack 16 (`DIALOGUE_STACK_MAX`, one more ends it `TooDeep`); an ended conversation stays
+open 200 ticks without `done` (`CONVERSATION_LINGER_TICKS`); one batch walks at most 4096 steps
+(`BATCH_STEPS_MAX`, else `TooDeep`); a scene takes at most 16 follow-ups (`SCENE_FOLLOW_UPS_MAX`); a timed
+line lasts 30 ticks plus 1 per character (`LINE_BASE_TICKS`, `LINE_TICKS_PER_CHAR`), clamped to 30..200
+(`LINE_MIN_TICKS`, `LINE_MAX_TICKS`); a program's dialogue graph at most 65535 steps (`GRAPH_STEPS_MAX`); a
+read set (dialogue or part) above 256 words gets the `mirror-size` warning (`MIRROR_WORDS_WARN`); timers 16
+(`TIMERS_MAX`).
+
 ## Tests, goldens
 
 `just quest-check` (clippy `-D warnings` plus a wasm32 build), `just quest-test ["<cargo test args>"]`,
@@ -150,12 +159,18 @@ assurance comes from fuzzing, planned later.
 
 ## Known MVP limits
 
-- **`not-yet` compile errors**: a fallible host property (`x.p` of a property that declares errors),
-  an unawaited `all(...)`, and `after` of a host event. A host event's field must have a concrete type: the
-  stub's `ItemGiven.to` and `Killed.victim` are `Entity { id }` (any entity by its id; HostApi 6).
-- Dialogues and quests run in the stub's `World` (`quest_stub::World`: the home and its parts, people,
-  conversations, scenes); `quest run` does not drive it yet (the plain runner only prints the `quest.*`
-  commands).
+- **`not-yet` compile errors**: a fallible host property (`x.p` of a property that declares errors), an
+  unawaited `all(...)`, `after` of a host event (a timer delivers a script `event` only), a host struct's or
+  event's field of the open type `Value` (the host must give it a concrete type), and `play` of a scene held in
+  a variable or with none of its cast named (`play(scene, a=…)` needs the scene by name). Against a host API
+  other than the stub's, also a quest built-in the host has no `quest.<name>` of the right shape for, and
+  `after` / `cancel` without a `Timer { id }` type.
+- The stub's `Entity { id }` (`ItemGiven.to`, `Killed.victim`) is **any** entity by its id (HostApi 6).
+- An unset `site` or `owner` (a person without one) refuses the query; in a condition that is false.
+- Conversations and scenes read each instance's **dialogue mirror**, its committed state as of the end of the
+  last tick (one tick old; a handler still running over several ticks shows what it had before it began).
+- A repeatable quest's reset ends the run's conversations (`Left`) and stops its scenes.
+- No `busy` bark yet: a talk to an NPC in another conversation or an uninterruptible scene is ignored.
 - Float `==` inside collections compares bits; `to_upper` is ASCII only.
 - The trace of a re-raise after another failure inside one handler shows the latest entries.
 - The host must discard the old VM after a successful `migrate`.
@@ -176,6 +191,8 @@ assurance comes from fuzzing, planned later.
 quest check <dir>
 quest run <dir> [--fuel N] [--ticks N] [--mem BYTES] [--trace] [--latency N]
                 [--fail KIND[@NTH][:OP]] [--chest KIND=N] [--save FILE] [--load FILE] [--reset]
+                [--roles NAME=WIRE,...] [--people FILE] [--script FILE] [--talk PLAYER:NPC]
+                [--picks N|l,...] [--lines]
 ```
 
 `<dir>` is read recursively for `*.qs` files (paths relative to it, `/` separators).
@@ -185,7 +202,8 @@ passing check means the program compiles. It prints only diagnostics, to stderr;
 
 `quest run` compiles, then runs the program against the stub host: the initialisers, `main` once, then
 ticks until nothing is left to do. Script output goes to stdout; diagnostics, reports and trace lines go to
-stderr.
+stderr. A program with a `quest`, or a run with `--talk` or a script (`--script`, or `<dir>/script.txt`),
+runs in the **world** instead (below).
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -199,6 +217,58 @@ stderr.
 | `--save FILE` | write the program and its VM state after the run | |
 | `--load FILE` | start from a saved state | |
 | `--reset` | re-initialise the instance (after `--load`): as if the script had just been placed | off |
+| `--roles NAME=WIRE,...` | the quest's role values as wire literals (`farmer=Person(3),miller=None`); repeatable | none |
+| `--people FILE` | the people the world's queries read (format below) | `<dir>/people.txt` if present |
+| `--script FILE` | the world's scripted inputs (format below) | `<dir>/script.txt` if present |
+| `--talk PLAYER:NPC` | the player talks to the NPC at tick 1; each offer is answered from stdin (a number, `l` to leave; the input's end leaves), the end acknowledged with `done` | off |
+| `--picks N\|l,...` | `--talk`'s answers, in turn (then `l`); needs `--talk` | stdin |
+| `--lines` | print line ids (`@lostdog.plea(Rufus)`) instead of their texts | off |
+
+**The world** (`quest_stub::World`, spec §5.11, §9.1): the quest's home and one instance per `part`, the
+people, conversations, scenes, and the messages between them, which land at the next tick. Placement checks
+`requires` and each role's type and `where`; `Setup` is delivered at tick 0 (`main` is not run). Every line
+goes to stdout as `[tick] text`: a script's `print`, `Hal: <line>`, `menu: 1) … 2) …`, `end Hal: <reason>`,
+and the commands the world acts on (`joined Ana`, `give Ana 1 carved_whistle`, `follow Rufus Ana`,
+`completed Ana`, `failed`, `declined`, `reaped`). The run ends when the script is used up, the `--talk`
+conversation is over and nothing is left to do. The world's instances use the default memory (`--mem` does
+not apply). `--save` writes every instance (`QSSTATE2` for more than one); `--load` restores them (a changed
+script is migrated per instance, a part's report lines prefixed with its name) and does not deliver `Setup`
+again, `--reset` does.
+
+`people.txt`, one entity per line (`#` starts a comment); an id names one entity:
+
+```
+fact act=1
+person 3 name="Hal" occupation=Farmer site=1 pos=0,0,0 tags=witness
+creature 7 name="Rufus" tags=pet owner=3 pos=2,0,0
+player 1 name="Ana" skill.trade=3 inv.meat=1
+site 1 kind=Village
+place 9 open_ground=30
+fact completed=errantry/x::Q
+```
+
+Keys: `name`, `occupation` (an `Occupation` variant), `site`, `owner` (ids), `tags` (comma-separated), `kind`
+(a site's `SiteKind`; anyone else's `kind` string), `open_ground` (blocks), `region`, `pos=x,y,z`, `related`
+(comma-separated ids), `skill.<name>`, `inv.<kind>`; flags `alive` (the default), `dead`, `ours`.
+
+`script.txt`, `<tick> <input>` per line (`#` comments; ticks may not go down):
+
+| Input | Meaning |
+|---|---|
+| `talk <player> <npc>` | the player starts a conversation |
+| `pick <player> <n>` | option `n` (from 1) of the player's offer |
+| `leave <player>` | walks away from the conversation (`Left`) |
+| `done <player>` | acknowledges the conversation's end |
+| `event <Name> <field>=<wire>... [@<part>]` | a host or script event to the home, or to the part |
+| `near <player> <entity>` | `PlayerNear` to the parts anchored on the entity |
+| `kill <victim> [by <player>]` | `Killed`, then `RoleLost` for its roles |
+| `lose <entity>` | `RoleLost` for the roles bound to it |
+| `ambient <npc> <npc>...` | the ambient schedule casts its scenes from these idle people |
+| `edit <dir>` | the script is edited to that directory's (relative to `<dir>`) |
+
+Wire literals (roles, event fields): ints, floats with a `.`, `"strings"`, `true` / `false`, `None`,
+`Some(v)`, `[a, b]`, `Occupation::Smith`, entity handles `Person(3)` / `Player(1)` (a player takes its name
+from the people), structs `Item(kind="meat",count=1)`.
 
 A state file holds the program it was saved with. `--load` of a state saved by the same program resumes it
 exactly; a loaded state that already ran `main` runs it again. A state saved by a changed script is
@@ -230,7 +300,7 @@ A report prints as `error: handler <name> aborted: <fault or error text>` follow
 |---|---|
 | 0 | finished (or `check` passed) |
 | 1 | compile errors, or no `fn main()` |
-| 2 | a task aborted, or the instance failed, or a state could not be loaded |
+| 2 | a task aborted, or the instance failed, or a state could not be loaded; a role refused, a quest that called `decline()` or `fail()`, a people or script file that does not parse |
 | 3 | the tick limit was reached |
 | 64 | usage error |
 | 66 | unreadable directory or file |

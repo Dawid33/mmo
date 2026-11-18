@@ -232,3 +232,325 @@ fn save_then_load_changed_program() {
         err(&reset)
     );
 }
+
+// ---- quests (`World`) -----------------------------------------------------------------------------------
+
+/// Runs `quest run <dir> args…` with `stdin` as its input.
+fn quest_stdin(args: &[&str], dir: &PathBuf, stdin: &str) -> Output {
+    use std::io::Write as _;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_quest"))
+        .args(&args[..1])
+        .arg(dir)
+        .args(&args[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+const LOST_DOG: &str = r#"# Package errantry/lost-dog — src/main.qs
+
+let NIGHT_TICKS = 9000                  # from finding the dog to it bolting, unless fed
+
+quest LostDog:
+    requires act() >= 1
+    role farmer: Person where farmer.occupation == Occupation::Farmer and farmer.alive
+    role dog: Creature where dog.has_tag("pet") and dog.owner == farmer
+    optional role miller: Person where miller.occupation == Occupation::Miller and near(miller, farmer, regions=1)
+
+    let attempts = 0                    # quest state: how often the dog was found and lost again
+
+    event Accepted:
+        player: Player
+    event AskedMiller:
+        player: Player
+    event DogFound:
+        player: Player
+    event DogFed:
+        player: Player
+    event Nightfall:
+        attempt: int
+    event Reunited:
+        player: Player
+
+    # ── Open: the farmer asks anyone who talks to him ─────────────────────────
+    stage Open:
+        dialogue worry(p: Player, npc: Person) for farmer:          # a greeting: no topic
+            node hi when once per p:
+                npc: "Stranger! Have you seen a brown dog on the road?"         @lostdog.worry.first
+            node hi:
+                => npc: "Still no sign of him."                                 @lostdog.worry.a
+                => npc: "I left the gate open. My own fault."                   @lostdog.worry.b
+
+        dialogue plea(p: Player, npc: Person) for farmer topic f"About {dog.name}" @lostdog.topic:
+            npc: f"{dog.name} ran off toward the hills two days ago."           @lostdog.plea
+            npc: "He's never been gone a night before."                         @lostdog.plea2
+            choice:
+                "I'll find him."                                                @lostdog.accept:
+                    emit Accepted(player=p)
+                    npc: "Bless you. Take something to eat. He's skittish."     @lostdog.hint
+                "What does he look like?"                                       @lostdog.ask_look:
+                    npc: "Brown, one ear up. Answers to his name, mostly."      @lostdog.look
+                "Not now."                                                      @lostdog.not_now
+
+        @on(Accepted)
+        fn accepted(e):
+            join(e.player)
+            -> Search
+
+    # ── Search: two objectives in parallel, one optional ─────────────────────
+    stage Search:
+        objective find_dog f"Find {dog.name}"                    @lostdog.find     at dog
+        objective feed_dog f"Coax {dog.name} with food"          @lostdog.feed     at dog
+        optional objective ask_miller "Ask at the mill"          @lostdog.ask_mill at miller
+        -> Returning when find_dog.done and feed_dog.done
+
+        dialogue join_in(p: Player, npc: Person) for farmer topic "Can I help look?" @lostdog.join if not (p in participants):
+            npc: "Every pair of eyes helps."                                    @lostdog.join_ok
+            emit Accepted(player=p)
+
+        dialogue lost_again(p: Player, npc: Person) for farmer:
+            node hi when attempts >= 2:
+                npc: f"Found and lost {attempts} times now. He's frightened."   @lostdog.again
+            node hi:
+                npc: "Any luck?"                                                @lostdog.any_luck
+
+        dialogue tip(p: Player, npc: Person) for miller topic f"Seen {dog.name}?" @lostdog.mill_topic if p in participants:
+            npc: "Something's been at my grain sacks down by the weir."         @lostdog.mill_tip
+            emit AskedMiller(player=p)
+
+        @on(Entered)
+        fn count_attempt(e):
+            attempts = attempts + 1
+
+        @on(Accepted)
+        fn joined_late(e):
+            join(e.player)
+
+        @on(AskedMiller)
+        fn asked(e):
+            ask_miller.finish()
+
+        @on(DogFound)
+        fn found(e):
+            if not find_dog.done:       # two players may spot him in one tick
+                find_dog.finish()
+                after(NIGHT_TICKS, Nightfall(attempt=attempts))
+
+        @on(DogFed)
+        fn fed(e):
+            if find_dog.done:
+                feed_dog.finish()
+                follow(dog, e.player)
+
+        @on(Nightfall)
+        fn bolted(e):
+            -> Search                   # a failed attempt: re-entering re-opens both objectives
+
+    # ── Returning: bring him home ────────────────────────────────────────────
+    stage Returning:
+        objective bring_home f"Bring {dog.name} home to {farmer.name}"   @lostdog.return at farmer
+
+        dialogue reunion(p: Player, npc: Person) for farmer topic f"{dog.name} is back" @lostdog.back_topic if near(dog, farmer, blocks=8):
+            npc: f"{dog.name}! You daft mutt."                                  @lostdog.reunion
+            npc: "Take this. My father carved it. It's all I have of worth."    @lostdog.reward
+            emit Reunited(player=p)
+
+        @on(Reunited)
+        fn reunited(e):
+            bring_home.finish()
+            for q in participants:
+                give(q, Item(kind="carved_whistle", count=1))
+            complete()                  # for every participant
+
+    # ── In any stage ─────────────────────────────────────────────────────────
+    @on(RoleLost)
+    fn lost(e):
+        match e.role:
+            case Role::miller:
+                pass                    # optional: the tip is simply gone
+            case _:
+                fail()                  # the farmer or the dog: the quest cannot be done
+
+    # ── The part that rides with the dog ─────────────────────────────────────
+    part dog_watch on dog:
+        @on(PlayerNear)
+        fn spotted(e):
+            if stage == Stage::Search and e.player in participants and not find_dog.done:
+                emit DogFound(player=e.player)
+
+        @on(ItemGiven)
+        fn offered(e):
+            if stage == Stage::Search and e.item.kind == "meat":
+                emit DogFed(player=e.player)
+"#;
+
+const LOST_DOG_PEOPLE: &str = r#"
+fact act=1
+person 3 name="Hal" occupation=Farmer pos=0,0,0
+creature 7 name="Rufus" tags=pet owner=3 pos=2,0,0
+person 4 name="Mira" occupation=Miller
+player 1 name="Ana" inv.meat=1
+player 2 name="Bo"
+"#;
+
+const LOST_DOG_ROLES: &str = "farmer=Person(3),dog=Creature(7),miller=Person(4)";
+
+/// Ana talks to Hal: the topic, "I'll find him.", then she walks away at the hub.
+const LOST_DOG_TALK: &str = "[1] Hal: Stranger! Have you seen a brown dog on the road?
+[1] menu: 1) About Rufus
+[2] Hal: Rufus ran off toward the hills two days ago.
+[2] Hal: He's never been gone a night before.
+[2] menu: 1) I'll find him. 2) What does he look like? 3) Not now.
+[3] Hal: Bless you. Take something to eat. He's skittish.
+[3] menu: 1) About Rufus
+[4] joined Ana
+[4] end Hal: Left
+";
+
+#[test]
+fn run_with_roles_and_picks() {
+    let d = dir(
+        "picks",
+        &[("main.qs", LOST_DOG), ("people.txt", LOST_DOG_PEOPLE)],
+    );
+    let args = [
+        "run",
+        "--roles",
+        LOST_DOG_ROLES,
+        "--talk",
+        "1:3",
+        "--picks",
+        "1,1",
+    ];
+    let o = quest(&args, &d);
+    assert_eq!(
+        (code(&o), out(&o)),
+        (0, LOST_DOG_TALK.to_string()),
+        "{}",
+        err(&o)
+    );
+    // `--lines`: the line ids, with their substitutions.
+    let o = quest(&[&args[..], &["--lines"]].concat(), &d);
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    let lines: Vec<String> = out(&o).lines().take(3).map(String::from).collect();
+    assert_eq!(
+        lines,
+        [
+            "[1] Hal: @lostdog.worry.first",
+            "[1] menu: 1) @lostdog.topic(Rufus)",
+            "[2] Hal: @lostdog.plea(Rufus)",
+        ]
+    );
+}
+
+#[test]
+fn talk_reads_stdin() {
+    let d = dir(
+        "talk",
+        &[("main.qs", LOST_DOG), ("people.txt", LOST_DOG_PEOPLE)],
+    );
+    let o = quest_stdin(
+        &["run", "--roles", LOST_DOG_ROLES, "--talk", "1:3"],
+        &d,
+        "1\nwhat\n1\nl\n",
+    );
+    assert_eq!(
+        (code(&o), out(&o)),
+        (0, LOST_DOG_TALK.to_string()),
+        "{}",
+        err(&o)
+    );
+    assert!(err(&o).contains("`what`"), "{}", err(&o));
+    // The input ends: Ana walks away from the first offer.
+    let o = quest_stdin(&["run", "--roles", LOST_DOG_ROLES, "--talk", "1:3"], &d, "");
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert!(out(&o).ends_with("[2] end Hal: Left\n"), "{}", out(&o));
+}
+
+#[test]
+fn bad_roles_exit_2() {
+    let d = dir(
+        "roles",
+        &[("main.qs", LOST_DOG), ("people.txt", LOST_DOG_PEOPLE)],
+    );
+    let wrong = "farmer=Player(1),dog=Creature(7)";
+    let o = quest(&["run", "--roles", wrong], &d);
+    assert_eq!(code(&o), 2, "{}", err(&o));
+    assert!(err(&o).contains("role farmer"), "{}", err(&o));
+    // A role missing, a value that does not parse.
+    let o = quest(&["run", "--roles", "dog=Creature(7)"], &d);
+    assert_eq!(code(&o), 2, "{}", err(&o));
+    let o = quest(&["run", "--roles", "farmer=Person(3,dog=Creature(7)"], &d);
+    assert_eq!(code(&o), 2, "{}", err(&o));
+    // Malformed flags are usage errors.
+    assert_eq!(code(&quest(&["run", "--roles", "farmer"], &d)), 64);
+    assert_eq!(code(&quest(&["run", "--talk", "1-3"], &d)), 64);
+    assert_eq!(code(&quest(&["run", "--picks", "1"], &d)), 64);
+    let o = quest(&["run", "--talk", "1:3", "--picks", "1,0"], &d);
+    assert_eq!(code(&o), 64);
+}
+
+#[test]
+fn script_file_default() {
+    let script = "1 talk 1 3
+2 pick 1 1
+3 pick 1 1
+5 leave 1
+6 done 1
+8 near 1 7
+10 event ItemGiven player=Player(1) to=Creature(7) item=Item(kind=\"meat\",count=1) @dog_watch
+20 talk 1 3
+21 pick 1 1
+23 leave 1
+24 done 1
+";
+    let d = dir(
+        "script",
+        &[
+            ("main.qs", LOST_DOG),
+            ("people.txt", LOST_DOG_PEOPLE),
+            ("script.txt", script),
+            ("fails.txt", "2 lose 4\n4 kill 7\n"),
+        ],
+    );
+    let o = quest(&["run", "--roles", LOST_DOG_ROLES], &d);
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    let o = out(&o);
+    assert!(o.starts_with("[1] Hal: Stranger!"), "{o}");
+    assert!(
+        o.ends_with("[22] give Ana 1 carved_whistle\n[22] completed Ana\n[23] end Hal: Left\n"),
+        "{o}"
+    );
+    // `--script FILE` over the default; `fail()` exits 2.
+    let fails = d.join("fails.txt");
+    let o = quest(
+        &[
+            "run",
+            "--roles",
+            LOST_DOG_ROLES,
+            "--script",
+            fails.to_str().unwrap(),
+        ],
+        &d,
+    );
+    assert_eq!(
+        (code(&o), out(&o)),
+        (2, "[4] failed\n".to_string()),
+        "{}",
+        err(&o)
+    );
+    // A script that does not parse names its line.
+    std::fs::write(d.join("script.txt"), "1 talk 1\n").unwrap();
+    let o = quest(&["run", "--roles", LOST_DOG_ROLES], &d);
+    assert_eq!(code(&o), 2);
+    assert!(err(&o).contains("script line 1"), "{}", err(&o));
+}

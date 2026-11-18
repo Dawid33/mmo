@@ -26,11 +26,7 @@ pub const RUNNER_EVENTS: [&str; 3] = ["Talked", "DialogueEnded", "SceneEnded"];
 
 /// The [`VmConfig`] of instance `instance` of `program` against the stub's API (its events and the
 /// [`RUNNER_EVENTS`]).
-pub(crate) fn vm_config(
-    mem_bytes: u32,
-    instance: u16,
-    roles: Vec<(String, WireValue)>,
-) -> VmConfig {
+pub fn vm_config(mem_bytes: u32, instance: u16, roles: Vec<(String, WireValue)>) -> VmConfig {
     let api = stub_api();
     let mut events: Vec<String> = api.events.into_iter().map(|e| e.name).collect();
     events.extend(RUNNER_EVENTS.iter().map(|e| e.to_string()));

@@ -1,13 +1,22 @@
-//! The `quest` command: `quest check <dir>` and `quest run <dir> [flags]` (see `quest/README.md`).
+//! The `quest` command: `quest check <dir>` and `quest run <dir> [flags]` (see `quest/README.md`). A program
+//! with a quest (or a run given `--talk` or a script) runs in the stub's `World`; any other in a `Runner`.
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use quest_lang::{SourceTree, compile, render};
-use quest_stub::{FailureKind, FailureRule, Runner, StubConfig, stub_api};
+use quest_stub::{
+    FailureKind, FailureRule, Input, Outcome, People, Runner, StubConfig, World, parse_people,
+    parse_script, parse_wire, stub_api, vm_config,
+};
+use quest_vm::consts::MEM_BYTES_DEFAULT;
+use quest_vm::dialogue_run::ConvState;
 use quest_vm::host::{AbortCause, Report};
+use quest_vm::wire::WireValue;
 use quest_vm::{Program, Status, Vm, VmConfig};
 
 const EXIT_ABORTED: u8 = 2;
@@ -18,7 +27,19 @@ const EXIT_NO_INPUT: u8 = 66;
 const USAGE: &str = "usage:
   quest check <dir>
   quest run <dir> [--fuel N] [--ticks N] [--mem BYTES] [--trace] [--latency N]
-                  [--fail KIND[@NTH][:OP]] [--chest KIND=N] [--save FILE] [--load FILE] [--reset]";
+                  [--fail KIND[@NTH][:OP]] [--chest KIND=N] [--save FILE] [--load FILE] [--reset]
+                  [--roles NAME=WIRE,...] [--people FILE] [--script FILE] [--talk PLAYER:NPC]
+                  [--picks N|l,...] [--lines]";
+
+/// The tick `--talk` talks at.
+const TALK_TICK: u64 = 1;
+
+/// One answer to an offer: an option (1-based), or walking away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    Pick(u32),
+    Leave,
+}
 
 struct RunOpts {
     fuel: u64,
@@ -31,68 +52,147 @@ struct RunOpts {
     save: Option<String>,
     load: Option<String>,
     reset: bool,
+    /// `--roles`: (name, wire literal), parsed against the people when the run starts.
+    roles: Vec<(String, String)>,
+    people: Option<String>,
+    script: Option<String>,
+    /// `--talk`: (player, npc).
+    talk: Option<(i64, i64)>,
+    /// `--picks`: the answers, in turn (else stdin's).
+    picks: Option<Vec<Answer>>,
+    lines: bool,
 }
 
-/// A state file of `--save` / `--load`: this magic, the program's bytes (a `u32` length and the bytes),
-/// then the VM's save. The program comes along so that a later run of a changed script can migrate
-/// the state: reading the old values out needs the old program.
+/// A state file of `--save` / `--load` of one instance: this magic, the program's bytes (a `u32` length and
+/// the bytes), then the VM's save. The program comes along so that a later run of a changed script can
+/// migrate the state: reading the old values out needs the old program.
 const STATE_MAGIC: [u8; 8] = *b"QSSTATE1";
+/// A state file of several instances (a quest's home and parts, in id order): this magic, the program as in
+/// `QSSTATE1`, a `u32` count, then each instance's save (a `u32` length and the bytes).
+const STATES_MAGIC: [u8; 8] = *b"QSSTATE2";
 
-fn state_file(program: &Program, vm: &Vm) -> Vec<u8> {
+fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    // A program's or a VM's bytes are far below 4 GiB.
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn state_file(program: &Program, vms: &[&Vm]) -> Vec<u8> {
     let code = program.to_bytes();
-    let mut out = STATE_MAGIC.to_vec();
-    // A program's bytes are far below 4 GiB.
-    out.extend_from_slice(&(code.len() as u32).to_le_bytes());
-    out.extend_from_slice(&code);
-    out.extend_from_slice(&vm.save());
+    if let [vm] = vms {
+        let mut out = STATE_MAGIC.to_vec();
+        push_bytes(&mut out, &code);
+        out.extend_from_slice(&vm.save());
+        return out;
+    }
+    let mut out = STATES_MAGIC.to_vec();
+    push_bytes(&mut out, &code);
+    out.extend_from_slice(&(vms.len() as u32).to_le_bytes());
+    for vm in vms {
+        push_bytes(&mut out, &vm.save());
+    }
     out
 }
 
-/// The instance in a state file, for `program`: loaded as it was when the file holds `program`,
-/// migrated (the report on stderr) when it holds another.
-fn load_state(bytes: &[u8], program: Arc<Program>, cfg: VmConfig) -> Result<Vm, String> {
-    let rest = bytes
-        .strip_prefix(&STATE_MAGIC[..])
-        .ok_or("not a quest state file")?;
-    let (len, rest) = rest.split_first_chunk::<4>().ok_or("truncated")?;
+/// A `u32` length and that many bytes.
+fn take_bytes(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    let (len, rest) = bytes.split_first_chunk::<4>().ok_or("truncated")?;
     let len = u32::from_le_bytes(*len) as usize;
     if rest.len() < len {
         return Err("truncated".into());
     }
-    let (code, save) = rest.split_at(len);
+    Ok(rest.split_at(len))
+}
+
+/// A state file's program and its instances' saves.
+fn read_state(bytes: &[u8]) -> Result<(Program, Vec<&[u8]>), String> {
+    let (several, rest) = match (
+        bytes.strip_prefix(&STATE_MAGIC[..]),
+        bytes.strip_prefix(&STATES_MAGIC[..]),
+    ) {
+        (Some(rest), _) => (false, rest),
+        (_, Some(rest)) => (true, rest),
+        _ => return Err("not a quest state file".into()),
+    };
+    let (code, mut rest) = take_bytes(rest)?;
     let old = Program::from_bytes(code).map_err(|e| format!("{e:?}"))?;
-    if old.content_hash() == program.content_hash() {
-        return Vm::load(program, cfg, save).map_err(|e| format!("{e:?}"));
+    if !several {
+        return Ok((old, vec![rest]));
     }
-    let vm = Vm::load(Arc::new(old), cfg.clone(), save).map_err(|e| format!("{e:?}"))?;
-    // A refused edit leaves the state file as it is: the run stops before anything is saved.
-    let (vm, report) = vm
-        .migrate(program, cfg)
-        .map_err(|e| format!("the edit is refused (the state file is unchanged): {e:?}"))?;
-    let lists = [
-        ("carried", &report.carried),
-        ("adopted", &report.adopted),
-        ("initialised", &report.initialised),
-        ("orphaned", &report.orphaned),
-    ];
-    for (what, names) in lists {
-        if !names.is_empty() {
-            eprintln!("{what}: {}", names.join(", "));
+    let (n, tail) = rest.split_first_chunk::<4>().ok_or("truncated")?;
+    rest = tail;
+    let mut saves = Vec::new();
+    for _ in 0..u32::from_le_bytes(*n) {
+        let (save, tail) = take_bytes(rest)?;
+        saves.push(save);
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        return Err("unexpected bytes after the last instance".into());
+    }
+    Ok((old, saves))
+}
+
+/// The instances in a state file, for `program`, one per `cfgs` entry (`names` label a migration report's
+/// lines, the first unlabelled): loaded as they were when the file holds `program`, migrated (the report on
+/// stderr) when it holds another.
+fn load_state(
+    bytes: &[u8],
+    program: Arc<Program>,
+    cfgs: Vec<VmConfig>,
+    names: &[String],
+) -> Result<Vec<Vm>, String> {
+    let (old, saves) = read_state(bytes)?;
+    if saves.len() != cfgs.len() {
+        return Err(format!(
+            "the state holds {} instances, the program has {}",
+            saves.len(),
+            cfgs.len()
+        ));
+    }
+    let same = old.content_hash() == program.content_hash();
+    let old = Arc::new(old);
+    let mut vms = Vec::new();
+    for (k, (save, cfg)) in saves.into_iter().zip(cfgs).enumerate() {
+        if same {
+            vms.push(Vm::load(Arc::clone(&program), cfg, save).map_err(|e| format!("{e:?}"))?);
+            continue;
         }
+        let vm = Vm::load(Arc::clone(&old), cfg.clone(), save).map_err(|e| format!("{e:?}"))?;
+        // A refused edit leaves the state file as it is: the run stops before anything is saved.
+        let (vm, report) = vm
+            .migrate(Arc::clone(&program), cfg)
+            .map_err(|e| format!("the edit is refused (the state file is unchanged): {e:?}"))?;
+        let label = match (k, names.get(k)) {
+            (1.., Some(name)) => format!("{name}: "),
+            _ => String::new(),
+        };
+        let lists = [
+            ("carried", &report.carried),
+            ("adopted", &report.adopted),
+            ("initialised", &report.initialised),
+            ("orphaned", &report.orphaned),
+        ];
+        for (what, names) in lists {
+            if !names.is_empty() {
+                eprintln!("{label}{what}: {}", names.join(", "));
+            }
+        }
+        for o in vm.orphans() {
+            eprintln!("{label}orphan: {}: {} = {:?}", o.name, o.ty, o.value);
+        }
+        if report.events_dropped > 0 {
+            eprintln!("{label}events dropped: {}", report.events_dropped);
+        }
+        if report.handlers_cancelled > 0 {
+            eprintln!("{label}handlers cancelled: {}", report.handlers_cancelled);
+        }
+        if report.timers_dropped > 0 {
+            eprintln!("{label}timers dropped: {}", report.timers_dropped);
+        }
+        vms.push(vm);
     }
-    for o in vm.orphans() {
-        eprintln!("orphan: {}: {} = {:?}", o.name, o.ty, o.value);
-    }
-    if report.events_dropped > 0 {
-        eprintln!("events dropped: {}", report.events_dropped);
-    }
-    if report.handlers_cancelled > 0 {
-        eprintln!("handlers cancelled: {}", report.handlers_cancelled);
-    }
-    if report.timers_dropped > 0 {
-        eprintln!("timers dropped: {}", report.timers_dropped);
-    }
-    Ok(vm)
+    Ok(vms)
 }
 
 fn usage(msg: &str) -> ExitCode {
@@ -135,6 +235,55 @@ fn parse_fail(spec: &str) -> Result<FailureRule, String> {
     Ok(FailureRule { op, nth, kind })
 }
 
+/// `text` split at the commas outside quotes and brackets.
+fn split_top(text: &str) -> Vec<&str> {
+    let (mut depth, mut quoted, mut escaped, mut start) = (0i32, false, false, 0);
+    let mut out = Vec::new();
+    for (i, c) in text.char_indices() {
+        if quoted {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
+fn parse_roles(v: &str) -> Result<Vec<(String, String)>, String> {
+    split_top(v)
+        .into_iter()
+        .map(|item| match item.split_once('=') {
+            Some((name, value)) if !name.trim().is_empty() && !value.trim().is_empty() => {
+                Ok((name.trim().to_string(), value.trim().to_string()))
+            }
+            _ => Err(format!("--roles: `{item}` is not NAME=WIRE")),
+        })
+        .collect()
+}
+
+/// An answer to an offer: an option number (from 1), or `l` to leave.
+fn parse_answer(s: &str) -> Option<Answer> {
+    match s.trim() {
+        "l" => Some(Answer::Leave),
+        n => n.parse::<u32>().ok().filter(|n| *n >= 1).map(Answer::Pick),
+    }
+}
+
 fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunOpts, String> {
     let mut o = RunOpts {
         fuel: 2000,
@@ -147,6 +296,12 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunOpts, String> 
         save: None,
         load: None,
         reset: false,
+        roles: Vec::new(),
+        people: None,
+        script: None,
+        talk: None,
+        picks: None,
+        lines: false,
     };
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -172,8 +327,38 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunOpts, String> 
             }
             "--save" => o.save = Some(args.next().ok_or("--save needs a file")?),
             "--load" => o.load = Some(args.next().ok_or("--load needs a file")?),
+            "--roles" => {
+                let v = args.next().ok_or("--roles needs a value")?;
+                o.roles.extend(parse_roles(&v)?);
+            }
+            "--people" => o.people = Some(args.next().ok_or("--people needs a file")?),
+            "--script" => o.script = Some(args.next().ok_or("--script needs a file")?),
+            "--talk" => {
+                let v = args.next().ok_or("--talk needs a value")?;
+                let pair = v
+                    .split_once(':')
+                    .and_then(|(p, n)| Some((p.parse().ok()?, n.parse().ok()?)));
+                o.talk = Some(pair.ok_or_else(|| format!("--talk: `{v}` is not PLAYER:NPC"))?);
+            }
+            "--picks" => {
+                let v = args.next().ok_or("--picks needs a value")?;
+                let picks = v
+                    .split(',')
+                    .filter(|p| !p.is_empty())
+                    .map(|p| {
+                        parse_answer(p).ok_or_else(|| {
+                            format!("--picks: `{p}` is not an option number (from 1) or `l`")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                o.picks = Some(picks);
+            }
+            "--lines" => o.lines = true,
             other => return Err(format!("unknown flag `{other}`")),
         }
+    }
+    if o.picks.is_some() && o.talk.is_none() {
+        return Err("--picks needs --talk".into());
     }
     Ok(o)
 }
@@ -280,11 +465,50 @@ fn print_report(r: &Report) -> bool {
     }
 }
 
+/// `--people` / `--script`, else `<dir>/<default>` when it is a file.
+fn input_file(given: &Option<String>, dir: &str, default: &str) -> Option<PathBuf> {
+    match given {
+        Some(f) => Some(PathBuf::from(f)),
+        None => Some(Path::new(dir).join(default)).filter(|p| p.is_file()),
+    }
+}
+
+/// A file's text; unreadable is exit 66.
+fn read_text(file: &Path) -> Result<String, ExitCode> {
+    std::fs::read_to_string(file).map_err(|e| {
+        eprintln!("quest: {}: {e}", file.display());
+        ExitCode::from(EXIT_NO_INPUT)
+    })
+}
+
+/// The `--roles` values, their wire literals read against `people`; one that does not parse is exit 2.
+fn role_values(
+    roles: &[(String, String)],
+    people: &People,
+) -> Result<Vec<(String, WireValue)>, ExitCode> {
+    roles
+        .iter()
+        .map(|(name, text)| match parse_wire(text, people) {
+            Ok(v) => Ok((name.clone(), v)),
+            Err(e) => {
+                eprintln!("error: role {name}: {e}");
+                Err(ExitCode::from(EXIT_ABORTED))
+            }
+        })
+        .collect()
+}
+
 fn run(dir: &str, opts: RunOpts) -> ExitCode {
     let (_, compiled) = match compile_tree(dir) {
         Ok(c) => c,
         Err(code) => return code,
     };
+    let script = input_file(&opts.script, dir, "script.txt");
+    if compiled.program.quest.is_some() || opts.talk.is_some() || script.is_some() {
+        return match run_world(dir, opts, compiled, script) {
+            Ok(code) | Err(code) => code,
+        };
+    }
     let program_has_main = compiled.program.main_fn.is_some();
     let program = Arc::new(compiled.program);
     let cfg = StubConfig {
@@ -293,7 +517,13 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
         chest: opts.chest,
         ..StubConfig::default()
     };
-    let mut runner = match Runner::new(program.clone(), opts.mem, cfg.clone()) {
+    // Only a quest has roles: any given here is refused when the program loads.
+    let roles = match role_values(&opts.roles, &People::default()) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let runner = Runner::for_instance(program.clone(), opts.mem, cfg.clone(), 0, roles.clone());
+    let mut runner = match runner {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: cannot start the program: {e:?}");
@@ -315,10 +545,10 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
             host_api_version: api.version,
             events: api.events.into_iter().map(|e| e.name).collect(),
             instance: 0,
-            roles: vec![],
+            roles,
         };
-        match load_state(&bytes, Arc::clone(&program), vm_cfg) {
-            Ok(vm) => runner.vm = vm,
+        match load_state(&bytes, Arc::clone(&program), vec![vm_cfg], &[]) {
+            Ok(vms) => runner.vm = vms.into_iter().next().unwrap_or(runner.vm),
             Err(e) => {
                 eprintln!("error: cannot load {file}: {e}");
                 return ExitCode::from(EXIT_ABORTED);
@@ -375,7 +605,7 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
         }
     }
     if let Some(file) = &opts.save
-        && let Err(e) = std::fs::write(file, state_file(&program, &runner.vm))
+        && let Err(e) = std::fs::write(file, state_file(&program, &[&runner.vm]))
     {
         eprintln!("quest: {file}: {e}");
         return ExitCode::from(EXIT_NO_INPUT);
@@ -388,6 +618,226 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// What `--talk` does next: talk at [`TALK_TICK`], answer each offer (from `--picks`, else stdin), and
+/// acknowledge the end.
+struct Driver {
+    player: i64,
+    npc: i64,
+    /// `--picks`' answers left; `None`: stdin's.
+    picks: Option<VecDeque<Answer>>,
+    talked: bool,
+    over: bool,
+}
+
+impl Driver {
+    /// The input for the tick `now`, from the world as the last tick left it.
+    fn input(&mut self, now: u64, w: &World) -> Option<Input> {
+        let player = self.player;
+        if !self.talked {
+            if now < TALK_TICK {
+                return None;
+            }
+            self.talked = true;
+            return Some(Input::Talk {
+                player,
+                npc: self.npc,
+            });
+        }
+        let c = w.conversation(player)?;
+        match c.state() {
+            ConvState::AwaitingPick if c.offer().is_some() => match self.answer() {
+                Answer::Pick(option) => Some(Input::Pick { player, option }),
+                Answer::Leave => Some(Input::Leave { player }),
+            },
+            ConvState::Ended { .. } => Some(Input::Done { player }),
+            _ => None,
+        }
+    }
+
+    /// The next answer: `--picks`' (leaving when they ran out), else a line of stdin (leaving at its end).
+    fn answer(&mut self) -> Answer {
+        if let Some(picks) = &mut self.picks {
+            return picks.pop_front().unwrap_or(Answer::Leave);
+        }
+        let mut stdin = std::io::stdin().lock();
+        loop {
+            eprint!("> ");
+            let mut line = String::new();
+            match stdin.read_line(&mut line) {
+                Ok(0) | Err(_) => return Answer::Leave,
+                Ok(_) => {}
+            }
+            match parse_answer(&line) {
+                Some(a) => return a,
+                None => eprintln!(
+                    "quest: `{}` is not an option number (from 1) or `l`",
+                    line.trim()
+                ),
+            }
+        }
+    }
+
+    /// After a tick: the talk is over once the player has no conversation (refused, or closed).
+    fn settle(&mut self, w: &World) {
+        if self.talked && w.conversation(self.player).is_none() {
+            self.over = true;
+        }
+    }
+}
+
+/// `quest run` of a quest (or with `--talk` or a script): the program's instances in the stub's `World`,
+/// with the people, the roles and the script's inputs.
+fn run_world(
+    dir: &str,
+    opts: RunOpts,
+    compiled: quest_lang::Compiled,
+    script: Option<PathBuf>,
+) -> Result<ExitCode, ExitCode> {
+    let people = match input_file(&opts.people, dir, "people.txt") {
+        Some(file) => parse_people(&read_text(&file)?).map_err(|e| {
+            eprintln!("error: {}: {e}", file.display());
+            ExitCode::from(EXIT_ABORTED)
+        })?,
+        None => People::default(),
+    };
+    let script = match script {
+        Some(file) => parse_script(&read_text(&file)?).map_err(|e| {
+            eprintln!("error: {}: {e}", file.display());
+            ExitCode::from(EXIT_ABORTED)
+        })?,
+        None => Vec::new(),
+    };
+    let roles = role_values(&opts.roles, &people)?;
+    let program = Arc::new(compiled.program);
+    let cfg = StubConfig {
+        latency: opts.latency,
+        failures: opts.failures,
+        chest: opts.chest,
+        ..StubConfig::default()
+    };
+    let mut w =
+        World::new(Arc::clone(&program), people, roles.clone(), cfg, opts.fuel).map_err(|e| {
+            eprintln!("error: {e}");
+            ExitCode::from(EXIT_ABORTED)
+        })?;
+    w.set_lines(compiled.lines);
+    w.show_ids(opts.lines);
+    // `edit <dir>` in a script: a directory relative to the run's.
+    let base = PathBuf::from(dir);
+    w.set_edit(Box::new(move |d: &str| {
+        let tree = read_tree(&base.join(d))?;
+        match compile(&tree, &stub_api()) {
+            Ok(c) => Ok((Arc::new(c.program), c.lines)),
+            Err(diags) => {
+                let text: Vec<String> = diags.iter().map(|d| render(d, &tree)).collect();
+                Err(text.join("\n"))
+            }
+        }
+    }));
+    if let Some(file) = &opts.load {
+        let bytes = std::fs::read(file).map_err(|e| {
+            eprintln!("quest: {file}: {e}");
+            ExitCode::from(EXIT_NO_INPUT)
+        })?;
+        let cannot = |e: String| {
+            eprintln!("error: cannot load {file}: {e}");
+            ExitCode::from(EXIT_ABORTED)
+        };
+        let mut names = vec!["home".to_string()];
+        if let Some(q) = &program.quest {
+            names.extend(q.parts.iter().map(|p| p.name.clone()));
+        }
+        let cfgs = (0..w.instances())
+            .map(|k| {
+                let k = u16::try_from(k).unwrap_or(u16::MAX);
+                vm_config(MEM_BYTES_DEFAULT, k, roles.clone())
+            })
+            .collect();
+        let mut vms = load_state(&bytes, Arc::clone(&program), cfgs, &names).map_err(cannot)?;
+        if opts.reset {
+            for vm in &mut vms {
+                vm.reset().map_err(|e| {
+                    eprintln!("error: cannot reset: {e:?}");
+                    ExitCode::from(EXIT_ABORTED)
+                })?;
+            }
+        }
+        // A loaded state already had its `Setup`; a reset one is given it again.
+        w.load_vms(vms, opts.reset).map_err(cannot)?;
+    }
+    let mut driver = opts.talk.map(|(player, npc)| Driver {
+        player,
+        npc,
+        picks: opts.picks.map(VecDeque::from),
+        talked: false,
+        over: false,
+    });
+    let (mut next, mut failed, mut finished) = (0, false, false);
+    for _ in 0..opts.ticks {
+        let now = w.now();
+        let k = script[next..].iter().take_while(|(t, _)| *t <= now).count();
+        let mut inputs: Vec<Input> = script[next..next + k]
+            .iter()
+            .map(|(_, i)| i.clone())
+            .collect();
+        next += k;
+        if let Some(d) = &mut driver {
+            inputs.extend(d.input(now, &w));
+        }
+        let report = w.step(&inputs);
+        for line in &report.lines {
+            println!("{line}");
+        }
+        for (_, r) in &report.reports {
+            failed |= print_report(r);
+        }
+        let statuses: Vec<Status> = (0..w.instances())
+            .filter_map(|k| w.vm(u16::try_from(k).ok()?).map(Vm::status))
+            .collect();
+        if opts.trace {
+            let status = if statuses.contains(&Status::Failed) {
+                "failed"
+            } else if statuses.iter().any(|s| *s != Status::Idle) {
+                "busy"
+            } else {
+                "idle"
+            };
+            eprintln!(
+                "tick={} fuel={} hash={:016x} status={status}",
+                report.tick,
+                report.fuel.iter().sum::<u64>(),
+                w.hash64()
+            );
+        }
+        failed |= statuses.contains(&Status::Failed);
+        if let Some(d) = &mut driver {
+            d.settle(&w);
+        }
+        if next == script.len() && driver.as_ref().is_none_or(|d| d.over) && w.quiescent() {
+            finished = true;
+            break;
+        }
+    }
+    if let Some(file) = &opts.save {
+        let vms: Vec<&Vm> = (0..w.instances())
+            .filter_map(|k| w.vm(u16::try_from(k).ok()?))
+            .collect();
+        if let Err(e) = std::fs::write(file, state_file(&program, &vms)) {
+            eprintln!("quest: {file}: {e}");
+            return Err(ExitCode::from(EXIT_NO_INPUT));
+        }
+    }
+    failed |= matches!(w.outcome(), Outcome::Failed | Outcome::Declined);
+    Ok(if failed {
+        ExitCode::from(EXIT_ABORTED)
+    } else if !finished {
+        eprintln!("quest: tick limit reached");
+        ExitCode::from(EXIT_TICK_LIMIT)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn main() -> ExitCode {

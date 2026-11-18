@@ -68,7 +68,7 @@ mod scenes;
 mod talk;
 
 use env::Core;
-use talk::{Talk, conv_quiet};
+use talk::{Talk, conv_over, conv_quiet};
 
 /// Compiles the script directory an `edit` input names: the new program and its lines table.
 pub type EditFn = Box<dyn FnMut(&str) -> Result<(Arc<Program>, BTreeMap<String, String>), String>>;
@@ -374,6 +374,39 @@ impl World {
     /// The instances: 1 + the parts.
     pub fn instances(&self) -> usize {
         self.core.insts.len()
+    }
+
+    /// `player`'s conversation: the one not over, else one ended and not yet closed.
+    pub fn conversation(&self, player: i64) -> Option<&Conversation> {
+        let mine = || self.talks.values().filter(|tk| tk.player == player);
+        mine()
+            .find(|tk| !conv_over(&tk.conv))
+            .or_else(|| mine().next())
+            .map(|tk| &tk.conv)
+    }
+
+    /// Every instance's VM replaced, in id order (a loaded or migrated state; each must be made with
+    /// [`crate::vm_config`] of its instance and the world's roles). `setup`: `Setup` is still delivered at the
+    /// next tick (a reset state); otherwise it is not (the state already had it). The dialogue mirrors are
+    /// taken again from the new VMs.
+    pub fn load_vms(&mut self, vms: Vec<Vm>, setup: bool) -> Result<(), String> {
+        if vms.len() != self.core.insts.len() {
+            return Err(format!(
+                "the state holds {} instances, the program has {}",
+                vms.len(),
+                self.core.insts.len()
+            ));
+        }
+        for (inst, vm) in self.core.insts.iter_mut().zip(vms) {
+            inst.runner.vm = vm;
+        }
+        if !setup {
+            self.setup_at = None;
+        }
+        self.sent.clear();
+        self.core.mirrors.clear();
+        self.core.take_mirrors();
+        Ok(())
     }
 
     fn say(&mut self, line: String) {
