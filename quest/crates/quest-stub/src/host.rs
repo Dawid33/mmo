@@ -169,6 +169,13 @@ impl StubHost {
         self.emitted.state_hash(h);
     }
 
+    /// Whether a failure rule of `kind` has fired (its `nth` request was made).
+    pub fn rule_fired(&self, kind: FailureKind) -> bool {
+        self.rules
+            .iter()
+            .any(|(rule, seen)| rule.kind == kind && *seen >= rule.nth)
+    }
+
     /// Whether a request is still waiting for its answer (a never-answered one counts until the VM's own
     /// deadline has passed).
     pub fn has_pending(&self) -> bool {

@@ -234,8 +234,9 @@ built" (`docs/superpowers/plans/2026-11-17-quest-script-completion.md`).
 - A `let` named in `pause`, `(ticks=…)`, `count` or `timeout=` stands for its initialiser's literal, read at
   compile time: assigning the `let` at run time does not change the duration or the count.
 - Fuel equivalence (a run at any budget per tick ends as the unlimited run) holds under the same host timing,
-  not across a promise **timeout**: it is counted in ticks (`PROMISE_TIMEOUT_TICKS`), so a budget changes how
-  much another handler did before it fires.
+  not across a promise **timeout** or an `after` timer racing other work: both count ticks
+  (`PROMISE_TIMEOUT_TICKS`, the timer's delay), not work, so a budget changes how much another handler did
+  (or whether an answer had come) before one fires.
 - A quest's transitions that chain into as many stages as the quest has (a cycle, `A → B → A`, both holding)
   stop where they stand, reported (`TransitionCycle`), instead of running every tick, at any fuel per tick; the
   stages' `Entered` handlers do not start them again, another handler (or `main`) does.
@@ -312,11 +313,24 @@ goes to stdout as `[tick] text`: a script's `print`, `Hal: <line>`, `menu: 1) �
 and the commands the world acts on (`joined Ana`, `give Ana 1 carved_whistle`, `follow Rufus Ana`,
 `completed Ana`, `failed`, `declined`, `reaped`). The run ends when the script is used up, the `--talk`
 conversation is over and nothing is left to do (a `--talk` that starts no conversation, an unknown id say,
-says so on stderr). `--mem` is each instance's memory. `--save` writes every instance (`QSSTATE2` for more
-than one); `--load` restores them (a changed script is migrated per instance, a part's report lines prefixed
-with its name) and does not deliver `Setup` again; a state whose instance count differs from the program's
-(a part added or removed by the edit) is refused (exit 2). `--reset`, with or without `--load`,
-re-initialises every instance and delivers `Setup` again.
+says so on stderr). `--mem` is each instance's memory. `--save` writes every instance and, for a world,
+its world-side state (`QSSTATE3`; `QSSTATE2` files of instances only still load); `--load` restores them (a
+changed script is migrated per instance, a part's report lines prefixed with its name); a state whose
+instance count differs from the program's (a part added or removed by the edit) is refused (exit 2). What a
+world's file keeps and what it does not:
+
+- **kept**: every instance's VM (its memory: globals, queue, parked handlers, promises, timers, its own
+  clock); the `Setup` the world had due, as ticks from the save (none due: not delivered again); what each
+  part was last sent; each instance's last dialogue mirror. These are kept as saved, never re-derived from
+  the loaded VMs: one a loaded VM contradicts (another state, a migrated program) is taken again, and after a
+  migration only the `Setup` due is kept.
+- **not kept**: the world's clock (a loaded world starts at tick 0, its output stamped from there), the
+  people (read again from `people.txt`: what the quest gave, tagged or moved is gone), the namespace, the
+  conversations and their records, the scenes, the attachments, the completions, and the events and mirrors
+  on their way. So `--load` of a world resumes its instances exactly, not the world around them.
+
+`--reset`, with or without `--load`, re-initialises every instance as a placement — `requires` and `where`
+checked again (refused: exit 2), the initialisers' commands acted on only then — and delivers `Setup` again.
 
 `people.txt`, one entity per line (`#` starts a comment); an id names one entity:
 
@@ -354,7 +368,8 @@ Wire literals (roles, event fields): ints, floats with a `.`, `"strings"`, `true
 from the people), structs `Item(kind="meat",count=1)`.
 
 A state file holds the program it was saved with. It loads only under the `--mem` it was saved with (another
-size is refused, exit 2). `--load` of a state saved by the same program resumes it exactly; a loaded state that already ran `main` runs it again. A state saved by a changed script is
+size is refused, exit 2). `--load` of a state saved by the same program resumes the instances exactly (a world: only what the list
+above keeps); a loaded state that already ran `main` runs it again. A state saved by a changed script is
 **migrated** (spec §6.9): each top-level variable whose name and type still fit keeps its value, a new one
 runs its initialiser, and a value whose variable is gone or no longer fits is kept aside as an orphan (a
 later edit that brings the name back with a fitting type takes it again); queued events go to the new
