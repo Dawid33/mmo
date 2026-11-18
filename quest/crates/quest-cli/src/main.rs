@@ -357,7 +357,6 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunOpts, String> 
     Ok(o)
 }
 
-/// Every `*.qs` under `root`, paths relative to it with `/` separators.
 /// Every `.qs` file under `root`, by its path relative to it. A directory reached a second time (a symlink
 /// back into the tree) is refused: the walk would read the same files again under ever longer names.
 fn read_tree(root: &Path) -> Result<SourceTree, String> {

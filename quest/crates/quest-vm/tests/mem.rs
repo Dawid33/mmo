@@ -136,10 +136,12 @@ fn from_bytes_refuses_ragged_length() {
     assert!(Mem::from_bytes(vec![0; 8]).is_ok());
 }
 
-/// A memory longer than `u32::MAX` bytes is refused, not truncated by `len`. The zeroed vector is
-/// allocated lazily: its pages are never touched.
+/// A memory longer than `u32::MAX` bytes is refused, not truncated by `len`. The zeroed vector's pages
+/// are never touched, but it still asks for 4 GiB, which a box with strict overcommit or a small
+/// address-space limit refuses — so it runs only by hand (`-- --ignored`).
 #[cfg(target_pointer_width = "64")]
 #[test]
+#[ignore = "asks for 4 GiB: run by hand with -- --ignored"]
 fn oversized_mem_is_refused() {
     let len = (1usize << 32) + 8;
     assert!(Mem::from_bytes(vec![0; len]).is_err());
