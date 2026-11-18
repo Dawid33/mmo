@@ -1,23 +1,19 @@
 //! The `quest` command: `quest check <dir>` and `quest run <dir> [flags]` (see `quest/README.md`). A program
-//! with a quest (or a run given `--talk` or a script) runs in the stub's `World`; any other in a `Runner`.
+//! with a quest (or a run given `--talk`, `--script` or `--people`) runs in the stub's `World`
+//! ([`world_run`]); any other in a `Runner`.
 
-use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use quest_lang::{SourceTree, compile, render};
-use quest_stub::{
-    FailureKind, FailureRule, Input, Outcome, People, Runner, StubConfig, World, parse_people,
-    parse_script, parse_wire, stub_api, vm_config,
-};
-use quest_vm::consts::MEM_BYTES_DEFAULT;
-use quest_vm::dialogue_run::ConvState;
+use quest_stub::{FailureKind, FailureRule, People, Runner, StubConfig, parse_wire, stub_api};
 use quest_vm::host::{AbortCause, Report};
 use quest_vm::wire::WireValue;
 use quest_vm::{Program, Status, Vm, VmConfig};
+
+mod world_run;
 
 const EXIT_ABORTED: u8 = 2;
 const EXIT_TICK_LIMIT: u8 = 3;
@@ -30,9 +26,6 @@ const USAGE: &str = "usage:
                   [--fail KIND[@NTH][:OP]] [--chest KIND=N] [--save FILE] [--load FILE] [--reset]
                   [--roles NAME=WIRE,...] [--people FILE] [--script FILE] [--talk PLAYER:NPC]
                   [--picks N|l,...] [--lines]";
-
-/// The tick `--talk` talks at.
-const TALK_TICK: u64 = 1;
 
 /// One answer to an offer: an option (1-based), or walking away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -465,22 +458,6 @@ fn print_report(r: &Report) -> bool {
     }
 }
 
-/// `--people` / `--script`, else `<dir>/<default>` when it is a file.
-fn input_file(given: &Option<String>, dir: &str, default: &str) -> Option<PathBuf> {
-    match given {
-        Some(f) => Some(PathBuf::from(f)),
-        None => Some(Path::new(dir).join(default)).filter(|p| p.is_file()),
-    }
-}
-
-/// A file's text; unreadable is exit 66.
-fn read_text(file: &Path) -> Result<String, ExitCode> {
-    std::fs::read_to_string(file).map_err(|e| {
-        eprintln!("quest: {}: {e}", file.display());
-        ExitCode::from(EXIT_NO_INPUT)
-    })
-}
-
 /// The `--roles` values, their wire literals read against `people`; one that does not parse is exit 2.
 fn role_values(
     roles: &[(String, String)],
@@ -503,9 +480,9 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
         Ok(c) => c,
         Err(code) => return code,
     };
-    let script = input_file(&opts.script, dir, "script.txt");
-    if compiled.program.quest.is_some() || opts.talk.is_some() || script.is_some() {
-        return match run_world(dir, opts, compiled, script) {
+    let world = opts.talk.is_some() || opts.script.is_some() || opts.people.is_some();
+    if compiled.program.quest.is_some() || world {
+        return match world_run::run_world(dir, opts, compiled) {
             Ok(code) | Err(code) => code,
         };
     }
@@ -618,226 +595,6 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
-}
-
-/// What `--talk` does next: talk at [`TALK_TICK`], answer each offer (from `--picks`, else stdin), and
-/// acknowledge the end.
-struct Driver {
-    player: i64,
-    npc: i64,
-    /// `--picks`' answers left; `None`: stdin's.
-    picks: Option<VecDeque<Answer>>,
-    talked: bool,
-    over: bool,
-}
-
-impl Driver {
-    /// The input for the tick `now`, from the world as the last tick left it.
-    fn input(&mut self, now: u64, w: &World) -> Option<Input> {
-        let player = self.player;
-        if !self.talked {
-            if now < TALK_TICK {
-                return None;
-            }
-            self.talked = true;
-            return Some(Input::Talk {
-                player,
-                npc: self.npc,
-            });
-        }
-        let c = w.conversation(player)?;
-        match c.state() {
-            ConvState::AwaitingPick if c.offer().is_some() => match self.answer() {
-                Answer::Pick(option) => Some(Input::Pick { player, option }),
-                Answer::Leave => Some(Input::Leave { player }),
-            },
-            ConvState::Ended { .. } => Some(Input::Done { player }),
-            _ => None,
-        }
-    }
-
-    /// The next answer: `--picks`' (leaving when they ran out), else a line of stdin (leaving at its end).
-    fn answer(&mut self) -> Answer {
-        if let Some(picks) = &mut self.picks {
-            return picks.pop_front().unwrap_or(Answer::Leave);
-        }
-        let mut stdin = std::io::stdin().lock();
-        loop {
-            eprint!("> ");
-            let mut line = String::new();
-            match stdin.read_line(&mut line) {
-                Ok(0) | Err(_) => return Answer::Leave,
-                Ok(_) => {}
-            }
-            match parse_answer(&line) {
-                Some(a) => return a,
-                None => eprintln!(
-                    "quest: `{}` is not an option number (from 1) or `l`",
-                    line.trim()
-                ),
-            }
-        }
-    }
-
-    /// After a tick: the talk is over once the player has no conversation (refused, or closed).
-    fn settle(&mut self, w: &World) {
-        if self.talked && w.conversation(self.player).is_none() {
-            self.over = true;
-        }
-    }
-}
-
-/// `quest run` of a quest (or with `--talk` or a script): the program's instances in the stub's `World`,
-/// with the people, the roles and the script's inputs.
-fn run_world(
-    dir: &str,
-    opts: RunOpts,
-    compiled: quest_lang::Compiled,
-    script: Option<PathBuf>,
-) -> Result<ExitCode, ExitCode> {
-    let people = match input_file(&opts.people, dir, "people.txt") {
-        Some(file) => parse_people(&read_text(&file)?).map_err(|e| {
-            eprintln!("error: {}: {e}", file.display());
-            ExitCode::from(EXIT_ABORTED)
-        })?,
-        None => People::default(),
-    };
-    let script = match script {
-        Some(file) => parse_script(&read_text(&file)?).map_err(|e| {
-            eprintln!("error: {}: {e}", file.display());
-            ExitCode::from(EXIT_ABORTED)
-        })?,
-        None => Vec::new(),
-    };
-    let roles = role_values(&opts.roles, &people)?;
-    let program = Arc::new(compiled.program);
-    let cfg = StubConfig {
-        latency: opts.latency,
-        failures: opts.failures,
-        chest: opts.chest,
-        ..StubConfig::default()
-    };
-    let mut w =
-        World::new(Arc::clone(&program), people, roles.clone(), cfg, opts.fuel).map_err(|e| {
-            eprintln!("error: {e}");
-            ExitCode::from(EXIT_ABORTED)
-        })?;
-    w.set_lines(compiled.lines);
-    w.show_ids(opts.lines);
-    // `edit <dir>` in a script: a directory relative to the run's.
-    let base = PathBuf::from(dir);
-    w.set_edit(Box::new(move |d: &str| {
-        let tree = read_tree(&base.join(d))?;
-        match compile(&tree, &stub_api()) {
-            Ok(c) => Ok((Arc::new(c.program), c.lines)),
-            Err(diags) => {
-                let text: Vec<String> = diags.iter().map(|d| render(d, &tree)).collect();
-                Err(text.join("\n"))
-            }
-        }
-    }));
-    if let Some(file) = &opts.load {
-        let bytes = std::fs::read(file).map_err(|e| {
-            eprintln!("quest: {file}: {e}");
-            ExitCode::from(EXIT_NO_INPUT)
-        })?;
-        let cannot = |e: String| {
-            eprintln!("error: cannot load {file}: {e}");
-            ExitCode::from(EXIT_ABORTED)
-        };
-        let mut names = vec!["home".to_string()];
-        if let Some(q) = &program.quest {
-            names.extend(q.parts.iter().map(|p| p.name.clone()));
-        }
-        let cfgs = (0..w.instances())
-            .map(|k| {
-                let k = u16::try_from(k).unwrap_or(u16::MAX);
-                vm_config(MEM_BYTES_DEFAULT, k, roles.clone())
-            })
-            .collect();
-        let mut vms = load_state(&bytes, Arc::clone(&program), cfgs, &names).map_err(cannot)?;
-        if opts.reset {
-            for vm in &mut vms {
-                vm.reset().map_err(|e| {
-                    eprintln!("error: cannot reset: {e:?}");
-                    ExitCode::from(EXIT_ABORTED)
-                })?;
-            }
-        }
-        // A loaded state already had its `Setup`; a reset one is given it again.
-        w.load_vms(vms, opts.reset).map_err(cannot)?;
-    }
-    let mut driver = opts.talk.map(|(player, npc)| Driver {
-        player,
-        npc,
-        picks: opts.picks.map(VecDeque::from),
-        talked: false,
-        over: false,
-    });
-    let (mut next, mut failed, mut finished) = (0, false, false);
-    for _ in 0..opts.ticks {
-        let now = w.now();
-        let k = script[next..].iter().take_while(|(t, _)| *t <= now).count();
-        let mut inputs: Vec<Input> = script[next..next + k]
-            .iter()
-            .map(|(_, i)| i.clone())
-            .collect();
-        next += k;
-        if let Some(d) = &mut driver {
-            inputs.extend(d.input(now, &w));
-        }
-        let report = w.step(&inputs);
-        for line in &report.lines {
-            println!("{line}");
-        }
-        for (_, r) in &report.reports {
-            failed |= print_report(r);
-        }
-        let statuses: Vec<Status> = (0..w.instances())
-            .filter_map(|k| w.vm(u16::try_from(k).ok()?).map(Vm::status))
-            .collect();
-        if opts.trace {
-            let status = if statuses.contains(&Status::Failed) {
-                "failed"
-            } else if statuses.iter().any(|s| *s != Status::Idle) {
-                "busy"
-            } else {
-                "idle"
-            };
-            eprintln!(
-                "tick={} fuel={} hash={:016x} status={status}",
-                report.tick,
-                report.fuel.iter().sum::<u64>(),
-                w.hash64()
-            );
-        }
-        failed |= statuses.contains(&Status::Failed);
-        if let Some(d) = &mut driver {
-            d.settle(&w);
-        }
-        if next == script.len() && driver.as_ref().is_none_or(|d| d.over) && w.quiescent() {
-            finished = true;
-            break;
-        }
-    }
-    if let Some(file) = &opts.save {
-        let vms: Vec<&Vm> = (0..w.instances())
-            .filter_map(|k| w.vm(u16::try_from(k).ok()?))
-            .collect();
-        if let Err(e) = std::fs::write(file, state_file(&program, &vms)) {
-            eprintln!("quest: {file}: {e}");
-            return Err(ExitCode::from(EXIT_NO_INPUT));
-        }
-    }
-    failed |= matches!(w.outcome(), Outcome::Failed | Outcome::Declined);
-    Ok(if failed {
-        ExitCode::from(EXIT_ABORTED)
-    } else if !finished {
-        eprintln!("quest: tick limit reached");
-        ExitCode::from(EXIT_TICK_LIMIT)
-    } else {
-        ExitCode::SUCCESS
-    })
 }
 
 fn main() -> ExitCode {

@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hasher;
 use std::sync::Arc;
 
-use quest_vm::consts::{COND_FUEL, MEM_BYTES_DEFAULT};
+use quest_vm::consts::COND_FUEL;
 use quest_vm::dialogue::DialogueKind;
 use quest_vm::dialogue_run::{
     Attachment, Batch, ConvState, Conversation, DialogueEnv, EndReason, EventShape, InstanceId,
@@ -178,18 +178,20 @@ fn load_error(e: LoadError) -> String {
 
 impl World {
     /// The quest's instances placed: `requires` and each role's `where` hold (evaluated over `people`), the
-    /// home and one instance per part made with `roles`, `Setup` due at the first tick. A role of the wrong
-    /// type, a `requires` or a `where` that does not hold, or a program that does not load is `Err`.
+    /// home and one instance per part made with `roles` and `mem_bytes` of memory each, `Setup` due at the
+    /// first tick. A role of the wrong type, a `requires` or a `where` that does not hold, or a program that
+    /// does not load is `Err`.
     pub fn new(
         program: Arc<Program>,
         people: People,
         roles: Vec<(String, WireValue)>,
         cfg: StubConfig,
         fuel: u64,
+        mem_bytes: u32,
     ) -> Result<World, String> {
         let home = Runner::for_instance(
             Arc::clone(&program),
-            MEM_BYTES_DEFAULT,
+            mem_bytes,
             cfg.clone(),
             0,
             roles.clone(),
@@ -215,6 +217,7 @@ impl World {
                 faults: Vec::new(),
                 api_events: stub_api().events,
                 roles,
+                mem_bytes,
                 mirrors: BTreeMap::new(),
             },
             lines: BTreeMap::new(),
@@ -244,7 +247,7 @@ impl World {
             let id = u16::try_from(k + 1).map_err(|_| "too many parts".to_string())?;
             let runner = Runner::for_instance(
                 Arc::clone(&program),
-                MEM_BYTES_DEFAULT,
+                mem_bytes,
                 cfg.clone(),
                 id,
                 w.core.roles.clone(),
@@ -385,8 +388,41 @@ impl World {
             .map(|tk| &tk.conv)
     }
 
+    /// Asks the home for `main` (`Vm::start_main`; again, `Vm::restart_main`, when a loaded state already ran
+    /// it). `false` when the program has no `main`.
+    pub fn start_main(&mut self) -> bool {
+        if self.core.program.main_fn.is_none() {
+            return false;
+        }
+        let Some(home) = self.core.insts.first_mut() else {
+            return false;
+        };
+        if !home.runner.vm.start_main() {
+            home.runner.vm.restart_main();
+        }
+        true
+    }
+
+    /// Every instance re-initialised (`Vm::reset`, `--reset`): as if the quest had just been placed; `Setup`
+    /// is due at the next tick.
+    pub fn reset(&mut self) -> Result<(), String> {
+        for inst in &mut self.core.insts {
+            inst.runner
+                .vm
+                .reset()
+                .map_err(|e| format!("the {} did not reset: {e:?}", inst.name))?;
+        }
+        self.setup_at = Some(self.core.now);
+        self.pending.clear();
+        self.pending_mirrors.clear();
+        self.sent.clear();
+        self.core.mirrors.clear();
+        self.core.take_mirrors();
+        Ok(())
+    }
+
     /// Every instance's VM replaced, in id order (a loaded or migrated state; each must be made with
-    /// [`crate::vm_config`] of its instance and the world's roles). `setup`: `Setup` is still delivered at the
+    /// [`crate::vm_config`] of its instance, the world's memory and its roles). `setup`: `Setup` is still delivered at the
     /// next tick (a reset state); otherwise it is not (the state already had it). The dialogue mirrors are
     /// taken again from the new VMs.
     pub fn load_vms(&mut self, vms: Vec<Vm>, setup: bool) -> Result<(), String> {

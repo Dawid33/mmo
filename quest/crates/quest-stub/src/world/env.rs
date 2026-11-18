@@ -14,6 +14,8 @@ pub(super) struct Core {
     pub(super) api_events: Vec<HostStruct>,
     /// The quest's role values (a dialogue mirror's scratch instance is made with them).
     pub(super) roles: Vec<(String, WireValue)>,
+    /// Each instance's memory (and a scratch instance's).
+    pub(super) mem_bytes: u32,
     /// Each instance's dialogue mirror, by instance id: what its conditions are evaluated over.
     pub(super) mirrors: BTreeMap<u32, DialogueMirror>,
 }
@@ -125,6 +127,7 @@ impl Core {
             completed_by,
             now,
             roles,
+            mem_bytes,
             mirrors,
             ..
         } = self;
@@ -135,7 +138,7 @@ impl Core {
             return Err(PureFault::BadCall);
         };
         if d.scratch.is_none() {
-            let cfg = vm_config(MEM_BYTES_DEFAULT, id, roles.clone());
+            let cfg = vm_config(*mem_bytes, id, roles.clone());
             let mut vm = Vm::new(Arc::clone(program), cfg).map_err(|_| PureFault::BadCall)?;
             vm.install_mirror(&d.mirror)
                 .map_err(|_| PureFault::BadCall)?;

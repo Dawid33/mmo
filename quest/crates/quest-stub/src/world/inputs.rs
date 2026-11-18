@@ -169,7 +169,7 @@ impl World {
         let mut vms = Vec::new();
         for (k, inst) in self.core.insts.iter().enumerate() {
             let id = u16::try_from(k).map_err(|_| "too many instances".to_string())?;
-            let cfg = vm_config(MEM_BYTES_DEFAULT, id, self.core.roles.clone());
+            let cfg = vm_config(self.core.mem_bytes, id, self.core.roles.clone());
             match inst.runner.vm.migrate(Arc::clone(&program), cfg) {
                 Ok((vm, _)) => vms.push(vm),
                 Err(e) => return Err(format!("the {} refused the edit: {e:?}", inst.name)),

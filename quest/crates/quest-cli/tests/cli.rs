@@ -554,3 +554,142 @@ fn script_file_default() {
     assert_eq!(code(&o), 2);
     assert!(err(&o).contains("script line 1"), "{}", err(&o));
 }
+
+const QUEST_WITH_MAIN: &str = r#"quest Q:
+    role keeper: Person
+    stage S:
+        @on(Entered)
+        fn s(e):
+            pass
+
+fn main():
+    print("main ran")
+"#;
+
+#[test]
+fn quest_main_runs_in_the_world() {
+    let people = "person 3 name=\"Hal\"\n";
+    let d = dir(
+        "quest-main",
+        &[("main.qs", QUEST_WITH_MAIN), ("people.txt", people)],
+    );
+    let o = quest(&["run", "--roles", "keeper=Person(3)"], &d);
+    assert_eq!(
+        (code(&o), out(&o)),
+        (0, "[0] main ran\n".to_string()),
+        "{}",
+        err(&o)
+    );
+    // A fault in `main` is reported and exits 2, as in the runner.
+    let faulting = QUEST_WITH_MAIN.replace(
+        "    print(\"main ran\")",
+        "    let z = 0\n    print(f\"{1 / z}\")",
+    );
+    std::fs::write(d.join("main.qs"), faulting).unwrap();
+    let o = quest(&["run", "--roles", "keeper=Person(3)"], &d);
+    assert_eq!(code(&o), 2, "{}", err(&o));
+    assert!(
+        err(&o).starts_with("error: handler main aborted: "),
+        "{}",
+        err(&o)
+    );
+}
+
+#[test]
+fn plain_program_ignores_a_stray_script_txt() {
+    let d = dir(
+        "stray",
+        &[
+            ("main.qs", SECTION_5_4),
+            ("script.txt", "1 talk 1 3\n"),
+            ("people.txt", "not a people file\n"),
+        ],
+    );
+    let o = quest(&["run"], &d);
+    assert_eq!(
+        (code(&o), out(&o)),
+        (0, "total 130, stopped at 7\n".to_string()),
+        "{}",
+        err(&o)
+    );
+}
+
+#[test]
+fn quest_save_load_reset_round_trip() {
+    let d = dir(
+        "quest-save",
+        &[("main.qs", LOST_DOG), ("people.txt", LOST_DOG_PEOPLE)],
+    );
+    let file = d.join("state.bin");
+    let f = file.to_str().unwrap();
+    let talk = ["run", "--roles", LOST_DOG_ROLES, "--talk", "1:3"];
+    let first = quest(&[&talk[..], &["--picks", "1,1", "--save", f]].concat(), &d);
+    assert_eq!(code(&first), 0, "{}", err(&first));
+    // Loaded: Ana joined, the quest is in `Search`.
+    let o = quest(&[&talk[..], &["--picks", "l", "--load", f]].concat(), &d);
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert!(out(&o).starts_with("[1] Hal: Any luck?\n"), "{}", out(&o));
+    // Reset: placed again, back in `Open`.
+    let o = quest(
+        &[&talk[..], &["--picks", "l", "--load", f, "--reset"]].concat(),
+        &d,
+    );
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert!(out(&o).starts_with("[1] Hal: Stranger!"), "{}", out(&o));
+}
+
+#[test]
+fn world_input_files_and_talk_errors() {
+    let d = dir(
+        "world-files",
+        &[
+            ("main.qs", LOST_DOG),
+            ("people.txt", LOST_DOG_PEOPLE),
+            ("bad.txt", "dragon 9\n"),
+        ],
+    );
+    let bad = d.join("bad.txt");
+    let o = quest(
+        &[
+            "run",
+            "--roles",
+            LOST_DOG_ROLES,
+            "--people",
+            bad.to_str().unwrap(),
+        ],
+        &d,
+    );
+    assert_eq!(code(&o), 2, "{}", err(&o));
+    let missing = d.join("missing.txt");
+    let o = quest(
+        &[
+            "run",
+            "--roles",
+            LOST_DOG_ROLES,
+            "--people",
+            missing.to_str().unwrap(),
+        ],
+        &d,
+    );
+    assert_eq!(code(&o), 66, "{}", err(&o));
+    // `--mem` reaches the world's instances: far too little does not load.
+    let o = quest(&["run", "--roles", LOST_DOG_ROLES, "--mem", "64"], &d);
+    assert_eq!(code(&o), 2, "{}", err(&o));
+    // An unknown NPC or player: no conversation, a note, no hang.
+    for pair in ["1:99", "99:3"] {
+        let o = quest(
+            &[
+                "run",
+                "--roles",
+                LOST_DOG_ROLES,
+                "--talk",
+                pair,
+                "--picks",
+                "1",
+            ],
+            &d,
+        );
+        assert_eq!(code(&o), 0, "{}", err(&o));
+        assert!(err(&o).contains("started no conversation"), "{}", err(&o));
+    }
+}

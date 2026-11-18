@@ -142,8 +142,7 @@ open 200 ticks without `done` (`CONVERSATION_LINGER_TICKS`); one batch walks at 
 (`BATCH_STEPS_MAX`, else `TooDeep`); a scene takes at most 16 follow-ups (`SCENE_FOLLOW_UPS_MAX`); a timed
 line lasts 30 ticks plus 1 per character (`LINE_BASE_TICKS`, `LINE_TICKS_PER_CHAR`), clamped to 30..200
 (`LINE_MIN_TICKS`, `LINE_MAX_TICKS`); a program's dialogue graph at most 65535 steps (`GRAPH_STEPS_MAX`); a
-read set (dialogue or part) above 256 words gets the `mirror-size` warning (`MIRROR_WORDS_WARN`); timers 16
-(`TIMERS_MAX`).
+read set (dialogue or part) above 256 words gets the `mirror-size` warning (`MIRROR_WORDS_WARN`).
 
 ## Tests, goldens
 
@@ -161,11 +160,11 @@ assurance comes from fuzzing, planned later.
 
 - **`not-yet` compile errors**: a fallible host property (`x.p` of a property that declares errors), an
   unawaited `all(...)`, `after` of a host event (a timer delivers a script `event` only), a host struct's or
-  event's field of the open type `Value` (the host must give it a concrete type), and `play` of a scene held in
+  event's field of the open type `Value` (the host must give it a concrete type: the stub's `ItemGiven.to`
+  and `Killed.victim` are `Entity { id }`, **any** entity by its id, HostApi 6), and `play` of a scene held in
   a variable or with none of its cast named (`play(scene, a=…)` needs the scene by name). Against a host API
   other than the stub's, also a quest built-in the host has no `quest.<name>` of the right shape for, and
   `after` / `cancel` without a `Timer { id }` type.
-- The stub's `Entity { id }` (`ItemGiven.to`, `Killed.victim`) is **any** entity by its id (HostApi 6).
 - An unset `site` or `owner` (a person without one) refuses the query; in a condition that is false.
 - Conversations and scenes read each instance's **dialogue mirror**, its committed state as of the end of the
   last tick (one tick old; a handler still running over several ticks shows what it had before it began).
@@ -202,8 +201,8 @@ passing check means the program compiles. It prints only diagnostics, to stderr;
 
 `quest run` compiles, then runs the program against the stub host: the initialisers, `main` once, then
 ticks until nothing is left to do. Script output goes to stdout; diagnostics, reports and trace lines go to
-stderr. A program with a `quest`, or a run with `--talk` or a script (`--script`, or `<dir>/script.txt`),
-runs in the **world** instead (below).
+stderr. A program with a `quest`, or a run with `--talk`, `--script` or `--people`, runs in the **world**
+instead (below). Only a program with a quest takes `<dir>/people.txt` and `<dir>/script.txt` by default.
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -218,22 +217,26 @@ runs in the **world** instead (below).
 | `--load FILE` | start from a saved state | |
 | `--reset` | re-initialise the instance (after `--load`): as if the script had just been placed | off |
 | `--roles NAME=WIRE,...` | the quest's role values as wire literals (`farmer=Person(3),miller=None`); repeatable | none |
-| `--people FILE` | the people the world's queries read (format below) | `<dir>/people.txt` if present |
-| `--script FILE` | the world's scripted inputs (format below) | `<dir>/script.txt` if present |
+| `--people FILE` | the people the world's queries read (format below) | a quest: `<dir>/people.txt` if present |
+| `--script FILE` | the world's scripted inputs (format below) | a quest: `<dir>/script.txt` if present |
 | `--talk PLAYER:NPC` | the player talks to the NPC at tick 1; each offer is answered from stdin (a number, `l` to leave; the input's end leaves), the end acknowledged with `done` | off |
 | `--picks N\|l,...` | `--talk`'s answers, in turn (then `l`); needs `--talk` | stdin |
 | `--lines` | print line ids (`@lostdog.plea(Rufus)`) instead of their texts | off |
 
 **The world** (`quest_stub::World`, spec §5.11, §9.1): the quest's home and one instance per `part`, the
 people, conversations, scenes, and the messages between them, which land at the next tick. Placement checks
-`requires` and each role's type and `where`; `Setup` is delivered at tick 0 (`main` is not run). Every line
+`requires` and each role's type and `where`; `Setup` is delivered at tick 0, and `main`, when there is one,
+runs once in the home as the runner runs it (asked for after placement, so it runs before `Setup`'s
+handlers; its reports and faults exit as in the runner). Every line
 goes to stdout as `[tick] text`: a script's `print`, `Hal: <line>`, `menu: 1) … 2) …`, `end Hal: <reason>`,
 and the commands the world acts on (`joined Ana`, `give Ana 1 carved_whistle`, `follow Rufus Ana`,
 `completed Ana`, `failed`, `declined`, `reaped`). The run ends when the script is used up, the `--talk`
-conversation is over and nothing is left to do. The world's instances use the default memory (`--mem` does
-not apply). `--save` writes every instance (`QSSTATE2` for more than one); `--load` restores them (a changed
-script is migrated per instance, a part's report lines prefixed with its name) and does not deliver `Setup`
-again, `--reset` does.
+conversation is over and nothing is left to do (a `--talk` that starts no conversation, an unknown id say,
+says so on stderr). `--mem` is each instance's memory. `--save` writes every instance (`QSSTATE2` for more
+than one); `--load` restores them (a changed script is migrated per instance, a part's report lines prefixed
+with its name) and does not deliver `Setup` again; a state whose instance count differs from the program's
+(a part added or removed by the edit) is refused (exit 2). `--reset`, with or without `--load`,
+re-initialises every instance and delivers `Setup` again.
 
 `people.txt`, one entity per line (`#` starts a comment); an id names one entity:
 

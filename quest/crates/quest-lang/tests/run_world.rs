@@ -14,6 +14,7 @@ use quest_vm::Program;
 use quest_vm::wire::WireValue;
 
 const FUEL: u64 = 2_000;
+const MEM: u32 = quest_vm::consts::MEM_BYTES_DEFAULT;
 
 fn compiled(src: &str) -> (Arc<Program>, BTreeMap<String, String>) {
     compiled_files(&[("main.qs", src)])
@@ -54,6 +55,7 @@ fn world_of(
         roles(people, role_text),
         StubConfig::default(),
         FUEL,
+        MEM,
     )?;
     w.set_lines(lines);
     Ok(w)
@@ -923,7 +925,7 @@ fn mirror_waits_while_the_part_is_mid_segment() {
     let (p, _) = compiled(SLOW_PART);
     let people = parse_people(PART_PEOPLE).expect("people");
     let roles = roles(PART_PEOPLE, &[("pet", "Creature(7)")]);
-    let mut w = World::new(p, people, roles, StubConfig::default(), 200).expect("placed");
+    let mut w = World::new(p, people, roles, StubConfig::default(), 200, MEM).expect("placed");
     let script = parse_script("2 near 1 7\n2 event M::Bump n=1\n").expect("script");
     let mut installed = Vec::new();
     for t in 0..40u64 {
@@ -1036,7 +1038,7 @@ fn conversation_reads_the_dialogue_mirror_not_uncommitted_state() {
     let (p, lines) = compiled(SLOW_HOME);
     let people = parse_people(SMITH_PEOPLE).expect("people");
     let roles = roles(SMITH_PEOPLE, &[("keeper", "Person(3)")]);
-    let mut w = World::new(p, people, roles, StubConfig::default(), 200).expect("placed");
+    let mut w = World::new(p, people, roles, StubConfig::default(), 200, MEM).expect("placed");
     w.set_lines(lines);
     // `go` writes `flag` at 2 and runs on for several ticks: a talk meanwhile sees the committed 0.
     let out = run(
@@ -1076,7 +1078,7 @@ fn talk_during_a_multi_tick_setup_reads_the_placed_mirror() {
     let (p, lines) = compiled(SLOW_SETUP);
     let people = parse_people(SMITH_PEOPLE).expect("people");
     let roles = roles(SMITH_PEOPLE, &[("keeper", "Person(3)")]);
-    let mut w = World::new(p, people, roles, StubConfig::default(), 200).expect("placed");
+    let mut w = World::new(p, people, roles, StubConfig::default(), 200, MEM).expect("placed");
     w.set_lines(lines);
     // `setup` runs over several ticks from tick 0: the talk at 1 reads the mirror taken at placement.
     let out = run(&mut w, "1 talk 1 3\n2 done 1\n");
