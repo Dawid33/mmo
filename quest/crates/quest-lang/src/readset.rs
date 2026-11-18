@@ -9,7 +9,8 @@
 //! `mirror-size` (a warning) when a read set's static size exceeds `MIRROR_WORDS_WARN` words: each global
 //! counts its slot and its value's words; a value of unbounded size (a `str`, a `list`, a `dict`, a type
 //! that contains itself) counts `MIRROR_WORDS_WARN` on its own, so reading one warns. Reported at the largest
-//! global of the set.
+//! global of the set. The generated `participants` list is not counted (a deviation from spec §5.11, ruled
+//! at Task 49): it is bounded by the party, and nearly every part reads it.
 
 use crate::callgraph::{self, Facts};
 use crate::diag::{Diagnostic, Severity};
@@ -43,10 +44,13 @@ pub(crate) fn read_sets_with(
     let mut starts: Vec<DefId> = Vec::new();
     let mut parts: Vec<(String, Vec<DefId>)> = Vec::new();
     let mut part_globals: BTreeSet<DefId> = BTreeSet::new();
+    // Not counted by `mirror-size` (module docs).
+    let mut uncounted: BTreeSet<DefId> = BTreeSet::new();
     for def in &krate.defs {
         match &def.kind {
             DefKind::Dialogue(dl) => starts.extend(dl.pure_fns()),
             DefKind::Quest(q) => {
+                uncounted.insert(q.generated.participants);
                 starts.extend(
                     q.stages
                         .iter()
@@ -84,6 +88,7 @@ pub(crate) fn read_sets_with(
         krate,
         typed,
         memo: BTreeMap::new(),
+        uncounted,
     };
     if let Some(d) = sizes.too_big(&sets.dialogue, "the dialogue read set") {
         diags.push(d);
@@ -101,6 +106,8 @@ struct Sizes<'a> {
     krate: &'a Crate,
     typed: &'a Typed,
     memo: BTreeMap<TyId, u32>,
+    /// Globals the sum leaves out (`participants`).
+    uncounted: BTreeSet<DefId>,
 }
 
 impl Sizes<'_> {
@@ -108,7 +115,8 @@ impl Sizes<'_> {
     fn too_big(&mut self, set: &BTreeSet<DefId>, what: &str) -> Option<Diagnostic> {
         let mut total: u32 = 0;
         let mut largest: Option<(u32, DefId)> = None;
-        for g in set {
+        let counted: Vec<DefId> = set.difference(&self.uncounted).copied().collect();
+        for g in &counted {
             let ty = self.typed.globals.get(g).copied().unwrap_or(TyId::ERROR);
             // Its slot, and its value's words.
             let words = 1u32.saturating_add(self.value_words(ty));

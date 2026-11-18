@@ -936,6 +936,19 @@ dialogue crier(npc: Person):
 }
 
 #[test]
+fn bad_line_text_from_source() {
+    // Regression (Task 49): the grammar's refusal of a computed line text was a bare `syntax` error.
+    let main = "let r = \"No.\"\ndialogue d(p: Player, npc: Person):\n    npc: r @d.x\n";
+    let Err(diags) =
+        quest_lang::compile(&common::tree(&[("main.qs", main)]), &quest_stub::stub_api())
+    else {
+        panic!("compiled, but a computed line text must be refused");
+    };
+    let codes: Vec<(&str, u32)> = diags.iter().map(|d| (d.code, d.line)).collect();
+    assert_eq!(codes, [("bad-line-text", 3)]);
+}
+
+#[test]
 fn bad_line_text() {
     use quest_lang::ast;
     let main = "dialogue d(p: Player, npc: Person):\n    npc: \"x\" @d.x\n";

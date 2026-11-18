@@ -652,6 +652,24 @@ fn diagnose(file: &str, toks: &[Token], end: End, err: PErr) -> Vec<Diagnostic> 
             // An operator that cannot follow here must not read as "expected an operator".
             let stray_operator = fixed_spelling(&tok)
                 .is_some_and(|op| OPERATORS.contains(&op) && !expects(&expected, op));
+            // Only a string or an f-string: a line's (or a topic's, an option's, an objective's) text, which
+            // is translated by its id and so is a literal (spec §5.11).
+            let text_only =
+                !expected.is_empty() && expected.iter().all(|e| e == "STRING" || e == "FSTRING");
+            if text_only {
+                return vec![Diagnostic::error(
+                    "bad-line-text",
+                    format!(
+                        "a line's text is a string or an f-string literal (it is translated by its id), \
+                         not {}",
+                        describe(&tok)
+                    ),
+                    file,
+                    at(i).0,
+                    at(i).1,
+                    at(i).2,
+                )];
+            }
             let message = if stray_operator {
                 format!(
                     "{} cannot follow here: expected {}",

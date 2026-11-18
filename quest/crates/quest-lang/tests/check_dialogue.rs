@@ -580,6 +580,30 @@ dialogue d(p: Player, npc: Person):
 }
 
 #[test]
+fn mirror_size_leaves_participants_out() {
+    // The generated `participants` list is bounded by the party: a part reading it does not warn (Task 49
+    // ruling); any other list still does.
+    let main = r#"quest Q:
+    role pet: Creature
+    event Seen:
+        player: Player
+    let names: list[str] = []
+    stage S:
+        @on(Seen)
+        fn seen(e):
+            pass
+    part watch on pet:
+        @on(PlayerNear)
+        fn near(e):
+            if e.player in participants:
+                emit Seen(player=e.player)
+"#;
+    assert_eq!(errs(main), vec![]);
+    let reads_list = main.replace("if e.player in participants:", "if \"x\" in names:");
+    assert_eq!(errs(&reads_list), vec![d("mirror-size", 5)]);
+}
+
+#[test]
 fn quest_builtins_and_values_are_typed() {
     let main = r#"event Ring:
     n: int
