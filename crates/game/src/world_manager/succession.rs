@@ -524,7 +524,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         for h in gone {
             match self.forget_host(h) {
                 Ok(()) => log::info!("[server] host {h} has no `hosts` row any more (pruned) and no open succession names it: forgotten"),
-                Err(e) => log::info!("[server] host {h} has no `hosts` row any more (pruned), but it is not forgotten yet: {e}"),
+                Err(e) => {
+                    // Final review G-I2: pruned, it was dead or clean-left and owns nothing. A clean
+                    // leaver's traffic was saved by its leave cut (its forget succeeds), so what keeps
+                    // it here is state traffic with a DEAD host no run here accounts for: seen dead,
+                    // so the next cut stops this host for a rollback (`take_unaccounted_dead`) rather
+                    // than refusing every part for ever.
+                    log::warn!("[server] host {h} has no `hosts` row any more (pruned), but it is not forgotten yet: {e}; noted dead");
+                    self.dead_seen.insert(h);
+                }
             }
         }
     }

@@ -11289,6 +11289,91 @@ fn a_host_landed_adjacent_after_the_declaration_rolls_the_world_back_never_stuck
     );
 }
 
+/// Final review G-I2 (the flagged T10b gap): host X wins land beside holder H's region and a
+/// slime crosses from X into H — state traffic no committed cut has saved. X's land is freed and X
+/// dies landless: the coordinator ENDS it (no succession), and its row is pruned (another host's
+/// registration) before any directory read of H showed it dead. H's next read finds X absent
+/// below the read's next id; the journal refuses to forget it (the unsaved traffic). That id must
+/// count as seen dead: at the next `BeginCut` H stops without saving (`take_unaccounted_dead`: the
+/// server's stop for a rollback; its lapse is then the coordinator's to handle — a succession, or
+/// with a run open a rollback) — never a world whose every cut part is refused for ever.
+fn pruned_landless_peer_with_unsaved_traffic(rig: &mut MultiRig) {
+    let chain = host_chain(2);
+    let (rs, rd) = (chain[0], chain[1]);
+    let rf = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .map(|(dx, dz)| RegionCoords::new(rd.x + dx, rd.z + dz))
+        .into_iter()
+        .find(|c| *c != rs && sr_of(rig, *c) != sr_of(rig, rs) && sr_of(rig, *c) != sr_of(rig, rd))
+        .expect("a free neighbour of the holder's region");
+    let rows = rendezvous_rows(rig, &[sr_of(rig, rf)], &[]);
+    rig.with_directory(rows);
+    rig.with_claims();
+    rig.run(rs);
+    rig.run(rd);
+    world_cuts(rig);
+    rig.core().set_crash_policy(game::CrashPolicy::Succession);
+    let x = rig.start("x");
+    let running: std::collections::BTreeSet<HostId> = host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).collect();
+    rig.core().set_expected_hosts(running);
+    for _ in 0..FLAP_ROUNDS {
+        rig.cut_round();
+    }
+    let holder = rig.owner(rd);
+    until_committed(rig, 1);
+    let base = rig.last_committed().0;
+    win_land(rig, x, sr_of(rig, rf));
+    rig.homes[x.0 as usize] = rf;
+    rig.keep(x);
+    for _ in 0..FLAP_ROUNDS {
+        rig.cut_round();
+    }
+    let id = rig.spawn_slime(rf, past_seam(rf, rd, REGION_SIZE / 2.0));
+    let traded = until(rig, CROSS_ROUNDS, |rig| rig.hosts[holder.0 as usize].manager.peer_journal().entries(x).next().is_some());
+    assert!(traded, "the slime {id:?} crossed from X to the holder (seed {})", rig.seed);
+    // X's land freed (the table: no row of it), X dies landless, is ended and its row pruned —
+    // all before the holder's next directory read.
+    for (owner, epoch) in rig.claim_store.as_mut().expect("with_claims").values_mut() {
+        if *owner == Some(x) {
+            *owner = None;
+            *epoch += 1;
+        }
+    }
+    rig.kill(x);
+    let mut ended = false;
+    for _ in 0..FLAP_ROUNDS {
+        if rig.drive_leases().is_some() {
+            ended = true;
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(ended, "the landless host is ended (seed {})", rig.seed);
+    rig.pruned.insert(x);
+    let mut stopped = None;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        rig.cut_round();
+        rig.drive_claims();
+        if let Some(d) = rig.hosts[holder.0 as usize].manager.take_unaccounted_dead() {
+            stopped = Some(d);
+            break;
+        }
+    }
+    assert_eq!(stopped, Some(x), "the holder stops: its traffic with the pruned host is accounted for nowhere (seed {})", rig.seed);
+    assert_eq!(rig.last_committed().0, base, "nothing committed after the base cut");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_pruned_landless_peer_with_unsaved_traffic_rolls_the_world_back_never_stuck() {
+    sweep(
+        "a_pruned_landless_peer_with_unsaved_traffic_rolls_the_world_back_never_stuck",
+        2,
+        1,
+        HEIR_SWEEP_SEEDS,
+        pruned_landless_peer_with_unsaved_traffic,
+    );
+}
+
 #[test]
 fn the_rig_store_refuses_a_stale_version() {
     use game::coordinator::{CallStamp, ReplicaId, RigWrite, StoreDecision};
