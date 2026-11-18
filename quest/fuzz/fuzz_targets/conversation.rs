@@ -330,7 +330,7 @@ impl<'a> Sim<'a> {
     fn hash(&self) -> u64 {
         let mut h = Fnv64::default();
         self.now.state_hash(&mut h);
-        self.env.program_key.state_hash(&mut h);
+        self.env.key().state_hash(&mut h);
         for r in &self.insts {
             r.vm.hash64().state_hash(&mut h);
             r.now.state_hash(&mut h);
@@ -369,7 +369,7 @@ impl<'a> Sim<'a> {
     /// `i`, `attach_dialogue` when bit `(3k + i) % 7` of `mask` is set; with bit 7 set, `detach_dialogue`
     /// of the home's dialogues it did not attach.
     fn handlers_attach(&mut self, npc: i64, mask: u8) {
-        let program = Arc::clone(&self.env.program);
+        let program = Arc::clone(self.env.program());
         for (k, d) in program.dialogues.dialogues.iter().enumerate() {
             if d.kind != DialogueKind::Conversation || d.cast != 2 {
                 continue;
@@ -642,7 +642,7 @@ impl<'a> Sim<'a> {
         for (k, r) in self.insts.iter().enumerate() {
             let Ok(id) = u16::try_from(k) else { return };
             let cfg = vm_config(MEM_BYTES_DEFAULT, id, self.env.roles.clone());
-            let Ok(copy) = Vm::load(Arc::clone(&self.env.program), cfg.clone(), &r.vm.save())
+            let Ok(copy) = Vm::load(Arc::clone(self.env.program()), cfg.clone(), &r.vm.save())
             else {
                 return;
             };

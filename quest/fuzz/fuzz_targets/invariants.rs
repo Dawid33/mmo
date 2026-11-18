@@ -26,10 +26,9 @@
 //!   (a budget moves when a handler's effect lands; a timed input would meet another state);
 //! - **save/load**: every instance saved before tick `k` (the first tick from `k` with no instance
 //!   mid-segment: the stub's `World::load_vms` takes the dialogue mirrors again) and loaded in its place,
-//!   the world goes on as the uninterrupted one: the same output, outcome and people, and every instance's
-//!   globals equal by value. Not `World::hash64`: `load_vms` forgets which mirror each part was sent, so
-//!   the home's is sent and installed again, and an install allocates its values anew — a part's heap
-//!   layout, not its values, then differs.
+//!   the world goes on as the uninterrupted one: the same output, outcome, completions and people, every
+//!   instance's globals equal by value, and at the end the same `World::hash64` (`load_vms` keeps what each
+//!   part was sent while the part still holds it, so no unchanged mirror is installed again).
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -495,10 +494,12 @@ fn unstamped(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Runs the world with each tick's batch of the script given once it is quiescent; `None` when it does not
-/// end within [`WORLD_TICKS`].
-fn gated(wc: &WorldCase, fuel: u64) -> Option<WorldEnd> {
-    let mut w = wc.world(fuel).ok()?;
+/// Runs the world with each tick's batch of the script given once it is quiescent; `Err` saying why when it
+/// is not placed or does not end within [`WORLD_TICKS`].
+fn gated(wc: &WorldCase, fuel: u64) -> Result<WorldEnd, String> {
+    let mut w = wc
+        .world(fuel)
+        .map_err(|e| format!("not placed at fuel {fuel}: {e}"))?;
     let mut batches: Vec<Vec<Input>> = Vec::new();
     let mut last = None;
     for (t, input) in &wc.script {
@@ -506,7 +507,9 @@ fn gated(wc: &WorldCase, fuel: u64) -> Option<WorldEnd> {
             batches.push(Vec::new());
             last = Some(*t);
         }
-        batches.last_mut()?.push(input.clone());
+        if let Some(b) = batches.last_mut() {
+            b.push(input.clone());
+        }
     }
     let mut next = batches.into_iter();
     let mut reports = Vec::new();
@@ -520,7 +523,7 @@ fn gated(wc: &WorldCase, fuel: u64) -> Option<WorldEnd> {
                         .filter_map(|k| w.vm(u16::try_from(k).ok()?))
                         .map(|vm| timeless(vm.mem_bytes()))
                         .collect();
-                    return Some(WorldEnd {
+                    return Ok(WorldEnd {
                         output: unstamped(w.output()),
                         outcome: w.outcome(),
                         completions: w.completions().clone(),
@@ -533,7 +536,9 @@ fn gated(wc: &WorldCase, fuel: u64) -> Option<WorldEnd> {
         }
         reports.extend(w.step(&batch).reports);
     }
-    None
+    Err(format!(
+        "not finished at fuel {fuel} within {WORLD_TICKS} ticks"
+    ))
 }
 
 /// The inputs of the script due at the world's tick, from `next` on.
@@ -564,9 +569,8 @@ fn world_case(i: &In) {
     } else {
         i.fuel
     };
-    if let Some(unlimited) = gated(wc, u64::MAX) {
-        let budgeted =
-            gated(wc, fuel).unwrap_or_else(|| panic!("{name}: not finished at fuel {fuel}"));
+    if let Ok(unlimited) = gated(wc, u64::MAX) {
+        let budgeted = gated(wc, fuel).unwrap_or_else(|e| panic!("{name}: {e}"));
         // Over (completed, failed, declined, reaped), a quest's instances are run no more: each stops where
         // the budget had brought it in the tick the quest ended, so only a running world's are compared.
         let running = unlimited.outcome == quest_stub::Outcome::Running;
@@ -606,6 +610,9 @@ fn world_case(i: &In) {
         w.step(&due(&wc.script, next, now));
         *next == wc.script.len() && w.quiescent()
     };
+    // A world not placed at this fuel (the home's initialisers unfinished within the placement's one tick,
+    // so `requires` / `where` read unset globals) has nothing to save; whether a budget may refuse a
+    // placement the unlimited run makes is the fuel equivalence's question above, not this one's.
     let Ok(mut plain) = wc.world(fuel) else {
         return;
     };
@@ -614,9 +621,11 @@ fn world_case(i: &In) {
         .find(|_| run(&mut plain, &mut next_a))
         .unwrap_or(WORLD_TICKS);
     let k = i.k.min(length - 1);
-    let (Ok(mut plain), Ok(mut resumed)) = (wc.world(fuel), wc.world(fuel)) else {
-        return;
-    };
+    // Placed once at this fuel, so placed again (the placement is deterministic).
+    let (mut plain, mut resumed) = (
+        wc.world(fuel).expect("placed as before"),
+        wc.world(fuel).expect("placed as before"),
+    );
     let (mut next_a, mut next_b) = (0, 0);
     let mut saved = None;
     for _ in 0..WORLD_TICKS {

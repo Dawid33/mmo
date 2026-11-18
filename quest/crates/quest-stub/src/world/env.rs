@@ -19,9 +19,9 @@ pub(super) struct Core {
 /// A clone keeps the mirrors (not their scratch instances, made again at the next evaluation).
 #[derive(Clone)]
 pub struct DialogueWorld {
-    pub program: Arc<Program>,
+    program: Arc<Program>,
     /// `program.content_hash()`.
-    pub program_key: u64,
+    program_key: u64,
     pub people: People,
     /// `quest.completed_by` answers from it.
     pub completed_by: BTreeSet<i64>,
@@ -95,6 +95,16 @@ impl Host for EvalHost<'_> {
 }
 
 impl DialogueWorld {
+    /// The program the instances run (replaced by [`DialogueWorld::set_program`]).
+    pub fn program(&self) -> &Arc<Program> {
+        &self.program
+    }
+
+    /// The program's content hash (`Program::content_hash`): what a record and a mirror are keyed on.
+    pub fn key(&self) -> u64 {
+        self.program_key
+    }
+
     /// No mirror yet: [`DialogueWorld::take_mirrors`] takes the first.
     pub fn new(
         program: Arc<Program>,

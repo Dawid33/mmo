@@ -40,7 +40,7 @@ impl World {
 
     /// The parts anchored on `entity` (`part … on role`, the role bound to it).
     pub(super) fn parts_on(&self, entity: i64) -> Vec<u16> {
-        let Some(q) = self.core.env.program.quest.as_ref() else {
+        let Some(q) = self.core.env.program().quest.as_ref() else {
             return Vec::new();
         };
         q.parts
@@ -78,7 +78,7 @@ impl World {
             None => return self.say(format!("kill: no entity {victim}")),
         }
         // `by`'s type as the program's `Killed` has it (its option's field name).
-        let program = Arc::clone(&self.core.env.program);
+        let program = Arc::clone(self.core.env.program());
         let by_ty = program
             .handlers
             .iter()
@@ -121,7 +121,7 @@ impl World {
 
     /// `RoleLost` to the home for each role bound to `entity`.
     pub(super) fn lose(&mut self, entity: i64) {
-        let program = Arc::clone(&self.core.env.program);
+        let program = Arc::clone(self.core.env.program());
         let Some(q) = program.quest.as_ref() else {
             return;
         };
@@ -185,7 +185,7 @@ impl World {
             // `migrate` consumes the instance it migrates: a copy is migrated, so a later refusal
             // leaves every instance as it was.
             let copy = Vm::load(
-                Arc::clone(&self.core.env.program),
+                Arc::clone(self.core.env.program()),
                 cfg.clone(),
                 &inst.runner.vm.save(),
             )

@@ -15,7 +15,7 @@ impl World {
         let found = self
             .core
             .env
-            .program
+            .program()
             .dialogues
             .dialogues
             .iter()
@@ -51,7 +51,7 @@ impl World {
         let candidates: Vec<Attachment> = self
             .core
             .env
-            .program
+            .program()
             .dialogues
             .dialogues
             .iter()
@@ -75,14 +75,13 @@ impl World {
         let name = self
             .core
             .env
-            .program
+            .program()
             .dialogues
             .dialogues
             .get(usize::from(att.dialogue))
             .map(|d| d.name.clone())
             .unwrap_or_default();
-        self.played
-            .insert((Some(self.core.env.program_key), name), now);
+        self.played.insert((Some(self.core.env.key()), name), now);
         let play = ScenePlay::start(&mut self.core.env, att.instance, att.dialogue, cast, now);
         self.scenes.push(play);
     }

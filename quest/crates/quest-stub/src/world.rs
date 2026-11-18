@@ -327,7 +327,7 @@ impl World {
 
     /// The `requires` conditions, then each bound role's `where`, over the home as it is.
     fn check_placement(&mut self) -> Result<(), String> {
-        let program = Arc::clone(&self.core.env.program);
+        let program = Arc::clone(self.core.env.program());
         let Some(q) = program.quest.as_ref() else {
             return Ok(());
         };
@@ -420,7 +420,7 @@ impl World {
     }
 
     pub fn program(&self) -> &Arc<Program> {
-        &self.core.env.program
+        self.core.env.program()
     }
 
     /// Instance `i`'s VM (0 the home, `1 + i` part `i`).
@@ -450,7 +450,7 @@ impl World {
     /// Asks the home for `main` (`Vm::start_main`; again, `Vm::restart_main`, when a loaded state already ran
     /// it). `false` when the program has no `main`.
     pub fn start_main(&mut self) -> bool {
-        if self.core.env.program.main_fn.is_none() {
+        if self.core.env.program().main_fn.is_none() {
             return false;
         }
         let Some(home) = self.core.insts.first_mut() else {
@@ -503,7 +503,7 @@ impl World {
         // loaded back): sending an unchanged mirror again would install equal values anew, and the part's
         // memory, not its values, would part from a run that was never saved. A record the loaded state
         // does not bear out (another state, a migrated program) is dropped, and that part sent the home's.
-        let program = Arc::clone(&self.core.env.program);
+        let program = Arc::clone(self.core.env.program());
         let parts = program
             .quest
             .as_ref()
@@ -533,7 +533,7 @@ impl World {
     fn owner_of(&self, event: &str, not: Option<u16>) -> Option<u16> {
         self.core
             .env
-            .program
+            .program()
             .handlers
             .iter()
             .filter(|h| h.event == event && Some(h.owner) != not)
@@ -547,7 +547,7 @@ impl World {
         let owners: BTreeSet<u16> = self
             .core
             .env
-            .program
+            .program()
             .handlers
             .iter()
             .filter(|h| h.event == event && usize::from(h.owner) < self.core.insts.len())
@@ -583,7 +583,7 @@ impl World {
         let own = self
             .core
             .env
-            .program
+            .program()
             .handlers
             .iter()
             .any(|h| h.event == event && u32::from(h.owner) == i);
@@ -811,7 +811,7 @@ impl World {
 
     /// After `complete`: a one-off quest is over; a repeatable one resets (module docs).
     fn completed(&mut self) {
-        let program = Arc::clone(&self.core.env.program);
+        let program = Arc::clone(self.core.env.program());
         let Some(repeat) = program.quest.as_ref().and_then(|q| q.repeat) else {
             self.outcome = Outcome::Completed;
             return;
@@ -860,7 +860,7 @@ impl World {
     // ---- mirrors ------------------------------------------------------------------------------------
 
     fn collect_mirrors(&mut self) {
-        let program = Arc::clone(&self.core.env.program);
+        let program = Arc::clone(self.core.env.program());
         let Some(q) = program.quest.as_ref() else {
             return;
         };
@@ -941,7 +941,7 @@ impl World {
     pub fn hash64(&self) -> u64 {
         let mut h = Fnv64::default();
         self.core.env.now.state_hash(&mut h);
-        self.core.env.program_key.state_hash(&mut h);
+        self.core.env.key().state_hash(&mut h);
         let outcome: u8 = match self.outcome {
             Outcome::Running => 0,
             Outcome::Completed => 1,
