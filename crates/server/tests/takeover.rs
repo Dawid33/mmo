@@ -1610,7 +1610,7 @@ impl Takeover {
             |m| {
                 m.spawner_mut().tick_all();
                 m.spawner_mut().pump();
-                let _ = server::lease::pump_or_fence(&mut beat, &fenced, Instant::now());
+                let _ = server::lease::pump_or_fence(&mut beat, &fenced, Instant::now(), &mut game::HostLoad::default);
                 pair.round();
                 round += 1;
                 each(&fenced, &generation, round);
@@ -1858,7 +1858,7 @@ fn exit_every_host_at_once(w: &mut World) -> Vec<Exited> {
                             now_tick: || 0,
                         },
                         |m| {
-                            let _ = server::lease::pump_or_fence(&mut beat, &beat_fenced, Instant::now());
+                            let _ = server::lease::pump_or_fence(&mut beat, &beat_fenced, Instant::now(), &mut game::HostLoad::default);
                             m.spawner_mut().tick_all();
                             m.spawner_mut().pump();
                             tick.fetch_max(m.spawner_mut().world_tick(), std::sync::atomic::Ordering::SeqCst);

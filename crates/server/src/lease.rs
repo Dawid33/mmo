@@ -75,7 +75,7 @@ impl Heartbeat {
         if self.replaced {
             return LeaseState::Replaced;
         }
-        match self.store.heartbeat(self.id, self.boot) {
+        match self.store.heartbeat(self.id, self.boot, game::HostLoad::default()) {
             Ok(Beat { live: true, drain_in_ms }) => {
                 self.drain_in_ms = drain_in_ms;
                 LeaseState::Held
@@ -95,7 +95,10 @@ impl Heartbeat {
     /// [`HOST_HEARTBEAT_MS`], none while one is in flight). `Replaced` once a beat answered
     /// that the row is not this live boot (it stays so); a store error is logged (at most
     /// once per [`HEARTBEAT_WARN_MS`]) and is not `Replaced`.
-    pub fn pump(&mut self, now: Instant) -> LeaseState {
+    ///
+    /// `load` is called only when a beat is sent; what it returns is the row's load and the
+    /// `/metrics` gauges (`mmo_host_load_*`).
+    pub fn pump(&mut self, now: Instant, load: &mut dyn FnMut() -> game::HostLoad) -> LeaseState {
         if self.replaced {
             return LeaseState::Replaced;
         }
@@ -124,7 +127,9 @@ impl Heartbeat {
         }
         if self.next_at.is_none_or(|at| now >= at) {
             self.next_at = Some(now + self.period);
-            self.pending = Some(self.store.heartbeat_later(self.id, self.boot));
+            let load = load();
+            crate::health::Health::global().host_load(load);
+            self.pending = Some(self.store.heartbeat_later(self.id, self.boot, load));
         }
         LeaseState::Held
     }
@@ -133,9 +138,14 @@ impl Heartbeat {
 /// The host main loop's lease step: pumps `heartbeat` (if this process holds a lease) and,
 /// once it answers `Replaced`, logs it and sets `fenced` (the exit then refuses its sessions
 /// with `FENCED_REFUSAL` and saves nothing). `true`: the loop must end.
-pub fn pump_or_fence(heartbeat: &mut Option<Heartbeat>, fenced: &Fenced, now: Instant) -> bool {
+pub fn pump_or_fence(
+    heartbeat: &mut Option<Heartbeat>,
+    fenced: &Fenced,
+    now: Instant,
+    load: &mut dyn FnMut() -> game::HostLoad,
+) -> bool {
     let Some(beat) = heartbeat.as_mut() else { return false };
-    if beat.pump(now) == LeaseState::Held {
+    if beat.pump(now, load) == LeaseState::Held {
         return false;
     }
     log::error!(
@@ -224,7 +234,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         store.register_host(host(11), CrashPolicy::Succession).unwrap();
         assert_eq!(beat.beat_now("a later step"), LeaseState::Replaced);
-        assert_eq!(beat.pump(Instant::now()), LeaseState::Replaced);
+        assert_eq!(beat.pump(Instant::now(), &mut game::HostLoad::default), LeaseState::Replaced);
         store.shutdown();
     }
 
@@ -241,11 +251,11 @@ mod tests {
         assert_eq!(beat.drain_in_ms(), None, "known only from a beat");
         // A pumped beat: sent at the first pump, its answer read at a later one.
         let now = Instant::now();
-        assert_eq!(beat.pump(now), LeaseState::Held);
+        assert_eq!(beat.pump(now, &mut game::HostLoad::default), LeaseState::Held);
         let deadline = Instant::now() + Duration::from_secs(5);
         while beat.drain_in_ms().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
-            assert_eq!(beat.pump(now), LeaseState::Held);
+            assert_eq!(beat.pump(now, &mut game::HostLoad::default), LeaseState::Held);
         }
         let d = beat.drain_in_ms().expect("the pumped beat's answer");
         assert!((55_000..=60_000).contains(&d), "{d}");

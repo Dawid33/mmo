@@ -77,6 +77,9 @@ pub struct Health {
     successions_open: AtomicU64,
     world_generation: AtomicU64,
     hosts_live: AtomicU64,
+    load_players: AtomicU64,
+    load_regions: AtomicU64,
+    load_tick_permille: AtomicU64,
     coordinator_transitions: AtomicU64,
     coordinator_core_bytes: AtomicU64,
     coordinator_history_bytes: AtomicU64,
@@ -104,6 +107,9 @@ impl Health {
             successions_open: AtomicU64::new(0),
             world_generation: AtomicU64::new(0),
             hosts_live: AtomicU64::new(0),
+            load_players: AtomicU64::new(0),
+            load_regions: AtomicU64::new(0),
+            load_tick_permille: AtomicU64::new(0),
             coordinator_transitions: AtomicU64::new(0),
             coordinator_core_bytes: AtomicU64::new(0),
             coordinator_history_bytes: AtomicU64::new(0),
@@ -244,6 +250,13 @@ impl Health {
         self.hosts_live.store(n, Ordering::Relaxed);
     }
 
+    /// What the last heartbeat sent as this host's load (Elastic 3).
+    pub fn host_load(&self, load: game::HostLoad) {
+        self.load_players.store(u64::from(load.players), Ordering::Relaxed);
+        self.load_regions.store(u64::from(load.regions), Ordering::Relaxed);
+        self.load_tick_permille.store(u64::from(load.tick_permille), Ordering::Relaxed);
+    }
+
     /// The coordinator committed a transition: its row's `core` and `history` (0: not written)
     /// bytes (Elastic 2a, decision 8).
     pub fn coordinator_written(&self, core_bytes: u64, history_bytes: u64) {
@@ -336,6 +349,13 @@ impl Health {
         counter("mmo_successions_settled_total", "Successions settled by a committed world cut.", load(&self.successions_settled));
         gauge("mmo_successions_open", "Successions open now, as the coordinator knows them.", load(&self.successions_open));
         gauge("mmo_world_generation", "The world generation this process runs.", load(&self.world_generation));
+        gauge("mmo_host_load_players", "Sessions this host reported in its last heartbeat.", load(&self.load_players));
+        gauge("mmo_host_load_regions", "Regions this host reported running in its last heartbeat.", load(&self.load_regions));
+        gauge(
+            "mmo_host_load_tick_permille",
+            "Worst tick compute time of the heartbeat window over the tick period, x1000, as last reported.",
+            load(&self.load_tick_permille),
+        );
         gauge("mmo_hosts_live", "Hosts whose `hosts` row is dirty and live at the coordinator's last read.", load(&self.hosts_live));
         counter(
             "mmo_coordinator_transitions_total",
@@ -609,6 +629,9 @@ mod tests {
             "mmo_successions_open",
             "mmo_world_generation",
             "mmo_hosts_live",
+            "mmo_host_load_players",
+            "mmo_host_load_regions",
+            "mmo_host_load_tick_permille",
             "mmo_coordinator_transitions_total",
             "mmo_coordinator_written_bytes_total",
             "mmo_coordinator_conflicts_total",

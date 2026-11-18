@@ -474,7 +474,7 @@ impl Pair {
         for sim in self.sims.iter_mut().filter(|s| !s.frozen(at)) {
             sim.settle(now);
             // The lease step of `server::run`'s loop (no heartbeat: nothing).
-            let _ = server::lease::pump_or_fence(&mut sim.heartbeat, &sim.fenced, at);
+            let _ = server::lease::pump_or_fence(&mut sim.heartbeat, &sim.fenced, at, &mut game::HostLoad::default);
             // Its drain step (Elastic 1 Task 8): the beat's mark becomes the manager's deadline.
             let drain_in_ms = sim.heartbeat.as_ref().and_then(server::lease::Heartbeat::drain_in_ms);
             let tick = sim.manager.spawner_mut().world_tick();

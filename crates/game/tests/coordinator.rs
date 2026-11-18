@@ -1852,7 +1852,7 @@ fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
 
 /// Host `ordinal`'s row as the coordinator reads it: dirty and live, last seen at `seen_ms`.
 fn seen(ordinal: HostId, seen_ms: u64) -> HostSeen {
-    HostSeen { ordinal, boot: 100 + ordinal.0, clean: false, state: game::HOST_LIVE, seen_ms, draining: false, landed: true }
+    HostSeen { ordinal, boot: 100 + ordinal.0, clean: false, state: game::HOST_LIVE, seen_ms, draining: false, load: Default::default(), landed: true }
 }
 
 /// A host is lapsed only once the coordinator itself read one `seen_ms` over a whole lease
@@ -3925,7 +3925,7 @@ fn a_world_life(gone: std::rc::Rc<std::cell::Cell<bool>>) -> Vec<(u64, LifeStep)
     // A lease read showing a dead row nobody here declared (host 8): the open successions are
     // read again (`reread_for`, `reread`, `known`), and the read's answer.
     at(&mut life, 10, Box::new(|c, now| {
-        let row = |o: u64, state: i64| HostSeen { ordinal: h(o), boot: 7 + o, clean: false, state, seen_ms: now, draining: false, landed: true };
+        let row = |o: u64, state: i64| HostSeen { ordinal: h(o), boot: 7 + o, clean: false, state, seen_ms: now, draining: false, load: Default::default(), landed: true };
         c.observe_leases(&[row(0, game::HOST_LIVE), row(1, game::HOST_LIVE), row(8, game::HOST_DEAD)], now, now);
     }));
     at(&mut life, 10, Box::new(|c, now| {

@@ -31,6 +31,16 @@ pub enum CrashPolicy {
 /// How often a host stamps its lease (`hosts.seen_ms`), from its MAIN loop: a hung loop must
 /// stop beating although its sockets live (a timer thread would keep a hung host alive).
 pub const HOST_HEARTBEAT_MS: u64 = 2_000;
+
+/// What a host reports in its heartbeat (Elastic 3): sessions it holds, regions it runs, and its
+/// worst tick compute time since the previous beat over the tick period, x1000 (capped at 10000).
+/// All zero for a fresh row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostLoad {
+    pub players: u32,
+    pub regions: u32,
+    pub tick_permille: u32,
+}
 /// How long a host's lease lasts without a beat: the coordinator declares a host dead once
 /// it has read the same `seen_ms` over this long of its own successful reads; a booting host
 /// counts another host alive while `db_now - seen_ms` is within it.

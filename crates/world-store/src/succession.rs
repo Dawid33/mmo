@@ -17,7 +17,8 @@
 //! compare-and-set, below), then `world` `FOR NO KEY UPDATE`
 //! (it serialises with `decide_in`, `register_host` and `rollback_world_in`, which take the
 //! same lock in the same order, and never waits for a claim's `FOR KEY SHARE`), then the
-//! predecessors' `hosts` rows `FOR NO KEY UPDATE` in id order (a heartbeat waits for
+//! predecessors' `hosts` rows `FOR NO KEY UPDATE` in id order (the heartbeat's load columns ride its same one-row
+//! statement, no new lock; a heartbeat waits for
 //! the declaration, so a beat between the lapse check and the update cannot be lost), then
 //! each predecessor's `super_regions` rows `FOR NO KEY UPDATE` in key order. A staged cut
 //! part of the predecessor holds those rows `FOR SHARE` until its cut is decided: the

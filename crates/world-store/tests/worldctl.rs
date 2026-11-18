@@ -272,7 +272,7 @@ fn retire_vouches_while_others_live() {
     assert!(out.contains("vouched"), "{out}");
     assert_eq!(w.h.hosts().unwrap()[2].seen_ms, 0, "vouched: seen_ms = 0");
     assert!(w.h.open_successions().unwrap().is_empty(), "the command declares nothing itself");
-    assert!(w.hosts[2].heartbeat(hid(2), boot_of(hid(2))).unwrap().live);
+    assert!(w.hosts[2].heartbeat(hid(2), boot_of(hid(2)), Default::default()).unwrap().live);
     assert_eq!(w.declare(hid(2), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(2)]), "it beat: harmless");
     assert_eq!(w.state_of(hid(2)), (HOST_LIVE, false));
     // Running again: a second vouch is refused.

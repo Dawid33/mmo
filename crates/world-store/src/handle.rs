@@ -77,6 +77,8 @@ pub struct HostRow {
     /// succession settled, or it was ended holding no land) is gone for good: a host forgets it
     /// (`WorldManager::forget_dead_hosts`).
     pub succeeding: bool,
+    /// What the host's last beat reported ([`StoreHandle::heartbeat`]); all zero until one did.
+    pub load: game::HostLoad,
 }
 
 /// A read of every `hosts` row ([`StoreHandle::hosts_later`]) with the database clock.
@@ -1139,13 +1141,13 @@ impl StoreHandle {
     }
 
     /// One lease beat: host `ordinal`'s row gets `seen_ms` = the database clock, if it is
-    /// still boot `boot` and live, and the beat reports the row's drain mark ([`Beat`]).
+    /// still boot `boot` and live, carries `load` (the host's own report) and the beat reports the row's drain mark ([`Beat`]).
     /// `live: false`: no such live row — the caller was replaced.
     /// With Postgres a row lock held by a registration or a decision makes the beat fail with an error
     /// after [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (not `live: false`). Unfenced on purpose: it writes only the caller's own row and proves nothing but
     /// liveness (ownership is what the fence proves, and every write still checks it).
-    pub fn heartbeat(&self, ordinal: HostId, boot: u64) -> Result<Beat, StoreError> {
-        self.ask(|r| Request::Heartbeat(ordinal, boot, r))
+    pub fn heartbeat(&self, ordinal: HostId, boot: u64, load: game::HostLoad) -> Result<Beat, StoreError> {
+        self.ask(|r| Request::Heartbeat(ordinal, boot, load, r))
     }
 
     /// [`Self::heartbeat`], answered on the receiver.
@@ -1153,8 +1155,9 @@ impl StoreHandle {
         &self,
         ordinal: HostId,
         boot: u64,
+        load: game::HostLoad,
     ) -> crossbeam::channel::Receiver<Result<Beat, StoreError>> {
-        self.ask_later(|r| Request::Heartbeat(ordinal, boot, r))
+        self.ask_later(|r| Request::Heartbeat(ordinal, boot, load, r))
     }
 
     /// Elastic 1, `worldctl drain`: marks host `id` draining — its `drain_at_ms` becomes the

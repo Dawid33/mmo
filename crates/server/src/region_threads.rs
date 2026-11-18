@@ -48,6 +48,8 @@ pub struct ThreadRegionSpawner {
     /// never generates and never runs with an unseeded seam. `None`: no
     /// forged world to prefetch (tests, tools with their own generators).
     prefetch: Option<RegionPrefetch>,
+    /// Every region thread notes its tick compute time here (the host's heartbeat reports the worst).
+    tick_load: crate::load::TickLoad,
 }
 
 impl Default for ThreadRegionSpawner {
@@ -59,6 +61,7 @@ impl Default for ThreadRegionSpawner {
             generator: None,
             store: None,
             prefetch: None,
+            tick_load: crate::load::TickLoad::default(),
         }
     }
 }
@@ -101,6 +104,12 @@ impl ThreadRegionSpawner {
         self
     }
 
+    /// Region threads note their ticks into `tick_load` (read by the host's heartbeat).
+    pub fn with_tick_load(mut self, tick_load: crate::load::TickLoad) -> Self {
+        self.tick_load = tick_load;
+        self
+    }
+
     /// Pin a region's forged tiles with `prefetch` before it generates.
     pub fn with_prefetch(mut self, prefetch: RegionPrefetch) -> Self {
         self.prefetch = Some(prefetch);
@@ -122,6 +131,7 @@ impl RegionSpawner for ThreadRegionSpawner {
         };
         let store = self.store.clone();
         let prefetch = self.prefetch.clone();
+        let tick_load = self.tick_load.clone();
         let (clock, started) = (self.clock, self.started);
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
@@ -235,7 +245,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                     game::perf::ms(build),
                     game::perf::ms(hash_time)
                 );
-                region_thread_loop(id, runner, recv, clock, started);
+                region_thread_loop(id, runner, recv, clock, started, tick_load);
             })
             .expect("failed to spawn region thread");
         self.handles.insert(id, handle);
@@ -283,6 +293,7 @@ pub fn region_thread_loop(
     recv: Receiver<RegionInput>,
     clock: game::WorldClock,
     started: Instant,
+    tick_load: crate::load::TickLoad,
 ) {
     let now_ms = || started.elapsed().as_millis() as u64;
     let mut metrics = TickMetrics::new();
@@ -302,7 +313,9 @@ pub fn region_thread_loop(
                 for _ in 0..due {
                     let compute_start = Instant::now();
                     runner.tick();
-                    metrics.record_tick(compute_start.elapsed());
+                    let compute = compute_start.elapsed();
+                    tick_load.note(compute);
+                    metrics.record_tick(compute);
                     if first_tick {
                         // The first step after genesis pays one-off physics setup
                         // (broad-phase build, mass properties) the averages hide.

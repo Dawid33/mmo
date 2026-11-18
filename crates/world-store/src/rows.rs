@@ -177,9 +177,26 @@ pub(crate) enum CutEnd {
 /// seen_ms`, NULL when not draining). No row returned: not that live boot.
 pub(crate) fn heartbeat_sql(now_ms: &str) -> String {
     format!(
-        "UPDATE hosts SET seen_ms = {now_ms} WHERE id = $1 AND boot = $2 AND state = {} RETURNING drain_at_ms - seen_ms",
+        "UPDATE hosts SET seen_ms = {now_ms}, load_players = $3, load_regions = $4, load_tick_permille = $5 \
+         WHERE id = $1 AND boot = $2 AND state = {} RETURNING drain_at_ms - seen_ms",
         crate::HOST_LIVE
     )
+}
+
+/// A stored load column as the `u32` it was written from (a value out of range is clamped).
+pub(crate) fn load_of(v: i64) -> u32 {
+    u32::try_from(v.max(0)).unwrap_or(u32::MAX)
+}
+
+/// `heartbeat_sql`'s `$3..$5`: the load, in the order of [`game::HostLoad`]'s fields.
+pub(crate) fn bind_load<'q, DB: sqlx::Database>(
+    q: sqlx::query::Query<'q, DB, <DB as sqlx::Database>::Arguments<'q>>,
+    load: game::HostLoad,
+) -> sqlx::query::Query<'q, DB, <DB as sqlx::Database>::Arguments<'q>>
+where
+    i64: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+{
+    q.bind(i64::from(load.players)).bind(i64::from(load.regions)).bind(i64::from(load.tick_permille))
 }
 
 /// A [`heartbeat_sql`] answer as a [`crate::Beat`]: `None` = no row (replaced); `Some(d)` = the
@@ -855,7 +872,7 @@ macro_rules! engine_rows {
                     .unwrap_or(0);
                 let sql = format!(
                     "SELECT id, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, \
-                     seen_ms, name, drain_at_ms - {NOW_MS}, \
+                     seen_ms, name, drain_at_ms - {NOW_MS}, load_players, load_regions, load_tick_permille, \
                      (EXISTS (SELECT 1 FROM super_regions WHERE owner = hosts.id) \
                       OR EXISTS (SELECT 1 FROM in_flight WHERE host = hosts.id)), \
                      EXISTS (SELECT 1 FROM successions WHERE predecessor = hosts.id \
@@ -880,8 +897,13 @@ macro_rules! engine_rows {
                             seen_ms: u(r.try_get(10)?),
                             name: r.try_get(11)?,
                             drain_in_ms: r.try_get(12)?,
-                            owns_land: r.try_get(13)?,
-                            succeeding: r.try_get(14)?,
+                            load: game::HostLoad {
+                                players: load_of(r.try_get(13)?),
+                                regions: load_of(r.try_get(14)?),
+                                tick_permille: load_of(r.try_get(15)?),
+                            },
+                            owns_land: r.try_get(16)?,
+                            succeeding: r.try_get(17)?,
                         })
                     })
                     .collect::<Result<Vec<HostRow>, StoreError>>()?;
@@ -895,11 +917,11 @@ macro_rules! engine_rows {
             /// time"), it neither hangs nor answers `live: false`. It touches neither `world` nor
             /// `super_regions`. `live: false`: no live row of that boot (the caller was
             /// replaced); a live one also answers its drain mark ([`super::heartbeat_sql`]).
-            pub(crate) async fn heartbeat(pool: &Pool, ordinal: HostId, boot: u64) -> Result<crate::Beat, StoreError> {
+            pub(crate) async fn heartbeat(pool: &Pool, ordinal: HostId, boot: u64, load: game::HostLoad) -> Result<crate::Beat, StoreError> {
                 let sql = super::heartbeat_sql(NOW_MS);
                 let mut tx = pool.begin().await?;
                 cut_lock_timeout(&mut *tx, crate::HEARTBEAT_LOCK_TIMEOUT_MS).await?;
-                let row = sqlx::query(&sql).bind(i(ordinal.0)).bind(i(boot)).fetch_optional(&mut *tx).await?;
+                let row = super::bind_load(sqlx::query(&sql).bind(i(ordinal.0)).bind(i(boot)), load).fetch_optional(&mut *tx).await?;
                 tx.commit().await?;
                 Ok(super::beat_of(row.map(|r| r.try_get::<Option<i64>, _>(0)).transpose()?))
             }

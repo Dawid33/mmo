@@ -91,7 +91,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("coordinator", "id:I*, epoch:I, saved_utc:T?, version:I, core:B?, history:B?, next_replica:I, history_version:I"),
     ("coordinator_replicas", "replica:I*, seen_ms:I, state:I, addr:T, registered_utc:I"),
     ("outbox", "seq:I*, version:I, host:I, boot:I, msg:B"),
-    ("hosts", "id:I*, boot:I, generation:I, clean:I, state:I, seen_ms:I, reg:I, peer_addr:T?, peer_cert:T?, quic:T?, webtransport:T?, wt_cert_hash:T?, updated_utc:T, name:T, drain_at_ms:I?"),
+    ("hosts", "id:I*, boot:I, generation:I, clean:I, state:I, seen_ms:I, reg:I, peer_addr:T?, peer_cert:T?, quic:T?, webtransport:T?, wt_cert_hash:T?, updated_utc:T, name:T, drain_at_ms:I?, load_players:I, load_regions:I, load_tick_permille:I"),
     ("cut_decisions", "cut_id:I*, tick:I, committed:I, decided_utc:T"),
     ("cut_begins", "cut_id:I*, hosts_below:I, begun_utc:T"),
     ("successions", "id:I*, predecessor:I, predecessor_boot:I, heir:I, kind:I, base_cut:I, settled_cut:I?, abandoned:I, declared_utc:T, survivors:T, moved:T"),

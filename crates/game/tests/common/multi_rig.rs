@@ -772,7 +772,7 @@ impl MultiRig {
                 let boot = self.boots[h.0 as usize];
                 let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
                 let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
-                game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, landed: self.landed(h) }
+                game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
             })
             .collect();
         let open: Vec<game::Succession> = self
@@ -876,7 +876,7 @@ impl MultiRig {
                 let boot = self.boots[h.0 as usize];
                 let clean = self.left.get(&h) == Some(&boot);
                 let state = if declared_dead.contains(&(h, boot)) && !clean { game::HOST_DEAD } else { game::HOST_LIVE };
-                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms: now + 1, draining: false, landed: self.landed(h) }
+                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms: now + 1, draining: false, load: Default::default(), landed: self.landed(h) }
             })
             .collect();
         let expected: BTreeSet<HostId> =
@@ -1756,7 +1756,7 @@ impl MultiRig {
                     let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
                     // Every live host beats every round; the dead ones are vouched.
                     let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
-                    game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, landed: self.landed(h) }
+                    game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
                 })
                 .collect();
             let mut core = self.core();
@@ -1914,7 +1914,7 @@ impl MultiRig {
                 let clean = self.left.get(&h) == Some(&boot);
                 let state = if self.row_dead(h) { game::HOST_DEAD } else { game::HOST_LIVE };
                 let seen_ms = if self.dead.contains(&h) { 0 } else { now + 1 };
-                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms, draining: false, landed: self.landed(h) }
+                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
             })
             .collect();
         let expected: BTreeSet<HostId> =
@@ -2057,7 +2057,7 @@ impl MultiRig {
                 .filter(|h| !self.dead.contains(h) || *h == dead)
                 .map(|h| {
                     let seen_ms = if h == dead { 0 } else { now + 1 };
-                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h.0 as usize], clean: false, state: game::HOST_LIVE, seen_ms, draining: false, landed: self.landed(h) }
+                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h.0 as usize], clean: false, state: game::HOST_LIVE, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
                 })
                 .collect();
             let mut core = self.core();

@@ -171,6 +171,7 @@ pub mod dev_structures;
 pub mod drain;
 pub mod health;
 pub mod lease;
+pub mod load;
 pub mod lod_workers;
 pub mod login_link;
 pub mod peer_link;
@@ -1088,7 +1089,10 @@ pub fn run() -> claims::ServerExit {
     // Each region thread pins the forged tiles of its 3x3 neighbourhood
     // before it is built; one that will not load stops the region
     // (`RegionOutput::LoadFailed`).
+    // Every region thread notes its ticks here; each heartbeat reads the worst of its window.
+    let tick_load = load::TickLoad::default();
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
+        .with_tick_load(tick_load.clone())
         .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
         .with_clock(world_clock, start);
     // Region loads and cut commits are fenced: the super-regions this process owns are
@@ -1349,7 +1353,9 @@ pub fn run() -> claims::ServerExit {
         // The lease is beaten from THIS loop on purpose (R4 decision 3): a hung main loop must
         // stop beating although its sockets live, so the coordinator sees it lapse — a timer
         // thread would keep beating for a host that no longer runs.
-        if lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now()) {
+        if lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now(), &mut || {
+            load::host_load(&manager, &tick_load)
+        }) {
             break 'main;
         }
         // A drain mark (`worldctl drain`), read by that beat: the deadline its players are told
@@ -1472,7 +1478,7 @@ pub fn run() -> claims::ServerExit {
         // leaver's), and a beat finding no row must not make a clean exit a fenced one.
         |m| {
             if claim_on_demand && m.leave_outcome() != Some(true) {
-                lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now());
+                lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now(), &mut || load::host_load(m, &tick_load));
             }
         },
     );

@@ -176,7 +176,7 @@ fn declare_moves_every_super_region_and_fences_the_dead_host() {
     assert!(fenced(dead.load_region(B, &f1)), "load");
     assert_eq!(prepared(&w.w), 0);
     // Its lease is gone; its row is dead and still dirty.
-    assert!(!dead.heartbeat(hid(1), boot_of(hid(1))).unwrap().live);
+    assert!(!dead.heartbeat(hid(1), boot_of(hid(1)), Default::default()).unwrap().live);
     assert_eq!(w.state_of(hid(1)), (HOST_DEAD, false));
     assert_eq!(w.h.open_successions().unwrap(), vec![s]);
     w.shutdown();
@@ -189,7 +189,7 @@ fn declare_refuses_a_row_that_heartbeated() {
     assert_eq!(w.declare(hid(1), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(1)]));
     // Lapsed, then it beat again before the declaration.
     w.lapse(hid(1));
-    assert!(w.hosts[1].heartbeat(hid(1), boot_of(hid(1))).unwrap().live);
+    assert!(w.hosts[1].heartbeat(hid(1), boot_of(hid(1)), Default::default()).unwrap().live);
     assert_eq!(w.declare(hid(1), hid(0), SuccessionKind::Crash).unwrap(), Declared::NotLapsed(vec![hid(1)]));
     // Another boot of the ordinal is not the one the caller judged dead.
     w.lapse(hid(1));
@@ -829,7 +829,7 @@ fn a_landless_lapsed_host_is_ended_without_a_generation_change() {
     assert_eq!(w.h.world_generation().unwrap(), 0, "the generation untouched");
     assert!(w.h.open_successions().unwrap().is_empty(), "no succession");
     assert_eq!((0..2).map(|o| w.h.owned_by(hid(o)).unwrap()).collect::<Vec<_>>(), land_before, "nothing moved");
-    assert!(!w.hosts[2].heartbeat(hid(2), boot2).unwrap().live, "its next beat finds it replaced");
+    assert!(!w.hosts[2].heartbeat(hid(2), boot2, Default::default()).unwrap().live, "its next beat finds it replaced");
     assert_eq!(w.h.end_landless_host(hid(2), boot2), Ok(LandlessEnd::Gone), "dead already");
     // A claim of a free row by the ended boot (a zombie) is refused.
     let err = w.hosts[2].claim_free(hid(2), boot2, vec![(40, 40)]);

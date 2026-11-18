@@ -411,7 +411,7 @@ fn restarted_listener_is_found_again() {
         }
     };
     // Host 1 runs on (its lease beaten): the restart is not a total crash.
-    assert!(s1.heartbeat(h(1), 2).unwrap().live, "host 1's row is its live boot");
+    assert!(s1.heartbeat(h(1), 2, Default::default()).unwrap().live, "host 1's row is its live boot");
     let store2 = db.open();
     let (mut l2, again) = boot_links(&store2, next_id(&db), "host-0", 3, TOKEN, &dir, &new_bind.to_string());
     assert_eq!((again.id, l2.local_addr()), (h(2), new_bind), "a new id: the next one");
@@ -992,14 +992,14 @@ fn replaced_host_exits_fenced_at_its_next_heartbeat() {
     let live_until = Instant::now() + Duration::from_millis(game::HOST_HEARTBEAT_MS + 500);
     while Instant::now() < live_until {
         w.pair.round();
-        assert!(!pump_or_fence(&mut beat, &fenced, Instant::now()), "a live row holds its lease");
+        assert!(!pump_or_fence(&mut beat, &fenced, Instant::now(), &mut game::HostLoad::default), "a live row holds its lease");
     }
     assert!(!fenced.is_set());
     exec(&db, "UPDATE hosts SET state = 1 WHERE id = 1");
     let marked = Instant::now();
     loop {
         w.pair.round();
-        if pump_or_fence(&mut beat, &fenced, Instant::now()) {
+        if pump_or_fence(&mut beat, &fenced, Instant::now(), &mut game::HostLoad::default) {
             break;
         }
         assert!(marked.elapsed() < Duration::from_secs(3), "no Replaced within 3 s of the row marked dead");

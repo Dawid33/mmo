@@ -142,7 +142,7 @@ pub(crate) enum Request {
     RegisterHost(crate::NewHost, game::CrashPolicy, Reply<crate::Registered>),
     Hosts(Reply<crate::HostsRead>),
     WorldGeneration(Reply<u64>),
-    Heartbeat(HostId, u64, Reply<crate::Beat>),
+    Heartbeat(HostId, u64, game::HostLoad, Reply<crate::Beat>),
     DrainHost(HostId, u64, Reply<()>),
     Owners(Reply<Vec<(SuperRegion, i64, u64)>>),
     OwnedBy(HostId, Reply<Fence>),
@@ -688,9 +688,9 @@ async fn serve(
             // Postgres: neither a connection of the shared pool (a burst of region loads, a
             // long part and a claim waiting on a lock can hold all of them for longer than
             // the lease) — the beat task's own connection, under its deadline.
-            Request::Heartbeat(ordinal, boot, r) => match (&pool, &beat_tx) {
+            Request::Heartbeat(ordinal, boot, load, r) => match (&pool, &beat_tx) {
                 (Pool::Pg(_), Some(beat_tx)) => {
-                    if let Err(mpsc::error::SendError(job)) = beat_tx.send(BeatJob::Host(ordinal, boot, r)) {
+                    if let Err(mpsc::error::SendError(job)) = beat_tx.send(BeatJob::Host(ordinal, boot, load, r)) {
                         job.refuse("the heartbeat task has stopped");
                     }
                     continue;
@@ -700,7 +700,7 @@ async fn serve(
                         Pool::Sqlite(_) => Some(writer.lock().await),
                         Pool::Pg(_) => None,
                     };
-                    r.send(on_pool!(&pool, heartbeat(ordinal, boot)))
+                    r.send(on_pool!(&pool, heartbeat(ordinal, boot, load)))
                 }),
             },
             Request::TestHook(hook, r) => match hook {
@@ -767,7 +767,7 @@ async fn serve(
 /// A lease beat for the beat task: a host's `(ordinal, boot, answer)`, or a coordinator
 /// replica's (Elastic 2b Task 4).
 enum BeatJob {
-    Host(HostId, u64, Reply<crate::Beat>),
+    Host(HostId, u64, game::HostLoad, Reply<crate::Beat>),
     Replica(game::coordinator::ReplicaId, Reply<bool>),
 }
 
@@ -776,7 +776,7 @@ impl BeatJob {
     fn refuse(self, why: &str) {
         let e = || StoreError::Backend(why.into());
         match self {
-            BeatJob::Host(_, _, r) => r.send(Err(e())),
+            BeatJob::Host(_, _, _, r) => r.send(Err(e())),
             BeatJob::Replica(_, r) => r.send(Err(e())),
         }
     }
@@ -804,8 +804,8 @@ async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::Unbounde
     let replica_sql = crate::replicas::beat_sql(crate::succession::PG_NOW_MS);
     let mut conn: Option<sqlx::PgConnection> = None;
     while let Some(job) = rx.recv().await {
-        let (ordinal, boot, reply) = match job {
-            BeatJob::Host(ordinal, boot, reply) => (ordinal, boot, reply),
+        let (ordinal, boot, load, reply) = match job {
+            BeatJob::Host(ordinal, boot, load, reply) => (ordinal, boot, load, reply),
             BeatJob::Replica(me, reply) => {
                 let beat = async {
                     if conn.is_none() {
@@ -841,7 +841,9 @@ async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::Unbounde
             }
             let mut tx = conn.as_mut().expect("connected above").begin().await?;
             sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", crate::HEARTBEAT_LOCK_TIMEOUT_MS)).execute(&mut *tx).await?;
-            let row = sqlx::query(&sql).bind(i(ordinal.0)).bind(crate::rows::i(boot)).fetch_optional(&mut *tx).await?;
+            let row = crate::rows::bind_load(sqlx::query(&sql).bind(i(ordinal.0)).bind(crate::rows::i(boot)), load)
+                .fetch_optional(&mut *tx)
+                .await?;
             tx.commit().await?;
             Ok::<crate::Beat, sqlx::Error>(crate::rows::beat_of(row.map(|r| r.try_get::<Option<i64>, _>(0)).transpose()?))
         };

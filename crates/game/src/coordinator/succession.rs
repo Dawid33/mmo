@@ -123,6 +123,8 @@ pub struct HostSeen {
     /// The operator marked it draining (`hosts.drain_at_ms` set, `worldctl drain`): it is never
     /// the gate host ([`super::Coordinator::gate_host`]).
     pub draining: bool,
+    /// What its last beat reported (Elastic 3; nothing reads it yet).
+    pub load: crate::HostLoad,
     /// It holds land at the read: a `super_regions` row or an `in_flight` row of its id
     /// (Elastic 2a). A lapse of a landless host that no open run names is ENDED
     /// ([`Coordinator::take_end_landless`]), never succeeded; heirs are picked among landed

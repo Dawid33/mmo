@@ -32,19 +32,19 @@ fn heartbeat_moves_seen_ms_for_the_live_boot_only() {
         let seen = || h.hosts().unwrap()[0].seen_ms;
         let first = seen();
         std::thread::sleep(std::time::Duration::from_millis(30));
-        assert!(h.heartbeat(a, 10).unwrap().live);
+        assert!(h.heartbeat(a, 10, Default::default()).unwrap().live);
         let second = seen();
         assert!(second > first, "{second} > {first}");
         // Another boot under the id, or an id that was never issued: replaced.
-        assert!(!h.heartbeat(a, 11).unwrap().live);
-        assert!(!h.heartbeat(hid(5), 10).unwrap().live);
+        assert!(!h.heartbeat(a, 11, Default::default()).unwrap().live);
+        assert!(!h.heartbeat(hid(5), 10, Default::default()).unwrap().live);
         assert_eq!(seen(), second);
         // A dead row no longer takes beats.
         h.shutdown();
         raw_exec(url, "UPDATE hosts SET state = 1");
         let h = open(url);
         let before = h.hosts().unwrap()[0].seen_ms;
-        assert!(!h.heartbeat(a, 10).unwrap().live);
+        assert!(!h.heartbeat(a, 10, Default::default()).unwrap().live);
         assert_eq!(h.hosts().unwrap()[0].seen_ms, before);
         h.shutdown();
     });
@@ -57,14 +57,14 @@ fn a_beat_reports_the_drain_and_its_remaining_time() {
     each_backend("lease_drain_beat", false, |url| {
         let h = open(url);
         let a = register(&h, "a", 10).unwrap().id;
-        assert_eq!(h.heartbeat(a, 10).unwrap(), Beat { live: true, drain_in_ms: None });
+        assert_eq!(h.heartbeat(a, 10, Default::default()).unwrap(), Beat { live: true, drain_in_ms: None });
         h.drain_host(a, 60_000).unwrap();
-        let beat = h.heartbeat(a, 10).unwrap();
+        let beat = h.heartbeat(a, 10, Default::default()).unwrap();
         assert!(beat.live);
         let d = beat.drain_in_ms.expect("draining");
         assert!((55_000..=60_000).contains(&d), "{d}");
         // Another boot under the id is not that live row: nothing to report.
-        assert_eq!(h.heartbeat(a, 11).unwrap(), Beat { live: false, drain_in_ms: None });
+        assert_eq!(h.heartbeat(a, 11, Default::default()).unwrap(), Beat { live: false, drain_in_ms: None });
         h.shutdown();
     });
 }
@@ -136,7 +136,7 @@ fn a_lapsed_row_is_not_drainable() {
         }
         assert!(h.hosts().unwrap().iter().all(|r| r.drain_in_ms.is_none()), "nothing written");
         // It beats again: markable.
-        assert!(h.heartbeat(a, 10).unwrap().live);
+        assert!(h.heartbeat(a, 10, Default::default()).unwrap().live);
         h.drain_host(a, 60_000).unwrap();
         h.shutdown();
     });
@@ -163,14 +163,14 @@ fn a_heartbeat_behind_a_held_row_lock_errors_instead_of_waiting() {
         sqlx::query("SELECT 1 FROM hosts WHERE id = 1 FOR UPDATE").execute(&mut *tx).await.unwrap();
         let started = std::time::Instant::now();
         let h2 = h.clone();
-        let beat = tokio::task::spawn_blocking(move || h2.heartbeat(a, 10)).await.unwrap();
+        let beat = tokio::task::spawn_blocking(move || h2.heartbeat(a, 10, Default::default())).await.unwrap();
         let waited = started.elapsed();
         assert!(matches!(&beat, Err(e) if e.is_lock_conflict()), "a beat behind a row lock is a lock conflict, got {beat:?}");
         assert!(waited < std::time::Duration::from_millis(HEARTBEAT_LOCK_TIMEOUT_MS * 3), "waited {waited:?}");
         tx.rollback().await.unwrap();
         // Released: the beat goes through again.
         let h2 = h.clone();
-        assert!(tokio::task::spawn_blocking(move || h2.heartbeat(a, 10)).await.unwrap().unwrap().live);
+        assert!(tokio::task::spawn_blocking(move || h2.heartbeat(a, 10, Default::default())).await.unwrap().unwrap().live);
     });
     h.shutdown();
     drop(db);
@@ -197,11 +197,11 @@ fn a_heartbeat_does_not_wait_for_the_shared_pool() {
     std::thread::sleep(std::time::Duration::from_millis(30));
     h.hold_pool_connections(STORE_POOL_MAX, HELD_MS).unwrap();
     let started = std::time::Instant::now();
-    assert!(h.heartbeat(a, 10).unwrap().live, "the live boot's beat");
+    assert!(h.heartbeat(a, 10, Default::default()).unwrap().live, "the live boot's beat");
     let waited = started.elapsed();
     assert!(waited < std::time::Duration::from_millis(HELD_MS / 2), "the beat waited {waited:?} for the busy shared pool");
     // Another boot under the id is still answered `false` on that connection.
-    assert!(!h.heartbeat(a, 11).unwrap().live);
+    assert!(!h.heartbeat(a, 11, Default::default()).unwrap().live);
     // (The read waits for the pool; the beat above did not.)
     assert!(h.hosts().unwrap()[0].seen_ms > before);
     h.shutdown();
@@ -217,7 +217,7 @@ fn a_lone_claim_host_restarts_after_a_crash_without_waiting() {
     each_backend("lease_lone_claim", false, |url| {
         let h = open(url);
         let first = h.register_host(crate::hosts::new_host("host", 10), CrashPolicy::Succession).unwrap();
-        assert!(h.heartbeat(first.id, 10).unwrap().live);
+        assert!(h.heartbeat(first.id, 10, Default::default()).unwrap().live);
         let started = std::time::Instant::now();
         let again = h.register_host(crate::hosts::new_host("host", 20), CrashPolicy::Succession).unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "registered at once");
@@ -228,6 +228,24 @@ fn a_lone_claim_host_restarts_after_a_crash_without_waiting() {
             vec![(again.id, 20, HOST_LIVE, false)],
             "the old row, dead and landless, is pruned"
         );
+        h.shutdown();
+    });
+}
+
+/// Elastic 3 Task 1: a beat writes the host's load into its row, and the `hosts` read returns it.
+#[test]
+fn a_beat_writes_the_load_and_the_hosts_read_returns_it() {
+    each_backend("lease_load_beat", false, |url| {
+        let h = open(url);
+        let a = register(&h, "a", 10).unwrap().id;
+        assert_eq!(h.hosts().unwrap()[0].load, game::HostLoad::default(), "a fresh row carries no load");
+        let load = game::HostLoad { players: 3, regions: 7, tick_permille: 412 };
+        assert!(h.heartbeat(a, 10, load).unwrap().live);
+        assert_eq!(h.hosts().unwrap()[0].load, load);
+        // A beat for another boot changes nothing.
+        let other = game::HostLoad { players: 9, regions: 9, tick_permille: 999 };
+        assert!(!h.heartbeat(a, 11, other).unwrap().live);
+        assert_eq!(h.hosts().unwrap()[0].load, load);
         h.shutdown();
     });
 }
