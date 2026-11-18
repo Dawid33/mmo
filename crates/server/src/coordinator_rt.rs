@@ -1069,10 +1069,12 @@ pub struct CoordinatorRuntime {
     store: StoreHandle,
     /// The transition being written and the store's answer on its way (one at a time).
     writing: Option<(game::coordinator::Transition, Receiver<Result<TransitionWritten, StoreError>>)>,
-    /// The hashes of the cores of the writes that failed since the last commit (at most
-    /// [`COORDINATOR_UNACKED_MAX`]): one of them may have committed with its answer lost. While
-    /// any is remembered a rebase could apply that write's inputs twice: none is done.
-    unacked: VecDeque<u64>,
+    /// The writes that failed since the last commit (at most [`COORDINATOR_UNACKED_MAX`]), by
+    /// their cores' hashes: one of them may have committed with its answer lost. While any is
+    /// remembered a rebase could apply that write's inputs twice: none is done.
+    unacked: VecDeque<Unacked>,
+    /// The hosts (with their links' boots) the write in flight takes outbox rows for.
+    writing_take_for: Vec<(HostId, u64)>,
     /// Conflicts rebased through since the last commit (or the last wait,
     /// [`COORDINATOR_CONFLICT_RETRIES`]).
     conflicts_in_a_row: u32,
@@ -1138,8 +1140,8 @@ pub struct CoordinatorRuntime {
     notices: Option<Receiver<world_store::Notice>>,
     /// The outbox take in flight between transitions (one store call at a time with the write).
     outbox_rx: Option<Answer<Vec<world_store::OutboxRow>>>,
-    /// Outbox rows taken and not sent yet, in commit order: each leaves once the cache is at
-    /// least as new as its version.
+    /// Outbox rows taken and not sent yet, in commit order: every one at or below the cache's
+    /// version (a take is bounded by it, final review S-I2).
     relay: VecDeque<world_store::OutboxRow>,
     /// A take between transitions is due (a notice, the backstop, a refresh).
     take_wanted: bool,
@@ -1200,11 +1202,13 @@ struct WriteTally {
     history_bytes: u64,
     conflicts: u64,
     failures: u64,
+    /// Host links closed after a lost commit answer took their outbox rows (final review S-I3).
+    relinks: u64,
 }
 
 impl WriteTally {
     fn new() -> Self {
-        WriteTally { since: Instant::now(), transitions: 0, core_bytes: 0, history_bytes: 0, conflicts: 0, failures: 0 }
+        WriteTally { since: Instant::now(), transitions: 0, core_bytes: 0, history_bytes: 0, conflicts: 0, failures: 0, relinks: 0 }
     }
 }
 
@@ -1249,6 +1253,19 @@ enum Settled {
 /// The error a write refused by the test hook [`CoordinatorThread::fail_coordinator_writes`]
 /// carries: it never reached the store (certainly not committed — its decisions go out again).
 const HOOK_REFUSED: &str = "test hook: coordinator writes fail (refused before the store)";
+
+/// A write that failed and may have committed ([`CoordinatorRuntime::unacked`]): what its
+/// recognition as this process's own lost commit needs (final review S-I3).
+struct Unacked {
+    /// [`core_hash`] of its core.
+    hash: u64,
+    /// How many outbox messages it carried: in the row already if it committed — the head of the
+    /// core's outbox then (a write handed back puts its outbox first), not written again.
+    outbox: usize,
+    /// The hosts (and their links' boots) whose outbox rows it took: if it committed, those rows
+    /// left the table with its lost answer.
+    took_for: Vec<(HostId, u64)>,
+}
 
 /// A hash of a written core: what a re-read row is compared with ([`CoordinatorRuntime::unacked`]).
 fn core_hash(core: &[u8]) -> u64 {
@@ -1346,6 +1363,7 @@ impl CoordinatorRuntime {
             store,
             writing: None,
             unacked: VecDeque::new(),
+            writing_take_for: Vec::new(),
             conflicts_in_a_row: 0,
             tally: WriteTally::new(),
             #[cfg(feature = "test-hooks")]
@@ -2216,7 +2234,9 @@ impl CoordinatorRuntime {
             if idle && (self.take_wanted || self.check_take) {
                 // The rows other replicas left for this replica's hosts, between transitions.
                 self.take_wanted = false;
-                self.outbox_rx = Some(self.store.take_outbox_later(self.take_for()));
+                // Bounded by this cache's version (final review S-I2): a newer row may have been
+                // decided after its host attached elsewhere — it waits for a refreshed cache.
+                self.outbox_rx = Some(self.store.take_outbox_later(self.take_for(), self.core.version()));
             }
             if self.outbox_rx.is_none() && !self.check_take {
                 out.extend(self.core.take_out());
@@ -2239,9 +2259,10 @@ impl CoordinatorRuntime {
             .collect()
     }
 
-    /// The take in flight answered: its rows join the relay, in order. Then every held row the
-    /// cache is at least as new as leaves (into `out`, ahead of anything decided later); a row
-    /// newer than the cache asks a refresh.
+    /// The take in flight answered: its rows join the relay, in order. Then every held row leaves
+    /// (into `out`, ahead of anything decided later) — none is newer than the cache: a take is
+    /// bounded by the version of the cache that issued it (final review S-I2), a transition's own
+    /// take by its new version.
     fn pump_outbox(&mut self, out: &mut Vec<(Target, CoordMsg)>) {
         if let Some(rx) = &self.outbox_rx {
             match rx.try_recv() {
@@ -2262,20 +2283,28 @@ impl CoordinatorRuntime {
                 }
             }
         }
-        if self.relay.front().is_some_and(|row| row.version > self.core.version()) {
-            self.refresh_wanted = true;
-        }
         out.extend(self.release_relay());
     }
 
-    /// The held outbox rows whose version this cache has reached, in order, as messages for
-    /// their hosts (`game::decode_packet`; an undecodable row is an error, dropped). A row for
-    /// another boot than the one the host's link here is of now is dropped unsent (Task 5 review
-    /// m3: the host reconnected while the row was held — its `Attach` reconciles what it said).
+    /// The held outbox rows, in order, as messages for their hosts (`game::decode_packet`; an
+    /// undecodable row is an error, dropped). Dropped unsent: a row for a host the core does not
+    /// attach to THIS replica (any more: final review S-I2 — the host attached elsewhere since
+    /// the take, and its `Attach` there reconciles what the row said), and a row for another boot
+    /// than the one the host's link here is of now (Task 5 review m3: the host reconnected while
+    /// the row was held). Every row is at or below the cache's version (`pump_outbox`).
     fn release_relay(&mut self) -> Vec<(Target, CoordMsg)> {
         let mut out = Vec::new();
-        while self.relay.front().is_some_and(|row| row.version <= self.core.version()) {
-            let row = self.relay.pop_front().expect("checked");
+        let mine = self.core.hosts_attached_to(self.core.replica());
+        while let Some(row) = self.relay.pop_front() {
+            debug_assert!(row.version <= self.core.version(), "outbox row {} at version {} above the cache's {}", row.seq, row.version, self.core.version());
+            if !mine.contains(&row.host) && matches!(self.links.links, Links::Listener(_)) {
+                log::debug!(
+                    "[coordinator] outbox row {} for host {}: the host is not attached to this replica any more; dropped unsent",
+                    row.seq,
+                    row.host
+                );
+                continue;
+            }
             if let Links::Listener(l) = &self.links.links {
                 let linked = l.routes.peer_of(row.host).and_then(|peer| l.routes.boots.get(&peer).copied());
                 if linked != Some(row.boot) {
@@ -2388,7 +2417,7 @@ impl CoordinatorRuntime {
                         self.stale_refresh |= for_stale;
                     } else {
                         self.refresh_onto(row)?;
-                        // Held rows may leave now; rows newer still are taken.
+                        // The rows up to the refreshed version are taken now.
                         self.take_wanted = true;
                     }
                 }
@@ -2575,6 +2604,7 @@ impl CoordinatorRuntime {
     fn write_next(&mut self) -> bool {
         debug_assert!(self.writing.is_none());
         let Some(t) = self.core.take_transition() else { return false };
+        self.writing_take_for.clear();
         // The transition carries every output (its compare-and-set is their check): a version
         // check or a refresh asked before it answers about an older cache — dropped (fix round 1).
         // Its own take relays the rows a check would have waited for (Elastic 2b Task 5).
@@ -2628,6 +2658,7 @@ impl CoordinatorRuntime {
             take_for: self.take_for(),
             discard_for: t.attached_now.clone(),
         };
+        self.writing_take_for = w.take_for.clone();
         let written = self.store.write_transition_later(w);
         #[cfg(feature = "test-hooks")]
         let written = if self.hooks.hold_answers.load(Ordering::SeqCst) {
@@ -2740,7 +2771,9 @@ impl CoordinatorRuntime {
                 self.hooks.conflicts.fetch_add(1, Ordering::SeqCst);
                 let mine = self.core.version();
                 match self.reread_row(deadline) {
-                    Ok(Some(row)) if row.version == mine + 1 && self.unacked.contains(&core_hash(&row.core)) => {
+                    Ok(Some(row))
+                        if row.version == mine + 1 && self.unacked.iter().any(|u| u.hash == core_hash(&row.core)) =>
+                    {
                         // Lost-commit recognition (decision 1): our own write; the cached core
                         // holds it and every input applied since — written over it at once. (That
                         // write's decisions were looked up at its failure; `t` met the conflict,
@@ -2750,9 +2783,18 @@ impl CoordinatorRuntime {
                              commit's answer was lost); writing again over it",
                             row.version
                         );
+                        // Its entry stays remembered (as every failed write's, until a commit): the
+                        // log still holds that write's inputs, so a rebase now would apply them twice.
+                        let hash = core_hash(&row.core);
+                        let committed = self.unacked.iter_mut().find(|u| u.hash == hash).map(|u| {
+                            (std::mem::take(&mut u.outbox), std::mem::take(&mut u.took_for))
+                        });
                         self.core.set_version(row.version);
                         self.history_version = row.history_version;
                         self.core.transition_refused(t);
+                        if let Some((outbox, took_for)) = committed {
+                            self.lost_commit_recognised(outbox, took_for);
+                        }
                         self.retry_at_ms = now;
                         Settled::Held { now: true }
                     }
@@ -2812,6 +2854,34 @@ impl CoordinatorRuntime {
         }
     }
 
+    /// A write of this process that failed proves to be in the row (lost-commit recognition; final
+    /// review S-I3): the `outbox` messages it carried are in the table already — dropped from the
+    /// core, never inserted twice — and the outbox rows it took for `took_for` left the table with
+    /// its lost answer. Those cannot be read back: each such host still linked here at that boot
+    /// has its link closed, so it re-`Attach`es — its `Attach` reconciles everything an outbox
+    /// message could have carried (orders not listed are sent again, a pending cut is answered,
+    /// the view is sent) — and the loss is counted (`lost_answer_relinks=` on the window line).
+    /// Ruling (final fix wave): healed by a re-attach, never read back (a read-back needs the taken
+    /// rows kept until acknowledged: a schema change).
+    fn lost_commit_recognised(&mut self, outbox: usize, took_for: Vec<(HostId, u64)>) {
+        self.core.outbox_committed(outbox);
+        if took_for.is_empty() {
+            return;
+        }
+        let Links::Listener(l) = &mut self.links.links else { return };
+        for (host, boot) in took_for {
+            let Some(peer) = l.routes.peer_of(host) else { continue };
+            if l.routes.boots.get(&peer) == Some(&boot) {
+                log::warn!(
+                    "[coordinator] host {host}: outbox rows a write took for it were lost with that write's answer; its link \
+                     is closed so that it attaches again (its Attach reconciles them)"
+                );
+                l.senders.close(peer);
+                self.tally.relinks += 1;
+            }
+        }
+    }
+
     /// A write of `t` that failed with `why` and may have committed (not fenced, not a
     /// conflict): remembered by its core's hash (a later conflict may find it in the row), `t`
     /// back in the core (its decisions looked up, never issued again), the next write after
@@ -2820,7 +2890,11 @@ impl CoordinatorRuntime {
         if self.unacked.len() == COORDINATOR_UNACKED_MAX {
             self.unacked.pop_front();
         }
-        self.unacked.push_back(core_hash(&t.core));
+        self.unacked.push_back(Unacked {
+            hash: core_hash(&t.core),
+            outbox: t.outbox.len(),
+            took_for: std::mem::take(&mut self.writing_take_for),
+        });
         self.core.transition_failed(t);
         self.held_back(why, now)
     }
@@ -2865,14 +2939,16 @@ impl CoordinatorRuntime {
             return;
         }
         log::info!(
-            "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={}",
+            "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
+             lost_answer_relinks={}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
             t.history_bytes,
             t.conflicts,
             t.failures,
-            self.core.version()
+            self.core.version(),
+            t.relinks
         );
     }
 

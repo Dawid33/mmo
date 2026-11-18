@@ -142,8 +142,9 @@
 //!    another replica (a new row each: no existing row locked).
 //! 4. `DELETE FROM outbox WHERE host = ANY($attached_now)` — the rows of the hosts whose `Attach`
 //!    this transition applied, discarded unsent (BEFORE the take: they are not delivered).
-//! 5. `DELETE FROM outbox WHERE host = ANY($my_hosts) RETURNING …` — this replica's own hosts'
-//!    rows taken, in `seq` order (a row of another boot than its host's link is deleted unsent).
+//! 5. `DELETE FROM outbox WHERE host = ANY($my_hosts) AND version <= $new_version RETURNING …` —
+//!    this replica's own hosts' rows taken, in `seq` order (a row of another boot than its host's
+//!    link is deleted unsent).
 //!    Steps 4 and 5 lock `outbox` rows only, inserted by earlier transitions that committed
 //!    before this one could hold `coordinator`: no transaction holds them now (only a take between
 //!    transitions may — see below — and it holds nothing else).
@@ -151,8 +152,10 @@
 //! 7. The commit.
 //!
 //! **A take between transitions** (`coordinator_tx::take_outbox_pg`, Elastic 2b Task 5): ONE
-//! statement, `DELETE FROM outbox WHERE host = ANY($my_hosts) RETURNING …` — the `outbox` rows
-//! only, no other lock: it holds them and wants nothing after them. A transition's step 4 or 5
+//! statement, `DELETE FROM outbox WHERE host = ANY($my_hosts) AND version <= $cache_version
+//! RETURNING …` — the `outbox` rows only, no other lock: it holds them and wants nothing after
+//! them. Bounded by the version of the cache that named `$my_hosts` (final review S-I2): a newer
+//! row may have been decided after its host attached to another replica, whose relay it is. A transition's step 4 or 5
 //! meeting a row it holds waits for its commit (one statement) and then skips it (the row is gone:
 //! READ COMMITTED re-checks the deleted row) — a wait, never a cycle (only these deletes lock
 //! `outbox` rows, each in one scan in the table's one order; should two ever meet in opposite

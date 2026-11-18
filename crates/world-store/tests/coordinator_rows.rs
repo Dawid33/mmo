@@ -294,9 +294,9 @@ fn outbox_rows_older_than_an_attach_are_discarded() {
     let attached = write(&h, relay(2, 2, &[], &[(5, 9)], &[5])).unwrap();
     assert!(attached.taken.is_empty(), "the rows older than the Attach are discarded, never taken: {:?}", attached.taken);
     write(&h, relay(3, 1, &[(5, 9, 3)], &[], &[])).unwrap();
-    let rows = h.take_outbox_later(vec![(hid(5), 9), (hid(6), 3)]).recv().unwrap().unwrap();
+    let rows = h.take_outbox_later(vec![(hid(5), 9), (hid(6), 3)], 4).recv().unwrap().unwrap();
     assert_eq!(rows_of(&rows), vec![(2, 6, 3, vec![7]), (4, 5, 9, vec![3])], "host 6's row stands; host 5's newer row is delivered");
-    assert!(h.take_outbox_later(vec![(hid(5), 9), (hid(6), 3)]).recv().unwrap().unwrap().is_empty(), "taken once");
+    assert!(h.take_outbox_later(vec![(hid(5), 9), (hid(6), 3)], 4).recv().unwrap().unwrap().is_empty(), "taken once");
     h.shutdown();
 }
 
@@ -315,9 +315,26 @@ fn a_write_takes_only_its_own_hosts_rows_in_seq_order() {
         vec![(2, 1, 10, vec![1]), (2, 1, 10, vec![3]), (3, 3, 30, vec![4])],
         "hosts 1 and 3's rows at their links' boots, in seq order"
     );
-    let rows = h.take_outbox_later(vec![(hid(2), 20)]).recv().unwrap().unwrap();
+    let rows = h.take_outbox_later(vec![(hid(2), 20)], 4).recv().unwrap().unwrap();
     assert_eq!(rows_of(&rows), vec![(2, 2, 20, vec![2]), (4, 2, 20, vec![6])], "host 2's rows stayed for its replica");
-    assert!(h.take_outbox_later(vec![(hid(1), 11)]).recv().unwrap().unwrap().is_empty(), "host 1's row of another boot was deleted unsent");
+    assert!(h.take_outbox_later(vec![(hid(1), 11)], 4).recv().unwrap().unwrap().is_empty(), "host 1's row of another boot was deleted unsent");
+    h.shutdown();
+}
+
+/// Final review S-I2: a take between transitions takes only the rows at or below the version of
+/// the cache that named its hosts. Host 5 is attached to replica A as of version 3; a row decided
+/// at version 4 (after host 5 attached to B, say — A's cache cannot know) stays in the table for B,
+/// and B (at version 4) takes it.
+#[test]
+fn a_take_between_transitions_stops_at_its_cache_version() {
+    let Some((_db, h)) = pg_store("upto") else { return };
+    write(&h, relay(1, 1, &[(5, 9, 1)], &[], &[])).unwrap();
+    write(&h, relay(2, 1, &[], &[], &[])).unwrap();
+    write(&h, relay(3, 3, &[(5, 9, 2)], &[], &[])).unwrap();
+    let stale = h.take_outbox_later(vec![(hid(5), 9)], 3).recv().unwrap().unwrap();
+    assert_eq!(rows_of(&stale), vec![(2, 5, 9, vec![1])], "only the row at or below the taker's cache");
+    let newer = h.take_outbox_later(vec![(hid(5), 9)], 4).recv().unwrap().unwrap();
+    assert_eq!(rows_of(&newer), vec![(4, 5, 9, vec![2])], "the newer row stayed for a cache that knows it");
     h.shutdown();
 }
 
@@ -341,7 +358,7 @@ fn a_conflicting_write_inserts_no_outbox_row() {
     assert_eq!(next_payload(), Some("2".to_string()), "the committed write's version");
     write(&h, relay(2, 1, &[], &[], &[])).unwrap();
     assert_eq!(next_payload(), Some("3".to_string()), "no notice of the conflicting write came between");
-    let rows = h.take_outbox_later(vec![(hid(7), 1)]).recv().unwrap().unwrap();
+    let rows = h.take_outbox_later(vec![(hid(7), 1)], 3).recv().unwrap().unwrap();
     assert_eq!(rows_of(&rows), vec![(2, 7, 1, vec![1])], "only the committed write's row; the conflicting one discarded and took nothing");
     h.shutdown();
 }

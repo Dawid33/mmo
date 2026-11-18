@@ -1283,6 +1283,20 @@ impl Coordinator {
         self.decisions.extend(later);
     }
 
+    /// A write this replica handed back as failed proves to have committed after all (the
+    /// runtime's lost-commit recognition, final review S-I3): the first `n` messages of the outbox
+    /// waiting now are the ones that write carried — the store holds them already. Dropped, so the
+    /// next transition does not insert them twice (call it right after
+    /// [`Self::transition_refused`] of the transition that met the conflict: a write handed back
+    /// puts its outbox ahead of anything routed since, so the committed write's are the head).
+    pub fn outbox_committed(&mut self, n: usize) {
+        let n = n.min(self.outbox.len());
+        if n > 0 {
+            log::info!("coordinator: {n} outbox message(s) of a write whose commit's answer was lost are in the row already: not written again");
+            self.outbox.drain(..n);
+        }
+    }
+
     /// `t` back in the core (not committed as far as this replica knows): its messages ahead of
     /// what was decided since, the whole projection (and the history if `t` carried it) to be
     /// written again. Its decisions, to the caller.

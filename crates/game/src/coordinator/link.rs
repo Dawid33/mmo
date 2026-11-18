@@ -132,14 +132,16 @@ impl RigStore {
             self.push_outbox(version, m.host, m.boot, m.msg);
         }
         self.outbox.retain(|r| !w.discard_for.contains(&r.host));
-        Ok((version, self.take_outbox(&w.take_for)))
+        Ok((version, self.take_outbox(&w.take_for, version)))
     }
 
-    /// The outbox rows of `for_hosts` (each with its link's boot), taken: in `seq` order; a row
-    /// of another boot deleted unsent.
-    pub fn take_outbox(&mut self, for_hosts: &[(HostId, u64)]) -> Vec<RigOutboxRow> {
-        let (mine, rest): (Vec<RigOutboxRow>, Vec<RigOutboxRow>) =
-            std::mem::take(&mut self.outbox).into_iter().partition(|r| for_hosts.iter().any(|(h, _)| *h == r.host));
+    /// The outbox rows of `for_hosts` (each with its link's boot) at or below row version `upto`
+    /// (the taker's cache: final review S-I2), taken: in `seq` order; a row of another boot
+    /// deleted unsent.
+    pub fn take_outbox(&mut self, for_hosts: &[(HostId, u64)], upto: u64) -> Vec<RigOutboxRow> {
+        let (mine, rest): (Vec<RigOutboxRow>, Vec<RigOutboxRow>) = std::mem::take(&mut self.outbox)
+            .into_iter()
+            .partition(|r| r.version <= upto && for_hosts.iter().any(|(h, _)| *h == r.host));
         self.outbox = rest;
         mine.into_iter().filter(|r| for_hosts.iter().any(|(h, b)| *h == r.host && *b == r.boot)).collect()
     }
@@ -555,7 +557,8 @@ impl RigCluster {
                 }
                 // The rows other replicas left for this replica's hosts (as on a notice).
                 let take_for = self.take_for(r);
-                let rows = self.store.as_mut().expect("a store").take_outbox(&take_for);
+                let upto = self.replicas[r].core.version();
+                let rows = self.store.as_mut().expect("a store").take_outbox(&take_for, upto);
                 self.replicas[r].held.extend(rows);
                 if self.replicas[r].held.iter().any(|row| row.version > self.replicas[r].core.version()) && self.refresh(r) {
                     continue;

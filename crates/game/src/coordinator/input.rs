@@ -137,6 +137,11 @@ impl Coordinator {
                 Some((*boot, *epoch))
             }
             Input::Host { host, .. } => self.link_attach.get(host).copied(),
+            Input::LinkDown { host } => {
+                // That link carries nothing more (a new one opens with its `Attach`).
+                self.link_attach.remove(host);
+                None
+            }
             _ => None,
         };
         if self.superseded(&input, link) {

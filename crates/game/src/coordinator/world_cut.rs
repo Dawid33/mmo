@@ -981,7 +981,7 @@ impl Coordinator {
     }
 
     /// Host `host`'s newest `Attach` applied, as `(boot, epoch)` (final review G-I1).
-    pub(super) fn newest_attach(&self, host: HostId) -> Option<(u64, u64)> {
+    pub fn newest_attach(&self, host: HostId) -> Option<(u64, u64)> {
         self.cuts.attach_epochs.get(&host).copied()
     }
 

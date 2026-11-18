@@ -202,7 +202,9 @@ pub(crate) async fn write_pg(
             log::debug!("[world-store] {gone} outbox row(s) older than their hosts' Attach discarded");
         }
     }
-    let taken = take_in(&mut tx, &w.take_for).await?;
+    // Under the compare-and-set this transaction IS the row's newest version: every row is at or
+    // below it.
+    let taken = take_in(&mut tx, &w.take_for, version as u64).await?;
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(crate::listen::COORDINATOR_ROW_CHANNEL)
         .bind(version.to_string())
@@ -212,16 +214,24 @@ pub(crate) async fn write_pg(
     Ok((version as u64, store_ms as u64, out, taken))
 }
 
-/// The outbox rows of `for_hosts` (each host with its link's boot), taken on `conn` — one
-/// `DELETE … RETURNING` of the rows only (no other lock): returned in `seq` order (commit order);
-/// a row whose boot is not its link's is deleted unsent (that boot is gone).
-pub(crate) async fn take_in(conn: &mut sqlx::PgConnection, for_hosts: &[(HostId, u64)]) -> Result<Vec<OutboxRow>, StoreError> {
+/// The outbox rows of `for_hosts` (each host with its link's boot) at or below row version
+/// `upto`, taken on `conn` — one `DELETE … RETURNING` of the rows only (no other lock): returned
+/// in `seq` order (commit order); a row whose boot is not its link's is deleted unsent (that boot
+/// is gone). `upto` is the version of the cache that decided `for_hosts` are attached to the
+/// taker (final review S-I2): a row newer than that cache may have been decided after its host
+/// attached to another replica, whose relay it is — it stays in the table.
+pub(crate) async fn take_in(
+    conn: &mut sqlx::PgConnection,
+    for_hosts: &[(HostId, u64)],
+    upto: u64,
+) -> Result<Vec<OutboxRow>, StoreError> {
     if for_hosts.is_empty() {
         return Ok(Vec::new());
     }
     let hosts: Vec<i64> = for_hosts.iter().map(|(h, _)| crate::rows::i(h.0)).collect();
-    let rows = sqlx::query("DELETE FROM outbox WHERE host = ANY($1) RETURNING seq, version, host, boot, msg")
+    let rows = sqlx::query("DELETE FROM outbox WHERE host = ANY($1) AND version <= $2 RETURNING seq, version, host, boot, msg")
         .bind(&hosts)
+        .bind(crate::rows::i(upto))
         .fetch_all(&mut *conn)
         .await?;
     let mut taken = Vec::with_capacity(rows.len());
@@ -249,9 +259,9 @@ pub(crate) async fn take_in(conn: &mut sqlx::PgConnection, for_hosts: &[(HostId,
 
 /// [`take_in`] on its own (between transitions: a replica relaying what other replicas left for
 /// its hosts).
-pub(crate) async fn take_outbox_pg(pool: &PgPool, for_hosts: &[(HostId, u64)]) -> Result<Vec<OutboxRow>, StoreError> {
+pub(crate) async fn take_outbox_pg(pool: &PgPool, for_hosts: &[(HostId, u64)], upto: u64) -> Result<Vec<OutboxRow>, StoreError> {
     let mut conn = pool.acquire().await?;
-    take_in(&mut conn, for_hosts).await
+    take_in(&mut conn, for_hosts, upto).await
 }
 
 /// Decision `d` refused with `e` before it ran.

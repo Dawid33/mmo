@@ -2493,6 +2493,117 @@ fn a_write_in_flight_while_notices_arrive_does_not_spin_the_loop() {
     w.stop(&dir);
 }
 
+/// The outbox rows waiting for host `host`, decoded, in `seq` order.
+fn outbox_for(db: &PgDb, host: HostId) -> Vec<game::CoordMsg> {
+    let (url, sql) = (db.0.url.clone(), format!("SELECT msg FROM outbox WHERE host = {} ORDER BY seq", host.0));
+    let rows: Vec<Vec<u8>> = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use sqlx::Connection;
+            let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+            let v: Vec<Vec<u8>> = sqlx::query_scalar(&sql).fetch_all(&mut c).await.unwrap();
+            c.close().await.unwrap();
+            v
+        })
+    })
+    .join()
+    .unwrap();
+    rows.iter().map(|b| game::decode_packet::<game::CoordMsg>(b).expect("an outbox row decodes")).collect()
+}
+
+/// The `coordinator` row's version.
+fn db_version(db: &PgDb) -> i64 {
+    query_i64s(db, "SELECT version FROM coordinator WHERE id = 1").first().copied().unwrap_or(0)
+}
+
+/// A `StartAdventure` of `player` asked as host `host` (boot `boot`) would, applied in the core
+/// `c` at the first populated site.
+fn ask_as(c: &mut game::Coordinator, host: HostId, boot: u64, seq: u64, player: game::PlayerId) {
+    let h = c.history();
+    let site = h.sites().find(|s| s.abandoned.is_none() && !h.living_members(s.id).is_empty()).expect("a populated site").id;
+    let id = game::RequestId { host, boot, seq };
+    let req = game::WorldRequest::StartAdventure(site);
+    let now = c.clock_floor();
+    c.apply(game::coordinator::Input::Host { host, msg: game::HostMsg::Request { id, player, hop: 1, req } }, now);
+}
+
+/// Final review S-I3: replica A's write commits and its answer is lost. It carried an outbox row
+/// (a reply for host 1, attached to replica B) and took one (B's reply for host 0, attached to A).
+/// A's next write meets its own commit (lost-commit recognition) and writes over it: the reply
+/// for host 1 is in the outbox ONCE (never inserted twice), and host 0 — whose row left the table
+/// with the lost answer — is made to attach again (its `Attach` reconciles what the row said).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_lost_commit_answer_neither_duplicates_nor_silently_loses_outbox_rows() {
+    install_props();
+    let Some(db) = PgDb::create("lostbox") else { return };
+    let dir = scratch("lostbox");
+    let mut w = world(&db, &dir);
+    let (b, b_store, b_cert) = spare_replica(&mut w, &db, &dir);
+    let b_id = *live_of(&b).iter().last().expect("B is live");
+    let one = HostId(1);
+    let (boot1, reg1) = (w.pair.sims[1].boot, w.pair.sims[1].reg);
+    w.switches[1].replace(quic_world_link(b.addr, b_cert.clone(), one, boot1, reg1));
+    let only_one: std::collections::BTreeSet<HostId> = [one].into_iter().collect();
+    let deadline = Instant::now() + WAIT;
+    while b.thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("B answers") != only_one
+        || w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("A answers") != only_one
+    {
+        assert!(Instant::now() < deadline, "host 1 never attached to B");
+        w.pair.round();
+    }
+    w.pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+    let (p0, _) = w.claims[0].store().resolve_player("lostbox-player-0").unwrap();
+    let (p1, _) = w.claims[0].store().resolve_player("lostbox-player-1").unwrap();
+    let a = &w.coordinator.as_ref().expect("A runs").thread;
+    let attach_0 = a.inspect(|c| c.newest_attach(HostId(0)), WAIT).flatten().expect("host 0 attached");
+    // A holds still while B writes a reply for host 0 (attached to A): a row in the outbox.
+    a.hold_main_loop(true);
+    b.thread.with_core(move |c| ask_as(c, HostId(0), 1000, 9_300, p0), WAIT).expect("B answers");
+    let is_reply = |m: &game::CoordMsg, seq| matches!(m, game::CoordMsg::Reply { id, .. } if id.seq == seq);
+    let deadline = Instant::now() + WAIT;
+    while !outbox_for(&db, HostId(0)).iter().any(|m| is_reply(m, 9_300)) {
+        assert!(Instant::now() < deadline, "B never left a reply for host 0 in the outbox");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // B holds still too (it would relay host 1's rows at once); A's next commit answer is lost,
+    // and that write carries a reply for host 1 and takes B's row for host 0.
+    b.thread.hold_main_loop(true);
+    let held_at = db_version(&db);
+    a.lose_next_write_answer();
+    // Queued for A's first pass once released (A answers nothing while held).
+    let _ = a.with_core(move |c| ask_as(c, one, boot1, 9_301, p1), Duration::from_millis(1));
+    a.hold_main_loop(false);
+    let deadline = Instant::now() + WAIT;
+    // Written over its lost commit: the row is two versions past the one A held still at.
+    while a.inspect(move |c| c.claim_of(p1), WAIT).flatten().is_none() || db_version(&db) < held_at + 2 {
+        assert!(
+            Instant::now() < deadline,
+            "A never wrote host 1's claim over its lost commit: claim {:?}, row {} (held at {held_at}), A finished {}",
+            a.inspect(move |c| (c.claim_of(p1), c.version(), c.logged()), WAIT),
+            db_version(&db),
+            a.is_finished()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let replies = outbox_for(&db, one).iter().filter(|m| is_reply(m, 9_301)).count();
+    b.thread.hold_main_loop(false);
+    assert_eq!(replies, 1, "the reply for host 1 is in the outbox once");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let now = w.coordinator.as_ref().unwrap().thread.inspect(|c| c.newest_attach(HostId(0)), WAIT).flatten();
+        if now.is_some_and(|n| n.1 > attach_0.1) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "host 0 never attached again after its taken row was lost: {now:?} (was {attach_0:?})");
+        w.pair.round();
+    }
+    w.pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+    assert_eq!(b.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+    b_store.shutdown();
+    w.stop(&dir);
+}
+
 /// Elastic 2b Task 5: host 0 is linked to replica A (the world's coordinator: it runs the cuts)
 /// and host 1 to replica B. A's `BeginCut` and `CutDone` for host 1 reach it through the outbox
 /// (B relays them in commit order), host 1's `CutPrepared` reaches A through the row (B's cache

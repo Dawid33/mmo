@@ -128,7 +128,7 @@ pub(crate) enum Request {
     /// Elastic 2b Task 4: the row's version.
     RowVersion(Reply<u64>),
     /// Elastic 2b Task 5: the outbox rows of these hosts (each with its link's boot), taken.
-    TakeOutbox(Vec<(HostId, u64)>, Reply<Vec<crate::OutboxRow>>),
+    TakeOutbox(Vec<(HostId, u64)>, u64, Reply<Vec<crate::OutboxRow>>),
     /// Elastic 2b Task 4: a coordinator replica registers (`replicas.rs`).
     RegisterReplica(String, Reply<crate::ReplicaRegistered>),
     /// Elastic 2b Task 4: a replica's beat (Postgres: the beat connection).
@@ -620,9 +620,9 @@ async fn serve(
             Request::RowVersion(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, row_version())) }),
             // No writer lock (as a transition on Postgres: the rows it deletes are only ever
             // deleted by coordinator statements). SQLite: one replica, no row to take.
-            Request::TakeOutbox(for_hosts, r) => tokio::spawn(async move {
+            Request::TakeOutbox(for_hosts, upto, r) => tokio::spawn(async move {
                 r.send(match &pool {
-                    Pool::Pg(p) => coordinator_tx::take_outbox_pg(p, &for_hosts).await,
+                    Pool::Pg(p) => coordinator_tx::take_outbox_pg(p, &for_hosts, upto).await,
                     Pool::Sqlite(_) => Ok(Vec::new()),
                 })
             }),
