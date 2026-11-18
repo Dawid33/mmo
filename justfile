@@ -2927,10 +2927,12 @@ clean:
 
 # The quest script language: its OWN Cargo workspace in quest/ (own Cargo.lock and quest/target/), so its
 # builds never touch the game's. Plan: docs/superpowers/plans/2026-11-16-quest-script-language-mvp.md.
-# quest-check: type-check, clippy, and the wasm32 build of the crates that must run anywhere.
+# quest-check: type-check, clippy, and the wasm32 build of the crates that must run anywhere; and a check of
+# the fuzz crate (its own workspace, quest/fuzz/), so an API change cannot break the targets unseen.
 quest-check:
     {{cap}} {{cargo}} clippy --manifest-path quest/Cargo.toml --workspace --all-targets -- -D warnings
     {{cap}} {{cargo}} check --manifest-path quest/Cargo.toml --workspace --exclude quest-cli --target wasm32-unknown-unknown
+    {{cap}} {{cargo}} check --manifest-path quest/fuzz/Cargo.toml --bins
 
 # quest-test "-p quest-vm --test mem" — the language's tests (all of them when no argument is given).
 quest-test args="":
@@ -2971,3 +2973,18 @@ quest-fuzz target secs="60" fuzz_jobs="1":
     cd quest
     {{cap}} "$root/bin/cargo-fuzz" fuzz run "{{target}}" --jobs "{{fuzz_jobs}}" -- \
         -max_total_time="{{secs}}" -timeout=10 -rss_limit_mb=2048
+
+# quest-fuzz-replay <target> — run a fuzz target over each input kept under quest/fuzz/regressions/<target>/
+# (the FILES, one by one: given the directory, libFuzzer would fuzz into it). A target's own bugs are kept
+# there; a crate's bugs have their regression tests in the crate.
+quest-fuzz-replay target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=0.13.2
+    root="$PWD/quest/target/tools/cargo-fuzz-$ver"
+    [ -x "$root/bin/cargo-fuzz" ] || {{cap}} cargo install --locked cargo-fuzz --version "$ver" --root "$root"
+    shopt -s nullglob
+    cd quest
+    files=(fuzz/regressions/{{target}}/*)
+    [ ${#files[@]} -gt 0 ] || { echo "no inputs under quest/fuzz/regressions/{{target}}/"; exit 0; }
+    {{cap}} "$root/bin/cargo-fuzz" fuzz run "{{target}}" "${files[@]}" -- -timeout=10 -rss_limit_mb=2048

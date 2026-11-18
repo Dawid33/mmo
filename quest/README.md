@@ -205,8 +205,9 @@ found are kept beside the seeds.
 crate that owns the bug (the input inline when it is under 20 lines, else a file under
 `fuzz/regressions/<target>/` read by the test), see it fail, fix, see it pass, replay the artifact, and commit
 `fix(quest…): <what> (fuzz)`. A bug in a target itself (a property it over-claims) is fixed in the target, and
-its input kept under `fuzz/regressions/<target>/` for `cargo fuzz run <target> fuzz/regressions/<target>/*` (the files: given the directory, libFuzzer
-fuzzes into it). A compiler timeout on a quadratic path is to be fixed, or bounded with a new `too-complex` diagnostic, with its
+its input kept under `fuzz/regressions/<target>/`; `just quest-fuzz-replay <target>` runs the target over
+each of them (the files: given the directory, libFuzzer fuzzes into it). `just quest-check` also type-checks
+the fuzz crate, so an API change cannot break the targets unseen. A compiler timeout on a quadratic path is to be fixed, or bounded with a new `too-complex` diagnostic, with its
 regression (none found yet). The first campaign (10 minutes per target) is recorded in the plan's "As
 built" (`docs/superpowers/plans/2026-11-17-quest-script-completion.md`).
 
