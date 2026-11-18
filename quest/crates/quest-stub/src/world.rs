@@ -406,6 +406,13 @@ impl World {
         self.core.env.now
     }
 
+    /// Whether a `Setup` is still due: at the first tick after placement or a reset, or at the end of a
+    /// repeatable's cooldown. What a caller loading this world's own state back passes as `load_vms`'s
+    /// `setup`.
+    pub fn setup_due(&self) -> bool {
+        self.setup_at.is_some()
+    }
+
     pub fn outcome(&self) -> Outcome {
         self.outcome
     }
@@ -482,8 +489,9 @@ impl World {
     }
 
     /// Every instance's VM replaced, in id order (a loaded or migrated state; each must be made with
-    /// [`crate::vm_config`] of its instance, the world's memory and its roles). `setup`: `Setup` is still delivered at the
-    /// next tick (a reset state); otherwise it is not (the state already had it). The dialogue mirrors are
+    /// [`crate::vm_config`] of its instance, the world's memory and its roles). `setup`: the `Setup` the world
+    /// has due ([`World::setup_due`]) is still delivered at its tick (a reset state); otherwise it is dropped
+    /// (the state already had it). The dialogue mirrors are
     /// taken again from the new VMs.
     pub fn load_vms(&mut self, vms: Vec<Vm>, setup: bool) -> Result<(), String> {
         if vms.len() != self.core.insts.len() {

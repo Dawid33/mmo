@@ -674,9 +674,11 @@ fn world_case(i: &In) {
                     )
                 })
                 .collect();
-            // `Setup` is still owed only before the first tick.
+            // The world's own state loaded back: a `Setup` it has due (the first, or a repeatable's after
+            // its cooldown) is still owed (Task 55, `regressions/invariants/repeat-setup`).
+            let setup = resumed.setup_due();
             resumed
-                .load_vms(vms, now == 0)
+                .load_vms(vms, setup)
                 .unwrap_or_else(|e| panic!("{name}: the saves do not load: {e}"));
         }
         let (a, b) = (run(&mut plain, &mut next_a), run(&mut resumed, &mut next_b));
