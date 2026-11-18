@@ -727,3 +727,30 @@ fn world_input_files_and_talk_errors() {
         assert!(err(&o).contains("started no conversation"), "{}", err(&o));
     }
 }
+
+/// Review B2 (whole-branch, Task 52): `--save` after a script `edit` wrote the start-up program's code
+/// beside instances migrated to the edited one, so no `--load` could read the file back.
+#[test]
+fn save_after_an_edit_loads_again() {
+    let v1 = "quest Q:\n    let n = 0\n    @on(Setup)\n    fn setup(e):\n        n = 1\n    stage A:\n        @on(Entered)\n        fn a(e):\n            print(f\"n is {n}\")\n";
+    let v2 = v1.replace("    let n = 0\n", "    let extra = 7\n    let n = 0\n");
+    let d = dir(
+        "save-after-edit",
+        &[
+            ("main.qs", v1),
+            ("v2/main.qs", &v2),
+            ("script.txt", "1 edit v2\n"),
+        ],
+    );
+    let file = d.join("state.bin");
+    let f = file.to_str().unwrap();
+    let first = quest(&["run", "--save", f], &d);
+    assert_eq!(code(&first), 0, "{}", err(&first));
+    let empty = d.join("empty.txt");
+    std::fs::write(&empty, "").unwrap();
+    let o = quest(
+        &["run", "--load", f, "--script", empty.to_str().unwrap()],
+        &d,
+    );
+    assert_eq!(code(&o), 0, "{}", err(&o));
+}

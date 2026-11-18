@@ -269,7 +269,8 @@ pub(crate) fn run_world(
         let vms: Vec<&Vm> = (0..w.instances())
             .filter_map(|k| w.vm(u16::try_from(k).ok()?))
             .collect();
-        if let Err(e) = write_state(file, &state_file(&program, &vms)) {
+        // The program the instances run now: an `edit` may have replaced the start-up one.
+        if let Err(e) = write_state(file, &state_file(w.program(), &vms)) {
             eprintln!("quest: {file}: {e}");
             return Err(ExitCode::from(EXIT_NO_INPUT));
         }
