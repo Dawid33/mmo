@@ -33,7 +33,6 @@
 #![no_main]
 
 use std::collections::BTreeMap;
-use std::hash::Hasher as _;
 use std::sync::{Arc, OnceLock};
 
 use libfuzzer_sys::fuzz_target;
@@ -45,7 +44,9 @@ use quest_stub::{
     parse_script, parse_wire, vm_config,
 };
 use quest_vm::consts::MEM_BYTES_DEFAULT;
-use quest_vm::{Fnv64, Program, Status, Vm};
+use quest_vm::host::Report;
+use quest_vm::layout::{H_FUEL_DEBT, H_INBOX_BASE, H_INBOX_END, H_NOW};
+use quest_vm::{Program, Status, Vm};
 
 /// Ticks the unlimited run of a generated program may take (waits on latency and timeouts).
 const UNLIMITED_TICKS: u64 = 2_000;
@@ -106,12 +107,6 @@ fn read(data: &[u8]) -> In {
     }
 }
 
-fn fnv(bytes: &[u8]) -> u64 {
-    let mut h = Fnv64::default();
-    h.write(bytes);
-    h.finish()
-}
-
 fn runner(program: &Arc<Program>, stub: &StubConfig) -> Runner {
     let mut r = Runner::new(Arc::clone(program), MEM_BYTES_DEFAULT, stub.clone())
         .expect("a generated program loads");
@@ -119,27 +114,89 @@ fn runner(program: &Arc<Program>, stub: &StubConfig) -> Runner {
     r
 }
 
-/// The end of a run: `None` when it did not get there within the ticks.
+/// The end of a run.
 struct End {
     output: Vec<String>,
+    reports: Vec<Report>,
     failed: bool,
-    script: u64,
+    /// The memory without what the budget moves ([`timeless`]).
+    mem: Vec<u8>,
     fuel: u64,
+    /// The ticks it took.
+    ticks: u64,
 }
 
-/// Steps until quiescent or failed, at most `ticks` ticks.
+/// The reports a fuel budget does not move: all but `EventQueued`, which says an event was delivered while
+/// a task was in progress — whether one was depends on how far the budget let it run.
+fn settled<'a, T: 'a>(
+    reports: impl IntoIterator<Item = &'a T>,
+    report: impl Fn(&T) -> &Report,
+) -> Vec<&'a T> {
+    reports
+        .into_iter()
+        .filter(|r| !matches!(report(r), Report::EventQueued { .. }))
+        .collect()
+}
+
+/// Word `w` of `mem` (0 past its end).
+fn word(mem: &[u8], w: u64) -> u64 {
+    usize::try_from(w * 8)
+        .ok()
+        .and_then(|at| mem.get(at..at + 8))
+        .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+}
+
+/// The inbox allocator's used-words word, relative to the inbox's base (`alloc.rs` `A_USED`).
+const INBOX_A_USED: u64 = 2;
+
+/// `mem` with what a fuel budget moves by design zeroed, and nothing else:
+/// - the header words `H_NOW` (the latest tick the instance ran) and `H_FUEL_DEBT` (what a segment overran
+///   its last tick by);
+/// - the inbox region, but only while its allocator holds no live block (used words 0): an event's payload
+///   lives there from its delivery to its dispatch, so with none live the region is allocator bookkeeping
+///   only — its LIFO free lists and freed blocks' links record the ORDER deliveries and dispatches
+///   interleaved in, which the budget moves; nothing reads them but the next allocation's address.
+///
+/// Every other byte — the static slots and the script heap, the shadow and dirty bits, the queue, the
+/// promises, the parked handlers, the timers, the commands, the trace, the counters — must be equal.
+fn timeless(mem: &[u8]) -> Vec<u8> {
+    let mut out = mem.to_vec();
+    for w in [H_NOW, H_FUEL_DEBT] {
+        let at = w as usize * 8;
+        if let Some(word) = out.get_mut(at..at + 8) {
+            word.fill(0);
+        }
+    }
+    let (base, end) = (
+        word(mem, u64::from(H_INBOX_BASE)),
+        word(mem, u64::from(H_INBOX_END)),
+    );
+    if base % 8 == 0 && word(mem, base / 8 + INBOX_A_USED) == 0 {
+        let (Ok(base), Ok(end)) = (usize::try_from(base), usize::try_from(end)) else {
+            return out;
+        };
+        if let Some(inbox) = out.get_mut(base..end) {
+            inbox.fill(0);
+        }
+    }
+    out
+}
+
+/// Steps until quiescent or failed, at most `ticks` ticks; `None` when it did not get there.
 fn finish(r: &mut Runner, fuel: u64, ticks: u64) -> Option<End> {
     let mut used = 0u64;
-    for _ in 0..ticks {
+    for t in 0..ticks {
         let rep = r.step(fuel);
         used = used.saturating_add(rep.fuel_used);
         let failed = rep.status == Status::Failed;
         if failed || r.quiescent() {
             return Some(End {
                 output: r.host.output.clone(),
+                reports: r.host.reports.clone(),
                 failed,
-                script: fnv(r.vm.script_bytes()),
+                mem: timeless(r.vm.mem_bytes()),
                 fuel: used,
+                ticks: t + 1,
             });
         }
     }
@@ -191,43 +248,57 @@ fn generated(i: &In) {
 
     // The unlimited run, and what an idle end holds.
     let mut free = runner(&program, &stub);
-    let Some(unlimited) = finish(&mut free, u64::MAX, UNLIMITED_TICKS) else {
-        return;
-    };
-    if free.vm.is_idle()
-        && let Some((held, baseline)) = heap_after_reinit(&program, &free.vm)
+    let unlimited = finish(&mut free, u64::MAX, UNLIMITED_TICKS);
+    if unlimited.is_some() && free.vm.is_idle() {
+        // `None` only when the copy's heap cannot also hold the initial values (a nearly full heap).
+        if let Some((held, baseline)) = heap_after_reinit(&program, &free.vm) {
+            assert_eq!(
+                held, baseline,
+                "idle and given its initial globals again, the heap holds {held} words; the post-init \
+                 baseline is {baseline}\n{text}"
+            );
+        }
+    }
+
+    // Fuel equivalence, for a run that ends within its budget of ticks.
+    let mut fuel = i.fuel;
+    let mut ticks = K_MAX + WINDOW_MAX;
+    if let Some(unlimited) = &unlimited
+        && unlimited.fuel <= TOTAL_FUEL_MAX
     {
+        fuel = fuel.max(unlimited.fuel / BUDGET_TICKS_MAX + 1);
+        ticks = unlimited.fuel / fuel + TICKS_SLACK + UNLIMITED_TICKS;
+        let budgeted = finish(&mut runner(&program, &stub), fuel, ticks)
+            .unwrap_or_else(|| panic!("not finished at fuel {fuel} after {ticks} ticks\n{text}"));
         assert_eq!(
-            held, baseline,
-            "idle and given its initial globals again, the heap holds {held} words; the post-init \
-             baseline is {baseline}\n{text}"
+            budgeted.output, unlimited.output,
+            "output at fuel {fuel}\n{text}"
         );
+        assert_eq!(
+            settled(&budgeted.reports, |r| r),
+            settled(&unlimited.reports, |r| r),
+            "reports at fuel {fuel}\n{text}"
+        );
+        assert_eq!(
+            budgeted.failed, unlimited.failed,
+            "failed at fuel {fuel}\n{text}"
+        );
+        if let Some(at) = (0..budgeted.mem.len()).find(|&b| budgeted.mem[b] != unlimited.mem[b]) {
+            panic!(
+                "memory at fuel {fuel}: byte {at} (word {}) differs\n{text}",
+                at / 8
+            );
+        }
     }
-    if unlimited.fuel > TOTAL_FUEL_MAX {
-        return;
-    }
-    let fuel = i.fuel.max(unlimited.fuel / BUDGET_TICKS_MAX + 1);
+    // The ticks a save and a checkpoint fall before: within the unlimited run when it ended (else a
+    // prefix of the run), so neither is vacuous.
+    let last = unlimited.as_ref().map_or(i.k, |u| u.ticks - 1);
+    let k = i.k.min(last);
+    let j = k + (i.j - i.k);
 
-    // Fuel equivalence.
-    let ticks = unlimited.fuel / fuel + TICKS_SLACK + UNLIMITED_TICKS;
-    let budgeted = finish(&mut runner(&program, &stub), fuel, ticks)
-        .unwrap_or_else(|| panic!("not finished at fuel {fuel} after {ticks} ticks\n{text}"));
-    assert_eq!(
-        budgeted.output, unlimited.output,
-        "output at fuel {fuel}\n{text}"
-    );
-    assert_eq!(
-        budgeted.failed, unlimited.failed,
-        "failed at fuel {fuel}\n{text}"
-    );
-    assert_eq!(
-        budgeted.script, unlimited.script,
-        "script state at fuel {fuel}\n{text}"
-    );
-
-    // The rollback bar.
+    // The rollback bar: a checkpoint before tick k, the ticks to j, rolled back.
     let mut r = runner(&program, &stub);
-    for _ in 0..i.k {
+    for _ in 0..k {
         r.step(fuel);
     }
     let cp = r.vm.checkpoint();
@@ -238,7 +309,7 @@ fn generated(i: &In) {
         r.vm.mem_bytes().to_vec(),
     );
     let window = |r: &mut Runner| -> Vec<u64> {
-        (i.k..i.j)
+        (k..j)
             .map(|_| {
                 r.step(fuel);
                 r.vm.hash64()
@@ -261,10 +332,11 @@ fn generated(i: &In) {
         "the output after rollback\n{text}"
     );
 
-    // Save and load.
+    // Save before tick k and load.
     let (mut plain, mut resumed) = (runner(&program, &stub), runner(&program, &stub));
-    for tick in 0..ticks {
-        if tick == i.k {
+    let mut saved = false;
+    for tick in 0..ticks.max(k + 1) {
+        if tick == k {
             let bytes = resumed.vm.save();
             resumed.vm = Vm::load(
                 Arc::clone(&program),
@@ -272,22 +344,22 @@ fn generated(i: &In) {
                 &bytes,
             )
             .unwrap_or_else(|e| panic!("a save does not load: {e:?}\n{text}"));
+            saved = true;
         }
         let (a, b) = (plain.step(fuel), resumed.step(fuel));
         assert_eq!(
             a.fuel_used, b.fuel_used,
-            "tick {tick}: fuel after a save at {}\n{text}",
-            i.k
+            "tick {tick}: fuel after a save at {k}\n{text}"
         );
         assert!(
             plain.vm.mem_bytes() == resumed.vm.mem_bytes(),
-            "tick {tick}: memory after a save at {}\n{text}",
-            i.k
+            "tick {tick}: memory after a save at {k}\n{text}"
         );
-        if a.status == Status::Failed || plain.quiescent() {
+        if saved && (a.status == Status::Failed || plain.quiescent()) {
             break;
         }
     }
+    assert!(saved, "no save at tick {k}\n{text}");
     assert_eq!(
         plain.vm.hash64(),
         resumed.vm.hash64(),
@@ -399,13 +471,15 @@ impl WorldCase {
 }
 
 /// What a world run ends with, without its clock.
-#[derive(Debug, PartialEq)]
 struct WorldEnd {
     output: Vec<String>,
     outcome: quest_stub::Outcome,
     completions: BTreeMap<i64, u32>,
     people: People,
-    scripts: Vec<u64>,
+    /// The instances' reports, in order.
+    reports: Vec<(u16, Report)>,
+    /// Each instance's memory without what the budget moves ([`timeless`]).
+    mems: Vec<Vec<u8>>,
 }
 
 /// The output without the `[tick] ` stamps.
@@ -435,29 +509,29 @@ fn gated(wc: &WorldCase, fuel: u64) -> Option<WorldEnd> {
         batches.last_mut()?.push(input.clone());
     }
     let mut next = batches.into_iter();
+    let mut reports = Vec::new();
     for _ in 0..WORLD_TICKS {
+        let mut batch = Vec::new();
         if w.quiescent() {
             match next.next() {
-                Some(batch) => {
-                    w.step(&batch);
-                    continue;
-                }
+                Some(b) => batch = b,
                 None => {
-                    let scripts = (0..w.instances())
+                    let mems = (0..w.instances())
                         .filter_map(|k| w.vm(u16::try_from(k).ok()?))
-                        .map(|vm| fnv(vm.script_bytes()))
+                        .map(|vm| timeless(vm.mem_bytes()))
                         .collect();
                     return Some(WorldEnd {
                         output: unstamped(w.output()),
                         outcome: w.outcome(),
                         completions: w.completions().clone(),
                         people: w.people().clone(),
-                        scripts,
+                        reports,
+                        mems,
                     });
                 }
             }
         }
-        w.step(&[]);
+        reports.extend(w.step(&batch).reports);
     }
     None
 }
@@ -493,23 +567,66 @@ fn world_case(i: &In) {
     if let Some(unlimited) = gated(wc, u64::MAX) {
         let budgeted =
             gated(wc, fuel).unwrap_or_else(|| panic!("{name}: not finished at fuel {fuel}"));
-        assert_eq!(budgeted, unlimited, "{name}: the end at fuel {fuel}");
+        // Over (completed, failed, declined, reaped), a quest's instances are run no more: each stops where
+        // the budget had brought it in the tick the quest ended, so only a running world's are compared.
+        let running = unlimited.outcome == quest_stub::Outcome::Running;
+        let mems = if running {
+            budgeted.mems.as_slice()
+        } else {
+            &[]
+        };
+        for (k, (a, b)) in mems.iter().zip(&unlimited.mems).enumerate() {
+            if let Some(at) = (0..a.len()).find(|&x| a[x] != b[x]) {
+                panic!(
+                    "{name}: instance {k}'s memory at fuel {fuel}: byte {at} (word {}) differs",
+                    at / 8
+                );
+            }
+        }
+        let (b, u) = (&budgeted, &unlimited);
+        assert_eq!(b.output, u.output, "{name}: the output at fuel {fuel}");
+        assert_eq!(b.outcome, u.outcome, "{name}: the outcome at fuel {fuel}");
+        assert_eq!(
+            b.completions, u.completions,
+            "{name}: the completions at fuel {fuel}"
+        );
+        assert_eq!(b.people, u.people, "{name}: the people at fuel {fuel}");
+        assert_eq!(
+            settled(&b.reports, |r| &r.1),
+            settled(&u.reports, |r| &r.1),
+            "{name}: the reports at fuel {fuel}"
+        );
     }
 
-    // Save and load of every instance (as `quest run --save/--load`), at the case's own schedule.
+    // Save and load of every instance (as `quest run --save/--load`), at the case's own schedule: before
+    // tick k, k within the uninterrupted run (its length is learnt first), so the save is never vacuous.
     let fuel = i.fuel;
+    let run = |w: &mut World, next: &mut usize| -> bool {
+        let now = w.now();
+        w.step(&due(&wc.script, next, now));
+        *next == wc.script.len() && w.quiescent()
+    };
+    let Ok(mut plain) = wc.world(fuel) else {
+        return;
+    };
+    let mut next_a = 0;
+    let length = (1..=WORLD_TICKS)
+        .find(|_| run(&mut plain, &mut next_a))
+        .unwrap_or(WORLD_TICKS);
+    let k = i.k.min(length - 1);
     let (Ok(mut plain), Ok(mut resumed)) = (wc.world(fuel), wc.world(fuel)) else {
         return;
     };
     let (mut next_a, mut next_b) = (0, 0);
-    let mut saved = false;
+    let mut saved = None;
     for _ in 0..WORLD_TICKS {
         let now = plain.now();
+        // `World::load_vms` takes the dialogue mirrors again: not while an instance is mid-segment.
         let busy = (0..resumed.instances())
             .filter_map(|k| resumed.vm(u16::try_from(k).ok()?))
             .any(|vm| vm.in_segment());
-        if !saved && now >= i.k && !busy {
-            saved = true;
+        if saved.is_none() && now >= k && !busy {
+            saved = Some(now);
             let program = Arc::clone(resumed.program());
             let vms: Vec<Vm> = (0..resumed.instances())
                 .filter_map(|k| {
@@ -528,18 +645,12 @@ fn world_case(i: &In) {
                 .load_vms(vms, now == 0)
                 .unwrap_or_else(|e| panic!("{name}: the saves do not load: {e}"));
         }
-        plain.step(&due(&wc.script, &mut next_a, now));
-        resumed.step(&due(&wc.script, &mut next_b, now));
-        if next_a == wc.script.len() && plain.quiescent() && resumed.quiescent() {
+        let (a, b) = (run(&mut plain, &mut next_a), run(&mut resumed, &mut next_b));
+        if saved.is_some() && a && b {
             break;
         }
     }
-    assert_eq!(
-        resumed.output(),
-        plain.output(),
-        "{name}: the output after a save at tick {}",
-        i.k
-    );
+    let at = saved.unwrap_or_else(|| panic!("{name}: no save from tick {k} on"));
     let values = |w: &World| -> Vec<Option<quest_vm::Mirror>> {
         let all = all_globals(w.program());
         (0..w.instances())
@@ -548,20 +659,34 @@ fn world_case(i: &In) {
             .collect()
     };
     assert_eq!(
-        values(&resumed),
-        values(&plain),
-        "{name}: the instances' globals after a save at tick {}",
-        i.k
+        resumed.output(),
+        plain.output(),
+        "{name}: the output after a save before tick {at}"
     );
     assert_eq!(
         resumed.outcome(),
         plain.outcome(),
-        "{name}: the outcome after a save"
+        "{name}: the outcome after a save before tick {at}"
+    );
+    assert_eq!(
+        resumed.completions(),
+        plain.completions(),
+        "{name}: the completions after a save before tick {at}"
     );
     assert_eq!(
         resumed.people(),
         plain.people(),
-        "{name}: the people after a save"
+        "{name}: the people after a save before tick {at}"
+    );
+    assert_eq!(
+        values(&resumed),
+        values(&plain),
+        "{name}: the instances' globals after a save before tick {at}"
+    );
+    assert_eq!(
+        resumed.hash64(),
+        plain.hash64(),
+        "{name}: the world's hash after a save before tick {at}"
     );
 }
 

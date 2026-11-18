@@ -2954,9 +2954,10 @@ quest-wasm:
     grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$log" || { echo "quest-wasm: the wasm32 half ran no test" >&2; exit 1; }
 
 # quest-fuzz <target> [secs] [jobs] — run one fuzz target of quest/fuzz/ (compile, program_bytes, vm_load,
-# wire_decode, stub_inputs) for `secs` seconds on `jobs` libFuzzer processes. cargo-fuzz is installed pinned
-# under quest/target/tools on first use; the corpus is seeded from quest/corpus by quest/fuzz/seeds.sh when
-# the target has none. Crashes land in quest/fuzz/artifacts/<target>/ (git-ignored).
+# wire_decode, stub_inputs, invariants, conversation) for `secs` seconds on `jobs` libFuzzer processes.
+# cargo-fuzz is installed pinned under quest/target/tools on first use; the corpus is seeded from
+# quest/corpus by quest/fuzz/seeds.sh when the target has none. Crashes land in
+# quest/fuzz/artifacts/<target>/ (git-ignored).
 quest-fuzz target secs="60" fuzz_jobs="1":
     #!/usr/bin/env bash
     set -euo pipefail

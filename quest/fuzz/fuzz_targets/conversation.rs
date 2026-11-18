@@ -1,25 +1,26 @@
 //! The conversation runner (`quest_vm::dialogue_run`, spec §5.11) driven by ops over a Phase 10 corpus
 //! program: the first byte picks a run case with conversation dialogues (compiled once per process), every
-//! further byte group is an op — `talk p n` (with a byte choosing the dialogues attached beside those whose
-//! `for` target or `where` filter holds), `pick serial n`, `leave`, `done`, `tick`, `checkpoint`,
-//! `rollback`, `edit <variant>` (the program again; the case's own edit directory, else the program with a
-//! comment line before it; another Phase 10 case's program), `shuffle attachments`.
+//! further byte group is an op — `talk p n mask`, `pick which serial option`, `leave which`, `done which`,
+//! `tick`, `checkpoint`, `rollback`, `edit <variant>` (the program again; the case's own edit directory,
+//! else the program with a comment line before it; another Phase 10 case's program), `shuffle <8 bytes>`.
 //!
-//! The world here is the fuzz target's own, not the stub's `World` (whose attachments, picks and state it
-//! does not expose): the case's instances (its `World` placed and run until quiescent, every VM copied out),
-//! each a `Runner`; per NPC its `Records` and its conversation; each instance's dialogue mirror, which every
-//! condition is evaluated over on a `MirrorVm`, as the stub's `World` does; the events a batch emitted (and
-//! `Talked`), delivered to their instance at the next tick.
+//! The runner reads through the stub's own env, `quest_stub::DialogueWorld` — the dialogue mirrors, the
+//! stage, the attached set, the people's queries, the faults — exactly as the stub's `World` does. What is
+//! the target's own is what `World` does not expose: the instances (the case's `World` placed and settled,
+//! every VM copied out into a `Runner`), the conversations and records, the events in flight (a batch's
+//! emits and `Talked`, delivered at the next tick), the attachments handlers would make (a talk's `mask`
+//! attaches and detaches as `attach_dialogue` / `detach_dialogue` would), and a checkpoint of all of it.
 //!
 //! Properties: no panic; every pick is `Ok` or a `PickRefused` whose offer is the conversation's current
-//! one (`NoOffer` only when none is out); a rollback brings the world's hash back to the checkpoint's;
-//! the attachments in another order give the same batch, conversation and records (commutativity);
-//! once the inputs stop, every conversation is `Closed` — or waits on a pick with no timeout, an input the
-//! player owes — within `CONVERSATION_LINGER_TICKS` + `DIALOGUE_STACK_MAX` × the longest pause or choice
-//! timeout of the program, and, left, is `Closed` within the linger.
+//! one (`NoOffer` only when none is out); a rollback brings the world's hash back to the checkpoint's; the
+//! attachments in another order (a seeded Fisher–Yates permutation) give the same batch, conversation and
+//! records as in sorted order (commutativity); once the inputs stop, every conversation is `Closed` — or
+//! waits on a pick with no timeout, an input the player owes — within `CONVERSATION_LINGER_TICKS` +
+//! `DIALOGUE_STACK_MAX` × the longest pause or choice timeout of the program, and, left, is `Closed` within
+//! the linger.
 #![no_main]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hasher as _;
 use std::sync::{Arc, OnceLock};
 
@@ -27,20 +28,13 @@ use libfuzzer_sys::fuzz_target;
 use quest_corpus::{Case, RUN, config_of, is_world, tree_of};
 use quest_lang::{SourceTree, compile};
 use quest_stub::{
-    People, Runner, StubConfig, StubHost, World, id_of, parse_people, parse_wire, vm_config,
+    DialogueWorld, People, Runner, StubConfig, StubHost, World, parse_people, parse_wire, vm_config,
 };
-use quest_vm::consts::{
-    COND_FUEL, CONVERSATION_LINGER_TICKS, DIALOGUE_STACK_MAX, MEM_BYTES_DEFAULT,
-};
+use quest_vm::consts::{CONVERSATION_LINGER_TICKS, DIALOGUE_STACK_MAX, MEM_BYTES_DEFAULT};
 use quest_vm::dialogue::{DialogueGraph, DialogueKind, StepDef};
-use quest_vm::dialogue_run::{
-    Attachment, Batch, ConvState, Conversation, DialogueEnv, EventShape, InstanceId, PickRefused,
-    Records,
-};
-use quest_vm::host::HostStruct;
-use quest_vm::types::TypeDesc;
+use quest_vm::dialogue_run::{Attachment, Batch, ConvState, Conversation, PickRefused, Records};
 use quest_vm::wire::WireValue;
-use quest_vm::{Checkpoint, Fnv64, Mirror, MirrorVm, Program, PureFault, Vm};
+use quest_vm::{Checkpoint, Fnv64, Program, Vm};
 use state_hash::StateHash;
 
 /// Ops read per input.
@@ -216,160 +210,45 @@ fn cases() -> &'static [Talks] {
     })
 }
 
-/// An instance: its runner and its dialogue mirror.
-struct Inst {
-    runner: Runner,
-    /// The mirror last taken and its hash.
-    mirror: Option<(Mirror, u64)>,
-    /// A scratch instance holding it, made at its first evaluation.
-    scratch: Option<MirrorVm>,
-}
-
-/// What the runner reads through.
-struct Env {
-    program: Arc<Program>,
-    key: u64,
-    insts: Vec<Inst>,
-    roles: Vec<(String, WireValue)>,
-    api_events: Vec<HostStruct>,
-    /// The host a condition's queries reach: the people.
-    eval_host: StubHost,
-}
-
-fn hash_of<T: StateHash + ?Sized>(t: &T) -> u64 {
-    let mut h = Fnv64::default();
-    t.state_hash(&mut h);
-    h.finish()
-}
-
-impl Env {
-    /// The globals a dialogue mirror holds (as the stub's `World`): the quest's read set and stage, else
-    /// every global.
-    fn dialogue_set(&self) -> Vec<u16> {
-        let p = &self.program;
-        match &p.quest {
-            Some(q) => {
-                let mut set = q.read_set.clone();
-                set.push(q.stage_global);
-                set.sort_unstable();
-                set.dedup();
-                set
-            }
-            None => (0..p.globals.len())
-                .filter_map(|g| u16::try_from(g).ok())
-                .collect(),
-        }
-    }
-
-    /// Each instance's mirror taken again, but of one mid-segment or initialising (it keeps its last).
-    fn take_mirrors(&mut self) {
-        let set = self.dialogue_set();
-        for inst in &mut self.insts {
-            let Ok(m) = inst.runner.vm.mirror(&set) else {
-                continue;
-            };
-            let h = hash_of(&m);
-            if inst.mirror.as_ref().is_none_or(|(_, old)| *old != h) {
-                inst.mirror = Some((m, h));
-                inst.scratch = None;
-            }
-        }
-    }
-}
-
-impl DialogueEnv for Env {
-    fn graph(&self, i: InstanceId) -> Option<&DialogueGraph> {
-        let k = usize::try_from(i.0).ok()?;
-        (k < self.insts.len()).then_some(&self.program.dialogues)
-    }
-
-    fn eval(
-        &mut self,
-        i: InstanceId,
-        f: u16,
-        args: &[WireValue],
-        _depth: u32,
-    ) -> Result<WireValue, PureFault> {
-        let (Ok(k), Ok(id)) = (usize::try_from(i.0), u16::try_from(i.0)) else {
-            return Err(PureFault::BadCall);
-        };
-        let Env {
-            program,
-            insts,
-            roles,
-            eval_host,
-            ..
-        } = self;
-        let inst = insts.get_mut(k).ok_or(PureFault::BadCall)?;
-        let (m, _) = inst.mirror.as_ref().ok_or(PureFault::BadCall)?;
-        if inst.scratch.is_none() {
-            let cfg = vm_config(MEM_BYTES_DEFAULT, id, roles.clone());
-            inst.scratch =
-                Some(MirrorVm::new(Arc::clone(program), cfg, m).map_err(|_| PureFault::BadCall)?);
-        }
-        let vm = inst.scratch.as_mut().ok_or(PureFault::BadCall)?;
-        vm.eval_pure(f, args, COND_FUEL, eval_host)
-    }
-
-    fn report(&mut self, _: InstanceId, _: PureFault) {}
-
-    fn event(&self, _: InstanceId, event: u16, script: bool) -> Option<EventShape> {
-        if !script {
-            let e = self.api_events.get(usize::from(event))?;
-            return Some(EventShape {
-                name: e.name.clone(),
-                fields: e.fields.iter().map(|f| f.0.clone()).collect(),
-            });
-        }
-        let p = &self.program;
-        let e = p.events.get(usize::from(event))?;
-        match p.types.desc(e.ty).ok()? {
-            TypeDesc::Struct { fields, .. } => Some(EventShape {
-                name: e.name.clone(),
-                fields: fields.iter().map(|f| f.0.clone()).collect(),
-            }),
-            _ => None,
-        }
-    }
-
-    fn program_key(&self, i: InstanceId) -> Option<u64> {
-        self.graph(i).map(|_| self.key)
-    }
-}
-
 /// A conversation with an NPC.
 #[derive(Clone)]
 struct Talk {
     player: i64,
     conv: Conversation,
-    /// The byte choosing the dialogues attached beside the targeted and filtered ones.
-    mask: u8,
 }
 
-/// An instance at a checkpoint: its VM's undo position, its host, its clock, its mirror.
-type InstSnapshot = (Checkpoint, StubHost, u64, Option<(Mirror, u64)>);
+/// An instance at a checkpoint: its VM's undo position, its host, its clock.
+type InstSnapshot = (Checkpoint, StubHost, u64);
 
 /// What a checkpoint keeps.
 struct Snapshot {
     now: u64,
+    env: DialogueWorld,
     talks: BTreeMap<i64, Talk>,
     records: BTreeMap<i64, Records>,
     pending: Vec<(u32, String, WireValue)>,
+    attached: BTreeSet<(u32, i64, String)>,
+    detached: BTreeSet<(u32, i64, String)>,
     insts: Vec<InstSnapshot>,
     hash: u64,
 }
 
 struct Sim<'a> {
     case: &'a Talks,
-    env: Env,
+    /// The instances, in id order.
+    insts: Vec<Runner>,
+    env: DialogueWorld,
     now: u64,
     talks: BTreeMap<i64, Talk>,
     records: BTreeMap<i64, Records>,
     /// Events for the next tick: (instance, event, payload).
     pending: Vec<(u32, String, WireValue)>,
+    /// What handlers attached and detached: (instance, NPC id, dialogue).
+    attached: BTreeSet<(u32, i64, String)>,
+    detached: BTreeSet<(u32, i64, String)>,
     snapshot: Option<Snapshot>,
-    /// The order the attachments are handed over in: rotated by this.
-    shuffle: u8,
+    /// The seed of the order the attachments are handed over in.
+    shuffle: u64,
 }
 
 fn struct_of(name: &str, fields: Vec<(&str, WireValue)>) -> WireValue {
@@ -382,15 +261,22 @@ fn struct_of(name: &str, fields: Vec<(&str, WireValue)>) -> WireValue {
     }
 }
 
-/// The attachments in the order `shuffle` makes: rotated, and reversed when its top bit is set.
-fn shuffled(att: &[Attachment], shuffle: u8) -> Vec<Attachment> {
+/// SplitMix64: the next value of `state`.
+fn splitmix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// `att` permuted by a Fisher–Yates shuffle seeded with `seed`.
+fn shuffled(att: &[Attachment], seed: u64) -> Vec<Attachment> {
     let mut out = att.to_vec();
-    if !out.is_empty() {
-        let n = out.len();
-        out.rotate_left(usize::from(shuffle & 0x7f) % n);
-    }
-    if shuffle & 0x80 != 0 {
-        out.reverse();
+    let mut state = seed;
+    for k in (1..out.len()).rev() {
+        let j = (splitmix(&mut state) % (k as u64 + 1)) as usize;
+        out.swap(k, j);
     }
     out
 }
@@ -415,51 +301,45 @@ impl<'a> Sim<'a> {
             )
             .ok()?;
             runner.host.people = case.people.clone();
-            insts.push(Inst {
-                runner,
-                mirror: None,
-                scratch: None,
-            });
+            insts.push(runner);
         }
-        let mut eval_host = StubHost::new(StubConfig::default());
-        eval_host.people = case.people.clone();
-        let mut env = Env {
-            key: case.program.content_hash(),
-            program: Arc::clone(&case.program),
-            insts,
-            roles: case.roles.clone(),
-            api_events: quest_stub::stub_api().events,
-            eval_host,
-        };
-        env.take_mirrors();
+        let mut env = DialogueWorld::new(
+            Arc::clone(&case.program),
+            case.people.clone(),
+            case.roles.clone(),
+            MEM_BYTES_DEFAULT,
+        );
+        env.take_mirrors(insts.iter().map(|r| &r.vm));
         Some(Sim {
             case,
+            insts,
             env,
             now: 0,
             talks: BTreeMap::new(),
             records: BTreeMap::new(),
             pending: Vec::new(),
+            attached: BTreeSet::new(),
+            detached: BTreeSet::new(),
             snapshot: None,
             shuffle: 0,
         })
     }
 
-    /// The world's hash: the clock, each instance's VM and mirror, the conversations, the records, the
-    /// events in flight.
+    /// The world's hash: the clock, each instance's VM and clock, the mirrors, the conversations, the
+    /// records, the events in flight, the attachments.
     fn hash(&self) -> u64 {
         let mut h = Fnv64::default();
         self.now.state_hash(&mut h);
-        self.env.key.state_hash(&mut h);
-        for inst in &self.env.insts {
-            inst.runner.vm.hash64().state_hash(&mut h);
-            inst.runner.now.state_hash(&mut h);
-            inst.mirror.as_ref().map(|(_, m)| *m).state_hash(&mut h);
+        self.env.program_key.state_hash(&mut h);
+        for r in &self.insts {
+            r.vm.hash64().state_hash(&mut h);
+            r.now.state_hash(&mut h);
         }
+        self.env.hash_mirrors(&mut h);
         (self.talks.len() as u64).state_hash(&mut h);
         for (npc, tk) in &self.talks {
             npc.state_hash(&mut h);
             tk.player.state_hash(&mut h);
-            tk.mask.state_hash(&mut h);
             tk.conv.state_hash(&mut h);
         }
         self.records.state_hash(&mut h);
@@ -469,51 +349,43 @@ impl<'a> Sim<'a> {
             e.state_hash(&mut h);
             v.state_hash(&mut h);
         }
+        self.attached.state_hash(&mut h);
+        self.detached.state_hash(&mut h);
         h.finish()
     }
 
-    /// The NPC's attachments: each conversation dialogue of the home whose `for` target is the NPC or whose
-    /// `where` filter holds, and those `mask` picks (by instance and index).
-    fn attachments(&mut self, player: &WireValue, npc: &WireValue, mask: u8) -> Vec<Attachment> {
-        let npc_id = id_of(Some(npc));
+    /// The NPC's attachments now, as the stub's `World` computes them.
+    fn attachments(&mut self, player: &WireValue, npc: &WireValue) -> Vec<Attachment> {
+        self.env.now = self.now;
+        let att = self
+            .env
+            .attachments(player, npc, &self.attached, &self.detached);
+        // A fault counts as false; the env keeps it for a caller that reports it.
+        self.env.faults.clear();
+        att
+    }
+
+    /// What handlers would do before a talk: for each conversation dialogue `k` (cast 2) and instance
+    /// `i`, `attach_dialogue` when bit `(3k + i) % 7` of `mask` is set; with bit 7 set, `detach_dialogue`
+    /// of the home's dialogues it did not attach.
+    fn handlers_attach(&mut self, npc: i64, mask: u8) {
         let program = Arc::clone(&self.env.program);
-        let mut out = Vec::new();
         for (k, d) in program.dialogues.dialogues.iter().enumerate() {
-            let Ok(k) = u16::try_from(k) else { break };
             if d.kind != DialogueKind::Conversation || d.cast != 2 {
                 continue;
             }
-            if let Some(f) = d.target.or(d.filter) {
-                let n = program
-                    .fns
-                    .get(usize::from(f))
-                    .and_then(|x| x.sig.as_ref())
-                    .map_or(0, |s| s.params.len());
-                let cast: Vec<WireValue> =
-                    [player.clone(), npc.clone()].into_iter().take(n).collect();
-                let holds = match self.env.eval(InstanceId(0), f, &cast, 1) {
-                    Ok(v) if d.target.is_some() => id_of(Some(&v)) == npc_id,
-                    Ok(v) => v == WireValue::Bool(true),
-                    Err(_) => false,
-                };
-                if holds {
-                    out.push(Attachment {
-                        instance: InstanceId(0),
-                        dialogue: k,
-                    });
-                }
-            }
-            for i in 0..self.env.insts.len() {
-                let bit = (usize::from(k) * 3 + i) % 8;
-                if mask & (1 << bit) != 0 {
-                    out.push(Attachment {
-                        instance: InstanceId(u32::try_from(i).unwrap_or(u32::MAX)),
-                        dialogue: k,
-                    });
+            for i in 0..self.insts.len() {
+                let Ok(i32) = u32::try_from(i) else { break };
+                let key = (i32, npc, d.name.clone());
+                if mask & (1 << ((3 * k + i) % 7)) != 0 {
+                    self.detached.remove(&key);
+                    self.attached.insert(key);
+                } else if i == 0 && mask & 0x80 != 0 {
+                    self.attached.remove(&key);
+                    self.detached.insert(key);
                 }
             }
         }
-        out
     }
 
     /// The emits of a batch for the next tick.
@@ -544,9 +416,10 @@ impl<'a> Sim<'a> {
         let Some((pv, nv)) = self.cast(player, npc) else {
             return;
         };
-        let att = self.attachments(&pv, &nv, mask);
+        self.handlers_attach(npc, mask);
+        let att = self.attachments(&pv, &nv);
         let now = self.now;
-        // Commutativity: the attachments in the canonical order, on copies.
+        // Commutativity: the attachments in sorted order, on copies.
         let mut rec_sorted = self.records.get(&npc).cloned().unwrap_or_default();
         let mut sorted = att.clone();
         sorted.sort();
@@ -567,6 +440,7 @@ impl<'a> Sim<'a> {
             nv.clone(),
             now,
         );
+        self.env.faults.clear();
         let name = self.case.name;
         assert_eq!(
             batch, batch_sorted,
@@ -583,12 +457,12 @@ impl<'a> Sim<'a> {
         );
         self.batch(&batch);
         let talked = struct_of("Talked", vec![("player", pv), ("npc", nv)]);
-        for i in 0..self.env.insts.len() {
+        for i in 0..self.insts.len() {
             if let Ok(i) = u32::try_from(i) {
                 self.pending.push((i, "Talked".into(), talked.clone()));
             }
         }
-        self.talks.insert(npc, Talk { player, conv, mask });
+        self.talks.insert(npc, Talk { player, conv });
     }
 
     /// The NPC of the `which`-th conversation.
@@ -610,7 +484,7 @@ impl<'a> Sim<'a> {
         let Some((pv, nv)) = self.cast(tk.player, npc) else {
             return;
         };
-        let att = self.attachments(&pv, &nv, tk.mask);
+        let att = self.attachments(&pv, &nv);
         // Mostly the serial out; sometimes another one.
         let serial = match (serial & 3, tk.conv.offer()) {
             (0, _) | (_, None) => u32::from(serial >> 2),
@@ -634,6 +508,7 @@ impl<'a> Sim<'a> {
             option,
             now,
         );
+        self.env.faults.clear();
         let name = self.case.name;
         assert_eq!(
             r, r_sorted,
@@ -688,20 +563,18 @@ impl<'a> Sim<'a> {
     /// conversation's clock moved on.
     fn tick(&mut self) {
         for (i, event, value) in std::mem::take(&mut self.pending) {
-            if let Some(inst) = usize::try_from(i)
-                .ok()
-                .and_then(|i| self.env.insts.get_mut(i))
-            {
-                let _ = inst.runner.vm.deliver(&event, &value);
+            if let Some(r) = usize::try_from(i).ok().and_then(|i| self.insts.get_mut(i)) {
+                let _ = r.vm.deliver(&event, &value);
             }
         }
-        for inst in &mut self.env.insts {
-            inst.runner.host.output.clear();
-            inst.runner.host.reports.clear();
-            inst.runner.step(FUEL);
+        for r in &mut self.insts {
+            r.host.output.clear();
+            r.host.reports.clear();
+            r.step(FUEL);
         }
-        self.env.take_mirrors();
+        self.env.take_mirrors(self.insts.iter().map(|r| &r.vm));
         let now = self.now;
+        self.env.now = now;
         let npcs: Vec<i64> = self.talks.keys().copied().collect();
         for npc in npcs {
             let Some(tk) = self.talks.get_mut(&npc) else {
@@ -712,6 +585,7 @@ impl<'a> Sim<'a> {
                 self.batch(&b);
             }
         }
+        self.env.faults.clear();
         self.now += 1;
     }
 
@@ -719,21 +593,16 @@ impl<'a> Sim<'a> {
         let hash = self.hash();
         self.snapshot = Some(Snapshot {
             now: self.now,
+            env: self.env.clone(),
             talks: self.talks.clone(),
             records: self.records.clone(),
             pending: self.pending.clone(),
+            attached: self.attached.clone(),
+            detached: self.detached.clone(),
             insts: self
-                .env
                 .insts
                 .iter()
-                .map(|x| {
-                    (
-                        x.runner.vm.checkpoint(),
-                        x.runner.host.clone(),
-                        x.runner.now,
-                        x.mirror.clone(),
-                    )
-                })
+                .map(|r| (r.vm.checkpoint(), r.host.clone(), r.now))
                 .collect(),
             hash,
         });
@@ -743,18 +612,17 @@ impl<'a> Sim<'a> {
         let Some(s) = &self.snapshot else { return };
         let name = self.case.name;
         self.now = s.now;
+        self.env = s.env.clone();
         self.talks = s.talks.clone();
         self.records = s.records.clone();
         self.pending = s.pending.clone();
-        for (inst, (cp, host, now, mirror)) in self.env.insts.iter_mut().zip(&s.insts) {
-            inst.runner
-                .vm
-                .rollback_to(*cp)
+        self.attached = s.attached.clone();
+        self.detached = s.detached.clone();
+        for (r, (cp, host, now)) in self.insts.iter_mut().zip(&s.insts) {
+            r.vm.rollback_to(*cp)
                 .unwrap_or_else(|e| panic!("{name}: a VM refused the rollback: {e:?}"));
-            inst.runner.host = host.clone();
-            inst.runner.now = *now;
-            inst.mirror = mirror.clone();
-            inst.scratch = None;
+            r.host = host.clone();
+            r.now = *now;
         }
         assert_eq!(
             self.hash(),
@@ -763,21 +631,19 @@ impl<'a> Sim<'a> {
         );
     }
 
-    /// The script edited: every instance migrated (all or none), the mirrors taken again, every
-    /// conversation rebound. A checkpoint does not survive it (its undo log is the old instances').
+    /// The script edited (as the stub's `World::edit`): every instance migrated (all or none), the
+    /// mirrors taken again, every conversation rebound. A checkpoint does not survive it (its undo log is
+    /// the old instances').
     fn edit(&mut self, variant: u8) {
         let Some(program) = self.case.edits[usize::from(variant) % 3].clone() else {
             return;
         };
         let mut vms = Vec::new();
-        for (k, inst) in self.env.insts.iter().enumerate() {
+        for (k, r) in self.insts.iter().enumerate() {
             let Ok(id) = u16::try_from(k) else { return };
             let cfg = vm_config(MEM_BYTES_DEFAULT, id, self.env.roles.clone());
-            let Ok(copy) = Vm::load(
-                Arc::clone(&self.env.program),
-                cfg.clone(),
-                &inst.runner.vm.save(),
-            ) else {
+            let Ok(copy) = Vm::load(Arc::clone(&self.env.program), cfg.clone(), &r.vm.save())
+            else {
                 return;
             };
             match copy.migrate(Arc::clone(&program), cfg) {
@@ -785,14 +651,11 @@ impl<'a> Sim<'a> {
                 Err(_) => return,
             }
         }
-        for (inst, vm) in self.env.insts.iter_mut().zip(vms) {
-            inst.runner.vm = vm;
-            inst.mirror = None;
-            inst.scratch = None;
+        for (r, vm) in self.insts.iter_mut().zip(vms) {
+            r.vm = vm;
         }
-        self.env.key = program.content_hash();
-        self.env.program = program;
-        self.env.take_mirrors();
+        self.env.set_program(program);
+        self.env.take_mirrors(self.insts.iter().map(|r| &r.vm));
         self.snapshot = None;
         let npcs: Vec<i64> = self.talks.keys().copied().collect();
         for npc in npcs {
@@ -803,6 +666,7 @@ impl<'a> Sim<'a> {
                 self.batch(&b);
             }
         }
+        self.env.faults.clear();
     }
 
     /// The inputs stopped: every conversation closes, or waits on a pick with no timeout, within the bound;
@@ -889,7 +753,7 @@ fuzz_target!(|data: &[u8]| {
             5 => sim.checkpoint(),
             6 => sim.rollback(),
             7 => sim.edit(b.next()),
-            _ => sim.shuffle = b.next(),
+            _ => sim.shuffle = u64::from_le_bytes(std::array::from_fn(|_| b.next())),
         }
     }
     sim.settle();
