@@ -832,3 +832,247 @@ struct WorldLinks { addrs: Vec<SocketAddr>, links: BTreeMap<SocketAddr, Arc<Host
   - T7–T9 are compatible at one address.
   - Two replicas are switched on in T10.
 - **Proportion:** 12 tasks; the risk is in T2–T6, and each carries a seeded conservation test; T7–T11 are edges.
+
+## As built (2026-11-18)
+
+Built on `develop` from `03da3335`, executed subagent-driven; the ledger and the per-task briefs and reports are in
+`.superpowers/sdd/2026-11-17-elastic-2b-coordinator-replicas/`. Every task was reviewed clean (T3, T4 and T6 after one
+fix round each). **Task 11 (the world panel) is NOT done**: `crates/panel` is still untracked (2026-11-18), so the
+task is blocked by the plan's own gate; its `ops.rs` must still learn `world-stop` / `world-start`'s replica count
+(below), and its CLAUDE.md paragraph is unchanged. Not yet accepted: the whole-branch review and Dawid's hand checks
+(TODO.md, "Elastic 2b") are pending; nothing ran live or on orion.
+
+### Commits
+
+Foreign `quest` commits are interleaved on `develop` and not listed.
+
+| Task | Commits |
+|---|---|
+| plan | `ce9d116c` docs: Elastic 2b plan — several coordinator replicas over one row |
+| T1 the rig's row | `16241666` test(rig): the seeded rig's store is a versioned row with an outbox |
+| T2 input log, rebase | `5765b7d4` feat(coordinator): inputs are logged and a conflict rebases onto the newer row |
+| T3 decisions in the transaction | `1b148abb` feat(coordinator): a store decision commits in the transaction of the core that decided it; `88043c07` fix(coordinator): a committed cut is announced only after its parts are finished |
+| T4 replicas | `0a29aa14` feat(coordinator): replicas register and beat; attachments count while their replica lives; `e47995f8` fix(coordinator): a replica a registration ended leaves the live set; a refresh never goes back |
+| T5 the outbox | `68911542` feat(coordinator): messages for a host linked to another replica go through the outbox, in commit order |
+| T6 the ticker | `1352f702` feat(coordinator): one ticker replica runs the timed and lease work; `0cc7fd17` fix(coordinator): a successions read out across a rebase is stale, never applied |
+| T7 links | `78fbcb12` feat(svc-link): a link target names every replica; a host dials them in turn |
+| T8 login | `120ade15` feat(login): a link per coordinator replica; a replica with no gate host says so (link protocol 9) |
+| T9 host readiness | `564da569` feat(host): a host is Ready once a coordinator replica acknowledged its attach; `584ff54c` fix(twin): a killed landless host's old row may already be pruned when phase 5 looks |
+| T10 deployment | `9b3398ff` feat(world): two coordinator replicas with a disruption budget; recipes, twin phases and alerts |
+| T10b (inserted) | `b58d2379` fix(host): forget a peer whose hosts row was pruned (absent below next_host_id) |
+| T11 the world panel | — blocked (`crates/panel` untracked) |
+| T12 docs | `docs: Elastic 2b — coordinator replicas over one row, as built` (CLAUDE.md, TODO.md, this section) |
+
+### "To confirm with Dawid" — defaults taken (not answered before execution)
+
+- Orion stays at 2 replicas on one node (`coordinator_replicas` default 2): a replica crash is survived, the node is not.
+- Store decisions run inside the core's transaction (departs 1): a decision holds the row up to its `lock_timeout`.
+- The ticker owns all timed and lease work (departs 2): a dead ticker stalls cuts and declarations ≤ one replica lease
+  plus one read.
+- `crates/panel` was not committed before Task 11 → Task 11 stopped at its gate (ruling, ledger 2026-11-18).
+
+### Rulings
+
+Execution-wide:
+- T1 may edit `game/src/coordinator/link.rs` (the rig's store lives there; test-support types only).
+- Every file with Dawid's uncommitted hunks (justfile, `deploy/modules/world/variables.tf`, the env roots' `main.tf`,
+  the monitoring `tftpl`, CLAUDE.md, TODO.md) was staged by filtered patch (`-U3`, `--recount`).
+- **Task 10b inserted**: the twin's strict join check found a pre-existing host bug (below); a gate host refusing every
+  spawn forever after a landless host's crash + prune is a production outage, and the deployment gate cannot pass.
+- **Task 11 blocked**; T12 written without the panel paragraphs (cost: one small docs follow-up).
+
+T1: `RigCluster` (an `Arc<Mutex<…>>` of replicas, store and mailboxes) replaces `SharedCore` and stands in for the
+brief's `MultiRig` fields (the inline links need shared access); `InlineWorldLink::shared_at(core, replica, host)`.
+
+T2:
+- Interim: store answers were not yet logged; a core holding an unlogged change (or a failed write that may be in the
+  row) did not rebase but stopped as in E2a (`End::Conflict`) — removed by T6 except for the double-apply / no-row cases.
+- `set_cut_epoch` only raises; the epoch moved to bootstrap-once in T3.
+- Tests keep `c.handle / maintain / host_detached` through `tests/common::CoreInputs` (every input still goes through
+  `apply`); `take_out`'s release truncates the log (those inputs changed nothing durable); `LeaveRequest` on replay is
+  stamped with the replay's clock.
+- Process fields are split `kept` / `reset` in `projection!`; `WorldCuts` / `SuccessionRuns` carry their `serde(skip)`
+  fields across a rebase by destructuring.
+
+T3:
+- Marks are stamped `version + 1` when `take_transition` takes them (the row holds the exact stamp; a replay matches).
+- `TransitionWrite` carries `replica`; `Declare` gained `generation` (the store's `StaleGeneration` check survives).
+- `DecideCut` and `Rollback` are explicit hand-outs (`take_decision`, `take_rollback`), so the rig executes decisions
+  in the call that commits them.
+- A failed write (outcome unknown) orphans its marks → lookup; one that provably did not commit (Conflict, a refusal
+  before the store) re-queues its decisions (`transition_refused`). A decision's `Err` → the cut is looked up and the
+  successions re-read.
+- Postgres `write_transition` takes no store-thread writer mutex (SQLite keeps it).
+- Obsolete coordinator-fence tests deleted (`stale_coordinator_*`, `ending_is_fenced`, `fenced_coordinator_stops`,
+  `overlapping_start_claims_before_it_loads`), replaced by `coordinator_rows::a_decision_rolls_back_with_its_conflicting_transition`.
+- E2a's "a coordinator that dies between its claim and its first write" refusal is retired: there is no claim; a new
+  core is bootstrapped at once (`INSERT … ON CONFLICT … WHERE core IS NULL`).
+- **Fix round**: the cut notice is sent by `FinishCut` after `finish_staged` (it could reach hosts before `COMMIT
+  PREPARED`); `NotifyCut` is now unqueued.
+
+T4:
+- `ReplicaJoined { alone: true }` drops only LOWER replica ids (a replayed lone join must not evict a later live
+  replica) — reviewer-approved, safer than the plan's "every other id".
+- Dropping a replica does not detach its hosts: their attachments stop counting (filtered by the live set) until a
+  re-`Attach`, a deadline or a `hosts` read — reviewer-approved.
+- `register_replica` upserts an empty `coordinator` row (a replica registers before the bootstrap); Postgres
+  `state BIGINT`; `ReplicaWatch::observe` takes the read's issue time.
+- The version check covers a prefix (outputs decided before it was handed out) and drains the log prefix before it.
+- The multi-replica server tests live in `server/tests/hosts.rs` (`just test-r3`): only `hosts_rig` has claim-cut
+  hosts with switchable links (also T5, T7, T8). Restart-modelling game tests apply `ReplicaJoined { alone: true }`.
+- **Fix round**: a replica ended by another's REGISTRATION (not the watch) left the live set never → `ReplicaWatch::gone`
+  (dead rows and pruned ids below the read's highest); role `all` joins `alone` when it is not a listener. A refresh
+  could rebase onto an OLDER row → `Coordinator::refresh` is forward only; stale receivers dropped at a hand-out.
+
+T5:
+- A host attached to a non-live replica gets nothing (its next `Attach` reconciles); one with no attachment → direct.
+  `Attached` / `Generation` always go direct. `Every` stays one direct entry plus one outbox copy per host on another
+  live replica. Routing happens at `take_transition` only.
+- `take_for` is sent with every transition, even at one replica (an index `DELETE` + `pg_notify`; cost unmeasured).
+- Notice-, held-row- and stale-cut refreshes are deferred while the core holds `unacked`.
+- In the rig, every route pass refreshes the cache when the row moved (as a NOTIFY does).
+- The two-replica reference core replays commits, releases and replica 0's world ticks in commit order.
+
+T6:
+- A rebased ticker owes a successions read when the rebase dropped one it applied OR one is out (final, after the fix
+  round; the brief's "every rebase" made `a_rebase_at_any_round_conserves_everything` diverge).
+- `CutLookedUp` (a stored decision read back) is a LOGGED, replayed input; the generation-lookup answer stays a direct,
+  unlogged call (a dropped one re-hands the conditional rollback).
+- `End::Conflict` stays only for an unacked write that may be in the row and a gone / undecodable row.
+- Drain marks moved into a durable `draining` set (a non-ticker reads no `hosts` rows but its gate needs the marks).
+- The runtime's cut configuration survives a rebase onto a row written before it was committed.
+- **Fix round**: a successions read out across a rebase could re-open a run the rebased row closed → a read is owed
+  when one is out, and `read_floor` drops answers issued below it.
+
+T7: a dropped link's next pass starts after the address that dropped (one failed attempt when that replica was fine);
+dev replicas via `just coordinators=N` and `DEV_R3_REPLICAS` / `DEV_R3_LOGIN_LINK` (env-driven, CLI unchanged); the
+second replica shares the first's identity (`spare_replica_with_cert`).
+
+T8:
+- The cross-replica placement goes gate → holder over the hosts' PEER links (the brief assumed the outbox); "acks on
+  any link" matters for a gate that re-attaches mid-order (`acks_match_on_any_link`).
+- Every link `NoGate` → `SpawnError::Timeout` (503); `orders_dropped` keeps its name (now counts `NoGate` answers).
+- A failed DNS resolution keeps an unchanged row's links; a first failure is `BadLink`. Kick durability unchanged.
+
+T9: health keeps its own monotonic clock; the roles test replicates the main loop's `set_attached(world_attached())`
+line (the wiring itself is covered by the twin only).
+
+T10:
+- `WorldCoordinatorNoTicker` selects `role="coordinator"` and requires a registered replica; `WorldNoCommittedCut`,
+  `WorldNoFirstCut`, `WorldHostsBelowReplicas` read across replicas (each replica counts only its own decisions; only
+  the ticker refreshes `hosts_live`).
+- `world-start` keeps a running coordinator's own count (the annotation only when the spec is 0).
+- `world_update.sh` stops the coordinator explicitly (to 0 after the hosts, back to the count after the images); a
+  re-run of the recorded release may find it at 0.
+- Twin phase 7 accepts a host's link on ANY live replica and force-deletes the ticker's pod; the join check is a real
+  join through the login service (`issue-refresh` in the login pod, `POST /login/v1/join`).
+- The coordinator PDB exists only above one replica (login's pattern).
+
+T10b: candidates are the keys of `peers`, `peer_endpoints`, `peer_boots`; the open-run guard covers heir, survivors,
+adoptions and reports; refusals on the absent path log at info; the server test (`takeover.rs`) marks the row dead by
+SQL at the kill so the old dead-row path cannot win.
+
+### Plan defects found
+
+- **T2 before T3**: store answers could not be logged before T3's stamps existed; T2 needed interim unlogged marks and
+  an `End::Conflict` stop (gone in T6).
+- **T3's two post-commit effects** (`FinishCut`, `NotifyCut`) ran as separate store tasks: listeners could hear of a
+  cut before its parts were committed (and fall back to the 30 s poll). Fixed in `88043c07`.
+- **T4**: the plan's lone join "drops every other id" would evict a later live replica on replay; a replica ended by a
+  registration (not the watch) was never dropped from the live set; a refresh could go backwards. Fixed in T4 /
+  `e47995f8`. The core needed `register_replica` to create the row before the bootstrap.
+- **T5**: without a NOTIFY-style refresh in the rig no cut ever began on two replicas; `with_replicas` had to commit
+  replica 0 first.
+- **T6**: "a rebased ticker owes a read" (every rebase) diverged from the one-core world; narrowed, then the review
+  found the stale read across a rebase. A T5 runtime busy loop surfaced: notices left in their channel while a write
+  waited to retry woke every wait (~1M `Maintain`s a second, `test-r4` OOM) — `pump_notices` now runs every pass.
+- **T8**: the brief routed cross-replica placement through the outbox; it goes over peer links.
+- **T9**: twin phase 5 assumed the killed landless host's old row is `dead`; a new pod's registration may already have
+  pruned it (`584ff54c`, tightened in T10 to "dead or absent").
+- **T10**: three existing alerts read one pod's counters (false fire / masked at 2 replicas). The twin's strict join
+  check found a PRE-EXISTING host bug: a force-killed host's dead row pruned by another registration before the gate
+  host forgot it → `peers_synced` waited for it forever → every spawn refused, every join 503 → Task 10b.
+- The core format changed within `COORDINATOR_STATE_VERSION` 5 in T3, T4 and T6 (the plan bumps it once, in T2): a dev
+  row written by a mid-plan build reads as `Corrupt` or misdecodes silently (bincode allows trailing bytes) — re-forge.
+
+### Deferred minors (for the final review)
+
+- **Flagged**: T8 — `HostToLogin::NoGate` carries no kind (spawn and kick share the `(token, epoch)` key space; a racing
+  kick / join cross-feed costs at most one extra resend) — cheap to change only while protocol 9 is unreleased.
+- **Flagged (stuck-world shape)**: T10b — absent ids are not added to `dead_seen` (`note_dead_rows`): a landless host
+  with unsaved state traffic to this host, ended AND pruned before this host's read → the journal refuses the forget
+  (correct) but every cut part is refused for `unsaved_traffic` forever: the world stops saving instead of rolling back.
+- T1: `RigReplica.hosts` / outbox scaffolding (used from T5); `shared_at` index panic (named since T2).
+- T2: hand-placed `unlogged` marks (deleted in T6); a Conflict-answered write must not enter `unacked` (fixed in T3).
+- T3: `world_file.rs` ~:446 replace path hard-codes cut epoch 1 (use row epoch + 1); bincode trailing bytes (above);
+  stale docs / dead code (`thread.rs` ~:788 doc on the wrong fn, ~:460 comment, `operator.rs` ~:33 broken intra-doc
+  link, `handle.rs` ~:201 names `write_coordinator_later`, `coordinator_rt.rs` ~:851
+  `WORLD_CUT_DECISION_SLOW_RETRY_MS` unused); `DecideAlone` helpers `pub #[doc(hidden)]` (a test-support feature?); two
+  `warn!` lines log before the outer commit; no runtime test that a stale second coordinator process loses the CAS and
+  rebases; no seeded lost-rollback-answer case; `tests/coordinator.rs` ~:4452 unused `mut`; the cut-notice regression
+  test pins the ordering structurally; `AfterCommit::NotifyCut` dead; post-commit effects queued at an orderly stop are
+  not run.
+- T4: accessors inserted between existing doc comments and fns (`succession.rs` ~797–814, `world_cut.rs` ~833–844); dead
+  `now` in `pump_version_check`; a stale `version_rx` after an intervening write costs an extra refresh;
+  `a_lapsed_replica_is_ended_and_exits_fenced` does not assert "writes nothing" after release;
+  `every_replica_down…` injects the claim into the core; comment the `unlogged_committed` prefix-release invariant;
+  `gone` never drops an absent id above the read's highest; dead code in `a_refresh_onto_an_older_row_changes_nothing`;
+  `refresh_onto` duplicates `pump_version_check`'s guard.
+- T5: one-replica cost (every transition `pg_notify` + outbox `DELETE … RETURNING`, one more listener connection —
+  consider skipping the take at one live replica with an empty relay); the coordinator row listener uses
+  `TERRAIN_LISTENER_APP` as `application_name`; a malformed `coordinator_row` payload is ignored at debug rather than
+  `Resync`; the reference core does not replay replica 0's rare unlogged hand-outs.
+- T6: the generation-lookup answer is not ticker-gated on a non-ticker; no test that a new ticker waits a full lease for
+  a non-vouched lapse; a needless refresh read after an own commit when the NOTIFY beats the write answer; a fresh drain
+  mark dropped by a rebase vanishes until the next read; `hosts_live` metric only updated on the ticker.
+- T7: "answered once" asserted only as a grant on B; `resolve_all` silently skips an unresolvable part among good ones;
+  a dropped-but-healthy replica costs one failed attempt; no unit test for rotate-after-Up-then-drop; mixed v4/v6
+  targets bind the first family only.
+- T8: a NoGate-only sweeper wake resends every pending kick (kicks² × links per 2 s); a partly failed comma-list
+  resolution retires that replica's link; `login_host_link_up{world}` is "any link up"; joins ask replicas in row order
+  (+1 RTT when the first has no gate).
+- T9: `ATTACH_GRACE_MS` not const-asserted equal to `HOST_LEASE_MS`; Ready does not decay on a stalled loop while
+  attached (`/livez` covers it); the real wiring (`require_attach` + the loop's `set_attached`) is covered by the twin only.
+- T10: `WorldCoordinatorReplicasDown`'s one-to-one match can error on duplicate KSM series and fires while no replica is
+  registered (forge wait); `WorldNoCommittedCut` drops to 0 when the last committing replica dies (misleading
+  `NoFirstCut` wording); twin phase 2b reads the PDB status once; phase 7 skips the re-link check silently when
+  `link_ip` cannot parse; the fallback `2` is hard-coded in `world-start` and `world_update.sh`; `world_update.sh`'s real
+  path ran only as `--dry-run`; the alerts were only `promtool`-checked.
+- T10b: the takeover test's dead mark and prune are separate steps; the game test `absent_peer_forgotten` places no
+  spawn; the run guard cannot go RED alone (the journal refuses first); a cleanly-left peer pruned before this host saw
+  its clean row skips `note_clean_rows` / `note_left_peers`.
+
+### The twin
+
+- T9, ONE replica: run 1 FAIL at phase 5 (the script's `dead` assumption), run 2 PASS in 465 s
+  (`target/twin/check-20261118T110851Z/`); conflicts 0, write failures 0 (`window=5.1s transitions=5 core_bytes=1552
+  … version=74`).
+- T10, TWO replicas: run 1 FAIL phase 7 (script: the token line); run 2 FAIL phase 7 (every join 503 — the host bug);
+  run 3 with the join assertion temporarily record-only PASS in 652 s (`check-20261118T115325Z`).
+- T10b, TWO replicas, strict join check: **PASS in 481 s** (`target/twin/check-20261118T124846Z/`), every phase 1–11 incl.
+  7 (ticker's pod force-killed mid-play: new ticker after 12 s, cuts 1 s later, both host links on a live replica, join
+  200 before and after, back to 2, generation 0) and 7b (0 → 2). Windows: transitions ≤ 6 per window, conflicts 0–3 per
+  replica (≤ 1 per window), write failures 0; the longest-lived replica 111 transitions over 49 windows, 0 conflicts.
+  In this run the gate forgot the killed host by the dead-row path (timing); the absent path is pinned by
+  `takeover::a_pruned_landless_peer_is_forgotten_and_the_gate_places_again`.
+- Not exercised: a player, a host owning land, a real node drain, `world_update.sh` for real, the alerts on live series.
+
+### Final suites (T12, at `b58d2379` + docs; sequential, dev Postgres via `just pg-up`)
+
+| Suite | Result |
+|---|---|
+| `just test-one game "--no-fail-fast"` | lib 159 passed, 3 failed (the known `lod::tests` reds); `it` 953 passed / 319 ignored; hash_mode 7, state_hash_check 1, voxel_body 20, wasm_determinism 7 — ok |
+| `just test-one world-store "--no-fail-fast"` (SQLite) | unit 6; `it` 150 passed, 43 ignored (`codec::golden_blobs_decode` passed this time) |
+| `just test-pg "--no-fail-fast -- --test-threads=4"` | unit 6; `it` 150 passed, 43 ignored |
+| `just test-one server "--features test-hooks --no-fail-fast"` | ok: lib 108, it 29, login_link 7, observer 3, store_world 4, dev_structures 2, player_store 2, roles 2 (the rest slow-ignored there) |
+| `just test-one login "--no-fail-fast"` | lib 3, `it` 85 (4 ignored) — ok |
+| `just test-one svc-link "--no-fail-fast"` | lib 14, `it` 1 (11 ignored) — ok |
+| `just test-threads` | 297 + 3 + 10 ok |
+| `just test-r2` | 20/20 |
+| `just test-r3` | 49/49 |
+| `just test-r4` | **26/27 — `a_leavers_restart_is_a_new_host_and_its_land_is_given_at_once` FAILED** (`takeover.rs:377`, "timed out waiting: the coordinator records host 0's request for host 1's land", the `until` at ~:1974 on `core.lands_wanted() == [h(1)]`); alone 3 times: FAIL, FAIL, ok (33.7 s, 33.9 s, 10.4 s). Green in T6, T8 and T10b's full runs. Not diagnosed (no code changed in T12) — for the final review: unverified guess, the land-wanted window became ticker work in T6 (a lookup taken and answered between two observations) or a real stall of the `LandWanted` → `Leave` path. The WATCH test `a_clean_leave_…` passed. |
+| `just determinism-wasm` | ok |
+| `just smoke` | ok (3 s) |
+| `just web-check` | ok |
+
+Client tests were not run (Dawid's hand check). Another session ran `quest/` tests concurrently during part of the run.

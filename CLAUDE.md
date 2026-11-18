@@ -114,7 +114,9 @@ hand steps are its Phase D) — the deployment chain**: apply order `registry` (
 `platform` (carries the CloudNativePG operator) → `garage-buckets` (bucket `world-backups`) → `postgres` (cluster
 `pg`, a database and role per world, a nightly dump CronJob to `world-backups` — same disk as the data, no off-box
 copy) → `dns` → `login` → `monitoring` → `world` (`deploy/modules/world`, namespace `world-<id>`: Deployment
-`coordinator` (it holds the login link, Secret `login-link-identity`), per key `<name>` of the MAP `var.hosts` a
+`coordinator` (`var.coordinator_replicas` replicas, default 2, `Recreate`, every replica on the same identity
+Secrets — one pin — behind the headless Service, each holding a login link, Secret `login-link-identity`; a
+PodDisruptionBudget `min_available = 1` only above one replica), per key `<name>` of the MAP `var.hosts` a
 Deployment, a UDP NodePort Service and a PodDisruptionBudget `host-<name>` (label `errantry/host=<name>`, all hosts
 `app.kubernetes.io/component=host`), Deployment `toolbox` holding `worldctl`, Deployment
 `web` = page + a `/login` proxy that forwards ONLY login's `/v1/` and `/.well-known/jwks.json` (never its `/healthz`
@@ -122,9 +124,13 @@ or `/metrics`), the cert-manager Certificate `client-tls` for `game.errantry.ren
 secret). Pods never forge (`VOXEL_EMPTY_STORE=wait`): the forge runs in the toolbox, then the pods turn Ready. Each
 host Deployment is 1 replica, `Recreate`; never `kubectl rollout status` a host — poll each Deployment's
 `status.readyReplicas` and skip a drained one (unready for good), as the recipes do. A host is removed by
-`world-drain <name>` → remove its key from `var.hosts` → apply. **Emptying a node**: a PodDisruptionBudget of 0
-holds each host pod, but the coordinator, toolbox, web and login have none and go at once — on ONE node `world-stop`
-first, then `kubectl drain`; with more nodes drain and remove that node's hosts first. **An apply that changes
+`world-drain <name>` → remove its key from `var.hosts` → apply. The coordinator's replicas move together: never
+`kubectl rollout status` it either — `world-stop` records the count in the Deployment annotation `errantry/replicas`
+and scales it to 0, `world-start` restores it (absent: 2) and waits for every replica's `/readyz`, `world_update.sh`
+stops and starts every replica together (no two builds share the row). **Emptying a node**: a PodDisruptionBudget
+of 0 holds each host pod and the coordinator's keeps one replica (which cannot move on ONE node, so the drain cannot
+finish); toolbox, web and login have none and go at once — on ONE node `world-stop` first, then `kubectl drain`;
+with more nodes drain and remove that node's hosts first. **An apply that changes
 anything the coordinator and the hosts share** (`database_url`, `service_token`, the coordinator certificate,
 `save_secs`, `super_region_regions`, `ownership`) restarts them ALL at once — the hosts likely leave without a cut,
 a total crash, the generation raised: such a change is `world-stop` → apply (which starts it); only a host-only
@@ -141,12 +147,15 @@ set — apply only with the world running and no update under way (images are ne
 
 **The world's operator recipes** (context `world_ctx`, namespace `world_ns`, default orion / `world-errantry`; the
 twin reuses them with `world_ctx=k3d-mmo world_ns=world-twin`): `world-ctl <worldctl args>` (e.g. `forge --preset …`),
-`world-status` (pods, host Deployments, node ports, each `/readyz` body), `world-logs|world-metrics <target>`,
+`world-status` (pods, host Deployments, node ports, each `/readyz` body; the coordinator's WANT / READY / RECORDED
+count and per replica its ticker flag, live replicas and conflicts), `world-logs|world-metrics <target>`,
 `world-hosts` (the `hosts` rows), `world-drain <name> [secs]` (`claim` worlds only; marks that name's live row,
 follows its log to the leave line), `world-stop` / `world-start` (hosts by label; drained and marked hosts warned
-about before acting; every host leaves through its leave cut, a host that left WITHOUT one is warned about; start
-waits per Deployment, never on a drained host), `world-register` (prints the login service's `world add …` line;
-the link is `coordinator.<ns>.svc.cluster.local:6490`, pin from Secret `login-link-identity`). Releases: `just
+about before acting; every host leaves through its leave cut, a host that left WITHOUT one is warned about; the
+coordinator's count recorded / restored as above; start waits per Deployment, never on a drained host),
+`world-register` (prints the login service's `world add …` line; the link is
+`coordinator.<ns>.svc.cluster.local:6490` — every replica's address, login links each — pin from Secret
+`login-link-identity`). Releases: `just
 orion-world-push` builds and pushes both images and prints digests;
 `orion-world-update <server> <web>` = `scripts/world_update.sh` (records the refs it replaces in the world's ConfigMap
 `release-history` first, prints the leave lines, refuses a world whose coordinator is at 0 (`world-start` first), and
@@ -276,15 +285,18 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   `coordinator/mod.rs`: a new one does not compile until listed); `history` = History v4 (every field but `grid`;
   a load is not a restart, no blanket return), written only when `content_dirty` (a day turn with nothing due
   writes nothing); both bincode + lz4. Each runtime pass is a **transition**: apply the inputs → `take_transition`
-  → `write_coordinator_later`, a compare-and-set (`WHERE epoch = $e AND version = $v`) → only after the commit
+  → `write_transition_later`, one transaction: a compare-and-set (`WHERE version = $v`; no epoch any more), the
+  transition's store decisions, its outbox rows (Elastic 2b, below) → only after the commit
   are its outputs sent (**write-before-send**; one write in flight, `take_out` releases nothing meanwhile; an
   answer that changed nothing durable leaves without a write). No periodic save, no `gated` messages. A failed
-  write keeps its outputs and retries (`COORDINATOR_SAVE_RETRY_MS`); another epoch → `Fenced`; the same epoch
-  at another version → `StoreError::Conflict`: the row is re-read and written over once only if it is this
-  process's own lost commit (≤ `COORDINATOR_UNACKED_MAX` remembered), else exit `EXIT_FENCED`. A process may
-  hold only its links, the decoded cache, observation timers (`LeaseWatch`, retry pacing, log limits) and the
-  login relay queues. Attachments, a handed-out cut decision, a declaration and an end in flight carry a random
-  `ProcessBoot`: another boot's count as detached / not in flight (a restart needs no forget step). The first
+  write keeps its outputs and retries (`COORDINATOR_SAVE_RETRY_MS`); a `StoreError::Conflict` is this process's
+  own lost commit if the row is at `version + 1` with a core hash among ≤ `COORDINATOR_UNACKED_MAX` remembered
+  failed writes, else the core REBASES (below); only a failed write that may be in the row, or a gone / undecodable
+  row, exits `EXIT_FENCED`. A process may hold only its links, the decoded cache, its input log, observation timers
+  (`LeaseWatch`, `ReplicaWatch`, retry pacing, log limits) and the login relay queues. Attachments carry the
+  `ReplicaId` (issued by the store per process start, never reused) and count only while that replica is in the
+  core's live set; a store decision's mark is a `CallStamp { replica, version }` (an answer with another stamp
+  changes nothing; a lost one is looked up, never re-issued blind). The first
   `Attach` at a newer generation parks every older-generation host's regions and detaches those still attached
   (`first_of_generation`). A store decision whose answer died with its process (a succession, a landless end)
   still takes the dead host out of the view: a run new to the start read (`successions_open`), or a dead row
@@ -297,6 +309,53 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   row, or no projection beside saved regions is refused at start — re-forge (`just pg-reset`, `just run
   --reset`). Counters `mmo_coordinator_transitions_total`, `mmo_coordinator_written_bytes_total{part}`,
   `mmo_coordinator_conflicts_total` and the `[coordinator] window=` line.
+- **Several coordinator replicas over one row (Elastic 2b; plan
+  `docs/superpowers/plans/2026-11-17-elastic-2b-coordinator-replicas.md`, "As built")**: any number of coordinator
+  processes, each a cache of the same row; the row's `version` compare-and-set is the ONLY fence — never a replica
+  count, a budget, a lease or the ticker preference. Migration `0017_coordinator_replicas` (`coordinator_replicas`,
+  `outbox`, `coordinator.next_replica`, `coordinator.history_version`); the core format changed several times inside
+  `COORDINATOR_STATE_VERSION` 5 during the plan — a dev world written by a mid-plan build: re-forge (`just pg-reset`,
+  `just run --reset`).
+  - **Replicas**: `register_replica` issues a `ReplicaId`; a split replica beats `coordinator_replicas.seen_ms` every
+    `REPLICA_BEAT_MS` (2 s) from its main loop. Its first input is `Input::ReplicaJoined { me, alone }` (`alone`: no
+    other row beaten within `REPLICA_LEASE_MS`, 10 s — a total replica crash; it drops the LOWER ids). The lowest
+    replica its own `ReplicaWatch` shows live applies `ReplicaLapsed(r)` after a lease of unchanged reads (or for a
+    row a read shows dead / pruned, `gone`); its `EndReplica` decision marks the row dead. A replica whose beat finds
+    its row dead, or that is not in the live set of the core it holds, exits `EXIT_FENCED` without writing. Its
+    `/readyz` is 200 once its `ReplicaJoined` committed. SQLite (role `all`) registers its one replica and never beats.
+  - **Input log and rebase** (`coordinator/input.rs`): every input goes through `Coordinator::apply` and stays in the
+    log, with its `now_ms`, until its transition commits; a conflict that is not our own lost commit → `rebase(row)`:
+    the projection replaced, `out` cleared, the log re-applied at `max(now, clock_floor())`; retried
+    `COORDINATOR_CONFLICT_RETRIES` (8) in a row, then after `COORDINATOR_SAVE_RETRY_MS` — never an exit. NEVER logged:
+    `HostMsg::Login`, login orders, the ticker's reads (`HostsRead`, `SuccessionsOpen`, `LandOwners`); a new input
+    is classified (replayed or not, why) as in the plan's decision 3 table. Process fields are `kept` / `reset` in
+    `projection!`. The calendar's day only moves forward.
+  - **Store decisions run inside the transition** (`world-store/src/coordinator_tx.rs`): the CAS `UPDATE` first (it
+    locks the row), then each `StoreDecision` (`DecideCut`, `BeginCut` = `record_cut_begin`, `Declare`,
+    `EndLandless`, `Rollback`, `EndReplica`) in its own SAVEPOINT (a refusal is that decision's answer; the core
+    still commits), the outbox, `pg_notify('coordinator_row', version)`: issuing a decision IS committing it.
+    Answers come back as logged `Input::Decision`. Post-commit effects (`FinishCut`: `COMMIT PREPARED` of the parts,
+    THEN the cut notice) run after the commit and are retried. Every statement that locks `coordinator` takes it
+    FIRST (lock walk: `succession.rs`'s notes). SQLite: a transition with decisions or outbox rows is `Unsupported`.
+  - **The ticker** (`ticker()` = the lowest id of the core's durable live set `replicas`) ALONE runs `Maintain`, the
+    `hosts` read (leases, expected hosts, world tick), every `take_*` hand-out, land lookups and succession
+    re-reads; the others apply host messages, link events, their own lifecycle and answers bearing their stamp. A
+    dead ticker stalls timed work ≤ one replica lease + one read; a new ticker's `LeaseWatch` counts from zero (a
+    declaration is delayed, never hastened).
+  - **The outbox** is the only channel between replicas (no replica-to-replica link): a message for a host attached
+    to another live replica (`Coordinator::route_out`, at `take_transition`) is an `outbox` row (host, boot)
+    written in the same transaction; whoever links the host relays it — taken in its own transitions, or by
+    `take_outbox_later` on a `coordinator_row` NOTIFY / the `COORDINATOR_POLL_MS` (1 s) backstop with > 1 live
+    replica — only from a cache at least as new as the row's version; rows older than the host's newest applied
+    `Attach` are discarded, another boot's deleted unsent; at most once after commit. A replica's cache also follows
+    the row by NOTIFY (`load_coordinator_since`, forward only).
+  - **Version check**: with > 1 live replica, outputs leaving with nothing durable changed (`take_out`) wait for a
+    `SELECT version`; a moved row → refresh and replay first.
+  - Attachments: `LinkDown` detaches only this replica's attachment; `forget_absent_hosts` forgets only ids below the
+    read's `next_host_id` that no live replica's attachment holds. Metrics `mmo_coordinator_replicas_live`,
+    `mmo_coordinator_is_ticker`; alerts `WorldCoordinatorReplicasDown`, `WorldCoordinatorConflicts` (measure before
+    splitting the row), `WorldCoordinatorNoTicker`. Dev: `just coordinators=2 dev-r3`, `just coordinator claim <n>`
+    (replica n on 6480+n, login link 6490+n, the same cert files).
 - **Many hosts (R3 + R4 takeover + Elastic 1 hosts by id; plans `docs/superpowers/plans/2026-11-12-r3-multi-host.md`,
   `2026-11-13-r4-takeover.md`, `2026-11-15-elastic-1-hosts-as-deployments.md` ("As built") — built; whole-branch
   reviews and the owner's hand checks pending, see `TODO.md`)**: `claim` is any number of hosts and needs role
@@ -309,7 +368,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     `all` / SQLite. A restarted process is a NEW host that owns nothing; its old id is ended by a succession if
     it owned land, else by `end_landless_host` (row dead, no succession, generation unchanged). The coordinator
     forgets an id a `hosts` read no longer shows and nothing attached holds (`forget_absent_hosts`); a host
-    forgets dead rows no open succession names (`forget_dead_hosts`).
+    forgets dead rows no open succession names (`forget_dead_hosts`) and, from a successful directory read, ids
+    ABSENT from it below its `next_host_id` that no run it holds names (`WorldManager::forget_absent_hosts`, a
+    pruned row — else a gate waits for that peer's sync forever and refuses every spawn).
     `VOXEL_HOST_NAME` (default empty) labels a process (logs, dev files, `hosts.name`, the Deployment), never a
     key: a registration lapses the other dirty live rows of its non-empty name at once (`seen_ms = 0`).
     `VOXEL_HOST_ORDINAL`, `VOXEL_HOSTS`, `VOXEL_ENTRY_HOST` are gone (ignored if set).
@@ -388,10 +449,13 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     only vouches a row dead while hosts run; with no host running it is refused (the first registration takes
     the land, a total crash). `claim` only — the store does not record the policy, so it cannot refuse a
     `static` world.
-  - Login links to the COORDINATOR, which relays each order (`CoordMsg::Login(LoginOrder)`) to the **gate
-    host** — the lowest attached, live, not leaving, not draining id (`Coordinator::gate_host`) — and each
-    answer (`HostMsg::Login`) back, keeping no per-order state (a gate that dies holding an order costs a 503
-    and the client's retry). The gate resolves the player — a store read its main loop never waits on
+  - Login links to the COORDINATOR — one link per replica (every address of the world's `host_link`, re-resolved
+    at each join and kick sweep) — and each replica relays an order (`CoordMsg::Login(LoginOrder)`) to ITS **gate
+    host** — the lowest host attached to that replica, live, not leaving, not draining (`Coordinator::gate_host_here`)
+    — or answers `HostToLogin::NoGate` at once and login tries the next link (every link `NoGate` → 503; acks match
+    by `(token, epoch)` on any link); each answer (`HostMsg::Login`) goes back, keeping no per-order state (a gate
+    that dies holding an order costs a 503 and the client's retry); a placement on a host of another replica goes
+    gate → holder over the peer link. The gate resolves the player — a store read its main loop never waits on
     (`login_link::OrderResolver`, at most `LOGIN_ORDERS_IN_FLIGHT_MAX` waiting, one more is dropped) — and places them on
     the host that holds them (`world_manager/placement.rs`, relayed `SpawnOrder`s); a world request carries its
     player's hop (`HostMsg::Request { hop }`, an older placement's is refused). Regions of another host reach a
@@ -410,14 +474,15 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     same ownership word). `just go-nogo-r3` re-forges each run and seams from the client's own region→host map
     (Elastic 2a Task 1); its first valid run is a hand check (TODO.md).
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
-  with an epoch; every cut / region load / coordinator write is fenced on it (`StoreError::Fenced`) — a fenced
+  with an epoch; every cut part / region load is fenced on it (`StoreError::Fenced`; the coordinator's writes and
+  store decisions are fenced by its row's `version` compare-and-set since Elastic 2b) — a fenced
   process stops writing and exits `EXIT_FENCED` (3, also when fenced at `register_host`); a dead coordinator
   thread exits `EXIT_COORDINATOR_FAILED` (4); a world rollback exits `EXIT_WORLD_ROLLBACK` (5). No advisory
   lock any more (SQLite keeps its flock). `OpenMode::ReadOnly` handles (export, tools) write nothing and need
   the newest schema. Never add a store write that skips the fence. A world cut's commit decision must list
   every host with a non-clean `hosts` row (`two_phase::decide_cut` records an abort otherwise) — EXCEPT one
-  registered after the cut began: the fenced coordinator records each cut's begin with the `next_host_id` of
-  that moment (`record_cut_begin`, `cut_begins`, migration `0015_cut_begins`), and only ids at or above it may
+  registered after the cut began: the coordinator records each cut's begin, in the transition that starts the cut,
+  with the `next_host_id` of that moment (`record_cut_begin`, `cut_begins`, migration `0015_cut_begins`), and only ids at or above it may
   be missing; never relax that check without the host side (Peer link rules). Each decision prunes the older
   `cut_begins`; `cut_decisions` is never pruned (a re-attaching host's `pending_cut` looks one up). A succession
   moves rows at `epoch + 1`: the replaced process is fenced at its next heartbeat (`lease.rs`
@@ -430,11 +495,14 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
 - **Link rules**: a re-`Attach` after any reconnect reconciles the coordinator's (durable) view; requests are memoised by
   `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
   beats latency). Login pushes `SpawnPlayer`/`Kick` to the coordinator's login listener (role `all`: to the
-  process); kicks are durable until acked (login migration 0003); the coordinator relays, holding at most the
+  process); kicks are durable until acked (login migration 0003); each coordinator replica relays, holding at most the
   `SessionEnded`s no login service is connected for (`LOGIN_ENDS_HELD_MAX`). It serves any number of hosts
-  by id. Every link hello names the world (`LinkHello.world` = `VOXEL_WORLD_ID`; a mismatch is refused, `""`
-  matches only `""`); `LINK_PROTOCOL_VERSION` is 8 — older hosts and clients do not mix with this build
-  (stop, upgrade, rejoin).
+  by id. A link target (`VOXEL_COORDINATOR_ADDR`, login's `host_link`) may be a comma list or a DNS name with
+  several answers (`LinkTarget::resolve_all`); a host's dialer tries them in turn, starting after the one that last
+  failed or dropped, under ONE pin (every replica shares one identity). Every link hello names the world
+  (`LinkHello.world` = `VOXEL_WORLD_ID`; a mismatch is refused, `""` matches only `""`); `LINK_PROTOCOL_VERSION`
+  is 9 (`HostToLogin::NoGate`) — older hosts, login services and clients do not mix with this build (stop,
+  upgrade, rejoin).
 - **Peer link rules** (`game::peer`, `world_manager/peers.rs`, `world_cut.rs`): a `PeerSession` is never
   replaced — `set_peer` on a known host id swaps the link and resets the connection. Resume is boot-scoped
   (`PeerHello.received_from_boot`: a count made against another boot renumbers). `Reliable` is numbered,
@@ -446,9 +514,10 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   relayed by the coordinator) and the cut can still commit; one that drops after a side's part is complete
   by marks still aborts it. From `BeginCut` until `CutDone` a participant FREEZES its session with every host
   outside the cut (nothing sent or read), and refuses its part if it exchanged a state message with such a
-  host that no committed cut of both saved (`unsaved_traffic`) — what lets `decide_cut` omit a newcomer. The
-  coordinator down means no cuts, no takeover and no logins until it is back (one process until Elastic 2b) —
-  but nothing it decided is lost: a restart resumes from the row.
+  host that no committed cut of both saved (`unsaved_traffic`) — what lets `decide_cut` omit a newcomer. EVERY
+  coordinator replica down means no cuts, no takeover and no logins until one is back (it registers `alone`) —
+  but nothing they decided is lost: it resumes from the row. One live replica suffices; a host whose replica died
+  re-attaches to another.
 - **Peer journal** (`game/src/peer/journal.rs`): every host under `claim` (a `static` host records nothing)
   journals the state messages it exchanged with each peer since the last committed cut — a succession's
   reports; an entity's events are ordered by its transfer stamp, a player's by the hand-off's hop, never by a
@@ -458,7 +527,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   `host_fields!` (`world_manager/succession.rs`; per-host kind or `other`): `forget_host` and `mentions`
   destructure the manager with no `..`, so a new field does not compile until it is listed.
 - **World on k8s variables (R5; each unset = today's behaviour)**: `VOXEL_COORDINATOR_ADDR` and login's `--link` accept
-  a NAME (`svc_link::LinkTarget`, resolved at EVERY dial — a restarted pod's new IP is found within the DNS TTL);
+  a NAME or a comma list (`svc_link::LinkTarget`, resolved at EVERY dial with every answer — a restarted pod's new IP
+  is found within the DNS TTL);
   peers stay literal `ip:port`: `VOXEL_ADVERTISE_PEER` (a literal `ip:port`; required when the peer bind is a wildcard,
   a pod passes `$(POD_IP):6500`). A link identity (`VOXEL_*_CERT_HASH_FILE`'s `<file>.cert` / `.key`) may sit on a
   read-only mount (the pin file is then not written, a WARN), and a dialer's pin is derived from `<file>.cert` when
@@ -466,7 +536,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   never forges, it waits for `worldctl forge` (`mmo_waiting{why="forge"}`) and exits 0 on SIGTERM. `VOXEL_HEALTH_BIND`
   (`ip:port`, unset = no listener; `server/src/health.rs`): `/livez` fails only when a REGISTERED (or drained) process's main loop
   has not passed for `LIVEZ_STALL_MS` (30 s = 3 × the lease — the lease always acts first; it never replaces or feeds
-  the lease heartbeat), `/readyz` is 200 once registered (503 body: `forge` / `drained` / `starting`),
+  the lease heartbeat), `/readyz` is 200 once registered (503 body: `forge` / `drained` / `starting`) — a host
+  also needs its attach acknowledged by a coordinator replica (503 `attaching`; Ready for `ATTACH_GRACE_MS`, one
+  lease, after a detach), a coordinator replica its `ReplicaJoined` committed —
   `/metrics` is Prometheus text with a `role` label (`host` or `coordinator`; coordinator-only series are constant on a
   host — alerts select `role="coordinator"`). `VOXEL_CLIENT_CERT` / `VOXEL_CLIENT_KEY` (PEM chain + key; the old
   `VOXEL_WT_CERT` / `_KEY` are aliases): ONE certificate for the QUIC listener and WebTransport, files WAITED for at
