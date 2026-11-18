@@ -1,4 +1,4 @@
-//! The stub's host-API description (design D9, version 4) and the host-fn ids it implies: a host fn id is the
+//! The stub's host-API description (design D9, version 6) and the host-fn ids it implies: a host fn id is the
 //! index into [`stub_api`]`().fns`.
 //!
 //! Version 2 adds the quest host API of spec §9.1 ("Assumed host API" of the quest examples): the entity
@@ -14,6 +14,11 @@
 //!
 //! Version 5: a `Dialogue` parameter (`attach_dialogue`, `detach_dialogue`, `bark`, `quest.play`) is
 //! `HostTy::Dialogue`, a dialogue's qualified name on the wire.
+//!
+//! Version 6: the struct `Entity { id }`, any entity by its id (a person, a creature, a player, a site, a
+//! place): the type of the event fields that may name any of them, `ItemGiven.to` and `Killed.victim` (they
+//! were `Value`, which no handler could take). `place(prefab, at)` takes any entity as `at` (`Value`): a
+//! `Place` the coordinator chose, or a `Site` (the Sealed Mine places its nest at the mine).
 
 use quest_vm::host::{
     HostApi, HostEnum, HostError, HostFn, HostFnKind, HostStruct, HostTy, PROMISE_ERRORS,
@@ -36,7 +41,37 @@ pub const F_WORLD_SET: u16 = 12;
 pub const F_WORLD_ADD: u16 = 13;
 pub const F_WORLD_CAS: u16 = 14;
 pub const F_WORLD_DELETE: u16 = 15;
+pub const F_ACT: u16 = 16;
+pub const F_LOOP: u16 = 17;
+pub const F_COMPLETED: u16 = 18;
+pub const F_NEAR: u16 = 19;
+pub const F_PERSON_ALIVE: u16 = 20;
+pub const F_PERSON_OCCUPATION: u16 = 21;
+pub const F_PERSON_SITE: u16 = 22;
+pub const F_PERSON_OWNER: u16 = 23;
+pub const F_PERSON_KIND: u16 = 24;
+pub const F_PERSON_NAME: u16 = 25;
+pub const F_PERSON_HAS_TAG: u16 = 26;
+pub const F_CREATURE_ALIVE: u16 = 27;
+pub const F_CREATURE_OCCUPATION: u16 = 28;
+pub const F_CREATURE_SITE: u16 = 29;
+pub const F_CREATURE_OWNER: u16 = 30;
+pub const F_CREATURE_KIND: u16 = 31;
+pub const F_CREATURE_NAME: u16 = 32;
+pub const F_CREATURE_HAS_TAG: u16 = 33;
+pub const F_SITE_KIND: u16 = 34;
+pub const F_PLACE_OPEN_GROUND: u16 = 35;
+pub const F_PLAYER_SKILL: u16 = 36;
+pub const F_PLAYER_INVENTORY_COUNT: u16 = 37;
+pub const F_OURS: u16 = 38;
+pub const F_PREFAB: u16 = 39;
+pub const F_TAKE: u16 = 40;
+pub const F_FOLLOW: u16 = 41;
 pub const F_PLACE: u16 = 42;
+pub const F_TAG: u16 = 43;
+pub const F_ATTACH_DIALOGUE: u16 = 44;
+pub const F_DETACH_DIALOGUE: u16 = 45;
+pub const F_BARK: u16 = 46;
 pub const F_QUEST_JOINED: u16 = 47;
 pub const F_QUEST_LEFT: u16 = 48;
 pub const F_QUEST_JOIN_REFUSED: u16 = 49;
@@ -45,7 +80,9 @@ pub const F_QUEST_FAIL: u16 = 51;
 pub const F_QUEST_DECLINE: u16 = 52;
 pub const F_QUEST_PLAY: u16 = 53;
 pub const F_QUEST_COMPLETED_BY: u16 = 54;
+pub const F_QUEST_DIALOGUE_DEPTH: u16 = 55;
 pub const F_PERSON_DISTANCE_TO: u16 = 56;
+pub const F_RELATED: u16 = 57;
 
 fn p(name: &str, ty: HostTy) -> (String, HostTy) {
     (name.to_string(), ty)
@@ -155,8 +192,8 @@ pub fn stub_api() -> HostApi {
     let person = || Struct("Person".into());
     let creature = || Struct("Creature".into());
     let site = || Struct("Site".into());
-    let place = || Struct("Place".into());
     let prefab = || Struct("Prefab".into());
+    let entity = || Struct("Entity".into());
     let key = || ("key", Str);
     let mut fns = vec![
         f(
@@ -359,7 +396,7 @@ pub fn stub_api() -> HostApi {
             None,
             false,
             "place",
-            &[("prefab", prefab()), ("at", place())],
+            &[("prefab", prefab()), ("at", Value)],
             Unit,
             &["NoRoom"],
             Command,
@@ -425,7 +462,7 @@ pub fn stub_api() -> HostApi {
         Query,
     )));
     HostApi {
-        version: 5,
+        version: 6,
         structs: vec![
             event("Player", &[("id", Int), ("name", Str)]),
             event("Item", &[("kind", Str), ("count", Int)]),
@@ -435,6 +472,7 @@ pub fn stub_api() -> HostApi {
             event("Place", &[("id", Int)]),
             event("Prefab", &[("name", Str)]),
             event("Timer", &[("id", Int)]),
+            event("Entity", &[("id", Int)]),
         ],
         enums: vec![
             host_enum(
@@ -460,12 +498,12 @@ pub fn stub_api() -> HostApi {
             event("PlayerNear", &[("player", player())]),
             event(
                 "ItemGiven",
-                &[("player", player()), ("to", Value), ("item", item())],
+                &[("player", player()), ("to", entity()), ("item", item())],
             ),
             event(
                 "Killed",
                 &[
-                    ("victim", Value),
+                    ("victim", entity()),
                     ("by", HostTy::Option(Box::new(player()))),
                 ],
             ),

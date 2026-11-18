@@ -68,7 +68,7 @@ fn one(h: &mut StubHost, id: u64, f: u16, args: &[W]) -> Result<W, W> {
 #[test]
 fn stub_api_is_pinned() {
     let api = stub_api();
-    assert_eq!(api.version, 5);
+    assert_eq!(api.version, 6);
     assert_eq!(op_name(F_PLACE).as_deref(), Some("place"));
     for (f, name) in [
         (F_QUEST_JOINED, "quest.joined"),
@@ -79,6 +79,38 @@ fn stub_api_is_pinned() {
         (F_QUEST_DECLINE, "quest.decline"),
         (F_QUEST_PLAY, "quest.play"),
         (F_QUEST_COMPLETED_BY, "quest.completed_by"),
+        (F_QUEST_DIALOGUE_DEPTH, "quest.dialogue_depth"),
+        (F_ACT, "act"),
+        (F_LOOP, "loop"),
+        (F_COMPLETED, "completed"),
+        (F_NEAR, "near"),
+        (F_PERSON_ALIVE, "Person.alive"),
+        (F_PERSON_OCCUPATION, "Person.occupation"),
+        (F_PERSON_SITE, "Person.site"),
+        (F_PERSON_OWNER, "Person.owner"),
+        (F_PERSON_KIND, "Person.kind"),
+        (F_PERSON_NAME, "Person.name"),
+        (F_PERSON_HAS_TAG, "Person.has_tag"),
+        (F_CREATURE_ALIVE, "Creature.alive"),
+        (F_CREATURE_OCCUPATION, "Creature.occupation"),
+        (F_CREATURE_SITE, "Creature.site"),
+        (F_CREATURE_OWNER, "Creature.owner"),
+        (F_CREATURE_KIND, "Creature.kind"),
+        (F_CREATURE_NAME, "Creature.name"),
+        (F_CREATURE_HAS_TAG, "Creature.has_tag"),
+        (F_SITE_KIND, "site_kind"),
+        (F_PLACE_OPEN_GROUND, "Place.open_ground"),
+        (F_PLAYER_SKILL, "Player.skill"),
+        (F_PLAYER_INVENTORY_COUNT, "Player.inventory_count"),
+        (F_OURS, "ours"),
+        (F_PREFAB, "prefab"),
+        (F_TAKE, "take"),
+        (F_FOLLOW, "follow"),
+        (F_TAG, "tag"),
+        (F_ATTACH_DIALOGUE, "attach_dialogue"),
+        (F_DETACH_DIALOGUE, "detach_dialogue"),
+        (F_BARK, "bark"),
+        (F_RELATED, "related"),
     ] {
         assert_eq!(op_name(f).as_deref(), Some(name));
     }
@@ -189,6 +221,7 @@ fn stub_api_is_pinned() {
         "fn world.get",
         "fn world.set",
         "struct Creature",
+        "struct Entity",
         "struct Item",
         "struct Person",
         "struct Place",

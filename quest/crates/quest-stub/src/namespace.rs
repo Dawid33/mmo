@@ -74,3 +74,11 @@ impl Namespace {
         }
     }
 }
+
+impl Namespace {
+    /// Hashes the stored keys and values.
+    pub(crate) fn hash_state<H: std::hash::Hasher>(&self, h: &mut H) {
+        use state_hash::StateHash;
+        self.map.state_hash(h);
+    }
+}

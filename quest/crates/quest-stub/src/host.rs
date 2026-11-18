@@ -3,13 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hasher;
 
-use quest_vm::Fnv64;
 use quest_vm::consts::PROMISE_TIMEOUT_TICKS;
 use quest_vm::host::{Host, PromiseId, QueryError, Report};
 use quest_vm::wire::WireValue;
+use state_hash::StateHash;
 
 use crate::api::*;
 use crate::namespace::{Answer, Namespace, error};
+use crate::people::{People, QueryCtx, field, id_of, int_of, str_of};
 
 /// What goes wrong for a request a [`FailureRule`] picks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,14 +53,14 @@ pub struct StubConfig {
     pub latency: u64,
     pub failures: Vec<FailureRule>,
     pub chest: Vec<(String, i64)>,
-    /// The people the stub knows, by id, with their block position: `Person.distance_to` of anyone else is
-    /// `OutOfReach`.
+    /// Block positions by entity id (added to the host's [`People`]): `Person.distance_to` of anyone
+    /// without one is `OutOfReach`.
     pub people: Vec<(i64, [i64; 3])>,
     /// The places (by id) with no room: `place(…, at)` of one fails its check with `NoRoom`.
     pub full_places: Vec<i64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Pending {
     due: u64,
     f: u16,
@@ -67,7 +68,7 @@ struct Pending {
     fate: Fate,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Fate {
     Normal,
     Fail(FailureKind),
@@ -85,44 +86,22 @@ pub struct StubHost {
     pub emitted: Vec<WireValue>,
     /// The players (by id) who completed the quest: `quest.completed_by` answers from it.
     pub completed_by: BTreeSet<i64>,
-    /// Events routed to another instance (`Host::route`): recorded only (the world comes later).
+    /// Events routed to another instance (`Host::route`): the [`crate::World`] delivers them.
     pub routed: Vec<(String, WireValue)>,
+    /// The world the queries read and the commands change (tags, inventories, …). A [`crate::World`] lends
+    /// its own to the host of the instance it runs.
+    pub people: People,
+    /// Set by a [`crate::World`]: the commands it acts on (the `quest.*` builtins, dialogues, scenes,
+    /// `follow`) are recorded in [`StubHost::world_cmds`] instead of printed here.
+    pub(crate) in_world: bool,
+    pub(crate) world_cmds: Vec<(u16, Vec<WireValue>)>,
+    pub(crate) namespace: Namespace,
     latency: u64,
     rules: Vec<(FailureRule, u32)>,
     namespace_gone: bool,
-    tags: BTreeMap<i64, BTreeSet<String>>,
     chest: BTreeMap<String, i64>,
-    people: BTreeMap<i64, [i64; 3]>,
     full_places: BTreeSet<i64>,
-    namespace: Namespace,
     pending: BTreeMap<u64, Pending>,
-}
-
-fn field<'a>(v: &'a WireValue, name: &str) -> Option<&'a WireValue> {
-    match v {
-        WireValue::Struct { fields, .. } | WireValue::Variant { fields, .. } => {
-            fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)
-        }
-        _ => None,
-    }
-}
-
-fn str_of(v: Option<&WireValue>) -> Option<&str> {
-    match v {
-        Some(WireValue::Str(s)) => Some(s),
-        _ => None,
-    }
-}
-
-fn int_of(v: Option<&WireValue>) -> Option<i64> {
-    match v {
-        Some(WireValue::Int(i)) => Some(*i),
-        _ => None,
-    }
-}
-
-fn player_id(v: Option<&WireValue>) -> Option<i64> {
-    int_of(v.and_then(|p| field(p, "id")))
 }
 
 impl StubHost {
@@ -131,6 +110,10 @@ impl StubHost {
         for (kind, n) in cfg.chest {
             *chest.entry(kind).or_insert(0i64) += n;
         }
+        let people = People {
+            pos: cfg.people.into_iter().collect(),
+            ..People::default()
+        };
         StubHost {
             output: Vec::new(),
             reports: Vec::new(),
@@ -138,16 +121,46 @@ impl StubHost {
             emitted: Vec::new(),
             completed_by: BTreeSet::new(),
             routed: Vec::new(),
+            people,
+            in_world: false,
+            world_cmds: Vec::new(),
+            namespace: Namespace::default(),
             latency: cfg.latency,
             rules: cfg.failures.into_iter().map(|r| (r, 0)).collect(),
             namespace_gone: false,
-            tags: BTreeMap::new(),
             chest,
-            people: cfg.people.into_iter().collect(),
             full_places: cfg.full_places.into_iter().collect(),
-            namespace: Namespace::default(),
             pending: BTreeMap::new(),
         }
+    }
+
+    /// Hashes the host's own state: the namespace, the chest, the requests in flight and the failure
+    /// rules' counts (not the output, the reports or the people, which a [`crate::World`] hashes itself).
+    pub(crate) fn hash_state<H: Hasher>(&self, h: &mut H) {
+        self.namespace.hash_state(h);
+        self.chest.state_hash(h);
+        self.namespace_gone.state_hash(h);
+        for (_, seen) in &self.rules {
+            seen.state_hash(h);
+        }
+        (self.pending.len() as u64).state_hash(h);
+        for (id, p) in &self.pending {
+            id.state_hash(h);
+            p.due.state_hash(h);
+            p.f.state_hash(h);
+            p.args.state_hash(h);
+            let fate: u8 = match p.fate {
+                Fate::Normal => 0,
+                Fate::Fail(FailureKind::Timeout) => 1,
+                Fate::Fail(FailureKind::Lost) => 2,
+                Fate::Fail(FailureKind::Changed) => 3,
+                Fate::Fail(FailureKind::NamespaceGone) => 4,
+                Fate::Never => 5,
+            };
+            fate.state_hash(h);
+        }
+        self.tick.state_hash(h);
+        self.emitted.state_hash(h);
     }
 
     /// Whether a request is still waiting for its answer (a never-answered one counts until the VM's own
@@ -273,59 +286,33 @@ fn item(kind: &str, count: i64) -> WireValue {
 
 impl Host for StubHost {
     fn query(&mut self, f: u16, args: &[WireValue]) -> Result<WireValue, QueryError> {
-        let bad = || QueryError::Failed(format!("bad arguments to host fn {f}"));
+        let ctx = QueryCtx {
+            tick: self.tick,
+            depth: 0,
+            completed_by: &self.completed_by,
+        };
+        if let Some(answer) = self.people.query(f, args, &ctx) {
+            return answer;
+        }
         match f {
-            F_HAS_TAG => {
-                let id = player_id(args.first()).ok_or_else(bad)?;
-                let tag = str_of(args.get(1)).ok_or_else(bad)?;
-                Ok(WireValue::Bool(
-                    self.tags.get(&id).is_some_and(|t| t.contains(tag)),
-                ))
-            }
-            F_ROLL => {
-                let (salt, sides) = (int_of(args.first()), int_of(args.get(1)));
-                let (salt, sides) = salt.zip(sides).ok_or_else(bad)?;
-                if sides <= 0 {
-                    return Ok(WireValue::Int(0));
-                }
-                let mut h = Fnv64::default();
-                h.write(&salt.to_le_bytes());
-                // `sides > 0`, so the remainder is below `i64::MAX` and fits.
-                Ok(WireValue::Int((h.finish() % sides as u64) as i64))
-            }
             F_CHEST_COUNT => {
-                let kind = str_of(args.first()).ok_or_else(bad)?;
+                let kind = str_of(args.first())
+                    .ok_or_else(|| QueryError::Failed(format!("bad arguments to host fn {f}")))?;
                 Ok(WireValue::Int(self.chest.get(kind).copied().unwrap_or(0)))
             }
-            F_QUEST_COMPLETED_BY => {
-                let id = player_id(args.first()).ok_or_else(bad)?;
-                Ok(WireValue::Bool(self.completed_by.contains(&id)))
-            }
-            F_PERSON_DISTANCE_TO => {
-                let (a, b) = player_id(args.first())
-                    .zip(player_id(args.get(1)))
-                    .ok_or_else(bad)?;
-                match self.people.get(&a).zip(self.people.get(&b)) {
-                    // Blocks apart along the axis they differ most on.
-                    Some((pa, pb)) => Ok(WireValue::Int(
-                        (0..3)
-                            .map(|i| pa[i].abs_diff(pb[i]))
-                            .max()
-                            .map_or(0, |d| i64::try_from(d).unwrap_or(i64::MAX)),
-                    )),
-                    None => Err(QueryError::Raised(error("OutOfReach", vec![]))),
-                }
-            }
-            _ => Err(QueryError::Failed(format!("host fn {f} is not a query"))),
+            _ => Err(QueryError::Failed(format!(
+                "the stub answers no query {}",
+                op_name(f).unwrap_or_else(|| format!("(host fn {f})"))
+            ))),
         }
     }
 
     fn check(&mut self, f: u16, args: &[WireValue]) -> Result<(), QueryError> {
         match f {
             F_PLACE => {
-                let at = player_id(args.get(1))
+                let at = id_of(args.get(1))
                     .ok_or_else(|| QueryError::Failed(format!("bad arguments to host fn {f}")))?;
-                if self.full_places.contains(&at) {
+                if self.full_places.contains(&at) || self.people.no_room(at) {
                     return Err(QueryError::Raised(error("NoRoom", vec![])));
                 }
                 Ok(())
@@ -337,40 +324,66 @@ impl Host for StubHost {
     }
 
     fn command(&mut self, f: u16, args: &[WireValue]) {
+        fn name_of(v: Option<&WireValue>) -> Option<&str> {
+            str_of(v.and_then(|p| field(p, "name")))
+        }
+        fn item_of(v: Option<&WireValue>) -> Option<(&str, i64)> {
+            str_of(v.and_then(|i| field(i, "kind"))).zip(int_of(v.and_then(|i| field(i, "count"))))
+        }
+        if self.in_world
+            && matches!(
+                f,
+                F_FOLLOW
+                    | F_ATTACH_DIALOGUE
+                    | F_DETACH_DIALOGUE
+                    | F_BARK
+                    | F_QUEST_JOINED
+                    | F_QUEST_LEFT
+                    | F_QUEST_JOIN_REFUSED
+                    | F_QUEST_COMPLETE
+                    | F_QUEST_FAIL
+                    | F_QUEST_DECLINE
+                    | F_QUEST_PLAY
+            )
+        {
+            self.world_cmds.push((f, args.to_vec()));
+            return;
+        }
         let line = match f {
-            F_SAY => {
-                let name = args.first().and_then(|p| field(p, "name"));
-                str_of(name)
-                    .zip(str_of(args.get(1)))
-                    .map(|(n, t)| format!("{n}: {t}"))
-            }
+            F_SAY => name_of(args.first())
+                .zip(str_of(args.get(1)))
+                .map(|(n, t)| format!("{n}: {t}")),
             F_LOG => str_of(args.first()).map(|t| format!("log: {t}")),
-            F_GIVE => {
-                let name = str_of(args.first().and_then(|p| field(p, "name")));
-                let it = args.get(1);
-                let kind = str_of(it.and_then(|i| field(i, "kind")));
-                let count = int_of(it.and_then(|i| field(i, "count")));
-                name.zip(kind)
-                    .zip(count)
-                    .map(|((n, k), c)| format!("give {n} {c} {k}"))
-            }
-            F_ADD_TAG | F_REMOVE_TAG => {
-                if let Some((id, tag)) = player_id(args.first()).zip(str_of(args.get(1))) {
-                    let tags = self.tags.entry(id).or_default();
-                    if f == F_ADD_TAG {
-                        tags.insert(tag.to_string());
-                    } else {
-                        tags.remove(tag);
+            F_GIVE | F_TAKE => {
+                let who = id_of(args.first());
+                let what = if f == F_GIVE {
+                    item_of(args.get(1))
+                } else {
+                    str_of(args.get(1)).zip(int_of(args.get(2)))
+                };
+                match (name_of(args.first()), who, what) {
+                    (Some(n), Some(id), Some((kind, count))) => {
+                        let (verb, sign) = if f == F_GIVE {
+                            ("give", 1)
+                        } else {
+                            ("take", -1)
+                        };
+                        let line = format!("{verb} {n} {count} {kind}");
+                        self.people.add_items(id, kind, count.saturating_mul(sign));
+                        Some(line)
                     }
+                    _ => None,
+                }
+            }
+            F_ADD_TAG | F_REMOVE_TAG | F_TAG => {
+                if let Some((id, tag)) = id_of(args.first()).zip(str_of(args.get(1))) {
+                    self.people.set_tag(id, tag, f != F_REMOVE_TAG);
                     return;
                 }
                 None
             }
             F_CHEST_PUT => {
-                let it = args.first();
-                if let Some((kind, n)) = str_of(it.and_then(|i| field(i, "kind")))
-                    .zip(int_of(it.and_then(|i| field(i, "count"))))
-                {
+                if let Some((kind, n)) = item_of(args.first()) {
                     let slot = self.chest.entry(kind.to_string()).or_insert(0);
                     *slot = slot.saturating_add(n);
                     return;
@@ -378,8 +391,8 @@ impl Host for StubHost {
                 None
             }
             F_PLACE => {
-                let name = str_of(args.first().and_then(|p| field(p, "name")));
-                let at = player_id(args.get(1));
+                let name = name_of(args.first());
+                let at = id_of(args.get(1));
                 name.zip(at).map(|(n, at)| format!("place {n} at {at}"))
             }
             F_EMIT => {
@@ -389,15 +402,27 @@ impl Host for StubHost {
                 }
                 None
             }
-            // The host side of the quest builtins is recorded only (the world comes later).
+            F_FOLLOW => id_of(args.first())
+                .zip(name_of(args.get(1)))
+                .map(|(c, p)| format!("follow {c} {p}")),
+            F_ATTACH_DIALOGUE | F_DETACH_DIALOGUE | F_BARK => {
+                let verb = match f {
+                    F_ATTACH_DIALOGUE => "attach_dialogue",
+                    F_DETACH_DIALOGUE => "detach_dialogue",
+                    _ => "bark",
+                };
+                id_of(args.first())
+                    .zip(str_of(args.get(1)))
+                    .map(|(npc, d)| format!("{verb} {npc} {d}"))
+            }
+            // Outside a world, the host side of the quest builtins is printed only.
             F_QUEST_JOINED | F_QUEST_LEFT | F_QUEST_JOIN_REFUSED => {
                 let what = match f {
                     F_QUEST_JOINED => "joined",
                     F_QUEST_LEFT => "left",
                     _ => "join_refused",
                 };
-                str_of(args.first().and_then(|p| field(p, "name")))
-                    .map(|n| format!("quest.{what} {n}"))
+                name_of(args.first()).map(|n| format!("quest.{what} {n}"))
             }
             F_QUEST_COMPLETE => match args.first() {
                 Some(WireValue::List(ps)) => ps

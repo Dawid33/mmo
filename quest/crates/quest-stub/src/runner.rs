@@ -20,6 +20,30 @@ pub enum RunOutcome {
     TickLimit,
 }
 
+/// The events the dialogue runner raises (spec §5.11; the compiler's built-in event types, not the host
+/// API's): an instance takes them like the host's events.
+pub const RUNNER_EVENTS: [&str; 3] = ["Talked", "DialogueEnded", "SceneEnded"];
+
+/// The [`VmConfig`] of instance `instance` of `program` against the stub's API (its events and the
+/// [`RUNNER_EVENTS`]).
+pub(crate) fn vm_config(
+    mem_bytes: u32,
+    instance: u16,
+    roles: Vec<(String, WireValue)>,
+) -> VmConfig {
+    let api = stub_api();
+    let mut events: Vec<String> = api.events.into_iter().map(|e| e.name).collect();
+    events.extend(RUNNER_EVENTS.iter().map(|e| e.to_string()));
+    VmConfig {
+        mem_bytes,
+        epoch: 1,
+        host_api_version: api.version,
+        events,
+        instance,
+        roles,
+    }
+}
+
 pub struct Runner {
     pub vm: Vm,
     pub host: StubHost,
@@ -45,18 +69,7 @@ impl Runner {
         instance: u16,
         roles: Vec<(String, WireValue)>,
     ) -> Result<Runner, LoadError> {
-        let api = stub_api();
-        let vm = Vm::new(
-            program,
-            VmConfig {
-                mem_bytes,
-                epoch: 1,
-                host_api_version: api.version,
-                events: api.events.into_iter().map(|e| e.name).collect(),
-                instance,
-                roles,
-            },
-        )?;
+        let vm = Vm::new(program, vm_config(mem_bytes, instance, roles))?;
         Ok(Runner {
             vm,
             host: StubHost::new(cfg),

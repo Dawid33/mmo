@@ -361,6 +361,12 @@ impl Vm {
         self.sched_status()
     }
 
+    /// Whether a task's segment is open (a task paused on fuel mid-segment): its writes are not committed,
+    /// so a [`Vm::mirror`] taken now would show them, and [`Vm::install_mirror`] is refused (`Busy`).
+    pub fn in_segment(&self) -> bool {
+        self.store.segment_is_open()
+    }
+
     /// No task in progress, nothing queued or ready, no zombies left to reap (`Status::Idle`). A failed
     /// instance is not idle: it is `Status::Failed`.
     pub fn is_idle(&self) -> bool {
