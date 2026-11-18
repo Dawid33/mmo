@@ -1421,11 +1421,29 @@ pub struct NpcTalk { pub attached: Vec<(ScriptInstanceId, u16 /*dialogue*/)>, pu
 GameDataUpdate::DialogueBatch { npc: EntityId, batch: Batch }
 ```
 
+- **First step (amendment, Task 52 review A4):** the runner state has no byte form yet. Before any of it becomes
+  region state, `quest-vm` gives `Conversation`, `Records`, `ScenePlay` and `Mirror` a canonical byte encoding
+  (`encode` / `decode`, no `usize`, `BTreeMap` order, byte-identical on every platform) whose decode returns `Err`
+  on hostile bytes (never a panic, every count bounded before it allocates); adds `Records::forget_instance(i)`
+  (an ended or reaped instance's records pruned — today they only grow); settles the key of a **stateless**
+  dialogue's records (its docs and its code disagree, review A4 — one rule, written in both); and bounds `once per` growth (one record per distinct `per` value, unbounded today:
+  a named cap in `consts.rs`, the oldest dropped first, or a ruling that argues it out). Its own tests (initial
+  implementation of the byte form) plus a hostile-bytes case for the fuzz targets of Part 3.
 - A `Talk` builds the attachment list from the instances **in this region** (Task 63 adds the others), raises
   `Talked`, starts the conversation and emits the first batch — all in the tick the input is stamped at.
   Conversations are **private**: a second talker gets the NPC's `busy` bark or nothing.
-- `DialogueEnv::eval` runs `Vm::eval_pure` on the owning instance's live VM with `COND_FUEL`; `emit`s land in the
+- `DialogueEnv::eval` evaluates over the owning instance's **committed dialogue mirror** (ruling T47-2, spec
+  §5.11 "Conditions run … over mirrored script state"), never over the live VM mid-segment: the mirror
+  (`Vm::mirror(&QuestInfo::read_set ∪ {stage})`, refused `Busy` mid-segment or while initialisers are pending) is
+  taken at tick boundaries, kept while unchanged, and evaluated with `COND_FUEL` on a `quest_vm::pure::MirrorVm`
+  built from (program, `VmConfig`, `Mirror`) — the one scratch-VM path, which the stub already uses
+  (`quest-stub/src/world/env.rs`) and `Mirror::eval_pure` delegates to (both **built in the Task 52 fix wave**,
+  with the mirror's program content hash, A2, and the refusal while initialising, A1). `emit`s land in the
   owning instance's queue at **T+1** (the stub's rule, so the corpus goldens describe the game too).
+- Wherever the game binds a program (a load, an edit, a state read back), it first calls
+  `Program::check_api(&HostApi)` (**built in the Task 52 fix wave**, A6) and refuses a program that does not fit;
+  the stub's `quest_stub::bind` is the model. A placement runs the initialisers first (`Vm::initialise`, built in
+  the same wave) so `requires`, `where` and the first mirror read set globals, not zeros.
 - Ends: `Finished`; `Left` (`LeaveTalk`, or the talker's client gone); `OutOfRange` (talker and NPC more than
   `TALK_RANGE_BLOCKS` apart through `WorldView`, checked each tick); `Timeout`; `TooDeep`; `Edited` (Task 71).
   `DialogueEnded` is delivered at the end; the NPC is released at `TalkDone` or after `CONVERSATION_LINGER_TICKS`.
@@ -1467,8 +1485,10 @@ script_at: BTreeMap<ScriptInstanceId, RegionCoords>
 
 - An instance sends its **dialogue read set** (`QuestInfo.read_set`) as a `Mirror` to each region holding an NPC
   it attaches to, and a home sends each **part read set** to its part — only when the mirror's `state_hash`
-  changed, only from final ticks. The receiver stores mirrors as rollback state and evaluates conditions with
-  `Mirror::eval_pure`.
+  changed, only from final ticks. The receiver stores mirrors as rollback state and evaluates conditions on a
+  `MirrorVm` per mirror (kept while the mirror is unchanged; the one scratch path, Task 62), not a fresh VM per
+  call. A mirror carries its program's content hash: one of another program (home and part migrated at
+  different ticks) is refused by `Vm::install_mirror` and `MirrorVm::new` — the sender re-sends after an edit.
 - The conversation, the attachments and the mirrors are **carried state of the NPC** (`Carried.talk`); the sender
   re-targets when it learns the NPC moved (the manager's `script_at` / entity routing).
 - Between hosts a `ScriptMsg` is a `Reliable` peer message and is **journalled** (the peer-journal rule: a new
