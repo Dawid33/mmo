@@ -2028,7 +2028,11 @@ Every bullet is covered; no test was added in this task.
 
 ### Not done
 
+Everything below went into `2026-11-17-quest-script-completion.md` (one plan to finish the language, the game
+integration and packages; it supersedes the Phase 10 plan); each line says where.
+
 - **Phase 10** (Tasks 36–40): lowering of `dialogue` and `quest` items (they parse, resolve and type-check, then report `not-yet`), and the host-side use of the language in the game.
-- **`not-yet` in the core language**: fallible host queries and commands, and an unawaited `all(...)`.
-- **Fuzzing** (planned; from here on tests are regression-only).
-- **Whole-branch review** by the owner.
+- **`not-yet` in the core language**: fallible host queries and commands (built: completion plan Tasks 37,
+  37b), and an unawaited `all(...)` (still `not-yet`).
+- **Fuzzing** (planned; from here on tests are regression-only): completion plan Part 3.
+- **Whole-branch review** by the owner: completion plan Task 52 (the owner's own review stays open in `TODO.md`).

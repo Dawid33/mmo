@@ -73,11 +73,13 @@ changed build/run/test command updates its recipe in the same change.
 from the root workspace; nothing in the root may depend on it, and it reaches into the game tree only for
 `crates/state-hash`): the standalone compiler (`quest-lang`), bytecode VM (`quest-vm`), stub host and CLI for
 player-written quest blocks. `just quest-check | quest-test | quest-run <dir> | quest-wasm`. Spec
-`docs/superpowers/specs/2026-11-16-quest-script-language-design.md`, plan
-`docs/superpowers/plans/2026-11-16-quest-script-language-mvp.md`.
+`docs/superpowers/specs/2026-11-16-quest-script-language-design.md` (says what was built and decided since); plans
+`docs/superpowers/plans/2026-11-16-quest-script-language-mvp.md` (the MVP, built) and
+`docs/superpowers/plans/2026-11-17-quest-script-completion.md` (everything after it, in order: Phase 10, leftovers,
+fuzzing, the game, packages).
 **Tests in `quest/` (owner's rule, 2026-11-16):** the MVP plan's tests are the initial implementation's. Once it is
 built, a test is written ONLY as a regression for a bug that was actually found — never pre-emptively, not "for
-coverage", not alongside a new feature by default. Broad assurance comes from fuzzing (planned later), not from
+coverage", not alongside a new feature by default. Broad assurance comes from fuzzing (completion plan Part 3), not from
 more hand-written tests. Phase 10 (dialogue and quests, plan
 `docs/superpowers/plans/2026-11-17-quest-script-completion.md` Part 1) was initial implementation too (Dawid,
 2026-11-17) and carried its own tests; it closed with its corpus (Task 49, 2026-11-18), so the regression-only rule

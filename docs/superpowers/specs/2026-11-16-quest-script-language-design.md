@@ -157,6 +157,8 @@ r.append(9)        # a == [1, 2, 9]
   access is a deterministic fault.
 - Field access and method calls auto-dereference. Whole-value assignment through a reference is `*r = v`
   **[call]**.
+- A reference local or parameter is never re-pointed: `r = &b` is `ref-reassign` (`b` could die before `r`). Bind
+  a new one with `let r = &b`, whose scope ends with its block **[as built]**.
 - No `&` vs `&mut` in the MVP — every reference can write.
 - Mutating a collection while iterating it is defined behaviour (iteration is by index / insertion position
   at each step), bounded by fuel.
@@ -276,7 +278,8 @@ match take_gold(c, 20):
 ```
 
 - `match` on a fallible value is **exhaustive against the inferred set**; an arm naming an error that cannot
-  occur there is a compile error (catches typos and stale arms).
+  occur there is a compile error (catches typos and stale arms). A bare error name as a pattern there is
+  `Err(name)`: `case NotEnough(have):` reads `case Err(NotEnough(have)):` **[as built]**.
 - `?` and `else` work on `Option` too (`None` propagates / falls back).
 - A "did you mean" **warning** when a raised error name is never matched or declared anywhere and is within
   edit distance 2 of one that is **[call]**.
@@ -343,9 +346,9 @@ pub struct Ledger:
 
 ### 6.1 Static frames, no recursion [decided]
 
-- The call graph is a DAG (recursion is rejected). Each function gets **one fixed frame** (a fixed number of
-  value slots) allocated up front; the maximum call depth and total frame memory are known at compile time
-  (as early Fortran).
+- The call graph is a DAG (recursive **calls** are rejected; recursive data and dialogue are not). Each
+  function gets **one fixed frame** (a fixed number of value slots) allocated up front; the maximum call
+  depth and total frame memory are known at compile time (as early Fortran).
 - Only **one handler runs per block at a time** (§7), so one frame per function suffices. A handler parked at
   `await` has its live frames copied into the heap and restored on resume (§8.2).
 
@@ -423,6 +426,10 @@ host state passed in).
   the world as of the current tick, not the segment's own buffered commands (no read-your-writes overlay in
   the MVP); world calls that can fail at apply time (e.g. `chest.take` on an emptied chest) report through the
   host's error channel / a later event, or — where the script needs the result inline — are promises.
+- **A fallible host command is checked when it is issued [as built, Task 37b]:** the host answers `Ok` or one of
+  its declared errors from the current tick's state (a pure read). An error takes the script's fallible path at
+  once and nothing is buffered; `Ok` buffers the effect as above. A failure at apply time (the world changed
+  within the segment) still goes to the host's error channel, never back to the script.
 
 ### 6.7 Determinism across platforms
 
@@ -437,11 +444,11 @@ make either impossible (e.g. serialized VM state also records the version).
 
 ### 6.9 Editing a script: state is kept; "reset" re-initialises [decided]
 
-When the owner edits a block's script, the block's **saved state is kept**. A **reset** (in game a button on
-the block, labelled "Reset"; standalone a CLI flag / API call) **re-initialises the whole program instance**
-[decided]: all top-level variables run their initialisers again, the queue is emptied, parked handlers and
-pending promises are cancelled (answers discarded; committed writes stay — writes are final, §8.2), orphaned
-state (below) is gone. Afterwards the block is exactly as if the current script had just been placed.
+When an admin edits a script instance's program (editor mode, game-design §10), the instance's **saved state is
+kept**. A **reset** (in game a button on the script block, labelled "Reset"; standalone a CLI flag / API call)
+**re-initialises the whole script instance** [decided]: all top-level variables run their initialisers again,
+the queue is emptied, parked handlers and pending promises are cancelled (answers discarded; committed writes
+stay — writes are final, §8.2), orphaned state (below) is gone. Afterwards the instance is exactly as if the current script had just been placed.
 
 How the old state meets edited code **[call]**:
 
@@ -451,7 +458,7 @@ How the old state meets edited code **[call]**:
   - same name, value structurally compatible with the new type (the §8.2 rule) → value carried over;
   - name new in the new code → its initialiser runs;
   - name gone, or its type no longer compatible → the old value is kept aside as **orphaned state**
-    (invisible to the script, listed to the owner with its name and type) and the new variable, if any, runs
+    (invisible to the script, listed to the admin with its name and type) and the new variable, if any, runs
     its initialiser. Orphans disappear on reset (or a later edit that brings the name back with a
     compatible type takes the value again).
 - **Queued events** stay queued and are delivered to the new code's handlers (dropped if no handler hooks
@@ -467,7 +474,7 @@ How the old state meets edited code **[call]**:
 ## 7. Events and handlers [decided]
 
 In game, scripts are event-driven (Factorio-like): a script hooks into events such as a player entering an
-area or clicking the block. `main()` exists only for standalone runs and tests.
+area or clicking the script block. `main()` exists only for standalone runs and tests.
 
 ```python
 @on(PlayerClicked)
@@ -485,10 +492,10 @@ fn warn(e):
 - **Handler order is not guaranteed to authors** [decided] — scripts must compose without depending on each
   other. The implementation's order is deterministic (e.g. by module path + declaration order) and **not**
   shuffled [decided].
-- **One handler runs at a time per block** [decided]. Handlers run to completion, pausing only on fuel
+- **One handler runs at a time per script instance** [decided]. Handlers run to completion, pausing only on fuel
   exhaustion (continuing next tick) or at `await` (§8). There is no `wait`/`sleep` inside handlers; state that
   must last across events lives in top-level variables and is advanced by later events.
-- **Queue** [decided]: an event that arrives while the block is still busy (a handler unfinished from an
+- **Queue** [decided]: an event that arrives while the instance is still busy (a handler unfinished from an
   earlier tick) is queued. Any event queued ⇒ a **warning** to the owner. The queue is small (a named
   tunable, default **[call]** 4); when full, the **newest** event is dropped and a **script error** is shown to
   the player.
@@ -498,13 +505,14 @@ fn warn(e):
 
 ### 8.1 Namespaces
 
-- Created, deleted and **owned by players**. A player assigns any number of quest blocks, in any regions, to
-  one of their namespaces; a block belongs to at most one. A namespace is the player's "system": the blocks
-  that work together plus their shared external data.
-- MVP rule **[call, accepted]**: a block reads and writes only its own namespace. Sharing a namespace with
-  other players (so they can add to a system) is future work.
+- **A namespace belongs to one quest instance [changed 2026-11-16, quests-in-the-world §2; it beats the
+  earlier player-owned rule]:** the system makes it for the instance and deletes it with the instance; no
+  player creates, owns or deletes one. Its script instances are that quest's home and parts, in any regions.
+  It holds durable data only (what survives a repeatable reset); quest state lives in the instance (§5.12).
+- A script instance reads and writes only its own quest's namespace **[call, accepted]**. Sharing one between
+  quests is future work.
 - In game the coordinator owns namespace records and is the single writer of their data (no table two hosts
-  can both write). Deleting a namespace makes every later or in-flight call from its blocks fail with
+  can both write). Deleting a namespace makes every later or in-flight call from its instances fail with
   `NamespaceGone`.
 
 ### 8.2 Promises (JS-like) [decided]
@@ -512,9 +520,9 @@ fn warn(e):
 ```python
 @on(ItemDelivered)
 fn claim(e):
-    match await world.compare_and_set("wyrm_quest", "open", e.player.id):
+    match await world.compare_and_set("wyrm_quest", "open", str(e.player.id)):
         case Ok(_):
-            give(e.player, chest.take("gold", 20)?)
+            give(e.player, await chest.take("gold", 20)?)
         case Err(Changed(winner)):
             say(e.player, "Another claimed it first.")
 
@@ -526,27 +534,35 @@ fn ask(e):
     let r = await p else 0
 ```
 
-- Operations on the block's namespace, each returning `Promise[Result]`: `get(key)`, `set(key, v)`,
+- Operations on the instance's namespace, each returning `Promise[Result]`: `get(key)`, `set(key, v)`,
   `add(key, n)`, `compare_and_set(key, expected, new)` (error `Changed(current)`), `delete(key)`. Keys are
   strings; values are any script value (serialized). A `get` whose stored value has another type than the
   receiving binding fails with `WrongType` **[call]**. `await all([a, b])` **[call]**.
-- **Stored values are self-describing [call]:** shared data is written by blocks running *different*
+- **Stored values are self-describing [call]:** shared data is written by instances running *different*
   programs, so a stored struct/enum carries its field and variant **names** with their values (not slot
   indices or a program-local type id). A `get` checks the stored value structurally against the receiving
   type — same field names with matching types, the variant present in the receiving enum — and fails with
   `WrongType` otherwise. Type names themselves are not compared, so two programs declaring the same shape
   interoperate. (Declaring shared types once per namespace is a possible later refinement.)
 - Rejections are ordinary errors: `NotFound`, `Changed`, `Timeout`, `Lost`, `NamespaceGone`, `WrongType` —
-  handled with `?`, `else`, `match`.
+  handled with `?`, `else`, `match`. `compare_and_set` needs `expected` and `new` of one type (`str(e.player.id)`
+  against a string key, above).
+- **Base promise errors [as built]:** every awaited result (and `await all`) can fail with `Timeout`, `Lost` and
+  `WrongType`, which the VM makes itself whatever the host function declares; an exhaustive `match` needs arms
+  for them (or `Err(_)`).
+- **Promise error sets by origin [MVP plan decision 21]:** `await` of a host promise call, or of a local assigned
+  only from host calls with the same `raises`, raises exactly that list (plus the base errors); `await` of any
+  other promise (a parameter, field, list element, global, a function's result, `all`) raises the union of
+  every host promise function's errors — handle `Err(_)` there.
 - **Mechanics**: issuing a promise appends a request record (id from the VM's counter — identical everywhere)
   to VM state. Only the server acts on it, after the tick is final; clients send nothing. The answer re-enters
-  the sim as a stamped event at one tick on every machine and lands in the block's queue.
-- **`await` parks**: the handler's live frames are copied to the heap; the block proceeds with its queue; on
+  the sim as a stamped event at one tick on every machine and lands in the instance's queue.
+- **`await` parks**: the handler's live frames are copied to the heap; the instance proceeds with its queue; on
   resolution the continuation is queued and resumes with frames restored. Parked handlers are capped per
-  block (tunable). Top-level variables may have changed across an `await` (as in JS) — only at visible
+  instance (tunable). Top-level variables may have changed across an `await` (as in JS) — only at visible
   `await`s.
 - **Writes are final** [decided]: a write's promise resolves only after the coordinator committed it to
-  Postgres. A host crash may roll a block's own state back to its last cut while external data keeps the
+  Postgres. A host crash may roll an instance's own state back to its last cut while external data keeps the
   write — scripts treat external data as the source of truth for anything that must not be undone (who won,
   what was paid). The promise id is the idempotency key (a resend after recovery is harmless). Every request
   times out (`Timeout`) after a fixed number of ticks.
@@ -556,6 +572,11 @@ fn ask(e):
 - The VM talks to the world only through a **host trait** **[call: shape left to builder]** covering: game
   calls (`say`, `give`, tags, chest access, `roll`…), event delivery, promise request/resolution, the
   fuel budget per tick, warnings and errors for the owner.
+- **Fallible host calls [as built, Task 37b]:** a host query or command may declare errors (`raises`). It is
+  handled like any fallible call (`?`, `else`, `match`), its error set exactly the declared list; an error it
+  does not declare is the fault `HostError`. A condition may use one only with the error handled
+  (`q() else false`); an escaping one is `impure-condition`. A query about an entity out of reach raises
+  `OutOfReach` this way.
 - **The compiler learns the host API from a host description [call]:** a signature table (functions and
   their types, event structs and fields, the `world.*` operations, built-in error names) passed to
   `quest-lang` at compile time; `quest-lang` has no host knowledge of its own beyond the core built-ins
@@ -566,6 +587,10 @@ fn ask(e):
   `print` write to stdout (and to a capture buffer for tests); an in-memory namespace store with configurable
   latency (ticks) and **failure injection** (`Timeout`, `Lost`, `Changed`, `NamespaceGone`); a small set of
   event structs (`PlayerClicked`, `PlayerEntered`, `ItemDelivered` at least).
+- **The stub's host API as built (version 6):** `Entity { id }` is its "any entity" type (`ItemGiven.to`,
+  `Killed.victim`; `place` at any entity); `Person.distance_to(other) -> int raises OutOfReach` is its
+  fallible query (either entity missing from `people.txt`); a role's value is checked by struct name as well as
+  shape, so `Person(3)` never fills a `Creature` role.
 - In `main()` tests may call handlers directly (they are ordinary functions) and may `emit(Event)` to go
   through the real queue **[call]**; `assert(cond)` / `assert_eq(a, b)` faults with a message.
 - **CLI `quest`** **[call: names]**: `quest check <dir>` (compile only, diagnostics), `quest run <dir>`
@@ -580,10 +605,15 @@ fn ask(e):
 quest/                     # its own Cargo workspace: Cargo.toml [workspace], Cargo.lock, target/
   crates/quest-lang/       # lexer (indentation), parser, modules, name resolution, type + error-set
                            # inference, exhaustiveness, no-recursion check, frame sizing, bytecode emit
-  crates/quest-vm/         # bytecode, VM, heap, fuel, undo log, flat memory + StateHash, queue, promises
-  crates/quest-cli/        # the `quest` binary + the standalone host
-  tests/ or examples/      # .qs corpus
+  crates/quest-vm/         # bytecode, VM, heap, fuel, undo log, flat memory + StateHash, queue, promises,
+                           # the dialogue graph, conversation and scene runners
+  crates/quest-stub/       # the standalone host: its API, the in-memory world, the runner
+  crates/quest-cli/        # the `quest` binary
+  crates/quest-corpus/     # the .qs corpus (corpus/run, corpus/fail) and its goldens
 ```
+
+**As built: five crates, not three** — the standalone host and the corpus are crates of their own beside the CLI
+(both build for wasm32, where the corpus's goldens are reproduced).
 
 - Root `Cargo.toml` gets `exclude = ["quest"]`. The language workspace inherits the root
   `rust-toolchain.toml` and `.cargo/config.toml` (harmless). Its `target/` is `quest/target` (already covered
@@ -597,8 +627,11 @@ quest/                     # its own Cargo workspace: Cargo.toml [workspace], Ca
 - Justfile recipes (all through `{{cap}}`, run from `quest/`): `quest-check`, `quest-test`, `quest-run <dir>`,
   `quest-wasm` (the wasm32 determinism corpus, reusing the wasm-bindgen test runner the way
   `determinism-wasm` does). Add a short `CLAUDE.md` paragraph pointing at the workspace and recipes.
-- Integration later: move `quest/crates/*` into the root workspace (or add them as members), implement the
-  host trait in `game`/`server`, bridge the undo log to the region's undo.
+- Integration later: implement the host trait in `game`/`server` and bridge the undo log to the region's undo
+  (`docs/superpowers/plans/2026-11-17-quest-script-completion.md` Part 4). How the game links the crates is that
+  plan's gate **G2**, open until Dawid decides it; its recommendation replaces the move named here: `quest/` stays
+  its own workspace (tests, CLI and lockfile untouched), `crates/game` takes `quest-vm` as a path dependency with
+  the root `exclude` kept, and only `server` links `quest-lang`.
 
 ## 11. Testing (the MVP is judged by this)
 
@@ -638,7 +671,7 @@ be revisited with a note in the plan.
 The **wasm backend** (compile scripts to wasm modules with inserted fuel counters and resumable
 state-machine functions, all state in the module's linear memory in the §6.3 layout; fixed memory, NaN
 canonicalised by emitted code, `libm` compiled in, no relaxed SIMD) — planned, after the interpreter;
-game integration (quest block entity, sim events, coordinator promise path, Postgres namespace storage, Slint
-editor, per-block budgets per region); how modules live and are shared in game; namespace sharing; function
+game integration — now planned in `docs/superpowers/plans/2026-11-17-quest-script-completion.md` Part 4; how
+modules live and are shared in game; namespace sharing; function
 parameters (monomorphised) and function values; read-only references; generics/traits; bytecode upgrade
 policy in game; the language's real name.

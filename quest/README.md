@@ -171,7 +171,7 @@ written only as a regression for a bug that was actually found; never pre-emptiv
 assurance comes from fuzzing, planned later. Phase 10 (dialogue and quests) was initial implementation too and
 carried its own tests; since its close-out (Task 49) the rule applies again.
 
-## Known MVP limits
+## Known limits
 
 - **`not-yet` compile errors**: a fallible host property (`x.p` of a property that declares errors), an
   unawaited `all(...)`, `after` of a host event (a timer delivers a script `event` only), a host struct's or
@@ -303,8 +303,8 @@ Wire literals (roles, event fields): ints, floats with a `.`, `"strings"`, `true
 `Some(v)`, `[a, b]`, `Occupation::Smith`, entity handles `Person(3)` / `Player(1)` (a player takes its name
 from the people), structs `Item(kind="meat",count=1)`.
 
-A state file holds the program it was saved with. `--load` of a state saved by the same program resumes it
-exactly; a loaded state that already ran `main` runs it again. A state saved by a changed script is
+A state file holds the program it was saved with. It loads only under the `--mem` it was saved with (another
+size is refused, exit 2). `--load` of a state saved by the same program resumes it exactly; a loaded state that already ran `main` runs it again. A state saved by a changed script is
 **migrated** (spec §6.9): each top-level variable whose name and type still fit keeps its value, a new one
 runs its initialiser, and a value whose variable is gone or no longer fits is kept aside as an orphan (a
 later edit that brings the name back with a fitting type takes it again); queued events go to the new
