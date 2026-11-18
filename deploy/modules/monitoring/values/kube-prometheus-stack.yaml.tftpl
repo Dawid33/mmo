@@ -121,9 +121,11 @@ additionalPrometheusRulesMap:
 
           - alert: WorldCoordinatorReplicasDown
             # Fewer registered coordinator replicas than the Deployment wants (one of two down: the
-            # world runs on, without a spare). None registered at all is WorldCoordinatorDown.
+            # world runs on, without a spare). None registered at all (a forge wait, a stopped
+            # world, every replica down) is WorldCoordinatorDown's, not this one's. The spec side
+            # aggregated: kube-state-metrics series may be duplicated during its own rollout.
             expr: |
-              sum by (namespace) (mmo_registered{role="coordinator"}) < on (namespace) kube_deployment_spec_replicas{deployment="coordinator"}
+              (sum by (namespace) (mmo_registered{role="coordinator"}) < on (namespace) max by (namespace) (kube_deployment_spec_replicas{namespace=~"world-.*", deployment="coordinator"})) and on (namespace) (sum by (namespace) (mmo_registered{role="coordinator"}) > 0)
             for: 5m
             labels:
               severity: warning
