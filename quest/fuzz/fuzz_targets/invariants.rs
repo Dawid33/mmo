@@ -4,7 +4,8 @@
 //! latency (`0..=8`), a failure rule (on the nth `world.add`), a tick `k`, a tick `j`, a world case and a
 //! flag byte. A short input reads zeros.
 //!
-//! **Generated program** (in a `Runner`):
+//! **Generated program** (in a `Runner`; one whose unlimited run takes more than `UNLIMITED_FUEL_MAX` counts as
+//! not ending, and is checked on a prefix):
 //! - it compiles (the generator's contract);
 //! - **fuel equivalence**: run at the fuel per tick, it ends with the output, the failed-or-not status and
 //!   the script state (static slots and heap) of the unlimited run. Not `Vm::hash64`: it covers the
@@ -53,6 +54,10 @@ use quest_vm::{Program, Status, Vm};
 const UNLIMITED_TICKS: u64 = 2_000;
 /// The most fuel a generated program may take in all for the budgeted runs (some take tens of millions).
 const TOTAL_FUEL_MAX: u64 = 2_000_000;
+/// The most fuel the unlimited run may take in all: past it the program counts as not ending (some take
+/// hundreds of millions within `UNLIMITED_TICKS`, minutes under the sanitizer, past libFuzzer's timeout;
+/// Task 55, `regressions/invariants/slow-unlimited`).
+const UNLIMITED_FUEL_MAX: u64 = 5_000_000;
 /// The most ticks a budgeted run may take: a smaller budget is raised to fit.
 const BUDGET_TICKS_MAX: u64 = 5_000;
 /// Ticks beyond `total fuel / budget` a budgeted run may take.
@@ -183,12 +188,18 @@ fn timeless(mem: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Steps until quiescent or failed, at most `ticks` ticks; `None` when it did not get there.
-fn finish(r: &mut Runner, fuel: u64, ticks: u64) -> Option<End> {
+/// Steps until quiescent or failed, at most `ticks` ticks and `fuel_max` fuel in all; `None` when it did not
+/// get there.
+fn finish(r: &mut Runner, fuel: u64, ticks: u64, fuel_max: u64) -> Option<End> {
     let mut used = 0u64;
     for t in 0..ticks {
-        let rep = r.step(fuel);
+        // Never more than what is left of `fuel_max` (and one more, to see it passed): a tick of a
+        // run without a budget may take more than all of it.
+        let rep = r.step(fuel.min(fuel_max.saturating_sub(used).saturating_add(1)));
         used = used.saturating_add(rep.fuel_used);
+        if used > fuel_max {
+            return None;
+        }
         let failed = rep.status == Status::Failed;
         if failed || r.quiescent() {
             return Some(End {
@@ -249,7 +260,7 @@ fn generated(i: &In) {
 
     // The unlimited run, and what an idle end holds.
     let mut free = runner(&program, &stub);
-    let unlimited = finish(&mut free, u64::MAX, UNLIMITED_TICKS);
+    let unlimited = finish(&mut free, u64::MAX, UNLIMITED_TICKS, UNLIMITED_FUEL_MAX);
     if unlimited.is_some() && free.vm.is_idle() {
         // `None` only when the copy's heap cannot also hold the initial values (a nearly full heap).
         if let Some((held, baseline)) = heap_after_reinit(&program, &free.vm) {
@@ -281,7 +292,7 @@ fn generated(i: &In) {
         && unlimited.fuel <= TOTAL_FUEL_MAX
         && !timeout_rule
     {
-        let budgeted = finish(&mut runner(&program, &stub), fuel, ticks)
+        let budgeted = finish(&mut runner(&program, &stub), fuel, ticks, u64::MAX)
             .unwrap_or_else(|| panic!("not finished at fuel {fuel} after {ticks} ticks\n{text}"));
         assert_eq!(
             budgeted.output, unlimited.output,
