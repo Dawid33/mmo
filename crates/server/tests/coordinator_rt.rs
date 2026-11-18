@@ -24,7 +24,7 @@ use world_store::{StoreHandle, StoreUrl};
 
 #[path = "common/coordinator.rs"]
 mod coordinator_common;
-use coordinator_common::{attach_msg, resumed, stored_core};
+use coordinator_common::{attach_msg, land_map, resumed, stored_core};
 
 /// The placement hop the tests' `Attach` reports their player at, and so the hop of its requests.
 const ATTACHED_HOP: u64 = 1;
@@ -47,39 +47,6 @@ fn open_store(dir: &Path) -> StoreHandle {
 fn install_props() {
     let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
     game::install_block_props(registry.props());
-}
-
-/// A 48 × 48 grassland with a sea border (a bootstrap settles it).
-fn land_map() -> WorldMap {
-    let mut tiles = Vec::new();
-    for z in 0..48 {
-        for x in 0..48 {
-            let sea = x < 2 || z < 2 || x >= 46 || z >= 46;
-            tiles.push(game::TileSummary {
-                ground_min_m: 0.0,
-                ground_mean_m: 10.0,
-                ground_max_m: 10.0,
-                relief_m: 10.0,
-                slope: [0.0, 0.0],
-                sea_fraction: if sea { 1.0 } else { 0.0 },
-                lake_fraction: 0.0,
-                lake_level_m: None,
-                rivers: 1,
-                river_max_discharge_m2: 0.0,
-                river_max_width_m: 0.0,
-                surface_rock: None,
-                landing: Some([256, 256]),
-                biome: if sea { game::Biome::Ocean } else { game::Biome::Grassland },
-                region: 0,
-                temperature_c: 15.0,
-                precip_mm: 800.0,
-                savagery: 0,
-                alignment: 0,
-                volcano: false,
-            });
-        }
-    }
-    WorldMap { origin: RegionCoords::new(0, 0), width: 48, height: 48, tiles, rock_names: vec![], region_types: vec![] }
 }
 
 fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
@@ -751,27 +718,7 @@ const LOGIN_TEST_TOKEN: &str = "login-listener-test-token";
 /// A coordinator listening for hosts and for the login service (world "w"), as
 /// `run_coordinator` starts it, on a SQLite store (no host attaches in these tests).
 fn listening_with_login(dir: &Path) -> (StoreHandle, coordinator_rt::ListeningCoordinator) {
-    let store = open_store(dir);
-    let start = ensure_coordinator_state(&store, &land_map(), None).unwrap().unwrap();
-    let login = coordinator_rt::LoginListen {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        token: LOGIN_TEST_TOKEN.into(),
-        cert_hash_file: Some(dir.join("login-link.cert-sha256")),
-    };
-    let listening = coordinator_rt::start_listening_as(
-        store.clone(),
-        start,
-        "127.0.0.1:0".parse().unwrap(),
-        LOGIN_TEST_TOKEN.into(),
-        Some(dir.join("coordinator.cert-sha256")),
-        server::claims::Fenced::default(),
-        None,
-        game::CrashPolicy::Rollback,
-        "w",
-        Some(login),
-    )
-    .expect("the coordinator listens");
-    (store, listening)
+    coordinator_common::gateless_replica(dir, LOGIN_TEST_TOKEN, "w", &dir.join("login-link.cert-sha256"))
 }
 
 /// Whether a dialer of `role` to (`addr`, `pin`) is closed — it saw its link come up (the
@@ -798,8 +745,9 @@ macro_rules! closed_after_up {
 }
 
 /// A host's hello on the coordinator's LOGIN listener is closed (only the login service is
-/// served there); the login service's own hello stays up, and its order — no host attached to
-/// take it — is dropped, not answered.
+/// served there); the login service's own hello stays up, and its orders — no host attached to
+/// take them — are answered `NoGate` at once (Elastic 2b Task 8: the login service tries its
+/// next replica), the link staying up.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_host_peer_on_the_login_listener_is_closed() {
@@ -812,11 +760,17 @@ fn a_host_peer_on_the_login_listener_is_closed() {
     let (tx, events) = svc_link::LinkDialer::connect::<login_api::HostToLogin, login_api::LoginToHost>(addr, pin.clone(), hello);
     assert!(matches!(events.recv_timeout(WAIT), Ok(svc_link::LinkEvent::Up(_))));
     tx.send(login_api::LoginToHost::SpawnPlayer { player_token: "ab".repeat(16), session_epoch: 1 }).unwrap();
-    match events.recv_timeout(Duration::from_millis(700)) {
-        Err(_) => {}
-        Ok(other) => panic!("no host attached: nothing answers, the link stays up — got {other:?}"),
+    tx.send(login_api::LoginToHost::Kick { player_token: "cd".repeat(16), session_epoch: 3, reason: "bye".into() }).unwrap();
+    for want in [
+        login_api::HostToLogin::NoGate { player_token: "ab".repeat(16), session_epoch: 1 },
+        login_api::HostToLogin::NoGate { player_token: "cd".repeat(16), session_epoch: 3 },
+    ] {
+        match events.recv_timeout(Duration::from_millis(700)) {
+            Ok(svc_link::LinkEvent::Msg(got)) => assert_eq!(got, want),
+            other => panic!("no host attached: the order is answered NoGate, the link stays up — got {other:?}"),
+        }
     }
-    let want = coordinator_rt::LoginCounts { orders: 1, orders_dropped: 1, ends_dropped: 0 };
+    let want = coordinator_rt::LoginCounts { orders: 2, orders_dropped: 2, ends_dropped: 0 };
     assert_eq!(listening.login_counts(), Some(want), "received, and counted as dropped: no gate host");
     assert_eq!(listening.thread.shutdown(Duration::from_secs(10)), ServerExit::Clean);
     store.shutdown();

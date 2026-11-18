@@ -185,6 +185,10 @@ pub enum HostToLogin {
     SessionEnded { player_token: String, session_epoch: u64 },
     /// The host applied the [`LoginToHost::Kick`] up to this epoch (sent for every copy).
     KickAck { player_token: String, session_epoch: u64 },
+    /// A coordinator replica's answer to an order (spawn or kick) when no host attached to IT
+    /// takes logins (Elastic 2b): it relayed nothing — the login service tries its next link
+    /// (another replica). Matched by token and epoch, as the acks are.
+    NoGate { player_token: String, session_epoch: u64 },
 }
 
 /// What the link messages' `Debug` shows instead of a player token.
@@ -232,6 +236,11 @@ impl std::fmt::Debug for HostToLogin {
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
                 .finish(),
+            HostToLogin::NoGate { player_token: _, session_epoch } => f
+                .debug_struct("NoGate")
+                .field("player_token", &hidden)
+                .field("session_epoch", session_epoch)
+                .finish(),
         }
     }
 }
@@ -250,6 +259,7 @@ mod tests {
             format!("{:?}", HostToLogin::SpawnAck { player_token: t.clone(), session_epoch: 3, ok: true, quic: None, webtransport: None, cert_hash: None }),
             format!("{:?}", HostToLogin::SessionEnded { player_token: t.clone(), session_epoch: 4 }),
             format!("{:?}", HostToLogin::KickAck { player_token: t.clone(), session_epoch: 5 }),
+            format!("{:?}", HostToLogin::NoGate { player_token: t.clone(), session_epoch: 6 }),
         ];
         for s in shown {
             assert!(!s.contains(&t) && s.contains(REDACTED) && s.contains("session_epoch"), "{s}");

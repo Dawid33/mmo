@@ -2251,6 +2251,17 @@ fn spare_replica_with_cert(
     db: &PgDb,
     cert: PathBuf,
 ) -> (server::coordinator_rt::ListeningCoordinator, StoreHandle, PathBuf) {
+    spare_replica_listening(w, db, cert, None)
+}
+
+/// [`spare_replica_with_cert`], listening for the login service too when `login` says where
+/// (Elastic 2b Task 8).
+fn spare_replica_listening(
+    w: &mut World,
+    db: &PgDb,
+    cert: PathBuf,
+    login: Option<server::coordinator_rt::LoginListen>,
+) -> (server::coordinator_rt::ListeningCoordinator, StoreHandle, PathBuf) {
     let store = db.open();
     let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
     assert!(!start.alone, "A beats its row: B is not alone");
@@ -2270,7 +2281,7 @@ fn spare_replica_with_cert(
         Some(cuts),
         CrashPolicy::Rollback,
         RIG_WORLD,
-        None,
+        login,
     )
     .expect("B listens");
     let deadline = Instant::now() + WAIT;
@@ -2540,5 +2551,116 @@ fn a_host_whose_replica_dies_reattaches_to_another() {
     w.coordinator = Some(b);
     let old = std::mem::replace(&mut w.store, b_store);
     old.shutdown();
+    w.stop(&dir);
+}
+
+/// The login service's spawn of `token` at `epoch` through its real host links (`links`, on
+/// `rt`), the hosts running round by round meanwhile.
+fn spawn_through(
+    w: &mut LoginWorld,
+    rt: &tokio::runtime::Runtime,
+    links: &Arc<login::host_link::HostLinks>,
+    row: &login::WorldRow,
+    token: &str,
+    epoch: u64,
+) -> Result<login::host_link::SpawnPlace, login::host_link::SpawnError> {
+    let (links, row, token) = (links.clone(), row.clone(), token.to_string());
+    let task = rt.spawn(async move { links.spawn(&row, &token, epoch).await });
+    let deadline = Instant::now() + WAIT;
+    while !task.is_finished() {
+        assert!(Instant::now() < deadline, "the spawn never answered");
+        w.rounds(1);
+    }
+    rt.block_on(task).unwrap()
+}
+
+/// Elastic 2b Task 8, end to end: coordinator replicas A (both hosts attached) and B (none),
+/// one identity, the world's `host_link` naming B first. The login service's real host links
+/// hold a link to each. A join goes to B, which has no gate host and answers `NoGate`; it moves
+/// to A, whose gate (host 0) places the player on host 1 (its record's land). Then host 1 moves
+/// to B: a join goes to B, whose gate is now host 1, which places the player on host 0 — a host
+/// attached to the OTHER replica (the hosts' peer link carries the order and the ack; no
+/// replica is involved past the gate).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_join_moves_past_a_replica_without_a_gate_and_reaches_a_holder_on_another_replica() {
+    install_props();
+    let Some(db) = PgDb::create("lreplicas") else { return };
+    let dir = scratch("lreplicas");
+    let mut w = login_hosts(&db, &dir);
+    let a_cert = w.w.cert.clone();
+    let login = server::coordinator_rt::LoginListen {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        token: TOKEN.into(),
+        cert_hash_file: Some(a_cert.with_file_name("login-link.cert-sha256")),
+    };
+    let (b, b_store, _) = spare_replica_listening(&mut w.w, &db, a_cert.clone(), Some(login));
+    let b_id = *live_of(&b).iter().last().expect("B is live");
+    let (b_login, pin) = b.login.clone().expect("B listens for the login service");
+    assert_eq!(pin, w.login_at.1, "one identity for both replicas' login listeners");
+
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let row = login::WorldRow {
+        world_id: RIG_WORLD.into(),
+        name: "Hosts".into(),
+        status: login_api::WorldStatus::Open,
+        quic: Some("world-row.example:6466".into()),
+        webtransport: None,
+        cert_hash: None,
+        created_at: 1,
+        host_link: Some(format!("{b_login},{}", w.login_at.0)),
+        host_link_cert: Some(pin),
+    };
+    let links = rt.block_on(async {
+        let store = login::LoginStore::open("sqlite::memory:").await.unwrap();
+        let links = Arc::new(login::host_link::HostLinks::new(Some(TOKEN.into()), store, Arc::new(|| 1)).with_ack_timeout(WAIT));
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let states = links.link_states(&row).await.unwrap();
+            if states.len() == 2 && states.iter().all(|(_, up)| *up) {
+                break links;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the login service never linked both replicas: {states:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    // B has no host: NoGate, then A's gate (host 0) places the player on host 1.
+    let (b1, _) = sides(w.w.seam, h(1), &w);
+    let first = w.player(21, PlayerId(931), Some(b1));
+    let place = spawn_through(&mut w, &rt, &links, &row, &first, 1).expect("the join is acked");
+    assert_eq!(place.quic, endpoint(h(1)).quic, "host 1 took it");
+    let counts = b.login_counts().unwrap();
+    assert_eq!((counts.orders, counts.orders_dropped), (1, 1), "B was asked first and answered NoGate");
+
+    // Host 1 moves to B: B's gate is host 1 now.
+    let (boot, reg) = (w.w.pair.sims[1].boot, w.w.pair.sims[1].reg);
+    w.w.switches[1].replace(quic_world_link(b.addr, a_cert.clone(), h(1), boot, reg));
+    let only_one: std::collections::BTreeSet<HostId> = [h(1)].into_iter().collect();
+    let deadline = Instant::now() + WAIT;
+    while b.thread.inspect(move |c| c.gate_host_here(), WAIT).expect("B answers") != Some(h(1))
+        || w.w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("A answers") != only_one
+    {
+        assert!(Instant::now() < deadline, "host 1 never attached to B as both replicas see it");
+        w.rounds(1);
+    }
+    w.w.pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+
+    // B relays to host 1, which places the player on host 0 (attached to A) over their peer
+    // link; host 0's acknowledgement goes back to the gate, host 1, which tells the login
+    // service through B.
+    let (a0, _) = sides(w.w.seam, h(0), &w);
+    let second = w.player(22, PlayerId(932), Some(a0));
+    let place = spawn_through(&mut w, &rt, &links, &row, &second, 1).expect("the join is acked");
+    assert_eq!(place.quic, endpoint(h(0)).quic, "host 0 took it");
+    let counts = b.login_counts().unwrap();
+    assert_eq!((counts.orders, counts.orders_dropped), (2, 1), "B relayed the second order");
+    assert!(w.orders(h(0)).pending().by_token.contains_key(&second), "host 0 holds the pending spawn");
+    assert!(w.orders(h(1)).pending().by_token.get(&second).is_none(), "host 1 holds none of it");
+
+    drop(links);
+    drop(rt);
+    assert_eq!(b.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+    b_store.shutdown();
     w.stop(&dir);
 }

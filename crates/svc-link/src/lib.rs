@@ -53,7 +53,9 @@ pub use target::LinkTarget;
 /// to a live host and their answers back (`CoordMsg::Login`, `HostMsg::Login`).
 /// 8: embark, return and retire are gone — `WorldRequest` / `WorldReply` lose their embark and
 /// return variants, `Claim` is an adventure only, and `PlayerHandoff` carries no fortress.
-pub const LINK_PROTOCOL_VERSION: u32 = 8;
+/// 9: Elastic 2b — coordinator replicas: the login service links to every replica, and one
+/// whose own hosts take no logins answers an order `HostToLogin::NoGate`.
+pub const LINK_PROTOCOL_VERSION: u32 = 9;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

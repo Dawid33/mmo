@@ -181,6 +181,13 @@ pub fn order_from(msg: LoginToHost) -> game::LoginOrder {
     }
 }
 
+/// A coordinator replica's answer to `msg` when no host attached to it takes logins
+/// ([`game::Coordinator::gate_host_here`]): the login service tries its next replica.
+pub fn no_gate(msg: &LoginToHost) -> HostToLogin {
+    let (LoginToHost::SpawnPlayer { player_token, session_epoch } | LoginToHost::Kick { player_token, session_epoch, .. }) = msg;
+    HostToLogin::NoGate { player_token: player_token.clone(), session_epoch: *session_epoch }
+}
+
 /// A host's answer, as the coordinator forwards it to the login service.
 pub fn answer_from(out: game::LoginOut) -> HostToLogin {
     match out {

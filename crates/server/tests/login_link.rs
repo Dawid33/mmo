@@ -20,7 +20,11 @@ use server::auth_edge::{Authenticator, Clock, JwksCache, REFUSE_SUPERSEDED};
 use server::login_link::{self, LoginLink, SpawnOrders, REFUSE_NO_SPAWN_ORDER};
 use server::player_store::{self, HelloSession, SharedPlayerStore};
 use server::region_threads::ThreadRegionSpawner;
+use server::coordinator_rt;
 use svc_link::{LinkDialer, LinkEvent, LinkHello, PeerRole};
+
+#[path = "common/coordinator.rs"]
+mod coordinator_common;
 
 const NOW: u64 = 1_800_000_000;
 const WORLD: &str = "alpha";
@@ -711,5 +715,254 @@ fn kick_queued_while_the_link_is_down_parks_once_it_is_up() {
     assert!(acked, "the host's ack deleted the pending kick");
     drop(links);
     drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- Elastic 2b Task 8: a link per coordinator replica ----------------------------------------
+
+/// A scratch directory of its own.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("login-link-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The login service's side of a world whose `host_link` names `replicas` in that order (one
+/// shared identity, `cert`): its store (an account playing as `player` at epoch 1, the world
+/// row) and its host links (kick sweeper started) — what a deployed login service holds.
+struct LoginService {
+    store: login::LoginStore,
+    links: Arc<login::host_link::HostLinks>,
+    row: login::WorldRow,
+    account: login::AccountId,
+}
+
+impl LoginService {
+    async fn start(replicas: &[std::net::SocketAddr], cert: &str, player: &PlayerToken) -> LoginService {
+        let store = login::LoginStore::open("sqlite::memory:").await.unwrap();
+        let link: Vec<String> = replicas.iter().map(|a| a.to_string()).collect();
+        let row = login::WorldRow {
+            world_id: WORLD.into(),
+            name: "Alpha".into(),
+            status: login_api::WorldStatus::Open,
+            quic: Some("alpha.example:6466".into()),
+            webtransport: None,
+            cert_hash: None,
+            created_at: 1,
+            host_link: Some(link.join(",")),
+            host_link_cert: Some(cert.into()),
+        };
+        store.put_world(&row).await.unwrap();
+        let account = store.create_account("alice@example.org", "x", 1).await.unwrap().unwrap();
+        let token = player.0.clone();
+        assert_eq!(store.player_token_for(account, WORLD, 1, move || token).await.unwrap(), player.0);
+        assert_eq!(store.bump_session(account, WORLD, 1).await.unwrap(), 1);
+        let links = Arc::new(
+            login::host_link::HostLinks::new(Some(SERVICE_TOKEN.into()), store.clone(), Arc::new(|| NOW)).with_ack_timeout(LINK_WAIT),
+        );
+        links.start();
+        LoginService { store, links, row, account }
+    }
+
+    /// Waits until the login service holds an up link to each of `replicas`.
+    async fn until_linked(&self, replicas: &[std::net::SocketAddr]) {
+        let want: Vec<(String, bool)> = replicas.iter().map(|a| (a.to_string(), true)).collect();
+        let deadline = tokio::time::Instant::now() + LINK_WAIT;
+        loop {
+            let states = self.links.link_states(&self.row).await.unwrap();
+            if states == want {
+                return;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the login service never linked each replica: {states:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Signs the account out everywhere (a durable kick of epoch 1) and waits until a replica
+    /// acknowledged it; whether one did.
+    async fn kick_acked(&self) -> bool {
+        assert_eq!(self.store.revoke_account_with_kicks(self.account, NOW as i64, KICK_REASON).await.unwrap(), 1);
+        self.links.wake_kicks();
+        let deadline = tokio::time::Instant::now() + LINK_WAIT * 2;
+        while !self.store.pending_kicks().await.unwrap().is_empty() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    }
+}
+
+/// Replica G has no host attached (a real coordinator replica: it answers every order
+/// `NoGate`); H, after it in the world's `host_link`, is a role-`all` server that takes it.
+/// The join's spawn order goes to G first, then to H, and is acked; so is a kick.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_order_to_a_replica_without_a_gate_moves_to_the_next() {
+    let dir = scratch("nogate-next");
+    let pin = dir.join("replica.cert-sha256");
+    let (g_store, g) = coordinator_common::gateless_replica(&dir.join("g"), SERVICE_TOKEN, WORLD, &pin);
+    let (g_addr, cert) = g.login.clone().expect("G listens for the login service");
+    let mut host = Host::unlinked();
+    host.listen("127.0.0.1:0".parse().unwrap(), Some(pin.clone()));
+    let h_addr = host.link.as_ref().unwrap().local_addr();
+    assert_eq!(host.link.as_ref().unwrap().cert_sha256(), cert, "one identity for both replicas");
+    let alice = token(1);
+
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let login = rt.block_on(async {
+        let login = LoginService::start(&[g_addr, h_addr], &cert, &alice).await;
+        login.until_linked(&[g_addr, h_addr]).await;
+        let place = login.links.spawn(&login.row, &alice.0, 1).await;
+        assert_eq!(place, Ok(login::host_link::SpawnPlace::default()), "H took the order");
+        login
+    });
+    assert_eq!(g.login_counts(), Some(coordinator_rt::LoginCounts { orders: 1, orders_dropped: 1, ends_dropped: 0 }), "G answered NoGate");
+    assert!(host.hello(&alice, 1).is_ok(), "H holds the spawn order");
+
+    // A kick goes to G first too, then to H, which applies and acks it.
+    assert!(rt.block_on(login.kick_acked()), "the kick was acked: {:?}", g.login_counts());
+    let counts = g.login_counts().unwrap();
+    assert!(counts.orders >= 2 && counts.orders == counts.orders_dropped, "G was asked and answered NoGate each time: {counts:?}");
+    assert_eq!(host.hello(&alice, 1).unwrap_err(), REFUSE_NO_SPAWN_ORDER, "H applied the kick");
+
+    drop(login);
+    drop(rt);
+    assert_eq!(g.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+    g_store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fake coordinator replica on `pin`'s identity: records every order, answers nothing by
+/// itself; a test answers through its senders.
+struct SilentReplica {
+    listener: Option<svc_link::LinkListener>,
+    peers: svc_link::PeerSenders<HostToLogin>,
+    seen: Arc<std::sync::Mutex<Vec<LoginToHost>>>,
+}
+
+impl SilentReplica {
+    fn start(pin: &std::path::Path) -> SilentReplica {
+        let (listener, events, peers) = svc_link::LinkListener::bind::<LoginToHost, HostToLogin>(
+            "127.0.0.1:0".parse().unwrap(),
+            SERVICE_TOKEN.into(),
+            WORLD.into(),
+            Some(pin.to_path_buf()),
+        )
+        .unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<LoginToHost>>> = Arc::default();
+        let record = seen.clone();
+        std::thread::spawn(move || {
+            for (_, event) in events.iter() {
+                if let LinkEvent::Msg(msg) = event {
+                    record.lock().unwrap().push(msg);
+                }
+            }
+        });
+        SilentReplica { listener: Some(listener), peers, seen }
+    }
+
+    fn addr(&self) -> std::net::SocketAddr {
+        self.listener.as_ref().unwrap().local_addr()
+    }
+
+    fn seen(&self) -> Vec<LoginToHost> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl Drop for SilentReplica {
+    fn drop(&mut self) {
+        // The listener owns a runtime: drop it off any async context.
+        if let Some(listener) = self.listener.take() {
+            std::thread::spawn(move || drop(listener)).join().unwrap();
+        }
+    }
+}
+
+/// Waits (async) until `want` holds of what `replica` has seen.
+async fn until_seen(replica: &SilentReplica, what: &str, want: impl Fn(&[LoginToHost]) -> bool) {
+    let deadline = tokio::time::Instant::now() + LINK_WAIT;
+    while !want(&replica.seen()) {
+        assert!(tokio::time::Instant::now() < deadline, "replica never saw {what}: {:?}", replica.seen());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// An order goes out on one link (the first replica's) and its ack comes back on ANOTHER (the
+/// gate host's answer can reach the login service through any replica): a spawn ack and a
+/// kick ack, both matched by token and epoch, both accepted.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn acks_match_on_any_link() {
+    let dir = scratch("acks-any");
+    let pin = dir.join("replica.cert-sha256");
+    let (first, second) = (SilentReplica::start(&pin), SilentReplica::start(&pin));
+    let cert = first.listener.as_ref().unwrap().cert_sha256().to_string();
+    let alice = token(1);
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    rt.block_on(async {
+        let login = LoginService::start(&[first.addr(), second.addr()], &cert, &alice).await;
+        login.until_linked(&[first.addr(), second.addr()]).await;
+        let order = LoginToHost::SpawnPlayer { player_token: alice.0.clone(), session_epoch: 1 };
+        let ack_on_second = async {
+            until_seen(&first, "the spawn order", |s| s.contains(&order)).await;
+            second.peers.broadcast(HostToLogin::SpawnAck {
+                player_token: alice.0.clone(),
+                session_epoch: 1,
+                ok: true,
+                quic: Some("host-7.example:7401".into()),
+                webtransport: None,
+                cert_hash: None,
+            });
+        };
+        let (place, ()) = tokio::join!(login.links.spawn(&login.row, &alice.0, 1), ack_on_second);
+        assert_eq!(place.map(|p| p.quic), Ok(Some("host-7.example:7401".into())), "the ack on the second link answered the join");
+        assert!(second.seen().is_empty(), "the order went out on one link only");
+
+        let kick = LoginToHost::Kick { player_token: alice.0.clone(), session_epoch: 1, reason: KICK_REASON.into() };
+        let ack_kick_on_second = async {
+            until_seen(&first, "the kick", |s| s.contains(&kick)).await;
+            second.peers.broadcast(HostToLogin::KickAck { player_token: alice.0.clone(), session_epoch: 1 });
+        };
+        let (acked, ()) = tokio::join!(login.kick_acked(), ack_kick_on_second);
+        assert!(acked, "the kick ack on the second link cleared the pending kick");
+        assert!(!second.seen().contains(&kick), "the kick went out on the first link only");
+    });
+    drop(rt);
+    drop((first, second));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every replica of the world answers `NoGate` (no host attached to any): the join fails at
+/// once — `Timeout`, which the join answers 503 — without waiting out the ack timeout.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn every_replica_without_a_gate_is_a_503() {
+    let dir = scratch("nogate-all");
+    let pin = dir.join("replica.cert-sha256");
+    let (a_store, a) = coordinator_common::gateless_replica(&dir.join("a"), SERVICE_TOKEN, WORLD, &pin);
+    let (b_store, b) = coordinator_common::gateless_replica(&dir.join("b"), SERVICE_TOKEN, WORLD, &pin);
+    let (a_addr, cert) = a.login.clone().unwrap();
+    let b_addr = b.login.clone().unwrap().0;
+    let alice = token(1);
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    rt.block_on(async {
+        let login = LoginService::start(&[a_addr, b_addr], &cert, &alice).await;
+        login.until_linked(&[a_addr, b_addr]).await;
+        let started = tokio::time::Instant::now();
+        let answer = login.links.spawn(&login.row, &alice.0, 1).await;
+        assert_eq!(answer, Err(login::host_link::SpawnError::Timeout), "no replica has a gate: a 503");
+        assert!(started.elapsed() < LINK_WAIT / 2, "answered at once, not at the ack timeout: {:?}", started.elapsed());
+    });
+    let one = Some(coordinator_rt::LoginCounts { orders: 1, orders_dropped: 1, ends_dropped: 0 });
+    assert_eq!((a.login_counts(), b.login_counts()), (one, one), "each replica was asked once and answered NoGate");
+    drop(rt);
+    for (c, s) in [(a, a_store), (b, b_store)] {
+        assert_eq!(c.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+        s.shutdown();
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -206,7 +206,7 @@ pub struct LoginListen {
 pub struct LoginCounts {
     /// Orders of a connected login service received.
     pub orders: u64,
-    /// Of those, dropped: no gate host attached.
+    /// Of those, not relayed: no gate host attached to this replica (answered `NoGate`).
     pub orders_dropped: u64,
     /// `SessionEnded` dropped past [`LOGIN_ENDS_HELD_MAX`].
     pub ends_dropped: u64,
@@ -230,9 +230,10 @@ impl LoginTally {
     }
 }
 
-/// The coordinator's login listener: every order of a connected login service goes to the
-/// gate host of its moment ([`Coordinator::login_order`]); every host's answer
-/// ([`HostMsg::Login`]) goes to every connected login service, unchanged. No order is kept.
+/// The coordinator's login listener: every order of a connected login service goes to this
+/// replica's gate host of its moment ([`Coordinator::login_order`]), or is answered `NoGate`
+/// when it has none; every host's answer ([`HostMsg::Login`]) goes to every connected login
+/// service, unchanged. No order is kept. Held `SessionEnded`s are this replica's own.
 struct LoginSide {
     listener: Option<LinkListener>,
     events: Receiver<(PeerId, LinkEvent<LoginToHost>)>,
@@ -291,7 +292,8 @@ impl LoginSide {
             return;
         }
         log::warn!(
-            "[coordinator] login relay: {} orders dropped with no host attached (the login service answers 503), {} session \
+            "[coordinator] login relay: {} orders answered NoGate with no host of this replica taking logins (the login \
+             service tries another replica), {} session \
              ends dropped past {LOGIN_ENDS_HELD_MAX} held, since the last report (total {} / {})",
             new.0,
             new.1,
@@ -1664,11 +1666,15 @@ impl CoordinatorRuntime {
                 }
                 LinkEvent::Msg(msg) if login.peers.contains(&peer) => {
                     login.tally.orders.fetch_add(1, Ordering::SeqCst);
+                    let no_gate = crate::login_link::no_gate(&msg);
                     match self.core.login_order(crate::login_link::order_from(msg)) {
                         Some((gate, msg)) => relay.push((Target::Host(gate), msg)),
+                        // No host attached to THIS replica takes logins: answered at once, so
+                        // the login service tries its next replica (Elastic 2b Task 8).
                         // Counted; reported once per period below.
                         None => {
                             login.tally.orders_dropped.fetch_add(1, Ordering::SeqCst);
+                            login.senders.send(peer, no_gate);
                         }
                     }
                 }

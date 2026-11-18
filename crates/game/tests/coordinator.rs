@@ -4809,6 +4809,30 @@ fn an_attachment_of_a_lapsed_replica_counts_detached() {
     assert!(b.hosts_attached_to(ReplicaId(1)).is_empty(), "nothing counts attached to an ended replica");
 }
 
+/// Elastic 2b Task 8: a replica relays the login service's orders only to a gate host attached
+/// to IT (`gate_host_here`); with none it has no gate (`login_order` is `None`: the runtime
+/// answers `NoGate` and the login service tries the next replica), even while another replica's
+/// host is the world's gate.
+#[test]
+fn a_replica_relays_login_orders_only_to_its_own_hosts() {
+    let (mut row, mut a, mut b) = two_replicas();
+    a.handle(h(0), claim_attach(h(0), 7, Vec::new(), Vec::new()), 0);
+    row.write(&mut a).expect("A's attach commits");
+    row.rebase(&mut b);
+    assert_eq!(b.gate_host(), Some(h(0)), "host 0 is the world's gate");
+    assert_eq!(b.gate_host_here(), None, "no host is attached to B");
+    assert_eq!(b.login_order(spawn_order(1)), None, "B has no gate: the order is not relayed");
+    assert_eq!(a.gate_host_here(), Some(h(0)));
+    assert_eq!(a.login_order(spawn_order(1)), Some((h(0), CoordMsg::Login(spawn_order(1)))));
+
+    b.handle(h(1), claim_attach(h(1), 8, Vec::new(), Vec::new()), 0);
+    row.write(&mut b).expect("B's attach commits");
+    row.rebase(&mut a);
+    assert_eq!(b.gate_host_here(), Some(h(1)), "B's own host, though host 0 is lower");
+    assert_eq!(b.login_order(spawn_order(2)), Some((h(1), CoordMsg::Login(spawn_order(2)))));
+    assert_eq!(a.gate_host_here(), Some(h(0)));
+}
+
 /// Elastic 2b Task 4 fix round 1 (I1): replica A dies and C registers beside B before B's watch
 /// counted a lease — the registration marks A's row dead, no watch ever sees A standing still.
 /// B's watch still names A gone (its row dead), and a replica the core holds whose row was

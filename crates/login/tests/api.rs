@@ -340,6 +340,8 @@ mod host_link {
         seen: Arc<Mutex<Vec<LoginToHost>>>,
         peers: PeerSenders<HostToLogin>,
         listener: Option<LinkListener>,
+        /// Login services linked to it now.
+        connected: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl FakeHost {
@@ -369,8 +371,9 @@ mod host_link {
             )
             .unwrap();
             let seen: Arc<Mutex<Vec<LoginToHost>>> = Arc::default();
-            let (record, answer) = (seen.clone(), peers.clone());
-            std::thread::spawn(move || serve(events, answer, record, ack, place));
+            let connected: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+            let (record, answer, count) = (seen.clone(), peers.clone(), connected.clone());
+            std::thread::spawn(move || serve(events, answer, record, ack, place, count));
             FakeHost {
                 world_id,
                 link: listener.local_addr().to_string(),
@@ -378,6 +381,7 @@ mod host_link {
                 seen,
                 peers,
                 listener: Some(listener),
+                connected,
             }
         }
 
@@ -432,10 +436,18 @@ mod host_link {
         seen: Arc<Mutex<Vec<LoginToHost>>>,
         ack: AckPolicy,
         place: SpawnPlace,
+        connected: Arc<std::sync::atomic::AtomicUsize>,
     ) {
+        use std::sync::atomic::Ordering::SeqCst;
         for (peer, event) in events.iter() {
             match event {
-                LinkEvent::Up(hello) => assert_eq!(hello.role, PeerRole::Login),
+                LinkEvent::Up(hello) => {
+                    assert_eq!(hello.role, PeerRole::Login);
+                    connected.fetch_add(1, SeqCst);
+                }
+                LinkEvent::Down(_) => {
+                    connected.fetch_sub(1, SeqCst);
+                }
                 LinkEvent::Msg(msg) => {
                     seen.lock().unwrap().push(msg.clone());
                     match msg {
@@ -451,7 +463,6 @@ mod host_link {
                         }
                     }
                 }
-                LinkEvent::Down(_) => {}
             }
         }
     }
@@ -757,6 +768,57 @@ mod host_link {
         assert!(host.seen().contains(&kick), "{:?}", host.seen());
         assert!(wait_no_pending_kicks(&a).await, "the ack deletes it");
         drop(host);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Elastic 2b Task 8: the login service holds a link per address of the world's
+    /// `host_link` (each a coordinator replica, one shared identity), re-read at every join: a
+    /// new address is dialled, a gone one's link is retired — its dialer stops, so that replica
+    /// sees the login service leave.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    async fn a_new_replica_address_is_dialled_and_a_gone_one_retired() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = std::env::temp_dir().join(format!("login-replicas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pin = dir.join("replica.cert-sha256");
+        let replica = || FakeHost::start_with("r", "127.0.0.1:0", Some(pin.clone()), Box::new(|_, _| Some(true)));
+        let (ra, rb, rc) = (replica(), replica(), replica());
+        assert!(ra.cert == rb.cert && rb.cert == rc.cert, "one identity");
+        let mut row = ra.world("r");
+        row.host_link = Some(format!("{},{}", ra.link, rb.link));
+        let mut held = None;
+        let a = app_from(|state| {
+            let links = HostLinks::new(Some(SERVICE_TOKEN.into()), state.store.clone(), state.clock.clone());
+            let state = state.with_host_links(links);
+            held = Some(state.host_links.clone());
+            state
+        })
+        .await;
+        let links = held.expect("the app's host links");
+        a.store.put_world(&row).await.unwrap();
+        let refresh = a.account().await;
+        let r = a.join(&refresh, "r").await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let j: JoinResponse = r.json();
+        let states = async |row: &WorldRow| -> Vec<String> {
+            links.link_states(row).await.unwrap().into_iter().map(|(addr, _)| addr).collect()
+        };
+        assert_eq!(states(&row).await, vec![ra.link.clone(), rb.link.clone()], "a link per replica");
+        wait_for("both replicas linked", async || ra.connected.load(SeqCst) == 1 && rb.connected.load(SeqCst) == 1).await;
+        assert_eq!(ra.seen().len() + rb.seen().len(), 1, "the order went out on one link");
+
+        // The row now names B and C: C is dialled, A's link retired.
+        row.host_link = Some(format!("{},{}", rb.link, rc.link));
+        a.store.put_world(&row).await.unwrap();
+        let r = a.join(&j.refresh_token, "r").await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        assert_eq!(states(&row).await, vec![rb.link.clone(), rc.link.clone()]);
+        wait_for("C linked", async || rc.connected.load(SeqCst) == 1).await;
+        wait_for("A's link retired: its dialer left", async || ra.connected.load(SeqCst) == 0).await;
+        assert_eq!(rb.connected.load(SeqCst), 1, "B's link is kept, not redialled");
+        drop((ra, rb, rc));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

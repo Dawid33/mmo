@@ -1109,12 +1109,21 @@ impl Coordinator {
         self.orphan_marks(|s| s.replica == r, "its replica is no longer live");
     }
 
-    /// The gate host: the host the login service's orders go to ([`Self::login_order`]) — the
-    /// lowest attached host that neither left nor was succeeded, and is neither leaving nor
-    /// draining ([`Self::takes_logins`]). `None`: no such host (none attached, or every one
-    /// draining): a login then times out and answers 503.
+    /// The world's gate host: the lowest host attached to any live replica that neither left
+    /// nor was succeeded, and is neither leaving nor draining ([`Self::takes_logins`]). `None`:
+    /// no such host (none attached, or every one draining). A replica relays the login
+    /// service's orders to its OWN gate host, [`Self::gate_host_here`] (Elastic 2b Task 8).
     pub fn gate_host(&self) -> Option<HostId> {
         self.attached_live().into_iter().filter(|h| self.takes_logins(*h)).min()
+    }
+
+    /// This replica's gate host (Elastic 2b Task 8): [`Self::gate_host`] among the hosts
+    /// attached to THIS replica only — the one its login orders go to ([`Self::login_order`]).
+    /// `None`: none of its hosts takes logins (another replica's may): the runtime answers the
+    /// login service `NoGate` at once, and it tries its next link.
+    pub fn gate_host_here(&self) -> Option<HostId> {
+        let here = self.hosts_attached_to(self.replica());
+        self.attached_live().into_iter().filter(|h| here.contains(h) && self.takes_logins(*h)).min()
     }
 
     /// Whether attached live host `host` may be the gate host: not leaving (its leave asked
@@ -1125,13 +1134,15 @@ impl Coordinator {
         !self.leave_asked(host) && !self.draining.contains(&host)
     }
 
-    /// An order of the login service: for the gate host of this moment ([`Self::gate_host`]),
-    /// as the message to send it — the runtime sends it; nothing is stored here (a resend of
-    /// the order, or of a kick, goes to the gate host of ITS moment, and the hosts' answers
-    /// come back as [`HostMsg::Login`]). `None`: no gate host — the order is dropped (the
-    /// login service answers 503 at its timeout; a kick is resent).
+    /// An order of the login service: for this replica's gate host of this moment
+    /// ([`Self::gate_host_here`]), as the message to send it — the runtime sends it; nothing is
+    /// stored or logged here (process-local, never replayed: a resend of the order, or of a
+    /// kick, goes to the gate host of ITS moment, and the hosts' answers come back as
+    /// [`HostMsg::Login`]). `None`: this replica has no gate host — the runtime answers the
+    /// login service `NoGate`, and it tries another replica (none: the join answers 503; a kick
+    /// is resent).
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<(HostId, CoordMsg)> {
-        let gate = self.gate_host()?;
+        let gate = self.gate_host_here()?;
         Some((gate, CoordMsg::Login(order)))
     }
 
