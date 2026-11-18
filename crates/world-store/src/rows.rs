@@ -1043,6 +1043,30 @@ macro_rules! engine_rows {
                 })
             }
 
+            /// Raises the existing coordinator row's `epoch` past every cut id's high half made
+            /// before (final review T3): past its own epoch and past the high half of every
+            /// recorded `cut_decisions` id — the epoch a core REPLACING an unreadable one (another
+            /// world's, an older format's) makes its cut ids under, so that no id of the replaced
+            /// core is made again (a stored decision of a reused id would be returned unchecked).
+            /// The new epoch; `None`: no row. One statement on the one `coordinator` row (lock
+            /// notes: `succession.rs`; `cut_decisions` is read without a lock). The version is
+            /// untouched (the replacing core's first transition writes at it). Callers hold the
+            /// writer lock.
+            pub(crate) async fn raise_coordinator_epoch(pool: &Pool) -> Result<Option<u64>, StoreError> {
+                let row = sqlx::query(
+                    "UPDATE coordinator SET epoch = 1 + CASE \
+                     WHEN epoch >= COALESCE((SELECT MAX(cut_id) FROM cut_decisions), 0) / 4294967296 THEN epoch \
+                     ELSE COALESCE((SELECT MAX(cut_id) FROM cut_decisions), 0) / 4294967296 END \
+                     WHERE id = 1 RETURNING epoch",
+                )
+                .fetch_optional(pool)
+                .await?;
+                Ok(match row {
+                    Some(r) => Some(u(r.try_get(0)?)),
+                    None => None,
+                })
+            }
+
             /// Writes the coordinator's projection (Elastic 2a) with NO store decision (on
             /// SQLite every write is one: a transition with decisions is refused before this):
             /// `core`, and `history` unless `None` (the stored one is kept), if the row is at

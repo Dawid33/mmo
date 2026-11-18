@@ -2493,6 +2493,30 @@ fn a_write_in_flight_while_notices_arrive_does_not_spin_the_loop() {
     w.stop(&dir);
 }
 
+/// Final review T3: a world with no saved regions whose coordinator row holds a core this build
+/// cannot read (an older format) and cut decisions it recorded at a cut epoch above the row's:
+/// the start replaces the core, and the new core makes its cut ids past every recorded one (a
+/// reused id would be answered from the replaced core's stored decision, unchecked).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_replaced_coordinator_state_reuses_no_cut_id() {
+    let Some(db) = PgDb::create("replcut") else { return };
+    let store = db.open();
+    // An older build's row: its core in format 1 (OldVersion), at the row's epoch 1 — and the
+    // decisions its cuts recorded under cut epoch 3.
+    assert_eq!(store.bootstrap_coordinator(vec![1, 0, 0], Vec::new()).unwrap(), world_store::Bootstrapped::Written { version: 1, epoch: 1 });
+    let old = game::CutId((3 << 32) | 7);
+    assert!(!store.abort_cut(old, 1).unwrap(), "the old core's decision is recorded");
+    let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
+    assert!(
+        start.coordinator.cut_epoch() > 3,
+        "the replacing core's cut ids are past every recorded one: epoch {}",
+        start.coordinator.cut_epoch()
+    );
+    assert_eq!(start.version, 1, "it writes over the row at its version");
+    store.shutdown();
+}
+
 /// The outbox rows waiting for host `host`, decoded, in `seq` order.
 fn outbox_for(db: &PgDb, host: HostId) -> Vec<game::CoordMsg> {
     let (url, sql) = (db.0.url.clone(), format!("SELECT msg FROM outbox WHERE host = {} ORDER BY seq", host.0));

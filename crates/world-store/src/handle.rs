@@ -970,6 +970,14 @@ impl StoreHandle {
         self.ask(|r| Request::BootstrapCoordinator(core, history, r))
     }
 
+    /// Raises the coordinator row's epoch past its own and past the high half of every recorded
+    /// cut decision's id (final review T3): the cut ids' high half of a core that REPLACES an
+    /// unreadable stored one, so no cut id of the replaced core is made again. The new epoch;
+    /// `None`: no row. The row's version is untouched.
+    pub fn raise_coordinator_epoch(&self) -> Result<Option<u64>, StoreError> {
+        self.ask(Request::RaiseCoordinatorEpoch)
+    }
+
     /// Queues a coordinator transition (Elastic 2b Task 3, `coordinator_tx.rs`) and returns at
     /// once: its projection written with a compare-and-set on `w.version` and its store
     /// decisions run in the same transaction. The answer arrives on the receiver: the new

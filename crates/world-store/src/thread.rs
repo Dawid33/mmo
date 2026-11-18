@@ -112,6 +112,7 @@ pub(crate) enum Request {
     Release(Fence, Reply<()>),
     /// Elastic 2b Task 3: the coordinator row's first write (first writer wins).
     BootstrapCoordinator(Vec<u8>, Vec<u8>, Reply<crate::Bootstrapped>),
+    RaiseCoordinatorEpoch(Reply<Option<u64>>),
     /// Elastic 2b Task 3: a coordinator transition — the compare-and-set of its row and its
     /// store decisions, one transaction (`coordinator_tx.rs`). `injected[i]`: decision `i`
     /// fails without running (the decision test hook).
@@ -613,6 +614,10 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, bootstrap_coordinator(core, history)))
             }),
+            Request::RaiseCoordinatorEpoch(r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, raise_coordinator_epoch()))
+            }),
             Request::LoadCoordinator(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) }),
             Request::LoadCoordinatorSince(since, r) => {
                 tokio::spawn(async move { r.send(on_replicas!(&pool, load_coordinator_since(since))) })
@@ -997,6 +1002,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::ClaimFree(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::Release(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::BootstrapCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RaiseCoordinatorEpoch(r) => r.send(Err(StoreError::ReadOnly)),
         Request::WriteTransition { reply, .. } => reply.send(Err(StoreError::ReadOnly)),
         Request::DecideAlone { reply, .. } => reply.send(Err(StoreError::ReadOnly)),
         Request::AfterCommit(_, _, r) => r.send(Err(StoreError::ReadOnly)),

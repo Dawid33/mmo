@@ -459,7 +459,14 @@ fn start_from_row(
     // bootstrapped it meanwhile (`None`: load that instead).
     let first = |mut coordinator: game::Coordinator, replacing: Option<u64>| -> Result<Option<(game::Coordinator, u64)>, String> {
         if let Some(version) = replacing {
-            coordinator.set_cut_epoch(1);
+            // Final review T3: its cut ids' high half past every one the replaced core made (a
+            // reused cut id would be answered from that core's stored decision, unchecked).
+            let epoch = store
+                .raise_coordinator_epoch()
+                .map_err(|e| format!("raising the replaced coordinator row's epoch: {e}"))?
+                .ok_or_else(|| "the coordinator row being replaced is gone".to_string())?;
+            log::info!("[coordinator] replacing the stored coordinator state: its cut ids' high half is now {epoch}");
+            coordinator.set_cut_epoch(epoch);
             return Ok(Some((coordinator, version)));
         }
         coordinator.set_cut_epoch(1);

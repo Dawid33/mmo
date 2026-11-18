@@ -321,6 +321,21 @@ fn a_write_takes_only_its_own_hosts_rows_in_seq_order() {
     h.shutdown();
 }
 
+/// Final review T3: the epoch a core replacing an unreadable stored one makes its cut ids under is
+/// raised past the row's own and past the high half of every recorded cut decision's id — never an
+/// id the replaced core made (its stored decision would be returned for a new cut, unchecked).
+#[test]
+fn a_raised_epoch_is_past_every_recorded_cut_id() {
+    let Some((_db, h)) = pg_store("raise") else { return };
+    assert_eq!(h.raise_coordinator_epoch().unwrap(), Some(2), "past the bootstrapped row's epoch 1");
+    let old = game::CutId((5 << 32) | 3);
+    assert!(!h.abort_cut(old, 1).unwrap(), "an abort recorded at cut epoch 5");
+    assert_eq!(h.raise_coordinator_epoch().unwrap(), Some(6), "past the recorded decisions' epoch 5");
+    assert_eq!(h.raise_coordinator_epoch().unwrap(), Some(7), "and past its own again");
+    assert_eq!(h.load_coordinator().unwrap().map(|r| r.version), Some(1), "the version is untouched");
+    h.shutdown();
+}
+
 /// Final review S-I2: a take between transitions takes only the rows at or below the version of
 /// the cache that named its hosts. Host 5 is attached to replica A as of version 3; a row decided
 /// at version 4 (after host 5 attached to B, say — A's cache cannot know) stays in the table for B,

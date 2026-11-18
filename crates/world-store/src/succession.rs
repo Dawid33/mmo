@@ -165,7 +165,9 @@
 //! is in flight), so a row is delivered at most once.
 //!
 //! Why no cycle: every statement that locks `coordinator` takes it FIRST (only the coordinator's
-//! transitions, its bootstrap's one-statement insert and a replica's registration touch it); hosts, claims, registrations,
+//! transitions, its bootstrap's one-statement insert, the replace path's one-statement epoch raise
+//! — `rows::raise_coordinator_epoch`, reading `cut_decisions` without a lock — and a replica's
+//! registration touch it); hosts, claims, registrations,
 //! heartbeats, the drain mark and the operator never lock it. So nothing holds another lock and
 //! then waits for `coordinator`. After it each decision keeps its own walk (`world` → `hosts` →
 //! `super_regions`; `world` → `cut_decisions` → `hosts` → `successions`), which was already a

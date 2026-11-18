@@ -350,6 +350,12 @@ impl Coordinator {
         self.set_cut_epoch(self.cut_epoch_config);
     }
 
+    /// The high half of the cut ids this core makes (tests, tools).
+    #[doc(hidden)]
+    pub fn cut_epoch(&self) -> u64 {
+        self.cuts.epoch
+    }
+
     /// The high half of the cut ids from now on: `epoch` if it is higher than the one held.
     /// Set ONCE, from the row's epoch when the runtime bootstraps the row (Elastic 2b Task 3):
     /// it is durable, `next` too, and a cut's begin and decision commit only with the transition
