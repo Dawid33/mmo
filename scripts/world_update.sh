@@ -9,16 +9,20 @@
 # -l app.kubernetes.io/component=host; strategy Recreate, 1 replica). They stop first, all
 # of them, so that none runs the old image beside a new coordinator: scaling every host
 # Deployment to 0 makes each host ask for a leave cut and exit (bounded by about 90 s), then
-# every workload gets its new image — every host Deployment while it is at 0, where a
-# Recreate Deployment starts nothing — the coordinator and web roll out, and every host
-# Deployment comes back at 1 replica. A host is never started on a mixed set of images:
-# no host Deployment is scaled up before the images of all of them are set. `--dry-run`
-# prints the commands and changes nothing (it reads the list of host Deployments).
+# every coordinator replica stops together (the count recorded in the Deployment's annotation
+# errantry/replicas, as world-stop does), every workload gets its new image — every host and
+# the coordinator Deployment while at 0, where a Recreate Deployment starts nothing — the
+# coordinator comes back at its count (every replica's /readyz 200, never `rollout status`),
+# toolbox and web roll out, and every host Deployment comes back at 1 replica. A host is never
+# started on a mixed set of images: no host Deployment is scaled up before the images of all
+# of them are set. `--dry-run` prints the commands and changes nothing (it reads the list of
+# host Deployments and the coordinator's count).
 # Before anything is scaled a preflight checks the workloads and their container names
 # (coordinator, toolbox, every host Deployment's host, web); a world with no host
 # Deployment is refused, and so is one whose coordinator is at 0 replicas (a world
-# stopped by world-stop: the release never starts the coordinator, and hosts without one
-# cannot leave through a cut — start the world first). A drained host (/readyz `drained`) and a host
+# stopped by world-stop: hosts started without a coordinator cannot leave through a cut —
+# start the world first), unless this run repeats the release recorded in release-history
+# (a failed run that stopped the coordinator: it comes back at the recorded count). A drained host (/readyz `drained`) and a host
 # MARKED draining (`worldctl hosts` drain=, not due yet) are WARNED about, all at once, then one 10 s
 # pause before anything changes: the release stops each and starts it again as a NEW host — a mark
 # is lost — so remove a drained one from var.hosts first if it is to go.
@@ -98,6 +102,8 @@ record_field() {
 # Recovery: armed when the hosts are about to be scaled down, disarmed at the end.
 # hostdeps: the host Deployments as `deploy/host-<name>` words; were: their replicas before.
 hostdeps='' were='' stopped=0 images_touched=0 scaled_up=0 finished=0 where='before step 2'
+# coord_down: the coordinator was scaled to 0 (step 2) and is not back yet (step 4).
+coord_down=0 coord_replicas='' coord_count=''
 follow_dir='' follow_pids=()
 on_exit() {
     local rc=$?
@@ -122,6 +128,9 @@ on_exit() {
             echo "world_update: STOPPED at: $where (exit $rc)."
             echo "world_update: the host Deployments are scaled to 0 (were:$were); the world is DOWN. No image was changed."
             echo "world_update: go on with either:"
+            if [ "$coord_down" -eq 1 ]; then
+                echo "  kubectl --context $ctx -n $ns scale deploy/coordinator --replicas=$coord_count   (first; then wait until every replica is Ready)"
+            fi
             echo "  kubectl --context $ctx -n $ns scale $hostdeps --replicas=1"
             echo "  $0 $ctx $ns $server_ref $web_ref"
         } >&2
@@ -195,10 +204,28 @@ if ! coord_replicas=$(k get deploy/coordinator -o jsonpath='{.spec.replicas}'); 
     echo "world_update: cannot read the coordinator's replicas; nothing changed" >&2
     exit 2
 fi
-if [ "${coord_replicas:-0}" = 0 ]; then
-    echo "world_update: the coordinator is at 0 replicas: the world is stopped. Refusing (the release does not start the" >&2
-    echo "world_update: coordinator, and hosts started without one cannot leave through a cut): start it first (just world-start). Nothing changed." >&2
-    exit 2
+case "$coord_replicas" in ''|*[!0-9]*) echo "world_update: the coordinator's replica count '$coord_replicas' is not a number; nothing changed" >&2; exit 2 ;; esac
+# coord_count: the replicas the coordinator comes back with at step 4 — every one of them stops
+# at step 2 and starts at step 4 together. A coordinator at 0 is a stopped world, refused, unless
+# this run repeats the release recorded in ConfigMap release-history (a failed run stopped it at
+# step 2): then the count recorded at that stop (annotation errantry/replicas, else the module's 2).
+if [ "$coord_replicas" = 0 ]; then
+    if ! rec_server=$(record_field released-server) || ! rec_web=$(record_field released-web); then
+        echo "world_update: cannot read ConfigMap $history; nothing changed" >&2
+        exit 2
+    fi
+    if [ "$rec_server" != "$server_ref" ] || [ "$rec_web" != "$web_ref" ]; then
+        echo "world_update: the coordinator is at 0 replicas: the world is stopped. Refusing (hosts started without a" >&2
+        echo "world_update: coordinator cannot leave through a cut): start it first (just world-start). Nothing changed." >&2
+        exit 2
+    fi
+    coord_count=$(k get deploy/coordinator -o 'jsonpath={.metadata.annotations.errantry/replicas}' 2>/dev/null || true)
+    [ -n "$coord_count" ] || coord_count=2
+    case "$coord_count" in 0|*[!0-9]*) echo "world_update: the recorded coordinator count '$coord_count' (annotation errantry/replicas) is not a positive number; nothing changed" >&2; exit 2 ;; esac
+    echo "  the coordinator is at 0: a re-run of the recorded release; it comes back with $coord_count replica(s)"
+else
+    coord_count="$coord_replicas"
+    echo "  coordinator: $coord_count replica(s), stopped and started together"
 fi
 for d in $hostdeps; do preflight "$d" host; done
 preflight deploy/web web
@@ -388,6 +415,35 @@ else
         echo "world_update: WARNING: no leave line seen for$unknown (its log could not be followed to the end); whether it left with a cut is not known. Going on." >&2
     fi
 fi
+# Then every coordinator replica, together: no replica of the old build runs beside one of the
+# new (Recreate would do the same at step 3; stopping first keeps a failure there plain). The
+# count is recorded as world-stop records it.
+where='step 2 (coordinator to 0)'
+coord_down=1
+if [ "$coord_replicas" != 0 ]; then
+    run annotate deploy/coordinator --overwrite "errantry/replicas=$coord_count"
+fi
+run scale deploy/coordinator --replicas=0
+if [ "$dry" -eq 1 ]; then
+    echo "  + wait until no pod -l app.kubernetes.io/component=coordinator exists (timeout $stop_timeout s)"
+else
+    deadline=$((SECONDS + stop_timeout))
+    while :; do
+        if listing=$(k get pods -l app.kubernetes.io/component=coordinator -o name 2>&1); then
+            left=$(printf '%s\n' "$listing" | grep -c '^pod/' || true)
+            [ "$left" -eq 0 ] && break
+            what="$left coordinator pod(s) still there"
+        else
+            what="the pod listing failed ($(printf '%s' "$listing" | head -1))"
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "world_update: after $stop_timeout s: $what; not updating anything" >&2
+            exit 1
+        fi
+        sleep 2
+    done
+    echo "  the coordinator is down ($coord_count replica(s) to come back)"
+fi
 
 step 3 "set the images"
 where='step 3 (set image)'
@@ -402,9 +458,30 @@ for d in $hostdeps; do
 done
 run set image deploy/web "web=$web_ref"
 
-step 4 "wait for the coordinator, toolbox and web rollouts"
-where='step 4 (rollouts)'
-run rollout status deploy/coordinator --timeout=5m
+step 4 "the coordinator back to $coord_count replica(s), each Ready; the toolbox and web rollouts"
+where='step 4 (coordinator up / rollouts)'
+run scale deploy/coordinator --replicas="$coord_count"
+# Not `rollout status`: every replica's /readyz (200 once its join committed), as world-start
+# waits; a pod being deleted is not counted, a failed read keeps waiting.
+if [ "$dry" -eq 1 ]; then
+    echo "  + wait until $coord_count coordinator pods answer /readyz 200 (timeout $ready_timeout s)"
+else
+    deadline=$((SECONDS + ready_timeout))
+    while :; do
+        up=0
+        for p in $(k get pods -l app.kubernetes.io/component=coordinator -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers 2>/dev/null | awk '$2 == "<none>" { print $1 }'); do
+            k get --raw "/api/v1/namespaces/$ns/pods/$p:9100/proxy/readyz" > /dev/null 2>&1 && up=$((up + 1))
+        done
+        [ "$up" -ge "$coord_count" ] && break
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "world_update: after $ready_timeout s: $up of $coord_count coordinator replicas answer /readyz 200" >&2
+            exit 1
+        fi
+        sleep "${WORLD_UPDATE_POLL:-3}"
+    done
+    echo "  $coord_count coordinator replica(s) Ready"
+fi
+coord_down=0
 run rollout status deploy/toolbox --timeout=5m
 run rollout status deploy/web --timeout=5m
 

@@ -5,7 +5,8 @@
 # at http://game.localhost:8480/, no ServiceMonitor, a 10 s save period and small
 # requests. Needs ../postgres and ../login applied (their local state is read here).
 # Forge it from the toolbox: `just world_ctx=k3d-mmo world_ns=world-twin world-ctl forge`.
-# An apply owns the replica counts (coordinator 1, each host Deployment 1: applied to a
+# An apply owns the replica counts (coordinator: the module's coordinator_replicas, 2;
+# each host Deployment 1: applied to a
 # stopped world it starts it). An apply that changes anything the coordinator and the
 # hosts share (database_url, service_token, the coordinator's certificate, save_secs,
 # super_region_regions, ownership) restarts them all at once, the hosts likely leave

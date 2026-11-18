@@ -1,9 +1,23 @@
-# The coordinator (VOXEL_ROLE=coordinator): claims, embark/return, history, the
-# successions, the world cuts' decisions. One pod, Recreate: two coordinators of
-# one world must never run side by side (a convenience: the store's fencing is what
-# keeps two writers apart). It listens for its hosts on 6480/UDP and for the login
-# service on 6490/UDP (the login link: the login service never dials a host), each
-# with its identity from identities.tf, and serves /livez, /readyz and /metrics on 9100.
+# The coordinator (VOXEL_ROLE=coordinator): claims, history, the successions, the
+# world cuts' decisions. var.coordinator_replicas pods (default 2; Elastic 2b): each
+# is a replica with an id the store issues at its start, never reused; all of them
+# hold the one cache of the store's coordinator row and write it by a compare-and-set
+# on its version, which is the only thing that keeps their writes apart (not this
+# count, the budget or the strategy). The lowest live replica id is the ticker (the
+# timed and lease work; mmo_coordinator_is_ticker). Every replica mounts the same
+# identity Secrets (identities.tf): one pin for all of them, so a host or the login
+# service dialing coordinator.<ns> (the headless Service below resolves to every pod)
+# reaches any replica. Each listens for hosts on 6480/UDP and for the login service on
+# 6490/UDP, and serves /livez, /readyz (200 once its join committed) and /metrics on 9100.
+#
+# Recreate: a template change (an image set by a release) stops every replica before
+# the new ones start, so no two builds ever share the row. Releases stop the world
+# first anyway (world_update.sh scales the coordinator to 0, sets the images, scales it
+# back to the count). The PodDisruptionBudget (min_available 1, only above one replica)
+# keeps one replica up through a voluntary eviction on a cluster with room to move it;
+# on ONE node `kubectl drain` cannot finish while the world runs: `just world-stop`
+# first (hosts.tf). world-stop records the count in the annotation errantry/replicas
+# before it scales to 0, and world-start restores it (absent: the module default).
 
 resource "kubernetes_deployment_v1" "coordinator" {
   metadata {
@@ -12,7 +26,7 @@ resource "kubernetes_deployment_v1" "coordinator" {
     labels    = local.coordinator_labels
   }
   spec {
-    replicas = 1
+    replicas = var.coordinator_replicas
     strategy {
       type = "Recreate"
     }
@@ -150,14 +164,35 @@ resource "kubernetes_deployment_v1" "coordinator" {
   }
   # Unready until the world is forged (main.tf): never wait for the rollout.
   wait_for_rollout = false
-  # Releases set the image (world_update.sh); an apply must not undo them.
+  # Releases set the image (world_update.sh); an apply must not undo them. The
+  # Deployment's own annotations are world-stop's record of the replica count
+  # (errantry/replicas); none is set here.
   lifecycle {
-    ignore_changes = [spec[0].template[0].spec[0].container[0].image]
+    ignore_changes = [
+      spec[0].template[0].spec[0].container[0].image,
+      metadata[0].annotations,
+    ]
+  }
+}
+
+# A voluntary eviction (a node drain) leaves at least one replica running: see the header.
+resource "kubernetes_pod_disruption_budget_v1" "coordinator" {
+  count = var.coordinator_replicas > 1 ? 1 : 0
+  metadata {
+    name      = "coordinator"
+    namespace = local.ns
+    labels    = local.coordinator_labels
+  }
+  spec {
+    min_available = "1"
+    selector {
+      match_labels = local.coordinator_labels
+    }
   }
 }
 
 # Headless: hosts (6480) and the login service (6490, output login_link) resolve
-# coordinator.<ns>.svc.cluster.local to the pod's own IP at every dial, so no UDP
+# coordinator.<ns>.svc.cluster.local to every replica pod's own IP at every dial, so no UDP
 # conntrack entry to a Service IP outlives a restart, and an unready coordinator
 # (waiting for its forge) is still reachable. The health port is here for the
 # ServiceMonitor (charts/world-monitor).

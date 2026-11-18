@@ -43,9 +43,11 @@
 # PodDisruptionBudget go.
 #
 # Emptying a node (a kernel update, a move): the PodDisruptionBudget (max_unavailable 0)
-# makes `kubectl drain` wait on every host pod of the node. The coordinator, toolbox and
-# web have NO budget: a drain evicts them at once. On ONE node the coordinator cannot
-# reschedule, so the hosts would run with no saves and no logins and could not even be
+# makes `kubectl drain` wait on every host pod of the node. The coordinator's budget
+# (min_available 1, coordinator.tf) lets a drain evict all but one of its replicas; the
+# toolbox and web have NO budget: a drain evicts them at once. On ONE node the evicted
+# replicas cannot reschedule and the last one blocks the drain, the toolbox goes, so the
+# hosts would run with one coordinator replica and no worldctl and could not even be
 # drained (that needs the coordinator and the toolbox): `just world-stop` FIRST, then
 # drain the node (a host Deployment at 0 replicas has no pod to block it). With several
 # nodes: drain and remove the node's hosts (`just world-drain <name>`, remove the key

@@ -91,6 +91,16 @@ variable "ownership" {
   }
 }
 
+variable "coordinator_replicas" {
+  description = "Coordinator replicas (Elastic 2b): each one a process of its own with a replica id the store issues, all sharing the same link identities (Secrets coordinator-identity, login-link-identity: one pin for every replica) behind the headless Service. Two keep saves, logins and successions going through a dead coordinator pod; their writes are fenced by the coordinator row's version, never by this count. A PodDisruptionBudget (min_available 1) exists only above 1. world-stop records the count in the Deployment's annotation errantry/replicas and world-start restores it."
+  type        = number
+  default     = 2
+  validation {
+    condition     = var.coordinator_replicas >= 1 && floor(var.coordinator_replicas) == var.coordinator_replicas
+    error_message = "coordinator_replicas: a whole number, at least 1 (a stopped world is world-stop's business, not 0 here)."
+  }
+}
+
 variable "save_secs" {
   description = "VOXEL_SAVE_SECS: the world-cut period."
   type        = number

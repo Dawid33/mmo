@@ -75,10 +75,12 @@ additionalPrometheusRulesMap:
         rules:
           - alert: WorldNoCommittedCut
             # Needs a first commit (> 0): the series is 0 until then, see WorldNoFirstCut.
+            # `max by (namespace)`: with several coordinator replicas each pod counts only the
+            # decisions it wrote, so the newest commit of any replica is the world's.
             expr: |
-              mmo_cut_last_committed_timestamp_seconds{role="coordinator"} > 0
-              and
-              time() - mmo_cut_last_committed_timestamp_seconds{role="coordinator"} > 300
+              max by (namespace) (mmo_cut_last_committed_timestamp_seconds{role="coordinator"}) > 0
+              and on (namespace)
+              time() - max by (namespace) (mmo_cut_last_committed_timestamp_seconds{role="coordinator"}) > 300
             for: 2m
             labels:
               severity: critical
@@ -89,11 +91,12 @@ additionalPrometheusRulesMap:
 
           - alert: WorldNoFirstCut
             # mmo_hosts_live is set only while the coordinator runs world cuts (several hosts),
-            # so a one-host world, which never cuts, does not fire.
+            # so a one-host world, which never cuts, does not fire. Only the ticker replica reads the
+            # hosts (another's mmo_hosts_live is stale), and any replica may write a cut's decision.
             expr: |
-              mmo_hosts_live{role="coordinator"} > 0
-              and
-              mmo_cut_last_committed_timestamp_seconds{role="coordinator"} == 0
+              max by (namespace) (mmo_hosts_live{role="coordinator"} and on (namespace, pod) (mmo_coordinator_is_ticker{role="coordinator"} == 1)) > 0
+              and on (namespace)
+              max by (namespace) (mmo_cut_last_committed_timestamp_seconds{role="coordinator"}) == 0
             for: 10m
             labels:
               severity: critical
@@ -115,6 +118,48 @@ additionalPrometheusRulesMap:
             annotations:
               summary: "World {{ $labels.namespace }} has no registered coordinator"
               description: "The coordinator Deployment of {{ $labels.namespace }} wants replicas but no coordinator reports itself registered (down, not scraped, or not listening)."
+
+          - alert: WorldCoordinatorReplicasDown
+            # Fewer registered coordinator replicas than the Deployment wants (one of two down: the
+            # world runs on, without a spare). None registered at all is WorldCoordinatorDown.
+            expr: |
+              sum by (namespace) (mmo_registered{role="coordinator"}) < on (namespace) kube_deployment_spec_replicas{deployment="coordinator"}
+            for: 5m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} runs fewer coordinator replicas than it wants"
+              description: "Only {{ $value }} coordinator replica(s) of {{ $labels.namespace }} have reported themselves registered for 5 minutes, fewer than the Deployment's replicas: a replica pod down, crash-looping, unscheduled (one node after a drain) or not scraped. The world runs on the others."
+
+          - alert: WorldCoordinatorConflicts
+            # A conflict = a replica's write of the coordinator row lost its compare-and-set to
+            # another replica's: it re-reads the row and replays its inputs. Some are normal.
+            expr: |
+              rate(mmo_coordinator_conflicts_total{role="coordinator"}[10m]) > 0.5
+            for: 15m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "Coordinator replicas of {{ $labels.namespace }} keep conflicting"
+              description: "Pod {{ $labels.pod }} of {{ $labels.namespace }} has lost {{ printf \"%.2f\" $value }} row writes per second to another replica for 15 minutes (each a re-read and a replay). Look at the replicas' `[coordinator] window=` lines (transitions, conflicts, written bytes) before acting; split the coordinator row only after measuring that the conflicts cost what it would save."
+
+          - alert: WorldCoordinatorNoTicker
+            # The ticker (the lowest live replica id) alone runs the timed and lease work: cuts
+            # started, hosts declared dead, the calendar. Only while a replica is registered (none
+            # registered is WorldCoordinatorDown; a world waiting for its forge has no ticker yet).
+            expr: |
+              max by (namespace) (mmo_coordinator_is_ticker{role="coordinator"}) == 0
+              and on (namespace)
+              max by (namespace) (mmo_registered{role="coordinator"}) == 1
+            for: 2m
+            labels:
+              severity: critical
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} has no coordinator ticker"
+              description: "No coordinator replica of {{ $labels.namespace }} has called itself the ticker for 2 minutes: no world cuts start, no dead host is declared, the calendar stands. A dead ticker is replaced within a replica lease (10 s); longer means the replicas disagree about who is live — see their logs."
 
           - alert: WorldSuccessionDeclared
             expr: |
@@ -163,9 +208,10 @@ additionalPrometheusRulesMap:
             # only while world cuts run — never under `static`, but a lone `claim` host sets it: hence
             # the `> 1`, on the count — written in parentheses, since comparisons bind left to right) and while the world is stopped
             # (every host Deployment at 0). A drained host keeps its Deployment at 1 but is no live
-            # host: this fires until it is removed from var.hosts.
+            # host: this fires until it is removed from var.hosts. The ticker replica's count only
+            # (it alone reads the hosts; another replica's value is stale).
             expr: |
-              max by (namespace) (mmo_hosts_live{role="coordinator"})
+              max by (namespace) (mmo_hosts_live{role="coordinator"} and on (namespace, pod) (mmo_coordinator_is_ticker{role="coordinator"} == 1))
               < on (namespace)
               (count by (namespace) (kube_deployment_spec_replicas{namespace=~"world-.*", deployment=~"host-.*"} > 0) > 1)
             for: 5m

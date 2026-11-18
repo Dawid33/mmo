@@ -2085,6 +2085,19 @@ world-status:
     echo
     k get deploy -l app.kubernetes.io/component=host -o custom-columns=HOST:.metadata.name,WANT:.spec.replicas,READY:.status.readyReplicas,IMAGE:.spec.template.spec.containers[0].image
     echo
+    # The coordinator's replicas (RECORDED: world-stop's errantry/replicas, what world-start restores),
+    # and per replica pod what its /metrics says: the live replicas it counts, and whether it is the ticker.
+    k get deploy/coordinator -o custom-columns='COORDINATOR:.metadata.name,WANT:.spec.replicas,READY:.status.readyReplicas,RECORDED:.metadata.annotations.errantry/replicas,IMAGE:.spec.template.spec.containers[0].image'
+    for pod in $(k get pods -l app.kubernetes.io/component=coordinator -o jsonpath='{.items[*].metadata.name}'); do
+        if text=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/metrics" 2>/dev/null); then
+            sample() { printf '%s\n' "$text" | awk -v n="$1" '$1 ~ ("^" n "([{]|$)") { print $NF; exit }'; }
+            case "$(sample mmo_coordinator_is_ticker)" in 1) ticker=TICKER ;; 0) ticker='not the ticker' ;; *) ticker='ticker ?' ;; esac
+            echo "  $pod: $ticker, live replicas $(sample mmo_coordinator_replicas_live || true), registered $(sample mmo_registered || true), conflicts $(sample mmo_coordinator_conflicts_total || true)"
+        else
+            echo "  $pod: (no /metrics answer)"
+        fi
+    done
+    echo
     k get svc -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,PORT:.spec.ports[*].port,NODEPORT:.spec.ports[*].nodePort
     echo
     # Only the coordinator and the hosts have the health port.
@@ -2238,6 +2251,7 @@ world-stop:
     # With the coordinator already down the hosts cannot finish their leave cut: they would hang until
     # the grace period. Refuse before anything is scaled.
     coord=$(k get deploy/coordinator -o jsonpath='{.spec.replicas}') || { echo "world-stop: cannot read the coordinator; nothing changed" >&2; exit 2; }
+    case "$coord" in ''|*[!0-9]*) echo "world-stop: the coordinator's replica count '$coord' is not a number; nothing changed" >&2; exit 2 ;; esac
     hostdeps=$(k get deploy -l "$hostsel" -o name) || { echo "world-stop: cannot list the host Deployments; nothing changed" >&2; exit 2; }
     hostpods=$(k get pods -l "$hostsel" -o name) || { echo "world-stop: cannot list the host pods; nothing changed" >&2; exit 2; }
     if [ "${coord:-0}" = 0 ] && printf '%s\n' "$hostpods" | grep -q '^pod/'; then
@@ -2312,12 +2326,20 @@ world-stop:
     if [ -n "$unknown" ]; then
         echo "world-stop: WARNING: no leave line seen for$unknown (its log could not be followed to the end); whether it left with a cut is not known. Going on." >&2
     fi
-    echo "world-stop: coordinator to 0"
+    # Every replica together, after the hosts. The count is recorded first (world-start restores
+    # it); a coordinator already at 0 keeps the record it has.
+    if [ "${coord:-0}" != 0 ]; then
+        k annotate deploy/coordinator --overwrite "errantry/replicas=$coord" > /dev/null
+        echo "world-stop: coordinator ($coord replicas, recorded in its annotation errantry/replicas) to 0"
+    else
+        echo "world-stop: coordinator already at 0"
+    fi
     k scale deploy/coordinator --replicas=0
     wait_gone 'app.kubernetes.io/component=coordinator'
     echo "world-stop: the world is down (web and toolbox keep running); \`just world-start\` brings it back"
 
-# Start the world: coordinator to 1, wait until it is Ready, then every host Deployment
+# Start the world: the coordinator to its replica count (a stopped one: world-stop's record in the
+# annotation errantry/replicas, else 2), wait until every replica's /readyz is 200, then every host Deployment
 # (-l app.kubernetes.io/component=host) to 1, wait until each has readyReplicas 1 (never `rollout
 # status`). A drained host (/readyz `drained`, unready for good) is not waited for: it is named, with
 # how to remove it. Refused when the world has no host Deployment. WORLD_START_TIMEOUT s (default 300).
@@ -2332,18 +2354,40 @@ world-start:
         echo "world-start: the world has no host Deployment ($hostsel); refusing to start" >&2
         exit 1
     fi
-    echo "world-start: coordinator to 1"
-    k scale deploy/coordinator --replicas=1
-    k rollout status deploy/coordinator --timeout=5m
+    # readyz <pod>: the /readyz body, 200 or not (kubectl logs a 503's body at -v=8).
+    readyz() { k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$1:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true; }
+    timeout="${WORLD_START_TIMEOUT:-300}"
+    # The coordinator's count: a running coordinator keeps its own; a stopped one gets what world-stop
+    # recorded (annotation errantry/replicas), else the world module's default coordinator_replicas (2).
+    want=$(k get deploy/coordinator -o jsonpath='{.spec.replicas}') || { echo "world-start: cannot read the coordinator; nothing changed" >&2; exit 1; }
+    if [ "${want:-0}" = 0 ]; then
+        want=$(k get deploy/coordinator -o jsonpath='{.metadata.annotations.errantry/replicas}' 2>/dev/null || true)
+        [ -n "$want" ] || want=2
+    fi
+    case "$want" in ''|0|*[!0-9]*) echo "world-start: the coordinator's replica count '$want' is not a positive number (annotation errantry/replicas?); nothing changed" >&2; exit 1 ;; esac
+    echo "world-start: coordinator to $want replica(s); waiting until every replica's /readyz answers 200 ($timeout s)"
+    k scale deploy/coordinator --replicas="$want"
+    # Every replica, not `rollout status`: a replica is Ready once its join committed. A pod being
+    # deleted is not counted; a failed read keeps waiting, never counts as ready.
+    deadline=$((SECONDS + timeout))
+    while :; do
+        up=0
+        for p in $(k get pods -l app.kubernetes.io/component=coordinator -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers 2>/dev/null | awk '$2 == "<none>" { print $1 }'); do
+            k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$p:9100/proxy/readyz" > /dev/null 2>&1 && up=$((up + 1))
+        done
+        [ "$up" -ge "$want" ] && break
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "world-start: after $timeout s: $up of $want coordinator replicas answer /readyz 200" >&2
+            exit 1
+        fi
+        sleep 2
+    done
     echo "world-start: host Deployments to 1: $(printf '%s\n' "$names" | tr '\n' ' ')"
     for d in $names; do k scale "deploy/$d" --replicas=1; done
     # Not `rollout status`: a drained host is unready for good, and a host waiting for a succession
     # may be unready for minutes. Poll each Deployment's readyReplicas (WORLD_START_TIMEOUT s, default
     # 300); a failed read keeps waiting, never counts as ready. A host whose pod says `drained` is not
     # waited for.
-    # readyz <pod>: the /readyz body, 200 or not (kubectl logs a 503's body at -v=8).
-    readyz() { k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$1:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true; }
-    timeout="${WORLD_START_TIMEOUT:-300}"
     deadline=$((SECONDS + timeout))
     while :; do
         ready=0 drained='' waiting=''

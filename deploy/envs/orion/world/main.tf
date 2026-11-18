@@ -8,7 +8,8 @@
 #   just orion-init world && just orion-plan world && just orion-apply world
 # The coordinator and the hosts stay unready until the world is forged from the
 # toolbox (see modules/world/main.tf). Releases: scripts/world_update.sh.
-# An apply owns the replica counts (coordinator 1, each host Deployment host-<name> 1):
+# An apply owns the replica counts (coordinator: the module's coordinator_replicas, 2,
+# with a PodDisruptionBudget; each host Deployment host-<name> 1):
 # an `orion-apply world` while the world is stopped (`just world-stop`) or in the
 # middle of an update STARTS it again on whatever images are set then (an interrupted
 # update's half-set images included); images are never changed by an apply
