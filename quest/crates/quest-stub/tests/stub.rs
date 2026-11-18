@@ -68,8 +68,20 @@ fn one(h: &mut StubHost, id: u64, f: u16, args: &[W]) -> Result<W, W> {
 #[test]
 fn stub_api_is_pinned() {
     let api = stub_api();
-    assert_eq!(api.version, 4);
+    assert_eq!(api.version, 5);
     assert_eq!(op_name(F_PLACE).as_deref(), Some("place"));
+    for (f, name) in [
+        (F_QUEST_JOINED, "quest.joined"),
+        (F_QUEST_LEFT, "quest.left"),
+        (F_QUEST_JOIN_REFUSED, "quest.join_refused"),
+        (F_QUEST_COMPLETE, "quest.complete"),
+        (F_QUEST_FAIL, "quest.fail"),
+        (F_QUEST_DECLINE, "quest.decline"),
+        (F_QUEST_PLAY, "quest.play"),
+        (F_QUEST_COMPLETED_BY, "quest.completed_by"),
+    ] {
+        assert_eq!(op_name(f).as_deref(), Some(name));
+    }
     assert_eq!(
         op_name(F_PERSON_DISTANCE_TO).as_deref(),
         Some("Person.distance_to")

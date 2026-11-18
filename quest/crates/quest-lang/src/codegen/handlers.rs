@@ -85,14 +85,16 @@ impl Gen<'_> {
                 };
                 let (file, span) = self.def_site(d);
                 if let Some(tid) = self.type_id(pb, event_ty, &file, span) {
-                    pb.handler(&name, tid, f);
+                    let (owner, stage) = self.handler_place(d);
+                    pb.owned_handler(&name, tid, f, owner, stage);
                 }
             }
         }
+        self.role_lost_handler(pb);
     }
 
     /// The host site for these types, made on first use.
-    fn site(
+    pub(super) fn site(
         &mut self,
         fb: &mut FnBuilder<'_>,
         host_fn: u16,
@@ -114,8 +116,12 @@ impl Gen<'_> {
 
 impl Emit<'_, '_, '_> {
     /// `emit(e)` (the statement `emit Ev(…)`) of a script event: `Enqueue` to this instance's own queue.
-    /// `false` when `f` is not the host's `emit` or the event is the host's (a host call, then).
+    /// `false` when `f` is not the host's `emit`, the event is the host's, or the emit is a part's (a host
+    /// call, then: the host routes a part's events to the home).
     pub(super) fn script_emit(&mut self, f: u32, args: &[Arg], dst: Option<SlotRef>) -> bool {
+        if self.part_handler {
+            return false;
+        }
         let is_emit = self
             .g
             .host
@@ -347,6 +353,8 @@ impl Emit<'_, '_, '_> {
             Some(l) => (Op::AwaitAll, self.val(l)),
             None => (Op::Await, self.val(x)),
         };
+        // A home handler's segment ends here.
+        self.segment_end();
         let run = self.slots.run(&[heap, true]);
         let (a, err) = (self.word(run), self.word(run + 1));
         self.at(e.span);

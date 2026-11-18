@@ -83,6 +83,8 @@ pub struct StubHost {
     pub tick: u64,
     /// Events emitted by scripts, delivered by the runner at the start of its next step.
     pub emitted: Vec<WireValue>,
+    /// The players (by id) who completed the quest: `quest.completed_by` answers from it.
+    pub completed_by: BTreeSet<i64>,
     latency: u64,
     rules: Vec<(FailureRule, u32)>,
     namespace_gone: bool,
@@ -132,6 +134,7 @@ impl StubHost {
             reports: Vec::new(),
             tick: 0,
             emitted: Vec::new(),
+            completed_by: BTreeSet::new(),
             latency: cfg.latency,
             rules: cfg.failures.into_iter().map(|r| (r, 0)).collect(),
             namespace_gone: false,
@@ -291,6 +294,10 @@ impl Host for StubHost {
                 let kind = str_of(args.first()).ok_or_else(bad)?;
                 Ok(WireValue::Int(self.chest.get(kind).copied().unwrap_or(0)))
             }
+            F_QUEST_COMPLETED_BY => {
+                let id = player_id(args.first()).ok_or_else(bad)?;
+                Ok(WireValue::Bool(self.completed_by.contains(&id)))
+            }
             F_PERSON_DISTANCE_TO => {
                 let (a, b) = player_id(args.first())
                     .zip(player_id(args.get(1)))
@@ -379,6 +386,34 @@ impl Host for StubHost {
                 }
                 None
             }
+            // The host side of the quest builtins is recorded only (the world comes later).
+            F_QUEST_JOINED | F_QUEST_LEFT | F_QUEST_JOIN_REFUSED => {
+                let what = match f {
+                    F_QUEST_JOINED => "joined",
+                    F_QUEST_LEFT => "left",
+                    _ => "join_refused",
+                };
+                str_of(args.first().and_then(|p| field(p, "name")))
+                    .map(|n| format!("quest.{what} {n}"))
+            }
+            F_QUEST_COMPLETE => match args.first() {
+                Some(WireValue::List(ps)) => ps
+                    .iter()
+                    .map(|p| str_of(field(p, "name")))
+                    .collect::<Option<Vec<&str>>>()
+                    .map(|names| format!("quest.complete {}", names.join(", "))),
+                _ => None,
+            },
+            F_QUEST_FAIL => Some("quest.fail".to_string()),
+            F_QUEST_DECLINE => Some("quest.decline".to_string()),
+            F_QUEST_PLAY => match (str_of(args.first()), args.get(1)) {
+                (Some(scene), Some(WireValue::List(cast))) => cast
+                    .iter()
+                    .map(|c| int_of(field(c, "id")).map(|i| i.to_string()))
+                    .collect::<Option<Vec<String>>>()
+                    .map(|ids| format!("quest.play {scene} [{}]", ids.join(", "))),
+                _ => None,
+            },
             _ => None,
         };
         // A well-formed call returned above or wrote `Some`; anything else is a malformed call.

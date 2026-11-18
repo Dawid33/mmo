@@ -867,6 +867,19 @@ fn hostile_quest_info_is_err() {
         Box::new(move |p| p.quest.as_mut().unwrap().stage_global = ng),
         Box::new(move |p| p.quest.as_mut().unwrap().participants_global = ng),
         Box::new(|p| p.quest.as_mut().unwrap().home_role = 2),
+        // the stage, the participants or a role sharing a global
+        Box::new(|p| {
+            let q = p.quest.as_mut().unwrap();
+            q.participants_global = q.stage_global;
+        }),
+        Box::new(|p| {
+            let q = p.quest.as_mut().unwrap();
+            q.stage_global = q.roles[0].global;
+        }),
+        Box::new(|p| {
+            let q = p.quest.as_mut().unwrap();
+            q.participants_global = q.roles[1].global;
+        }),
         // fns out of range or of the wrong arity
         Box::new(move |p| p.quest.as_mut().unwrap().start_fn = nf),
         Box::new(move |p| p.quest.as_mut().unwrap().requires = vec![nf]),

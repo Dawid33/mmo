@@ -29,8 +29,15 @@ impl Emit<'_, '_, '_> {
     pub(super) fn function(mut self, kind: FnKind) -> u32 {
         match kind {
             FnKind::Def(d) => self.fn_body(d),
+            FnKind::Enter(_, s) => self.enter_body(s),
+            FnKind::Start(_) => self.start_body(),
+            FnKind::Transitions(_) => self.transitions_body(),
+            FnKind::RoleLost(_) => self.role_lost_body(),
             FnKind::Init(d) => {
-                if let Some(DefKind::Global(global)) = self.def_kind(d) {
+                // A role's global: the VM installs its value and never runs its initialiser.
+                if let Some(DefKind::Global(global)) = self.def_kind(d)
+                    && !matches!(global.value.kind, ExprKind::Error)
+                {
                     let ty = self.ty_of(&global.value);
                     if self.heap_ty(ty) {
                         let ret = self.fb.ret();
@@ -69,7 +76,14 @@ impl Emit<'_, '_, '_> {
             let ret = self.fb.ret();
             self.fb.mark_ref(ret);
         }
+        self.home_handler = self.home_handler_of(d);
+        let (owner, stage) = self.g.handler_place(d);
+        self.part_handler = owner > 0;
+        if let Some(s) = stage {
+            self.stage_prologue(s);
+        }
         self.block(&f.body);
+        self.segment_end();
         self.ret_now();
     }
 
@@ -157,8 +171,7 @@ impl Emit<'_, '_, '_> {
             StmtKind::Continue => self.leave_loop(false),
             StmtKind::Return(value) => self.ret(value.as_ref()),
             StmtKind::Raise(x) => self.raise(s.span, x),
-            // Never met: a quest is `not-yet` before code generation starts.
-            StmtKind::Stage(_) => self.not_yet("a stage change", s.span),
+            StmtKind::Stage(to) => self.stage_jump(*to, s.span),
         }
     }
 
@@ -176,6 +189,7 @@ impl Emit<'_, '_, '_> {
             let ret = self.fb.ret();
             self.eval_into(v, ret);
         }
+        self.segment_end();
         self.ret_now();
     }
 

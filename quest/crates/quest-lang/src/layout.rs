@@ -9,18 +9,32 @@
 //!   global, type or variant, or a method it calls). Dependencies come first; modules are visited by path
 //!   (the root first), and a cycle of modules (allowed, spec §5.10) is broken where the walk meets it.
 //! - **`main`** is the root module's free function `main`.
+//! - **A quest's generated fns** (`codegen/quest.rs`): `$enter::Q::<Stage>` for each stage, `$start::Q`,
+//!   `$transitions::Q`, and `$role_lost::Q` (the default `RoleLost` handler) when the quest has a required
+//!   role and no `RoleLost` handler of its own. They sort with the others by name.
 
-use crate::hir::{Crate, DefId, DefKind, Expr, ExprKind, FStrPart, ModId, Stmt, StmtKind};
+use crate::hir::{
+    Crate, DefId, DefKind, EventRef, Expr, ExprKind, FStrPart, ModId, Quest, StageIdx, Stmt,
+    StmtKind,
+};
 use crate::infer::{Method, Typed};
 use std::collections::BTreeSet;
 
 /// A function of the program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FnKind {
     /// A function or a method.
     Def(DefId),
     /// The initialiser of a top-level `let`.
     Init(DefId),
+    /// `$enter::Q::<Stage>` of the quest.
+    Enter(DefId, StageIdx),
+    /// `$start::Q`.
+    Start(DefId),
+    /// `$transitions::Q`.
+    Transitions(DefId),
+    /// `$role_lost::Q`: the default `RoleLost` handler.
+    RoleLost(DefId),
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +65,29 @@ pub(crate) fn plan(krate: &Crate, typed: &Typed) -> Layout {
                 name: format!("$init::{}", krate.qualified_name(id)),
                 kind: FnKind::Init(id),
             }),
+            DefKind::Quest(ref q) => {
+                let name = krate.qualified_name(id);
+                for (i, st) in q.stages.iter().enumerate() {
+                    fns.push(FnItem {
+                        name: format!("$enter::{name}::{}", st.name),
+                        kind: FnKind::Enter(id, StageIdx(u32::try_from(i).unwrap_or(u32::MAX))),
+                    });
+                }
+                fns.push(FnItem {
+                    name: format!("$start::{name}"),
+                    kind: FnKind::Start(id),
+                });
+                fns.push(FnItem {
+                    name: format!("$transitions::{name}"),
+                    kind: FnKind::Transitions(id),
+                });
+                if needs_role_lost(krate, q) {
+                    fns.push(FnItem {
+                        name: format!("$role_lost::{name}"),
+                        kind: FnKind::RoleLost(id),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -74,10 +111,27 @@ pub(crate) fn plan(krate: &Crate, typed: &Typed) -> Layout {
     Layout { fns, globals, main }
 }
 
-fn def_of(k: FnKind) -> DefId {
+/// The item a function belongs to: its own, or (a generated one) the quest's.
+pub(crate) fn def_of(k: FnKind) -> DefId {
     match k {
-        FnKind::Def(d) | FnKind::Init(d) => d,
+        FnKind::Def(d)
+        | FnKind::Init(d)
+        | FnKind::Enter(d, _)
+        | FnKind::Start(d)
+        | FnKind::Transitions(d)
+        | FnKind::RoleLost(d) => d,
     }
+}
+
+/// Whether the quest gets the default `RoleLost` handler: it has a required role and no handler of its
+/// own for `RoleLost` (in the body, a stage or a part).
+pub(crate) fn needs_role_lost(krate: &Crate, q: &Quest) -> bool {
+    let lost = EventRef::Script(q.generated.role_lost);
+    let handles = |d: &DefId| matches!(krate.def(*d).map(|d| &d.kind), Some(DefKind::Fn(f)) if f.handler == Some(lost));
+    let own = q.handlers.iter().any(handles)
+        || q.stages.iter().flat_map(|s| &s.handlers).any(handles)
+        || q.parts.iter().flat_map(|p| &p.handlers).any(handles);
+    q.roles.iter().any(|r| !r.optional) && !own
 }
 
 /// Every module, each after the modules it depends on (a depth-first walk in path order, children of a

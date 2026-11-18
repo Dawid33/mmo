@@ -1084,6 +1084,18 @@ impl Program {
         {
             return invalid(format!("quest {}: a global is out of range", q.name));
         }
+        // The stage, the participants and the roles are distinct globals: the VM installs the roles.
+        if q.stage_global == q.participants_global
+            || role_globals
+                .binary_search(&q.stage_global)
+                .or_else(|_| role_globals.binary_search(&q.participants_global))
+                .is_ok()
+        {
+            return invalid(format!(
+                "quest {}: the stage, the participants and the roles share a global",
+                q.name
+            ));
+        }
         if usize::from(q.home_role) >= q.roles.len().max(1) {
             return invalid(format!("quest {}: the home role is out of range", q.name));
         }

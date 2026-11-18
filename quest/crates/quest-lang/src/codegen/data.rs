@@ -214,8 +214,10 @@ impl Emit<'_, '_, '_> {
     /// `x.name`.
     pub(super) fn field(&mut self, e: &Expr, x: &Expr, name: &str, dst: SlotRef) {
         // A host property: a call of its host method.
-        if let Some(Method::Host(f)) = self.g.typed.methods.get(&e.id) {
-            return self.host_call(e, *f, Some(x), &[], Some(dst));
+        match self.g.typed.methods.get(&e.id) {
+            Some(Method::Host(f)) => return self.host_call(e, *f, Some(x), &[], Some(dst)),
+            Some(Method::Objective(op)) => return self.objective_read(x, *op, dst),
+            _ => {}
         }
         let Some(i) = self.field_index(self.target_kind(x), name) else {
             return self.not_yet("a field of this value", e.span);

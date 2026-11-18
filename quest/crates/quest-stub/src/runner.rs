@@ -33,6 +33,18 @@ impl Runner {
         mem_bytes: u32,
         cfg: StubConfig,
     ) -> Result<Runner, LoadError> {
+        Runner::for_instance(program, mem_bytes, cfg, 0, Vec::new())
+    }
+
+    /// A runner of instance `instance` of a quest program (0 the home, `1 + i` part `i`), with the quest's
+    /// role values (`VmConfig::roles`).
+    pub fn for_instance(
+        program: Arc<Program>,
+        mem_bytes: u32,
+        cfg: StubConfig,
+        instance: u16,
+        roles: Vec<(String, WireValue)>,
+    ) -> Result<Runner, LoadError> {
         let api = stub_api();
         let vm = Vm::new(
             program,
@@ -41,8 +53,8 @@ impl Runner {
                 epoch: 1,
                 host_api_version: api.version,
                 events: api.events.into_iter().map(|e| e.name).collect(),
-                instance: 0,
-                roles: vec![],
+                instance,
+                roles,
             },
         )?;
         Ok(Runner {

@@ -23,7 +23,7 @@
 //!   `{1}`, … in `LineDef::subst` order and a literal brace doubled (`{{`, `}}`). A line's duration is its
 //!   `(ticks=n)`, else `line_ticks` of its source length: the text's characters, each hole by its source
 //!   length with its braces.
-//! - Only top-level dialogues and scenes are lowered here; a quest's are Task 44's.
+//! - A quest's dialogues are lowered here too, by the same rules; a stage's carries its stage.
 
 use super::Gen;
 use crate::ast::Span;
@@ -42,8 +42,9 @@ use std::collections::BTreeMap;
 pub(crate) type Lines = BTreeMap<String, String>;
 
 impl<'a> Gen<'a> {
-    /// The program's script events (every `event` outside a quest, the compiler's own excepted), by
-    /// qualified name: the operand of `Enqueue` and of a dialogue's `emit`.
+    /// The program's script events (every `event`, a quest's and its generated `Entered` and `RoleLost`
+    /// included, the compiler's own excepted), by qualified name: the operand of `Enqueue`, `After` and of
+    /// a dialogue's `emit`.
     pub(super) fn script_events(&mut self, pb: &mut ProgramBuilder) {
         let krate = self.krate;
         let builtins = [
@@ -54,9 +55,10 @@ impl<'a> Gen<'a> {
         let mut events: Vec<(String, DefId)> = (0..krate.defs.len())
             .map(|i| DefId(u32::try_from(i).unwrap_or(u32::MAX)))
             .filter(|d| {
-                krate.def(*d).is_some_and(|def| {
-                    matches!(def.kind, DefKind::Event(_)) && def.parent.is_none()
-                }) && !builtins.contains(&Some(*d))
+                krate
+                    .def(*d)
+                    .is_some_and(|def| matches!(def.kind, DefKind::Event(_)))
+                    && !builtins.contains(&Some(*d))
             })
             .map(|d| (krate.qualified_name(d), d))
             .collect();
@@ -96,15 +98,16 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The dialogue graph of the top-level dialogues and scenes, and their lines.
+    /// The dialogue graph of every dialogue and scene (a quest's too: a stage's carries its stage), and
+    /// their lines.
     pub(super) fn dialogues(&mut self, pb: &mut ProgramBuilder) -> Lines {
         let krate = self.krate;
         let mut order: Vec<(String, DefId)> = (0..krate.defs.len())
             .map(|i| DefId(u32::try_from(i).unwrap_or(u32::MAX)))
             .filter(|d| {
-                krate.def(*d).is_some_and(|def| {
-                    matches!(def.kind, DefKind::Dialogue(_)) && def.parent.is_none()
-                })
+                krate
+                    .def(*d)
+                    .is_some_and(|def| matches!(def.kind, DefKind::Dialogue(_)))
             })
             .map(|d| (krate.qualified_name(d), d))
             .collect();

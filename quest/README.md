@@ -151,8 +151,10 @@ assurance comes from fuzzing, planned later.
 ## Known MVP limits
 
 - **`not-yet` compile errors**: a fallible host property (`x.p` of a property that declares errors),
-  an unawaited `all(...)`, and `dialogue` / `quest` items: they parse, resolve and type-check, then report
-  `not-yet` until Phase 10 lowers them.
+  an unawaited `all(...)`, `after` of a host event, and a handler of a host event with an open field
+  (`ItemGiven.to`, `Killed.victim`).
+- Dialogues and quests compile; running them needs the stub's world (conversations, scenes, parts, the
+  host side of `join`, `complete`, …), which comes later: the stub host only prints the `quest.*` commands.
 - Float `==` inside collections compares bits; `to_upper` is ASCII only.
 - The trace of a re-raise after another failure inside one handler shows the latest entries.
 - The host must discard the old VM after a successful `migrate`.

@@ -130,6 +130,8 @@ pub enum HostTy {
     Infer,
     /// Any event struct.
     Event,
+    /// A dialogue or scene (the compiler's `Dialogue` type): its qualified name on the wire.
+    Dialogue,
 }
 
 /// Why `deliver` did not run an event (design D7).

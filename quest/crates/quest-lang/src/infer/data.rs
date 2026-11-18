@@ -116,6 +116,7 @@ impl Infer<'_> {
             HostTy::Float => TyId::FLOAT,
             HostTy::Bool => TyId::BOOL,
             HostTy::Str => TyId::STR,
+            HostTy::Dialogue => self.types.intern(Ty::Dialogue),
             HostTy::List(inner) => {
                 let inner = self.host_ty(inner, open);
                 self.types.intern(Ty::List(inner))

@@ -6,13 +6,14 @@
 //! subset) and other pure queries, the commands, the events, and in the namespace `quest` the host side of
 //! the quest builtins. The types and events a quest generates or the compiler owns (`Entered`, `RoleLost`,
 //! `Talked`, `DialogueEnded`, `SceneEnded`, `EndReason`, `SceneEnd`, `Exit`, `Stage`, `Role`) are not here.
-//! A `Dialogue` parameter is still `Value` here: the compiler has a `Dialogue` type now, and the host side
-//! is tightened to it in Task 44 (a new `HostTy` variant).
 //!
 //! Version 3 adds a fallible query, `Person.distance_to(other) -> Int raises OutOfReach`.
 //!
 //! Version 4 (the query subset's fact table): `Player.has_tag` is a fact like every other `has_tag`, `kind`
 //! is a fact, and the relation `related(a, b)` is added (a fact).
+//!
+//! Version 5: a `Dialogue` parameter (`attach_dialogue`, `detach_dialogue`, `bark`, `quest.play`) is
+//! `HostTy::Dialogue`, a dialogue's qualified name on the wire.
 
 use quest_vm::host::{
     HostApi, HostEnum, HostError, HostFn, HostFnKind, HostStruct, HostTy, PROMISE_ERRORS,
@@ -36,6 +37,14 @@ pub const F_WORLD_ADD: u16 = 13;
 pub const F_WORLD_CAS: u16 = 14;
 pub const F_WORLD_DELETE: u16 = 15;
 pub const F_PLACE: u16 = 42;
+pub const F_QUEST_JOINED: u16 = 47;
+pub const F_QUEST_LEFT: u16 = 48;
+pub const F_QUEST_JOIN_REFUSED: u16 = 49;
+pub const F_QUEST_COMPLETE: u16 = 50;
+pub const F_QUEST_FAIL: u16 = 51;
+pub const F_QUEST_DECLINE: u16 = 52;
+pub const F_QUEST_PLAY: u16 = 53;
+pub const F_QUEST_COMPLETED_BY: u16 = 54;
 pub const F_PERSON_DISTANCE_TO: u16 = 56;
 
 fn p(name: &str, ty: HostTy) -> (String, HostTy) {
@@ -356,9 +365,15 @@ pub fn stub_api() -> HostApi {
             Command,
         ),
         command("tag", &[("e", Value), ("t", Str)]),
-        command("attach_dialogue", &[("npc", person()), ("d", Value)]),
-        command("detach_dialogue", &[("npc", person()), ("d", Value)]),
-        command("bark", &[("npc", person()), ("d", Value)]),
+        command(
+            "attach_dialogue",
+            &[("npc", person()), ("d", HostTy::Dialogue)],
+        ),
+        command(
+            "detach_dialogue",
+            &[("npc", person()), ("d", HostTy::Dialogue)],
+        ),
+        command("bark", &[("npc", person()), ("d", HostTy::Dialogue)]),
         // The host side of the quest builtins.
         quest_command("joined", &[("p", player())]),
         quest_command("left", &[("p", player())]),
@@ -366,7 +381,10 @@ pub fn stub_api() -> HostApi {
         quest_command("complete", &[("ps", List(Box::new(player())))]),
         quest_command("fail", &[]),
         quest_command("decline", &[]),
-        quest_command("play", &[("scene", Value), ("cast", List(Box::new(Value)))]),
+        quest_command(
+            "play",
+            &[("scene", HostTy::Dialogue), ("cast", List(Box::new(Value)))],
+        ),
         fact(f(
             Some(QUEST_NAMESPACE),
             false,
@@ -407,7 +425,7 @@ pub fn stub_api() -> HostApi {
         Query,
     )));
     HostApi {
-        version: 4,
+        version: 5,
         structs: vec![
             event("Player", &[("id", Int), ("name", Str)]),
             event("Item", &[("kind", Str), ("count", Int)]),

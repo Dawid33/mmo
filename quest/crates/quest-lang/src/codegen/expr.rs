@@ -8,7 +8,7 @@
 
 use super::{Emit, Val};
 use crate::ast::{BinOp, Span, UnOp};
-use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, HostItem, Prelude, QuestFn};
+use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, HostItem, Prelude};
 use crate::infer::Method;
 use crate::layout::each_expr;
 use crate::ty::{Ty, TyId};
@@ -177,6 +177,9 @@ impl Emit<'_, '_, '_> {
             }
             ExprKind::Str(s) => self.load_str(dst, s),
             ExprKind::FStr(parts) => self.fstring(parts, dst),
+            ExprKind::Def(d) if matches!(self.def_kind(*d), Some(DefKind::Dialogue(_))) => {
+                self.dialogue_value(*d, dst)
+            }
             ExprKind::Local(_) | ExprKind::Def(_) => match self.variable(e) {
                 Some(src) => {
                     let heap = self.heap_expr(e);
@@ -224,9 +227,9 @@ impl Emit<'_, '_, '_> {
             }
             // Never met: the checker reported it, or it is not a value (and was reported).
             ExprKind::Error | ExprKind::Host(_) => self.not_yet("this expression", e.span),
-            ExprKind::Quest(_) | ExprKind::Exit(_, _) => {
-                self.not_yet("dialogue and quest code", e.span)
-            }
+            ExprKind::Exit(d, i) => self.exit_value(*d, *i, dst),
+            // Only met as a callee.
+            ExprKind::Quest(_) => self.not_yet("this expression", e.span),
         }
     }
 
@@ -528,7 +531,7 @@ impl Emit<'_, '_, '_> {
                     self.host_call(e, *f, None, args, dst)
                 }
             }
-            ExprKind::Quest(QuestFn::DialogueDepth) => self.dialogue_depth(e, args, dst),
+            ExprKind::Quest(f) => self.quest_call(e, *f, args, dst),
             ExprKind::Host(HostItem::Struct(_) | HostItem::Event(_)) => {
                 let ty = self.ty_kind(e);
                 match dst {
@@ -569,7 +572,7 @@ impl Emit<'_, '_, '_> {
             }
             Some(Method::Builtin(b)) => self.builtin_method(e, b, recv, args, dst),
             Some(Method::Host(f)) => self.host_call(e, f, Some(recv), args, dst),
-            Some(Method::Objective(_)) => self.not_yet("dialogue and quest code", e.span),
+            Some(Method::Objective(op)) => self.objective_command(e, recv, op, args, dst),
             None => self.not_yet("this call", e.span),
         }
     }

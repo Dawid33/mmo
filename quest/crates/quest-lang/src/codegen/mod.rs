@@ -39,6 +39,7 @@ mod expr;
 mod handlers;
 mod matching;
 mod place;
+mod quest;
 mod refs;
 mod stmt;
 
@@ -47,7 +48,7 @@ use crate::diag::Diagnostic;
 use crate::hir::{Crate, DefId, DefKind, LocalId};
 use crate::infer::Shape;
 use crate::infer::Typed;
-use crate::layout::{self, FnKind};
+use crate::layout::{self, FnKind, def_of};
 use crate::ty::{Ty, TyId};
 use quest_vm::asm::{FnBuilder, FnRef, GlobalRef, SlotRef};
 use quest_vm::host::HostApi;
@@ -61,33 +62,6 @@ const STATIC_WORDS_MAX: u32 = u16::MAX as u32;
 /// Words before a frame's parameters: return link, return value, error value.
 const FRAME_HEADER_WORDS: u32 = quest_vm::asm::FRAME_HEADER_WORDS as u32;
 
-/// `not-yet` for each quest: quests are lowered by a later task (Task 44). Their synthesised fns, generated
-/// items and dialogues never reach code generation.
-fn not_yet_quests(krate: &Crate) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
-    for def in &krate.defs {
-        let noun = match &def.kind {
-            DefKind::Quest(_) => "quest",
-            _ => continue,
-        };
-        let file = krate
-            .module(def.module)
-            .map_or(String::new(), |m| m.file.clone());
-        out.push(Diagnostic::error(
-            "not-yet",
-            format!(
-                "{noun} `{}` is checked but not compiled yet (dialogue and quests come in a later version)",
-                def.name
-            ),
-            &file,
-            def.span.line,
-            def.span.col,
-            def.span.len,
-        ));
-    }
-    out
-}
-
 /// Compiles a checked program (no error diagnostics were reported): the program and its lines table (line
 /// id → source text), or the errors only code generation finds (`too-many-slots`, `not-yet`).
 pub(crate) fn generate(
@@ -95,10 +69,6 @@ pub(crate) fn generate(
     typed: &Typed,
     host: &HostApi,
 ) -> Result<(Program, dialogue::Lines), Vec<Diagnostic>> {
-    let pending = not_yet_quests(krate);
-    if !pending.is_empty() {
-        return Err(pending);
-    }
     let plan = layout::plan(krate, typed);
     let mut pb = ProgramBuilder::new(host.version);
     let mut g = Gen {
@@ -111,6 +81,8 @@ pub(crate) fn generate(
         error_ty: None,
         sites: BTreeMap::new(),
         events: BTreeMap::new(),
+        generated: BTreeMap::new(),
+        quest: None,
         diags: Vec::new(),
     };
     g.declare_errors(&mut pb);
@@ -119,7 +91,9 @@ pub(crate) fn generate(
     for item in &plan.fns {
         let params = match item.kind {
             FnKind::Def(d) => g.param_count(d),
-            FnKind::Init(_) => 0,
+            // The default `RoleLost` handler takes the event.
+            FnKind::RoleLost(_) => 1,
+            FnKind::Init(_) | FnKind::Enter(..) | FnKind::Start(_) | FnKind::Transitions(_) => 0,
         };
         let params = match u8::try_from(params) {
             Ok(p) => p,
@@ -142,9 +116,13 @@ pub(crate) fn generate(
         let r = pb.declare(&item.name, params);
         refs.push(r);
         match item.kind {
-            FnKind::Def(d) => g.fns.insert(d, r),
-            FnKind::Init(d) => g.fns.insert(d, r),
-        };
+            FnKind::Def(d) | FnKind::Init(d) => {
+                g.fns.insert(d, r);
+            }
+            FnKind::Enter(..) | FnKind::Start(_) | FnKind::Transitions(_) | FnKind::RoleLost(_) => {
+                g.generated.insert(item.kind, r);
+            }
+        }
     }
     for d in &plan.globals {
         let ty = typed.globals.get(d).copied().unwrap_or(TyId::ERROR);
@@ -161,10 +139,12 @@ pub(crate) fn generate(
     if let Some(m) = plan.main.and_then(|m| g.fns.get(&m)) {
         pb.main(*m);
     }
+    g.quest_plan();
     g.handlers(&mut pb);
     g.script_events(&mut pb);
     g.pure_sigs(&mut pb);
     let lines = g.dialogues(&mut pb);
+    g.quest_info(&mut pb);
 
     // Frame sizes, for `too-many-slots`: (words, the function's index in `plan.fns`).
     let mut frames: Vec<(u32, usize)> = Vec::with_capacity(plan.fns.len());
@@ -223,12 +203,6 @@ pub(crate) fn generate(
     Ok((program, lines))
 }
 
-fn def_of(k: FnKind) -> DefId {
-    match k {
-        FnKind::Def(d) | FnKind::Init(d) => d,
-    }
-}
-
 /// What every body's emitter shares.
 pub(crate) struct Gen<'a> {
     krate: &'a Crate,
@@ -245,6 +219,10 @@ pub(crate) struct Gen<'a> {
     sites: BTreeMap<handlers::SiteKey, u16>,
     /// Each script event's index in `Program::events` (`dialogue.rs`).
     events: BTreeMap<DefId, u16>,
+    /// The quest's generated fns, by their kind.
+    generated: BTreeMap<FnKind, FnRef>,
+    /// What code generation knows of the program's quest (`quest.rs`).
+    quest: Option<quest::QuestGen>,
     diags: Vec<Diagnostic>,
 }
 
@@ -294,6 +272,8 @@ impl<'a> Gen<'a> {
                 | Ty::HostEvent(_)
                 | Ty::Ref(_)
                 | Ty::Caught(_)
+                | Ty::Dialogue
+                | Ty::Exit
         )
     }
 
@@ -376,7 +356,14 @@ impl<'a> Gen<'a> {
             }
             let children = match shape {
                 Ty::List(_) | Ty::Dict(_, _) | Ty::Option(_) | Ty::Promise(_) => shape.children(),
-                Ty::Unit | Ty::Never | Ty::Int | Ty::Float | Ty::Bool | Ty::Str => Vec::new(),
+                Ty::Unit
+                | Ty::Never
+                | Ty::Int
+                | Ty::Float
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Dialogue
+                | Ty::Exit => Vec::new(),
                 Ty::Adt(_) | Ty::HostStruct(_) | Ty::HostEvent(_) => {
                     if let std::collections::btree_map::Entry::Vacant(slot) = self.type_ids.entry(t)
                     {
@@ -417,7 +404,8 @@ impl<'a> Gen<'a> {
                 Ty::Int => TypeDesc::Int,
                 Ty::Float => TypeDesc::Float,
                 Ty::Bool => TypeDesc::Bool,
-                Ty::Str => TypeDesc::Str,
+                // A dialogue and an exit travel as their qualified names.
+                Ty::Str | Ty::Dialogue | Ty::Exit => TypeDesc::Str,
                 Ty::List(e) => TypeDesc::List(id(e)),
                 Ty::Dict(k, v) => TypeDesc::Dict(id(k), id(v)),
                 Ty::Promise(v) => TypeDesc::Promise(id(v)),
@@ -616,6 +604,11 @@ pub(crate) struct Emit<'g, 'a, 'p> {
     line: (u32, u32),
     /// Whether the function writes its error word (a `raise` or a `?` on a fallible result).
     fails: bool,
+    /// Whether the function is a home handler of the quest: it evaluates the stage transitions at its
+    /// segment ends (`quest.rs`).
+    home_handler: bool,
+    /// Whether the function is a part's handler: its `emit`s go to the host, which routes them to the home.
+    part_handler: bool,
 }
 
 impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
@@ -633,6 +626,8 @@ impl<'g, 'a, 'p> Emit<'g, 'a, 'p> {
             loops: Vec::new(),
             line: (0, 0),
             fails: false,
+            home_handler: false,
+            part_handler: false,
         }
     }
 
