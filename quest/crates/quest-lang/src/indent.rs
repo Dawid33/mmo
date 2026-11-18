@@ -171,6 +171,17 @@ fn begins_operand(t: Option<&Tok>) -> bool {
     )
 }
 
+/// Whether token `i` is followed by a `(` with a space between (`requires (a or b) and c`, not the call
+/// `requires(x)`).
+fn spaced_paren(out: &[Token], i: usize) -> bool {
+    match (out.get(i), out.get(i + 1)) {
+        (Some(w), Some(p)) => {
+            p.kind == Tok::LParen && p.line == w.line && p.col > w.col.saturating_add(w.len)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `t` can end an expression (what may stand before a trailing `uninterruptible`).
 fn ends_operand(t: Option<&Tok>) -> bool {
     matches!(
@@ -256,7 +267,7 @@ fn line_word(out: &mut [Token], i: usize) {
         "emit" if operand => Tok::Emit,
         "detour" if operand => Tok::Detour,
         "part" if operand => Tok::Part,
-        "requires" if begins_operand(next) => Tok::Requires,
+        "requires" if begins_operand(next) || spaced_paren(out, i) => Tok::Requires,
         "pause" if begins_operand(next) => Tok::Pause,
         "optional"
             if (is_ident(out.get(i + 1), "role") || is_ident(out.get(i + 1), "objective"))

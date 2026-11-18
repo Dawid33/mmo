@@ -217,12 +217,14 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
         handlers: BTreeMap::new(),
         may_await: BTreeSet::new(),
         objectives: BTreeMap::new(),
+        emit_arg_tys: BTreeMap::new(),
         diags,
     };
     inf.collect_objectives();
     inf.user_types();
     inf.declared_errors();
     inf.annotated_globals();
+    inf.emit_arg_types();
     inf.self_typed_globals(&plan.cycles);
     inf.in_cycle.extend(plan.cycles.iter().flatten());
     let order = inf.run(plan.order);
@@ -419,6 +421,8 @@ struct Infer<'k> {
     may_await: BTreeSet<DefId>,
     /// Every objective's global, with its `count`.
     objectives: BTreeMap<DefId, Option<i64>>,
+    /// The return type of each dialogue `emit` argument's synthesised fn: its field's (`emit_arg_types`).
+    emit_arg_tys: BTreeMap<DefId, TyId>,
     diags: Vec<Diagnostic>,
 }
 
@@ -558,9 +562,11 @@ impl<'k> Infer<'k> {
                     | hir::PureSite::Transition(_)
             )
         );
-        b.ret = match &f.ret {
-            Some(t) => self.lower_kept(t, file, &mut b.diags, "returned"),
-            None => self.fresh(),
+        b.ret = match (&f.ret, self.emit_arg_tys.get(&d)) {
+            (Some(t), _) => self.lower_kept(t, file, &mut b.diags, "returned"),
+            // A dialogue's `emit` argument gives its field's type (its author cannot annotate it).
+            (None, Some(&t)) => t,
+            (None, None) => self.fresh(),
         };
         let receiver = f.receiver.map(|(r, local)| {
             let owner = f

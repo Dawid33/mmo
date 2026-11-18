@@ -4,7 +4,7 @@ error[duplicate-def]: `dog` is defined twice in this quest
 7 |         objective dog "Find the dog" at dog            # duplicate-def: the objective `dog` shadows the role
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-warning[missing-line-id]: this line has no id (`@…`): it is `@Q.0` until it gets one
+warning[missing-line-id]: this line has no id (`@…`): it is `@Q.0` until it gets one, numbered by position (an edit above it renumbers it, and its `once` records with it)
  --> main.qs:7:9
   |
 7 |         objective dog "Find the dog" at dog            # duplicate-def: the objective `dog` shadows the role

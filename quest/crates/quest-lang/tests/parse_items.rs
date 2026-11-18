@@ -1505,3 +1505,15 @@ fn quest_examples_doc_parses() {
     let dump = parse_ok(QX6_DUPLICATE);
     assert_has(&dump, "(objective dog \"Find the dog\" (at dog))");
 }
+
+/// Review B (whole-branch, Task 52, minor): `requires (a or b) and c` was a syntax error — a `(` after
+/// `requires` did not begin its expression. A spaced `(` does; `requires(x)` stays a call.
+#[test]
+fn requires_may_begin_with_a_parenthesis() {
+    let dump = parse_ok(
+        "quest Q:\n    requires (act() >= 1 or act() >= 2) and act() < 9\n    stage A:\n        @on(Entered)\n        fn a(e):\n            pass\n",
+    );
+    assert_has(&dump, "(requires (and (or");
+    let dump = parse_ok("fn main():\n    requires(1)\n");
+    assert_has(&dump, "(call requires 1)");
+}

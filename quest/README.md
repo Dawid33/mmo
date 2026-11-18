@@ -100,7 +100,9 @@ command (`place(...) else: ...`, `NoRoom`) is handled like any fallible call, it
 declares (an error it does not declare is a fault). The host checks a fallible command against the current tick
 when it is issued: a refusal takes the fallible path and nothing is buffered; a command that passes is handed
 over when its segment commits, like any other, and a failure when it is applied (the world changed in between)
-goes to the host's own error channel, never back to the script.
+goes to the host's own error channel, never back to the script. A host binds a program only after
+`Program::check_api` (every host call site of the fn's kind, parameters, result and errors; every host `emit`
+of the event's fields): the stub refuses one that does not fit, a loaded state file's included.
 
 **Promises.** Host reads and writes that answer later (`world.get`, `world.set`, `world.compare_and_set`,
 `chest.take`, ...) return a promise; `await p` parks the handler until it resolves (other events run
@@ -139,7 +141,9 @@ source nesting 256.
 Dialogues and quests: a condition or substitution 500 fuel (`COND_FUEL`; running out counts as false); a
 conversation's detour stack 16 (`DIALOGUE_STACK_MAX`, one more ends it `TooDeep`); an ended conversation stays
 open 200 ticks without `done` (`CONVERSATION_LINGER_TICKS`); one batch walks at most 4096 steps
-(`BATCH_STEPS_MAX`, else `TooDeep`); a scene takes at most 16 follow-ups (`SCENE_FOLLOW_UPS_MAX`); a timed
+(`BATCH_STEPS_MAX`, else `TooDeep`) and makes at most 1024 pure evaluations (`RUNNER_EVALS_MAX`, else a
+conversation ends `TooDeep`, a scene `Finished`); a node group or line group has at most 64 members
+(`GROUP_MEMBERS_MAX`), a dialogue at most 1024 nodes (`DIALOGUE_NODES_MAX`; both `dialogue-too-large`); a scene takes at most 16 follow-ups (`SCENE_FOLLOW_UPS_MAX`); a timed
 line lasts 30 ticks plus 1 per character (`LINE_BASE_TICKS`, `LINE_TICKS_PER_CHAR`), clamped to 30..200
 (`LINE_MIN_TICKS`, `LINE_MAX_TICKS`); a program's dialogue graph at most 65535 steps (`GRAPH_STEPS_MAX`); a
 read set (dialogue or part) above 256 words gets the `mirror-size` warning (`MIRROR_WORDS_WARN`).
@@ -187,8 +191,14 @@ carried its own tests; since its close-out (Task 49) the rule applies again.
 - No `busy` bark yet: a talk to an NPC in another conversation or an uninterruptible scene is ignored.
 - `print`, `assert` and `assert_eq` are allowed in a pure function (a condition): they change no state.
 - `once` records are keyed by a site anchored on line ids (the option's, the first member's, the node's name and
-  first line, a `once:` block's first line), so they survive edits; `once: once: …` with the same first line
-  anchors both on one id and is refused (`site-collision`).
+  first line, a `once:` block's first line), so they survive edits — of lines with explicit ids only: a line
+  without one gets a provisional id numbered by its position (`missing-line-id`), which an edit above it
+  shifts, and its records move with it. `once: once: …` with the same first line anchors both on one id and
+  is refused (`site-collision`).
+- A `let` named in `pause`, `(ticks=…)`, `count` or `timeout=` stands for its initialiser's literal, read at
+  compile time: assigning the `let` at run time does not change the duration or the count.
+- A quest's transitions that chain into as many stages as the quest has (a cycle, `A → B → A`, both holding)
+  stop where they stand, reported (`TransitionCycle`), instead of running every tick.
 - A handler that changes the stage in the middle of an event: each later handler of that event checks the stage
   when it starts, so a handler of the new stage may run for the same event.
 - An edit whose current stage no longer exists falls back to the first stage, without cancelling the removed
@@ -198,8 +208,8 @@ carried its own tests; since its close-out (Task 49) the rule applies again.
   counts `MIRROR_WORDS_WARN` on its own.
 - A program whose dialogue graph passes `GRAPH_STEPS_MAX` (or holds more than 65 536 dialogues) is reported
   as the code `internal`, not a named code.
-- `pause -1` (any operand starting with `-`, `(` or `[` after `pause` or `requires`) is a syntax error rather than
-  `not-constant`.
+- `pause -1` (any operand starting with `-` or `[` after `pause` or `requires`, or a `(` with no space before it)
+  is a syntax error rather than `not-constant`; `requires (a or b) and c` (a space before the `(`) parses.
 - Float `==` inside collections compares bits; `to_upper` is ASCII only.
 - The trace of a re-raise after another failure inside one handler shows the latest entries.
 - The host must discard the old VM after a successful `migrate`.
@@ -292,7 +302,7 @@ Keys: `name`, `occupation` (an `Occupation` variant), `site`, `owner` (ids), `ta
 | `pick <player> <n>` | option `n` (from 1) of the player's offer |
 | `leave <player>` | walks away from the conversation (`Left`) |
 | `done <player>` | acknowledges the conversation's end |
-| `event <Name> <field>=<wire>... [@<part>]` | a host or script event to the home, or to the part |
+| `event <Name> <field>=<wire>... [@<part>]` | a host or script event to the home, or to the part; a quest's own event by its qualified name (`Q::Go`) |
 | `near <player> <entity>` | `PlayerNear` to the parts anchored on the entity |
 | `kill <victim> [by <player>]` | `Killed`, then `RoleLost` for its roles |
 | `lose <entity>` | `RoleLost` for the roles bound to it |

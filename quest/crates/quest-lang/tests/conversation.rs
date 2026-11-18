@@ -1453,3 +1453,46 @@ fn hostile_graphs_and_attachments_never_panic() {
         );
     }
 }
+
+/// Review B4 (whole-branch, Task 52): each `emit` argument of a dialogue is a synthesised fn with an
+/// inferred return type, so `None` or `[]` stopped at `needs-annotation` on a fn the author cannot
+/// annotate. The argument takes its field's type.
+#[test]
+fn emit_args_take_their_fields_types() {
+    let src = r#"event Ev:
+    x: Option[int]
+    ys: list[int]
+
+dialogue d(p: Player, npc: Person):
+    npc: "Hm." @d.hm
+    emit Ev(x=None, ys=[])
+"#;
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", src)]));
+    let att = env.att(1, &["d"]);
+    let (_, b) = Conversation::start(
+        &mut env,
+        &att,
+        &mut Records::default(),
+        player(1),
+        person(1),
+        0,
+    );
+    assert_eq!(b.emits.len(), 1, "{b:?}");
+    assert_eq!(
+        b.emits[0].value,
+        WireValue::Struct {
+            name: "Ev".into(),
+            fields: vec![
+                (
+                    "x".into(),
+                    WireValue::Variant {
+                        name: "None".into(),
+                        fields: vec![]
+                    }
+                ),
+                ("ys".into(), WireValue::List(vec![])),
+            ],
+        }
+    );
+}

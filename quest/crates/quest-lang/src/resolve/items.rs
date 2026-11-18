@@ -50,6 +50,9 @@ pub(super) fn host_enum_items(host: &HostApi) -> Vec<ast::Item> {
         .collect()
 }
 
+/// The dialogue runner's events, which the compiler declares (`Builtins`): no script event takes their names.
+const RUNNER_EVENT_NAMES: [&str; 3] = ["Talked", "DialogueEnded", "SceneEnded"];
+
 impl HostNames {
     pub(super) fn new(host: &HostApi) -> HostNames {
         let mut names = HostNames::default();
@@ -169,7 +172,10 @@ impl<'a> Resolver<'a> {
             ast::ItemKind::Struct(n, _) => Some(def(n, Tag::Struct)),
             ast::ItemKind::Enum(n, _) => Some(def(n, Tag::Enum)),
             ast::ItemKind::ErrorSet(n, _) => Some(def(n, Tag::ErrorSet)),
-            ast::ItemKind::Event(n, _) => Some(def(n, Tag::Event)),
+            ast::ItemKind::Event(n, _) => {
+                self.reserved_event(n, file, item.span);
+                Some(def(n, Tag::Event))
+            }
             ast::ItemKind::Let(l) => Some(def(&l.name, Tag::Global)),
             ast::ItemKind::Dialogue(d) | ast::ItemKind::Scene(d) => {
                 Some(def(&d.name, Tag::Dialogue))
@@ -422,6 +428,21 @@ impl<'a> Resolver<'a> {
             end_reason: Some(end_reason),
             scene_end: Some(scene_end),
         };
+    }
+
+    /// A script event named as one of the runner's own (`Talked`, `DialogueEnded`, `SceneEnded`) is
+    /// `reserved-name`: it would hide the runner's event from every `@on` in its scope.
+    pub(super) fn reserved_event(&mut self, name: &str, file: &str, at: ast::Span) {
+        if RUNNER_EVENT_NAMES.contains(&name) {
+            self.diags.push(error(
+                "reserved-name",
+                format!(
+                    "`{name}` is the dialogue runner's own event: give this event another name"
+                ),
+                file,
+                at,
+            ));
+        }
     }
 
     fn add_builtin(&mut self, name: &'static str, tag: Tag, kind: hir::DefKind) -> DefId {

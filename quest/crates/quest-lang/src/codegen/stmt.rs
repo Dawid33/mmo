@@ -77,7 +77,12 @@ impl Emit<'_, '_, '_> {
             self.fb.mark_ref(ret);
         }
         if let (_, Some(s)) = self.g.handler_place(d) {
-            self.stage_prologue(s);
+            let entered = if self.handles_entered(d) {
+                params.first().and_then(|l| self.locals.get(l)).copied()
+            } else {
+                None
+            };
+            self.stage_prologue(s, entered);
         }
         self.block(&f.body);
         self.ret_now();

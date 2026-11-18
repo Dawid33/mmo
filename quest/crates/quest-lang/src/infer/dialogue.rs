@@ -19,6 +19,7 @@ use crate::hir::{
     Speaker, StepKind,
 };
 use crate::ty::{Ty, TyId};
+use std::collections::BTreeMap;
 
 /// An objective's commands and reads (spec §5.12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -309,6 +310,46 @@ impl Infer<'_> {
             ObjectiveOp::Count => TyId::INT,
             _ => TyId::BOOL,
         }
+    }
+
+    /// Before any body: the field each dialogue `emit` argument's synthesised fn gives, by its name or
+    /// position (`Infer::emit_arg_tys`), so `None` or `[]` need no annotation the author cannot write. A
+    /// field of an open type (a host `Value`) is left to inference; what does not match a field is left to
+    /// `emit_args`.
+    pub(super) fn emit_arg_types(&mut self) {
+        let krate = self.krate;
+        let mut out = BTreeMap::new();
+        for def in &krate.defs {
+            let DefKind::Dialogue(dl) = &def.kind else {
+                continue;
+            };
+            for step in dl.steps() {
+                let StepKind::Emit(event, args) = &step.kind else {
+                    continue;
+                };
+                let shape = match event {
+                    EventRef::Script(d) => self.adts.get(d).and_then(|s| s.first()).cloned(),
+                    EventRef::Host(i) => self.host_events.get(*i as usize).cloned(),
+                };
+                let Some(shape) = shape else { continue };
+                let mut positional = 0usize;
+                for a in args {
+                    let index = match &a.name {
+                        Some(field) => shape.names.iter().position(|n| n == field),
+                        None => {
+                            positional += 1;
+                            Some(positional - 1)
+                        }
+                    };
+                    if let Some(&t) = index.and_then(|i| shape.tys.get(i))
+                        && !self.has_var(t)
+                    {
+                        out.insert(a.value, t);
+                    }
+                }
+            }
+        }
+        self.emit_arg_tys = out;
     }
 
     // After every body.

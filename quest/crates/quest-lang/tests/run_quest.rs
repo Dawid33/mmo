@@ -235,7 +235,8 @@ fn starts_in_first_stage_with_entered() {
         ]
     );
     assert_eq!(p.fns[usize::from(q.start_fn)].name, "$start::Q");
-    // The transition reads both objectives: the dialogue read set.
+    // The transition reads both objectives, but the home runs it (ruling T44-1): no dialogue reads them,
+    // so the dialogue read set is empty.
     let mut read: Vec<&str> = q
         .read_set
         .iter()
@@ -243,7 +244,7 @@ fn starts_in_first_stage_with_entered() {
         .collect();
     assert!(q.read_set.windows(2).all(|w| w[0] < w[1]));
     read.sort_unstable();
-    assert_eq!(read, ["Q::Search.feed_dog", "Q::Search.find_dog"]);
+    assert_eq!(read, Vec::<&str>::new());
     assert_eq!(q.home_role, 0);
     assert!(q.repeat.is_none() && q.parts.is_empty() && q.requires.is_empty());
 }

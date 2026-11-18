@@ -550,7 +550,8 @@ quest Q:
         v.sort();
         v
     };
-    assert_eq!(names(&typed.read_sets.dialogue), ["Q::found", "a", "b"]);
+    // Not `Q::found`: only the transition reads it, and the home runs the transitions (ruling T44-1).
+    assert_eq!(names(&typed.read_sets.dialogue), ["a", "b"]);
     assert_eq!(typed.read_sets.parts.len(), 1);
     // A top-level `let` is home state too: a part reads it through its mirror.
     assert_eq!(
@@ -689,4 +690,36 @@ fn stage_jump_ends_the_handler() {
     let sigs = quest_lang::signatures(&tree(&[("main.qs", main)]), &quest_stub::stub_api());
     assert_eq!(sigs["Q::click"], "fn(PlayerClicked) -> ()");
     assert_eq!(sigs["Q::other"], "fn(PlayerClicked) -> ()");
+}
+
+/// Review B (whole-branch, Task 52, minor): the dialogue read set took the stages' transitions too, though
+/// the home runs them itself (ruling T44-1): a `str` only a transition reads drew `mirror-size` and was
+/// mirrored to every NPC's region.
+#[test]
+fn transitions_are_not_in_the_dialogue_read_set() {
+    let main = r#"let n = 1
+
+dialogue d(p: Player, npc: Person):
+    node x when n > 0:
+        npc: "x" @d.x
+
+quest Q:
+    let password = "swordfish"
+    stage A:
+        -> B when password == "open"
+    stage B:
+        @on(Entered)
+        fn b(e):
+            pass
+"#;
+    assert_eq!(messages(main, "mirror-size"), Vec::<String>::new());
+    let program = resolved(main);
+    let (typed, _) = quest_lang::infer(&program, &quest_stub::stub_api());
+    let names: Vec<String> = typed
+        .read_sets
+        .dialogue
+        .iter()
+        .map(|d| program.qualified_name(*d))
+        .collect();
+    assert_eq!(names, ["n"]);
 }

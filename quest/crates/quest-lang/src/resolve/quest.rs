@@ -141,6 +141,7 @@ impl<'a> Resolver<'a> {
                     lets.push((l, d));
                 }
                 ast::ItemKind::Event(name, fields) => {
+                    self.reserved_event(name, file, member.span);
                     let d = self.member_def(m, name, member, Tag::Event, id);
                     self.quest_name(&mut scope, name, QName::Def(d), file, member.span);
                     events.push((fields, d));
@@ -666,6 +667,7 @@ impl<'a> Resolver<'a> {
                 match &member.kind {
                     ast::ItemKind::Let(l) => lets.push((l, own(self, &l.name, Tag::Global, &mut ps))),
                     ast::ItemKind::Event(name, fields) => {
+                        self.reserved_event(name, file, member.span);
                         events.push((fields, own(self, name, Tag::Event, &mut ps)));
                     }
                     ast::ItemKind::Fn(f) => {

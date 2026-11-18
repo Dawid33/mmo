@@ -1,0 +1,5 @@
+error[dialogue-too-large]: node group `a` has more than 64 nodes (each pick evaluates them all): split it
+   --> main.qs:133:5
+    |
+133 |     node a when n == 64:
+    |     ^^^^^^^^^^^^^^^^^^^

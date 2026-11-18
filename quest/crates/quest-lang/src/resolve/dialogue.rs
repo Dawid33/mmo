@@ -8,6 +8,7 @@ use crate::diag::{Diagnostic, Severity};
 use crate::hir::{
     self, Builtin, DefId, DefKind, EventRef, HostItem, ModId, PureSite, StageIdx, TypeName,
 };
+use quest_vm::consts::{DIALOGUE_NODES_MAX, GROUP_MEMBERS_MAX};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The arguments `@pick` takes (spec §5.11).
@@ -123,6 +124,23 @@ impl<'a> Resolver<'a> {
         let scope = quest.map(|(q, _)| q);
         let pick = self.dialogue_decorators(item, file);
         let kind = self.dialogue_kind(d, item.span, file);
+        if kind != hir::DialogueKind::Conversation && (d.target.is_some() || d.topic.is_some()) {
+            let at = match (&d.target, &d.topic) {
+                (Some(t), _) if t.span.line != 0 => t.span,
+                (_, Some(t)) => t.span,
+                _ => item.span,
+            };
+            self.diags.push(error(
+                "conversation-only",
+                format!(
+                    "`{}` is a bark, said to nobody in particular: a `for`, a filter or a topic belongs to a \
+                     conversation `(p: Player, npc: Person)`",
+                    d.name
+                ),
+                file,
+                at,
+            ));
+        }
         // The parameters: their types are resolved once, and each synthesised fn binds its own.
         let mut cx = Cx::new(m, file, scope);
         cx.push();
@@ -201,10 +219,36 @@ impl<'a> Resolver<'a> {
         let mut loose = Vec::new();
         let mut mixed_reported = false;
         let last_entry = d.body.len().saturating_sub(1);
+        let mut members: BTreeMap<&str, usize> = BTreeMap::new();
         for (i, entry) in d.body.iter().enumerate() {
             let last = i == last_entry;
             match entry {
                 ast::DialogueEntry::Node(n) => {
+                    let count = members.entry(n.name.as_str()).or_insert(0);
+                    *count += 1;
+                    if *count == GROUP_MEMBERS_MAX + 1 {
+                        self.diags.push(error(
+                            "dialogue-too-large",
+                            format!(
+                                "node group `{}` has more than {GROUP_MEMBERS_MAX} nodes (each pick \
+                                 evaluates them all): split it",
+                                n.name
+                            ),
+                            file,
+                            n.span,
+                        ));
+                    }
+                    if nodes.len() == DIALOGUE_NODES_MAX {
+                        self.diags.push(error(
+                            "dialogue-too-large",
+                            format!(
+                                "`{}` has more than {DIALOGUE_NODES_MAX} nodes: split it into dialogues",
+                                d.name
+                            ),
+                            file,
+                            n.span,
+                        ));
+                    }
                     let cond = n.cond.as_ref().map(|c| self.cond(c, &mut s));
                     let steps = self.steps(&n.steps, &mut s, &dcx, last);
                     nodes.push(hir::Node {
@@ -520,7 +564,10 @@ impl<'a> Resolver<'a> {
                     severity: Severity::Warning,
                     ..error(
                         "missing-line-id",
-                        format!("this line has no id (`@…`): it is `@{path}` until it gets one"),
+                        format!(
+                            "this line has no id (`@…`): it is `@{path}` until it gets one, numbered by \
+                             position (an edit above it renumbers it, and its `once` records with it)"
+                        ),
                         s.file,
                         at,
                     )
@@ -728,10 +775,31 @@ impl<'a> Resolver<'a> {
                         steps: self.steps(&o.steps, s, dcx, false),
                         span: o.span,
                     })
-                    .collect();
+                    .collect::<Vec<hir::ChoiceOption>>();
+                if let Some(extra) = options.iter().filter(|o| o.default).nth(1) {
+                    self.diags.push(error(
+                        "choice-defaults",
+                        "a timeout takes one default: this choice has a second (`default \"…\"` or \
+                         `default:`)"
+                            .to_string(),
+                        s.file,
+                        extra.span,
+                    ));
+                }
                 hir::StepKind::Choice { timeout, options }
             }
-            ast::StepKind::Group(members) => hir::StepKind::Group(
+            ast::StepKind::Group(members) => hir::StepKind::Group({
+                if let Some(m) = members.get(GROUP_MEMBERS_MAX) {
+                    self.diags.push(error(
+                        "dialogue-too-large",
+                        format!(
+                            "a line group has more than {GROUP_MEMBERS_MAX} members (each pick evaluates \
+                             them all): split it"
+                        ),
+                        s.file,
+                        m.span,
+                    ));
+                }
                 members
                     .iter()
                     .map(|m| hir::GroupMember {
@@ -740,8 +808,8 @@ impl<'a> Resolver<'a> {
                         steps: self.steps(&m.steps, s, dcx, false),
                         span: m.span,
                     })
-                    .collect(),
-            ),
+                    .collect()
+            }),
             ast::StepKind::When(c, steps) => {
                 let c = self.cond(c, s);
                 hir::StepKind::When(c, self.steps(steps, s, dcx, false))
@@ -782,7 +850,7 @@ impl<'a> Resolver<'a> {
                         st.span,
                     ));
                 }
-                let callee = self.dialogue_named(name, s);
+                let mut callee = self.dialogue_named(name, s);
                 if callee.is_none() {
                     self.diags.push(error(
                         "jump-target",
@@ -790,6 +858,17 @@ impl<'a> Resolver<'a> {
                         s.file,
                         st.span,
                     ));
+                } else if !scene_like && !callee.is_some_and(|c| self.is_conversation(c)) {
+                    self.diags.push(error(
+                        "detour-target",
+                        format!(
+                            "`detour {name}`: `{name}` is a scene or a bark; a detour runs a conversation \
+                             `(p: Player, npc: Person)` and comes back"
+                        ),
+                        s.file,
+                        st.span,
+                    ));
+                    callee = None;
                 }
                 let mut out = Vec::new();
                 let mut seen = BTreeSet::new();
@@ -867,6 +946,19 @@ impl<'a> Resolver<'a> {
             },
         }?;
         (self.tag(d) == Some(Tag::Dialogue)).then_some(d)
+    }
+
+    /// Whether dialogue `d` is a conversation (`dialogue name(p, npc)`): not a scene, not a bark.
+    fn is_conversation(&self, d: DefId) -> bool {
+        match self
+            .metas
+            .get(d.0 as usize)
+            .and_then(|m| m.item)
+            .map(|i| &i.kind)
+        {
+            Some(ast::ItemKind::Dialogue(d)) => d.params.len() != 1,
+            _ => false,
+        }
     }
 
     fn scene_named(&self, name: &str, s: &Synth) -> Option<DefId> {

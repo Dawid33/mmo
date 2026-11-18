@@ -1,8 +1,9 @@
 //! Read sets (spec §5.11 "Across region boundaries", §5.12 parts): the globals a mirror must carry.
 //!
 //! - The **dialogue read set**: every global read by a dialogue's or scene's synthesised fns (conditions,
-//!   substitutions, `emit` arguments, targets, filters, speakers, `once per` keys) or a stage's transitions,
-//!   and by everything they call, transitively. Only these are mirrored to an NPC's region.
+//!   substitutions, `emit` arguments, targets, filters, speakers, `once per` keys), and by everything they
+//!   call, transitively. Only these are mirrored to an NPC's region. A stage's transitions are not: the home
+//!   runs them on its own state (ruling T44-1).
 //! - Each **part's read set**: the home's globals (the quest's and the program's top-level `let`s, not the
 //!   parts' own) its handlers read, and what they call reads.
 //!
@@ -23,19 +24,16 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The globals the mirrors carry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadSets {
-    /// Read by the dialogues', scenes' and transitions' synthesised fns (and what they call).
+    /// Read by the dialogues' and scenes' synthesised fns (and what they call).
     pub dialogue: BTreeSet<DefId>,
     /// Each part's (by its index in `Quest::parts`): the home's globals (quest and top-level `let`s) its
     /// handlers read.
     pub parts: Vec<BTreeSet<DefId>>,
 }
 
-/// The read sets, and a `mirror-size` warning for each one that is too big.
-pub fn read_sets(krate: &Crate, typed: &Typed) -> (ReadSets, Vec<Diagnostic>) {
-    read_sets_with(krate, typed, &callgraph::facts(krate, typed))
-}
-
-/// [`read_sets`] over the typed call graph `facts` (`callgraph::facts`), computed once by `infer`.
+/// The read sets, and a `mirror-size` warning for each one that is too big, over the typed call graph
+/// `facts` (`callgraph::facts`), computed once by `infer`, which keeps them in `Typed::read_sets` (and
+/// reports the warnings once).
 pub(crate) fn read_sets_with(
     krate: &Crate,
     typed: &Typed,
@@ -51,12 +49,6 @@ pub(crate) fn read_sets_with(
             DefKind::Dialogue(dl) => starts.extend(dl.pure_fns()),
             DefKind::Quest(q) => {
                 uncounted.insert(q.generated.participants);
-                starts.extend(
-                    q.stages
-                        .iter()
-                        .flat_map(|s| &s.transitions)
-                        .map(|(_, f)| *f),
-                );
                 for p in &q.parts {
                     parts.push((p.name.clone(), p.handlers.clone()));
                     part_globals.extend(p.globals.iter().copied());

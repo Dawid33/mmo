@@ -1121,3 +1121,51 @@ fn an_edit_drops_the_old_programs_pending_mirrors() {
         out.join("\n")
     );
 }
+
+/// Review B1 (whole-branch, Task 52): a stage's `@on(Entered)` handler checked only the current stage, so
+/// an `Entered` of another stage still queued after the stage moved on ran it: a `Setup` doing `-> B`
+/// ran B's handler twice (once for A's `Entered`), and a chain A → B → C on one event ran C's twice and
+/// B's never.
+const STALE_ENTERED: &str = r#"quest E:
+    event Go:
+        n: int
+    @on(Setup)
+    fn setup(e):
+        -> B
+    stage A:
+        @on(Entered)
+        fn a(e):
+            print("A entered")
+    stage B:
+        @on(Entered)
+        fn b(e):
+            print(f"B entered for {e.stage}")
+        @on(Go)
+        fn go(e):
+            -> C
+    stage C:
+        @on(Entered)
+        fn c(e):
+            print(f"C entered for {e.stage}")
+            -> D
+    stage D:
+        @on(Entered)
+        fn d(e):
+            print(f"D entered for {e.stage}")
+"#;
+
+#[test]
+fn a_stage_handles_only_its_own_entered() {
+    let mut w = world(STALE_ENTERED, SMITH_PEOPLE, &[]).expect("placed");
+    let out = run(&mut w, "3 event E::Go n=0\n");
+    assert_eq!(
+        out,
+        [
+            "[0] B entered for Stage::B",
+            "[3] C entered for Stage::C",
+            "[3] D entered for Stage::D"
+        ],
+        "{}",
+        out.join("\n")
+    );
+}

@@ -23,12 +23,9 @@ use crate::infer::Typed;
 use quest_vm::host::{HostApi, HostFnKind};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The Phase 10 write checks: `impure-condition`, `stateless-dialogue`, `role-assign`, `part-write`.
-pub fn purity(krate: &Crate, typed: &Typed, host: &HostApi) -> Vec<Diagnostic> {
-    purity_with(krate, typed, host, &callgraph::facts(krate, typed))
-}
-
-/// [`purity`] over the typed call graph `facts` (`callgraph::facts`), computed once by `infer`.
+/// The Phase 10 write checks: `impure-condition`, `stateless-dialogue`, `role-assign`, `part-write`, over
+/// the typed call graph `facts` (`callgraph::facts`), computed once by `infer`, which runs them (and only
+/// it: a second run would report everything twice).
 pub(crate) fn purity_with(
     krate: &Crate,
     typed: &Typed,

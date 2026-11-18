@@ -27,7 +27,7 @@ use super::dialogue::{Lines, stored_text};
 use super::{Emit, Gen};
 use crate::ast::{PartAnchor, Span};
 use crate::diag::Diagnostic;
-use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, Quest, StageIdx};
+use crate::hir::{Arg, DefId, DefKind, EventRef, Expr, ExprKind, Quest, StageIdx};
 use crate::infer::ObjectiveOp;
 use crate::layout::FnKind;
 use crate::ty::{Ty, TyId};
@@ -225,18 +225,6 @@ impl<'a> Gen<'a> {
             }
             objectives.push(list);
         }
-        if let Some(o) = q.repeatable
-            && o.cooldown < 0
-        {
-            self.diags.push(Diagnostic::error(
-                "bad-quest-option",
-                "`cooldown` takes a number of ticks, 0 or more".to_string(),
-                &file,
-                span.line,
-                span.col,
-                span.len,
-            ));
-        }
         let info = QuestInfo {
             name: q.name.clone(),
             roles,
@@ -303,17 +291,40 @@ impl<'a> Emit<'_, 'a, '_> {
 
     // Handlers.
 
-    /// A stage handler's prologue: `if stage != s: return`.
-    pub(super) fn stage_prologue(&mut self, s: u16) {
-        let ok = self.fb.label();
+    /// A stage handler's prologue: `if stage != s: return`; for a handler of the quest's `Entered`
+    /// (`entered`: its event parameter) also `if e.stage != s: return` — an `Entered` of a stage the quest
+    /// already left is still queued when the next stage's handlers are registered.
+    pub(super) fn stage_prologue(&mut self, s: u16, entered: Option<SlotRef>) {
+        let (ok, fail) = (self.fb.label(), self.fb.label());
         let t = self.temp(false);
         let w = self.word(t);
         if self.stage_is(u32::from(s), w) {
+            if let Some(ev) = entered {
+                self.fb.jump(Op::JmpIfNot, w, fail);
+                // `Entered`'s one field, the stage: a field-less variant, an immediate.
+                let f = self.temp(true);
+                let fw = self.word(f);
+                self.fb.emit(Op::GetField, fw, ev, 0u16);
+                self.load_int(w, variant_imm(u32::from(s)));
+                self.fb.emit(Op::EqI, w, fw, w);
+                self.fb.emit(Op::Drop, fw, 0u16, 0u16);
+                self.free(f);
+            }
             self.fb.jump(Op::JmpIf, w, ok);
+            self.fb.bind(fail);
             self.ret_now();
         }
         self.free(t);
         self.fb.bind(ok);
+    }
+
+    /// Whether handler `d` takes the quest's generated `Entered`.
+    pub(super) fn handles_entered(&self, d: DefId) -> bool {
+        let Some((_, q)) = self.quest() else {
+            return false;
+        };
+        matches!(self.def_kind(d), Some(DefKind::Fn(f))
+            if f.handler == Some(EventRef::Script(q.generated.entered)))
     }
 
     /// `-> Stage`: enters it, then returns.
