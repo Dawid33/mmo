@@ -17,8 +17,9 @@
 //! The orphans are in their canonical order (sorted by name, then type text, no pair twice): a save
 //! that breaks it is refused, so equal states have equal saves and hashes.
 //!
-//! [`Vm::load`] checks the envelope and the memory's header (versions, program hash, length, every
-//! region base); it does not parse the scheduler's or the heap's contents. A loaded memory that is
+//! [`Vm::load`] checks the envelope and the memory's header (versions, program hash, length — the
+//! configuration's `mem_bytes` —, every region base); it does not parse the scheduler's or the heap's
+//! contents. A loaded memory that is
 //! malformed there fails at run time like any corrupt memory (`FaultKind::Corrupt`, `Status::Failed`).
 
 use std::hash::Hasher;
@@ -137,8 +138,8 @@ impl Vm {
     /// must be the one it was saved with (`ProgramMismatch`), `cfg.host_api_version` the program's and
     /// `cfg.instance` the instance it was saved as (`Invalid`); `cfg.events` and `cfg.roles` configure it as
     /// in [`Vm::new`]. The roles are checked as `Vm::new` checks them ([`LoadError::Role`]) but not
-    /// installed again (the memory holds them); [`Vm::reset`] installs them.
-    /// `cfg.mem_bytes` and `cfg.epoch` are not used: the memory carries both.
+    /// installed again (the memory holds them); [`Vm::reset`] installs them. The memory must be
+    /// `cfg.mem_bytes` long (`Invalid`); `cfg.epoch` is not used: the memory carries it.
     pub fn load(program: Arc<Program>, cfg: VmConfig, bytes: &[u8]) -> Result<Vm, LoadError> {
         let mut r = Reader { rest: bytes };
         if r.take(SAVE_MAGIC.len()).ok() != Some(&SAVE_MAGIC[..]) {
@@ -181,12 +182,14 @@ impl Vm {
         if !r.rest.is_empty() {
             return Err(LoadError::Invalid("bytes after the save".into()));
         }
-        if !mem_len.is_multiple_of(8) {
-            return Err(LoadError::Invalid(
-                "the memory is not a whole number of words".into(),
-            ));
+        if mem_len != cfg.mem_bytes {
+            return Err(LoadError::Invalid(format!(
+                "the memory is {mem_len} bytes, the configuration's {}",
+                cfg.mem_bytes
+            )));
         }
-        let mem = Mem::from_bytes(mem.to_vec());
+        let mem = Mem::from_bytes(mem.to_vec())
+            .map_err(|_| LoadError::Invalid("the memory is not a whole number of words".into()))?;
         // The magic, `mem_bytes` against the memory's length, and every region base against the plan
         // for the header's static words — which must be the program's.
         let layout = Layout::read_header(&mem)?;

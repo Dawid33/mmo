@@ -31,7 +31,18 @@
 //! so no earlier number moves: `ModF` (41, float `%`) and `StrCmp` (42, string ordering).
 
 /// Version of the instruction set, builtin ids, fuel table and memory layout.
-pub const BYTECODE_VERSION: u32 = 6;
+pub const BYTECODE_VERSION: u32 = 7;
+
+/// `NewList`'s `b`: the elements are heap kinds.
+pub const LIST_REFS: u16 = 1;
+/// `NewDict`'s `b`: bit 0 the keys are heap kinds.
+pub const DICT_KEY_REFS: u16 = 1;
+/// `NewDict`'s `b`: bit 1 the values are heap kinds.
+pub const DICT_VAL_REFS: u16 = 2;
+/// `RefMake`'s `c`: the target is a heap kind.
+pub const REF_TARGET_REF: u16 = 1;
+/// `TracePush`'s `a`: start a new trace (0 appends to it).
+pub const TRACE_NEW: u16 = 1;
 
 macro_rules! numbered {
     ($(#[$m:meta])* $name:ident, $repr:ty, $from:ident, [$($v:ident),* $(,)?]) => {

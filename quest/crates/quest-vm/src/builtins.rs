@@ -277,11 +277,12 @@ impl Vm {
             }
             Builtin::DictKeyAt | Builtin::DictValAt => {
                 let serial = second()? as i64;
-                let (v, r) = if b == Builtin::DictKeyAt {
+                let ((v, words), r) = if b == Builtin::DictKeyAt {
                     (dict::key_at(&self.store, heap, d, serial)?, kr)
                 } else {
                     (dict::val_at(&self.store, heap, d, serial)?, vr)
                 };
+                m.words(words);
                 let v = self.dup_out(v, r)?;
                 self.put(res, v, r)
             }

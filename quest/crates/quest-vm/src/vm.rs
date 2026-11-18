@@ -78,6 +78,17 @@ pub struct Vm {
     pub(crate) pure_eval: bool,
 }
 
+impl std::fmt::Debug for Vm {
+    /// Which instance of which program, and its status; the memory is not shown.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vm")
+            .field("program_hash", &format_args!("{:016x}", self.program_hash))
+            .field("instance", &self.instance)
+            .field("status", &self.status())
+            .finish_non_exhaustive()
+    }
+}
+
 /// What [`Vm::new`] and [`Vm::load`] require of a program: this VM's bytecode version, the host's API
 /// version, and a valid program (one built by hand may have skipped `finish`/`from_bytes`; the
 /// interpreter relies on it).

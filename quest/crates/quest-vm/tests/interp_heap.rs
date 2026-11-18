@@ -879,7 +879,7 @@ fn heap_full_faults() {
     let before = mem_hash(&vm);
     let (kind, _, _) = fault_of(&mut vm, 0);
     assert_eq!(kind, FaultKind::HeapFull);
-    assert!(Layout::read_header(&Mem::from_bytes(vm.mem_bytes().to_vec())).is_ok());
+    assert!(Layout::read_header(&Mem::from_bytes(vm.mem_bytes().to_vec()).expect("words")).is_ok());
     assert!(vm.heap_used_words() > 0, "the heap header still parses");
     returns(&mut vm, 1);
     assert_eq!(vm.slot(frame_slot(&p, 1, 1)), 5, "the VM still runs");

@@ -153,9 +153,9 @@ fn load_state(
         }
         let vm = Vm::load(Arc::clone(&old), cfg.clone(), save).map_err(|e| format!("{e:?}"))?;
         // A refused edit leaves the state file as it is: the run stops before anything is saved.
-        let (vm, report) = vm
-            .migrate(Arc::clone(&program), cfg)
-            .map_err(|e| format!("the edit is refused (the state file is unchanged): {e:?}"))?;
+        let (vm, report) = vm.migrate(Arc::clone(&program), cfg).map_err(|(_, e)| {
+            format!("the edit is refused (the state file is unchanged): {e:?}")
+        })?;
         let label = match (k, names.get(k)) {
             (1.., Some(name)) => format!("{name}: "),
             _ => String::new(),

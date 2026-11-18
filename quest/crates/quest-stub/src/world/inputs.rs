@@ -170,9 +170,17 @@ impl World {
         for (k, inst) in self.core.insts.iter().enumerate() {
             let id = u16::try_from(k).map_err(|_| "too many instances".to_string())?;
             let cfg = vm_config(self.core.mem_bytes, id, self.core.roles.clone());
-            match inst.runner.vm.migrate(Arc::clone(&program), cfg) {
+            // `migrate` consumes the instance it migrates: a copy is migrated, so a later refusal
+            // leaves every instance as it was.
+            let copy = Vm::load(
+                Arc::clone(&self.core.program),
+                cfg.clone(),
+                &inst.runner.vm.save(),
+            )
+            .map_err(|e| format!("the {} cannot be copied for the edit: {e:?}", inst.name))?;
+            match copy.migrate(Arc::clone(&program), cfg) {
                 Ok((vm, _)) => vms.push(vm),
-                Err(e) => return Err(format!("the {} refused the edit: {e:?}", inst.name)),
+                Err((_, e)) => return Err(format!("the {} refused the edit: {e:?}", inst.name)),
             }
         }
         for (inst, vm) in self.core.insts.iter_mut().zip(vms) {

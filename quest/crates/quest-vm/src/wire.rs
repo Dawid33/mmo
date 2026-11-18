@@ -678,8 +678,9 @@ impl ToFrame<'_> {
                 if serial < 0 {
                     return Ok(None);
                 }
-                let k = dict::key_at(st, heap, *v, serial)?;
-                *val = dict::val_at(st, heap, *v, serial)?;
+                // `next` charged the walk to this entry: the two searches below find it again.
+                let (k, _) = dict::key_at(st, heap, *v, serial)?;
+                (*val, _) = dict::val_at(st, heap, *v, serial)?;
                 *pos = serial + 1;
                 Some((*kt, k))
             }

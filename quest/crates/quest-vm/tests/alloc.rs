@@ -284,3 +284,59 @@ proptest! {
         prop_assert_eq!(st.mem.bytes(), &before[..]);
     }
 }
+
+#[test]
+fn address_overflow_is_corrupt() {
+    let (mut st, _) = setup();
+    // A heap whose base lies at the top of the address space: every allocator word is past `u32::MAX`.
+    let top = Heap {
+        base: u32::MAX - 7,
+        end: u32::MAX - 7,
+        script: false,
+    };
+    assert!(matches!(top.used_words(&st), Err(MemError::Corrupt { .. })));
+    assert!(matches!(
+        top.zombie_head(&st),
+        Err(MemError::Corrupt { .. })
+    ));
+    assert!(matches!(
+        top.alloc(&mut st, Kind::Raw, 1),
+        Err(MemError::Corrupt { .. })
+    ));
+    assert!(top.init(&mut st).is_err());
+}
+
+#[test]
+fn set_header_refuses_kind_free() {
+    let (mut st, h) = setup();
+    let p = a(&mut st, &h, Kind::Raw, 3);
+    let mut hd = h.header(&st, p).unwrap();
+    hd.kind = Kind::Free;
+    assert_eq!(
+        h.set_header(&mut st, p, hd),
+        Err(MemError::Corrupt { off: p })
+    );
+    h.free(&mut st, p).unwrap();
+    let mut freed = h.header(&st, p).unwrap();
+    freed.kind = Kind::Raw;
+    assert_eq!(
+        h.set_header(&mut st, p, freed),
+        Err(MemError::Corrupt { off: p }),
+        "a free block is not revived through its header"
+    );
+}
+
+#[test]
+fn hdr_refuses_a_zombie() {
+    use quest_vm::fault::FaultKind;
+    use quest_vm::{object, string};
+    let (mut st, h) = setup();
+    let a = string::new(&mut st, h, "a").unwrap();
+    let b = string::new(&mut st, h, "b").unwrap();
+    object::release(&mut st, h, a).unwrap();
+    object::release(&mut st, h, b).unwrap();
+    // `b` heads the zombie list, `a` ends it (its link is 0).
+    assert_eq!(string::read(&st, h, a), Err(FaultKind::Corrupt));
+    assert_eq!(string::read(&st, h, b), Err(FaultKind::Corrupt));
+    assert_eq!(object::release(&mut st, h, b), Err(FaultKind::Corrupt));
+}

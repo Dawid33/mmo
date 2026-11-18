@@ -15,7 +15,10 @@
 //! count larger than the input runs out of bytes first) and ends with [`Program::validate`]; a program
 //! that validates can be handed to the interpreter.
 
-use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand, Wide};
+use crate::bytecode::{
+    BYTECODE_VERSION, Builtin, DICT_KEY_REFS, DICT_VAL_REFS, Instr, LIST_REFS, Op, Operand,
+    REF_TARGET_REF, TRACE_NEW, Wide,
+};
 use crate::consts::STRUCT_FIELDS_MAX;
 use crate::dialogue::{self, DialogueGraph};
 use crate::hash::Fnv64;
@@ -1257,6 +1260,13 @@ impl Program {
             Op::After if u32::from(ins.b) + 1 >= static_words => {
                 Err("After's value slot is outside the static region".into())
             }
+            // a flag operand holds only the bits the interpreter reads
+            Op::NewList if ins.b & !LIST_REFS != 0 => Err("NewList has unknown flags".into()),
+            Op::NewDict if ins.b & !(DICT_KEY_REFS | DICT_VAL_REFS) != 0 => {
+                Err("NewDict has unknown flags".into())
+            }
+            Op::RefMake if ins.c & !REF_TARGET_REF != 0 => Err("RefMake has unknown flags".into()),
+            Op::TracePush if ins.a & !TRACE_NEW != 0 => Err("TracePush has unknown flags".into()),
             Op::CallBuiltin => match Builtin::from_u16(ins.a).map(Builtin::arity) {
                 Some(n) if u32::from(ins.b) + u32::from(n) > static_words => {
                     Err("CallBuiltin arguments run outside the static region".into())
@@ -1337,12 +1347,14 @@ fn validate_types(t: &TypeTable) -> Result<(), ProgramError> {
         let too_many = match d {
             TypeDesc::Struct { fields, .. } => fields.len() > STRUCT_FIELDS_MAX,
             TypeDesc::Enum { variants, .. } => {
-                variants.iter().any(|v| v.1.len() > STRUCT_FIELDS_MAX)
+                // a variant's tag is a `u16`
+                variants.len() > usize::from(u16::MAX) + 1
+                    || variants.iter().any(|v| v.1.len() > STRUCT_FIELDS_MAX)
             }
             _ => false,
         };
         if too_many {
-            return invalid(format!("type {i} has too many fields"));
+            return invalid(format!("type {i} has too many fields or variants"));
         }
     }
     Ok(())

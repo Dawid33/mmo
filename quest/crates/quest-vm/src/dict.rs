@@ -429,7 +429,7 @@ pub fn next(st: &Store, heap: Heap, d: u64, pos: i64) -> VmResult<(i64, u32)> {
         return Ok((-1, 1));
     };
     let mut p = lower_bound(&dd, st, start)?;
-    let mut work = 32 - dd.used.leading_zeros();
+    let mut work = search_work(&dd);
     while p < dd.used {
         work = work.saturating_add(1);
         if dd.eread(st, p, E_HASH)? != 0 {
@@ -452,16 +452,25 @@ fn live_position(dd: &Dict, st: &Store, serial: i64) -> VmResult<u32> {
     }
 }
 
-/// The raw key of the live entry with this serial (one `next` returned); `Corrupt` if there is none.
-pub fn key_at(st: &Store, heap: Heap, d: u64, serial: i64) -> VmResult<u64> {
-    let dd = open(st, heap, d)?;
-    dd.eread(st, live_position(&dd, st, serial)?, E_KEY)
+/// Positions the binary search for a serial probes, at most (`next` and `key_at` / `val_at` charge it).
+fn search_work(dd: &Dict) -> u32 {
+    32 - dd.used.leading_zeros()
 }
 
-/// The raw value of the live entry with this serial (one `next` returned); `Corrupt` if there is none.
-pub fn val_at(st: &Store, heap: Heap, d: u64, serial: i64) -> VmResult<u64> {
+/// The raw key of the live entry with this serial (one `next` returned), and the work (the search);
+/// `Corrupt` if there is none.
+pub fn key_at(st: &Store, heap: Heap, d: u64, serial: i64) -> VmResult<(u64, u32)> {
     let dd = open(st, heap, d)?;
-    dd.eread(st, live_position(&dd, st, serial)?, E_VAL)
+    let k = dd.eread(st, live_position(&dd, st, serial)?, E_KEY)?;
+    Ok((k, search_work(&dd)))
+}
+
+/// The raw value of the live entry with this serial (one `next` returned), and the work (the search);
+/// `Corrupt` if there is none.
+pub fn val_at(st: &Store, heap: Heap, d: u64, serial: i64) -> VmResult<(u64, u32)> {
+    let dd = open(st, heap, d)?;
+    let v = dd.eread(st, live_position(&dd, st, serial)?, E_VAL)?;
+    Ok((v, search_work(&dd)))
 }
 
 fn collect(st: &mut Store, heap: Heap, d: u64, field: u32) -> VmResult<(u64, u32)> {

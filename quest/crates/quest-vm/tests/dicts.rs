@@ -47,8 +47,8 @@ fn entries(st: &Store, h: Heap, d: u64) -> Vec<(u64, u64)> {
             return out;
         }
         out.push((
-            dict::key_at(st, h, d, p).unwrap(),
-            dict::val_at(st, h, d, p).unwrap(),
+            dict::key_at(st, h, d, p).unwrap().0,
+            dict::val_at(st, h, d, p).unwrap().0,
         ));
         pos = p + 1;
     }
@@ -106,7 +106,7 @@ fn string_keys_compare_by_content() {
     // Overwrite through the other string: the stored key stays, the passed one is released.
     put(&mut st, h, d, k2, 2);
     assert_eq!(dict::len(&st, h, d).unwrap(), 1);
-    assert_eq!(dict::key_at(&st, h, d, 0).unwrap(), k1);
+    assert_eq!(dict::key_at(&st, h, d, 0).unwrap().0, k1);
     assert_eq!(dict::get(&st, h, d, k1).unwrap().0, Some(2));
     let other = str_(&mut st, h, "j");
     assert_eq!(dict::get(&st, h, d, other).unwrap().0, None);
@@ -157,7 +157,7 @@ fn iteration_by_position_sees_appends() {
         if p < 0 {
             break;
         }
-        let k = dict::key_at(&st, h, d, p).unwrap();
+        let k = dict::key_at(&st, h, d, p).unwrap().0;
         seen.push(k);
         if k == 1 {
             put(&mut st, h, d, 2, 2);
@@ -284,12 +284,12 @@ fn clone_is_independent_and_shares_children() {
     put(&mut st, h, c, k2, 0);
     assert_eq!(dict::len(&st, h, c).unwrap(), 2);
     assert_eq!(dict::len(&st, h, d).unwrap(), 1);
-    assert_eq!(dict::key_at(&st, h, c, 0).unwrap(), k);
+    assert_eq!(dict::key_at(&st, h, c, 0).unwrap().0, k);
     release(&mut st, h, c).unwrap();
     reap_all(&mut st, h);
     // The original still owns its children intact.
     assert_eq!(
-        string::read(&st, h, dict::val_at(&st, h, d, 0).unwrap()).unwrap(),
+        string::read(&st, h, dict::val_at(&st, h, d, 0).unwrap().0).unwrap(),
         "v"
     );
     release(&mut st, h, d).unwrap();
@@ -531,7 +531,7 @@ fn a_walk_that_inserts_sees_every_entry_across_a_compaction() {
         if s < 0 {
             break;
         }
-        let k = dict::key_at(&st, h, d, s).unwrap();
+        let k = dict::key_at(&st, h, d, s).unwrap().0;
         seen.push(k);
         if k == 1 {
             // Fills the block (3 -> a compaction on the next insert), then one more triggers it.
@@ -562,7 +562,7 @@ fn a_walk_survives_growth_and_compaction_in_the_middle() {
         if s < 0 {
             break;
         }
-        let k = dict::key_at(&st, h, d, s).unwrap();
+        let k = dict::key_at(&st, h, d, s).unwrap().0;
         seen.push(k);
         // Every few steps append a new key and remove an old one already visited: growth and
         // compaction happen under the walk.
@@ -680,5 +680,148 @@ proptest! {
         prop_assert_eq!(h.used_words(&st).unwrap(), 0);
         st.mem.rollback_to(cp).unwrap();
         prop_assert_eq!(st.mem.bytes(), &initial[..]);
+    }
+}
+
+// ---- through the interpreter -------------------------------------------------------------------------
+
+mod common;
+
+mod run {
+    use std::sync::Arc;
+
+    use super::common::{API, cfg, run_fn};
+    use quest_vm::FaultKind;
+    use quest_vm::asm::{FnBuilder, ProgramBuilder, SlotRef};
+    use quest_vm::program::Program;
+    use quest_vm::vm::{RunEnd, Vm, VmConfig};
+    use quest_vm::{Builtin, Op};
+
+    /// `for i in 0..n { body(i) }` with the counter, limit, one and condition in `ctr`.
+    fn emit_loop(
+        f: &mut FnBuilder,
+        ctr: [SlotRef; 4],
+        n: i16,
+        body: impl Fn(&mut FnBuilder, SlotRef),
+    ) {
+        let [i, lim, one, cond] = ctr;
+        f.emit(Op::LoadSmall, i, 0u16, 0u16);
+        f.emit(Op::LoadSmall, lim, n as u16, 0u16);
+        f.emit(Op::LoadSmall, one, 1u16, 0u16);
+        let (top, done) = (f.label(), f.label());
+        f.bind(top);
+        f.emit(Op::LtI, cond, i, lim);
+        f.jump(Op::JmpIfNot, cond, done);
+        body(f, i);
+        f.emit(Op::AddI, i, i, one);
+        f.jump(Op::Jmp, 0u16, top);
+        f.bind(done);
+    }
+
+    fn big_vm(p: &Arc<Program>) -> Vm {
+        let cfg = VmConfig {
+            mem_bytes: 16 << 20,
+            ..cfg()
+        };
+        Vm::new(p.clone(), cfg).expect("the test program loads")
+    }
+
+    #[test]
+    fn failed_set_key_leaks_nothing() {
+        let mut pb = ProgramBuilder::new(API);
+        let text = pb.string("abcdefgh");
+        let main = pb.declare("main", 0);
+        let set = pb.declare("set", 0);
+        let drop = pb.declare("drop", 0);
+        {
+            // d: a dict of string keys; s: a string of 2^17 words, too large to hash as a key.
+            let mut f = pb.body(main);
+            let (d, s, copy) = (f.local(20), f.local(21), f.local(22));
+            f.emit(Op::NewDict, d, 0b01u16, 0u16);
+            f.emit_t(Op::LoadStr, s, text);
+            let ctr = [f.local(0), f.local(1), f.local(2), f.local(3)];
+            emit_loop(&mut f, ctr, 17, |f, _| {
+                f.emit(Op::Dup, copy, s, 0u16);
+                f.emit(Op::CallBuiltin, Builtin::StrConcat as u16, s, s);
+            });
+            f.emit(Op::Drop, copy, 0u16, 0u16);
+            f.emit(Op::Ret, 0u16, 0u16, 0u16);
+            f.end();
+        }
+        {
+            let mut f = pb.body(set);
+            let m = f.of(main);
+            let v = f.local(0);
+            f.emit(Op::LoadSmall, v, 1u16, 0u16);
+            f.emit(Op::SetKey, m.local(20), m.local(21), v);
+            f.emit(Op::Ret, 0u16, 0u16, 0u16);
+            f.end();
+        }
+        {
+            let mut f = pb.body(drop);
+            let m = f.of(main);
+            f.emit(Op::Drop, m.local(20), 0u16, 0u16);
+            f.emit(Op::Drop, m.local(21), 0u16, 0u16);
+            f.emit(Op::Ret, 0u16, 0u16, 0u16);
+            f.end();
+        }
+        let p = Arc::new(pb.finish().expect("test program"));
+        let mut vm = big_vm(&p);
+        let base = vm.heap_used_words();
+        assert_eq!(run_fn(&mut vm, 0).end, RunEnd::Returned);
+        match run_fn(&mut vm, 1).end {
+            RunEnd::Faulted { kind, .. } => assert_eq!(kind, FaultKind::ValueTooLarge),
+            other => panic!("expected a fault, got {other:?}"),
+        }
+        assert_eq!(run_fn(&mut vm, 2).end, RunEnd::Returned);
+        assert_eq!(
+            vm.heap_used_words(),
+            base,
+            "the key's reference was given back"
+        );
+    }
+
+    /// Fuel of one `DictKeyAt` (serial 0) on a dict of `n` int entries.
+    fn key_at_fuel(n: i16) -> u64 {
+        let mut pb = ProgramBuilder::new(API);
+        let main = pb.declare("main", 0);
+        let at = pb.declare("at", 0);
+        {
+            let mut f = pb.body(main);
+            let d = f.local(20);
+            f.emit(Op::NewDict, d, 0u16, 0u16);
+            let ctr = [f.local(0), f.local(1), f.local(2), f.local(3)];
+            emit_loop(&mut f, ctr, n, |f, i| {
+                f.emit(Op::SetKey, d, i, i);
+            });
+            f.emit(Op::Ret, 0u16, 0u16, 0u16);
+            f.end();
+        }
+        {
+            let mut f = pb.body(at);
+            let m = f.of(main);
+            // the arguments: the dict, then the serial
+            f.emit(Op::LoadSmall, m.local(21), 0u16, 0u16);
+            f.emit(
+                Op::CallBuiltin,
+                Builtin::DictKeyAt as u16,
+                m.local(20),
+                f.local(0),
+            );
+            f.emit(Op::Ret, 0u16, 0u16, 0u16);
+            f.end();
+        }
+        let p = Arc::new(pb.finish().expect("test program"));
+        let mut vm = big_vm(&p);
+        assert_eq!(run_fn(&mut vm, 0).end, RunEnd::Returned);
+        let r = run_fn(&mut vm, 1);
+        assert_eq!(r.end, RunEnd::Returned);
+        r.fuel_used
+    }
+
+    #[test]
+    fn dict_probe_is_charged() {
+        // The binary search for a serial probes about log2(entries) positions.
+        assert!(key_at_fuel(2_000) > key_at_fuel(1));
     }
 }

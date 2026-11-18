@@ -52,11 +52,23 @@ fn word_in_range(off: u32, len: u64) -> bool {
 impl Mem {
     /// Zero-filled; `bytes` is rounded down to a multiple of 8.
     pub fn new(bytes: u32) -> Mem {
-        Mem::from_bytes(vec![0; (bytes - bytes % WORD) as usize])
+        Mem::adopt(vec![0; (bytes - bytes % WORD) as usize])
     }
 
-    /// Adopts `bytes` as the memory, with an empty log.
-    pub fn from_bytes(bytes: Vec<u8>) -> Mem {
+    /// Adopts `bytes` as the memory, with an empty log. A length that is no whole number of words is
+    /// `Unaligned`, one above `u32::MAX` (offsets are `u32`) is `OutOfRange`.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Mem, MemError> {
+        let Ok(len) = u32::try_from(bytes.len()) else {
+            return Err(MemError::OutOfRange { off: u32::MAX });
+        };
+        if !len.is_multiple_of(WORD) {
+            return Err(MemError::Unaligned { off: len });
+        }
+        Ok(Mem::adopt(bytes))
+    }
+
+    /// `bytes`, whole words of at most `u32::MAX` bytes (checked by the callers), with an empty log.
+    fn adopt(bytes: Vec<u8>) -> Mem {
         Mem {
             bytes: bytes.into_boxed_slice(),
             log: VecDeque::new(),
@@ -64,8 +76,10 @@ impl Mem {
         }
     }
 
+    /// The length in bytes: it fits a `u32` (`new`, `from_bytes`).
     pub fn len(&self) -> u32 {
-        self.bytes.len() as u32
+        // `new` and `from_bytes` never build a longer memory.
+        u32::try_from(self.bytes.len()).unwrap_or(u32::MAX)
     }
 
     pub fn is_empty(&self) -> bool {

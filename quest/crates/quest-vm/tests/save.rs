@@ -7,9 +7,11 @@ use std::sync::Arc;
 use common::*;
 use proptest::prelude::*;
 use quest_vm::BYTECODE_VERSION;
+use quest_vm::FaultKind;
 use quest_vm::consts::HEADER_WORDS;
 use quest_vm::host::PromiseId;
-use quest_vm::layout::{H_MEM_BYTES, Layout, LoadError};
+use quest_vm::host::{AbortCause, Report};
+use quest_vm::layout::{H_CURRENT_FN, H_FUEL_DEBT, H_MEM_BYTES, Layout, LoadError};
 use quest_vm::program::Program;
 use quest_vm::vm::{Status, Vm, VmConfig};
 use quest_vm::wire::WireValue;
@@ -241,6 +243,57 @@ fn load_refuses_wrong_length() {
     let at = AT_MEM + H_MEM_BYTES as usize * 8;
     header[at..at + 8].copy_from_slice(&u64::from(MEM / 2).to_le_bytes());
     assert!(invalid(&header), "the header's mem_bytes disagrees");
+}
+
+#[test]
+fn load_checks_mem_bytes() {
+    let p = scenario(SPIN);
+    let save = save_at(&p, 3);
+    let larger = VmConfig {
+        mem_bytes: MEM * 2,
+        ..small_cfg()
+    };
+    assert!(matches!(
+        Vm::load(p.clone(), larger, &save),
+        Err(LoadError::Invalid(_))
+    ));
+    assert!(Vm::load(p, small_cfg(), &save).is_ok());
+}
+
+/// A save made mid-task (tick 1 starts `Ping`, whose spin outlasts its fuel) with header word `w` set to
+/// `v`: it loads, and its next tick fails the instance with a `Corrupt` report.
+fn corrupt_on_tick(w: u32, v: u64) {
+    let p = scenario(SPIN);
+    let mut save = save_at(&p, 1);
+    let at = AT_MEM + w as usize * 8;
+    save[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    let mut vm = Vm::load(p, small_cfg(), &save).expect("the envelope and the layout are intact");
+    let mut host = RecordingHost::default();
+    assert_eq!(vm.tick(2, FUEL, &mut host).status, Status::Failed);
+    assert!(
+        host.reports.iter().any(|r| matches!(
+            r,
+            Report::HandlerAborted {
+                cause: AbortCause::Fault {
+                    kind: FaultKind::Corrupt,
+                    ..
+                },
+                ..
+            }
+        )),
+        "{:?}",
+        host.reports
+    );
+}
+
+#[test]
+fn load_of_absurd_fuel_debt_is_corrupt() {
+    corrupt_on_tick(H_FUEL_DEBT, u64::MAX / 2);
+}
+
+#[test]
+fn load_of_unknown_fn_is_corrupt() {
+    corrupt_on_tick(H_CURRENT_FN, 999);
 }
 
 /// Where a bit flip lands: anywhere, the envelope + header + static slots, the start of the heap, or the

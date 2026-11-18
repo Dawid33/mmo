@@ -25,8 +25,8 @@
 //! made part of a path unique before meeting a step that no longer resolves leaves nothing behind. The
 //! fuel charged stands.
 
-use crate::bytecode::{Instr, Op};
-use crate::consts::ERR_TRACE_MAX;
+use crate::bytecode::{Instr, Op, TRACE_NEW};
+use crate::consts::{ERR_TRACE_MAX, FUEL_DEBT_MAX};
 use crate::fault::FaultKind;
 use crate::fuel::{
     FUEL_AFTER, FUEL_ALLOC, FUEL_AWAIT, FUEL_BUILTIN, FUEL_CALL, FUEL_CANCEL, FUEL_ENQUEUE,
@@ -377,6 +377,11 @@ impl Vm {
     /// run ends.
     pub(crate) fn meter_after_debt(&mut self, fuel: u64) -> Exec<Option<Meter>> {
         let debt = self.header(H_FUEL_DEBT)?;
+        if debt > FUEL_DEBT_MAX {
+            return Err(Fault::corrupt(
+                "the fuel debt is larger than any run leaves",
+            ));
+        }
         if fuel <= debt {
             self.set_header(H_FUEL_DEBT, debt - fuel)?;
             return Ok(None);
@@ -558,7 +563,7 @@ impl Vm {
             }
             Op::Call => return self.call(fn_id, pc, a),
             Op::Ret => return self.ret(fn_id),
-            Op::TracePush => self.trace_push(pc, a == 1)?,
+            Op::TracePush => self.trace_push(pc, a == TRACE_NEW)?,
 
             Op::LoadStr
             | Op::Dup

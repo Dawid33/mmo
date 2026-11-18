@@ -12,7 +12,7 @@ pub const FUEL_HEAP: u64 = 3;
 pub const FUEL_ALLOC: u64 = 5;
 /// Dict key ops (+ key size).
 pub const FUEL_KEY: u64 = 6;
-/// Every builtin (+ size).
+/// Every builtin (+ size; `DictNext`, `DictKeyAt` and `DictValAt` count the positions their search probes).
 pub const FUEL_BUILTIN: u64 = 4;
 /// `CallHost` of a query (+ argument size).
 pub const FUEL_HOST_QUERY: u64 = 10;

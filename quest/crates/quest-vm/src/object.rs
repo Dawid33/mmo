@@ -37,8 +37,9 @@
 //! A reap step pops the head, releases at most `REAP_CHILDREN_MAX` children (they become zombies in turn and
 //! are linked ahead of it), then either frees the block or pushes it back at the head with its advanced
 //! cursor. Everything lives in the flat memory and goes through the heap's write path, so a pause between
-//! two steps, a segment abort and a rollback all see a consistent list. Releasing a pointer that is already
-//! a zombie is not detectable (its link looks like a refcount); a freed block is.
+//! two steps, a segment abort and a rollback all see a consistent list. Using a pointer that is already a
+//! zombie is detected only at the list's head or end (`hdr`): further down, its link looks like a refcount.
+//! A freed block is always detected.
 
 use crate::alloc::{Heap, Kind, ObjHeader};
 use crate::consts::{REAP_CHILDREN_MAX, STRUCT_FIELDS_MAX};
@@ -75,11 +76,13 @@ pub(crate) fn ptr_of(v: u64) -> VmResult<u32> {
     u32::try_from(v).map_err(|_| FaultKind::Corrupt)
 }
 
-/// The pointer and header of a live (not free) object.
+/// The pointer and header of a live object: not free, and not a zombie as far as one can tell — the
+/// head of the zombie list, or one whose count is 0 (the end of the list: a live object has a reference).
+/// A zombie further down the list is not detectable (its link looks like a count, module docs).
 pub(crate) fn hdr(st: &Store, heap: Heap, v: u64) -> VmResult<(u32, ObjHeader)> {
     let p = ptr_of(v)?;
     let h = heap.header(st, p)?;
-    if h.kind == Kind::Free {
+    if h.kind == Kind::Free || h.refcount == 0 || heap.zombie_head(st)? == u64::from(p) {
         return Err(FaultKind::Corrupt);
     }
     Ok((p, h))

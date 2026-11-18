@@ -1322,7 +1322,8 @@ fn quest_start_runs_after_the_initialisers_in_the_home_only() {
     assert_eq!(logged(&hh), [(0, 7), (0, 9), (0, 6), (0, 8), (0, 6)]);
     assert_eq!(logged(&ph), [(0, 7), (0, 8)]);
     // an edit does not start the quest again; its transitions are due (the edit may have changed them)
-    let (mut next, _) = home.migrate(p.clone(), dog_cfg(0)).expect("migrates");
+    let copy = Vm::load(p.clone(), dog_cfg(0), &home.save()).expect("loads");
+    let (mut next, _) = copy.migrate(p.clone(), dog_cfg(0)).expect("migrates");
     let mut nh = RecordingHost::default();
     at(&mut next, &mut nh, 2);
     assert_eq!(logged(&nh), [(0, 6)]);
@@ -1522,7 +1523,8 @@ fn timers_carried_by_an_edit() {
     vm.deliver("Pong", &ping(4)); // id 2, due 7
     at(&mut vm, &mut host, 3);
     // the same program: both timers, ids, due ticks and scopes carried; the serial goes on
-    let (mut next, report) = vm.migrate(p.clone(), cfg()).expect("migrates");
+    let copy = Vm::load(p.clone(), cfg(), &vm.save()).expect("loads");
+    let (mut next, report) = copy.migrate(p.clone(), cfg()).expect("migrates");
     assert_eq!(report.timers_dropped, 0);
     assert_eq!(next.timers(), vm.timers());
     next.deliver("Quiet", &ping(0));
@@ -1724,10 +1726,10 @@ fn load_with_missing_roles_is_refused() {
 fn migrate_keeps_its_instance() {
     let p = owners_program();
     let part = Vm::new(p.clone(), dog_cfg(1)).expect("part");
-    assert!(matches!(
-        part.migrate(p.clone(), dog_cfg(0)),
-        Err(MigrateError::Refused(LoadError::Invalid(_)))
-    ));
+    let part = match part.migrate(p.clone(), dog_cfg(0)) {
+        Err((part, MigrateError::Refused(LoadError::Invalid(_)))) => part,
+        other => panic!("{other:?}"),
+    };
     let (mut next, _) = part.migrate(p.clone(), dog_cfg(1)).expect("migrates");
     let mut host = RecordingHost::default();
     next.deliver("Ping", &ping(5));

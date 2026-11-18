@@ -145,14 +145,17 @@ fn main():
     assert!(r.host.reports.is_empty(), "{:?}", r.host.reports);
     let (before, saved) = (r.vm.hash64(), r.vm.save());
     let edited = program(&format!("{aliased}\nlet c = 1\n"));
+    let Runner { vm, host, now } = r;
+    let (vm, e) = vm.migrate(edited, vm_cfg(1)).expect_err("refused");
     assert_eq!(
-        r.vm.migrate(edited, vm_cfg(1)).err(),
-        Some(MigrateError::GlobalUnreadable {
+        e,
+        MigrateError::GlobalUnreadable {
             name: "b".into(),
             kind: FaultKind::ValueTooLarge,
-        })
+        }
     );
-    assert_eq!((r.vm.hash64(), r.vm.save()), (before, saved));
+    assert_eq!((vm.hash64(), vm.save()), (before, saved));
+    let mut r = Runner { vm, host, now };
     assert!(r.vm.restart_main());
     assert!(matches!(
         r.run_main(FUEL, 10_000),

@@ -33,6 +33,11 @@ pub const ERR_TRACE_MAX: usize = 16;
 /// A request unanswered this long resolves `Timeout`.
 pub const PROMISE_TIMEOUT_TICKS: u64 = 200;
 
+/// The largest fuel debt a run can leave (`H_FUEL_DEBT`): a stored debt above it is corrupt memory. A debt
+/// is what the last charges overshot the budget by: base costs and `ceil(words / 8)` of reported work,
+/// and no work is more than a few passes over a memory of at most 2^29 words.
+pub const FUEL_DEBT_MAX: u64 = 1 << 32;
+
 /// CLI default fuel per tick.
 pub const FUEL_PER_TICK_DEFAULT: u64 = 2_000;
 
@@ -103,6 +108,7 @@ mod tests {
         assert_eq!(TIMERS_MAX, 16);
         assert_eq!(ERR_TRACE_MAX, 16);
         assert_eq!(PROMISE_TIMEOUT_TICKS, 200);
+        assert_eq!(FUEL_DEBT_MAX, 1 << 32);
         assert_eq!(FUEL_PER_TICK_DEFAULT, 2_000);
         assert_eq!(REAP_CHILDREN_MAX, 16);
         assert_eq!(REF_PATH_MAX, 32);

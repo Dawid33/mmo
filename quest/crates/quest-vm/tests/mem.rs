@@ -122,9 +122,35 @@ fn out_of_range_and_unaligned_are_errors() {
 
 #[test]
 fn from_bytes_has_empty_log() {
-    let m = Mem::from_bytes(vec![1; 16]);
+    let m = Mem::from_bytes(vec![1; 16]).expect("whole words");
     assert_eq!(m.log_len(), 0);
     assert_eq!(m.len(), 16);
+}
+
+#[test]
+fn from_bytes_refuses_ragged_length() {
+    assert_eq!(
+        Mem::from_bytes(vec![0; 12]).err(),
+        Some(MemError::Unaligned { off: 12 })
+    );
+    assert!(Mem::from_bytes(vec![0; 8]).is_ok());
+}
+
+/// A memory longer than `u32::MAX` bytes is refused, not truncated by `len`. The zeroed vector is
+/// allocated lazily: its pages are never touched.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn oversized_mem_is_refused() {
+    let len = (1usize << 32) + 8;
+    assert!(Mem::from_bytes(vec![0; len]).is_err());
+}
+
+#[test]
+fn fnv_u64_is_little_endian() {
+    let mut h = Fnv64::default();
+    h.write_u64(0x0102_0304_0506_0708);
+    // FNV-1a 64 of the bytes 08 07 06 05 04 03 02 01, on every target.
+    assert_eq!(h.finish(), 0x0c6d_4496_e178_59d5);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

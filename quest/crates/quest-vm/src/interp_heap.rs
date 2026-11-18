@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use crate::alloc::Kind;
-use crate::bytecode::{Instr, Op};
+use crate::bytecode::{DICT_KEY_REFS, DICT_VAL_REFS, Instr, LIST_REFS, Op};
 use crate::dict;
 use crate::eq::deep_eq;
 use crate::fault::FaultKind;
@@ -34,12 +34,6 @@ use crate::list;
 use crate::object::{check_obj_shape, hdr, incref, make_unique, obj, release};
 use crate::string;
 use crate::vm::Vm;
-
-/// `NewList`'s `b`: the elements are heap kinds.
-const LIST_REFS: u16 = 1;
-/// `NewDict`'s `b`: bit 0 the keys, bit 1 the values are heap kinds.
-const DICT_KEY_REFS: u16 = 1;
-const DICT_VAL_REFS: u16 = 2;
 
 impl Vm {
     /// Writes `v` to `slot`; when the slot is a heap kind (`is_ref`), the value it held is released.
@@ -234,7 +228,17 @@ impl Vm {
                 let (k, v) = (self.rd(b)?, self.rd(c)?);
                 // The dict takes a reference of its own: the key slot is borrowed.
                 let k = self.dup_out(k, kr)?;
-                let (_, words) = dict::set(&mut self.store, heap, d, k, v)?;
+                let words = match dict::set(&mut self.store, heap, d, k, v) {
+                    Ok((_, words)) => words,
+                    Err(e) => {
+                        // Short of `Corrupt` (the instance fails), `set` fails before it stores the
+                        // key: the reference taken for it goes back.
+                        if kr && e != FaultKind::Corrupt {
+                            release(&mut self.store, heap, k)?;
+                        }
+                        return Err(e.into());
+                    }
+                };
                 m.words(words);
                 if vr { self.wt(c, 0) } else { Ok(()) }
             }

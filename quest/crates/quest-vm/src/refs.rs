@@ -46,7 +46,7 @@
 //! key hash and compare on the way.
 
 use crate::alloc::{Heap, Kind, ObjHeader};
-use crate::bytecode::{Instr, Op};
+use crate::bytecode::{Instr, Op, REF_TARGET_REF};
 use crate::consts::REF_PATH_MAX;
 use crate::dict;
 use crate::fault::{FaultKind, VmResult};
@@ -187,7 +187,7 @@ impl Vm {
             Op::RefMake => {
                 let root_ref = match c {
                     0 => 0,
-                    1 => ROOT_REF,
+                    REF_TARGET_REF => ROOT_REF,
                     _ => return Err(Fault::corrupt("bad RefMake flag")),
                 };
                 let p = alloc(&mut self.store, heap, Kind::RefPath, 0)?;

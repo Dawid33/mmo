@@ -353,6 +353,47 @@ fn validate_rejects_type_out_of_range() {
 }
 
 #[test]
+fn validate_rejects_variant_overflow() {
+    // A tag is a `u16`: 65 536 variants fit, one more does not.
+    let enum_of = |n: usize| TypeDesc::Enum {
+        name: "Many".into(),
+        variants: (0..n).map(|i| (format!("V{i}"), vec![])).collect(),
+    };
+    let mut p = base();
+    p.types.0.push(enum_of(usize::from(u16::MAX) + 1));
+    p.validate().unwrap();
+    let mut p = base();
+    p.types.0.push(enum_of(usize::from(u16::MAX) + 2));
+    invalid(&p);
+}
+
+#[test]
+fn validate_rejects_unknown_flags() {
+    let n = base().static_words;
+    let slot = n - 1;
+    for ok in [
+        instr(Op::NewList, slot, 1, 0),
+        instr(Op::NewDict, slot, 3, 0),
+        instr(Op::RefMake, slot, slot, 1),
+        instr(Op::TracePush, 1, 0, 0),
+    ] {
+        let mut p = base();
+        poke(&mut p, 0, ok);
+        p.validate().unwrap_or_else(|e| panic!("{ok:?}: {e:?}"));
+    }
+    for bad in [
+        instr(Op::NewList, slot, 2, 0),
+        instr(Op::NewDict, slot, 4, 0),
+        instr(Op::RefMake, slot, slot, 2),
+        instr(Op::TracePush, 2, 0, 0),
+    ] {
+        let mut p = base();
+        poke(&mut p, 0, bad);
+        invalid(&p);
+    }
+}
+
+#[test]
 fn validate_rejects_builtin_out_of_range() {
     let mut p = base();
     poke(
@@ -815,9 +856,9 @@ fn roundtrip_bytes_identical() {
 }
 
 #[test]
-fn program_v6_roundtrip() {
+fn program_v7_roundtrip() {
     let p = full();
-    assert_eq!(p.bytecode_version, 6);
+    assert_eq!(p.bytecode_version, 7);
     assert_eq!(p.quest.as_ref().map(|q| q.objectives[1].len()), Some(1));
     assert_eq!(p.dialogues.dialogues.len(), 2);
     assert!(p.fns.iter().any(|f| f.sig.is_some()) && p.fns.iter().any(|f| f.sig.is_none()));

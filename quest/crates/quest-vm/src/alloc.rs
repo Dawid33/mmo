@@ -84,6 +84,11 @@ fn block_bytes(class: u8) -> u64 {
     (1u64 << class) * u64::from(WORD)
 }
 
+/// The offset of the word after the one at `off`; past `u32::MAX` is `Corrupt`.
+fn word_after(off: u32) -> Result<u32, MemError> {
+    off.checked_add(WORD).ok_or(MemError::Corrupt { off })
+}
+
 impl Heap {
     /// Writes one word through this heap's path (`ws` for the script heap, `wr` for the inbox).
     pub fn w(&self, st: &mut Store, off: u32, v: u64) -> Result<(), MemError> {
@@ -98,9 +103,12 @@ impl Heap {
         u64::from(self.base) + u64::from(ALLOC_HEADER_WORDS) * u64::from(WORD)
     }
 
-    fn ah(&self, word: u32) -> u32 {
-        // `base + word * 8` is inside the region once `init` checked its size.
-        self.base + word * WORD
+    /// The offset of allocator header word `word`; past `u32::MAX` (a heap no layout plans) is
+    /// `Corrupt`. Range checks are the memory's.
+    fn ah(&self, word: u32) -> Result<u32, MemError> {
+        word.checked_mul(WORD)
+            .and_then(|w| self.base.checked_add(w))
+            .ok_or(MemError::Corrupt { off: self.base })
     }
 
     /// Writes the allocator header: nothing allocated, no free blocks.
@@ -111,44 +119,41 @@ impl Heap {
         if self.first_block() > u64::from(self.end) {
             return Err(MemError::OutOfRange { off: self.base });
         }
-        self.w(st, self.ah(A_TOP), self.first_block())?;
-        self.w(st, self.ah(A_ZOMBIE), 0)?;
-        self.w(st, self.ah(A_USED), 0)?;
+        self.w(st, self.ah(A_TOP)?, self.first_block())?;
+        self.w(st, self.ah(A_ZOMBIE)?, 0)?;
+        self.w(st, self.ah(A_USED)?, 0)?;
         for c in 0..CLASS_SLOTS {
-            self.w(st, self.ah(A_FREE_HEADS + c), 0)?;
+            self.w(st, self.ah(A_FREE_HEADS + c)?, 0)?;
         }
         Ok(())
     }
 
     /// The bump top, checked to lie inside the region.
     fn top(&self, st: &Store) -> Result<u32, MemError> {
-        let t = st.r(self.ah(A_TOP))?;
+        let off = self.ah(A_TOP)?;
+        let t = st.r(off)?;
         if t < self.first_block() || t > u64::from(self.end) || !t.is_multiple_of(u64::from(WORD)) {
-            return Err(MemError::Corrupt {
-                off: self.ah(A_TOP),
-            });
+            return Err(MemError::Corrupt { off });
         }
         Ok(t as u32)
     }
 
     /// Head of the zombie list (an object pointer, 0 = no zombies); the reaper owns its meaning.
     pub fn zombie_head(&self, st: &Store) -> Result<u64, MemError> {
-        st.r(self.ah(A_ZOMBIE))
+        st.r(self.ah(A_ZOMBIE)?)
     }
 
     pub fn set_zombie_head(&self, st: &mut Store, v: u64) -> Result<(), MemError> {
-        self.w(st, self.ah(A_ZOMBIE), v)
+        self.w(st, self.ah(A_ZOMBIE)?, v)
     }
 
     pub fn used_words(&self, st: &Store) -> Result<u32, MemError> {
-        let u = st.r(self.ah(A_USED))?;
-        u32::try_from(u).map_err(|_| MemError::Corrupt {
-            off: self.ah(A_USED),
-        })
+        let off = self.ah(A_USED)?;
+        u32::try_from(st.r(off)?).map_err(|_| MemError::Corrupt { off })
     }
 
     fn set_used(&self, st: &mut Store, v: u64) -> Result<(), MemError> {
-        self.w(st, self.ah(A_USED), v)
+        self.w(st, self.ah(A_USED)?, v)
     }
 
     /// Allocates a block for `payload_words` words: refcount 1, zeroed payload, `len = 0`.
@@ -168,7 +173,7 @@ impl Heap {
         }
         let words = 1u64 << class;
         let used = u64::from(self.used_words(st)?);
-        let head_off = self.ah(A_FREE_HEADS + u32::from(class));
+        let head_off = self.ah(A_FREE_HEADS + u32::from(class))?;
         let head = st.r(head_off)?;
         let ptr = if head != 0 {
             let ptr = self.check_ptr(st, head)?;
@@ -176,7 +181,7 @@ impl Heap {
             if h.kind != Kind::Free || h.class != class {
                 return Err(MemError::Corrupt { off: ptr });
             }
-            let next = st.r(ptr + WORD)?;
+            let next = st.r(word_after(ptr)?)?;
             self.w(st, head_off, next)?;
             ptr
         } else {
@@ -185,7 +190,7 @@ impl Heap {
             if new_top > u64::from(self.end) {
                 return Ok(Err(AllocError));
             }
-            self.w(st, self.ah(A_TOP), new_top)?;
+            self.w(st, self.ah(A_TOP)?, new_top)?;
             top
         };
         self.set_used(st, used + words)?;
@@ -213,19 +218,21 @@ impl Heap {
         let used = u64::from(self.used_words(st)?);
         let words = 1u64 << h.class;
         let used = used.checked_sub(words).ok_or(MemError::Corrupt {
-            off: self.ah(A_USED),
+            off: self.ah(A_USED)?,
         })?;
-        let head_off = self.ah(A_FREE_HEADS + u32::from(h.class));
+        let head_off = self.ah(A_FREE_HEADS + u32::from(h.class))?;
         let head = st.r(head_off)?;
         for i in OBJ_HEADER_WORDS..words {
-            self.w(st, ptr + (i as u32) * WORD, 0)?;
+            let off = u64::from(ptr) + i * u64::from(WORD);
+            let off = u32::try_from(off).map_err(|_| MemError::Corrupt { off: ptr })?;
+            self.w(st, off, 0)?;
         }
         self.w(
             st,
             ptr,
             u64::from(Kind::Free as u8) << 32 | u64::from(h.class) << 40,
         )?;
-        self.w(st, ptr + WORD, head)?;
+        self.w(st, word_after(ptr)?, head)?;
         self.w(st, head_off, u64::from(ptr))?;
         self.set_used(st, used)
     }
@@ -248,7 +255,7 @@ impl Heap {
 
     fn read_header(&self, st: &Store, ptr: u32) -> Result<ObjHeader, MemError> {
         let w0 = st.r(ptr)?;
-        let w1 = st.r(ptr + WORD)?;
+        let w1 = st.r(word_after(ptr)?)?;
         let kind = Kind::from_u8((w0 >> 32) as u8).ok_or(MemError::Corrupt { off: ptr })?;
         let class = (w0 >> 40) as u8;
         let top = u64::from(self.top(st)?);
@@ -272,7 +279,7 @@ impl Heap {
             | u64::from(h.tag) << 48;
         let w1 = u64::from(h.len) | u64::from(h.aux) << 32;
         self.w(st, ptr, w0)?;
-        self.w(st, ptr + WORD, w1)
+        self.w(st, word_after(ptr)?, w1)
     }
 
     pub fn header(&self, st: &Store, ptr: u32) -> Result<ObjHeader, MemError> {
@@ -280,10 +287,11 @@ impl Heap {
         self.read_header(st, p)
     }
 
-    /// Rewrites the header; the block's size class cannot change.
+    /// Rewrites the header of a live block; its size class cannot change, and only `free` makes a block
+    /// `Free` (nor does a free block come back to life here).
     pub fn set_header(&self, st: &mut Store, ptr: u32, h: ObjHeader) -> Result<(), MemError> {
         let old = self.header(st, ptr)?;
-        if old.class != h.class {
+        if old.class != h.class || old.kind == Kind::Free || h.kind == Kind::Free {
             return Err(MemError::Corrupt { off: ptr });
         }
         self.write_header(st, ptr, h)

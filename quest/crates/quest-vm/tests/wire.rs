@@ -654,3 +654,46 @@ fn ownership_helpers_take_values_apart() {
     assert_eq!(WireValue::default().into_pairs(), None);
     assert_eq!(WireValue::default(), WireValue::Unit);
 }
+
+#[test]
+fn failed_from_wire_leaks_nothing() {
+    let t = shop();
+    let (mut st, h) = setup();
+    let before = h.used_words(&st).unwrap();
+    let entry = |k: &str, v: WireValue| (WireValue::Str(s(k)), v);
+    let ints = |n: i64| WireValue::List((0..n).map(WireValue::Int).collect());
+    // A dict whose third value, inside a list, is of the wrong type; one whose third key is.
+    let bad_value = WireValue::Dict(vec![
+        entry("a", ints(3)),
+        entry("b", ints(40)),
+        entry(
+            "c",
+            WireValue::List(vec![WireValue::Int(1), WireValue::Str(s("x"))]),
+        ),
+        entry("d", ints(2)),
+    ]);
+    let bad_key = WireValue::Dict(vec![
+        entry("a", ints(3)),
+        entry("b", ints(40)),
+        (WireValue::Int(7), ints(1)),
+    ]);
+    // A ledger (a struct holding a dict's sibling list) whose list breaks after the owner was built.
+    let bad_ledger = WireValue::Struct {
+        name: s("Ledger"),
+        fields: vec![
+            field("owner", WireValue::Str(s("someone"))),
+            field(
+                "entries",
+                WireValue::List(vec![WireValue::Int(1), WireValue::Unit]),
+            ),
+        ],
+    };
+    for (ty, w) in [(BAG, &bad_value), (BAG, &bad_key), (LEDGER, &bad_ledger)] {
+        assert!(matches!(
+            from_wire(&mut st, h, &t, ty, w),
+            Err(FromWire::WrongType)
+        ));
+        reap_all(&mut st, h);
+        assert_eq!(h.used_words(&st).unwrap(), before, "{w:?}");
+    }
+}

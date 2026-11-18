@@ -5,7 +5,8 @@
 //! instance is read out as self-describing values and a fresh instance of the new program is built from
 //! them, so nothing of the old memory's layout, tables or heap survives. Every step below works on a
 //! copy: the old instance is never changed, so when a migration fails ([`MigrateError`]) the edit is
-//! refused and the block runs on with its old program and state, exactly as it was.
+//! refused and the block runs on with its old program and state, exactly as it was (`migrate` hands it
+//! back). A migration that succeeds consumes the old instance: the new one shares its epoch and serials.
 //! 1. A segment still open (a task out of fuel mid-run) is aborted: its writes are undone as if it
 //!    faulted, and the task does not continue.
 //! 2. Parked tasks are cancelled and every promise record is dropped with the old memory (the fresh
@@ -200,9 +201,26 @@ impl Vm {
     /// A new instance of `new`, the edited script's program, holding this instance's state (the module
     /// docs give the steps), and what happened to each variable. `cfg` configures it as in [`Vm::new`]
     /// and must name this instance (`cfg.instance`; another is `Refused(Invalid)`),
-    /// except that the epoch is this instance's (`cfg.epoch` is not used). Never changes `self`: on an
-    /// error the edit is refused and this instance runs on as it was.
+    /// except that the epoch is this instance's (`cfg.epoch` is not used).
+    ///
+    /// Takes the instance: the new one continues its epoch and promise serials, so the two must never
+    /// both run. On an error the edit is refused and this instance comes back unchanged, to run on as
+    /// it was.
+    // The error carries the instance back, as large as the success: boxing it would only move it.
+    #[allow(clippy::result_large_err)]
     pub fn migrate(
+        self,
+        new: Arc<Program>,
+        cfg: VmConfig,
+    ) -> Result<(Vm, MigrationReport), (Vm, MigrateError)> {
+        match self.migrate_into(new, cfg) {
+            Ok(done) => Ok(done),
+            Err(e) => Err((self, e)),
+        }
+    }
+
+    /// [`Vm::migrate`], reading `self` and never changing it.
+    fn migrate_into(
         &self,
         new: Arc<Program>,
         cfg: VmConfig,
