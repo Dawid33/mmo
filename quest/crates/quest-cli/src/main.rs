@@ -2,14 +2,15 @@
 //! with a quest (or a run given `--talk`, `--script` or `--people`) runs in the stub's `World`
 //! ([`world_run`]); any other in a `Runner`.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use quest_lang::{SourceTree, compile, render};
 use quest_stub::{FailureKind, FailureRule, People, Runner, StubConfig, parse_wire, stub_api};
-use quest_vm::host::{AbortCause, Report};
+use quest_vm::host::{AbortCause, DropReason, Report};
 use quest_vm::wire::WireValue;
 use quest_vm::{Program, Status, Vm, VmConfig};
 
@@ -357,13 +358,27 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<RunOpts, String> 
 }
 
 /// Every `*.qs` under `root`, paths relative to it with `/` separators.
+/// Every `.qs` file under `root`, by its path relative to it. A directory reached a second time (a symlink
+/// back into the tree) is refused: the walk would read the same files again under ever longer names.
 fn read_tree(root: &Path) -> Result<SourceTree, String> {
-    fn walk(root: &Path, dir: &Path, tree: &mut SourceTree) -> Result<(), String> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        seen: &mut BTreeSet<PathBuf>,
+        tree: &mut SourceTree,
+    ) -> Result<(), String> {
+        let real = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if !seen.insert(real) {
+            return Err(format!(
+                "{}: a symlink cycle (this directory is reached twice)",
+                dir.display()
+            ));
+        }
         let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in entries {
             let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
             if path.is_dir() {
-                walk(root, &path, tree)?;
+                walk(root, &path, seen, tree)?;
             } else if path.extension().is_some_and(|e| e == "qs") {
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -378,8 +393,28 @@ fn read_tree(root: &Path) -> Result<SourceTree, String> {
         Ok(())
     }
     let mut tree = SourceTree::default();
-    walk(root, root, &mut tree)?;
+    walk(root, root, &mut BTreeSet::new(), &mut tree)?;
     Ok(tree)
+}
+
+/// Writes the state file through a temporary file beside it, renamed over it: an interrupted write never
+/// leaves a torn state file.
+fn write_state(file: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = format!("{file}.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, file)
+}
+
+/// A dropped event's reason, as the CLI prints it.
+fn drop_text(reason: DropReason) -> &'static str {
+    match reason {
+        DropReason::NoHandler => "no handler takes it",
+        DropReason::UnknownEvent => "no such event",
+        DropReason::WrongShape => "its value does not fit the event",
+        DropReason::InstanceFailed => "the instance failed",
+        DropReason::QueueFull => "the queue is full",
+        DropReason::InboxFull => "the inbox is full",
+    }
 }
 
 fn compile_tree(dir: &str) -> Result<(SourceTree, quest_lang::Compiled), ExitCode> {
@@ -444,7 +479,7 @@ fn print_report(r: &Report) -> bool {
             false
         }
         Report::EventDropped { event, reason } => {
-            eprintln!("error: event {event} dropped ({reason:?})");
+            eprintln!("error: event {event} dropped ({})", drop_text(*reason));
             false
         }
         Report::HandlerAborted { task, cause } => {
@@ -582,7 +617,7 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
         }
     }
     if let Some(file) = &opts.save
-        && let Err(e) = std::fs::write(file, state_file(&program, &[&runner.vm]))
+        && let Err(e) = write_state(file, &state_file(&program, &[&runner.vm]))
     {
         eprintln!("quest: {file}: {e}");
         return ExitCode::from(EXIT_NO_INPUT);

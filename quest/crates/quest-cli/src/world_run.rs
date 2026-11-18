@@ -16,7 +16,7 @@ use quest_vm::{Status, Vm};
 
 use crate::{
     Answer, EXIT_ABORTED, EXIT_NO_INPUT, EXIT_TICK_LIMIT, RunOpts, load_state, parse_answer,
-    print_report, read_tree, role_values, state_file,
+    print_report, read_tree, role_values, state_file, write_state,
 };
 
 /// The tick `--talk` talks at.
@@ -269,7 +269,7 @@ pub(crate) fn run_world(
         let vms: Vec<&Vm> = (0..w.instances())
             .filter_map(|k| w.vm(u16::try_from(k).ok()?))
             .collect();
-        if let Err(e) = std::fs::write(file, state_file(&program, &vms)) {
+        if let Err(e) = write_state(file, &state_file(&program, &vms)) {
             eprintln!("quest: {file}: {e}");
             return Err(ExitCode::from(EXIT_NO_INPUT));
         }

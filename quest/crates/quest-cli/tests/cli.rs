@@ -188,6 +188,40 @@ fn missing_dir_exit_66() {
     assert_eq!(code(&quest(&["run"], &d)), 66);
 }
 
+/// Regression (MVP review, quest-cli): `read_tree` followed a symlink back into the tree, reading the
+/// same files again under ever longer names.
+#[cfg(unix)]
+#[test]
+fn symlink_cycle_is_exit_66() {
+    let d = dir(
+        "symlink-cycle",
+        &[("main.qs", "fn main():\n    print(\"hi\")\n")],
+    );
+    std::os::unix::fs::symlink(".", d.join("again")).unwrap();
+    let o = quest(&["check"], &d);
+    assert_eq!(code(&o), 66, "{}", err(&o));
+    assert!(err(&o).contains("cycle"), "{}", err(&o));
+}
+
+/// Regression (MVP review, quest-cli): a dropped event's reason printed in its `Debug` form.
+#[test]
+fn drop_reason_is_plain_text() {
+    let d = dir(
+        "drop-reason",
+        &[(
+            "main.qs",
+            include_str!("../../../corpus/run/queue_overflow/main.qs"),
+        )],
+    );
+    let o = quest(&["run", "--fuel", "300"], &d);
+    assert!(
+        err(&o).contains("error: event ItemDelivered dropped (the queue is full)"),
+        "{}",
+        err(&o)
+    );
+    assert!(!err(&o).contains("QueueFull"), "{}", err(&o));
+}
+
 #[test]
 fn no_main_exit_1() {
     let d = dir("nomain", &[("main.qs", "fn helper():\n    pass\n")]);
