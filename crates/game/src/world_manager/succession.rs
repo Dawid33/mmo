@@ -500,6 +500,44 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// The hosts a successful directory read did NOT show (Elastic 2b Task 10b): `present` is
+    /// every id of its `hosts` rows, `next_host_id` the `world.next_host_id` read BEFORE them.
+    /// An id below it was issued before the rows were read, so one absent from them was pruned
+    /// (`register_host`'s `prune_hosts`: clean or dead, owning no land, named by no open
+    /// succession) — gone for good, like a dead row no open succession names
+    /// ([`Self::forget_dead_hosts`]), and forgotten the same way ([`Self::forget_host`]: refused
+    /// while the journal still needs it, tried again at the next read). Mirrors the
+    /// coordinator's `forget_absent_hosts`. Kept: this host, an id at or above `next_host_id`
+    /// (registered after the read was issued), and an id a run this host still holds names as
+    /// predecessor, heir or survivor (its `SuccessionDone` comes first — the store may have
+    /// settled and pruned before this host heard of the settle). A failed read calls nothing.
+    pub fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>, next_host_id: u64) {
+        let me = self.ordinal();
+        // Every host this one keeps by id (a peer session, an endpoint, a boot).
+        let known: BTreeSet<HostId> =
+            self.peers.keys().chain(self.peer_endpoints.keys()).chain(self.peer_boots.keys()).copied().collect();
+        let gone: Vec<HostId> = known
+            .into_iter()
+            .filter(|h| *h != me && h.0 < next_host_id && !present.contains(h) && !self.forgotten_hosts.contains(h))
+            .filter(|h| !self.named_by_a_run_here(*h))
+            .collect();
+        for h in gone {
+            match self.forget_host(h) {
+                Ok(()) => log::info!("[server] host {h} has no `hosts` row any more (pruned) and no open succession names it: forgotten"),
+                Err(e) => log::info!("[server] host {h} has no `hosts` row any more (pruned), but it is not forgotten yet: {e}"),
+            }
+        }
+    }
+
+    /// Whether a succession this host still holds names `h`: as the predecessor, heir or a
+    /// survivor of a run ordered here, the predecessor of an adoption, or a survivor whose
+    /// report this heir holds.
+    fn named_by_a_run_here(&self, h: HostId) -> bool {
+        self.successions.values().any(|r| r.order.predecessor == h || r.order.heir == h || r.order.survivors.contains(&h))
+            || self.adoptions.values().any(|a| a.predecessor == h)
+            || self.succession_reports.values().any(|reports| reports.contains_key(&h))
+    }
+
     /// The `hosts` rows a directory read found dead (`dead`, every one of them): noted for the
     /// cut-time check of traffic nobody accounts for ([`Self::dead_seen`]'s rule, `world_cut.rs`).
     pub fn note_dead_rows(&mut self, dead: impl IntoIterator<Item = HostId>) {

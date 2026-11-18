@@ -394,6 +394,10 @@ pub struct MultiRig {
     /// How many times the rig store ran each cut's decision (Elastic 2b Task 5: once, whatever
     /// replicas the world has).
     pub decide_executions: BTreeMap<CutId, u32>,
+    /// Rows the rig store pruned (`register_host`'s `prune_hosts`, Elastic 2b Task 10b): absent
+    /// from every later directory read, below its `next_host_id` (the rig's next id,
+    /// `hosts.len()`), so each reader forgets them ([`game::WorldManager::forget_absent_hosts`]).
+    pub pruned: BTreeSet<HostId>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -523,6 +527,7 @@ impl MultiRig {
                 ended: BTreeSet::new(),
                 coordinator_starts: 0,
                 decide_executions: BTreeMap::new(),
+                pruned: BTreeSet::new(),
             };
         for h in host_ids(keepers) {
             rig.keep(h);
@@ -1414,16 +1419,23 @@ impl MultiRig {
         // Dead rows no open succession names (an ended landless host, a settled predecessor):
         // forgotten before the clean rows are noted, as the server's directory keeper does.
         let open = self.open_successions();
+        // A pruned row is absent: neither dead nor clean, and below the read's next id.
+        let shown = |o: &HostId| !self.pruned.contains(o);
         let gone: Vec<HostId> = host_ids(self.hosts.len() as u32)
+            .filter(shown)
             .filter(|o| self.row_dead(*o))
             .filter(|o| !self.successions.iter().any(|(s, _)| open.contains(&s.id) && s.predecessor == *o))
             .collect();
-        let dead: Vec<HostId> = host_ids(self.hosts.len() as u32).filter(|o| self.row_dead(*o)).collect();
+        let dead: Vec<HostId> = host_ids(self.hosts.len() as u32).filter(shown).filter(|o| self.row_dead(*o)).collect();
+        let present: BTreeSet<HostId> = host_ids(self.hosts.len() as u32).filter(shown).collect();
+        let left: Vec<(HostId, u64)> = left.into_iter().filter(|(o, _)| shown(o)).collect();
+        let next_host_id = self.hosts.len() as u64;
         let m = &mut self.hosts[h.0 as usize].manager;
         m.set_draining(self.draining.clone());
         m.directory_read(rows, live);
         m.note_dead_rows(dead);
         m.forget_dead_hosts(gone);
+        m.forget_absent_hosts(&present, next_host_id);
         m.note_clean_rows(left);
     }
 

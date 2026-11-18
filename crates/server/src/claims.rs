@@ -453,10 +453,10 @@ impl DirectoryRead {
         DirectoryRead { owners: store.owners_later(), hosts: store.hosts_later(), now: store.db_now_ms_later(), got: (None, None, None) }
     }
 
-    /// The read's rows, live hosts and `hosts` rows once all three answered; an error as soon
-    /// as one fails.
+    /// The read's rows, live hosts, `hosts` rows and `world.next_host_id` (read before them)
+    /// once all three answered; an error as soon as one fails.
     #[allow(clippy::type_complexity)]
-    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, Vec<HostRow>), StoreError>> {
+    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, Vec<HostRow>, u64), StoreError>> {
         fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
             if slot.is_none() {
                 match rx.try_recv() {
@@ -474,7 +474,8 @@ impl DirectoryRead {
         match &mut self.got {
             (rows @ Some(_), hosts @ Some(_), Some(now)) => {
                 let live = live_hosts(&hosts.as_ref().expect("matched").rows, *now);
-                Some(Ok((rows.take().expect("matched"), live, hosts.take().expect("matched").rows)))
+                let hosts = hosts.take().expect("matched");
+                Some(Ok((rows.take().expect("matched"), live, hosts.rows, hosts.next_host_id)))
             }
             _ => None,
         }
@@ -532,6 +533,9 @@ pub trait ClaimingManager {
     /// The dead `hosts` rows no open succession names ([`WorldManager::forget_dead_hosts`]).
     /// The tests' fakes keep no peers: nothing to forget.
     fn forget_dead_hosts(&mut self, _dead: Vec<HostId>) {}
+    /// The ids of a read's `hosts` rows and its `next_host_id`: an id below it absent from the
+    /// rows was pruned ([`WorldManager::forget_absent_hosts`]). The tests' fakes keep no peers.
+    fn forget_absent_hosts(&mut self, _present: BTreeSet<HostId>, _next_host_id: u64) {}
     /// Every dead `hosts` row of a read ([`WorldManager::note_dead_rows`]).
     fn note_dead_rows(&mut self, _dead: Vec<HostId>) {}
 }
@@ -542,6 +546,9 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
     }
     fn forget_dead_hosts(&mut self, dead: Vec<HostId>) {
         WorldManager::forget_dead_hosts(self, dead)
+    }
+    fn forget_absent_hosts(&mut self, present: BTreeSet<HostId>, next_host_id: u64) {
+        WorldManager::forget_absent_hosts(self, &present, next_host_id)
     }
     fn note_dead_rows(&mut self, dead: Vec<HostId>) {
         WorldManager::note_dead_rows(self, dead)
@@ -664,7 +671,7 @@ impl DirectoryKeeper {
             if let Some(answer) = read.poll() {
                 self.reading = None;
                 match answer {
-                    Ok((rows, live, hosts)) => {
+                    Ok((rows, live, hosts, next_host_id)) => {
                         manager.set_draining(draining_hosts(&hosts));
                         manager.directory_read(rows, live);
                         // Every dead row is noted (`note_dead_rows`); then those no open
@@ -674,6 +681,12 @@ impl DirectoryKeeper {
                         manager.forget_dead_hosts(
                             hosts.iter().filter(|r| r.state != world_store::HOST_LIVE && !r.succeeding).map(|r| r.id).collect(),
                         );
+                        // Rows that are gone (pruned: clean or dead, owning nothing, named by no
+                        // open succession — Elastic 2b Task 10b): an id below the read's
+                        // `next_host_id` absent from it is forgotten like a dead row, else a
+                        // peer whose dead row was pruned before its forget succeeded is awaited
+                        // for ever (the gate refuses every login).
+                        manager.forget_absent_hosts(hosts.iter().map(|r| r.id).collect(), next_host_id);
                         // Hosts that left in a committed leave cut: one this host missed (it
                         // registered while that cut ran, outside it; or its boot's read of the
                         // clean rows failed) is noted now — the manager skips the known ones.

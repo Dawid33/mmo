@@ -9808,6 +9808,86 @@ fn a_forgotten_host_leaves_no_trace() {
     sweep_hosts("a_forgotten_host_leaves_no_trace", forgotten_leaves_no_trace);
 }
 
+/// Elastic 2b Task 10b (the twin's phase 7): a landless host the gate linked to dies, and its
+/// row is pruned (another host's registration) before any read of the gate showed it dead.
+/// While the gate keeps the peer, every spawn order waits for its sync; a read that does not
+/// show it — its id below the read's `next_host_id` — forgets it, and the gate places logins
+/// again. An id at or above `next_host_id` (registered after the read was issued) is kept.
+fn absent_peer_forgotten(rig: &mut MultiRig) {
+    succession_world(rig);
+    until_committed(rig, 1);
+    let gate = h(0);
+    let x = rig.start("x");
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| {
+            let m = &r.hosts[gate.0 as usize].manager;
+            m.peer_is_reachable(x) && m.peers_synced()
+        }),
+        "the gate synced with the new host (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    rig.kill(x);
+    rig.pruned.insert(x);
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    assert!(!rig.hosts[gate.0 as usize].manager.peers_synced(), "a dead peer the gate still keeps is never synced");
+    // A read issued before `x` registered: absent, but at the read's next id — kept.
+    let before: std::collections::BTreeSet<HostId> = host_ids(x.0 as u32).collect();
+    rig.hosts[gate.0 as usize].manager.forget_absent_hosts(&before, x.0);
+    assert!(!rig.hosts[gate.0 as usize].manager.is_forgotten(x), "an id at the read's next id may have registered after it");
+    // The gate's next read: `x` is absent below its next id — pruned, forgotten.
+    rig.read_directory(gate);
+    let m = &rig.hosts[gate.0 as usize].manager;
+    assert!(m.is_forgotten(x), "the pruned peer is forgotten (seed {}, link delay {})", rig.seed, rig.link_delay);
+    assert_eq!(m.mentions(x), Vec::<&str>::new(), "nothing of it is left");
+    assert!(m.peers_synced(), "the gate awaits nobody's sync any more");
+    assert_eq!(m.peer_state_to_forgotten(), 0, "no state message was owed to it");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_absent_peer_below_the_next_host_id_is_forgotten_and_the_gate_places_again() {
+    sweep_hosts("an_absent_peer_below_the_next_host_id_is_forgotten_and_the_gate_places_again", absent_peer_forgotten);
+}
+
+/// Elastic 2b Task 10b: an absent id that a succession this host still holds names (here the
+/// predecessor, the survivor's run open while the heir's order is held) is kept: the store may
+/// have settled and pruned before this host heard of the settle. Its `SuccessionDone` forgets it.
+fn absent_predecessor_kept_until_the_settle(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let dead = rig.owner(chain[1]);
+    let (heir, survivor) = heir_and_survivor(rig, dead);
+    let survivor = survivor.expect("three hosts");
+    until_committed(rig, 1);
+    rig.kill(dead);
+    let s = rig.run_succession(dead).remove(0);
+    assert!(s.survivors.contains(&survivor), "the survivor holds land");
+    rig.hold_orders(heir, true);
+    assert!(
+        until(rig, SUCCESSION_ROUNDS, |r| r.hosts[survivor.0 as usize].manager.successions().iter().any(|(id, _)| *id == s.id)),
+        "the survivor took its order"
+    );
+    rig.pruned.insert(dead);
+    rig.read_directory(survivor);
+    assert!(!rig.hosts[survivor.0 as usize].manager.is_forgotten(dead), "an open run names it: kept");
+    rig.hold_orders(heir, false);
+    until_settled(rig, &s);
+    assert!(
+        until(rig, SUCCESSION_ROUNDS, |r| r.hosts[survivor.0 as usize].manager.is_forgotten(dead)),
+        "forgotten once the succession is over (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_absent_peer_an_open_succession_names_is_kept_until_the_settle() {
+    sweep("an_absent_peer_an_open_succession_names_is_kept_until_the_settle", 3, 1, HEIR_SWEEP_SEEDS, absent_predecessor_kept_until_the_settle);
+}
+
 /// A message for a forgotten host is never queued, and a state message never vanishes
 /// silently (Task 4 fix round 1): a transfer waits for its super-region's owner like any
 /// transfer whose owner is unreachable; a non-state message is dropped and counted; a

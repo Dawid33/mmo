@@ -2174,6 +2174,48 @@ fn a_crash_looping_pod_beside_a_healthy_host_never_raises_the_generation() {
     t.stop(&db, &dir);
 }
 
+/// Elastic 2b Task 10b (the twin's phase 7): a landless process X starts, the gate (host 0)
+/// links to it and syncs, then X is force-killed. Its row is dead (the coordinator's
+/// `end_landless_host`, done here by hand in the same instant so no read of the gate sees it
+/// dead first) and a new host's registration prunes it (dead, owning nothing). The gate's next
+/// directory read does not show X — its id below the read's `next_host_id` — so the gate
+/// forgets it: it stops waiting for X's sync and a join answers ok (a 200, not the 503 of a
+/// gate awaiting a peer for ever). The world generation never moves.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn a_pruned_landless_peer_is_forgotten_and_the_gate_places_again() {
+    install_props();
+    let Some(db) = PgDb::create("tk_pruned_peer") else { return };
+    let dir = scratch("tk_pruned_peer");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, true);
+    let generation = t.w.store.world_generation().unwrap();
+    let s0 = t.seams[0];
+    let (first, _) = t.player(41, s0);
+    assert!(t.join(&first, 1).0, "a join before anything died is placed");
+    // X: a landless process under a name of its own, linked to both hosts.
+    let x = t.restart(&db, &dir, h(9), 4100);
+    assert!(t.w.claims[x.0 as usize].fence().epochs.is_empty(), "X owns nothing");
+    t.until("the gate synced with X", WAIT, |t| {
+        let m = &t.sim(h(0)).manager;
+        m.peer_is_reachable(x) && m.peers_synced()
+    });
+    t.kill(x);
+    exec(&db, &format!("UPDATE hosts SET state = {}, seen_ms = 0 WHERE id = {}", game::HOST_DEAD, x.0));
+    // Another process registers: X's dead row, owning nothing, is pruned.
+    let y = t.restart(&db, &dir, h(10), 4101);
+    assert_eq!(count(&db, &format!("SELECT COUNT(*) FROM hosts WHERE id = {}", x.0)), 0, "X's row is pruned");
+    t.until("Y attached and every peer of the gate synced", WAIT, |t| {
+        t.sim(y).manager.world_attached() && t.sim(h(0)).manager.peers_synced()
+    });
+    assert!(t.sim(h(0)).manager.is_forgotten(x), "the gate forgot X");
+    let (second, _) = t.player(42, s0);
+    let (ok, at) = t.join(&second, 1);
+    assert!(ok, "a join after X's row was pruned is placed (not refused: the gate awaits no sync of X)");
+    assert_eq!(at, Some(h(0)), "on the host holding the record's region");
+    assert_eq!(t.w.store.world_generation().unwrap(), generation, "the generation never moves");
+    t.stop(&db, &dir);
+}
+
 /// Elastic 2b Task 6 (Review Focus 4): two coordinator replicas over one row — A the ticker (the
 /// lowest id), B beside it, configured alike — and two hosts linked to A. During a world cut A
 /// dies (no stop, no last write); the hosts dial B; two seconds later host 1 dies. B ends A after
