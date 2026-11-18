@@ -1,0 +1,8 @@
+# The pick emits `Bump` at 2: the rest of the batch, and the menu built at 2, still read 0.
+1 talk 1 3
+2 pick 1 1
+# At 3 the handler has run: "While it is nought" is no longer eligible — refused, the menu re-sent.
+3 pick 1 2
+4 pick 1 1
+5 leave 1
+6 done 1

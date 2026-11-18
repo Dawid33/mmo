@@ -1,6 +1,6 @@
 //! Embeds `quest/corpus/{run,fail}/<case>/` into the crate (wasm32 has no filesystem): every `*.qs` file
-//! (paths relative to the case, `/` separators), `expect.txt` and, for a run case, `golden.txt` when it
-//! exists. Cases and files are sorted by name, and the generated code names files relative to
+//! (paths relative to the case, `/` separators), `expect.txt` and, for a run case, `golden.txt`, `people.txt`
+//! and `script.txt` when they exist. Cases and files are sorted by name, and the generated code names files relative to
 //! `CARGO_MANIFEST_DIR`, so the output is the same on every machine.
 
 use std::fmt::Write as _;
@@ -87,12 +87,16 @@ fn cases(manifest: &Path, kind: &str, with_golden: bool) -> String {
             "        expect: {},",
             include(&format!("{base}/expect.txt"))
         );
-        let golden = if with_golden && case.join("golden.txt").is_file() {
-            format!("Some({})", include(&format!("{base}/golden.txt")))
-        } else {
-            "None".to_string()
+        let optional = |file: &str| {
+            if with_golden && case.join(file).is_file() {
+                format!("Some({})", include(&format!("{base}/{file}")))
+            } else {
+                "None".to_string()
+            }
         };
-        let _ = writeln!(code, "        golden: {golden},\n    }},");
+        let _ = writeln!(code, "        golden: {},", optional("golden.txt"));
+        let _ = writeln!(code, "        people: {},", optional("people.txt"));
+        let _ = writeln!(code, "        script: {},\n    }},", optional("script.txt"));
     }
     code
 }

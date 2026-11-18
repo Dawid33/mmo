@@ -1,0 +1,23 @@
+warning[mirror-size] main.qs:9:1: the dialogue read set is 261 words, more than 256: it is mirrored whole on every change, and `dog_name` alone is 257
+output:
+[1] Hal: Have you seen my dog? He ran off toward the hills.
+[1] menu: 1) I'll find him. 2) What does he look like? 3) Is that blood on your sleeve? 4) Goodbye.
+[2] Hal: Brown, one ear up. He answers to Rufus.
+[2] Hal: Have you seen my dog? He ran off toward the hills.
+[2] menu: 1) I'll find him. 2) What does he look like? 3) Is that blood on your sleeve? 4) Goodbye.
+[3] Hal: Chicken. Only chicken.
+[3] Hal: Safe roads.
+[3] end Hal: Finished
+[5] Hal: Have you seen my dog? He ran off toward the hills.
+[5] menu: 1) I'll find him. 2) What does he look like? 3) Goodbye.
+[6] Hal: Bless you. Bring him back before dark.
+[6] Hal: Safe roads.
+[6] end Hal: Finished
+[7] give Bo 1 dog whistle
+[10] Hal: Have you seen my dog? He ran off toward the hills.
+[10] menu: 1) What does he look like? 2) Goodbye.
+[11] Hal: Brown, one ear up. He answers to Rufus.
+[11] Hal: Have you seen my dog? He ran off toward the hills.
+[11] menu: 1) What does he look like? 2) Goodbye.
+[12] Hal: Safe roads.
+[12] end Hal: Finished

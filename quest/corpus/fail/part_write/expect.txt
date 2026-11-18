@@ -1,0 +1,5 @@
+error[part-write]: part `watch` never writes quest state, but this assigns `Q::sightings`: `emit` an event to the quest, and let its handler do it
+  --> main.qs:14:13
+   |
+14 |             sightings = sightings + 1
+   |             ^^^^^^^^^

@@ -1,0 +1,11 @@
+error[impure-condition]: a condition must be pure, but this, through `noisy`, calls the host command `give`: a dialogue changes nothing itself (emit an event, and let a handler do it)
+  --> main.qs:15:18
+   |
+15 |     node hi when noisy(p):
+   |                  ^^^^^^^^
+
+error[impure-condition]: a condition must be pure, but this, through `counting`, assigns `seen`: a dialogue changes nothing itself (emit an event, and let a handler do it)
+  --> main.qs:17:18
+   |
+17 |     node hi when counting():
+   |                  ^^^^^^^^^^

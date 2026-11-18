@@ -1,0 +1,22 @@
+# Bo has neither skill: only "Then I'll be back." — `refused`, so `confront` leaves by `stalled`.
+1 talk 2 4
+2 pick 2 1
+3 pick 2 1
+4 leave 2
+5 done 2
+# Ana walks away mid-haggle: `Left`, exit `confront::done` — `after_talk` ignores it.
+6 talk 1 4
+7 pick 1 1
+8 leave 1
+9 done 1
+# Ana again: her trade skill offers the first option: `agreed`, then `confront::paid` — joined, collected.
+10 talk 1 4
+11 pick 1 1
+12 pick 1 1
+13 leave 1
+14 done 1
+# The lender's topic, now that `collect` is done: the reward.
+15 talk 1 3
+16 pick 1 1
+17 leave 1
+18 done 1

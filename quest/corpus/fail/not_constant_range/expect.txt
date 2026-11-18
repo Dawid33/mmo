@@ -1,0 +1,11 @@
+error[not-constant]: `timeout=` takes an int constant: a literal, or a `let` of one
+ --> main.qs:8:20
+  |
+8 |     choice(timeout=n + 1):
+  |                    ^^^^^
+
+error[not-constant]: `count` takes an int constant of 1 or more, not 0
+  --> main.qs:14:66
+   |
+14 |         objective coins "Collect coins" @q.coins at keeper count 0
+   |                                                                  ^

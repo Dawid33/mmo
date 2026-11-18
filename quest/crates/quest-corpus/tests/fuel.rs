@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use quest_corpus::{CaseConfig, RUN, config_of, trace_of, tree_of};
+use quest_corpus::{CaseConfig, RUN, config_of, is_world, trace_of, tree_of};
 use quest_lang::{SourceTree, compile};
 use quest_stub::{Runner, StubConfig};
 use quest_vm::Status;
@@ -91,9 +91,10 @@ const GENERATED: usize = 8;
 
 #[test]
 fn fuel_equivalence() {
-    // Every corpus case under its own config (promises, latency and failures included)…
+    // Every corpus case under its own config (promises, latency and failures included; the world cases run
+    // several instances and conversations, which this runner-based comparison does not model)…
     let mut bad = Vec::new();
-    for case in RUN {
+    for case in RUN.iter().filter(|c| !is_world(c)) {
         let (tree, cfg) = (tree_of(case), config_of(case));
         bad.extend(differences(case.name, &tree, &cfg, &unlimited(&tree, &cfg)));
     }

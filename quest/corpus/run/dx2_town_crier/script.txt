@@ -1,0 +1,15 @@
+# Ambient: a bark from the crier (the dragon line, score 1, beats "Hear ye"); none from Pim.
+1 event Ambient npc=Person(8)
+1 event Ambient npc=Person(9)
+# Talked to: the greeting walks to the hub; the news detour returns to it; Goodbye returns out.
+200 talk 1 8
+201 pick 1 1
+202 pick 1 2
+203 done 1
+# The dragon slain: the bark and the news change. Walking away at the hub ends it (`Left`).
+210 event DragonSlain by=Player(1)
+212 event Ambient npc=Person(8)
+400 talk 1 8
+401 pick 1 1
+402 leave 1
+403 done 1

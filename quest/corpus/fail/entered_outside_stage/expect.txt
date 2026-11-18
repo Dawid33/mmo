@@ -1,0 +1,5 @@
+error[entered-outside-stage]: `Entered` is delivered when a stage becomes current: handle it inside a `stage`
+  --> main.qs:10:5
+   |
+10 |     @on(Entered)
+   |     ^^^^^^^^^^^^

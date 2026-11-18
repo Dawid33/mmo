@@ -1,0 +1,17 @@
+error[duplicate-def]: `dog` is defined twice in this quest
+ --> main.qs:7:9
+  |
+7 |         objective dog "Find the dog" at dog            # duplicate-def: the objective `dog` shadows the role
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[missing-line-id]: this line has no id (`@…`): it is `@Q.0` until it gets one
+ --> main.qs:7:9
+  |
+7 |         objective dog "Find the dog" at dog            # duplicate-def: the objective `dog` shadows the role
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[entered-outside-stage]: `Entered` is delivered when a stage becomes current: handle it inside a `stage`
+ --> main.qs:8:5
+  |
+8 |     @on(Entered)                                       # entered-outside-stage: whose stage was entered?
+  |     ^^^^^^^^^^^^

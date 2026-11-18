@@ -14,8 +14,8 @@ mod harness;
 pub mod generate;
 
 pub use harness::{
-    CaseConfig, Trace, config_of, diagnostics_of, expect_text_of, golden_of, report_line, trace_of,
-    tree_of,
+    CaseConfig, Trace, config_of, diagnostics_of, expect_text_of, golden_of, is_world, report_line,
+    trace_of, trace_of_tree, tree_of, warning_line,
 };
 
 /// One corpus case, embedded.
@@ -29,6 +29,10 @@ pub struct Case {
     pub expect: &'static str,
     /// `golden.txt` (run cases; `None` until blessed).
     pub golden: Option<&'static str>,
+    /// `people.txt` (run cases): the people a world case's queries read (`quest_stub::parse_people`).
+    pub people: Option<&'static str>,
+    /// `script.txt` (run cases): a world case's inputs by tick (`quest_stub::parse_script`).
+    pub script: Option<&'static str>,
 }
 
 include!(concat!(env!("OUT_DIR"), "/corpus.rs"));

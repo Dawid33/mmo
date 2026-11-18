@@ -1,0 +1,11 @@
+# One greeting (the site's `greet` group: the quest attached a topic, not a greeting) with its own hub; the
+# quest's topic is offered only after that hub returns.
+1 talk 1 5
+2 pick 1 3
+3 pick 1 1
+4 leave 1
+5 done 1
+# The stage moved on: the topic is gone; the site's dialogue is untouched.
+10 talk 1 5
+11 pick 1 3
+12 done 1

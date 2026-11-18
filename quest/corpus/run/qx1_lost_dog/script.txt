@@ -1,0 +1,35 @@
+# Ana: the greeting (`once per p`, score 1) and the menu; the plea; "I'll find him." — the hint and the menu
+# built before the home handled `Accepted` (read-your-emit).
+1 talk 1 3
+2 pick 1 1
+3 pick 1 1
+# The menu was built at 3: picking "About Rufus" now finds `plea` detached (the stage is `Search`); the menu
+# built again is empty (Ana, a participant, is offered no `join_in`), so the conversation ends. (§7's farmer
+# also has the site's own topics, so there the menu is re-sent.)
+4 pick 1 1
+5 leave 1
+6 done 1
+# Bo, later: `Search`'s greeting (`lost_again`), and `join_in` offered to a non-participant.
+7 talk 2 3
+8 pick 2 1
+9 leave 2
+10 done 2
+# Ana spots the dog (the part emits `DogFound`): the stage's timer starts. Nobody feeds him: nightfall.
+12 near 1 7
+# After the bolt: `Search` entered again, `attempts` 2. Ana, a participant, gets the `attempts >= 2` greeting.
+320 talk 1 3
+321 done 1
+# The optional miller's tip, for participants.
+322 talk 1 4
+323 pick 1 1
+324 leave 1
+325 done 1
+# Both spot him in one tick: two `DogFound`s, one finish, one timer. Ana feeds him: he follows her.
+330 near 1 7
+330 near 2 7
+332 event ItemGiven player=Player(1) to=Creature(7) item=Item(kind="meat",count=1) @dog_watch
+# Returning: the reunion topic (the dog near the farmer); both participants get the whistle.
+340 talk 1 3
+341 pick 1 1
+342 leave 1
+343 done 1

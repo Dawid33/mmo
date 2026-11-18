@@ -1,0 +1,23 @@
+warning[missing-line-id]: this line has no id (`@…`): it is `@Q.0` until it gets one
+ --> main.qs:7:9
+  |
+7 |         objective talk "Talk to the keeper" at keeper
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[bad-objective-call]: `Q::S.talk` has no `count`: `progress(n)` counts towards one (`objective … count n`); use `finish()`
+  --> main.qs:10:13
+   |
+10 |             talk.progress(1)
+   |             ^^^^^^^^^^^^^^^^
+
+error[bad-objective-call]: an objective has no method `burn`: its commands are `finish()`, `fail()`, `reset()` and `progress(n)`
+  --> main.qs:11:13
+   |
+11 |             talk.burn()
+   |             ^^^^^^^^^^^
+
+error[bad-objective-call]: `done` is an objective's read: write it without parentheses (`.done`)
+  --> main.qs:12:16
+   |
+12 |             if talk.done():
+   |                ^^^^^^^^^^^

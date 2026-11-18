@@ -1,0 +1,76 @@
+# Run 1. Ana hires on and walks off at once; Bo talks to the watchman and hires on in the same tick, before
+# the home has handled Ana's `Hired`.
+1 talk 1 3
+2 pick 1 1
+3 pick 1 1
+3 leave 1
+3 done 1
+3 talk 2 3
+3 pick 2 1
+3 pick 2 1
+3 leave 2
+3 done 2
+# Ana is down: nobody is left, the attempt failed, the job is open again; Bo takes it.
+12 event PlayerDefeated player=Player(1)
+# Bo takes the banner and clears the hollow (a wolf does not count); he is paid 35.
+15 kill 50 by 2
+20 talk 2 3
+21 pick 2 1
+22 pick 2 1
+23 leave 2
+24 done 2
+30 event BlockUsed player=Player(2) tag="bandit_banner"
+31 kill 20 by 2
+32 kill 21 by 2
+33 kill 22 by 2
+34 kill 23 by 2
+35 kill 24 by 2
+38 talk 2 3
+39 pick 2 1
+40 leave 2
+41 done 2
+# Run 2 (Setup again after the cooldown): Ana alone, 30 silver.
+200 talk 1 3
+201 pick 1 1
+202 pick 1 1
+203 leave 1
+204 done 1
+210 kill 25 by 1
+211 kill 26 by 1
+212 kill 27 by 1
+213 kill 28 by 1
+214 kill 29 by 1
+217 talk 1 3
+218 pick 1 1
+219 leave 1
+220 done 1
+# Run 3.
+400 talk 1 3
+401 pick 1 1
+402 pick 1 1
+403 leave 1
+404 done 1
+410 kill 30 by 1
+411 kill 31 by 1
+412 kill 32 by 1
+413 kill 33 by 1
+414 kill 34 by 1
+417 talk 1 3
+418 pick 1 1
+419 leave 1
+420 done 1
+# Run 4: `times_beaten` is 3 — the veteran camp, and the watchman says so.
+600 talk 1 3
+601 pick 1 1
+602 pick 1 1
+603 leave 1
+604 done 1
+610 kill 35 by 1
+611 kill 36 by 1
+612 kill 37 by 1
+613 kill 38 by 1
+614 kill 39 by 1
+617 talk 1 3
+618 pick 1 1
+619 leave 1
+620 done 1

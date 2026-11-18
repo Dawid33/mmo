@@ -1,0 +1,44 @@
+warning[missing-line-id] main.qs:7:9: this line has no id (`@…`): it is `@timeouts.0` until it gets one
+warning[missing-line-id] main.qs:8:9: this line has no id (`@…`): it is `@timeouts.1` until it gets one
+warning[missing-line-id] main.qs:10:13: this line has no id (`@…`): it is `@timeouts.2` until it gets one
+warning[missing-line-id] main.qs:12:13: this line has no id (`@…`): it is `@timeouts.3` until it gets one
+warning[missing-line-id] main.qs:15:9: this line has no id (`@…`): it is `@timeouts.4` until it gets one
+warning[missing-line-id] main.qs:16:9: this line has no id (`@…`): it is `@timeouts.5` until it gets one
+warning[missing-line-id] main.qs:18:13: this line has no id (`@…`): it is `@timeouts.6` until it gets one
+warning[missing-line-id] main.qs:19:17: this line has no id (`@…`): it is `@timeouts.7` until it gets one
+warning[missing-line-id] main.qs:20:13: this line has no id (`@…`): it is `@timeouts.8` until it gets one
+warning[missing-line-id] main.qs:21:17: this line has no id (`@…`): it is `@timeouts.9` until it gets one
+warning[missing-line-id] main.qs:23:17: this line has no id (`@…`): it is `@timeouts.10` until it gets one
+warning[missing-line-id] main.qs:25:9: this line has no id (`@…`): it is `@timeouts.11` until it gets one
+warning[missing-line-id] main.qs:26:9: this line has no id (`@…`): it is `@timeouts.12` until it gets one
+warning[missing-line-id] main.qs:28:13: this line has no id (`@…`): it is `@timeouts.13` until it gets one
+warning[missing-line-id] main.qs:29:17: this line has no id (`@…`): it is `@timeouts.14` until it gets one
+warning[missing-line-id] main.qs:30:17: this line has no id (`@…`): it is `@timeouts.15` until it gets one
+warning[missing-line-id] main.qs:31:13: this line has no id (`@…`): it is `@timeouts.16` until it gets one
+warning[missing-line-id] main.qs:32:17: this line has no id (`@…`): it is `@timeouts.17` until it gets one
+output:
+[1] Alice: This sample shows off three different ways of having an option be selected automatically after a fixed amount of time.
+[1] Alice: Which would you like to see?
+[1] menu: 1) Hidden fallback option? 2) Default option?
+[2] Alice: In this example if no option is chosen before time runs out we chose the option with the fallback metadata.
+[2] Alice: This differs from the default example as the fallback option is hidden from the user.
+[2] menu: 1) Option 1? 2) Option 2?
+[302] Alice: The hidden fallback option was selected
+[302] end Alice: Finished
+[401] Alice: This sample shows off three different ways of having an option be selected automatically after a fixed amount of time.
+[401] Alice: Which would you like to see?
+[401] menu: 1) Hidden fallback option? 2) Default option?
+[402] Alice: In this example if no option is chosen before time runs out we chose the option with the default metadata.
+[402] Alice: this differs from the fallback example as the default is visible to the user.
+[402] menu: 1) Option 1? 2) Option 2?
+[702] Alice: option 1 was selected
+[702] Alice: this is the default.
+[702] end Alice: Finished
+[801] Alice: This sample shows off three different ways of having an option be selected automatically after a fixed amount of time.
+[801] Alice: Which would you like to see?
+[801] menu: 1) Hidden fallback option? 2) Default option?
+[802] Alice: In this example if no option is chosen before time runs out we chose the option with the fallback metadata.
+[802] Alice: This differs from the default example as the fallback option is hidden from the user.
+[802] menu: 1) Option 1? 2) Option 2?
+[803] Alice: option 2 was selected
+[803] end Alice: Finished

@@ -1,0 +1,14 @@
+# The description jumps back to `start`; the `once` option detours, then the choice's gather says goodbye.
+1 talk 1 3
+2 pick 1 2
+3 pick 1 3
+4 done 1
+# The `once` option is spent (for every player); Bo accepts: the emit, the thanks, the gather.
+5 talk 2 3
+6 pick 2 1
+7 done 2
+# The handler ran: `accepted` is true, so "I'll find him." is gone.
+10 talk 1 3
+11 pick 1 1
+12 pick 1 2
+13 done 1

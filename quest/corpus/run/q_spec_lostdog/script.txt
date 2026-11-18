@@ -1,0 +1,11 @@
+# Ana takes the job: joined, `Search` entered.
+1 talk 1 3
+2 pick 1 1
+3 pick 1 1
+4 leave 1
+5 done 1
+# The part sees her near the dog: `DogFound` to the home, the stage's timer set.
+8 near 1 7
+# Fed: both objectives done → `Returning`; the stage's timer is cancelled with the visit.
+10 event LostDog::DogFed player=Player(1)
+12 event LostDog::DogDelivered player=Player(1)

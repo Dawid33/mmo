@@ -1,17 +1,24 @@
 //! Running a case: its config line, its compile and run against the stub host, and the texts the tests
 //! compare — the output a run case's `expect.txt` holds, the golden trace, the rendered diagnostics.
+//!
+//! A **world case** — a program with a quest, or a case with `people.txt` or `script.txt` — runs in the stub's
+//! `World` as `quest run` does (its home and parts, the people, the config's roles, the script's inputs),
+//! every other case in a `Runner`.
 
 use std::fmt::Write as _;
 use std::hash::Hasher as _;
 use std::sync::Arc;
 
-use quest_lang::{SourceTree, compile, render};
-use quest_stub::{FailureKind, FailureRule, Runner, StubConfig};
+use quest_lang::{Compiled, SourceTree, compile, render};
+use quest_stub::{
+    FailureKind, FailureRule, Input, People, Runner, StubConfig, World, parse_people, parse_script,
+    parse_wire,
+};
 use quest_vm::Fnv64;
+use quest_vm::Status;
 use quest_vm::consts::{FUEL_PER_TICK_DEFAULT, MEM_BYTES_DEFAULT};
 use quest_vm::host::{AbortCause, Report, SrcLoc};
 use quest_vm::wire::WireValue;
-use quest_vm::{Program, Status};
 
 use crate::Case;
 
@@ -31,6 +38,8 @@ pub struct CaseConfig {
     pub failures: Vec<FailureRule>,
     /// The chest's contents.
     pub chest: Vec<(String, i64)>,
+    /// A world case's roles: (name, wire text, read against its people).
+    pub roles: Vec<(String, String)>,
 }
 
 impl Default for CaseConfig {
@@ -41,13 +50,15 @@ impl Default for CaseConfig {
             latency: 0,
             failures: Vec::new(),
             chest: Vec::new(),
+            roles: Vec::new(),
         }
     }
 }
 
 /// The case's config: the first line of its `main.qs` when it starts with `#!`, a comment to the compiler,
-/// e.g. `#! fuel=200 ticks=500 latency=2 fail=Lost@2 chest=gold=3`. Words are `key=value`; `fail` and
-/// `chest` may repeat. `fail=KIND[@NTH][:OP]`: the NTH (default 1) request of OP (`world.get`, …; default
+/// e.g. `#! fuel=200 ticks=500 latency=2 fail=Lost@2 chest=gold=3 role=farmer=Person(3)`. Words are
+/// `key=value`; `fail`, `chest` and `role` may repeat. `role=NAME=WIRE` binds a world case's role (a wire
+/// literal of `quest run --roles`, no spaces). `fail=KIND[@NTH][:OP]`: the NTH (default 1) request of OP (`world.get`, …; default
 /// any) fails with KIND (`Timeout`, `Lost`, `Changed`, `NamespaceGone`). `chest=KIND=N`. Defaults: fuel
 /// [`FUEL_PER_TICK_DEFAULT`], 10 000 ticks, latency 0, no failures, an empty chest.
 ///
@@ -80,6 +91,10 @@ pub fn config_of(case: &Case) -> CaseConfig {
                 let (kind, n) = value.split_once('=').unwrap_or_else(|| bad(word));
                 let n = n.parse::<i64>().unwrap_or_else(|_| bad(word));
                 cfg.chest.push((kind.to_string(), n));
+            }
+            "role" => {
+                let (name, wire) = value.split_once('=').unwrap_or_else(|| bad(word));
+                cfg.roles.push((name.to_string(), wire.to_string()));
             }
             _ => bad(word),
         }
@@ -131,6 +146,14 @@ pub fn diagnostics_of(case: &Case) -> String {
     format!("{head}{}", rendered.join("\n"))
 }
 
+/// Whether the case runs in the stub's `World`: its program has a quest, or it has `people.txt` or
+/// `script.txt` (as `quest run` decides).
+pub fn is_world(case: &Case) -> bool {
+    case.people.is_some()
+        || case.script.is_some()
+        || compile(&tree_of(case), &quest_stub::stub_api()).is_ok_and(|c| c.program.quest.is_some())
+}
+
 /// What one run of a case produced: the golden trace's parts ([`Trace::golden`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trace {
@@ -141,8 +164,18 @@ pub struct Trace {
     /// FNV-1a 64 of the final memory.
     pub mem: u64,
     pub output: Vec<String>,
-    /// One line per report ([`report_line`]).
+    /// One line per report ([`report_line`]; in a world, `[tick] <instance>: ` before it).
     pub reports: Vec<String>,
+    /// The compiler's warnings, one line each ([`warning_line`]).
+    pub warnings: Vec<String>,
+}
+
+/// A warning as one line: `warning[<code>] <file>:<line>:<col>: <message>`.
+pub fn warning_line(d: &quest_lang::Diagnostic) -> String {
+    format!(
+        "warning[{}] {}:{}:{}: {}",
+        d.code, d.file, d.line, d.col, d.message
+    )
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
@@ -155,14 +188,33 @@ fn fnv(bytes: &[u8]) -> u64 {
 /// `main` are asked for at once, then ticks run until the instance is quiescent or failed, or `cfg.ticks`
 /// ticks ran. `Err` is the text that stands in for the trace when the case does not compile or load.
 pub fn trace_of(case: &Case, cfg: &CaseConfig) -> Result<Trace, String> {
-    let tree = tree_of(case);
-    let program: Arc<Program> = match compile(&tree, &quest_stub::stub_api()) {
-        Ok(c) => Arc::new(c.program),
+    trace_of_tree(case, &tree_of(case), cfg)
+}
+
+/// [`trace_of`] with the case's sources replaced by `tree` (its people, script and config kept).
+pub fn trace_of_tree(case: &Case, tree: &SourceTree, cfg: &CaseConfig) -> Result<Trace, String> {
+    let compiled = match compile(tree, &quest_stub::stub_api()) {
+        Ok(c) => c,
         Err(diags) => {
-            let rendered: Vec<String> = diags.iter().map(|d| render(d, &tree)).collect();
+            let rendered: Vec<String> = diags.iter().map(|d| render(d, tree)).collect();
             return Err(format!("compile failed:\n{}\n", rendered.join("\n")));
         }
     };
+    let warnings = compiled.warnings.iter().map(warning_line).collect();
+    let world = case.people.is_some() || case.script.is_some() || compiled.program.quest.is_some();
+    let mut trace = if world {
+        world_trace(case, compiled, cfg)?
+    } else {
+        runner_trace(compiled, cfg)?
+    };
+    trace.warnings = warnings;
+    Ok(trace)
+}
+
+/// A plain program in a `Runner`: the initialisers and `main` asked for at once, then ticks until the
+/// instance is quiescent or failed, or `cfg.ticks` ticks ran.
+fn runner_trace(compiled: Compiled, cfg: &CaseConfig) -> Result<Trace, String> {
+    let program = Arc::new(compiled.program);
     let bytecode = fnv(&program.to_bytes());
     let stub = StubConfig {
         latency: cfg.latency,
@@ -188,6 +240,108 @@ pub fn trace_of(case: &Case, cfg: &CaseConfig) -> Result<Trace, String> {
         mem: fnv(runner.vm.mem_bytes()),
         output: std::mem::take(&mut runner.host.output),
         reports: runner.host.reports.iter().map(report_line).collect(),
+        warnings: Vec::new(),
+    })
+}
+
+/// The case's sources under `dir/` as a tree of their own (the target of a script's `edit <dir>`).
+fn subtree(case: &Case, dir: &str) -> SourceTree {
+    let prefix = format!("{dir}/");
+    SourceTree {
+        files: case
+            .files
+            .iter()
+            .filter_map(|(path, text)| {
+                Some((path.strip_prefix(&prefix)?.to_string(), text.to_string()))
+            })
+            .collect(),
+    }
+}
+
+/// A world case as `quest run` runs it: placed with the case's people and the config's roles, `main` (if
+/// any) asked for in the home, then per tick the script's inputs of that tick and one `World::step`, until
+/// the script is used up and the world is quiescent, or `cfg.ticks` ticks ran. A tick's fuel is the sum over
+/// the instances, its hash `World::hash64`, the memory hash over every instance's memory in id order.
+fn world_trace(case: &Case, compiled: Compiled, cfg: &CaseConfig) -> Result<Trace, String> {
+    let people: People = match case.people {
+        Some(text) => parse_people(text).map_err(|e| format!("people.txt: {e}\n"))?,
+        None => People::default(),
+    };
+    let script: Vec<(u64, Input)> = match case.script {
+        Some(text) => parse_script(text).map_err(|e| format!("script.txt: {e}\n"))?,
+        None => Vec::new(),
+    };
+    let mut roles = Vec::new();
+    for (name, wire) in &cfg.roles {
+        let v = parse_wire(wire, &people).map_err(|e| format!("role {name}: {e}\n"))?;
+        roles.push((name.clone(), v));
+    }
+    let program = Arc::new(compiled.program);
+    let bytecode = fnv(&program.to_bytes());
+    let stub = StubConfig {
+        latency: cfg.latency,
+        failures: cfg.failures.clone(),
+        chest: cfg.chest.clone(),
+        ..StubConfig::default()
+    };
+    let mut w = World::new(
+        Arc::clone(&program),
+        people,
+        roles,
+        stub,
+        cfg.fuel,
+        MEM_BYTES_DEFAULT,
+    )
+    .map_err(|e| format!("placement refused: {e}\n"))?;
+    w.set_lines(compiled.lines);
+    let files = *case;
+    w.set_edit(Box::new(move |dir: &str| {
+        let tree = subtree(&files, dir);
+        match compile(&tree, &quest_stub::stub_api()) {
+            Ok(c) => Ok((Arc::new(c.program), c.lines)),
+            Err(diags) => {
+                let text: Vec<String> = diags.iter().map(|d| render(d, &tree)).collect();
+                Err(text.join("\n"))
+            }
+        }
+    }));
+    let mut names = vec!["home".to_string()];
+    if let Some(q) = &program.quest {
+        names.extend(q.parts.iter().map(|p| p.name.clone()));
+    }
+    w.start_main();
+    let (mut ticks, mut reports, mut next) = (Vec::new(), Vec::new(), 0);
+    for _ in 0..cfg.ticks {
+        let now = w.now();
+        let k = script[next..].iter().take_while(|(t, _)| *t <= now).count();
+        let inputs: Vec<Input> = script[next..next + k]
+            .iter()
+            .map(|(_, i)| i.clone())
+            .collect();
+        next += k;
+        let step = w.step(&inputs);
+        ticks.push((step.tick, step.fuel.iter().sum(), w.hash64()));
+        for (i, r) in &step.reports {
+            let who = names.get(usize::from(*i)).map_or("?", String::as_str);
+            reports.push(format!("[{}] {who}: {}", step.tick, report_line(r)));
+        }
+        if next == script.len() && w.quiescent() {
+            break;
+        }
+    }
+    let mut h = Fnv64::default();
+    for k in 0..w.instances() {
+        if let Some(vm) = u16::try_from(k).ok().and_then(|k| w.vm(k)) {
+            h.write(vm.mem_bytes());
+        }
+    }
+    Ok(Trace {
+        bytecode,
+        ticks,
+        mem: h.finish(),
+        output: w.output().to_vec(),
+        reports,
+        warnings: Vec::new(),
     })
 }
 
@@ -283,12 +437,20 @@ fn output_text(out: &mut String, run: &Trace, always_reports: bool) {
     }
 }
 
-/// What a run case's `expect.txt` holds: one line per line of output, then — only when the run reported
-/// something — a line `reports:` and one line per report (the golden's report lines).
+/// What a run case's `expect.txt` holds: the compiler's warnings ([`warning_line`]) and — when there are any —
+/// a line `output:`; one line per line of output; then — only when the run reported something — a line
+/// `reports:` and one line per report (the golden's report lines).
 pub fn expect_text_of(case: &Case) -> String {
     match run(case) {
         Ok(r) => {
             let mut out = String::new();
+            for w in &r.warnings {
+                out.push_str(w);
+                out.push('\n');
+            }
+            if !r.warnings.is_empty() {
+                out.push_str("output:\n");
+            }
             output_text(&mut out, &r, false);
             out
         }

@@ -1,0 +1,41 @@
+warning[missing-line-id] main.qs:18:9: this line has no id (`@…`): it is `@OldDebt.0` until it gets one
+warning[missing-line-id] main.qs:20:62: this line has no id (`@…`): it is `@OldDebt.confront.0` until it gets one
+warning[missing-line-id] main.qs:21:13: this line has no id (`@…`): it is `@OldDebt.confront.1` until it gets one
+warning[missing-line-id] main.qs:24:21: this line has no id (`@…`): it is `@OldDebt.confront.2` until it gets one
+warning[missing-line-id] main.qs:27:21: this line has no id (`@…`): it is `@OldDebt.confront.3` until it gets one
+warning[missing-line-id] main.qs:30:60: this line has no id (`@…`): it is `@OldDebt.thanks.0` until it gets one
+warning[missing-line-id] main.qs:31:13: this line has no id (`@…`): it is `@OldDebt.thanks.1` until it gets one
+warning[missing-line-id] trade/haggle.qs:4:5: this line has no id (`@…`): it is `@trade.haggle.haggle.0` until it gets one
+warning[missing-line-id] trade/haggle.qs:6:9: this line has no id (`@…`): it is `@trade.haggle.haggle.1` until it gets one
+warning[missing-line-id] trade/haggle.qs:7:13: this line has no id (`@…`): it is `@trade.haggle.haggle.2` until it gets one
+warning[missing-line-id] trade/haggle.qs:9:9: this line has no id (`@…`): it is `@trade.haggle.haggle.3` until it gets one
+warning[missing-line-id] trade/haggle.qs:10:13: this line has no id (`@…`): it is `@trade.haggle.haggle.4` until it gets one
+warning[missing-line-id] trade/haggle.qs:12:9: this line has no id (`@…`): it is `@trade.haggle.haggle.5` until it gets one
+output:
+[1] menu: 1) Lena sent me
+[2] Dov: Oh. Them.
+[2] Dov: Times are hard. You know how it is.
+[2] menu: 1) Then I'll be back.
+[3] Dov: Come back when you're less... you.
+[3] menu: 1) Lena sent me
+[4] end Dov: Left
+[6] menu: 1) Lena sent me
+[7] Dov: Oh. Them.
+[7] Dov: Times are hard. You know how it is.
+[7] menu: 1) Half now, half at harvest? 2) Then I'll be back.
+[8] end Dov: Left
+[10] menu: 1) Lena sent me
+[11] Dov: Oh. Them.
+[11] Dov: Times are hard. You know how it is.
+[11] menu: 1) Half now, half at harvest? 2) Then I'll be back.
+[12] Dov: ...Half now. Fine.
+[12] Dov: Here. Tell them we're square.
+[12] menu: 1) Lena sent me
+[13] joined Ana
+[13] end Dov: Left
+[15] menu: 1) About the debt
+[16] Lena: You got it? Then here's your cut.
+[16] menu: 1) About the debt
+[17] give Ana 10 silver
+[17] completed Ana
+[17] end Lena: Left

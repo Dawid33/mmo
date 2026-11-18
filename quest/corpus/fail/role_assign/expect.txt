@@ -1,0 +1,5 @@
+error[role-assign]: `role.keeper` is read-only: roles never re-bind, and the stage, the participants and the objectives change only through `-> Stage`, the builtins (`join`, `leave`, …) and an objective's commands
+ --> main.qs:8:13
+  |
+8 |             keeper = Person(id=9)
+  |             ^^^^^^

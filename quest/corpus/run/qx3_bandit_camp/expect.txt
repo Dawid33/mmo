@@ -1,0 +1,83 @@
+warning[mirror-size] main.qs:21:5: the dialogue read set is 269 words, more than 256: it is mirrored whole on every change, and `BanditCamp::paid` alone is 257
+warning[missing-line-id] main.qs:40:57: this line has no id (`@…`): it is `@BanditCamp.hire.0` until it gets one
+warning[missing-line-id] main.qs:42:17: this line has no id (`@…`): it is `@BanditCamp.hire.1` until it gets one
+warning[missing-line-id] main.qs:43:13: this line has no id (`@…`): it is `@BanditCamp.hire.2` until it gets one
+warning[missing-line-id] main.qs:45:17: this line has no id (`@…`): it is `@BanditCamp.hire.3` until it gets one
+warning[missing-line-id] main.qs:47:17: this line has no id (`@…`): it is `@BanditCamp.hire.4` until it gets one
+warning[missing-line-id] main.qs:55:9: this line has no id (`@…`): it is `@BanditCamp.0` until it gets one
+warning[missing-line-id] main.qs:56:9: this line has no id (`@…`): it is `@BanditCamp.1` until it gets one
+warning[missing-line-id] main.qs:76:56: this line has no id (`@…`): it is `@BanditCamp.pay.0` until it gets one
+warning[missing-line-id] main.qs:77:13: this line has no id (`@…`): it is `@BanditCamp.pay.1` until it gets one
+warning[missing-line-id] main.qs:79:17: this line has no id (`@…`): it is `@BanditCamp.pay.2` until it gets one
+output:
+[1] place bandit_camp at 9
+[1] menu: 1) Any work going?
+[2] Wulf: Bandits in the hollow. Clear them out and the village pays thirty silver.
+[2] menu: 1) Consider it done. 2) Not today.
+[3] menu: 1) Any work going?
+[3] end Wulf: Left
+[3] menu: 1) Any work going?
+[3] Wulf: Bandits in the hollow. Clear them out and the village pays thirty silver.
+[3] menu: 1) Consider it done. 2) Not today.
+[3] menu: 1) Any work going?
+[3] end Wulf: Left
+[4] joined Ana
+[12] left Ana
+[20] menu: 1) Any work going?
+[21] Wulf: Bandits in the hollow. Clear them out and the village pays thirty silver.
+[21] menu: 1) Consider it done. 2) Not today.
+[22] menu: 1) Any work going?
+[23] joined Bo
+[23] end Wulf: Left
+[38] menu: 1) The hollow is clear.
+[39] Wulf: Good work. Thirty, as promised.
+[39] Wulf: And the banner? The reeve will want that. Five more.
+[39] menu: 1) The hollow is clear.
+[40] give Bo 35 silver
+[40] end Wulf: Left
+[41] completed Bo
+[41] reaped
+[142] place bandit_camp at 9
+[200] menu: 1) Any work going?
+[201] Wulf: Bandits in the hollow. Clear them out and the village pays thirty silver.
+[201] menu: 1) Consider it done. 2) Not today.
+[202] menu: 1) Any work going?
+[203] joined Ana
+[203] end Wulf: Left
+[217] menu: 1) The hollow is clear.
+[218] Wulf: Good work. Thirty, as promised.
+[218] menu: 1) The hollow is clear.
+[219] give Ana 30 silver
+[219] end Wulf: Left
+[220] completed Ana
+[220] reaped
+[321] place bandit_camp at 9
+[400] menu: 1) Any work going?
+[401] Wulf: Bandits in the hollow. Clear them out and the village pays thirty silver.
+[401] menu: 1) Consider it done. 2) Not today.
+[402] menu: 1) Any work going?
+[403] joined Ana
+[403] end Wulf: Left
+[417] menu: 1) The hollow is clear.
+[418] Wulf: Good work. Thirty, as promised.
+[418] menu: 1) The hollow is clear.
+[419] give Ana 30 silver
+[419] end Wulf: Left
+[420] completed Ana
+[420] reaped
+[521] place bandit_camp_veteran at 9
+[600] menu: 1) Any work going?
+[601] Wulf: Them again. Better blades this time, I hear.
+[601] Wulf: Bandits in the hollow. Clear them out and the village pays thirty silver.
+[601] menu: 1) Consider it done. 2) Not today.
+[602] menu: 1) Any work going?
+[603] joined Ana
+[603] end Wulf: Left
+[617] menu: 1) The hollow is clear.
+[618] Wulf: Good work. Thirty, as promised.
+[618] menu: 1) The hollow is clear.
+[619] give Ana 30 silver
+[619] end Wulf: Left
+[620] completed Ana
+[620] reaped
+[721] place bandit_camp_veteran at 9

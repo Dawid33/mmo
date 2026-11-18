@@ -1,0 +1,5 @@
+error[bad-quest-option]: a quest's options are named: `cooldown=…`, `exclusive=…`, `once_per_player=…`
+ --> main.qs:3:45
+  |
+3 | repeatable quest Again(cooldown=10, forever=true):
+  |                                             ^^^^

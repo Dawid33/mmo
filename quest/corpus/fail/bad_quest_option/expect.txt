@@ -1,0 +1,5 @@
+error[bad-quest-option]: options belong to a `repeatable quest`; a one-off quest takes none
+ --> main.qs:3:21
+  |
+3 | quest Once(cooldown=10):
+  |                     ^^

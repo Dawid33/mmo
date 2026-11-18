@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use quest_corpus::{CaseConfig, RUN, config_of, golden_of, report_line, tree_of};
+use quest_corpus::{CaseConfig, RUN, config_of, golden_of, is_world, report_line, tree_of};
 use quest_lang::compile;
 use quest_stub::{Runner, StubConfig};
 use quest_vm::consts::MEM_BYTES_DEFAULT;
@@ -91,7 +91,8 @@ fn resumed_differs(program: &Arc<Program>, cfg: &CaseConfig, at: u64) -> Option<
 #[test]
 fn save_load_at_every_tick() {
     let mut bad = Vec::new();
-    for case in RUN {
+    // A world case's instances are saved and loaded by `quest run --save/--load`, not by this runner.
+    for case in RUN.iter().filter(|c| !is_world(c)) {
         // The uninterrupted run is the golden one.
         let golden = golden_of(case);
         assert_eq!(Some(golden.as_str()), case.golden, "{}: golden", case.name);

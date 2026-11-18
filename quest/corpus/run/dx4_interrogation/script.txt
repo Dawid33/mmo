@@ -1,0 +1,16 @@
+# Bob before anything happened.
+1 talk 1 4
+2 done 1
+# Alice: her special opening (once), then the plain one, which emits Advance(Started).
+3 talk 1 3
+4 done 1
+5 talk 1 3
+6 done 1
+# Started: the interrogation, the Mansion line of the group; it emits Advance(Complete).
+7 talk 1 3
+8 done 1
+# Complete: Alice's thanks; Bob's confession, the Mansion line (score 1) over the unconditional one.
+9 talk 1 3
+10 done 1
+11 talk 1 4
+12 done 1

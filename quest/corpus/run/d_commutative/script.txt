@@ -1,0 +1,11 @@
+# The `once per p` greeting (score 1) beats the plain one; the menu: the priority-1 filter topic, then the
+# priority-0 topics by qualified name (`a::rooms`, `b::ale`, `c::news` once attached).
+1 event c::Open npc=Person(5)
+3 talk 1 5
+4 pick 1 3
+5 leave 1
+6 done 1
+# Ana again: the plain greeting.
+7 talk 1 5
+8 leave 1
+9 done 1

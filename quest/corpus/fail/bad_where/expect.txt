@@ -1,0 +1,6 @@
+error[bad-where]: a role's `where` is a query the coordinator evaluates: `wealthy` is a script `fn`; only the host's facts are called here
+ --> main.qs:9:30
+  |
+9 |     role buyer: Person where wealthy(buyer)            # bad-where: a script fn is not a fact query
+  |                              ^^^^^^^^^^^^^^
+  = note: it is an `and` of atoms: a fact compared with a constant, `x.f in [A, B]`, a `bool` fact, a relation between roles, `not atom`, or an `or` of atoms about one role

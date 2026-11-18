@@ -1,0 +1,24 @@
+warning[mirror-size]: the dialogue read set is 257 words, more than 256: it is mirrored whole on every change, and `rumour` alone is 257
+ --> main.qs:4:1
+  |
+4 | let rumour = "wolves"                                  # a global in a package with no quest
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: a `str`, `list` or `dict` counts as unbounded: read a smaller value (a count, a flag) where a condition needs it
+
+warning[missing-line-id]: this line has no id (`@…`): it is `@gossip.0` until it gets one
+  --> main.qs:10:5
+   |
+10 |     npc: f"They say {rumour}."                         # stateless-dialogue: reads a script global
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[stateless-dialogue]: `gossip` is package-level content (declared outside any quest): it reads no script global, but this reads `rumour`
+  --> main.qs:10:22
+   |
+10 |     npc: f"They say {rumour}."                         # stateless-dialogue: reads a script global
+   |                      ^^^^^^
+
+error[stateless-dialogue]: `gossip` is package-level content (declared outside any quest): no script instance receives an `emit`
+  --> main.qs:11:5
+   |
+11 |     emit Gossiped(player=p)                            # stateless-dialogue: no instance to emit to
+   |     ^^^^^^^^^^^^^^^^^^^^^^^

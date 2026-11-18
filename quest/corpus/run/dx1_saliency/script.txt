@@ -1,0 +1,39 @@
+# Monday morning. Alice: the Monday storylet, whatever the time.
+1 talk 1 3
+2 done 1
+# Barry, three times: the three morning nodes in turn (least recently used).
+3 talk 1 4
+4 done 1
+5 talk 1 4
+6 done 1
+7 talk 1 4
+8 done 1
+# Liz: her `once` node (score 1) once for the whole world — Ana gets it, Bo does not.
+9 talk 1 5
+10 done 1
+11 talk 2 5
+12 done 2
+13 talk 1 5
+14 done 1
+# George, Monday morning: the two score-1 members in turn.
+15 talk 1 6
+16 done 1
+17 talk 1 6
+18 done 1
+# Tuesday evening: Alice's two evening nodes in turn; Barry's evening nodes.
+19 event Clock day=Day::Tuesday time=TimeOfDay::Evening
+21 talk 1 3
+22 done 1
+23 talk 1 3
+24 done 1
+25 talk 1 4
+26 done 1
+# Wednesday evening: Alice's `once if` node (score 3) once, then the plain one (score 2); George's member
+# with steps (score 2).
+27 event Clock day=Day::Wednesday time=TimeOfDay::Evening
+29 talk 1 3
+30 done 1
+31 talk 2 3
+32 done 2
+33 talk 1 6
+34 done 1

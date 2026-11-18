@@ -1,0 +1,17 @@
+error[scene-follow-up]: `-> trio` plays a follow-up scene: it must be the scene's last step
+ --> main.qs:6:5
+  |
+6 |     -> trio
+  |     ^^^^^^^
+
+error[scene-follow-up]: `-> trio`: `trio` has a cast of 3, this scene of 2; a follow-up takes the same cast by position
+ --> main.qs:6:5
+  |
+6 |     -> trio
+  |     ^^^^^^^
+
+error[scene-follow-up]: `-> trio`: `trio` has a cast of 3, this scene of 1; a follow-up takes the same cast by position
+  --> main.qs:14:5
+   |
+14 |     -> trio
+   |     ^^^^^^^

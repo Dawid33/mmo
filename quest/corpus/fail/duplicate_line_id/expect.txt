@@ -1,0 +1,6 @@
+error[duplicate-line-id]: line id `@greet.hello` is used twice
+ --> main.qs:7:25
+  |
+7 |     npc: "Hello again." @greet.hello
+  |                         ^^^^^^^^^^^^
+  = note: first used at main.qs:6
